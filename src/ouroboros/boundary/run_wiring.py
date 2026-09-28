@@ -176,7 +176,7 @@ class BoundaryRunState:
     interpreter: CheckInterpreter
     """Pinned before the worker starts (``check_env.CheckInterpreter``); every check uses it."""
     contract: RunContract
-    """The run contract recorded on the enabled record; every post-start check uses its settings."""
+    """The run contract recorded on the enabled record; every check of the run uses its timeout."""
     package_path: Path | None = None
     criterion_keys: tuple[str, ...] = ()
     base_snapshot: Path | None = None
@@ -260,7 +260,8 @@ class _Sealer:
     seed: Seed
     base: Path
     store: Path
-    settings: CheckPackageSettings
+    contract: RunContract
+    """The run contract recorded before construction: every check run uses its timeout."""
     interpreter: CheckInterpreter
     execution_id: str
     exclusions: list[tuple[str, str, str]] = field(default_factory=list)
@@ -285,7 +286,7 @@ class _Sealer:
         admission = await admit_check_package(
             package,
             self.base,
-            timeout_seconds=self.settings.check_timeout_seconds,
+            timeout_seconds=self.contract.check_timeout_seconds,
             interpreter=self.interpreter,
         )
         write_receipt(admission, self.store / "receipts")
@@ -307,7 +308,7 @@ class _Sealer:
             references,
             seed=self.seed,
             interpreter=self.interpreter,
-            timeout_seconds=self.settings.check_timeout_seconds,
+            timeout_seconds=self.contract.check_timeout_seconds,
         )
         return (checked if checked.checks else None), report
 
@@ -339,6 +340,7 @@ async def prepare_check_package(
     ledger = BoundaryLedger(event_store)
     # First, before anything that can fail: the run had the check package on.
     # A resume reads it back, so a missing boundary is undecided, never legacy.
+    # The one run contract: admission and every later check read its timeout.
     contract = RunContract(check_timeout_seconds=settings.check_timeout_seconds)
     await ledger.record_check_package_enabled(execution_id, contract)
     store = private_store_dir(store_dir or default_store_dir(execution_id))
@@ -356,7 +358,7 @@ async def prepare_check_package(
     # Every check runs confined by the execution sandbox, with the project's
     # interpreter when one exists, pinned here (boundary/check_env.py).
     interpreter = resolve_check_interpreter(base)
-    sealer = _Sealer(ledger, seed, base, store, settings, interpreter, execution_id)
+    sealer = _Sealer(ledger, seed, base, store, contract, interpreter, execution_id)
     reference_check: ReferenceCheck | None = None
 
     for attempt in range(1, settings.attempts + 1):

@@ -418,6 +418,7 @@ def test_a_repair_shows_visible_cases_and_never_a_held_out_one() -> None:
                 False,
                 {"symbol": "m.f", "call_kind": "function", "arg_map": {}},
                 "declared",
+                declared_binding_pass=False,
             )
         },
         oracle_results={"oracle_1": result},
@@ -751,7 +752,9 @@ async def test_a_verification_that_raises_leaves_no_verified_claim(
     verified = reconcile_acceptance(
         seed_criterion_keys(seed),
         {
-            key: CriterionVerdict(key, PackageCriterionStatus.PASS, CheckTier.A, "passed")
+            key: CriterionVerdict(
+                key, PackageCriterionStatus.PASS, CheckTier.A, "passed", declared_binding_pass=False
+            )
             for key in seed_criterion_keys(seed)
         },
         {},
@@ -767,7 +770,11 @@ async def test_a_verification_that_raises_leaves_no_verified_claim(
         seed_criterion_keys(seed),
         {
             key: CriterionVerdict(
-                key, PackageCriterionStatus.INDETERMINATE, CheckTier.A, "authority_error:OSError"
+                key,
+                PackageCriterionStatus.INDETERMINATE,
+                CheckTier.A,
+                "authority_error:OSError",
+                declared_binding_pass=False,
             )
             for key in seed_criterion_keys(seed)
         },

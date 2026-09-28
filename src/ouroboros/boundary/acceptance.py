@@ -149,10 +149,11 @@ class CriterionVerdict:
     failed_heldout_only: bool = False
     binding: dict[str, Any] | None = None
     binding_source: str | None = None
-    declared_binding_pass: bool = False
+    declared_binding_pass: bool = field(kw_only=True)
     """The ``pass`` rests on a worker-declared binding: no reproduction oracle
     passed a held-out case through a tier ``A`` binding. ``False`` unless
-    ``status`` is ``pass``. It, not ``tier``, decides corroboration."""
+    ``status`` is ``pass``. It, not ``tier``, decides corroboration; it has no
+    default, so every verdict states its provenance."""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -270,6 +271,7 @@ def criterion_verdicts(
                 CheckTier.U,
                 f"uncovered:{lost[key]}",
                 tuple(all_check_ids),
+                declared_binding_pass=False,
             )
             continue
         if not check_ids:
@@ -278,6 +280,7 @@ def criterion_verdicts(
                 PackageCriterionStatus.UNCOVERED,
                 CheckTier.U,
                 f"uncovered:{uncovered.get(key, 'no_check')}",
+                declared_binding_pass=False,
             )
             continue
         tiers: list[CheckTier] = []
@@ -380,7 +383,7 @@ def criterion_verdicts(
             heldout_only,
             binding,
             source,
-            declared_binding_pass,
+            declared_binding_pass=declared_binding_pass,
         )
     return verdicts
 
@@ -460,7 +463,7 @@ class CriterionDecision:
     failed_heldout_only: bool = False
     existing_failure_class: str | None = None
     binding: dict[str, Any] | None = None
-    declared_binding_pass: bool = False
+    declared_binding_pass: bool = field(kw_only=True)
     """The package's ``pass`` rests on a worker-declared binding (``CriterionVerdict``)."""
 
     @property
@@ -606,6 +609,9 @@ def reconcile_acceptance(
                 raw,
                 CheckTier.U if raw.is_unverified else CheckTier.A,
                 raw.value,
+                # A bare status names no binding: a pass the caller states
+                # directly is the package's own (tier A).
+                declared_binding_pass=False,
             )
         )
         status = verdict.status
