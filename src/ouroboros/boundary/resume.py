@@ -26,14 +26,20 @@ construction, with the run contract). It is exactly one of:
     admitted package is still in memory (``run_wiring.live_state``); when its
     sealed id is the projection's and its pinned interpreter is the one the
     admission recorded and still verifies, the full terminal decision runs,
-    held-out cases included, under the recorded run contract;
+    held-out cases included, under the recorded run contract and the bound
+    version's admission (``run_wiring.verify_check_package``, the live rule:
+    a verified pass needs a passing held-out case the base failed). It is
+    journaled like a fresh one, through the same gateway: the resume's own
+    bindings (``phase="resumed"``), its candidate verification (and re-run),
+    then its decision, which the reducer judges by that recorded run;
   - otherwise no check runs. The held-out cases were never written to disk,
     so no covered criterion can be a verified pass here, and running the
     visible cases would only choose between two rejections. Every covered
     criterion is indeterminate (``held_out_unavailable``, or
     ``interpreter_changed`` when the live interpreter is not the pin);
     uncovered criteria are decided by the legacy verifier, as in the live
-    run.
+    run. Only the decision is recorded: it claims nothing but indeterminate
+    and uncovered statuses.
 
 The resumed authority belongs to the run the projection names: its execution
 id, the Seed digest the package was sealed for, and the frozen criterion keys
@@ -41,7 +47,11 @@ in order (``authority.mismatched_run``, the live authority's rule). A call for
 any other run is refused before any check runs and before anything is
 recorded (``run_mismatch:<field>``): covered criteria are undecided, the
 legacy verifier decides the rest, and the run's one decision is not used. An
-undecidable boundary names no Seed, so only its execution id is checked.
+undecidable boundary names no Seed, so only its execution id is checked. With
+the package in memory, the same refusal (``package_record_changed``) follows
+when the package, or the record the store holds for it, does not have the
+digest the frozen record journaled (``record_sha256``), or the stored record
+does not name the Seed's criteria in order.
 
 The journal is as writable as the workspace; removing every record of the
 run, the enabled record included, still reads as "off" (a documented
@@ -49,13 +59,13 @@ residual). What counts as an attempt is the live rule with the check package
 on (``existing_outcomes_from_results(..., gated=True)``): a root that failed
 for any reason other than the package gate is not accepted, whatever the
 package says. The decision is recorded as ``boundary.acceptance.resumed``;
-the frozen boundary's single-shot records (final bindings, candidate
-verification) are not written again.
+the live run's final bindings are not written again.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -65,7 +75,6 @@ from ouroboros.boundary.acceptance import (
     CriterionVerdict,
     PackageCriterionStatus,
     artifact_verdict,
-    criterion_verdicts,
     reconcile_acceptance,
     render_reconciliation,
 )
@@ -82,9 +91,13 @@ from ouroboros.boundary.authority import (
     mismatched_run,
 )
 from ouroboros.boundary.binding import CheckTier
-from ouroboros.boundary.binding_flow import assign_tiers, verify_with_bindings
 from ouroboros.boundary.check_env import INTERPRETER_CHANGED
-from ouroboros.boundary.events import ResumedPayload, RunContract
+from ouroboros.boundary.events import (
+    PACKAGE_FROZEN,
+    ResumedPayload,
+    RunContract,
+    parse_boundary_version,
+)
 from ouroboros.boundary.ledger import (
     BoundaryLedger,
     BoundaryOrderError,
@@ -92,13 +105,19 @@ from ouroboros.boundary.ledger import (
     RecoveryUndecidable,
     recovery_projection,
 )
-from ouroboros.boundary.package import CheckPackage, seed_criterion_keys
+from ouroboros.boundary.package import (
+    CheckPackage,
+    package_record_bytes,
+    seed_criterion_keys,
+    sha256_bytes,
+)
 from ouroboros.boundary.run_wiring import (
     BoundaryRunState,
     BoundaryVerdict,
     forget_live_state,
     live_state,
     render_verdict,
+    verify_check_package,
 )
 
 if TYPE_CHECKING:
@@ -109,6 +128,7 @@ log = structlog.get_logger(__name__)
 
 HELD_OUT_UNAVAILABLE = "held_out_unavailable"
 BOUNDARY_RECORD_MISSING = "boundary_record_missing"
+PACKAGE_RECORD_CHANGED = "package_record_changed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +145,8 @@ class ResumedBoundary:
     """The criterion keys the frozen manifest names, in order (``None``: undecidable boundary)."""
     seed_digest: str | None = None
     """The Seed the package was sealed for (``None``: undecidable boundary)."""
+    record_sha256: str | None = None
+    """The digest of the stored package record the frozen record journaled."""
     held_out_checks: frozenset[str] = frozenset()
     contract: RunContract | None = None
     """The settings the run started with (its enabled record), never the live config."""
@@ -181,9 +203,8 @@ async def load_resumed_boundary(
     if not execution_id:
         raise BoundaryOrderError("a resumed run needs its execution id to find its boundary")
     ledger = BoundaryLedger(event_store)
-    projection = recovery_projection(
-        execution_id, await ledger.events(execution_id), await ledger.run_versions(execution_id)
-    )
+    versions = await ledger.run_versions(execution_id)
+    projection = recovery_projection(execution_id, await ledger.events(execution_id), versions)
     if isinstance(projection, RecoveryUndecidable):
         log.warning("boundary.resume.boundary_record_missing", detail=projection.reason)
         return ResumedBoundary(
@@ -197,6 +218,11 @@ async def load_resumed_boundary(
         return None
     live = live_state(execution_id)
     problem = _live_problem(live, projection)
+    # The projection replayed every record through the journal gateway: the
+    # bound version holds exactly one frozen record, with its record digest.
+    parsed = parse_boundary_version(projection.boundary_id)
+    assert parsed is not None
+    (frozen,) = [event for event in versions[parsed[1]] if event.type == PACKAGE_FROZEN]
     return ResumedBoundary(
         execution_id=execution_id,
         boundary_id=projection.boundary_id,
@@ -204,6 +230,7 @@ async def load_resumed_boundary(
         covered=tuple(sorted(projection.covered)),
         criterion_keys=projection.criterion_keys,
         seed_digest=projection.seed_digest,
+        record_sha256=str(frozen.data["record_sha256"]),
         held_out_checks=projection.held_out_checks,
         contract=projection.contract,
         live=live if problem is None else None,
@@ -229,9 +256,15 @@ async def decide_resumed(
     *,
     seed: Seed,
     candidate: Path,
+    event_store: EventStore,
     declared: dict[str, list[Any]] | None = None,
 ) -> BoundaryVerdict:
-    """The package's per-criterion verdicts on ``candidate`` (see the module docstring)."""
+    """The package's per-criterion verdicts on ``candidate`` (see the module docstring).
+
+    With the package in memory the resume's bindings and verification are
+    recorded on the bound version (``verify_check_package``); otherwise
+    nothing runs and nothing is recorded here.
+    """
     keys = seed_criterion_keys(seed)
     run = boundary.run
     mismatch = None if run is None else mismatched_run(run, seed, None)
@@ -248,24 +281,15 @@ async def decide_resumed(
             boundary,
             {key: _undecided(key, reason) if key in covered else _uncovered(key) for key in keys},
         )
-    package = live.package
-    assignments, _results = await assign_tiers(
-        package,
-        base=live.base_snapshot,
-        contract=live.contract,
-        declared=declared,
-        expected_base_digest=live.admission.base_tree_digest,
-        admitted_tiers=live.admission.check_tiers,
-        run_options={"interpreter": live.interpreter},
-    )
-    bound = await verify_with_bindings(
-        package,
-        candidate,
-        assignments,
-        contract=live.contract,
-        interpreter=live.interpreter,
-    )
-    computed = criterion_verdicts(package, bound.effective, assignments=assignments)
+    computed = (
+        await verify_check_package(
+            live,
+            event_store=event_store,
+            candidate_checkout=candidate,
+            declared_entry_points=declared,
+            phase="resumed",
+        )
+    ).verdicts
     verdicts: dict[str, CriterionVerdict] = {}
     for key in keys:
         item = computed.get(key)
@@ -312,7 +336,7 @@ class ResumedCheckPackageAuthority:
     async def __call__(self, *, seed: Seed, execution_id: str, parallel_result: Any) -> Any:
         if self.outcome is not None:
             return parallel_result
-        mismatch = self._run_mismatch(seed, execution_id)
+        mismatch = self._run_mismatch(seed, execution_id) or self._record_changed(seed)
         if mismatch is not None:
             return self._refuse_foreign_run(seed, execution_id, parallel_result, mismatch)
         if self._terminal_started:
@@ -343,6 +367,31 @@ class ResumedCheckPackageAuthority:
         # An undecidable boundary names no Seed: only the run can be checked.
         if execution_id != self.boundary.execution_id:
             return f"{RUN_MISMATCH_PREFIX}execution_id"
+        return None
+
+    def _record_changed(self, seed: Seed) -> str | None:
+        """``package_record_changed`` unless the package in memory is the one the journal sealed.
+
+        The package and the record the store holds for it must both have the
+        frozen record's digest, and the stored record must name the Seed's
+        criteria in order. Without the package in memory nothing runs.
+        """
+        live = self.boundary.live
+        if live is None:
+            return None
+        try:
+            assert live.package is not None and live.package_path is not None
+            stored = live.package_path.read_bytes()
+            expected = self.boundary.record_sha256
+            if (
+                sha256_bytes(stored) != expected
+                or sha256_bytes(package_record_bytes(live.package)) != expected
+                or tuple(json.loads(stored)["package"]["criterion_keys"])
+                != seed_criterion_keys(seed)
+            ):
+                return PACKAGE_RECORD_CHANGED
+        except Exception:  # noqa: BLE001 - a record that cannot be read is not the sealed one
+            return PACKAGE_RECORD_CHANGED
         return None
 
     def _keys(self, seed: Seed) -> tuple[str, ...]:
@@ -394,6 +443,7 @@ class ResumedCheckPackageAuthority:
             self.boundary,
             seed=seed,
             candidate=self._candidate.resolve(),
+            event_store=self._event_store,
             declared=declared,
         )
         reconciliation = reconcile_acceptance(
@@ -483,6 +533,7 @@ class ResumedCheckPackageAuthority:
 __all__ = [
     "BOUNDARY_RECORD_MISSING",
     "HELD_OUT_UNAVAILABLE",
+    "PACKAGE_RECORD_CHANGED",
     "ResumedBoundary",
     "ResumedCheckPackageAuthority",
     "decide_resumed",

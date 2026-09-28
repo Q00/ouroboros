@@ -17,6 +17,7 @@ import asyncio
 import copy as copy_module
 from dataclasses import replace
 from datetime import timedelta
+import json
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -31,7 +32,9 @@ from ouroboros.boundary.events import (
     ACCEPTANCE_RESUMED,
     ACTOR_STARTED,
     ADMISSION_COMPLETED,
+    BINDING_RECORDED,
     BOUNDARY_AGGREGATE_TYPE,
+    CANDIDATE_VERIFIED,
     CHECK_PACKAGE_ENABLED,
     CONSTRUCTION_FAILED,
     PACKAGE_FROZEN,
@@ -49,9 +52,11 @@ import ouroboros.boundary.resume as resume_module
 from ouroboros.boundary.resume import (
     BOUNDARY_RECORD_MISSING,
     HELD_OUT_UNAVAILABLE,
+    PACKAGE_RECORD_CHANGED,
     ResumedCheckPackageAuthority,
     load_resumed_boundary,
 )
+import ouroboros.boundary.run_wiring as run_wiring_module
 from ouroboros.boundary.run_wiring import (
     BoundaryRunState,
     CheckPackageSettings,
@@ -189,8 +194,9 @@ def no_check_runs(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         calls.append("ran")
         raise AssertionError("a resumed run without its package must run no check")
 
-    monkeypatch.setattr(resume_module, "assign_tiers", refuse)
-    monkeypatch.setattr(resume_module, "verify_with_bindings", refuse)
+    # The resumed decision binds and runs checks through the live path.
+    monkeypatch.setattr(run_wiring_module, "assign_tiers", refuse)
+    monkeypatch.setattr(run_wiring_module, "verify_with_bindings", refuse)
     return calls
 
 
@@ -409,13 +415,13 @@ async def test_the_same_process_uses_the_check_timeout_the_run_started_with(
     recorded = await BoundaryLedger(store).run_contract(EXECUTION)
     assert recorded is not None
     seen: list[float] = []
-    real = resume_module.verify_with_bindings
+    real = run_wiring_module.verify_with_bindings
 
     async def spy(*args: Any, **kwargs: Any) -> Any:
         seen.append(kwargs["contract"])
         return await real(*args, **kwargs)
 
-    monkeypatch.setattr(resume_module, "verify_with_bindings", spy)
+    monkeypatch.setattr(run_wiring_module, "verify_with_bindings", spy)
     authority = await _resume(store, repo)
     assert authority.boundary.contract == recorded
     await authority(seed=seed, execution_id=EXECUTION, parallel_result=_restored())
@@ -785,13 +791,13 @@ def check_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Records every bind or run of a check by the resumed authority (they still run)."""
     calls: list[str] = []
     for name in ("assign_tiers", "verify_with_bindings"):
-        real = getattr(resume_module, name)
+        real = getattr(run_wiring_module, name)
 
         def spy(*args: Any, _real: Any = real, _name: str = name, **kwargs: Any) -> Any:
             calls.append(_name)
             return _real(*args, **kwargs)
 
-        monkeypatch.setattr(resume_module, name, spy)
+        monkeypatch.setattr(run_wiring_module, name, spy)
     return calls
 
 
@@ -889,7 +895,7 @@ async def test_a_resume_for_another_run_runs_nothing_and_records_nothing(
     assert len(await _resumed_records(store)) == 1
 
 
-async def test_a_frozen_manifest_with_the_criteria_in_another_order_runs_nothing(
+async def test_a_frozen_manifest_with_the_criteria_in_another_order_is_undecidable(
     store: EventStore,
     repo: Path,
     tmp_path: Path,
@@ -903,16 +909,37 @@ async def test_a_frozen_manifest_with_the_criteria_in_another_order_runs_nothing
         store,
         _edit(PACKAGE_FROZEN, lambda d: d["manifest"]["criterion_keys"].reverse()),
     )
+    # The ledger refuses a manifest the product could not write.
     authority = await _resume(journal, repo)
-    assert authority.boundary.criterion_keys == tuple(reversed(seed_criterion_keys(seed)))
+    assert authority.boundary.reason == BOUNDARY_RECORD_MISSING
     decided = await authority(seed=seed, execution_id=EXECUTION, parallel_result=_restored())
-    assert check_calls == [] and await _resumed_records(journal) == []
-    assert authority.outcome is None
+    assert check_calls == []
+    assert [result.outcome for result in decided.results] == [ACExecutionOutcome.FAILED] * 3
+    forget_live_state(state)
+    await journal.close()
+
+
+async def test_a_boundary_naming_the_criteria_in_another_order_runs_nothing(
+    store: EventStore,
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    check_calls: list[str],
+) -> None:
+    """Same Seed digest, criteria in another order: refused on the ordered keys alone."""
+    seed, state = await _run_until_the_worker_stops(store, repo, tmp_path, monkeypatch)
+    (repo / "mathutils.py").write_text(CLAMP_FIXED + DOUBLE)
+    loaded = await load_resumed_boundary(store, EXECUTION)
+    assert loaded is not None and loaded.criterion_keys is not None
+    boundary = replace(loaded, criterion_keys=tuple(reversed(loaded.criterion_keys)))
+    authority = ResumedCheckPackageAuthority(boundary, event_store=store, candidate_checkout=repo)
+    decided = await authority(seed=seed, execution_id=EXECUTION, parallel_result=_restored())
+    assert check_calls == [] and await _resumed_records(store) == []
+    assert authority.outcome is None and live_state(EXECUTION) is state
     # Not the run's criteria: every criterion counts as covered and stays undecided.
     assert [result.outcome for result in decided.results] == [ACExecutionOutcome.FAILED] * 3
     assert all("run_mismatch:criterion_keys" in (result.error or "") for result in decided.results)
     forget_live_state(state)
-    await journal.close()
 
 
 async def test_an_undecidable_resume_for_another_execution_records_nothing(
@@ -1198,3 +1225,179 @@ async def test_a_seed_that_cannot_be_read_fails_every_root_closed(
     assert no_check_runs == [] and await _resumed_records(journal) == []
     forget_live_state(state)
     await journal.close()
+
+
+# --------------------------------------------------------------------------
+# A resumed decision is journaled like a fresh one: the resume's own bindings
+# and verification, then its decision, judged by the same reducer rule.
+
+
+async def test_a_resumed_pass_is_journaled_with_its_own_run_and_replays(
+    store: EventStore, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed, state = await _run_until_the_worker_stops(store, repo, tmp_path, monkeypatch)
+    (repo / "mathutils.py").write_text(CLAMP_FIXED + DOUBLE)
+    authority = await _resume(store, repo)
+    assert authority.boundary.source == "memory"
+    decided = await authority(seed=seed, execution_id=EXECUTION, parallel_result=_restored())
+    assert decided.all_succeeded
+    events = await store.replay(BOUNDARY_AGGREGATE_TYPE, V1)
+    run_events = await store.replay(BOUNDARY_AGGREGATE_TYPE, EXECUTION)
+    assert verify_boundary_order(events, run_events=run_events) == ()
+    types = [event.type for event in events]
+    after_start = types[types.index(ACTOR_STARTED) + 1 :]
+    assert after_start[0] == BINDING_RECORDED and after_start[-1] == ACCEPTANCE_RESUMED
+    assert set(after_start[1:-1]) == {CANDIDATE_VERIFIED}
+    (bindings,) = [event for event in events if event.type == BINDING_RECORDED]
+    assert bindings.data["phase"] == "resumed"
+    (resumed,) = [event for event in events if event.type == ACCEPTANCE_RESUMED]
+    statuses = {item["criterion_key"]: item["package_status"] for item in resumed.data["criteria"]}
+    keys = seed_criterion_keys(seed)
+    # The preservation oracle passes on the base too: unverified, as in the live run.
+    assert [statuses[key] for key in keys] == ["pass", "unverified", "uncovered"]
+    # The journal the resume wrote is one the product could write: it projects again.
+    copy = await _copy_journal(store)
+    assert (
+        verify_boundary_order(
+            await copy.replay(BOUNDARY_AGGREGATE_TYPE, V1),
+            run_events=await copy.replay(BOUNDARY_AGGREGATE_TYPE, EXECUTION),
+        )
+        == ()
+    )
+    reloaded = await load_resumed_boundary(copy, EXECUTION)
+    assert reloaded is not None and reloaded.package_id == state.package.package_id
+    await copy.close()
+
+
+def _base_passing_held_out_reply() -> dict[str, Any]:
+    """Criterion 1's only held-out case, clamp(5, 0, 10) == 5, passes on the buggy base."""
+    reply = _reply()
+    reply["oracles"][0]["cases"][1].update(
+        args={"value": 5, "low": 0, "high": 10}, expect={"kind": "returns", "value": 5}
+    )
+    return reply
+
+
+class _ReplyConstructor:
+    """Builds the package from ``reply`` for the Seed it is given."""
+
+    def __init__(self, reply: dict[str, Any]) -> None:
+        self.reply = reply
+
+    async def construct(self, seed: Seed, base: Path, *, feedback=()) -> ConstructionOutcome:
+        package = package_from_reply(self.reply, seed, input_digest="1" * 64, generator="fake")
+        return ConstructionOutcome(package, None, "1" * 64, "fake")
+
+
+async def test_a_resumed_held_out_pass_the_base_also_passed_is_not_a_verified_pass(
+    store: EventStore, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end: admission excludes the check, the resumed decision leaves it to legacy."""
+    seed, state = await _run_until_the_worker_stops(
+        store,
+        repo,
+        tmp_path,
+        monkeypatch,
+        constructor=_ReplyConstructor(_base_passing_held_out_reply()),
+    )
+    assert state.admitted and live_state(EXECUTION) is state
+    assert state.admission.excluded_checks == {"oracle_1": "held_out_not_discriminating"}
+    (repo / "mathutils.py").write_text(CLAMP_FIXED + DOUBLE)
+    authority = await _resume(store, repo)
+    assert authority.boundary.source == "memory"
+    await authority(seed=seed, execution_id=EXECUTION, parallel_result=_restored())
+    keys = seed_criterion_keys(seed)
+    first = authority.outcome.verdict.verdicts[keys[0]]
+    assert first.status is PackageCriterionStatus.UNCOVERED
+    # Uncovered: the legacy verifier decides it (it accepted), the package verified nothing.
+    decision = authority.outcome.reconciliation.decisions[0]
+    assert decision.package_status is PackageCriterionStatus.UNCOVERED
+    assert authority.outcome.reconciliation.verified_pass_count == 0
+    (resumed,) = await _resumed_records(store)
+    assert resumed.data["criteria"][0]["package_status"] == "uncovered"
+
+
+def _base_passed(admission: Any, check_id: str, case_id: str) -> Any:
+    """``admission`` as if the base had passed ``case_id`` of ``check_id``."""
+    checks = []
+    for check in admission.checks:
+        if check.check_id == check_id:
+            result = check.oracle_result
+            cases = [
+                case.model_copy(update={"passed": True}) if case.case_id == case_id else case
+                for case in result.cases
+            ]
+            check = check.model_copy(
+                update={"oracle_result": result.model_copy(update={"cases": cases})}
+            )
+        checks.append(check)
+    return admission.model_copy(update={"checks": tuple(checks)})
+
+
+async def test_an_admission_in_memory_the_journal_did_not_record_decides_nothing(
+    store: EventStore, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The resumed decision is judged by the journaled admission, not by memory.
+
+    In memory the base passed criterion 1's only held-out case, so the resume
+    computes no verified pass (``no_held_out_case``); the journal's admission
+    says the base failed it, so the reducer refuses that decision. Either
+    way nothing is a pass: covered criteria end undecided.
+    """
+    seed, state = await _run_until_the_worker_stops(store, repo, tmp_path, monkeypatch)
+    (repo / "mathutils.py").write_text(CLAMP_FIXED + DOUBLE)
+    base_passed = replace(state, admission=_base_passed(state.admission, "oracle_1", "c2"))
+    monkeypatch.setattr(resume_module, "live_state", lambda _execution: base_passed)
+    authority = await _resume(store, repo)
+    assert authority.boundary.source == "memory"
+    decided = await authority(seed=seed, execution_id=EXECUTION, parallel_result=_restored())
+    assert authority.outcome.error == "BoundaryOrderError"
+    decisions = authority.outcome.reconciliation.decisions
+    assert [(d.package_status, d.accepted) for d in decisions[:2]] == [
+        (PackageCriterionStatus.INDETERMINATE, False)
+    ] * 2
+    assert [result.outcome for result in decided.results[:2]] == [ACExecutionOutcome.FAILED] * 2
+    assert await _resumed_records(store) == []
+    forget_live_state(state)
+
+
+def _edit_record(path: Path) -> None:
+    record = json.loads(path.read_bytes())
+    record["package"]["criterion_keys"].reverse()
+    path.write_bytes(json.dumps(record).encode())
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [_edit_record, Path.unlink, lambda path: path.write_bytes(path.read_bytes() + b" ")],
+    ids=["criteria_reordered", "deleted", "one_byte_added"],
+)
+async def test_a_stored_package_record_that_is_not_the_sealed_one_runs_and_records_nothing(
+    store: EventStore,
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    check_calls: list[str],
+    tamper: Any,
+) -> None:
+    seed, state = await _run_until_the_worker_stops(store, repo, tmp_path, monkeypatch)
+    (repo / "mathutils.py").write_text(CLAMP_FIXED + DOUBLE)  # the package would pass it
+    assert state.package_path is not None and state.package_path.is_file()
+    state.package_path.chmod(0o600)
+    tamper(state.package_path)
+    before = [event.type for event in await store.replay(BOUNDARY_AGGREGATE_TYPE, V1)]
+    authority = await _resume(store, repo)
+    assert authority.boundary.source == "memory"
+    decided = await authority(seed=seed, execution_id=EXECUTION, parallel_result=_restored())
+    assert check_calls == []
+    assert [event.type for event in await store.replay(BOUNDARY_AGGREGATE_TYPE, V1)] == before
+    assert await _resumed_records(store) == []
+    assert authority.outcome is None and live_state(EXECUTION) is state
+    # Covered criteria undecided; the uncovered one is the legacy verifier's (it accepted).
+    assert [result.outcome for result in decided.results] == [
+        ACExecutionOutcome.FAILED,
+        ACExecutionOutcome.FAILED,
+        ACExecutionOutcome.SUCCEEDED,
+    ]
+    assert all(PACKAGE_RECORD_CHANGED in (r.error or "") for r in decided.results[:2])
+    forget_live_state(state)

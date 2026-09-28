@@ -49,7 +49,7 @@ from dataclasses import dataclass, field, replace
 import json
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from ouroboros.boundary.acceptance import (
     ArtifactVerdict,
@@ -695,6 +695,7 @@ async def verify_check_package(
     candidate_checkout: Path,
     declared_entry_points: Mapping[str, Sequence[Any]] | None = None,
     base_run_cache: dict[str, Any] | None = None,
+    phase: Literal["final", "resumed"] = "final",
 ) -> BoundaryVerdict:
     """Bind, then run the unchanged package on the candidate; record everything.
 
@@ -703,7 +704,8 @@ async def verify_check_package(
     run under the run contract the run recorded before its worker started
     (``state.contract``), never under settings resolved later. Order: final bindings
     (``boundary.binding.recorded``), candidate verification (plus one R3
-    re-run of transiently indeterminate checks).
+    re-run of transiently indeterminate checks). A resumed run records its own
+    bindings (``phase="resumed"``) and verification the same way.
 
     Without an admitted package the verdict is ``unavailable`` with no
     per-criterion verdicts: every criterion is uncovered, so the legacy
@@ -733,7 +735,7 @@ async def verify_check_package(
     await ledger.record_bindings(
         state.boundary_id,
         package_id=package.package_id,
-        payload=bindings_payload(assignments, results, phase="final"),
+        payload=bindings_payload(assignments, results, phase=phase),
     )
     bound = await verify_with_bindings(
         package,
