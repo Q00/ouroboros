@@ -352,6 +352,11 @@ def project_interview(events: list[dict[str, Any]]) -> dict[str, Any] | None:
             }
         projection["interview_id"] = interview_id
         projection["last_event"] = event_type
+        # Failure details describe only the current failed lifecycle state. A
+        # resumed interview may later become active or complete, in which case
+        # carrying these fields forward would show contradictory dashboard data.
+        projection.pop("error", None)
+        projection.pop("phase", None)
         if event_type == "interview.started":
             projection["status"] = "started"
         elif event_type in {
