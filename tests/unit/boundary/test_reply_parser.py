@@ -17,7 +17,7 @@ from ouroboros.boundary.oracle_build import (
     package_from_reply,
     reply_failure_reason,
 )
-from ouroboros.boundary.package import package_record_bytes, seal_package
+from ouroboros.boundary.package import CheckPackage, package_record_bytes, seal_package
 
 from .clamp_fixtures import _oracle, _seed
 
@@ -98,13 +98,25 @@ def test_normalize_keeps_unknown_keys_and_fills_every_section() -> None:
     assert normalized["checks"] == normalized["files"] == normalized["uncovered"] == []
 
 
+def _persisted(package: CheckPackage) -> str:
+    """The record and the summary, with the random package id and Seed digest blinded.
+
+    Both are hex strings that vary from run to run (the id is random, the
+    fixture Seed carries its creation time), so a numeric secret can occur in
+    them by chance; every other byte is searched.
+    """
+    text = package_record_bytes(package).decode("utf-8") + json.dumps(package.manifest_summary())
+    return text.replace(package.package_id, "<package_id>").replace(
+        package.seed_digest, "<seed_digest>"
+    )
+
+
 def test_a_declared_uncovered_reason_is_recorded_as_a_code_not_as_its_text() -> None:
     reply = {"oracles": [GOOD], "uncovered": [{"criterion": 2, "reason": f"secret {SECRET}"}]}
     package = seal_package(package_from_reply(reply, _seed(), input_digest="1" * 64, generator="t"))
     reasons = {item.reason for item in package.uncovered}
     assert DECLARED_NOT_EXECUTABLE in reasons
-    assert str(SECRET) not in json.dumps(package.manifest_summary())
-    assert str(SECRET).encode() not in package_record_bytes(package)
+    assert str(SECRET) not in _persisted(package)
 
 
 def test_identifiers_the_constructor_chose_never_reach_the_package() -> None:
@@ -133,8 +145,7 @@ def test_identifiers_the_constructor_chose_never_reach_the_package() -> None:
     ]
     assert [link.assertion_id for link in package.checks[1].assertions] == ["script_2_1.a1"]
     assert package.checks[1].assertions[0].locator is None
-    assert str(SECRET) not in json.dumps(package.manifest_summary())
-    assert str(SECRET).encode() not in package_record_bytes(package)
+    assert str(SECRET) not in _persisted(package)
 
 
 def test_minting_is_stable_when_a_reply_is_normalized_twice() -> None:

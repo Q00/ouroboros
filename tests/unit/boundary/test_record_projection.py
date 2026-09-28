@@ -117,14 +117,26 @@ def _from_reply(secret: str = SENTINEL) -> CheckPackage:
     )
 
 
+def _blind(text: str, package: CheckPackage) -> str:
+    """``text`` with the package's random id and its Seed digest replaced by placeholders.
+
+    Both are hex strings that vary from run to run (the id is random, the
+    fixture Seed carries its creation time): a numeric sentinel can occur in
+    them by chance, which says nothing about a leak. Every other byte is kept.
+    """
+    if package.sealed:
+        text = text.replace(package.package_id, "<package_id>")
+    return text.replace(package.seed_digest, "<seed_digest>")
+
+
 def _assert_sentinel_absent(package: CheckPackage) -> None:
     sealed = seal_package(package)
     record = package_record_bytes(sealed)
     summaries = (
-        json.dumps(sealed.manifest_summary()),
-        json.dumps(package.manifest_summary()),
+        _blind(json.dumps(sealed.manifest_summary()), sealed),
+        _blind(json.dumps(package.manifest_summary()), package),
     )
-    assert SENTINEL.encode() not in record
+    assert SENTINEL not in _blind(record.decode("utf-8"), sealed)
     assert json.loads(record) == package_record(sealed)
     for text in summaries:
         assert SENTINEL not in text
@@ -400,4 +412,5 @@ def test_assembling_mints_dense_ids_whatever_the_parts_carried() -> None:
         "oracle_1.c2",
         "script_1_1.a1",
     ]
-    assert SENTINEL.encode() not in package_record_bytes(seal_package(package))
+    sealed = seal_package(package)
+    assert SENTINEL not in _blind(package_record_bytes(sealed).decode("utf-8"), sealed)
