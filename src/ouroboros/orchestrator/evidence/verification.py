@@ -15,7 +15,10 @@ from ouroboros.orchestrator.evidence.claims import (
     _workspace_relative_file_claim,
 )
 from ouroboros.orchestrator.evidence.command_replay import replayed_command_supports_claim
-from ouroboros.orchestrator.evidence.common import _flatten_evidence_values
+from ouroboros.orchestrator.evidence.common import (
+    _flatten_evidence_values,
+    is_terminal_narrative_message,
+)
 from ouroboros.orchestrator.evidence.harness_observation import (
     is_harness_observation_message,
     observation_from_message,
@@ -77,6 +80,9 @@ def _verify_atomic_evidence_against_runtime_messages(
     support_messages = tuple(
         message for index, message in enumerate(messages) if index != terminal_index
     )
+    evidence_messages = tuple(
+        message for message in support_messages if not is_terminal_narrative_message(message)
+    )
     # A harness observation is support for claims, not proof that the runtime
     # transcript arrived: an otherwise empty stream is still an infrastructure
     # signal.
@@ -107,7 +113,7 @@ def _verify_atomic_evidence_against_runtime_messages(
         for command in _flatten_evidence_values(typed_evidence.get("commands_run"))
         if _runtime_messages_support_command_claim(
             command,
-            _runtime_support_messages_for_field("commands_run", support_messages),
+            _runtime_support_messages_for_field("commands_run", evidence_messages),
         )
     )
     required_fields = set(effective_schema.required)
@@ -127,21 +133,21 @@ def _verify_atomic_evidence_against_runtime_messages(
                 if (
                     field_name == "files_touched"
                     and verify_gate_active
-                    and observations_confirm_unmutated_workspace(support_messages)
+                    and observations_confirm_unmutated_workspace(evidence_messages)
                 ):
                     continue
                 unsupported.append(f"{field_name}: no concrete claim values")
             continue
-        field_messages = _runtime_support_messages_for_field(field_name, support_messages)
+        field_messages = _runtime_support_messages_for_field(field_name, evidence_messages)
         for value in values:
             if field_name == "commands_run":
                 if _runtime_messages_support_command_claim(value, field_messages):
                     continue
-                if _harness_observation_supports_command_claim(value, support_messages):
+                if _harness_observation_supports_command_claim(value, evidence_messages):
                     continue
                 # Replay-first: a transcript command linked to this claim
                 # exited 0 when the harness replayed it in a workspace copy.
-                if replayed_command_supports_claim(value, support_messages):
+                if replayed_command_supports_claim(value, evidence_messages):
                     continue
                 if _runtime_messages_have_masked_test_command_form(
                     value,
@@ -175,7 +181,7 @@ def _verify_atomic_evidence_against_runtime_messages(
                 if (
                     has_success_contract
                     and verify_gate_active
-                    and observations_confirm_unmutated_workspace(support_messages)
+                    and observations_confirm_unmutated_workspace(evidence_messages)
                     and _claimed_file_exists_in_workspace(value, task_cwd=workspace_cwd)
                 ):
                     continue
@@ -185,11 +191,11 @@ def _verify_atomic_evidence_against_runtime_messages(
                 if _runtime_messages_support_test_claim(
                     value=value,
                     backed_commands=backed_commands,
-                    messages=support_messages,
+                    messages=evidence_messages,
                     task_cwd=workspace_cwd,
                 ):
                     continue
-                if replayed_command_supports_claim(value, support_messages):
+                if replayed_command_supports_claim(value, evidence_messages):
                     continue
                 # Functional-verification tier: while the verify gate is
                 # active, a non-test claim that IS a transcript-backed,
@@ -201,13 +207,13 @@ def _verify_atomic_evidence_against_runtime_messages(
                 # tier away from the ACs that needed it.
                 if verify_gate_active and _functional_command_supports_test_claim(
                     value=value,
-                    messages=support_messages,
+                    messages=evidence_messages,
                     task_cwd=workspace_cwd,
                 ):
                     continue
                 if _runtime_messages_have_masked_test_command_for_test_claim(
                     value=value,
-                    messages=support_messages,
+                    messages=evidence_messages,
                     task_cwd=workspace_cwd,
                 ):
                     masked_command_mismatch = True
@@ -215,7 +221,7 @@ def _verify_atomic_evidence_against_runtime_messages(
                     unsupported.append(f"{field_name}: {value}")
                     continue
                 if _runtime_messages_have_completed_command_for_test_claim(
-                    value=value, messages=support_messages
+                    value=value, messages=evidence_messages
                 ):
                     completed_command_mismatch = True
                     evidence_form_mismatches.append(f"{field_name}: {value}")

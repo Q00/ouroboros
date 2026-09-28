@@ -21,7 +21,10 @@ from ouroboros.orchestrator.evidence.claims import (
     _runtime_messages_support_file_claim,
     _workspace_relative_file_claim,
 )
-from ouroboros.orchestrator.evidence.common import _normalized_evidence_text
+from ouroboros.orchestrator.evidence.common import (
+    _normalized_evidence_text,
+    is_terminal_narrative_message,
+)
 from ouroboros.orchestrator.evidence.harness_observation import (
     CommandObservation,
     observation_from_message,
@@ -494,6 +497,7 @@ def _runtime_messages_support_test_claim(
     task_cwd: str | None,
 ) -> bool:
     """Return True when a backed test command chunk proves one test claim."""
+    messages = tuple(message for message in messages if not is_terminal_narrative_message(message))
     needle = value.strip().lower()
     if not needle:
         return False
@@ -1158,6 +1162,7 @@ def _successful_runtime_test_commands(messages: tuple[AgentMessage, ...]) -> set
             continue
         if any(
             not item.is_final
+            and not is_terminal_narrative_message(item)
             and _text_proves_test_execution_success(_runtime_message_test_proof_text(item))
             for item in chunk
         ):

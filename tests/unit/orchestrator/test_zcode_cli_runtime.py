@@ -30,6 +30,12 @@ import pytest
 
 from ouroboros.core.filesystem_capability import open_nofollow_directory_chain
 from ouroboros.orchestrator.adapter import ParamSupport
+from ouroboros.orchestrator.evidence.verification import (
+    _verify_atomic_evidence_against_runtime_messages,
+)
+from ouroboros.orchestrator.evidence_schema import EvidenceRecord
+from ouroboros.orchestrator.failure_taxonomy import FailureClass
+from ouroboros.orchestrator.profile_loader import EvidenceSchema, load_profile
 import ouroboros.orchestrator.zcode_cli_runtime as zcode_cli_runtime_module
 from ouroboros.orchestrator.zcode_cli_runtime import ZcodeCLIRuntime
 
@@ -168,6 +174,37 @@ def test_convert_event_loads_exact_rollout_receipts_and_preserves_final(
     assert messages[0].tool_name == "Bash"
     assert messages[1].data["exit_code"] == 0
     assert messages[-1].content == "Final answer"
+
+
+def test_terminal_zcode_response_cannot_support_file_claim_in_verifier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, rollout_path = _rollout_fixture(tmp_path, monkeypatch)
+    rollout_path.unlink()
+    event["response"] = "Updated src/app.py"
+    stale_file = tmp_path / "src" / "app.py"
+    stale_file.parent.mkdir()
+    stale_file.write_text("pre-existing file", encoding="utf-8")
+    messages = tuple(runtime._convert_event(event, None))
+    profile = load_profile("code").model_copy(
+        update={
+            "must_produce": ("files_touched",),
+            "evidence_schema": EvidenceSchema(required=("files_touched",)),
+        }
+    )
+
+    verdict = _verify_atomic_evidence_against_runtime_messages(
+        messages=messages,
+        typed_evidence=EvidenceRecord(data={"files_touched": ["src/app.py"]}),
+        ac_content="Update src/app.py",
+        execution_profile=profile,
+        task_cwd=str(tmp_path),
+        adapter_working_directory=str(tmp_path),
+    )
+
+    assert verdict.passed is False
+    assert verdict.failure_class == FailureClass.FABRICATION_SUSPECTED.value
+    assert "files_touched: src/app.py" in verdict.reasons[0]
 
 
 def test_rollout_cumulative_messages_deduplicate_exact_replays(
@@ -714,6 +751,72 @@ def test_rollout_malformed_json_fails_closed(
     path.write_text("{not-json}\n", encoding="utf-8")
     messages = runtime._convert_event(event, None)
     assert [message.type for message in messages] == ["assistant"]
+
+
+def test_rollout_duplicate_json_keys_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    text = json.dumps(record).replace('"isError": false', '"isError": true, "isError": false', 1)
+    assert '"isError": true, "isError": false' in text
+    path.write_text(text + "\n", encoding="utf-8")
+
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("messageOffset", 1),
+        ("messageOffset", True),
+        ("messageOffset", None),
+        ("messageCount", 4),
+        ("messageCount", True),
+    ],
+)
+def test_rollout_full_snapshot_rejects_inconsistent_offset_and_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, value: object
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["request"].update({"messagesKind": "full", "messageOffset": 0, "messageCount": 3})
+    record["request"][field] = value
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
+def test_rollout_delta_rejects_inconsistent_message_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    first = json.loads(path.read_text(encoding="utf-8"))
+    first["request"].update({"messagesKind": "full", "messageOffset": 0, "messageCount": 3})
+    delta = {
+        **{key: event[key] for key in ("sessionId", "traceId", "turnId")},
+        "request": {
+            "messagesKind": "delta",
+            "messageOffset": 3,
+            "messageCount": 5,
+            "messages": [{"role": "assistant", "content": "extra"}],
+        },
+    }
+    path.write_text(json.dumps(first) + "\n" + json.dumps(delta) + "\n", encoding="utf-8")
+
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
+@pytest.mark.parametrize("content", [None, 1, {}, []])
+def test_rollout_non_string_tool_result_content_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: object
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["request"]["messages"][2]["content"] = content
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
 
 
 def test_rollout_deeply_nested_json_fails_closed(

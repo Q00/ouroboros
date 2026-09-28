@@ -108,6 +108,18 @@ _ZCODE_SESSION_ID_RE = re.compile(
     r"sess_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z"
 )
 _MAX_ZCODE_ROLLOUT_BYTES = 16 * 1024 * 1024
+
+
+def _unique_rollout_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject duplicate JSON keys before rollout fields acquire authority."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"Duplicate Zcode rollout key: {key}")
+        result[key] = value
+    return result
+
+
 _MAX_ZCODE_TOOL_INPUT_DEPTH = 100
 _MAX_ZCODE_MESSAGE_IDENTITY_DEPTH = 1_000
 
@@ -705,7 +717,7 @@ class ZcodeCLIRuntime(CodexCliRuntime):
             if not line.strip():
                 continue
             try:
-                candidate = json.loads(line)
+                candidate = json.loads(line, object_pairs_hook=_unique_rollout_object)
             except (json.JSONDecodeError, ValueError, RecursionError):
                 return None
             if not isinstance(candidate, dict):
@@ -739,16 +751,25 @@ class ZcodeCLIRuntime(CodexCliRuntime):
             # malformed/gapped delta remains fail-closed rather than silently
             # dropping tool receipts.
             messages_kind = request.get("messagesKind", "full")
+            message_offset = request.get("messageOffset")
+            message_count = request.get("messageCount")
+            if "messageCount" in request and (
+                isinstance(message_count, bool)
+                or not isinstance(message_count, int)
+                or message_count < 0
+            ):
+                return None
             if messages_kind == "delta":
-                offset = request.get("messageOffset")
                 if (
                     previous_messages is None
-                    or isinstance(offset, bool)
-                    or not isinstance(offset, int)
-                    or offset != len(previous_messages)
+                    or isinstance(message_offset, bool)
+                    or not isinstance(message_offset, int)
+                    or message_offset != len(previous_messages)
                 ):
                     return None
                 canonical_messages = [*previous_messages, *messages]
+                if "messageCount" in request and message_count != len(canonical_messages):
+                    return None
                 request = {
                     **request,
                     "messages": canonical_messages,
@@ -756,7 +777,16 @@ class ZcodeCLIRuntime(CodexCliRuntime):
                     "messageOffset": 0,
                 }
                 candidate = {**candidate, "request": request}
-            elif messages_kind != "full":
+            elif messages_kind == "full":
+                if "messageOffset" in request and (
+                    isinstance(message_offset, bool)
+                    or not isinstance(message_offset, int)
+                    or message_offset != 0
+                ):
+                    return None
+                if "messageCount" in request and message_count != len(messages):
+                    return None
+            else:
                 return None
             previous_messages = list(request["messages"])
             records.append(candidate)
@@ -858,6 +888,8 @@ class ZcodeCLIRuntime(CodexCliRuntime):
             if not isinstance(message, dict):
                 return []
             role = message.get("role")
+            if role == "tool" and not isinstance(message.get("content"), str):
+                return []
             tool_calls = message.get("toolCalls")
             if "toolCalls" in message:
                 if role != "assistant" or not isinstance(tool_calls, list):
@@ -923,7 +955,7 @@ class ZcodeCLIRuntime(CodexCliRuntime):
             history_result_signature = (
                 result_name,
                 result_error,
-                str(message.get("content") or ""),
+                message["content"],
             )
             prior_result = history_results.get(result_id)
             if prior_result is not None and prior_result != history_result_signature:
@@ -1032,7 +1064,7 @@ class ZcodeCLIRuntime(CodexCliRuntime):
             is_error = message.get("isError")
             if not isinstance(is_error, bool):
                 return []
-            content = str(message.get("content") or "")
+            content = message["content"]
             result_signature: tuple[str, bool, str] = (str(tool_name), is_error, content)
             if call_id in completed:
                 prior = completed[call_id]

@@ -88,7 +88,10 @@ from ouroboros.orchestrator.evidence.claims import (
     _runtime_message_tool_call_ids,
     _runtime_messages_support_command_claim,
 )
-from ouroboros.orchestrator.evidence.common import _flatten_evidence_values
+from ouroboros.orchestrator.evidence.common import (
+    _flatten_evidence_values,
+    is_terminal_narrative_message,
+)
 from ouroboros.orchestrator.evidence.harness_observation import (
     _IGNORED_DIRECTORY_NAMES,
     CommandObservation,
@@ -478,7 +481,11 @@ def select_replay_candidates(
         record = extract_evidence(final_message)
     except EvidenceError:
         return ()
-    support_messages = tuple(message for message in messages if not message.is_final)
+    support_messages = tuple(
+        message
+        for message in messages
+        if not message.is_final and not is_terminal_narrative_message(message)
+    )
     bash_messages = tuple(message for message in support_messages if message.tool_name == "Bash")
     unproven = [
         claim

@@ -9,7 +9,10 @@ import stat
 import sys
 
 from ouroboros.orchestrator.adapter import AgentMessage
-from ouroboros.orchestrator.evidence.common import _flatten_evidence_values
+from ouroboros.orchestrator.evidence.common import (
+    _flatten_evidence_values,
+    is_terminal_narrative_message,
+)
 from ouroboros.orchestrator.evidence.harness_observation import observation_from_message
 from ouroboros.orchestrator.evidence.shell_parsing import (
     _has_trailing_output_filter_pipeline,
@@ -214,7 +217,9 @@ def _runtime_messages_support_claim(value: str, messages: tuple[AgentMessage, ..
     """Return True when a non-final runtime message backs a claim string."""
     needle = value.strip().lower()
     return bool(needle) and any(
-        needle in _runtime_message_search_text(message) for message in messages
+        needle in _runtime_message_search_text(message)
+        for message in messages
+        if not is_terminal_narrative_message(message)
     )
 
 
@@ -305,6 +310,7 @@ def _runtime_messages_support_file_claim(
     claimed relative path resolves inside the active workspace, which covers
     tool outputs that report ``generated.py`` instead of ``src/generated.py``.
     """
+    messages = tuple(message for message in messages if not is_terminal_narrative_message(message))
     if task_cwd is not None:
         # Workspace is KNOWN: every ``files_touched`` claim must resolve inside
         # it. ``_workspace_relative_file_claim`` returns None for an absolute

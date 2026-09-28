@@ -228,6 +228,16 @@ def _flatten_evidence_values(value: object) -> tuple[str, ...]:
     return (str(value),)
 
 
+def is_terminal_narrative_message(message: object) -> bool:
+    """Identify display-only terminal prose from runtimes that do not stream events."""
+    data = getattr(message, "data", None)
+    return (
+        getattr(message, "type", None) == "assistant"
+        and isinstance(data, Mapping)
+        and data.get("terminal") is True
+    )
+
+
 def _normalized_evidence_text(text: str) -> str:
     """Normalize transcript/claim text for conservative containment checks."""
     return " ".join(text.lower().split())
