@@ -442,8 +442,8 @@ from ouroboros.orchestrator.verify_quarantine import (
 )
 from ouroboros.orchestrator.verify_shell import (
     capture_verify_shell_identity,
+    project_verify_environment,
     resolve_verify_shell,
-    sanitized_verify_environment,
     verify_shell_path_from_identity,
     verify_shell_unavailable_reason,
 )
@@ -9801,7 +9801,7 @@ Respond with either ATOMIC or the structured JSON object only.
         # is cmd.exe on native Windows and cannot parse that syntax. The
         # command text itself is never rewritten — the pass/fail signal stays
         # the exit code of exactly what the seed declared.
-        verify_env = sanitized_verify_environment()
+        verify_env = project_verify_environment(cwd)
         verify_shell_path = verify_shell_path_from_identity(self._verify_shell_identity)
         if verify_shell_path is None:
             return _VerifyGateOutcome(

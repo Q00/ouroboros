@@ -6491,6 +6491,52 @@ class TestZombieJobReconciliation:
         finally:
             await store.close()
 
+    @pytest.mark.parametrize("terminal_status", ["completed", "failed"])
+    async def test_live_detached_owner_keeps_its_job_after_execution_terminal(
+        self, tmp_path, terminal_status: str
+    ) -> None:
+        # A durable job runs in a detached worker; the MCP server that reads it
+        # holds no task for it. The worker is alive and still doing post-terminal
+        # work (QA, the chained evaluation), so the reader must not write the
+        # job's terminal event from the execution's terminal evidence.
+        store = _build_store(tmp_path)
+        try:
+            await self._seed_running_job(
+                store,
+                "job_live_detached_owner",
+                owner_pid=4_242_424,
+                owner_start_time=111.0,
+                session_id="orch_live_owner",
+                execution_id="exec_live_owner",
+            )
+            await store.append(
+                BaseEvent(
+                    type="execution.terminal",
+                    aggregate_type="execution",
+                    aggregate_id="exec_live_owner",
+                    data={
+                        "session_id": "orch_live_owner",
+                        "status": terminal_status,
+                        "error_message": "Partial failure: 1 failed",
+                    },
+                )
+            )
+            reader = JobManager(store)
+
+            with patch.object(
+                job_manager_module, "persisted_process_owner_alive", return_value=True
+            ):
+                snapshot = await reader.get_snapshot("job_live_detached_owner")
+
+            assert snapshot.status is JobStatus.RUNNING
+            assert snapshot.is_terminal is False
+            events, _ = await store.get_events_after(
+                "job", "job_live_detached_owner", last_row_id=0
+            )
+            assert [event.type for event in events] == ["mcp.job.created"]
+        finally:
+            await store.close()
+
     async def test_dead_owner_with_only_provisional_attempt_is_interrupted(self, tmp_path) -> None:
         store = _build_store(tmp_path)
         try:

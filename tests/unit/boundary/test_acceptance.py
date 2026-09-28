@@ -280,6 +280,30 @@ def test_package_pass_cannot_accept_a_criterion_nobody_attempted(
     assert not result.run_accepted
 
 
+def test_an_attempt_that_failed_outside_the_package_is_not_reported_as_never_attempted() -> None:
+    # A failed verify_command: the worker ran, the package passed, but the
+    # attempt is not one the package may accept (authority.existing_outcomes_from).
+    prior = ExistingOutcome(
+        0, "failed", "failed", "not_attempted", failure_class="EVIDENCE_MISSING"
+    )
+    result = reconcile_acceptance(("k1",), {"k1": PASS}, {0: prior}, existing_run_accepted=False)
+    (decision,) = result.decisions
+    assert decision.governed_by is Governor.EXECUTION and not decision.accepted
+    assert decision.failed_outside_package
+    line = render_reconciliation(result)[0]
+    assert "never attempted" not in line
+    assert "attempt failed outside the check package (EVIDENCE_MISSING)" in line
+    assert line.endswith("check package: pass")
+
+
+def test_a_criterion_nobody_ran_is_still_reported_as_never_attempted() -> None:
+    prior = ExistingOutcome(0, "blocked", "blocked", "not_attempted")
+    result = reconcile_acceptance(("k1",), {"k1": PASS}, {0: prior}, existing_run_accepted=False)
+    (decision,) = result.decisions
+    assert not decision.failed_outside_package
+    assert "the worker never attempted it (blocked)" in render_reconciliation(result)[0]
+
+
 def test_one_verified_pass_and_the_rest_unverified_is_an_accepted_pass() -> None:
     result = reconcile_acceptance(
         ("k1", "k2"),
