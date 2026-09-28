@@ -45,6 +45,7 @@ from collections.abc import Mapping, Sequence
 from importlib import resources
 import json
 import re
+import sys
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -181,6 +182,26 @@ class OracleCase(BaseModel):
         return None if value is None else _json_value(value)
 
 
+def imported_before_checkout(module: str) -> bool:
+    """Whether Python imports the top-level ``module`` before any checkout code.
+
+    A built-in, frozen or already imported module comes before every search
+    path, so a standard library name is never the checkout's, whatever the
+    checkout holds. Read from this interpreter's module lists: a name that
+    only the project interpreter has is not known here.
+    """
+    return module in sys.stdlib_module_names or module in sys.builtin_module_names
+
+
+def target_module(binding: Binding) -> str | None:
+    """The top-level module ``binding`` imports; ``None`` for a CLI script path."""
+    if binding.call_kind is CallKind.CLI:
+        if not binding.symbol.startswith("-m "):
+            return None
+        return binding.symbol[3:].split(".")[0]
+    return binding.symbol.split(".")[0]
+
+
 class OracleSpec(BaseModel):
     """The frozen oracle of one criterion, executed by one check."""
 
@@ -243,13 +264,21 @@ class OracleSpec(BaseModel):
         ``A`` when the target process resolved the default binding inside
         the base checkout (``resolve`` ``ok``), or found it missing there while
         the constructor declared that the criterion names it (the feature
-        the worker is asked to add); otherwise ``U`` (a worker-declared
-        binding may still make it ``A_prime``). The resolution is the
-        harness's own, in a process, so a file that merely looks like the
-        target (a workspace module shadowing the standard library, a package
-        linked in from outside the checkout) does not count.
+        the worker is asked to add) and the worker can add it to the
+        checkout; otherwise ``U`` (a worker-declared binding may still make
+        it ``A_prime``). A missing target that can never be checkout code (a
+        standard library module, ``imported_before_checkout``) is ``U``: no
+        candidate could pass it, and an admitted check nobody can pass would
+        reject every candidate. The resolution is the harness's own, in a
+        process, so a file that merely looks like the target (a workspace
+        module shadowing the standard library, a package linked in from
+        outside the checkout) does not count.
         """
-        if resolve == "ok" or (resolve == "missing" and self.target_named_in_criterion):
+        if resolve == "ok":
+            return CheckTier.A
+        module = target_module(self.default_binding)
+        addable = module is None or not imported_before_checkout(module)
+        if resolve == "missing" and self.target_named_in_criterion and addable:
             return CheckTier.A
         return CheckTier.U
 
