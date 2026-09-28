@@ -17,7 +17,7 @@ For every criterion that states behavior a program can show (a return value, a r
 Cases:
 
 1. Include the examples the criterion states, each with `"held_out": false`.
-2. Include at least two held-out cases, each with `"held_out": true`: inputs the specification does not state, which the criterion's rule decides (boundaries, other signs, empty or larger inputs). Every case must carry `held_out` as `true` or `false`; the product records your declaration as given and never infers it. The worker never sees a held-out case. Held-out cases count toward the verdict, and only a `reproduction` oracle whose held-out cases pass can make a criterion a verified pass. An oracle without any held-out case is refused (`oracle_without_held_out_case`), and its criterion is then decided by the existing verifier: a pass on the specification's own examples proves nothing the worker was not shown.
+2. Include at least two held-out cases, each with `"held_out": true`: inputs the specification does not state, which the criterion's rule decides (boundaries, other signs, empty or larger inputs). Every case must carry `held_out` as `true` or `false`; the product records your declaration as given and never infers it. The worker never sees a held-out case. Held-out cases count toward the verdict, and only a `reproduction` oracle whose held-out cases pass can make a criterion a verified pass. Every `reproduction` oracle needs at least one held-out case that the current (base) code fails: pick inputs that exercise the same missing or wrong behavior as the stated example, with different values. Held-out cases that the base already passes do not count; an oracle whose held-out cases all pass on the base is not admitted, because such a case cannot tell a fix from no fix. An oracle without any held-out case is refused (`oracle_without_held_out_case`), and its criterion is then decided by the existing verifier: a pass on the specification's own examples proves nothing the worker was not shown.
 3. Derive every expected value from the criterion's words and the stated examples. Never derive it from running or reading the repository's current implementation: on a bug-fix task the current code is the wrong answer.
 
 Reference (required for every oracle): `reference` is `{"source": "<Python module>", "symbol": "<name>"}`, your own small implementation of the criterion's rule, written from the criterion's words. Before any worker starts, the product runs it on every case's inputs and compares the result with the expected value you stated:
@@ -62,8 +62,8 @@ Answer with exactly one JSON object and nothing else (a ```json fence around it 
       "reference": {"source": "def clamp(value, low, high):\n    return max(low, min(value, high))\n", "symbol": "clamp"},
       "cases": [
         {"held_out": false, "args": {"value": 15, "low": 0, "high": 10}, "expect": {"kind": "returns", "value": 10}},
-        {"held_out": true, "args": {"value": -3, "low": -2, "high": 4}, "expect": {"kind": "returns", "value": -2}},
-        {"held_out": true, "args": {"value": 7, "low": 1, "high": 9}, "expect": {"kind": "returns", "value": 7}}
+        {"held_out": true, "args": {"value": 12, "low": 1, "high": 9}, "expect": {"kind": "returns", "value": 9}},
+        {"held_out": true, "args": {"value": -3, "low": -2, "high": 4}, "expect": {"kind": "returns", "value": -2}}
       ]
     }
   ],
@@ -74,5 +74,7 @@ Answer with exactly one JSON object and nothing else (a ```json fence around it 
   ]
 }
 ```
+
+In this example the base `clamp` returns `value` unchanged when it is above `high`. The stated case and the first held-out case fail on that base; the second held-out case passes on it and is kept only as an extra boundary case.
 
 The product assigns every identifier (oracle and check ids, case ids, assertion ids) itself; any you give are ignored. A script check's `check_id` names only its file and its failure signature: letters, digits, `_` and `-`. Script checks use the fields `check_id`, `role`, `argv`, `cwd`, `failure_signature` (`OUROBOROS_CHECK_FAILED:<check_id>`; null for preservation), and `assertions` (`[{"criterion"}]`, one per criterion the script checks), with their scripts in `files` (`{"path", "content"}`). A reply whose shape or required fields are wrong is refused as a whole (or, for one criterion's reply, that criterion is left unchecked) and you are told only a short code for the problem, such as `held_out_not_boolean` or `argv_invalid`. If the user message reports that an earlier package was not admitted, fix the named problems; do not repeat them.

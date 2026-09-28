@@ -347,3 +347,29 @@ def test_the_constructor_prompt_forbids_prose_checks() -> None:
     assert "Do not check a criterion by reading documentation" in prompt
     assert "List it in `uncovered`." in prompt
     assert "declared_not_executable" in prompt
+
+
+def test_the_prompt_example_has_a_held_out_case_the_buggy_base_fails() -> None:
+    # A held-out case the base already passes discriminates nothing, so the
+    # prompt's own example must show one the base it describes fails, and the
+    # rule must be stated.
+    from ouroboros.boundary.constructor import extract_json_object, load_constructor_system_prompt
+
+    from .clamp_fixtures import BUGGY
+
+    prompt = load_constructor_system_prompt()
+    assert "at least one held-out case that the current (base) code fails" in prompt
+    assert "Held-out cases that the base already passes do not count" in prompt
+    namespace: dict[str, Any] = {}
+    exec(BUGGY, namespace)  # noqa: S102 - the fixture's own base clamp
+    reproductions = [
+        oracle
+        for oracle in extract_json_object(prompt)["oracles"]
+        if oracle["role"] == "reproduction"
+    ]
+    assert reproductions
+    for oracle in reproductions:
+        held_out = [case for case in oracle["cases"] if case["held_out"]]
+        assert any(
+            namespace["clamp"](**case["args"]) != case["expect"]["value"] for case in held_out
+        )
