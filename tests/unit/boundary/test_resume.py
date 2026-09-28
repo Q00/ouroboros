@@ -59,6 +59,9 @@ from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.parallel_executor_models import (
     ACExecutionOutcome,
     ACExecutionResult,
+    CheckPackageOwner,
+    CheckPackageProvenance,
+    FinalGateSettlement,
     ParallelExecutionResult,
 )
 from ouroboros.persistence.event_store import EventStore
@@ -404,14 +407,14 @@ async def test_the_same_process_uses_the_check_timeout_the_run_started_with(
     real = resume_module.verify_with_bindings
 
     async def spy(*args: Any, **kwargs: Any) -> Any:
-        seen.append(kwargs["timeout_seconds"])
+        seen.append(kwargs["contract"])
         return await real(*args, **kwargs)
 
     monkeypatch.setattr(resume_module, "verify_with_bindings", spy)
     authority = await _resume(store, repo)
     assert authority.boundary.contract == recorded
     await authority(seed=seed, execution_id=EXECUTION, parallel_result=_restored())
-    assert seen == [recorded.check_timeout_seconds]
+    assert seen == [recorded]
 
 
 # A resumed run counts attempts exactly as the live run with the package on does.
@@ -445,6 +448,22 @@ async def test_after_a_crash_a_root_that_already_failed_is_never_accepted(
     assert [decision.accepted for decision in decisions] == [True, False, False]
 
 
+def _gate_failed(settlement: FinalGateSettlement | None) -> ParallelExecutionResult:
+    """Criterion 1 failed by the package gate alone; ``settlement`` is this run's final one."""
+    gate_failed = _failed(
+        0,
+        "check_package: the finished workspace fails the frozen check package",
+        check_package=CheckPackageProvenance(
+            CheckPackageOwner.CHECK_PACKAGE, repair="counterexample"
+        ),
+        final_gate_settlement=settlement,
+    )
+    base = _restored().results
+    return ParallelExecutionResult(
+        results=(gate_failed, base[1], base[2]), success_count=2, failure_count=1
+    )
+
+
 async def test_after_a_crash_a_root_only_the_gate_failed_is_decided_by_the_package(
     store: EventStore, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -452,20 +471,25 @@ async def test_after_a_crash_a_root_only_the_gate_failed_is_decided_by_the_packa
     seed, _state = await _run_until_the_worker_stops(store, repo, tmp_path, monkeypatch)
     (repo / "mathutils.py").write_text(CLAMP_FIXED + DOUBLE)
     authority = await _resume(store, repo)
-    gate_failed = _failed(
-        0,
-        "check_package: the finished workspace fails the frozen check package",
-        check_package_repair="counterexample",
-        check_package_failure_class="CHECK_PACKAGE_FAIL:abc",
-    )
-    base = _restored().results
-    restored = ParallelExecutionResult(
-        results=(gate_failed, base[1], base[2]), success_count=2, failure_count=1
-    )
+    # The resumed executor's final settlement found every other gate holding.
+    restored = _gate_failed(FinalGateSettlement.HOLDS)
     decided = await authority(seed=seed, execution_id=EXECUTION, parallel_result=restored)
     # The finished workspace passes criterion 1, held-out case included.
     assert decided.results[0].outcome is ACExecutionOutcome.SUCCEEDED
     assert decided.all_succeeded
+
+
+async def test_after_a_crash_an_unsettled_gate_failure_is_never_accepted(
+    store: EventStore, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The settlement is never persisted: until the resumed executor settles it, it stays failed."""
+    seed, _state = await _run_until_the_worker_stops(store, repo, tmp_path, monkeypatch)
+    (repo / "mathutils.py").write_text(CLAMP_FIXED + DOUBLE)
+    authority = await _resume(store, repo)
+    decided = await authority(seed=seed, execution_id=EXECUTION, parallel_result=_gate_failed(None))
+    assert decided.results[0].outcome is ACExecutionOutcome.FAILED
+    assert not authority.outcome.reconciliation.decisions[0].accepted
+    assert not decided.all_succeeded
 
 
 # The live authority's fail-closed rule, on resume (B1 parity).

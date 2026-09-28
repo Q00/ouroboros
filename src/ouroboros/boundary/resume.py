@@ -191,12 +191,16 @@ async def load_resumed_boundary(
 
 
 def _undecided(key: str, reason: str) -> CriterionVerdict:
-    return CriterionVerdict(key, PackageCriterionStatus.INDETERMINATE, CheckTier.A, reason)
+    return CriterionVerdict(
+        key, PackageCriterionStatus.INDETERMINATE, CheckTier.A, reason, declared_binding_pass=False
+    )
 
 
 def _uncovered(key: str) -> CriterionVerdict:
     """Not the package's: the legacy verifier decides it."""
-    return CriterionVerdict(key, PackageCriterionStatus.UNCOVERED, CheckTier.U, "uncovered")
+    return CriterionVerdict(
+        key, PackageCriterionStatus.UNCOVERED, CheckTier.U, "uncovered", declared_binding_pass=False
+    )
 
 
 async def decide_resumed(
@@ -223,6 +227,7 @@ async def decide_resumed(
     assignments, _results = await assign_tiers(
         package,
         base=live.base_snapshot,
+        contract=live.contract,
         declared=declared,
         expected_base_digest=live.admission.base_tree_digest,
         admitted_tiers=live.admission.check_tiers,
@@ -232,7 +237,7 @@ async def decide_resumed(
         package,
         candidate,
         assignments,
-        timeout_seconds=live.contract.check_timeout_seconds,
+        contract=live.contract,
         interpreter=live.interpreter,
     )
     computed = criterion_verdicts(package, bound.effective, assignments=assignments)
