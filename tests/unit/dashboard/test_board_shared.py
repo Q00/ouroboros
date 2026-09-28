@@ -101,6 +101,34 @@ class TestSharedReducerLocation:
         }
         assert set(board) == {"meta", "columns", "providers"}
 
+    def test_recovered_interview_drops_obsolete_failure_diagnostics(self) -> None:
+        failed = {
+            "aggregate_id": "interview-c1",
+            "event_type": "interview.failed",
+            "payload": {"error": "generation timed out", "phase": "question_generation"},
+        }
+        resumed = {
+            "aggregate_id": "interview-c1",
+            "event_type": "interview.response.recorded",
+            "payload": {"round_number": 2, "response_preview": "continued"},
+        }
+        completed = {
+            "aggregate_id": "interview-c1",
+            "event_type": "interview.completed",
+            "payload": {"total_rounds": 3},
+        }
+
+        active = reduce_board([failed, resumed], execution_id="exec-c1")["meta"]["interview"]
+        done = reduce_board([failed, resumed, completed], execution_id="exec-c1")["meta"][
+            "interview"
+        ]
+
+        assert active["status"] == "active"
+        assert done["status"] == "completed"
+        for projection in (active, done):
+            assert "error" not in projection
+            assert "phase" not in projection
+
     def test_interview_projection_ignores_unrecognized_or_identity_free_rows(self) -> None:
         board = reduce_board(
             [
