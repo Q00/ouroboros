@@ -51,7 +51,6 @@ import anyio
 from rich.console import Console
 
 from ouroboros import telemetry as usage_telemetry
-from ouroboros.core.project_env import with_project_venv
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     InvestmentSpec,
@@ -443,8 +442,8 @@ from ouroboros.orchestrator.verify_quarantine import (
 )
 from ouroboros.orchestrator.verify_shell import (
     capture_verify_shell_identity,
+    project_verify_environment,
     resolve_verify_shell,
-    sanitized_verify_environment,
     verify_shell_path_from_identity,
     verify_shell_unavailable_reason,
 )
@@ -9802,10 +9801,7 @@ Respond with either ATOMIC or the structured JSON object only.
         # is cmd.exe on native Windows and cannot parse that syntax. The
         # command text itself is never rewritten — the pass/fail signal stays
         # the exit code of exactly what the seed declared.
-        # A task worktree lacks the gitignored project virtualenv, so the
-        # command resolves ``python`` and the project's tools through the one
-        # the project has (``core/project_env``), as the check package does.
-        verify_env = with_project_venv(sanitized_verify_environment(), Path(cwd))
+        verify_env = project_verify_environment(cwd)
         verify_shell_path = verify_shell_path_from_identity(self._verify_shell_identity)
         if verify_shell_path is None:
             return _VerifyGateOutcome(

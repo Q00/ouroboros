@@ -36,6 +36,8 @@ from pathlib import Path, PureWindowsPath
 import shutil
 import subprocess
 
+from ouroboros.core.project_env import with_project_venv
+
 VERIFY_BASH_ENV_VAR = "OUROBOROS_VERIFY_BASH"
 
 # Windows locations Git for Windows installs its bundled bash into. A user who
@@ -443,3 +445,13 @@ def sanitized_verify_environment(base: Mapping[str, str] | None = None) -> dict[
         if key.upper() not in VERIFY_ENV_STRIPPED_KEYS
         and not key.upper().startswith(VERIFY_ENV_STRIPPED_PREFIXES)
     }
+
+
+def project_verify_environment(cwd: str | Path) -> dict[str, str]:
+    """The sanitized environment with the project's virtualenv resolving first.
+
+    A task worktree lacks the gitignored project virtualenv, so a
+    ``verify_command`` resolves ``python`` and the project's tools through the
+    one the project has (``core/project_env``), as the check package does.
+    """
+    return with_project_venv(sanitized_verify_environment(), Path(cwd))

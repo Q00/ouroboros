@@ -74,6 +74,19 @@ def project_venv_scripts(checkout: Path) -> Path | None:
     return python.parent if python is not None else None
 
 
+def project_venv_provides(checkout: Path, tool: str) -> bool:
+    """Whether the project's virtualenv for ``checkout`` has the executable ``tool``.
+
+    The checkout's own ``.venv`` counts even without an interpreter in it.
+    """
+    local = checkout / ".venv"
+    scripts = project_venv_scripts(checkout)
+    candidates = [local / "bin" / tool, local / "Scripts" / f"{tool}.exe"]
+    if scripts is not None:
+        candidates += [scripts / tool, scripts / f"{tool}.exe"]
+    return any(candidate.exists() for candidate in candidates)
+
+
 def with_project_venv(env: Mapping[str, str], checkout: Path) -> dict[str, str]:
     """A copy of ``env`` in which the project's virtualenv resolves first.
 
@@ -94,6 +107,7 @@ def with_project_venv(env: Mapping[str, str], checkout: Path) -> dict[str, str]:
 __all__ = [
     "VENV_DIRECTORY_NAMES",
     "main_worktree_root",
+    "project_venv_provides",
     "project_venv_python",
     "project_venv_scripts",
     "venv_python",
