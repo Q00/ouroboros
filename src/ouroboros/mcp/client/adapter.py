@@ -43,6 +43,24 @@ log = structlog.get_logger(__name__)
 RETRIABLE_EXCEPTIONS = (TimeoutError, ConnectionError, OSError)
 
 
+def _record_cleanup_failure(primary: BaseException, cleanup: BaseException) -> None:
+    """Record secondary teardown failure without replacing the primary error."""
+    try:
+        primary.add_note(f"MCP cleanup also failed ({type(cleanup).__name__}): {cleanup}")
+    except (asyncio.CancelledError, KeyboardInterrupt, GeneratorExit):
+        raise
+    except BaseException:
+        pass
+    try:
+        log.warning("mcp.cleanup_during_exception_failed", error=cleanup)
+    except (asyncio.CancelledError, KeyboardInterrupt, GeneratorExit):
+        raise
+    except BaseException:
+        # Logging is best-effort during exception unwinding. In particular, a
+        # broken logging sink must not replace the error from the context body.
+        pass
+
+
 def _freeze_json(value: Any) -> Any:
     """Return an immutable defensive copy of a JSON-compatible value."""
     if isinstance(value, dict):
@@ -114,11 +132,18 @@ class MCPClientAdapter:
         exc_val: BaseException | None,
         exc_tb: Any,
     ) -> None:
-        result = await self.disconnect()
+        try:
+            result = await self.disconnect()
+        except (asyncio.CancelledError, KeyboardInterrupt, GeneratorExit):
+            raise
+        except BaseException as cleanup_error:
+            if exc_val is None:
+                raise
+            _record_cleanup_failure(exc_val, cleanup_error)
+            return None
         if result.is_err:
             if exc_val is not None:
-                exc_val.add_note(f"MCP cleanup also failed: {result.error}")
-                log.warning("mcp.cleanup_during_exception_failed", error=result.error)
+                _record_cleanup_failure(exc_val, result.error)
             else:
                 raise result.error
 

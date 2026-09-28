@@ -132,6 +132,28 @@ def _not_run_result(name: str, blocked_by: str) -> CheckResult:
     )
 
 
+def _local_stdio_failure(exc: BaseException) -> list[CheckResult]:
+    return [
+        CheckResult(
+            _LOCAL_STDIO_STAGE_STARTUP,
+            "fail",
+            f"Local probe failed ({type(exc).__name__}): {exc}",
+            "Inspect the isolated MCP installation and rerun the doctor.",
+        ),
+        _not_run_result(_LOCAL_STDIO_STAGE_PROTOCOL, "local probe"),
+        _not_run_result(_LOCAL_STDIO_STAGE_TOOLS, "local probe"),
+    ]
+
+
+def _note_cleanup_failure(primary: BaseException, cleanup: BaseException) -> None:
+    try:
+        primary.add_note(f"Local stdio cleanup also failed ({type(cleanup).__name__}): {cleanup}")
+    except (asyncio.CancelledError, KeyboardInterrupt, GeneratorExit):
+        raise
+    except BaseException:
+        pass
+
+
 def _local_stdio_probe_config(home: Path) -> MCPServerConfig:
     # -I ignores caller PYTHONPATH and cwd imports. Only this already-imported
     # installation is added, and cwd changes before importing its entrypoint.
@@ -267,32 +289,65 @@ async def _collect_local_stdio_results(
 
 async def _probe_local_stdio() -> list[CheckResult]:
     """Own the isolated offline probe lifecycle and observe teardown results."""
-    with tempfile.TemporaryDirectory(prefix="ouroboros-doctor-") as temporary_home:
-        config = _local_stdio_probe_config(Path(temporary_home))
+    temporary_directory: tempfile.TemporaryDirectory[str] | None = None
+    adapter: MCPClientAdapter | None = None
+    results: list[CheckResult] = []
+    primary_error: BaseException | None = None
+    cleanup_errors: list[BaseException] = []
+    try:
+        temporary_directory = tempfile.TemporaryDirectory(prefix="ouroboros-doctor-")
+        config = _local_stdio_probe_config(Path(temporary_directory.name))
         adapter = MCPClientAdapter(max_retries=1)
-        try:
-            results = await _collect_local_stdio_results(adapter, config)
-        except Exception as exc:
-            results = [
-                CheckResult(
-                    _LOCAL_STDIO_STAGE_STARTUP,
-                    "fail",
-                    f"Local probe failed: {exc}",
-                    "Inspect the isolated MCP installation and rerun the doctor.",
-                ),
-                _not_run_result(_LOCAL_STDIO_STAGE_PROTOCOL, "local probe"),
-                _not_run_result(_LOCAL_STDIO_STAGE_TOOLS, "local probe"),
-            ]
-        finally:
-            # Explicit Result inspection also catches a failed cleanup after
-            # partial connect: no passing report escapes before child teardown.
-            cleanup = await adapter.disconnect()
-        if cleanup.is_err:
-            for result in results:
-                result.status = "fail"
-                result.remediation = "Resolve local stdio teardown before rerunning the probe."
-            results[0].message = f"Local stdio teardown failed: {cleanup.error}"
-        return results
+        results = await _collect_local_stdio_results(adapter, config)
+    except BaseException as exc:
+        primary_error = exc
+    finally:
+        # Disconnect and remove temporary state under one failure envelope.
+        # Catch BaseException here so teardown cannot replace a pending body
+        # exception; external cancellation is re-raised after all cleanup runs.
+        if adapter is not None:
+            try:
+                cleanup = await adapter.disconnect()
+                if cleanup.is_err:
+                    cleanup_errors.append(cleanup.error)
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+        if temporary_directory is not None:
+            try:
+                temporary_directory.cleanup()
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+
+    external_exceptions = (asyncio.CancelledError, KeyboardInterrupt, GeneratorExit)
+    if isinstance(primary_error, external_exceptions):
+        for cleanup_error in cleanup_errors:
+            _note_cleanup_failure(primary_error, cleanup_error)
+        raise primary_error.with_traceback(primary_error.__traceback__)
+
+    cleanup_cancellation = next(
+        (error for error in cleanup_errors if isinstance(error, external_exceptions)), None
+    )
+    if cleanup_cancellation is not None:
+        if primary_error is not None:
+            _note_cleanup_failure(cleanup_cancellation, primary_error)
+        for cleanup_error in cleanup_errors:
+            if cleanup_error is not cleanup_cancellation:
+                _note_cleanup_failure(cleanup_cancellation, cleanup_error)
+        raise cleanup_cancellation.with_traceback(cleanup_cancellation.__traceback__)
+
+    if primary_error is not None:
+        results = _local_stdio_failure(primary_error)
+    if cleanup_errors:
+        if not results:
+            results = _local_stdio_failure(cleanup_errors[0])
+        for result in results:
+            result.status = "fail"
+            result.remediation = "Resolve local stdio teardown before rerunning the probe."
+        cleanup_error = cleanup_errors[0]
+        results[
+            0
+        ].message = f"Local stdio teardown failed ({type(cleanup_error).__name__}): {cleanup_error}"
+    return results
 
 
 def check_python_version() -> CheckResult:
