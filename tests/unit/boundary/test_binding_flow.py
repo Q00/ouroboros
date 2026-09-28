@@ -27,6 +27,7 @@ from ouroboros.boundary.events import (
     CANDIDATE_VERIFIED,
     PACKAGE_FROZEN,
     BindingsPayload,
+    RunContract,
 )
 from ouroboros.boundary.ledger import BoundaryLedger, BoundaryOrderError, verify_boundary_order
 from ouroboros.boundary.oracle_build import assemble_package, build_oracle_spec, package_from_reply
@@ -51,6 +52,7 @@ from .test_oracle import _seed as _oracle_seed
 
 BUGGY = "def clamp(value, low, high):\n    if value > high:\n        return value\n    return max(low, value)\n"
 FIXED = "def clamp(value, low, high):\n    return max(low, min(high, value))\n"
+CONTRACT = RunContract(check_timeout_seconds=120)
 LERP_CASES = [
     {
         "case_id": "stated",
@@ -364,6 +366,7 @@ async def test_each_late_binding_has_exactly_one_base_run(
         await binding_flow.assign_tiers(
             state.package,
             base=state.base_snapshot,
+            contract=state.contract,
             declared={keys[1]: [{"symbol": "mathutils.lerp"}]},
             expected_base_digest=state.admission.base_tree_digest,
             base_run_cache=cache,
@@ -373,6 +376,7 @@ async def test_each_late_binding_has_exactly_one_base_run(
     await binding_flow.assign_tiers(
         state.package,
         base=state.base_snapshot,
+        contract=state.contract,
         declared={keys[1]: [{"symbol": "mathutils.lerp", "arg_map": {"a": 0, "b": 1, "t": 2}}]},
         base_run_cache=cache,
     )
@@ -540,8 +544,10 @@ async def test_no_held_out_value_reaches_the_store(
     ]
     assert hits == []
     (record,) = (tmp_path / "store" / "packages").iterdir()
-    cases = json.loads(record.read_text())["package"]["oracles"][0]["cases"]
-    assert {"case_id": "c2", "held_out": True} in cases
+    # The record (schema v4) keeps case counts only, never a case or its id.
+    oracle = json.loads(record.read_text())["package"]["oracles"][0]
+    assert "cases" not in oracle
+    assert (oracle["case_count"], oracle["held_out_count"]) == (2, 1)
 
 
 @pytest.fixture
@@ -592,10 +598,11 @@ async def test_a_bare_name_in_the_criterion_is_not_tier_a_and_a_declaration_bind
     assignments, _ = await assign_tiers(
         package,
         base=base,
+        contract=CONTRACT,
         declared={key: [{"symbol": "interp.interpolate"}]},
     )
     assert assignments["oracle_1"].tier.value == "A_prime"
-    bound = await verify_with_bindings(package, candidate, assignments)
+    bound = await verify_with_bindings(package, candidate, assignments, contract=CONTRACT)
     assert bound.effective is not None and bound.effective.verdict is CandidateVerdict.PASS
 
 

@@ -19,6 +19,7 @@ from ouroboros.boundary.acceptance import (
 from ouroboros.boundary.admission import admit_check_package
 from ouroboros.boundary.binding import CheckTier
 from ouroboros.boundary.binding_flow import assign_tiers, verify_with_bindings
+from ouroboros.boundary.events import RunContract
 from ouroboros.boundary.oracle_build import package_from_reply
 from ouroboros.boundary.per_check import (
     REPRO_PASSES_ON_BASE,
@@ -34,6 +35,8 @@ from .test_per_check import (
     _dev_seed,
     _seed,
 )
+
+CONTRACT = RunContract(check_timeout_seconds=120)
 
 
 @pytest.fixture
@@ -57,9 +60,11 @@ async def test_an_excluded_check_is_tier_c_and_never_runs(repo: Path) -> None:
     assert applied.verdict is PackageVerdict.ADMITTED
     assert applied.excluded_checks == {"oracle_2": REPRO_PASSES_ON_BASE}
     (repo / "mathutils.py").write_text(FIXED)
-    assignments, _ = await assign_tiers(package, base=None, admitted_tiers=applied.check_tiers)
+    assignments, _ = await assign_tiers(
+        package, base=None, contract=CONTRACT, admitted_tiers=applied.check_tiers
+    )
     assert assignments["oracle_2"].tier is CheckTier.C
-    bound = await verify_with_bindings(package, repo, assignments)
+    bound = await verify_with_bindings(package, repo, assignments, contract=CONTRACT)
     assert {check.check_id for check in bound.effective.checks} == {"oracle_1", "oracle_3"}
     verdicts = criterion_verdicts(package, bound.effective, assignments=assignments)
     # Criterion 3 has only a preservation check: it passes, but a check the
@@ -123,8 +128,10 @@ async def test_a_linked_check_decides_whatever_else_the_reply_says(repo: Path) -
     admission = await admit_check_package(package, repo)
     assert admission.verdict is PackageVerdict.ADMITTED and admission.excluded_checks is None
     (repo / "mathutils.py").write_text(FIXED)
-    assignments, _ = await assign_tiers(package, base=None, admitted_tiers=admission.check_tiers)
-    bound = await verify_with_bindings(package, repo, assignments)
+    assignments, _ = await assign_tiers(
+        package, base=None, contract=CONTRACT, admitted_tiers=admission.check_tiers
+    )
+    bound = await verify_with_bindings(package, repo, assignments, contract=CONTRACT)
     verdicts = criterion_verdicts(package, bound.effective, assignments=assignments)
     assert [v.status for v in verdicts.values()] == [PackageCriterionStatus.PASS]
 

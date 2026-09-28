@@ -45,25 +45,16 @@ HELD = "SNTLHELD"
 HELD_NUMBER = 737373
 VISIBLE = "sntlvis"
 
-# Model text that may be persisted, by the field that carries it.
+# Model text that may be persisted, by the field that carries it. The package
+# record is the product's allowlist projection (``package.manifest_summary``):
+# it carries no oracle input name, case, file content or path, so none of
+# those fields may carry model text anywhere.
 VISIBLE_ALLOWLIST = {
-    # An oracle's input names: the worker is shown them (``OracleSpec.interface``)
-    # so it can map them onto its own parameters.
-    "params",
-    # The binding's parameter mapping, keyed by those input names: part of the
-    # binding a worker declares and is shown back in repair text.
+    # The binding's parameter mapping, keyed by the oracle's input names:
+    # part of the binding a worker declares and is shown back in repair text.
     "arg_map",
-    # A visible case's inputs, keyed by the input names. Visible cases are
-    # the ones the constructor declared stated by the Seed; a failing one is
-    # shown to the worker as its counterexample. Held-out cases are stored as
-    # ids only.
-    "args",
-    # Package file contents (a script check and the oracle data with its
-    # visible cases only): no held-out case is ever in a file's content.
-    "content",
-    # A script check's path and argv: scripts carry no held-out case and
-    # their pass is advisory, never a verified pass.
-    "path",
+    # A script check's argv in its execution receipt: scripts carry no
+    # held-out case and their pass is advisory, never a verified pass.
     "argv",
 }
 
@@ -252,4 +243,4 @@ async def test_every_persisted_byte_is_closed_to_model_text_but_the_allowlist(
             visible_fields |= set(path) & VISIBLE_ALLOWLIST
     assert HELD not in printed and str(HELD_NUMBER) not in printed
     # The allowlist is exercised, not vacuous.
-    assert {"params", "arg_map", "args", "content", "path", "argv"} <= visible_fields
+    assert visible_fields == VISIBLE_ALLOWLIST

@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from ouroboros.boundary.acceptance import PackageCriterionStatus, reconcile_acceptance
 from ouroboros.boundary.admission import admit_check_package
 from ouroboros.boundary.binding import CHECK_DIR
 from ouroboros.boundary.events import (
@@ -19,7 +20,6 @@ from ouroboros.boundary.events import (
     CONSTRUCTION_FAILED,
     PACKAGE_FROZEN,
     SUPERSEDED,
-    ReconciliationPayload,
     RunContract,
     boundary_version_id,
 )
@@ -54,18 +54,6 @@ from .calc_fixtures import (
 from .fake_constructors import (
     FakeConstructor,
     _ok,
-)
-
-EMPTY_RECONCILIATION = ReconciliationPayload(
-    schema_version="ouroboros.acceptance_reconciliation.v3",
-    run_accepted=False,
-    existing_run_accepted=True,
-    artifact_verdict="unverified",
-    verified_pass_count=0,
-    unverified_count=0,
-    criterion_count=0,
-    tier_summary={},
-    criteria=(),
 )
 
 CONTRACT = RunContract(check_timeout_seconds=120)
@@ -433,19 +421,29 @@ async def test_reconciliation_must_follow_a_verification_and_is_single(
     ledger = BoundaryLedger(store)
     assert state.package is not None
     reference = state.package.package_id  # the id the journal cites
-    with pytest.raises(BoundaryOrderError):
+    # A decision of exactly the frozen manifest's criteria (the journal
+    # gateway refuses any other): the one the verification below produces.
+    keys = seed_criterion_keys(seed)
+    reconciliation = reconcile_acceptance(
+        keys,
+        dict.fromkeys(keys, PackageCriterionStatus.UNVERIFIED),
+        {},
+        existing_run_accepted=True,
+        legacy_decides_unverified=True,
+    ).to_payload()
+    with pytest.raises(BoundaryOrderError, match="verification"):
         await ledger.record_acceptance_reconciled(
-            state.boundary_id, package_id=reference, reconciliation=EMPTY_RECONCILIATION
+            state.boundary_id, package_id=reference, reconciliation=reconciliation
         )
     (repo / "calc.py").write_text(FIXED)
     verdict = await verify_check_package(state, event_store=store, candidate_checkout=repo)
-    assert verdict.criteria == {seed_criterion_keys(seed)[0]: "unverified"}
+    assert verdict.criteria == {keys[0]: "unverified"}
     await ledger.record_acceptance_reconciled(
-        state.boundary_id, package_id=reference, reconciliation=EMPTY_RECONCILIATION
+        state.boundary_id, package_id=reference, reconciliation=reconciliation
     )
     with pytest.raises(BoundaryOrderError):
         await ledger.record_acceptance_reconciled(
-            state.boundary_id, package_id=reference, reconciliation=EMPTY_RECONCILIATION
+            state.boundary_id, package_id=reference, reconciliation=reconciliation
         )
 
 
@@ -575,10 +573,99 @@ async def test_the_final_verification_runs_under_the_recorded_run_contract(
     verify = run_wiring.verify_with_bindings
 
     async def spy(*args: Any, **kwargs: Any) -> Any:
-        seen.append(kwargs["timeout_seconds"])
+        seen.append(kwargs["contract"].check_timeout_seconds)
         return await verify(*args, **kwargs)
 
     monkeypatch.setattr(run_wiring, "verify_with_bindings", spy)
     (repo / "calc.py").write_text(FIXED)
     await verify_check_package(state, event_store=store, candidate_checkout=repo)
     assert seen == [37]
+
+
+async def test_late_binding_uses_the_recorded_run_contract(
+    store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Review probe: the run records a check timeout of 37; the late binding a
+    # worker declares after it stops is admitted (one base run) under that
+    # recorded value, never under the live default, and so is every check.
+    from ouroboros.boundary import binding_flow
+
+    from .test_binding_flow import BUGGY as FLOW_BUGGY
+    from .test_binding_flow import FIXED as FLOW_FIXED
+    from .test_binding_flow import _Constructor
+    from .test_binding_flow import _seed as flow_seed
+
+    repo = tmp_path / "flow_repo"
+    repo.mkdir()
+    (repo / "mathutils.py").write_text(FLOW_BUGGY)
+    seed = flow_seed()
+    state = await prepare_check_package(
+        seed,
+        event_store=store,
+        constructor=_Constructor(seed, repo),
+        execution_id="exec_late_contract",
+        base_checkout=repo,
+        worker_workspace=repo,
+        runtime_label="codex",
+        settings=CheckPackageSettings(True, check_timeout_seconds=37, max_construction_attempts=1),
+        store_dir=tmp_path / "store",
+    )
+    assert state.admission is not None and state.admission.check_tiers["oracle_2"] == "U"
+    assert await BoundaryLedger(store).run_contract("exec_late_contract") == RunContract(
+        check_timeout_seconds=37
+    )
+    seen: dict[str, list[int]] = {"binding": [], "candidate": []}
+    admit, verify = binding_flow.admit_binding, binding_flow.verify_candidate
+
+    async def admit_spy(*args: Any, **kwargs: Any) -> Any:
+        seen["binding"].append(kwargs["timeout_seconds"])
+        return await admit(*args, **kwargs)
+
+    async def verify_spy(*args: Any, **kwargs: Any) -> Any:
+        seen["candidate"].append(kwargs["timeout_seconds"])
+        return await verify(*args, **kwargs)
+
+    monkeypatch.setattr(binding_flow, "admit_binding", admit_spy)
+    monkeypatch.setattr(binding_flow, "verify_candidate", verify_spy)
+    (repo / "mathutils.py").write_text(
+        FLOW_FIXED + "\ndef lerp(a, b, t):\n    return a + (b - a) * t\n"
+    )
+    keys = seed_criterion_keys(seed)
+    verdict = await verify_check_package(
+        state,
+        event_store=store,
+        candidate_checkout=repo,
+        declared_entry_points={keys[1]: [{"symbol": "mathutils.lerp"}]},
+    )
+    assert verdict.assignments["oracle_2"].tier.value == "A_prime"
+    assert seen["binding"] == [37]
+    assert seen["candidate"] and set(seen["candidate"]) == {37}
+
+
+async def test_the_product_store_root_resolves_a_symlinked_config_dir(
+    store, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A user whose config dir (or home) is a symlink: the product resolves its
+    # own store root once, so the no-follow publication below that trusted
+    # anchor works and lands in the real directory.
+    real = tmp_path / "real_config"
+    real.mkdir()
+    link = tmp_path / "linked_config"
+    link.symlink_to(real, target_is_directory=True)
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: link)
+    seed = _seed("add(2, 3) returns 5")
+    state = await prepare_check_package(
+        seed,
+        event_store=store,
+        constructor=FakeConstructor(_ok(_package(seed, "repro_add", BUGFIX_SCRIPT))),
+        execution_id="exec_linked_home",
+        base_checkout=repo,
+        worker_workspace=repo,
+        runtime_label="codex",
+        settings=CheckPackageSettings(enabled=True),
+    )
+    assert state.admitted and state.package is not None
+    assert state.store_dir == real.resolve() / "boundary" / "exec_linked_home"
+    (record,) = (state.store_dir / "packages").iterdir()
+    assert record.name == f"{state.package.package_id}.json" and not record.is_symlink()
+    assert list((real / "boundary" / "exec_linked_home" / "receipts").iterdir())

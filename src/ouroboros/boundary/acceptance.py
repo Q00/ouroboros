@@ -40,9 +40,12 @@ status once the worker has stopped:
 ``unverified`` and ``uncovered`` are both "unverified": they never count as a
 pass in any aggregate. A criterion is accepted when the worker attempted it
 and its status is ``pass``, ``unverified`` or ``uncovered``, except that a
-``pass`` through a worker-declared binding (tier ``A_prime``) only
-corroborates: over a legacy rejection it is not accepted
-(``a_prime_corroborates_only``, decided by the legacy verifier). A criterion
+``pass`` that rests on a worker-declared binding (``declared_binding_pass``:
+no reproduction oracle passed a held-out case through the product's own
+binding, tier ``A``) only corroborates: over a legacy rejection it is not
+accepted (``a_prime_corroborates_only``, decided by the legacy verifier).
+The display tier (the weakest over the linked checks) decides nothing: an
+``A_prime`` oracle plus an advisory script shows ``S``. A criterion
 nobody attempted (blocked, invalid, cancelled, or missing on a failed run)
 is not accepted, whatever the package says.
 
@@ -146,6 +149,10 @@ class CriterionVerdict:
     failed_heldout_only: bool = False
     binding: dict[str, Any] | None = None
     binding_source: str | None = None
+    declared_binding_pass: bool = False
+    """The ``pass`` rests on a worker-declared binding: no reproduction oracle
+    passed a held-out case through a tier ``A`` binding. ``False`` unless
+    ``status`` is ``pass``. It, not ``tier``, decides corroboration."""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -157,6 +164,7 @@ class CriterionVerdict:
             "failed_heldout_only": self.failed_heldout_only,
             "binding": self.binding,
             "binding_source": self.binding_source,
+            "declared_binding_pass": self.declared_binding_pass,
         }
 
 
@@ -284,6 +292,9 @@ def criterion_verdicts(
         advisory = 0
         reproduced = 0
         held_out_verified = 0
+        # Of those, the ones through the product's own binding (tier A); a
+        # pass without one rests on a worker-declared binding.
+        held_out_by_default = 0
         # The binding each check ran through, and which checks decided each
         # outcome, so the verdict names the binding of a deciding check.
         bound: dict[str, tuple[CheckTier, dict[str, Any], str | None]] = {}
@@ -326,7 +337,9 @@ def criterion_verdicts(
                     passed += 1
                     if roles.get(check_id) is CheckRole.REPRODUCTION:
                         reproduced += 1
-                        held_out_verified += int(_held_out_passed(execution))
+                        if _held_out_passed(execution):
+                            held_out_verified += 1
+                            held_out_by_default += int(check_tier is CheckTier.A)
             else:
                 undecided.append(execution.reason)
                 decided_by["undecided"].append(check_tier)
@@ -351,6 +364,7 @@ def criterion_verdicts(
         else:
             status, reason, heldout_only = PackageCriterionStatus.PASS, "passed", False
             tier = _weakest(tiers)
+        declared_binding_pass = status is PackageCriterionStatus.PASS and not held_out_by_default
         bucket = (
             "fail" if failed else "undecided" if undecided else "unverified" if unverified else None
         )
@@ -366,6 +380,7 @@ def criterion_verdicts(
             heldout_only,
             binding,
             source,
+            declared_binding_pass,
         )
     return verdicts
 
@@ -445,6 +460,8 @@ class CriterionDecision:
     failed_heldout_only: bool = False
     existing_failure_class: str | None = None
     binding: dict[str, Any] | None = None
+    declared_binding_pass: bool = False
+    """The package's ``pass`` rests on a worker-declared binding (``CriterionVerdict``)."""
 
     @property
     def legacy_decided(self) -> bool:
@@ -470,6 +487,7 @@ class CriterionDecision:
             "existing_accepted": self.existing_accepted,
             "accepted": self.accepted,
             "governed_by": self.governed_by.value,
+            "declared_binding_pass": self.declared_binding_pass,
         }
 
 
@@ -605,8 +623,9 @@ def reconcile_acceptance(
             and not prior.no_evidence
         ):
             accepted, governor = prior.passed, Governor.EXISTING_VERIFIER
-        elif verdict.tier is CheckTier.A_PRIME and prior is not None and prior.rejected_attempt:
-            # A worker-declared binding corroborates; it never overrules.
+        elif verdict.declared_binding_pass and prior is not None and prior.rejected_attempt:
+            # A pass that rests on a worker-declared binding corroborates; it
+            # never overrules. Its provenance decides, never the display tier.
             accepted, governor = False, Governor.EXISTING_VERIFIER
             verdict = replace(verdict, reason=A_PRIME_CORROBORATES_ONLY)
         else:
@@ -625,6 +644,7 @@ def reconcile_acceptance(
                 failed_heldout_only=verdict.failed_heldout_only,
                 existing_failure_class=None if prior is None else prior.failure_class,
                 binding=verdict.binding,
+                declared_binding_pass=verdict.declared_binding_pass,
             )
         )
     run_accepted = bool(decisions) and all(decision.accepted for decision in decisions)

@@ -128,10 +128,16 @@ class CheckPackageSettings:
 
 
 def default_store_dir(execution_id: str) -> Path:
-    """``~/.ouroboros/boundary/<execution_id>``: outside every checkout."""
+    """``~/.ouroboros/boundary/<execution_id>``: outside every checkout.
+
+    The product owns this root, so it is resolved once here (a config dir or
+    home that is a symlink is followed to its real directory); every
+    publication below it then opens each directory without following a link
+    (``package.publish_exact``).
+    """
     from ouroboros.config.models import get_config_dir
 
-    return get_config_dir() / "boundary" / execution_id
+    return Path(os.path.realpath(get_config_dir())) / "boundary" / execution_id
 
 
 def private_store_dir(store: Path) -> Path:
@@ -632,9 +638,9 @@ async def verify_check_package(
     """Bind, then run the unchanged package on the candidate; record everything.
 
     ``declared_entry_points`` maps a criterion key to the worker's declared
-    ``entry_points`` (typed evidence). Checks run under the run contract the
-    run recorded before its worker started (``state.contract``), never under
-    settings resolved later. Order: final bindings
+    ``entry_points`` (typed evidence). Late-binding admission and every check
+    run under the run contract the run recorded before its worker started
+    (``state.contract``), never under settings resolved later. Order: final bindings
     (``boundary.binding.recorded``), candidate verification (plus one R3
     re-run of transiently indeterminate checks).
 
@@ -656,6 +662,7 @@ async def verify_check_package(
     assignments, results = await assign_tiers(
         package,
         base=state.base_snapshot,
+        contract=state.contract,
         declared=declared_entry_points,
         expected_base_digest=state.admission.base_tree_digest,
         admitted_tiers=state.admission.check_tiers,
@@ -671,7 +678,7 @@ async def verify_check_package(
         package,
         candidate,
         assignments,
-        timeout_seconds=state.contract.check_timeout_seconds,
+        contract=state.contract,
         interpreter=state.interpreter,
     )
     receipt: Path | None = None

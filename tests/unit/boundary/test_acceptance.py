@@ -370,7 +370,9 @@ def _a_prime(status: PackageCriterionStatus = PASS):
     from ouroboros.boundary.acceptance import CriterionVerdict
     from ouroboros.boundary.binding import CheckTier
 
-    return CriterionVerdict("k1", status, CheckTier.A_PRIME, "passed")
+    return CriterionVerdict(
+        "k1", status, CheckTier.A_PRIME, "passed", declared_binding_pass=status is PASS
+    )
 
 
 def test_a_worker_declared_binding_pass_never_overrules_a_legacy_rejection() -> None:
@@ -487,3 +489,101 @@ def test_the_verdict_names_the_binding_of_the_check_that_decided_it() -> None:
     assert item.status is FAIL and item.tier is CheckTier.A
     assert item.binding is not None and item.binding["symbol"] == "calc.add"
     assert item.binding_source == "default"
+
+
+# ----------------------------------------------------------------------
+# A worker-declared binding corroborates by provenance, not by display tier
+
+
+def _mixed_package():
+    """One criterion checked by a reproduction oracle and a model-written script."""
+    reply = _oracle_reply("reproduction")
+    reply["checks"] = [_check("script_add", 1)]
+    reply["files"] = [{"path": f"{CHECK_DIR}/script_add.py", "content": "print('add')\n"}]
+    return package_from_reply(reply, _seed(), input_digest="2" * 64, generator="fake")
+
+
+def _mixed_assignments(package, oracle_tier):
+    from ouroboros.boundary.binding import BindingSource, CheckTier, TierAssignment
+
+    key = package.criterion_keys[0]
+    assignments = {}
+    for check in package.checks:
+        oracle = package.oracle_for(check.check_id)
+        if oracle is None:
+            assignments[check.check_id] = TierAssignment(
+                key, check.check_id, CheckTier.S, None, None, "run", "script_check"
+            )
+            continue
+        source = BindingSource.DEFAULT if oracle_tier is CheckTier.A else BindingSource.DECLARED
+        assignments[check.check_id] = TierAssignment(
+            key, check.check_id, oracle_tier, oracle.default_binding, source, "run", "bound"
+        )
+    return assignments
+
+
+def _mixed_verification(package) -> CandidateVerification:
+    """Every check passes; the oracle passes its visible and its held-out case."""
+    oracle_run = _oracle_verification(
+        package.model_copy(update={"checks": package.checks[:1]}),
+        cases=(("c1", False, True), ("c2", True, True)),
+    )
+    script = _execution(package.checks[1].check_id, CheckStatus.EXPECTED)
+    return oracle_run.model_copy(
+        update={"package_sha256": package.sha256, "checks": (*oracle_run.checks, script)}
+    )
+
+
+def _mixed_decision(oracle_tier, existing: ExistingOutcome):
+    package = _mixed_package()
+    verdicts = criterion_verdicts(
+        package,
+        _mixed_verification(package),
+        assignments=_mixed_assignments(package, oracle_tier),
+    )
+    key = package.criterion_keys[0]
+    result = reconcile_acceptance(
+        package.criterion_keys,
+        verdicts,
+        {0: existing, 1: _outcome(1, "blocked"), 2: _outcome(2, "blocked")},
+        existing_run_accepted=False,
+        legacy_decides_unverified=True,
+    )
+    return verdicts[key], result
+
+
+def test_mixed_a_prime_and_script_pass_cannot_overrule_a_legacy_rejection() -> None:
+    # Review probe: a reproduction oracle that passed its held-out case
+    # through a worker-declared binding (A') plus a passing advisory script
+    # displays tier S; the pass still rests on the declared binding, so it
+    # only corroborates and the legacy verifier's rejection decides.
+    from ouroboros.boundary.binding import CheckTier
+
+    item, result = _mixed_decision(CheckTier.A_PRIME, _outcome(0, "failed"))
+    decision = result.decisions[0]
+    assert not decision.accepted and decision.governed_by is Governor.EXISTING_VERIFIER
+    assert decision.reason == "a_prime_corroborates_only" and not result.run_accepted
+    assert (item.status, item.tier) == (PASS, CheckTier.S)  # the display tier decides nothing
+    assert item.declared_binding_pass and decision.declared_binding_pass
+    assert result.to_payload().criteria[0].declared_binding_pass
+
+
+def test_a_tier_a_pass_with_an_advisory_script_is_decided_by_the_package() -> None:
+    from ouroboros.boundary.binding import CheckTier
+
+    item, result = _mixed_decision(CheckTier.A, _outcome(0, "failed"))
+    decision = result.decisions[0]
+    assert (item.status, item.tier) == (PASS, CheckTier.S)
+    assert not item.declared_binding_pass
+    assert decision.accepted and decision.governed_by is Governor.CHECK_PACKAGE
+    assert not result.to_payload().criteria[0].declared_binding_pass
+
+
+def test_a_mixed_a_prime_pass_corroborates_a_legacy_acceptance() -> None:
+    from ouroboros.boundary.binding import CheckTier
+
+    item, result = _mixed_decision(CheckTier.A_PRIME, _outcome(0, "succeeded", "completed"))
+    decision = result.decisions[0]
+    assert item.declared_binding_pass
+    assert decision.accepted and decision.governed_by is Governor.CHECK_PACKAGE
+    assert result.to_payload().criteria[0].declared_binding_pass

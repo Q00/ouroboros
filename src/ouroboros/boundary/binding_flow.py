@@ -35,13 +35,7 @@ import shutil
 from typing import Any, Literal
 
 from ouroboros.boundary.acceptance import rerunnable_checks
-from ouroboros.boundary.admission import (
-    ADMISSION_TIMEOUT_SECONDS,
-    BINDING_ADMISSION_TIMEOUT_SECONDS,
-    BindingAdmission,
-    admit_binding,
-    verify_candidate,
-)
+from ouroboros.boundary.admission import BindingAdmission, admit_binding, verify_candidate
 from ouroboros.boundary.binding import (
     BindingValidation,
     CheckTier,
@@ -49,7 +43,7 @@ from ouroboros.boundary.binding import (
     assign_tier,
     parse_declared_binding,
 )
-from ouroboros.boundary.events import BindingsPayload
+from ouroboros.boundary.events import BindingsPayload, RunContract
 from ouroboros.boundary.package import CheckPackage
 from ouroboros.boundary.per_check import EXCLUDED_STATUS_HINT, exclusion_reason_for_role
 from ouroboros.boundary.receipts import CandidateVerdict, CandidateVerification, CheckStatus
@@ -105,8 +99,8 @@ async def validate_declared_binding(
     raw: object,
     *,
     base: Path,
+    contract: RunContract,
     expected_base_digest: str | None = None,
-    timeout_seconds: int = BINDING_ADMISSION_TIMEOUT_SECONDS,
     run_options: Mapping[str, Any] | None = None,
     base_run_cache: dict[str, BindingAdmission] | None = None,
 ) -> DeclaredBindingResult:
@@ -115,7 +109,9 @@ async def validate_declared_binding(
     The grammar first (``binding.parse_declared_binding``); then
     exactly one run of the frozen oracle through the binding on an isolated
     copy of ``base`` (``admission.admit_binding``), whose outcome must match
-    the oracle's role. ``expected_base_digest`` pins ``base`` (for example to
+    the oracle's role, under the run contract the run recorded before its
+    worker started (``contract``; a late binding is only ever validated
+    after that start). ``expected_base_digest`` pins ``base`` (for example to
     the admission's ``base_tree_digest``); a mismatch is indeterminate.
     ``run_options`` are passed to ``admit_binding`` (for example ``env`` and
     ``interpreter`` where the admission executor accepts them).
@@ -156,7 +152,7 @@ async def validate_declared_binding(
             check_id,
             validation.binding,
             base,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=contract.check_timeout_seconds,
             **dict(run_options or {}),
         )
         if base_run_cache is not None:
@@ -181,10 +177,10 @@ async def assign_tiers(
     package: CheckPackage,
     *,
     base: Path | None,
+    contract: RunContract,
     declared: Mapping[str, Sequence[Any]] | None = None,
     expected_base_digest: str | None = None,
     admitted_tiers: Mapping[str, str] | None = None,
-    timeout_seconds: int = BINDING_ADMISSION_TIMEOUT_SECONDS,
     run_options: Mapping[str, Any] | None = None,
     base_run_cache: dict[str, BindingAdmission] | None = None,
 ) -> tuple[dict[str, TierAssignment], dict[str, DeclaredBindingResult]]:
@@ -196,6 +192,7 @@ async def assign_tiers(
     (``base`` is ``None``) a declared binding cannot be admitted and is
     indeterminate (``base_unavailable``). A check whose admitted tier is
     ``C`` (excluded by the per-check rule) is assigned ``C`` and never run.
+    Every declared binding is admitted under the recorded ``contract``.
     """
     declared = declared or {}
     admitted = dict(admitted_tiers or {})
@@ -243,8 +240,8 @@ async def assign_tiers(
                     check.check_id,
                     entries[0],
                     base=base,
+                    contract=contract,
                     expected_base_digest=expected_base_digest,
-                    timeout_seconds=timeout_seconds,
                     run_options=run_options,
                     base_run_cache=base_run_cache,
                 )
@@ -310,12 +307,13 @@ async def verify_with_bindings(
     candidate: Path,
     assignments: Mapping[str, TierAssignment],
     *,
-    timeout_seconds: int = ADMISSION_TIMEOUT_SECONDS,
+    contract: RunContract,
     rerun_indeterminate: bool = True,
     **run_options: Any,
 ) -> BoundVerification:
     """Run the checks with a runnable tier (``A``, ``A_prime``, ``S``) through their bindings.
 
+    Every run (the re-run too) uses the recorded ``contract``'s timeout.
     ``run_options`` are passed to ``verify_candidate`` (for example ``env`` and
     ``interpreter`` where the admission executor accepts them).
     """
@@ -335,7 +333,7 @@ async def verify_with_bindings(
     first = await verify_candidate(
         package,
         candidate,
-        timeout_seconds=timeout_seconds,
+        timeout_seconds=contract.check_timeout_seconds,
         bindings=bindings,
         only_checks=to_run,
         check_tiers=tiers,
@@ -347,7 +345,7 @@ async def verify_with_bindings(
     rerun = await verify_candidate(
         package,
         candidate,
-        timeout_seconds=timeout_seconds,
+        timeout_seconds=contract.check_timeout_seconds,
         bindings={key: value for key, value in bindings.items() if key in again},
         only_checks=list(again),
         check_tiers={key: tiers[key] for key in again},
