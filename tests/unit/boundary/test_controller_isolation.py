@@ -68,6 +68,20 @@ def _under(path: Path, roots: list[Path]) -> bool:
     return any(path == root or root in path.parents for root in roots)
 
 
+def _reads_the_process_table(kind: str, path: str) -> bool:
+    """Linux: killing a check's session lists ``/proc`` and reads ``/proc/<pid>/stat``.
+
+    That is process metadata (``oracle_run._session_members``), not file
+    content, so it is exempt; any other ``/proc`` access still counts.
+    """
+    if kind == "list":
+        return path == "/proc"
+    parts = path.split("/")
+    return (
+        len(parts) == 4 and parts[:2] == ["", "proc"] and parts[2].isdigit() and parts[3] == "stat"
+    )
+
+
 def _plant_canary(root: Path) -> Path:
     canary = root / "evaluator_only"
     (canary / "private_tests").mkdir(parents=True)
@@ -96,7 +110,11 @@ def _violations(
     runtime.append(Path("/dev"))
     allowed = [p.resolve() for p in declared] + runtime
     problems: list[str] = []
-    touched = [(k, Path(v).resolve()) for k, v in records if k in {"open", "list"}]
+    touched = [
+        (k, Path(v).resolve())
+        for k, v in records
+        if k in {"open", "list"} and not _reads_the_process_table(k, str(v))
+    ]
     if not touched:
         problems.append("no file access recorded; the canary would be vacuous")
     problems += [f"canary {k}: {p}" for k, p in touched if _under(p, [canary.resolve()])]
