@@ -113,6 +113,28 @@ def test_windows_names_and_separator_are_synthetic(tmp_path):
     assert facts.collisions == {}
 
 
+def test_windows_cross_extension_candidates_share_logical_collision_name(tmp_path):
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    cmd_launcher = first / "ouroboros.cmd"
+    exe_launcher = second / "ouroboros.exe"
+    for executable in (cmd_launcher, exe_launcher):
+        executable.write_text("unused", encoding="utf-8")
+        executable.chmod(0o755)
+
+    with patch.object(runtime.sys, "platform", "win32"):
+        facts = runtime.collect_path_facts(f"{first};{second}")
+
+    assert [candidate.name for candidate in facts.candidates] == [
+        "ouroboros.cmd",
+        "ouroboros.exe",
+    ]
+    assert facts.collisions == {
+        "ouroboros": (str(cmd_launcher), str(exe_launcher)),
+    }
+
+
 def test_path_limits_discard_partial_component(tmp_path):
     with patch.object(runtime, "MAX_PATH_CHARS", 3):
         facts = runtime.collect_path_facts("abcdef")

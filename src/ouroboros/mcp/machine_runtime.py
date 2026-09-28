@@ -104,11 +104,13 @@ class RuntimeSnapshot:
         return asdict(self)
 
 
-def _executable_names() -> tuple[str, ...]:
+def _executable_names() -> tuple[tuple[str, str], ...]:
     names = ("ouroboros", "python", "python3")
     if sys.platform == "win32":
-        return tuple(f"{name}{suffix}" for name in names for suffix in (".exe", ".cmd", ".bat"))
-    return names
+        return tuple(
+            (name, f"{name}{suffix}") for name in names for suffix in (".exe", ".cmd", ".bat")
+        )
+    return tuple((name, name) for name in names)
 
 
 def collect_path_facts(path_value: str | None = None) -> PathFacts:
@@ -128,11 +130,12 @@ def collect_path_facts(path_value: str | None = None) -> PathFacts:
     truncated = cut or len(entries) > MAX_PATH_ENTRIES
     candidates: list[PathCandidate] = []
     seen: set[tuple[str, str]] = set()
+    paths_by_command: dict[str, list[str]] = {}
     inaccessible = False
     for entry in entries[:MAX_PATH_ENTRIES]:
         directory = Path(entry or ".")
-        for name in _executable_names():
-            candidate = directory / name
+        for command_name, filename in _executable_names():
+            candidate = directory / filename
             try:
                 mode = candidate.stat().st_mode
                 executable = stat.S_ISREG(mode) and os.access(candidate, os.X_OK)
@@ -141,17 +144,19 @@ def collect_path_facts(path_value: str | None = None) -> PathFacts:
                 identity = os.path.realpath(candidate)
                 if sys.platform == "win32":
                     identity = identity.casefold()
-                if (name, identity) not in seen:
-                    seen.add((name, identity))
-                    candidates.append(PathCandidate(name, str(candidate), True))
+                if (command_name, identity) not in seen:
+                    seen.add((command_name, identity))
+                    candidates.append(PathCandidate(filename, str(candidate), True))
+                    paths_by_command.setdefault(command_name, []).append(str(candidate))
             except FileNotFoundError:
                 continue
             except (OSError, ValueError):
                 inaccessible = True
-    by_name: dict[str, list[str]] = {}
-    for candidate in candidates:
-        by_name.setdefault(candidate.name, []).append(candidate.path)
-    collisions = {name: tuple(paths) for name, paths in by_name.items() if len(paths) > 1}
+    collisions = {
+        command_name: tuple(paths)
+        for command_name, paths in paths_by_command.items()
+        if len(paths) > 1
+    }
     return PathFacts(
         entries_seen=min(len(entries), MAX_PATH_ENTRIES),
         entries_limit=MAX_PATH_ENTRIES,
