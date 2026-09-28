@@ -318,14 +318,15 @@ def _resolve_cli_project_dir(
         return _directory_for_runtime(metadata_project_dir)
 
     target_dir = _resolve_brownfield_target_dir(seed_data)
-    project_base = seed_base
-    if detected_root is None and fallback_dir is None and _in_global_seed_store(seed_file):
-        # The global store holds Seeds for every project, so its folder says
-        # nothing about where this one belongs; the directory the command runs
-        # from does, as for `init` (`ouroboros run ~/.ouroboros/seeds/<id>.yaml`
-        # is the documented terminal flow).
-        project_base = Path.cwd().resolve()
-    stable_base = target_dir or project_base
+    # The global store holds Seeds for every project, so its folder says
+    # nothing about where this one belongs; the directory the command runs
+    # from does, as for `init` (`ouroboros run ~/.ouroboros/seeds/<id>.yaml`
+    # is the documented terminal flow).
+    global_seed = (
+        detected_root is None and fallback_dir is None and _in_global_seed_store(seed_file)
+    )
+    project_root = detected_root or (Path.cwd().resolve() if global_seed else None)
+    stable_base = target_dir or project_root or seed_base
     resolution = resolve_seed_project_path(seed, stable_base=stable_base)
     if resolution.rejected:
         print_error(
@@ -335,8 +336,9 @@ def _resolve_cli_project_dir(
             "with --project-dir pointing at the target project."
         )
         raise typer.Exit(1)
-    if detected_root is not None and target_dir is None:
-        # Central seed: the detected root *is* the project root.
+    if project_root is not None and target_dir is None:
+        # Central seed: the detected root *is* the project root; so is the
+        # current directory for a Seed in the global store.
         # context_references are documentation pointers — collapsing an
         # existing-file reference (e.g. ``src/.../foo.py``) to its parent
         # would push the runtime cwd into a subdirectory and break the
@@ -344,7 +346,7 @@ def _resolve_cli_project_dir(
         # branch above already handled any user-declared override, and
         # the containment check above still surfaces escapes. Honor the
         # detected root directly.
-        return detected_root
+        return project_root
     if resolution.path is not None:
         return _directory_for_runtime(resolution.path)
     return stable_base

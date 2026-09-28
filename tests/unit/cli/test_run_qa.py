@@ -260,6 +260,38 @@ def test_resolve_cli_project_dir_global_seed_store_without_hints_uses_the_curren
     assert resolved == project.resolve()
 
 
+@pytest.mark.parametrize("reference", ["durlib", "src/durlib/duration.py", "."])
+def test_resolve_cli_project_dir_global_seed_store_keeps_the_current_directory_over_references(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reference: str,
+) -> None:
+    """A context reference is a documentation pointer, never the runtime root."""
+    fake_home = tmp_path / "home"
+    global_seeds = fake_home / ".ouroboros" / "seeds"
+    global_seeds.mkdir(parents=True)
+    seed_file = global_seeds / "seed_abc123.yaml"
+    seed_file.write_text("goal: ignored\n", encoding="utf-8")
+    project = tmp_path / "project"
+    (project / "durlib").mkdir(parents=True)
+    (project / "src" / "durlib").mkdir(parents=True)
+    (project / "src" / "durlib" / "duration.py").write_text("", encoding="utf-8")
+    monkeypatch.chdir(project)
+    seed_data = {
+        **VALID_SEED_DATA,
+        "brownfield_context": {
+            "project_type": "brownfield",
+            "context_references": [{"path": reference, "role": "primary", "summary": "repo"}],
+        },
+    }
+    seed = Seed.from_dict(seed_data)
+
+    with patch.object(Path, "home", return_value=fake_home):
+        resolved = _resolve_cli_project_dir(seed, seed_file, seed_data=seed_data)
+
+    assert resolved == project.resolve()
+
+
 def test_resolve_cli_project_dir_global_seed_store_still_prefers_explicit_project_dir(
     tmp_path: Path,
 ) -> None:
