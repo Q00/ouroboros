@@ -13,6 +13,7 @@ runs and covered criteria are undecided.
 
 from __future__ import annotations
 
+import asyncio
 import copy as copy_module
 from dataclasses import replace
 from datetime import timedelta
@@ -23,6 +24,7 @@ from uuid import uuid4
 import pytest
 
 from ouroboros.boundary.acceptance import PackageCriterionStatus
+from ouroboros.boundary.authority import CheckPackageAuthority
 from ouroboros.boundary.check_env import INTERPRETER_CHANGED
 from ouroboros.boundary.constructor import ConstructionOutcome
 from ouroboros.boundary.events import (
@@ -34,8 +36,11 @@ from ouroboros.boundary.events import (
     CONSTRUCTION_FAILED,
     PACKAGE_FROZEN,
     RunContract,
+    actor_started_event,
     boundary_version_id,
+    construction_failed_event,
     package_frozen_event,
+    superseded_event,
 )
 from ouroboros.boundary.ledger import BoundaryLedger, BoundaryOrderError, verify_boundary_order
 from ouroboros.boundary.oracle_build import package_from_reply
@@ -766,4 +771,390 @@ async def test_a_later_version_without_the_first_is_never_a_legacy_run(
     boundary = await load_resumed_boundary(journal, EXECUTION)
     assert boundary is not None and boundary.covered is None
     assert boundary.reason == BOUNDARY_RECORD_MISSING
+    await journal.close()
+
+
+# --------------------------------------------------------------------------
+# The resumed authority belongs to the run the journal projects: its execution
+# id, Seed digest and ordered criterion keys. A call for any other run runs no
+# check, records nothing, and leaves every covered criterion undecided.
+
+
+@pytest.fixture
+def check_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Records every bind or run of a check by the resumed authority (they still run)."""
+    calls: list[str] = []
+    for name in ("assign_tiers", "verify_with_bindings"):
+        real = getattr(resume_module, name)
+
+        def spy(*args: Any, _real: Any = real, _name: str = name, **kwargs: Any) -> Any:
+            calls.append(_name)
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(resume_module, name, spy)
+    return calls
+
+
+def _with(seed: Seed, **fields: Any) -> Seed:
+    return Seed(
+        goal=fields.get("goal", seed.goal),
+        acceptance_criteria=fields.get("acceptance_criteria", seed.acceptance_criteria),
+        ontology_schema=seed.ontology_schema,
+        metadata=seed.metadata,
+    )
+
+
+async def _resumed_records(store: EventStore) -> list[BaseEvent]:
+    return [
+        event
+        for aggregate in (EXECUTION, V1)
+        for event in await store.replay(BOUNDARY_AGGREGATE_TYPE, aggregate)
+        if event.type == ACCEPTANCE_RESUMED
+    ]
+
+
+def _other_goal(seed: Seed) -> tuple[Seed, str]:
+    other = _with(seed, goal="math helpers, faster")
+    assert seed_criterion_keys(other) == seed_criterion_keys(seed)
+    return other, EXECUTION
+
+
+def _other_execution(seed: Seed) -> tuple[Seed, str]:
+    return seed, "exec_other"
+
+
+def _reordered_criteria(seed: Seed) -> tuple[Seed, str]:
+    first, second, third = seed.acceptance_criteria
+    other = _with(seed, acceptance_criteria=(second, first, third))
+    assert set(seed_criterion_keys(other)) == set(seed_criterion_keys(seed))
+    assert seed_criterion_keys(other) != seed_criterion_keys(seed)
+    return other, EXECUTION
+
+
+@pytest.mark.parametrize(
+    ("foreign", "field", "covered"),
+    [
+        (_other_goal, "seed_digest", (0, 1)),
+        (_other_execution, "execution_id", (0, 1)),
+        # Not the run's criteria: coverage is unknown, every criterion counts as covered.
+        (_reordered_criteria, "seed_digest", (0, 1, 2)),
+    ],
+    ids=["other_goal_same_keys", "other_execution_id", "same_keys_other_order"],
+)
+async def test_a_resume_for_another_run_runs_nothing_and_records_nothing(
+    store: EventStore,
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    check_calls: list[str],
+    foreign: Any,
+    field: str,
+    covered: tuple[int, ...],
+) -> None:
+    seed, state = await _run_until_the_worker_stops(store, repo, tmp_path, monkeypatch)
+    (repo / "mathutils.py").write_text(CLAMP_FIXED + DOUBLE)  # the package would pass it
+    authority = await _resume(store, repo)
+    assert authority.boundary.source == "memory"
+    other_seed, execution_id = foreign(seed)
+    # Criterion 1: only the package gate failed it and every other gate holds;
+    # criterion 3 (uncovered): the legacy verifier rejected it.
+    restored = _gate_failed(FinalGateSettlement.HOLDS)
+    restored = replace(
+        restored,
+        results=(
+            *restored.results[:2],
+            replace(restored.results[2], legacy_rejection=LEGACY_TEXT),
+        ),
+    )
+    decided = await authority(seed=other_seed, execution_id=execution_id, parallel_result=restored)
+    assert check_calls == []
+    assert await _resumed_records(store) == []
+    # The run's one decision is not used and its held-out cases are kept.
+    assert authority.outcome is None
+    assert live_state(EXECUTION) is state
+    mismatch = f"run_mismatch:{field}"
+    assert [result.outcome for result in decided.results] == [ACExecutionOutcome.FAILED] * 3
+    # The package gate failure is not lifted; the covered success is undecided.
+    assert decided.results[0].error == restored.results[0].error
+    assert mismatch in (decided.results[1].error or "")
+    # The uncovered criterion: undecided when the criteria are not the run's,
+    # else the legacy verifier's rejection.
+    expected = mismatch if 2 in covered else LEGACY_TEXT
+    assert expected in (decided.results[2].error or "")
+    # The run's own call still decides in full from memory.
+    decided = await authority(seed=seed, execution_id=EXECUTION, parallel_result=restored)
+    assert check_calls
+    assert authority.boundary.source == "memory"
+    assert decided.results[0].outcome is ACExecutionOutcome.SUCCEEDED
+    assert len(await _resumed_records(store)) == 1
+
+
+async def test_an_undecidable_resume_for_another_execution_records_nothing(
+    store: EventStore,
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    no_check_runs: list[str],
+) -> None:
+    seed, state = await _run_until_the_worker_stops(store, repo, tmp_path, monkeypatch)
+    journal = await _copy_journal(store, _duplicate(PACKAGE_FROZEN))
+    authority = await _resume(journal, repo)
+    assert authority.boundary.reason == BOUNDARY_RECORD_MISSING
+    decided = await authority(seed=seed, execution_id="exec_other", parallel_result=_restored())
+    assert [result.outcome for result in decided.results] == [ACExecutionOutcome.FAILED] * 3
+    assert "run_mismatch:execution_id" in (decided.results[0].error or "")
+    assert await _resumed_records(journal) == []
+    assert authority.outcome is None and no_check_runs == []
+    forget_live_state(state)
+    await journal.close()
+
+
+# A run-level resumed record the product could not have written makes recovery
+# undecidable: it is built from the record the product wrote, then changed.
+
+
+async def _product_run_level_record(store: EventStore) -> BaseEvent:
+    """The run-level record an undecidable resume writes (on a copy of ``store``)."""
+    journal = await _copy_journal(store, _duplicate(PACKAGE_FROZEN))
+    authority = await _resume(journal, Path("."))
+    await authority(seed=_seed(), execution_id=EXECUTION, parallel_result=_restored())
+    (record,) = await _resumed_records(journal)
+    assert record.aggregate_id == EXECUTION and record.data["package_id"] is None
+    await journal.close()
+    return record
+
+
+def _set(**fields: Any) -> Any:
+    return lambda data: data.update(fields)
+
+
+def _first_criterion(**fields: Any) -> Any:
+    return lambda data: data["criteria"][0].update(fields)
+
+
+RUN_LEVEL_RESUMED = {
+    "cites_a_package": _set(package_id="f" * 64),
+    "no_reason": _set(reason=None),
+    "empty_reason": _set(reason=""),
+    "cites_held_out_checks": _set(held_out_checks=["oracle_1"]),
+    "claims_a_pass": _first_criterion(package_status="pass"),
+    "claims_a_fail": _first_criterion(package_status="fail"),
+    "extra_field": _set(verdict="pass"),
+}
+
+
+@pytest.mark.parametrize("change", list(RUN_LEVEL_RESUMED.values()), ids=list(RUN_LEVEL_RESUMED))
+async def test_an_impossible_run_level_resumed_record_is_undecidable(
+    store: EventStore, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: Any
+) -> None:
+    _seed_, state = await _run_until_the_worker_stops(store, repo, tmp_path, monkeypatch)
+    record = await _product_run_level_record(store)
+
+    def plant(events: list[BaseEvent]) -> list[BaseEvent]:
+        data = copy_module.deepcopy(dict(record.data))
+        change(data)
+        later = max(event.timestamp for event in events) + timedelta(seconds=1)
+        return [*events, record.model_copy(update={"data": data, "timestamp": later})]
+
+    journal = await _copy_journal(store, plant)
+    boundary = await load_resumed_boundary(journal, EXECUTION)
+    assert boundary is not None
+    assert boundary.reason == BOUNDARY_RECORD_MISSING
+    assert boundary.live is None and boundary.source == "journal"
+    forget_live_state(state)
+    await journal.close()
+
+
+async def test_a_run_level_resumed_record_before_the_enabled_record_is_undecidable(
+    store: EventStore, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_, state = await _run_until_the_worker_stops(store, repo, tmp_path, monkeypatch)
+    record = await _product_run_level_record(store)
+
+    def plant(events: list[BaseEvent]) -> list[BaseEvent]:
+        earlier = min(event.timestamp for event in events) - timedelta(seconds=1)
+        return [record.model_copy(update={"timestamp": earlier}), *events]
+
+    journal = await _copy_journal(store, plant)
+    boundary = await load_resumed_boundary(journal, EXECUTION)
+    assert boundary is not None and boundary.reason == BOUNDARY_RECORD_MISSING
+    assert boundary.source == "journal"
+    forget_live_state(state)
+    await journal.close()
+
+
+# Held-out cases that reached a target during an interrupted terminal
+# verification never decide again in this process (independent review H1).
+
+
+def _leaky(leak: Path) -> str:
+    """``clamp`` that records every input; it stalls on any input but the stated one."""
+    return (
+        "import json, time\n"
+        "def clamp(value, low, high):\n"
+        f"    with open({str(leak)!r}, 'a') as f:\n"
+        "        f.write(json.dumps([value, low, high]) + '\\n')\n"
+        "    if (value, low, high) != (15, 0, 10):\n"
+        "        time.sleep(10)\n"
+        "    return max(low, min(high, value))\n"
+    )
+
+
+async def _cancel_once_a_held_out_input_arrives(call: Any, leak: Path) -> None:
+    task = asyncio.create_task(call())
+    for _ in range(400):
+        await asyncio.sleep(0.05)
+        if leak.exists() and "[99, 1, 7]" in leak.read_text():
+            break
+    # The held-out input (99, 1, 7) reached the candidate: the terminal verification runs.
+    assert "[99, 1, 7]" in leak.read_text()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_after_an_interrupted_live_verification_a_resume_runs_no_held_out_case(
+    store: EventStore, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed, state = await _run_until_the_worker_stops(store, repo, tmp_path, monkeypatch)
+    leak = tmp_path / "leak.jsonl"
+    (repo / "mathutils.py").write_text(_leaky(leak) + DOUBLE)
+    live = CheckPackageAuthority(
+        state,
+        CheckPackageSettings(True, max_construction_attempts=1),
+        event_store=store,
+        candidate_checkout=repo,
+    )
+    await _cancel_once_a_held_out_input_arrives(
+        lambda: live(seed=seed, execution_id=EXECUTION, parallel_result=_restored()), leak
+    )
+    seen = leak.read_text()
+    authority = await _resume(store, repo)
+    assert authority.boundary.source == "journal"
+    assert authority.boundary.reason == HELD_OUT_UNAVAILABLE
+    decided = await authority(seed=seed, execution_id=EXECUTION, parallel_result=_restored())
+    assert leak.read_text() == seen
+    verdicts = authority.outcome.verdict.verdicts
+    keys = seed_criterion_keys(seed)
+    assert [verdicts[key].reason for key in keys[:2]] == [HELD_OUT_UNAVAILABLE] * 2
+    assert [result.outcome for result in decided.results[:2]] == [ACExecutionOutcome.FAILED] * 2
+
+
+async def test_an_interrupted_resumed_verification_never_reuses_its_held_out_cases(
+    store: EventStore, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed, _state = await _run_until_the_worker_stops(store, repo, tmp_path, monkeypatch)
+    leak = tmp_path / "leak.jsonl"
+    (repo / "mathutils.py").write_text(_leaky(leak) + DOUBLE)
+    authority = await _resume(store, repo)
+    assert authority.boundary.source == "memory"
+    await _cancel_once_a_held_out_input_arrives(
+        lambda: authority(seed=seed, execution_id=EXECUTION, parallel_result=_restored()), leak
+    )
+    assert authority.outcome is None
+    seen = leak.read_text()
+    # Another resume in this process finds no held-out cases in memory ...
+    assert live_state(EXECUTION) is None
+    again = await _resume(store, repo)
+    assert again.boundary.source == "journal"
+    # ... and a second call of the interrupted authority runs no check.
+    decided = await authority(seed=seed, execution_id=EXECUTION, parallel_result=_restored())
+    assert leak.read_text() == seen
+    assert authority.outcome is not None
+    assert authority.outcome.error == "terminal_interrupted"
+    decisions = authority.outcome.reconciliation.decisions
+    assert [(d.package_status, d.accepted) for d in decisions[:2]] == [
+        (PackageCriterionStatus.INDETERMINATE, False)
+    ] * 2
+    assert not decided.all_succeeded
+
+
+# Appending (never deleting) a failed construction to a later version never
+# turns a run bound to an admitted package into a legacy resume (independent
+# review M3).
+
+V2 = boundary_version_id(EXECUTION, 2)
+
+
+def _bare(_state: Any) -> list[BaseEvent]:
+    return [
+        BaseEvent(type=kind, aggregate_type=BOUNDARY_AGGREGATE_TYPE, aggregate_id=V2, data={})
+        for kind in (CONSTRUCTION_FAILED, ACTOR_STARTED)
+    ]
+
+
+def _product_built(state: Any) -> list[BaseEvent]:
+    return [
+        construction_failed_event(
+            V2, seed_digest=state.seed_digest, input_digest="1" * 64, reason="constructor_timeout"
+        ),
+        actor_started_event(V2, actor_id="worker", package_id=None, runtime="codex"),
+    ]
+
+
+def _v1_superseded(state: Any) -> list[BaseEvent]:
+    assert state.package is not None
+    return [
+        superseded_event(
+            V1,
+            superseded_by=V2,
+            package_id=state.package.package_id,
+            successor_package_id=None,
+            reason="replaced",
+        ),
+        *_product_built(state),
+    ]
+
+
+@pytest.mark.parametrize(
+    "appended",
+    [_bare, _product_built, _v1_superseded],
+    ids=["bare", "product_built", "v1_superseded"],
+)
+async def test_appended_failed_construction_never_resumes_as_legacy(
+    store: EventStore, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, appended: Any
+) -> None:
+    _seed, state = await _run_until_the_worker_stops(store, repo, tmp_path, monkeypatch)
+    forget_live_state(state)  # another process
+    later = max(event.timestamp for event in await store.replay(BOUNDARY_AGGREGATE_TYPE, V1))
+    for offset, event in enumerate(appended(state), start=1):
+        await store.append(
+            event.model_copy(update={"timestamp": later + timedelta(seconds=offset)})
+        )
+    boundary = await load_resumed_boundary(store, EXECUTION)
+    assert boundary is not None, "appended rows turned a package-on run into a legacy resume"
+    assert boundary.reason == BOUNDARY_RECORD_MISSING
+
+
+class _UnreadableSeed:
+    """A Seed whose criteria cannot be read (for example a corrupted resume payload)."""
+
+    @property
+    def acceptance_criteria(self) -> Any:
+        raise ValueError("unreadable criteria")
+
+    def to_dict(self) -> Any:
+        raise ValueError("unreadable seed")
+
+
+@pytest.mark.parametrize(
+    "journal_edit", [None, _duplicate(PACKAGE_FROZEN)], ids=["bound", "undecidable"]
+)
+async def test_a_seed_that_cannot_be_read_fails_every_root_closed(
+    store: EventStore,
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    no_check_runs: list[str],
+    journal_edit: Any,
+) -> None:
+    _seed_, state = await _run_until_the_worker_stops(store, repo, tmp_path, monkeypatch)
+    journal = await _copy_journal(store, journal_edit)
+    authority = await _resume(journal, repo)
+    decided = await authority(
+        seed=_UnreadableSeed(), execution_id=EXECUTION, parallel_result=_restored()
+    )
+    assert [result.outcome for result in decided.results] == [ACExecutionOutcome.FAILED] * 3
+    assert no_check_runs == [] and await _resumed_records(journal) == []
+    forget_live_state(state)
     await journal.close()

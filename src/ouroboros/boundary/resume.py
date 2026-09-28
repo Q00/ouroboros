@@ -35,6 +35,14 @@ construction, with the run contract). It is exactly one of:
     uncovered criteria are decided by the legacy verifier, as in the live
     run.
 
+The resumed authority belongs to the run the projection names: its execution
+id, the Seed digest the package was sealed for, and the frozen criterion keys
+in order (``authority.mismatched_run``, the live authority's rule). A call for
+any other run is refused before any check runs and before anything is
+recorded (``run_mismatch:<field>``): covered criteria are undecided, the
+legacy verifier decides the rest, and the run's one decision is not used. An
+undecidable boundary names no Seed, so only its execution id is checked.
+
 The journal is as writable as the workspace; removing every record of the
 run, the enabled record included, still reads as "off" (a documented
 residual). What counts as an attempt is the live rule with the check package
@@ -63,12 +71,15 @@ from ouroboros.boundary.acceptance import (
 )
 from ouroboros.boundary.authority import (
     AUTHORITY_ERROR_PREFIX,
+    RUN_MISMATCH_PREFIX,
     AuthorityOutcome,
+    RunIdentity,
     _declared_from,
     _fail_attempted,
     apply_reconciliation,
     decide_without_package,
     existing_outcomes_from_results,
+    mismatched_run,
 )
 from ouroboros.boundary.binding import CheckTier
 from ouroboros.boundary.binding_flow import assign_tiers, verify_with_bindings
@@ -111,7 +122,9 @@ class ResumedBoundary:
     covered: tuple[str, ...] | None
     """The criteria admitted checks cover; ``None`` when unknown (every criterion)."""
     criterion_keys: tuple[str, ...] | None = None
-    """The criterion keys the frozen manifest names (``None``: undecidable boundary)."""
+    """The criterion keys the frozen manifest names, in order (``None``: undecidable boundary)."""
+    seed_digest: str | None = None
+    """The Seed the package was sealed for (``None``: undecidable boundary)."""
     held_out_checks: frozenset[str] = frozenset()
     contract: RunContract | None = None
     """The settings the run started with (its enabled record), never the live config."""
@@ -123,6 +136,13 @@ class ResumedBoundary:
     @property
     def package(self) -> CheckPackage | None:
         return self.live.package if self.live is not None else None
+
+    @property
+    def run(self) -> RunIdentity | None:
+        """The run the projection names; ``None`` for an undecidable boundary."""
+        if self.seed_digest is None or self.criterion_keys is None:
+            return None
+        return (self.execution_id, self.seed_digest, self.criterion_keys)
 
     @property
     def source(self) -> str:
@@ -183,6 +203,7 @@ async def load_resumed_boundary(
         package_id=projection.package_id,
         covered=tuple(sorted(projection.covered)),
         criterion_keys=projection.criterion_keys,
+        seed_digest=projection.seed_digest,
         held_out_checks=projection.held_out_checks,
         contract=projection.contract,
         live=live if problem is None else None,
@@ -212,9 +233,13 @@ async def decide_resumed(
 ) -> BoundaryVerdict:
     """The package's per-criterion verdicts on ``candidate`` (see the module docstring)."""
     keys = seed_criterion_keys(seed)
-    if boundary.criterion_keys is not None and set(boundary.criterion_keys) != set(keys):
-        # The frozen manifest names other criteria than this Seed: nothing is known.
-        boundary = replace(boundary, covered=None, live=None, reason=BOUNDARY_RECORD_MISSING)
+    run = boundary.run
+    mismatch = None if run is None else mismatched_run(run, seed, None)
+    if run is not None and mismatch is not None:
+        # Not the run's Seed: nothing runs. When the criteria are not the
+        # run's either, coverage is unknown and every criterion counts as covered.
+        covered_now = boundary.covered if keys == run[2] else None
+        boundary = replace(boundary, covered=covered_now, live=None, reason=mismatch)
     covered = set(keys) if boundary.covered is None else set(boundary.covered)
     live = boundary.live
     if live is None or live.package is None or live.admission is None:
@@ -281,13 +306,22 @@ class ResumedCheckPackageAuthority:
         self._event_store = event_store
         self._candidate = candidate_checkout
         self.outcome: AuthorityOutcome | None = None
+        # Set once the resumed decision starts (held-out cases may run).
+        self._terminal_started = False
 
     async def __call__(self, *, seed: Seed, execution_id: str, parallel_result: Any) -> Any:
         if self.outcome is not None:
             return parallel_result
-        keys = seed_criterion_keys(seed)
+        mismatch = self._run_mismatch(seed, execution_id)
+        if mismatch is not None:
+            return self._refuse_foreign_run(seed, execution_id, parallel_result, mismatch)
+        if self._terminal_started:
+            # An earlier resumed verification was interrupted after its
+            # held-out cases may have reached the candidate: they decide nothing again.
+            return self._undecided(seed, parallel_result, "terminal_interrupted")
+        self._terminal_started = True
         try:
-            return await self._decide(seed, keys, parallel_result)
+            return await self._decide(seed, self._keys(seed), parallel_result)
         except Exception as exc:  # noqa: BLE001 - fail closed below, never open
             log.warning(
                 "boundary.resume.failed",
@@ -295,11 +329,54 @@ class ResumedCheckPackageAuthority:
                 boundary_id=self.boundary.boundary_id,
                 error_type=type(exc).__name__,
             )
-            return self._undecided(keys, parallel_result, type(exc).__name__)
+            return self._undecided(seed, parallel_result, type(exc).__name__)
         finally:
-            live = live_state(execution_id)
-            if self.outcome is not None and live is not None:
-                forget_live_state(live)
+            # Once the resumed decision starts, decided or interrupted
+            # (cancelled included), nothing in this process re-derives the held-out cases.
+            forget_live_state(live_state(self.boundary.execution_id))
+
+    def _run_mismatch(self, seed: Seed, execution_id: str) -> str | None:
+        """``run_mismatch:<field>`` when a call is not for the projected run, else ``None``."""
+        run = self.boundary.run
+        if run is not None:
+            return mismatched_run(run, seed, execution_id)
+        # An undecidable boundary names no Seed: only the run can be checked.
+        if execution_id != self.boundary.execution_id:
+            return f"{RUN_MISMATCH_PREFIX}execution_id"
+        return None
+
+    def _keys(self, seed: Seed) -> tuple[str, ...]:
+        """The run's criterion keys: the projection's (checked), or the Seed's when undecidable."""
+        return self.boundary.criterion_keys or seed_criterion_keys(seed)
+
+    def _refuse_foreign_run(
+        self, seed: Seed, execution_id: str, parallel_result: Any, mismatch: str
+    ) -> Any:
+        """Another run's call: covered criteria undecided, the rest legacy, nothing recorded.
+
+        The live authority's rule: this run's one decision is not used and its
+        journal is not written. When the criteria are not the run's, coverage
+        is unknown, so every criterion counts as covered.
+        """
+        log.warning(
+            "boundary.resume.foreign_run",
+            execution_id=execution_id,
+            boundary_id=self.boundary.boundary_id,
+            mismatch=mismatch,
+        )
+        try:
+            keys = seed_criterion_keys(seed)
+            covered = (
+                self.boundary.covered
+                if self.boundary.covered is not None and keys == self.boundary.criterion_keys
+                else keys
+            )
+            decided, _reconciliation, _legacy = decide_without_package(
+                keys, set(covered), mismatch, parallel_result, gated=True
+            )
+        except Exception:  # noqa: BLE001 - no criteria can be read: fail every root
+            return _fail_attempted(parallel_result)
+        return decided
 
     async def _decide(self, seed: Seed, keys: tuple[str, ...], parallel_result: Any) -> Any:
         # The live rule: only a root that succeeded, or that only the package
@@ -352,9 +429,10 @@ class ResumedCheckPackageAuthority:
         )
         return apply_reconciliation(parallel_result, reconciliation)
 
-    def _undecided(self, keys: tuple[str, ...], parallel_result: Any, error: str) -> Any:
+    def _undecided(self, seed: Seed, parallel_result: Any, error: str) -> Any:
         """The live authority's fail-closed rule: covered criteria undecided, the rest legacy."""
         try:
+            keys = self._keys(seed)
             decided, reconciliation, legacy = decide_without_package(
                 keys,
                 set(keys) if self.boundary.covered is None else set(self.boundary.covered),

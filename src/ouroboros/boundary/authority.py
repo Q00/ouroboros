@@ -133,6 +133,30 @@ AUTHORITY_ERROR_PREFIX = "authority_error:"
 RUN_MISMATCH_PREFIX = "run_mismatch:"
 
 
+RunIdentity = tuple[str, str, tuple[str, ...]]
+"""The run an authority belongs to: execution id, Seed digest, ordered criterion keys."""
+
+
+def mismatched_run(run: RunIdentity, seed: Seed, execution_id: str | None) -> str | None:
+    """``run_mismatch:<field>`` when a call is not for ``run``, else ``None``.
+
+    The one identity rule of the live and the resumed authority.
+    ``execution_id`` ``None`` means the caller did not say (the Seed is
+    still checked). A Seed that cannot be digested is a mismatch.
+    """
+    expected_execution, expected_digest, expected_keys = run
+    if execution_id is not None and execution_id != expected_execution:
+        return f"{RUN_MISMATCH_PREFIX}execution_id"
+    try:
+        if seed_digest(seed) != expected_digest:
+            return f"{RUN_MISMATCH_PREFIX}seed_digest"
+        if seed_criterion_keys(seed) != expected_keys:
+            return f"{RUN_MISMATCH_PREFIX}criterion_keys"
+    except Exception:  # noqa: BLE001 - an unreadable Seed is not this run's Seed
+        return f"{RUN_MISMATCH_PREFIX}seed_digest"
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class AuthorityOutcome:
     """What the authority decided for one run."""
@@ -709,22 +733,8 @@ class CheckPackageAuthority:
         return frozenset(criteria_without_admitted_check(package, excluded))
 
     def run_mismatch(self, seed: Seed, execution_id: str | None) -> str | None:
-        """``run_mismatch:<field>`` when a call is not for this run, else ``None``.
-
-        ``execution_id`` ``None`` means the caller did not say (the Seed is
-        still checked). A Seed that cannot be digested is a mismatch.
-        """
-        expected_execution, expected_digest, expected_keys = self._run
-        if execution_id is not None and execution_id != expected_execution:
-            return f"{RUN_MISMATCH_PREFIX}execution_id"
-        try:
-            if seed_digest(seed) != expected_digest:
-                return f"{RUN_MISMATCH_PREFIX}seed_digest"
-            if seed_criterion_keys(seed) != expected_keys:
-                return f"{RUN_MISMATCH_PREFIX}criterion_keys"
-        except Exception:  # noqa: BLE001 - an unreadable Seed is not this run's Seed
-            return f"{RUN_MISMATCH_PREFIX}seed_digest"
-        return None
+        """``run_mismatch:<field>`` when a call is not for this run, else ``None``."""
+        return mismatched_run(self._run, seed, execution_id)
 
     def install(self, executor: Any) -> None:
         """Make the legacy verifier advisory and the package the repair signal.
