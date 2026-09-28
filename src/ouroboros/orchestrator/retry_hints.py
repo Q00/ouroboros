@@ -146,7 +146,14 @@ def build_ac_retry_prompt(
     parts: list[str] = []
     if failure_class:
         parts.append(f"### Prior failure classification\n{failure_class}")
-    if result.error != _STALL_SENTINEL:
+    if result.check_package_repair:
+        # The frozen check package failed this criterion; its counterexample is
+        # the repair signal (held-out inputs are already withheld upstream).
+        parts.append(
+            "### Check package counterexample\n"
+            + _sanitize_fragment(result.check_package_repair, spec)
+        )
+    elif result.error != _STALL_SENTINEL:
         hint = build_assertion_safe_retry_hint(
             outcome=outcome,
             result=result,
@@ -174,6 +181,8 @@ def failure_class_for_result(result: ACExecutionResult) -> str | None:
 
     if result.outcome is ACExecutionOutcome.BLOCKED:
         return FailureClass.BLOCKED.value
+    if result.check_package_failure_class:
+        return result.check_package_failure_class
     for message in reversed(result.messages):
         if not (message.is_final and message.is_error):
             continue

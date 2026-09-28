@@ -4896,7 +4896,7 @@ async def test_provisional_success_replay_rejects_non_strict_cached_evidence(
     elif mutation == "non_string_session":
         cached["session_id"] = 123
     else:
-        verify = {
+        verify: dict[str, Any] = {
             "passed": True,
             "reason": None,
             "output_tail": "ok",
@@ -4990,3 +4990,205 @@ async def test_resume_rejects_boolean_root_index_before_membership_lookup() -> N
             session_id="session-1",
             root_ac_indices=(0,),
         )
+
+
+LEGACY_TEXT = "legacy verifier: evidence form mismatch"
+
+
+@pytest.mark.asyncio
+async def test_resume_keeps_the_legacy_rejection_of_a_provisional_success(tmp_path: Any) -> None:
+    # with the check package on, a gate-passed attempt the legacy
+    # verifier rejected is a provisional success whose rejection is advisory.
+    # Resumed through Routing D it must still carry that rejection, so the
+    # resumed run never restores it as a clean success.
+    from ouroboros.boundary.authority import legacy_verdict_in_tree
+    from ouroboros.orchestrator.parallel_executor_models import checkpoint_outcome
+
+    executor, store, events = _executor()
+    executor._adapter.working_directory = str(tmp_path)  # type: ignore[attr-defined]
+    seed = _seed()
+    candidate = _candidate(executor, "compat:claude:frugal")
+    original = ACExecutionResult(
+        ac_index=0,
+        ac_content="ship it",
+        success=True,
+        final_message="done",
+        duration_seconds=1.0,
+        retry_attempt=0,
+        route_candidate=candidate,
+        legacy_rejection=LEGACY_TEXT,
+    )
+    await executor._emit_ac_attempt_judged(
+        result=original,
+        root_ac_index=0,
+        session_id="session-1",
+        execution_id="execution-1",
+        required=True,
+        route_episode_id=_episode_id(seed),
+        route_attempt_index=0,
+    )
+    await executor._persist_route_observation(
+        seed=seed,
+        result=original,
+        root_ac_index=0,
+        session_id="session-1",
+        execution_id="execution-1",
+        attempted_route_ids=(candidate.route_id,),
+        failure_class=None,
+        decision=None,
+    )
+    sealed = [e for e in events if e.data.get("provisional_result") is not None]
+    assert sealed and sealed[-1].data["provisional_result"]["schema_version"] == 3
+    assert sealed[-1].data["provisional_result"]["check_package"] == {
+        "legacy_rejection": LEGACY_TEXT
+    }
+
+    async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+        return [event for event in events if event.type == kwargs.get("event_type")]
+
+    store.query_execution_related_events.side_effect = query
+    provider = AsyncMock()
+    executor._execute_ac_batch = provider  # type: ignore[method-assign]
+    replayed = await executor._run_batch_with_bounded_route_escalation(
+        seed=seed,
+        batch_executable=[0],
+        session_id="session-1",
+        execution_id="execution-1",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts={0: 0},
+        execution_counters=None,
+    )
+    provider.assert_not_awaited()
+    restored = replayed[0]
+    assert isinstance(restored, ACExecutionResult)
+    assert restored.legacy_rejection == LEGACY_TEXT
+    assert legacy_verdict_in_tree(restored)[0] is True
+    assert checkpoint_outcome(restored) == "failed"
+
+
+def test_composite_tree_keeps_check_package_annotations_across_resume() -> None:
+    from ouroboros.orchestrator.parallel_executor import (
+        _deserialize_composite_result_tree,
+        _serialize_composite_result_tree,
+    )
+
+    failed = ACExecutionResult(
+        ac_index=0,
+        ac_content="ship it",
+        success=False,
+        error="check_package: the finished workspace fails the frozen check package",
+        outcome=ACExecutionOutcome.FAILED,
+        check_package_repair="clamp(15, 0, 10): expected 10, observed 15",
+        check_package_failure_class="CHECK_PACKAGE_FAIL:abc",
+    )
+    rejected = replace(
+        failed,
+        success=True,
+        error=None,
+        outcome=ACExecutionOutcome.SUCCEEDED,
+        check_package_repair=None,
+        check_package_failure_class=None,
+        legacy_rejection=LEGACY_TEXT,
+    )
+    plain = replace(rejected, legacy_rejection=None)
+    for result in (failed, rejected):
+        data = _serialize_composite_result_tree(result, node_budget=[10], workspace_root="/w")
+        assert data["schema_version"] == 3 and "check_package" in data
+        back = _deserialize_composite_result_tree(data, node_budget=[10])
+        for name in ("legacy_rejection", "check_package_repair", "check_package_failure_class"):
+            assert getattr(back, name) == getattr(result, name)
+    # Check package off: the record keeps its earlier shape, and an earlier record still loads.
+    data = _serialize_composite_result_tree(plain, node_budget=[10], workspace_root="/w")
+    assert data["schema_version"] == 2 and "check_package" not in data
+    assert _deserialize_composite_result_tree(data, node_budget=[10]).legacy_rejection is None
+    # Fail closed on a malformed or unknown annotation.
+    bad = _serialize_composite_result_tree(rejected, node_budget=[10], workspace_root="/w")
+    for block in ({"legacy_rejection": 3}, {"other": "x"}, {}, "text"):
+        with pytest.raises(RuntimeError):
+            _deserialize_composite_result_tree({**bad, "check_package": block}, node_budget=[10])
+    with pytest.raises(RuntimeError):
+        _deserialize_composite_result_tree({**bad, "schema_version": 2}, node_budget=[10])
+
+
+def test_composite_root_keeps_its_check_package_annotations_across_resume() -> None:
+    """The composite root's own envelope carries the gate's annotations."""
+    from ouroboros.orchestrator.parallel_executor import (
+        _deserialize_composite_completion_result,
+        _serialize_composite_completion_result,
+    )
+
+    decision = _split_decision()
+    children = tuple(
+        ACExecutionResult(
+            ac_index=index,
+            ac_content=child.description,
+            success=True,
+            outcome=ACExecutionOutcome.SUCCEEDED,
+            depth=1,
+        )
+        for index, child in enumerate(decision.children)
+    )
+    gated = ACExecutionResult(
+        ac_index=0,
+        ac_content="ship it",
+        success=False,
+        error="check_package: the finished workspace fails the frozen check package",
+        outcome=ACExecutionOutcome.FAILED,
+        is_decomposed=True,
+        sub_results=children,
+        decomposition_decision=decision,
+        check_package_repair="clamp(15, 0, 10): expected 10, observed 15",
+        check_package_failure_class="CHECK_PACKAGE_FAIL:abc",
+    )
+    plain = replace(
+        gated,
+        success=True,
+        error=None,
+        outcome=ACExecutionOutcome.SUCCEEDED,
+        check_package_repair=None,
+        check_package_failure_class=None,
+    )
+
+    def round_trip(result: ACExecutionResult) -> tuple[dict[str, Any], ACExecutionResult]:
+        data, _decision, _fingerprint = _serialize_composite_completion_result(
+            result, workspace_root="/w"
+        )
+        return data, _deserialize_composite_completion_result(
+            data, ac_index=0, ac_content="ship it", decomposition_decision=decision
+        )
+
+    data, back = round_trip(gated)
+    assert data["schema_version"] == 2 and "check_package" in data
+    assert back.check_package_repair == gated.check_package_repair
+    assert back.check_package_failure_class == gated.check_package_failure_class
+    # Check package off keeps schema 1 bytes; a schema 1 record still loads; fail closed otherwise.
+    data, back = round_trip(plain)
+    assert data["schema_version"] == 1 and "check_package" not in data
+    assert back.check_package_failure_class is None
+    with pytest.raises(RuntimeError):
+        _deserialize_composite_completion_result(
+            {**data, "check_package": {"legacy_rejection": "x"}},
+            ac_index=0,
+            ac_content="ship it",
+            decomposition_decision=decision,
+        )
+
+
+def test_an_empty_check_package_annotation_is_absent() -> None:
+    """An empty annotation neither raises in a live persist nor reaches the record."""
+    from ouroboros.orchestrator.parallel_executor_models import check_package_record
+
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content="x",
+        success=True,
+        outcome=ACExecutionOutcome.SUCCEEDED,
+        legacy_rejection="",
+    )
+    assert check_package_record(result) == {}
+    assert check_package_record(replace(result, check_package_repair="fix")) == {
+        "check_package": {"check_package_repair": "fix"}
+    }

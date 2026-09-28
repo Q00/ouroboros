@@ -393,3 +393,26 @@ class TestWheelPackaging:
                 f"(profiles sample): "
                 f"{sorted(n for n in names if 'profile' in n)}"
             )
+
+
+def test_a_profile_snapshot_without_optional_evidence_keeps_its_bytes() -> None:
+    """A profile persisted before ``evidence_schema.optional`` existed revalidates byte-identical.
+
+    The runner refuses to resume when a persisted profile's canonical JSON
+    changes on revalidation, so an empty ``optional`` is never serialized.
+    """
+    import json
+
+    def canonical(value: object) -> str:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+    current = load_profile("code").model_dump(mode="json")
+    assert current["evidence_schema"]["optional"] == ["entry_points"]
+    older = json.loads(canonical(current))
+    del older["evidence_schema"]["optional"]
+    revalidated = ExecutionProfile.model_validate(older).model_dump(mode="json")
+    assert canonical(revalidated) == canonical(older)
+    # A declared optional field round-trips too.
+    assert canonical(ExecutionProfile.model_validate(current).model_dump(mode="json")) == canonical(
+        current
+    )

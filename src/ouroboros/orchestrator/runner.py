@@ -984,6 +984,9 @@ class OrchestratorRunner:
         self._max_decomposition_depth = validate_max_decomposition_depth(max_decomposition_depth)
         self._max_parallel_workers = max(1, max_parallel_workers)
         self._fat_harness_mode = fat_harness_mode
+        # Optional acceptance authority (ouroboros.boundary.authority), set after
+        # construction; see its call site in _execute_parallel.
+        self.acceptance_authority: Any | None = None
         self._session_signal_hub = session_signal_hub
         self._execution_preferences_override_explicit = (
             efficiency_mode is not None or frugality_assurance is not None
@@ -10370,6 +10373,9 @@ class OrchestratorRunner:
             expected_runtime_effect_capabilities=execution_semantics["runtime_effect_capabilities"],
             usage_limit_pause_seconds=execution_semantics["usage_limit_pause_seconds"],
         )
+        if (install := getattr(self.acceptance_authority, "install", None)) is not None:
+            # Check package on: it drives repairs; the legacy verifier is advisory.
+            install(parallel_executor)
 
         raw_published_pause_owner = tracker.progress.get("pause_owner")
         if (
@@ -10482,6 +10488,14 @@ class OrchestratorRunner:
                 ),
                 default_pause_seconds=execution_semantics["usage_limit_pause_seconds"],
             )
+        if self.acceptance_authority is not None and recoverable_failure_pause is None:
+            # Terminal, non-pausing results only (a paused run is decided when it
+            # resumes); it may replace covered root results before the terminal
+            # plan is built, so the durable status carries its decision.
+            parallel_result = await self.acceptance_authority(
+                seed=seed, execution_id=exec_id, parallel_result=parallel_result
+            )
+            success = parallel_result.all_succeeded
 
         final_message = render_parallel_completion_message(
             parallel_result,
