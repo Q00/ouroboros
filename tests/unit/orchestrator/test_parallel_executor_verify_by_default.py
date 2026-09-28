@@ -173,6 +173,35 @@ async def test_verify_gate_rejects_assertion_only_constructed_contract(tmp_path:
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX virtualenv layout")
+async def test_verify_gate_resolves_tools_from_the_main_worktree_venv(tmp_path: Any) -> None:
+    """A task worktree lacks the gitignored ``.venv``; the gate uses the main tree's."""
+    main = tmp_path / "project"
+    bin_dir = main / ".venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    (main / ".venv" / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    for name, body in (("python3", ""), ("projtool", "echo PROJECT_VENV_TOOL")):
+        script = bin_dir / name
+        script.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+        script.chmod(0o755)
+    gitdir = main / ".git" / "worktrees" / "orch_1"
+    gitdir.mkdir(parents=True)
+    worktree = tmp_path / "worktrees" / "orch_1"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+    executor = _make_executor(working_directory=str(worktree))
+    spec = AcceptanceCriterionSpec(
+        description="project tool",
+        verify_command="projtool",
+        output_assertion="PROJECT_VENV_TOOL",
+    )
+
+    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(worktree))
+
+    assert outcome.passed is True, outcome.reason
+
+
+@pytest.mark.asyncio
 async def test_verify_gate_fails_on_nonzero_exit(tmp_path: Any) -> None:
     executor = _make_executor(working_directory=str(tmp_path))
     spec = AcceptanceCriterionSpec(description="bad", verify_command="exit 3")

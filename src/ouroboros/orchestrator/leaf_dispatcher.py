@@ -37,6 +37,7 @@ from ouroboros.core.filesystem_capability import (
     nofollow_directory_capabilities_available,
     open_nofollow_directory_chain,
 )
+from ouroboros.core.project_env import with_project_venv
 from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.evidence.claims import (
     _runtime_message_command_values,
@@ -972,7 +973,7 @@ class LeafDispatcher:
         runs = await replay_commands(
             candidates,
             workspace=task_cwd,
-            env=sanitized_verify_environment(),
+            env=with_project_venv(sanitized_verify_environment(), Path(task_cwd)),
             timeout_seconds=float(timeout_seconds),
             sandbox_enabled=sandbox_enabled,
         )

@@ -89,6 +89,7 @@ import sys
 import tempfile
 
 from ouroboros.config.exec_sandbox import exec_sandbox_enabled
+from ouroboros.core.project_env import project_venv_python, venv_python
 from ouroboros.runtime.exec_sandbox import DEFAULT_ENV_PASSTHROUGH, SandboxUnavailable, confine
 
 # Windows cannot start a process, or find its system directories, without these.
@@ -388,59 +389,17 @@ async def spawn_check_process(
     return CheckProcess(transport, protocol, loop, report)
 
 
-def _python_in_venv(venv: Path) -> Path | None:
-    names = ("Scripts/python.exe",) if sys.platform == "win32" else ("bin/python3", "bin/python")
-    for name in names:
-        candidate = venv / name
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return candidate
-    return None
-
-
-def _venv_python(root: Path) -> Path | None:
-    for venv in (".venv", "venv"):
-        found = _python_in_venv(root / venv)
-        if found is not None:
-            return found
-    return None
-
-
-def _main_worktree_root(checkout: Path) -> Path | None:
-    """The main working tree of a linked git worktree, read from its ``.git`` file."""
-    marker = checkout / ".git"
-    try:
-        if not marker.is_file():
-            return None
-        text = marker.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    if not text.startswith("gitdir:"):
-        return None
-    gitdir = Path(text.removeprefix("gitdir:").strip())
-    if not gitdir.is_absolute():
-        gitdir = (checkout / gitdir).resolve()
-    # <main>/.git/worktrees/<name>
-    if gitdir.parent.name == "worktrees" and gitdir.parent.parent.name == ".git":
-        return gitdir.parent.parent.parent
-    return None
-
-
 def resolve_check_interpreter(
     checkout: Path, environ: Mapping[str, str] | None = None
 ) -> CheckInterpreter:
     """Pick and pin the interpreter for ``python3``/``python`` in a check's argv."""
-    roots = [checkout]
-    main_root = _main_worktree_root(checkout)
-    if main_root is not None:
-        roots.append(main_root)
-    for root in roots:
-        found = _venv_python(root)
-        if found is not None:
-            return pin_interpreter(str(found), "project_venv")
+    found = project_venv_python(checkout)
+    if found is not None:
+        return pin_interpreter(str(found), "project_venv")
     source = os.environ if environ is None else environ
     active = source.get("VIRTUAL_ENV", "").strip()
     if active:
-        found = _python_in_venv(Path(active))
+        found = venv_python(Path(active))
         if found is not None:
             return pin_interpreter(str(found), "active_venv")
     return default_interpreter()

@@ -28,6 +28,7 @@ from typing import Literal
 import structlog
 
 from ouroboros.core.json_utils import extract_json_payload
+from ouroboros.core.project_env import project_venv_scripts
 from ouroboros.evaluation.command_parsing import split_command
 from ouroboros.evaluation.languages import _ALLOWED_EXECUTABLES
 from ouroboros.evolution.provider_usage import tracked_complete
@@ -1916,12 +1917,18 @@ def _bare_tool_declared_by_repo(working_dir: Path, tool: str) -> bool:
 
     Accepts any of:
       * Project-local bin: ``.venv/bin/<tool>`` or ``node_modules/.bin/<tool>``
+      * The project's virtualenv (``core/project_env``): for a linked task
+        worktree, the main working tree's, since a gitignored ``.venv`` is not
+        in the worktree; ``mechanical.run_command`` resolves it the same way
       * Python: declared in ``pyproject.toml`` or ``requirements*.txt``
       * Node: declared in ``package.json`` dependencies
     """
     if (working_dir / ".venv" / "bin" / tool).exists():
         return True
     if (working_dir / ".venv" / "Scripts" / f"{tool}.exe").exists():
+        return True
+    scripts = project_venv_scripts(working_dir)
+    if scripts is not None and ((scripts / tool).exists() or (scripts / f"{tool}.exe").exists()):
         return True
     if (working_dir / "node_modules" / ".bin" / tool).exists():
         return True
