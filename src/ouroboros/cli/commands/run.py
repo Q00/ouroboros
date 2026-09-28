@@ -278,6 +278,12 @@ def _detect_project_root_from_seed_path(seed_file: Path, *, max_levels: int = 6)
     return None
 
 
+def _in_global_seed_store(seed_file: Path) -> bool:
+    """Whether ``seed_file`` lives in the global Seed store, ``~/.ouroboros/seeds``."""
+    store = (Path.home() / ".ouroboros" / "seeds").resolve()
+    return seed_file.resolve().is_relative_to(store)
+
+
 def _resolve_cli_project_dir(
     seed: "Seed",
     seed_file: Path,
@@ -292,7 +298,8 @@ def _resolve_cli_project_dir(
     the Seed does not say where it belongs. Callers that hold a better answer
     than "wherever the file sits" pass it — `init` passes the directory the
     interview was run from — so a Seed written to the global store cannot turn
-    that store into a workspace. It stays a *fallback*: an explicit
+    that store into a workspace. Without one, a Seed in the global store uses
+    the current directory for the same reason. It stays a *fallback*: an explicit
     ``project_dir``, Seed metadata, and a valid brownfield target all still win,
     and every one of those decisions is made here, once.
     """
@@ -311,7 +318,14 @@ def _resolve_cli_project_dir(
         return _directory_for_runtime(metadata_project_dir)
 
     target_dir = _resolve_brownfield_target_dir(seed_data)
-    stable_base = target_dir or seed_base
+    project_base = seed_base
+    if detected_root is None and fallback_dir is None and _in_global_seed_store(seed_file):
+        # The global store holds Seeds for every project, so its folder says
+        # nothing about where this one belongs; the directory the command runs
+        # from does, as for `init` (`ouroboros run ~/.ouroboros/seeds/<id>.yaml`
+        # is the documented terminal flow).
+        project_base = Path.cwd().resolve()
+    stable_base = target_dir or project_base
     resolution = resolve_seed_project_path(seed, stable_base=stable_base)
     if resolution.rejected:
         print_error(

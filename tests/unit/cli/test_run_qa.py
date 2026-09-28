@@ -235,8 +235,29 @@ def test_resolve_cli_project_dir_global_seed_store_without_hints_does_not_return
     with patch.object(Path, "home", return_value=fake_home):
         resolved = _resolve_cli_project_dir(seed, seed_file, seed_data=VALID_SEED_DATA)
 
-    assert resolved == global_seed_dir.resolve()
+    assert resolved != global_seed_dir.resolve()
     assert resolved != fake_home.resolve()
+
+
+def test_resolve_cli_project_dir_global_seed_store_without_hints_uses_the_current_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`ouroboros run ~/.ouroboros/seeds/<id>.yaml` from a project builds in that project."""
+    fake_home = tmp_path / "home"
+    global_seeds = fake_home / ".ouroboros" / "seeds"
+    global_seeds.mkdir(parents=True)
+    seed_file = global_seeds / "seed_abc123.yaml"
+    seed_file.write_text("goal: ignored\n", encoding="utf-8")
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    seed = Seed.from_dict(VALID_SEED_DATA)
+
+    with patch.object(Path, "home", return_value=fake_home):
+        resolved = _resolve_cli_project_dir(seed, seed_file, seed_data=VALID_SEED_DATA)
+
+    assert resolved == project.resolve()
 
 
 def test_resolve_cli_project_dir_global_seed_store_still_prefers_explicit_project_dir(
