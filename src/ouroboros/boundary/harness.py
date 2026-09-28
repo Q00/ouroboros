@@ -1,6 +1,6 @@
 """Ouroboros oracle harness (product code; the constructor writes data only).
 
-One process role and one in-process role.
+Two process roles and one in-process role.
 
 target <nonce> <call_kind> <symbol>
     Runs in the project interpreter (-I -B) with the checkout copy under test
@@ -16,6 +16,10 @@ target <nonce> <call_kind> <symbol>
     reports what the candidate's code computed, never proof that the bound
     callable ran. The nonce only keeps the target's own prints apart from its
     report (see ``boundary/oracle_run.py``, "What an observation is").
+
+cli <nonce> <script|module> <name> <count> <proven files> <args>
+    Runs a CLI oracle's target from the bytes of the files the controller
+    proved, never from a pathname opened anew (see the cli role below).
 
 compare(request)
     Called inside the controller process (never a separate process), which
@@ -133,26 +137,47 @@ def _checkout_file(filename: str | None) -> bool:
     resolved through ``realpath``. Raises ``_Unprovable`` where this
     platform has no ``O_NOFOLLOW`` or ``dir_fd`` support.
     """
+    _require_nofollow()
+    root = os.getcwd()
+    if not isinstance(filename, str) or not filename.startswith(root.rstrip(os.sep) + os.sep):
+        return False
+    try:
+        descriptor = _open_checkout_file(filename[len(root.rstrip(os.sep)) + 1 :].split(os.sep))
+    except OSError:
+        return False
+    try:
+        return stat.S_ISREG(os.fstat(descriptor).st_mode)
+    finally:
+        os.close(descriptor)
+
+
+def _require_nofollow() -> tuple[int, int]:
+    """``O_NOFOLLOW`` and ``O_DIRECTORY``; ``_Unprovable`` where no-follow opens are unavailable."""
     nofollow = getattr(os, "O_NOFOLLOW", None)
     directory_flag = getattr(os, "O_DIRECTORY", None)
     if nofollow is None or directory_flag is None or os.open not in os.supports_dir_fd:
         raise _Unprovable("no-follow checkout resolution is unavailable")
-    root = os.getcwd()
-    if not isinstance(filename, str) or not filename.startswith(root.rstrip(os.sep) + os.sep):
-        return False
-    parts = filename[len(root.rstrip(os.sep)) + 1 :].split(os.sep)
-    if any(part in ("", ".", "..") for part in parts):
-        return False
+    return nofollow, directory_flag
+
+
+def _open_checkout_file(parts: list[str]) -> int:
+    """A descriptor of the working directory's file ``parts``, opened without following a link.
+
+    Every directory of the path is opened by name from the one before it
+    with ``O_NOFOLLOW``, and so is the file. ``OSError`` for a link, a
+    missing entry or a non-canonical part; ``_Unprovable`` where this
+    platform has no ``O_NOFOLLOW`` or ``dir_fd`` support.
+    """
+    nofollow, directory_flag = _require_nofollow()
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        raise OSError("not a path below the working directory")
     held: list[int] = []
     try:
         held.append(os.open(".", os.O_RDONLY | directory_flag))
         for part in parts[:-1]:
             held.append(os.open(part, os.O_RDONLY | directory_flag | nofollow, dir_fd=held[-1]))
         flags = os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0)
-        held.append(os.open(parts[-1], flags, dir_fd=held[-1]))
-        return stat.S_ISREG(os.fstat(held[-1]).st_mode)
-    except OSError:
-        return False
+        return os.open(parts[-1], flags, dir_fd=held[-1])
     finally:
         for descriptor in reversed(held):
             os.close(descriptor)
@@ -244,6 +269,139 @@ def _target(nonce: str, kind: str, symbol: str) -> None:
     call = json.loads(_read_all(0))
     frame({"phase": "result", "entry": _run(target, kind, call)})
     os._exit(0)
+
+
+# ------------------------------------------------------------------- cli role
+#
+# cli <nonce> <script|module> <name> <count> (<path> <device> <inode> <sha256>){count} <arg>...
+#     Runs a CLI oracle's target in the project interpreter (-I -B), with the
+#     checkout copy under test as cwd: ``python <name> <arg>...`` for a
+#     script, ``python -m <name> <arg>...`` for a module. The controller has
+#     proven each file (its checkout-relative path, device, inode and the
+#     SHA-256 of its bytes; never an expected value); each is opened here
+#     again without following a link, must be that same file holding those
+#     same bytes, and the bytes read from that descriptor are what runs,
+#     never the pathname opened anew. The outcome is one frame
+#     '<nonce> {"phase": "resolved", "resolve": ...}' on stderr (``ok``, or
+#     ``unprovable`` when a file is not the proven one), written before any
+#     target code runs; stderr is then pointed at the null device, so the
+#     target cannot write to that channel. The target's stdout is the
+#     observation.
+
+
+def _proven_files(proofs: list[str]) -> list[tuple[str, bytes]]:
+    """Each proven ``(path, device, inode, sha256)`` as ``(absolute path, bytes)``.
+
+    ``OSError`` when a file is not the proven one.
+    """
+    import hashlib
+
+    root = os.getcwd()
+    files = []
+    for index in range(0, len(proofs), 4):
+        relative, device, inode, digest = proofs[index : index + 4]
+        descriptor = _open_checkout_file(relative.split("/"))
+        try:
+            status = os.fstat(descriptor)
+            if not stat.S_ISREG(status.st_mode) or (status.st_dev, status.st_ino) != (
+                int(device),
+                int(inode),
+            ):
+                raise OSError(relative + ": not the proven file")
+            chunks = []
+            while True:
+                chunk = os.read(descriptor, 65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        finally:
+            os.close(descriptor)
+        data = b"".join(chunks)
+        if hashlib.sha256(data).hexdigest() != digest:
+            raise OSError(relative + ": not the proven file")
+        files.append((os.path.join(root, *relative.split("/")), data))
+    return files
+
+
+def _stdio_as_configured() -> None:
+    """Stdio as ``PYTHONIOENCODING`` / ``PYTHONUTF8`` set it (``-I`` ignores both)."""
+    encoding, _sep, errors = os.environ.get("PYTHONIOENCODING", "").partition(":")
+    if not encoding and os.environ.get("PYTHONUTF8") == "1":
+        encoding = "utf-8"
+    if not encoding and not errors:
+        return
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding=encoding or None, errors=errors or None)
+
+
+def _run_main(path: str, source: bytes, main: Any) -> None:
+    sys.modules["__main__"] = main
+    exec(compile(source, path, "exec", dont_inherit=True), main.__dict__)
+
+
+def _cli(nonce: str, kind: str, name: str, count: str, rest: list[str]) -> None:
+    def frame(payload: dict[str, Any]) -> None:
+        data = ("\n" + nonce + " " + json.dumps(payload) + "\n").encode("utf-8")
+        while data:
+            data = data[os.write(2, data) :]
+
+    number = int(count)
+    try:
+        files = _proven_files(rest[: 4 * number])
+    except (_Unprovable, OSError, ValueError) as exc:
+        frame({"phase": "resolved", "resolve": "unprovable", "detail": str(exc)[:500]})
+        os._exit(0)
+    frame({"phase": "resolved", "resolve": "ok", "detail": ""})
+    null = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(null, 2)
+    os.close(null)
+    _stdio_as_configured()
+    arguments = rest[4 * number :]
+    bootstrap = sys.modules["_frozen_importlib"]
+    loader = sys.modules["_frozen_importlib_external"].SourceFileLoader
+    main = type(sys)("__main__")
+    main.__dict__["__builtins__"] = sys.modules["builtins"]
+    if kind == "script":
+        path, source = files[0]
+        # As ``python <name>`` sets them: argv as given, ``__file__`` absolute,
+        # the script's directory first on the path.
+        main.__dict__.update(
+            __file__=path, __cached__=None, __loader__=loader("__main__", path), __spec__=None
+        )
+        sys.argv = [name, *arguments]
+        sys.path.insert(0, os.path.dirname(path))
+        _run_main(path, source, main)
+        return
+    # As ``python -m <name>`` runs it: the working directory first on the
+    # path, every parent package imported from its proven ``__init__.py``,
+    # then the module (or a package's ``__main__``) run as ``__main__``.
+    parts = name.split(".")
+    packages = parts if len(files) == len(parts) + 1 else parts[:-1]
+    sys.path.insert(0, os.getcwd())
+    for index, (path, source) in enumerate(files[: len(packages)]):
+        dotted = ".".join(packages[: index + 1])
+        spec = bootstrap.ModuleSpec(dotted, loader(dotted, path), origin=path, is_package=True)
+        spec.submodule_search_locations = [os.path.dirname(path)]
+        spec.has_location = True
+        module = bootstrap.module_from_spec(spec)
+        sys.modules[dotted] = module
+        exec(compile(source, path, "exec", dont_inherit=True), module.__dict__)
+        if index:
+            setattr(sys.modules[".".join(packages[:index])], packages[index], module)
+    path, source = files[-1]
+    dotted = name + ".__main__" if len(files) == len(parts) + 1 else name
+    spec = bootstrap.ModuleSpec(dotted, loader(dotted, path), origin=path)
+    spec.has_location = True
+    main.__dict__.update(
+        __file__=path,
+        __cached__=None,
+        __loader__=spec.loader,
+        __package__=dotted.rpartition(".")[0],
+        __spec__=spec,
+    )
+    sys.argv = [path, *arguments]
+    _run_main(path, source, main)
 
 
 # ---------------------------------------------------------- shared call shape
@@ -467,8 +625,10 @@ def main() -> None:
     role = sys.argv[1] if len(sys.argv) > 1 else ""
     if role == "target":
         _target(sys.argv[2], sys.argv[3], sys.argv[4])
+    elif role == "cli":
+        _cli(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6:])
     else:
-        sys.stderr.write("usage: harness target <nonce> <kind> <symbol>\n")
+        sys.stderr.write("usage: harness target <nonce> <kind> <symbol> | cli <nonce> ...\n")
         sys.exit(2)
 
 

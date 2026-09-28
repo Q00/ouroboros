@@ -41,9 +41,11 @@ One oracle check runs as follows:
    observation as a ``result`` frame. Frames are JSON after a per-process
    random nonce on a pipe; every other line is ignored, and the target code's
    own output goes to stderr, which is discarded. A CLI oracle's target is the
-   bound command itself, run only once the controller has proven, before
-   every case, that the code it runs is regular files of the checkout
-   (``_cli_target_files``). When the case is over, the controller kills the
+   bound script or module: before every case the controller proves its
+   files are regular files of the checkout (``_cli_target_files``), and the
+   harness ``cli`` role runs the bytes of exactly those files, found again
+   by identity in the target process, never a pathname opened anew. When
+   the case is over, the controller kills the
    target's whole process group (on Linux also every process still in its
    session), closes its own ends of the pipes, and waits, bounded, for the
    group to be empty. One absolute deadline, taken before anything starts,
@@ -99,6 +101,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+import hashlib
 from importlib.machinery import EXTENSION_SUFFIXES
 import json
 import math
@@ -127,10 +130,16 @@ from ouroboros.boundary.oracle import (
     OracleSpec,
     imported_before_checkout,
 )
-from ouroboros.core.filesystem_capability import CheckoutFileRefusal, resolve_checkout_file
+from ouroboros.core.filesystem_capability import (
+    CheckoutFileRefusal,
+    RegularFile,
+    resolve_checkout_file,
+)
 
 _FRAME_LIMIT = 8 * 1024 * 1024
 _CLI_OUTPUT_LIMIT = 1024 * 1024
+# The harness ``cli`` role writes one short frame on stderr, nothing else.
+_CLI_FRAME_LIMIT = 64 * 1024
 _READ_CHUNK = 64 * 1024
 _MAX_EXCEPTION_NAMES = 64  # an exception's class hierarchy, never longer in practice
 _MAX_NAME_CHARS = 200
@@ -646,26 +655,66 @@ def _module_files(cwd: Path, dotted: str) -> tuple[str, ...] | _NotProven:
     return tuple(files)
 
 
-def _cli_target_files(cwd: Path, symbol: str) -> _NotProven | None:
-    """``None`` when a CLI target's code is proven to be regular checkout files.
+def _cli_target_files(cwd: Path, symbol: str) -> _NotProven | tuple[tuple[str, RegularFile], ...]:
+    """The CLI target's code as proven regular checkout files: each path and its identity.
 
     Every file is proven through ``resolve_checkout_file`` from ``cwd``,
-    never through a link. Otherwise the outcome is the one the harness gives
-    a Python target (``boundary/harness.py``): ``missing`` when the code is
-    not a checkout file (a link anywhere on its path, a directory, a special
-    file, a standard library module), ``unprovable`` when this host cannot
-    tell (no no-follow traversal, an unreadable or moving path, a namespace
-    package, an extension module or bytecode beside the source).
+    never through a link; the target process runs these files' bytes only
+    after it finds the same files there (the harness ``cli`` role). Otherwise
+    the outcome is the one the harness gives a Python target
+    (``boundary/harness.py``): ``missing`` when the code is not a checkout
+    file (a link anywhere on its path, a directory, a special file, a
+    standard library module), ``unprovable`` when this host cannot tell (no
+    no-follow traversal, an unreadable or moving path, a namespace package,
+    an extension module or bytecode beside the source) or cannot run the
+    proven bytes (an executable that is not a Python script or module).
     """
-    files = _module_files(cwd, symbol[3:]) if symbol.startswith("-m ") else (symbol,)
+    if symbol.startswith("-m "):
+        files = _module_files(cwd, symbol[3:])
+    elif symbol.endswith(".py"):
+        files = (symbol,)
+    else:
+        return _NotProven("unprovable", f"{symbol}: not_a_python_target")
     if isinstance(files, _NotProven):
         return _NotProven(files.resolve, f"{symbol}: {files.reason}")
+    proven = []
     for relative in files:
         proof = resolve_checkout_file(cwd, relative)
         if isinstance(proof, CheckoutFileRefusal):
             resolve = "missing" if proof in _NOT_CHECKOUT_CODE else "unprovable"
             return _NotProven(resolve, f"{symbol}: {relative}: {proof.value}")
-    return None
+        proven.append((relative, proof))
+    return tuple(proven)
+
+
+def _cli_launch(
+    python: str, harness: str, nonce: str, symbol: str, proven: Sequence[tuple[str, RegularFile]]
+) -> list[str]:
+    """The argv of the harness ``cli`` role running ``symbol`` from the ``proven`` files."""
+    kind, name = ("module", symbol[3:]) if symbol.startswith("-m ") else ("script", symbol)
+    identities = [
+        part
+        for relative, proof in proven
+        for part in (
+            relative,
+            str(proof.device),
+            str(proof.inode),
+            hashlib.sha256(proof.data).hexdigest(),
+        )
+    ]
+    return [
+        python,
+        "-I",
+        "-B",
+        "-c",
+        harness,
+        "cli",
+        nonce,
+        kind,
+        name,
+        str(len(proven)),
+        *identities,
+    ]
 
 
 async def _feed(process: asyncio.subprocess.Process, data: bytes) -> None:
@@ -682,14 +731,19 @@ async def _feed(process: asyncio.subprocess.Process, data: bytes) -> None:
             pass
 
 
-async def _cli_case(command: CheckCommand, stdin: str, deadline: float, call_text: str) -> _Case:
+async def _cli_case(
+    command: CheckCommand, stdin: str, deadline: float, call_text: str, nonce: str
+) -> _Case:
     """One CLI call, from launch to reap, within ``deadline`` (event loop time).
 
-    Its stdout is read under ``_CLI_OUTPUT_LIMIT`` while it streams. More
-    output than the limit is an oversized observation (this case fails on a
-    candidate, the base is undecided): the process group is killed at the
-    first byte past the limit, so a target cannot make the controller buffer
-    its output. The stdin write shares the case deadline.
+    The process is the harness ``cli`` role: its one frame on stderr, written
+    before any target code runs, says whether it found the proven files; a
+    call without an ``ok`` frame is ``unprovable`` and nothing it printed is
+    an observation. Its stdout is read under ``_CLI_OUTPUT_LIMIT`` while it
+    streams. More output than the limit is an oversized observation (this
+    case fails on a candidate, the base is undecided): the process group is
+    killed at the first byte past the limit, so a target cannot make the
+    controller buffer its output. The stdin write shares the case deadline.
     """
     loop = asyncio.get_running_loop()
     timeout = _Case("observed", entry={"outcome": "timeout", "call": call_text})
@@ -697,14 +751,18 @@ async def _cli_case(command: CheckCommand, stdin: str, deadline: float, call_tex
         return timeout
     try:
         process = await spawn_check_process(
-            command, stdin=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+            command, stdin=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
     except OSError as exc:
         return _Case("resolve", resolve="missing", detail=f"{call_text}: {exc}")
-    output = CappedOutput(_CLI_OUTPUT_LIMIT)
+    output, frames = CappedOutput(_CLI_OUTPUT_LIMIT), CappedOutput(_CLI_FRAME_LIMIT)
     try:
         await asyncio.wait_for(
-            asyncio.gather(_feed(process, stdin.encode("utf-8")), output.fill(process.stdout)),
+            asyncio.gather(
+                _feed(process, stdin.encode("utf-8")),
+                output.fill(process.stdout),
+                frames.fill(process.stderr),
+            ),
             timeout=max(deadline - loop.time(), 0.01),
         )
         if output.overflow:
@@ -717,6 +775,14 @@ async def _cli_case(command: CheckCommand, stdin: str, deadline: float, call_tex
     if loop.time() > deadline:
         # Its reap ran past the deadline: nothing it reported stands.
         return timeout
+    resolved = _launch_frame(frames.data, nonce)
+    if resolved.get("resolve") != "ok":
+        detail = resolved.get("detail")
+        return _Case(
+            "resolve",
+            resolve="unprovable",
+            detail=f"{call_text}: {detail if isinstance(detail, str) else 'no launch frame'}"[:500],
+        )
     return _Case(
         "observed",
         entry={
@@ -726,6 +792,17 @@ async def _cli_case(command: CheckCommand, stdin: str, deadline: float, call_tex
             "stdout": output.data.decode("utf-8", errors="replace"),
         },
     )
+
+
+def _launch_frame(data: bytes, nonce: str) -> dict[str, Any]:
+    """The ``resolved`` frame of a harness ``cli`` process, or ``{}`` when it wrote none."""
+    prefix = (nonce + " ").encode("ascii")
+    for line in data.splitlines():
+        if line.startswith(prefix):
+            frame = parse_frame(line[len(prefix) :])
+            if frame is not None and frame.get("phase") == "resolved":
+                return frame
+    return {}
 
 
 async def _observe(
@@ -757,14 +834,21 @@ async def _observe(
                 python, str(cwd), binding.symbol, list(oracle.params), arg_map, case.args
             )
             call_text = " ".join(argv[2:] if argv[0] == python else argv)
-            # Proven before every case: an earlier case's target may have
-            # replaced the file.
-            refused = _cli_target_files(cwd, binding.symbol)
-            if refused is not None:
-                outcome = _Case("resolve", resolve=refused.resolve, detail=refused.reason)
+            # Proven before every case (an earlier case's target may have
+            # replaced a file), and run from the proven files only.
+            proven = _cli_target_files(cwd, binding.symbol)
+            if isinstance(proven, _NotProven):
+                outcome = _Case("resolve", resolve=proven.resolve, detail=proven.reason)
             else:
+                nonce = secrets.token_hex(16)
+                tail = argv[4:] if binding.symbol.startswith("-m ") else argv[3:]
+                launch = _cli_launch(python, harness, nonce, binding.symbol, proven)
                 outcome = await _cli_case(
-                    _prepared(prepare, argv), case.stdin or "", case_deadline, call_text
+                    _prepared(prepare, [*launch, *tail]),
+                    case.stdin or "",
+                    case_deadline,
+                    call_text,
+                    nonce,
                 )
         else:
             args, kwargs = harness_module.split_args(list(oracle.params), arg_map, case.args)
