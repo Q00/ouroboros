@@ -89,7 +89,7 @@ use. Each row below is the exact property set accepted by the serializer.
 | `subagent_dispatch` | A session used subagent fan-out — at most one row per user/day/phase/fanout_kind | phase (`emitted`/`submitted`/`unknown`), fanout_kind, runtime_backend, app_version, os, ci, `$insert_id` |
 | `command_run` (service=mcp) | A retained lifecycle MCP command succeeds/is accepted, or any MCP command fails/is blocked | command, service, status (`succeeded`, `accepted`, `failed`, `rejected`, `blocked`), error_type (exception failures only), origin (`command=seed` only; closed enum, see below), runtime_backend, app_version, os, ci, `$insert_id` |
 | `command_run` (service=cli) | A direct non-internal `ooo <command>` is invoked | command, service (`cli`), status (`invoked`), app_version, os, ci, `$insert_id` |
-| `workflow_outcome` | A background workflow, a terminal `ooo run`, or direct evaluation reaches a terminal result inside Ouroboros (a paused run is not terminal and emits nothing) | command, terminal_status, verified, failure_reason_code (non-success only), failure_cause (non-success `run` only; closed enum, see below), runtime_backend, app_version, os, ci, `$insert_id` |
+| `workflow_outcome` | A background workflow, a terminal `ooo run`, or direct evaluation reaches a terminal result inside Ouroboros (a paused run is not terminal and emits nothing) | command, terminal_status, verified, failure_reason_code (non-success only), failure_cause (non-success `run` only; closed enum, see below), ac_passed / ac_total (`run` only; see below), runtime_backend, app_version, os, ci, `$insert_id` |
 | `runtime_drift` | A frozen runtime authority input (Codex config, CLI executable, dispatch registry, profile routing) is observed to have changed after the runtime initialized; the run continues on the re-baselined input | kind (closed enum: `codex_config`/`cli_executable`/`skill_dispatcher`/`mcp_handler_registry`/`skill_dispatch_registry`/`profile_routing`/`baseline_unavailable`/`attestation_timeout`/`unknown`), runtime_backend, app_version, os, ci |
 | `ac_verify_failed` | The orchestrator's deterministic AC verify gate rejects an attempt (`run_verify_commands` enabled) | cause (closed enum: `invalid_contract`/`artifacts_missing`/`artifacts_missing_found_elsewhere`/`environment_unverifiable`/`timeout`/`exit_nonzero`/`output_assertion_unmatched`/`workspace_mutated`/`unknown`), runtime_backend, app_version, os, ci |
 
@@ -156,6 +156,14 @@ Notes:
   carries only the branch-level `failure_reason_code` its handler already
   reports on the direct path (`validation`/`config`/`auth`/`timeout`/`model`),
   never a `failure_cause`.
+- `ac_passed` / `ac_total` on a `run` outcome count the root-level acceptance
+  criteria the executor judged accepted versus judged at all, derived from
+  durable `execution.ac.attempt_judged` events (counts only — never AC text,
+  paths, commands, or output). A run is all-or-nothing, so this is what
+  separates a run that delivered 3 of 4 criteria from one that delivered
+  none. Absent when nothing was judged (e.g. a pre-launch rejection); the
+  boundary forwards the pair only as consistent non-negative integers with
+  `ac_passed <= ac_total`.
 - `command` values come only from static built-in command/tool/job registries.
 - `$insert_id` on `command_run` and `service_active` is a SHA-256 digest of the
   anonymous ID, UTC day, event, and retained dimensions. Job-derived

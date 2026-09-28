@@ -803,6 +803,42 @@ class TestCapture:
         assert props["failure_reason_code"] == "config"
         assert props["failure_cause"] == "launch_workspace_unavailable"
 
+    @pytest.mark.parametrize(
+        ("meta", "expected"),
+        [
+            ({"ac_passed": 3, "ac_total": 4}, {"ac_passed": 3, "ac_total": 4}),
+            ({"ac_passed": 0, "ac_total": 0}, {"ac_passed": 0, "ac_total": 0}),
+            ({"ac_passed": 5, "ac_total": 4}, {}),
+            ({"ac_passed": -1, "ac_total": 4}, {}),
+            ({"ac_passed": True, "ac_total": 1}, {}),
+            ({"ac_passed": "3", "ac_total": 4}, {}),
+            ({"ac_passed": 3}, {}),
+            ({"ac_passed": 3, "ac_total": 10_001}, {}),
+        ],
+    )
+    def test_run_ac_tally_forwards_only_a_consistent_int_pair(
+        self, sent: list[dict[str, Any]], meta: dict[str, Any], expected: dict[str, int]
+    ) -> None:
+        telemetry.capture_job_outcome(
+            "job-private-id", "execute_seed", terminal_status="failed", result_meta=meta
+        )
+        telemetry.flush(timeout=2.0)
+
+        props = sent[0]["properties"]
+        assert {k: props[k] for k in ("ac_passed", "ac_total") if k in props} == expected
+
+    def test_ac_tally_is_a_run_only_dimension(self, sent: list[dict[str, Any]]) -> None:
+        telemetry.capture_job_outcome(
+            "job-private-id",
+            "evaluate",
+            terminal_status="completed",
+            result_meta={"ac_passed": 3, "ac_total": 4, "final_approved": True},
+        )
+        telemetry.flush(timeout=2.0)
+
+        props = sent[0]["properties"]
+        assert "ac_passed" not in props and "ac_total" not in props
+
     def test_unaudited_failure_cause_folds_to_unknown(self, sent: list[dict[str, Any]]) -> None:
         telemetry.capture_job_outcome(
             "job-private-id",

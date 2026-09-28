@@ -19,6 +19,7 @@ Privacy contract — see TELEMETRY.md at the repository root:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import hashlib
 import json
 import os
@@ -281,6 +282,8 @@ _WORKFLOW_OUTCOME_KEYS = frozenset(
         "verified",
         "failure_reason_code",
         "failure_cause",
+        "ac_passed",
+        "ac_total",
         "$insert_id",
         "runtime_backend",
         "app_version",
@@ -1138,6 +1141,26 @@ def capture_subagent_dispatch(properties: dict[str, Any]) -> None:
         pass
 
 
+_AC_TALLY_CAP = 10_000
+
+
+def _run_ac_tally_properties(meta: Mapping[str, Any]) -> dict[str, int]:
+    """Forward ``ac_passed``/``ac_total`` only as a consistent pair of bounded ints.
+
+    Producer: ``mcp/tools/run_ac_tally.py``. Anything malformed (non-int,
+    bool, negative, passed > total, absurd size) drops both keys rather than
+    forwarding a partial or spoofed tally.
+    """
+    passed = meta.get("ac_passed")
+    total = meta.get("ac_total")
+    for value in (passed, total):
+        if not isinstance(value, int) or isinstance(value, bool):
+            return {}
+    if not (0 <= passed <= total <= _AC_TALLY_CAP):
+        return {}
+    return {"ac_passed": passed, "ac_total": total}
+
+
 def capture_job_outcome(
     job_id: str,
     job_type: str,
@@ -1178,6 +1201,8 @@ def capture_job_outcome(
             "verified": verified,
             "$insert_id": hashlib.sha256(f"ouroboros-job-outcome\0{job_id}".encode()).hexdigest(),
         }
+        if command == "run":
+            properties.update(_run_ac_tally_properties(meta))
         if resolution is not None:
             properties["failure_reason_code"] = resolution.reason_code.value
             # The fine-grained run cause (SSOT: orchestrator/run_failure_cause.py)
