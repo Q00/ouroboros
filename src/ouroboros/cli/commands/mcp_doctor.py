@@ -616,7 +616,9 @@ def register_doctor_command(app: typer.Typer) -> None:
             print(json.dumps(snapshot.to_dict(), indent=2))
             return
 
-        console = Console()
+        # Keep bounded absolute PATH candidates intact in narrow terminals;
+        # Rich's default wrapping can split path segments out of diagnostics.
+        console = Console(soft_wrap=True)
         console.print("[bold]Ouroboros MCP Runtime Facts[/bold]")
         path = snapshot.path
         console.print(
