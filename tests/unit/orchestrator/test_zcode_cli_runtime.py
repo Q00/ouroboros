@@ -113,6 +113,24 @@ def test_convert_event_simple_summary_to_assistant(runtime: ZcodeCLIRuntime) -> 
     assert event["sessionId"].startswith("sess_")
 
 
+@pytest.mark.parametrize(
+    "summary",
+    [
+        '{"sessionId":"sess_12345678-1234-1234-1234-123456789abc",'
+        '"traceId":"attacker-trace","traceId":"trace-test-1",'
+        '"turnId":"turn-test-1","response":"Final answer"}',
+        '{"sessionId":"sess_12345678-1234-1234-1234-123456789abc",'
+        '"traceId":"trace-test-1","turnId":"turn-test-1",'
+        '"response":"Final answer","usage":NaN}',
+    ],
+    ids=["duplicate-trace-identity", "non-finite-summary-value"],
+)
+def test_parse_json_event_rejects_ambiguous_terminal_summary(
+    runtime: ZcodeCLIRuntime, summary: str
+) -> None:
+    assert runtime._parse_json_event(summary) is None
+
+
 def test_convert_event_tool_summary_to_assistant(runtime: ZcodeCLIRuntime) -> None:
     """Tool-invoking prompts still surface as one assistant message; the tool
     call is reflected only in eventCount/usage, not as a separate event."""
@@ -753,6 +771,16 @@ def test_rollout_malformed_json_fails_closed(
     assert [message.type for message in messages] == ["assistant"]
 
 
+def test_rollout_non_finite_json_constant_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record_text = path.read_text(encoding="utf-8").strip()
+    path.write_text(record_text[:-1] + ',"sentinel":NaN}\n', encoding="utf-8")
+
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
 def test_rollout_duplicate_json_keys_fail_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -912,6 +940,39 @@ def test_rollout_parent_replacement_cannot_redirect_leaf_open(
     assert replaced is True
     assert [message.type for message in messages] == ["tool", "tool_result", "assistant"]
     assert messages[1].content == "ok"
+
+
+def test_rollout_world_writable_directory_rejects_leaf_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    path.parent.chmod(0o777)
+    original_open = os.open
+    leaf_replaced = False
+
+    def replace_leaf_before_open(
+        name: str | os.PathLike[str],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal leaf_replaced
+        if name == path.name and dir_fd is not None:
+            leaf_replaced = True
+            stale_record = json.loads(path.read_text(encoding="utf-8"))
+            stale_record["request"]["messages"][2]["content"] = "stale replacement"
+            path.unlink()
+            path.write_text(json.dumps(stale_record) + "\n", encoding="utf-8")
+            path.chmod(0o600)
+        return original_open(name, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(zcode_cli_runtime_module.os, "open", replace_leaf_before_open)
+
+    messages = runtime._convert_event(event, None)
+
+    assert leaf_replaced is False
+    assert [message.type for message in messages] == ["assistant"]
 
 
 def test_rollout_oversized_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

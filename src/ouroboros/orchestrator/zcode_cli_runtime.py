@@ -110,14 +110,27 @@ _ZCODE_SESSION_ID_RE = re.compile(
 _MAX_ZCODE_ROLLOUT_BYTES = 16 * 1024 * 1024
 
 
-def _unique_rollout_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    """Reject duplicate JSON keys before rollout fields acquire authority."""
+def _unique_zcode_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject duplicate JSON keys before Zcode data acquires authority."""
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
-            raise ValueError(f"Duplicate Zcode rollout key: {key}")
+            raise ValueError(f"Duplicate Zcode JSON key: {key}")
         result[key] = value
     return result
+
+
+def _reject_nonfinite_zcode_constant(value: str) -> Any:
+    raise ValueError(f"Non-finite Zcode JSON constant: {value}")
+
+
+def _strict_zcode_json_loads(value: str) -> Any:
+    """Decode Zcode summaries and rollout records without ambiguous values."""
+    return json.loads(
+        value,
+        object_pairs_hook=_unique_zcode_object,
+        parse_constant=_reject_nonfinite_zcode_constant,
+    )
 
 
 _MAX_ZCODE_TOOL_INPUT_DEPTH = 100
@@ -578,6 +591,14 @@ class ZcodeCLIRuntime(CodexCliRuntime):
             return sid.strip()
         return super()._extract_event_session_id(event)
 
+    def _parse_json_event(self, line: str) -> dict[str, Any] | None:
+        """Parse the terminal summary strictly before identity can bind receipts."""
+        try:
+            event = _strict_zcode_json_loads(line)
+        except (json.JSONDecodeError, ValueError, RecursionError):
+            return None
+        return event if isinstance(event, dict) else None
+
     def _convert_event(
         self,
         event: dict[str, Any],
@@ -680,10 +701,17 @@ class ZcodeCLIRuntime(CodexCliRuntime):
             )
             fd: int | None = None
             try:
-                fd = os.open(rollout_name, flags, dir_fd=parent_chain.leaf_fd)
-                fd_stat = os.fstat(fd)
+                directory_stat = os.fstat(parent_chain.leaf_fd)
                 getuid = getattr(os, "getuid", None)
                 current_uid = getuid() if callable(getuid) else None
+                if (
+                    not stat.S_ISDIR(directory_stat.st_mode)
+                    or (current_uid is not None and directory_stat.st_uid != current_uid)
+                    or directory_stat.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                ):
+                    return None
+                fd = os.open(rollout_name, flags, dir_fd=parent_chain.leaf_fd)
+                fd_stat = os.fstat(fd)
                 if (
                     not stat.S_ISREG(fd_stat.st_mode)
                     or (current_uid is not None and fd_stat.st_uid != current_uid)
@@ -717,7 +745,7 @@ class ZcodeCLIRuntime(CodexCliRuntime):
             if not line.strip():
                 continue
             try:
-                candidate = json.loads(line, object_pairs_hook=_unique_rollout_object)
+                candidate = _strict_zcode_json_loads(line)
             except (json.JSONDecodeError, ValueError, RecursionError):
                 return None
             if not isinstance(candidate, dict):
