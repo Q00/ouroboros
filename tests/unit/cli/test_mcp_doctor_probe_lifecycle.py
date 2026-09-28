@@ -59,6 +59,78 @@ async def test_real_adapter_teardown_failure_cannot_return_passing_probe():
     client.__aexit__.assert_awaited_once()
 
 
+async def test_baseexception_from_real_adapter_teardown_becomes_visible_probe_failure():
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(side_effect=SystemExit(73))
+    client.protocol_version = "2026-07-28"
+    client.server_info = None
+    client.server_capabilities = SimpleNamespace(
+        tools=None, resources=None, prompts=None, logging=None, extensions=None
+    )
+    client.instructions = None
+    client.session = SimpleNamespace(discover_result=None)
+    client.list_tools = AsyncMock(return_value=SimpleNamespace(tools=[]))
+    with patch(
+        "ouroboros.mcp.client.adapter.build_sdk_client",
+        return_value=SDKClientResources(
+            client, transport_lifecycle=TransportLifecycle(entered=True)
+        ),
+    ):
+        results = await _probe_local_stdio()
+
+    assert [result.status for result in results] == ["fail", "fail", "fail"]
+    assert "SystemExit): 73" in results[0].message
+    client.__aexit__.assert_awaited_once()
+
+
+async def test_temporary_directory_cleanup_failure_becomes_visible_probe_failure(
+    tmp_path, monkeypatch
+):
+    class CleanupFailingTemporaryDirectory:
+        name = str(tmp_path)
+
+        def __init__(self, *, prefix):
+            assert prefix == "ouroboros-doctor-"
+
+        def cleanup(self):
+            raise OSError("temporary-state cleanup failed")
+
+    monkeypatch.setattr(
+        "ouroboros.cli.commands.mcp_doctor.tempfile.TemporaryDirectory",
+        CleanupFailingTemporaryDirectory,
+    )
+    adapter = MagicMock()
+    adapter.disconnect = AsyncMock(return_value=SimpleNamespace(is_err=False))
+    adapter.connect = AsyncMock(return_value=SimpleNamespace(is_err=True, error="not used"))
+    monkeypatch.setattr("ouroboros.cli.commands.mcp_doctor.MCPClientAdapter", lambda **_: adapter)
+
+    results = await _probe_local_stdio()
+
+    assert [result.status for result in results] == ["fail", "fail", "fail"]
+    assert "temporary-state cleanup failed" in results[0].message
+
+
+async def test_probe_preserves_external_cancellation_while_teardown_also_fails(monkeypatch):
+    cancellation = anyio.get_cancelled_exc_class()("probe cancelled")
+    adapter = MagicMock()
+    adapter.disconnect = AsyncMock(return_value=SimpleNamespace(is_err=False))
+    monkeypatch.setattr("ouroboros.cli.commands.mcp_doctor.MCPClientAdapter", lambda **_: adapter)
+
+    async def cancel_probe(*_args):
+        raise cancellation
+
+    monkeypatch.setattr(
+        "ouroboros.cli.commands.mcp_doctor._collect_local_stdio_results", cancel_probe
+    )
+
+    with pytest.raises(type(cancellation)) as caught:
+        await _probe_local_stdio()
+
+    assert caught.value is cancellation
+    adapter.disconnect.assert_awaited_once()
+
+
 @pytest.mark.parametrize(
     "missing",
     [

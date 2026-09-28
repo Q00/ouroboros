@@ -222,3 +222,22 @@ async def test_context_exit_preserves_body_exception_when_cleanup_fails(body_err
             raise original
     assert caught.value is original
     assert any("child reap failed" in note for note in original.__notes__)
+
+
+@pytest.mark.parametrize("warning_fails", [False, True])
+async def test_context_exit_preserves_body_error_when_baseexception_cleanup_fails(warning_fails):
+    adapter = MCPClientAdapter()
+    client = _entered_client()
+    client.__aexit__.side_effect = SystemExit(73)
+    adapter._client = client
+    original = ValueError("body failed")
+    warning = patch(
+        "ouroboros.mcp.client.adapter.log.warning",
+        side_effect=SystemExit(74) if warning_fails else None,
+    )
+    with warning, pytest.raises(ValueError) as caught:
+        async with adapter:
+            raise original
+
+    assert caught.value is original
+    assert any("SystemExit): 73" in note for note in original.__notes__)
