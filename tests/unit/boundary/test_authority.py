@@ -73,6 +73,7 @@ def _decision(index: int, *, accepted: bool, existing_accepted: bool) -> Criteri
         existing_accepted=existing_accepted,
         accepted=accepted,
         governed_by=Governor.CHECK_PACKAGE,
+        declared_binding_pass=False,
     )
 
 

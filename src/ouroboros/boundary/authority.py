@@ -452,6 +452,7 @@ class CheckPackageGate:
         assignments, results = await assign_tiers(
             package,
             base=state.base_snapshot,
+            contract=state.contract,
             declared={key: entries} if entries else None,
             expected_base_digest=state.admission.base_tree_digest,
             admitted_tiers=state.admission.check_tiers,
@@ -465,7 +466,7 @@ class CheckPackageGate:
             package,
             authority.candidate,
             subset,
-            timeout_seconds=state.contract.check_timeout_seconds,
+            contract=state.contract,
             interpreter=state.interpreter,
             include_held_out=False,
         )
@@ -895,9 +896,21 @@ def decide_without_package(
     """
     verdicts = {
         key: (
-            CriterionVerdict(key, PackageCriterionStatus.INDETERMINATE, CheckTier.A, reason)
+            CriterionVerdict(
+                key,
+                PackageCriterionStatus.INDETERMINATE,
+                CheckTier.A,
+                reason,
+                declared_binding_pass=False,
+            )
             if key in covered
-            else CriterionVerdict(key, PackageCriterionStatus.UNCOVERED, CheckTier.U, "uncovered")
+            else CriterionVerdict(
+                key,
+                PackageCriterionStatus.UNCOVERED,
+                CheckTier.U,
+                "uncovered",
+                declared_binding_pass=False,
+            )
         )
         for key in keys
     }

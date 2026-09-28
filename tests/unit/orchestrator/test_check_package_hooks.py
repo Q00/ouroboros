@@ -644,7 +644,15 @@ async def test_the_cross_harness_alternate_runs_under_the_installed_package_auth
     legacy = existing_outcomes_from_results(parallel, gated=True)
     reconciliation = reconcile_acceptance(
         ("k0",),
-        {"k0": CriterionVerdict("k0", PackageCriterionStatus.PASS, CheckTier.A, "passed")},
+        {
+            "k0": CriterionVerdict(
+                "k0",
+                PackageCriterionStatus.PASS,
+                CheckTier.A,
+                "passed",
+                declared_binding_pass=False,
+            )
+        },
         legacy,
         existing_run_accepted=True,
         legacy_decides_unverified=True,

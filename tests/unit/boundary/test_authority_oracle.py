@@ -755,10 +755,10 @@ async def test_an_unreadable_candidate_file_cannot_turn_a_package_fail_into_acce
     # also holds when it runs as root, where mode 000 does not stop a read).
     hash_file = tree._file_sha256
 
-    def unreadable(path: Path) -> str:
-        if Path(path).name == trap.name:
-            raise PermissionError(13, "Permission denied", str(path))
-        return hash_file(path)
+    def unreadable(directory: Any, name: str) -> str:
+        if name == trap.name:
+            raise PermissionError(13, "Permission denied", name)
+        return hash_file(directory, name)
 
     monkeypatch.setattr(tree, "_file_sha256", unreadable)
     parallel = ParallelExecutionResult(
@@ -1069,21 +1069,17 @@ async def test_held_out_values_never_reach_the_boundary_store(
     assert [token for token in secrets if found(token, journal)] == []
     # The matcher does find a value where it would be leaked.
     assert found("4409", b'{"value": 4409}') and not found("4409", b"ab4409cd")
-    # The record names the package by its id and keeps held-out cases as ids.
+    # The record names the package by its id and keeps held-out cases as counts only.
     (record_path,) = (tmp_path / "store" / "packages").iterdir()
     record = json.loads(record_path.read_text())
     assert record["package_id"] == state.package.package_id
     assert "package_sha256" not in record
+    oracles = record["package"]["oracles"]
+    assert all("cases" not in spec for spec in oracles)
     held = [
-        (spec["check_id"], case)
-        for spec in record["package"]["oracles"]
-        for case in spec["cases"]
-        if case.get("held_out")
+        (spec["check_id"], spec["held_out_count"]) for spec in oracles if spec["held_out_count"]
     ]
-    assert held == [
-        ("oracle_1", {"case_id": "c2", "held_out": True}),
-        ("oracle_2", {"case_id": "c2", "held_out": True}),
-    ]
+    assert held == [("oracle_1", 1), ("oracle_2", 1)]
 
 
 async def _the_outcome_summary_never_reads_an_unavailable_transcript_as_a_rejection_scenario(
