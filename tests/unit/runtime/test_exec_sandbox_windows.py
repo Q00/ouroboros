@@ -333,6 +333,26 @@ class TestDispatch:
         assert _run(only).returncode == launcher.EXIT_NOT_FOUND
         assert not (copy / "shadow.txt").exists()
 
+    def test_an_absolute_path_entry_naming_the_copy_is_honored(
+        self, layout: dict[str, Path]
+    ) -> None:
+        """Explicit configuration, as with execvpe on POSIX: replay remaps the
+        worker's workspace paths, PATH included, onto the copy on purpose."""
+        _require_backend()
+        tools = layout["copy"] / "bin"
+        tools.mkdir()
+        shutil.copy(sys.executable, tools / "tool.exe")
+
+        command = _confine(
+            layout,
+            ("tool", "--version"),
+            env_source=self._source(tools),
+            env_passthrough=self._PASSTHROUGH,
+        )
+
+        resolved = Path(command.argv[command.argv.index("--") + 1])
+        assert resolved.parent == tools and resolved.stem.lower() == "tool", resolved
+
     def test_a_batch_file_is_refused(self, layout: dict[str, Path]) -> None:
         """cmd.exe will not run a batch file in an AppContainer: indeterminate, not failed."""
         _require_backend()

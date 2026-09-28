@@ -842,7 +842,9 @@ def confine(
     too. ``argv`` is run directly, never through a shell. On Windows it goes
     through the repository's dispatch policy
     (``evaluation.command_dispatch.prepare_command``): a bare name is resolved
-    on absolute ``PATH`` entries only, never in the working directory; a
+    on absolute ``PATH`` entries only, as ``execvpe`` does on POSIX: the
+    working directory and relative entries are never searched implicitly,
+    and an absolute entry the command names is honored, the copy included; a
     batch file is refused as ``windows_batch_file``, since ``cmd.exe`` will
     not run one inside an AppContainer. ``enabled`` is the
     caller's sandbox policy; ``False`` is the unsafe off switch (the caller
@@ -886,8 +888,9 @@ def confine(
     readable: tuple[str, ...] = ()
     if backend is SandboxBackend.APPCONTAINER:
         # The repository's Windows dispatch policy: a bare name is resolved on
-        # absolute PATH entries only, never in the current directory (the
-        # writable copy). The launcher then runs exactly this executable.
+        # absolute PATH entries only, so the working directory (the copy) is
+        # never searched implicitly, as with execvpe on POSIX. The launcher
+        # then runs exactly this executable.
         from ouroboros.evaluation.command_dispatch import prepare_command
 
         try:
