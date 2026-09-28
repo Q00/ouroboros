@@ -158,6 +158,7 @@ url = "http://127.0.0.1:12000/mcp"
 | `drift` | `DriftConfig` | Drift monitoring thresholds |
 | `runtime_controls` | `RuntimeControlsConfig` | Long-running workflow liveness and progress controls |
 | `logging` | `LoggingConfig` | Log level, path, and verbosity |
+| `boundary` | `BoundaryConfig` | Check package boundary of `ooo run` (on by default) |
 
 ---
 
@@ -409,6 +410,139 @@ rejects runs with enabled project guidance.
 
 ---
 
+## `boundary`
+
+The check package boundary of `ooo run` (CLI and `ouroboros_execute_seed`),
+on by default for every run it applies to (a fresh run; a resumed session
+keeps the boundary it started with): before the worker starts, a read-only
+model call writes executable checks for the acceptance criteria, and each
+check is admitted only if it behaves as declared on the current tree. After the worker stops, the package decides
+the criteria it covers, before the session's terminal status is recorded; the
+existing verifier's verdict is kept as advisory for those criteria and decides
+the others. Edits the worker makes to test configuration inside the workspace
+(for example `pytest.ini`, `conftest.py`, or Django's `tests/test_sqlite.py`)
+can make the existing verifier accept; the check package's oracle checks are
+unaffected, because they call the implementation through the product harness
+and do not read workspace test configuration (a model-written script check
+that runs the project's test runner would read it).
+
+MCP results: `ouroboros_start_execute_seed` reports the closed-value summary
+(`check_package`, `check_package_status`, `package_verdict`, `legacy_verdict`,
+`reconciliation`, `verification_coverage`) in its job result, with or without
+`auto_evaluate`. The receipts of `ouroboros_start_execute_seed` and of a
+background `ouroboros_execute_seed` call carry `check_package` and
+`check_package_status: pending` (`off` and `not_run` when the check package is
+off; the decision is then the session's terminal status, which the package
+reconciled before it was recorded). A resumed session's receipt reports the
+mode the run started with, read from its journal before the receipt is
+returned; if the journal cannot be read, the resume is refused. An execution
+dispatched to the OpenCode plugin (a child session outside this process) is
+not governed: its result carries `check_package: not_applied` with
+`check_package_reason: plugin_dispatch`.
+
+Before the package is frozen, each oracle's stated expected values are
+compared with a reference implementation the constructor writes in the same
+reply, run in the same isolated target processes: a held-out case that
+disagrees is dropped (`oracle_inconsistent`; an oracle left with no held-out
+case is dropped too, since only a held-out case can verify a pass), and a
+criterion whose reference
+does not reproduce a case the constructor declared as stated in the Seed, or
+has no reference that runs, is reported as unverified
+(`reference_contradicts_stated_case`,
+`reference_unavailable`). This catches a slip in a stated value; it does not
+catch a misreading of the criterion that the cases and the reference share.
+
+What an oracle observation proves. The candidate's code runs inside each
+target process, so it can write the process's report itself (the frame
+nonce is a parsing convention, not an authority boundary). A report is
+therefore evidence of what the candidate's code computed for the inputs it
+was sent, never proof that the bound function ran: the identity of the bound
+callable is not proven, and a candidate that computes the right outputs
+elsewhere in its code passes. That is why every oracle
+must carry at least one held-out case (a reply without one is refused,
+`oracle_without_held_out_case`) and why only a passing held-out case of a
+reproduction oracle verifies a criterion: its inputs reach the candidate only
+in the final verification, so matching its expected value means computing the
+rule's output for an input the candidate had never seen. A report can only
+make a case pass, never fail one the candidate's code passes, and admission
+runs the base checkout's code, so neither admission nor a failure depends on
+it.
+
+Admission is per check: a reproduction check that already passes on the
+current tree, or a preservation check that already fails on it, is excluded on
+its own (`repro_passes_on_base`, `preservation_fails_on_base`) and the rest of
+the package is admitted. A criterion keeps the package's authority only while
+an admitted check covers it (for a bug-fix criterion, an admitted reproduction
+check). For the criteria left without an admitted check, one more constructor
+call, before the worker starts, asks for replacement checks and says why the
+earlier ones were excluded; the replacements go through the same admission.
+The constructor is asked for a check for every criterion. Whether an
+admitted check covers a criterion is the only thing that decides who judges
+it; nothing classifies criteria by kind, and the reason a criterion was left
+uncovered is descriptive only.
+
+Every criterion the package cannot verify (no admitted check, or no binding)
+is decided by the existing verifier: its rejection fails the
+run (exit 1) and is shown as legacy-decided. Only a criterion neither verifier
+had evidence for (for example the existing verifier's transcript was
+unavailable) is accepted as unverified; the run then prints an
+insufficient-verification warning, as it does when half or more of the
+criteria were not decided by the package.
+
+```yaml
+boundary:
+  check_package: off              # on | off; unset = on
+  constructor_timeout_seconds: 600
+  check_timeout_seconds: 120
+  max_construction_attempts: 2
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `check_package` | `"on"` \| `"off"` \| unset | unset (on) | `off` turns the check package off for every run; unset or `on` keeps it on. `--check-package/--no-check-package` and `OUROBOROS_CHECK_PACKAGE` take precedence, in that order. A bare YAML `on`/`off` is accepted. If `config.yaml` cannot be read, the check package is off for runs that set neither the flag nor the variable, since the unreadable file may hold an `off`. The setting does not depend on telemetry. |
+| `constructor_timeout_seconds` | `int` (30..3600) | `600` | Wall-clock budget of one constructor call. |
+| `check_timeout_seconds` | `int` (5..1800) | `120` | Per-check timeout during admission and verification. |
+| `max_construction_attempts` | `int` (1..5) | `2` | Package versions tried before the worker starts; a version that is not admitted is superseded by the next. The one replacement call for criteria left without an admitted check adds a version outside this budget. |
+
+Checks are model-written Python scripts. They run on throwaway copies of the
+project, with the project's virtualenv interpreter when one is found (else
+`python3`), a per-check timeout, and confined by the execution sandbox (see
+`execution.exec_sandbox`): a check can write only beneath its own copy and a
+scratch directory that is removed afterwards, has no non-loopback network, and
+gets an environment built from an allowlist (`PATH`, the locale variables,
+`TZ`, a few Python I/O settings, and on Windows the system variables a process
+needs; `HOME` and the temp directory in the scratch directory; `VIRTUAL_ENV`
+when the interpreter is a virtualenv's). The same applies to the processes
+that run the implementation under an oracle check and to the constructor's
+reference implementation. Where the sandbox cannot confine a check, the check
+is undecided and nothing runs. Reads are not restricted: a check can read
+files you can read, and on macOS (where `sandbox-exec` cannot deny
+`KERN_PROCARGS2`) the arguments and environment of your other processes,
+Ouroboros included; under Landlock on Linux it cannot. Turn the check package
+off where that matters. A project `.env` cannot set
+`OUROBOROS_CHECK_PACKAGE`.
+
+Constructor runtimes: the constructor's model call must keep no session on
+disk (its reply holds the held-out cases), so it runs only on runtimes with a
+no-persistence mode: Claude Code (`--no-session-persistence`) and Codex CLI
+(`codex exec --ephemeral`). With any other runtime the run has no check
+package (`constructor_session_not_ephemeral:<backend>`, before any model call)
+and the existing verifier decides every criterion, deterministically.
+
+A resumed run keeps the mode and the `boundary` settings it started with
+(`check_timeout_seconds` is recorded on the run's
+`boundary.check_package.enabled` journal record): changing the switch or the
+config between the start and the resume changes nothing for that run.
+
+On resume the package decision is recovered from the journal alone. A journal
+the run could not have written (a missing, duplicated or conflicting record,
+or a gap in the package versions) leaves every criterion undecided
+(`boundary_record_missing`) and runs no check. When the same process still
+holds the admitted package, its full decision runs, held-out cases included.
+In another process the held-out cases are gone (they are never written to
+disk), so no check runs: covered criteria are undecided
+(`held_out_unavailable`) and the existing verifier decides the rest.
+
 ## `resilience`
 
 Controls Phase 3 — stagnation detection and lateral thinking.
@@ -655,6 +789,7 @@ All environment variables have higher priority than the corresponding `config.ya
 | `OUROBOROS_OUROCODE_CLI_PATH` | `orchestrator.ourocode_cli_path` | Path to the ourocode CLI binary used by the LLM-only `ourocode` backend. |
 | `OUROBOROS_DSH_CLI_PATH` | `orchestrator.dsh_cli_path` | Path to the `dsh-acp-demo` binary used by the LLM-only `dsh` backend. |
 | `OUROBOROS_DSH_CONFIG_PATH` | `orchestrator.dsh_config_path` | Absolute path to the trusted Cordis composition the `dsh` backend loads. Required by that backend. |
+| `OUROBOROS_CHECK_PACKAGE` | `boundary.check_package` | `on` or `off` for the `ooo run` check package boundary (on by default); overrides config, and is overridden by `--check-package/--no-check-package`. Only the exact value `on` turns it on: any other set value (`off`, an alias such as `1`, `true`, `yes` or `ON`, empty or whitespace) means `off`. Not accepted from a project `.env`. |
 | `OUROBOROS_SKIP_VERSION_CHECK` | *(none)* | Controls the Claude Agent SDK per-call version compatibility check. Defaults to `"1"` (skip the check, saving ~0.3-0.8 s per LLM call). Set to `"0"` to re-enable the check for debugging version-mismatch issues. Maps to `CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK` internally. |
 
 ### LLM Flow

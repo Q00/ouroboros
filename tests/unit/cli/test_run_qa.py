@@ -682,7 +682,7 @@ async def test_run_orchestrator_resume_uses_persisted_fat_harness_contract(
 
     tracker = SessionTracker.create(
         "exec-resume",
-        VALID_SEED_DATA["metadata"]["seed_id"],
+        "test-seed-cli-qa",  # VALID_SEED_DATA's seed_id
         session_id="sess-resume",
     )
     fake_exec = SimpleNamespace(
@@ -709,6 +709,9 @@ async def test_run_orchestrator_resume_uses_persisted_fat_harness_contract(
         patch("ouroboros.cli.commands.run.maybe_restore_task_workspace", return_value=None),
     ):
         mock_event_store_cls.return_value.initialize = AsyncMock()
+        # An empty journal: the original run bound no check package.
+        mock_event_store_cls.return_value.replay = AsyncMock(return_value=[])
+        mock_event_store_cls.return_value.query_events = AsyncMock(return_value=[])
         mock_repo_cls.return_value.reconstruct_session = AsyncMock(return_value=Result.ok(tracker))
 
         await _run_orchestrator(seed_file, resume_session="sess-resume", no_qa=True)
