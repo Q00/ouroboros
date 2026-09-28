@@ -421,3 +421,35 @@ def test_multi_target_replacement_restriction_is_the_singleton_one_for_one_targe
     pair = restrict_reply_to(reply, {1, 2})
     assert [item["check_id"] for item in pair["checks"]] == ["r1_repro", "r2_repro"]
     assert restrict_reply_to(reply, set())["checks"] == []
+
+
+_CASE_SECRET = "HELDOUT_SECRET_4242"
+
+
+async def test_a_malformed_held_out_expectation_never_reaches_a_reason(tmp_path: Path) -> None:
+    # Adversarial review probe: a held-out case whose expectation is malformed
+    # (``expect.approx`` holding a case value) refuses its piece. The refusal
+    # reason, the package's uncovered reason and the stored record carry only
+    # a closed code, never the value; the replacement call refuses the same way.
+    bad = _oracle(2, -5, 0)
+    bad["cases"][1]["expect"]["approx"] = _CASE_SECRET
+    runtime = _PerCriterionRuntime({1: {"oracles": [_oracle(1, 15, 10)]}, 2: {"oracles": [bad]}})
+    base = _base(tmp_path)
+    outcome = await _constructor(runtime, 5).construct(_probe_seed(), base)
+    assert outcome.package is not None
+    keys = seed_criterion_keys(_probe_seed())
+    (reason,) = [item.reason for item in outcome.package.uncovered]
+    assert reason.startswith("constructor_failed:constructor_reply_invalid:")
+    assert _CASE_SECRET not in reason
+    sealed = seal_package(outcome.package)
+    assert _CASE_SECRET not in json.dumps(sealed.manifest_summary())
+    assert _CASE_SECRET.encode() not in package_record_bytes(sealed)
+    assert [item.criterion_key for item in outcome.package.uncovered] == [keys[1]]
+
+    _runtime, constructor = _single_reply_constructor({"oracles": [bad]})
+    replaced = await constructor.construct_replacements(
+        _probe_seed(), base, targets={2: "no admitted check"}
+    )
+    assert replaced.package is None and replaced.failure_reason is not None
+    assert replaced.failure_reason.startswith("constructor_reply_invalid:")
+    assert _CASE_SECRET not in replaced.failure_reason
