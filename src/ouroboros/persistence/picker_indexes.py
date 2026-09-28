@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import sqlite3
 
+PICKER_INTERVIEW_ROOT_EVENT_TYPE = "interview.started"
+
 PICKER_PROGRESS_EVENT_TYPES: tuple[str, ...] = (
     "orchestrator.progress.updated",
     "workflow.progress.updated",
@@ -19,6 +21,11 @@ PICKER_PROGRESS_EVENT_TYPES: tuple[str, ...] = (
 PICKER_PROJECTION_EVENT_TYPES: tuple[str, ...] = (
     "orchestrator.session.started",
     *PICKER_PROGRESS_EVENT_TYPES,
+)
+# Writer freshness includes roots that must never enter an unlinked run tail.
+PICKER_WRITER_PROJECTION_EVENT_TYPES = (
+    *PICKER_PROJECTION_EVENT_TYPES,
+    PICKER_INTERVIEW_ROOT_EVENT_TYPE,
 )
 # One canonical family contract for EventTail and the recent-run picker.  The
 # high-volume projection families are separated below; every remaining family
@@ -87,7 +94,7 @@ def _workflow_snapshot_sql(payload_sql: str) -> str:
 
 
 PICKER_PROGRESS_SCOPE_SQL = _event_type_scope(PICKER_PROGRESS_EVENT_TYPES)
-PICKER_PROJECTION_SCOPE_SQL = _event_type_scope(PICKER_PROJECTION_EVENT_TYPES)
+PICKER_PROJECTION_SCOPE_SQL = _event_type_scope(PICKER_WRITER_PROJECTION_EVENT_TYPES)
 PICKER_DIRECT_SCOPE_SQL = _event_type_scope(PICKER_DIRECT_EVENT_TYPES)
 PICKER_START_SCOPE_SQL = "event_type = 'orchestrator.session.started'"
 # Prefix ranges keep unrelated-write predicate cost low. Any canonical direct
@@ -169,7 +176,7 @@ PICKER_START_TABLE = "dashboard_picker_starts_v1"
 PICKER_START_SESSION_TABLE = "dashboard_picker_start_sessions_v1"
 PICKER_PROGRESS_TABLE = "dashboard_picker_progress_v1"
 PICKER_META_TABLE = "dashboard_picker_projection_meta_v1"
-PICKER_PROJECTION_VERSION = 3
+PICKER_PROJECTION_VERSION = 4
 PICKER_START_EXECUTION_INDEX = "ix_dashboard_picker_starts_execution_v2"
 
 DIRECT_EVENT_INDEX_DDL = (
@@ -183,6 +190,23 @@ PICKER_GAP_INDEX_DDL = (
     f"WHERE {PICKER_PROJECTION_SCOPE_SQL} "
     f"AND picker_projection_version IS NOT {PICKER_PROJECTION_VERSION}"
 )
+# Root identity remains separate from execution identity, including colliding IDs.
+PICKER_INTERVIEW_ROOT_TABLE = "dashboard_picker_interview_roots_v1"
+PICKER_INTERVIEW_ROOT_INDEX = "ix_dashboard_picker_interview_root_identity_v1"
+PICKER_INTERVIEW_ROOT_VALID_SQL = (
+    "event_type = 'interview.started' AND aggregate_type = 'interview' "
+    f"AND {_nonblank_text_sql('aggregate_id')} IS NOT NULL "
+    "AND CASE WHEN json_valid(payload) THEN json_type(payload) = 'object' ELSE 0 END"
+)
+PICKER_INTERVIEW_ROOT_TABLE_DDL = (
+    f"CREATE TABLE IF NOT EXISTS {PICKER_INTERVIEW_ROOT_TABLE} ("
+    "event_rowid INTEGER PRIMARY KEY, interview_id TEXT NOT NULL)"
+)
+PICKER_INTERVIEW_ROOT_INDEX_DDL = (
+    f"CREATE INDEX IF NOT EXISTS {PICKER_INTERVIEW_ROOT_INDEX} "
+    f"ON {PICKER_INTERVIEW_ROOT_TABLE} (interview_id)"
+)
+
 PICKER_START_TABLE_DDL = (
     f"CREATE TABLE IF NOT EXISTS {PICKER_START_TABLE} ("
     "event_rowid INTEGER PRIMARY KEY, execution_id TEXT, session_id TEXT)"
@@ -222,25 +246,34 @@ PICKER_CONTRACT_DDL_BY_NAME: dict[str, str] = {
     PICKER_START_SESSION_TABLE: PICKER_START_SESSION_TABLE_DDL,
     PICKER_PROGRESS_TABLE: PICKER_PROGRESS_TABLE_DDL,
     PICKER_META_TABLE: PICKER_META_TABLE_DDL,
+    PICKER_INTERVIEW_ROOT_TABLE: PICKER_INTERVIEW_ROOT_TABLE_DDL,
+    PICKER_INTERVIEW_ROOT_INDEX: PICKER_INTERVIEW_ROOT_INDEX_DDL,
 }
 PICKER_CONTRACT_NAMES: tuple[str, ...] = tuple(PICKER_CONTRACT_DDL_BY_NAME)
 PICKER_INDEX_NAMES: tuple[str, ...] = (
+    PICKER_INTERVIEW_ROOT_INDEX,
     DIRECT_EVENT_INDEX,
     PICKER_GAP_INDEX,
     PICKER_START_EXECUTION_INDEX,
 )
 PICKER_INDEX_DDL: tuple[str, ...] = (
+    PICKER_INTERVIEW_ROOT_INDEX_DDL,
     DIRECT_EVENT_INDEX_DDL,
     PICKER_GAP_INDEX_DDL,
     PICKER_START_EXECUTION_INDEX_DDL,
 )
 PICKER_INDEX_DDL_BY_NAME = {
+    PICKER_INTERVIEW_ROOT_INDEX: PICKER_INTERVIEW_ROOT_INDEX_DDL,
     DIRECT_EVENT_INDEX: DIRECT_EVENT_INDEX_DDL,
     PICKER_GAP_INDEX: PICKER_GAP_INDEX_DDL,
     PICKER_START_EXECUTION_INDEX: PICKER_START_EXECUTION_INDEX_DDL,
 }
 
 _EXPECTED_TABLE_COLUMNS: dict[str, tuple[tuple[object, ...], ...]] = {
+    PICKER_INTERVIEW_ROOT_TABLE: (
+        ("event_rowid", "INTEGER", 0, 1, 0),
+        ("interview_id", "TEXT", 1, 0, 0),
+    ),
     PICKER_START_TABLE: (
         ("event_rowid", "INTEGER", 0, 1, 0),
         ("execution_id", "TEXT", 0, 0, 0),
@@ -328,6 +361,7 @@ def matching_picker_contract(conn: sqlite3.Connection) -> frozenset[str]:
                 if int(row[5]) == 1
             )
             expected_keys = {
+                PICKER_INTERVIEW_ROOT_INDEX: ("interview_id",),
                 DIRECT_EVENT_INDEX: (None, "event_type"),
                 PICKER_GAP_INDEX: ("event_type",),
                 PICKER_START_EXECUTION_INDEX: ("execution_id",),

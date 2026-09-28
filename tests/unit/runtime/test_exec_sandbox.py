@@ -1,8 +1,9 @@
 """The execution sandbox for controller-run commands (``runtime/exec_sandbox.py``).
 
 Tests that need the real backend of this host (``sandbox-exec`` on macOS,
-Landlock on Linux) skip with the probe's reason where it is unavailable; the
-refusal path is tested on every host by standing in for the probe.
+Landlock on Linux, an AppContainer on Windows) skip with the probe's reason
+where it is unavailable; the refusal path is tested on every host by standing
+in for the probe. Windows-only behavior is in ``test_exec_sandbox_windows.py``.
 """
 
 from __future__ import annotations
@@ -29,6 +30,10 @@ from ouroboros.runtime.exec_sandbox import (
     build_environment,
     confine,
 )
+
+_WINDOWS = sys.platform == "win32"
+_IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
+_POSIX_ONLY = pytest.mark.skipif(_WINDOWS, reason="POSIX file modes, shells or the POSIX helper")
 
 
 def _require_backend(*, deny_network: bool = False) -> None:
@@ -72,7 +77,9 @@ class TestRealBackend:
             "open('inside.txt', 'w').write('ok')\n"
             "os.mkdir('made'); os.rename('inside.txt', 'made/moved.txt')\n"
             "fd, name = tempfile.mkstemp(); os.write(fd, b'tmp'); os.close(fd)\n"
-            "open(os.devnull, 'w').write('discarded')\n"
+            # An AppContainer cannot open NUL (test_exec_sandbox_windows.py).
+            "if os.name != 'nt':\n"
+            "    open(os.devnull, 'w').write('discarded')\n"
             "try:\n"
             "    open(os.path.join(sys.argv[1], 'escaped.txt'), 'w').write('no')\n"
             "except OSError:\n"
@@ -87,15 +94,20 @@ class TestRealBackend:
             deny_network=False,
         )
         assert isinstance(command, ConfinedCommand)
-        assert command.backend in (SandboxBackend.SANDBOX_EXEC, SandboxBackend.LANDLOCK)
+        assert command.backend in (
+            SandboxBackend.SANDBOX_EXEC,
+            SandboxBackend.LANDLOCK,
+            SandboxBackend.APPCONTAINER,
+        )
 
         result = _run(command)
 
         assert result.returncode == 0, result.stderr
         assert (copy / "made" / "moved.txt").read_text(encoding="utf-8") == "ok"
-        assert len(list(layout["temp"].iterdir())) == 1
+        assert len([path for path in layout["temp"].rglob("*") if path.is_file()]) == 1
         assert not (outside / "escaped.txt").exists()
 
+    @_POSIX_ONLY
     def test_a_shell_script_cannot_write_outside_the_copy(
         self, layout: dict[str, Path], tmp_path: Path
     ) -> None:
@@ -119,6 +131,7 @@ class TestRealBackend:
         assert result.returncode != 0
         assert not target.exists()
 
+    @_POSIX_ONLY
     def test_metadata_outside_cannot_change(self, layout: dict[str, Path]) -> None:
         _require_backend()
         victim = layout["outside"].resolve() / "victim"
@@ -215,7 +228,8 @@ class TestRealBackend:
         assert result.returncode == _confine_exec.EXIT_SANDBOX_FAILED, result.stderr
         assert victim.read_text(encoding="utf-8") == "KEEP"
 
-    @pytest.mark.skipif(os.geteuid() == 0, reason="root reads any directory")
+    @_POSIX_ONLY
+    @pytest.mark.skipif(_IS_ROOT, reason="root reads any directory")
     def test_a_hard_link_in_an_unreadable_subtree_runs_nothing(
         self, layout: dict[str, Path]
     ) -> None:
@@ -260,6 +274,8 @@ class TestRealBackend:
 
     @staticmethod
     def _can_make_device_nodes(directory: Path) -> bool:
+        if not hasattr(os, "mknod"):
+            return False
         try:
             os.mknod(directory / "device-probe", stat.S_IFCHR | 0o600, os.makedev(1, 3))
         except (PermissionError, OSError):
@@ -322,6 +338,7 @@ class TestRealBackend:
         assert refused.reason is SandboxUnavailableReason.ALIASED_WRITABLE_ROOT
         assert result.returncode == _confine_exec.EXIT_SANDBOX_FAILED, result.stderr
 
+    @pytest.mark.skipif(_WINDOWS, reason="a Windows file name cannot hold a quote")
     def test_writable_root_with_quote_and_backslash_in_its_name(self, tmp_path: Path) -> None:
         _require_backend()
         root = tmp_path / 'we"ird\\dir'
@@ -411,13 +428,30 @@ class TestRealBackend:
         result = _run(command)
 
         env = json.loads(result.stdout)
-        # ``__CF_USER_TEXT_ENCODING`` is added by macOS to every process.
+        # ``__CF_USER_TEXT_ENCODING`` is added by macOS to every process, and
+        # ``__PYVENV_LAUNCHER__`` by a Windows virtual environment's launcher.
         env.pop("__CF_USER_TEXT_ENCODING", None)
+        env.pop("__PYVENV_LAUNCHER__", None)
         temp = os.path.realpath(layout["temp"])
-        assert env["TMPDIR"] == env["TMP"] == env["TEMP"] == env["HOME"] == temp
+        # On Windows, process creation moves these into the container's
+        # directories beneath LOCALAPPDATA, which is the temp directory.
+        moved = {"TMP", "TEMP", "LOCALAPPDATA"} if _WINDOWS else set()
+        for name in ("TMPDIR", "TMP", "TEMP", *exec_sandbox._HOME_VARIABLES):
+            if name in moved:
+                assert Path(env[name]).is_relative_to(temp), (name, env[name])
+            else:
+                assert env[name] == temp, name
         assert env["LANG"] == "C.UTF-8" and env["EXTRA"] == "1"
         assert "OUROBOROS_TEST_SECRET" not in env
-        allowed = {*DEFAULT_ENV_PASSTHROUGH, "TMPDIR", "TMP", "TEMP", "HOME", "EXTRA"}
+        allowed = {
+            *DEFAULT_ENV_PASSTHROUGH,
+            "TMPDIR",
+            "TMP",
+            "TEMP",
+            *exec_sandbox._HOME_VARIABLES,
+            "EXTRA",
+            *(("SYSTEMROOT",) if _WINDOWS else ()),
+        }
         assert set(env) <= allowed
 
 
@@ -544,7 +578,7 @@ class TestUnavailable:
         assert isinstance(allowed, ConfinedCommand) and not allowed.network_denied
 
     def test_unsupported_platform_has_no_backend(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(exec_sandbox.sys, "platform", "win32")
+        monkeypatch.setattr(exec_sandbox.sys, "platform", "sunos5")
 
         assert exec_sandbox.filesystem_backend.__wrapped__() is None  # type: ignore[attr-defined]
 
@@ -581,6 +615,10 @@ class TestNetworkPlan:
         assert exec_sandbox._network_plan(SandboxBackend.LANDLOCK, True) is plan
         assert exec_sandbox._network_plan(SandboxBackend.LANDLOCK, False) is NetworkPlan.ALLOW
         assert exec_sandbox._network_plan(SandboxBackend.SANDBOX_EXEC, True) is NetworkPlan.PROFILE
+        assert (
+            exec_sandbox._network_plan(SandboxBackend.APPCONTAINER, True)
+            is NetworkPlan.NO_CAPABILITY
+        )
 
     @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux network namespaces")
     def test_network_interface_appearing_after_the_check_runs_nothing(
@@ -652,6 +690,7 @@ class TestNetworkPlan:
         ), outer.stdout + outer.stderr
         assert not marker.exists()
 
+    @_POSIX_ONLY
     def test_network_final_check_refuses_other_interfaces(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -690,7 +729,7 @@ class TestLaunchers:
                 os.path.isabs(found) and not found.startswith(str(tmp_path.resolve()))
             )
 
-    @pytest.mark.skipif(os.geteuid() == 0, reason="root owns every file it creates")
+    @pytest.mark.skipif(_IS_ROOT, reason="root owns every file it creates")
     def test_a_user_owned_or_relative_launcher_is_refused(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -760,13 +799,15 @@ class TestEnvironment:
 
         env = build_environment("/scratch/tmp", source=source, overrides={"X": "1"})
 
+        windows = {"SYSTEMROOT": exec_sandbox._windows_directory()} if _WINDOWS else {}
         assert env == {
             "PATH": "/bin",
             "LANG": "C",
             "TMPDIR": "/scratch/tmp",
             "TMP": "/scratch/tmp",
             "TEMP": "/scratch/tmp",
-            "HOME": "/scratch/tmp",
+            **dict.fromkeys(exec_sandbox._HOME_VARIABLES, "/scratch/tmp"),
+            **windows,
             "X": "1",
         }
 
@@ -949,6 +990,7 @@ class TestLandlockAccessMask:
             assert not granted & (make_char | make_block)
             assert granted == handled & ~(make_char | make_block)
 
+    @_POSIX_ONLY
     def test_helper_refuses_an_abi_that_cannot_deny_truncation(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -965,6 +1007,7 @@ class TestLandlockAccessMask:
     def test_helper_refuses_without_a_command(self) -> None:
         assert _confine_exec.main(["--root", "/tmp", "1", "2"]) == _confine_exec.EXIT_SANDBOX_FAILED
 
+    @_POSIX_ONLY
     def test_helper_refuses_a_root_that_is_not_the_confined_directory(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -973,3 +1016,42 @@ class TestLandlockAccessMask:
         wrong_inode = ["--root", str(tmp_path), str(status.st_dev), str(status.st_ino + 1)]
 
         assert _confine_exec.main([*wrong_inode, "--", "true"]) == _confine_exec.EXIT_SANDBOX_FAILED
+
+
+class TestPersistentReadScope:
+    """Where the Windows backend may place its persistent read grant (pure path rules)."""
+
+    def test_only_what_a_command_needs_below_the_user_and_system_trees(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        base = tmp_path.resolve()
+        home, system, copy = base / "home", base / "system", base / "scratch" / "copy"
+        venv = home / "project" / ".venv"
+        for path in (venv, system / "sub", copy):
+            path.mkdir(parents=True)
+        monkeypatch.setattr(exec_sandbox.Path, "home", staticmethod(lambda: home))
+        monkeypatch.setattr(exec_sandbox, "_system_anchors", lambda: (str(system),))
+        roots = (str(copy),)
+
+        def allowed(path: Path | str) -> bool:
+            return exec_sandbox._persistent_read_allowed(str(path), roots)
+
+        assert allowed(venv)
+        assert not allowed(home)  # the user's whole profile
+        assert not allowed(base)  # above the profile and the scratch directory
+        assert not allowed(base / "scratch")  # contains a writable root
+        assert not allowed(copy) and not allowed(copy / "linked")  # writable already
+        assert not allowed(system) and not allowed(system / "sub")  # system managed
+        assert not allowed(os.path.abspath(os.sep))  # a volume root
+
+
+def test_the_windows_environment_is_folded_once_last_spelling_wins() -> None:
+    """One fold serves every lookup and the environment block (pure; any host)."""
+    from ouroboros.runtime import _confine_windows
+
+    env = {"LOCALAPPDATA": "C:\\temp", "Path": "C:\\bin", "LocalAppData": "D:\\elsewhere"}
+
+    assert _confine_windows.effective_environment(env) == {
+        "LOCALAPPDATA": "D:\\elsewhere",
+        "PATH": "C:\\bin",
+    }
