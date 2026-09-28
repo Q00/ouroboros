@@ -1661,31 +1661,83 @@ class TestLLMHelperLookups:
         ):
             assert get_llm_model_for_role("decomposition") == "env-exec-model"
 
-    def test_get_llm_model_for_role_execute_stage_falls_back_to_evaluate_model(self) -> None:
-        """Without an execution pin, EXECUTE-stage roles keep the evaluate model."""
+    def test_get_llm_model_for_role_execute_stage_uses_backend_default_without_pin(self) -> None:
+        """Without an execution pin, EXECUTE-stage roles use their backend default."""
         config = OuroborosConfig(
-            evaluation=EvaluationConfig(semantic_model="evaluate-model"),
+            evaluation=EvaluationConfig(semantic_model="claude-fable-5"),
+            orchestrator=OrchestratorConfig(
+                runtime_profile=RuntimeProfileConfig(
+                    stages={"execute": "codex", "evaluate": "claude_code"}
+                )
+            ),
         )
 
         with (
             patch.dict(os.environ, {}, clear=True),
             patch("ouroboros.config.loader.load_config", return_value=config),
         ):
-            assert get_llm_model_for_role("decomposition") == "evaluate-model"
-            assert get_llm_model_for_role("atomicity") == "evaluate-model"
+            assert get_llm_model_for_role("decomposition") == "default"
+            assert get_llm_model_for_role("atomicity") == "default"
 
-    def test_get_llm_model_for_role_execute_stage_ignores_default_sentinel(self) -> None:
-        """The UI's ``default``/``current`` sentinel means "let the runtime pick"."""
+        litellm_config = OuroborosConfig(
+            orchestrator=OrchestratorConfig(
+                runtime_profile=RuntimeProfileConfig(stages={"execute": "antigravity"})
+            ),
+            llm=LLMConfig(backend="litellm"),
+            evaluation=EvaluationConfig(semantic_model="openrouter/anthropic/claude-sonnet-4"),
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=litellm_config),
+        ):
+            assert get_llm_backend_for_role("decomposition") == "litellm"
+            assert get_llm_model_for_role("decomposition") == "openrouter/anthropic/claude-sonnet-4"
+
+        for alias in ("openai", "openrouter"):
+            with (
+                patch.dict(os.environ, {"OUROBOROS_LLM_BACKEND": alias}, clear=True),
+                patch("ouroboros.config.loader.load_config", return_value=litellm_config),
+            ):
+                assert get_llm_backend_for_role("decomposition") == alias
+                assert get_llm_model_for_role("decomposition") == (
+                    "openrouter/anthropic/claude-sonnet-4"
+                )
+
+    def test_get_llm_model_for_role_execute_stage_honors_automatic_sentinel(self) -> None:
+        """The UI's ``default``/``current`` sentinel lets the Execute runtime pick."""
         config = OuroborosConfig(
             execution=ExecutionConfig(default_model="default"),
-            evaluation=EvaluationConfig(semantic_model="evaluate-model"),
+            evaluation=EvaluationConfig(semantic_model="claude-fable-5"),
+            orchestrator=OrchestratorConfig(
+                runtime_profile=RuntimeProfileConfig(
+                    stages={"execute": "codex", "evaluate": "claude_code"}
+                )
+            ),
         )
 
         with (
             patch.dict(os.environ, {}, clear=True),
             patch("ouroboros.config.loader.load_config", return_value=config),
         ):
-            assert get_llm_model_for_role("decomposition") == "evaluate-model"
+            assert get_llm_backend_for_role("decomposition") == "codex"
+            assert get_llm_model_for_role("decomposition") == "default"
+
+        with (
+            patch.dict(os.environ, {"OUROBOROS_EXECUTION_MODEL": " current "}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert get_llm_model_for_role("decomposition") == "default"
+
+        assert config.orchestrator.runtime_profile is not None
+        for backend in ("gemini", "gemini_cli", "goose", "goose_cli", "claude_code"):
+            config.orchestrator.runtime_profile.stages["execute"] = backend
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch("ouroboros.config.loader.load_config", return_value=config),
+            ):
+                for role in ("decomposition", "atomicity", "agent_runtime_implementation"):
+                    assert get_llm_backend_for_role(role) == backend
+                    assert get_llm_model_for_role(role) == "default"
 
     def test_get_llm_model_for_role_execute_stage_explicit_model_beats_pin(self) -> None:
         """A caller-supplied explicit_model remains the highest-precedence override."""
