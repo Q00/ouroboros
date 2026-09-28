@@ -91,12 +91,12 @@ def merge_pieces(pieces: Sequence[CriterionPiece]) -> tuple[dict[str, Any], dict
     ``product_uncovered``), so they are never mistaken for the constructor's
     own ``uncovered`` declarations.
 
-    A piece whose check id or file path collides with an earlier piece is
-    dropped (its criterion becomes uncovered, ``constructor_conflict``).
+    A piece whose file path collides with an earlier piece is dropped (its
+    criterion becomes uncovered, ``constructor_conflict``). Check ids cannot
+    collide: ``package_from_reply`` re-mints them over the merged reply.
     """
     merged: dict[str, list[Any]] = {"oracles": [], "checks": [], "files": [], "uncovered": []}
     missing: dict[int, str] = {}
-    check_ids: set[str] = set()
     paths: set[str] = set()
     for piece in sorted(pieces, key=lambda item: item.criterion):
         if piece.status != "ok" or piece.reply is None:
@@ -106,15 +106,10 @@ def merge_pieces(pieces: Sequence[CriterionPiece]) -> tuple[dict[str, Any], dict
                 else f"constructor_failed:{(piece.reason or 'unknown')[:_REASON_CHARS]}"
             )
             continue
-        ids = {
-            str(item.get("check_id") or f"oracle_{piece.criterion}")
-            for item in piece.reply["oracles"]
-        } | {str(item.get("check_id")) for item in piece.reply["checks"]}
         piece_paths = {str(item.get("path")) for item in piece.reply["files"]}
-        if ids & check_ids or piece_paths & paths:
+        if piece_paths & paths:
             missing[piece.criterion] = "constructor_conflict"
             continue
-        check_ids |= ids
         paths |= piece_paths
         for key in merged:
             merged[key].extend(piece.reply.get(key) or ())

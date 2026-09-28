@@ -479,3 +479,119 @@ def test_a_non_discriminating_held_out_exclusion_is_explained_to_the_replacement
     assert HELD_OUT_NOT_DISCRIMINATING not in why
     assert "held-out case" in why and "the base code fails" in why
     assert f"- criterion 1: {why}" in build_replacement_prompt(seed, {1: why})
+
+
+def _package_of(reply: dict[str, Any], seed: Seed, digest: str) -> Any:
+    from ouroboros.boundary.oracle_build import package_from_reply
+
+    return package_from_reply(reply, seed, input_digest=digest * 64, generator="t")
+
+
+def test_a_replacement_oracle_for_a_criterion_with_a_kept_oracle_is_merged() -> None:
+    # Criterion 1 keeps its admitted preservation oracle (oracle_1); its
+    # reproduction oracle (oracle_1_2) was excluded. The replacement's
+    # reproduction oracle is normalized as oracle_1 too. Ids are re-minted
+    # from structure, so the two are oracle_1 and oracle_1_2 in the merged
+    # package, not a replacement_conflict.
+    from ouroboros.boundary.coverage import merge_replacement, replacement_targets
+    from ouroboros.boundary.package import CheckRole
+    from ouroboros.boundary.per_check import NO_ADMITTED_REPRODUCTION_CHECK
+
+    seed = _seed_u_reduction()
+    keys = seed_criterion_keys(seed)
+    preserve_1 = _oracle_u_reduction(1, "p", "preservation", (5, 0, 10), 5)
+    stale_1 = _oracle_u_reduction(1, "r", "reproduction", (5, 0, 10), 5)
+    package = _package_of(
+        {
+            "oracles": [
+                preserve_1,
+                stale_1,
+                GOOD_REPRO_1 | {"criterion": 2},
+                _oracle_u_reduction(3, "o", "preservation", (-5, 0, 10), 0),
+            ]
+        },
+        seed,
+        "1",
+    )
+    assert [check.check_id for check in package.checks] == [
+        "oracle_1",
+        "oracle_1_2",
+        "oracle_2",
+        "oracle_3",
+    ]
+    excluded = {"oracle_1_2": REPRO_PASSES_ON_BASE}
+    targets = replacement_targets(package, excluded)
+    assert targets == {keys[0]: NO_ADMITTED_REPRODUCTION_CHECK}
+    replacement = _package_of({"oracles": [GOOD_REPRO_1]}, seed, "2")
+    assert [check.check_id for check in replacement.checks] == ["oracle_1"]
+
+    merged, still = merge_replacement(package, excluded, replacement, targets, seed)
+    assert still == {}
+    # Kept checks first, then the replacement's, each id minted from that order.
+    assert [(check.check_id, check.role) for check in merged.checks] == [
+        ("oracle_1", CheckRole.PRESERVATION),
+        ("oracle_2", CheckRole.REPRODUCTION),
+        ("oracle_3", CheckRole.PRESERVATION),
+        ("oracle_1_2", CheckRole.REPRODUCTION),
+    ]
+    added = next(spec for spec in merged.oracles if spec.check_id == "oracle_1_2")
+    assert added.criterion_key == keys[0]
+    assert added.cases[0].args == GOOD_REPRO_1["cases"][0]["args"]
+    assert merged.uncovered == ()
+
+
+def test_a_replacement_script_whose_file_path_a_kept_check_uses_is_refused() -> None:
+    # The file-path rule stays: two different scripts cannot share one path.
+    from ouroboros.boundary.coverage import (
+        REPLACEMENT_CONFLICT,
+        merge_replacement,
+        replacement_targets,
+    )
+
+    seed = _seed_u_reduction()
+    keys = seed_criterion_keys(seed)
+    kept, kept_file = _script("shared", 2)
+    package = _package_of(
+        {
+            "oracles": [_oracle_u_reduction(1, "r", "reproduction", (5, 0, 10), 5)],
+            "checks": [kept],
+            "files": [kept_file],
+            "uncovered": [{"criterion": 3}],
+        },
+        seed,
+        "1",
+    )
+    excluded = {"oracle_1": REPRO_PASSES_ON_BASE}
+    targets = replacement_targets(package, excluded)
+    assert set(targets) == {keys[0], keys[2]}
+    clash, _file = _script("shared", 1)
+    clash["failure_signature"] = "OUROBOROS_CHECK_FAILED:other"
+    replacement = _package_of(
+        {"checks": [clash], "files": [{**kept_file, "content": "print(1)\n"}]}, seed, "2"
+    )
+    merged, still = merge_replacement(package, excluded, replacement, targets, seed)
+    assert still[keys[0]] == REPLACEMENT_CONFLICT
+    assert [check.check_id for check in merged.checks] == ["script_2_1"]
+    assert [item.path for item in merged.files] == [kept_file["path"]]
+    assert merged.files[0].content == kept_file["content"]
+
+
+def test_merged_pieces_conflict_only_on_file_paths() -> None:
+    # Check ids in pieces are re-minted over the merged reply, so equal ids
+    # never drop a piece; two pieces writing one file path do.
+    from ouroboros.boundary.incremental import CriterionPiece, merge_pieces
+
+    one, one_file = _script("same", 1)
+    two, two_file = _script("same", 2)
+    three, three_file = _script("other", 3)
+    three["check_id"] = one["check_id"]
+
+    def piece(number: int, check: dict[str, Any], file: dict[str, str]) -> CriterionPiece:
+        reply = {"oracles": [], "checks": [check], "files": [file], "uncovered": []}
+        return CriterionPiece(number, "ok", reply=reply)
+
+    merged, missing = merge_pieces(
+        [piece(1, one, one_file), piece(2, two, two_file), piece(3, three, three_file)]
+    )
+    assert missing == {2: "constructor_conflict"}
+    assert [item["path"] for item in merged["files"]] == [one_file["path"], three_file["path"]]

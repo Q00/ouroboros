@@ -141,8 +141,9 @@ def build_replacement_prompt(seed: Seed, targets: Mapping[int, str]) -> str:
 
     Only the listed criteria get checks; each is told why the earlier package
     has no admitted check for it (reasons only, never case values), and
-    check ids start with ``r<number>_`` so they cannot collide with the
-    admitted checks that are kept.
+    the model's check names start with ``r<number>_`` so the script files and
+    failure signatures they name do not collide with the kept checks' (the
+    product re-mints every check id itself).
     """
     parts = [
         "Repository: the current working directory (read-only copy of the base).",

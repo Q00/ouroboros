@@ -127,37 +127,28 @@ def merge_replacement(
     """The admitted checks of ``package`` plus ``replacement``'s checks for ``targets``.
 
     Returns the merged package and, per target, why it is still uncovered
-    (a target the replacement did not link, or whose check id or file path
-    collides with a kept check: ``replacement_conflict``). Excluded checks
-    are not carried over.
+    (a target the replacement did not link, or whose script's file path
+    collides with a kept check's file: ``replacement_conflict``). Excluded
+    checks are not carried over. Check ids never collide: ``assemble_package``
+    re-mints every id from the merged structure.
     """
     excluded_ids = set(excluded)
     kept_oracles, kept_scripts, kept_files = _parts(
         package, lambda check: check.check_id not in excluded_ids
     )
-    # Only what is carried over can collide: an excluded check's id (the
-    # product's ``oracle_<n>`` of a target criterion) is free again.
-    taken_ids = {spec.check_id for spec, _role in kept_oracles} | {
-        check.check_id for check in kept_scripts
-    }
     taken_paths = {item.path for item in kept_files}
     target_keys = set(targets)
     new_oracles, new_scripts, new_files = _parts(
         replacement, lambda check: bool(_links(check)) and _links(check) <= target_keys
     )
     still: dict[str, str] = {}
-    oracles = list(kept_oracles)
-    for spec, role in new_oracles:
-        if spec.check_id in taken_ids:
-            still[spec.criterion_key] = REPLACEMENT_CONFLICT
-            continue
-        oracles.append((spec, role))
+    oracles = [*kept_oracles, *new_oracles]
     scripts = list(kept_scripts)
     files = list(kept_files)
     by_path = {item.path: item for item in new_files}
     for check in new_scripts:
         paths = set(check.argv[1:])
-        if check.check_id in taken_ids or paths & taken_paths:
+        if paths & taken_paths:
             for key in _links(check):
                 still[key] = REPLACEMENT_CONFLICT
             continue
