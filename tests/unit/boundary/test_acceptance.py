@@ -587,3 +587,43 @@ def test_a_mixed_a_prime_pass_corroborates_a_legacy_acceptance() -> None:
     assert item.declared_binding_pass
     assert decision.accepted and decision.governed_by is Governor.CHECK_PACKAGE
     assert result.to_payload().criteria[0].declared_binding_pass
+
+
+def test_a_tier_a_held_out_pass_decides_even_beside_a_declared_binding_pass() -> None:
+    # Decisive evidence through the product's own binding: a reproduction
+    # oracle passing its held-out case through tier A makes the pass the
+    # package's own, even when a second oracle ran through a declared binding.
+    from ouroboros.boundary.binding import CheckTier
+
+    reply = _oracle_reply("reproduction")
+    second = dict(reply["oracles"][0], check_id="oracle_add_2")
+    reply["oracles"].append(second)
+    package = package_from_reply(reply, _seed(), input_digest="2" * 64, generator="fake")
+    first_id, second_id = (check.check_id for check in package.checks)
+    runs = [
+        _oracle_verification(
+            package.model_copy(update={"checks": (check,)}),
+            cases=(("c1", False, True), ("c2", True, True)),
+        ).checks[0]
+        for check in package.checks
+    ]
+    verification = _oracle_verification(
+        package.model_copy(update={"checks": package.checks[:1]}), cases=()
+    ).model_copy(update={"package_sha256": package.sha256, "checks": tuple(runs)})
+    assignments = _mixed_assignments(package, CheckTier.A)
+    assignments[second_id] = _mixed_assignments(package, CheckTier.A_PRIME)[second_id]
+    item = criterion_verdicts(package, verification, assignments=assignments)[
+        package.criterion_keys[0]
+    ]
+    assert (item.status, item.tier) == (PASS, CheckTier.A_PRIME)
+    assert not item.declared_binding_pass
+    result = reconcile_acceptance(
+        package.criterion_keys,
+        {package.criterion_keys[0]: item},
+        {0: _outcome(0, "failed"), 1: _outcome(1, "blocked"), 2: _outcome(2, "blocked")},
+        existing_run_accepted=False,
+        legacy_decides_unverified=True,
+    )
+    assert result.decisions[0].accepted
+    assert result.decisions[0].governed_by is Governor.CHECK_PACKAGE
+    assert first_id in item.check_ids
