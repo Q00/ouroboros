@@ -669,3 +669,28 @@ async def test_the_product_store_root_resolves_a_symlinked_config_dir(
     (record,) = (state.store_dir / "packages").iterdir()
     assert record.name == f"{state.package.package_id}.json" and not record.is_symlink()
     assert list((real / "boundary" / "exec_linked_home" / "receipts").iterdir())
+
+
+async def test_no_record_is_written_for_a_package_not_bound_to_the_seed(
+    store, repo: Path, tmp_path: Path
+) -> None:
+    # The constructor returns a package built for another Seed: the product
+    # refuses it before anything reaches the store, not only at the freeze.
+    from ouroboros.boundary.package import CheckPackageError
+
+    seed = _seed("add(2, 3) returns 5")
+    other = _seed("sub(5, 3) returns 2")
+    with pytest.raises(CheckPackageError):
+        await prepare_check_package(
+            seed,
+            event_store=store,
+            constructor=FakeConstructor(_ok(_package(other, "repro_sub", BUGFIX_SCRIPT))),
+            execution_id="exec_foreign",
+            base_checkout=repo,
+            worker_workspace=repo,
+            runtime_label="codex",
+            settings=CheckPackageSettings(enabled=True),
+            store_dir=tmp_path / "store",
+        )
+    packages = tmp_path / "store" / "packages"
+    assert not packages.exists() or list(packages.iterdir()) == []

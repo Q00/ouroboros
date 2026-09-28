@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
 
 import pytest
@@ -19,12 +20,16 @@ from ouroboros.boundary.oracle import OracleResult
 from ouroboros.boundary.oracle_build import package_from_reply
 from ouroboros.boundary.package import CheckRole
 from ouroboros.boundary.receipts import (
+    AdmissionResult,
     CandidateVerdict,
     CandidateVerification,
     CheckExecution,
     CheckStatus,
+    PackageVerdict,
 )
 from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
+
+from .journal_fixtures import expected_execution, oracle_result
 
 PASS = PackageCriterionStatus.PASS
 FAIL = PackageCriterionStatus.FAIL
@@ -112,10 +117,50 @@ def _verification(package, *statuses: CheckStatus, mutated: bool = False) -> Can
     )
 
 
+def admission_on_base(
+    package,
+    *,
+    base_passed: Mapping[str, Mapping[str, bool]] | None = None,
+    excluded: Mapping[str, str] | None = None,
+) -> AdmissionResult:
+    """An admission of ``package`` built as data (nothing runs).
+
+    Every check met its role on the base; an oracle's base run failed each
+    case except those ``base_passed`` names for its check.
+    """
+    now = datetime.now(UTC)
+    checks = []
+    for check in package.checks:
+        execution = expected_execution(check)
+        if package.oracle_for(check.check_id) is not None:
+            passed = (base_passed or {}).get(check.check_id, {})
+            execution = execution.model_copy(
+                update={"oracle_result": oracle_result(package, check.check_id, passed)}
+            )
+        checks.append(execution)
+    return AdmissionResult(
+        package_sha256=package.sha256,
+        package_id=None,
+        seed_digest=package.seed_digest,
+        base_tree_digest="4" * 64,
+        base_tree_digest_after="4" * 64,
+        verdict=PackageVerdict.ADMITTED,
+        reasons=(),
+        protected_bytes_mutated=False,
+        timeout_seconds=120,
+        checks=tuple(checks),
+        started_at=now,
+        completed_at=now,
+        excluded_checks=dict(excluded) if excluded else None,
+    )
+
+
 def _statuses(package, verification, **kwargs) -> dict:
     return {
         key: item.status
-        for key, item in criterion_verdicts(package, verification, **kwargs).items()
+        for key, item in criterion_verdicts(
+            package, verification, admission=admission_on_base(package), **kwargs
+        ).items()
     }
 
 
@@ -332,8 +377,9 @@ def _oracle_verification(package, *, cases: tuple[tuple[str, bool, bool], ...]):
     )
 
 
-def _first_verdict(package, verification):
-    return criterion_verdicts(package, verification)[package.criterion_keys[0]]
+def _first_verdict(package, verification, admission=None):
+    admission = admission or admission_on_base(package)
+    return criterion_verdicts(package, verification, admission=admission)[package.criterion_keys[0]]
 
 
 def test_a_reproduction_oracle_passing_a_held_out_case_is_a_verified_pass() -> None:
@@ -343,6 +389,24 @@ def test_a_reproduction_oracle_passing_a_held_out_case_is_a_verified_pass() -> N
     verification = _oracle_verification(package, cases=(("c1", False, True), ("c2", True, True)))
     item = _first_verdict(package, verification)
     assert (item.status, item.reason) == (PASS, "passed")
+
+
+def test_a_held_out_case_the_base_already_passed_never_verifies_a_pass() -> None:
+    # B2 review probe: a candidate that hardcodes the one visible case passes
+    # it, and passes a held-out case the buggy base passes too. Only a
+    # held-out case the base failed at admission shows a fix
+    # (``per_check.base_failing_held_out``); this one shows nothing.
+    package = package_from_reply(
+        _oracle_reply("reproduction"), _seed(), input_digest="2" * 64, generator="fake"
+    )
+    (check,) = package.checks
+    admission = admission_on_base(package, base_passed={check.check_id: {"c2": True}})
+    verification = _oracle_verification(package, cases=(("c1", False, True), ("c2", True, True)))
+    item = _first_verdict(package, verification, admission)
+    assert (item.status, item.reason) == (UNVERIFIED, "no_held_out_case")
+    assert not item.declared_binding_pass
+    # The same run over an admission whose base failed that case is a pass.
+    assert _first_verdict(package, verification).status is PASS
 
 
 def test_passing_only_the_visible_cases_is_unverified() -> None:
@@ -485,7 +549,9 @@ def test_the_verdict_names_the_binding_of_the_check_that_decided_it() -> None:
         "script_1_2": assigned("script_1_2", CheckTier.A_PRIME, "calc.plus"),
     }
     verification = _verification(package, CheckStatus.VIOLATED, CheckStatus.EXPECTED)
-    item = criterion_verdicts(package, verification, assignments=assignments)[key]
+    item = criterion_verdicts(
+        package, verification, admission=admission_on_base(package), assignments=assignments
+    )[key]
     assert item.status is FAIL and item.tier is CheckTier.A
     assert item.binding is not None and item.binding["symbol"] == "calc.add"
     assert item.binding_source == "default"
@@ -539,6 +605,7 @@ def _mixed_decision(oracle_tier, existing: ExistingOutcome):
     verdicts = criterion_verdicts(
         package,
         _mixed_verification(package),
+        admission=admission_on_base(package),
         assignments=_mixed_assignments(package, oracle_tier),
     )
     key = package.criterion_keys[0]
@@ -612,9 +679,9 @@ def test_a_tier_a_held_out_pass_decides_even_beside_a_declared_binding_pass() ->
     ).model_copy(update={"package_sha256": package.sha256, "checks": tuple(runs)})
     assignments = _mixed_assignments(package, CheckTier.A)
     assignments[second_id] = _mixed_assignments(package, CheckTier.A_PRIME)[second_id]
-    item = criterion_verdicts(package, verification, assignments=assignments)[
-        package.criterion_keys[0]
-    ]
+    item = criterion_verdicts(
+        package, verification, admission=admission_on_base(package), assignments=assignments
+    )[package.criterion_keys[0]]
     assert (item.status, item.tier) == (PASS, CheckTier.A_PRIME)
     assert not item.declared_binding_pass
     result = reconcile_acceptance(

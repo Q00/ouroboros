@@ -79,15 +79,18 @@ from ouroboros.boundary.coverage import (
 )
 from ouroboros.boundary.events import ReferenceCheckPayload, RunContract, boundary_version_id
 from ouroboros.boundary.ledger import BoundaryLedger
-from ouroboros.boundary.oracle import OracleResult
+from ouroboros.boundary.oracle import OracleResult, OracleSpec
 from ouroboros.boundary.package import (
     CheckPackage,
+    CheckPackageError,
+    canonical_json_bytes,
     seal_package,
     seed_criterion_keys,
     seed_digest,
+    validate_package_for_seed,
     write_package_record,
 )
-from ouroboros.boundary.per_check import criteria_without_admitted_check, excluded_check_ids
+from ouroboros.boundary.per_check import criteria_without_admitted_check
 from ouroboros.boundary.receipts import (
     AdmissionResult,
     CandidateVerdict,
@@ -269,6 +272,9 @@ class _Sealer:
     async def seal_and_admit(
         self, boundary_id: str, package: CheckPackage, reference_check: ReferenceCheck | None
     ) -> tuple[CheckPackage, AdmissionResult, Path]:
+        # No record is written for a package not bound to the run's Seed
+        # (the ledger checks the same at the freeze, after the write).
+        validate_package_for_seed(package, self.seed)
         # A fresh opaque id per package; the record, the journal and every
         # receipt cite it (I2 orders it before the worker).
         package = seal_package(package)
@@ -507,7 +513,9 @@ async def _replace_uncovered(
     ``None``.
     """
     call = getattr(constructor, "construct_replacements", None)
-    excluded = tuple((admission.excluded_checks or {}).keys())
+    # The bound version's own exclusions, by its own check ids (ids are
+    # re-minted in the merged version, so nothing is carried by id).
+    excluded: dict[str, str] = dict(admission.excluded_checks or {})
     targets = replacement_targets(package, excluded)
     if call is None or not targets:
         return None
@@ -543,8 +551,12 @@ async def _replace_uncovered(
         # The failed replacement stays an unbound version: a version is
         # superseded only by a later one, and the worker binds ``bound``.
         return None
+    assert candidate is not None
+    merged_report = _merged_reference_check(
+        package, excluded, references_kept, candidate, reference_check, targets, merged
+    )
     new_package, new_admission, new_path = await sealer.seal_and_admit(
-        new_id, merged, reference_check
+        new_id, merged, merged_report
     )
     if new_admission.verdict is not PackageVerdict.ADMITTED:
         report.outcome = "not_admitted"
@@ -552,19 +564,65 @@ async def _replace_uncovered(
         return None
     report.outcome = "admitted"
     await sealer.ledger.record_superseded(bound, superseded_by=new_id, reason=REPLACEMENT_REASON)
-    combined = references_kept
-    if reference_check is not None:
-        combined = ReferenceCheck(
-            excluded={
-                **(references_kept.excluded if references_kept else {}),
-                **reference_check.excluded,
-            },
-            uncovered={
-                **(references_kept.uncovered if references_kept else {}),
-                **reference_check.uncovered,
-            },
-        )
-    return new_id, new_package, new_admission, new_path, combined
+    return new_id, new_package, new_admission, new_path, merged_report
+
+
+def _oracle_identity(spec: OracleSpec) -> bytes:
+    """An oracle apart from its check id (the one field a merge re-mints)."""
+    return canonical_json_bytes(spec.model_dump(mode="json", exclude={"check_id"}))
+
+
+def _merged_reference_check(
+    package: CheckPackage,
+    excluded: Mapping[str, str],
+    kept_report: ReferenceCheck | None,
+    candidate: CheckPackage,
+    candidate_report: ReferenceCheck | None,
+    targets: Mapping[str, str],
+    merged: CheckPackage,
+) -> ReferenceCheck | None:
+    """The reference check of the merged version, against the merged package's own ids.
+
+    The kept oracles' exclusions were counted against the bound version's ids
+    and the replacement's against the candidate's; the merge re-mints every
+    id (``coverage.merge_replacement``). Each merged oracle is matched to its
+    source oracle by everything but its id, first come first served over the
+    bound version's admitted oracles and then the candidate's (the order the
+    merge keeps), and carries that source's count. A criterion is reported
+    uncovered only while no check of the merged package links it; the
+    replacement's report counts only for its targets.
+    """
+    if kept_report is None and candidate_report is None:
+        return None
+    sources: dict[bytes, list[int]] = {}
+    for spec in package.oracles:
+        if spec.check_id not in excluded:
+            count = (kept_report.excluded if kept_report else {}).get(spec.check_id, 0)
+            sources.setdefault(_oracle_identity(spec), []).append(count)
+    for spec in candidate.oracles:
+        count = (candidate_report.excluded if candidate_report else {}).get(spec.check_id, 0)
+        sources.setdefault(_oracle_identity(spec), []).append(count)
+    counts: dict[str, int] = {}
+    for spec in merged.oracles:
+        queue = sources.get(_oracle_identity(spec))
+        if not queue:
+            raise CheckPackageError("a merged oracle has no source oracle")
+        count = queue.pop(0)
+        if count:
+            counts[spec.check_id] = count
+    linked = {link.criterion_key for check in merged.checks for link in check.assertions}
+    uncovered = {
+        **(kept_report.uncovered if kept_report else {}),
+        **{
+            key: reason
+            for key, reason in (candidate_report.uncovered if candidate_report else {}).items()
+            if key in targets
+        },
+    }
+    return ReferenceCheck(
+        excluded=counts,
+        uncovered={key: reason for key, reason in uncovered.items() if key not in linked},
+    )
 
 
 # The admitted boundary of each run still in progress in this process, with
@@ -667,7 +725,7 @@ async def verify_check_package(
         contract=state.contract,
         declared=declared_entry_points,
         expected_base_digest=state.admission.base_tree_digest,
-        admitted_tiers=state.admission.check_tiers,
+        admission=state.admission,
         run_options={"interpreter": state.interpreter},
         base_run_cache=base_run_cache,
     )
@@ -692,6 +750,7 @@ async def verify_check_package(
     verdicts = criterion_verdicts(
         package,
         verification,
+        admission=state.admission,
         assignments=assignments,
         candidate_identity_ok=_candidate_unchanged(candidate_digest, verification, candidate),
     )
@@ -710,9 +769,7 @@ async def verify_check_package(
         uncovered=(
             *(item.criterion_key for item in package.uncovered),
             # Criteria that lost every admitted check to per-check admission.
-            *criteria_without_admitted_check(
-                package, excluded_check_ids(state.admission.check_tiers)
-            ),
+            *criteria_without_admitted_check(package, state.admission.excluded_checks or {}),
         ),
         criteria={key: item.status for key, item in verdicts.items()},
         verdicts=verdicts,
@@ -789,7 +846,10 @@ def render_preparation(state: BoundaryRunState) -> list[str]:
     if state.exclusions:
         lines.append(
             "Checks excluded at admission: "
-            + ", ".join(f"{check_id} ({reason})" for _v, check_id, reason in state.exclusions)
+            + ", ".join(
+                f"{version}: {check_id} ({reason})"
+                for version, check_id, reason in state.exclusions
+            )
         )
     if state.replacement_calls:
         lines.append(f"Replacement checks: one constructor call, {state.replacement_outcome}")

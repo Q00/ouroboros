@@ -9,8 +9,8 @@ journal event of the run) and every line it printed is walked as data.
 - ``SNTLHELD`` marks what must never persist: the held-out case (its inputs,
   expected value and id), identifiers the model chose (check ids, case ids,
   assertion ids), its free-text locator and uncovered reason, and the
-  reference implementation. The number ``737373`` is the held-out case's
-  values.
+  reference implementation. The numbers ``737373`` and ``3 * 737373`` are
+  the held-out case's values.
 - ``sntlvis`` marks model text that may persist, and only in the fields of
   ``VISIBLE_ALLOWLIST``; each is safe for the reason given there.
 """
@@ -43,6 +43,10 @@ from .clamp_fixtures import BUGGY, FIXED, _seed
 
 HELD = "SNTLHELD"
 HELD_NUMBER = 737373
+# The held-out input above ``high``: the base (``value > high`` returns
+# ``value``) fails the case, so admission keeps the oracle (a held-out case the
+# base passes verifies nothing and is excluded).
+HELD_VALUE = 3 * HELD_NUMBER
 VISIBLE = "sntlvis"
 
 # Model text that may be persisted, by the field that carries it. The package
@@ -94,11 +98,11 @@ def _reply() -> dict[str, Any]:
                         "case_id": f"{HELD}case{HELD_NUMBER}",
                         "held_out": True,
                         "args": {
-                            "sntlvisvalue": -HELD_NUMBER,
+                            "sntlvisvalue": HELD_VALUE,
                             "sntlvislow": -HELD_NUMBER,
                             "sntlvishigh": HELD_NUMBER,
                         },
-                        "expect": {"kind": "returns", "value": -HELD_NUMBER},
+                        "expect": {"kind": "returns", "value": HELD_NUMBER},
                     },
                 ],
             }
@@ -221,6 +225,7 @@ async def test_every_persisted_byte_is_closed_to_model_text_but_the_allowlist(
                 documents.append(json.loads(text))
             else:  # a base snapshot file: no value of the package at all
                 assert HELD not in text and str(HELD_NUMBER) not in text, path
+                assert str(HELD_VALUE) not in text, path
         printed = "\n".join([*render_preparation(state), *render_verdict(verdict)]) + json.dumps(
             verdict.summary()
         )
@@ -233,7 +238,7 @@ async def test_every_persisted_byte_is_closed_to_model_text_but_the_allowlist(
         if isinstance(leaf, bool):
             continue
         if isinstance(leaf, int | float):
-            assert abs(leaf) != HELD_NUMBER, path
+            assert abs(leaf) not in (HELD_NUMBER, HELD_VALUE), path
             continue
         if not isinstance(leaf, str):
             continue
@@ -242,5 +247,6 @@ async def test_every_persisted_byte_is_closed_to_model_text_but_the_allowlist(
             assert set(path) & VISIBLE_ALLOWLIST, path
             visible_fields |= set(path) & VISIBLE_ALLOWLIST
     assert HELD not in printed and str(HELD_NUMBER) not in printed
+    assert str(HELD_VALUE) not in printed
     # The allowlist is exercised, not vacuous.
     assert visible_fields == VISIBLE_ALLOWLIST

@@ -47,12 +47,31 @@ from .clamp_fixtures import (
     BUGGY,
     FIXED,
     GOOD_PRESERVE_3,
-    GOOD_REPRO_1,
     STALE_REASON,
     WILLING,
     _oracle,
     _seed,
 )
+from .clamp_fixtures import GOOD_REPRO_1 as _GOOD_REPRO_1
+
+
+def _discriminating(oracle: dict[str, Any]) -> dict[str, Any]:
+    """``oracle`` with a held-out case the base fails (above ``high``).
+
+    Only a held-out case the base fails can verify a fix; a reproduction
+    oracle whose every held-out case the base passes is excluded at
+    admission (``held_out_not_discriminating``).
+    """
+    held = {
+        "case_id": "held",
+        "held_out": True,
+        "args": {"value": 7, "low": -2, "high": 4},
+        "expect": {"kind": "returns", "value": 4},
+    }
+    return {**oracle, "cases": [oracle["cases"][0], held]}
+
+
+GOOD_REPRO_1 = _discriminating(_GOOD_REPRO_1)
 
 
 class _Constructor:
@@ -259,7 +278,7 @@ async def test_one_replacement_call_supersedes_the_version_before_dispatch(
         seed,
         repo,
         {"oracles": [GOOD_REPRO_1, BAD_REPRO_2, GOOD_PRESERVE_3]},
-        {"oracles": [_oracle(2, "r2_repro", "reproduction", (20, 0, 10), 10)]},
+        {"oracles": [_discriminating(_oracle(2, "r2_repro", "reproduction", (20, 0, 10), 10))]},
     )
     state = await _prepare(store, repo, tmp_path, constructor, seed)
     assert constructor.replacement_calls == [

@@ -45,8 +45,13 @@ from ouroboros.boundary.binding import (
 )
 from ouroboros.boundary.events import BindingsPayload, RunContract
 from ouroboros.boundary.package import CheckPackage
-from ouroboros.boundary.per_check import EXCLUDED_STATUS_HINT, exclusion_reason_for_role
-from ouroboros.boundary.receipts import CandidateVerdict, CandidateVerification, CheckStatus
+from ouroboros.boundary.per_check import EXCLUDED_STATUS_HINT
+from ouroboros.boundary.receipts import (
+    AdmissionResult,
+    CandidateVerdict,
+    CandidateVerification,
+    CheckStatus,
+)
 from ouroboros.boundary.tree import copy_checkout, tree_digest
 
 BASE_SNAPSHOT_DIR = "base_snapshot"
@@ -180,7 +185,7 @@ async def assign_tiers(
     contract: RunContract,
     declared: Mapping[str, Sequence[Any]] | None = None,
     expected_base_digest: str | None = None,
-    admitted_tiers: Mapping[str, str] | None = None,
+    admission: AdmissionResult | None = None,
     run_options: Mapping[str, Any] | None = None,
     base_run_cache: dict[str, BindingAdmission] | None = None,
 ) -> tuple[dict[str, TierAssignment], dict[str, DeclaredBindingResult]]:
@@ -190,12 +195,15 @@ async def assign_tiers(
     declared for it; the first entry is used. A declared binding is consulted
     only where the default binding does not resolve. Without a usable base
     (``base`` is ``None``) a declared binding cannot be admitted and is
-    indeterminate (``base_unavailable``). A check whose admitted tier is
-    ``C`` (excluded by the per-check rule) is assigned ``C`` and never run.
-    Every declared binding is admitted under the recorded ``contract``.
+    indeterminate (``base_unavailable``). ``admission`` is the package's
+    admission: a check it admitted at tier ``A`` keeps its default binding,
+    and a check it excluded (tier ``C``, ``excluded_checks``) is assigned
+    ``C`` with the recorded exclusion reason and never run. Every declared
+    binding is admitted under the recorded ``contract``.
     """
     declared = declared or {}
-    admitted = dict(admitted_tiers or {})
+    admitted = dict((admission.check_tiers if admission is not None else None) or {})
+    excluded = dict((admission.excluded_checks if admission is not None else None) or {})
     assignments: dict[str, TierAssignment] = {}
     results: dict[str, DeclaredBindingResult] = {}
     for check in package.checks:
@@ -211,7 +219,7 @@ async def assign_tiers(
                 None,
                 None,
                 EXCLUDED_STATUS_HINT,
-                exclusion_reason_for_role(check.role),
+                excluded[check.check_id],
             )
             continue
         if oracle is None:
@@ -358,7 +366,7 @@ def bindings_payload(
     assignments: Mapping[str, TierAssignment],
     results: Mapping[str, DeclaredBindingResult],
     *,
-    phase: Literal["final", "repair"],
+    phase: Literal["final", "repair", "resumed"],
     **attempt: Any,
 ) -> BindingsPayload:
     """Journal payload for ``boundary.binding.recorded`` (bindings are data, no code).

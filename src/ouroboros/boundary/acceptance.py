@@ -10,11 +10,14 @@ status once the worker has stopped:
   binding (tier ``A`` or ``A_prime``) and met its contract, and at least one
   of them is an oracle check with the ``reproduction`` role (admission
   proved it fails on the base) that passed with at least one held-out case
-  (a case the worker never saw) passing. Nothing weaker is a verified pass:
-  a criterion whose passing checks are all preservation checks
-  (``no_reproduction_check``), or whose reproduction oracle ran no held-out
-  case (``no_held_out_case``, which is also every per-attempt gate run, since
-  the gate runs visible cases only), is ``unverified``. Why a held-out case:
+  (a case the worker never saw) passing that its base run failed at
+  admission (``per_check.base_failing_held_out``). Nothing weaker is a
+  verified pass: a criterion whose passing checks are all preservation
+  checks (``no_reproduction_check``), or whose reproduction oracle passed no
+  held-out case the base failed (``no_held_out_case``, which is also every
+  per-attempt gate run, since the gate runs visible cases only), is
+  ``unverified``; a held-out case the base already passed shows nothing the
+  candidate fixed. Why a held-out case:
   an oracle observation is reported by code the candidate controls (it runs
   in the target process and can write the report itself,
   ``boundary/oracle_run.py``), so a pass is evidence of what the candidate
@@ -77,18 +80,26 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from ouroboros.boundary.binding import CheckTier, TierAssignment, tier_summary
-from ouroboros.boundary.events import ReconciliationPayload
+from ouroboros.boundary.events import (
+    LEGACY_RULE_SCHEMA,
+    ReconciliationPayload,
+    artifact_verdict_of,
+    coverage_of,
+)
 from ouroboros.boundary.oracle import failed_heldout_only
 from ouroboros.boundary.package import CheckRole
-from ouroboros.boundary.per_check import criteria_without_admitted_check
-from ouroboros.boundary.receipts import CandidateVerification, CheckExecution, CheckStatus
+from ouroboros.boundary.per_check import base_failing_held_out, criteria_without_admitted_check
+from ouroboros.boundary.receipts import (
+    AdmissionResult,
+    CandidateVerification,
+    CheckExecution,
+    CheckStatus,
+)
 
 if TYPE_CHECKING:
     from ouroboros.boundary.package import CheckPackage
 
 RECONCILIATION_SCHEMA = "ouroboros.acceptance_reconciliation.v2"
-LEGACY_RULE_SCHEMA = "ouroboros.acceptance_reconciliation.v3"
-LOW_COVERAGE_SHARE = 0.5
 _EXISTING_PASS_OUTCOMES = frozenset({"succeeded", "satisfied_externally"})
 
 
@@ -179,14 +190,21 @@ SCRIPT_CHECK_ADVISORY = "script_check_advisory"
 NO_REPRODUCTION_CHECK = "no_reproduction_check"
 """Reason of a criterion no passing reproduction oracle check covers (preservation only)."""
 NO_HELD_OUT_CASE = "no_held_out_case"
-"""Reason of a criterion whose passing reproduction oracle passed no held-out case."""
+"""Reason of a criterion whose passing reproduction oracle passed no held-out case the base failed."""
 A_PRIME_CORROBORATES_ONLY = "a_prime_corroborates_only"
 """A pass through a worker-declared binding cannot overrule a legacy rejection."""
 
 
-def _held_out_passed(execution: CheckExecution) -> bool:
-    """Whether the oracle result shows at least one held-out case that passed."""
-    return execution.oracle_result is not None and execution.oracle_result.held_out_passed
+def _base_failing_held_out_passed(execution: CheckExecution, base_failing: frozenset[str]) -> bool:
+    """A held-out case the base failed at admission passed on the candidate.
+
+    Only such a case verifies a pass: a held-out case the base already
+    passed shows nothing the candidate fixed (``per_check.base_failing_held_out``).
+    """
+    result = execution.oracle_result
+    return result is not None and any(
+        case.held_out and case.passed and case.case_id in base_failing for case in result.cases
+    )
 
 
 def rerunnable_checks(verification: CandidateVerification) -> tuple[str, ...]:
@@ -224,16 +242,20 @@ def criterion_verdicts(
     package: CheckPackage,
     verification: CandidateVerification | None,
     *,
+    admission: AdmissionResult,
     assignments: Mapping[str, TierAssignment] | None = None,
     candidate_identity_ok: bool = True,
 ) -> dict[str, CriterionVerdict]:
     """Every criterion's package verdict, with its tier.
 
-    ``assignments`` maps a check id to its tier assignment; a check without
-    one is tier ``A`` and was expected to run. A check assigned ``U`` is not
+    ``admission`` is the package's admission on the base: the checks it
+    excluded (``excluded_checks``) do not count for their criterion, and a
+    reproduction oracle verifies a pass only through a held-out case its
+    base run failed (``per_check.base_failing_held_out``). ``assignments``
+    maps a check id to its tier assignment; a check without one is tier
+    ``A`` and was expected to run. A check assigned ``U`` is not
     run: ``status_hint`` ``unverified`` makes the criterion unverified and
     ``indeterminate`` (an invalid declared binding) makes it indeterminate.
-    A check assigned ``C`` was excluded at admission and does not count.
     A protected-byte mutation, a precondition failure (no check executed), a
     package digest mismatch, or a candidate tree that changed under
     verification makes every check that should have run indeterminate.
@@ -259,8 +281,9 @@ def criterion_verdicts(
     # check (or a reproduction-type one without an admitted reproduction
     # check) is uncovered.
     roles = {check.check_id: check.role for check in package.checks}
-    excluded = {check_id for check_id, item in assignments.items() if item.tier is CheckTier.C}
-    lost = criteria_without_admitted_check(package, excluded) if excluded else {}
+    excluded: dict[str, str] = dict(admission.excluded_checks or {})
+    lost = criteria_without_admitted_check(package, excluded)
+    base_failing = base_failing_held_out(admission.checks, excluded)
     verdicts: dict[str, CriterionVerdict] = {}
     for key, all_check_ids in linked.items():
         check_ids = [check_id for check_id in all_check_ids if check_id not in excluded]
@@ -340,7 +363,9 @@ def criterion_verdicts(
                     passed += 1
                     if roles.get(check_id) is CheckRole.REPRODUCTION:
                         reproduced += 1
-                        if _held_out_passed(execution):
+                        if _base_failing_held_out_passed(
+                            execution, base_failing.get(check_id, frozenset())
+                        ):
                             held_out_verified += 1
                             held_out_by_default += int(check_tier is CheckTier.A)
             else:
@@ -389,15 +414,12 @@ def criterion_verdicts(
 
 
 def artifact_verdict(statuses: Iterable[PackageCriterionStatus]) -> ArtifactVerdict:
-    """Precedence: fail, then indeterminate, then pass (one verified pass), else unverified."""
-    values = list(statuses)
-    if PackageCriterionStatus.FAIL in values:
-        return ArtifactVerdict.FAIL
-    if PackageCriterionStatus.INDETERMINATE in values:
-        return ArtifactVerdict.INDETERMINATE
-    if PackageCriterionStatus.PASS in values:
-        return ArtifactVerdict.PASS
-    return ArtifactVerdict.UNVERIFIED
+    """Precedence: fail, then indeterminate, then pass (one verified pass), else unverified.
+
+    The journal's rule (``events.artifact_verdict_of``), so a recorded
+    decision's verdict always agrees with its criteria.
+    """
+    return ArtifactVerdict(artifact_verdict_of(status.value for status in statuses))
 
 
 @dataclass(frozen=True, slots=True)
@@ -572,12 +594,11 @@ class AcceptanceReconciliation:
 
 
 def verification_coverage(total: int, not_decided: int, unverified: int) -> VerificationCoverage:
-    """``low`` when half or more of ``total`` were not decided by the package or any is unverified."""
-    if unverified or (total and not_decided / total >= LOW_COVERAGE_SHARE):
-        return VerificationCoverage.LOW
-    if not_decided:
-        return VerificationCoverage.PARTIAL
-    return VerificationCoverage.FULL
+    """``low`` when half or more of ``total`` were not decided by the package or any is unverified.
+
+    The journal's rule (``events.coverage_of``).
+    """
+    return VerificationCoverage(coverage_of(total, not_decided, unverified))
 
 
 def reconcile_acceptance(

@@ -26,6 +26,7 @@ from ouroboros.boundary.per_check import (
 )
 from ouroboros.boundary.receipts import PackageVerdict
 
+from .test_acceptance import admission_on_base
 from .test_per_check import (
     BAD_REPRO_2,
     BUGGY,
@@ -60,13 +61,13 @@ async def test_an_excluded_check_is_tier_c_and_never_runs(repo: Path) -> None:
     assert applied.verdict is PackageVerdict.ADMITTED
     assert applied.excluded_checks == {"oracle_2": REPRO_PASSES_ON_BASE}
     (repo / "mathutils.py").write_text(FIXED)
-    assignments, _ = await assign_tiers(
-        package, base=None, contract=CONTRACT, admitted_tiers=applied.check_tiers
-    )
+    assignments, _ = await assign_tiers(package, base=None, contract=CONTRACT, admission=applied)
     assert assignments["oracle_2"].tier is CheckTier.C
     bound = await verify_with_bindings(package, repo, assignments, contract=CONTRACT)
     assert {check.check_id for check in bound.effective.checks} == {"oracle_1", "oracle_3"}
-    verdicts = criterion_verdicts(package, bound.effective, assignments=assignments)
+    verdicts = criterion_verdicts(
+        package, bound.effective, admission=applied, assignments=assignments
+    )
     # Criterion 3 has only a preservation check: it passes, but a check the
     # base already passed verifies nothing new (no_reproduction_check).
     assert [(v.status, v.reason) for v in verdicts.values()] == [
@@ -95,7 +96,7 @@ def test_an_uncovered_reason_never_routes() -> None:
         input_digest="1" * 64,
         generator="fake",
     )
-    verdicts = criterion_verdicts(package, None)
+    verdicts = criterion_verdicts(package, None, admission=admission_on_base(package))
     assert [v.status for v in verdicts.values()] == [PackageCriterionStatus.UNCOVERED] * 2
     rejected = {i: ExistingOutcome(i, "failed", "failed", "failed") for i in range(2)}
     decided = reconcile_acceptance(
@@ -128,11 +129,11 @@ async def test_a_linked_check_decides_whatever_else_the_reply_says(repo: Path) -
     admission = await admit_check_package(package, repo)
     assert admission.verdict is PackageVerdict.ADMITTED and admission.excluded_checks is None
     (repo / "mathutils.py").write_text(FIXED)
-    assignments, _ = await assign_tiers(
-        package, base=None, contract=CONTRACT, admitted_tiers=admission.check_tiers
-    )
+    assignments, _ = await assign_tiers(package, base=None, contract=CONTRACT, admission=admission)
     bound = await verify_with_bindings(package, repo, assignments, contract=CONTRACT)
-    verdicts = criterion_verdicts(package, bound.effective, assignments=assignments)
+    verdicts = criterion_verdicts(
+        package, bound.effective, admission=admission, assignments=assignments
+    )
     assert [v.status for v in verdicts.values()] == [PackageCriterionStatus.PASS]
 
 

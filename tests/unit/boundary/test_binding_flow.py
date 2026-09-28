@@ -47,6 +47,7 @@ from ouroboros.boundary.run_wiring import (
 from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
 from ouroboros.persistence.event_store import EventStore
 
+from .test_acceptance import admission_on_base
 from .test_oracle import CASES, _package, _repo
 from .test_oracle import _seed as _oracle_seed
 
@@ -103,8 +104,10 @@ def _reply() -> dict[str, Any]:
                     {
                         "case_id": "held",
                         "held_out": True,
-                        "args": {"value": -3, "low": -2, "high": 4},
-                        "expect": {"kind": "returns", "value": -2},
+                        # The base fails it (``value > high``): a held-out case
+                        # the base passes shows no fix and verifies nothing.
+                        "args": {"value": 7, "low": -2, "high": 4},
+                        "expect": {"kind": "returns", "value": 4},
                     },
                 ],
             },
@@ -648,7 +651,9 @@ async def test_a_criterion_takes_its_tier_from_the_checks_that_decided_it(base: 
         ),
     }
     verification = await verify_candidate(package, base, only_checks=["oracle_1"])
-    verdict = criterion_verdicts(package, verification, assignments=assignments)[key]
+    verdict = criterion_verdicts(
+        package, verification, admission=admission_on_base(package), assignments=assignments
+    )[key]
     assert (verdict.status, verdict.tier) == (PackageCriterionStatus.FAIL, CheckTier.A)
 
 
@@ -698,7 +703,11 @@ async def test_a_script_check_pass_under_a_planted_sitecustomize_is_only_advisor
     )
     candidate = _repo(tmp_path / "cand", {"mathutils.py": BUGGY})
     honest = await verify_candidate(package, candidate)
-    assert criterion_verdicts(package, honest)[key].status is PackageCriterionStatus.FAIL
+    admission = admission_on_base(package)
+    assert (
+        criterion_verdicts(package, honest, admission=admission)[key].status
+        is PackageCriterionStatus.FAIL
+    )
 
     venv.create(candidate / ".venv", with_pip=False, symlinks=True)
     (site,) = (candidate / ".venv/lib").glob("python*/site-packages")
@@ -706,7 +715,7 @@ async def test_a_script_check_pass_under_a_planted_sitecustomize_is_only_advisor
     monkeypatch.setenv("PATH", f"{candidate / '.venv/bin'}{os.pathsep}{os.environ.get('PATH', '')}")
     forged = await verify_candidate(package, candidate)
     assert forged.verdict is CandidateVerdict.PASS  # the forged exit code
-    verdict = criterion_verdicts(package, forged)[key]
+    verdict = criterion_verdicts(package, forged, admission=admission)[key]
     assert (verdict.status, verdict.reason) == (
         PackageCriterionStatus.UNVERIFIED,
         SCRIPT_CHECK_ADVISORY,
@@ -759,6 +768,7 @@ async def test_a_verification_that_raises_leaves_no_verified_claim(
         },
         {},
         existing_run_accepted=True,
+        legacy_decides_unverified=True,  # the only rule the journal admits
     )
     with pytest.raises(BoundaryOrderError, match="acceptance must cite a verification"):
         await BoundaryLedger(store).record_acceptance_reconciled(
@@ -780,6 +790,7 @@ async def test_a_verification_that_raises_leaves_no_verified_claim(
         },
         {},
         existing_run_accepted=True,
+        legacy_decides_unverified=True,  # the only rule the journal admits
     )
     await BoundaryLedger(store).record_acceptance_reconciled(
         state.boundary_id,
@@ -790,4 +801,77 @@ async def test_a_verification_that_raises_leaves_no_verified_claim(
     )
     assert (
         verify_boundary_order(await store.replay(BOUNDARY_AGGREGATE_TYPE, state.boundary_id)) == ()
+    )
+
+
+# The review probe's candidate: the base bug is kept, and only the one
+# visible (stated) input is special-cased.
+HARDCODED = (
+    "def clamp(value, low, high):\n"
+    "    if (value, low, high) == (15, 0, 10):\n"
+    "        return 10\n"
+    "    if value > high:\n"
+    "        return value\n"
+    "    return max(low, value)\n"
+)
+
+
+async def test_a_held_out_case_the_base_passes_never_makes_a_hardcoded_candidate_pass(
+    store: EventStore, repo: Path, tmp_path: Path
+) -> None:
+    # B2 review probe, end to end: oracle_1's only held-out case already
+    # passes on the buggy base, so it cannot tell a fix from none. Admission
+    # excludes it, the criterion is left to the legacy verifier, and a
+    # candidate that hardcodes the visible case is never a verified pass.
+    reply = _reply()
+    reply["oracles"][0]["cases"][1] = {
+        "case_id": "held",
+        "held_out": True,
+        "args": {"value": -3, "low": -2, "high": 4},
+        "expect": {"kind": "returns", "value": -2},
+    }
+    seed = _seed()
+    constructor = _Constructor(seed, repo)
+    constructor.outcome = ConstructionOutcome(
+        package_from_reply(reply, seed, input_digest="1" * 64, generator="fake"),
+        None,
+        "1" * 64,
+        "fake",
+    )
+    state = await prepare_check_package(
+        seed,
+        event_store=store,
+        constructor=constructor,
+        execution_id="exec_b2",
+        base_checkout=repo,
+        worker_workspace=repo,
+        runtime_label="test",
+        settings=CheckPackageSettings(True, max_construction_attempts=1),
+        store_dir=tmp_path / "store",
+    )
+    assert state.admission is not None
+    assert state.admission.excluded_checks == {"oracle_1": "held_out_not_discriminating"}
+    _write(repo, {"mathutils.py": HARDCODED})
+    keys = seed_criterion_keys(seed)
+    verdict = await verify_check_package(state, event_store=store, candidate_checkout=repo)
+    item = verdict.verdicts[keys[0]]
+    assert item.status is PackageCriterionStatus.UNCOVERED
+    assert item.reason == "uncovered:held_out_not_discriminating"
+    decision = reconcile_acceptance(
+        keys,
+        verdict.verdicts,
+        {
+            0: ExistingOutcome(0, "failed", "failed", "failed"),
+            1: ExistingOutcome(1, "blocked", "blocked", "blocked"),
+            2: ExistingOutcome(2, "blocked", "blocked", "blocked"),
+        },
+        existing_run_accepted=False,
+        legacy_decides_unverified=True,
+    )
+    first = decision.decisions[0]
+    assert not first.accepted and first.legacy_decided
+    await BoundaryLedger(store).record_acceptance_reconciled(
+        state.boundary_id,
+        package_id=state.package.package_id,
+        reconciliation=decision.to_payload(),
     )
