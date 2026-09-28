@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -123,3 +125,44 @@ def test_config_accepts_yaml_boolean_spelling() -> None:
     assert BoundaryConfig.model_validate({"check_package": "off"}).check_package == "off"
     # Unset means "use the default (on)", which differs from an explicit on or off.
     assert OuroborosConfig().boundary.check_package is None
+
+
+def test_an_absent_config_file_keeps_the_default_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No ``~/.ouroboros/config.yaml`` is a supported fresh setup, not an unreadable one.
+
+    Before the fix the loader's missing-file error was read as unreadable: off.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("OUROBOROS_CHECK_PACKAGE", raising=False)
+    (tmp_path / ".ouroboros").mkdir()
+    assert resolve_check_package_settings(None).enabled is True
+    (tmp_path / ".ouroboros").rmdir()
+    assert resolve_check_package_settings(None).enabled is True
+
+
+@pytest.mark.parametrize("kind", ["unparsable", "dangling_link", "unreadable"])
+def test_a_present_config_file_that_cannot_be_read_turns_the_default_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("OUROBOROS_CHECK_PACKAGE", raising=False)
+    config_dir = tmp_path / ".ouroboros"
+    config_dir.mkdir()
+    config = config_dir / "config.yaml"
+    if kind == "unparsable":
+        config.write_text("boundary: [unclosed\n")
+    elif kind == "dangling_link":
+        config.symlink_to(config_dir / "missing.yaml")
+    else:
+        if os.geteuid() == 0:
+            pytest.skip("root reads any file")
+        config.write_text("boundary:\n  check_package: off\n")
+        config.chmod(0)
+    try:
+        assert resolve_check_package_settings(None).enabled is False
+        assert resolve_check_package_settings(True).enabled is True
+    finally:
+        if config.exists():
+            config.chmod(0o600)

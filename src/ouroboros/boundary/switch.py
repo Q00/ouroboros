@@ -13,7 +13,8 @@ setting turns it off (or on). Precedence, first match wins:
 
 An unreadable ``config.yaml`` may hold an explicit ``off`` this process cannot
 see, so without a flag or environment setting it never yields the default:
-the switch is then ``off``. The switch depends on nothing else: not on
+the switch is then ``off``. A ``config.yaml`` that does not exist holds no
+setting, so the default ``on`` applies. The switch depends on nothing else: not on
 telemetry, not on the anonymous ID, not on any notice.
 """
 
@@ -75,9 +76,22 @@ def resolve_switch(
 
 
 def _load_boundary_config() -> Any:
-    from ouroboros.config.loader import load_config
+    """``boundary`` from ``config.yaml``; its defaults (switch unset) when there is no file.
 
-    return load_config().boundary
+    Only a file that does not exist is absent: no file can hold an explicit
+    ``off``, so the default applies. Anything else that stops the file being
+    read (permissions, a dangling link, bad YAML, invalid values) raises, and
+    the switch is then ``off``.
+    """
+    from ouroboros.config.loader import load_config
+    from ouroboros.config.models import BoundaryConfig, get_config_dir
+
+    config_path = get_config_dir() / "config.yaml"
+    try:
+        config_path.lstat()
+    except FileNotFoundError:
+        return BoundaryConfig()
+    return load_config(config_path).boundary
 
 
 def resolve_check_package_settings(cli_value: bool | None = None) -> CheckPackageSettings:

@@ -499,7 +499,7 @@ boundary:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `check_package` | `"on"` \| `"off"` \| unset | unset (on) | `off` turns the check package off for every run; unset or `on` keeps it on. `--check-package/--no-check-package` and `OUROBOROS_CHECK_PACKAGE` take precedence, in that order. A bare YAML `on`/`off` is accepted. If `config.yaml` cannot be read, the check package is off for runs that set neither the flag nor the variable, since the unreadable file may hold an `off`. The setting does not depend on telemetry. |
+| `check_package` | `"on"` \| `"off"` \| unset | unset (on) | `off` turns the check package off for every run; unset or `on` keeps it on. `--check-package/--no-check-package` and `OUROBOROS_CHECK_PACKAGE` take precedence, in that order. A bare YAML `on`/`off` is accepted. If `config.yaml` cannot be read, the check package is off for runs that set neither the flag nor the variable, since the unreadable file may hold an `off`; with no `config.yaml` at all the default (on) applies. The setting does not depend on telemetry. |
 | `constructor_timeout_seconds` | `int` (30..3600) | `600` | Wall-clock budget of one constructor call. |
 | `check_timeout_seconds` | `int` (5..1800) | `120` | Per-check timeout during admission and verification. |
 | `max_construction_attempts` | `int` (1..5) | `2` | Package versions tried before the worker starts; a version that is not admitted is superseded by the next. The one replacement call for criteria left without an admitted check adds a version outside this budget. |
