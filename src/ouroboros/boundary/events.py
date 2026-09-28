@@ -40,7 +40,14 @@ from pydantic import (
     model_validator,
 )
 
-from ouroboros.boundary.binding import Binding, BindingSource, CallKind, CheckTier, tier_summary
+from ouroboros.boundary.binding import (
+    BINDING_GRAMMAR,
+    Binding,
+    BindingSource,
+    CallKind,
+    CheckTier,
+    tier_summary,
+)
 from ouroboros.boundary.package import (
     PACKAGE_ID_BYTES,
     CheckPackage,
@@ -697,9 +704,26 @@ class ManifestRecord(_Payload):
 
     @model_validator(mode="after")
     def _oracles_together(self) -> ManifestRecord:
+        """What a package with oracles carries follows from having them (``CheckPackage``).
+
+        Oracles and the binding grammar are listed together, or neither; a
+        package with oracles is schema v2 with the product grammar and one
+        oracle harness and one oracle data file, one without them schema v1
+        with neither file.
+        """
         fields = self.model_fields_set
         if ("oracles" in fields) != ("binding_grammar" in fields) or self.oracles == ():
             raise ValueError("a manifest lists oracles and their grammar together, or neither")
+        oracles = bool(self.oracles)
+        kinds = [item.kind for item in self.files]
+        if (
+            self.schema_version
+            != ("ouroboros.check_package.v2" if oracles else "ouroboros.check_package.v1")
+            or (oracles and self.binding_grammar != BINDING_GRAMMAR)
+            or kinds.count("oracle_harness") != int(oracles)
+            or kinds.count("oracle_data") != int(oracles)
+        ):
+            raise ValueError("a manifest's schema and files disagree with its oracles")
         return self
 
 

@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 
+from ouroboros.boundary.binding import CheckTier
 from ouroboros.boundary.events import (
     ACCEPTANCE_RECONCILED,
     ACCEPTANCE_RESUMED,
@@ -66,7 +67,7 @@ from ouroboros.boundary.package import (
     seal_package,
     write_package_record,
 )
-from ouroboros.boundary.receipts import PackageVerdict
+from ouroboros.boundary.receipts import CheckStatus, PackageVerdict
 from ouroboros.events.base import BaseEvent
 
 from .clamp_fixtures import _oracle
@@ -75,6 +76,7 @@ from .journal_fixtures import (
     admission_receipt,
     criterion,
     decision_data,
+    expected_execution,
     final_bindings,
     verification_receipt,
 )
@@ -141,8 +143,22 @@ class _Records:
                 BOUNDARY, package_id=str(package_id), payload=_bindings("resumed", self.package)
             )
         if kind == CANDIDATE_VERIFIED:
+            # Every check timed out: a run, and a re-run of it, the product can write.
+            timed_out = tuple(
+                expected_execution(check).model_copy(
+                    update={
+                        "status": CheckStatus.INDETERMINATE,
+                        "reason": "timeout",
+                        "timed_out": True,
+                        "return_code": None,
+                        "signature_seen": False,
+                        "tier": CheckTier.S,
+                    }
+                )
+                for check in self.package.checks
+            )
             return candidate_verified_event(
-                BOUNDARY, verification_receipt(self.package, self.checkout)
+                BOUNDARY, verification_receipt(self.package, self.checkout, timed_out)
             )
         if kind == ACCEPTANCE_RECONCILED:
             return acceptance_reconciled_event(

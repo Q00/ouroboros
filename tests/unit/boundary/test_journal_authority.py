@@ -47,17 +47,20 @@ from ouroboros.boundary.ledger import (
     version_state,
 )
 from ouroboros.boundary.package import CheckPackage, seal_package
-from ouroboros.boundary.receipts import CheckStatus
+from ouroboros.boundary.receipts import CandidateVerdict, CheckStatus, PackageVerdict
 from ouroboros.events.base import BaseEvent
 from ouroboros.persistence.event_store import EventStore
 
 from .conftest import REPRO_SCRIPT, build_package
 from .journal_fixtures import (
+    PIN,
     admission_receipt,
     candidate_execution,
     expected_execution,
     oracle_result,
     seed_for,
+    settled_admission,
+    unresolved_admission,
     verification_receipt,
 )
 from .test_package_identity import held_out_package
@@ -311,7 +314,12 @@ async def _script_verified(
     await ledger.record_bindings(
         B, package_id=package.package_id, payload=_script_bindings(package)
     )
-    verification = verification_receipt(package, checkout).model_copy(update={"checks": checks})
+    given = {check.check_id: check for check in checks}
+    ran = tuple(
+        given.get(check.check_id) or candidate_execution(check, met=True)
+        for check in package.checks
+    )
+    verification = verification_receipt(package, checkout, ran)
     await ledger.record_candidate_verification(B, verification)
     return ledger
 
@@ -362,7 +370,10 @@ def _oracle_run(package: CheckPackage, passed: dict[str, bool]) -> Any:
             "return_code": 0 if every else 1,
             "signature_seen": not every,
             "tier": CheckTier.A,
-            "oracle_result": oracle_result(package, check.check_id, passed),
+            # The product hands every bound oracle its binding: the harness says declared.
+            "oracle_result": oracle_result(package, check.check_id, passed).model_copy(
+                update={"binding_source": "declared"}
+            ),
         }
     )
 
@@ -407,7 +418,7 @@ async def _oracle_verified(
     held = bool(held_out_passed)
     passed = candidate if candidate is not None else {"c1": True, "c2": held, "c3": held}
     run = _oracle_run(package, passed)
-    verification = verification_receipt(package, checkout).model_copy(update={"checks": (run,)})
+    verification = verification_receipt(package, checkout, (run,))
     await ledger.record_candidate_verification(B, verification)
     return ledger, package
 
@@ -518,10 +529,12 @@ async def test_a_rerun_of_a_check_that_met_its_role_is_refused(
         payload=BindingsPayload.model_validate({"phase": "final", "checks": admitted}),
     )
     expected = [candidate_execution(check, met=True) for check in package.checks]
-    receipt = verification_receipt(package, base_checkout)
-    await ledger.record_candidate_verification(B, receipt.model_copy(update={"checks": expected}))
+    receipt = verification_receipt(package, base_checkout, tuple(expected))
+    await ledger.record_candidate_verification(B, receipt)
     # A re-run of a check that already met its role.
-    rerun = receipt.model_copy(update={"checks": expected[:1]})
+    rerun = verification_receipt(
+        package, base_checkout, tuple(expected[:1]), selection=(expected[0].check_id,)
+    )
     with pytest.raises(BoundaryOrderError):
         await ledger.record_candidate_verification(B, rerun)
 
@@ -641,9 +654,7 @@ async def test_an_a_prime_binding_without_its_valid_declaration_is_refused(
 ) -> None:
     package = seal_package(held_out_package())
     (key,) = package.criterion_keys
-    admission = admission_receipt(package, base_checkout).model_copy(
-        update={"check_tiers": {"oracle_1": CheckTier.U}}
-    )
+    admission = unresolved_admission(package, base_checkout)
     ledger = BoundaryLedger(store)
     await ledger.record_package_frozen(B, package, seed=seed_for(package))
     await ledger.record_admission(B, admission)
@@ -658,7 +669,12 @@ async def test_an_a_prime_binding_without_its_valid_declaration_is_refused(
         "base_run": None,
     }
     a_prime = _binding(
-        "oracle_1", key, "A_prime", binding_source="declared", binding=binding, reason="r"
+        "oracle_1",
+        key,
+        "A_prime",
+        binding_source="declared",
+        binding=binding,
+        reason="declared_binding_resolves",
     )
     for forged in (
         a_prime,  # no declaration recorded
@@ -827,9 +843,7 @@ async def test_a_resumed_pass_needs_the_resumes_own_recorded_verification(
     again = BindingsPayload.model_validate({**data, "phase": "resumed"})
     await ledger.record_bindings(B, package_id=package.package_id, payload=again)
     run = _oracle_run(package, _PASSING)
-    verification = verification_receipt(package, base_checkout).model_copy(
-        update={"checks": (run,)}
-    )
+    verification = verification_receipt(package, base_checkout, (run,))
     await ledger.record_candidate_verification(B, verification)
     await ledger.record_acceptance_resumed(B, package_id=package.package_id, payload=resumed)
     assert verify_boundary_order(await ledger.events(B)) == ()
@@ -950,14 +964,9 @@ def test_the_base_failing_rule_reads_the_receipt_and_its_journal_form_alike(
 
 def _run_on(package: CheckPackage, checkout: Path, run: Any, before: str, after: str) -> Any:
     """A verification receipt as the product writes it: its mutation flag from its evidence."""
-    receipt = verification_receipt(package, checkout)
-    return receipt.model_copy(
-        update={
-            "checks": (run,),
-            "artifact_tree_digest": before,
-            "artifact_tree_digest_after": after,
-            "protected_bytes_mutated": before != after or bool(run.mutated_paths),
-        }
+    selection = (run.check_id,)
+    return verification_receipt(
+        package, checkout, (run,), before=before, after=after, selection=selection
     )
 
 
@@ -1085,7 +1094,8 @@ async def test_passing_cases_on_an_unresolved_target_are_refused(store, base_che
     assert run.oracle_result is not None
     for forged in (
         run.oracle_result.model_copy(update={"resolve": "import_error"}),
-        run.oracle_result.model_copy(update={"binding_source": "declared"}),
+        # The run was handed its binding, yet the harness says it used the default.
+        run.oracle_result.model_copy(update={"binding_source": "default"}),
     ):
         receipt = _run_on(
             package, base_checkout, run.model_copy(update={"oracle_result": forged}), X, X
@@ -1170,8 +1180,11 @@ async def test_a_script_check_reporting_an_oracle_result_is_refused(
     foreign = oracle_result(
         seal_package(held_out_package()), "oracle_1", {"c1": True, "c2": True, "c3": True}
     )
-    script = expected_execution(package.checks[0]).model_copy(update={"oracle_result": foreign})
-    receipt = verification_receipt(package, base_checkout).model_copy(update={"checks": (script,)})
+    script = candidate_execution(package.checks[0], met=True).model_copy(
+        update={"oracle_result": foreign}
+    )
+    other = candidate_execution(package.checks[1], met=True)
+    receipt = verification_receipt(package, base_checkout, (script, other))
     with pytest.raises(BoundaryOrderError, match="script check"):
         await ledger.record_candidate_verification(B, receipt)
 
@@ -1286,12 +1299,15 @@ async def test_a_script_status_other_than_its_exit_code_shows_is_refused(
             "reason": "reproduction_still_failing" if met else "passed",
         }
     )
-    receipt = verification_receipt(package, base_checkout)
+    other = candidate_execution(package.checks[1], met=True)
+    forged = verification_receipt(package, base_checkout, (run, other)).model_copy(
+        update={"checks": (flipped, other)}
+    )
     with pytest.raises(BoundaryOrderError, match="recorded run"):
-        await ledger.record_candidate_verification(
-            B, receipt.model_copy(update={"checks": (flipped,)})
-        )
-    await ledger.record_candidate_verification(B, receipt.model_copy(update={"checks": (run,)}))
+        await ledger.record_candidate_verification(B, forged)
+    await ledger.record_candidate_verification(
+        B, verification_receipt(package, base_checkout, (run, other))
+    )
 
 
 # --------------------------------------------------------------------------
@@ -1341,3 +1357,204 @@ async def test_a_package_is_frozen_only_for_the_seed_it_was_built_for(store, pac
         await ledger.record_package_frozen(B, package)  # type: ignore[call-arg]
     assert await ledger.events(B) == []
     await ledger.record_package_frozen(B, package, seed=seed)
+
+
+# --------------------------------------------------------------------------
+# Every field that follows from other recorded fields is checked against them.
+
+
+async def test_an_admitted_receipt_relabelled_rejected_is_refused(
+    store, package, base_checkout
+) -> None:
+    # The round 2 (#2476) probe: two expected checks, an unchanged base, no
+    # reasons, and only the verdict changed to rejected.
+    ledger = BoundaryLedger(store)
+    await ledger.record_package_frozen(B, package, seed=seed_for(package))
+    admitted = admission_receipt(package, base_checkout)
+    relabelled = admitted.model_copy(update={"verdict": PackageVerdict.REJECTED})
+    with pytest.raises(BoundaryOrderError, match="verdict"):
+        await ledger.record_admission(B, relabelled)
+    assert [e.type for e in await ledger.events(B)] == ["boundary.check_package.frozen"]
+    await store.append(admission_completed_event(B, relabelled))
+    assert any("verdict" in problem for problem in verify_boundary_order(await ledger.events(B)))
+
+
+def _admission_variants(package: CheckPackage, checkout: Path) -> dict[str, Any]:
+    admitted = admission_receipt(package, checkout)
+    rejected = admission_receipt(package, checkout, PackageVerdict.REJECTED)
+    return {
+        "rejected_relabelled_admitted": rejected.model_copy(
+            update={
+                "verdict": PackageVerdict.ADMITTED,
+                "interpreter_sha256": PIN,
+                "interpreter_realpath_sha256": PIN,
+            }
+        ),
+        "rejected_relabelled_indeterminate": rejected.model_copy(
+            update={"verdict": PackageVerdict.INDETERMINATE}
+        ),
+        "reason_dropped": rejected.model_copy(update={"reasons": rejected.reasons[1:]}),
+        "reason_added": admitted.model_copy(update={"reasons": ("timeout:script_1_1",)}),
+        "reasons_reordered": rejected.model_copy(update={"reasons": rejected.reasons[::-1]}),
+        "precondition_with_checks": admitted.model_copy(
+            update={"reasons": ("package_path_collision:x",)}
+        ),
+        "tier_restated": admitted.model_copy(
+            update={"check_tiers": dict.fromkeys(admitted.check_tiers or {}, CheckTier.U)}
+        ),
+        "exclusion_invented": admitted.model_copy(
+            update={"excluded_checks": {"script_1_1": "repro_passes_on_base"}}
+        ),
+        "ends_before_it_starts": admitted.model_copy(
+            update={"completed_at": admitted.started_at - timedelta(seconds=1)}
+        ),
+    }
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "rejected_relabelled_admitted",
+        "rejected_relabelled_indeterminate",
+        "reason_dropped",
+        "reason_added",
+        "reasons_reordered",
+        "precondition_with_checks",
+        "tier_restated",
+        "exclusion_invented",
+        "ends_before_it_starts",
+    ],
+)
+async def test_an_admission_receipt_its_checks_do_not_give_is_refused(
+    store, package, base_checkout, variant: str
+) -> None:
+    ledger = BoundaryLedger(store)
+    await ledger.record_package_frozen(B, package, seed=seed_for(package))
+    forged = _admission_variants(package, base_checkout)[variant]
+    with pytest.raises((BoundaryOrderError, ValueError)):
+        await ledger.record_admission(B, forged)
+    assert [e.type for e in await ledger.events(B)] == ["boundary.check_package.frozen"]
+
+
+async def test_a_package_whose_every_check_is_excluded_stays_rejected(
+    store, package, base_checkout
+) -> None:
+    from ouroboros.boundary.per_check import ALL_CHECKS_EXCLUDED
+
+    admitted = admission_receipt(package, base_checkout)
+    passed_on_base = admitted.checks[0].model_copy(
+        update={
+            "status": CheckStatus.VIOLATED,
+            "reason": "reproduction_passed_on_base",
+            "return_code": 0,
+            "signature_seen": False,
+        }
+    )
+    failed_on_base = admitted.checks[1].model_copy(
+        update={"status": CheckStatus.VIOLATED, "reason": "preservation_failed", "return_code": 1}
+    )
+    genuine = settled_admission(
+        package, admitted.model_copy(update={"checks": (passed_on_base, failed_on_base)})
+    )
+    assert genuine.verdict is PackageVerdict.REJECTED
+    assert genuine.reasons[-1] == ALL_CHECKS_EXCLUDED
+    ledger = BoundaryLedger(store)
+    await ledger.record_package_frozen(B, package, seed=seed_for(package))
+    with pytest.raises(BoundaryOrderError):
+        await ledger.record_admission(
+            B, genuine.model_copy(update={"reasons": genuine.reasons[:-1]})
+        )
+    await ledger.record_admission(B, genuine)
+
+
+@pytest.mark.parametrize(
+    "edit",
+    ["verdict_pass_over_a_failure", "verdict_fail_over_passes", "reason_dropped"],
+)
+async def test_a_verification_receipt_its_checks_do_not_give_is_refused(
+    store, package, base_checkout, edit: str
+) -> None:
+    ledger = await _started(store, package, base_checkout)
+    await ledger.record_bindings(
+        B, package_id=package.package_id, payload=_script_bindings(package)
+    )
+    failing = verification_receipt(
+        package,
+        base_checkout,
+        (
+            candidate_execution(package.checks[0], met=False),
+            candidate_execution(package.checks[1], met=True),
+        ),
+    )
+    passing = verification_receipt(
+        package,
+        base_checkout,
+        tuple(candidate_execution(check, met=True) for check in package.checks),
+    )
+    forged = {
+        "verdict_pass_over_a_failure": failing.model_copy(
+            update={"verdict": CandidateVerdict.PASS}
+        ),
+        "verdict_fail_over_passes": passing.model_copy(update={"verdict": CandidateVerdict.FAIL}),
+        "reason_dropped": failing.model_copy(update={"reasons": ()}),
+    }[edit]
+    with pytest.raises(BoundaryOrderError):
+        await ledger.record_candidate_verification(B, forged)
+    await ledger.record_candidate_verification(B, failing)
+
+
+async def test_a_verification_selects_every_runnable_check_with_its_binding(
+    store, base_checkout
+) -> None:
+    ledger, package = await _oracle_verified(store, base_checkout, held_out_passed=None)
+    run = _oracle_run(package, _PASSING)
+    genuine = verification_receipt(package, base_checkout, (run,))
+    for forged in (
+        genuine.model_copy(update={"bindings": None}),  # the binding handed is not recorded
+        genuine.model_copy(update={"check_tiers": None}),  # no selection recorded
+    ):
+        with pytest.raises(BoundaryOrderError):
+            await ledger.record_candidate_verification(B, forged)
+    await ledger.record_candidate_verification(B, genuine)
+
+
+async def test_bindings_state_the_reason_and_attempt_their_assignment_gives(
+    store, package, base_checkout
+) -> None:
+    ledger = await _started(store, package, base_checkout)
+    good = _script_bindings(package).model_dump()["checks"]
+    repair = [c for c in good if c["check_id"] == package.checks[0].check_id]
+    for forged in (
+        {"phase": "final", "checks": [{**good[0], "reason": "because"}, good[1]]},
+        {"phase": "final", "checks": good, "root_ac_index": 0, "retry_attempt": 0},
+        {"phase": "repair", "checks": repair},  # no attempt named
+        {"phase": "repair", "checks": good, "root_ac_index": 0, "retry_attempt": 0},
+    ):
+        with pytest.raises(BoundaryOrderError):
+            await ledger.record_bindings(
+                B, package_id=package.package_id, payload=BindingsPayload.model_validate(forged)
+            )
+    await ledger.record_bindings(
+        B,
+        package_id=package.package_id,
+        payload=BindingsPayload.model_validate(
+            {"phase": "repair", "checks": repair, "root_ac_index": 0, "retry_attempt": 0}
+        ),
+    )
+
+
+def test_a_manifest_whose_schema_or_files_disagree_with_its_oracles_is_refused() -> None:
+    from pydantic import ValidationError
+
+    from ouroboros.boundary.events import ManifestRecord
+
+    summary = seal_package(held_out_package()).manifest_summary()
+    ManifestRecord.model_validate(summary)
+    without_data = [item for item in summary["files"] if item["kind"] != "oracle_data"]
+    for forged in (
+        {**summary, "schema_version": "ouroboros.check_package.v1"},
+        {**summary, "binding_grammar": "another.grammar"},
+        {**summary, "files": without_data},
+    ):
+        with pytest.raises(ValidationError):
+            ManifestRecord.model_validate(forged)

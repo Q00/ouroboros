@@ -17,7 +17,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ouroboros.boundary.binding import Binding, CheckTier
 from ouroboros.boundary.oracle import OracleResult, journal_safe_oracle_result, redact_held_out
@@ -254,6 +254,12 @@ class AdmissionJournal(_CitesPackage):
     check_tiers: dict[str, CheckTier] | None = None
     excluded_checks: dict[str, ExclusionReason] | None = None
 
+    @model_validator(mode="after")
+    def _ordered(self) -> AdmissionJournal:
+        if self.completed_at < self.started_at:
+            raise ValueError("a run completes after it starts")
+        return self
+
     def check_ids(self) -> tuple[str, ...]:
         """Every check id the record names."""
         return (
@@ -279,6 +285,12 @@ class VerificationJournal(_CitesPackage):
     interpreter_source: str | None = None
     check_tiers: dict[str, CheckTier] | None = None
     bindings: dict[str, Binding] | None = None
+
+    @model_validator(mode="after")
+    def _ordered(self) -> VerificationJournal:
+        if self.completed_at < self.started_at:
+            raise ValueError("a run completes after it starts")
+        return self
 
     def check_ids(self) -> tuple[str, ...]:
         """Every check id the record names."""

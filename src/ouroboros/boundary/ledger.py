@@ -129,6 +129,7 @@ from ouroboros.boundary.package import (
     validate_package_for_seed,
 )
 from ouroboros.boundary.per_check import (
+    ALL_CHECKS_EXCLUDED,
     EXCLUDED_STATUS_HINT,
     EXCLUSION_REASONS,
     HELD_OUT_NOT_DISCRIMINATING,
@@ -201,6 +202,8 @@ class FrozenManifest:
     """Checks that run an oracle (every other check is a model-written script)."""
     oracle_cases: Mapping[str, tuple[int, int]] = field(default_factory=dict)
     """Per oracle check, its case count and held-out case count."""
+    named_targets: frozenset[str] = frozenset()
+    """Oracle checks whose criterion names their target (``target_named_in_criterion``)."""
 
 
 def _strings(value: object, what: str) -> tuple[str, ...]:
@@ -280,6 +283,7 @@ def frozen_manifest(data: Mapping[str, Any]) -> FrozenManifest:
     held: set[str] = set()
     oracle_ids: set[str] = set()
     oracle_cases: dict[str, tuple[int, int]] = {}
+    named: set[str] = set()
     for spec in oracles:
         check = by_id.get(spec.get("check_id")) if isinstance(spec, Mapping) else None
         count = spec.get("held_out_count") if isinstance(spec, Mapping) else None
@@ -295,13 +299,17 @@ def frozen_manifest(data: Mapping[str, Any]) -> FrozenManifest:
         oracle_ids.add(check.check_id)
         cases = spec.get("case_count")
         oracle_cases[check.check_id] = (cases if type(cases) is int else 0, count)
+        if spec.get("target_named_in_criterion") is True:
+            named.add(check.check_id)
         if count:
             held.add(check.check_id)
     if not _minted(raw_checks, oracles, keys):
         raise BoundaryOrderError(
             "the frozen manifest names a check by an id the product never mints"
         )
-    return FrozenManifest(keys, tuple(checks), frozenset(held), frozenset(oracle_ids), oracle_cases)
+    return FrozenManifest(
+        keys, tuple(checks), frozenset(held), frozenset(oracle_ids), oracle_cases, frozenset(named)
+    )
 
 
 def _minted(
@@ -622,6 +630,7 @@ def _bindings(state: VersionState, _event: BaseEvent, record: BindingsRecord) ->
         raise BoundaryOrderError("bindings must cite the boundary's frozen package")
     for item in record.checks:
         _require_assignable(state, item)
+    _require_attempt(state, record)
     if record.phase != "resumed" and state.phase is not Phase.STARTED:
         raise BoundaryOrderError("the run's bindings are recorded before its verification")
     if record.phase == "repair":
@@ -718,8 +727,15 @@ def _require_assignable(state: VersionState, item: CheckBindingRecord) -> None:
     bound = item.tier in (CheckTier.A, CheckTier.A_PRIME)
     declared = item.declared
     usable = declared is not None and declared.valid and declared.binding is not None
+    # The reason ``assign_tier`` gives each assignment.
+    reason = {
+        CheckTier.A: "default_binding_resolves",
+        CheckTier.S: "script_check",
+        CheckTier.C: state.excluded.get(item.check_id),
+    }.get(item.tier, declared.reason if declared is not None else "no_binding")
     if (
-        item.tier not in allowed
+        item.reason != reason
+        or item.tier not in allowed
         or item.status_hint not in hints
         or (item.status_hint == "run") != (item.tier in _RUNNABLE_TIERS)
         or item.binding_source not in sources
@@ -736,8 +752,46 @@ def _require_assignable(state: VersionState, item: CheckBindingRecord) -> None:
         raise BoundaryOrderError("a binding gives a check a tier the product cannot assign")
 
 
+def _require_attempt(state: VersionState, record: BindingsRecord) -> None:
+    """A repair record names its attempt and binds that criterion's admitted checks; no other does.
+
+    The per-attempt gate (``authority``) records the bindings of one root
+    criterion's admitted (not excluded) checks with its index and retry
+    attempt; the final and resumed records carry neither.
+    """
+    manifest = state.manifest
+    assert manifest is not None
+    attempt = (record.root_ac_index, record.retry_attempt, record.status)
+    if record.phase != "repair":
+        if attempt != (None, None, None):
+            raise BoundaryOrderError("only a repair record names an attempt")
+        return
+    index = record.root_ac_index
+    if index is None or not 0 <= index < len(manifest.criterion_keys):
+        raise BoundaryOrderError("a repair record names no root criterion")
+    if record.retry_attempt is None or record.retry_attempt < 0:
+        raise BoundaryOrderError("a repair record names no retry attempt")
+    key = manifest.criterion_keys[index]
+    admitted = {
+        check.check_id
+        for check in manifest.checks
+        if check.check_id not in state.excluded
+        and any(link.criterion_key == key for link in check.assertions)
+    }
+    if {item.check_id for item in record.checks} != admitted:
+        raise BoundaryOrderError("a repair record binds exactly its criterion's admitted checks")
+
+
 def _require_bound_run(state: VersionState, record: VerificationRecord) -> None:
-    """A verification runs only runnable bound checks, at their bound tiers and bindings."""
+    """A verification runs exactly the checks it selected, at their bound tiers and bindings.
+
+    ``binding_flow.verify_with_bindings``: the run selects every runnable
+    bound check (the re-run, the ones it re-runs) and records that selection
+    as ``check_tiers`` with each check's bound tier, and ``bindings`` with the
+    binding of each selected check that has one; it runs every selected check
+    unless a precondition stopped it (then none). A script check runs
+    through no binding; an oracle check through its bound one.
+    """
     runnable = {key for key, item in state.bound.items() if item.tier in _RUNNABLE_TIERS}
     assert state.manifest is not None
     roles = {check.check_id: check.role for check in state.manifest.checks}
@@ -755,6 +809,23 @@ def _require_bound_run(state: VersionState, record: VerificationRecord) -> None:
         )
     ):
         raise BoundaryOrderError("a verification runs a check other than the bound runnable ones")
+    selected = set(record.check_tiers or {})
+    handed = {
+        key: state.bound[key].binding
+        for key in sorted(selected)
+        if state.bound[key].binding is not None
+    }
+    if (
+        (not state.verifications and selected != runnable)
+        or not selected
+        or (ran and set(ran) != selected)
+        or dict(record.bindings or {}) != handed
+        or any(
+            check.binding is not None and check.check_id not in state.manifest.oracle_checks
+            for check in record.checks
+        )
+    ):
+        raise BoundaryOrderError("a verification's selection is not the one its bindings give")
     _require_observed_results(
         state,
         record,
@@ -766,7 +837,7 @@ def _require_bound_run(state: VersionState, record: VerificationRecord) -> None:
         return
     first = state.verifications[0]
     rerunnable = {c.check_id for c in first.checks if c.status is CheckStatus.INDETERMINATE}
-    if len(state.verifications) > 1 or not set(ran) <= rerunnable:
+    if len(state.verifications) > 1 or not selected <= rerunnable:
         raise BoundaryOrderError("a verification is re-run once, only for indeterminate checks")
 
 
@@ -923,6 +994,99 @@ def _require_observed_results(
             or check.signature_seen != (code == 1)
         ):
             raise BoundaryOrderError("an oracle result is not one the oracle harness can write")
+    _require_derived_receipt(state, record, tree=tree, on_base=on_base)
+
+
+def _base_tier(manifest: FrozenManifest, check: JournalCheckExecution) -> CheckTier:
+    """The tier admission gives a check from its base run (``admission.base_run_tiers``).
+
+    A script check is ``S``; an oracle check ``A`` when its target resolved on
+    the base, or was missing there while its criterion names it
+    (``OracleSpec.base_run_tier``), else ``U``.
+    """
+    if check.check_id not in manifest.oracle_checks:
+        return CheckTier.S
+    resolve = check.oracle_result.resolve if check.oracle_result is not None else None
+    named = check.check_id in manifest.named_targets
+    return CheckTier.A if resolve == "ok" or (resolve == "missing" and named) else CheckTier.U
+
+
+def _require_derived_receipt(
+    state: VersionState,
+    record: AdmissionRecord | VerificationRecord,
+    *,
+    tree: tuple[str, str],
+    on_base: bool,
+) -> None:
+    """The receipt's verdict, reasons and tiers are the ones the product derives from its checks.
+
+    ``admission.admit_check_package`` and ``verify_candidate`` alike: the
+    reasons are the run's preconditions (a run has some exactly when it ran
+    no check), then its mutation reasons (a changed tree, each check that
+    changed a protected byte), then each violated check and each other
+    undecided check as ``<reason>:<check id>``; the verdict is undecided on a
+    precondition or a mutation, else rejected (fail) on a violated check,
+    else undecided on an undecided one, else admitted (pass). On the base,
+    ``per_check.per_check_admission`` then admits a rejected package whose
+    every unmet check was violated for an exclusion reason, excluding those
+    checks (tier ``C``, ``excluded_checks``), or, when that would exclude
+    every check, keeps it rejected and adds ``all_checks_excluded``. Each
+    check's tier is its base tier (``_base_tier``) and ``check_tiers`` maps
+    every check to it, ``C`` for an excluded one.
+    """
+    manifest = state.manifest
+    assert manifest is not None
+    checks = record.checks
+    mutation = ["source_checkout_mutated"] if tree[0] != tree[1] else []
+    mutation += [f"protected_bytes_mutated:{c.check_id}" for c in checks if c.mutated_paths]
+    violated = [c for c in checks if c.status is CheckStatus.VIOLATED]
+    undecided = [c for c in checks if c.status is CheckStatus.INDETERMINATE]
+    tail = [
+        *mutation,
+        *(f"{c.reason}:{c.check_id}" for c in violated),
+        *(f"{c.reason}:{c.check_id}" for c in undecided if c.reason != "protected_bytes_mutated"),
+    ]
+    reasons = list(record.reasons)
+    stated_all = on_base and bool(checks) and reasons[-1:] == [ALL_CHECKS_EXCLUDED]
+    body = reasons[:-1] if stated_all else reasons
+    split = len(body) - len(tail)
+    if split < 0 or body[split:] != tail or bool(body[:split]) != (not checks):
+        raise BoundaryOrderError("a receipt's reasons are not the ones its checks give")
+    good, bad = ("admitted", "rejected") if on_base else ("pass", "fail")
+    if body[:split] or mutation:
+        verdict = "indeterminate"
+    elif violated:
+        verdict = bad
+    elif undecided:
+        verdict = "indeterminate"
+    else:
+        verdict = good
+    excluded: dict[str, str] = {}
+    derived_all = False
+    if on_base and verdict == bad:
+        unmet = [c for c in checks if c.status is not CheckStatus.EXPECTED]
+        mapped = {c.check_id: EXCLUSION_REASONS.get(c.reason) for c in unmet}
+        if all(c.status is CheckStatus.VIOLATED for c in unmet) and None not in mapped.values():
+            if len(unmet) == len(checks):
+                derived_all = True
+            else:
+                verdict = good
+                excluded = {key: value for key, value in mapped.items() if value is not None}
+    if stated_all != derived_all:
+        raise BoundaryOrderError("a receipt's reasons are not the ones its checks give")
+    if record.verdict != verdict:
+        raise BoundaryOrderError("a receipt's verdict is not the one its checks give")
+    if not on_base:
+        return
+    assert isinstance(record, AdmissionRecord)
+    base = {check.check_id: _base_tier(manifest, check) for check in checks}
+    tiers = {key: CheckTier.C if key in excluded else tier for key, tier in base.items()}
+    if (
+        any(check.tier is not base[check.check_id] for check in checks)
+        or dict(record.check_tiers or {}) != tiers
+        or dict(record.excluded_checks or {}) != excluded
+    ):
+        raise BoundaryOrderError("a receipt's tiers are not the ones its checks give")
 
 
 def _effective(state: VersionState) -> tuple[dict[str, JournalCheckExecution], bool]:

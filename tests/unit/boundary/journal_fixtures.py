@@ -85,9 +85,10 @@ def _base_execution(package: CheckPackage, check: CheckSpec) -> CheckExecution:
     A reproduction oracle reproduced the bug: its base run failed every case,
     held-out cases included.
     """
+    oracle = package.oracle_for(check.check_id)
     execution = expected_execution(check)
-    if package.oracle_for(check.check_id) is None:
-        return execution
+    if oracle is None:
+        return execution.model_copy(update={"tier": CheckTier.S})
     return execution.model_copy(
         update={"tier": CheckTier.A, "oracle_result": oracle_result(package, check.check_id, {})}
     )
@@ -109,8 +110,88 @@ def candidate_execution(check: CheckSpec, *, met: bool) -> CheckExecution:
             else ("reproduction_still_failing" if reproduction else "preservation_failed"),
             "return_code": 0 if met else 1,
             "signature_seen": not met and reproduction,
+            "tier": CheckTier.S,
         }
     )
+
+
+# What admission and verification write over their checks (``admission.py``):
+# the mutation flag, the reasons and the verdict, and on the base the
+# per-check exclusions and tiers. Receipts built as data go through these so
+# they are the ones the product writes.
+_PRECONDITION = "package_path_collision:probe/test_add.py"
+
+
+def _summary(
+    checks: tuple[CheckExecution, ...], before: str, after: str, preconditions: tuple[str, ...]
+) -> tuple[bool, list[str], str]:
+    mutation = ["source_checkout_mutated"] if before != after else []
+    mutation += [f"protected_bytes_mutated:{c.check_id}" for c in checks if c.mutated_paths]
+    violated = [c for c in checks if c.status is CheckStatus.VIOLATED]
+    undecided = [c for c in checks if c.status is CheckStatus.INDETERMINATE]
+    reasons = [
+        *preconditions,
+        *mutation,
+        *(f"{c.reason}:{c.check_id}" for c in violated),
+        *(f"{c.reason}:{c.check_id}" for c in undecided if c.reason != "protected_bytes_mutated"),
+    ]
+    if preconditions or mutation:
+        verdict = "indeterminate"
+    elif violated:
+        verdict = "violated"
+    elif undecided:
+        verdict = "indeterminate"
+    else:
+        verdict = "met"
+    return bool(mutation), reasons, verdict
+
+
+def settled_verification(receipt: CandidateVerification) -> CandidateVerification:
+    """``receipt`` with the flag, reasons and verdict ``verify_candidate`` gives its checks."""
+    preconditions = () if receipt.checks else (_PRECONDITION,)
+    mutated, reasons, verdict = _summary(
+        receipt.checks,
+        receipt.artifact_tree_digest,
+        receipt.artifact_tree_digest_after,
+        preconditions,
+    )
+    names = {"violated": CandidateVerdict.FAIL, "met": CandidateVerdict.PASS}
+    return receipt.model_copy(
+        update={
+            "protected_bytes_mutated": mutated,
+            "reasons": tuple(reasons),
+            "verdict": names.get(verdict, CandidateVerdict.INDETERMINATE),
+        }
+    )
+
+
+def settled_admission(package: CheckPackage, receipt: AdmissionResult) -> AdmissionResult:
+    """``receipt`` as ``admit_check_package`` and ``per_check_admission`` write its checks."""
+    from ouroboros.boundary.per_check import per_check_admission
+
+    preconditions = () if receipt.checks else (_PRECONDITION,)
+    mutated, reasons, verdict = _summary(
+        receipt.checks, receipt.base_tree_digest, receipt.base_tree_digest_after, preconditions
+    )
+    tiers: dict[str, CheckTier] = {}
+    for check in receipt.checks:
+        oracle = package.oracle_for(check.check_id)
+        resolve = check.oracle_result.resolve if check.oracle_result is not None else None
+        tiers[check.check_id] = CheckTier.S if oracle is None else oracle.base_run_tier(resolve)
+    names = {"violated": PackageVerdict.REJECTED, "met": PackageVerdict.ADMITTED}
+    settled = receipt.model_copy(
+        update={
+            "protected_bytes_mutated": mutated,
+            "reasons": tuple(reasons),
+            "verdict": names.get(verdict, PackageVerdict.INDETERMINATE),
+            "checks": tuple(
+                c.model_copy(update={"tier": tiers[c.check_id]}) for c in receipt.checks
+            ),
+            "check_tiers": tiers or None,
+            "excluded_checks": None,
+        }
+    )
+    return per_check_admission(settled)
 
 
 def admission_receipt(
@@ -118,13 +199,33 @@ def admission_receipt(
 ) -> AdmissionResult:
     """An admission receipt for ``package`` on ``checkout``, built as data (nothing runs).
 
-    An admitted receipt is one admission can write: one expected result and a
-    tier per check, and the interpreter pin.
+    Admitted: every check met its role on the base, with the interpreter pin.
+    Rejected: the first check's reproduction passed on the base while the
+    second timed out, so the per-check rule cannot admit the rest.
     """
     now = datetime.now(UTC)
     digest = tree_digest(checkout)
     admitted = verdict is PackageVerdict.ADMITTED
-    return AdmissionResult(
+    checks = [_base_execution(package, check) for check in package.checks]
+    if not admitted:
+        checks[0] = checks[0].model_copy(
+            update={
+                "status": CheckStatus.VIOLATED,
+                "reason": "reproduction_passed_on_base",
+                "return_code": 0,
+                "signature_seen": False,
+            }
+        )
+        checks[1] = checks[1].model_copy(
+            update={
+                "status": CheckStatus.INDETERMINATE,
+                "reason": "timeout",
+                "timed_out": True,
+                "return_code": None,
+                "signature_seen": False,
+            }
+        )
+    receipt = AdmissionResult(
         package_sha256=package.sha256,
         package_id=package.package_id if package.sealed else None,
         seed_digest=package.seed_digest,
@@ -134,42 +235,58 @@ def admission_receipt(
         reasons=(),
         protected_bytes_mutated=False,
         timeout_seconds=120,
-        checks=tuple(_base_execution(package, check) for check in package.checks)
-        if admitted
-        else (),
+        checks=tuple(checks),
         started_at=now,
         completed_at=now,
         interpreter_sha256=PIN if admitted else None,
         interpreter_realpath_sha256=PIN if admitted else None,
-        check_tiers={
-            c.check_id: CheckTier.A if package.oracle_for(c.check_id) else CheckTier.S
-            for c in package.checks
-        }
-        if admitted
-        else None,
     )
+    return settled_admission(package, receipt)
 
 
 def verification_receipt(
-    package: CheckPackage, checkout: Path, verdict: CandidateVerdict = CandidateVerdict.FAIL
+    package: CheckPackage,
+    checkout: Path,
+    checks: tuple[CheckExecution, ...] = (),
+    *,
+    before: str | None = None,
+    after: str | None = None,
+    selection: tuple[str, ...] | None = None,
 ) -> CandidateVerification:
-    """A candidate verification of ``package`` on ``checkout``, built as data (nothing runs)."""
+    """A candidate verification of ``package`` on ``checkout``, built as data (nothing runs).
+
+    The run selects every check of ``final_bindings(package)`` (``selection``
+    narrows it for a re-run), handing each oracle its default binding; with
+    no ``checks`` a precondition stopped it.
+    """
     now = datetime.now(UTC)
     digest = tree_digest(checkout)
-    return CandidateVerification(
+    selected = selection or tuple(check.check_id for check in package.checks)
+    tiers = {
+        key: CheckTier.A if package.oracle_for(key) is not None else CheckTier.S for key in selected
+    }
+    bindings = {}
+    for key in selected:
+        spec = package.oracle_for(key)
+        if spec is not None:
+            bindings[key] = spec.default_binding
+    receipt = CandidateVerification(
         package_sha256=package.sha256,
         package_id=package.package_id if package.sealed else None,
         seed_digest=package.seed_digest,
-        artifact_tree_digest=digest,
-        artifact_tree_digest_after=digest,
-        verdict=verdict,
+        artifact_tree_digest=before or digest,
+        artifact_tree_digest_after=after or before or digest,
+        verdict=CandidateVerdict.INDETERMINATE,
         reasons=(),
         protected_bytes_mutated=False,
         timeout_seconds=120,
-        checks=(),
+        checks=checks,
         started_at=now,
         completed_at=now,
+        check_tiers=tiers,
+        bindings=bindings or None,
     )
+    return settled_verification(receipt)
 
 
 def final_bindings(package: CheckPackage, phase: str = "final") -> BindingsPayload:
@@ -271,3 +388,17 @@ def seed_for(package: CheckPackage) -> Seed:
         if seed_digest(seed) == package.seed_digest:
             return seed
     raise AssertionError("no test Seed for this package")
+
+
+def unresolved_admission(package: CheckPackage, checkout: Path) -> AdmissionResult:
+    """Admission where the oracle's default target was missing on the base: its tier is ``U``."""
+    admission = admission_receipt(package, checkout)
+    checks = tuple(
+        check.model_copy(
+            update={"oracle_result": check.oracle_result.model_copy(update={"resolve": "missing"})}
+        )
+        if check.oracle_result is not None
+        else check
+        for check in admission.checks
+    )
+    return settled_admission(package, admission.model_copy(update={"checks": checks}))

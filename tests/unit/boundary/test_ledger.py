@@ -9,7 +9,7 @@ from typing import Any
 from pydantic import ValidationError
 import pytest
 
-from ouroboros.boundary.binding import CheckTier
+from ouroboros.boundary.binding import BINDING_GRAMMAR, CheckTier
 from ouroboros.boundary.events import (
     ACTOR_STARTED,
     ADMISSION_COMPLETED,
@@ -57,6 +57,7 @@ from .journal_fixtures import (
     decision_data,
     final_bindings,
     seed_for,
+    unresolved_admission,
     verification_receipt,
 )
 from .test_package_identity import held_out_package
@@ -180,7 +181,8 @@ async def test_candidate_verification_cites_the_frozen_package(
     event = await ledger.record_candidate_verification("task-1/V1", verification)
 
     assert event.type == CANDIDATE_VERIFIED
-    assert event.data["verdict"] == "fail"
+    # A precondition stopped the run (no check ran): undecided.
+    assert event.data["verdict"] == "indeterminate"
     assert verify_boundary_order(await ledger.events("task-1/V1")) == ()
 
 
@@ -540,8 +542,8 @@ async def test_bindings_with_no_runnable_check_may_be_followed_by_an_unrun_decis
     # tier U) and no declared binding: nothing runs, the criterion is unverified.
     package = seal_package(held_out_package())
     (key,) = package.criterion_keys
-    admission = admission_receipt(package, base_checkout)
-    admission = admission.model_copy(update={"check_tiers": {"oracle_1": CheckTier.U}})
+    admission = unresolved_admission(package, base_checkout)
+    assert admission.check_tiers == {"oracle_1": CheckTier.U}
     ledger = await _started(store, package, admission)
     unbound = {
         "criterion_key": key,
@@ -576,9 +578,8 @@ async def test_a_verified_decision_follows_the_candidate_verification(
         "task-1/V1", package_id=package.package_id, payload=final_bindings(package)
     )
     repro = candidate_execution(package.checks[0], met=False)
-    verification = verification_receipt(package, base_checkout).model_copy(
-        update={"checks": (repro,)}
-    )
+    keep = candidate_execution(package.checks[1], met=True)
+    verification = verification_receipt(package, base_checkout, (repro, keep))
     await ledger.record_candidate_verification("task-1/V1", verification)
     # The repro check failed; the preservation check did not run (undecided);
     # the third criterion has no check.
@@ -597,22 +598,28 @@ async def test_a_verified_decision_follows_the_candidate_verification(
 def _manifest_event_data(
     checks: list[dict[str, Any]], oracles: list[dict[str, Any]], *, keys=("k1", "k2")
 ) -> dict[str, Any]:
+    # A package with oracles is schema v2 with the product grammar and the
+    # oracle harness and data files; one without is schema v1 with neither.
+    with_oracles = {
+        "binding_grammar": BINDING_GRAMMAR,
+        "oracles": oracles,
+    }
+    files = [{"kind": "oracle_harness"}, {"kind": "oracle_data", "held_out_redacted": True}]
     return {
         "package_id": "1" * 64,
         "seed_digest": "2" * 64,
         "record_sha256": "a" * 64,
         "manifest": {
-            "schema_version": "ouroboros.check_package.v2",
+            "schema_version": f"ouroboros.check_package.v{2 if oracles else 1}",
             "package_id": "1" * 64,
             "seed_digest": "2" * 64,
             "criterion_keys": list(keys),
             "checks": checks,
-            "files": [],
+            "files": [*(files if oracles else []), {"kind": "generated"}],
             "base_file_count": 0,
             "scratch_path_count": 0,
             "uncovered": [],
-            "binding_grammar": "g",
-            "oracles": oracles,
+            **(with_oracles if oracles else {}),
         },
     }
 
@@ -665,7 +672,12 @@ def _admission_data(frozen: dict[str, Any], excluded: tuple[str, ...] = ()) -> d
         "package_id": frozen["package_id"],
         "seed_digest": frozen["seed_digest"],
         "verdict": "admitted",
-        "reasons": [],
+        # Each excluded check's violation, in check order (``admit_check_package``).
+        "reasons": [
+            f"{_BASE_REASON[role, True]}:{check_id}"
+            for check_id, role in roles.items()
+            if check_id in excluded
+        ],
         "timeout_seconds": 120,
         "started_at": "2026-09-28T00:00:00+00:00",
         "completed_at": "2026-09-28T00:00:01+00:00",
@@ -685,6 +697,7 @@ def _admission_data(frozen: dict[str, Any], excluded: tuple[str, ...] = ()) -> d
                 "role": role,
                 "status": "violated" if check_id in excluded else "expected",
                 "reason": _BASE_REASON[role, check_id in excluded],
+                "tier": "A" if check_id in oracles else "S",
                 "cwd": ".",
                 "return_code": 0 if _BASE_PASSED[role, check_id in excluded] else 1,
                 "timed_out": False,
@@ -893,8 +906,6 @@ def test_manifest_ids_are_the_dense_sequence_the_package_mints() -> None:
         ("script_1_1", ("k1",)), ("script_1_2", ("k1", "k2")), ("script_3_1", ("k3",))
     )
     for data in (genuine, _scripts(("script_2_1", ("k1", "k2")), ("script_3_1", ("k3",)))):
-        data["manifest"].pop("binding_grammar")
-        data["manifest"].pop("oracles")
         frozen_manifest(data)
     for forged in (
         _scripts(("script_1_2", ("k1",)), ("script_3_1", ("k2", "k3"))),  # a gap
