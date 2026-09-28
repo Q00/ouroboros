@@ -83,6 +83,23 @@ async def test_the_claude_constructor_call_disables_session_persistence() -> Non
     assert options[1]["extra_args"] == {"no-session-persistence": None}
 
 
+@pytest.mark.parametrize("persist_sessions", [False, True])
+def test_the_claude_cli_worker_constructor_call_disables_session_persistence(
+    tmp_path: Path, persist_sessions: bool
+) -> None:
+    # The ``[mcp]`` profile runs Claude through ``--runtime claude-cli``
+    # (backend ``claude_mcp``); its constructor call must not be refused, and it
+    # must keep no session even when worker sessions are persisted.
+    from ouroboros.orchestrator.claude_worker_runtime import build_claude_worker_runtime
+
+    runtime = build_claude_worker_runtime(
+        cli_path="claude", cwd=tmp_path, persist_sessions=persist_sessions
+    )
+    assert disable_session_persistence(runtime) is None
+    command = runtime._transport._base_command(cwd=str(tmp_path))
+    assert "--no-session-persistence" in command
+
+
 def test_a_runtime_without_a_no_persistence_mode_is_refused(tmp_path: Path) -> None:
     copilot = object.__new__(CopilotCliRuntime)  # a Codex-family CLI without --ephemeral
     assert disable_session_persistence(copilot) == f"{NOT_EPHEMERAL_PREFIX}:copilot"

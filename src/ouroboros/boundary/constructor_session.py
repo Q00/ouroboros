@@ -12,7 +12,12 @@ constructor call the runtime is switched to its no-persistence mode:
   under ``CODEX_HOME``, including its sqlite files, holds the call);
 - Claude Code (backend ``claude``, Agent SDK): ``--no-session-persistence``
   (checked against Claude Code 2.1.283 in the SDK's stream-json mode: no
-  transcript is written).
+  transcript is written);
+- Claude Code CLI worker (backend ``claude_mcp``, ``claude -p``, the runtime
+  of the ``[mcp]`` profile's ``--runtime claude-cli``): the same flag, which
+  its transport passes whenever it does not persist sessions (checked against
+  Claude Code 2.1.284 in ``-p --output-format json`` mode: no transcript is
+  written). The constructor turns its opt-in session persistence off.
 
 The same switch keeps the reply out of the logs: the Claude adapter logs
 message and result text by length and SHA-256 only (``_log_message_text``).
@@ -47,6 +52,14 @@ def disable_session_persistence(runtime: Any) -> str | None:
     if backend == "claude" and hasattr(runtime, "_session_cli_args"):
         runtime._session_cli_args = CLAUDE_NO_SESSION_PERSISTENCE
         runtime._log_message_text = False
+        return None
+    transport = getattr(runtime, "_transport", None)
+    if getattr(transport, "backend_name", None) == "claude_mcp" and hasattr(
+        transport, "_persist_sessions"
+    ):
+        # The CLI worker logs no reply text; without persistence its every
+        # ``claude -p`` call carries ``--no-session-persistence``.
+        transport._persist_sessions = False
         return None
     # A plugin runtime (for example LeaderDrivenWorkerRuntime) has no class
     # backend; name the backend it was configured with, not its class.

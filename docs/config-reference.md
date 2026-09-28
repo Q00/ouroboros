@@ -524,7 +524,8 @@ off where that matters. A project `.env` cannot set
 
 Constructor runtimes: the constructor's model call must keep no session on
 disk (its reply holds the held-out cases), so it runs only on runtimes with a
-no-persistence mode: Claude Code (`--no-session-persistence`) and Codex CLI
+no-persistence mode: Claude Code (`--no-session-persistence`, through the Agent
+SDK or the `claude -p` worker of `--runtime claude-cli`) and Codex CLI
 (`codex exec --ephemeral`). With any other runtime the run has no check
 package (`constructor_session_not_ephemeral:<backend>`, before any model call)
 and the existing verifier decides every criterion, deterministically.
