@@ -17,6 +17,7 @@ time to the event about to be appended and at replay time by
    for a role violation on the base);
 3. ``record_actor_started`` refuses to start a worker until every boundary it
    binds is sealed (and, with a package, admitted) and not superseded, and
+   every later version of its run was abandoned in its favor, and
    starts at most one worker per version; a
    version of a run binds only that run's worker; with a workspace it
    refuses one that contains a generated check file (scanned with the live
@@ -49,12 +50,17 @@ the run's records replayed through the same reducer, reduced to off, no
 package, a bound admitted package (coverage, held-out checks, run contract,
 interpreter pin), or undecidable for anything the product could not have
 written, including a version history other than superseded predecessors
-followed by the one bound version, last.
+followed by the one bound version, last but for replacement versions recorded
+abandoned in its favor before its worker started.
 
 Regeneration policy. The seal rule above is per boundary id and never
 changes. The product run path gives each attempt its own boundary version id
 and calls ``record_superseded`` on the old version once the new one is
-sealed; the old package stays in the journal, marked superseded. The ledger
+sealed; the old package stays in the journal, marked superseded. A
+replacement version that is not admitted is closed instead
+(``record_replacement_abandoned``), naming the version the worker stays
+bound to; a worker starts only on the last version of its run that is not
+abandoned. The ledger
 assumes one writer per boundary.
 """
 
@@ -82,7 +88,9 @@ from ouroboros.boundary.events import (
     CONSTRUCTION_FAILED,
     PACKAGE_FROZEN,
     REFERENCE_CHECKED,
+    REPLACEMENT_ABANDONED,
     SUPERSEDED,
+    AbandonedRecord,
     ActorStartedRecord,
     AdmissionRecord,
     BindingsPayload,
@@ -115,6 +123,7 @@ from ouroboros.boundary.events import (
     package_frozen_event,
     parse_boundary_version,
     reference_checked_event,
+    replacement_abandoned_event,
     superseded_event,
     validate_record,
     validate_run_record,
@@ -467,6 +476,8 @@ class Phase(StrEnum):
     """A resumed run recorded its own bindings; its verification and decision follow."""
     SUPERSEDED = "superseded"
     """A later version of the run replaced this one; nothing more is recorded on it."""
+    ABANDONED = "abandoned"
+    """A replacement version not admitted; the worker starts on the earlier version it names."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -623,6 +634,16 @@ def _actor_started(
 def _superseded(state: VersionState, event: BaseEvent, record: SupersededRecord) -> VersionState:
     _require_successor(event.aggregate_id, record.superseded_by)
     return replace(state, phase=Phase.SUPERSEDED)
+
+
+def _abandoned(state: VersionState, event: BaseEvent, record: AbandonedRecord) -> VersionState:
+    old = parse_boundary_version(record.bound)
+    new = parse_boundary_version(event.aggregate_id)
+    if old is None or new is None or old[0] != new[0] or old[1] >= new[1]:
+        raise BoundaryOrderError(
+            "an abandoned replacement names an earlier version of its run as the bound one"
+        )
+    return replace(state, phase=Phase.ABANDONED)
 
 
 def _bindings(state: VersionState, _event: BaseEvent, record: BindingsRecord) -> VersionState:
@@ -1216,6 +1237,8 @@ TRANSITIONS: Mapping[tuple[Phase, str], Transition] = {
     (Phase.REJECTED, SUPERSEDED): _superseded,
     (Phase.ADMITTED, SUPERSEDED): _superseded,
     (Phase.NO_PACKAGE, SUPERSEDED): _superseded,
+    (Phase.REJECTED, REPLACEMENT_ABANDONED): _abandoned,
+    (Phase.NO_PACKAGE, REPLACEMENT_ABANDONED): _abandoned,
     (Phase.ADMITTED, ACTOR_STARTED): _actor_started,
     (Phase.NO_PACKAGE, ACTOR_STARTED): _actor_started,
     (Phase.STARTED, BINDING_RECORDED): _bindings,
@@ -1245,6 +1268,7 @@ VERSION_RECORDS: tuple[str, ...] = (
     ADMISSION_COMPLETED,
     ACTOR_STARTED,
     SUPERSEDED,
+    REPLACEMENT_ABANDONED,
     BINDING_RECORDED,
     CANDIDATE_VERIFIED,
     ACCEPTANCE_RECONCILED,
@@ -1262,6 +1286,8 @@ def _refusal(state: VersionState, kind: str) -> str:
         if kind == SUPERSEDED:
             return "boundary version already superseded"
         return f"{kind} recorded on a superseded boundary version"
+    if phase is Phase.ABANDONED:
+        return f"{kind} recorded on an abandoned boundary version"
     if kind in (PACKAGE_FROZEN, CONSTRUCTION_FAILED):
         return "boundary already sealed; a package cannot be regenerated or replaced"
     if phase is Phase.NONE:
@@ -1281,6 +1307,9 @@ def _refusal(state: VersionState, kind: str) -> str:
             Phase.REJECTED: "actor started on a package admission did not admit",
         }.get(phase, "a worker already started on this boundary version"),
         SUPERSEDED: "a boundary version bound to a worker cannot be superseded",
+        REPLACEMENT_ABANDONED: (
+            "only a sealed version without an admitted package can be abandoned"
+        ),
         BINDING_RECORDED: "bindings are recorded only after admission and the worker start",
         CANDIDATE_VERIFIED: (
             "candidate verification requires a frozen, admitted package and a started worker"
@@ -1523,7 +1552,9 @@ class BoundaryLedger:
         """Record a worker start on every boundary it is bound to.
 
         Raises ``BoundaryOrderError`` unless each boundary is sealed, not
-        superseded and, when it holds a package, admitted. With
+        superseded and, when it holds a package, admitted, and every later
+        version of its run is recorded abandoned in its favor
+        (``record_replacement_abandoned``). With
         ``workspace``, every frozen boundary's live sealed package must be in
         ``packages`` (the one whose id the seal cites), and
         ``BoundaryLeakError`` is raised when the workspace contains a
@@ -1563,6 +1594,18 @@ class BoundaryLedger:
                     )
                 live.append(package)
             started.append(event)
+        for boundary_id in tentative:
+            run = parse_boundary_version(boundary_id)
+            if run is None:
+                continue
+            versions = await self.run_versions(run[0])
+            later = {number: events for number, events in versions.items() if number > run[1]}
+            if _standing_after(boundary_id, later):
+                raise BoundaryOrderError(
+                    "actor cannot start: a later version of the run is neither superseded nor "
+                    "abandoned in this version's favor",
+                    details={"boundary_id": boundary_id, "actor_id": actor_id},
+                )
         if workspace is not None:
             leaks = find_workspace_leaks(workspace, live)
             if leaks:
@@ -1608,6 +1651,23 @@ class BoundaryLedger:
             successor_package_id=new.package_id,
             reason=reason,
         )
+        return await self._append(boundary_id, event)
+
+    async def record_replacement_abandoned(self, boundary_id: str, *, bound: str) -> BaseEvent:
+        """Close the replacement version ``boundary_id``; the worker stays bound to ``bound``.
+
+        Refused unless ``boundary_id`` was sealed without a package or not
+        admitted (the table's rule) and ``bound`` is an earlier version of
+        the same run whose package is admitted and on which no worker has
+        started yet. An abandoned version accepts no later record.
+        """
+        if (await self._state(bound)).phase is not Phase.ADMITTED:
+            raise BoundaryOrderError(
+                "a replacement is abandoned only while its bound version is admitted and unstarted",
+                details={"boundary_id": boundary_id, "bound": bound},
+            )
+        state = await self._state(boundary_id)
+        event = replacement_abandoned_event(boundary_id, bound=bound, package_id=state.package_id)
         return await self._append(boundary_id, event)
 
     async def record_bindings(
@@ -1815,6 +1875,27 @@ def _run_record(event: BaseEvent, execution_id: str) -> EnabledRecord | ResumedR
         raise BoundaryOrderError(str(exc), details={"execution_id": execution_id}) from exc
 
 
+def _standing_after(
+    bound: str, later: Mapping[int, Sequence[BaseEvent]], *, before: datetime | None = None
+) -> list[int]:
+    """The versions in ``later`` not recorded abandoned in favor of ``bound``.
+
+    With ``before`` (the worker start on ``bound``), an abandonment recorded
+    after it stands too: the product abandons a replacement before the worker starts.
+    """
+    standing = []
+    for number, events in later.items():
+        closing = _first(events, REPLACEMENT_ABANDONED)
+        if (
+            closing is None
+            or version_state(events).phase is not Phase.ABANDONED
+            or closing.data.get("bound") != bound
+            or (before is not None and _utc(closing.timestamp) > before)
+        ):
+            standing.append(number)
+    return standing
+
+
 def _project(
     execution_id: str,
     run_events: Sequence[BaseEvent],
@@ -1856,10 +1937,20 @@ def _project(
     if len(started) != 1:
         raise BoundaryOrderError("the run's worker is not bound to exactly one version")
     # The product seals each regeneration as the next version and supersedes
-    # the one before; the worker starts on the last. Any other history (a
-    # version recorded after the worker started, an unsuperseded predecessor)
-    # is one the product could not write.
-    if started[0] != max(versions) or set(successors) != set(versions) - {started[0]}:
+    # the one before; the worker starts on the last version not abandoned
+    # (``_standing_after``), and only an admitted version has a replacement to
+    # abandon. Any other history (a version recorded after the worker started,
+    # an unsuperseded predecessor) is one the product could not write.
+    start = _first(versions[started[0]], ACTOR_STARTED)
+    assert start is not None  # the bound version started
+    after = {number: versions[number] for number in versions if number > started[0]}
+    if (
+        set(successors) != set(range(1, started[0]))
+        or (after and not states[started[0]].frozen)
+        or _standing_after(
+            boundary_version_id(execution_id, started[0]), after, before=_utc(start.timestamp)
+        )
+    ):
         raise BoundaryOrderError("the bound version is not the last, or an earlier one stands")
     for later, package_id in successors.values():
         if states[later].package_id != package_id:

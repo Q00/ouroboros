@@ -11,6 +11,9 @@ Event Types (aggregate_type ``boundary``, aggregate_id = boundary id):
     boundary.candidate.verified - frozen package run on a candidate
     boundary.check_package.superseded - product regeneration: this boundary
         version was replaced by a later version before any worker bound to it
+    boundary.check_package.replacement_abandoned - this replacement version
+        was not admitted (or not built), and the worker starts on the earlier
+        version it names; nothing more is recorded on it
     boundary.binding.recorded - after the worker stopped: the tier and binding
         of every check (late bindings are data; no code, no cases)
     boundary.acceptance.resumed - a run resumed after its controller died:
@@ -71,6 +74,7 @@ ADMISSION_COMPLETED = "boundary.check_package.admission_completed"
 ACTOR_STARTED = "boundary.actor.started"
 CANDIDATE_VERIFIED = "boundary.candidate.verified"
 SUPERSEDED = "boundary.check_package.superseded"
+REPLACEMENT_ABANDONED = "boundary.check_package.replacement_abandoned"
 ACCEPTANCE_RECONCILED = "boundary.acceptance.reconciled"
 BINDING_RECORDED = "boundary.binding.recorded"
 ACCEPTANCE_RESUMED = "boundary.acceptance.resumed"
@@ -525,6 +529,13 @@ def superseded_event(
     )
 
 
+def replacement_abandoned_event(
+    boundary_id: str, *, bound: str, package_id: str | None
+) -> BaseEvent:
+    """Close a replacement version that was not admitted; ``bound`` stays the worker's version."""
+    return _event(boundary_id, REPLACEMENT_ABANDONED, {"bound": bound, **cite(package_id)})
+
+
 def acceptance_reconciled_event(
     boundary_id: str,
     *,
@@ -798,6 +809,16 @@ class SupersededRecord(_Payload):
         return Cited(self.package_id)
 
 
+class AbandonedRecord(_Payload):
+    """``boundary.check_package.replacement_abandoned`` as journaled."""
+
+    bound: str
+    package_id: str | None
+
+    def cited(self) -> Cited:
+        return Cited(self.package_id)
+
+
 class BindingsRecord(BindingsPayload):
     """``boundary.binding.recorded`` as journaled: one record per check, each once."""
 
@@ -891,6 +912,7 @@ JOURNAL_RECORDS: Mapping[str, type[BaseModel]] = {
     ADMISSION_COMPLETED: AdmissionRecord,
     ACTOR_STARTED: ActorStartedRecord,
     SUPERSEDED: SupersededRecord,
+    REPLACEMENT_ABANDONED: AbandonedRecord,
     BINDING_RECORDED: BindingsRecord,
     CANDIDATE_VERIFIED: VerificationRecord,
     ACCEPTANCE_RECONCILED: ReconciledRecord,
@@ -906,6 +928,7 @@ _LABELS = {
     ADMISSION_COMPLETED: "admission receipt",
     ACTOR_STARTED: "actor start",
     SUPERSEDED: "a supersession",
+    REPLACEMENT_ABANDONED: "an abandoned replacement",
     BINDING_RECORDED: "bindings",
     CANDIDATE_VERIFIED: "candidate verification",
     ACCEPTANCE_RECONCILED: "acceptance",

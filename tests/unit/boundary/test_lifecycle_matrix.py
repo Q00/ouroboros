@@ -31,6 +31,7 @@ from ouroboros.boundary.events import (
     CONSTRUCTION_FAILED,
     PACKAGE_FROZEN,
     REFERENCE_CHECKED,
+    REPLACEMENT_ABANDONED,
     SUPERSEDED,
     BindingsPayload,
     ReconciliationPayload,
@@ -46,6 +47,7 @@ from ouroboros.boundary.events import (
     construction_failed_event,
     package_frozen_event,
     reference_checked_event,
+    replacement_abandoned_event,
     superseded_event,
 )
 from ouroboros.boundary.ledger import (
@@ -82,8 +84,10 @@ from .journal_fixtures import (
 )
 
 RUN = "run_matrix"
-BOUNDARY = boundary_version_id(RUN, 1)
-SUCCESSOR = boundary_version_id(RUN, 2)
+# The version under test follows one it can be abandoned in favor of.
+PREDECESSOR = boundary_version_id(RUN, 1)
+BOUNDARY = boundary_version_id(RUN, 2)
+SUCCESSOR = boundary_version_id(RUN, 3)
 T0 = datetime(2026, 9, 28, tzinfo=UTC)
 
 
@@ -137,6 +141,8 @@ class _Records:
                 successor_package_id=None,
                 reason="r",
             )
+        if kind == REPLACEMENT_ABANDONED:
+            return replacement_abandoned_event(BOUNDARY, bound=PREDECESSOR, package_id=package_id)
         if kind == BINDING_RECORDED:
             # A resumed run's bindings: the one binding record every started phase allows.
             return binding_recorded_event(
@@ -200,7 +206,16 @@ STATES: dict[str, tuple[tuple[str, ...], bool, frozenset[str]]] = {
         True,
         frozenset({REFERENCE_CHECKED, ADMISSION_COMPLETED, SUPERSEDED}),
     ),
-    "rejected": ((PACKAGE_FROZEN, "rejected_admission"), True, frozenset({SUPERSEDED})),
+    "rejected": (
+        (PACKAGE_FROZEN, "rejected_admission"),
+        True,
+        frozenset({SUPERSEDED, REPLACEMENT_ABANDONED}),
+    ),
+    "abandoned": (
+        (PACKAGE_FROZEN, "rejected_admission", REPLACEMENT_ABANDONED),
+        True,
+        frozenset(),
+    ),
     "admitted": (
         (PACKAGE_FROZEN, ADMISSION_COMPLETED),
         True,
@@ -246,7 +261,12 @@ STATES: dict[str, tuple[tuple[str, ...], bool, frozenset[str]]] = {
         frozenset({BINDING_RECORDED, CANDIDATE_VERIFIED, ACCEPTANCE_RESUMED}),
     ),
     "superseded": ((PACKAGE_FROZEN, SUPERSEDED), True, frozenset()),
-    "no_package": ((CONSTRUCTION_FAILED,), False, frozenset({ACTOR_STARTED, SUPERSEDED})),
+    "no_package": (
+        (CONSTRUCTION_FAILED,),
+        False,
+        frozenset({ACTOR_STARTED, SUPERSEDED, REPLACEMENT_ABANDONED}),
+    ),
+    "no_package_abandoned": ((CONSTRUCTION_FAILED, REPLACEMENT_ABANDONED), False, frozenset()),
     "no_package_started": (
         (CONSTRUCTION_FAILED, ACTOR_STARTED),
         False,
@@ -308,6 +328,8 @@ def test_the_transition_table_is_the_documented_lifecycle() -> None:
         (Phase.REJECTED, SUPERSEDED),
         (Phase.ADMITTED, SUPERSEDED),
         (Phase.NO_PACKAGE, SUPERSEDED),
+        (Phase.REJECTED, REPLACEMENT_ABANDONED),
+        (Phase.NO_PACKAGE, REPLACEMENT_ABANDONED),
         (Phase.ADMITTED, ACTOR_STARTED),
         (Phase.NO_PACKAGE, ACTOR_STARTED),
         (Phase.STARTED, BINDING_RECORDED),

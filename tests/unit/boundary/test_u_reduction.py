@@ -22,6 +22,7 @@ from ouroboros.boundary.events import (
     BOUNDARY_AGGREGATE_TYPE,
     CONSTRUCTION_FAILED,
     PACKAGE_FROZEN,
+    REPLACEMENT_ABANDONED,
     SUPERSEDED,
 )
 from ouroboros.boundary.ledger import verify_boundary_order
@@ -328,9 +329,12 @@ async def test_a_failed_replacement_call_keeps_the_admitted_version(
     assert len(constructor.replacement_calls) == 1
     assert state.boundary_id == "exec_u/check_package/v1" and state.admitted
     assert state.replacement_calls == 1 and state.replacement_outcome == "construction_failed"
-    # The failed replacement stays an unbound version: a version is
+    # The failed replacement is closed in favor of v1: a version is
     # superseded only by a later one, never by the version before it.
-    assert await _types(store, "exec_u/check_package/v2") == [CONSTRUCTION_FAILED]
+    assert await _types(store, "exec_u/check_package/v2") == [
+        CONSTRUCTION_FAILED,
+        REPLACEMENT_ABANDONED,
+    ]
     assert await _types(store, "exec_u/check_package/v1") == [
         PACKAGE_FROZEN,
         ADMISSION_COMPLETED,

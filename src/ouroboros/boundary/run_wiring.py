@@ -506,9 +506,10 @@ async def _replace_uncovered(
     The new version (the admitted checks kept, plus the replacements) goes
     through the reference check, the seal and per-check admission, and
     supersedes ``bound`` when admitted. When the call fails, or the new
-    version is not admitted, the new version stays sealed and unbound (its
-    seal or admission receipt says why) and ``bound`` stays the version the
-    worker is bound to (a version is superseded only by a later one). Returns the
+    version is not admitted, the new version stays sealed (its seal or
+    admission receipt says why) and is recorded abandoned in favor of
+    ``bound``, which stays the version the worker is bound to (a version is
+    superseded only by a later one). Returns the
     new ``(boundary_id, package, admission, path, reference_check)`` or
     ``None``.
     """
@@ -548,8 +549,9 @@ async def _replace_uncovered(
             input_digest=outcome.input_digest,
             reason=f"replacement_failed:{reason}",
         )
-        # The failed replacement stays an unbound version: a version is
+        # The failed replacement is closed in favor of ``bound``: a version is
         # superseded only by a later one, and the worker binds ``bound``.
+        await sealer.ledger.record_replacement_abandoned(new_id, bound=bound)
         return None
     assert candidate is not None
     merged_report = _merged_reference_check(
@@ -560,7 +562,8 @@ async def _replace_uncovered(
     )
     if new_admission.verdict is not PackageVerdict.ADMITTED:
         report.outcome = "not_admitted"
-        # Its admission receipt records why; it stays an unbound version.
+        # Its admission receipt records why; it is closed in favor of ``bound``.
+        await sealer.ledger.record_replacement_abandoned(new_id, bound=bound)
         return None
     report.outcome = "admitted"
     await sealer.ledger.record_superseded(bound, superseded_by=new_id, reason=REPLACEMENT_REASON)
