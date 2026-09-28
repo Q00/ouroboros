@@ -468,6 +468,19 @@ class ExistingOutcome:
         """A worker attempt exists (accepted or rejected by the existing verifier)."""
         return self.passed or self.rejected_attempt
 
+    @property
+    def failed_outside_package(self) -> bool:
+        """The worker's attempt failed a gate the package does not decide.
+
+        A runtime failure, a failed ``verify_command``, or a package gate
+        failure the final settlement did not find holding
+        (``authority.existing_outcomes_from``): the worker ran, but this is
+        not an attempt the package may accept, so it is recorded as not
+        attempted with the outcome ``failed``. A blocked, invalid or cancelled
+        criterion was never run.
+        """
+        return self.terminal_status == "not_attempted" and self.outcome == "failed"
+
 
 @dataclass(frozen=True, slots=True)
 class CriterionDecision:
@@ -487,6 +500,9 @@ class CriterionDecision:
     binding: dict[str, Any] | None = None
     declared_binding_pass: bool = field(kw_only=True)
     """The package's ``pass`` rests on a worker-declared binding (``CriterionVerdict``)."""
+    failed_outside_package: bool = field(default=False, kw_only=True)
+    """Not accepted because the worker's attempt failed a gate the package does
+    not decide (``ExistingOutcome.failed_outside_package``); display only."""
 
     @property
     def legacy_decided(self) -> bool:
@@ -672,6 +688,7 @@ def reconcile_acceptance(
                 existing_failure_class=None if prior is None else prior.failure_class,
                 binding=verdict.binding,
                 declared_binding_pass=verdict.declared_binding_pass,
+                failed_outside_package=prior is not None and prior.failed_outside_package,
             )
         )
     run_accepted = bool(decisions) and all(decision.accepted for decision in decisions)
@@ -691,6 +708,14 @@ def render_reconciliation(reconciliation: AcceptanceReconciliation) -> list[str]
     for decision in reconciliation.decisions:
         verdict = "accepted" if decision.accepted else "not accepted"
         existing = decision.existing_outcome or "no decision"
+        if decision.governed_by is Governor.EXECUTION and decision.failed_outside_package:
+            cause = decision.existing_failure_class or "no failure class"
+            lines.append(
+                f"AC {decision.root_ac_index + 1}: {verdict}; the worker's attempt failed "
+                f"outside the check package ({cause}), so the package cannot accept it; "
+                f"check package: {decision.package_status.value}"
+            )
+            continue
         if decision.governed_by is Governor.EXECUTION:
             lines.append(
                 f"AC {decision.root_ac_index + 1}: {verdict}; the worker never attempted it "
