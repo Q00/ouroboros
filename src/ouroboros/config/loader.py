@@ -2027,16 +2027,11 @@ def get_llm_model_for_role(
     """Resolve the configured model for a logical internal-LLM role.
 
     Stage model fields are the default source of truth: interview roles use
-    ``clarification.default_model``, evaluate roles use
+    ``clarification.default_model``, evaluate/execute roles use
     ``evaluation.semantic_model``, and reflect roles use
-    ``resilience.reflect_model``. Execute-stage planning roles
-    (``atomicity`` / ``decomposition`` / ``agent_runtime_implementation``)
-    honor the Execute-stage pin (``execution.default_model`` /
-    ``OUROBOROS_EXECUTION_MODEL``, resolved by :func:`get_execution_model`)
-    when one is set, and otherwise keep the evaluate model as their fallback.
-    An explicitly-pinned legacy per-role field (e.g. ``llm.qa_model``) still
-    takes precedence for backward compatibility, and an unmapped role degrades
-    to the evaluate model rather than raising.
+    ``resilience.reflect_model``. An explicitly-pinned legacy per-role field
+    (e.g. ``llm.qa_model``) still takes precedence for backward compatibility,
+    and an unmapped role degrades to the evaluate model rather than raising.
     """
     if explicit_model:
         return explicit_model
@@ -2055,19 +2050,8 @@ def get_llm_model_for_role(
         return get_clarification_model(resolved_backend)
     if stage == Stage.REFLECT:
         return get_reflect_model(resolved_backend)
-    if stage == Stage.EXECUTE:
-        # EXECUTE-stage roles have an EXECUTE-stage *backend* but no dedicated
-        # stage *model* field of their own, so they inherited
-        # ``evaluation.semantic_model`` verbatim (#2300). With heterogeneous
-        # ``runtime_profile.stages`` an explicit never-shipped evaluate pin can
-        # reach an execute backend that cannot run it. The Execute-stage pin
-        # surface already exists and is shared by the CLI, MCP, and config
-        # views — consult it here so these roles can opt into a runnable id.
-        # Without a pin the evaluate model stays the fallback, so resolution is
-        # byte-for-byte unchanged for configs that never set the pin.
-        execution_model = get_execution_model()
-        if execution_model is not None:
-            return execution_model
+    if stage == Stage.EXECUTE and (execution_model := get_execution_model()) is not None:
+        return execution_model
     return get_semantic_model(resolved_backend)
 
 
