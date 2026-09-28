@@ -555,6 +555,46 @@ Every runtime adapter satisfies the `AgentRuntime` protocol (defined in `src/our
 
 The orchestrator never inspects backend-specific internals — each adapter maps its native events into these shared types.
 
+### Interview calibration control turns
+
+Unfamiliar terminology must not force a user to guess at a requirements decision.
+`ooo idk <evidence>` adjusts the current conversation's explanation level while
+preserving the interview's decisions, ambiguity checks, and closure gates.
+It carries one overall `foundational`, `working`, or `fluent` level plus explicit
+unknown terms; it is not a per-domain proficiency model or a permanent profile.
+
+`InterviewSessionTransition` in `orchestrator/interview_session.py` owns command
+classification, MCP arguments, and returned runtime metadata. The shared
+dispatcher and every direct runtime interceptor use this same contract:
+
+| Turn | MCP arguments | State effect |
+|------|---------------|--------------|
+| Start | `initial_context`, optional `interview_calibration` | Attach the returned interview session ID |
+| Answer | `session_id`, `answer`, optional `interview_calibration` | Advance only after a real answer |
+| Calibrate | `calibration_input`, optional `session_id`; never `answer` | Replace calibration and rephrase the same pending question |
+| Resume | `session_id`, optional `interview_calibration`; no answer | Retain the current pending round |
+
+Calibration can precede the first interview. Later results that return only a
+session ID retain the calibration, native runtime identity, and unrelated
+metadata. The bounded payload lives only in the active `RuntimeHandle` and is
+removed by durable serialization; loading a saved session requires recalibration.
+Claude/plugin clients relay `meta.interview_calibration` into subsequent MCP
+calls as `interview_calibration`, as specified by the canonical `idk` and
+`interview` skills. The server does not persist a user profile.
+
+The engine extension is optional: legacy `ask_next_question(state)` engines
+remain supported, and engines without `rephrase_pending_question` return the
+unchanged question. Provider errors, raised exceptions, and empty rephrases also
+return calibration with `question_rephrased=false` and explicitly state that
+the pending question is unchanged. Cancellation propagates after resource cleanup.
+Neither successful rephrasing nor fallback writes an answer to interview state.
+
+The runtime sequence tests live in `tests/unit/orchestrator/test_interview_session.py`;
+engine/fallback, inference, PM composition, and packaging contracts live in their
+owning MCP, calibration, Big Bang, and skill suites. Structured choices and the
+broader novice-friendly presentation work in #1638 remain separate from this
+wording control turn.
+
 ### Shipped adapters
 
 - **`ClaudeAgentAdapter`** (`backend="claude"`) — Wraps Claude Agent SDK / Claude Code CLI with streaming, retry, and session resumption. Module: `src/ouroboros/orchestrator/adapter.py`

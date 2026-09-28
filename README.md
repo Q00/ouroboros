@@ -432,6 +432,12 @@ Inside AI coding agent sessions, use `ooo <cmd>` skills. From the terminal, use 
 | `ooo publish`    | *(skill/runtime surface; uses `gh` CLI)*                          | Publish a Seed as GitHub Epic/Task issues for team workflows |
 | `ooo maintain`   | *(via skill; uses `gh` CLI)*                                      | Triage and resolve maintainer issues and PRs                 |
 
+`ooo idk` adjusts interview wording in the active conversation without answering
+the pending question or lowering requirements rigor. It works with the Claude
+skill relay and intercepted interviews on Codex, Copilot, Gemini, OpenCode,
+Hermes, Pi, OMP, GJC, and Kiro. Calibration is not saved: run `ooo idk` again
+after reopening a saved session. See the [calibration contract](docs/architecture.md#interview-calibration-control-turns).
+
 > Not all skills have direct CLI equivalents. Some (`evaluate`, `evolve`, `unstuck`, `ralph`, `publish`, `maintain`) are available through agent skills, runtime rules, or MCP tools rather than a direct `ouroboros <subcommand>` shell command.
 > `/resume` is reserved for Claude Code's built-in session picker; use `ooo resume-session` for Ouroboros in-flight sessions.
 > Claude Code also reserves `/run`, `/status`, `/help`, and `/config`. The safe

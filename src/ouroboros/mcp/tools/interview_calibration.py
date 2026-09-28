@@ -14,6 +14,9 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
+from ouroboros.observability.logging import get_logger
+
+log = get_logger(__name__)
 
 
 def interview_calibration_parameters() -> tuple[MCPToolParameter, ...]:
@@ -63,12 +66,17 @@ async def handle_interview_calibration_turn(
                 pending_question = state.rounds[-1].question
                 rephrase_method = getattr(engine, "rephrase_pending_question", None)
                 if callable(rephrase_method):
-                    rephrase_result = await rephrase_method(
-                        pending_question,
-                        calibration,
-                    )
-                    if rephrase_result.is_ok and rephrase_result.value:
-                        rephrased_question = rephrase_result.value
+                    try:
+                        rephrase_result = await rephrase_method(pending_question, calibration)
+                        if rephrase_result.is_ok and rephrase_result.value.strip():
+                            rephrased_question = rephrase_result.value
+                    except Exception as exc:
+                        # Rephrasing is optional; retain the calibration and the
+                        # original pending question. Cancellation still propagates.
+                        log.warning(
+                            "interview.calibration.rephrase_unavailable",
+                            error_type=type(exc).__name__,
+                        )
         finally:
             if handler._owns_event_store:
                 await handler.close()
@@ -120,3 +128,37 @@ async def handle_interview_calibration_turn(
             meta=meta,
         )
     )
+
+
+def _engine_supports_calibration(engine: Any) -> bool:
+    """Return whether *engine* accepts the ``language_calibration`` keyword.
+
+    The check uses signature inspection so that injected/custom/fake engines
+    that implement only the established ``ask_next_question(state)`` contract
+    are never passed the unsupported keyword.
+    """
+    import inspect
+
+    method = getattr(engine, "ask_next_question", None)
+    if method is None:
+        return False
+    try:
+        sig = inspect.signature(method)
+    except (ValueError, TypeError):
+        return False
+    return "language_calibration" in sig.parameters
+
+
+async def _ask_next_question(
+    engine: Any,
+    state: Any,
+    calibration: Any | None,
+) -> Any:
+    """Call *engine.ask_next_question* with optional calibration support.
+
+    If the engine supports the ``language_calibration`` keyword it is
+    forwarded; otherwise the call uses the established one-argument form.
+    """
+    if calibration is not None and _engine_supports_calibration(engine):
+        return await engine.ask_next_question(state, language_calibration=calibration)
+    return await engine.ask_next_question(state)

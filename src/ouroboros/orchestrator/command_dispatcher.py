@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import replace
-from datetime import UTC, datetime
 from functools import lru_cache
 import hashlib
 import json
@@ -28,7 +25,7 @@ from ouroboros.orchestrator.interview_session import (
     INTERVIEW_SESSION_METADATA_KEY as _INTERVIEW_SESSION_METADATA_KEY,
 )
 from ouroboros.orchestrator.interview_session import (
-    build_interview_tool_arguments,
+    InterviewSessionTransition,
 )
 from ouroboros.router.types import Resolved
 
@@ -100,8 +97,8 @@ class CodexCommandDispatcher:
 
         payload.update(
             {
-                "external:build_interview_tool_arguments": self._callable_implementation_digest(
-                    build_interview_tool_arguments
+                "external:InterviewSessionTransition": self._class_implementation_digest(
+                    InterviewSessionTransition
                 ),
                 "external:create_ouroboros_server": self._callable_implementation_digest(
                     create_ouroboros_server
@@ -257,8 +254,8 @@ class CodexCommandDispatcher:
         intercept: Resolved,
         current_handle: RuntimeHandle | None,
     ) -> dict[str, Any]:
-        """Build the MCP argument payload for an intercepted skill."""
-        return build_interview_tool_arguments(intercept, current_handle)
+        """Build arguments through the shared interview transition contract."""
+        return InterviewSessionTransition(intercept, current_handle).tool_arguments()
 
     def _build_resume_handle(
         self,
@@ -266,38 +263,12 @@ class CodexCommandDispatcher:
         intercept: Resolved,
         tool_result: Any,
     ) -> RuntimeHandle | None:
-        """Attach interview session metadata to the runtime handle."""
-        if intercept.mcp_tool != "ouroboros_interview":
-            return current_handle
-
-        session_id = tool_result.meta.get("session_id")
-        calibration = tool_result.meta.get("interview_calibration")
-        valid_session_id = isinstance(session_id, str) and bool(session_id.strip())
-        valid_calibration = isinstance(calibration, Mapping)
-        if not valid_session_id and not valid_calibration:
-            if session_id is not None and not valid_session_id:
-                log.warning(
-                    "command_dispatcher.resume_handle.invalid_session_id",
-                    session_id_type=type(session_id).__name__,
-                    session_id_value=repr(session_id),
-                )
-            return current_handle
-
-        metadata = dict(current_handle.metadata) if current_handle is not None else {}
-        if valid_session_id:
-            metadata[_INTERVIEW_SESSION_METADATA_KEY] = session_id.strip()
-        if valid_calibration:
-            metadata[_INTERVIEW_CALIBRATION_METADATA_KEY] = dict(calibration)
-        updated_at = datetime.now(UTC).isoformat()
-
-        if current_handle is not None:
-            return replace(current_handle, metadata=metadata, updated_at=updated_at)
-
-        return RuntimeHandle(
+        """Retain session-local interview state through the shared transition."""
+        return InterviewSessionTransition(intercept, current_handle).resume_handle(
+            tool_result.meta,
             backend=self._resume_handle_backend(),
             cwd=self._cwd,
-            updated_at=updated_at,
-            metadata=metadata,
+            log_namespace="command_dispatcher",
         )
 
     def _build_tool_call_message(

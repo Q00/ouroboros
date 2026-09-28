@@ -58,3 +58,44 @@ def test_dev_mode_agents_routes_and_summarizes_idk() -> None:
 
     assert "`ooo idk ...` | Read `skills/idk/SKILL.md`" in text
     assert "`ooo idk` | MCP: `ouroboros_interview` calibration control turn" in text
+
+
+def test_claude_plugin_idk_skill_exists() -> None:
+    test_file = Path(__file__).resolve()
+    repo_root = test_file.parent
+    while repo_root != repo_root.parent:
+        if (repo_root / "pyproject.toml").exists():
+            break
+        repo_root = repo_root.parent
+    skill_path = repo_root / "skills" / "idk" / "SKILL.md"
+    assert skill_path.exists(), f"Missing: {skill_path}"
+    content = skill_path.read_text()
+    assert "mcp_tool: ouroboros_interview" in content
+    assert "calibration_input" in content
+
+
+def test_claude_plugin_idk_skill_instructs_calibration_relay() -> None:
+    test_file = Path(__file__).resolve()
+    repo_root = test_file.parent
+    while repo_root != repo_root.parent:
+        if (repo_root / "pyproject.toml").exists():
+            break
+        repo_root = repo_root.parent
+    skill_path = repo_root / "skills" / "idk" / "SKILL.md"
+    content = skill_path.read_text()
+    assert "meta.interview_calibration" in content
+    assert "interview_calibration" in content
+    assert "subsequent" in content.lower()
+
+
+def test_claude_plugin_interview_skill_instructs_calibration_relay() -> None:
+    test_file = Path(__file__).resolve()
+    repo_root = test_file.parent
+    while repo_root != repo_root.parent:
+        if (repo_root / "pyproject.toml").exists():
+            break
+        repo_root = repo_root.parent
+    skill_path = repo_root / "skills" / "interview" / "SKILL.md"
+    content = skill_path.read_text()
+    assert "interview_calibration" in content
+    assert "interview_calibration" in content and "argument" in content.lower()
