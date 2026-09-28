@@ -12,11 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from ouroboros.boundary.acceptance import Governor, PackageCriterionStatus
-from ouroboros.boundary.authority import (
-    LEGACY_DECIDED_FAILURE_CLASS_PREFIX,
-    PACKAGE_FAILURE_CLASS_PREFIX,
-    CheckPackageAuthority,
-)
+from ouroboros.boundary.authority import CheckPackageAuthority, CheckPackageGate
 from ouroboros.boundary.binding import entry_points_request
 from ouroboros.boundary.events import RunContract
 from ouroboros.boundary.package import seed_criterion_keys, seed_digest
@@ -31,6 +27,9 @@ from ouroboros.orchestrator.parallel_executor_models import (
     ACExecutionOutcome,
     ACExecutionResult,
     governing_verifier_verdict,
+    legacy_owned,
+    package_failure_class,
+    package_repair,
 )
 from ouroboros.orchestrator.profile_loader import load_profile
 from ouroboros.orchestrator.retry_hints import build_ac_retry_prompt, failure_class_for_result
@@ -303,7 +302,7 @@ async def test_the_gate_without_an_admitted_package_lets_the_legacy_verifier_dec
     )
     decided = await authority.gate(seed=seed, ac_index=0, result=advisory, execution_id="exec")
     assert decided.success is False and decided.outcome is ACExecutionOutcome.FAILED
-    assert str(decided.check_package_failure_class).startswith(LEGACY_DECIDED_FAILURE_CLASS_PREFIX)
+    assert legacy_owned(decided) and package_failure_class(decided) is None
 
 
 @pytest.mark.asyncio
@@ -327,13 +326,12 @@ async def test_a_root_without_an_interface_gets_no_entry_points_request() -> Non
 def test_retry_prompt_carries_the_package_counterexample_and_class() -> None:
     base = ACExecutionResult(ac_index=0, ac_content="AC", success=False, error="legacy said no")
     assert failure_class_for_result(base) is None
-    repaired = replace(
+    repaired = CheckPackageGate._repair(
         base,
-        error="check package failed",
-        check_package_repair="It called your declared entry point: function m.lerp.\n- lerp(0, 10, 0.5): expected 5, observed 0",
-        check_package_failure_class="CHECK_PACKAGE_FAIL:abc123",
+        "It called your declared entry point: function m.lerp.\n- lerp(0, 10, 0.5): expected 5, observed 0",
     )
-    assert failure_class_for_result(repaired) == "CHECK_PACKAGE_FAIL:abc123"
+    assert failure_class_for_result(repaired) == package_failure_class(repaired)
+    assert str(package_failure_class(repaired)).startswith("CHECK_PACKAGE_FAIL:")
     prompt = build_ac_retry_prompt(
         failure_class=failure_class_for_result(repaired),
         outcome=None,
@@ -475,12 +473,7 @@ async def test_the_package_gate_runs_after_the_verify_command_on_a_passing_resul
         *, seed: Any, ac_index: int, result: ACExecutionResult, **_run: Any
     ) -> ACExecutionResult:
         seen.append(result.verify_gate_outcome)
-        return replace(
-            result,
-            success=False,
-            outcome=ACExecutionOutcome.FAILED,
-            check_package_failure_class="CHECK_PACKAGE_FAIL:abc",
-        )
+        return CheckPackageGate._repair(result, "counterexample")
 
     executor.check_package_gate = gate  # type: ignore[attr-defined]
     seed = Seed(
@@ -499,9 +492,9 @@ async def test_the_package_gate_runs_after_the_verify_command_on_a_passing_resul
     if gate_runs:
         (outcome,) = seen
         assert outcome is not None and outcome.passed is True
-        assert gated.check_package_failure_class == "CHECK_PACKAGE_FAIL:abc"
+        assert package_repair(gated) == "counterexample"
     else:
-        assert seen == [] and gated.check_package_failure_class is None
+        assert seen == [] and gated.check_package is None
 
 
 def test_only_a_verdict_handed_back_to_the_legacy_verifier_routes_control_flow() -> None:
@@ -513,17 +506,14 @@ def test_only_a_verdict_handed_back_to_the_legacy_verifier_routes_control_flow()
     )
     assert governing_verifier_verdict(ungated) is legacy
     # The package gate decided: the legacy verdict is advisory and routes nothing.
-    package_failed = replace(
-        ungated,
-        legacy_rejection="evidence form mismatch",
-        check_package_failure_class=f"{PACKAGE_FAILURE_CLASS_PREFIX}:abc",
+    advisory = replace(
+        ungated, success=True, outcome=None, legacy_rejection="evidence form mismatch"
     )
+    package_failed = CheckPackageGate._repair(advisory, "counterexample")
     assert governing_verifier_verdict(package_failed) is None
     # The gate handed the criterion back to the legacy verifier: its verdict routes again.
-    handed_back = replace(
-        package_failed,
-        check_package_failure_class=f"{LEGACY_DECIDED_FAILURE_CLASS_PREFIX}:FABRICATION_SUSPECTED",
-    )
+    handed_back = CheckPackageGate._legacy_decides(advisory)
+    assert legacy_owned(handed_back)
     assert governing_verifier_verdict(handed_back) is legacy
 
 
@@ -543,15 +533,17 @@ async def test_cross_harness_redispatch_is_routed_by_the_package_decision_not_th
     monkeypatch.setattr(redispatch, "decide_alt_harness_redispatch", decide)
     executor = _executor(_runtime())
     executor._cross_harness_redispatch_enabled = True  # type: ignore[attr-defined]
-    result = ACExecutionResult(
-        ac_index=0,
-        ac_content="AC",
-        success=False,
-        atomic_verifier_verdict=VerifierVerdict(
-            passed=False, reasons=("r",), failure_class="FABRICATION_SUSPECTED"
+    result = CheckPackageGate._repair(
+        ACExecutionResult(
+            ac_index=0,
+            ac_content="AC",
+            success=True,
+            atomic_verifier_verdict=VerifierVerdict(
+                passed=False, reasons=("r",), failure_class="FABRICATION_SUSPECTED"
+            ),
+            legacy_rejection="the legacy verifier rejected the evidence",
         ),
-        legacy_rejection="the legacy verifier rejected the evidence",
-        check_package_failure_class=f"{PACKAGE_FAILURE_CLASS_PREFIX}:abc",
+        "counterexample",
     )
     rerun = {
         "ac_index": 0,
@@ -659,3 +651,102 @@ async def test_the_cross_harness_alternate_runs_under_the_installed_package_auth
     )
     [decision] = reconciliation.decisions
     assert decision.accepted and decision.governed_by is Governor.CHECK_PACKAGE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "later, resurrected",
+    [
+        ("nothing", True),
+        ("unrelated_sibling_write", True),
+        ("sibling_breaks_the_verify_command", False),
+        ("coordinator_breaks_the_verify_command", False),
+        ("no_final_settlement", False),
+    ],
+)
+async def test_a_package_gate_failure_is_accepted_again_only_on_the_settled_final_workspace(
+    tmp_path: Any, later: str, resurrected: bool
+) -> None:
+    # Review probe (#2466): the package gate failed an attempt whose verify
+    # command passed; a later sibling or coordinator write then broke that
+    # command. Final settlement once skipped the failed result, so a terminal
+    # package PASS resurrected it on its stale cached pass.
+    from ouroboros.boundary.acceptance import (
+        AcceptanceReconciliation,
+        CriterionDecision,
+    )
+    from ouroboros.boundary.authority import apply_reconciliation
+    from ouroboros.boundary.binding import CheckTier
+    from ouroboros.core.seed import AcceptanceCriterionSpec, OntologySchema, Seed, SeedMetadata
+    from ouroboros.orchestrator.parallel_executor_models import ParallelExecutionResult
+
+    (tmp_path / "state.txt").write_text("ok\n")
+    executor = ParallelACExecutor(
+        adapter=MagicMock(working_directory=str(tmp_path), runtime_backend="claude"),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        run_verify_commands=True,
+    )
+    executor._task_cwd = str(tmp_path)  # type: ignore[attr-defined]
+
+    async def gate(
+        *, seed: Any, ac_index: int, result: ACExecutionResult, **_run: Any
+    ) -> ACExecutionResult:
+        return CheckPackageGate._repair(result, "clamp(15, 0, 10): expected 10, observed 15")
+
+    executor.check_package_gate = gate  # type: ignore[attr-defined]
+    seed = Seed(
+        goal="g",
+        acceptance_criteria=(
+            AcceptanceCriterionSpec(description="ac", verify_command="grep -qx ok state.txt"),
+        ),
+        ontology_schema=OntologySchema(name="n", description="d"),
+        metadata=SeedMetadata(ambiguity_score=0.05),
+    )
+    attempt = ACExecutionResult(
+        ac_index=0, ac_content="ac", success=True, outcome=ACExecutionOutcome.SUCCEEDED
+    )
+    gated = await executor._apply_verify_gate(
+        seed=seed, ac_index=0, result=attempt, session_id="s", execution_id="e"
+    )
+    assert gated.success is False and gated.verify_gate_outcome.passed is True
+    results = [gated]
+    run = {"seed": seed, "session_id": "s", "execution_id": "e"}
+    if later == "unrelated_sibling_write":
+        (tmp_path / "other.txt").write_text("sibling\n")
+    elif later == "sibling_breaks_the_verify_command":
+        (tmp_path / "state.txt").write_text("bad\n")
+    elif later == "coordinator_breaks_the_verify_command":
+        (tmp_path / "state.txt").write_text("bad\n")
+        results = await executor._revalidate_results_after_coordinator(results=results, **run)
+    if later != "no_final_settlement":
+        results = await executor._settle_verify_gate_results(results=results, **run)
+    # The terminal verification passes the package on this criterion.
+    decision = CriterionDecision(
+        root_ac_index=0,
+        criterion_key="k0",
+        package_status=PackageCriterionStatus.PASS,
+        existing_outcome=None,
+        existing_accepted=False,
+        accepted=True,
+        governed_by=Governor.CHECK_PACKAGE,
+        tier=CheckTier.A,
+        declared_binding_pass=False,
+    )
+    decided = apply_reconciliation(
+        ParallelExecutionResult(results=tuple(results), success_count=0, failure_count=1),
+        AcceptanceReconciliation(
+            decisions=(decision,), run_accepted=True, existing_run_accepted=False
+        ),
+    )
+    [final] = decided.results
+    assert decided.all_succeeded is resurrected
+    assert final.success is resurrected
+    if resurrected:
+        assert final.check_package is not None
+        assert final.check_package.owner.value == "check_package"
+        assert final.check_package.declared_binding_pass is False
+    elif later != "no_final_settlement":
+        # The broken verify command owns the failure now, not the package.
+        assert package_repair(final) is None and final.verify_gate_outcome.passed is False

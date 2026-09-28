@@ -362,7 +362,9 @@ from ouroboros.orchestrator.parallel_executor_models import (
     collect_decomposition_depth_warning_paths,
     governing_verifier_verdict,
     inherit_check_package_hooks,
+    package_settlement_view,
     restore_check_package_record,
+    settle_package_results,
 )
 from ouroboros.orchestrator.profile_loader import ExecutionProfile, SuggestedModelTier
 from ouroboros.orchestrator.rate_limit import (
@@ -2052,10 +2054,9 @@ def _deserialize_provisional_route_success(
         }
     )
     schema = value.get("schema_version") if isinstance(value, Mapping) else None
-    if schema == 3:
-        expected_keys = expected_keys | {"check_package"}
+    record = {"check_package"} if schema == 3 else set()
     if (
-        not _mapping_has_exact_keys(value, expected_keys)
+        not _mapping_has_exact_keys(value, expected_keys | record)
         or not isinstance(value, Mapping)
         or type(schema) is not int
         or schema not in (2, 3)
@@ -2237,10 +2238,8 @@ def _deserialize_composite_result_tree(
         }
     )
     schema = value.get("schema_version") if isinstance(value, Mapping) else None
-    if schema == 3:
-        expected = expected | {"check_package"}
     if (
-        not _mapping_has_exact_keys(value, expected)
+        not _mapping_has_exact_keys(value, expected | ({"check_package"} if schema == 3 else set()))
         or not isinstance(value, Mapping)
         or type(schema) is not int
         or schema not in (2, 3)
@@ -5273,20 +5272,21 @@ class ParallelACExecutor:
     ) -> list[ACExecutionResult]:
         """Fail closed when final shared-workspace evidence is no longer valid.
 
-        Verify gates run as each AC completes, while later ACs can still touch
-        the same workspace.  Before terminal acceptance, re-check every
-        successful contract's artifact leg and cached workspace identity. A
-        stale command result — the workspace moved on after it passed, or the
-        gate deferred a mutation verdict it could not attribute while siblings
-        were writing — is replayed once here, on the quiescent workspace.
-        Invalidate the complete success set when any verify command was
-        observed mutating the workspace.
+        Verify gates run as each AC completes, while later ACs can still touch the same
+        workspace.  Before terminal acceptance, re-check every successful contract's artifact
+        leg and cached workspace identity; a result only the check package gate failed is
+        settled as the success the other gates saw (``package_settlement_view``). A stale
+        command result (the workspace moved on after it passed, or the gate deferred a mutation
+        verdict it could not attribute while siblings were writing) is replayed once here, on
+        the quiescent workspace. Invalidate the complete success set when any verify command
+        was observed mutating the workspace.
         """
         from ouroboros.events.base import BaseEvent
         from ouroboros.orchestrator.failure_taxonomy import FailureClass
 
+        originals, results = results, [package_settlement_view(result) for result in results]
         if not self._run_verify_commands:
-            return results
+            return settle_package_results(originals, results)
 
         successful_contracts: dict[int, AcceptanceCriterionSpec] = {}
         verify_mutated_workspace = False
@@ -5302,7 +5302,7 @@ class ParallelACExecutor:
                 successful_contracts[result.ac_index] = spec
 
         if not successful_contracts and not verify_mutated_workspace:
-            return results
+            return settle_package_results(originals, results)
 
         cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
         settled: list[ACExecutionResult] = []
@@ -5482,7 +5482,7 @@ class ParallelACExecutor:
                     ),
                 )
             )
-        return finalized
+        return settle_package_results(originals, finalized)
 
     def _coerce_decomposition_decision(
         self,

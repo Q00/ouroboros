@@ -16,6 +16,7 @@ from ouroboros.boundary import tree
 from ouroboros.boundary.acceptance import PackageCriterionStatus
 from ouroboros.boundary.authority import (
     CheckPackageAuthority,
+    CheckPackageGate,
     existing_outcomes_from_results,
     legacy_verdict_in_tree,
 )
@@ -34,6 +35,11 @@ from ouroboros.orchestrator.parallel_executor_models import (
     ACExecutionOutcome,
     ACExecutionResult,
     ParallelExecutionResult,
+    legacy_owned,
+    package_failure_class,
+    package_repair,
+    package_settlement_view,
+    settle_package_results,
 )
 from ouroboros.orchestrator.verifier import VerifierVerdict
 from ouroboros.persistence.event_store import EventStore
@@ -171,6 +177,11 @@ def _legacy_rejected(index: int, *, entry: dict | None = None) -> ACExecutionRes
         legacy_rejection="legacy verifier: evidence form mismatch",
         typed_evidence=EvidenceRecord(data={"entry_points": [entry]} if entry else {}),
     )
+
+
+def _settled(result: ACExecutionResult) -> ACExecutionResult:
+    """``result`` after a final settlement that found every other gate holding."""
+    return settle_package_results([result], [package_settlement_view(result)])[0]
 
 
 def _transcript_unavailable(index: int) -> ACExecutionResult:
@@ -470,19 +481,16 @@ def test_existing_outcomes_with_the_gate_treat_runtime_failures_as_unattempted()
         results=(
             _legacy_rejected(0),
             ACExecutionResult(ac_index=1, ac_content="c", success=False, error="crash"),
-            ACExecutionResult(
-                ac_index=2,
-                ac_content="c",
-                success=False,
-                error="pkg",
-                check_package_failure_class="CHECK_PACKAGE_FAIL:abc",
-            ),
+            # The package gate alone failed it; the final settlement found every other gate holding.
+            _settled(CheckPackageGate._repair(_legacy_accepted(2), "counterexample")),
+            # The package gate failed it, but no final settlement judged its other gates.
+            CheckPackageGate._repair(_legacy_accepted(3), "counterexample"),
         ),
         success_count=1,
-        failure_count=2,
+        failure_count=3,
     )
     gated = existing_outcomes_from_results(parallel, gated=True)
-    assert [gated[i].attempted for i in range(3)] == [True, False, True]
+    assert [gated[i].attempted for i in range(4)] == [True, False, True, False]
     assert gated[0].failure_class == "EVIDENCE_FORM_MISMATCH" and not gated[0].passed
 
 
@@ -528,7 +536,7 @@ async def test_the_gate_decides_each_attempt_once(
     again = await authority.gate(seed=seed, ac_index=1, result=attempt)  # a settlement path
     assert runs == [1]
     assert first.success is False and again.success is False
-    assert again.check_package_repair == first.check_package_repair
+    assert package_repair(again) == package_repair(first)
 
 
 async def test_omitting_entry_points_after_a_counterexample_does_not_withdraw_the_binding(
@@ -595,7 +603,7 @@ async def test_held_out_cases_run_only_in_the_final_verification(
     phase = "gate"
     attempt = _legacy_accepted(0)
     gated = await authority.gate(seed=seed, ac_index=0, result=attempt)
-    assert gated is attempt and gated.check_package_repair is None
+    assert gated is attempt and package_repair(gated) is None
     # Case ids are the product's: c1 is the stated case, c2 the held-out one.
     assert ("gate", "c2") not in seen and ("gate", "c1") in seen
     phase = "final"
@@ -618,7 +626,7 @@ async def test_a_repair_message_never_mentions_held_out_cases(
     (repo / "mathutils.py").write_text(FIXED + BAD_MIX)  # fails the stated and held-out cases
     attempt = _legacy_rejected(1, entry=MIX_ENTRY)
     gated = await authority.gate(seed=seed, ac_index=1, result=attempt)
-    repair = gated.check_package_repair
+    repair = package_repair(gated)
     assert "mix(start=0, end=10, weight=0.5): expected 5, observed 9.5" in repair
     assert "held" not in repair.lower() and "2.5" not in repair and "start=2" not in repair
 
@@ -633,15 +641,7 @@ async def _an_authority_error_leaves_covered_criteria_undecided_never_accepted_s
         raise OSError("disk full")
 
     monkeypatch.setattr("ouroboros.boundary.authority.verify_check_package", broken)
-    gate_only = ACExecutionResult(
-        ac_index=0,
-        ac_content="criterion 0",
-        success=False,
-        outcome=ACExecutionOutcome.FAILED,
-        error="check_package: ...",
-        check_package_repair="counterexample",
-        check_package_failure_class="CHECK_PACKAGE_FAIL:abc",
-    )
+    gate_only = _settled(CheckPackageGate._repair(_legacy_accepted(0), "counterexample"))
     parallel = ParallelExecutionResult(
         results=(gate_only, _legacy_accepted(1), _legacy_accepted(2)),
         success_count=2,
@@ -821,8 +821,8 @@ async def test_a_declared_entry_point_the_workspace_lacks_fails_through_it_with_
     wrong = {"symbol": "mathutils.blend", "arg_map": MIX_ENTRY["arg_map"]}
     gated = await authority.gate(seed=seed, ac_index=1, result=_legacy_rejected(1, entry=wrong))
     assert gated.success is False
-    assert gated.check_package_failure_class.startswith("CHECK_PACKAGE_FAIL:")
-    repair = gated.check_package_repair
+    assert str(package_failure_class(gated)).startswith("CHECK_PACKAGE_FAIL:")
+    repair = package_repair(gated)
     assert "It called your declared entry point: function mathutils.blend" in repair
     assert "blend not found" in repair
     assert "2.5" not in repair  # no oracle value
@@ -946,8 +946,8 @@ async def test_a_hostile_frame_is_a_package_fail_not_an_authority_error(
         ac_index=0, ac_content="c0", success=True, outcome=ACExecutionOutcome.SUCCEEDED
     )
     gated = await authority.gate(seed=seed, ac_index=0, result=ok)
-    assert gated.check_package_repair
-    assert "observed malformed or oversized output" in gated.check_package_repair
+    assert package_repair(gated)
+    assert "observed malformed or oversized output" in package_repair(gated)
     parallel = ParallelExecutionResult(
         results=(
             ok,
@@ -1036,7 +1036,7 @@ async def test_held_out_values_never_reach_the_boundary_store(
         ac_index=0, ac_content="c0", success=True, outcome=ACExecutionOutcome.SUCCEEDED
     )
     gated = await authority.gate(seed=seed, ac_index=0, result=ok)
-    assert gated.check_package_repair
+    assert package_repair(gated)
     parallel = ParallelExecutionResult(
         results=(
             ok,
@@ -1136,7 +1136,9 @@ async def test_a_legacy_rejection_of_a_legacy_decided_criterion_drives_the_retry
     assert authority.gate.legacy_failures == 1
     retry = prompts[1][2]
     assert "### Check package counterexample" not in retry
-    assert "LEGACY_DECIDED:EVIDENCE_FORM_MISMATCH" in retry
+    # The legacy verdict's own class, exactly as with the check package off.
+    assert "### Prior failure classification\nEVIDENCE_FORM_MISMATCH\n" in retry
+    assert "LEGACY_DECIDED" not in retry
     assert authority.gate.log == []  # no package verification ran for it
     # A settlement path handing the same attempt to the gate again is not recounted.
     again = await authority.gate(seed=seed, ac_index=2, result=_legacy_rejected(2))
@@ -1289,10 +1291,6 @@ async def test_a_terminal_call_for_another_run_never_uses_this_runs_package(
 async def test_the_gate_never_judges_another_runs_attempt(
     store: EventStore, repo: Path, tmp_path: Path, foreign: str
 ) -> None:
-    from ouroboros.orchestrator.parallel_executor_models import (
-        LEGACY_DECIDED_FAILURE_CLASS_PREFIX,
-    )
-
     seed, authority = await _authority(store, repo, tmp_path)
     (repo / "mathutils.py").write_text(FIXED + GOOD_MIX)
     authority.install(_executor(repo))
@@ -1306,9 +1304,7 @@ async def test_the_gate_never_judges_another_runs_attempt(
     # The legacy rejection the executor made advisory decides again; the
     # package ran nothing for the other run's attempt.
     assert foreign_attempt.success is False
-    assert str(foreign_attempt.check_package_failure_class).startswith(
-        LEGACY_DECIDED_FAILURE_CLASS_PREFIX
-    )
+    assert legacy_owned(foreign_attempt) and package_failure_class(foreign_attempt) is None
     assert authority.gate.log == []
 
     own_attempt = await authority.gate(
@@ -1391,3 +1387,198 @@ async def test_a_forged_report_never_makes_a_verified_pass(
     assert not first.accepted and first.governed_by.value == "check_package"
     assert decided.results[0].outcome is ACExecutionOutcome.FAILED
     assert not decided.all_succeeded
+
+
+@pytest.mark.parametrize("trap", ["file000", "dir000", "gitdir000", "fifo"])
+async def test_a_workspace_the_controller_cannot_read_never_lifts_a_package_fail(
+    store: EventStore, repo: Path, tmp_path: Path, trap: str
+) -> None:
+    """Independent review probe B1: errors the worker can trigger grant nothing."""
+    import os
+
+    if trap != "fifo" and hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("mode 000 does not stop root (the injected read error covers it)")
+    seed, authority = await _authority(store, repo, tmp_path)
+    (repo / "mathutils.py").write_text(BUGGY + GOOD_MIX)
+    authority.install(_executor(repo))
+    ok = ACExecutionResult(
+        ac_index=0, ac_content="c0", success=True, outcome=ACExecutionOutcome.SUCCEEDED
+    )
+    gated = await authority.gate(seed=seed, ac_index=0, result=ok)
+    assert gated.outcome is ACExecutionOutcome.FAILED  # the package saw the bug
+    target = {
+        "file000": repo / "notes.bin",
+        "dir000": repo / "d",
+        "gitdir000": repo / ".git" / "x",
+        "fifo": repo / "p",
+    }[trap]
+    if trap == "file000":
+        target.write_text("x")
+    elif trap == "fifo":
+        os.mkfifo(target)
+    else:
+        target.mkdir(parents=True)
+    if trap != "fifo":
+        os.chmod(target, 0)
+    try:
+        parallel = ParallelExecutionResult(
+            results=(gated, _legacy_accepted(1, entry=MIX_ENTRY), _legacy_accepted(2)),
+            success_count=2,
+            failure_count=1,
+        )
+        decided = await authority(seed=seed, execution_id="exec_oracle", parallel_result=parallel)
+    finally:
+        if trap != "fifo":
+            os.chmod(target, 0o700)
+    first = authority.outcome.reconciliation.decisions[0]
+    assert not first.accepted and decided.results[0].outcome is ACExecutionOutcome.FAILED
+    assert first.package_status is not PackageCriterionStatus.PASS
+    assert not decided.all_succeeded
+
+
+def _leaky(leak: Path) -> str:
+    """``clamp`` that records every input it gets; it stalls on any input but the stated one."""
+    return (
+        "import json, time\n"
+        "def clamp(value, low, high):\n"
+        f"    with open({str(leak)!r}, 'a') as f:\n"
+        "        f.write(json.dumps([value, low, high]) + '\\n')\n"
+        "    if (value, low, high) != (15, 0, 10):\n"
+        "        time.sleep(10)\n"
+        "    return max(low, min(high, value))\n"
+    )
+
+
+async def test_an_interrupted_terminal_verification_never_reuses_its_held_out_cases(
+    store: EventStore, repo: Path, tmp_path: Path
+) -> None:
+    """Independent review probe H1: a cancelled final verification forgets the held-out cases."""
+    import asyncio
+
+    from ouroboros.boundary.run_wiring import live_state
+
+    seed, authority = await _authority(store, repo, tmp_path)
+    leak = tmp_path / "leak.jsonl"
+    (repo / "mathutils.py").write_text(_leaky(leak) + GOOD_MIX)
+    authority.install(_executor(repo))
+    parallel = ParallelExecutionResult(
+        results=(_legacy_accepted(0), _legacy_accepted(1, entry=MIX_ENTRY), _legacy_accepted(2)),
+        success_count=3,
+        failure_count=0,
+    )
+    assert live_state("exec_oracle") is authority.state
+    task = asyncio.create_task(
+        authority(seed=seed, execution_id="exec_oracle", parallel_result=parallel)
+    )
+    for _ in range(400):
+        await asyncio.sleep(0.05)
+        if leak.exists() and len(leak.read_text().splitlines()) > 1:
+            break
+    # A held-out input reached the candidate: the final verification is running.
+    assert len(leak.read_text().splitlines()) > 1
+    task.cancel()  # for example the job is cancelled during the final verification
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert authority.outcome is None
+    # Nothing in this process can decide with the held-out cases again: the
+    # live registry (what a same-process resume reads) forgot them ...
+    assert live_state("exec_oracle") is None
+    seen = leak.read_text()
+    # ... and a second terminal call runs no check: covered criteria stay undecided.
+    decided = await authority(seed=seed, execution_id="exec_oracle", parallel_result=parallel)
+    assert leak.read_text() == seen
+    assert authority.outcome is not None
+    assert authority.outcome.error == "terminal_interrupted"
+    decisions = authority.outcome.reconciliation.decisions
+    assert [(d.package_status.value, d.accepted) for d in decisions][:2] == [
+        ("indeterminate", False),
+        ("indeterminate", False),
+    ]
+    assert not decided.all_succeeded
+
+
+async def test_a_cross_harness_alternate_attempt_is_judged_afresh(
+    store: EventStore, repo: Path, tmp_path: Path
+) -> None:
+    """Independent review probe (gate memo): an alternate attempt shares only its retry number.
+
+    The cross-harness alternate of an attempt carries the same criterion and
+    retry number; the decision of the attempt it replaces must not be
+    replayed onto it, on a legacy-decided criterion or a covered one.
+    """
+    seed, authority = await _authority(store, repo, tmp_path)
+    (repo / "mathutils.py").write_text(FIXED + GOOD_MIX)
+    authority.install(_executor(repo))
+    # Legacy-decided criterion: the legacy verifier rejects, then accepts the alternate.
+    first = await authority.gate(
+        seed=seed, ac_index=2, result=replace(_legacy_rejected(2), retry_attempt=2)
+    )
+    alternate = await authority.gate(
+        seed=seed, ac_index=2, result=replace(_legacy_accepted(2), retry_attempt=2)
+    )
+    assert first.outcome is ACExecutionOutcome.FAILED
+    assert alternate.outcome is ACExecutionOutcome.SUCCEEDED
+    assert authority.gate.legacy_failures == 1
+    # Covered criterion: a wrong declaration fails, the alternate's right one passes.
+    wrong = {"symbol": "mathutils.blend", "arg_map": MIX_ENTRY["arg_map"]}
+    failed = await authority.gate(
+        seed=seed, ac_index=1, result=replace(_legacy_rejected(1, entry=wrong), retry_attempt=1)
+    )
+    fixed = await authority.gate(
+        seed=seed,
+        ac_index=1,
+        result=replace(_legacy_rejected(1, entry=MIX_ENTRY), retry_attempt=1),
+    )
+    assert failed.success is False and package_repair(failed)
+    assert fixed.success is True and package_repair(fixed) is None
+
+
+async def test_a_seed_that_fails_to_read_after_the_run_check_cannot_escape_the_decision(
+    store: EventStore, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Independent review note: the terminal decision reads the Seed's keys only once."""
+    from ouroboros.boundary import authority as authority_module
+
+    seed, authority = await _authority(store, repo, tmp_path)
+    (repo / "mathutils.py").write_text(FIXED + GOOD_MIX)
+    authority.install(_executor(repo))
+    reads: list[int] = []
+    real = authority_module.seed_criterion_keys
+
+    def flaky(value: Any) -> tuple[str, ...]:
+        reads.append(1)
+        if len(reads) > 1:
+            raise RuntimeError("seed became unreadable")
+        return real(value)
+
+    monkeypatch.setattr(authority_module, "seed_criterion_keys", flaky)
+    parallel = ParallelExecutionResult(
+        results=(_legacy_accepted(0), _legacy_accepted(1, entry=MIX_ENTRY), _legacy_rejected(2)),
+        success_count=3,
+        failure_count=0,
+    )
+    decided = await authority(seed=seed, execution_id="exec_oracle", parallel_result=parallel)
+    assert authority.outcome is not None and authority.outcome.reconciliation is not None
+    decisions = authority.outcome.reconciliation.decisions
+    assert decisions[2].legacy_decided and not decisions[2].accepted
+    assert authority.outcome.error is None and not decided.all_succeeded
+
+
+async def test_a_legacy_blocked_verdict_on_an_uncovered_criterion_keeps_its_class(
+    store: EventStore, repo: Path, tmp_path: Path
+) -> None:
+    """Review probe (#2466): the handed-back legacy class is the legacy verdict's own."""
+    from ouroboros.orchestrator.failure_taxonomy import FailureClass
+    from ouroboros.orchestrator.retry_hints import failure_class_for_result
+
+    seed, authority = await _authority(store, repo, tmp_path)
+    authority.install(_executor(repo))
+    blocked = replace(
+        _legacy_rejected(2),
+        atomic_verifier_verdict=VerifierVerdict(
+            passed=False, reasons=("no access",), failure_class="BLOCKED"
+        ),
+    )
+    gated = await authority.gate(seed=seed, ac_index=2, result=blocked)
+    assert gated.success is False and legacy_owned(gated)
+    assert FailureClass(failure_class_for_result(gated)) is FailureClass.BLOCKED

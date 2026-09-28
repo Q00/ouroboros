@@ -11,8 +11,9 @@ the executor module focused on orchestration logic.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
+import hashlib
 from typing import TYPE_CHECKING, Any
 
 from ouroboros.orchestrator.decomposition_policy import DecompositionDecisionRecord
@@ -35,6 +36,55 @@ class ACExecutionOutcome(str, Enum):  # noqa: UP042
     FAILED = "failed"
     BLOCKED = "blocked"
     INVALID = "invalid"
+
+
+class CheckPackageOwner(str, Enum):  # noqa: UP042
+    """The authority that decided a result while the check package was installed."""
+
+    CHECK_PACKAGE = "check_package"
+    LEGACY_VERIFIER = "legacy_verifier"
+
+
+class FinalGateSettlement(str, Enum):  # noqa: UP042
+    """Whether every gate other than the check package holds on the final workspace.
+
+    Current run state only: it is never persisted, so a restored result is
+    unsettled until this run's final settlement judges it again.
+    """
+
+    HOLDS = "holds"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class CheckPackageProvenance:
+    """Who decided a result under the check package: provenance, never gate state.
+
+    ``owner`` is the deciding authority. ``repair`` is the counterexample of a
+    package gate failure (the package owns the attempt's failure and the next
+    attempt repairs against it). ``declared_binding_pass`` says that a
+    terminal package pass rests on a worker-declared binding. Neither the
+    effective failure class (``package_failure_class``) nor whether the other
+    gates still hold (``ACExecutionResult.final_gate_settlement``) is stored
+    here, and no check tier is: a tier is display only.
+    """
+
+    owner: CheckPackageOwner
+    repair: str | None = None
+    declared_binding_pass: bool = False
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.owner, CheckPackageOwner)
+            or (self.repair is not None and (not isinstance(self.repair, str) or not self.repair))
+            or type(self.declared_binding_pass) is not bool
+            or (
+                self.owner is CheckPackageOwner.LEGACY_VERIFIER
+                and (self.repair is not None or self.declared_binding_pass)
+            )
+            or (self.repair is not None and self.declared_binding_pass)
+        ):
+            raise ValueError("check package provenance is malformed")
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,11 +153,11 @@ class ACExecutionResult:
     # messages that are intentionally not persisted.
     context_summary: ACContextSummary | None = None
     conflict_files: tuple[str, ...] | None = None
-    # Check-package repair (set only when the check package is on): the
-    # counterexample text for the retry prompt, and the failure class that
-    # drives the retry kill criterion instead of the advisory legacy class.
-    check_package_repair: str | None = None
-    check_package_failure_class: str | None = None
+    # Set only when the check package is on. Who decided the result
+    # (provenance), and, for a result the package gate alone failed, whether
+    # every other gate still holds on the final workspace (current state).
+    check_package: CheckPackageProvenance | None = None
+    final_gate_settlement: FinalGateSettlement | None = None
     # The legacy verifier's rejection that the check package made advisory;
     # it decides the criteria no admitted check covers.
     legacy_rejection: str | None = None
@@ -405,8 +455,8 @@ def _legacy_rejected(result: ACExecutionResult) -> bool:
 
 
 # Check-package annotations a Routing D record keeps across resume.
-_CHECK_PACKAGE_FIELDS = ("legacy_rejection", "check_package_repair", "check_package_failure_class")
 _CHECK_PACKAGE_FIELD_CHARS = 20_000
+_PROVENANCE_KEYS = frozenset({"owner", "repair", "declared_binding_pass"})
 
 
 def check_package_record(result: ACExecutionResult) -> dict[str, object]:
@@ -414,27 +464,148 @@ def check_package_record(result: ACExecutionResult) -> dict[str, object]:
 
     A gate-passed, legacy-rejected attempt is a provisional success whose
     ``legacy_rejection`` must survive a resume; otherwise the resumed run
-    restores it as a clean success. With the check package off none of these
-    fields is set, so its records keep their earlier bytes.
+    restores it as a clean success. The provenance (``check_package``) is
+    kept; ``final_gate_settlement`` is current run state and is not, so a
+    restored result is judged again by the resumed run's final settlement.
+    With the check package off none of these fields is set, so its records
+    keep their earlier bytes.
     """
-    fields: dict[str, str] = {}
-    for name in _CHECK_PACKAGE_FIELDS:
-        value = getattr(result, name)
-        if value is None or value == "":
-            # An empty annotation carries nothing (``legacy_verdict_in_tree``
-            # reads it as no rejection); never fail a live persist on it.
-            continue
-        if not isinstance(value, str) or not value:
+    fields: dict[str, object] = {}
+    # An empty annotation carries nothing (``legacy_verdict_in_tree`` reads
+    # it as no rejection); never fail a live persist on it.
+    if result.legacy_rejection is not None and result.legacy_rejection != "":
+        if not isinstance(result.legacy_rejection, str):
             raise RuntimeError("check package annotation is malformed")
-        fields[name] = value[:_CHECK_PACKAGE_FIELD_CHARS]
+        fields["legacy_rejection"] = result.legacy_rejection[:_CHECK_PACKAGE_FIELD_CHARS]
+    provenance = result.check_package
+    if provenance is not None:
+        if not isinstance(provenance, CheckPackageProvenance):
+            raise RuntimeError("check package annotation is malformed")
+        fields["provenance"] = {
+            "owner": provenance.owner.value,
+            "repair": (
+                provenance.repair[:_CHECK_PACKAGE_FIELD_CHARS] if provenance.repair else None
+            ),
+            "declared_binding_pass": provenance.declared_binding_pass,
+        }
     return {"check_package": fields} if fields else {}
 
 
-# Failure-class prefixes the check package gate sets (``boundary/authority.py``).
+# The failure-class prefix of a package gate failure (``package_failure_class``).
 PACKAGE_FAILURE_CLASS_PREFIX = "CHECK_PACKAGE_FAIL"
-LEGACY_DECIDED_FAILURE_CLASS_PREFIX = "LEGACY_DECIDED"
 # What ``CheckPackageAuthority.install`` sets on an executor.
 _CHECK_PACKAGE_HOOKS = ("check_package_gate", "check_package_interfaces")
+
+
+def package_repair(result: ACExecutionResult) -> str | None:
+    """The package counterexample that owns ``result``'s failure, else ``None``.
+
+    Only a package gate failure owns it, and only while no other gate failed
+    the result on the final workspace (then that gate owns the failure).
+    """
+    provenance = result.check_package
+    if (
+        provenance is None
+        or provenance.owner is not CheckPackageOwner.CHECK_PACKAGE
+        or result.final_gate_settlement is FinalGateSettlement.FAILED
+    ):
+        return None
+    return provenance.repair
+
+
+def package_failure_class(result: ACExecutionResult) -> str | None:
+    """The effective failure class of a package-owned failure (drives the retry kill criterion).
+
+    Derived from the counterexample, so the same counterexample twice is the
+    same class. A legacy-owned failure has none here: its class is the legacy
+    verifier's own, read exactly as with the check package off.
+    """
+    repair = package_repair(result)
+    if repair is None:
+        return None
+    return (
+        f"{PACKAGE_FAILURE_CLASS_PREFIX}:{hashlib.sha256(repair.encode('utf-8')).hexdigest()[:12]}"
+    )
+
+
+def legacy_owned(result: ACExecutionResult) -> bool:
+    """Whether the gate handed ``result`` to the legacy verifier (no admitted check covers it)."""
+    provenance = result.check_package
+    return provenance is not None and provenance.owner is CheckPackageOwner.LEGACY_VERIFIER
+
+
+def awaits_package_decision(result: ACExecutionResult) -> bool:
+    """Whether the package gate alone failed ``result`` when its attempt ran.
+
+    The gate runs last, on an attempt every other gate passed; the final
+    settlement has not failed it since. Such a result is settled as the
+    success the other gates saw (``package_settlement_view``).
+    """
+    return (
+        not result.success
+        and result.outcome is ACExecutionOutcome.FAILED
+        and package_repair(result) is not None
+    )
+
+
+def failed_by_the_package_gate_alone(result: ACExecutionResult) -> bool:
+    """Whether only the package gate fails ``result`` now: the package may accept it again.
+
+    Requires this run's final settlement to have judged every other gate on
+    the final workspace (``FinalGateSettlement.HOLDS``); the verify outcome it
+    left must pass and need no replay. A cached pass from the attempt grants
+    nothing.
+    """
+    verify = result.verify_gate_outcome
+    return (
+        awaits_package_decision(result)
+        and result.final_gate_settlement is FinalGateSettlement.HOLDS
+        and (
+            verify is None
+            or (
+                bool(getattr(verify, "passed", False))
+                and not bool(getattr(verify, "replay_required", False))
+            )
+        )
+    )
+
+
+def package_settlement_view(result: ACExecutionResult) -> ACExecutionResult:
+    """``result`` as the other gates' settlement judges it.
+
+    A result the package gate alone failed passed every other gate, so it is
+    settled exactly as the success those gates saw; any other result as is.
+    """
+    if not awaits_package_decision(result):
+        return result
+    return replace(result, success=True, outcome=ACExecutionOutcome.SUCCEEDED)
+
+
+def settle_package_results(
+    originals: list[ACExecutionResult], settled: list[ACExecutionResult]
+) -> list[ACExecutionResult]:
+    """Fold the final settlement of ``package_settlement_view`` results back, position by position.
+
+    A result the package gate alone failed keeps its package failure, with the
+    settled verify outcome and ``HOLDS`` when every other gate still holds on
+    the final workspace; when another gate failed it there, that gate's
+    failure replaces it (``FAILED``), so no package decision can accept it.
+    """
+    folded: list[ACExecutionResult] = []
+    for original, result in zip(originals, settled, strict=True):
+        if not awaits_package_decision(original):
+            folded.append(result)
+        elif result.success:
+            folded.append(
+                replace(
+                    original,
+                    verify_gate_outcome=result.verify_gate_outcome,
+                    final_gate_settlement=FinalGateSettlement.HOLDS,
+                )
+            )
+        else:
+            folded.append(replace(result, final_gate_settlement=FinalGateSettlement.FAILED))
+    return folded
 
 
 def governing_verifier_verdict(result: ACExecutionResult) -> Any:
@@ -443,13 +614,10 @@ def governing_verifier_verdict(result: ACExecutionResult) -> Any:
     With the check package gate installed, the executor keeps a legacy
     rejection as an advisory annotation (``legacy_rejection``): its verdict
     routes nothing, unless the gate handed the criterion back to the legacy
-    verifier (a ``LEGACY_DECIDED`` failure class). Otherwise the verdict is
+    verifier (``legacy_owned``). Otherwise the verdict is
     ``atomic_verifier_verdict`` as before.
     """
-    handed_back = (result.check_package_failure_class or "").startswith(
-        LEGACY_DECIDED_FAILURE_CLASS_PREFIX
-    )
-    if result.legacy_rejection and not handed_back:
+    if result.legacy_rejection and not legacy_owned(result):
         return None
     return result.atomic_verifier_verdict
 
@@ -467,34 +635,64 @@ def inherit_check_package_hooks(parent: object, child: object) -> None:
             setattr(child, name, value)
 
 
-def restore_check_package_record(value: object) -> dict[str, str | None]:
+def restore_check_package_record(value: object) -> dict[str, object]:
     """The annotations of a ``check_package_record`` block; fail closed on anything else."""
     if (
         not isinstance(value, dict)
         or not value
-        or not set(value) <= set(_CHECK_PACKAGE_FIELDS)
-        or any(
-            not isinstance(item, str) or not item or len(item) > _CHECK_PACKAGE_FIELD_CHARS
-            for item in value.values()
-        )
+        or not set(value) <= {"legacy_rejection", "provenance"}
     ):
         raise RuntimeError("check package annotation is malformed")
-    return {name: value.get(name) for name in _CHECK_PACKAGE_FIELDS}
+    legacy = value.get("legacy_rejection")
+    raw = value.get("provenance")
+    if "legacy_rejection" in value and (
+        not isinstance(legacy, str) or not legacy or len(legacy) > _CHECK_PACKAGE_FIELD_CHARS
+    ):
+        raise RuntimeError("check package annotation is malformed")
+    provenance = None
+    if "provenance" in value:
+        repair = raw.get("repair") if isinstance(raw, dict) else None
+        if (
+            not isinstance(raw, dict)
+            or set(raw) != _PROVENANCE_KEYS
+            or raw["owner"] not in {owner.value for owner in CheckPackageOwner}
+            or (
+                repair is not None
+                and (not isinstance(repair, str) or len(repair) > _CHECK_PACKAGE_FIELD_CHARS)
+            )
+        ):
+            raise RuntimeError("check package annotation is malformed")
+        try:
+            provenance = CheckPackageProvenance(
+                CheckPackageOwner(raw["owner"]), repair, raw["declared_binding_pass"]
+            )
+        except ValueError as exc:
+            raise RuntimeError("check package annotation is malformed") from exc
+    return {"legacy_rejection": legacy, "check_package": provenance}
 
 
 __all__ = [
     "ACExecutionOutcome",
     "ACExecutionResult",
+    "CheckPackageOwner",
+    "CheckPackageProvenance",
     "CoordinatorQuotaPause",
+    "FinalGateSettlement",
     "ParallelExecutionResult",
     "ParallelExecutionStageResult",
     "StageExecutionOutcome",
-    "LEGACY_DECIDED_FAILURE_CLASS_PREFIX",
     "PACKAGE_FAILURE_CLASS_PREFIX",
+    "awaits_package_decision",
     "check_package_record",
     "checkpoint_outcome",
     "collect_decomposition_depth_warning_paths",
+    "failed_by_the_package_gate_alone",
     "governing_verifier_verdict",
     "inherit_check_package_hooks",
+    "legacy_owned",
+    "package_failure_class",
+    "package_repair",
+    "package_settlement_view",
     "restore_check_package_record",
+    "settle_package_results",
 ]

@@ -19,6 +19,7 @@ from ouroboros.boundary.acceptance import (
 from ouroboros.boundary.authority import (
     PACKAGE_REJECTION_ERROR,
     CheckPackageAuthority,
+    CheckPackageGate,
     apply_reconciliation,
     existing_outcomes_from_results,
 )
@@ -34,6 +35,8 @@ from ouroboros.orchestrator.parallel_executor_models import (
     ACExecutionOutcome,
     ACExecutionResult,
     ParallelExecutionResult,
+    package_settlement_view,
+    settle_package_results,
 )
 from ouroboros.persistence.event_store import EventStore
 
@@ -92,7 +95,12 @@ def test_existing_outcomes_mark_only_failed_results_as_rejected_attempts() -> No
 
 def _gate_failed(result: ACExecutionResult, **changes: Any) -> ACExecutionResult:
     """``result`` as the package gate leaves an attempt it failed."""
-    return replace(result, check_package_failure_class="CHECK_PACKAGE_FAIL:abc", **changes)
+    return CheckPackageGate._repair(replace(result, **changes), "counterexample")
+
+
+def _settled(result: ACExecutionResult) -> ACExecutionResult:
+    """``result`` after a final settlement that found every other gate holding."""
+    return settle_package_results([result], [package_settlement_view(result)])[0]
 
 
 def test_apply_reconciliation_flips_results_and_recomputes_counts() -> None:
@@ -101,7 +109,9 @@ def test_apply_reconciliation_flips_results_and_recomputes_counts() -> None:
         ACExecutionOutcome.SUCCEEDED,
         ACExecutionOutcome.SATISFIED_EXTERNALLY,
     )
-    legacy = replace(legacy, results=(_gate_failed(legacy.results[0]), *legacy.results[1:]))
+    legacy = replace(
+        legacy, results=(_settled(_gate_failed(legacy.results[0])), *legacy.results[1:])
+    )
     reconciliation = AcceptanceReconciliation(
         decisions=(
             _decision(0, accepted=True, existing_accepted=False),
@@ -131,9 +141,23 @@ def test_apply_reconciliation_flips_results_and_recomputes_counts() -> None:
     "failed",
     [
         _result(0, ACExecutionOutcome.FAILED),  # another gate (runtime, legacy) failed it
+        _settled(
+            _gate_failed(
+                _result(0, ACExecutionOutcome.FAILED),
+                verify_gate_outcome=SimpleNamespace(passed=False),
+            )
+        ),
+        # Only the attempt-time (cached) state: no final settlement judged it.
         _gate_failed(
             _result(0, ACExecutionOutcome.FAILED),
-            verify_gate_outcome=SimpleNamespace(passed=False),
+            verify_gate_outcome=SimpleNamespace(passed=True),
+        ),
+        # The final settlement left a verify pass that still needs its replay.
+        _settled(
+            _gate_failed(
+                _result(0, ACExecutionOutcome.FAILED),
+                verify_gate_outcome=SimpleNamespace(passed=True, replay_required=True),
+            )
         ),
     ],
 )

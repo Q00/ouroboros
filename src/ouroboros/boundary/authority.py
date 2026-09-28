@@ -14,12 +14,16 @@ While the worker runs (``CheckPackageGate``, installed as the executor's
   and failure class for telemetry), so it triggers no retry. For a criterion
   no admitted check covers (uncovered, or every check excluded at
   admission) the legacy verifier decides: its rejection fails
-  the attempt and drives the retry, as with the check package off;
+  the attempt and drives the retry with the legacy verdict's own failure
+  class, as with the check package off;
 - after each attempt of a root criterion the gate runs that criterion's
   checks on the workspace, through the default binding or the entry point
   the worker declared in its evidence; a fail marks the attempt failed with
-  the counterexample (``ACExecutionResult.check_package_repair``), which the
-  executor's retry loop carries into the next attempt. A failure through a
+  the counterexample (``CheckPackageProvenance.repair``), which the
+  executor's retry loop carries into the next attempt. The executor's final
+  settlement judges every other gate of such an attempt on the final
+  workspace; only one it finds holding may be accepted again by the
+  terminal decision (``failed_by_the_package_gate_alone``). A failure through a
   worker-declared binding names that binding. The gate runs the visible
   cases only (the base run of a declared binding too): held-out cases run
   only in the final verification, so no held-out input reaches a process the
@@ -66,7 +70,6 @@ from __future__ import annotations
 
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-import hashlib
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -102,8 +105,11 @@ from ouroboros.boundary.run_wiring import (
     verify_check_package,
 )
 from ouroboros.orchestrator.parallel_executor_models import (
-    LEGACY_DECIDED_FAILURE_CLASS_PREFIX,
     PACKAGE_FAILURE_CLASS_PREFIX,
+    CheckPackageOwner,
+    CheckPackageProvenance,
+    failed_by_the_package_gate_alone,
+    legacy_owned,
 )
 
 if TYPE_CHECKING:
@@ -234,21 +240,6 @@ def _legacy_owned(reconciliation: AcceptanceReconciliation) -> AcceptanceReconci
     return replace(reconciliation, decisions=decisions)
 
 
-def failed_by_the_package_gate_alone(result: Any) -> bool:
-    """Whether the package gate, and nothing else, failed this result.
-
-    The gate runs after every other gate of an attempt (the verify command
-    included) and only on a result that still passes, so its failure class
-    means everything else passed; the verify outcome is checked as well.
-    Only such a result may be accepted again by the package's final decision.
-    """
-    failure_class = str(getattr(result, "check_package_failure_class", None) or "")
-    verify = getattr(result, "verify_gate_outcome", None)
-    return failure_class.startswith(PACKAGE_FAILURE_CLASS_PREFIX) and (
-        verify is None or bool(getattr(verify, "passed", False))
-    )
-
-
 def existing_outcomes_from_results(
     parallel_result: Any, *, gated: bool = False
 ) -> dict[int, ExistingOutcome]:
@@ -259,10 +250,11 @@ def existing_outcomes_from_results(
     ``failure_class`` its class. With the gate installed (``gated``), an
     attempt counts as made when the executor result succeeded, failed only
     because the package gate failed it (``failed_by_the_package_gate_alone``),
-    or was a legacy-decided rejection; a runtime failure, a blocked or
-    invalid criterion, or a failed ``verify_command`` is not an attempt the
-    package may accept. Without the gate, a failed result is a legacy
-    rejection of an attempt.
+    or was a legacy-decided rejection (``legacy_owned``); a runtime failure, a
+    blocked or invalid criterion, a failed ``verify_command``, or a package
+    gate failure whose other gates the final settlement did not find holding
+    is not an attempt the package may accept. Without the gate, a failed
+    result is a legacy rejection of an attempt.
     """
     outcomes: dict[int, ExistingOutcome] = {}
     for result in getattr(parallel_result, "results", ()) or ():
@@ -280,9 +272,7 @@ def existing_outcomes_from_results(
             judged = (
                 bool(getattr(result, "success", False))
                 or failed_by_the_package_gate_alone(result)
-                or str(getattr(result, "check_package_failure_class", None) or "").startswith(
-                    LEGACY_DECIDED_FAILURE_CLASS_PREFIX
-                )
+                or legacy_owned(result)
             )
         else:
             judged = base in _ACCEPTED_OUTCOMES or base == "failed"
@@ -310,8 +300,10 @@ def existing_outcomes_from_results(
 def apply_reconciliation(parallel_result: Any, reconciliation: AcceptanceReconciliation) -> Any:
     """Return ``parallel_result`` with every root result set to its decision.
 
-    A failed result becomes a success only when the package gate alone failed
-    it (``failed_by_the_package_gate_alone``): never one another gate failed.
+    A failed result becomes a success only when the package gate alone fails
+    it on the settled final workspace (``failed_by_the_package_gate_alone``):
+    never one another gate failed, and never on a cached pass. Every result
+    it changes records the deciding authority (``CheckPackageProvenance``).
     """
     from ouroboros.orchestrator.parallel_executor_models import ACExecutionOutcome
 
@@ -330,8 +322,18 @@ def apply_reconciliation(parallel_result: Any, reconciliation: AcceptanceReconci
             and previous is ACExecutionOutcome.FAILED
             and failed_by_the_package_gate_alone(result)
         ):
+            provenance = CheckPackageProvenance(
+                CheckPackageOwner.CHECK_PACKAGE,
+                declared_binding_pass=decision.declared_binding_pass,
+            )
             results.append(
-                replace(result, success=True, outcome=ACExecutionOutcome.SUCCEEDED, error=None)
+                replace(
+                    result,
+                    success=True,
+                    outcome=ACExecutionOutcome.SUCCEEDED,
+                    error=None,
+                    check_package=provenance,
+                )
             )
             success_delta += 1
             failure_delta -= 1
@@ -346,8 +348,19 @@ def apply_reconciliation(parallel_result: Any, reconciliation: AcceptanceReconci
                 error = PACKAGE_REJECTION_ERROR
             else:
                 error = f"{PACKAGE_INDETERMINATE_ERROR} ({decision.reason})"
+            owner = (
+                CheckPackageOwner.LEGACY_VERIFIER
+                if decision.legacy_decided
+                else CheckPackageOwner.CHECK_PACKAGE
+            )
             results.append(
-                replace(result, success=False, outcome=ACExecutionOutcome.FAILED, error=error)
+                replace(
+                    result,
+                    success=False,
+                    outcome=ACExecutionOutcome.FAILED,
+                    error=error,
+                    check_package=CheckPackageProvenance(owner),
+                )
             )
             failure_delta += 1
             if previous is ACExecutionOutcome.SUCCEEDED:
@@ -385,7 +398,9 @@ class CheckPackageGate:
         self.legacy_failures = 0
         # One decision per attempt: settlement paths hand the same attempt to
         # the gate again; they get the stored decision, not a new verification.
-        self._decided: dict[tuple[int, int], dict[str, Any] | None] = {}
+        # An attempt is the whole result handed over (a cross-harness alternate
+        # shares its criterion and retry number, not its session or verdict).
+        self._decided: dict[tuple[int, int], list[tuple[Any, Any]]] = {}
 
     async def __call__(
         self,
@@ -403,30 +418,19 @@ class CheckPackageGate:
             log.warning("boundary.gate.foreign_run", ac_index=ac_index, mismatch=mismatch)
             return self._legacy_decides(result) if getattr(result, "success", False) else result
         attempt = (ac_index, int(getattr(result, "retry_attempt", 0) or 0))
-        if attempt in self._decided:
-            stored = self._decided[attempt]
-            return result if stored is None or not result.success else replace(result, **stored)
+        for seen, stored in self._decided.get(attempt, ()):
+            if seen == result:
+                return stored
         try:
             decided = await self._decide(ac_index, result)
-            if decided is result:
-                self._decided[attempt] = None
-            elif getattr(decided, "check_package_repair", None) or str(
-                getattr(decided, "check_package_failure_class", None) or ""
-            ).startswith(LEGACY_DECIDED_FAILURE_CLASS_PREFIX):
-                if not getattr(decided, "check_package_repair", None):
-                    # A legacy-decided rejection, counted once per attempt.
-                    self.legacy_failures += 1
-                self._decided[attempt] = {
-                    "success": False,
-                    "outcome": decided.outcome,
-                    "error": decided.error,
-                    "check_package_repair": decided.check_package_repair,
-                    "check_package_failure_class": decided.check_package_failure_class,
-                }
-            return decided
         except Exception as exc:  # noqa: BLE001 - the gate must never fail an attempt by itself
             log.warning("boundary.gate.failed", ac_index=ac_index, error_type=type(exc).__name__)
             return result
+        self._decided.setdefault(attempt, []).append((result, decided))
+        if decided is not result and legacy_owned(decided):
+            # A legacy-decided rejection, counted once per attempt.
+            self.legacy_failures += 1
+        return decided
 
     async def _decide(self, ac_index: int, result: Any) -> Any:
         authority = self._authority
@@ -528,33 +532,34 @@ class CheckPackageGate:
 
     @staticmethod
     def _legacy_decides(result: Any) -> Any:
+        """The legacy verifier's rejection fails the attempt, as with the check package off.
+
+        Only the provenance says the legacy verifier owns it: the failure class
+        stays the legacy verdict's own, so retries and routing see exactly the
+        legacy class (``BLOCKED`` stays ``BLOCKED``).
+        """
         from ouroboros.orchestrator.parallel_executor_models import ACExecutionOutcome
 
-        rejected, failure_class, _text = legacy_verdict_in_tree(result)
-        if not rejected:
+        if not legacy_verdict_in_tree(result)[0]:
             return result
         return replace(
             result,
             success=False,
             outcome=ACExecutionOutcome.FAILED,
             error=legacy_decided_error(result, "no admitted check"),
-            check_package_failure_class=(
-                f"{LEGACY_DECIDED_FAILURE_CLASS_PREFIX}:{failure_class or 'rejected'}"
-            ),
+            check_package=CheckPackageProvenance(CheckPackageOwner.LEGACY_VERIFIER),
         )
 
     @staticmethod
     def _repair(result: Any, message: str) -> Any:
         from ouroboros.orchestrator.parallel_executor_models import ACExecutionOutcome
 
-        digest = hashlib.sha256(message.encode("utf-8")).hexdigest()[:12]
         return replace(
             result,
             success=False,
             outcome=ACExecutionOutcome.FAILED,
             error=PACKAGE_REJECTION_ERROR,
-            check_package_repair=message,
-            check_package_failure_class=f"{PACKAGE_FAILURE_CLASS_PREFIX}:{digest}",
+            check_package=CheckPackageProvenance(CheckPackageOwner.CHECK_PACKAGE, repair=message),
         )
 
 
@@ -627,6 +632,8 @@ class CheckPackageAuthority:
         # once for a declaration, or not asked because no retry was left.
         self.binding_requested: set[str] = set()
         self.binding_budget_exhausted: set[str] = set()
+        # Set once the terminal verification starts (held-out cases may run).
+        self._terminal_started = False
 
     def repair_follows(self, retry_attempt: int) -> bool:
         """Whether a repair attempt follows ``retry_attempt`` (unknown budget: yes)."""
@@ -738,12 +745,17 @@ class CheckPackageAuthority:
         mismatch = self.run_mismatch(seed, execution_id)
         if mismatch is not None:
             return self._refuse_foreign_run(seed, execution_id, parallel_result, mismatch)
+        if self._terminal_started:
+            # An earlier terminal verification was interrupted after its
+            # held-out cases may have reached the candidate: they decide nothing again.
+            return await self._undecided(self._run[2], parallel_result, "terminal_interrupted")
+        self._terminal_started = True
         try:
-            return await self._decide_run(seed, execution_id, parallel_result)
+            return await self._decide_run(execution_id, parallel_result)
         finally:
-            if self.outcome is not None:
-                # After the verdict nothing re-derives the held-out cases.
-                forget_live_state(self._state)
+            # Once the terminal verification starts, decided or interrupted
+            # (cancelled included), nothing in this process re-derives the held-out cases.
+            forget_live_state(self._state)
 
     def _refuse_foreign_run(
         self, seed: Seed, execution_id: str, parallel_result: Any, mismatch: str
@@ -781,8 +793,10 @@ class CheckPackageAuthority:
             if self.admitted_check_ids(key) and key not in self.legacy_decided_keys()
         )
 
-    async def _decide_run(self, seed: Seed, execution_id: str, parallel_result: Any) -> Any:
-        keys = seed_criterion_keys(seed)
+    async def _decide_run(self, execution_id: str, parallel_result: Any) -> Any:
+        # ``run_mismatch`` proved the Seed's criterion keys are this run's: the
+        # Seed is not read again, so nothing here can raise outside the fail-closed path.
+        keys = self._run[2]
         try:
             legacy = existing_outcomes_from_results(parallel_result, gated=self.installed)
             declared: Mapping[str, list[Any]] = {}
