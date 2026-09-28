@@ -889,6 +889,32 @@ async def test_a_resume_for_another_run_runs_nothing_and_records_nothing(
     assert len(await _resumed_records(store)) == 1
 
 
+async def test_a_frozen_manifest_with_the_criteria_in_another_order_runs_nothing(
+    store: EventStore,
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    check_calls: list[str],
+) -> None:
+    """The same Seed (same digest), but the journal names its criteria in another order."""
+    seed, state = await _run_until_the_worker_stops(store, repo, tmp_path, monkeypatch)
+    (repo / "mathutils.py").write_text(CLAMP_FIXED + DOUBLE)
+    journal = await _copy_journal(
+        store,
+        _edit(PACKAGE_FROZEN, lambda d: d["manifest"]["criterion_keys"].reverse()),
+    )
+    authority = await _resume(journal, repo)
+    assert authority.boundary.criterion_keys == tuple(reversed(seed_criterion_keys(seed)))
+    decided = await authority(seed=seed, execution_id=EXECUTION, parallel_result=_restored())
+    assert check_calls == [] and await _resumed_records(journal) == []
+    assert authority.outcome is None
+    # Not the run's criteria: every criterion counts as covered and stays undecided.
+    assert [result.outcome for result in decided.results] == [ACExecutionOutcome.FAILED] * 3
+    assert all("run_mismatch:criterion_keys" in (result.error or "") for result in decided.results)
+    forget_live_state(state)
+    await journal.close()
+
+
 async def test_an_undecidable_resume_for_another_execution_records_nothing(
     store: EventStore,
     repo: Path,
