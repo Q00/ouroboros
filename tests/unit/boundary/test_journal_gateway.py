@@ -56,6 +56,7 @@ from .journal_fixtures import (
     decision_data,
     expected_execution,
     final_bindings,
+    seed_for,
     verification_receipt,
 )
 
@@ -258,7 +259,7 @@ async def test_a_run_level_resume_is_refused_while_the_boundary_is_usable(
     try:
         ledger = BoundaryLedger(store)
         await ledger.record_check_package_enabled(RUN, CONTRACT)
-        await ledger.record_package_frozen(VERSION, package)
+        await ledger.record_package_frozen(VERSION, package, seed=seed_for(package))
         await ledger.record_admission(VERSION, admission_receipt(package, base_checkout))
         await ledger.record_actor_started(RUN, [VERSION])
         data = _undecided_resume(package.criterion_keys)
@@ -340,7 +341,7 @@ async def test_a_duplicate_boundary_in_one_start_batch_is_refused_before_append(
     store, package, base_checkout
 ) -> None:
     ledger = BoundaryLedger(store)
-    await ledger.record_package_frozen("b", package)
+    await ledger.record_package_frozen("b", package, seed=seed_for(package))
     await ledger.record_admission("b", admission_receipt(package, base_checkout))
     with pytest.raises(BoundaryOrderError, match="already started"):
         await ledger.record_actor_started("a", ["b", "b"])

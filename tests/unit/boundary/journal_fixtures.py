@@ -15,7 +15,7 @@ from ouroboros.boundary.events import (
     coverage_of,
 )
 from ouroboros.boundary.oracle import CaseResult, OracleResult
-from ouroboros.boundary.package import CheckPackage, CheckRole, CheckSpec
+from ouroboros.boundary.package import CheckPackage, CheckRole, CheckSpec, seed_digest
 from ouroboros.boundary.receipts import (
     AdmissionResult,
     CandidateVerdict,
@@ -25,6 +25,7 @@ from ouroboros.boundary.receipts import (
     PackageVerdict,
 )
 from ouroboros.boundary.tree import tree_digest
+from ouroboros.core.seed import Seed
 
 PIN = "d" * 64
 """A stand-in interpreter digest (binary and real path) for receipts built as data."""
@@ -259,3 +260,14 @@ def decision_data(criteria: list[dict[str, Any]], **extra: Any) -> dict[str, Any
         ),
         **extra,
     }
+
+
+def seed_for(package: CheckPackage) -> Seed:
+    """The test Seed ``package`` was built for (the freeze gateway validates against it)."""
+    from .conftest import make_seed
+    from .test_package_identity import _seed
+
+    for seed in (make_seed(), _seed()):
+        if seed_digest(seed) == package.seed_digest:
+            return seed
+    raise AssertionError("no test Seed for this package")

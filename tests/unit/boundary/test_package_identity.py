@@ -10,6 +10,7 @@ held-out case to its id.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from itertools import product
 import json
 from pathlib import Path
@@ -53,7 +54,11 @@ def _seed() -> Seed:
         goal="clamp helper",
         acceptance_criteria=("clamp(15, 0, 10) returns 10",),
         ontology_schema=OntologySchema(name="mathutils", description="math helpers"),
-        metadata=SeedMetadata(seed_id="seed_identity", ambiguity_score=0.1),
+        metadata=SeedMetadata(
+            seed_id="seed_identity",
+            ambiguity_score=0.1,
+            created_at=datetime(2026, 9, 25, tzinfo=UTC),
+        ),
     )
 
 

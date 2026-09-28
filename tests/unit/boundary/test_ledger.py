@@ -56,6 +56,7 @@ from .journal_fixtures import (
     criterion,
     decision_data,
     final_bindings,
+    seed_for,
     verification_receipt,
 )
 from .test_package_identity import held_out_package
@@ -108,7 +109,7 @@ async def test_actor_cannot_start_before_seal_or_admission(store, package) -> No
     ledger = BoundaryLedger(store)
     with pytest.raises(BoundaryOrderError, match="sealed"):
         await ledger.record_actor_started("actor-1", ["task-1/V1"])
-    await ledger.record_package_frozen("task-1/V1", package)
+    await ledger.record_package_frozen("task-1/V1", package, seed=seed_for(package))
     with pytest.raises(BoundaryOrderError, match="admission"):
         await ledger.record_actor_started("actor-1", ["task-1/V1"])
     assert all(e.type != ACTOR_STARTED for e in await ledger.events("task-1/V1"))
@@ -116,7 +117,7 @@ async def test_actor_cannot_start_before_seal_or_admission(store, package) -> No
 
 async def test_actor_waits_for_every_bound_boundary(store, package, admission) -> None:
     ledger = BoundaryLedger(store)
-    await ledger.record_package_frozen("task-1/V0", package)
+    await ledger.record_package_frozen("task-1/V0", package, seed=seed_for(package))
     await ledger.record_admission("task-1/V0", admission)
     with pytest.raises(BoundaryOrderError):
         await ledger.record_actor_started("actor-1", ["task-1/V0", "task-1/V1"])
@@ -129,10 +130,10 @@ async def test_actor_waits_for_every_bound_boundary(store, package, admission) -
 
 async def test_package_cannot_be_regenerated_after_seal(store, seed, package) -> None:
     ledger = BoundaryLedger(store)
-    await ledger.record_package_frozen("task-1/V1", package)
+    await ledger.record_package_frozen("task-1/V1", package, seed=seed_for(package))
     regenerated = seal_package(build_package(seed, repro_script=REPRO_SCRIPT + "# retry\n"))
     with pytest.raises(BoundaryOrderError, match="regenerated"):
-        await ledger.record_package_frozen("task-1/V1", regenerated)
+        await ledger.record_package_frozen("task-1/V1", regenerated, seed=seed_for(regenerated))
 
 
 async def test_admission_must_cite_frozen_digest_and_is_single(
@@ -140,11 +141,11 @@ async def test_admission_must_cite_frozen_digest_and_is_single(
 ) -> None:
     ledger = BoundaryLedger(store)
     other = seal_package(build_package(seed, repro_script=REPRO_SCRIPT + "# other\n"))
-    await ledger.record_package_frozen("task-1/V1", other)
+    await ledger.record_package_frozen("task-1/V1", other, seed=seed_for(other))
     with pytest.raises(BoundaryOrderError, match="different package"):
         await ledger.record_admission("task-1/V1", admission)
 
-    await ledger.record_package_frozen("task-2/V1", package)
+    await ledger.record_package_frozen("task-2/V1", package, seed=seed_for(package))
     await ledger.record_admission("task-2/V1", admission)
     with pytest.raises(BoundaryOrderError, match="already recorded"):
         await ledger.record_admission("task-2/V1", admission)
@@ -154,7 +155,7 @@ async def test_workspace_with_generated_check_code_is_refused(
     store, tmp_path: Path, package, admission
 ) -> None:
     ledger = BoundaryLedger(store)
-    await ledger.record_package_frozen("task-1/V1", package)
+    await ledger.record_package_frozen("task-1/V1", package, seed=seed_for(package))
     await ledger.record_admission("task-1/V1", admission)
     workspace = tmp_path / "worker"
     workspace.mkdir()
@@ -169,7 +170,7 @@ async def test_candidate_verification_cites_the_frozen_package(
     store, tmp_path: Path, base_checkout, package, admission
 ) -> None:
     ledger = BoundaryLedger(store)
-    await ledger.record_package_frozen("task-1/V1", package)
+    await ledger.record_package_frozen("task-1/V1", package, seed=seed_for(package))
     await ledger.record_admission("task-1/V1", admission)
     await ledger.record_actor_started("actor-1", ["task-1/V1"])
     await ledger.record_bindings(
@@ -229,7 +230,7 @@ def test_a_payload_cannot_name_another_package_or_carry_undefined_fields(package
 
 async def test_an_admission_receipt_for_another_seed_is_refused(store, package, admission) -> None:
     ledger = BoundaryLedger(store)
-    await ledger.record_package_frozen("task-1/V1", package)
+    await ledger.record_package_frozen("task-1/V1", package, seed=seed_for(package))
     foreign = admission.model_copy(update={"seed_digest": "f" * 64})
     with pytest.raises(BoundaryOrderError, match="different Seed"):
         await ledger.record_admission("task-1/V1", foreign)
@@ -245,10 +246,10 @@ async def test_a_superseded_version_accepts_no_actor_start(
     ledger = BoundaryLedger(store)
     await ledger.record_check_package_enabled("exec_s", CONTRACT)
     v1, v2 = boundary_version_id("exec_s", 1), boundary_version_id("exec_s", 2)
-    await ledger.record_package_frozen(v1, package)
+    await ledger.record_package_frozen(v1, package, seed=seed_for(package))
     await ledger.record_admission(v1, admission)
     successor = seal_package(build_package(seed, repro_script=REPRO_SCRIPT + "# v2\n"))
-    await ledger.record_package_frozen(v2, successor)
+    await ledger.record_package_frozen(v2, successor, seed=seed_for(successor))
     await ledger.record_admission(v2, admission_receipt(successor, base_checkout))
     await ledger.record_superseded(v1, superseded_by=v2, reason="replacement_checks")
     with pytest.raises(BoundaryOrderError, match="superseded"):
@@ -303,7 +304,7 @@ async def test_the_enabled_record_comes_before_every_version_of_the_run(store, p
     ledger = BoundaryLedger(store)
     v1 = boundary_version_id("exec_e", 1)
     with pytest.raises(BoundaryOrderError, match="enabled record"):
-        await ledger.record_package_frozen(v1, package)
+        await ledger.record_package_frozen(v1, package, seed=seed_for(package))
     # A version that reached the journal first (written around the ledger)
     # keeps the enabled record out, and replay against the run flags it.
     await store.append(package_frozen_event(v1, package))
@@ -313,7 +314,7 @@ async def test_the_enabled_record_comes_before_every_version_of_the_run(store, p
         await ledger.events(v1), run_events=await ledger.events("exec_e")
     )
     # A standalone boundary (not a version of a run) needs no enabled record.
-    await ledger.record_package_frozen("task-9/V1", package)
+    await ledger.record_package_frozen("task-9/V1", package, seed=seed_for(package))
 
 
 async def test_the_enabled_record_sees_every_version_not_only_the_first(store, package) -> None:
@@ -379,7 +380,7 @@ async def test_a_candidate_verification_for_another_seed_is_refused(
     store, base_checkout, package, admission
 ) -> None:
     ledger = BoundaryLedger(store)
-    await ledger.record_package_frozen("task-1/V1", package)
+    await ledger.record_package_frozen("task-1/V1", package, seed=seed_for(package))
     await ledger.record_admission("task-1/V1", admission)
     await ledger.record_actor_started("actor-1", ["task-1/V1"])
     await ledger.record_bindings(
@@ -446,7 +447,7 @@ def _decision(*statuses: str, undecided: str | None = None) -> ReconciliationPay
 
 async def _started(store, package, admission) -> BoundaryLedger:
     ledger = BoundaryLedger(store)
-    await ledger.record_package_frozen("task-1/V1", package)
+    await ledger.record_package_frozen("task-1/V1", package, seed=seed_for(package))
     await ledger.record_admission("task-1/V1", admission)
     await ledger.record_actor_started("actor-1", ["task-1/V1"])
     return ledger

@@ -57,6 +57,7 @@ from .journal_fixtures import (
     candidate_execution,
     expected_execution,
     oracle_result,
+    seed_for,
     verification_receipt,
 )
 from .test_package_identity import held_out_package
@@ -147,7 +148,7 @@ def _script_bindings(package: CheckPackage, phase: str = "final") -> BindingsPay
 
 async def _started(store: EventStore, package: CheckPackage, checkout: Path) -> BoundaryLedger:
     ledger = BoundaryLedger(store)
-    await ledger.record_package_frozen(B, package)
+    await ledger.record_package_frozen(B, package, seed=seed_for(package))
     await ledger.record_admission(B, admission_receipt(package, checkout))
     await ledger.record_actor_started("actor-1", [B])
     return ledger
@@ -283,7 +284,7 @@ async def test_an_admitted_record_without_its_interpreter_pins_is_refused(
     store, package, base_checkout
 ) -> None:
     ledger = BoundaryLedger(store)
-    await ledger.record_package_frozen(B, package)
+    await ledger.record_package_frozen(B, package, seed=seed_for(package))
     unpinned = admission_receipt(package, base_checkout).model_copy(
         update={"interpreter_sha256": None, "interpreter_realpath_sha256": None}
     )
@@ -386,7 +387,7 @@ async def _oracle_verified(
         )
         admission = admission.model_copy(update={"checks": (admitted,)})
     ledger = BoundaryLedger(store)
-    await ledger.record_package_frozen(B, package)
+    await ledger.record_package_frozen(B, package, seed=seed_for(package))
     await ledger.record_admission(B, admission)
     await ledger.record_actor_started("actor-1", [B])
     spec = package.oracle_for("oracle_1")
@@ -533,7 +534,7 @@ async def _bound_run(store: EventStore, package: CheckPackage, checkout: Path, r
     ledger = BoundaryLedger(store)
     await ledger.record_check_package_enabled(run, CONTRACT)
     v1 = boundary_version_id(run, 1)
-    await ledger.record_package_frozen(v1, package)
+    await ledger.record_package_frozen(v1, package, seed=seed_for(package))
     await ledger.record_admission(v1, admission_receipt(package, checkout))
     await ledger.record_actor_started(run, [v1])
     return ledger
@@ -594,9 +595,9 @@ async def test_only_a_superseded_predecessor_may_stand_before_the_bound_version(
     await ledger.record_check_package_enabled(run, CONTRACT)
     v1, v2 = boundary_version_id(run, 1), boundary_version_id(run, 2)
     successor = seal_package(build_package(seed, repro_script=REPRO_SCRIPT + "# v2\n"))
-    await ledger.record_package_frozen(v1, package)
+    await ledger.record_package_frozen(v1, package, seed=seed_for(package))
     await ledger.record_admission(v1, admission_receipt(package, base_checkout))
-    await ledger.record_package_frozen(v2, successor)
+    await ledger.record_package_frozen(v2, successor, seed=seed_for(successor))
     await ledger.record_admission(v2, admission_receipt(successor, base_checkout))
     await ledger.record_actor_started(run, [v2])
     # v1 was never superseded: not a history the product writes.
@@ -615,8 +616,8 @@ async def test_a_supersession_naming_another_successor_package_is_undecidable(
     await ledger.record_check_package_enabled(run, CONTRACT)
     v1, v2 = boundary_version_id(run, 1), boundary_version_id(run, 2)
     successor = seal_package(build_package(seed, repro_script=REPRO_SCRIPT + "# v2\n"))
-    await ledger.record_package_frozen(v1, package)
-    await ledger.record_package_frozen(v2, successor)
+    await ledger.record_package_frozen(v1, package, seed=seed_for(package))
+    await ledger.record_package_frozen(v2, successor, seed=seed_for(successor))
     await ledger.record_admission(v2, admission_receipt(successor, base_checkout))
     await store.append(
         superseded_event(
@@ -644,7 +645,7 @@ async def test_an_a_prime_binding_without_its_valid_declaration_is_refused(
         update={"check_tiers": {"oracle_1": CheckTier.U}}
     )
     ledger = BoundaryLedger(store)
-    await ledger.record_package_frozen(B, package)
+    await ledger.record_package_frozen(B, package, seed=seed_for(package))
     await ledger.record_admission(B, admission)
     await ledger.record_actor_started("actor-1", [B])
     binding = {"criterion_key": key, "symbol": "mathutils.clamp", "call_kind": "function"}
@@ -693,7 +694,7 @@ async def test_a_reference_check_is_expressed_against_the_frozen_package(store) 
     package = seal_package(held_out_package())
     (key,) = package.criterion_keys
     ledger = BoundaryLedger(store)
-    await ledger.record_package_frozen(B, package)
+    await ledger.record_package_frozen(B, package, seed=seed_for(package))
     kept = {"check_id": "oracle_1", "excluded_count": 1, "reason": "oracle_inconsistent"}
     for shape in (
         # Pre-rebuild case ids name nothing in the frozen package.
@@ -720,7 +721,7 @@ async def test_a_reference_check_excluding_cases_of_a_script_check_is_refused(
     store, package
 ) -> None:
     ledger = BoundaryLedger(store)
-    await ledger.record_package_frozen(B, package)
+    await ledger.record_package_frozen(B, package, seed=seed_for(package))
     script = {
         "check_id": package.checks[0].check_id,
         "excluded_count": 1,
@@ -948,12 +949,14 @@ def test_the_base_failing_rule_reads_the_receipt_and_its_journal_form_alike(
 
 
 def _run_on(package: CheckPackage, checkout: Path, run: Any, before: str, after: str) -> Any:
+    """A verification receipt as the product writes it: its mutation flag from its evidence."""
     receipt = verification_receipt(package, checkout)
     return receipt.model_copy(
         update={
             "checks": (run,),
             "artifact_tree_digest": before,
             "artifact_tree_digest_after": after,
+            "protected_bytes_mutated": before != after or bool(run.mutated_paths),
         }
     )
 
@@ -980,7 +983,13 @@ async def test_a_pass_on_a_candidate_tree_that_changed_under_verification_is_ref
 ) -> None:
     ledger, package = await _oracle_verified(store, base_checkout, held_out_passed=None)
     run = _oracle_run(package, _PASSING)
-    await ledger.record_candidate_verification(B, _run_on(package, base_checkout, run, X, Y))
+    changed = _run_on(package, base_checkout, run, X, Y)
+    # The round 3 probe: the tree changed but the receipt flags no mutation.
+    with pytest.raises(BoundaryOrderError, match="mutation evidence"):
+        await ledger.record_candidate_verification(
+            B, changed.model_copy(update={"protected_bytes_mutated": False})
+        )
+    await ledger.record_candidate_verification(B, changed)
     await _pass_refused(ledger, package)
 
 
@@ -1031,8 +1040,19 @@ async def test_a_rerun_pass_on_the_same_unchanged_candidate_is_recorded(
 
 async def test_a_pass_whose_check_changed_protected_bytes_is_refused(store, base_checkout) -> None:
     ledger, package = await _oracle_verified(store, base_checkout, held_out_passed=None)
-    run = _oracle_run(package, _PASSING).model_copy(update={"protected_digest_after": "9" * 64})
-    await ledger.record_candidate_verification(B, _run_on(package, base_checkout, run, X, X))
+    changed = {"protected_digest_after": "9" * 64}
+    silent = _oracle_run(package, _PASSING).model_copy(update=changed)
+    # A changed protected digest with no changed path: contradictory evidence.
+    with pytest.raises(BoundaryOrderError, match="mutation evidence"):
+        await ledger.record_candidate_verification(B, _run_on(package, base_checkout, silent, X, X))
+    mutated = silent.model_copy(
+        update={
+            "mutated_paths": ("calc.py",),
+            "status": CheckStatus.INDETERMINATE,
+            "reason": "protected_bytes_mutated",
+        }
+    )
+    await ledger.record_candidate_verification(B, _run_on(package, base_checkout, mutated, X, X))
     await _pass_refused(ledger, package)
 
 
@@ -1134,7 +1154,7 @@ async def test_an_admission_whose_oracle_result_contradicts_its_status_is_refuse
         }
     )
     ledger = BoundaryLedger(store)
-    await ledger.record_package_frozen(B, package)
+    await ledger.record_package_frozen(B, package, seed=seed_for(package))
     with pytest.raises(BoundaryOrderError, match="recorded run|harness"):
         await ledger.record_admission(B, admission.model_copy(update={"checks": (every,)}))
     await ledger.record_admission(B, admission)
@@ -1272,3 +1292,52 @@ async def test_a_script_status_other_than_its_exit_code_shows_is_refused(
             B, receipt.model_copy(update={"checks": (flipped,)})
         )
     await ledger.record_candidate_verification(B, receipt.model_copy(update={"checks": (run,)}))
+
+
+# --------------------------------------------------------------------------
+# One mutation rule for admission and verification; the freeze needs its Seed.
+
+
+async def test_an_admission_whose_check_changed_protected_bytes_is_not_admitted(
+    store, package, base_checkout
+) -> None:
+    # The round 1 (#2476) probe: one check's protected digest changed, the
+    # receipt still admitted. Silent evidence is contradictory; stated
+    # evidence makes the check indeterminate and the receipt mutated.
+    ledger = BoundaryLedger(store)
+    await ledger.record_package_frozen(B, package, seed=seed_for(package))
+    admission = admission_receipt(package, base_checkout)
+    changed = admission.checks[0].model_copy(update={"protected_digest_after": "9" * 64})
+    silent = admission.model_copy(update={"checks": (changed, *admission.checks[1:])})
+    with pytest.raises(BoundaryOrderError, match="mutation evidence"):
+        await ledger.record_admission(B, silent)
+    stated = changed.model_copy(
+        update={
+            "mutated_paths": ("calc.py",),
+            "status": CheckStatus.INDETERMINATE,
+            "reason": "protected_bytes_mutated",
+        }
+    )
+    mutated = admission.model_copy(
+        update={"checks": (stated, *admission.checks[1:]), "protected_bytes_mutated": True}
+    )
+    with pytest.raises(BoundaryOrderError):
+        await ledger.record_admission(B, mutated)
+    events = await ledger.events(B)
+    assert [event.type for event in events] == ["boundary.check_package.frozen"]
+    await store.append(admission_completed_event(B, silent))
+    assert verify_boundary_order(await ledger.events(B)) != ()
+
+
+async def test_a_package_is_frozen_only_for_the_seed_it_was_built_for(store, package, seed) -> None:
+    from ouroboros.boundary.package import CheckPackageError
+
+    from .test_package_identity import _seed
+
+    ledger = BoundaryLedger(store)
+    with pytest.raises(CheckPackageError):
+        await ledger.record_package_frozen(B, package, seed=_seed())
+    with pytest.raises(TypeError):
+        await ledger.record_package_frozen(B, package)  # type: ignore[call-arg]
+    assert await ledger.events(B) == []
+    await ledger.record_package_frozen(B, package, seed=seed)

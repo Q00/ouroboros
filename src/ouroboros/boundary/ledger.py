@@ -565,7 +565,13 @@ def _reference_checked(
 
 def _admission(state: VersionState, event: BaseEvent, record: AdmissionRecord) -> VersionState:
     time = _utc(event.timestamp)
-    _require_observed_results(state, record.checks, bindings=None, on_base=True)
+    _require_observed_results(
+        state,
+        record,
+        tree=(record.base_tree_digest, record.base_tree_digest_after),
+        bindings=None,
+        on_base=True,
+    )
     if record.verdict != "admitted":
         # Recorded, but not an admission: the version can only be superseded.
         return replace(state, phase=Phase.REJECTED, gate_time=time)
@@ -749,7 +755,13 @@ def _require_bound_run(state: VersionState, record: VerificationRecord) -> None:
         )
     ):
         raise BoundaryOrderError("a verification runs a check other than the bound runnable ones")
-    _require_observed_results(state, record.checks, bindings=record.bindings, on_base=False)
+    _require_observed_results(
+        state,
+        record,
+        tree=(record.artifact_tree_digest, record.artifact_tree_digest_after),
+        bindings=record.bindings,
+        on_base=False,
+    )
     if not state.verifications:
         return
     first = state.verifications[0]
@@ -829,12 +841,20 @@ def _classified(
 
 def _require_observed_results(
     state: VersionState,
-    checks: Sequence[JournalCheckExecution],
+    record: AdmissionRecord | VerificationRecord,
     *,
+    tree: tuple[str, str],
     bindings: Mapping[str, Any] | None,
     on_base: bool,
 ) -> None:
     """Every check's status is the one the product computes from what the run recorded.
+
+    Mutation evidence first, the same for admission and verification
+    (``admission._mutation_reasons``): a check changed a protected byte
+    exactly when its protected digest changed and it lists the changed paths,
+    and the receipt flags a mutation exactly when the checked-out tree
+    changed under the run (``tree``: its digest before and after) or a check
+    changed a protected byte.
 
     Admission (``on_base``) and verification receipts alike, script and
     oracle checks alike: the recorded status and reason must equal
@@ -855,6 +875,14 @@ def _require_observed_results(
     """
     manifest = state.manifest
     assert manifest is not None
+    checks = record.checks
+    if any(
+        bool(check.mutated_paths) != (check.protected_digest_before != check.protected_digest_after)
+        for check in checks
+    ) or record.protected_bytes_mutated != (
+        tree[0] != tree[1] or any(check.mutated_paths for check in checks)
+    ):
+        raise BoundaryOrderError("a receipt's mutation evidence contradicts itself")
     for check in checks:
         oracle = check.check_id in manifest.oracle_checks
         result = check.oracle_result
@@ -1286,15 +1314,17 @@ class BoundaryLedger:
         boundary_id: str,
         package: CheckPackage,
         *,
-        seed: Seed | None = None,
+        seed: Seed,
     ) -> BaseEvent:
         """Persist the package id, Seed digest and manifest; the boundary's only seal.
 
         The package id (``package.seal_package``) is what I2 orders before any
         worker start. Every later receipt and event must cite the same one.
+        The package must be the one for ``seed`` (``validate_package_for_seed``:
+        its Seed digest and its criterion keys in Seed order), checked before
+        anything is appended: no package is sealed for a Seed it was not built for.
         """
-        if seed is not None:
-            validate_package_for_seed(package, seed)
+        validate_package_for_seed(package, seed)
         await self._require_run_enabled(boundary_id)
         return await self._append(boundary_id, package_frozen_event(boundary_id, package))
 
