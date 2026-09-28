@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+import sys
 from typing import Any
 
 import pytest
@@ -373,3 +374,40 @@ def test_the_prompt_example_has_a_held_out_case_the_buggy_base_fails() -> None:
         assert any(
             namespace["clamp"](**case["args"]) != case["expect"]["value"] for case in held_out
         )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX no-follow proof")
+def test_the_constructor_prompt_names_the_cli_targets_an_oracle_can_prove(tmp_path: Path) -> None:
+    # Only a checkout `.py` script or a checkout `-m` module can be proven as
+    # a CLI oracle's target; the prompt must say so, and say it as the
+    # controller decides it.
+    from ouroboros.boundary import oracle_run
+    from ouroboros.boundary.constructor import load_constructor_system_prompt
+    from ouroboros.boundary.oracle import imported_before_checkout
+
+    prompt = load_constructor_system_prompt()
+    assert "(run as `python <path>`)" in prompt
+    assert '`"-m package.module"` for a module in the repository' in prompt
+    assert "every package on its path has an `__init__.py`" in prompt
+    assert (
+        "the standard library, installed programs, shell scripts, and other executables" in prompt
+    )
+
+    (tmp_path / "tool.py").write_text("print(1)\n")
+    (tmp_path / "tool.sh").write_text("echo 1\n")
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "cli.py").write_text("print(1)\n")
+    (tmp_path / "loose").mkdir()
+    (tmp_path / "loose" / "cli.py").write_text("print(1)\n")
+    assert isinstance(oracle_run._cli_target_files(tmp_path, "tool.py"), tuple)
+    assert isinstance(oracle_run._cli_target_files(tmp_path, "-m pkg.cli"), tuple)
+    for symbol, resolve in [
+        ("tool.sh", "unprovable"),
+        ("-m loose.cli", "unprovable"),
+        ("-m json.tool", "missing"),
+    ]:
+        refused = oracle_run._cli_target_files(tmp_path, symbol)
+        assert isinstance(refused, oracle_run._NotProven)
+        assert refused.resolve == resolve
+    assert imported_before_checkout("json")  # never tier A, even when named
