@@ -453,3 +453,29 @@ async def test_a_malformed_held_out_expectation_never_reaches_a_reason(tmp_path:
     assert replaced.package is None and replaced.failure_reason is not None
     assert replaced.failure_reason.startswith("constructor_reply_invalid:")
     assert _CASE_SECRET not in replaced.failure_reason
+
+
+def test_a_non_discriminating_held_out_exclusion_is_explained_to_the_replacement() -> None:
+    # Per-check admission excluded oracle_1: every held-out case passes on the
+    # base. The target keeps that recorded reason (read from the admission's
+    # excluded_checks mapping), and the replacement prompt says in plain text
+    # to write a held-out case the base fails.
+    from ouroboros.boundary.constructor import build_replacement_prompt
+    from ouroboros.boundary.coverage import replacement_targets
+    from ouroboros.boundary.oracle_build import package_from_reply
+    from ouroboros.boundary.per_check import HELD_OUT_NOT_DISCRIMINATING
+
+    seed = _probe_seed()
+    package = package_from_reply(
+        {"oracles": [_oracle(1, 15, 10), _oracle(2, -5, 0)]},
+        seed,
+        input_digest="1" * 64,
+        generator="t",
+    )
+    keys = seed_criterion_keys(seed)
+    targets = replacement_targets(package, {"oracle_1": HELD_OUT_NOT_DISCRIMINATING})
+    assert targets == {keys[0]: HELD_OUT_NOT_DISCRIMINATING}
+    why = why_excluded(targets[keys[0]])
+    assert HELD_OUT_NOT_DISCRIMINATING not in why
+    assert "held-out case" in why and "the base code fails" in why
+    assert f"- criterion 1: {why}" in build_replacement_prompt(seed, {1: why})

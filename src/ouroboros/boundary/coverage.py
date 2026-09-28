@@ -13,7 +13,7 @@ Reasons are descriptive only; none of them changes which criteria are targets.
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from ouroboros.boundary.oracle import is_oracle_file
@@ -27,6 +27,7 @@ from ouroboros.boundary.package import (
     sha256_bytes,
 )
 from ouroboros.boundary.per_check import (
+    HELD_OUT_NOT_DISCRIMINATING,
     NO_ADMITTED_REPRODUCTION_CHECK,
     PRESERVATION_FAILS_ON_BASE,
     REPRO_PASSES_ON_BASE,
@@ -47,6 +48,11 @@ _WHY: dict[str, str] = {
     PRESERVATION_FAILS_ON_BASE: (
         "its preservation check fails on the base code, so it does not describe behavior "
         "the base code already has"
+    ),
+    HELD_OUT_NOT_DISCRIMINATING: (
+        "every held-out case of its reproduction check already passes on the base code, "
+        "so the check cannot tell a fix from no fix; write at least one held-out case "
+        "that the base code fails"
     ),
     NO_ADMITTED_REPRODUCTION_CHECK: (
         "its reproduction check passes on the base code, so it does not reproduce the bug; "
@@ -98,10 +104,11 @@ def _parts(
     return oracles, scripts, files
 
 
-def replacement_targets(package: CheckPackage, excluded: Collection[str]) -> dict[str, str]:
+def replacement_targets(package: CheckPackage, excluded: Mapping[str, str]) -> dict[str, str]:
     """Every criterion of an admitted package without an admitted check, with the reason.
 
-    ``excluded`` are the check ids per-check admission excluded. Criteria the
+    ``excluded`` is the admission's ``excluded_checks`` (check id to its
+    recorded exclusion reason). Criteria the
     constructor left uncovered are targets too, with its reason, whatever
     that reason says.
     """
@@ -112,7 +119,7 @@ def replacement_targets(package: CheckPackage, excluded: Collection[str]) -> dic
 
 def merge_replacement(
     package: CheckPackage,
-    excluded: Collection[str],
+    excluded: Mapping[str, str],
     replacement: CheckPackage,
     targets: Mapping[str, str],
     seed: Seed,
