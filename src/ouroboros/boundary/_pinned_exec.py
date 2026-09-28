@@ -16,9 +16,11 @@ the virtualenv's path, so the interpreter finds that virtualenv's
 ``pyvenv.cfg`` as if it had been started through ``path``.
 
 Where the platform executes a file descriptor (``fexecve``: Linux), the
-process becomes the file that was verified; no name is looked up again.
-Elsewhere (macOS) the real path is executed right after the check, and the
-residual window is between that check and ``execve``. It depends on nothing
+process becomes the binary that was verified; no name is looked up again.
+Elsewhere (macOS), and for an interpreter that is a ``#!`` script wrapper
+(which, run from a descriptor, would see ``/dev/fd/<n>`` as its ``$0``), the
+real path is executed right after the check, and the residual window is
+between that check and ``execve``. It depends on nothing
 but the standard library, so it starts with ``-S`` and ``-I``.
 """
 
@@ -68,10 +70,7 @@ def main() -> None:
     os.close(int(channel))
     if binary is None:
         os._exit(REFUSED)
-    if os.execve in os.supports_fd:
-        # A ``#!`` interpreter reads the script through /dev/fd/<n>, so its
-        # descriptor stays open across the exec; a binary's is closed by it.
-        os.set_inheritable(binary, os.pread(binary, 2, 0) == b"#!")
+    if os.execve in os.supports_fd and os.pread(binary, 2, 0) != b"#!":
         os.execve(binary, command, os.environ)
     os.close(binary)
     os.execve(real, command, os.environ)

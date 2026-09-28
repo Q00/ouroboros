@@ -53,7 +53,8 @@ a shell, under the per-check timeout (``boundary/admission.py``,
   (``interpreter_changed``, or ``launch_unverified`` when it reported
   nothing). Residual window: on Linux none, the verified file descriptor is
   what is executed (``fexecve``); on macOS, which cannot execute a
-  descriptor, the instant between the check and ``execve`` of the real path.
+  descriptor, and for an interpreter that is a ``#!`` script wrapper, the
+  instant between the check and ``execve`` of the real path.
   The pin covers the interpreter binary only (not its shared libraries,
   standard library or ``pyvenv.cfg``). On Windows the pinned path is
   executed as prepared.
@@ -326,7 +327,9 @@ class CheckProcess(asyncio.subprocess.Process):
 
         Read once the process has ended: ``interpreter_changed`` when the
         launch found another interpreter than the pinned one and ran
-        nothing, ``launch_unverified`` when it reported nothing.
+        nothing, ``launch_unverified`` when it reported nothing (it failed,
+        or was killed at its deadline, before it could report). Every caller
+        of ``spawn_check_process`` reads it once the process is reaped.
         """
         if self._report is not None:
             os.set_blocking(self._report, False)
