@@ -913,14 +913,25 @@ async def test_an_undecidable_resume_for_another_execution_records_nothing(
 # undecidable: it is built from the record the product wrote, then changed.
 
 
-async def _product_run_level_record(store: EventStore) -> BaseEvent:
-    """The run-level record an undecidable resume writes (on a copy of ``store``)."""
-    journal = await _copy_journal(store, _duplicate(PACKAGE_FROZEN))
-    authority = await _resume(journal, Path("."))
+async def _product_run_level_record(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> BaseEvent:
+    """The run-level record an undecidable resume of a run with this id writes.
+
+    Made before the run under test starts: the resume that writes it forgets
+    the in-process state of its execution id.
+    """
+    first = EventStore("sqlite+aiosqlite:///:memory:")
+    await first.initialize()
+    await _run_until_the_worker_stops(first, repo, tmp_path / "first", monkeypatch)
+    journal = await _copy_journal(first, _duplicate(PACKAGE_FROZEN))
+    authority = await _resume(journal, repo)
     await authority(seed=_seed(), execution_id=EXECUTION, parallel_result=_restored())
     (record,) = await _resumed_records(journal)
     assert record.aggregate_id == EXECUTION and record.data["package_id"] is None
+    assert live_state(EXECUTION) is None
     await journal.close()
+    await first.close()
     return record
 
 
@@ -947,8 +958,8 @@ RUN_LEVEL_RESUMED = {
 async def test_an_impossible_run_level_resumed_record_is_undecidable(
     store: EventStore, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: Any
 ) -> None:
+    record = await _product_run_level_record(repo, tmp_path, monkeypatch)
     _seed_, state = await _run_until_the_worker_stops(store, repo, tmp_path, monkeypatch)
-    record = await _product_run_level_record(store)
 
     def plant(events: list[BaseEvent]) -> list[BaseEvent]:
         data = copy_module.deepcopy(dict(record.data))
@@ -957,6 +968,8 @@ async def test_an_impossible_run_level_resumed_record_is_undecidable(
         return [*events, record.model_copy(update={"data": data, "timestamp": later})]
 
     journal = await _copy_journal(store, plant)
+    # The run's package is still in memory: only the planted record stops it.
+    assert live_state(EXECUTION) is state
     boundary = await load_resumed_boundary(journal, EXECUTION)
     assert boundary is not None
     assert boundary.reason == BOUNDARY_RECORD_MISSING
@@ -968,14 +981,15 @@ async def test_an_impossible_run_level_resumed_record_is_undecidable(
 async def test_a_run_level_resumed_record_before_the_enabled_record_is_undecidable(
     store: EventStore, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    record = await _product_run_level_record(repo, tmp_path, monkeypatch)
     _seed_, state = await _run_until_the_worker_stops(store, repo, tmp_path, monkeypatch)
-    record = await _product_run_level_record(store)
 
     def plant(events: list[BaseEvent]) -> list[BaseEvent]:
         earlier = min(event.timestamp for event in events) - timedelta(seconds=1)
         return [record.model_copy(update={"timestamp": earlier}), *events]
 
     journal = await _copy_journal(store, plant)
+    assert live_state(EXECUTION) is state
     boundary = await load_resumed_boundary(journal, EXECUTION)
     assert boundary is not None and boundary.reason == BOUNDARY_RECORD_MISSING
     assert boundary.source == "journal"
