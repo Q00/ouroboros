@@ -260,6 +260,40 @@ class TestProfile:
             assert Path(env[name]).is_dir()
 
 
+class TestProfileDirectories:
+    """The unconfined launcher creates the profile directories inside the roots only."""
+
+    def test_a_junction_in_the_profile_path_is_refused(self, layout: dict[str, Path]) -> None:
+        _require_backend()
+        outside = layout["outside"]
+        _winapi.CreateJunction(str(outside), str(layout["temp"] / "Packages"))
+        command = _confine(layout, _python("open('ran.txt', 'w').write('x')"))
+
+        result = _run(command)
+
+        assert result.returncode == launcher.EXIT_SANDBOX_FAILED, result.stderr
+        assert "not a plain directory" in result.stderr
+        assert list(outside.iterdir()) == []
+        assert not (layout["copy"] / "ran.txt").exists()
+
+    def test_the_effective_localappdata_is_the_one_checked(self, layout: dict[str, Path]) -> None:
+        """Names differ only in case: the last one wins, for the check and the child alike."""
+        _require_backend()
+        outside = layout["outside"]
+        command = _confine(
+            layout,
+            _python("open('ran.txt', 'w').write('x')"),
+            env_set={"LocalAppData": str(outside)},
+        )
+
+        result = _run(command)
+
+        assert result.returncode == launcher.EXIT_SANDBOX_FAILED, result.stderr
+        assert "not inside a writable root" in result.stderr
+        assert list(outside.iterdir()) == []
+        assert not (layout["copy"] / "ran.txt").exists()
+
+
 class TestDispatch:
     """The repository's Windows dispatch policy holds inside the sandbox."""
 

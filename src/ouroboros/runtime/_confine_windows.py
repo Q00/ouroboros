@@ -876,14 +876,21 @@ def kill_on_close_job() -> int:
     return int(job)
 
 
-def environment_block(env: dict[str, str]) -> ctypes.Array[ctypes.c_wchar]:
-    """``env`` as a Unicode environment block, sorted case-insensitively."""
-    folded: dict[str, tuple[str, str]] = {}
+def effective_environment(env: dict[str, str]) -> dict[str, str]:
+    """``env`` as Windows sees it: names are case-insensitive, and of names
+    differing only in case the last one given wins. Keyed by the upper-case
+    name, so every lookup and the environment block read the same value."""
+    folded: dict[str, str] = {}
     for name, value in env.items():
         if not name or "=" in name[1:] or "\0" in name or "\0" in value:
             raise SandboxError(f"environment variable {name!r} cannot be passed on Windows")
-        folded[name.upper()] = (name, value)
-    entries = [f"{name}={value}" for _key, (name, value) in sorted(folded.items())]
+        folded[name.upper()] = value
+    return folded
+
+
+def environment_block(env: dict[str, str]) -> ctypes.Array[ctypes.c_wchar]:
+    """The effective ``env`` as a Unicode environment block, sorted by name."""
+    entries = [f"{name}={value}" for name, value in sorted(effective_environment(env).items())]
     text = "\0".join(entries) + "\0\0" if entries else "\0\0"
     return ctypes.create_unicode_buffer(text, len(text))
 
@@ -1016,27 +1023,51 @@ def launch(
     return int(info.hProcess), int(info.hThread)
 
 
-def _variable(env: dict[str, str], name: str) -> str | None:
-    return next((value for key, value in env.items() if key.upper() == name), None)
-
-
 def prepare_profile_directories(env: dict[str, str], name: str, roots: list[Root]) -> None:
     """Create the directories process creation will point ``LOCALAPPDATA``,
-    ``TEMP`` and ``TMP`` at, under the command's ``LOCALAPPDATA``, which must
-    lie inside a writable root (this launcher is not confined: it must not
-    create anything outside the roots)."""
-    base = _variable(env, "LOCALAPPDATA")
-    if not base or not os.path.isabs(base):
+    ``TEMP`` and ``TMP`` at: ``<LOCALAPPDATA>\\Packages\\<name>\\AC\\Temp``.
+
+    This launcher is not confined, so it must create nothing outside the
+    roots. ``LOCALAPPDATA`` (from the effective environment) must lie inside
+    a writable root; from that root, which is held open and cannot be
+    replaced, each component is created or found in turn and must be a
+    plain directory, not a junction or symbolic link that would carry the
+    next one elsewhere.
+    """
+    import ntpath
+    import stat
+
+    base = effective_environment(env).get("LOCALAPPDATA")
+    if not base or not ntpath.isabs(base) or not ntpath.splitdrive(base)[0]:
         raise SandboxError("LOCALAPPDATA must name a directory inside a writable root")
-    real = os.path.normcase(os.path.realpath(base))
-    inside = any(
-        os.path.commonpath((real, os.path.normcase(root.path))) == os.path.normcase(root.path)
-        for root in roots
-        if os.path.splitdrive(real)[0].lower() == os.path.splitdrive(root.path)[0].lower()
+    base = ntpath.normpath(base)
+    root = next(
+        (
+            root
+            for root in roots
+            if ntpath.splitdrive(base)[0].lower() == ntpath.splitdrive(root.path)[0].lower()
+            and ntpath.commonpath((base.lower(), root.path.lower())) == root.path.lower()
+        ),
+        None,
     )
-    if not inside:
+    if root is None:
         raise SandboxError(f"LOCALAPPDATA {base} is not inside a writable root")
-    os.makedirs(os.path.join(real, "Packages", name, "AC", "Temp"), exist_ok=True)
+    relative = ntpath.relpath(base, root.path)
+    parts = [] if relative == "." else relative.split("\\")
+    current = root.path
+    for part in (*parts, "Packages", name, "AC", "Temp"):
+        if part in ("", ".", ".."):
+            raise SandboxError(f"LOCALAPPDATA {base} is not a plain path")
+        current = ntpath.join(current, part)
+        try:
+            os.mkdir(current)
+        except FileExistsError:
+            pass
+        status = os.lstat(current)
+        if not stat.S_ISDIR(status.st_mode) or (
+            getattr(status, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            raise SandboxError(f"{current} is not a plain directory")
 
 
 def resume(thread: int, process: int) -> None:
@@ -1129,7 +1160,7 @@ def main(arguments: list[str]) -> int:
     try:
         try:
             parsed = _parse(arguments)
-            env = _command_environment()
+            env = effective_environment(_command_environment())
             api = _api()
             for path, device, inode in parsed["roots"]:
                 roots.append(Root(path, device, inode))

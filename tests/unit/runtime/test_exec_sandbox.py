@@ -1043,3 +1043,15 @@ class TestPersistentReadScope:
         assert not allowed(copy) and not allowed(copy / "linked")  # writable already
         assert not allowed(system) and not allowed(system / "sub")  # system managed
         assert not allowed(os.path.abspath(os.sep))  # a volume root
+
+
+def test_the_windows_environment_is_folded_once_last_spelling_wins() -> None:
+    """One fold serves every lookup and the environment block (pure; any host)."""
+    from ouroboros.runtime import _confine_windows
+
+    env = {"LOCALAPPDATA": "C:\\temp", "Path": "C:\\bin", "LocalAppData": "D:\\elsewhere"}
+
+    assert _confine_windows.effective_environment(env) == {
+        "LOCALAPPDATA": "D:\\elsewhere",
+        "PATH": "C:\\bin",
+    }
