@@ -588,7 +588,8 @@ def _merged_reference_check(
     id (``coverage.merge_replacement``). Each merged oracle is matched to its
     source oracle by everything but its id, first come first served over the
     bound version's admitted oracles and then the candidate's (the order the
-    merge keeps), and carries that source's count. A criterion is reported
+    merge keeps), and carries that source's count. Oracles identical but for
+    their id are assigned in that merge order, kept ones first. A criterion is reported
     uncovered only while no check of the merged package links it; the
     replacement's report counts only for its targets.
     """
