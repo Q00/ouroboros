@@ -12,7 +12,9 @@ import importlib.metadata
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
+import sysconfig
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -950,9 +952,159 @@ def test_doctor_runtime_human_output_includes_unavailable_reason(capsys):
     assert "registry unavailable reason: owner_unavailable" in output
 
 
+def test_doctor_runtime_human_output_escapes_terminal_controls(tmp_path: Path, monkeypatch):
+    from ouroboros.cli.commands.mcp import app
+
+    first = tmp_path / "line\nbreak\x1b[31m"
+    second = tmp_path / "second"
+    registry = tmp_path / "registry"
+    for directory in (first, second):
+        directory.mkdir()
+        executable = directory / "ouroboros"
+        executable.write_text("unused", encoding="utf-8")
+        executable.chmod(0o755)
+    registry.mkdir()
+    monkeypatch.setenv("PATH", os.pathsep.join((str(first), str(second))))
+
+    with patch("ouroboros.cli.commands.mcp._PID_REGISTRY_DIR", registry):
+        result = runner.invoke(app, ["doctor-runtime"])
+
+    assert result.exit_code == 0
+    rendered_path = str(first / "ouroboros").replace("\n", "\\x0a").replace("\x1b", "\\x1b")
+    assert "line\\x0abreak\\x1b[31m" in result.output
+    assert rendered_path in result.output
+    assert str(first / "ouroboros") not in result.output
+    assert "\x1b[31m" not in result.output
+
+
 def test_doctor_runtime_command_is_registered():
     from ouroboros.cli.commands.mcp import app
 
     callback_names = [cmd.callback.__name__ for cmd in app.registered_commands]
 
     assert "doctor_runtime" in callback_names
+
+
+def test_public_doctor_runtime_skips_config_telemetry_and_logging_bootstrap(tmp_path: Path):
+    repo_root = Path(__file__).resolve().parents[3]
+    home = tmp_path / "fresh-home"
+    home.mkdir()
+    script = """
+import sys
+from ouroboros import telemetry
+
+def forbidden(*_args, **_kwargs):
+    raise AssertionError("doctor-runtime must skip telemetry startup")
+
+telemetry.show_first_run_notice = forbidden
+telemetry.capture_cli_command = forbidden
+from ouroboros import main
+main()
+assert "ouroboros.config.loader" not in sys.modules
+"""
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["PYTHONPATH"] = str(repo_root / "src")
+    env["PATH"] = ""
+    env.pop("OUROBOROS_TELEMETRY", None)
+    result = subprocess.run(
+        [sys.executable, "-c", script, "mcp", "doctor-runtime", "--json"],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert set(payload) == {"path", "loopback", "registry"}
+    assert payload["registry"]["directory"] == "~/.ouroboros/mcp-servers"
+    assert str(home) not in result.stdout
+    assert not (home / ".ouroboros").exists()
+
+
+@pytest.mark.parametrize("command_name", ["ouroboros", "ooo"])
+def test_public_console_scripts_skip_config_telemetry_and_logging_bootstrap(
+    tmp_path: Path, command_name: str
+):
+    repo_root = Path(__file__).resolve().parents[3]
+    home = tmp_path / f"fresh-home-{command_name}"
+    home.mkdir()
+    probe_dir = tmp_path / f"probe-{command_name}"
+    probe_dir.mkdir()
+    probe_result = probe_dir / "imports.json"
+    (probe_dir / "sitecustomize.py").write_text(
+        """import atexit
+import builtins
+import importlib.abc
+import json
+import os
+from pathlib import Path
+import sys
+
+class ConfigLoaderGuard(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "ouroboros.config.loader":
+            raise AssertionError("runtime doctor must not import config loader")
+
+sys.meta_path.insert(0, ConfigLoaderGuard())
+original_import = builtins.__import__
+
+def forbidden(*_args, **_kwargs):
+    raise AssertionError("runtime doctor must skip telemetry startup")
+
+def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+    module = original_import(name, globals, locals, fromlist, level)
+    telemetry = sys.modules.get("ouroboros.telemetry")
+    if telemetry is not None:
+        telemetry.show_first_run_notice = forbidden
+        telemetry.capture_cli_command = forbidden
+    return module
+
+builtins.__import__ = guarded_import
+
+def record_imports():
+    Path(os.environ["ENTRYPOINT_PROBE_RESULT"]).write_text(
+        json.dumps({
+            "config_loader": "ouroboros.config.loader" in sys.modules,
+            "telemetry": "ouroboros.telemetry" in sys.modules,
+        }),
+        encoding="utf-8",
+    )
+
+atexit.register(record_imports)
+""",
+        encoding="utf-8",
+    )
+    script_name = command_name + (".exe" if os.name == "nt" else "")
+    executable = Path(sysconfig.get_path("scripts")) / script_name
+    assert executable.is_file(), f"expected installed console script at {executable}"
+
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["PATH"] = ""
+    env["PYTHONPATH"] = os.pathsep.join((str(probe_dir), str(repo_root / "src")))
+    env["ENTRYPOINT_PROBE_RESULT"] = str(probe_result)
+    env.pop("OUROBOROS_TELEMETRY", None)
+    result = subprocess.run(
+        [str(executable), "mcp", "doctor-runtime", "--json"],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert set(payload) == {"path", "loopback", "registry"}
+    assert payload["registry"]["directory"] == "~/.ouroboros/mcp-servers"
+    assert str(home) not in result.stdout
+    assert not home.exists() or not any(home.iterdir())
+    assert json.loads(probe_result.read_text(encoding="utf-8")) == {
+        "config_loader": False,
+        "telemetry": False,
+    }
