@@ -82,10 +82,11 @@ REPLY = {
                     "expect": {"kind": "returns", "value": 10},
                 },
                 {
+                    # The buggy base returns 20 here: a pass is a genuine fix.
                     "case_id": "held",
                     "held_out": True,
-                    "args": {"value": -3, "low": -2, "high": 4},
-                    "expect": {"kind": "returns", "value": -2},
+                    "args": {"value": 20, "low": -5, "high": 7},
+                    "expect": {"kind": "returns", "value": 7},
                 },
             ],
         },
@@ -572,7 +573,8 @@ async def test_omitting_entry_points_after_a_counterexample_does_not_withdraw_th
     assert not decided.all_succeeded
 
 
-STATED_ONLY = "def clamp(value, low, high):\n    return min(value, high)\n"
+# Passes the stated case by returning its expected value; wrong on any other input above high.
+STATED_ONLY = "def clamp(value, low, high):\n    return 10 if value > high else max(low, value)\n"
 
 
 async def test_held_out_cases_run_only_in_the_final_verification(
@@ -1582,3 +1584,70 @@ async def test_a_legacy_blocked_verdict_on_an_uncovered_criterion_keeps_its_clas
     gated = await authority.gate(seed=seed, ac_index=2, result=blocked)
     assert gated.success is False and legacy_owned(gated)
     assert FailureClass(failure_class_for_result(gated)) is FailureClass.BLOCKED
+
+
+async def test_an_oracle_whose_only_held_out_case_passes_on_the_base_decides_nothing(
+    store: EventStore, repo: Path, tmp_path: Path
+) -> None:
+    """A held-out case the buggy base already passes is no evidence of a fix.
+
+    The earlier shape of this fixture: oracle_1's only held-out case,
+    ``clamp(-3, -2, 4) == -2``, passes on the buggy base. Admission excludes
+    that oracle (``held_out_not_discriminating``), so its criterion has no
+    admitted check: the legacy verifier decides it, even when the finished
+    workspace is correct, and the package can never pass it.
+    """
+    import copy
+
+    reply: dict[str, Any] = copy.deepcopy(REPLY)
+    reply["oracles"][0]["cases"][1] = {
+        "case_id": "held",
+        "held_out": True,
+        "args": {"value": -3, "low": -2, "high": 4},
+        "expect": {"kind": "returns", "value": -2},
+    }
+    seed = _seed()
+    constructor = _Constructor(seed, repo)
+    constructor.outcome = ConstructionOutcome(
+        package_from_reply(reply, seed, input_digest="1" * 64, generator="fake"),
+        None,
+        "1" * 64,
+        "fake",
+    )
+    settings = CheckPackageSettings(enabled=True)
+    state = await prepare_check_package(
+        seed,
+        event_store=store,
+        constructor=constructor,
+        execution_id="exec_oracle",
+        base_checkout=repo,
+        worker_workspace=repo,
+        runtime_label="codex",
+        settings=settings,
+        store_dir=tmp_path / "store",
+    )
+    assert state.admitted and state.admission is not None
+    assert state.admission.excluded_checks == {"oracle_1": "held_out_not_discriminating"}
+    authority = CheckPackageAuthority(state, settings, event_store=store, candidate_checkout=repo)
+    executor = _executor(repo)
+    authority.install(executor)
+    keys = seed_criterion_keys(seed)
+    assert keys[0] in authority.legacy_decided_keys()
+    assert 0 not in executor.check_package_interfaces  # no entry_points request for it
+    (repo / "mathutils.py").write_text(FIXED + GOOD_MIX)
+    # The gate runs no package check for it: the legacy rejection decides the attempt.
+    gated = await authority.gate(seed=seed, ac_index=0, result=_legacy_rejected(0))
+    assert gated.success is False and legacy_owned(gated) and package_repair(gated) is None
+    assert authority.gate.log == []
+    parallel = ParallelExecutionResult(
+        results=(_legacy_rejected(0), _legacy_accepted(1, entry=MIX_ENTRY), _legacy_accepted(2)),
+        success_count=3,
+        failure_count=0,
+    )
+    decided = await authority(seed=seed, execution_id="exec_oracle", parallel_result=parallel)
+    verdicts = authority.outcome.verdict.verdicts
+    assert verdicts[keys[0]].status is not PackageCriterionStatus.PASS
+    first = authority.outcome.reconciliation.decisions[0]
+    assert first.legacy_decided and not first.accepted
+    assert decided.results[0].outcome is ACExecutionOutcome.FAILED
+    assert not decided.all_succeeded

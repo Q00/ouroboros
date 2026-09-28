@@ -94,7 +94,7 @@ from ouroboros.boundary.binding_flow import (
 from ouroboros.boundary.events import ReconciliationPayload
 from ouroboros.boundary.ledger import BoundaryLedger
 from ouroboros.boundary.package import seed_criterion_keys, seed_digest
-from ouroboros.boundary.per_check import criteria_without_admitted_check, excluded_check_ids
+from ouroboros.boundary.per_check import criteria_without_admitted_check
 from ouroboros.boundary.run_wiring import (
     BoundaryRunState,
     BoundaryVerdict,
@@ -459,7 +459,7 @@ class CheckPackageGate:
             contract=state.contract,
             declared={key: entries} if entries else None,
             expected_base_digest=state.admission.base_tree_digest,
-            admitted_tiers=state.admission.check_tiers,
+            admission=state.admission,
             # Visible cases only, for the base run of a declared binding too:
             # no held-out input reaches any process before the final verdict.
             run_options={"interpreter": state.interpreter, "include_held_out": False},
@@ -475,7 +475,9 @@ class CheckPackageGate:
             include_held_out=False,
         )
         verification = bound.effective
-        verdicts = criterion_verdicts(package, verification, assignments=subset)
+        verdicts = criterion_verdicts(
+            package, verification, admission=state.admission, assignments=subset
+        )
         item = verdicts[key]
         await BoundaryLedger(authority.event_store).record_bindings(
             state.boundary_id,
@@ -677,9 +679,13 @@ class CheckPackageAuthority:
             and spec.criterion_key not in lost
         }
 
-    def _excluded(self) -> frozenset[str]:
+    def _exclusions(self) -> dict[str, str]:
+        """The admission's excluded checks (check id to its recorded exclusion reason)."""
         admission = self._state.admission
-        return excluded_check_ids(admission.check_tiers if admission is not None else None)
+        return dict((admission.excluded_checks if admission is not None else None) or {})
+
+    def _excluded(self) -> frozenset[str]:
+        return frozenset(self._exclusions())
 
     def admitted_check_ids(self, key: str) -> list[str]:
         """The admitted (not excluded) checks linked to criterion ``key``."""
@@ -697,7 +703,7 @@ class CheckPackageAuthority:
     def legacy_decided_keys(self) -> frozenset[str]:
         """Criteria that lost their authority to per-check admission (``per_check.py``)."""
         package = self._state.package
-        excluded = self._excluded()
+        excluded = self._exclusions()
         if package is None or not excluded:
             return frozenset()
         return frozenset(criteria_without_admitted_check(package, excluded))
