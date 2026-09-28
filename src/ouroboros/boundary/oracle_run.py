@@ -118,10 +118,12 @@ from ouroboros.boundary.binding import Binding, CallKind
 from ouroboros.boundary.check_env import (
     CheckCommand,
     CheckInterpreter,
+    CheckProcess,
     CheckUnavailable,
     check_command,
     check_scratch,
     default_interpreter,
+    spawn_check_process,
 )
 from ouroboros.boundary.oracle import (
     ORACLE_DATA_PATH,
@@ -300,42 +302,6 @@ def _session_members(leader: int) -> list[int]:
     return members
 
 
-class CheckProcess(asyncio.subprocess.Process):
-    """A check process that keeps its transport, so the controller can close its pipe ends."""
-
-    def __init__(
-        self,
-        transport: asyncio.SubprocessTransport,
-        protocol: asyncio.subprocess.SubprocessStreamProtocol,
-        loop: asyncio.AbstractEventLoop,
-    ) -> None:
-        super().__init__(transport, protocol, loop)
-        self.transport = transport
-
-
-async def spawn_check_process(
-    command: CheckCommand, *, stdin: int, stderr: int, limit: int = _READ_CHUNK
-) -> CheckProcess:
-    """Start ``command`` in its own session and process group, its stdout on a pipe.
-
-    ``command`` comes from ``check_env.check_command``; ``stdin`` and
-    ``stderr`` are ``PIPE`` or ``DEVNULL``. Raises ``OSError`` when it
-    cannot be started.
-    """
-    loop = asyncio.get_running_loop()
-    transport, protocol = await loop.subprocess_exec(
-        lambda: asyncio.subprocess.SubprocessStreamProtocol(limit=limit, loop=loop),
-        *command.argv,
-        cwd=command.cwd,
-        env=dict(command.env),
-        stdin=stdin,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=stderr,
-        start_new_session=_POSIX,
-    )
-    return CheckProcess(transport, protocol, loop)
-
-
 def kill_check_group(process: asyncio.subprocess.Process) -> None:
     """SIGKILL the target's process group (and, on Linux, its session)."""
     if not _POSIX:
@@ -507,6 +473,10 @@ async def _python_case(
         outcome = await _python_exchange(process, nonce, call, deadline)
     finally:
         await reap_check_process(process, deadline)
+        refused = process.launch_problem()
+    if refused is not None:
+        # Not started from the pinned interpreter: nothing of the check ran.
+        raise _Unavailable(refused)
     if loop.time() > deadline and (outcome.entry or {}).get("outcome") != "timeout":
         # Its reap ran past the deadline: nothing it reported stands.
         return _timeout_case(case_id, observed=outcome.kind == "observed")
@@ -756,6 +726,7 @@ async def _cli_case(
     except OSError as exc:
         return _Case("resolve", resolve="missing", detail=f"{call_text}: {exc}")
     output, frames = CappedOutput(_CLI_OUTPUT_LIMIT), CappedOutput(_CLI_FRAME_LIMIT)
+    ended: _Case | None = None
     try:
         await asyncio.wait_for(
             asyncio.gather(
@@ -766,12 +737,19 @@ async def _cli_case(
             timeout=max(deadline - loop.time(), 0.01),
         )
         if output.overflow:
-            return _Case("observed", entry={"outcome": "malformed", "call": call_text})
-        await asyncio.wait_for(process.wait(), timeout=max(deadline - loop.time(), 0.01))
+            ended = _Case("observed", entry={"outcome": "malformed", "call": call_text})
+        else:
+            await asyncio.wait_for(process.wait(), timeout=max(deadline - loop.time(), 0.01))
     except TimeoutError:
-        return timeout
+        ended = timeout
     finally:
         await reap_check_process(process, deadline)
+        refused = process.launch_problem()
+    if refused is not None:
+        # Not started from the pinned interpreter: nothing of the check ran.
+        raise _Unavailable(refused)
+    if ended is not None:
+        return ended
     if loop.time() > deadline:
         # Its reap ran past the deadline: nothing it reported stands.
         return timeout
@@ -1072,13 +1050,11 @@ def _selected_data(data: dict[str, Any], check_id: str, cases: Sequence[Any]) ->
 __all__ = [
     "REAP_MARGIN_SECONDS",
     "CappedOutput",
-    "CheckProcess",
     "OracleRun",
     "kill_check_group",
     "parse_frame",
     "NO_VISIBLE_CASE",
     "reap_check_process",
     "run_oracle_check",
-    "spawn_check_process",
     "valid_entry",
 ]

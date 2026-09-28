@@ -56,6 +56,7 @@ from ouroboros.boundary.check_env import (
     check_command,
     check_scratch,
     default_interpreter,
+    spawn_check_process,
 )
 from ouroboros.boundary.oracle import OracleResult, is_oracle_file
 from ouroboros.boundary.oracle_run import (
@@ -63,7 +64,6 @@ from ouroboros.boundary.oracle_run import (
     kill_check_group,
     reap_check_process,
     run_oracle_check,
-    spawn_check_process,
 )
 from ouroboros.boundary.package import (
     CheckPackage,
@@ -192,6 +192,12 @@ async def _run_in_environment(command: CheckCommand, timeout: int) -> _Completed
     finally:
         # Also on cancellation (Ctrl-C, MCP cancel): nothing outlives the run.
         await reap_check_process(process, deadline)
+        refused = process.launch_problem()
+    if refused is not None:
+        # Not started from the pinned interpreter: nothing of the check ran.
+        return _Completed(
+            None, b"", b"", False, None, time.monotonic() - started, unavailable=refused
+        )
     # An overflow that ended in the timeout is still an overflow.
     return _Completed(
         process.returncode,

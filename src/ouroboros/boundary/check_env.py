@@ -39,6 +39,24 @@ a shell, under the per-check timeout (``boundary/admission.py``,
   makes the check indeterminate (``interpreter_changed``), never a run of
   the replacement. The choice is recorded in the admission and verification
   receipts.
+- **Launched from the pinned binary.** A process starts later than it is
+  prepared, so a pinned path could name another program by then. On POSIX a
+  command that runs the pinned interpreter starts as ``boundary/_pinned_exec.py``
+  under the controller's own interpreter (inside the sandbox, where it is
+  confined): it opens the pinned binary once, checks it is still the pinned
+  one reached from the pinned path, reports ``verified`` or ``changed`` on a
+  pipe only the controller reads, closes it, and executes the interpreter
+  with the virtualenv's path as ``argv[0]`` (so ``pyvenv.cfg`` is found as
+  before). ``spawn_check_process`` starts every check process and reads that
+  report (``CheckProcess.launch_problem``); a process that did not report
+  ``verified`` ran nothing of the check's and is indeterminate
+  (``interpreter_changed``, or ``launch_unverified`` when it reported
+  nothing). Residual window: on Linux none, the verified file descriptor is
+  what is executed (``fexecve``); on macOS, which cannot execute a
+  descriptor, the instant between the check and ``execve`` of the real path.
+  The pin covers the interpreter binary only (not its shared libraries,
+  standard library or ``pyvenv.cfg``). On Windows the pinned path is
+  executed as prepared.
 
 Held-out cases: an expected value never leaves the controller's memory (it
 is in no process's argv, environment or files), and a held-out input reaches
@@ -58,6 +76,7 @@ package with ``--no-check-package``, ``OUROBOROS_CHECK_PACKAGE=off``, or
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -131,6 +150,13 @@ def check_scratch(parent: Path | None = None) -> Iterator[Path]:
 
 INTERPRETER_CHANGED = "interpreter_changed"
 INTERPRETER_UNAVAILABLE = "interpreter_unavailable"
+LAUNCH_UNVERIFIED = "launch_unverified"
+"""A process that should have reported its pinned launch reported nothing."""
+_PINNED_EXEC = Path(__file__).with_name("_pinned_exec.py")
+_PINNED_LAUNCH = sys.platform != "win32"
+# In a prepared argv, where ``spawn_check_process`` puts the launch report's
+# pipe descriptor (known only once the process is started).
+_LAUNCH_CHANNEL = "{launch-channel}"
 
 
 def _file_sha256(path: str) -> str:
@@ -200,9 +226,11 @@ class CheckCommand:
 
     ``argv`` and ``env`` are the sandbox's (``ConfinedCommand.argv`` and its
     launchers' bootstrap ``env``); the check itself runs with the check
-    environment inside the sandbox. Spawn it with ``stdin`` set to
-    ``DEVNULL`` or a pipe the caller owns and ``stdout``/``stderr`` to pipes
-    or ``DEVNULL``, never with another inherited descriptor.
+    environment inside the sandbox. Start it with ``spawn_check_process``
+    (``stdin`` ``DEVNULL`` or a pipe the caller owns, ``stdout``/``stderr``
+    pipes or ``DEVNULL``): the only other descriptor it inherits is the
+    write end of its launch report's pipe, which the launch step closes
+    before the interpreter runs.
     """
 
     argv: tuple[str, ...]
@@ -229,8 +257,10 @@ def check_command(
 ) -> CheckCommand | CheckUnavailable:
     """How to run ``argv`` for the check package, confined, or why it must not run.
 
-    A bare ``python3``/``python`` in ``argv[0]`` becomes the pinned
-    interpreter, after the pin is verified. The command is confined by the
+    A bare ``python3``/``python`` (or the pinned path) in ``argv[0]`` becomes
+    the pinned interpreter, after the pin is verified, and on POSIX runs
+    through ``_pinned_exec.py``, which verifies it again as it starts it
+    (start it with ``spawn_check_process``). The command is confined by the
     shared execution sandbox (``runtime/exec_sandbox.confine``): it may write
     only beneath ``writable_root`` (the check's own copy) and ``scratch``
     (its temp and ``HOME`` directory, from ``check_scratch``), and its
@@ -242,8 +272,23 @@ def check_command(
     if problem is not None:
         return CheckUnavailable(problem, interpreter.path)
     resolved = tuple(argv)
-    if resolved and resolved[0] in CHECK_INTERPRETER_NAMES:
+    if resolved and resolved[0] in (*CHECK_INTERPRETER_NAMES, interpreter.path):
         resolved = (interpreter.path, *resolved[1:])
+        if _PINNED_LAUNCH:
+            # Started from the pinned binary itself (``_pinned_exec.py``).
+            resolved = (
+                sys.executable,
+                "-I",
+                "-S",
+                "-B",
+                str(_PINNED_EXEC),
+                interpreter.path,
+                interpreter.realpath,
+                interpreter.sha256,
+                _LAUNCH_CHANNEL,
+                "--",
+                *resolved[1:],
+            )
     values = os.environ if source is None else source
     confined = confine(
         resolved,
@@ -259,6 +304,85 @@ def check_command(
     if isinstance(confined, SandboxUnavailable):
         return CheckUnavailable(confined.reason.value, confined.detail)
     return CheckCommand(confined.argv, confined.env, confined.cwd)
+
+
+class CheckProcess(asyncio.subprocess.Process):
+    """A started check process: its transport (so its pipes can be closed) and launch report."""
+
+    def __init__(
+        self,
+        transport: asyncio.SubprocessTransport,
+        protocol: asyncio.subprocess.SubprocessStreamProtocol,
+        loop: asyncio.AbstractEventLoop,
+        report: int | None = None,
+    ) -> None:
+        super().__init__(transport, protocol, loop)
+        self.transport = transport
+        self._report = report
+        self._launch: str | None = None
+
+    def launch_problem(self) -> str | None:
+        """``None`` when the process started from the pinned interpreter (or needed none).
+
+        Read once the process has ended: ``interpreter_changed`` when the
+        launch found another interpreter than the pinned one and ran
+        nothing, ``launch_unverified`` when it reported nothing.
+        """
+        if self._report is not None:
+            os.set_blocking(self._report, False)
+            try:
+                report = os.read(self._report, 64)
+            except BlockingIOError:
+                report = b""
+            finally:
+                os.close(self._report)
+                self._report = None
+            self._launch = {b"verified": None, b"changed": INTERPRETER_CHANGED}.get(
+                report, LAUNCH_UNVERIFIED
+            )
+        return self._launch
+
+
+async def spawn_check_process(
+    command: CheckCommand, *, stdin: int, stderr: int, limit: int = 64 * 1024
+) -> CheckProcess:
+    """Start ``command`` in its own session and process group, its stdout on a pipe.
+
+    ``command`` comes from ``check_command``; ``stdin`` and ``stderr`` are
+    ``PIPE`` or ``DEVNULL``. A command that runs the pinned interpreter gets
+    the write end of a fresh pipe for its launch report, which only the
+    launch step holds and closes before the interpreter runs
+    (``CheckProcess.launch_problem``). Raises ``OSError`` when it cannot be
+    started.
+    """
+    argv = list(command.argv)
+    report: int | None = None
+    channel: tuple[int, ...] = ()
+    if _LAUNCH_CHANNEL in argv:
+        report, writer = os.pipe()
+        argv[argv.index(_LAUNCH_CHANNEL)] = str(writer)
+        channel = (writer,)
+    loop = asyncio.get_running_loop()
+    try:
+        transport, protocol = await loop.subprocess_exec(
+            lambda: asyncio.subprocess.SubprocessStreamProtocol(limit=limit, loop=loop),
+            *argv,
+            cwd=command.cwd,
+            env=dict(command.env),
+            stdin=stdin,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=stderr,
+            start_new_session=sys.platform != "win32",
+            pass_fds=channel,
+        )
+    except BaseException:
+        if report is not None:
+            os.close(report)
+        raise
+    finally:
+        for descriptor in channel:
+            os.close(descriptor)
+    return CheckProcess(transport, protocol, loop, report)
 
 
 def _python_in_venv(venv: Path) -> Path | None:
@@ -325,12 +449,15 @@ __all__ = [
     "CHECK_INTERPRETER_NAMES",
     "INTERPRETER_CHANGED",
     "INTERPRETER_UNAVAILABLE",
+    "LAUNCH_UNVERIFIED",
     "CheckCommand",
     "CheckInterpreter",
+    "CheckProcess",
     "CheckUnavailable",
     "check_command",
     "check_scratch",
     "default_interpreter",
     "pin_interpreter",
     "resolve_check_interpreter",
+    "spawn_check_process",
 ]

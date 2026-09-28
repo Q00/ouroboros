@@ -19,7 +19,7 @@ import pytest
 
 from ouroboros.boundary.admission import admit_check_package
 from ouroboros.boundary.binding import Binding, CallKind
-from ouroboros.boundary.check_env import pin_interpreter
+from ouroboros.boundary.check_env import CheckProcess, pin_interpreter
 from ouroboros.boundary.oracle import (
     ORACLE_DATA_PATH,
     ORACLE_HARNESS_PATH,
@@ -185,7 +185,7 @@ async def test_a_case_whose_reap_overran_the_deadline_is_a_timeout(
     (root / "inc.py").write_text("def inc(x):\n    return x + 1\n")
     real_reap = oracle_run.reap_check_process
 
-    async def slow_reap(process: oracle_run.CheckProcess, deadline: float) -> int | None:
+    async def slow_reap(process: CheckProcess, deadline: float) -> int | None:
         code = await real_reap(process, deadline)
         await asyncio.sleep(max(deadline - asyncio.get_running_loop().time(), 0) + 0.1)
         return code

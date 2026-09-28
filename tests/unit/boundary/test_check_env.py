@@ -291,7 +291,8 @@ def test_the_entry_point_refuses_a_replaced_interpreter(tmp_path: Path) -> None:
             scratch=scratch,
         )
         assert isinstance(command, CheckCommand)
-        assert command.argv[0] == str(python)
+        # Started through the pinned launch, which runs the pinned binary as ``python``.
+        assert command.argv[command.argv.index("--") - 4] == str(python)
         # The worker swaps the venv's interpreter for something else.
         python.unlink()
         python.write_text("#!/bin/sh\nexit 0\n")

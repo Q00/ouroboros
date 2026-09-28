@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from ouroboros.boundary import admission as admission_module
+from ouroboros.boundary import check_env
 from ouroboros.boundary.admission import verify_candidate
 from ouroboros.boundary.check_env import CheckCommand
 from ouroboros.boundary.oracle_run import parse_frame, valid_entry
@@ -229,7 +230,8 @@ async def test_the_comparison_runs_in_the_controller_with_modules_loaded_before_
         True,
         False,
     ]
-    assert len(launched) == 3 and all(argv[5] == "target" for argv in launched)
+    # Each starts the pinned interpreter (after ``--``) in the harness target role.
+    assert len(launched) == 3 and all(argv[argv.index("--") + 5] == "target" for argv in launched)
     assert modules["after"] - modules["before"] == set()
     assert sys.modules["json"] is json_module
 
@@ -247,7 +249,7 @@ async def test_a_target_s_children_are_killed_after_the_target_exits(tmp_path: P
         "subprocess.Popen([sys.executable, '-c', 'import sys, time; time.sleep(1.5); "
         'open(sys.argv[1], "a").write("alive")\', sys.argv[1]])\n'
     )
-    process = await oracle_run.spawn_check_process(
+    process = await check_env.spawn_check_process(
         CheckCommand((sys.executable, "-c", child, str(marker)), dict(os.environ), str(tmp_path)),
         stdin=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
