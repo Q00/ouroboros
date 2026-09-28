@@ -329,3 +329,95 @@ async def test_a_single_call_refusal_is_a_closed_code(tmp_path: Path) -> None:
     )
     assert replaced.package is None
     assert replaced.failure_reason == "constructor_reply_invalid:role_invalid"
+
+
+def _script(name: str, *numbers: int) -> tuple[dict[str, Any], dict[str, str]]:
+    """One script check linked to ``numbers``, and its packaged file."""
+    from ouroboros.boundary.binding import CHECK_DIR
+
+    path = f"{CHECK_DIR}/{name}.py"
+    check = {
+        "check_id": name,
+        "role": "reproduction",
+        "argv": ["python3", path],
+        "target_named_in_criterion": False,
+        "failure_signature": f"OUROBOROS_CHECK_FAILED:{name}",
+        "assertions": [{"criterion": number} for number in numbers],
+    }
+    return check, {"path": path, "content": "import sys\nsys.exit(1)\n"}
+
+
+def _single_reply_constructor(reply: dict[str, Any]) -> tuple[_Runtime, CheckConstructor]:
+    runtime = _Runtime({})
+
+    async def single(prompt: str, tools=None, system_prompt=None):
+        runtime.prompts.append(prompt)
+        text = "```json\n" + json.dumps(reply) + "\n```"
+        return Result.ok(TaskResult(success=True, final_message=text, messages=()))
+
+    runtime.execute_task_to_result = single  # type: ignore[method-assign]
+    return runtime, _constructor(runtime, 5)
+
+
+async def test_multi_target_replacement_keeps_a_script_linked_to_every_target(
+    tmp_path: Path,
+) -> None:
+    # #2464 review probe: one script whose assertions link criteria 1 and 2,
+    # asked for both. It must survive with both links, not vanish from each
+    # singleton partition.
+    check, file = _script("r1_repro", 1, 2)
+    runtime, constructor = _single_reply_constructor({"checks": [check], "files": [file]})
+    outcome = await constructor.construct_replacements(
+        _probe_seed(), _base(tmp_path), targets={1: "no admitted check", 2: "no admitted check"}
+    )
+    assert len(runtime.prompts) == 1
+    assert outcome.failure_reason is None and outcome.package is not None
+    keys = seed_criterion_keys(_probe_seed())
+    assert [check.check_id for check in outcome.package.checks] == ["script_1_1"]
+    (kept,) = outcome.package.checks
+    assert [link.criterion_key for link in kept.assertions] == [keys[0], keys[1]]
+    assert [item.path for item in outcome.package.files] == [file["path"]]
+    assert outcome.package.uncovered == ()
+
+
+async def test_multi_target_replacement_drops_a_script_linking_a_criterion_not_requested(
+    tmp_path: Path,
+) -> None:
+    # Criterion 3 is a real criterion of the Seed but not a target: a script
+    # linking 1 and 3 is dropped with its file, while a script for target 2 stays.
+    crossing, crossing_file = _script("r1_cross", 1, 3)
+    inside, inside_file = _script("r2_repro", 2)
+    reply = {"checks": [crossing, inside], "files": [crossing_file, inside_file]}
+    _runtime, constructor = _single_reply_constructor(reply)
+    outcome = await constructor.construct_replacements(
+        _seed(), _base(tmp_path), targets={1: "no admitted check", 2: "no admitted check"}
+    )
+    assert outcome.failure_reason is None and outcome.package is not None
+    keys = seed_criterion_keys(_seed())
+    assert [check.check_id for check in outcome.package.checks] == ["script_2_1"]
+    assert [link.criterion_key for link in outcome.package.checks[0].assertions] == [keys[1]]
+    assert [item.path for item in outcome.package.files] == [inside_file["path"]]
+
+
+def test_multi_target_replacement_restriction_is_the_singleton_one_for_one_target() -> None:
+    # Single-target restriction is the set primitive over one criterion: it
+    # keeps exactly what it kept before, and a script reaching past it is dropped.
+    from ouroboros.boundary.incremental import restrict_reply_to
+
+    both, both_file = _script("r1_repro", 1, 2)
+    only_two, only_two_file = _script("r2_repro", 2)
+    empty, _ = _script("r2_empty")
+    reply = {
+        **FULL,
+        "checks": [both, only_two, empty],
+        "files": [both_file, only_two_file],
+    }
+    for number in (1, 2, 3):
+        assert restrict_reply(reply, number) == restrict_reply_to(reply, {number})
+    piece = restrict_reply(reply, 2)
+    assert [item["check_id"] for item in piece["checks"]] == ["r2_repro"]
+    assert piece["files"] == [only_two_file]
+    assert [item["criterion"] for item in piece["oracles"]] == [2]
+    pair = restrict_reply_to(reply, {1, 2})
+    assert [item["check_id"] for item in pair["checks"]] == ["r1_repro", "r2_repro"]
+    assert restrict_reply_to(reply, set())["checks"] == []

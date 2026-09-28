@@ -18,7 +18,7 @@ product regenerate.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 import inspect
 from pathlib import Path
@@ -48,19 +48,26 @@ class CriterionPiece:
     generator: str | None = None
 
 
-def restrict_reply(reply: Mapping[str, Any], criterion: int) -> dict[str, Any]:
-    """The part of a normalized reply (``oracle_build.normalize_reply``) for ``criterion`` only."""
+def restrict_reply_to(reply: Mapping[str, Any], criteria: Collection[int]) -> dict[str, Any]:
+    """The part of a normalized reply (``oracle_build.normalize_reply``) for ``criteria``.
+
+    One pass against the whole allowed set: a script check is kept when it
+    links at least one criterion and every criterion it links is allowed, so
+    a script asserting several allowed criteria keeps all its links, and one
+    reaching any other criterion is dropped with its files.
+    """
+    allowed = frozenset(criteria)
 
     def number(entry: Any) -> Any:
         return entry.get("criterion") if isinstance(entry, Mapping) else None
 
-    oracles = [item for item in reply.get("oracles") or () if number(item) == criterion]
+    oracles = [item for item in reply.get("oracles") or () if number(item) in allowed]
     checks = [
         item
         for item in reply.get("checks") or ()
         if isinstance(item, Mapping)
         and item.get("assertions")
-        and all(number(link) == criterion for link in item.get("assertions") or ())
+        and all(number(link) in allowed for link in item.get("assertions") or ())
     ]
     paths = {arg for item in checks for arg in (item.get("argv") or [])[1:] if isinstance(arg, str)}
     files = [
@@ -68,8 +75,13 @@ def restrict_reply(reply: Mapping[str, Any], criterion: int) -> dict[str, Any]:
         for item in reply.get("files") or ()
         if isinstance(item, Mapping) and item.get("path") in paths
     ]
-    uncovered = [item for item in reply.get("uncovered") or () if number(item) == criterion]
+    uncovered = [item for item in reply.get("uncovered") or () if number(item) in allowed]
     return {"oracles": oracles, "checks": checks, "files": files, "uncovered": uncovered}
+
+
+def restrict_reply(reply: Mapping[str, Any], criterion: int) -> dict[str, Any]:
+    """The part of a normalized reply for ``criterion`` only (``restrict_reply_to``)."""
+    return restrict_reply_to(reply, (criterion,))
 
 
 def merge_pieces(pieces: Sequence[CriterionPiece]) -> tuple[dict[str, Any], dict[int, str]]:
@@ -233,4 +245,5 @@ __all__ = [
     "construct_pieces",
     "merge_pieces",
     "restrict_reply",
+    "restrict_reply_to",
 ]

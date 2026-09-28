@@ -25,7 +25,7 @@ across CLI runtimes, so none are claimed here.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 import inspect
 import json
@@ -36,7 +36,7 @@ import tempfile
 from typing import Any
 
 from ouroboros.boundary.constructor_session import disable_session_persistence
-from ouroboros.boundary.incremental import construct_pieces, merge_pieces, restrict_reply
+from ouroboros.boundary.incremental import construct_pieces, merge_pieces, restrict_reply_to
 from ouroboros.boundary.oracle_build import (
     ReplyError,
     ReplyFailure,
@@ -211,16 +211,6 @@ def extract_json_object(text: str) -> dict[str, Any]:
 RuntimeFactory = Callable[..., Any]
 
 
-def _restricted(reply: Mapping[str, Any], numbers: Collection[int]) -> dict[str, Any]:
-    """The part of ``reply`` that concerns the 1-based criteria ``numbers``."""
-    merged: dict[str, list[Any]] = {"oracles": [], "checks": [], "files": [], "uncovered": []}
-    for number in sorted(numbers):
-        part = restrict_reply(reply, number)
-        for key in merged:
-            merged[key].extend(part[key])
-    return merged
-
-
 def _concrete_model(value: object) -> str | None:
     """A model id, or None for an unset or ``default`` placeholder."""
     if not isinstance(value, str):
@@ -329,7 +319,8 @@ class CheckConstructor:
 
         Always a single read-only call, whatever ``per_criterion`` says, under
         the same timeout and isolation as ``construct``. The reply is kept
-        only for the target criteria (``incremental.restrict_reply``).
+        only for the target criteria, restricted once against the whole set
+        (``incremental.restrict_reply_to``).
         """
         return await self._construct_single(
             seed, base_checkout, build_replacement_prompt(seed, targets), only=frozenset(targets)
@@ -406,7 +397,7 @@ class CheckConstructor:
         try:
             parsed = normalize_reply(extract_json_object(reply))
             if only is not None:
-                parsed = _restricted(parsed, only)
+                parsed = restrict_reply_to(parsed, only)
             package = package_from_reply(
                 parsed,
                 seed,
