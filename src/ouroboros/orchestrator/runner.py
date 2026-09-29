@@ -984,6 +984,9 @@ class OrchestratorRunner:
         self._max_decomposition_depth = validate_max_decomposition_depth(max_decomposition_depth)
         self._max_parallel_workers = max(1, max_parallel_workers)
         self._fat_harness_mode = fat_harness_mode
+        # Optional acceptance authority (ouroboros.boundary.authority), set after
+        # construction; see its call site in _execute_parallel.
+        self.acceptance_authority: Any | None = None
         self._session_signal_hub = session_signal_hub
         self._execution_preferences_override_explicit = (
             efficiency_mode is not None or frugality_assurance is not None
@@ -9290,12 +9293,15 @@ class OrchestratorRunner:
             # uses the AC executor even for single-AC or --sequential runs so
             # the evidence gate is never silently bypassed. Investment metadata
             # likewise requires per-AC dispatch so direct whole-seed execution
-            # cannot discard difficulty/stakes authority.
+            # cannot discard difficulty/stakes authority. An installed check
+            # package authority decides only on the per-AC path, so it takes
+            # that path for one AC or a sequential run too.
             has_investment_metadata = _seed_has_investment_metadata(seed)
             if (
                 self._fat_harness_mode
                 or force_sequential_levels
                 or has_investment_metadata
+                or self.acceptance_authority is not None
                 or (parallel and len(seed.acceptance_criteria) > 1)
             ):
                 parallel_kwargs: dict[str, Any] = {
@@ -9310,9 +9316,9 @@ class OrchestratorRunner:
                 }
                 if externally_satisfied_acs:
                     parallel_kwargs["externally_satisfied_acs"] = externally_satisfied_acs
-                if force_sequential_levels or (
-                    not parallel and (self._fat_harness_mode or has_investment_metadata)
-                ):
+                # A sequential run that takes the per-AC path stays sequential,
+                # whatever sent it there.
+                if force_sequential_levels or not parallel:
                     parallel_kwargs["force_sequential_levels"] = True
 
                 try:
@@ -10370,6 +10376,9 @@ class OrchestratorRunner:
             expected_runtime_effect_capabilities=execution_semantics["runtime_effect_capabilities"],
             usage_limit_pause_seconds=execution_semantics["usage_limit_pause_seconds"],
         )
+        if (install := getattr(self.acceptance_authority, "install", None)) is not None:
+            # Check package on: it drives repairs; the legacy verifier is advisory.
+            install(parallel_executor)
 
         raw_published_pause_owner = tracker.progress.get("pause_owner")
         if (
@@ -10482,6 +10491,14 @@ class OrchestratorRunner:
                 ),
                 default_pause_seconds=execution_semantics["usage_limit_pause_seconds"],
             )
+        if self.acceptance_authority is not None and recoverable_failure_pause is None:
+            # Terminal, non-pausing results only (a paused run is decided when it
+            # resumes); it may replace covered root results before the terminal
+            # plan is built, so the durable status carries its decision.
+            parallel_result = await self.acceptance_authority(
+                seed=seed, execution_id=exec_id, parallel_result=parallel_result
+            )
+            success = parallel_result.all_succeeded
 
         final_message = render_parallel_completion_message(
             parallel_result,

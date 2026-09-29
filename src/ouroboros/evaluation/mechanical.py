@@ -17,9 +17,15 @@ from pathlib import Path
 from typing import Any
 
 from ouroboros.core.errors import ValidationError
+from ouroboros.core.project_env import with_project_venv
 from ouroboros.core.types import Result
 from ouroboros.evaluation.command_dispatch import prepare_command
-from ouroboros.evaluation.models import CheckResult, CheckType, MechanicalResult
+from ouroboros.evaluation.models import (
+    COMMAND_CHECK_TYPES,
+    CheckResult,
+    CheckType,
+    MechanicalResult,
+)
 from ouroboros.events.base import BaseEvent
 from ouroboros.events.evaluation import (
     create_stage1_completed_event,
@@ -108,7 +114,10 @@ async def run_command(
     Returns:
         CommandResult with output and status
     """
-    env = os.environ.copy()
+    # The detector accepts a tool the project's virtualenv provides, which a
+    # task worktree reaches only through the main working tree's, so the
+    # command resolves it the same way.
+    env = os.environ.copy() if working_dir is None else with_project_venv(os.environ, working_dir)
     # The MCP server sets this sentinel to prevent recursive server spawning.
     # Mechanical verification must test the repository as a fresh process would;
     # leaking the sentinel makes CLI tests take the nested-server early exit.
@@ -229,7 +238,7 @@ class MechanicalVerifier:
             Result containing MechanicalResult and events, or error
         """
         if checks is None:
-            checks = list(CheckType)
+            checks = list(COMMAND_CHECK_TYPES)
 
         events: list[BaseEvent] = []
         check_results: list[CheckResult] = []

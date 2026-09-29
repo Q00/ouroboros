@@ -403,3 +403,25 @@ class TestRunMechanicalVerification:
             )
 
             assert result.is_ok
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX virtualenv layout")
+def test_run_command_resolves_tools_from_the_main_worktree_venv(tmp_path) -> None:
+    """A task worktree lacks the gitignored ``.venv``; the command uses the main tree's."""
+    main = tmp_path / "project"
+    bin_dir = main / ".venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    (main / ".venv" / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    for name, body in (("python3", ""), ("projtool", "echo PROJECT_VENV_TOOL")):
+        (bin_dir / name).write_text(f"#!/bin/sh\n{body}\n")
+        (bin_dir / name).chmod(0o755)
+    gitdir = main / ".git" / "worktrees" / "orch_1"
+    gitdir.mkdir(parents=True)
+    worktree = tmp_path / "worktrees" / "orch_1"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: {gitdir}\n")
+
+    result = asyncio.run(run_command(("projtool",), timeout=30, working_dir=worktree))
+
+    assert result.return_code == 0, result.stderr
+    assert "PROJECT_VENV_TOOL" in result.stdout

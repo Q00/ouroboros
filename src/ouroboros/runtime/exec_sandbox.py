@@ -17,9 +17,10 @@ a check package exchanges frames over stdin and stdout). Under confinement:
 
 - **Writes** are allowed only beneath the writable roots the caller names
   (the copy) and the per-run temp directory, plus a few character devices
-  (``/dev/null`` and friends). Everything else, including the live
-  workspace, the user's home directory and the system temp directory, is
-  read-only. Reading and executing are not restricted.
+  (``/dev/null`` and friends; on Windows none: an AppContainer cannot open
+  the ``NUL`` device at all, so a command that redirects to it fails).
+  Everything else, including the live workspace, the user's home directory
+  and the system temp directory, is read-only.
   Each root is claimed by identity: ``confine`` records its real path,
   device and inode, and the helper opens it without following a symlink and
   refuses to run the command unless it is still that directory (on Linux the
@@ -32,19 +33,41 @@ a check package exchanges frames over stdin and stdout). Under confinement:
   runs nothing if a link appeared in between.
   "Read-only" covers content, names (create, remove, rename, link) and
   metadata the process sets (mode, ownership, timestamps, extended
-  attributes, inode flags). The access time the kernel records when a
+  attributes, inode flags; on Windows, file attributes, alternate data
+  streams and the DACL). The access time the kernel records when a
   permitted read happens is part of read access, not a write the process
   performs: it changes under ``sandbox-exec`` with every write denied as
   well, and only a mount option (``noatime``) can stop it.
+- **Reads** are not restricted on macOS and Linux. An AppContainer can read
+  only what its principals are granted, so on Windows the command reads what
+  every AppContainer may read (the system directories grant ``ALL
+  APPLICATION PACKAGES``), its writable roots, and the paths ``confine``
+  grants to the Ouroboros read capability (see the Windows backend). A
+  command that reads anything else fails, which fails closed.
 - **Network** (``deny_network=True``, reported as ``network_denied``):
-  non-loopback IP traffic is denied. Loopback (``localhost``) and Unix-domain
-  sockets stay available for local IPC.
+  non-loopback IP traffic is denied, and loopback (``localhost``) and
+  Unix-domain sockets stay available for local IPC. How far loopback
+  reaches differs: under ``sandbox-exec`` and in a container's own
+  loopback-only namespace it reaches every local process; in a new Linux
+  namespace and in a Windows AppContainer it reaches only the command's own
+  processes. An AppContainer never reaches a loopback server outside it,
+  even with ``deny_network=False``, unless an administrator has exempted it
+  (``CheckNetIsolation LoopbackExempt``), which a per-run container never
+  is. That is not reported separately: with the network denied (the
+  replay's only mode) a Windows command reaches what it reaches in a new
+  Linux namespace, and a check that needs a service outside the sandbox
+  cannot be verified by either.
 - **Other processes' environments** (``ConfinedCommand.isolates_process_environments``):
   under Landlock a confined process cannot read ``/proc/<pid>/environ``,
   ``mem`` or ``maps`` of any process outside its domain, the controller and
   every other process of the user included, because Landlock denies
   ptrace-mode access across the domain boundary; its own ``/proc/self`` and
-  its descendants' stay readable. ``sandbox-exec`` cannot deny the macOS
+  its descendants' stay readable. An AppContainer process cannot open a
+  process outside its container for reading its memory (``OpenProcess``
+  with ``PROCESS_VM_READ`` is denied by the process DACL and by the
+  mandatory integrity policy, since the container runs at low integrity),
+  so on Windows the environments of the controller and the user's other
+  processes are unreadable too. ``sandbox-exec`` cannot deny the macOS
   equivalent (``sysctl`` ``KERN_PROCARGS2``, which returns a same-user
   process's arguments and environment; neither ``sysctl-read`` nor
   ``process-info*`` rules gate it), so on macOS a confined process can read
@@ -55,8 +78,14 @@ a check package exchanges frames over stdin and stdout). Under confinement:
   ``env_passthrough`` (``DEFAULT_ENV_PASSTHROUGH`` by default: ``PATH``, the
   locale, ``TZ`` and Python I/O settings) are copied from the source
   environment; ``TMPDIR``, ``TMP`` and ``TEMP`` point to the temp directory,
-  and so does ``HOME`` unless the caller passes it through; ``env_set``
-  values are applied last. That environment (``ConfinedCommand.command_env``)
+  and so does ``HOME`` unless the caller passes it through (on Windows also
+  ``USERPROFILE``, ``APPDATA`` and ``LOCALAPPDATA``, and ``SYSTEMROOT`` is
+  set to the Windows directory, without which Winsock cannot start);
+  ``env_set`` values are applied last. On Windows, creating an AppContainer
+  process then rewrites ``LOCALAPPDATA`` to ``<LOCALAPPDATA>\\Packages\\<name>\\AC``
+  and ``TEMP`` and ``TMP`` to its ``Temp`` subdirectory; ``LOCALAPPDATA``
+  must lie inside a writable root (it is the temp directory unless the
+  caller changes it), so all three stay inside the temp directory. That environment (``ConfinedCommand.command_env``)
   takes effect only when the command itself is exec'd, inside the sandbox:
   every launcher (``sandbox-exec``, ``unshare``, the helper) starts with a
   fixed bootstrap environment (``ConfinedCommand.env``), so a loader control
@@ -89,9 +118,56 @@ Backends:
   ``unshare`` capability is), and the parent's choice is never the proof:
   the helper checks that its namespace has only ``lo`` immediately before
   exec and runs nothing otherwise.
-- **Anything else** (Windows, a Linux kernel without Landlock, a macOS
-  process that is already sandboxed): no backend, and ``confine`` returns
-  ``SandboxUnavailable``. A command is never run unconfined as a fallback.
+- **Windows**: an AppContainer, set up by the launcher
+  ``_confine_windows.py``, which stays outside the container, starts the
+  command inside it and waits for it (an AppContainer is applied when a
+  process is created, not by the process itself). Each ``confine`` call
+  names a fresh AppContainer (a random name). Concurrent commands therefore
+  never share a principal: one command's grants cannot reach another's copy.
+  ``CreateProcessW`` requires a registered profile, so the launcher creates
+  one and deletes it after creating the command's process and before
+  resuming it: the profile folder, which grants the container full control,
+  and its registry storage are gone before the command runs anything. The
+  launcher grants that SID modify on the writable roots, through the handles
+  it verified (keeping the rest of each DACL, its protection included; a
+  root with a NULL DACL, which means no access control, is refused rather
+  than rewritten),
+  creates the command suspended with ``PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES``
+  (no network capability when the network is denied; the client and server
+  capabilities otherwise) and ``PROC_THREAD_ATTRIBUTE_HANDLE_LIST`` (exactly
+  its standard handles), puts it in a Job Object that kills every process in
+  it when its last handle closes, resumes it, and when it exits terminates
+  the rest of its tree and revokes the grants. The caller's timeout kills
+  the launcher (directly or through the caller's own job); its job handle
+  then closes and the kernel kills the whole tree. The revocation cannot run
+  then, so the grants stay on the roots until the caller deletes them (it
+  owns and removes them; see the precondition), naming a SID that no process
+  holds any more.
+  Reading needs grants too. Read and execute on the controller's
+  interpreter (``sys.prefix``, ``sys.base_prefix``) and on the targets of
+  the links beneath the writable roots (the live dependency trees a
+  workspace copy links to) are granted to one stable capability SID,
+  ``_confine_windows.READ_CAPABILITY``, which every run's container holds.
+  **That grant is persistent**: it is applied once, inherited by files
+  created there later, and never revoked by a run, because a per-run read
+  grant would rewrite the DACL of every file in the user's live virtual
+  environment twice per command, concurrent commands rewriting the same DACL
+  can drop each other's grant, and a killed launcher could not revoke it. It
+  widens access only for processes holding that capability, which only the
+  sandbox gives out, and only to reading, which the other backends do not
+  restrict. A path is granted only when containers cannot already read it,
+  never when it is a volume root, contains a writable root, the user's home
+  directory, the Windows directory or a Program Files directory, or lies
+  inside one of the last two. Every grant is bound to its object: the
+  object's volume and file id are recorded in
+  ``~/.ouroboros/exec-sandbox/read-grants.jsonl`` before its DACL changes,
+  through the same handle, and ``remove_persistent_read_grants`` reopens each
+  object by that id (so one renamed since is still cleaned, and a new object
+  at the old name is not touched) and removes every such grant.
+- **Anything else** (a Linux kernel without Landlock, a macOS process that
+  is already sandboxed, another operating system): no backend, and
+  ``confine`` returns ``SandboxUnavailable``. A command is never run
+  unconfined as a fallback.
 
 Each backend is probed once per process with ``_sandbox_probe.py``: every
 mutation class it can perform unconfined on this host (content, names and
@@ -118,7 +194,13 @@ the authority to change that file directly.
 Outside this boundary: effects the confined process asks another, unconfined
 process to perform over IPC (a user service manager, a desktop automation
 service, a container daemon), changes other unconfined processes make to the
-roots while the command runs, and reads of anything the user can read.
+roots while the command runs, and reads of anything the user can read. On
+Windows also: objects every AppContainer may write (an ACL that grants ``ALL
+APPLICATION PACKAGES`` write), the container's named-object namespace, and
+per-run grants left on roots whose launcher was killed (their caller deletes
+the roots), and the profile of a launcher killed in the moment between
+creating the command's AppContainer profile and deleting it (before the
+command is resumed): its folder and registry key stay behind.
 """
 
 from __future__ import annotations
@@ -130,6 +212,7 @@ import functools
 import json
 import os
 from pathlib import Path
+import secrets
 import shutil
 import socket
 import stat
@@ -167,6 +250,7 @@ TEMP_DIRECTORY_VARIABLES: tuple[str, ...] = ("TMPDIR", "TMP", "TEMP")
 
 _PROBE_TIMEOUT_SECONDS = 10.0
 _CONFINE_HELPER = Path(__file__).with_name("_confine_exec.py")
+_WINDOWS_LAUNCHER = Path(__file__).with_name("_confine_windows.py")
 # Must match ``_confine_exec.COMMAND_ENV_VARIABLE`` (the helper is not imported).
 _COMMAND_ENV_VARIABLE = "OUROBOROS_SANDBOX_COMMAND_ENV"
 
@@ -192,6 +276,7 @@ class SandboxBackend(StrEnum):
 
     SANDBOX_EXEC = "sandbox_exec"
     LANDLOCK = "landlock"
+    APPCONTAINER = "appcontainer"
     DISABLED = "disabled"
     """The unsafe off switch is set: the command runs unconfined."""
 
@@ -207,6 +292,8 @@ class NetworkPlan(StrEnum):
     """Linux: a new, empty network namespace (``unshare``) with ``lo`` brought up."""
     CURRENT_NAMESPACE = "current_namespace"
     """Linux: this process's namespace had only ``lo`` when ``confine`` ran."""
+    NO_CAPABILITY = "no_capability"
+    """Windows: the AppContainer holds no network capability (its own loopback stays)."""
 
 
 class SandboxUnavailableReason(StrEnum):
@@ -222,6 +309,11 @@ class SandboxUnavailableReason(StrEnum):
     """A regular file under a writable root has another hard link, which may be
     outside the roots (writing it through the root would change that file
     too), or part of the root cannot be inspected to rule that out."""
+    WINDOWS_BATCH_FILE = "windows_batch_file"
+    """Windows: the command is a batch file (``.cmd``, ``.bat``). Inside an
+    AppContainer ``cmd.exe`` refuses to run one ("Access is denied", measured
+    on ``windows-latest`` with the file readable and the directory writable),
+    so it is not run."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,7 +351,7 @@ class ConfinedCommand:
     writable_roots: tuple[str, ...]
     network_denied: bool
     isolates_process_environments: bool
-    """Whether the command cannot read other processes' environments (Landlock only)."""
+    """Whether the command cannot read other processes' environments (Landlock, AppContainer)."""
 
 
 def _darwin_profile(root_count: int, *, deny_network: bool) -> str:
@@ -293,7 +385,11 @@ def _hard_linked_file(root: str) -> str | None:
     def unreadable(error: OSError) -> None:
         failures.append(f"{error.filename}: {error.strerror}")
 
-    for dirpath, _dirnames, filenames in os.walk(root, followlinks=False, onerror=unreadable):
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False, onerror=unreadable):
+        # ``os.walk`` follows Windows junctions even without ``followlinks``.
+        dirnames[:] = [
+            name for name in dirnames if not os.path.isjunction(os.path.join(dirpath, name))
+        ]
         for name in filenames:
             path = os.path.join(dirpath, name)
             try:
@@ -353,17 +449,33 @@ def _backend_argv(
     argv: Sequence[str],
     roots: Sequence[_RootClaim],
     network: NetworkPlan,
+    readable: Sequence[str] = (),
 ) -> tuple[str, ...]:
     """The argv running ``argv`` under ``backend`` with the ``network`` plan.
 
-    Every backend ends in ``_confine_exec.py``, which applies the command's
-    environment only when it execs the command, inside the sandbox. On Linux,
-    whenever the network is denied, the helper checks immediately before exec
-    that its namespace has only ``lo`` (``--require-loopback-only``): the
-    plan is a parent-side choice, never the final proof.
+    On macOS and Linux every backend ends in ``_confine_exec.py``, which
+    applies the command's environment only when it execs the command, inside
+    the sandbox. On Linux, whenever the network is denied, the helper checks
+    immediately before exec that its namespace has only ``lo``
+    (``--require-loopback-only``): the plan is a parent-side choice, never
+    the final proof. On Windows the launcher ``_confine_windows.py`` creates
+    the command inside a fresh AppContainer, with read grants on ``readable``.
     """
-    helper = (_interpreter(), "-I", "-S", "-B", str(_CONFINE_HELPER))
     claims = [part for path, dev, ino in roots for part in ("--root", path, str(dev), str(ino))]
+    if backend is SandboxBackend.APPCONTAINER:
+        options = [
+            "--appcontainer",
+            _appcontainer_name(),
+            "--manifest",
+            str(_read_grant_manifest()),
+        ]
+        if network is NetworkPlan.ALLOW:
+            options.append("--network")
+        for path in readable:
+            options += ["--read", path]
+        launcher = (_interpreter(), "-I", "-S", "-B", str(_WINDOWS_LAUNCHER))
+        return (*launcher, *options, *claims, "--", *argv)
+    helper = (_interpreter(), "-I", "-S", "-B", str(_CONFINE_HELPER))
     if backend is SandboxBackend.SANDBOX_EXEC:
         executable = _trusted_launcher("sandbox-exec")
         if executable is None:  # pragma: no cover - the backend was probed with it
@@ -385,6 +497,110 @@ def _backend_argv(
     else:
         prefix = helper
     return (*prefix, "--landlock", *claims, "--", *argv)
+
+
+def _appcontainer_name() -> str:
+    """A fresh AppContainer name: every command gets its own principal."""
+    return f"ouroboros.sandbox.{secrets.token_hex(16)}"
+
+
+def _read_grant_manifest() -> Path:
+    """Where the Windows launcher records each persistent read grant."""
+    return Path.home() / ".ouroboros" / "exec-sandbox" / "read-grants.jsonl"
+
+
+def _contains(parent: str, child: str) -> bool:
+    """Whether ``child`` is ``parent`` or lies beneath it (both real paths)."""
+    parent, child = os.path.normcase(parent), os.path.normcase(child)
+    try:
+        return os.path.commonpath((parent, child)) == parent
+    except ValueError:  # different drives
+        return False
+
+
+def _system_anchors() -> tuple[str, ...]:
+    """The Windows directory and the Program Files directories that exist here."""
+    names = ("SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432")
+    found = (os.environ.get(name) for name in names)
+    return tuple(os.path.realpath(path) for path in found if path and os.path.isdir(path))
+
+
+def _persistent_read_allowed(path: str, roots: Sequence[str]) -> bool:
+    """Whether ``path`` may receive the persistent read grant (see the module docstring).
+
+    Never a volume root; never a path that is or contains a writable root or
+    the user's home directory (a grant there would cover the scratch
+    directories and the user's whole profile); never the Windows directory or
+    a Program Files directory, nor anything above or inside them (system
+    managed; what containers may read there is already granted).
+    """
+    if os.path.ismount(path):
+        return False
+    home = os.path.realpath(Path.home())
+    if _contains(path, home) or any(
+        _contains(path, root) or _contains(root, path) for root in roots
+    ):
+        return False
+    return not any(
+        _contains(path, anchor) or _contains(anchor, path) for anchor in _system_anchors()
+    )
+
+
+def _link_targets(roots: Sequence[str]) -> list[str]:
+    """The real paths of the symbolic links and junctions beneath ``roots``."""
+    targets: list[str] = []
+    for root in roots:
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+            links = [
+                name
+                for name in (*dirnames, *filenames)
+                if os.path.islink(os.path.join(dirpath, name))
+                or os.path.isjunction(os.path.join(dirpath, name))
+            ]
+            dirnames[:] = [name for name in dirnames if name not in links]
+            targets += [os.path.realpath(os.path.join(dirpath, name)) for name in links]
+    return targets
+
+
+def _windows_read_paths(roots: Sequence[str], extra: Sequence[str] = ()) -> tuple[str, ...]:
+    """What an AppContainer command is granted to read: the controller's
+    interpreter, ``extra``, and the targets of links beneath ``roots``;
+    only paths that exist and may take the persistent grant, and none that
+    lies beneath another."""
+    prefixes = (sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix)
+    candidates: list[str] = []
+    for path in (*prefixes, *extra, *_link_targets(roots)):
+        real = os.path.realpath(path)
+        if real in candidates or not os.path.exists(real):
+            continue
+        if _persistent_read_allowed(real, roots):
+            candidates.append(real)
+        else:
+            log.info("exec_sandbox.read_grant_refused", path=real)
+    return tuple(
+        path
+        for path in candidates
+        if not any(other != path and _contains(other, path) for other in candidates)
+    )
+
+
+def remove_persistent_read_grants() -> tuple[str, ...]:
+    """Remove every persistent Windows read grant the sandbox has made.
+
+    Reads the manifest (``~/.ouroboros/exec-sandbox/read-grants.jsonl``),
+    reopens each recorded object by its volume and file id (wherever it has
+    been renamed to on that volume), removes every ACE for the Ouroboros read
+    capability from it, and deletes the manifest once every object is clean
+    or gone. Returns the recorded paths of the objects cleaned; empty on
+    other platforms. Run it while
+    no Ouroboros command is running: a confined command then loses what it
+    was reading. The next confined command grants what it needs again.
+    """
+    if sys.platform != "win32":
+        return ()
+    from ouroboros.runtime import _confine_windows
+
+    return tuple(_confine_windows.remove_read_grants(str(_read_grant_manifest())))
 
 
 def _bootstrap_environment(command_env: Mapping[str, str]) -> dict[str, str]:
@@ -416,7 +632,8 @@ def _probe_matrix(argv_prefix: Sequence[str] | None, root: Path) -> dict[str, An
     try:
         result = subprocess.run(  # noqa: S603 - fixed argv, no shell
             argv,
-            env=_bootstrap_environment({"PATH": os.defpath}),
+            # The probe command gets the environment a real command would.
+            env=_bootstrap_environment(build_environment(str(inside), source={"PATH": os.defpath})),
             capture_output=True,
             timeout=_PROBE_TIMEOUT_SECONDS,
             check=False,
@@ -463,6 +680,8 @@ def filesystem_backend() -> SandboxBackend | None:
         candidate = SandboxBackend.SANDBOX_EXEC
     elif sys.platform.startswith("linux"):
         candidate = SandboxBackend.LANDLOCK
+    elif sys.platform == "win32":
+        candidate = SandboxBackend.APPCONTAINER
     else:
         return None
     probe_root = Path(tempfile.mkdtemp(prefix="ouroboros-sandbox-probe-")).resolve()
@@ -472,7 +691,10 @@ def filesystem_backend() -> SandboxBackend | None:
         baseline = _probe_matrix(None, probe_root / "baseline")
         (probe_root / "confined" / "inside").mkdir()
         inside = _claim_root(str(probe_root / "confined" / "inside"))
-        prefix = _backend_argv(candidate, (), (inside,), NetworkPlan.ALLOW)
+        readable: tuple[str, ...] = ()
+        if candidate is SandboxBackend.APPCONTAINER:
+            readable = _windows_read_paths((inside[0],), (str(_PROBE.parent),))
+        prefix = _backend_argv(candidate, (), (inside,), NetworkPlan.ALLOW, readable)
         confined = _probe_matrix(prefix, probe_root / "confined")
         if not _matrix_confines(baseline, confined):
             log.info(
@@ -510,6 +732,8 @@ def _network_plan(backend: SandboxBackend, deny_network: bool) -> NetworkPlan | 
         return NetworkPlan.ALLOW
     if backend is SandboxBackend.SANDBOX_EXEC:
         return NetworkPlan.PROFILE
+    if backend is SandboxBackend.APPCONTAINER:
+        return NetworkPlan.NO_CAPABILITY
     if _process_has_only_loopback():
         return NetworkPlan.CURRENT_NAMESPACE
     if _unshare_prefix() is not None:
@@ -573,9 +797,30 @@ def build_environment(
     env = {name: values[name] for name in passthrough if name in values}
     for name in TEMP_DIRECTORY_VARIABLES:
         env[name] = temp_dir
-    env.setdefault("HOME", temp_dir)
+    for name in _HOME_VARIABLES:
+        env.setdefault(name, temp_dir)
+    if sys.platform == "win32":
+        env.setdefault("SYSTEMROOT", _windows_directory())
     env.update(overrides or {})
     return env
+
+
+# Where programs keep per-user state: pointed at the temp directory unless
+# passed through. On Windows the profile directories play the part of HOME.
+_HOME_VARIABLES: tuple[str, ...] = (
+    ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA") if sys.platform == "win32" else ("HOME",)
+)
+
+
+def _windows_directory() -> str:
+    """The Windows directory, from the system (never from an environment)."""
+    import ctypes
+
+    buffer = ctypes.create_unicode_buffer(260)
+    length = ctypes.WinDLL("kernel32").GetSystemWindowsDirectoryW(buffer, len(buffer))  # type: ignore[attr-defined]
+    if not length:
+        raise OSError("GetSystemWindowsDirectoryW failed")
+    return buffer.value
 
 
 def confine(
@@ -594,7 +839,14 @@ def confine(
 
     ``writable_roots`` and ``temp_dir`` must be existing directories; the
     caller creates them and removes them afterwards. ``temp_dir`` is writable
-    too. ``argv`` is run directly, never through a shell. ``enabled`` is the
+    too. ``argv`` is run directly, never through a shell. On Windows it goes
+    through the repository's dispatch policy
+    (``evaluation.command_dispatch.prepare_command``): a bare name is resolved
+    on absolute ``PATH`` entries only, as ``execvpe`` does on POSIX: the
+    working directory and relative entries are never searched implicitly,
+    and an absolute entry the command names is honored, the copy included; a
+    batch file is refused as ``windows_batch_file``, since ``cmd.exe`` will
+    not run one inside an AppContainer. ``enabled`` is the
     caller's sandbox policy; ``False`` is the unsafe off switch (the caller
     owns where that choice comes from and records it).
     """
@@ -632,15 +884,33 @@ def confine(
         aliased = _hard_linked_file(root)
         if aliased is not None:
             return SandboxUnavailable(SandboxUnavailableReason.ALIASED_WRITABLE_ROOT, aliased)
+    command = tuple(argv)
+    readable: tuple[str, ...] = ()
+    if backend is SandboxBackend.APPCONTAINER:
+        # The repository's Windows dispatch policy: a bare name is resolved on
+        # absolute PATH entries only, so the working directory (the copy) is
+        # never searched implicitly, as with execvpe on POSIX. The launcher
+        # then runs exactly this executable.
+        from ouroboros.evaluation.command_dispatch import prepare_command
+
+        try:
+            command = prepare_command(command, env)
+        except ValueError:
+            # Raised only for a batch file whose arguments cmd.exe would reinterpret.
+            return SandboxUnavailable(SandboxUnavailableReason.WINDOWS_BATCH_FILE, command[0])
+        if os.path.splitext(command[0])[1].lower() in (".cmd", ".bat"):
+            return SandboxUnavailable(SandboxUnavailableReason.WINDOWS_BATCH_FILE, command[0])
+        readable = _windows_read_paths(roots)
     return ConfinedCommand(
-        argv=_backend_argv(backend, argv, claims, network),
+        argv=_backend_argv(backend, command, claims, network, readable),
         env=_bootstrap_environment(env),
         command_env=env,
         cwd=cwd,
         backend=backend,
         writable_roots=tuple(roots),
         network_denied=network is not NetworkPlan.ALLOW,
-        isolates_process_environments=backend is SandboxBackend.LANDLOCK,
+        isolates_process_environments=backend
+        in (SandboxBackend.LANDLOCK, SandboxBackend.APPCONTAINER),
     )
 
 
@@ -663,5 +933,6 @@ __all__ = [
     "confine",
     "filesystem_backend",
     "NetworkPlan",
+    "remove_persistent_read_grants",
     "sandbox_unavailable_reason",
 ]

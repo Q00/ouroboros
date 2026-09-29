@@ -18,7 +18,7 @@ from typing import Any
 
 import structlog
 
-from ouroboros.core.lineage import EvaluationSummary, FeedbackMetadata
+from ouroboros.core.lineage import ACResult, EvaluationSummary, FeedbackMetadata
 from ouroboros.core.seed import ac_texts
 from ouroboros.evaluation.models import (
     AcceptanceState,
@@ -242,8 +242,106 @@ async def evaluate_generation_with_pipeline(
     return evaluation_summary_from_pipeline_result(eval_result.value, stage1_note=stage1_note)
 
 
+async def evaluate_criteria_with_pipeline(
+    seed: Any,
+    indices: tuple[int, ...],
+    *,
+    artifact: str,
+    project_dir: str | None,
+    llm_adapter: Any,
+    semantic_model: str,
+    detector_backend: str | None,
+    stage1_enabled: bool,
+) -> dict[int, ACResult]:
+    """Decide the Seed criteria at ``indices`` one by one, as ``ouroboros_evaluate`` does.
+
+    A criterion no check package and no verifier decided (for example a
+    preservation criterion, which has no reproduction check on any base) is
+    evaluated by the pipeline: the project's command checks run once in
+    ``project_dir`` and are shared, then each criterion gets the advisory
+    review, which sees those executed checks. Approval still needs executed
+    evidence and the review can only withhold. A criterion the pipeline
+    leaves unverified, or could not evaluate, is returned not evaluated.
+    """
+    from ouroboros.core.seed import AcceptanceCriterionSpec
+    from ouroboros.evaluation import (
+        EvaluationContext,
+        EvaluationPipeline,
+        PipelineConfig,
+        SemanticConfig,
+    )
+    from ouroboros.evaluation.artifact_collector import ArtifactCollector
+
+    criteria = tuple(getattr(seed, "acceptance_criteria", ()) or ())
+    texts = ac_texts(criteria)
+    run_stage1 = stage1_enabled and project_dir is not None
+    mechanical = (
+        await _project_mechanical_config(Path(project_dir), llm_adapter, detector_backend)
+        if run_stage1 and project_dir is not None
+        else None
+    )
+    pipeline = EvaluationPipeline(
+        llm_adapter=llm_adapter,
+        config=PipelineConfig(
+            stage1_enabled=run_stage1,
+            stage2_enabled=True,
+            stage3_enabled=False,
+            mechanical=mechanical,
+            semantic=SemanticConfig(model=semantic_model),
+        ),
+    )
+    bundle = ArtifactCollector().collect(artifact, project_dir)
+    stage1 = None
+    rows: dict[int, ACResult] = {}
+    for index in indices:
+        if not 0 <= index < len(criteria):
+            continue
+        criterion = criteria[index]
+        context = EvaluationContext(
+            execution_id=f"eval_{seed.metadata.seed_id}_ac{index}",
+            seed_id=seed.metadata.seed_id,
+            current_ac=texts[index],
+            current_ac_spec=criterion if isinstance(criterion, AcceptanceCriterionSpec) else None,
+            artifact=artifact,
+            artifact_type="code",
+            goal=seed.goal,
+            constraints=tuple(seed.constraints),
+            artifact_bundle=bundle,
+        )
+        outcome = await pipeline.evaluate(context, stage1_result=stage1)
+        if outcome.is_err:
+            log.warning(
+                "evolution.evaluation.criterion_failed", ac_index=index, error=str(outcome.error)
+            )
+            continue
+        result = outcome.value
+        if stage1 is None and result.stage1_result is not None:
+            stage1 = result.stage1_result.command_checks()
+        state = result.acceptance_state
+        verdict = {AcceptanceState.APPROVED: "pass", AcceptanceState.REJECTED: "fail"}.get(state)
+        stage2 = result.stage2_result
+        rows[index] = ACResult(
+            ac_index=index,
+            ac_content=texts[index],
+            semantic_ac_key=getattr(criterion, "semantic_ac_key", None),
+            passed=verdict == "pass",
+            score=stage2.score if stage2 is not None else None,
+            evidence=(
+                result.failure_reason
+                or (stage2.reasoning if stage2 is not None else "")
+                or f"evaluation pipeline: {state.value}"
+            ),
+            verification_method="evaluation_pipeline",
+            ac_verdict_state="evaluated" if verdict is not None else "not_evaluated",
+            final_verdict=verdict or "fail",
+            rendered_verdict=(verdict or "not_evaluated").upper(),
+        )
+    return rows
+
+
 __all__ = [
     "EVOLVE_STAGE1_ENV",
+    "evaluate_criteria_with_pipeline",
     "evaluate_generation_with_pipeline",
     "evaluation_summary_from_pipeline_result",
     "evolve_stage1_enabled",

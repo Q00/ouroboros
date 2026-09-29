@@ -16,6 +16,11 @@ from ouroboros.persistence.picker_indexes import (
     PICKER_CONTRACT_NAMES,
     PICKER_GAP_INDEX,
     PICKER_GAP_INDEX_DDL,
+    PICKER_INTERVIEW_ROOT_INDEX,
+    PICKER_INTERVIEW_ROOT_INDEX_DDL,
+    PICKER_INTERVIEW_ROOT_TABLE,
+    PICKER_INTERVIEW_ROOT_TABLE_DDL,
+    PICKER_INTERVIEW_ROOT_VALID_SQL,
     PICKER_META_TABLE,
     PICKER_META_TABLE_DDL,
     PICKER_PROGRESS_SCOPE_SQL,
@@ -92,6 +97,11 @@ def picker_contract_is_complete(connection: Connection) -> bool:
         ("backfilled_through_rowid", "INTEGER", 1, 0, 0),
     ):
         return False
+    if _table_columns(connection, PICKER_INTERVIEW_ROOT_TABLE) != (
+        ("event_rowid", "INTEGER", 0, 1, 0),
+        ("interview_id", "TEXT", 1, 0, 0),
+    ):
+        return False
     projection_column = next(
         (
             row
@@ -109,6 +119,7 @@ def picker_contract_is_complete(connection: Connection) -> bool:
     ) != ("INTEGER", 0, None, 0, 0):
         return False
     expected_index_keys = {
+        PICKER_INTERVIEW_ROOT_INDEX: ("interview_id",),
         DIRECT_EVENT_INDEX: (None, "event_type"),
         PICKER_GAP_INDEX: ("event_type",),
         PICKER_START_EXECUTION_INDEX: ("execution_id",),
@@ -181,9 +192,15 @@ def _projection_has_gaps(connection: Connection) -> bool:
 
 def _rebuild_projection(connection: Connection) -> None:
     installed = _installed_contract(connection)
+    # A stale same-name index may belong to a different table. Remove it before
+    # dropping roots (which would otherwise remove only indexes on that table).
+    root_index = installed.get(PICKER_INTERVIEW_ROOT_INDEX)
+    if root_index is not None:
+        _drop_object(connection, root_index[0], root_index[1])
     # SQLite DDL is transactional, so a failed backfill restores the prior
     # complete contract without a partial marker becoming visible to readers.
     for name in (
+        PICKER_INTERVIEW_ROOT_TABLE,
         PICKER_START_TABLE,
         PICKER_START_SESSION_TABLE,
         PICKER_PROGRESS_TABLE,
@@ -202,6 +219,20 @@ def _rebuild_projection(connection: Connection) -> None:
     connection.exec_driver_sql(PICKER_START_SESSION_TABLE_DDL)
     connection.exec_driver_sql(PICKER_PROGRESS_TABLE_DDL)
     connection.exec_driver_sql(PICKER_META_TABLE_DDL)
+    connection.exec_driver_sql(PICKER_INTERVIEW_ROOT_TABLE_DDL)
+    connection.exec_driver_sql(PICKER_INTERVIEW_ROOT_INDEX_DDL)
+    # Minimal legacy stores predate aggregate families. They cannot establish
+    # Interview identity; retain their run-only support without guessing.
+    if any(
+        row[1] == "aggregate_type"
+        for row in connection.exec_driver_sql('PRAGMA table_info("events")')
+    ):
+        # Force the existing event-type index; unrelated history is not scanned.
+        connection.exec_driver_sql(
+            f"INSERT INTO {PICKER_INTERVIEW_ROOT_TABLE} (event_rowid, interview_id) "
+            "SELECT rowid, aggregate_id FROM events INDEXED BY ix_events_event_type "
+            f"WHERE {PICKER_INTERVIEW_ROOT_VALID_SQL}"
+        )
     connection.exec_driver_sql(DIRECT_EVENT_INDEX_DDL)
 
     connection.exec_driver_sql(

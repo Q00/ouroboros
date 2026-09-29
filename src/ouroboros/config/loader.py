@@ -820,24 +820,14 @@ def get_agent_reasoning_effort() -> str | None:
 
 
 def get_execution_model() -> str | None:
-    """Return an explicit Execute-stage model pin, if one was configured.
-
-    Environment remains the one-off highest-priority override.  The web/TUI
-    setting writes ``execution.default_model``; an empty value or the UI's
-    ``default``/``current`` sentinel deliberately means "let this runtime pick"
-    rather than a model named ``default``.
-    """
-    env_model = os.environ.get("OUROBOROS_EXECUTION_MODEL")
-    if env_model is not None:
-        stripped = env_model.strip()
-        return None if not stripped or stripped.lower() in {"default", "current"} else stripped
-    try:
-        model = load_config().execution.default_model
-    except ConfigError:
-        return None
+    """Return the explicit Execute pin, or None for unset/automatic selection."""
+    model = os.environ.get("OUROBOROS_EXECUTION_MODEL")
     if model is None:
-        return None
-    stripped = model.strip()
+        try:
+            model = load_config().execution.default_model
+        except ConfigError:
+            return None
+    stripped = "" if model is None else model.strip()
     return None if not stripped or stripped.lower() in {"default", "current"} else stripped
 
 
@@ -2027,8 +2017,9 @@ def get_llm_model_for_role(
     """Resolve the configured model for a logical internal-LLM role.
 
     Stage model fields are the default source of truth: interview roles use
-    ``clarification.default_model``, evaluate/execute roles use
-    ``evaluation.semantic_model``, and reflect roles use
+    ``clarification.default_model``, execute roles use an explicit
+    ``execution.default_model`` or their backend default, evaluate
+    roles use ``evaluation.semantic_model``, and reflect roles use
     ``resilience.reflect_model``. An explicitly-pinned legacy per-role field
     (e.g. ``llm.qa_model``) still takes precedence for backward compatibility,
     and an unmapped role degrades to the evaluate model rather than raising.
@@ -2050,6 +2041,12 @@ def get_llm_model_for_role(
         return get_clarification_model(resolved_backend)
     if stage == Stage.REFLECT:
         return get_reflect_model(resolved_backend)
+    if stage == Stage.EXECUTE:
+        if (execution_model := get_execution_model()) is not None:
+            return execution_model
+        if resolved_backend in {"litellm", "openai", "openrouter"}:
+            return get_semantic_model(resolved_backend)
+        return "default"
     return get_semantic_model(resolved_backend)
 
 

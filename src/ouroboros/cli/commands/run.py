@@ -278,6 +278,12 @@ def _detect_project_root_from_seed_path(seed_file: Path, *, max_levels: int = 6)
     return None
 
 
+def _in_global_seed_store(seed_file: Path) -> bool:
+    """Whether ``seed_file`` lives in the global Seed store, ``~/.ouroboros/seeds``."""
+    store = (Path.home() / ".ouroboros" / "seeds").resolve()
+    return seed_file.resolve().is_relative_to(store)
+
+
 def _resolve_cli_project_dir(
     seed: "Seed",
     seed_file: Path,
@@ -292,7 +298,8 @@ def _resolve_cli_project_dir(
     the Seed does not say where it belongs. Callers that hold a better answer
     than "wherever the file sits" pass it — `init` passes the directory the
     interview was run from — so a Seed written to the global store cannot turn
-    that store into a workspace. It stays a *fallback*: an explicit
+    that store into a workspace. Without one, a Seed in the global store uses
+    the current directory for the same reason. It stays a *fallback*: an explicit
     ``project_dir``, Seed metadata, and a valid brownfield target all still win,
     and every one of those decisions is made here, once.
     """
@@ -311,7 +318,15 @@ def _resolve_cli_project_dir(
         return _directory_for_runtime(metadata_project_dir)
 
     target_dir = _resolve_brownfield_target_dir(seed_data)
-    stable_base = target_dir or seed_base
+    # The global store holds Seeds for every project, so its folder says
+    # nothing about where this one belongs; the directory the command runs
+    # from does, as for `init` (`ouroboros run ~/.ouroboros/seeds/<id>.yaml`
+    # is the documented terminal flow).
+    global_seed = (
+        detected_root is None and fallback_dir is None and _in_global_seed_store(seed_file)
+    )
+    project_root = detected_root or (Path.cwd().resolve() if global_seed else None)
+    stable_base = target_dir or project_root or seed_base
     resolution = resolve_seed_project_path(seed, stable_base=stable_base)
     if resolution.rejected:
         print_error(
@@ -321,8 +336,9 @@ def _resolve_cli_project_dir(
             "with --project-dir pointing at the target project."
         )
         raise typer.Exit(1)
-    if detected_root is not None and target_dir is None:
-        # Central seed: the detected root *is* the project root.
+    if project_root is not None and target_dir is None:
+        # Central seed: the detected root *is* the project root; so is the
+        # current directory for a Seed in the global store.
         # context_references are documentation pointers — collapsing an
         # existing-file reference (e.g. ``src/.../foo.py``) to its parent
         # would push the runtime cwd into a subdirectory and break the
@@ -330,7 +346,7 @@ def _resolve_cli_project_dir(
         # branch above already handled any user-declared override, and
         # the containment check above still surfaces escapes. Honor the
         # detected root directly.
-        return detected_root
+        return project_root
     if resolution.path is not None:
         return _directory_for_runtime(resolution.path)
     return stable_base
@@ -601,6 +617,7 @@ async def _record_cli_run_outcome(
     session_repo: "SessionRepository",
     execution_id: str | None,
     session_id: str | None,
+    check_package_run: Any = None,
 ) -> None:
     """Emit one durable ``workflow_outcome`` for a terminal ``ooo run``.
 
@@ -611,7 +628,9 @@ async def _record_cli_run_outcome(
     emits nothing (its resume will). A non-success outcome carries the closed
     ``failure_cause`` derived from durable executor evidence, never prose. The
     outcome id is fresh per invocation because ``--resume`` reuses the
-    execution id and each attempt is its own outcome. Never raises.
+    execution id and each attempt is its own outcome. ``check_package_run``
+    (``boundary/run_control.py``) closes its record at the same terminal
+    status; nothing from it is sent. Never raises.
     """
     from ouroboros.mcp.tools.run_failure_meta import derive_run_failure_meta
     from ouroboros.orchestrator.session import SessionStatus
@@ -655,6 +674,12 @@ async def _record_cli_run_outcome(
                 )
             except Exception:
                 pass
+        if check_package_run is not None:
+            try:
+                # A paused run returned above: the final verdict exists.
+                check_package_run.finish(terminal_status)
+            except Exception:
+                pass
         usage_telemetry.capture_job_outcome(
             f"{execution_id}:{uuid4().hex}",
             "run",
@@ -678,6 +703,7 @@ async def _run_orchestrator(
     skip_completed: str | None = None,
     project_dir: Path | None = None,
     project_fallback_dir: Path | None = None,
+    check_package: bool | None = None,
 ) -> None:
     """Run workflow via orchestrator mode.
 
@@ -695,6 +721,9 @@ async def _run_orchestrator(
         project_dir: Optional explicit project directory for seed path resolution.
         project_fallback_dir: Directory to stand in for the Seed file's folder
             when the Seed itself does not say where it belongs.
+        check_package: ``--check-package`` / ``--no-check-package``; ``None``
+            defers to ``OUROBOROS_CHECK_PACKAGE``, then ``boundary.check_package``,
+            then the default, which is on (``ouroboros.boundary.switch``).
     """
     from ouroboros.core.seed import Seed
     from ouroboros.orchestrator import (
@@ -858,7 +887,20 @@ async def _run_orchestrator(
     if dashboard_url:
         print_info(f"Live Dashboard: {dashboard_url}")
 
+    check_package_run = await _prepare_check_package_boundary(
+        runner,
+        seed,
+        check_package,
+        event_store=event_store,
+        execution_id=execution_id,
+        resume_session=resume_session,
+        worker_dir=Path(workspace.effective_cwd) if workspace else project_dir,
+        runtime_backend=resolved_runtime_backend,
+        execution_model=execution_model,
+    )
+
     # Execute
+    start_new_attempt = False
     try:
         if resume_session:
             if debug:
@@ -892,7 +934,10 @@ async def _run_orchestrator(
             session_repo=session_repo,
             execution_id=execution_id,
             session_id=session_id_for_run,
+            check_package_run=check_package_run,
         )
+        for line in check_package_run.render_outcome():
+            console.print(line)
         if result.is_ok:
             res = result.value
             if res.success:
@@ -943,6 +988,16 @@ async def _run_orchestrator(
                 print_info(f"Session ID: {res.session_id}")
                 console.print(f"[dim]Error: {res.final_message[:200]}[/dim]")
                 raise typer.Exit(1)
+        elif resume_session and _held_out_checks_were_lost(result.error):
+            # The resumed run's held-out checks lived only in the process that
+            # started it, so it cannot continue here (the runner has recorded
+            # it as failed). Start a new attempt instead of exiting.
+            print_warning(
+                "This run cannot continue in a new process: its check package lived in the "
+                "process that started it. Starting a new attempt from the project; the "
+                "interrupted attempt's work stays on its task branch."
+            )
+            start_new_attempt = True
         else:
             print_error(f"Orchestrator error: {result.error}")
             raise typer.Exit(1)
@@ -958,6 +1013,78 @@ async def _run_orchestrator(
         # ones (which keep going through QA) survive. The run is over, so a
         # bounded wait here blocks no command (see ``telemetry.flush``).
         usage_telemetry.flush()
+
+    if start_new_attempt:
+        await _run_orchestrator(
+            seed_file,
+            None,
+            mcp_config,
+            mcp_tool_prefix,
+            debug,
+            parallel=parallel,
+            no_qa=no_qa,
+            runtime_backend=runtime_backend,
+            max_decomposition_depth=max_decomposition_depth,
+            skip_completed=skip_completed,
+            project_dir=project_dir,
+            check_package=check_package,
+        )
+
+
+def _held_out_checks_were_lost(error: object) -> bool:
+    """Whether a resume failed because the run's live process-local state is gone.
+
+    The runner reports that exact outcome as ``resume_blocked ==
+    "process_local_resume_unavailable"`` after recording the session failed.
+    """
+    details = getattr(error, "details", None)
+    return (
+        isinstance(details, dict)
+        and details.get("resume_blocked") == "process_local_resume_unavailable"
+    )
+
+
+async def _prepare_check_package_boundary(
+    runner: Any,
+    seed: "Seed",
+    cli_value: bool | None,
+    *,
+    event_store: Any,
+    execution_id: str | None,
+    resume_session: str | None,
+    worker_dir: Path,
+    runtime_backend: str,
+    execution_model: str | None,
+) -> Any:
+    """Resolve the check-package switch and, when on, prepare the package before dispatch.
+
+    Returns the run's ``CheckPackageRun``. With the switch ``off`` nothing here
+    calls a model, writes an event, or changes the runner. With it ``on`` the
+    package is frozen and admitted before the worker starts, and the runner
+    gets the acceptance authority that decides covered criteria before the
+    terminal status is persisted.
+    """
+    from ouroboros.boundary.ledger import BoundaryOrderError
+    from ouroboros.boundary.run_control import CheckPackageRun
+
+    check_package_run = CheckPackageRun.resolve(cli_value)
+    try:
+        lines = await check_package_run.prepare(
+            runner,
+            seed,
+            event_store=event_store,
+            execution_id=execution_id,
+            worker_dir=worker_dir,
+            runtime_backend=runtime_backend,
+            model=execution_model,
+            resume=bool(resume_session),
+        )
+    except BoundaryOrderError as exc:
+        print_error(f"Check package refused the worker start: {exc}")
+        raise typer.Exit(1) from exc
+    for line in lines:
+        print_info(line)
+    return check_package_run
 
 
 @app.command()
@@ -1071,6 +1198,23 @@ def workflow(
             ),
         ),
     ] = None,
+    check_package: Annotated[
+        bool | None,
+        typer.Option(
+            "--check-package/--no-check-package",
+            help=(
+                "Before the worker starts, build executable checks from the acceptance "
+                "criteria, admit them on the current tree, and let them decide the "
+                "criteria they cover. On by default; --no-check-package opts out (or "
+                "OUROBOROS_CHECK_PACKAGE=off, or boundary.check_package: off in config). "
+                "The checks are model-written Python scripts. They run on throwaway "
+                "copies of the project with the project's interpreter, a per-check "
+                "timeout, and an allowlisted environment, confined by the execution "
+                "sandbox: they can write only inside their copy and a scratch "
+                "directory and have no network, but they can read files you can read."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Execute a workflow from a seed file.
 
@@ -1147,6 +1291,7 @@ def workflow(
                     max_decomposition_depth=max_decomposition_depth,
                     skip_completed=skip_completed,
                     project_dir=project_dir,
+                    check_package=check_package,
                 )
             )
         except (ValueError, NotImplementedError) as e:

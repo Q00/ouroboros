@@ -256,7 +256,7 @@ def _drop_required_evidence_field(schema: EvidenceSchema, field: str) -> Evidenc
     """Return a schema copy with ``field`` removed from required and rejected_if."""
     required = tuple(name for name in schema.required if name != field)
     rejected_if = tuple(expr for expr in schema.rejected_if if not expr.strip().startswith(field))
-    return EvidenceSchema(required=required, rejected_if=rejected_if)
+    return EvidenceSchema(required=required, rejected_if=rejected_if, optional=schema.optional)
 
 
 def _effective_evidence_schema_for_ac(
@@ -349,7 +349,7 @@ def _scoped_evidence_record_for_ac(
         has_expected_artifacts=has_expected_artifacts,
         verify_gate_active=verify_gate_active,
     )
-    allowed_fields = set(effective_schema.required)
+    allowed_fields = set(effective_schema.required) | set(effective_schema.optional)
     return EvidenceRecord(
         data={field: value for field, value in record.data.items() if field in allowed_fields},
         source=record.source,

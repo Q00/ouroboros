@@ -17,6 +17,7 @@ import asyncio
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import sys
 from typing import Any
 
 import pytest
@@ -125,6 +126,29 @@ class TestEnsureMechanicalToml:
         # build referred to `npm run build` which is not in package.json scripts
         # → dropped by validator, never written.
         assert config.build_command is None
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX virtualenv layout")
+    def test_tool_in_the_main_worktree_venv_is_kept(self, tmp_path: Path) -> None:
+        """A task worktree lacks the gitignored ``.venv``; its main tree's provides pytest."""
+        main = tmp_path / "project"
+        bin_dir = main / ".venv" / "bin"
+        bin_dir.mkdir(parents=True)
+        (main / ".venv" / "pyvenv.cfg").write_text("home = /usr/bin\n")
+        for name in ("python3", "pytest"):
+            (bin_dir / name).write_text("#!/bin/sh\n")
+            (bin_dir / name).chmod(0o755)
+        gitdir = main / ".git" / "worktrees" / "orch_1"
+        gitdir.mkdir(parents=True)
+        worktree = tmp_path / "worktrees" / "orch_1"
+        worktree.mkdir(parents=True)
+        (worktree / ".git").write_text(f"gitdir: {gitdir}\n")
+        (worktree / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+        adapter = _FakeAdapter(response=json.dumps({"test": "pytest"}))
+
+        ok = _run(ensure_mechanical_toml(worktree, adapter))
+
+        assert ok is True
+        assert build_mechanical_config(worktree).test_command == ("pytest",)
 
     def test_hallucinated_script_is_dropped(self, tmp_path: Path) -> None:
         _make_node_project(tmp_path, {"test": "jest"})

@@ -281,8 +281,8 @@ class CodexCliRuntime:
     _provider_name, _runtime_error_type = "codex_cli", "CodexCliError"
     _log_namespace = "codex_cli_runtime"
     _display_name = "Codex CLI"
-    _default_cli_name = "codex"
-    _default_llm_backend = "codex"
+    _default_cli_name, _default_llm_backend = "codex", "codex"
+    _exec_session_flags: tuple[str, ...] = ()  # ("--ephemeral",): keep no session on disk
     _tempfile_prefix = "ouroboros-codex-"
     _skills_package_uri = "packaged://ouroboros.codex/skills"
     _process_shutdown_timeout_seconds = 5.0
@@ -2081,7 +2081,7 @@ class CodexCliRuntime:
             self._reconcile_profile_resolution_config(runtime_handle)
         self._reconcile_codex_config_files(runtime_handle)
         self._reconcile_cli_executable_identity()
-        command = [self._cli_path, "exec"]
+        command = [self._cli_path, "exec", *self._exec_session_flags]
 
         normalized_model = self._normalize_model(model or self._model)
         runtime_model: str | None = None

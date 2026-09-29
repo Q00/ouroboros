@@ -29,7 +29,7 @@ import sys
 
 # Classes every backend must be able to deny; the probe is invalid (and the
 # backend unavailable) if the unconfined run cannot perform one of them.
-REQUIRED = (
+_POSIX_REQUIRED = (
     "create",
     "append",
     "truncate",
@@ -45,6 +45,26 @@ REQUIRED = (
     "chown_to_self",
     "utime",
 )
+# Windows has no owner or mode bits: ``chmod`` sets file attributes, and the
+# owner can always rewrite a file's DACL (``set_dacl``). Creating a symbolic
+# link needs a privilege most users lack, so it is checked when possible but
+# not required.
+_WINDOWS_REQUIRED = (
+    "create",
+    "append",
+    "truncate",
+    "unlink",
+    "rename_out",
+    "rename_in",
+    "mkdir",
+    "rmdir",
+    "hardlink",
+    "chmod",
+    "utime",
+    "set_dacl",
+    "alternate_stream",
+)
+REQUIRED = _WINDOWS_REQUIRED if sys.platform == "win32" else _POSIX_REQUIRED
 _UNSUPPORTED = {errno.ENOSYS, errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOTTY}
 _AT_FDCWD = -100
 _FS_IOC_GETFLAGS = 0x80086601
@@ -85,8 +105,64 @@ def snapshot(outside: str) -> dict[str, object]:
             content,
             xattrs,
             getattr(status, "st_flags", 0),
+            getattr(status, "st_file_attributes", 0),
+            _windows_dacl(path),
         ]
     return entries
+
+
+def _windows_dacl(path: str) -> str:
+    """The DACL of ``path`` in SDDL on Windows; empty elsewhere."""
+    if sys.platform != "win32":
+        return ""
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    descriptor = ctypes.c_void_p()
+    code = advapi32.GetNamedSecurityInfoW(
+        ctypes.c_wchar_p(path), 1, 4, None, None, None, None, ctypes.byref(descriptor)
+    )
+    if code != 0:
+        raise OSError(code, f"GetNamedSecurityInfoW({path}) failed")
+    try:
+        text = ctypes.c_wchar_p()
+        if not advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor, 1, 4, ctypes.byref(text), None
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())  # type: ignore[attr-defined]
+        try:
+            return str(text.value)
+        finally:
+            kernel32.LocalFree(text)
+    finally:
+        kernel32.LocalFree(descriptor)
+
+
+def _rewrite_dacl(path: str) -> None:
+    """Write the DACL of ``path`` back unchanged: needs ``WRITE_DAC`` (Windows only)."""
+    if sys.platform != "win32":
+        raise OSError(errno.ENOTSUP, "windows only")
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    dacl, descriptor = ctypes.c_void_p(), ctypes.c_void_p()
+    code = advapi32.GetNamedSecurityInfoW(
+        ctypes.c_wchar_p(path),
+        1,
+        4,
+        None,
+        None,
+        ctypes.byref(dacl),
+        None,
+        ctypes.byref(descriptor),
+    )
+    if code == 0:
+        try:
+            code = advapi32.SetNamedSecurityInfoW(
+                ctypes.c_wchar_p(path), 1, 4, None, None, dacl, None
+            )
+        finally:
+            kernel32.LocalFree(descriptor)
+    if code != 0:
+        raise OSError(errno.EACCES, f"DACL of {path} cannot be written (error {code})")
 
 
 def _setxattr(path: str) -> None:
@@ -151,7 +227,15 @@ def _set_inode_flags(path: str) -> None:
         os.close(fd)
 
 
+def _chown_to_self(path: str) -> None:
+    if not hasattr(os, "chown") or not hasattr(os, "getuid"):
+        raise OSError(errno.ENOTSUP, "no chown")
+    os.chown(path, os.getuid(), -1)
+
+
 def _fchmod_readonly(path: str) -> None:
+    if not hasattr(os, "fchmod"):
+        raise OSError(errno.ENOTSUP, "no fchmod")
     fd = os.open(path, os.O_RDONLY)
     try:
         os.fchmod(fd, 0o640)
@@ -191,13 +275,22 @@ def _outside_attempts(inside: str, outside: str) -> dict[str, Callable[[], objec
         "chmod": lambda: os.chmod(victim, 0o644),
         "fchmod_readonly_fd": lambda: _fchmod_readonly(victim),
         "fchmodat2": lambda: _fchmodat2(victim),
-        "chown_to_self": lambda: os.chown(victim, os.getuid(), -1),
+        "chown_to_self": lambda: _chown_to_self(victim),
         "utime": lambda: os.utime(victim, (0, 0)),
         "setxattr": lambda: _setxattr(victim),
         "setxattrat": lambda: _setxattrat(victim),
         "chflags": lambda: _chflags(victim),
         "inode_flags_ioctl": lambda: _set_inode_flags(victim),
+        "set_dacl": lambda: _rewrite_dacl(victim),
+        "alternate_stream": lambda: _alternate_stream(victim),
     }
+
+
+def _alternate_stream(path: str) -> None:
+    """Create a named data stream on ``path`` (NTFS only)."""
+    if sys.platform != "win32":
+        raise OSError(errno.ENOTSUP, "no alternate data streams")
+    _create(path + ":ouroboros_probe")
 
 
 def _inside_attempts(inside: str) -> dict[str, Callable[[], object]]:
