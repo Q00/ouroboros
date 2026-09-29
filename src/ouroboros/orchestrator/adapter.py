@@ -22,6 +22,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
+import hashlib
 import importlib.util
 import math
 import os
@@ -1149,6 +1150,9 @@ class ClaudeAgentAdapter:
     _runtime_handle_backend = "claude"
     _runtime_backend = "claude"
     _provider_name = "claude"
+    #: Extra CLI ``(flag, value)`` pairs; ``_log_message_text=False`` logs text as length, SHA-256.
+    _session_cli_args: tuple[tuple[str, str | None], ...] = ()
+    _log_message_text = True
 
     #: This adapter runs its own shared RPM/TPM bucket
     #: (:meth:`_build_rate_limit_bucket`), so the parallel executor must NOT add a
@@ -1655,6 +1659,9 @@ class ClaudeAgentAdapter:
                 if self._cli_path:
                     options_kwargs["cli_path"] = self._cli_path
 
+                if self._session_cli_args:
+                    options_kwargs["extra_args"] = dict(self._session_cli_args)
+
                 if system_prompt:
                     options_kwargs["system_prompt"] = system_prompt
 
@@ -1775,6 +1782,11 @@ class ClaudeAgentAdapter:
                 resume_handle=current_runtime_handle,
             )
 
+    def _loggable(self, text: str, limit: int) -> Any:
+        if self._log_message_text:
+            return text[:limit]
+        return {"chars": len(text), "sha256": hashlib.sha256(text.encode()).hexdigest()}
+
     def _convert_message(self, sdk_message: Any) -> AgentMessage:
         """Convert SDK message to internal AgentMessage format.
 
@@ -1790,7 +1802,7 @@ class ClaudeAgentAdapter:
         log.debug(
             "orchestrator.adapter.message_received",
             class_name=class_name,
-            sdk_message=str(sdk_message)[:500],
+            sdk_message=self._loggable(str(sdk_message), 500),
         )
 
         # Extract content based on message class
@@ -1859,7 +1871,7 @@ class ClaudeAgentAdapter:
                 data["total_cost_usd"] = total_cost_usd
             log.info(
                 "orchestrator.adapter.result_message",
-                result_content=content[:200] if content else "empty",
+                result_content=self._loggable(content, 200) if content else "empty",
                 subtype=data["subtype"],
                 is_error=data["is_error"],
             )

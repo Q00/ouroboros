@@ -10,6 +10,18 @@ doc_metadata:
 
 Ouroboros 的 Phase 4 会把每一次执行结果送进一条**三阶段递进式评估流水线**，然后才给出正式的验收标准（acceptance criterion，AC）判定。便宜的检查为昂贵的检查把关：Stage 1 免费，Stage 2 花一次 LLM 调用，Stage 3（多模型共识）只在被明确触发时才跑。
 
+### 验收权限
+
+模型判断可以澄清需求、构造检查、扣下通过，但不能授予验收；验收只来自实际执行的验证（#2449）。
+
+- **只有 Stage 1 能授予通过。** 只有当 Stage 1 至少执行了一项已配置的检查、且所有检查都通过（`MechanicalResult.has_executed_evidence`）时，`final_approved` 才为 `true`。
+- **Stage 2 和 Stage 3 只是建议。** 每个跑过的阶段都可以扣下通过：Stage 2 `ac_compliance=false`、Stage 2 分数低于 `0.8`、Stage 3 拒绝，或 [reward hacking 否决](#reward-hacking-否决)。它们都不能授予通过，Stage 3 的通过也不能解除 Stage 2 的扣留。
+- **没有执行证据就是「未验证」，不是通过。** Stage 1 没跑、或没有执行任何已配置检查时，结果为 `final_approved=false`、`acceptance_state="unverified"`。模型评审照常产出，作为反馈附在结果上；既不崩溃，也不静默放行。
+
+`EvaluationResult.acceptance_state`（`approved` / `rejected` / `unverified`）以及 `evaluation.pipeline.completed` 事件中的 `acceptance_state` 字段给出结果。`ouroboros_evaluate` 通过 `meta.acceptance_state` 与 `meta.executed_evidence` 返回它，并把未验证结果显示为 `NOT APPROVED (unverified: no executed verification evidence)` 而不是 `REJECTED`。
+
+> 下面的流程图仍按旧的「Stage 2 / Stage 3 可以直接通过」画法保留；以本节和英文版 [Evaluation Pipeline Guide](./evaluation-pipeline.md) 为准。
+
 > **术语边界：** worker 报告「任务完成」不等于正式的 AC 判定，任务失败也不等于语义漂移。`TaskResult` 与 `ACResult` 的区分见 [Execution vs. Evaluation Contract](./execution-vs-evaluation.md)（英文）。
 
 ```
@@ -71,7 +83,7 @@ APPROVED          REJECTED
 
 **流水线行为：** 只要**任意一项**检查失败，Stage 2 和 Stage 3 会被整个跳过，产物立即被拒绝。
 
-**被跳过的检查：** 如果某项检查没有配置命令（`None`），它会被静默跳过并**当作通过处理**。在没有于 `PipelineConfig.mechanical` 设置命令时，这就是默认状态。
+**被跳过的检查：** 如果某项检查没有配置命令（`None`），它会被跳过并报告为**通过**（`CheckResult.executed=False`），这样不会让 Stage 1 失败。但被跳过的检查不是证据：所有检查都被跳过时，Stage 1 什么也授予不了，结果为**未验证**。在没有于 `PipelineConfig.mechanical` 设置命令时，这就是默认状态。
 
 ### Stage 1 失败模式
 
@@ -193,26 +205,29 @@ Stage 2 调用一个 Standard 档位的 LLM（默认取 `OUROBOROS_SEMANTIC_MODE
 
 ### 通过逻辑
 
+Stage 2 只是建议：它从不授予通过，只能扣下本来由 Stage 1 执行证据授予的通过。
+
 ```
-if ac_compliance == False 且 not trigger_consensus  → REJECTED（不尝试 Stage 3）
-if score < 0.8                    → REJECTED（除非 Stage 3 被触发并通过）
-if score >= 0.8 且没有触发        → APPROVED
-if reward_hacking_risk >= 0.7     → REJECTED（最终否决，压过任何通过结论）
+if ac_compliance == False 且 not trigger_consensus  → 扣下（不尝试 Stage 3）
+if ac_compliance == False 且 trigger_consensus      → 扣下（Stage 3 作为第二意见运行并报告）
+if score < 0.8                                       → 扣下（Stage 3 的通过不能解除）
+if reward_hacking_risk >= 0.7                        → 扣下（否决）
+其他情况                                             → 无异议；通过仍需要 Stage 1 执行证据
 ```
 
 > **分数关卡是硬编码的 `0.8`。** `SemanticConfig.satisfaction_threshold`（默认 `0.8`）确实存在，也会被校验，但流水线比较的是字面量 `0.8`，从不读取这个字段。今天改它对通过与否没有任何影响——不要指望用它来放宽或收紧关卡。
 
-> **`ac_compliance=False` 并不总是终局。** 当评估上下文设置了 `trigger_consensus=True` 时，流水线不会就此拒绝，而是继续走到触发矩阵，让 Stage 3 对这条 Stage 2 判失败的 AC 给出第二意见。
+> **`ac_compliance=False` 且 `trigger_consensus=True`。** 流水线会继续走到触发矩阵，让 Stage 3 给出第二意见，其投票与分歧会被报告。但 Stage 2 的扣留依然有效：模型评审只是建议，共识的通过不能推翻它。
 
 > 分数在解析后会被钳制到 0.0–1.0；模型返回的越界值会被自动纠正。
 
 ### Reward hacking 否决
 
-`_build_result()` 施加了一道所有通过路径都必经的最终关卡：如果 Stage 2 报告 `reward_hacking_risk >= 0.7`（`REWARD_HACKING_VETO_THRESHOLD`），一个本来会通过的结果会被翻成拒绝。这个阈值定得刻意偏高，好让评估器轻微的疑心不至于挡下一次真实的通过。
+验收关卡（`decide_final_approval()`）把 Stage 2 的 `reward_hacking_risk >= 0.7`（`REWARD_HACKING_VETO_THRESHOLD`）当作模型评审的一种扣留：它挡下本来由 Stage 1 执行证据授予的通过。这个阈值定得刻意偏高，好让评估器轻微的疑心不至于挡下一次真实的通过。
 
-这道否决只把「通过」变成「拒绝」——它从不挽救一个已经被拒绝的结果，所以 Stage 3 共识的拒绝仍然是拒绝。
+和所有模型关卡一样，否决只会扣下，从不挽救被拒绝或未验证的结果。
 
-> **它并非总是被点名。** `_build_result()` 里 Stage 2 AC 未通过的分支排在否决分支**之前**。所以当 `trigger_consensus=True` 带着 `ac_compliance=False` 走到一个通过的 Stage 3、再由否决翻成拒绝时，报出来的 `failure_reason` 是 Stage 2 的 AC 未通过，而不是否决本身。判断是否发生了否决，请直接看 `stage2_result.reward_hacking_risk`。
+> **它并非总是被点名。** `failure_reason` 按以下顺序点名第一个扣留的关卡：Stage 3 拒绝、Stage 2 AC 未通过、Stage 2 分数低于 `0.8`，最后才是否决。所以一个同时 `ac_compliance=False` 的被否决结果，报出来的是 AC 未通过。判断是否发生了否决，请直接看 `stage2_result.reward_hacking_risk`。
 
 ### Stage 2 失败模式
 

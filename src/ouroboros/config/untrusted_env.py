@@ -220,6 +220,10 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # Onboarding attribution is an analytics boundary. A cloned repo must
         # not rewrite the surface label used to compare activation cohorts.
         "OUROBOROS_FIRST_COMMAND_SURFACE",
+        # Check-package switch (boundary/switch.py): a cloned repo must not
+        # turn off the verification layer that judges its own changes, nor
+        # decide whether model-written checks execute.
+        "OUROBOROS_CHECK_PACKAGE",
         "DO_NOT_TRACK",
         "CI",
         "GITHUB_ACTIONS",
@@ -245,6 +249,11 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # is therefore an approval-gate-bypass sink — same class as the
         # permission-mode overrides above.
         "OUROBOROS_TOOL_CAPABILITIES",
+        # Execution-sandbox off switch (`runtime/exec_sandbox.py`): turning it
+        # off lets controller-run commands (verifier replay) write outside
+        # their workspace copy and use the network. A cloned repository must
+        # not be able to lift the confinement its own scripts run under.
+        "OUROBOROS_EXEC_SANDBOX",
         # Backend limits YAML root (`orchestrator/backend_limits.py`); a
         # relative value resolves against the cloned repository — same
         # config-root class as the tool-capability override above.
@@ -270,6 +279,11 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # re-executes successful children and can double token spend.
         "OUROBOROS_MODEL_TIER_ROUTING",
         "OUROBOROS_SHADOW_REPLAY",
+        # Evolve fallback Stage 1 toggle: whether project mechanical.toml
+        # commands run for unmarked evolve output. An operator's persisted
+        # opt-out in ~/.ouroboros/.env must not lose the load-order race to a
+        # cloned repository's `.env` (same class as DO_NOT_TRACK above).
+        "OUROBOROS_EVOLVE_STAGE1",
         # Shell startup files, read before the first command of *any* shell
         # this process spawns — including the verify gate's `bash -c`. A repo
         # `.env` pointing `BASH_ENV` at a file containing `exit 0` turns

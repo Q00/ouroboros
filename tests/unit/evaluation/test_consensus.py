@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from ouroboros.core.errors import ProviderError
+from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.ontology_aspect import AnalysisResult
 from ouroboros.core.types import Result
 from ouroboros.evaluation.consensus import (
@@ -60,6 +60,42 @@ class TestBuildConsensusPrompt:
 
 class TestParseVoteResponse:
     """Tests for vote parsing."""
+
+    @pytest.mark.parametrize("approved", [True, False])
+    def test_preserves_boolean_approval(self, approved: bool) -> None:
+        response = json.dumps({"approved": approved, "confidence": 0.9, "reasoning": "Test"})
+
+        result = parse_vote_response(response, "model")
+
+        assert result.is_ok
+        assert result.value.approved is approved
+
+    @pytest.mark.parametrize(
+        "approved",
+        ["false", "true", "", 0, 1, 0.0, 1.0, None, [], [False], {}, {"value": False}],
+        ids=[
+            "string-false",
+            "string-true",
+            "empty-string",
+            "integer-zero",
+            "integer-one",
+            "float-zero",
+            "float-one",
+            "null",
+            "empty-array",
+            "nonempty-array",
+            "empty-object",
+            "nonempty-object",
+        ],
+    )
+    def test_rejects_non_boolean_approval(self, approved: object) -> None:
+        response = json.dumps({"approved": approved, "confidence": 0.9, "reasoning": "Test"})
+
+        result = parse_vote_response(response, "model")
+
+        assert result.is_err
+        assert isinstance(result.error, ValidationError)
+        assert result.error.field == "approved"
 
     def test_valid_vote(self) -> None:
         """Parse valid vote response."""
@@ -745,6 +781,49 @@ class TestDeliberativeConsensus:
         assert deliberation.final_verdict == FinalVerdict.CONDITIONAL
         assert deliberation.has_conditions is True
         assert deliberation.judgment.conditions == ("Add error handling",)
+
+    @pytest.mark.asyncio
+    async def test_invalid_advocate_boolean_stops_before_judge(
+        self,
+        mock_llm: AsyncMock,
+        sample_context: EvaluationContext,
+    ) -> None:
+        """A malformed Advocate vote is an error, even when the Devil agrees."""
+        mock_llm.complete.side_effect = [
+            Result.ok(
+                CompletionResponse(
+                    content='{"approved": "false", "confidence": 0.9, "reasoning": "Not approved"}',
+                    model="advocate",
+                    usage=UsageInfo(0, 0, 0),
+                )
+            ),
+            Result.ok(
+                CompletionResponse(
+                    content='{"is_root_problem": true, "confidence": 0.9, "reasoning": "Addresses root cause"}',
+                    model="devil",
+                    usage=UsageInfo(0, 0, 0),
+                )
+            ),
+            Result.ok(
+                CompletionResponse(
+                    content='{"verdict": "approved", "confidence": 0.9, "reasoning": "Both agree"}',
+                    model="judge",
+                    usage=UsageInfo(0, 0, 0),
+                )
+            ),
+        ]
+        evaluator = DeliberativeConsensus(
+            mock_llm,
+            DeliberativeConfig(advocate_model="advocate", devil_model="devil", judge_model="judge"),
+        )
+
+        result = await evaluator.deliberate(sample_context)
+
+        assert result.is_err
+        assert isinstance(result.error, ValidationError)
+        assert result.error.field == "approved"
+        roles = [call.args[1].role for call in mock_llm.complete.await_args_list]
+        assert roles == ["consensus_advocate", "ontology_analysis"]
 
     @pytest.mark.asyncio
     async def test_deliberation_advocate_failure(

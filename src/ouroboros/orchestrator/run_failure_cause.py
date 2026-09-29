@@ -95,9 +95,10 @@ def derive_run_failure_cause(
         return "cancelled"
 
     verify_final: list[str] = []
-    verify_last_by_ac: dict[int, str] = {}
+    verify_last_by_ac: dict[int, tuple[tuple[Any, str], str]] = {}
     exhausted: list[Mapping[str, Any]] = []
     judged_outcomes: list[str] = []
+    last_judged_by_ac: dict[int, tuple[Any, str]] = {}
     session_error_type: str | None = None
 
     for event in events:
@@ -118,13 +119,46 @@ def derive_run_failure_cause(
                 verify_final.append(cause)
             ac_index = data.get("ac_index")
             if isinstance(ac_index, int) and not isinstance(ac_index, bool):
-                verify_last_by_ac[ac_index] = cause
+                timestamp = getattr(event, "timestamp", None)
+                event_id = getattr(event, "id", None)
+                ordering_key = (
+                    timestamp,
+                    event_id if isinstance(event_id, str) else "",
+                )
+                previous = verify_last_by_ac.get(ac_index)
+                if (
+                    previous is None
+                    or timestamp is None
+                    or previous[0][0] is None
+                    or previous[0] <= ordering_key
+                ):
+                    verify_last_by_ac[ac_index] = (ordering_key, cause)
         elif event_type == "execution.ac.recovery_exhausted":
             exhausted.append(data)
         elif event_type == "execution.ac.attempt_judged":
             outcome = data.get("outcome")
             if isinstance(outcome, str):
                 judged_outcomes.append(outcome)
+                ac_index = data.get("root_ac_index", data.get("ac_index"))
+                timestamp = getattr(event, "timestamp", None)
+                event_id = getattr(event, "id", None)
+                if isinstance(ac_index, int) and not isinstance(ac_index, bool):
+                    previous = last_judged_by_ac.get(ac_index)
+                    # The durable store orders equal timestamps by event id
+                    # (event_store.query_events: timestamp, id), so "latest"
+                    # must key on both. Timestamp alone leaves same-instant
+                    # judgements to iterable order.
+                    ordering_key = (
+                        timestamp,
+                        event_id if isinstance(event_id, str) else "",
+                    )
+                    if (
+                        previous is None
+                        or timestamp is None
+                        or previous[0][0] is None
+                        or previous[0] <= ordering_key
+                    ):
+                        last_judged_by_ac[ac_index] = (ordering_key, outcome)
         elif event_type == "orchestrator.session.failed":
             error_type = data.get("error_type")
             if isinstance(error_type, str) and error_type:
@@ -135,11 +169,30 @@ def derive_run_failure_cause(
         return f"verify_{final_cause}"
 
     if exhausted:
+        # Dependency-cascade victims can also emit recovery_exhausted, but
+        # their BLOCKED class describes the consequence rather than the cause.
+        # Ignore those victims whenever a sibling exhausted after a non-blocked
+        # judgement. If every exhausted AC is blocked, preserve the existing
+        # dependency_blocked diagnosis below.
+        has_non_blocked_exhaustion = any(
+            last_judged_by_ac.get(data.get("root_ac_index"), (None, None))[1] != "blocked"
+            for data in exhausted
+        )
+        causal_exhausted = [
+            data
+            for data in exhausted
+            if not (
+                has_non_blocked_exhaustion
+                and last_judged_by_ac.get(data.get("root_ac_index"), (None, None))[1] == "blocked"
+            )
+        ]
+        if causal_exhausted and not has_non_blocked_exhaustion:
+            return "dependency_blocked"
         attributed: list[str] = []
-        for data in exhausted:
+        for data in causal_exhausted:
             ac_index = data.get("root_ac_index")
             if isinstance(ac_index, int) and ac_index in verify_last_by_ac:
-                attributed.append(f"verify_{verify_last_by_ac[ac_index]}")
+                attributed.append(f"verify_{verify_last_by_ac[ac_index][1]}")
                 continue
             failure_class = data.get("last_failure_class")
             attributed.append(

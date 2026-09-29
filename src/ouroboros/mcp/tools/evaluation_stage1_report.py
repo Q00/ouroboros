@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from ouroboros.evaluation.models import MechanicalResult
+from ouroboros.evaluation.models import MechanicalDisposition, MechanicalResult
 
 _OUTPUT_TAIL_CHARS = 500
 _DETAIL_FIELDS = (
@@ -29,11 +29,27 @@ def serialize_stage1_result(result: MechanicalResult | None) -> dict[str, Any] |
             {
                 "check_type": check.check_type.value,
                 "passed": check.passed,
+                "executed": check.executed,
                 "message": check.message,
                 "details": details,
             }
         )
-    return {"passed": result.passed, "coverage_score": result.coverage_score, "checks": checks}
+    return {
+        "passed": result.passed,
+        "executed_evidence": result.has_executed_evidence,
+        "coverage_score": result.coverage_score,
+        "checks": checks,
+    }
+
+
+def _stage1_status(result: MechanicalResult) -> str:
+    """Name Stage 1 by its evidence disposition, not by the aggregate flag alone."""
+    disposition = result.disposition
+    if disposition is MechanicalDisposition.EXECUTED_FAIL:
+        return "FAILED"
+    if disposition is MechanicalDisposition.NO_EVIDENCE:
+        return "NO CHECKS EXECUTED (not verification evidence)"
+    return "PASSED"
 
 
 def format_stage1_result(
@@ -45,7 +61,7 @@ def format_stage1_result(
     lines = [
         "Stage 1: Mechanical Verification",
         "-" * 40,
-        f"Status: {'PASSED' if result.passed else 'FAILED'}",
+        f"Status: {_stage1_status(result)}",
         f"Coverage: {result.coverage_score:.1%}" if result.coverage_score else "Coverage: N/A",
     ]
     for check in result.checks:

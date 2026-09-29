@@ -28,6 +28,7 @@ from typing import Literal
 import structlog
 
 from ouroboros.core.json_utils import extract_json_payload
+from ouroboros.core.project_env import project_venv_provides
 from ouroboros.evaluation.command_parsing import split_command
 from ouroboros.evaluation.languages import _ALLOWED_EXECUTABLES
 from ouroboros.evolution.provider_usage import tracked_complete
@@ -1915,13 +1916,11 @@ def _bare_tool_declared_by_repo(working_dir: Path, tool: str) -> bool:
     """True when a bare tool (pytest, ruff, eslint…) is provisioned by the repo.
 
     Accepts any of:
-      * Project-local bin: ``.venv/bin/<tool>`` or ``node_modules/.bin/<tool>``
+      * Project virtualenv (``core/project_env``, a task worktree's main tree too) or ``node_modules/.bin/<tool>``
       * Python: declared in ``pyproject.toml`` or ``requirements*.txt``
       * Node: declared in ``package.json`` dependencies
     """
-    if (working_dir / ".venv" / "bin" / tool).exists():
-        return True
-    if (working_dir / ".venv" / "Scripts" / f"{tool}.exe").exists():
+    if project_venv_provides(working_dir, tool):
         return True
     if (working_dir / "node_modules" / ".bin" / tool).exists():
         return True

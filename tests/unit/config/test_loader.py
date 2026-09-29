@@ -1629,6 +1629,132 @@ class TestLLMHelperLookups:
             assert get_llm_model_for_role("dependency_analysis") == "evaluate-model"
             assert get_llm_model_for_role("wonder") == "reflect-model"
 
+    def test_get_llm_model_for_role_execute_stage_uses_execution_pin(self) -> None:
+        """EXECUTE-stage roles honor execution.default_model over the evaluate model (#2300)."""
+        config = OuroborosConfig(
+            execution=ExecutionConfig(default_model="gpt-5-codex"),
+            evaluation=EvaluationConfig(semantic_model="claude-fable-5"),
+        )
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert get_llm_model_for_role("decomposition") == "gpt-5-codex"
+            assert get_llm_model_for_role("atomicity") == "gpt-5-codex"
+            assert get_llm_model_for_role("agent_runtime_implementation") == "gpt-5-codex"
+            # Evaluate-stage roles keep their own stage model.
+            assert get_llm_model_for_role("qa") == "claude-fable-5"
+            # The pin also applies when the caller pre-resolves the backend.
+            assert get_llm_model_for_role("decomposition", backend="codex") == "gpt-5-codex"
+
+    def test_get_llm_model_for_role_execute_stage_env_pin_wins(self) -> None:
+        """OUROBOROS_EXECUTION_MODEL outranks the config file pin."""
+        config = OuroborosConfig(
+            execution=ExecutionConfig(default_model="config-exec-model"),
+            evaluation=EvaluationConfig(semantic_model="claude-fable-5"),
+        )
+
+        with (
+            patch.dict(os.environ, {"OUROBOROS_EXECUTION_MODEL": "env-exec-model"}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert get_llm_model_for_role("decomposition") == "env-exec-model"
+
+    def test_get_llm_model_for_role_execute_stage_uses_backend_default_without_pin(self) -> None:
+        """Without an execution pin, EXECUTE-stage roles use their backend default."""
+        config = OuroborosConfig(
+            evaluation=EvaluationConfig(semantic_model="claude-fable-5"),
+            orchestrator=OrchestratorConfig(
+                runtime_profile=RuntimeProfileConfig(
+                    stages={"execute": "codex", "evaluate": "claude_code"}
+                )
+            ),
+        )
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert get_llm_model_for_role("decomposition") == "default"
+            assert get_llm_model_for_role("atomicity") == "default"
+
+        litellm_config = OuroborosConfig(
+            orchestrator=OrchestratorConfig(
+                runtime_profile=RuntimeProfileConfig(stages={"execute": "antigravity"})
+            ),
+            llm=LLMConfig(backend="litellm"),
+            evaluation=EvaluationConfig(semantic_model="openrouter/anthropic/claude-sonnet-4"),
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=litellm_config),
+        ):
+            assert get_llm_backend_for_role("decomposition") == "litellm"
+            assert get_llm_model_for_role("decomposition") == "openrouter/anthropic/claude-sonnet-4"
+
+        for alias in ("openai", "openrouter"):
+            with (
+                patch.dict(os.environ, {"OUROBOROS_LLM_BACKEND": alias}, clear=True),
+                patch("ouroboros.config.loader.load_config", return_value=litellm_config),
+            ):
+                assert get_llm_backend_for_role("decomposition") == alias
+                assert get_llm_model_for_role("decomposition") == (
+                    "openrouter/anthropic/claude-sonnet-4"
+                )
+
+    def test_get_llm_model_for_role_execute_stage_honors_automatic_sentinel(self) -> None:
+        """The UI's ``default``/``current`` sentinel lets the Execute runtime pick."""
+        config = OuroborosConfig(
+            execution=ExecutionConfig(default_model="default"),
+            evaluation=EvaluationConfig(semantic_model="claude-fable-5"),
+            orchestrator=OrchestratorConfig(
+                runtime_profile=RuntimeProfileConfig(
+                    stages={"execute": "codex", "evaluate": "claude_code"}
+                )
+            ),
+        )
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert get_llm_backend_for_role("decomposition") == "codex"
+            assert get_llm_model_for_role("decomposition") == "default"
+
+        with (
+            patch.dict(os.environ, {"OUROBOROS_EXECUTION_MODEL": " current "}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert get_llm_model_for_role("decomposition") == "default"
+
+        assert config.orchestrator.runtime_profile is not None
+        for backend in ("gemini", "gemini_cli", "goose", "goose_cli", "claude_code"):
+            config.orchestrator.runtime_profile.stages["execute"] = backend
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch("ouroboros.config.loader.load_config", return_value=config),
+            ):
+                for role in ("decomposition", "atomicity", "agent_runtime_implementation"):
+                    assert get_llm_backend_for_role(role) == backend
+                    assert get_llm_model_for_role(role) == "default"
+
+    def test_get_llm_model_for_role_execute_stage_explicit_model_beats_pin(self) -> None:
+        """A caller-supplied explicit_model remains the highest-precedence override."""
+        config = OuroborosConfig(
+            execution=ExecutionConfig(default_model="gpt-5-codex"),
+            evaluation=EvaluationConfig(semantic_model="claude-fable-5"),
+        )
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert (
+                get_llm_model_for_role("decomposition", explicit_model="explicit-model")
+                == "explicit-model"
+            )
+
     def test_get_llm_permission_mode_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Environment variable overrides config for llm permission mode."""
         monkeypatch.setenv("OUROBOROS_LLM_PERMISSION_MODE", "acceptEdits")

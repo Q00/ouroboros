@@ -33,11 +33,13 @@ _configure_utf8_stdio()
 # qa has a built-in fallback that adopts the qa-judge agent directly
 # resume-session reads the EventStore directly — its purpose is recovering after
 # an MCP disconnect, so the no-MCP path is exactly when the user needs it.
+# maintain uses GitHub through gh and does not need Ouroboros MCP setup.
 SETUP_BYPASS_SKILLS = [
     "/ouroboros:setup",
     "/ouroboros:ouroboros-help",
     "/ouroboros:qa",
     "/ouroboros:resume-session",
+    "/ouroboros:maintain",
 ]
 
 # Keyword → skill mapping
@@ -69,6 +71,7 @@ KEYWORD_MAP = [
     {"patterns": ["ooo update", "ooo upgrade"], "skill": "/ouroboros:update"},
     {"patterns": ["ooo brownfield"], "skill": "/ouroboros:brownfield"},
     {"patterns": ["ooo publish"], "skill": "/ouroboros:publish"},
+    {"patterns": ["ooo maintain"], "skill": "/ouroboros:maintain"},
     # Canonical form only. The short `ooo resume` alias was rejected because
     # word-boundary matching would route prose like "please ooo resume work on
     # this" to /ouroboros:resume-session, and skills/resume-session/SKILL.md

@@ -360,6 +360,7 @@ def _ensure_worktree(
 
     if _branch_exists(repo_root, branch):
         _run_git(["worktree", "add", str(worktree_path), branch], repo_root)
+        _record_task_provenance(worktree_path)
         return
 
     if base_ref is not None:
@@ -379,6 +380,21 @@ def _ensure_worktree(
             )
         base = head.stdout.strip()
     _run_git(["worktree", "add", "-b", branch, str(worktree_path), base], repo_root)
+    _record_task_provenance(worktree_path)
+
+
+_TASK_PROVENANCE_FILE = "ouroboros-task"
+"""Written in a task worktree's private git directory only when Ouroboros creates it."""
+
+
+def _task_git_dir(worktree_path: Path) -> Path:
+    return Path(_run_git(["rev-parse", "--path-format=absolute", "--git-dir"], worktree_path))
+
+
+def _record_task_provenance(worktree_path: Path) -> None:
+    """Record that Ouroboros created this task worktree (its durable id, untracked)."""
+    marker = _task_git_dir(worktree_path) / _TASK_PROVENANCE_FILE
+    marker.write_text(f"{worktree_path.name}\n", encoding="utf-8")
 
 
 def _lock_path(repo_name: str, durable_id: str) -> Path:
@@ -582,6 +598,63 @@ def managed_worktree_root() -> Path:
     return _worktree_root()
 
 
+def _is_managed_task_worktree(path: Path) -> bool:
+    """Whether ``path`` lies in a task worktree Ouroboros created, on its managed branch.
+
+    Created means Ouroboros recorded it when it ran ``git worktree add``
+    (``_record_task_provenance``); the path's shape and branch name alone are
+    not ownership.
+    """
+    try:
+        repo_root = _resolve_repo_root(path)
+        common_root = _resolve_common_repo_root(repo_root)
+    except WorktreeError:
+        return False
+    root = _worktree_root().expanduser().resolve()
+    if repo_root.parent.parent != root or common_root == repo_root:
+        return False
+    durable_id = repo_root.name
+    try:
+        expected = _managed_branch_name(common_root, durable_id)
+        marker = _task_git_dir(repo_root) / _TASK_PROVENANCE_FILE
+        recorded = marker.read_text(encoding="utf-8").strip()
+    except (WorktreeError, OSError):
+        return False
+    head = _run_git_process(["symbolic-ref", "--quiet", "--short", "HEAD"], repo_root)
+    return recorded == durable_id and head.returncode == 0 and head.stdout.strip() == expected
+
+
+def checkpoint_managed_worktree(path: str | Path, *, message: str) -> str | None:
+    """Commit every change in an Ouroboros-managed task worktree as a checkpoint.
+
+    Only a task worktree Ouroboros created is ever committed: a linked git
+    worktree at ``<managed root>/<repo>/<durable id>``, recorded by Ouroboros
+    when it created it, whose checked-out branch is that id's managed branch
+    (``ooo/<durable id>``). Any other checkout (the user's own, a standalone
+    repository or a worktree someone else created under the root, a worktree
+    on another branch) is left untouched and ``None`` is returned, as it is for
+    a clean worktree. Ignored files stay out (``git add -A`` honors
+    ``.gitignore``) and no git hook runs: this is the product's own record of a
+    generation's work on its task branch. Returns the checkpoint commit.
+    """
+    if not _is_managed_task_worktree(Path(path)):
+        return None
+    repo_root = _resolve_repo_root(Path(path))
+    if not _checkout_is_dirty(repo_root):
+        return None
+    _run_git(["add", "-A"], repo_root)
+    # Each identity field git needs is filled on its own when the
+    # configuration does not supply it; a configured field is kept.
+    identity: list[str] = []
+    for key, fallback in (("user.name", "Ouroboros"), ("user.email", "ouroboros@localhost")):
+        if not _run_git_process(["config", key], repo_root).stdout.strip():
+            identity += ["-c", f"{key}={fallback}"]
+    # No hook of any kind runs for the product's own checkpoint.
+    no_hooks = ["-c", f"core.hooksPath={os.devnull}"]
+    _run_git([*no_hooks, *identity, "commit", "-q", "--no-verify", "-m", message], repo_root)
+    return _run_git(["rev-parse", "HEAD"], repo_root)
+
+
 def lock_file_is_stale(lock_path: str | Path) -> bool:
     """Return True when a task lock file is stale, corrupt, or unreadable."""
     path = Path(lock_path)
@@ -716,6 +789,11 @@ def restore_task_workspace(
     source_dir = Path(fallback_source_cwd).expanduser().resolve()
     root = _worktree_root()
     caller_repo_root = _resolve_repo_root(source_dir)
+    # A managed worktree belongs to the repository its git data lives in. The
+    # source may itself be a linked worktree of that repository (the task
+    # worktree a chained evaluation ran in), so both sides are compared by
+    # their common repository root, never by the source's own top level.
+    caller_common_root = _resolve_common_repo_root(source_dir)
 
     repo_matches: list[tuple[Path, Path]] = []
     for match in root.glob(f"*/{durable_id}"):
@@ -724,7 +802,7 @@ def restore_task_workspace(
             match_repo_root = _resolve_common_repo_root(worktree_path)
         except WorktreeError:
             continue
-        if match_repo_root == caller_repo_root:
+        if match_repo_root == caller_common_root:
             repo_matches.append((worktree_path, match_repo_root))
 
     if len(repo_matches) > 1:

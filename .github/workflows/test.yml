@@ -19,7 +19,7 @@ jobs:
         uses: actions/checkout@v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.0.1
+        uses: astral-sh/setup-uv@v10.1.0
         with:
           version: "latest"
           enable-cache: true
@@ -70,7 +70,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.0.1
+        uses: astral-sh/setup-uv@v10.1.0
         with:
           version: "latest"
           enable-cache: true
@@ -124,6 +124,42 @@ jobs:
           retention-days: 1
 
 
+  runtime-sandbox-windows:
+    # The execution sandbox's Windows backend (an AppContainer) runs only on
+    # Windows. Its tests fail, rather than skip, on this runner when the
+    # backend is unavailable, so a green run means the confinement was tested.
+    name: Runtime sandbox (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          version: "latest"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --python 3.12 --dev
+
+      - name: Run the runtime sandbox tests
+        env:
+          PYTHONFAULTHANDLER: "1"
+        # Serial: the timeout tests measure wall-clock time, and one test
+        # removes the persistent read grants it made.
+        run: uv run --python 3.12 --no-sync pytest tests/unit/runtime/test_exec_sandbox.py tests/unit/runtime/test_exec_sandbox_windows.py -n 0 -rs --durations=15 -q
+
   performance-budget:
     name: Performance budget (advisory)
     if: github.event_name == 'push'
@@ -138,7 +174,7 @@ jobs:
         uses: actions/checkout@v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.0.1
+        uses: astral-sh/setup-uv@v10.1.0
         with:
           version: "latest"
           enable-cache: true

@@ -141,8 +141,8 @@ def _load_config(*, validate_event_store: bool = True) -> tuple[dict, Path]:
         print_error(f"Config not found: {config_path}\nRun [bold]ouroboros setup[/] first.")
         raise typer.Exit(1)
     try:
-        data = yaml.safe_load(config_path.read_text()) or {}
-    except (yaml.YAMLError, OSError):
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except (yaml.YAMLError, OSError, UnicodeError):
         print_error("Invalid YAML in configuration file.")
         raise typer.Exit(1) from None
     if not isinstance(data, dict):
@@ -187,7 +187,7 @@ def _database_file_path(data: dict, config_path: Path) -> Path:
 
 def _save_config(data: dict, path: Path) -> None:
     """Write config dict back to YAML."""
-    path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
+    path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False), encoding="utf-8")
 
 
 def _resolve_cli_path(data: dict) -> str | None:
@@ -920,13 +920,13 @@ def init() -> None:
             default_config = get_default_config()
             config_dict = default_config.model_dump(mode="json")
             config_path.write_text(
-                yaml.dump(config_dict, default_flow_style=False, sort_keys=False)
+                yaml.dump(config_dict, default_flow_style=False, sort_keys=False), encoding="utf-8"
             )
         if not has_credentials:
             default_credentials = get_default_credentials()
             cred_dict = default_credentials.model_dump(mode="json")
             credentials_path.write_text(
-                yaml.dump(cred_dict, default_flow_style=False, sort_keys=False)
+                yaml.dump(cred_dict, default_flow_style=False, sort_keys=False), encoding="utf-8"
             )
             import os
             import stat
@@ -1030,6 +1030,7 @@ def set_value(
         print_error(f"Invalid value — not saved.\n{exc}")
         raise typer.Exit(1) from None
 
+    original_bytes = config_path.read_bytes()
     _save_config(data, config_path)
 
     # Validate the written config loads without errors
@@ -1038,12 +1039,8 @@ def set_value(
 
         load_config()
     except Exception as exc:
-        # Rollback: restore old value or remove key
-        if old_value is not None:
-            target[keys[-1]] = old_value
-        else:
-            del target[keys[-1]]
-        _save_config(data, config_path)
+        # Preserve the original encoding, BOM, and line endings on rollback.
+        config_path.write_bytes(original_bytes)
         print_error(f"Invalid value — rolled back.\n{exc}")
         raise typer.Exit(1) from None
 
@@ -1072,19 +1069,24 @@ def undo() -> None:
         print_error(f"Config not found: {config_path}")
         raise typer.Exit(1)
 
-    current_text = config_path.read_text()
-    backup_text = backup_path.read_text()
-    config_path.write_text(backup_text)
+    current_bytes = config_path.read_bytes()
+    backup_bytes = backup_path.read_bytes()
+    try:
+        backup_bytes.decode("utf-8")
+    except UnicodeError:
+        print_error("Backup must be UTF-8 encoded — undo aborted.")
+        raise typer.Exit(1) from None
+    config_path.write_bytes(backup_bytes)
     try:
         from ouroboros.config.loader import load_config
 
         load_config()
     except Exception as exc:
-        config_path.write_text(current_text)
+        config_path.write_bytes(current_bytes)
         print_error(f"Backup is not a valid config — undo aborted.\n{exc}")
         raise typer.Exit(1) from None
     # Swap: the replaced config becomes the new backup, so undo ↔ redo.
-    backup_path.write_text(current_text)
+    backup_path.write_bytes(current_bytes)
     print_success("Restored previous configuration (run undo again to redo).")
 
 

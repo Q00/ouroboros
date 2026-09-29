@@ -90,6 +90,7 @@ from ouroboros.config.loader import (
     resolve_omp_cli_path,
 )
 from ouroboros.config.models import (
+    BoundaryConfig,
     ClarificationConfig,
     ConsensusConfig,
     CredentialsConfig,
@@ -122,6 +123,7 @@ __all__ = [
     "OuroborosConfig",
     "CredentialsConfig",
     "SeedConfig",
+    "BoundaryConfig",
     "TelemetryConfig",
     "TierConfig",
     "ModelConfig",
