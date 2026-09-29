@@ -333,6 +333,7 @@ class TestCodexSetup:
         assert "~/.ouroboros/config.yaml" in contents
         assert "This file is only for the Codex MCP/env registration block." in contents
         assert "[mcp_servers.ouroboros]" in contents
+        assert tomllib.loads(contents)["mcp_servers"]["ouroboros"]["startup_timeout_sec"] == 180
         assert 'OUROBOROS_AGENT_RUNTIME = "codex"' in contents
         assert 'OUROBOROS_LLM_BACKEND = "codex"' in contents
         assert "tool_timeout_sec" not in contents
@@ -424,6 +425,7 @@ class TestCodexSetup:
 
         assert f"command = {json.dumps(sys.executable)}" in contents
         assert "/stale/venv/bin/python" not in contents
+        assert tomllib.loads(contents)["mcp_servers"]["ouroboros"]["startup_timeout_sec"] == 180
 
     def test_register_codex_mcp_server_preserves_operator_comment_in_legacy_uvx_table(
         self,
@@ -820,6 +822,30 @@ class TestCodexSetup:
         assert contents.count("[mcp_servers.ouroboros.env]") == 1
         assert 'OUROBOROS_AGENT_RUNTIME = "claude"' in contents
         assert "tool_timeout_sec = 600" in contents
+
+    def test_register_codex_mcp_server_preserves_user_selected_startup_timeout(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Automatic setup leaves non-default startup budgets under user ownership."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        original = (
+            "[mcp_servers.ouroboros]\n"
+            'command = "uvx"\n'
+            'args = ["--isolated", "--python", ">=3.12", "--from", '
+            '"ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]\n'
+            "startup_timeout_sec = 240\n"
+            "[mcp_servers.ouroboros.env]\n"
+            'OUROBOROS_AGENT_RUNTIME = "codex"\n'
+            'OUROBOROS_LLM_BACKEND = "codex"\n'
+        )
+        codex_config.write_text(original, encoding="utf-8")
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            setup_cmd._register_codex_mcp_server()
+
+        assert codex_config.read_text(encoding="utf-8") == original
 
     def test_register_codex_mcp_server_preserves_url_config_by_default(
         self,
@@ -10025,16 +10051,14 @@ class TestHostRuntimeSetup:
         codex_dir = tmp_path / ".codex"
         codex_dir.mkdir()
         codex_config = codex_dir / "config.toml"
-        codex_config.write_text(
-            setup_cmd._CODEX_MCP_SECTION_TEMPLATE.format(
-                command_lines=(
-                    'command = "ouroboros"\n'
-                    'args = ["mcp", "serve", "--runtime", "codex", '
-                    '"--llm-backend", "codex"]'
-                )
-            ),
-            encoding="utf-8",
-        )
+        legacy_codex_config = setup_cmd._CODEX_MCP_SECTION_TEMPLATE.format(
+            command_lines=(
+                'command = "ouroboros"\n'
+                'args = ["mcp", "serve", "--runtime", "codex", '
+                '"--llm-backend", "codex"]'
+            )
+        ).replace("startup_timeout_sec = 180\n", "")
+        codex_config.write_text(legacy_codex_config, encoding="utf-8")
 
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
@@ -10055,6 +10079,7 @@ class TestHostRuntimeSetup:
             "OUROBOROS_AGENT_RUNTIME": "host",
             "OUROBOROS_LLM_BACKEND": "codex",
         }
+        assert entry["startup_timeout_sec"] == 180
         data = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
         assert data["orchestrator"]["runtime_backend"] == "host"
 

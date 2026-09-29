@@ -454,6 +454,7 @@ _CODEX_MCP_SECTION_TEMPLATE = """# Ouroboros MCP hookup for Codex CLI.
 
 [mcp_servers.ouroboros]
 {command_lines}
+startup_timeout_sec = 180
 
 [mcp_servers.ouroboros.env]
 OUROBOROS_AGENT_RUNTIME = "codex"
@@ -767,7 +768,10 @@ def _is_setup_managed_codex_mcp_entry(
     env = entry.get("env")
     if env is not None and env != _CODEX_MANAGED_MCP_ENV and env != _CODEX_HOST_MCP_ENV:
         return False
-    if set(entry) - {"command", "args", "env"}:
+    if set(entry) - {"command", "args", "env", "startup_timeout_sec"}:
+        return False
+    timeout = entry.get("startup_timeout_sec", 180)
+    if timeout != 180:
         return False
 
     if Path(command).name == "uvx":
