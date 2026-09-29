@@ -380,3 +380,88 @@ def evaluation_summary_for_unavailable_spec_verification(
         execution_completion_status=mechanical.execution_completion_status,
         approval_status="rejected",
     )
+
+
+def apply_package_decisions(summary: Any, decisions: tuple[Any, ...], seed: Any) -> Any:
+    """Let the controller's recorded check package decision decide what it covered.
+
+    ``decisions`` are the run's recorded per-criterion decisions in Seed order
+    (``boundary.decision.recorded_criterion_decisions``; empty when there are
+    none). A criterion the package decided (``governed_by == "check_package"``
+    with a ``pass`` or ``fail``) takes that verdict instead of the source-scan
+    verifier's, which cannot see behavior. Every other criterion keeps the
+    spec verifier's verdict. Approval is recomputed from the results.
+    """
+    from ouroboros.core.lineage import ACResult
+    from ouroboros.core.seed import ac_texts
+
+    if not decisions or summary is None:
+        return summary
+    seed_criteria = tuple(getattr(seed, "acceptance_criteria", ()) or ())
+    if len(decisions) != len(seed_criteria):
+        return summary
+    texts = ac_texts(seed_criteria)
+    decided: dict[int, ACResult] = {}
+    for index, record in enumerate(decisions):
+        if record.governed_by != "check_package" or record.package_status not in ("pass", "fail"):
+            continue
+        passed = record.package_status == "pass"
+        decided[index] = ACResult(
+            ac_index=index,
+            ac_content=texts[index],
+            semantic_ac_key=getattr(seed_criteria[index], "semantic_ac_key", None),
+            passed=passed,
+            score=1.0 if passed else 0.0,
+            evidence=f"check package {record.package_status} ({record.reason})",
+            verification_method="check_package",
+            ac_verdict_state="evaluated",
+            final_verdict="pass" if passed else "fail",
+            rendered_verdict="PASS" if passed else "FAIL",
+        )
+    if not decided:
+        return summary
+    results = [decided.get(result.ac_index, result) for result in summary.ac_results]
+    present = {result.ac_index for result in results}
+    results.extend(result for index, result in decided.items() if index not in present)
+    present |= set(decided)
+    # Every Seed criterion must be proven: one with no verdict row is not evaluated.
+    results.extend(
+        ACResult(
+            ac_index=index,
+            ac_content=texts[index],
+            semantic_ac_key=getattr(seed_criteria[index], "semantic_ac_key", None),
+            passed=False,
+            score=0.0,
+            evidence="Neither the check package nor the spec verifier decided this AC.",
+            verification_method="formal_evaluation",
+            ac_verdict_state="not_evaluated",
+            final_verdict="fail",
+            rendered_verdict="NOT_EVALUATED",
+        )
+        for index in range(len(seed_criteria))
+        if index not in present
+    )
+    results.sort(key=lambda result: result.ac_index)
+    total = len(results)
+    passed_count = sum(1 for result in results if result.authoritative_pass)
+    approved = (
+        total > 0 and passed_count == total and summary.execution_completion_status == "completed"
+    )
+    failure_reason = None
+    if not approved:
+        unresolved = [result for result in results if not result.authoritative_pass]
+        failure_reason = "; ".join(
+            f"AC {result.ac_index + 1} {result.rendered_verdict or 'NOT_EVALUATED'}: "
+            f"{result.evidence}".strip()
+            for result in unresolved
+        ) or (summary.failure_reason or "the run was not approved")
+    return summary.model_copy(
+        update={
+            "final_approved": approved,
+            "highest_stage_passed": 3 if approved else summary.highest_stage_passed,
+            "score": passed_count / total if total else 0.0,
+            "failure_reason": failure_reason,
+            "ac_results": tuple(results),
+            "approval_status": "approved" if approved else "rejected",
+        }
+    )
