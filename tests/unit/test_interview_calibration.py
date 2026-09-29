@@ -1,6 +1,49 @@
 """Behavioral examples for session-local calibration inference."""
 
+import pytest
+
 from ouroboros.interview_calibration import infer_interview_calibration
+
+
+@pytest.mark.parametrize(
+    ("evidence", "terms"),
+    [
+        ("idempotency", ("idempotency",)),
+        ("event sourcing", ("event sourcing",)),
+        ("CAN bus", ("CAN bus",)),
+        ("user experience", ("user experience",)),
+        ("idempotency, event sourcing", ("idempotency", "event sourcing")),
+        ("OAuth/PKCE", ("OAuth", "PKCE")),
+        ("멱등성, 이벤트 소싱", ("멱등성", "이벤트 소싱")),
+        ("idempotency and idempotency", ("idempotency",)),
+    ],
+)
+def test_bare_idk_terms_are_explicitly_unknown(evidence, terms) -> None:
+    calibration = infer_interview_calibration(evidence)
+
+    assert calibration.level == "foundational"
+    assert calibration.confidence == "medium"
+    assert calibration.unknown_terms == terms
+
+
+@pytest.mark.parametrize(
+    ("evidence", "level"),
+    [
+        ("I have some experience", "working"),
+        ("I am not sure", "working"),
+        ("familiar with OAuth", "working"),
+        ("comfortable with OAuth", "working"),
+        ("can explain OAuth", "working"),
+        ("experience with OAuth", "working"),
+        ("I used OAuth in production", "working"),
+        ("I teach OAuth deeply", "fluent"),
+    ],
+)
+def test_bare_idk_detection_does_not_replace_self_reported_prose(evidence, level) -> None:
+    calibration = infer_interview_calibration(evidence)
+
+    assert calibration.level == level
+    assert calibration.unknown_terms == ()
 
 
 def test_cannot_explain_pkce_infers_foundational() -> None:

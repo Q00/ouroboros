@@ -71,6 +71,24 @@ def infer_interview_calibration(evidence: str) -> InterviewCalibration:
     has_unknown = any(marker in lowered for marker in unknown_markers)
     has_working = any(marker in lowered for marker in working_markers)
     has_fluent = any(marker in lowered for marker in fluent_markers)
+    # The idk command itself supplies the unknown marker for a bare term/list.
+    # Keep self-reported prose out of this shorthand path.
+    bare_terms = (
+        not (has_unknown or has_working or has_fluent)
+        and re.fullmatch(r"[\w+#-]+(?:[ ,/]+[\w+#-]+)*", normalized) is not None
+        and re.search(
+            r"\b(?:i|we|you|it|this|that|am|is|are|know|understand|have|not|sure|"
+            r"(?:familiar|comfortable|experience)\s+with|experience\s+in|"
+            r"can\s+(?:explain|use|debug|compare|understand))\b",
+            lowered,
+        )
+        is None
+        and all(
+            len(term.split()) <= 4
+            for term in re.split(r"\s+(?:and|or)\s+|[,/]", normalized, flags=re.IGNORECASE)
+        )
+    )
+    has_unknown = has_unknown or bare_terms
     if has_unknown:
         level: Literal["foundational", "working", "fluent"] = "foundational"
     elif has_fluent:
@@ -84,7 +102,7 @@ def infer_interview_calibration(evidence: str) -> InterviewCalibration:
         "high" if has_unknown and has_working else "medium" if has_unknown or has_working else "low"
     )
     unknown_terms: list[str] = []
-    unknown_segments: list[str] = []
+    unknown_segments: list[str] = [normalized] if bare_terms else []
     english_match = re.search(
         r"(?:don't know|do not know|not familiar with|unfamiliar with)\s+([^.;]+)",
         normalized,

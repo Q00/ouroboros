@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -18,6 +19,8 @@ from ouroboros.mcp.tools.interview_calibration import (
 )
 from ouroboros.mcp.tools.subagent import build_interview_subagent
 from ouroboros.providers.base import CompletionResponse, UsageInfo
+from ouroboros.router import SkillDispatchRouter
+from ouroboros.router.types import Resolved
 
 
 def test_inference_uses_mixed_korean_evidence_conservatively() -> None:
@@ -57,7 +60,20 @@ def test_plugin_subagent_prompt_receives_the_same_calibration() -> None:
 
 
 @pytest.mark.asyncio
-async def test_idk_reasks_pending_question_without_recording_an_answer(tmp_path) -> None:
+@pytest.mark.parametrize(
+    ("evidence", "unknown_terms"),
+    [
+        ("I do not know idempotency; I built REST APIs", ["idempotency"]),
+        ("idempotency", ["idempotency"]),
+        ("idempotency, event sourcing", ["idempotency", "event sourcing"]),
+        ("idempotency or event sourcing", ["idempotency", "event sourcing"]),
+        ("CAN bus", ["CAN bus"]),
+        ("user experience", ["user experience"]),
+    ],
+)
+async def test_bare_idk_reasks_pending_question_without_recording_an_answer(
+    tmp_path, evidence, unknown_terms
+) -> None:
     adapter = MagicMock()
     adapter.complete = AsyncMock(
         return_value=Result.ok(
@@ -86,21 +102,45 @@ async def test_idk_reasks_pending_question_without_recording_an_answer(tmp_path)
         llm_adapter=adapter,
     )
 
-    result = await handler.handle(
-        {
-            "session_id": state.interview_id,
-            "calibration_input": "I do not know idempotency; I built REST APIs",
-        }
+    resolved = SkillDispatchRouter().resolve(
+        f"ooo idk {evidence}",
+        skills_dir=Path(__file__).resolve().parents[4] / "skills",
     )
+    assert isinstance(resolved, Resolved)
+    result = await handler.handle({**resolved.mcp_args, "session_id": state.interview_id})
 
     assert result.is_ok
+    calibration = result.value.meta["interview_calibration"]
+    assert isinstance(calibration, dict)
+    assert calibration["level"] == "foundational"
+    assert calibration["unknown_terms"] == unknown_terms
     assert result.value.meta["pending_question_preserved"] is True
     assert result.value.meta["question_rephrased"] is True
     assert result.value.meta["pending_question"] == state.rounds[0].question
     assert "돈이 두 번 빠지지" in result.value.text_content
     reloaded = await engine.load_state(state.interview_id)
     assert reloaded.is_ok
+    assert len(reloaded.value.rounds) == 1
     assert reloaded.value.rounds[0].user_response is None
+
+
+@pytest.mark.parametrize(
+    "evidence", ["familiar with OAuth", "some experience with OAuth", "comfortable with Python"]
+)
+async def test_bare_idk_preserves_positive_familiarity(evidence) -> None:
+    resolved = SkillDispatchRouter().resolve(
+        f"ooo idk {evidence}",
+        skills_dir=Path(__file__).resolve().parents[4] / "skills",
+    )
+    assert isinstance(resolved, Resolved)
+
+    result = await InterviewHandler().handle(resolved.mcp_args)
+
+    assert result.is_ok
+    calibration = result.value.meta["interview_calibration"]
+    assert isinstance(calibration, dict)
+    assert calibration["level"] == "working"
+    assert calibration["unknown_terms"] == []
 
 
 @pytest.mark.parametrize("failure", [RuntimeError("provider unavailable"), TimeoutError("timeout")])
