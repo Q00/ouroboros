@@ -10,7 +10,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ouroboros.boundary.decision import recorded_criterion_decisions
+from ouroboros.boundary.decision import (
+    recorded_criterion_decisions,
+    recorded_execution_for_seed,
+)
 from ouroboros.core.seed import AcceptanceCriterionSpec, ac_text
 from ouroboros.evaluation.mechanical import MechanicalConfig
 from ouroboros.evaluation.models import (
@@ -156,3 +159,14 @@ def test_criteria_with_the_same_text_keep_their_own_evidence() -> None:
     assert evidence_for_criteria(evaluated, seed, ((failed,), (passed,))) == ((failed,), (passed,))
     # Criteria that are not the Seed's own, in order, get no evidence at all.
     assert evidence_for_criteria(("clamp works",), seed, ((failed,), (passed,))) == ((),)
+
+
+async def test_the_journal_names_the_run_a_seed_was_frozen_for(
+    store: EventStore,  # noqa: F811
+    repo: Path,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    seed, _state, _authority = await _prepare(store, repo, tmp_path, _Constructor(_reply()))
+    assert await recorded_execution_for_seed(store, seed) == EXECUTION_ID
+    other = seed.model_copy(update={"goal": "another goal"})
+    assert await recorded_execution_for_seed(store, other) is None

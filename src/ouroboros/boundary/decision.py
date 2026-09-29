@@ -12,7 +12,12 @@ no evidence, never a pass.
 
 from __future__ import annotations
 
-from ouroboros.boundary.events import CriterionDecisionRecord, parse_boundary_version
+from ouroboros.boundary.events import (
+    BOUNDARY_AGGREGATE_TYPE,
+    PACKAGE_FROZEN,
+    CriterionDecisionRecord,
+    parse_boundary_version,
+)
 from ouroboros.boundary.ledger import (
     BoundaryLedger,
     RecoveryBound,
@@ -48,3 +53,34 @@ async def recorded_criterion_decisions(
     if tuple(item.criterion_key for item in decision.criteria) != seed_criterion_keys(seed):
         return ()
     return decision.criteria
+
+
+_PAGE = 500
+
+
+async def recorded_execution_for_seed(store: EventStore, seed: Seed) -> str | None:
+    """The latest run whose check package was frozen for exactly this Seed, if any.
+
+    A generation evaluated after a resume has no in-memory record of its run;
+    the journal names it: a frozen package cites its Seed digest.
+    """
+    digest = seed_digest(seed)
+    latest: tuple[object, str] | None = None
+    offset = 0
+    while True:
+        page = await store.query_events(
+            aggregate_type=BOUNDARY_AGGREGATE_TYPE,
+            event_type=PACKAGE_FROZEN,
+            limit=_PAGE,
+            offset=offset,
+        )
+        for event in page:
+            run = parse_boundary_version(event.aggregate_id)
+            if run is None or event.data.get("seed_digest") != digest:
+                continue
+            if latest is None or event.timestamp >= latest[0]:  # type: ignore[operator]
+                latest = (event.timestamp, run[0])
+        if len(page) < _PAGE:
+            break
+        offset += _PAGE
+    return None if latest is None else latest[1]

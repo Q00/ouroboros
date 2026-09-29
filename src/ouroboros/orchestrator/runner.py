@@ -9293,12 +9293,15 @@ class OrchestratorRunner:
             # uses the AC executor even for single-AC or --sequential runs so
             # the evidence gate is never silently bypassed. Investment metadata
             # likewise requires per-AC dispatch so direct whole-seed execution
-            # cannot discard difficulty/stakes authority.
+            # cannot discard difficulty/stakes authority. An installed check
+            # package authority decides only on the per-AC path, so it takes
+            # that path for one AC or a sequential run too.
             has_investment_metadata = _seed_has_investment_metadata(seed)
             if (
                 self._fat_harness_mode
                 or force_sequential_levels
                 or has_investment_metadata
+                or self.acceptance_authority is not None
                 or (parallel and len(seed.acceptance_criteria) > 1)
             ):
                 parallel_kwargs: dict[str, Any] = {

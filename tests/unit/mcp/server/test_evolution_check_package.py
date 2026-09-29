@@ -149,3 +149,23 @@ async def test_each_generation_prepares_its_package_before_its_worker(
     decided = await packages.decide(_skipped_summary(), _seed("seed-gen2"))
     assert seen == ["exec_seed-gen2"]
     assert decided.final_approved is True
+
+
+async def test_a_generation_evaluated_after_a_resume_finds_its_run_in_the_journal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    packages = GenerationCheckPackages(event_store=None)  # type: ignore[arg-type]
+    seen: list[str] = []
+
+    async def _run_for_seed(store: Any, seed: Any) -> str:
+        return "exec_recovered"
+
+    async def _decisions(store: Any, execution_id: str, seed: Any) -> tuple[Any, ...]:
+        seen.append(execution_id)
+        return (_decision("pass"), _decision("pass"))
+
+    monkeypatch.setattr(module, "recorded_execution_for_seed", _run_for_seed)
+    monkeypatch.setattr(module, "recorded_criterion_decisions", _decisions)
+    decided = await packages.decide(_skipped_summary(), _seed("seed-resumed"))
+    assert seen == ["exec_recovered"]
+    assert decided.final_approved is True

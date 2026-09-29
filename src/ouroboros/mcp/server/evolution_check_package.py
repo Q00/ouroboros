@@ -16,7 +16,10 @@ from uuid import uuid4
 
 import structlog
 
-from ouroboros.boundary.decision import recorded_criterion_decisions
+from ouroboros.boundary.decision import (
+    recorded_criterion_decisions,
+    recorded_execution_for_seed,
+)
 from ouroboros.boundary.ledger import BoundaryOrderError
 from ouroboros.boundary.run_control import CheckPackageRun
 from ouroboros.core.types import Result
@@ -79,8 +82,9 @@ class GenerationCheckPackages:
             parallel=parallel,
             externally_satisfied_acs=externally_satisfied_acs,
         )
-        terminal = "completed" if result.is_ok and result.value.success else "failed"
-        if result.is_ok and not result.value.success and result.value.summary.get("cancelled"):
+        value = result.value if getattr(result, "is_ok", False) else None
+        terminal = "completed" if getattr(value, "success", False) else "failed"
+        if value is not None and not value.success and value.summary.get("cancelled"):
             terminal = "cancelled"
         check_package.finish(terminal)
         return result
@@ -89,9 +93,12 @@ class GenerationCheckPackages:
         """``summary`` with the generation's recorded package verdicts on what they covered."""
         seed_id = _seed_id(seed)
         execution_id = self.execution_ids.get(seed_id) if seed_id is not None else None
-        if execution_id is None:
-            return summary
         try:
+            if execution_id is None:
+                # Evaluated after a resume: the journal names the generation's run.
+                execution_id = await recorded_execution_for_seed(self.event_store, seed)
+            if execution_id is None:
+                return summary
             decisions = await recorded_criterion_decisions(self.event_store, execution_id, seed)
         except Exception as exc:  # noqa: BLE001 - an unreadable decision is no evidence
             log.warning("evolution.recorded_decision_unreadable", error=str(exc))
