@@ -275,3 +275,64 @@ async def test_carried_verdicts_reach_only_an_evaluator_that_reads_them() -> Non
     await call_evaluator(reads, _seed(), "out", None, carried)
     assert seen["carried"] == carried
     await call_evaluator(ignores, _seed(), "out", "evolve:lin:generation:2", carried)
+
+
+async def _server_evaluator(store: Any, monkeypatch: Any, **patches: Any) -> Any:
+    """The evolve evaluator the MCP server actually wires into its loop."""
+    import ouroboros.evolution.loop as loop_module
+    from ouroboros.mcp.server import adapter
+
+    captured: dict[str, Any] = {}
+
+    class _Loop(loop_module.EvolutionaryLoop):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            captured.update(kwargs)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(loop_module, "EvolutionaryLoop", _Loop)
+    for name, value in patches.items():
+        monkeypatch.setattr(adapter, name, value)
+    adapter.create_ouroboros_server(event_store=store)
+    return captured["evaluator"]
+
+
+async def test_an_approved_no_marker_fallback_still_resolves_every_criterion(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """A recorded package failure rejects the generation even when the fallback approved."""
+    from ouroboros.persistence.event_store import EventStore
+
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'events.db'}")
+    await store.initialize()
+
+    async def _approved_fallback(**kwargs: Any) -> EvaluationSummary:
+        return EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            execution_completion_status="completed",
+            approval_status="approved",
+        )
+
+    async def _pipeline(seed: Any, indices: tuple[int, ...], **kwargs: Any) -> dict[int, ACResult]:
+        return {index: _row(index, passed=True, method="evaluation_pipeline") for index in indices}
+
+    async def _decisions(store: Any, execution_id: str, seed: Any) -> tuple[Any, ...]:
+        package_fail = SimpleNamespace(
+            package_status="fail", governed_by="check_package", reason="held_out"
+        )
+        return (_unverified(), package_fail, _unverified(), _unverified())
+
+    evaluator = await _server_evaluator(
+        store,
+        monkeypatch,
+        evaluate_generation_with_pipeline=_approved_fallback,
+        evaluate_criteria_with_pipeline=_pipeline,
+    )
+    monkeypatch.setattr(package_module, "recorded_criterion_decisions", _decisions)
+    summary = await evaluator(
+        _seed(), "worker report with no task markers", execution_id="evolve:lin:generation:2"
+    )
+    assert summary.final_approved is False
+    assert [row.rendered_verdict for row in summary.ac_results] == ["PASS", "FAIL", "PASS", "PASS"]
+    assert summary.ac_results[1].verification_method == "check_package"
+    await store.close()
