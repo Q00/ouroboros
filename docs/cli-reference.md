@@ -459,7 +459,7 @@ ouroboros run [workflow] [OPTIONS] SEED_FILE
 |--------|-------------|
 | `-o/-O, --orchestrator/--no-orchestrator` | Use the agent-runtime orchestrator for execution (default: enabled) |
 | `--runtime TEXT` | Agent runtime backend override (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `copilot`, `goose`, `kiro`, `pi`, `omp`, `gjc`, `antigravity`, `grok`, `zcode`). Uses configured default if omitted |
-| `-r, --resume TEXT` | Resume a previous orchestrator session by ID |
+| `-r, --resume TEXT` | Resume a previous orchestrator session by ID. A run continues only while the process that started it holds its live state (its check package's held-out cases never leave that process); resumed from a new process, the run is recorded as failed and a new attempt starts from the project, while the interrupted attempt's work stays on its task branch |
 | `--mcp-config PATH` | Path to MCP client configuration YAML file |
 | `--mcp-tool-prefix TEXT` | Prefix to add to all MCP tool names (e.g., `mcp_`) |
 | `-s, --sequential` | Execute ACs sequentially instead of in parallel |

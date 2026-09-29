@@ -900,6 +900,7 @@ async def _run_orchestrator(
     )
 
     # Execute
+    start_new_attempt = False
     try:
         if resume_session:
             if debug:
@@ -987,6 +988,16 @@ async def _run_orchestrator(
                 print_info(f"Session ID: {res.session_id}")
                 console.print(f"[dim]Error: {res.final_message[:200]}[/dim]")
                 raise typer.Exit(1)
+        elif resume_session and _held_out_checks_were_lost(result.error):
+            # The resumed run's held-out checks lived only in the process that
+            # started it, so it cannot continue here (the runner has recorded
+            # it as failed). Start a new attempt instead of exiting.
+            print_warning(
+                "This run cannot continue in a new process: its check package lived in the "
+                "process that started it. Starting a new attempt from the project; the "
+                "interrupted attempt's work stays on its task branch."
+            )
+            start_new_attempt = True
         else:
             print_error(f"Orchestrator error: {result.error}")
             raise typer.Exit(1)
@@ -1002,6 +1013,35 @@ async def _run_orchestrator(
         # ones (which keep going through QA) survive. The run is over, so a
         # bounded wait here blocks no command (see ``telemetry.flush``).
         usage_telemetry.flush()
+
+    if start_new_attempt:
+        await _run_orchestrator(
+            seed_file,
+            None,
+            mcp_config,
+            mcp_tool_prefix,
+            debug,
+            parallel=parallel,
+            no_qa=no_qa,
+            runtime_backend=runtime_backend,
+            max_decomposition_depth=max_decomposition_depth,
+            skip_completed=skip_completed,
+            project_dir=project_dir,
+            check_package=check_package,
+        )
+
+
+def _held_out_checks_were_lost(error: object) -> bool:
+    """Whether a resume failed because the run's live process-local state is gone.
+
+    The runner reports that exact outcome as ``resume_blocked ==
+    "process_local_resume_unavailable"`` after recording the session failed.
+    """
+    details = getattr(error, "details", None)
+    return (
+        isinstance(details, dict)
+        and details.get("resume_blocked") == "process_local_resume_unavailable"
+    )
 
 
 async def _prepare_check_package_boundary(
