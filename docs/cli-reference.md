@@ -466,6 +466,8 @@ ouroboros run [workflow] [OPTIONS] SEED_FILE
 | `--max-decomposition-depth INTEGER` | Maximum recursive AC decomposition depth (any non-negative integer; default `2`). Values `0..4` are eligible for Routing D durable replay. Larger legacy values remain executable but do not publish the Routing D parallel resume-owner guarantee. The same contract applies to `OUROBOROS_MAX_DECOMPOSITION_DEPTH` and `seed.orchestrator.max_decomposition_depth` |
 | `-n, --dry-run` | Validate seed without executing. **Currently only takes effect with `--no-orchestrator`.** In default orchestrator mode this flag is accepted but has no effect — the full workflow executes |
 | `--no-qa` | Skip post-execution QA evaluation |
+| `--auto-evaluate/--no-auto-evaluate` | After the run finishes (completed or failed), enqueue formal evaluation of the run's task worktree and wait for its result, as `ooo run` does. A paused or cancelled run is not evaluated. Default: `execution.auto_evaluate` in config (on) |
+| `--auto-evolve/--no-auto-evolve` | When formal evaluation is not approved, continue into the bounded Ralph job the evaluation chains and wait for its result. Default: `execution.auto_evolve` in config (on) |
 | `--check-package/--no-check-package` | Build executable checks from the acceptance criteria before the worker starts, admit them on the current tree, and let them decide the criteria they cover (the existing verifier stays advisory for those and decides the rest). On by default; `--no-check-package` opts out for this run. Default: `OUROBOROS_CHECK_PACKAGE` (only the exact value `on` turns it on; any other set value, such as `1`, `true` or `ON`, means off), then `boundary.check_package` in config, then on. The checks are model-written Python scripts: they run on throwaway copies of the project with the project's interpreter, a per-check timeout, and an allowlisted environment, confined by the execution sandbox (they can write only inside their copy and a scratch directory, and have no network); they can read files you can read. Where the sandbox is unavailable, a check is undecided and does not run. The same switch applies to `ooo run` from a plugin host, meaning the in-process `ouroboros_execute_seed` / `ouroboros_start_execute_seed` path; an execution dispatched to the OpenCode plugin's child session is not governed and reports `check_package: not_applied`. Only Claude Code and Codex CLI can construct checks; with another runtime the existing verifier decides the run. |
 | `-d, --debug` | Show logs and agent thinking (verbose output) |
 
@@ -490,6 +492,12 @@ ouroboros run seed.yaml --resume orch_abc123
 # Skip post-execution QA
 ouroboros run seed.yaml --no-qa
 
+# Stop after the run instead of continuing into formal evaluation
+ouroboros run seed.yaml --no-auto-evaluate
+
+# Evaluate, but do not continue a rejected evaluation into Ralph
+ouroboros run seed.yaml --no-auto-evolve
+
 # Opt out of the check package for this run (or: OUROBOROS_CHECK_PACKAGE=off,
 # or boundary.check_package: off in ~/.ouroboros/config.yaml)
 ouroboros run seed.yaml --no-check-package
@@ -503,6 +511,15 @@ ouroboros run seed.yaml --sequential
 # Allow up to four recursive splits with Routing D durable replay
 ouroboros run seed.yaml --max-decomposition-depth 4
 ```
+
+After execution (and post-execution QA on success), `ouroboros run` continues into formal
+evaluation and, when the evaluation is not approved, a bounded Ralph job, the same chain
+`ooo run` uses. The evaluation and Ralph jobs run in detached background workers; the command
+waits for each, prints its result, and keeps the run's own exit code (a failed run still exits
+`1`, and a failure to start evaluation is only a warning). Ctrl-C while waiting stops waiting
+without cancelling the jobs and prints their job ids; follow them with
+`ouroboros job wait <job_id> --timeout-seconds 60 --view compact` and
+`ouroboros job result <job_id>`.
 
 Depth values above `4` remain accepted for compatibility and execute through the
 historical legacy parallel path. They do not publish the Routing D parallel

@@ -704,6 +704,8 @@ async def _run_orchestrator(
     project_dir: Path | None = None,
     project_fallback_dir: Path | None = None,
     check_package: bool | None = None,
+    auto_evaluate: bool | None = None,
+    auto_evolve: bool | None = None,
 ) -> None:
     """Run workflow via orchestrator mode.
 
@@ -724,6 +726,8 @@ async def _run_orchestrator(
         check_package: ``--check-package`` / ``--no-check-package``; ``None``
             defers to ``OUROBOROS_CHECK_PACKAGE``, then ``boundary.check_package``,
             then the default, which is on (``ouroboros.boundary.switch``).
+        auto_evaluate: Override ``execution.auto_evaluate`` for this run.
+        auto_evolve: Override ``execution.auto_evolve`` for this run.
     """
     from ouroboros.core.seed import Seed
     from ouroboros.orchestrator import (
@@ -899,6 +903,21 @@ async def _run_orchestrator(
         execution_model=execution_model,
     )
 
+    async def _continue_into_evaluation(res: Any) -> None:
+        # Same successor chain as the MCP run job: evaluate, then Ralph.
+        from ouroboros.cli.commands import run_successors
+
+        await run_successors.continue_run_into_evaluation(
+            res,
+            session_repo=session_repo,
+            seed_content=yaml.dump(seed_data, default_flow_style=False),
+            worktree_path=workspace.worktree_path if workspace is not None else None,
+            working_dir=project_dir,
+            runtime_override=runtime_backend,
+            auto_evaluate=auto_evaluate,
+            auto_evolve=auto_evolve,
+        )
+
     # Execute
     start_new_attempt = False
     try:
@@ -983,10 +1002,12 @@ async def _run_orchestrator(
                         console.print(qa_result.value.content[0].text)
                     else:
                         print_warning(f"QA evaluation skipped: {qa_result.error}")
+                await _continue_into_evaluation(res)
             else:
                 print_error("Execution failed")
                 print_info(f"Session ID: {res.session_id}")
                 console.print(f"[dim]Error: {res.final_message[:200]}[/dim]")
+                await _continue_into_evaluation(res)
                 raise typer.Exit(1)
         elif resume_session and _held_out_checks_were_lost(result.error):
             # The resumed run's held-out checks lived only in the process that
@@ -1028,6 +1049,8 @@ async def _run_orchestrator(
             skip_completed=skip_completed,
             project_dir=project_dir,
             check_package=check_package,
+            auto_evaluate=auto_evaluate,
+            auto_evolve=auto_evolve,
         )
 
 
@@ -1215,6 +1238,26 @@ def workflow(
             ),
         ),
     ] = None,
+    auto_evaluate: Annotated[
+        bool | None,
+        typer.Option(
+            "--auto-evaluate/--no-auto-evaluate",
+            help=(
+                "After the run, enqueue formal evaluation (failed runs included) and follow "
+                "it. Default: execution.auto_evaluate in config (on)."
+            ),
+        ),
+    ] = None,
+    auto_evolve: Annotated[
+        bool | None,
+        typer.Option(
+            "--auto-evolve/--no-auto-evolve",
+            help=(
+                "When formal evaluation is not approved, continue into a bounded Ralph loop "
+                "and follow it. Default: execution.auto_evolve in config (on)."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Execute a workflow from a seed file.
 
@@ -1254,6 +1297,9 @@ def workflow(
         # Skip post-execution QA
         ouroboros run seed.yaml --no-qa
 
+        # Stop after the run instead of continuing into formal evaluation
+        ouroboros run seed.yaml --no-auto-evaluate
+
         # Limit recursive decomposition depth
         ouroboros run seed.yaml --max-decomposition-depth 1
 
@@ -1292,6 +1338,8 @@ def workflow(
                     skip_completed=skip_completed,
                     project_dir=project_dir,
                     check_package=check_package,
+                    auto_evaluate=auto_evaluate,
+                    auto_evolve=auto_evolve,
                 )
             )
         except (ValueError, NotImplementedError) as e:

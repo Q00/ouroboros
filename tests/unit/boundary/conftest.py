@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 import sys
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -36,6 +37,20 @@ def _unconfined_check_host(monkeypatch: pytest.MonkeyPatch) -> None:
     confinement request ``real_check_isolation``.
     """
     monkeypatch.setenv(EXEC_SANDBOX_ENV_VAR, "off")
+
+
+@pytest.fixture(autouse=True)
+def _no_run_evaluation_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep ``_run_orchestrator`` tests off the post-run evaluation chain.
+
+    A finished ``ouroboros run`` continues into formal evaluation, which builds
+    the whole MCP server. Tests of the run itself do not exercise that chain;
+    ``tests/unit/cli/test_run_successors.py`` does.
+    """
+    monkeypatch.setattr(
+        "ouroboros.cli.commands.run_successors.continue_run_into_evaluation",
+        AsyncMock(),
+    )
 
 
 @pytest.fixture

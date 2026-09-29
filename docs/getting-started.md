@@ -421,7 +421,9 @@ See [TUI Usage Guide](guides/tui-usage.md) for keyboard shortcuts and screen det
 
 ### Step 4: Review
 
-`ooo run` (or `ouroboros run`) prints a session summary with the QA verdict when complete.
+`ooo run` (or `ouroboros run`) prints a session summary with the QA verdict when complete, then
+continues into formal evaluation and, when the evaluation is not approved, a bounded Ralph loop.
+`ouroboros run` waits for both and prints their results; pass `--no-auto-evaluate` to stop after the run.
 
 Useful follow-ups:
 
@@ -572,6 +574,7 @@ ouroboros cancel execution <session_id>
 1. **Validate first** -- `ouroboros run seed.yaml --dry-run` checks YAML and schema before executing
 2. **Monitor with the TUI** -- run `ouroboros monitor` in a separate terminal during long workflows
 3. **Keep QA enabled** -- post-execution QA runs automatically unless you pass `--no-qa`
+4. **Let evaluation run** -- formal evaluation (and Ralph when it is not approved) follows every completed or failed run unless you pass `--no-auto-evaluate` or set `execution.auto_evaluate: false`
 
 ---
 
