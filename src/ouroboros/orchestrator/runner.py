@@ -9316,9 +9316,9 @@ class OrchestratorRunner:
                 }
                 if externally_satisfied_acs:
                     parallel_kwargs["externally_satisfied_acs"] = externally_satisfied_acs
-                if force_sequential_levels or (
-                    not parallel and (self._fat_harness_mode or has_investment_metadata)
-                ):
+                # A sequential run that takes the per-AC path stays sequential,
+                # whatever sent it there.
+                if force_sequential_levels or not parallel:
                     parallel_kwargs["force_sequential_levels"] = True
 
                 try:
