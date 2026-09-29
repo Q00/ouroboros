@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, TypeGuard
 
 
@@ -382,24 +383,40 @@ def evaluation_summary_for_unavailable_spec_verification(
     )
 
 
-def apply_package_decisions(summary: Any, decisions: tuple[Any, ...], seed: Any) -> Any:
-    """Let the controller's recorded check package decision decide what it covered.
+def apply_package_decisions(
+    summary: Any,
+    decisions: tuple[Any, ...],
+    seed: Any,
+    *,
+    carried: Mapping[int, Any] | None = None,
+    evaluated: Mapping[int, Any] | None = None,
+) -> Any:
+    """Resolve each Seed criterion's verdict for an evolve generation.
 
     ``decisions`` are the run's recorded per-criterion decisions in Seed order
     (``boundary.decision.recorded_criterion_decisions``; empty when there are
-    none). A criterion the package decided (``governed_by == "check_package"``
-    with a ``pass`` or ``fail``) takes that verdict instead of the source-scan
-    verifier's, which cannot see behavior. Every other criterion keeps the
-    spec verifier's verdict. Approval is recomputed from the results.
+    none). For each criterion, in order:
+
+    1. a check package ``pass`` or ``fail`` (``governed_by == "check_package"``)
+       decides it, instead of the source-scan verifier, which cannot see behavior;
+    2. an authoritative verdict already in ``summary`` (the spec verifier's) stands;
+    3. ``carried``: a frozen criterion's passing verdict from the previous
+       generation (``EvolutionFocus.carried_verdicts``);
+    4. ``evaluated``: the per-criterion evaluation pipeline's verdict
+       (``evaluate_criteria_with_pipeline``) for a criterion still undecided;
+    5. otherwise it is not evaluated.
+
+    Approval is recomputed and needs every Seed criterion proven. With nothing
+    from steps 1, 3 or 4, ``summary`` is returned unchanged.
     """
     from ouroboros.core.lineage import ACResult
     from ouroboros.core.seed import ac_texts
 
-    if not decisions or summary is None:
+    if summary is None:
         return summary
     seed_criteria = tuple(getattr(seed, "acceptance_criteria", ()) or ())
-    if len(decisions) != len(seed_criteria):
-        return summary
+    if decisions and len(decisions) != len(seed_criteria):
+        decisions = ()
     texts = ac_texts(seed_criteria)
     decided: dict[int, ACResult] = {}
     for index, record in enumerate(decisions):
@@ -418,29 +435,40 @@ def apply_package_decisions(summary: Any, decisions: tuple[Any, ...], seed: Any)
             final_verdict="pass" if passed else "fail",
             rendered_verdict="PASS" if passed else "FAIL",
         )
-    if not decided:
+    carried = carried or {}
+    evaluated = evaluated or {}
+    if not decided and not carried and not evaluated:
         return summary
-    results = [decided.get(result.ac_index, result) for result in summary.ac_results]
-    present = {result.ac_index for result in results}
-    results.extend(result for index, result in decided.items() if index not in present)
-    present |= set(decided)
-    # Every Seed criterion must be proven: one with no verdict row is not evaluated.
-    results.extend(
-        ACResult(
-            ac_index=index,
-            ac_content=texts[index],
-            semantic_ac_key=getattr(seed_criteria[index], "semantic_ac_key", None),
-            passed=False,
-            score=0.0,
-            evidence="Neither the check package nor the spec verifier decided this AC.",
-            verification_method="formal_evaluation",
-            ac_verdict_state="not_evaluated",
-            final_verdict="fail",
-            rendered_verdict="NOT_EVALUATED",
-        )
-        for index in range(len(seed_criteria))
-        if index not in present
-    )
+    current = {result.ac_index: result for result in summary.ac_results}
+    results: list[ACResult] = []
+    for index in range(len(seed_criteria)):
+        row = current.get(index)
+        if index in decided:
+            results.append(decided[index])
+        elif row is not None and row.verdict_is_authoritative:
+            results.append(row)
+        elif index in carried:
+            results.append(carried[index])
+        elif index in evaluated:
+            results.append(evaluated[index])
+        elif row is not None:
+            results.append(row)
+        else:
+            # Every Seed criterion must be proven: one with no verdict is not evaluated.
+            results.append(
+                ACResult(
+                    ac_index=index,
+                    ac_content=texts[index],
+                    semantic_ac_key=getattr(seed_criteria[index], "semantic_ac_key", None),
+                    passed=False,
+                    score=0.0,
+                    evidence="No check package, verifier or evaluation decided this AC.",
+                    verification_method="formal_evaluation",
+                    ac_verdict_state="not_evaluated",
+                    final_verdict="fail",
+                    rendered_verdict="NOT_EVALUATED",
+                )
+            )
     results.sort(key=lambda result: result.ac_index)
     total = len(results)
     passed_count = sum(1 for result in results if result.authoritative_pass)

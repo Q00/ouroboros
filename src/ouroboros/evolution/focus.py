@@ -17,7 +17,7 @@ import inspect
 import logging
 from typing import Any
 
-from ouroboros.core.lineage import EvaluationSummary
+from ouroboros.core.lineage import ACResult, EvaluationSummary, GenerationRecord
 from ouroboros.core.seed import Seed
 from ouroboros.evolution.evaluation_coverage import validate_seed_ac_coverage
 from ouroboros.evolution.provider_usage import call as call
@@ -51,6 +51,32 @@ class EvolutionFocus:
                 )
             }
             for index in self.frozen_ac_indices
+        }
+
+    def carried_verdicts(self, previous: GenerationRecord | None) -> dict[int, ACResult]:
+        """The previous generation's passing verdict for each frozen node.
+
+        A frozen node is not executed again, and a check package built on this
+        generation's base cannot reproduce a defect the previous generation
+        already fixed, so this generation has no fresh verdict for it. Its
+        authoritative pass carries into this generation's evaluation, which
+        still lets any fresh authoritative verdict for the node win.
+        """
+        summary = previous.evaluation_summary if previous is not None else None
+        if summary is None:
+            return {}
+        rows = {row.ac_index: row for row in summary.ac_results if row.authoritative_pass}
+        return {
+            index: rows[index].model_copy(
+                update={
+                    "evidence": (
+                        f"carried from generation {previous.generation_number}: "
+                        f"{rows[index].evidence}"
+                    ).strip()
+                }
+            )
+            for index in self.frozen_ac_indices
+            if index in rows
         }
 
     def log_selection(self, generation_number: int) -> None:
@@ -112,15 +138,17 @@ async def call_evaluator(
     evaluator: Any,
     seed: Seed,
     execution_output: str | None,
-    *,
     execution_id: str | None,
+    carried: dict[int, ACResult] | None = None,
 ) -> EvaluationSummary:
-    """Invoke an evaluator, naming the generation's run when it can read it."""
+    """Invoke an evaluator, naming the generation's run and carried verdicts when it reads them."""
     from ouroboros.evolution.evaluation_result import normalize_evaluator_result
 
     kwargs: dict[str, Any] = {}
     if execution_id is not None and callable_accepts_keyword(evaluator, "execution_id"):
         kwargs["execution_id"] = execution_id
+    if carried and callable_accepts_keyword(evaluator, "carried_ac_results"):
+        kwargs["carried_ac_results"] = carried
     return normalize_evaluator_result(await call(evaluator, seed, execution_output, **kwargs))
 
 

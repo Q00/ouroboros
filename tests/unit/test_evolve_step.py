@@ -2273,11 +2273,15 @@ class TestEvolveStepGen2:
         wonder_engine.wonder.assert_not_awaited()
         reflect_engine.reflect.assert_not_awaited()
         seed_generator.generate_from_reflect.assert_not_called()
-        evaluator.assert_awaited_once_with(
-            candidate,
-            "fresh execution",
-            execution_id=loop_support.generation_execution_id("lin_seeding_resume_focus", 2),
+        evaluator.assert_awaited_once()
+        assert evaluator.await_args.args == (candidate, "fresh execution")
+        kwargs = evaluator.await_args.kwargs
+        assert kwargs["execution_id"] == loop_support.generation_execution_id(
+            "lin_seeding_resume_focus", 2
         )
+        # The frozen node's previous pass is carried to the evaluator.
+        assert list(kwargs["carried_ac_results"]) == [0]
+        assert kwargs["carried_ac_results"][0].authoritative_pass
 
 
 class TestEvolveStepConvergence:
