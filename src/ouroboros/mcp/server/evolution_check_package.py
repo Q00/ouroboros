@@ -6,10 +6,11 @@ is constructed on that generation's base, frozen, and admitted, exactly as for
 deterministic execution id, given to both its executor and its evaluator; the
 evaluator reads that run's recorded decision, and no other run's, and lets it
 decide the criteria it covered (``apply_package_decisions``). A criterion the
-package did not decide keeps the source-scan verifier's authoritative verdict;
-otherwise a frozen criterion carries its previous passing verdict, and any
-criterion still undecided is evaluated by the per-criterion pipeline
-(``evaluate_criteria_with_pipeline``), as ``ouroboros_evaluate`` does.
+package could not evaluate takes the existing verifier's verdict the run
+recorded for it, as ``ooo run`` decides it (a spec-verifier failure still
+rejects it). Only when the run recorded no decision does a frozen criterion
+carry its previous passing verdict and a criterion still undecided go to the
+per-criterion pipeline (``evaluate_criteria_with_pipeline``).
 """
 
 from __future__ import annotations

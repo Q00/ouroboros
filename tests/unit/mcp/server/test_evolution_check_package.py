@@ -48,8 +48,15 @@ def _seed(seed_id: str = "seed-gen2") -> Any:
     )
 
 
-def _decision(status: str, governed_by: str = "check_package") -> Any:
-    return SimpleNamespace(package_status=status, governed_by=governed_by, reason="held_out")
+def _decision(status: str, governed_by: str = "check_package", *, accepted: bool = False) -> Any:
+    return SimpleNamespace(
+        package_status=status,
+        governed_by=governed_by,
+        reason="held_out",
+        existing_accepted=accepted,
+        existing_outcome="succeeded" if accepted else "failed",
+        existing_failure_class=None,
+    )
 
 
 def _skipped_summary(*, rows: bool = True) -> EvaluationSummary:
@@ -95,24 +102,28 @@ def test_a_package_fail_rejects_only_its_criterion() -> None:
     assert [r.rendered_verdict for r in summary.ac_results] == ["PASS", "FAIL"]
 
 
-def test_a_criterion_the_package_did_not_decide_keeps_the_verifier_verdict() -> None:
+@pytest.mark.parametrize(("accepted", "verdict"), [(True, "PASS"), (False, "FAIL")])
+def test_a_criterion_the_package_did_not_decide_takes_the_existing_verifier_verdict(
+    accepted: bool, verdict: str
+) -> None:
     summary = apply_package_decisions(
         _skipped_summary(),
-        (_decision("pass"), _decision("unverified", governed_by="existing_verifier")),
+        (_decision("pass"), _decision("unverified", "existing_verifier", accepted=accepted)),
         _seed(),
     )
-    assert summary.final_approved is False
-    assert [r.rendered_verdict for r in summary.ac_results] == ["PASS", "NOT_EVALUATED"]
+    assert summary.final_approved is accepted
+    assert [r.rendered_verdict for r in summary.ac_results] == ["PASS", verdict]
+    assert summary.ac_results[1].verification_method == "existing_verifier"
 
 
-def test_a_criterion_with_no_verdict_row_is_never_approved() -> None:
+def test_an_indeterminate_package_criterion_the_verifier_rejected_is_never_approved() -> None:
     summary = apply_package_decisions(
         _skipped_summary(rows=False),
         (_decision("pass"), _decision("indeterminate")),
         _seed(),
     )
     assert summary.final_approved is False
-    assert [r.rendered_verdict for r in summary.ac_results] == ["PASS", "NOT_EVALUATED"]
+    assert [r.rendered_verdict for r in summary.ac_results] == ["PASS", "FAIL"]
 
 
 def test_no_decision_leaves_the_verdicts_unchanged() -> None:

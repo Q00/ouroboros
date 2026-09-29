@@ -399,12 +399,18 @@ def apply_package_decisions(
 
     1. a check package ``pass`` or ``fail`` (``governed_by == "check_package"``)
        decides it, instead of the source-scan verifier, which cannot see behavior;
-    2. an authoritative verdict already in ``summary`` (the spec verifier's) stands;
-    3. ``carried``: a frozen criterion's passing verdict from the previous
+    2. an authoritative spec-verifier failure in ``summary`` rejects it;
+    3. a criterion the package could not evaluate takes the existing verifier's
+       verdict the run recorded for it (``existing_accepted``), as ``ooo run``
+       decides it;
+    4. an authoritative spec-verifier pass in ``summary`` stands;
+    5. ``carried``: a frozen criterion's passing verdict from the previous
        generation (``EvolutionFocus.carried_verdicts``);
-    4. ``evaluated``: the per-criterion evaluation pipeline's verdict
-       (``evaluate_criteria_with_pipeline``) for a criterion still undecided;
-    5. otherwise it is not evaluated.
+    6. ``evaluated``: the per-criterion evaluation pipeline's verdict
+       (``evaluate_criteria_with_pipeline``) for a criterion still undecided,
+       which is one with no recorded decision (the package was off or none was
+       admitted);
+    7. otherwise it is not evaluated.
 
     Approval is always recomputed and needs every Seed criterion proven, so a
     summary approved in aggregate, with no per-criterion rows, is not approved
@@ -420,8 +426,27 @@ def apply_package_decisions(
         decisions = ()
     texts = ac_texts(seed_criteria)
     decided: dict[int, ACResult] = {}
+    existing: dict[int, ACResult] = {}
     for index, record in enumerate(decisions):
         if record.governed_by != "check_package" or record.package_status not in ("pass", "fail"):
+            accepted = bool(record.existing_accepted)
+            verdict = "pass" if accepted else "fail"
+            outcome = record.existing_failure_class or record.existing_outcome or "no outcome"
+            existing[index] = ACResult(
+                ac_index=index,
+                ac_content=texts[index],
+                semantic_ac_key=getattr(seed_criteria[index], "semantic_ac_key", None),
+                passed=accepted,
+                score=1.0 if accepted else 0.0,
+                evidence=(
+                    f"existing verifier {'accepted' if accepted else 'rejected'} ({outcome}); "
+                    f"check package {record.package_status} ({record.reason})"
+                ),
+                verification_method="existing_verifier",
+                ac_verdict_state="evaluated",
+                final_verdict=verdict,
+                rendered_verdict=verdict.upper(),
+            )
             continue
         passed = record.package_status == "pass"
         decided[index] = ACResult(
@@ -442,9 +467,14 @@ def apply_package_decisions(
     results: list[ACResult] = []
     for index in range(len(seed_criteria)):
         row = current.get(index)
+        authoritative = row is not None and row.verdict_is_authoritative
         if index in decided:
             results.append(decided[index])
-        elif row is not None and row.verdict_is_authoritative:
+        elif authoritative and row is not None and not row.passed:
+            results.append(row)
+        elif index in existing:
+            results.append(existing[index])
+        elif authoritative and row is not None:
             results.append(row)
         elif index in carried:
             results.append(carried[index])

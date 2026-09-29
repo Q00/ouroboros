@@ -103,9 +103,17 @@ def _generation_one() -> GenerationRecord:
     )
 
 
-def _unverified(governed_by: str = "existing_verifier") -> Any:
+def _record(
+    status: str = "unverified", governed_by: str = "existing_verifier", *, accepted: bool = True
+) -> Any:
+    """A recorded criterion decision: the package's status and the existing verifier's verdict."""
     return SimpleNamespace(
-        package_status="unverified", governed_by=governed_by, reason="no_reproduction_check"
+        package_status=status,
+        governed_by=governed_by,
+        reason="no_reproduction_check" if status == "unverified" else "held_out",
+        existing_accepted=accepted,
+        existing_outcome="succeeded" if accepted else "failed",
+        existing_failure_class=None if accepted else "verification_failed",
     )
 
 
@@ -124,10 +132,9 @@ def test_a_frozen_criterion_carries_its_previous_passing_verdict() -> None:
     assert FOCUS.carried_verdicts(None) == {}
 
 
-def test_a_fresh_verdict_wins_over_a_carried_one() -> None:
-    carried = FOCUS.carried_verdicts(_generation_one())
-    package_fail = SimpleNamespace(package_status="fail", governed_by="check_package", reason="x")
-    verifier_fail = _skipped_summary().model_copy(
+def test_a_criterion_the_package_could_not_evaluate_takes_the_existing_verifier_verdict() -> None:
+    """The run's recorded existing-verifier verdict decides it, as ``ooo run`` does."""
+    spec = _skipped_summary().model_copy(
         update={
             "ac_results": (
                 _row(0, passed=False, state="not_evaluated", method="spec_verifier"),
@@ -137,26 +144,52 @@ def test_a_fresh_verdict_wins_over_a_carried_one() -> None:
             )
         }
     )
-    decisions = (package_fail, _unverified(), _unverified(), _unverified())
-    resolved = apply_package_decisions(verifier_fail, decisions, _seed(), carried=carried)
-    methods = [row.verification_method for row in resolved.ac_results]
-    # 0: the package failed it; 1: the verifier failed it; 3: carried; 2: undecided.
-    assert methods == ["check_package", "spec_verifier", "spec_verifier", "formal_evaluation"]
-    assert [row.rendered_verdict for row in resolved.ac_results] == [
-        "FAIL",
-        "FAIL",
-        "NOT_EVALUATED",
-        "PASS",
+    decisions = (
+        _record("fail", "check_package"),
+        _record(accepted=True),
+        _record(accepted=True),
+        _record("indeterminate", "check_package", accepted=False),
+    )
+    resolved = apply_package_decisions(
+        spec, decisions, _seed(), carried=FOCUS.carried_verdicts(_generation_one())
+    )
+    # 0: the package failed it; 1: a spec-verifier failure rejects it even though the existing
+    # verifier accepted it; 2: the existing verifier accepted it; 3: the package could not
+    # evaluate it and the existing verifier rejected it, which a carried pass does not lift.
+    assert [row.verification_method for row in resolved.ac_results] == [
+        "check_package",
+        "spec_verifier",
+        "existing_verifier",
+        "existing_verifier",
     ]
+    assert [row.rendered_verdict for row in resolved.ac_results] == ["FAIL", "FAIL", "PASS", "FAIL"]
     assert resolved.final_approved is False
 
 
-async def test_the_generation_two_lineage_converges(monkeypatch: Any) -> None:
-    """Carried verdicts for 0, 1, 3 and the pipeline for 2 approve generation 2."""
+async def test_the_dev_run_lineage_is_approved_by_the_recorded_verifier_verdicts(
+    monkeypatch: Any,
+) -> None:
+    """Run 11: the package verified nothing, the existing verifier accepted every criterion."""
 
     async def _decisions(store: Any, execution_id: str, seed: Any) -> tuple[Any, ...]:
-        return (_unverified(), _unverified(), _unverified(), _unverified("check_package"))
+        return (_record(), _record(), _record(), _record(governed_by="check_package"))
 
+    asked: list[tuple[int, ...]] = []
+
+    async def _pipeline(seed: Any, indices: tuple[int, ...], **kwargs: Any) -> dict[int, ACResult]:
+        asked.append(indices)
+        return {}
+
+    monkeypatch.setattr(package_module, "recorded_criterion_decisions", _decisions)
+    packages = GenerationCheckPackages(event_store=None, evaluate_criteria=_pipeline)  # type: ignore[arg-type]
+    decided = await packages.decide(_skipped_summary(), _seed(), "evolve:lin:generation:1")
+    assert asked == []
+    assert decided.final_approved is True
+    assert {row.verification_method for row in decided.ac_results} == {"existing_verifier"}
+
+
+async def test_with_no_recorded_decision_carried_verdicts_and_the_pipeline_decide() -> None:
+    """The package was off: 0, 1, 3 carried, 2 evaluated by the pipeline, generation approved."""
     asked: list[tuple[int, ...]] = []
 
     async def _pipeline(seed: Any, indices: tuple[int, ...], **kwargs: Any) -> dict[int, ACResult]:
@@ -164,12 +197,11 @@ async def test_the_generation_two_lineage_converges(monkeypatch: Any) -> None:
         assert kwargs == {"artifact": "report", "project_dir": "/work"}
         return {2: _row(2, passed=True, method="evaluation_pipeline")}
 
-    monkeypatch.setattr(package_module, "recorded_criterion_decisions", _decisions)
     packages = GenerationCheckPackages(event_store=None, evaluate_criteria=_pipeline)  # type: ignore[arg-type]
     decided = await packages.decide(
         _skipped_summary(),
         _seed(),
-        "evolve:lin:generation:2",
+        None,
         carried=FOCUS.carried_verdicts(_generation_one()),
         artifact="report",
         project_dir="/work",
@@ -317,10 +349,7 @@ async def test_an_approved_no_marker_fallback_still_resolves_every_criterion(
         return {index: _row(index, passed=True, method="evaluation_pipeline") for index in indices}
 
     async def _decisions(store: Any, execution_id: str, seed: Any) -> tuple[Any, ...]:
-        package_fail = SimpleNamespace(
-            package_status="fail", governed_by="check_package", reason="held_out"
-        )
-        return (_unverified(), package_fail, _unverified(), _unverified())
+        return (_record(), _record("fail", "check_package"), _record(), _record())
 
     evaluator = await _server_evaluator(
         store,
