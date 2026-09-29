@@ -3572,6 +3572,59 @@ class TestEvolveStepHandler:
         assert result.value.meta["qa_attempted"] is False
 
     @pytest.mark.asyncio
+    async def test_handler_records_the_source_generation_before_the_lineage_workspace(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The lineage worktree starts from the source generation's recorded work."""
+        from ouroboros.mcp.tools.definitions import EvolveStepHandler
+
+        store = await create_event_store()
+        seed = make_seed()
+        gen_result = GenerationResult(
+            generation_number=1,
+            seed=seed,
+            evaluation_summary=make_eval_summary(),
+            phase=GenerationPhase.COMPLETED,
+            success=True,
+        )
+        handler = EvolveStepHandler(evolutionary_loop=make_loop(store, gen_result=gen_result))
+        order: list[str] = []
+
+        def _checkpoint(path: str, *, message: str) -> None:
+            order.append(f"checkpoint:{path}")
+
+        def _restore(lineage_id: str, **kwargs: object) -> None:
+            order.append(f"restore:{kwargs['fallback_source_cwd']}")
+
+        import yaml
+
+        source = tmp_path / "gen1"
+        source.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=source, check=True)
+        with (
+            patch(
+                "ouroboros.mcp.tools.evolution_handlers.checkpoint_managed_worktree",
+                side_effect=_checkpoint,
+            ),
+            patch(
+                "ouroboros.mcp.tools.evolution_handlers.maybe_restore_task_workspace",
+                side_effect=_restore,
+            ),
+        ):
+            result = await handler.handle(
+                {
+                    "lineage_id": "lin_checkpoint",
+                    "seed_content": yaml.dump(seed.to_dict()),
+                    "project_dir": str(source),
+                    "skip_qa": True,
+                }
+            )
+
+        assert result.is_ok
+        assert order == [f"checkpoint:{source}", f"restore:{source}"]
+
+    @pytest.mark.asyncio
     async def test_public_benchmark_control_isolation_gates_fail_closed(
         self,
         tmp_path: Path,

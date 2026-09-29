@@ -582,6 +582,33 @@ def managed_worktree_root() -> Path:
     return _worktree_root()
 
 
+def checkpoint_managed_worktree(path: str | Path, *, message: str) -> str | None:
+    """Commit every change in an Ouroboros-managed task worktree as a checkpoint.
+
+    Only a worktree under the managed root (``managed_worktree_root``) is ever
+    committed; any other checkout, the user's own included, is left untouched
+    and ``None`` is returned, as it is for a clean worktree. Ignored files stay
+    out (``git add -A`` honors ``.gitignore``) and hooks do not run: this is the
+    product's own record of a generation's work on its task branch. Returns the
+    checkpoint commit.
+    """
+    target = Path(path).expanduser().resolve()
+    try:
+        repo_root = _resolve_repo_root(target)
+    except WorktreeError:
+        return None
+    if not repo_root.is_relative_to(_worktree_root().expanduser().resolve()):
+        return None
+    if not _checkout_is_dirty(repo_root):
+        return None
+    _run_git(["add", "-A"], repo_root)
+    identity: list[str] = []
+    if not _run_git_process(["config", "user.email"], repo_root).stdout.strip():
+        identity = ["-c", "user.name=Ouroboros", "-c", "user.email=ouroboros@localhost"]
+    _run_git([*identity, "commit", "-q", "--no-verify", "-m", message], repo_root)
+    return _run_git(["rev-parse", "HEAD"], repo_root)
+
+
 def lock_file_is_stale(lock_path: str | Path) -> bool:
     """Return True when a task lock file is stale, corrupt, or unreadable."""
     path = Path(lock_path)
