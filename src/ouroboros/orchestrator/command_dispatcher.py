@@ -10,7 +10,6 @@ from types import CodeType
 from typing import TYPE_CHECKING, Any
 
 from ouroboros.observability.logging import get_logger
-from ouroboros.orchestrator import interview_session
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
     ResolvedWorkerCwd,
@@ -21,6 +20,7 @@ from ouroboros.orchestrator.adapter import (
 )
 from ouroboros.orchestrator.interview_session import (
     InterviewSessionTransition,
+    interview_transition_digest,
 )
 from ouroboros.router.types import Resolved
 
@@ -83,20 +83,12 @@ class CodexCommandDispatcher:
                 "dispatch",
             )
         }
-        payload["globals"] = {
-            "INTERVIEW_SESSION_METADATA_KEY": interview_session.INTERVIEW_SESSION_METADATA_KEY,
-            "INTERVIEW_CALIBRATION_METADATA_KEY": (
-                interview_session.INTERVIEW_CALIBRATION_METADATA_KEY
-            ),
-        }
         from ouroboros.mcp.server.adapter import MCPServerAdapter, create_ouroboros_server
         from ouroboros.orchestrator.runner import OrchestratorRunner
 
         payload.update(
             {
-                "external:InterviewSessionTransition": self._class_implementation_digest(
-                    InterviewSessionTransition
-                ),
+                "external:InterviewSessionTransition": interview_transition_digest(),
                 "external:create_ouroboros_server": self._callable_implementation_digest(
                     create_ouroboros_server
                 ),

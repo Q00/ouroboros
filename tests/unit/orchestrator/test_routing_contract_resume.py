@@ -38,6 +38,7 @@ from ouroboros.orchestrator.execution_semantics import CURRENT_EXECUTION_SEMANTI
 from ouroboros.orchestrator.gemini_cli_runtime import GeminiCLIRuntime
 from ouroboros.orchestrator.goose_runtime import GooseCliRuntime
 from ouroboros.orchestrator.grok_cli_runtime import GrokCliRuntime
+from ouroboros.orchestrator.interview_session import interview_transition_digest
 from ouroboros.orchestrator.model_routing import (
     ModelRouter,
     deserialize_model_router,
@@ -1830,7 +1831,7 @@ def test_codex_dynamic_profiles_do_not_create_a_portable_resume_identity() -> No
         },
         "runtime_profile": "zep-runtime",
         "skill_dispatcher": "packaged",
-        "skill_dispatcher_identity": "packaged",
+        "skill_dispatcher_identity": f"packaged:{interview_transition_digest()}",
         "skill_dispatch_registry_fingerprint": (
             original_runtime._skill_dispatch_registry_fingerprint
         ),

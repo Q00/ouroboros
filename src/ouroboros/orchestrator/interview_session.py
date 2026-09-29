@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+import hashlib
+import json
 from typing import Any, Literal
 
 from ouroboros.observability.logging import get_logger
@@ -15,6 +17,22 @@ INTERVIEW_SESSION_METADATA_KEY = "ouroboros_interview_session_id"
 INTERVIEW_CALIBRATION_METADATA_KEY = "ouroboros_interview_calibration"
 
 log = get_logger(__name__)
+
+
+def interview_transition_digest() -> str:
+    """Bind transition code and metadata keys to one portable execution identity."""
+    # Reuse the dispatcher serializer for nested code, defaults, and properties.
+    from ouroboros.orchestrator.command_dispatcher import CodexCommandDispatcher
+
+    payload = {
+        "transition": CodexCommandDispatcher._class_implementation_digest(
+            InterviewSessionTransition
+        ),
+        "session_key": INTERVIEW_SESSION_METADATA_KEY,
+        "calibration_key": INTERVIEW_CALIBRATION_METADATA_KEY,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True)

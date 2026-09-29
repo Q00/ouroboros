@@ -197,6 +197,42 @@ class TestCodexCommandDispatcher:
 
         assert original["implementation_sha256"] != changed["implementation_sha256"]
 
+    @pytest.mark.parametrize(
+        "changed_member",
+        [
+            "tool_arguments",
+            "INTERVIEW_SESSION_METADATA_KEY",
+            "INTERVIEW_CALIBRATION_METADATA_KEY",
+        ],
+    )
+    @pytest.mark.parametrize("shared_dispatcher", [False, True], ids=["direct", "shared"])
+    def test_transition_drift_changes_execution_identity(
+        self, monkeypatch, tmp_path, changed_member, shared_dispatcher
+    ) -> None:
+        from ouroboros.orchestrator import interview_session
+
+        dispatcher = CodexCommandDispatcher(cwd=tmp_path)
+
+        def identity():
+            return CodexCliRuntime(
+                cli_path="test-runtime",
+                cwd=tmp_path,
+                skill_dispatcher=dispatcher.dispatch if shared_dispatcher else None,
+            ).execution_identity_contract()
+
+        original = identity()
+        assert identity() == original
+        if changed_member == "tool_arguments":
+            monkeypatch.setattr(
+                interview_session.InterviewSessionTransition,
+                changed_member,
+                lambda _self: {"changed": True},
+            )
+        else:
+            monkeypatch.setattr(interview_session, changed_member, "changed_metadata_key")
+
+        assert identity() != original
+
     @staticmethod
     def _write_skill(
         skills_dir: Path,

@@ -72,6 +72,7 @@ from ouroboros.orchestrator.frugality_runtime_attestation import (
 )
 from ouroboros.orchestrator.interview_session import (
     InterviewSessionTransition,
+    interview_transition_digest,
 )
 from ouroboros.orchestrator.runtime_drift import DRIFT_EPOCH_UNKNOWN, RuntimeDriftLedger
 from ouroboros.orchestrator.skill_tool_mapping import discover_skill_tool_mappings
@@ -1143,13 +1144,10 @@ class CodexCliRuntime:
         ]
         return self._hash_json_payload(payload)
 
-    def _fingerprint_skill_dispatcher(
-        self,
-        dispatcher: SkillDispatchHandler | None,
-    ) -> str:
-        """Fingerprint the process-local dispatch callable bound at startup."""
+    def _fingerprint_skill_dispatcher(self, dispatcher: SkillDispatchHandler | None) -> str:
+        """Fingerprint the bound callable or packaged transition implementation."""
         if dispatcher is None:
-            return "packaged"
+            return f"packaged:{interview_transition_digest()}"
         owner = getattr(dispatcher, "__self__", None)
         stable_identity = getattr(owner, "stable_identity_contract", None)
         if callable(stable_identity):
