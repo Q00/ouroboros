@@ -149,3 +149,35 @@ def test_a_managed_worktree_on_another_branch_is_never_committed(
         assert _git(gen_dir, "log", "--format=%s") == "initial"
     finally:
         release_lock(generation.lock_path)
+
+
+def test_a_worktree_someone_else_created_in_the_managed_shape_is_never_committed(
+    tmp_path: Path, worktrees: Path
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    lookalike = worktrees / "repo" / "orch_lookalike"
+    lookalike.parent.mkdir(parents=True)
+    _git(repo, "worktree", "add", "-q", "-b", "ooo/orch_lookalike", str(lookalike))
+    (lookalike / "product.py").write_text("VALUE = 6\n", encoding="utf-8")
+    assert checkpoint_managed_worktree(lookalike, message="ooo: checkpoint") is None
+    assert _git(lookalike, "log", "--format=%s") == "initial"
+
+
+def test_no_git_hook_runs_for_a_checkpoint(tmp_path: Path, worktrees: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    hooks = repo / ".git" / "hooks"
+    ran = tmp_path / "hook_ran"
+    for name in ("pre-commit", "prepare-commit-msg", "commit-msg", "post-commit"):
+        hook = hooks / name
+        hook.write_text(f"#!/bin/sh\necho {name} >> {ran}\nexit 1\n", encoding="utf-8")
+        hook.chmod(0o755)
+    generation = prepare_task_workspace(repo, "orch_hooks")
+    try:
+        gen_dir = Path(generation.worktree_path)
+        (gen_dir / "product.py").write_text("VALUE = 7\n", encoding="utf-8")
+        assert checkpoint_managed_worktree(gen_dir, message="ooo: checkpoint") is not None
+        assert not ran.exists()
+    finally:
+        release_lock(generation.lock_path)
