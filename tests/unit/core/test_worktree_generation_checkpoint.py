@@ -122,3 +122,30 @@ def test_a_path_outside_any_repository_is_left_alone(tmp_path: Path, worktrees: 
     plain = tmp_path / "plain"
     plain.mkdir()
     assert checkpoint_managed_worktree(plain, message="ooo: checkpoint") is None
+
+
+def test_a_standalone_repository_under_the_managed_root_is_never_committed(
+    tmp_path: Path, worktrees: Path
+) -> None:
+    placed = worktrees / "repo" / "orch_placed"
+    placed.parent.mkdir(parents=True)
+    _init_repo(placed)
+    (placed / "product.py").write_text("VALUE = 4\n", encoding="utf-8")
+    assert checkpoint_managed_worktree(placed, message="ooo: generation checkpoint") is None
+    assert _git(placed, "log", "--format=%s") == "initial"
+
+
+def test_a_managed_worktree_on_another_branch_is_never_committed(
+    tmp_path: Path, worktrees: Path
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    generation = prepare_task_workspace(repo, "orch_moved")
+    try:
+        gen_dir = Path(generation.worktree_path)
+        _git(gen_dir, "switch", "-q", "-c", "someone-else")
+        (gen_dir / "product.py").write_text("VALUE = 5\n", encoding="utf-8")
+        assert checkpoint_managed_worktree(gen_dir, message="ooo: checkpoint") is None
+        assert _git(gen_dir, "log", "--format=%s") == "initial"
+    finally:
+        release_lock(generation.lock_path)
