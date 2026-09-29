@@ -5,21 +5,40 @@ v0.55.0 dev run: generations 2 and 3 of a lineage ran with no check package
 source-scan spec verifier skips every behavioral assertion, so each behavioral
 criterion stayed "source verification skipped" and the lineage could never
 converge on a bug fix.
+
+The evolve loop names each generation's run with one deterministic execution
+id and gives it to both the executor and the evaluator, so a generation reads
+its own run's decision, in the same process or after a resume, and never
+another run's with the same Seed.
 """
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from ouroboros.core.lineage import ACResult, EvaluationSummary
+from ouroboros.core.lineage import ACResult, EvaluationSummary, OntologyLineage
+from ouroboros.core.seed import (
+    EvaluationPrinciple,
+    ExitCondition,
+    OntologyField,
+    OntologySchema,
+    Seed,
+    SeedMetadata,
+)
 from ouroboros.core.types import Result
+from ouroboros.events.lineage import lineage_created
+from ouroboros.evolution import loop_support
+from ouroboros.evolution.loop import EvolutionaryLoop
+from ouroboros.evolution.projector import LineageProjector
 from ouroboros.mcp.server import evolution_check_package as module
 from ouroboros.mcp.server.evolution_check_package import GenerationCheckPackages
 from ouroboros.mcp.server.spec_verification_adapter import apply_package_decisions
+from ouroboros.persistence.event_store import EventStore
 
 
 def _seed(seed_id: str = "seed-gen2") -> Any:
@@ -146,26 +165,100 @@ async def test_each_generation_prepares_its_package_before_its_worker(
         return (_decision("pass"), _decision("pass"))
 
     monkeypatch.setattr(module, "recorded_criterion_decisions", _decisions)
-    decided = await packages.decide(_skipped_summary(), _seed("seed-gen2"))
+    decided = await packages.decide(_skipped_summary(), _seed("seed-gen2"), "exec_seed-gen2")
     assert seen == ["exec_seed-gen2"]
     assert decided.final_approved is True
 
 
-async def test_a_generation_evaluated_after_a_resume_finds_its_run_in_the_journal(
+async def test_two_runs_of_one_seed_each_keep_their_own_decision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    packages = GenerationCheckPackages(event_store=None)  # type: ignore[arg-type]
-    seen: list[str] = []
-
-    async def _run_for_seed(store: Any, seed: Any) -> str:
-        return "exec_recovered"
+    recorded = {
+        "evolve:lin_a:generation:2": (_decision("pass"), _decision("pass")),
+        "evolve:lin_b:generation:2": (_decision("fail"), _decision("fail")),
+    }
 
     async def _decisions(store: Any, execution_id: str, seed: Any) -> tuple[Any, ...]:
-        seen.append(execution_id)
-        return (_decision("pass"), _decision("pass"))
+        return recorded[execution_id]
 
-    monkeypatch.setattr(module, "recorded_execution_for_seed", _run_for_seed)
     monkeypatch.setattr(module, "recorded_criterion_decisions", _decisions)
-    decided = await packages.decide(_skipped_summary(), _seed("seed-resumed"))
-    assert seen == ["exec_recovered"]
-    assert decided.final_approved is True
+    packages = GenerationCheckPackages(event_store=None)  # type: ignore[arg-type]
+    seed = _seed("seed-shared")
+    lineage_a = await packages.decide(_skipped_summary(), seed, "evolve:lin_a:generation:2")
+    lineage_b = await packages.decide(_skipped_summary(), seed, "evolve:lin_b:generation:2")
+    assert lineage_a.final_approved is True
+    assert [r.rendered_verdict for r in lineage_b.ac_results] == ["FAIL", "FAIL"]
+
+
+async def test_no_named_run_is_no_decision(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _decisions(store: Any, execution_id: str, seed: Any) -> tuple[Any, ...]:
+        raise AssertionError("no run was named, so no journal is read")
+
+    monkeypatch.setattr(module, "recorded_criterion_decisions", _decisions)
+    packages = GenerationCheckPackages(event_store=None)  # type: ignore[arg-type]
+    original = _skipped_summary()
+    assert await packages.decide(original, _seed(), None) is original
+
+
+def _real_seed() -> Seed:
+    return Seed(
+        goal="Fix parse_duration",
+        task_type="code",
+        constraints=("c1",),
+        acceptance_criteria=("AC0", "AC1"),
+        ontology_schema=OntologySchema(
+            name="o",
+            description="d",
+            fields=(OntologyField(name="f", field_type="entity", description="a field"),),
+        ),
+        evaluation_principles=(
+            EvaluationPrinciple(name="completeness", description="done", weight=1.0),
+        ),
+        exit_conditions=(ExitCondition(name="done", description="d", evaluation_criteria="100%"),),
+        metadata=SeedMetadata(seed_id="seed_identity", ambiguity_score=0.1),
+    )
+
+
+async def test_a_resumed_generation_is_evaluated_under_its_own_run(tmp_path: Path) -> None:
+    """The process that evaluates after a resume names the run the executor ran."""
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'events.db'}")
+    await store.initialize()
+    seed = _real_seed()
+    await store.append(lineage_created("lin_identity", seed.goal))
+    calls: list[tuple[str, str | None]] = []
+
+    async def executor(seed: Any, *, parallel: bool = True, execution_id: str | None = None) -> Any:
+        calls.append(("execute", execution_id))
+        return Result.ok(SimpleNamespace(final_message="done", summary={}, success=True))
+
+    async def dies_while_evaluating(
+        seed: Any, output: str | None, *, execution_id: str | None = None
+    ) -> Any:
+        raise asyncio.CancelledError
+
+    async def evaluator(seed: Any, output: str | None, *, execution_id: str | None = None) -> Any:
+        calls.append(("evaluate", execution_id))
+        return _skipped_summary()
+
+    first = EvolutionaryLoop(event_store=store, executor=executor, evaluator=dies_while_evaluating)
+    with pytest.raises(asyncio.CancelledError):
+        await first._run_generation_with_watchdog(
+            lineage=OntologyLineage(lineage_id="lin_identity", goal=seed.goal),
+            generation_number=1,
+            current_seed=seed,
+        )
+
+    # A new process replays the lineage and resumes after execution.
+    lineage = LineageProjector().project(await store.replay_lineage("lin_identity"))
+    assert lineage is not None
+    resumed = EvolutionaryLoop(event_store=store, executor=executor, evaluator=evaluator)
+    result = await resumed._run_generation_with_watchdog(
+        lineage=lineage,
+        generation_number=1,
+        current_seed=seed,
+        resume_after_phase="executing",
+    )
+    assert result.is_ok
+    run = loop_support.generation_execution_id("lin_identity", 1)
+    assert calls == [("execute", run), ("evaluate", run)]
+    await store.close()

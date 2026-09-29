@@ -108,6 +108,22 @@ async def call_executor(
     return await call(executor, seed, **kwargs)
 
 
+async def call_evaluator(
+    evaluator: Any,
+    seed: Seed,
+    execution_output: str | None,
+    *,
+    execution_id: str | None,
+) -> EvaluationSummary:
+    """Invoke an evaluator, naming the generation's run when it can read it."""
+    from ouroboros.evolution.evaluation_result import normalize_evaluator_result
+
+    kwargs: dict[str, Any] = {}
+    if execution_id is not None and callable_accepts_keyword(evaluator, "execution_id"):
+        kwargs["execution_id"] = execution_id
+    return normalize_evaluator_result(await call(evaluator, seed, execution_output, **kwargs))
+
+
 def add_active_focus(
     kwargs: dict[str, Any],
     callable_obj: Any,

@@ -1515,7 +1515,11 @@ class TestEvolveStepGen2:
         seed_generator.generate_from_reflect.assert_not_called()
         executor.assert_awaited_once()
         assert executor.await_args.args[0] == seed_v2
-        evaluator.assert_awaited_once_with(seed_v2, "verified output")
+        evaluator.assert_awaited_once_with(
+            seed_v2,
+            "verified output",
+            execution_id=loop_support.generation_execution_id("lin_verification_handoff", 4),
+        )
 
     @pytest.mark.asyncio
     async def test_hard_crash_after_reflect_without_provenance_fails_closed(self) -> None:
@@ -1671,7 +1675,11 @@ class TestEvolveStepGen2:
         wonder_engine.wonder.assert_not_awaited()
         reflect_engine.reflect.assert_not_awaited()
         executor.assert_awaited_once()
-        evaluator.assert_awaited_once_with(seed_v2, "verified output")
+        evaluator.assert_awaited_once_with(
+            seed_v2,
+            "verified output",
+            execution_id=loop_support.generation_execution_id("lin_atomic_handoff", 4),
+        )
 
     @pytest.mark.asyncio
     async def test_concurrent_same_lineage_replays_one_ontology_stable_winner(self) -> None:
@@ -1929,7 +1937,11 @@ class TestEvolveStepGen2:
         assert result.value.generation_result.frozen_ac_indices == ()
         reflect_engine.reflect.assert_not_awaited()
         executor.assert_awaited_once()
-        evaluator.assert_awaited_once_with(seed, "fresh execution")
+        evaluator.assert_awaited_once_with(
+            seed,
+            "fresh execution",
+            execution_id=loop_support.generation_execution_id("lin_unknown_pass", 2),
+        )
 
     @pytest.mark.asyncio
     async def test_resume_preserves_ambiguous_legacy_unstructured_ac_list(self) -> None:
@@ -2261,7 +2273,11 @@ class TestEvolveStepGen2:
         wonder_engine.wonder.assert_not_awaited()
         reflect_engine.reflect.assert_not_awaited()
         seed_generator.generate_from_reflect.assert_not_called()
-        evaluator.assert_awaited_once_with(candidate, "fresh execution")
+        evaluator.assert_awaited_once_with(
+            candidate,
+            "fresh execution",
+            execution_id=loop_support.generation_execution_id("lin_seeding_resume_focus", 2),
+        )
 
 
 class TestEvolveStepConvergence:
@@ -3179,7 +3195,11 @@ class TestEvolveStepResume:
         assert result.value.generation_result.seed == candidate
         assert result.value.generation_result.execution_output == "durable execution"
         executor.assert_not_awaited()
-        evaluator.assert_awaited_once_with(candidate, "durable execution")
+        evaluator.assert_awaited_once_with(
+            candidate,
+            "durable execution",
+            execution_id=loop_support.generation_execution_id(lineage_id, 2),
+        )
         replayed = await store.replay_lineage(lineage_id)
         assert (
             sum(

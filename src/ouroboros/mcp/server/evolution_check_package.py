@@ -2,24 +2,23 @@
 
 Every evolve generation is a run: before its worker starts, its check package
 is constructed on that generation's base, frozen, and admitted, exactly as for
-``ooo run`` (``CheckPackageRun``). After the run, the generation's evaluator
-reads the run's recorded decision and lets it decide the criteria it covered
-(``apply_package_decisions``); the source-scan verifier decides the rest.
+``ooo run`` (``CheckPackageRun``). The evolve loop names each generation's run with one
+deterministic execution id, given to both its executor and its evaluator; the
+evaluator reads that run's recorded decision, and no other run's, and lets it
+decide the criteria it covered (``apply_package_decisions``); the source-scan
+verifier decides the rest.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 import structlog
 
-from ouroboros.boundary.decision import (
-    recorded_criterion_decisions,
-    recorded_execution_for_seed,
-)
+from ouroboros.boundary.decision import recorded_criterion_decisions
 from ouroboros.boundary.ledger import BoundaryOrderError
 from ouroboros.boundary.run_control import CheckPackageRun
 from ouroboros.core.types import Result
@@ -30,18 +29,11 @@ from ouroboros.persistence.event_store import EventStore
 log = structlog.get_logger(__name__)
 
 
-def _seed_id(seed: Any) -> str | None:
-    seed_id = getattr(getattr(seed, "metadata", None), "seed_id", None)
-    return seed_id if isinstance(seed_id, str) and seed_id else None
-
-
 @dataclass
 class GenerationCheckPackages:
     """Prepares each generation's package and reads its decision back for evaluation."""
 
     event_store: EventStore
-    execution_ids: dict[str, str] = field(default_factory=dict)
-    """The execution id of each generation's run, by Seed id."""
 
     async def execute(
         self,
@@ -57,9 +49,6 @@ class GenerationCheckPackages:
     ) -> Any:
         """Prepare the generation's package, run the worker, and close the package record."""
         run_id = execution_id or f"exec_{uuid4().hex[:12]}"
-        seed_id = _seed_id(seed)
-        if seed_id is not None:
-            self.execution_ids[seed_id] = run_id
         check_package = CheckPackageRun.resolve()
         try:
             await check_package.prepare(
@@ -89,16 +78,15 @@ class GenerationCheckPackages:
         check_package.finish(terminal)
         return result
 
-    async def decide(self, summary: Any, seed: Any) -> Any:
-        """``summary`` with the generation's recorded package verdicts on what they covered."""
-        seed_id = _seed_id(seed)
-        execution_id = self.execution_ids.get(seed_id) if seed_id is not None else None
+    async def decide(self, summary: Any, seed: Any, execution_id: str | None) -> Any:
+        """``summary`` with the named run's recorded package verdicts on what they covered.
+
+        ``execution_id`` is the generation's run as the evolve loop named it, in
+        this process or after a resume; with no run named there is no decision.
+        """
+        if execution_id is None:
+            return summary
         try:
-            if execution_id is None:
-                # Evaluated after a resume: the journal names the generation's run.
-                execution_id = await recorded_execution_for_seed(self.event_store, seed)
-            if execution_id is None:
-                return summary
             decisions = await recorded_criterion_decisions(self.event_store, execution_id, seed)
         except Exception as exc:  # noqa: BLE001 - an unreadable decision is no evidence
             log.warning("evolution.recorded_decision_unreadable", error=str(exc))

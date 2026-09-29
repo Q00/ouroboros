@@ -2014,7 +2014,9 @@ def create_ouroboros_server(
 
         return _evaluation_summary_from_spec_verification(mechanical, summary, seed)
 
-    async def _evolution_evaluator(seed: Any, execution_output: str | None) -> EvaluationSummary:
+    async def _evolution_evaluator(
+        seed: Any, execution_output: str | None, *, execution_id: str | None = None
+    ) -> EvaluationSummary:
         await _ensure_evolution_store_initialized()
 
         artifact = execution_output or ""
@@ -2034,7 +2036,7 @@ def create_ouroboros_server(
             # Run spec verification to catch agent self-report lies
             verified = await _verify_spec_compliance(seed, artifact, mechanical)
             if verified is not None:
-                return await generation_packages.decide(verified, seed)
+                return await generation_packages.decide(verified, seed, execution_id)
             return mechanical
 
         # Fallback when the worker report has no ``### Task N`` markers: the
@@ -2067,7 +2069,7 @@ def create_ouroboros_server(
         return (
             fallback
             if fallback.final_approved
-            else await generation_packages.decide(fallback, seed)
+            else await generation_packages.decide(fallback, seed, execution_id)
         )
 
     async def _evolution_validator(seed: Any, execution_output: str | None) -> str:
