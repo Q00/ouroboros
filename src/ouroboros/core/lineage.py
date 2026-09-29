@@ -18,6 +18,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_validator
 
+from ouroboros.core.acceptance import AcceptanceState
 from ouroboros.core.seed import OntologyField, OntologySchema
 
 
@@ -50,6 +51,21 @@ class MutationAction(StrEnum):
     ADD = "add"
     MODIFY = "modify"
     REMOVE = "remove"
+
+
+class ACAuthorityState(StrEnum):
+    """Per-AC verdict at the authority boundary.
+
+    Attributes:
+        PASS: An authoritative verdict passed this AC.
+        FAIL: An authoritative verdict failed this AC.
+        UNRESOLVED: No authoritative verdict exists (for example the AC was not
+            evaluated because no executed verification ran). Not a failure.
+    """
+
+    PASS = "pass"
+    FAIL = "fail"
+    UNRESOLVED = "unresolved"
 
 
 class ACResult(BaseModel, frozen=True):
@@ -107,13 +123,13 @@ class ACResult(BaseModel, frozen=True):
         return not self.authoritative_pass
 
     @property
-    def authority_state(self) -> str:
+    def authority_state(self) -> ACAuthorityState:
         """Return ``pass``, ``fail``, or ``unresolved`` at the authority boundary."""
         if self.authoritative_pass:
-            return "pass"
+            return ACAuthorityState.PASS
         if self.verdict_is_authoritative:
-            return "fail"
-        return "unresolved"
+            return ACAuthorityState.FAIL
+        return ACAuthorityState.UNRESOLVED
 
     @property
     def provisional_verdict(self) -> str:
@@ -248,12 +264,35 @@ class EvaluationSummary(BaseModel, frozen=True):
                 and ac_passed
                 and execution_completed
             )
-            expected_status = "approved" if final_approved else "rejected"
+            # A non-approval keeps "not_evaluated" (no executed verification
+            # minted a verdict); every other non-approval reads "rejected".
+            if final_approved:
+                expected_status = "approved"
+            elif self.approval_status == "not_evaluated":
+                expected_status = "not_evaluated"
+            else:
+                expected_status = "rejected"
             if self.approval_status != expected_status:
                 object.__setattr__(self, "approval_status", expected_status)
             if self.final_approved != final_approved:
                 object.__setattr__(self, "final_approved", final_approved)
         return self
+
+    @property
+    def acceptance_state(self) -> AcceptanceState:
+        """The generation's acceptance outcome; the one tri-state displays read.
+
+        ``approval_status`` is the persisted tri-state (already reconciled with
+        the AC rows at construction). Approval needs both fields to agree;
+        ``not_evaluated`` means no executed verification minted a verdict;
+        every other non-approval, including an unrecognized status, is a
+        rejection, as in the Ralph chain projection.
+        """
+        if self.final_approved and self.approval_status == "approved":
+            return AcceptanceState.APPROVED
+        if self.approval_status == "not_evaluated":
+            return AcceptanceState.UNVERIFIED
+        return AcceptanceState.REJECTED
 
     @property
     def run_verdict_passed(self) -> bool:

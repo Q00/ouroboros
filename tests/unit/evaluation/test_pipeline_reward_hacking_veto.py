@@ -42,7 +42,7 @@ def _make_context() -> EvaluationContext:
 def _passing_stage1() -> MechanicalResult:
     return MechanicalResult(
         passed=True,
-        checks=(CheckResult(check_type=CheckType.LINT, passed=True, message="ok"),),
+        checks=(CheckResult(check_type=CheckType.LINT, passed=True, message="ok", executed=True),),
     )
 
 
@@ -182,7 +182,7 @@ async def _run_consensus(*, risk: float, consensus_approved: bool) -> Evaluation
             return_value=Result.ok((_consensus_result(consensus_approved), [])),
         ),
     ):
-        result = await pipeline.evaluate(_consensus_context())
+        result = await pipeline.evaluate(_consensus_context(), stage1_result=_passing_stage1())
     assert result.is_ok
     return result.value
 

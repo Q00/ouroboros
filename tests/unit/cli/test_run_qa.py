@@ -235,8 +235,61 @@ def test_resolve_cli_project_dir_global_seed_store_without_hints_does_not_return
     with patch.object(Path, "home", return_value=fake_home):
         resolved = _resolve_cli_project_dir(seed, seed_file, seed_data=VALID_SEED_DATA)
 
-    assert resolved == global_seed_dir.resolve()
+    assert resolved != global_seed_dir.resolve()
     assert resolved != fake_home.resolve()
+
+
+def test_resolve_cli_project_dir_global_seed_store_without_hints_uses_the_current_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`ouroboros run ~/.ouroboros/seeds/<id>.yaml` from a project builds in that project."""
+    fake_home = tmp_path / "home"
+    global_seeds = fake_home / ".ouroboros" / "seeds"
+    global_seeds.mkdir(parents=True)
+    seed_file = global_seeds / "seed_abc123.yaml"
+    seed_file.write_text("goal: ignored\n", encoding="utf-8")
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    seed = Seed.from_dict(VALID_SEED_DATA)
+
+    with patch.object(Path, "home", return_value=fake_home):
+        resolved = _resolve_cli_project_dir(seed, seed_file, seed_data=VALID_SEED_DATA)
+
+    assert resolved == project.resolve()
+
+
+@pytest.mark.parametrize("reference", ["durlib", "src/durlib/duration.py", "."])
+def test_resolve_cli_project_dir_global_seed_store_keeps_the_current_directory_over_references(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reference: str,
+) -> None:
+    """A context reference is a documentation pointer, never the runtime root."""
+    fake_home = tmp_path / "home"
+    global_seeds = fake_home / ".ouroboros" / "seeds"
+    global_seeds.mkdir(parents=True)
+    seed_file = global_seeds / "seed_abc123.yaml"
+    seed_file.write_text("goal: ignored\n", encoding="utf-8")
+    project = tmp_path / "project"
+    (project / "durlib").mkdir(parents=True)
+    (project / "src" / "durlib").mkdir(parents=True)
+    (project / "src" / "durlib" / "duration.py").write_text("", encoding="utf-8")
+    monkeypatch.chdir(project)
+    seed_data = {
+        **VALID_SEED_DATA,
+        "brownfield_context": {
+            "project_type": "brownfield",
+            "context_references": [{"path": reference, "role": "primary", "summary": "repo"}],
+        },
+    }
+    seed = Seed.from_dict(seed_data)
+
+    with patch.object(Path, "home", return_value=fake_home):
+        resolved = _resolve_cli_project_dir(seed, seed_file, seed_data=seed_data)
+
+    assert resolved == project.resolve()
 
 
 def test_resolve_cli_project_dir_global_seed_store_still_prefers_explicit_project_dir(
@@ -682,7 +735,7 @@ async def test_run_orchestrator_resume_uses_persisted_fat_harness_contract(
 
     tracker = SessionTracker.create(
         "exec-resume",
-        VALID_SEED_DATA["metadata"]["seed_id"],
+        "test-seed-cli-qa",  # VALID_SEED_DATA's seed_id
         session_id="sess-resume",
     )
     fake_exec = SimpleNamespace(
@@ -709,12 +762,97 @@ async def test_run_orchestrator_resume_uses_persisted_fat_harness_contract(
         patch("ouroboros.cli.commands.run.maybe_restore_task_workspace", return_value=None),
     ):
         mock_event_store_cls.return_value.initialize = AsyncMock()
+        # An empty journal: the original run bound no check package.
+        mock_event_store_cls.return_value.replay = AsyncMock(return_value=[])
+        mock_event_store_cls.return_value.query_events = AsyncMock(return_value=[])
         mock_repo_cls.return_value.reconstruct_session = AsyncMock(return_value=Result.ok(tracker))
 
         await _run_orchestrator(seed_file, resume_session="sess-resume", no_qa=True)
 
     assert mock_runner_cls.call_args.kwargs["fat_harness_mode"] is False
     mock_runner.resume_session.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_resume_whose_process_is_gone_starts_a_new_attempt(tmp_path: Path) -> None:
+    """A run resumed in a new process cannot continue; the CLI starts a new attempt."""
+    from ouroboros.orchestrator.runner import OrchestratorError
+
+    seed_file = tmp_path / "seed.yaml"
+    seed_file.write_text("goal: ignored\n", encoding="utf-8")
+    tracker = SessionTracker.create("exec-lost", "test-seed-cli-qa", session_id="sess-lost")
+    lost = OrchestratorError(
+        message="Cannot resume this process-local execution; start a new attempt.",
+        details={
+            "session_id": "sess-lost",
+            "execution_id": "exec-lost",
+            "resume_blocked": "process_local_resume_unavailable",
+        },
+    )
+    fake_exec = SimpleNamespace(
+        success=True,
+        session_id="sess-new",
+        messages_processed=1,
+        duration_seconds=1.0,
+        execution_id="exec-new",
+        summary={},
+        final_message="done",
+    )
+    mock_runner = MagicMock()
+    mock_runner.resume_session = AsyncMock(return_value=Result.err(lost))
+    mock_runner.execute_seed = AsyncMock(return_value=Result.ok(fake_exec))
+
+    with (
+        patch("ouroboros.cli.commands.run._load_seed_from_yaml", return_value=VALID_SEED_DATA),
+        patch("ouroboros.orchestrator.create_agent_runtime"),
+        patch("ouroboros.orchestrator.OrchestratorRunner", return_value=mock_runner),
+        patch("ouroboros.persistence.event_store.EventStore") as mock_event_store_cls,
+        patch("ouroboros.orchestrator.session.SessionRepository") as mock_repo_cls,
+        patch("ouroboros.cli.commands.run.maybe_restore_task_workspace", return_value=None),
+        patch("ouroboros.cli.commands.run.maybe_prepare_task_workspace", return_value=None),
+    ):
+        mock_event_store_cls.return_value.initialize = AsyncMock()
+        mock_event_store_cls.return_value.replay = AsyncMock(return_value=[])
+        mock_event_store_cls.return_value.query_events = AsyncMock(return_value=[])
+        mock_repo_cls.return_value.reconstruct_session = AsyncMock(return_value=Result.ok(tracker))
+
+        await _run_orchestrator(seed_file, resume_session="sess-lost", no_qa=True)
+
+    mock_runner.resume_session.assert_awaited_once()
+    new_attempt = mock_runner.execute_seed.await_args.kwargs
+    assert new_attempt["session_id"] != "sess-lost"
+    assert new_attempt["execution_id"] != "exec-lost"
+
+
+@pytest.mark.asyncio
+async def test_any_other_resume_failure_still_exits(tmp_path: Path) -> None:
+    from ouroboros.orchestrator.runner import OrchestratorError
+
+    seed_file = tmp_path / "seed.yaml"
+    seed_file.write_text("goal: ignored\n", encoding="utf-8")
+    tracker = SessionTracker.create("exec-x", "test-seed-cli-qa", session_id="sess-x")
+    mock_runner = MagicMock()
+    mock_runner.resume_session = AsyncMock(
+        return_value=Result.err(OrchestratorError(message="terminal", details={}))
+    )
+    mock_runner.execute_seed = AsyncMock()
+
+    with (
+        patch("ouroboros.cli.commands.run._load_seed_from_yaml", return_value=VALID_SEED_DATA),
+        patch("ouroboros.orchestrator.create_agent_runtime"),
+        patch("ouroboros.orchestrator.OrchestratorRunner", return_value=mock_runner),
+        patch("ouroboros.persistence.event_store.EventStore") as mock_event_store_cls,
+        patch("ouroboros.orchestrator.session.SessionRepository") as mock_repo_cls,
+        patch("ouroboros.cli.commands.run.maybe_restore_task_workspace", return_value=None),
+        pytest.raises(typer.Exit),
+    ):
+        mock_event_store_cls.return_value.initialize = AsyncMock()
+        mock_event_store_cls.return_value.replay = AsyncMock(return_value=[])
+        mock_event_store_cls.return_value.query_events = AsyncMock(return_value=[])
+        mock_repo_cls.return_value.reconstruct_session = AsyncMock(return_value=Result.ok(tracker))
+        await _run_orchestrator(seed_file, resume_session="sess-x", no_qa=True)
+
+    mock_runner.execute_seed.assert_not_awaited()
 
 
 @pytest.mark.asyncio

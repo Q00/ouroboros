@@ -2171,6 +2171,14 @@ class TestEntryToolRoutingContracts:
             async def initialize(self) -> None:
                 return None
 
+            # The resume reads the run's check package mode from the journal
+            # before the receipt; this run has none (it was off).
+            async def replay(self, *_args: object, **_kwargs: object) -> list[object]:
+                return []
+
+            async def query_events(self, *_args: object, **_kwargs: object) -> list[object]:
+                return []
+
         class FakeJobManager:
             async def allocate_job_id(self):
                 return "job_resume_preferences"
@@ -2852,6 +2860,7 @@ class TestEvaluateHandlerCodeChanges:
             passed=passed,
             message="tests passed" if passed else "tests failed",
             details=details,
+            executed=True,
         )
         return MechanicalResult(passed=passed, checks=(check,), coverage_score=None)
 

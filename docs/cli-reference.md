@@ -459,13 +459,14 @@ ouroboros run [workflow] [OPTIONS] SEED_FILE
 |--------|-------------|
 | `-o/-O, --orchestrator/--no-orchestrator` | Use the agent-runtime orchestrator for execution (default: enabled) |
 | `--runtime TEXT` | Agent runtime backend override (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `copilot`, `goose`, `kiro`, `pi`, `omp`, `gjc`, `antigravity`, `grok`, `zcode`). Uses configured default if omitted |
-| `-r, --resume TEXT` | Resume a previous orchestrator session by ID |
+| `-r, --resume TEXT` | Resume a previous orchestrator session by ID. A run continues only while the process that started it holds its live state (its check package's held-out cases never leave that process); resumed from a new process, the run is recorded as failed and a new attempt starts from the project, while the interrupted attempt's work stays on its task branch |
 | `--mcp-config PATH` | Path to MCP client configuration YAML file |
 | `--mcp-tool-prefix TEXT` | Prefix to add to all MCP tool names (e.g., `mcp_`) |
 | `-s, --sequential` | Execute ACs sequentially instead of in parallel |
 | `--max-decomposition-depth INTEGER` | Maximum recursive AC decomposition depth (any non-negative integer; default `2`). Values `0..4` are eligible for Routing D durable replay. Larger legacy values remain executable but do not publish the Routing D parallel resume-owner guarantee. The same contract applies to `OUROBOROS_MAX_DECOMPOSITION_DEPTH` and `seed.orchestrator.max_decomposition_depth` |
 | `-n, --dry-run` | Validate seed without executing. **Currently only takes effect with `--no-orchestrator`.** In default orchestrator mode this flag is accepted but has no effect — the full workflow executes |
 | `--no-qa` | Skip post-execution QA evaluation |
+| `--check-package/--no-check-package` | Build executable checks from the acceptance criteria before the worker starts, admit them on the current tree, and let them decide the criteria they cover (the existing verifier stays advisory for those and decides the rest). On by default; `--no-check-package` opts out for this run. Default: `OUROBOROS_CHECK_PACKAGE` (only the exact value `on` turns it on; any other set value, such as `1`, `true` or `ON`, means off), then `boundary.check_package` in config, then on. The checks are model-written Python scripts: they run on throwaway copies of the project with the project's interpreter, a per-check timeout, and an allowlisted environment, confined by the execution sandbox (they can write only inside their copy and a scratch directory, and have no network); they can read files you can read. Where the sandbox is unavailable, a check is undecided and does not run. The same switch applies to `ooo run` from a plugin host, meaning the in-process `ouroboros_execute_seed` / `ouroboros_start_execute_seed` path; an execution dispatched to the OpenCode plugin's child session is not governed and reports `check_package: not_applied`. Only Claude Code and Codex CLI can construct checks; with another runtime the existing verifier decides the run. |
 | `-d, --debug` | Show logs and agent thinking (verbose output) |
 
 **Examples:**
@@ -488,6 +489,10 @@ ouroboros run seed.yaml --resume orch_abc123
 
 # Skip post-execution QA
 ouroboros run seed.yaml --no-qa
+
+# Opt out of the check package for this run (or: OUROBOROS_CHECK_PACKAGE=off,
+# or boundary.check_package: off in ~/.ouroboros/config.yaml)
+ouroboros run seed.yaml --no-check-package
 
 # Debug output
 ouroboros run seed.yaml --debug
@@ -1161,6 +1166,16 @@ ouroboros tui monitor --backend slt
 ## `ouroboros mcp`
 
 MCP (Model Context Protocol) server commands for Claude Desktop and other MCP-compatible clients.
+
+### `mcp doctor --machine-snapshot`
+
+Run read-only MCP environment diagnostics. The default command prints health checks; `--json` emits the existing list of checks. Add `--machine-snapshot` to opt into a typed, content-free static snapshot; with `--json`, the result is an object containing the existing `checks` list and `machine_snapshot` fields.
+
+The snapshot covers OS, architecture, Python, current executable, installed `ouroboros-ai` version/location, home-directory disk usage, and fixed `~/.ouroboros/config.yaml` `lstat` metadata. It never reads configuration contents or credentials, invokes commands, scans `PATH`, inspects processes, probes ports or networks, writes files, or repairs anything. Missing, permission, unsupported, and unexpected probe failures are reported as `not_checked` with stable reasons. Native Windows machine architecture is explicitly `not_checked` rather than inferred from shell commands or environment variables. PATH collisions, loopback/port checks, and owned-process metadata are outside this static snapshot.
+
+```bash
+ouroboros mcp doctor [--json] [--machine-snapshot]
+```
 
 ### `mcp serve`
 

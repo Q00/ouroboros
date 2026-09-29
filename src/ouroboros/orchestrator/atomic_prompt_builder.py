@@ -264,6 +264,9 @@ class AtomicPromptBuilder:
                 "as test, build, lint, generation, or docs verification commands; omit "
                 "exploratory discovery commands such as rg, grep, sed, cat, ls, find, "
                 "or pwd unless the current AC explicitly requires that command as validation.\n"
+                "For tests_passed and commands_run, list the exact command strings you "
+                "executed, one command per item, with no annotations such as test counts, "
+                "pass markers, or explanations.\n"
                 f"{doc_only_note}{validation_only_note}\n"
                 "Use the available tools to accomplish this task. Report progress through "
                 "tool-visible work, not a prose-only completion claim.\n"
@@ -273,6 +276,13 @@ class AtomicPromptBuilder:
                 "wrapper. Do not prefix it with [TASK_COMPLETE] or any prose; the "
                 "harness decides success from typed evidence plus the verifier PASS."
             )
+            interfaces = getattr(executor, "check_package_interfaces", None) or {}
+            root_index = parent_ac_index if is_sub_ac else ac_index
+            if root_index in interfaces:
+                # An admitted oracle checks this root: ask for its entry_points.
+                from ouroboros.boundary.binding import entry_points_request
+
+                completion_instruction += entry_points_request(interfaces[root_index])
         else:
             completion_instruction = (
                 "Use the available tools to accomplish this task. Report your progress "

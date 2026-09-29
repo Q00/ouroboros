@@ -62,6 +62,54 @@ def codex_config_dir(tmp_path: Path) -> Path:
     return tmp_path
 
 
+@pytest.fixture()
+def cp949_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Exercise locale-dependent config I/O even on UTF-8 CI hosts."""
+    original_open = Path.open
+    original_read_text = Path.read_text
+    original_write_text = Path.write_text
+
+    def text_encoding(path: Path, encoding: str | None) -> str | None:
+        if (
+            path.parent == tmp_path
+            and path.name in {"config.yaml", "config.yaml.bak"}
+            and encoding in (None, "locale")
+        ):
+            return "cp949"
+        return encoding
+
+    def read_text(path: Path, encoding=None, errors=None, **kwargs):
+        return original_read_text(
+            path, encoding=text_encoding(path, encoding), errors=errors, **kwargs
+        )
+
+    def write_text(path: Path, data: str, encoding=None, errors=None, newline=None):
+        return original_write_text(
+            path, data, encoding=text_encoding(path, encoding), errors=errors, newline=newline
+        )
+
+    def open_with_cp949_default(
+        path: Path,
+        mode: str = "r",
+        buffering: int = -1,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ):
+        if "b" not in mode:
+            encoding = text_encoding(path, encoding)
+        return original_open(path, mode, buffering, encoding, errors, newline)
+
+    monkeypatch.setattr(Path, "open", open_with_cp949_default)
+    # read_text/write_text resolve an omitted encoding before calling open on
+    # newer Python versions, including when UTF-8 mode is enabled.
+    monkeypatch.setattr(Path, "read_text", read_text)
+    monkeypatch.setattr(Path, "write_text", write_text)
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: tmp_path)
+    monkeypatch.setattr("ouroboros.config.loader.get_config_dir", lambda: tmp_path)
+    return tmp_path
+
+
 def _patch_config_dir(config_dir: Path):
     """Patch get_config_dir to return our temp dir."""
     return patch("ouroboros.cli.commands.config._load_config", side_effect=None)
@@ -904,6 +952,124 @@ class TestConfigSet:
         assert result.exit_code == 1
         assert "Invalid value" in result.output
         assert config_path.read_text() == original
+
+
+class TestConfigEncoding:
+    """Config edits preserve Unicode values and failed edits preserve bytes."""
+
+    def test_set_preserves_unrelated_utf8_value(self, cp949_config_dir: Path) -> None:
+        from ouroboros.config.loader import load_config
+
+        config_path = cp949_config_dir / "config.yaml"
+        cli_path = "C:/도구/한글🚀/claude"
+        config_path.write_bytes(
+            (
+                "\ufefforchestrator:\r\n"
+                "  runtime_backend: claude\r\n"
+                f"  cli_path: '{cli_path}'\r\n"
+                "logging:\r\n"
+                "  level: info\r\n"
+            ).encode()
+        )
+
+        result = runner.invoke(app, ["set", "logging.level", "debug"])
+
+        assert result.exit_code == 0, result.output
+        saved = yaml.safe_load(config_path.read_bytes().decode("utf-8"))
+        assert saved["logging"]["level"] == "debug"
+        assert saved["orchestrator"]["cli_path"] == cli_path
+        assert load_config().orchestrator.cli_path == str(Path(cli_path))
+
+    def test_invalid_value_restores_original_utf8_bytes(self, cp949_config_dir: Path) -> None:
+        config_path = cp949_config_dir / "config.yaml"
+        original = (
+            "\ufeff# 한글 설정 🚀\r\n"
+            "orchestrator:\r\n"
+            "  runtime_backend: claude\r\n"
+            "  cli_path: 'C:/도구/claude'\r\n"
+            "logging:\r\n"
+            "  level: info  # retain this comment on rollback\r\n"
+        ).encode("utf-8")
+        config_path.write_bytes(original)
+
+        result = runner.invoke(app, ["set", "logging.level", "not-a-level"])
+
+        assert result.exit_code == 1
+        assert isinstance(result.exception, SystemExit)
+        assert "Invalid value" in result.output
+        assert config_path.read_bytes() == original
+
+    def test_invalid_utf8_is_rejected_without_writing(self, cp949_config_dir: Path) -> None:
+        config_path = cp949_config_dir / "config.yaml"
+        original = b"logging:\n  level: info\n# invalid UTF-8: \xff\n"
+        config_path.write_bytes(original)
+
+        result = runner.invoke(app, ["set", "logging.level", "debug"])
+
+        assert result.exit_code == 1
+        assert isinstance(result.exception, SystemExit)
+        assert "Invalid" in result.output
+        assert config_path.read_bytes() == original
+
+    def test_undo_redo_preserves_utf8_bom_and_newline_bytes(self, cp949_config_dir: Path) -> None:
+        config_path = cp949_config_dir / "config.yaml"
+        backup_path = cp949_config_dir / "config.yaml.bak"
+        current = (
+            "\ufeff# 현재 설정 🚀\r\n"
+            "orchestrator:\r\n"
+            "  runtime_backend: claude\r\n"
+            "  cli_path: 'C:/도구/현재🚀/claude'\r\n"
+        ).encode("utf-8")
+        previous = (
+            "# 이전 설정 🌱\n"
+            "orchestrator:\n"
+            "  runtime_backend: claude\n"
+            "  cli_path: 'C:/도구/이전🌱/claude'\n"
+        ).encode()
+        config_path.write_bytes(current)
+        backup_path.write_bytes(previous)
+
+        result = runner.invoke(app, ["undo"])
+
+        assert result.exit_code == 0, result.output
+        assert config_path.read_bytes() == previous
+        assert backup_path.read_bytes() == current
+
+        result = runner.invoke(app, ["undo"])
+
+        assert result.exit_code == 0, result.output
+        assert config_path.read_bytes() == current
+        assert backup_path.read_bytes() == previous
+
+    @pytest.mark.parametrize(
+        "invalid_backup",
+        [
+            b"orchestrator:\n  runtime_backend: not-a-backend\n",
+            b"logging:\n  level: info\n# invalid UTF-8: \xff\n",
+        ],
+        ids=["invalid-schema", "invalid-utf8"],
+    )
+    def test_undo_invalid_backup_preserves_both_files_bytes(
+        self, cp949_config_dir: Path, invalid_backup: bytes
+    ) -> None:
+        config_path = cp949_config_dir / "config.yaml"
+        backup_path = cp949_config_dir / "config.yaml.bak"
+        current = (
+            "\ufeff# 원본 설정 🚀\r\n"
+            "orchestrator:\r\n"
+            "  runtime_backend: claude\r\n"
+            "  cli_path: 'C:/도구/원본🚀/claude'\r\n"
+        ).encode("utf-8")
+        config_path.write_bytes(current)
+        backup_path.write_bytes(invalid_backup)
+
+        result = runner.invoke(app, ["undo"])
+
+        assert result.exit_code == 1
+        assert isinstance(result.exception, SystemExit)
+        assert "undo aborted" in result.output
+        assert config_path.read_bytes() == current
+        assert backup_path.read_bytes() == invalid_backup
 
 
 # ── config init ──────────────────────────────────────────────────

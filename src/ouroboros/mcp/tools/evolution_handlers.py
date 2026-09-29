@@ -32,6 +32,7 @@ from ouroboros.core.types import Result
 from ouroboros.core.worktree import (
     TaskWorkspace,
     WorktreeError,
+    checkpoint_managed_worktree,
     is_git_repo,
     maybe_restore_task_workspace,
     release_lock,
@@ -803,11 +804,20 @@ class EvolveStepHandler(BridgeAwareMixin):
         if execute and (
             effective_source_project_dir is None or is_git_repo(effective_source_project_dir)
         ):
+            source_cwd = effective_source_project_dir or os.getcwd()
             try:
+                # A generation that ran in a task worktree Ouroboros manages
+                # (a chained evaluation's run, an ``ooo auto`` worktree) left
+                # its work uncommitted there. Record it on that task branch so
+                # the lineage worktree starts from it; any other checkout is
+                # never committed and keeps the dirty-checkout refusal.
+                checkpoint_managed_worktree(
+                    source_cwd, message=f"ooo: generation checkpoint for {lineage_id}"
+                )
                 workspace = maybe_restore_task_workspace(
                     lineage_id,
                     persisted=None,
-                    fallback_source_cwd=effective_source_project_dir or os.getcwd(),
+                    fallback_source_cwd=source_cwd,
                     allow_untracked_evidence=True,
                 )
             except WorktreeError as e:

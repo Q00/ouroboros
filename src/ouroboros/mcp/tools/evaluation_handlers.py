@@ -24,12 +24,24 @@ from ouroboros.core.errors import ConfigError, ProviderError, ValidationError
 from ouroboros.core.project_paths import resolve_path_against_base, resolve_seed_project_path
 from ouroboros.core.seed import AcceptanceCriterionSpec, Seed, ac_text
 from ouroboros.core.types import Result
+from ouroboros.evaluation.models import (
+    AcceptanceState,
+    CheckResult,
+    MechanicalDisposition,
+    MechanicalResult,
+    aggregate_acceptance_state,
+    derive_acceptance_state,
+)
 from ouroboros.mcp.errors import MCPAuthError, MCPServerError, MCPTimeoutError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.telemetry_boundary import (
     record_direct_evaluation_outcome,
 )
 from ouroboros.mcp.tools import background as background_jobs
+from ouroboros.mcp.tools.evaluation_package_evidence import (
+    evidence_for_criteria,
+    recorded_checks_by_position,
+)
 from ouroboros.mcp.tools.evaluation_stage1_report import (
     format_stage1_result,
     serialize_stage1_result,
@@ -77,6 +89,14 @@ from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers import create_llm_adapter
 
 log = structlog.get_logger(__name__)
+
+# Unverified is not a rejection: no executed check ran, so model review could
+# only be attached as feedback. Rendering it as REJECTED would misstate that.
+_ACCEPTANCE_LABELS: dict[AcceptanceState, str] = {
+    AcceptanceState.APPROVED: "APPROVED",
+    AcceptanceState.REJECTED: "REJECTED",
+    AcceptanceState.UNVERIFIED: "NOT APPROVED (unverified: no executed verification evidence)",
+}
 
 
 def _direct_evaluation_failure_reason(error: object) -> str | None:
@@ -716,6 +736,29 @@ class EvaluateHandler:
             # — None leaves today's behavior untouched.
             executor_backend = await _resolve_executor_backend(store, session_id)
 
+            # The controller already ran the frozen check package for this run;
+            # its recorded per-criterion decision is Stage 1 evidence for that
+            # criterion (evaluation_package_evidence). No decision, no evidence.
+            by_position: tuple[tuple[CheckResult, ...], ...] = ()
+            if seed is not None:
+                if store is None:
+                    store = EventStore()
+                    owns_event_store = True
+                try:
+                    await store.initialize()
+                    by_position = await recorded_checks_by_position(store, session_id, seed)
+                except Exception as exc:  # noqa: BLE001 — a read failure is no evidence
+                    log.warning(
+                        "mcp.tool.evaluate.recorded_decision_unreadable",
+                        session_id=session_id,
+                        error=str(exc),
+                    )
+            recorded_checks = (
+                evidence_for_criteria(acceptance_criteria, seed, by_position)
+                if seed is not None
+                else tuple(() for _ in acceptance_criteria)
+            )
+
             # Derive current_ac from the unified acceptance_criteria tuple.
             # The tuple already incorporates both the plural and singular params,
             # so we only need to index or fall back to a default.
@@ -777,10 +820,11 @@ class EvaluateHandler:
                 artifact_bundle = None
 
             # Stage 1 trusts .ouroboros/mechanical.toml only. When the file is
-            # absent we run the AI detector once to author it — silent
-            # best-effort, so a failed detect simply leaves Stage 1 empty and
-            # the pipeline falls through to Stage 2 instead of phantom-failing
-            # on hardcoded preset guesses.
+            # absent we run the AI detector once to author it (best-effort).
+            # A failed detect leaves Stage 1 with no configured check, which
+            # is not executed evidence: the pipeline still runs the advisory
+            # Stage 2 review, and the result is reported as unverified rather
+            # than phantom-failing on hardcoded preset guesses.
             if not has_mechanical_toml(working_dir):
                 try:
                     await ensure_mechanical_toml(
@@ -824,6 +868,7 @@ class EvaluateHandler:
                     executor_backend=executor_backend,
                     ac_spec_map=ac_spec_map,
                     emit_terminal_telemetry=emit_terminal_telemetry,
+                    recorded_checks=recorded_checks,
                 )
 
             context = EvaluationContext(
@@ -838,6 +883,7 @@ class EvaluateHandler:
                 trigger_consensus=trigger_consensus,
                 artifact_bundle=artifact_bundle,
                 executor_backend=executor_backend,
+                recorded_checks=recorded_checks[0] if acceptance_criteria else (),
             )
             result = await pipeline.evaluate(context)
 
@@ -872,7 +918,10 @@ class EvaluateHandler:
 
             # Detect code changes when Stage 1 fails (presentation concern)
             code_changes: bool | None = None
-            if eval_result.stage1_result and not eval_result.stage1_result.passed:
+            if (
+                eval_result.stage1_result
+                and eval_result.stage1_result.disposition is MechanicalDisposition.EXECUTED_FAIL
+            ):
                 code_changes = await self._has_code_changes(working_dir)
 
             # Build result text
@@ -882,6 +931,9 @@ class EvaluateHandler:
             meta = {
                 "session_id": session_id,
                 "final_approved": eval_result.final_approved,
+                "acceptance_state": eval_result.acceptance_state.value,
+                "executed_evidence": eval_result.has_executed_evidence,
+                "failure_reason": eval_result.failure_reason,
                 "highest_stage": eval_result.highest_stage_completed,
                 "stage1_passed": eval_result.stage1_result.passed
                 if eval_result.stage1_result
@@ -981,6 +1033,7 @@ class EvaluateHandler:
         executor_backend: str | None = None,
         ac_spec_map: dict[str, AcceptanceCriterionSpec] | None = None,
         emit_terminal_telemetry: bool = True,
+        recorded_checks: tuple[tuple[CheckResult, ...], ...] = (),
     ) -> Result[MCPToolResult, MCPServerError]:
         """Evaluate each AC individually and return an aggregated checklist (#366).
 
@@ -1005,6 +1058,8 @@ class EvaluateHandler:
         )
 
         spec_map = ac_spec_map or {}
+        # Each criterion's own recorded evidence, by position.
+        recorded = recorded_checks or tuple(() for _ in acceptance_criteria)
 
         log.info(
             "mcp.tool.evaluate.multi_ac_started",
@@ -1025,6 +1080,7 @@ class EvaluateHandler:
             trigger_consensus=trigger_consensus,
             artifact_bundle=artifact_bundle,
             executor_backend=executor_backend,
+            recorded_checks=recorded[0],
         )
         first_result = await pipeline.evaluate(first_context)  # type: ignore[attr-defined]
         if first_result.is_err:
@@ -1043,11 +1099,13 @@ class EvaluateHandler:
                 )
             )
 
-        # Extract Stage 1 result to share with remaining ACs.
-        shared_stage1 = first_result.value.stage1_result
+        # Share the project command checks only; each AC adds its own
+        # recorded check package evidence (``recorded_checks``).
+        first_stage1 = first_result.value.stage1_result
+        shared_stage1 = first_stage1.command_checks() if first_stage1 is not None else None
 
         # --- Stage 2+: parallelize remaining ACs (Stage 1 injected) ---
-        async def _run_one(ac_text: str) -> Result[object, object]:
+        async def _run_one(index: int, ac_text: str) -> Result[object, object]:
             context = EvaluationContext(
                 execution_id=session_id,
                 seed_id=seed_id,
@@ -1060,6 +1118,7 @@ class EvaluateHandler:
                 trigger_consensus=trigger_consensus,
                 artifact_bundle=artifact_bundle,
                 executor_backend=executor_backend,
+                recorded_checks=recorded[index],
             )
             return await pipeline.evaluate(  # type: ignore[attr-defined]
                 context,
@@ -1067,7 +1126,7 @@ class EvaluateHandler:
             )
 
         remaining_gathered = await asyncio.gather(
-            *(_run_one(ac) for ac in acceptance_criteria[1:]),
+            *(_run_one(index, ac) for index, ac in enumerate(acceptance_criteria) if index),
             return_exceptions=True,
         )
         gathered = (first_result, *remaining_gathered)
@@ -1123,11 +1182,23 @@ class EvaluateHandler:
         highest_stage = min(max(1, result.highest_stage_completed) for result in eval_results)
 
         code_changes: bool | None = None
-        if any(r.stage1_result and not r.stage1_result.passed for r in eval_results):
+        if any(
+            r.stage1_result and r.stage1_result.disposition is MechanicalDisposition.EXECUTED_FAIL
+            for r in eval_results
+        ):
             code_changes = await self._has_code_changes(working_dir)
 
+        # The run's Stage 1: the shared command checks plus every criterion's
+        # recorded check package evidence, decided by the one classifier.
+        run_recorded = tuple(check for checks in recorded for check in checks)
+        run_stage1 = shared_stage1
+        if run_recorded:
+            run_stage1 = (shared_stage1 or MechanicalResult(passed=True, checks=())).with_recorded(
+                run_recorded
+            )
+
         text_parts = [
-            *format_stage1_result(shared_stage1, include_exit_status=True),
+            *format_stage1_result(run_stage1, include_exit_status=True),
             format_checklist(checklist),
         ]
         if code_changes is False:
@@ -1137,6 +1208,15 @@ class EvaluateHandler:
         meta = {
             "session_id": session_id,
             "final_approved": checklist.all_passed,
+            "acceptance_state": aggregate_acceptance_state(
+                [
+                    derive_acceptance_state(
+                        final_approved=r.final_approved, stage1_result=r.stage1_result
+                    )
+                    for r in eval_results
+                ]
+            ).value,
+            "executed_evidence": bool(run_stage1 and run_stage1.has_executed_evidence),
             "highest_stage": highest_stage,
             "multi_ac": True,
             "ac_count": checklist.total,
@@ -1155,7 +1235,7 @@ class EvaluateHandler:
             ],
             "run_feedback": list(feedback),
             "code_changes_detected": code_changes,
-            "stage1_result": serialize_stage1_result(shared_stage1),
+            "stage1_result": serialize_stage1_result(run_stage1),
         }
 
         log.info(
@@ -1213,7 +1293,7 @@ class EvaluateHandler:
             "Evaluation Results",
             "=" * 60,
             f"Execution ID: {result.execution_id}",
-            f"Final Approval: {'APPROVED' if result.final_approved else 'REJECTED'}",
+            f"Final Approval: {_ACCEPTANCE_LABELS[result.acceptance_state]}",
             f"Highest Stage Completed: {result.highest_stage_completed}",
             "",
         ]
@@ -1286,7 +1366,10 @@ class EvaluateHandler:
                 ]
             )
             # Contextual annotation for Stage 1 failures
-            stage1_failed = result.stage1_result and not result.stage1_result.passed
+            stage1_failed = (
+                result.stage1_result is not None
+                and result.stage1_result.disposition is MechanicalDisposition.EXECUTED_FAIL
+            )
             if stage1_failed and code_changes is True:
                 lines.extend(
                     [

@@ -1938,10 +1938,10 @@ class EvolutionaryLoop:
             )
         elif execute and self.evaluator:
             try:
-                from ouroboros.evolution.evaluation_result import normalize_evaluator_result
-
-                eval_result = await focus.call(self.evaluator, current_seed, execution_output)
-                evaluation_summary = normalize_evaluator_result(eval_result)
+                carried = generation_focus.carried_verdicts(prev_gen)
+                evaluation_summary = await focus.call_evaluator(
+                    self.evaluator, current_seed, execution_output, execution_id, carried
+                )
             except Exception as e:
                 logger.warning(
                     "evolution.evaluation.failed",

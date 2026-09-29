@@ -223,6 +223,10 @@ async def _run_process(
             *argv,
             cwd=cwd,
             env=dict(env),
+            # Never the controller's own stdin: under an MCP host that is the
+            # JSON-RPC stream, and a descriptor opened before any sandbox is
+            # usable whatever the sandbox's path rules say.
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             **_spawn_kwargs(),  # type: ignore[arg-type]

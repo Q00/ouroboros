@@ -232,12 +232,22 @@ def parse_vote_response(response_text: str, model: str) -> Result[Vote, Validati
             )
         )
 
+    approved = data["approved"]
+    if not isinstance(approved, bool):
+        return Result.err(
+            ValidationError(
+                f"'approved' must be a boolean in vote from {model}",
+                field="approved",
+                value=approved,
+            )
+        )
+
     try:
         confidence = max(0.0, min(1.0, float(data.get("confidence", 0.5))))
         return Result.ok(
             Vote(
                 model=model,
-                approved=bool(data["approved"]),
+                approved=approved,
                 confidence=confidence,
                 reasoning=str(data.get("reasoning", "No reasoning provided")),
             )

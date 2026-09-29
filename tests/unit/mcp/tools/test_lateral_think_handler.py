@@ -1195,6 +1195,24 @@ async def test_research_flag_adds_evidence_contract_to_payloads() -> None:
 
 
 @pytest.mark.asyncio
+async def test_single_persona_research_carries_evidence_contract() -> None:
+    handler = LateralThinkHandler(agent_runtime_backend="subprocess")
+    result = await handler.handle(
+        {
+            "problem_context": "choose an auth library",
+            "current_approach": "undecided",
+            "persona": "researcher",
+            "mode": "decision",
+            "research": True,
+        }
+    )
+    assert result.is_ok
+    payload = result.unwrap()
+    assert "external_sources" in payload.content[0].text
+    assert payload.meta["research"] is True
+
+
+@pytest.mark.asyncio
 async def test_decision_single_persona_inline_appends_convergence_contract() -> None:
     handler = LateralThinkHandler(agent_runtime_backend="subprocess")
 
