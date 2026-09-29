@@ -20,7 +20,12 @@ from ouroboros.core.errors import ValidationError
 from ouroboros.core.project_env import with_project_venv
 from ouroboros.core.types import Result
 from ouroboros.evaluation.command_dispatch import prepare_command
-from ouroboros.evaluation.models import CheckResult, CheckType, MechanicalResult
+from ouroboros.evaluation.models import (
+    COMMAND_CHECK_TYPES,
+    CheckResult,
+    CheckType,
+    MechanicalResult,
+)
 from ouroboros.events.base import BaseEvent
 from ouroboros.events.evaluation import (
     create_stage1_completed_event,
@@ -233,7 +238,7 @@ class MechanicalVerifier:
             Result containing MechanicalResult and events, or error
         """
         if checks is None:
-            checks = list(CheckType)
+            checks = list(COMMAND_CHECK_TYPES)
 
         events: list[BaseEvent] = []
         check_results: list[CheckResult] = []

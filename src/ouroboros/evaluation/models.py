@@ -16,6 +16,7 @@ Classes:
     EvaluationResult: Complete pipeline output
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -69,6 +70,18 @@ class CheckType(StrEnum):
     TEST = "test"
     STATIC = "static"
     COVERAGE = "coverage"
+    CHECK_PACKAGE = "check_package"
+    """The controller's recorded check package decision for one criterion, not a command."""
+
+
+COMMAND_CHECK_TYPES: tuple[CheckType, ...] = (
+    CheckType.LINT,
+    CheckType.BUILD,
+    CheckType.TEST,
+    CheckType.STATIC,
+    CheckType.COVERAGE,
+)
+"""The checks Stage 1 runs as project commands; the same for every criterion."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +186,30 @@ class MechanicalResult:
         if self.passed and self.executed_checks:
             return MechanicalDisposition.EXECUTED_PASS
         return MechanicalDisposition.NO_EVIDENCE
+
+    def with_recorded(self, recorded: tuple[CheckResult, ...]) -> "MechanicalResult":
+        """This result plus checks the controller already ran for one criterion.
+
+        ``recorded`` holds ``CHECK_PACKAGE`` results only; the one classifier
+        (``disposition``) then decides over the command checks and them alike.
+        """
+        if any(check.check_type is not CheckType.CHECK_PACKAGE for check in recorded):
+            raise ValueError("only check package results are recorded evidence")
+        checks = self.command_checks().checks + recorded
+        return MechanicalResult(
+            passed=all(check.passed is True for check in checks),
+            checks=checks,
+            coverage_score=self.coverage_score,
+        )
+
+    def command_checks(self) -> "MechanicalResult":
+        """This result without recorded criterion evidence: what every criterion shares."""
+        checks = tuple(c for c in self.checks if c.check_type is not CheckType.CHECK_PACKAGE)
+        return MechanicalResult(
+            passed=all(check.passed is True for check in checks),
+            checks=checks,
+            coverage_score=self.coverage_score,
+        )
 
     @property
     def has_executed_evidence(self) -> bool:
@@ -422,6 +459,10 @@ class EvaluationContext:
     # consensus keep the executor's own vendor out of the reviewer jury. ``None``
     # (the default) means "unknown" — today's behavior, no independence binding.
     executor_backend: str | None = None
+    # Checks the controller already ran for ``current_ac`` (its recorded check
+    # package decision, ``CheckType.CHECK_PACKAGE``). Stage 1 adds them to the
+    # project command checks for this criterion only.
+    recorded_checks: tuple[CheckResult, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -560,6 +601,19 @@ def derive_acceptance_state(
         return AcceptanceState.UNVERIFIED
     # EXECUTED_FAIL, or EXECUTED_PASS that model review withheld.
     return AcceptanceState.REJECTED
+
+
+def aggregate_acceptance_state(states: Sequence[AcceptanceState]) -> AcceptanceState:
+    """The run's state from its criteria' states (each from ``derive_acceptance_state``).
+
+    Approved only when every criterion is; rejected when any criterion was
+    rejected on executed evidence or model review; otherwise unverified.
+    """
+    if states and all(state is AcceptanceState.APPROVED for state in states):
+        return AcceptanceState.APPROVED
+    if any(state is AcceptanceState.REJECTED for state in states):
+        return AcceptanceState.REJECTED
+    return AcceptanceState.UNVERIFIED
 
 
 def build_failure_reason(

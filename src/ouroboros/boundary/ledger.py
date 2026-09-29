@@ -508,6 +508,8 @@ class VersionState:
     """Per admitted oracle check, the held-out cases its base run failed at admission."""
     admitted_cases: Mapping[str, tuple[tuple[str, bool], ...]] = field(default_factory=dict)
     """Per oracle check, its cases (id, held out) as admission ran them: every later run's."""
+    decision: ReconciledRecord | ResumedRecord | None = None
+    """The decision the reducer admitted (``DECIDED``): the one evaluation reads."""
 
     @property
     def seal(self) -> str | None:
@@ -688,7 +690,7 @@ def _reconciled(state: VersionState, _event: BaseEvent, record: ReconciledRecord
         _require_unverified_decision(state, record)
     if state.frozen:
         _require_supported_statuses(state, record)
-    return replace(state, phase=Phase.DECIDED)
+    return replace(state, phase=Phase.DECIDED, decision=record)
 
 
 def _resumed(state: VersionState, _event: BaseEvent, record: ResumedRecord) -> VersionState:
@@ -702,7 +704,7 @@ def _resumed(state: VersionState, _event: BaseEvent, record: ResumedRecord) -> V
         raise BoundaryOrderError("a resumed decision must cite the boundary's frozen package")
     judged = state if state.phase is Phase.RESUMING else replace(state, bound={}, verifications=())
     _require_supported_statuses(judged, record)
-    return replace(state, phase=Phase.DECIDED)
+    return replace(state, phase=Phase.DECIDED, decision=record)
 
 
 # --------------------------------------------------------------------------

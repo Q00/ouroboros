@@ -23,7 +23,7 @@ from ouroboros.evaluation.mechanical import (
     MechanicalVerifier,
 )
 from ouroboros.evaluation.models import (
-    CheckType,
+    COMMAND_CHECK_TYPES,
     ConsensusResult,
     EvaluationContext,
     EvaluationResult,
@@ -140,23 +140,10 @@ class EvaluationPipeline:
         # Stage 1: Mechanical Verification
         # When a pre-computed result is injected, skip re-running the
         # AC-agnostic lint/build/test checks.
-        if stage1_result is not None:
-            if stage1_result.disposition is MechanicalDisposition.EXECUTED_FAIL:
-                return self._build_result(
-                    context.execution_id,
-                    events,
-                    stage1_result=stage1_result,
-                )
-        elif self._config.stage1_enabled:
+        if stage1_result is None and self._config.stage1_enabled:
             result = await self._mechanical.verify(
                 context.execution_id,
-                checks=[
-                    CheckType.LINT,
-                    CheckType.BUILD,
-                    CheckType.TEST,
-                    CheckType.STATIC,
-                    CheckType.COVERAGE,
-                ],
+                checks=list(COMMAND_CHECK_TYPES),
             )
             if result.is_err:
                 return Result.err(result.error)
@@ -164,15 +151,25 @@ class EvaluationPipeline:
             stage1_result, stage1_events = result.value
             events.extend(stage1_events)
 
-            # Only an executed failure stops here. A result with no executed
-            # evidence continues so the advisory review can supply feedback;
-            # the acceptance gate still refuses to approve it.
-            if stage1_result.disposition is MechanicalDisposition.EXECUTED_FAIL:
-                return self._build_result(
-                    context.execution_id,
-                    events,
-                    stage1_result=stage1_result,
-                )
+        # What the controller already ran for this criterion (its recorded
+        # check package decision) is executed evidence for this criterion
+        # only; the one classifier decides over it and the command checks.
+        if context.recorded_checks:
+            base = stage1_result or MechanicalResult(passed=True, checks=())
+            stage1_result = base.with_recorded(context.recorded_checks)
+
+        # Only an executed failure stops here. A result with no executed
+        # evidence continues so the advisory review can supply feedback;
+        # the acceptance gate still refuses to approve it.
+        if (
+            stage1_result is not None
+            and stage1_result.disposition is MechanicalDisposition.EXECUTED_FAIL
+        ):
+            return self._build_result(
+                context.execution_id,
+                events,
+                stage1_result=stage1_result,
+            )
 
         # Stage 2: Semantic Evaluation (advisory). It still runs when Stage 1
         # produced no executed evidence: its review becomes the feedback that
