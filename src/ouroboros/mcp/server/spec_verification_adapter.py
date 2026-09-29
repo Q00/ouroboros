@@ -406,8 +406,9 @@ def apply_package_decisions(
        (``evaluate_criteria_with_pipeline``) for a criterion still undecided;
     5. otherwise it is not evaluated.
 
-    Approval is recomputed and needs every Seed criterion proven. With nothing
-    from steps 1, 3 or 4, ``summary`` is returned unchanged.
+    Approval is always recomputed and needs every Seed criterion proven, so a
+    summary approved in aggregate, with no per-criterion rows, is not approved
+    unless each criterion gets a passing verdict here.
     """
     from ouroboros.core.lineage import ACResult
     from ouroboros.core.seed import ac_texts
@@ -437,8 +438,6 @@ def apply_package_decisions(
         )
     carried = carried or {}
     evaluated = evaluated or {}
-    if not decided and not carried and not evaluated:
-        return summary
     current = {result.ac_index: result for result in summary.ac_results}
     results: list[ACResult] = []
     for index in range(len(seed_criteria)):

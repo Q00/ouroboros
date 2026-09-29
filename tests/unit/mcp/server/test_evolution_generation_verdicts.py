@@ -336,3 +336,24 @@ async def test_an_approved_no_marker_fallback_still_resolves_every_criterion(
     assert [row.rendered_verdict for row in summary.ac_results] == ["PASS", "FAIL", "PASS", "PASS"]
     assert summary.ac_results[1].verification_method == "check_package"
     await store.close()
+
+
+async def test_an_approved_rowless_fallback_the_pipeline_could_not_evaluate_is_not_approved() -> (
+    None
+):
+    """The reviewer's reproduction: no package decision, no carried verdict, pipeline returns nothing."""
+
+    async def _nothing(seed: Any, indices: tuple[int, ...], **kwargs: Any) -> dict[int, ACResult]:
+        return {}
+
+    one = SimpleNamespace(metadata=SimpleNamespace(seed_id="s"), acceptance_criteria=(CRITERIA[0],))
+    approved = EvaluationSummary(
+        final_approved=True,
+        highest_stage_passed=2,
+        execution_completion_status="completed",
+        approval_status="approved",
+    )
+    packages = GenerationCheckPackages(event_store=None, evaluate_criteria=_nothing)  # type: ignore[arg-type]
+    decided = await packages.decide(approved, one, None)
+    assert decided.final_approved is False
+    assert [row.rendered_verdict for row in decided.ac_results] == ["NOT_EVALUATED"]

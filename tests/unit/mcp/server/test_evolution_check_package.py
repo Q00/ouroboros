@@ -115,9 +115,21 @@ def test_a_criterion_with_no_verdict_row_is_never_approved() -> None:
     assert [r.rendered_verdict for r in summary.ac_results] == ["PASS", "NOT_EVALUATED"]
 
 
-def test_no_decision_leaves_the_summary_unchanged() -> None:
+def test_no_decision_leaves_the_verdicts_unchanged() -> None:
     original = _skipped_summary()
-    assert apply_package_decisions(original, (), _seed()) is original
+    resolved = apply_package_decisions(original, (), _seed())
+    assert resolved.ac_results == original.ac_results
+    assert resolved.final_approved is False
+
+
+def test_an_aggregate_approval_with_no_criterion_verdict_is_not_approved() -> None:
+    """A rowless summary approved in aggregate proves no Seed criterion."""
+    rowless = _skipped_summary(rows=False).model_copy(
+        update={"final_approved": True, "approval_status": "approved"}
+    )
+    resolved = apply_package_decisions(rowless, (), _seed())
+    assert resolved.final_approved is False
+    assert [r.rendered_verdict for r in resolved.ac_results] == ["NOT_EVALUATED"] * 2
 
 
 class _Runner:
@@ -197,7 +209,9 @@ async def test_no_named_run_is_no_decision(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(module, "recorded_criterion_decisions", _decisions)
     packages = GenerationCheckPackages(event_store=None)  # type: ignore[arg-type]
     original = _skipped_summary()
-    assert await packages.decide(original, _seed(), None) is original
+    resolved = await packages.decide(original, _seed(), None)
+    assert resolved.ac_results == original.ac_results
+    assert resolved.final_approved is False
 
 
 def _real_seed() -> Seed:
