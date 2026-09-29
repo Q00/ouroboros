@@ -36,20 +36,32 @@ def package_evidence(record: CriterionDecisionRecord) -> tuple[CheckResult, ...]
     )
 
 
-async def recorded_checks_by_ac(
+async def recorded_checks_by_position(
     store: EventStore, session_id: str, seed: Seed
-) -> dict[str, tuple[CheckResult, ...]]:
-    """Per acceptance criterion text, the evidence the run's recorded decision supports.
+) -> tuple[tuple[CheckResult, ...], ...]:
+    """Per Seed criterion position, the evidence the run's recorded decision supports.
 
     ``session_id`` is the evaluated execution's id, or a session whose start
-    names it. Criteria are matched to decisions by their position in the Seed,
-    which is how the decision orders them.
+    names it. The result is aligned with ``seed.acceptance_criteria`` (empty
+    when there is no decision); criteria are identified by position, never by
+    their text, so two criteria with the same description stay apart.
     """
     execution_id = await store.resolve_execution_id_for_session(session_id) or session_id
     decisions = await recorded_criterion_decisions(store, execution_id, seed)
-    if not decisions:
-        return {}
-    return {
-        ac_text(criterion).strip(): package_evidence(record)
-        for criterion, record in zip(seed.acceptance_criteria, decisions, strict=True)
-    }
+    return tuple(package_evidence(record) for record in decisions)
+
+
+def evidence_for_criteria(
+    evaluated: tuple[str, ...],
+    seed: Seed,
+    by_position: tuple[tuple[CheckResult, ...], ...],
+) -> tuple[tuple[CheckResult, ...], ...]:
+    """The evidence for each evaluated criterion, by position; none when positions are unknown.
+
+    Evidence is applied only when the evaluated criteria are exactly the
+    Seed's, in Seed order, so each position names one Seed criterion.
+    """
+    seed_texts = tuple(ac_text(criterion).strip() for criterion in seed.acceptance_criteria)
+    if not by_position or evaluated != seed_texts:
+        return tuple(() for _ in evaluated)
+    return by_position
