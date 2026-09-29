@@ -175,7 +175,7 @@ class EvaluationPipeline:
         # produced no executed evidence: its review becomes the feedback that
         # accompanies an unverified result, not a verdict.
         if self._config.stage2_enabled:
-            result = await self._semantic.evaluate(context)
+            result = await self._semantic.evaluate(context, stage1_result)
             if result.is_err:
                 return Result.err(result.error)
 
