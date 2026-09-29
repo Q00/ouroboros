@@ -114,6 +114,8 @@ def _record(
         existing_accepted=accepted,
         existing_outcome="succeeded" if accepted else "failed",
         existing_failure_class=None if accepted else "verification_failed",
+        # The run's reconciled acceptance: a package fail or indeterminate always rejects.
+        accepted=accepted and status not in ("fail", "indeterminate"),
     )
 
 
@@ -160,9 +162,25 @@ def test_a_criterion_the_package_could_not_evaluate_takes_the_existing_verifier_
         "check_package",
         "spec_verifier",
         "existing_verifier",
-        "existing_verifier",
+        "check_package",
     ]
     assert [row.rendered_verdict for row in resolved.ac_results] == ["FAIL", "FAIL", "PASS", "FAIL"]
+
+
+def test_an_indeterminate_package_criterion_is_rejected_even_when_the_verifier_accepted() -> None:
+    """The run rejected it (``accepted`` false); evolve must not turn it into a pass."""
+    resolved = apply_package_decisions(
+        _skipped_summary(),
+        (
+            _record(),
+            _record("indeterminate", "check_package", accepted=True),
+            _record(),
+            _record(),
+        ),
+        _seed(),
+    )
+    assert [row.rendered_verdict for row in resolved.ac_results] == ["PASS", "FAIL", "PASS", "PASS"]
+    assert resolved.final_approved is False
     assert resolved.final_approved is False
 
 
@@ -185,7 +203,12 @@ async def test_the_dev_run_lineage_is_approved_by_the_recorded_verifier_verdicts
     decided = await packages.decide(_skipped_summary(), _seed(), "evolve:lin:generation:1")
     assert asked == []
     assert decided.final_approved is True
-    assert {row.verification_method for row in decided.ac_results} == {"existing_verifier"}
+    assert [row.verification_method for row in decided.ac_results] == [
+        "existing_verifier",
+        "existing_verifier",
+        "existing_verifier",
+        "check_package",
+    ]
 
 
 async def test_with_no_recorded_decision_carried_verdicts_and_the_pipeline_decide() -> None:

@@ -56,6 +56,7 @@ def _decision(status: str, governed_by: str = "check_package", *, accepted: bool
         existing_accepted=accepted,
         existing_outcome="succeeded" if accepted else "failed",
         existing_failure_class=None,
+        accepted=(status == "pass") if governed_by == "check_package" else accepted,
     )
 
 

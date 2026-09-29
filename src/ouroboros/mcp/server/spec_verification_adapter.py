@@ -400,9 +400,10 @@ def apply_package_decisions(
     1. a check package ``pass`` or ``fail`` (``governed_by == "check_package"``)
        decides it, instead of the source-scan verifier, which cannot see behavior;
     2. an authoritative spec-verifier failure in ``summary`` rejects it;
-    3. a criterion the package could not evaluate takes the existing verifier's
-       verdict the run recorded for it (``existing_accepted``), as ``ooo run``
-       decides it;
+    3. any other recorded criterion takes the acceptance the run reconciled for
+       it (``accepted``), as ``ooo run`` decided it: the existing verifier's
+       verdict for a criterion the package could not evaluate, and a rejection
+       for one the package found indeterminate whatever that verifier said;
     4. an authoritative spec-verifier pass in ``summary`` stands;
     5. ``carried``: a frozen criterion's passing verdict from the previous
        generation (``EvolutionFocus.carried_verdicts``);
@@ -429,9 +430,10 @@ def apply_package_decisions(
     existing: dict[int, ACResult] = {}
     for index, record in enumerate(decisions):
         if record.governed_by != "check_package" or record.package_status not in ("pass", "fail"):
-            accepted = bool(record.existing_accepted)
+            accepted = bool(record.accepted)
             verdict = "pass" if accepted else "fail"
             outcome = record.existing_failure_class or record.existing_outcome or "no outcome"
+            by_verifier = record.governed_by == "existing_verifier"
             existing[index] = ACResult(
                 ac_index=index,
                 ac_content=texts[index],
@@ -439,10 +441,11 @@ def apply_package_decisions(
                 passed=accepted,
                 score=1.0 if accepted else 0.0,
                 evidence=(
-                    f"existing verifier {'accepted' if accepted else 'rejected'} ({outcome}); "
-                    f"check package {record.package_status} ({record.reason})"
+                    f"run {'accepted' if accepted else 'rejected'} it ({record.governed_by}); "
+                    f"existing verifier {'accepted' if record.existing_accepted else 'rejected'} "
+                    f"({outcome}); check package {record.package_status} ({record.reason})"
                 ),
-                verification_method="existing_verifier",
+                verification_method="existing_verifier" if by_verifier else "check_package",
                 ac_verdict_state="evaluated",
                 final_verdict=verdict,
                 rendered_verdict=verdict.upper(),
