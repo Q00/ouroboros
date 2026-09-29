@@ -220,3 +220,44 @@ def test_a_missing_identity_field_is_filled_and_a_configured_one_kept(
         assert _git(gen_dir, "log", "-1", "--format=%cn <%ce>") == expected
     finally:
         release_lock(generation.lock_path)
+
+
+def test_a_later_generation_resumes_the_lineage_worktree_from_the_task_worktree(
+    tmp_path: Path, worktrees: Path
+) -> None:
+    """Ralph passes generation 1's task worktree as the source on every step.
+
+    v0.55.1 dev run: the third generation looked the lineage worktree up by the
+    source's own top level, which never equals the repository a linked worktree
+    belongs to, so it tried to create the lineage worktree again and refused
+    generation 2's uncommitted work in it as a dirty checkout.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    generation = prepare_task_workspace(repo, "orch_gen1")
+    try:
+        gen_dir = Path(generation.worktree_path)
+        (gen_dir / "product.py").write_text("VALUE = 2\n", encoding="utf-8")
+        assert checkpoint_managed_worktree(gen_dir, message="ooo: checkpoint") is not None
+
+        second = maybe_restore_task_workspace(
+            "lineage_a", None, fallback_source_cwd=gen_dir, allow_untracked_evidence=True
+        )
+        assert second is not None
+        lineage_dir = Path(second.worktree_path)
+        # Generation 2 works in the lineage worktree and leaves it uncommitted.
+        (lineage_dir / "product.py").write_text("VALUE = 3\n", encoding="utf-8")
+        release_lock(second.lock_path)
+
+        third = maybe_restore_task_workspace(
+            "lineage_a", None, fallback_source_cwd=gen_dir, allow_untracked_evidence=True
+        )
+        assert third is not None
+        try:
+            assert Path(third.worktree_path) == lineage_dir
+            assert Path(third.effective_cwd) == lineage_dir
+            assert (lineage_dir / "product.py").read_text(encoding="utf-8") == "VALUE = 3\n"
+        finally:
+            release_lock(third.lock_path)
+    finally:
+        release_lock(generation.lock_path)

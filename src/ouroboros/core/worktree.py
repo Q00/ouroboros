@@ -789,6 +789,11 @@ def restore_task_workspace(
     source_dir = Path(fallback_source_cwd).expanduser().resolve()
     root = _worktree_root()
     caller_repo_root = _resolve_repo_root(source_dir)
+    # A managed worktree belongs to the repository its git data lives in. The
+    # source may itself be a linked worktree of that repository (the task
+    # worktree a chained evaluation ran in), so both sides are compared by
+    # their common repository root, never by the source's own top level.
+    caller_common_root = _resolve_common_repo_root(source_dir)
 
     repo_matches: list[tuple[Path, Path]] = []
     for match in root.glob(f"*/{durable_id}"):
@@ -797,7 +802,7 @@ def restore_task_workspace(
             match_repo_root = _resolve_common_repo_root(worktree_path)
         except WorktreeError:
             continue
-        if match_repo_root == caller_repo_root:
+        if match_repo_root == caller_common_root:
             repo_matches.append((worktree_path, match_repo_root))
 
     if len(repo_matches) > 1:
