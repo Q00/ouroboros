@@ -45,7 +45,11 @@ async def continue_run_into_evaluation(
 ) -> None:
     """Enqueue formal evaluation for a finished run and follow it, then Ralph.
 
-    ``execution`` is the runner's ``OrchestratorResult``. ``auto_evaluate`` and
+    ``working_dir`` is the directory the run executed in, which QA judged too
+    (inside a task worktree, the worktree's counterpart of the project
+    directory); evaluation and Ralph work there. ``worktree_path`` is the task
+    worktree root, shown in the run record. ``execution`` is the runner's
+    ``OrchestratorResult``. ``auto_evaluate`` and
     ``auto_evolve`` are the per-invocation overrides (``None`` defers to
     ``execution.auto_evaluate`` / ``execution.auto_evolve``). Never raises
     ``Exception``; the run's verdict and exit code are the caller's.
@@ -75,7 +79,7 @@ async def continue_run_into_evaluation(
             run_result,
             session_id=session_id,
             seed_content=seed_content,
-            working_dir=run_evaluate_chain.result_evaluation_working_dir(run_result, working_dir),
+            working_dir=working_dir,
             auto_evolve=evolve_enabled,
             start_evaluate_handler=handler,
         )

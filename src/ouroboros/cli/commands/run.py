@@ -912,7 +912,9 @@ async def _run_orchestrator(
             session_repo=session_repo,
             seed_content=yaml.dump(seed_data, default_flow_style=False),
             worktree_path=workspace.worktree_path if workspace is not None else None,
-            working_dir=project_dir,
+            # The directory the run executed in (and QA judged): the task
+            # worktree's counterpart of the project directory, not its root.
+            working_dir=Path(workspace.effective_cwd) if workspace is not None else project_dir,
             runtime_override=runtime_backend,
             auto_evaluate=auto_evaluate,
             auto_evolve=auto_evolve,

@@ -160,6 +160,7 @@ async def _continue(
     tmp_path: Path,
     *,
     worktree: str | None = None,
+    working_dir: Path | None = None,
     auto_evaluate: bool | None = None,
     auto_evolve: bool | None = None,
     session_repo: Any = None,
@@ -169,7 +170,7 @@ async def _continue(
         session_repo=session_repo if session_repo is not None else _session_repo(),
         seed_content=SEED_YAML,
         worktree_path=worktree,
-        working_dir=tmp_path,
+        working_dir=working_dir if working_dir is not None else tmp_path,
         runtime_override=None,
         auto_evaluate=auto_evaluate,
         auto_evolve=auto_evolve,
@@ -194,8 +195,11 @@ async def test_completed_run_evaluates_worktree_then_follows_evaluate_and_ralph(
 ) -> None:
     chain = _Chain()
     worktree = str(tmp_path / "wt")
+    executed_in = tmp_path / "wt" / "pkg"
     with chain.patches():
-        await _continue(_execution(success=True), tmp_path, worktree=worktree)
+        await _continue(
+            _execution(success=True), tmp_path, worktree=worktree, working_dir=executed_in
+        )
 
     assert chain.calls == [
         "enqueue",
@@ -206,7 +210,8 @@ async def test_completed_run_evaluates_worktree_then_follows_evaluate_and_ralph(
     ]
     arguments = chain.evaluate_arguments
     assert arguments is not None
-    assert arguments["working_dir"] == worktree
+    # Evaluation judges where the run executed, not the worktree root.
+    assert arguments["working_dir"] == str(executed_in)
     assert arguments["session_id"] == "orch_1"
     assert arguments["auto_evolve"] is True
     assert arguments["_source_execution_status"] == "completed"
@@ -337,27 +342,29 @@ async def test_build_successor_handler_resolves_evaluate_stage_and_demotes_plugi
     build.assert_called_once_with(agent_runtime_backend="opencode", opencode_mode="subprocess")
 
 
-def _orchestrator_patches(mock_runner: MagicMock, tracker: SessionTracker) -> list[Any]:
+def _orchestrator_patches(
+    mock_runner: MagicMock, tracker: SessionTracker, workspace: Any = None
+) -> list[Any]:
     return [
         patch("ouroboros.cli.commands.run._load_seed_from_yaml", return_value=VALID_SEED_DATA),
         patch("ouroboros.orchestrator.create_agent_runtime"),
         patch("ouroboros.orchestrator.OrchestratorRunner", return_value=mock_runner),
         patch("ouroboros.persistence.event_store.EventStore"),
         patch("ouroboros.orchestrator.session.SessionRepository"),
-        patch("ouroboros.cli.commands.run.maybe_restore_task_workspace", return_value=None),
-        patch("ouroboros.cli.commands.run.maybe_prepare_task_workspace", return_value=None),
+        patch("ouroboros.cli.commands.run.maybe_restore_task_workspace", return_value=workspace),
+        patch("ouroboros.cli.commands.run.maybe_prepare_task_workspace", return_value=workspace),
     ]
 
 
 async def _resume_run(
-    tmp_path: Path, execution: SimpleNamespace, **kwargs: Any
+    tmp_path: Path, execution: SimpleNamespace, *, workspace: Any = None, **kwargs: Any
 ) -> tuple[MagicMock, type[BaseException] | None]:
     seed_file = tmp_path / "seed.yaml"
     seed_file.write_text("goal: ignored\n", encoding="utf-8")
     tracker = SessionTracker.create("exec_1", "test-seed-run-successors", session_id="orch_1")
     mock_runner = MagicMock()
     mock_runner.resume_session = AsyncMock(return_value=Result.ok(execution))
-    started = [p.start() for p in _orchestrator_patches(mock_runner, tracker)]
+    started = [p.start() for p in _orchestrator_patches(mock_runner, tracker, workspace)]
     event_store_cls, repo_cls = started[3], started[4]
     event_store_cls.return_value.initialize = AsyncMock()
     event_store_cls.return_value.replay = AsyncMock(return_value=[])
@@ -479,3 +486,22 @@ async def test_new_attempt_keeps_the_evaluation_choices(tmp_path: Path) -> None:
     successor.assert_awaited_once()
     assert successor.await_args.kwargs["auto_evaluate"] is False
     assert successor.await_args.kwargs["auto_evolve"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_task_worktree_run_is_evaluated_where_it_executed(tmp_path: Path) -> None:
+    """A project in a repository subdirectory runs in that subdirectory of the worktree."""
+    root = tmp_path / "worktrees" / "repo" / "orch_1"
+    workspace = SimpleNamespace(
+        worktree_path=str(root),
+        effective_cwd=str(root / "pkg"),
+        branch="ooo/orch_1",
+        lock_path=str(tmp_path / "lock"),
+    )
+    successor = AsyncMock()
+    with patch.object(run_successors, "continue_run_into_evaluation", successor):
+        await _resume_run(tmp_path, _execution(success=True), workspace=workspace)
+
+    successor.assert_awaited_once()
+    assert successor.await_args.kwargs["working_dir"] == root / "pkg"
+    assert successor.await_args.kwargs["worktree_path"] == str(root)
