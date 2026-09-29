@@ -643,9 +643,12 @@ def checkpoint_managed_worktree(path: str | Path, *, message: str) -> str | None
     if not _checkout_is_dirty(repo_root):
         return None
     _run_git(["add", "-A"], repo_root)
+    # Each identity field git needs is filled on its own when the
+    # configuration does not supply it; a configured field is kept.
     identity: list[str] = []
-    if not _run_git_process(["config", "user.email"], repo_root).stdout.strip():
-        identity = ["-c", "user.name=Ouroboros", "-c", "user.email=ouroboros@localhost"]
+    for key, fallback in (("user.name", "Ouroboros"), ("user.email", "ouroboros@localhost")):
+        if not _run_git_process(["config", key], repo_root).stdout.strip():
+            identity += ["-c", f"{key}={fallback}"]
     # No hook of any kind runs for the product's own checkpoint.
     no_hooks = ["-c", f"core.hooksPath={os.devnull}"]
     _run_git([*no_hooks, *identity, "commit", "-q", "--no-verify", "-m", message], repo_root)

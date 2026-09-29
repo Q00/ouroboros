@@ -10,6 +10,7 @@ checkout Ouroboros does not manage is never committed.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import subprocess
 from unittest.mock import patch
@@ -179,5 +180,43 @@ def test_no_git_hook_runs_for_a_checkpoint(tmp_path: Path, worktrees: Path) -> N
         (gen_dir / "product.py").write_text("VALUE = 7\n", encoding="utf-8")
         assert checkpoint_managed_worktree(gen_dir, message="ooo: checkpoint") is not None
         assert not ran.exists()
+    finally:
+        release_lock(generation.lock_path)
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        ({"user.email": "dev@example.com"}, "Ouroboros <dev@example.com>"),
+        ({"user.name": "Dev"}, "Dev <ouroboros@localhost>"),
+        ({}, "Ouroboros <ouroboros@localhost>"),
+    ],
+)
+def test_a_missing_identity_field_is_filled_and_a_configured_one_kept(
+    tmp_path: Path,
+    worktrees: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configured: dict[str, str],
+    expected: str,
+) -> None:
+    for variable in ("NAME", "EMAIL"):
+        for role in ("AUTHOR", "COMMITTER"):
+            monkeypatch.delenv(f"GIT_{role}_{variable}", raising=False)
+    monkeypatch.delenv("EMAIL", raising=False)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    for key in ("user.name", "user.email"):
+        _git(repo, "config", "--unset", key)
+    for key, value in configured.items():
+        _git(repo, "config", key, value)
+    generation = prepare_task_workspace(repo, "orch_identity")
+    try:
+        gen_dir = Path(generation.worktree_path)
+        (gen_dir / "product.py").write_text("VALUE = 8\n", encoding="utf-8")
+        assert checkpoint_managed_worktree(gen_dir, message="ooo: checkpoint") is not None
+        assert _git(gen_dir, "log", "-1", "--format=%an <%ae>") == expected
+        assert _git(gen_dir, "log", "-1", "--format=%cn <%ce>") == expected
     finally:
         release_lock(generation.lock_path)
