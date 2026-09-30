@@ -322,8 +322,8 @@ class TestConsensusRosterResolution:
 
         assert result.is_ok
         consensus, _ = result.value
-        # "default" on codex is an OpenAI model, the executor's own vendor.
-        assert consensus.reviewer_independence == "same_vendor"
+        # "default" runs whatever codex is configured to run: vendor unproven.
+        assert consensus.reviewer_independence == "unverified"
 
     @pytest.mark.parametrize(
         ("backend", "env", "multi_model"),

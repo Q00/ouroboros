@@ -40,11 +40,13 @@ class TestVoterVendor:
         # Without a backend the bare alias carries no vendor marker.
         assert ri.voter_vendor("opus", None) == "unknown"
 
-    def test_sentinel_takes_the_backend_vendor(self) -> None:
-        assert ri.voter_vendor("default", "codex") == "openai"
-        assert ri.voter_vendor("default", "gemini") == "google"
-        # A known backend without a vendor family stays unknown, whatever the id.
-        assert ri.voter_vendor("gpt-4o", "dsh") == "unknown"
+    def test_sentinel_proves_no_vendor(self) -> None:
+        # "default" runs whatever the backend is configured to run, which may be
+        # another provider (OpenCode, Codex with a custom provider), so it stays
+        # unknown on every sentinel backend.
+        for backend in ("codex", "gemini", "opencode", "goose", "dsh"):
+            assert ri.voter_vendor("default", backend) == "unknown"
+        assert ri.voter_vendor("gpt-4o", "dsh") == "openai"
 
     def test_explicit_backends_infer_from_the_model_id(self) -> None:
         assert ri.voter_vendor("openrouter/google/gemini-2.5-pro", "litellm") == "google"
@@ -165,15 +167,15 @@ class TestResolveIndependence:
         assert result.status == ri.SAME_VENDOR
         assert result.filtered_voters == ("opus", "sonnet")
 
-    def test_codex_default_roster_is_same_vendor_for_a_codex_executor(self) -> None:
+    def test_sentinel_roster_on_a_multi_provider_backend_stays_unverified(self) -> None:
         result = ri.resolve_reviewer_independence(
             "codex",
             ["default", "default", "default"],
-            configured_backends=["codex", "claude"],
-            voter_backend="codex",
+            configured_backends=["codex", "opencode"],
+            voter_backend="opencode",
         )
-        assert result.status == ri.SAME_VENDOR
-        assert result.voter_vendors == ("openai",)
+        assert result.status == ri.UNVERIFIED
+        assert result.voter_vendors == ("unknown",)
 
     def test_litellm_roster_is_classified_by_model_id(self) -> None:
         voters = [

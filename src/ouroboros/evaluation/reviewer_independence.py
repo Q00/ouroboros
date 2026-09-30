@@ -142,16 +142,17 @@ def model_vendor(model: str | None) -> str:
 def voter_vendor(model: str | None, voter_backend: str | None) -> str:
     """Map a voter to its vendor family (``"unknown"`` if unmappable).
 
-    A backend that picks its own model (a tier alias such as ``opus`` or the
-    ``"default"`` sentinel) runs it from the backend's vendor, so the backend
-    decides, and a backend with no vendor family stays unknown. Explicit
-    backends (``litellm``, ``copilot``) take provider-owned ids, and an
-    unrecognized backend says nothing, so the model id decides there.
+    Only a tier-alias backend proves the vendor from the backend alone: it runs
+    the alias (``opus``) on its own vendor's models. A backend that picks its
+    own model through the ``"default"`` sentinel can be configured to run any
+    provider, so it proves nothing and the model id decides, which leaves
+    ``"default"`` unknown. Explicit and unrecognized backends also fall back to
+    the model id.
     """
     if (
         voter_backend
         and get_backend_capability(voter_backend) is not None
-        and backend_model_selection(voter_backend) != "explicit"
+        and backend_model_selection(voter_backend) == "alias"
     ):
         return backend_vendor(voter_backend) or _UNKNOWN_VENDOR
     return model_vendor(model)
