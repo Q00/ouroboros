@@ -22,6 +22,8 @@ from urllib.parse import urlparse
 
 import structlog
 
+from ouroboros.config.loader import get_llm_backend_for_role
+from ouroboros.config.model_selection import resolve_role_model
 from ouroboros.core.errors import ProviderError
 from ouroboros.persistence.brownfield import BrownfieldRepo, BrownfieldStore
 from ouroboros.providers.base import (
@@ -37,8 +39,6 @@ log = structlog.get_logger()
 BrownfieldEntry = BrownfieldRepo
 
 # ── Constants ──────────────────────────────────────────────────────
-
-_FRUGAL_MODEL = "anthropic/claude-3-5-haiku-20241022"
 
 # Maximum directory depth, relative to the scan root, to search for repos.
 # Repos commonly live at ``~/repo`` (depth 1) or ``~/group/repo`` (depth 2);
@@ -279,6 +279,12 @@ def _read_readme_content(repo_path: Path, max_chars: int = 3000) -> str | None:
     return None
 
 
+def _frugal_model() -> str:
+    """The frugal-tier model for the backend serving brownfield LLM calls."""
+    backend = get_llm_backend_for_role("brownfield")
+    return resolve_role_model("brownfield_scan", backend=backend).model
+
+
 async def generate_desc(
     repo_path: Path,
     llm_adapter: LLMAdapter,
@@ -302,7 +308,7 @@ async def generate_desc(
         return ""
 
     model_is_explicit = model is not None
-    resolved_model = model or _FRUGAL_MODEL
+    resolved_model = model or _frugal_model()
 
     messages = [
         Message(role=MessageRole.SYSTEM, content=_DESC_SYSTEM_PROMPT),
@@ -344,7 +350,7 @@ async def scan_and_register(
     llm_adapter: LLMAdapter | None = None,  # noqa: ARG001
     root: Path | None = None,
     *,
-    model: str = _FRUGAL_MODEL,  # noqa: ARG001
+    model: str | None = None,  # noqa: ARG001
 ) -> list[BrownfieldRepo]:
     """Scan a root directory for repos/worktrees and bulk-register them in the DB.
 

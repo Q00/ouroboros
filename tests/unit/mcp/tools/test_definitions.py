@@ -328,6 +328,7 @@ class TestExecuteSeedHandler:
             captured_runtime_kwargs.update(kwargs)
             return SimpleNamespace(runtime_backend="pi")
 
+        monkeypatch.setenv("OUROBOROS_PIN_MODELS", "1")
         monkeypatch.setenv("OUROBOROS_EXECUTION_MODEL", "openai-codex/gpt-5.4-mini")
         monkeypatch.setattr(
             "ouroboros.mcp.tools.execution_handlers.SessionRepository",

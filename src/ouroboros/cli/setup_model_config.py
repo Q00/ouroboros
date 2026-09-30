@@ -8,6 +8,7 @@ from ouroboros.config._model_defaults import (
     DEFAULT_SONNET_MODEL,
     recognized_shipped_defaults,
 )
+from ouroboros.config.model_selection import AUTO_MODEL
 
 _DEFAULT_CONSENSUS_MODELS = (
     "openrouter/openai/gpt-4o",
@@ -46,6 +47,8 @@ def is_shipped_default_roster(
 ) -> bool:
     """Return whether a model roster matches current or legacy shipped defaults."""
     current_tuple = tuple(current)
+    if current_tuple == (AUTO_MODEL,):
+        return True
     if len(current_tuple) != len(shipped_roster):
         return False
     return all(
@@ -69,7 +72,10 @@ def has_explicit_codex_model_override(config_dict: dict, role: str) -> bool:
         value = _get_nested_value(config_dict, path)
         if value is _MISSING:
             continue
-        if isinstance(default, str) and value in recognized_shipped_defaults(default):
+        if isinstance(default, str) and value in (
+            AUTO_MODEL,
+            *recognized_shipped_defaults(default),
+        ):
             continue
         if (
             isinstance(default, tuple)
@@ -107,7 +113,10 @@ def neutralize_fresh_codex_model_defaults(config_dict: dict) -> None:
             key = path[-1]
             value = current.get(key, _MISSING)
             if isinstance(shipped_default, str):
-                if isinstance(value, str) and value in recognized_shipped_defaults(shipped_default):
+                if isinstance(value, str) and value in (
+                    AUTO_MODEL,
+                    *recognized_shipped_defaults(shipped_default),
+                ):
                     current.pop(key, None)
             elif (
                 isinstance(shipped_default, tuple)

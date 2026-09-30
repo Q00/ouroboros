@@ -14,7 +14,6 @@ from typer.testing import CliRunner
 import yaml
 
 from ouroboros.cli.commands.config import _resolve_db_path, app
-from ouroboros.config._model_defaults import DEFAULT_SONNET_MODEL
 
 runner = CliRunner(env={"COLUMNS": "200"})
 
@@ -241,6 +240,7 @@ class TestConfigShow:
         data = yaml.safe_load((config_dir / "config.yaml").read_text())
         data["execution"] = {"default_model": "terra"}
         (config_dir / "config.yaml").write_text(yaml.dump(data))
+        monkeypatch.setenv("OUROBOROS_PIN_MODELS", "1")
         monkeypatch.setenv("OUROBOROS_EXECUTION_MODEL", "")
 
         with patch("ouroboros.config.models.get_config_dir", return_value=config_dir):
@@ -248,7 +248,7 @@ class TestConfigShow:
 
         assert result.exit_code == 0
         execute = json.loads(result.output)["stages"]["execute"]
-        assert execute["model"] == DEFAULT_SONNET_MODEL
+        assert execute["model"] == "sonnet"
         assert execute["model_source"] == "env OUROBOROS_EXECUTION_MODEL (cleared) ⚠"
 
     def test_show_json_reports_unpinned_claude_execution_model_truthfully(
@@ -260,7 +260,7 @@ class TestConfigShow:
 
         assert result.exit_code == 0
         execute = json.loads(result.output)["stages"]["execute"]
-        assert execute["model"] == DEFAULT_SONNET_MODEL
+        assert execute["model"] == "sonnet"
         assert execute["model_source"] == "default → backend default"
 
     def test_show_codex_automatic_model_is_not_presented_as_a_runtime_fact(

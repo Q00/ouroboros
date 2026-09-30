@@ -7,10 +7,13 @@ import subprocess
 
 import pytest
 
+from ouroboros.backends import llm_backend_choices, runtime_backend_choices
 from ouroboros.backends import model_catalog as mc
-from ouroboros.backends import runtime_backend_choices
-from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL, DEFAULT_SONNET_MODEL
-from ouroboros.config.loader import _default_model_for_backend
+from ouroboros.config._model_defaults import (
+    DEFAULT_HAIKU_MODEL,
+    DEFAULT_OPUS_MODEL,
+    DEFAULT_SONNET_MODEL,
+)
 
 
 @pytest.mark.parametrize("backend", runtime_backend_choices())
@@ -21,17 +24,42 @@ def test_every_runtime_backend_has_catalog_with_models(backend: str) -> None:
     assert catalog.default_model == catalog.models[0]
 
 
-@pytest.mark.parametrize("backend", runtime_backend_choices())
-def test_catalog_default_mirrors_loader_backend_mapping(backend: str) -> None:
-    """The static catalog must not drift from the loader's sentinel mapping."""
-    loader_default = _default_model_for_backend(DEFAULT_OPUS_MODEL, backend=backend)
-    assert mc.get_model_catalog(backend).default_model == loader_default
+@pytest.mark.parametrize("backend", sorted({*runtime_backend_choices(), *llm_backend_choices()}))
+def test_every_backend_declares_model_selection(backend: str) -> None:
+    """Model resolution reads this field; no backend may be left undeclared."""
+    assert mc.get_model_catalog(backend).model_selection in {"alias", "sentinel", "explicit"}
+
+
+def test_model_selection_per_backend() -> None:
+    """Only the Claude CLI family takes tier aliases; only provider-owned ids stay explicit."""
+    selections = {
+        backend: mc.get_model_catalog(backend).model_selection
+        for backend in {*runtime_backend_choices(), *llm_backend_choices()}
+    }
+    assert {name for name, value in selections.items() if value == "alias"} == {
+        "claude",
+        "claude_mcp",
+    }
+    assert {name for name, value in selections.items() if value == "explicit"} == {
+        "litellm",
+        "copilot",
+    }
+
+
+@pytest.mark.parametrize("backend", ["gemini", "goose", "host", "codex_mcp"])
+def test_self_selecting_runtimes_offer_the_sentinel_not_claude_ids(backend: str) -> None:
+    """These CLIs choose their own model; a Claude id would run as ``--model claude-...``."""
+    catalog = mc.get_model_catalog(backend)
+    assert catalog.default_model == mc.DEFAULT_MODEL_SENTINEL
+    assert DEFAULT_OPUS_MODEL not in catalog.models
+    assert mc.uses_default_model_sentinel(backend) is True
 
 
 def test_claude_catalog_lists_shipped_defaults_first() -> None:
     choices = mc.model_choices("claude")
     assert choices[:2] == (DEFAULT_OPUS_MODEL, DEFAULT_SONNET_MODEL)
-    assert "claude-haiku-4-5-20251001" in choices
+    assert DEFAULT_HAIKU_MODEL in choices
+    assert "claude-haiku-4-5-20251001" not in choices
 
 
 def test_codex_catalog_offers_known_models_after_sentinel() -> None:

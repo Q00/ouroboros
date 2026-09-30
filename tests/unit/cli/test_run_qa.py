@@ -983,6 +983,7 @@ async def test_run_orchestrator_passes_execution_model_to_runtime(
     mock_runner = MagicMock()
     mock_runner.execute_seed = AsyncMock(return_value=Result.ok(fake_exec))
     mock_runner.resume_session = AsyncMock()
+    monkeypatch.setenv("OUROBOROS_PIN_MODELS", "1")
     monkeypatch.setenv("OUROBOROS_EXECUTION_MODEL", "openai-codex/gpt-5.4-mini")
 
     with (

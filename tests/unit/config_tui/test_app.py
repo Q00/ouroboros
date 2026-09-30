@@ -14,7 +14,6 @@ import sys
 import pytest
 from textual.widgets import Input, OptionList, Select, Static
 
-from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL
 from ouroboros.config_tui import persistence
 from ouroboros.config_tui.app import (
     CUSTOM_SENTINEL,
@@ -102,7 +101,7 @@ async def test_agent_change_resets_incompatible_stage_model(app_env) -> None:
     async with app.run_test() as pilot:
         stage = Stage.INTERVIEW.value
         model_select = pilot.app.query_one(f"#stage-model-{stage}", Select)
-        assert model_select.value == "claude-opus-5"
+        assert model_select.value == "auto"
 
         pilot.app.query_one(f"#stage-runtime-{stage}", Select).value = "codex"
         await pilot.pause()
@@ -1033,7 +1032,7 @@ async def test_runtime_only_agent_default_sentinel_uses_completion_backend(
         stage = Stage.INTERVIEW.value
         pilot.app.query_one(f"#stage-runtime-{stage}", Select).value = "antigravity"
         await pilot.pause()
-        assert pilot.app.query_one(f"#stage-model-{stage}", Select).value == DEFAULT_OPUS_MODEL
+        assert pilot.app.query_one(f"#stage-model-{stage}", Select).value == "auto"
 
         pilot.app.action_save()
         await pilot.pause()
