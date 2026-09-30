@@ -733,6 +733,9 @@ def test_json_envelope_reports_its_single_model_usage_key() -> None:
         pytest.param({}, id="empty"),
         pytest.param({"claude-opus-5-5": _OPUS_USAGE, "claude-haiku-4-5": {}}, id="two-keys"),
         pytest.param({"not a model id": {}}, id="whitespace-key"),
+        pytest.param({" claude-opus-5-5": {}}, id="leading-space-key"),
+        pytest.param({"claude-opus-5-5\n": {}}, id="trailing-newline-key"),
+        pytest.param({" " + "x" * 256: {}}, id="over-limit-before-trim"),
         pytest.param(["claude-opus-5-5"], id="not-an-object"),
     ],
 )
@@ -746,7 +749,20 @@ def test_no_single_reported_model_yields_no_model(model_usage: object) -> None:
     assert normalized.model_source is None
 
 
-@pytest.mark.parametrize("init_model", [None, "", "   ", 42, "claude opus", "x" * 257])
+@pytest.mark.parametrize(
+    "init_model",
+    [
+        None,
+        "",
+        "   ",
+        42,
+        "claude opus",
+        "x" * 257,
+        " claude-opus-5-5",
+        "claude-opus-5-5 ",
+        "claude-opus\x005-5",
+    ],
+)
 def test_malformed_init_model_is_ignored_without_rejecting_the_envelope(
     init_model: object,
 ) -> None:

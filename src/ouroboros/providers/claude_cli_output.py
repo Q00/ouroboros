@@ -142,16 +142,14 @@ def normalize_claude_reported_model(value: object) -> str | None:
     control characters is rejected so arbitrary stream text can never be
     relabeled as the model that ran.
     """
-    if not isinstance(value, str):
-        return None
-    candidate = value.strip()
     if (
-        not candidate
-        or len(candidate) > _MAX_MODEL_ID_CHARS
-        or any(char.isspace() for char in candidate)
+        not isinstance(value, str)
+        or not value
+        or len(value) > _MAX_MODEL_ID_CHARS
+        or any(char.isspace() or not char.isprintable() for char in value)
     ):
         return None
-    return candidate
+    return value
 
 
 def _reported_model(
