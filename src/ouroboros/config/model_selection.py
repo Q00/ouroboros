@@ -34,7 +34,7 @@ Resolution order (first match wins):
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import functools
 import logging
 import os
@@ -164,6 +164,13 @@ _SETTINGS: Final[Mapping[str, _Setting]] = {
     ),
 }
 _CONSENSUS_ROSTER_ENV: Final = "OUROBOROS_CONSENSUS_MODELS"
+
+# Every per-role model field in config.yaml (``section``, ``field``). A fresh
+# config leaves them out so ``models.default`` is the only model setting.
+ROLE_MODEL_CONFIG_PATHS: Final[tuple[tuple[str, str], ...]] = (
+    *dict.fromkeys(s.config_path for s in _SETTINGS.values() if s.config_path is not None),
+    ("consensus", "models"),
+)
 
 # Every role-level model variable, for the untrusted project ``.env`` denylist.
 MODEL_ENV_VARS: Final[frozenset[str]] = frozenset(
@@ -342,6 +349,9 @@ class _Persisted:
     setting: str | None = None
     shipped_pin: str | None = None
     automatic: bool = False
+    # The setting and literal behind ``shipped_pin``, for display only.
+    shipped_setting: str | None = None
+    shipped_value: str | None = None
 
 
 def _persisted(setting_keys: tuple[str, ...], config: OuroborosConfig | None) -> _Persisted:
@@ -352,25 +362,29 @@ def _persisted(setting_keys: tuple[str, ...], config: OuroborosConfig | None) ->
     equals a current or historical shipped default is not a choice; the walk
     records it and continues.
     """
-    shipped_pin: str | None = None
+    shipped = _Persisted()
     for key in setting_keys:
         setting = _SETTINGS[key]
         raw_env = os.environ.get(setting.env_var) if setting.env_var is not None else None
         if raw_env is not None:
             env_value = raw_env.strip()
             if env_value not in _UNSET_VALUES:
-                return _Persisted(env_value, setting.env_var, shipped_pin)
+                return replace(shipped, value=env_value, setting=setting.env_var)
             if env_value or setting.blank_env_is_automatic:
-                return _Persisted(shipped_pin=shipped_pin, automatic=True)
+                return replace(shipped, automatic=True)
         raw = _config_value(config, setting.config_path)
         value = raw.strip() if isinstance(raw, str) else ""
         if value in _UNSET_VALUES:
             continue
+        path = ".".join(setting.config_path or ())
         if value in setting.recognized_shipped():
-            shipped_pin = shipped_pin or setting.shipped[0]
+            if shipped.shipped_pin is None:
+                shipped = _Persisted(
+                    shipped_pin=setting.shipped[0], shipped_setting=path, shipped_value=value
+                )
             continue
-        return _Persisted(value, ".".join(setting.config_path or ()), shipped_pin)
-    return _Persisted(shipped_pin=shipped_pin)
+        return replace(shipped, value=value, setting=path)
+    return shipped
 
 
 @functools.cache
@@ -459,6 +473,35 @@ def resolve_role_model(
     return resolved(tier_model(spec.tier, canonical), "auto")
 
 
+@dataclass(frozen=True, slots=True)
+class IgnoredModelSetting:
+    """A persisted model id that auto resolution skips because pin is off."""
+
+    setting: str
+    value: str
+    pinned_model: str
+
+
+def ignored_model_setting(role: str, *, backend: str | None) -> IgnoredModelSetting | None:
+    """The persisted setting ``role`` would run with ``models.pin: true``.
+
+    ``None`` unless the role resolves automatically now and turning pin on would
+    run a persisted value. ``pinned_model`` is what pin on would run: the value
+    itself, or the current shipped id for an untouched older shipped default.
+    """
+    if resolve_role_model(role, backend=backend).source != "auto":
+        return None
+    pinned = resolve_role_model(role, backend=backend, pinned=True)
+    if pinned.source != "pin":
+        return None
+    persisted = _persisted(_ROLE_SPECS[pinned.role].settings, _load_config())
+    if persisted.value is not None and persisted.setting is not None:
+        return IgnoredModelSetting(persisted.setting, persisted.value, pinned.model)
+    if persisted.shipped_setting is not None and persisted.shipped_value is not None:
+        return IgnoredModelSetting(persisted.shipped_setting, persisted.shipped_value, pinned.model)
+    return None
+
+
 def _roster(value: object) -> tuple[str, ...]:
     if isinstance(value, str):
         value = value.split(",")
@@ -510,15 +553,18 @@ __all__ = [
     "AUTO_MODEL",
     "CLAUDE_TIER_ALIASES",
     "MODEL_ENV_VARS",
+    "ROLE_MODEL_CONFIG_PATHS",
     "ROLE_TIERS",
     "SHIPPED_CONSENSUS_ROSTER",
     "SHIPPED_TIER_MODELS",
     "TIERS",
+    "IgnoredModelSetting",
     "ModelSource",
     "ResolvedModel",
     "Tier",
     "backend_model_selection",
     "canonical_backend",
+    "ignored_model_setting",
     "pin_models_enabled",
     "reset_ignored_model_warning",
     "resolve_consensus_roster",

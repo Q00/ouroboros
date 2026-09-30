@@ -25,6 +25,7 @@ from ouroboros import telemetry as usage_telemetry
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.cli.logging_setup import configure_cli_logging
+from ouroboros.cli.model_options import ModelOption, PinModelsOption, model_options
 from ouroboros.config.loader import (
     get_config_dir,
     get_max_parallel_workers,
@@ -1261,6 +1262,8 @@ def workflow(
             ),
         ),
     ] = None,
+    model: ModelOption = None,
+    pin_models: PinModelsOption = None,
 ) -> None:
     """Execute a workflow from a seed file.
 
@@ -1303,6 +1306,9 @@ def workflow(
         # Stop after the run instead of continuing into formal evaluation
         ouroboros run seed.yaml --no-auto-evaluate
 
+        # Run every role, evaluation included, on the frontier tier
+        ouroboros run seed.yaml --model frontier
+
         # Limit recursive decomposition depth
         ouroboros run seed.yaml --max-decomposition-depth 1
 
@@ -1327,24 +1333,25 @@ def workflow(
                 "Enabling orchestrator mode.[/yellow]"
             )
         try:
-            asyncio.run(
-                _run_orchestrator(
-                    seed_file,
-                    resume_session,
-                    mcp_config,
-                    mcp_tool_prefix,
-                    debug,
-                    parallel=not sequential,
-                    no_qa=no_qa,
-                    runtime_backend=public_runtime_backend(runtime.value if runtime else None),
-                    max_decomposition_depth=max_decomposition_depth,
-                    skip_completed=skip_completed,
-                    project_dir=project_dir,
-                    check_package=check_package,
-                    auto_evaluate=auto_evaluate,
-                    auto_evolve=auto_evolve,
+            with model_options(model, pin_models):
+                asyncio.run(
+                    _run_orchestrator(
+                        seed_file,
+                        resume_session,
+                        mcp_config,
+                        mcp_tool_prefix,
+                        debug,
+                        parallel=not sequential,
+                        no_qa=no_qa,
+                        runtime_backend=public_runtime_backend(runtime.value if runtime else None),
+                        max_decomposition_depth=max_decomposition_depth,
+                        skip_completed=skip_completed,
+                        project_dir=project_dir,
+                        check_package=check_package,
+                        auto_evaluate=auto_evaluate,
+                        auto_evolve=auto_evolve,
+                    )
                 )
-            )
         except (ValueError, NotImplementedError) as e:
             print_error(str(e))
             raise typer.Exit(1) from e

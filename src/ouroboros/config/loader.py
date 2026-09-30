@@ -56,8 +56,8 @@ from ouroboros.config.models import (  # noqa: E402
     CredentialsConfig,
     OuroborosConfig,
     RuntimeControlsConfig,
+    fresh_config_data,
     get_config_dir,
-    get_default_config,
     get_default_credentials,
 )
 from ouroboros.config.telemetry_env import telemetry_opt_out_in_env
@@ -286,8 +286,7 @@ def create_default_config(
             )
 
     # Create config.yaml
-    default_config = get_default_config()
-    config_dict = _model_to_yaml_dict(default_config)
+    config_dict = fresh_config_data()
     with config_path.open("w", encoding="utf-8") as f:
         yaml.dump(
             config_dict,

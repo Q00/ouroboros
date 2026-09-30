@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from unittest.mock import patch
 
 import pytest
-from typer.testing import CliRunner
+from typer.testing import CliRunner, Result
 import yaml
 
 from ouroboros.cli.commands.config import _resolve_db_path, app
@@ -405,6 +406,130 @@ def test_unresolvable_user_database_path_is_redacted(
     assert private_user not in output
     assert str(config_path) not in output
     assert "Traceback" not in output
+
+
+class TestConfigShowModels:
+    """The models table: one row per role, the one switch, and ignored ids."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated(self, config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The resolver reads config through the loader's own get_config_dir.
+        monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+        monkeypatch.setattr("ouroboros.config.loader.get_config_dir", lambda: config_dir)
+        for name in ("OUROBOROS_MODEL", "OUROBOROS_PIN_MODELS", "OUROBOROS_SEMANTIC_MODEL"):
+            monkeypatch.delenv(name, raising=False)
+
+    @staticmethod
+    def _invoke(*args: str) -> Result:
+        result = runner.invoke(app, list(args))
+        assert result.exit_code == 0, result.output
+        return result
+
+    @staticmethod
+    def _text(result: Result) -> str:
+        return re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+
+    @staticmethod
+    def _write(config_dir: Path, **sections: dict) -> None:
+        data = yaml.safe_load((config_dir / "config.yaml").read_text())
+        data.update(sections)
+        (config_dir / "config.yaml").write_text(yaml.dump(data))
+
+    def test_show_prints_auto_header_and_role_table(self, config_dir: Path) -> None:
+        result = self._invoke("show")
+        text = self._text(result)
+        assert "models: auto (pin off)" in text
+        for column in ("Role", "Tier", "Backend", "Resolved model", "Source"):
+            assert column in text
+        rows = {
+            line.split("│")[1].strip(): [cell.strip() for cell in line.split("│")[2:6]]
+            for line in text.splitlines()
+            if line.count("│") == 6
+        }
+        assert rows["execute"] == ["standard", "claude", "sonnet", "auto"]
+        assert rows["check_package"] == ["standard", "claude", "sonnet", "auto"]
+        assert rows["interview"] == ["frontier", "claude", "opus", "auto"]
+        assert rows["brownfield_scan"] == ["frugal", "claude", "haiku", "auto"]
+        assert "ignored (pin off):" not in text
+
+    def test_show_names_ignored_persisted_ids_with_the_pin_hint(self, config_dir: Path) -> None:
+        self._write(
+            config_dir,
+            evaluation={"semantic_model": "claude-opus-4-6"},
+            resilience={"reflect_model": "my-research-model"},
+        )
+        result = self._invoke("show")
+        text = self._text(result)
+        assert "ignored (pin off):" in text
+        assert (
+            "evaluation.semantic_model: claude-opus-4-6, set models.pin: true to use "
+            "(pin runs claude-opus-5)"
+        ) in text
+        assert "resilience.reflect_model: my-research-model, set models.pin: true to use" in text
+
+    def test_show_json_reports_models_under_a_stable_key(self, config_dir: Path) -> None:
+        self._write(config_dir, resilience={"reflect_model": "my-research-model"})
+        result = self._invoke("show", "--json")
+        models = json.loads(result.output)["models"]
+        assert models["header"] == "models: auto (pin off)"
+        assert models["default"] == {"value": "auto", "source": "default"}
+        assert models["pin"] is False
+        by_role = {row["role"]: row for row in models["roles"]}
+        assert by_role["check_package"] == {
+            "role": "check_package",
+            "tier": "standard",
+            "backend": "claude",
+            "model": "sonnet",
+            "source": "auto",
+        }
+        assert models["ignored"] == [
+            {
+                "setting": "resilience.reflect_model",
+                "value": "my-research-model",
+                "pinned_model": "my-research-model",
+                "hint": "set models.pin: true to use",
+                "roles": ["wonder", "reflect", "context_compression"],
+            }
+        ]
+
+    def test_show_pinned_runs_persisted_ids_and_lists_nothing_ignored(
+        self, config_dir: Path
+    ) -> None:
+        self._write(
+            config_dir,
+            models={"pin": True},
+            resilience={"reflect_model": "my-research-model"},
+        )
+        result = self._invoke("show", "--json")
+        models = json.loads(result.output)["models"]
+        assert models["header"] == "models: pinned"
+        reflect = next(row for row in models["roles"] if row["role"] == "reflect")
+        assert (reflect["model"], reflect["source"]) == ("my-research-model", "pin")
+        assert models["ignored"] == []
+
+    def test_show_one_switch_applies_to_every_role(self, config_dir: Path) -> None:
+        self._write(config_dir, models={"default": "frontier"})
+        result = self._invoke("show", "--json")
+        models = json.loads(result.output)["models"]
+        assert models["header"] == "models: frontier for every role (config)"
+        assert {(row["model"], row["source"]) for row in models["roles"]} == {
+            ("opus", "configured")
+        }
+
+    def test_show_blank_default_reads_as_auto(self, config_dir: Path) -> None:
+        self._write(config_dir, models={"default": ""})
+        result = self._invoke("show", "--json")
+
+        models = json.loads(result.output)["models"]
+        assert models["header"] == "models: auto (pin off)"
+        assert models["default"]["value"] == "auto"
+
+    def test_auto_is_an_automatic_model_value(self) -> None:
+        from ouroboros.cli.commands.config import _is_automatic_model_value
+
+        assert _is_automatic_model_value("auto")
+        assert _is_automatic_model_value(" Auto ")
+        assert not _is_automatic_model_value("claude-opus-5")
 
 
 # ── config backend ───────────────────────────────────────────────
@@ -893,6 +1018,19 @@ class TestConfigSet:
         data = yaml.safe_load((config_dir / "config.yaml").read_text())
         assert data["logging"]["level"] == "debug"
 
+    def test_set_models_keys_absent_from_file_use_the_schema_type(self, config_dir: Path) -> None:
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
+            patch("ouroboros.config.loader.get_config_dir", return_value=config_dir),
+        ):
+            pin = runner.invoke(app, ["set", "models.pin", "true"])
+            default = runner.invoke(app, ["set", "models.default", "frontier"])
+
+        assert pin.exit_code == 0
+        assert default.exit_code == 0
+        data = yaml.safe_load((config_dir / "config.yaml").read_text())
+        assert data["models"] == {"pin": True, "default": "frontier"}
+
     def test_set_unknown_top_level_key_rejected(self, config_dir: Path) -> None:
         """config set should reject unknown top-level keys."""
         with patch("ouroboros.config.models.get_config_dir", return_value=config_dir):
@@ -1115,6 +1253,8 @@ class TestConfigInit:
         assert (tmp_path / "config.yaml").exists()
         data = yaml.safe_load((tmp_path / "config.yaml").read_text())
         assert "orchestrator" in data
+        assert data["models"] == {"default": "auto", "pin": False}
+        assert "semantic_model" not in data["evaluation"]
         # credentials.yaml should be untouched (still has our original content)
         cred_data = yaml.safe_load((tmp_path / "credentials.yaml").read_text())
         assert cred_data == {"providers": {}}

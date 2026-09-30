@@ -73,14 +73,17 @@ conversationally over the scriptable surface:
    ouroboros config show
    ```
 
-2. Present the user a short menu in chat — default agent, per-stage agents,
-   per-stage models — with the current values, and ask what to change.
+2. Present the user a short menu in chat (default agent, per-stage agents,
+   and models: `auto`, a tier, or a model id for every role) with the current
+   values, and ask what to change.
 
 3. Apply each choice with the validated setter (same write path as the GUI):
 
    ```bash
    ouroboros config set orchestrator.runtime_backend <agent>
    ouroboros config set orchestrator.runtime_profile.stages.<interview|execute|evaluate|reflect> <agent>
+   ouroboros config set models.default <auto|frugal|standard|frontier|model>  # every role
+   ouroboros config set models.pin true                            # run the per-role ids below
    ouroboros config set clarification.default_model <model>        # interview & seed
    ouroboros config set execution.default_model <model>            # execute
    ouroboros config set evaluation.semantic_model <model>          # evaluate

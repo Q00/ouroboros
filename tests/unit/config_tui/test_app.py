@@ -12,13 +12,14 @@ import subprocess
 import sys
 
 import pytest
-from textual.widgets import Input, OptionList, Select, Static
+from textual.widgets import Collapsible, Input, OptionList, Select, Static, Switch
 
 from ouroboros.config_tui import persistence
 from ouroboros.config_tui.app import (
     CUSTOM_SENTINEL,
     INHERIT_SENTINEL,
     INSTALL_REQUIRED_SUFFIX,
+    PRESET_MODELS,
     SEARCH_SENTINEL,
     ModelSearchScreen,
     SettingsApp,
@@ -473,21 +474,59 @@ async def test_default_sentinel_label_shows_configured_model(app_env) -> None:
         assert model_select.value == "default"  # value stays the sentinel
 
 
+def test_model_presets_are_auto_and_the_tiers() -> None:
+    assert PRESET_MODELS == ("auto", "frugal", "standard", "frontier")
+
+
 @pytest.mark.asyncio
-async def test_preset_button_stages_models_for_every_card(app_env) -> None:
-    """One click sets a coherent model tier across all stages, respecting
-    each card's effective backend when the stage has a model selector."""
+async def test_preset_button_stages_models_default_only(app_env, monkeypatch) -> None:
+    """A preset sets the one models.default switch, never per-stage model ids."""
+    applied: dict[str, object] = {}
+    monkeypatch.setattr(persistence, "apply_config_values", lambda values: applied.update(values))
     app = SettingsApp()
     async with app.run_test() as pilot:
-        await pilot.click("#preset-frugal")
+        assert pilot.app.query_one("#models-default", Input).value == "auto"
+        pilot.app.query_one("#preset-frontier").scroll_visible(animate=False)
         await pilot.pause()
-        interview_model = pilot.app.query_one(f"#stage-model-{Stage.INTERVIEW.value}", Select)
-        execute_model = pilot.app.query_one(f"#stage-model-{Stage.EXECUTE.value}", Select)
-        assert interview_model.value == "claude-haiku-4-5-20251001"  # claude frugal
-        assert execute_model.value == "gpt-5-mini"  # execute fixture runs on codex
+        await pilot.click("#preset-frontier")
+        await pilot.pause()
+        assert pilot.app.query_one("#models-default", Input).value == "frontier"
         status = pilot.app.query_one("#status-bar", Static)
-        assert "frugal" in str(status.render())
+        assert "frontier" in str(status.render())
         assert "Save" in str(status.render())  # staged, not saved
+        pilot.app.query_one("#save-button").scroll_visible(animate=False)
+        await pilot.pause()
+        await pilot.click("#save-button")
+        await pilot.pause()
+    assert applied == {"models.default": "frontier"}
+
+
+@pytest.mark.asyncio
+async def test_models_default_accepts_a_free_model_id_and_pin(app_env, monkeypatch) -> None:
+    applied: dict[str, object] = {}
+    monkeypatch.setattr(persistence, "apply_config_values", lambda values: applied.update(values))
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        pilot.app.query_one("#models-default", Input).value = "claude-opus-5"
+        pilot.app.query_one("#models-pin", Switch).value = True
+        await pilot.pause()
+        pilot.app.query_one("#save-button").scroll_visible(animate=False)
+        await pilot.pause()
+        await pilot.click("#save-button")
+        await pilot.pause()
+    assert applied == {"models.default": "claude-opus-5", "models.pin": True}
+
+
+@pytest.mark.asyncio
+async def test_per_stage_model_ids_are_grouped_under_advanced(app_env) -> None:
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        advanced = pilot.app.query_one("#advanced-models", Collapsible)
+        assert advanced.collapsed
+        for stage in STAGE_MODEL_FIELDS:
+            assert advanced.query_one(f"#stage-model-{stage.value}", Select)
+            card = pilot.app.query_one(f"#stage-card-{stage.value}")
+            assert not list(card.query(f"#stage-model-{stage.value}").results(Select))
 
 
 @pytest.mark.asyncio

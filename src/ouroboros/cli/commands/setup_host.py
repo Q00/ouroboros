@@ -360,13 +360,13 @@ def _migrate_launchers(setup: Any) -> bool:
 def setup_host(setup: Any) -> bool:
     """Configure the CLI-less host runtime and reconcile setup-owned launchers."""
     from ouroboros.config.loader import create_default_config, ensure_config_dir
-    from ouroboros.config.models import get_default_config
+    from ouroboros.config.models import fresh_config_data
 
     config_dir = ensure_config_dir()
     config_path = config_dir / "config.yaml"
     missing = not config_path.exists()
     config = (
-        get_default_config().model_dump(mode="json")
+        fresh_config_data()
         if missing
         else yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     )

@@ -358,3 +358,17 @@ class TestResolveToken:
             patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="gh", timeout=5)),
         ):
             assert md._resolve_token() is None
+
+
+def test_latest_opus_model_picks_the_newest_version() -> None:
+    from ouroboros.copilot.model_discovery import CopilotModel, latest_opus_model
+
+    models = [
+        CopilotModel(id="claude-opus-4.6"),
+        CopilotModel(id="claude-opus-5"),
+        CopilotModel(id="claude-opus-4.8"),
+        CopilotModel(id="claude-opus-5-preview"),
+        CopilotModel(id="gpt-5.4"),
+    ]
+    assert latest_opus_model(models) == "claude-opus-5"
+    assert latest_opus_model([CopilotModel(id="gpt-5.4")]) is None

@@ -2381,6 +2381,31 @@ class TestCodexSetup:
         if os.name != "nt":
             assert credentials_path.stat().st_mode & 0o777 == 0o600
 
+    def test_setup_codex_fresh_config_has_one_model_switch(self, tmp_path: Path) -> None:
+        """A fresh config says ``models.default: auto`` and holds no per-role model ids."""
+        from ouroboros.config.model_selection import ROLE_MODEL_CONFIG_PATHS
+
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._register_codex_mcp_server", return_value=True),
+            patch("ouroboros.cli.commands.setup._install_codex_artifacts", return_value=True),
+            patch("ouroboros.cli.commands.setup._retire_codex_default_profiles"),
+            patch(
+                "ouroboros.cli.commands.setup._register_codex_worker_profile",
+                return_value=True,
+            ),
+        ):
+            assert setup_cmd._setup_codex("/usr/local/bin/codex") is True
+
+        config = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert config["models"] == {"default": "auto", "pin": False}
+        for section, field in ROLE_MODEL_CONFIG_PATHS:
+            assert field not in config.get(section, {}), f"{section}.{field}"
+
     def test_setup_codex_persists_do_not_track_opt_out_in_config(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -10826,6 +10851,37 @@ class TestCopilotSetup:
         )
         mock_register.assert_called_once()
         assert mock_register.call_args.kwargs["detected"]["command"] in {"uvx", "pipx"}
+
+    def test_setup_copilot_fresh_config_recommends_the_newest_opus(self, tmp_path: Path) -> None:
+        """Copilot is an explicit backend: fresh setup writes its chosen model,
+        recommending the newest Opus in the catalog, next to ``models.default: auto``."""
+        from ouroboros.copilot.model_discovery import CopilotModel
+
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        catalog = [
+            CopilotModel(id="claude-opus-4.6", family="claude-opus-4.6"),
+            CopilotModel(id="claude-opus-5", family="claude-opus-5"),
+            CopilotModel(id="claude-opus-4.8", family="claude-opus-4.8"),
+            CopilotModel(id="gpt-5.4", family="gpt-5.4"),
+        ]
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.copilot.model_discovery.list_copilot_models",
+                return_value=catalog,
+            ),
+            patch("ouroboros.copilot.model_discovery.used_fallback", return_value=False),
+            patch("ouroboros.cli.commands.setup._register_copilot_mcp_server"),
+        ):
+            setup_cmd._setup_copilot("/opt/bin/copilot", non_interactive=True)
+
+        config = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert config["models"] == {"default": "auto", "pin": False}
+        assert config["clarification"]["default_model"] == "claude-opus-5"
+        assert config["evaluation"]["semantic_model"] == "claude-opus-5"
 
     def test_setup_copilot_replaces_shipped_default_model_fields(self, tmp_path: Path) -> None:
         """Fresh/default configs should honor the model selected during setup."""

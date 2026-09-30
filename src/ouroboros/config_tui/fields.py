@@ -53,6 +53,22 @@ GLOBAL_LLM_BACKEND_FIELD = SettingField(
 )
 
 
+# The one switch most users need: ``auto`` (the latest model of each role's
+# tier), a tier name for every role, or one model id for every role.
+MODELS_DEFAULT_FIELD = SettingField(
+    key="models.default",
+    label="Models",
+    env_vars=("OUROBOROS_MODEL",),
+)
+
+# Research switch: run the per-role model ids saved below.
+MODELS_PIN_FIELD = SettingField(
+    key="models.pin",
+    label="Pin per-role model ids",
+    env_vars=("OUROBOROS_PIN_MODELS",),
+)
+
+
 def stage_runtime_field(stage: Stage) -> SettingField:
     """Per-stage runtime select (writes ``orchestrator.runtime_profile.stages.<stage>``)."""
     return SettingField(
@@ -121,6 +137,8 @@ __all__ = [
     "ADVANCED_MODEL_FIELDS",
     "GLOBAL_LLM_BACKEND_FIELD",
     "GLOBAL_RUNTIME_FIELD",
+    "MODELS_DEFAULT_FIELD",
+    "MODELS_PIN_FIELD",
     "STAGE_MODEL_FIELDS",
     "SettingField",
     "active_env_overrides",

@@ -238,6 +238,37 @@ not raw Anthropic model IDs. The supported selectors are `claude`, `claude_api`,
 
 ---
 
+## Choosing models
+
+Most users need no model setting at all, and one switch when they do.
+
+- **Default: `auto`.** Every role runs the latest model of its tier (frugal,
+  standard, frontier) on the backend you use. A new model release needs no
+  config change.
+- **One switch for every role.** `ouroboros config set models.default frontier`
+  (or `frugal`, `standard`, a model id, or back to `auto`). For a single
+  command, pass `--model` to `ouroboros run`, `ouroboros interview`, or
+  `ouroboros pm`, for example `ouroboros run seed.yaml --model frontier`. Tier
+  names work on every backend; Claude aliases such as `opus` mean something
+  only on Claude backends.
+- **See what runs.** `ouroboros config show` prints a models table (role,
+  tier, backend, resolved model, source) under a `models: auto (pin off)`,
+  `models: pinned`, or `models: <value> for every role (<source>)` header, and
+  lists saved per-role ids that are not applied
+  under `ignored (pin off)` with the hint `set models.pin: true to use`.
+  `ouroboros config show --json` carries the same data under `models`.
+- **Pin for research.** `ouroboros config set models.pin true` (or
+  `--pin-models` for one command) runs the per-role ids saved in the role
+  fields below. `litellm` and `copilot` take provider-owned ids, so they use
+  saved ids whether or not pin is on.
+
+A fresh config from `ouroboros setup` or `ouroboros config init` writes
+`models.default: auto` and no per-role model ids. Copilot setup also writes
+the model you pick from Copilot's catalog, because Copilot needs an id from
+that catalog.
+
+---
+
 ## `models`
 
 How every role's model is chosen. The default, `auto`, runs each role on the
@@ -269,8 +300,8 @@ a model depends on the backend:
 | `copilot` | The configured model string (from Copilot's own model catalog), used as-is. With nothing configured, Copilot's default model. |
 | Every other backend (Codex, OpenCode, Gemini, Goose, Kiro, Hermes, Pi, OMP, gjc, Antigravity, Grok, Zcode, ourocode, dsh, host) | `default`: the CLI's own configured model. |
 
-A model passed for one invocation (for example an explicit MCP or CLI model
-argument) always applies.
+A model passed for one invocation (for example an explicit MCP model argument,
+or `--model` on `ouroboros run`, `interview`, and `pm`) always applies.
 
 ---
 

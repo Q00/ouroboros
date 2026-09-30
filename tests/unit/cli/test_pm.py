@@ -1,5 +1,6 @@
 """Tests for the PM CLI command."""
 
+import os
 from unittest.mock import patch
 
 import pytest
@@ -45,15 +46,23 @@ def test_pm_uses_configured_clarification_model_when_option_omitted(
     assert "default" in result.output
 
 
-@patch("ouroboros.cli.commands.pm._run_pm_interview")
-@patch("ouroboros.cli.commands.pm.get_clarification_model")
-def test_pm_preserves_explicit_model_override(
-    mock_get_clarification_model, mock_run_pm_interview
+@pytest.mark.parametrize(
+    ("option", "expected"),
+    [("openai/gpt-5.2", "openai/gpt-5.2"), ("frontier", "opus"), ("frugal", "haiku")],
+)
+def test_pm_model_option_resolves_through_the_model_resolver(
+    option: str, expected: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An explicit --model value should bypass config lookup."""
-    result = runner.invoke(app, ["pm", "--model", "openai/gpt-5.2"], input="n\n")
+    """--model is the per-invocation choice: an id runs as given, a tier resolves."""
+    monkeypatch.delenv("OUROBOROS_MODEL", raising=False)
+    with (
+        patch("ouroboros.cli.commands.pm.get_llm_backend", return_value="claude_code"),
+        patch("ouroboros.cli.commands.pm.resolve_llm_backend", return_value="claude_code"),
+        patch("ouroboros.cli.commands.pm._run_pm_interview") as mock_run_pm_interview,
+    ):
+        result = runner.invoke(app, ["pm", "--model", option], input="n\n")
 
     assert result.exit_code == 0
-    mock_get_clarification_model.assert_not_called()
     mock_run_pm_interview.assert_called_once()
-    assert mock_run_pm_interview.call_args.kwargs["model"] == "openai/gpt-5.2"
+    assert mock_run_pm_interview.call_args.kwargs["model"] == expected
+    assert "OUROBOROS_MODEL" not in os.environ

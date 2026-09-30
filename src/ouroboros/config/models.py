@@ -949,6 +949,21 @@ def get_default_config() -> OuroborosConfig:
     )
 
 
+def fresh_config_data() -> dict[str, Any]:
+    """The contents of a new config.yaml.
+
+    Models are chosen by ``models.default`` (``auto``) alone: the per-role model
+    fields are left out, so a fresh file holds no model id that goes stale.
+    """
+    # Deferred: model_selection reads this module's types.
+    from ouroboros.config.model_selection import ROLE_MODEL_CONFIG_PATHS
+
+    data = get_default_config().model_dump(mode="json")
+    for section, field in ROLE_MODEL_CONFIG_PATHS:
+        data[section].pop(field, None)
+    return data
+
+
 def get_default_credentials() -> CredentialsConfig:
     """Get the default credentials configuration template.
 
