@@ -42,6 +42,8 @@ not require users to acknowledge a new notice.
   durations, tool names, provider details, Python version, frontdoor/onboarding
   attribution, recovery actions, and subagent dispatch data; added daily
   deduplication for retained command and service activity.
+- 2026-10: added `acceptance_no_evidence`, closed-reason counts of criteria a
+  run accepted without evidence from any verifier (see the table below).
 
 ## How to opt out
 

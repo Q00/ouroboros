@@ -269,10 +269,15 @@ async def test_an_unadmitted_run_names_no_admitted_package(
     )
     decided = await authority(seed=seed, execution_id="exec_none", parallel_result=parallel)
     assert decided.all_succeeded
-    run = CheckPackageRun(CheckPackageSettings(enabled=True), authority=authority)
+    run = CheckPackageRun(
+        CheckPackageSettings(enabled=True),
+        state=state,  # type: ignore[arg-type]
+        authority=authority,
+        attempted=True,
+    )
     run.finish("completed", surface="evolve")
     assert len(captured) == 1
     props = captured[0][1]
     assert props["pair_no_admitted_package__no_verifier_verdict"] == 1
     assert props["surface"] == "evolve"
-    assert props["check_package_status"] == "not_run"
+    assert props["check_package_status"] == "construction_failed"
