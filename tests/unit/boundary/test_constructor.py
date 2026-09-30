@@ -245,6 +245,70 @@ async def test_unpinned_constructor_records_the_model_the_runtime_reported(base:
     assert outcome.package.generator == "codex:gpt-6-luna"
 
 
+class StreamRuntime(FakeRuntime):
+    """Returns a fixed message stream, as a runtime's ``TaskResult.messages``."""
+
+    def __init__(self, reply: str, messages: tuple[Any, ...]) -> None:
+        super().__init__(reply)
+        self.messages = messages
+
+    async def execute_task_to_result(self, prompt: str, tools=None, system_prompt=None):
+        return Result.ok(TaskResult(success=True, final_message=self.reply, messages=self.messages))
+
+
+def _claude_init(data: dict[str, Any]) -> Any:
+    from ouroboros.orchestrator.adapter import AgentMessage
+
+    return AgentMessage(type="system", content="Session initialized", data=data)
+
+
+_CLAUDE_OBSERVATION = {
+    "mode": "pinned",
+    "status": "observed",
+    "requested_model": "opus",
+    "effective_model": "claude-opus-5-5",
+    "source": "runtime_stream:system.init:event.model",
+}
+
+
+@pytest.mark.parametrize(
+    ("messages", "expected"),
+    [
+        pytest.param(
+            (_claude_init({"subtype": "init", "model_observation": _CLAUDE_OBSERVATION}),),
+            "claude:claude-opus-5-5",
+            id="observed",
+        ),
+        pytest.param((), "claude:opus", id="no-messages"),
+        pytest.param((_claude_init({"subtype": "init"}),), "claude:opus", id="no-observation"),
+        pytest.param(
+            (_claude_init({"subtype": "init", "model_observation": "claude-opus-5-5"}),),
+            "claude:opus",
+            id="malformed-observation",
+        ),
+        pytest.param(
+            (_claude_init({"subtype": "init", "model_observation": {"effective_model": None}}),),
+            "claude:opus",
+            id="unreported-model",
+        ),
+    ],
+)
+async def test_pinned_constructor_records_the_observed_model_over_the_request(
+    base: Path, messages: tuple[Any, ...], expected: str
+) -> None:
+    runtime = StreamRuntime(_reply(), messages)
+    constructor = CheckConstructor(
+        runtime_backend="claude",
+        model="opus",
+        runtime_factory=lambda **_kwargs: runtime,
+        system_prompt="SYSTEM",
+    )
+    outcome = await constructor.construct(_seed(), base)
+    assert outcome.package is not None
+    assert outcome.generator == expected
+    assert outcome.package.generator == expected
+
+
 _OMIT = object()
 
 

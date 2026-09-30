@@ -25,6 +25,11 @@ from typing import Any
 MAX_CLAUDE_CLI_OUTPUT_CHARS = 8 * 1024 * 1024
 MAX_CLAUDE_CLI_EVENTS = 4096
 _MAX_SESSION_ID_CHARS = 4096
+_MAX_MODEL_ID_CHARS = 256
+# Where a reported model came from, in the ``runtime_stream:<event>:<field>``
+# form the Codex runtime uses for its ``model_observation.source``.
+CLAUDE_INIT_MODEL_SOURCE = "runtime_stream:system.init:event.model"
+CLAUDE_MODEL_USAGE_SOURCE = "runtime_stream:result:event.modelUsage"
 _MAX_TOKEN_COUNT = (1 << 63) - 1
 # Keep this trust-boundary schema aligned with the worker telemetry consumers
 # in ``orchestrator.adapter`` and ``orchestrator.frugality_evidence``.  Aliases
@@ -72,6 +77,8 @@ class ClaudeCliResult:
     stop_reason: str | None
     raw_payload: dict[str, Any]
     event_count: int
+    model: str | None = None
+    model_source: str | None = None
 
 
 def normalize_claude_cli_output(stdout: str) -> ClaudeCliResult:
@@ -104,6 +111,7 @@ def normalize_claude_cli_output(stdout: str) -> ClaudeCliResult:
     result_text = _result_text(final, is_error=is_error)
     subtype = _optional_string(final, "subtype")
     stop_reason = _optional_string(final, "stop_reason")
+    reported_model = _reported_model(events, final)
 
     raw_payload = dict(final)
     raw_payload["result"] = result_text
@@ -122,7 +130,54 @@ def normalize_claude_cli_output(stdout: str) -> ClaudeCliResult:
         stop_reason=stop_reason,
         raw_payload=raw_payload,
         event_count=len(events),
+        model=reported_model[0] if reported_model else None,
+        model_source=reported_model[1] if reported_model else None,
     )
+
+
+def normalize_claude_reported_model(value: object) -> str | None:
+    """Accept one machine-readable model id reported by Claude, else ``None``.
+
+    Model ids are protocol values, not prose. A value containing whitespace or
+    control characters is rejected so arbitrary stream text can never be
+    relabeled as the model that ran.
+    """
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > _MAX_MODEL_ID_CHARS
+        or any(char.isspace() or not char.isprintable() for char in value)
+    ):
+        return None
+    return value
+
+
+def _reported_model(
+    events: Sequence[dict[str, Any]], final: Mapping[str, Any]
+) -> tuple[str, str] | None:
+    """Return ``(model, source)`` for the concrete model Claude reports it ran.
+
+    The ``system``/``init`` event names the session's resolved model even when
+    an alias such as ``opus`` was requested, so it wins when present. A bare
+    ``--output-format json`` envelope has no init event; its ``modelUsage``
+    keys are the models billed for the request, which identify the model only
+    when there is exactly one. Several keys mean several models ran (for
+    example subagents), and none of them is singled out. Absent or malformed
+    fields yield ``None`` and never reject the envelope: the model is metadata,
+    not completion evidence.
+    """
+    for event in events:
+        if event.get("type") == "system" and event.get("subtype") == "init":
+            model = normalize_claude_reported_model(event.get("model"))
+            if model is not None:
+                return model, CLAUDE_INIT_MODEL_SOURCE
+            break
+    model_usage = final.get("modelUsage")
+    if isinstance(model_usage, Mapping) and len(model_usage) == 1:
+        model = normalize_claude_reported_model(next(iter(model_usage)))
+        if model is not None:
+            return model, CLAUDE_MODEL_USAGE_SOURCE
+    return None
 
 
 def _decode_documents(stdout: str) -> list[Any]:
