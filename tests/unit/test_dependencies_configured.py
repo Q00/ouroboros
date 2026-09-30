@@ -164,7 +164,7 @@ def test_mcp_claude_cli_and_sdk_profiles_have_explicit_contracts():
     assert optional_deps["mcp"] == ["mcp==2.0.0"]
     sdk_pins = [
         "claude-agent-sdk==0.2.144",
-        "anthropic==0.122.0",
+        "anthropic==1.0.0",
         # SDK 0.2.144 dropped its own MCP 1.x ceiling; the profile contract
         # keeps the 1.x graph through this explicit pin.
         "mcp==1.28.1",
