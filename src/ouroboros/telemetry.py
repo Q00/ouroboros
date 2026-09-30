@@ -1164,6 +1164,23 @@ def _canonical_runtime_backend(value: Any) -> str:
         return _UNKNOWN_NO_EVIDENCE_VALUE
 
 
+def _acceptance_no_evidence_opted_in() -> bool:
+    """Whether ``~/.ouroboros/config.yaml`` sets ``telemetry.acceptance_no_evidence: true``.
+
+    Default off (TELEMETRY.md change policy for a scope expansion): an absent,
+    invalid, or unreadable configuration is not an opt in.
+    """
+    try:
+        from ouroboros.config.loader import get_config_dir, load_config
+
+        path = get_config_dir() / "config.yaml"
+        if not path.is_file():
+            return False
+        return load_config(path).telemetry.acceptance_no_evidence is True
+    except Exception:
+        return False
+
+
 def capture_acceptance_no_evidence(
     pairs: Iterable[tuple[str | None, str | None]],
     *,
@@ -1181,9 +1198,13 @@ def capture_acceptance_no_evidence(
     verifier (claim replay) had no evidence. Each axis folds anything outside
     its audited vocabulary to ``unknown``; the counts are sent as
     ``pair_<package_reason>__<replay_reason>`` integers. Nothing is sent when
-    no criterion was accepted without evidence. Never raises.
+    no criterion was accepted without evidence, and nothing unless the user
+    opted in (``telemetry.acceptance_no_evidence: true``; default off) on
+    top of the usual controls. Never raises.
     """
     try:
+        if not is_enabled() or not _acceptance_no_evidence_opted_in():
+            return
         counts: dict[str, int] = {}
         for package_reason, replay_reason in pairs:
             key = _no_evidence_pair_key(
