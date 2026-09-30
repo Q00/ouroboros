@@ -92,6 +92,7 @@ use. Each row below is the exact property set accepted by the serializer.
 | `workflow_outcome` | A background workflow, a terminal `ooo run`, or direct evaluation reaches a terminal result inside Ouroboros (a paused run is not terminal and emits nothing) | command, terminal_status, verified, failure_reason_code (non-success only), failure_cause (non-success `run` only; closed enum, see below), runtime_backend, app_version, os, ci, `$insert_id` |
 | `runtime_drift` | A frozen runtime authority input (Codex config, CLI executable, dispatch registry, profile routing) is observed to have changed after the runtime initialized; the run continues on the re-baselined input | kind (closed enum: `codex_config`/`cli_executable`/`skill_dispatcher`/`mcp_handler_registry`/`skill_dispatch_registry`/`profile_routing`/`baseline_unavailable`/`attestation_timeout`/`unknown`), runtime_backend, app_version, os, ci |
 | `ac_verify_failed` | The orchestrator's deterministic AC verify gate rejects an attempt (`run_verify_commands` enabled) | cause (closed enum: `invalid_contract`/`artifacts_missing`/`artifacts_missing_found_elsewhere`/`environment_unverifiable`/`timeout`/`exit_nonzero`/`output_assertion_unmatched`/`workspace_mutated`/`unknown`), runtime_backend, app_version, os, ci |
+| `acceptance_no_evidence` | A terminal `ooo run`, MCP `execute_seed` run, or evolve generation whose acceptance the check package authority reconciled, when that decision accepted at least one criterion that no verifier had evidence for (the check package did not decide it and the legacy verifier had no evidence); at most one row per run, none when every accepted criterion had evidence. The acceptance itself is unchanged | `pair_<package_reason>__<replay_reason>` (integer count per reason pair; only non-zero pairs are sent; both reasons are closed enums, see below), criterion_count, no_evidence_count, verification_coverage (`full`/`partial`/`low`/`unknown`), surface (`cli_run`/`mcp_execute`/`evolve`/`unknown`), check_package (`on`/`off`/`unknown`), check_package_status (`admitted`/`construction_failed`/`rejected`/`not_run`/`unknown`), runtime_backend (a shipped runtime backend name, else `unknown`), app_version, os, ci |
 
 Notes:
 
@@ -120,6 +121,23 @@ Notes:
   stay in the local event store (`execution.verify.failed`), which also
   records `verify_cause` and the local-only `verify_cwd` for per-session
   debugging.
+- `acceptance_no_evidence` counts why a run accepted criteria without
+  evidence, so coverage can be improved where it is missing. `package_reason`
+  says why the check package did not decide the criterion: `uncovered` (no
+  admitted check is linked to it), `no_admitted_package` (the run was decided
+  with no admitted package), `no_binding`, `no_binding_after_request`,
+  `no_binding_budget_exhausted` (no binding reaches the target),
+  `script_check_advisory` (only model-written script checks passed),
+  `no_held_out_case` (no reproduction oracle passed a held-out case the base
+  failed), `no_reproduction_check` (only preservation checks passed), or
+  `unknown`. `replay_reason` says why the legacy verifier had no evidence:
+  `environment_unverifiable`, `transcript_unavailable`, `no_verifier_verdict`,
+  `verifier_verdict_not_passed`, `no_legacy_record`, or `unknown`. Both are
+  read from the product's typed decision state, never from text, and anything
+  else folds to `unknown` before serialization. The event never carries a
+  criterion, check, binding, path, or identifier. A run whose check package
+  was off, not admitted before the worker started, or not consulted by its
+  execution path is not reconciled, so it sends no row.
 - `ref` is one of `direct`, `readme`, `readme-hero`, `readme-ko`,
   `readme-hero-ko`, `readme-zh`, `readme-hero-zh`, or `docs-getting-started`.
   Every other value folds to `direct` before serialization.
@@ -190,6 +208,9 @@ Collection is triggered only at these audited call sites:
   `EvaluateHandler.handle()` (direct `ouroboros_evaluate`) and
   `ChecklistVerifyHandler`'s nested multi-AC delegation; suppresses it when
   the same handler runs behind the job-backed `ouroboros_start_evaluate` path;
+- [`src/ouroboros/boundary/run_control.py`](src/ouroboros/boundary/run_control.py):
+  once per decided run, the `acceptance_no_evidence` counts
+  ([`src/ouroboros/boundary/no_evidence.py`](src/ouroboros/boundary/no_evidence.py));
 - [`scripts/install.sh`](scripts/install.sh) — successful install completion.
   [`scripts/install.ps1`](scripts/install.ps1), the Windows installer, emits
   neither `install_started` nor `install_completed`. The `ouroboros setup`

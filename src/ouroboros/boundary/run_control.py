@@ -5,7 +5,9 @@ default), prepares the package before the worker starts, installs
 ``CheckPackageAuthority`` on the runner so the package decides the criteria it
 covers before the terminal status is persisted, and afterwards renders the
 outcome and a closed-value summary of it (``outcome_meta``) that the MCP
-``execute_seed`` result carries. Nothing here is sent as telemetry.
+``execute_seed`` result carries. The only telemetry is one anonymous
+``acceptance_no_evidence`` count per decided run of the criteria accepted
+without evidence and why (``boundary/no_evidence.py``); it decides nothing.
 
 With the switch ``off`` nothing here calls a model, writes an event, or
 touches the runner: the run is the legacy run.
@@ -39,6 +41,7 @@ from ouroboros.boundary.authority import (
     CheckPackageAuthority,
 )
 from ouroboros.boundary.ledger import BoundaryLedger, BoundaryOrderError
+from ouroboros.boundary.no_evidence import report_no_evidence
 from ouroboros.boundary.resume import (
     ResumedBoundary,
     ResumedCheckPackageAuthority,
@@ -171,6 +174,8 @@ class CheckPackageRun:
     resuming: bool = False
     _resume_boundary: ResumedBoundary | None = field(default=None, repr=False)
     _binding: dict[str, Any] = field(default_factory=dict, repr=False)
+    runtime_backend: str | None = None
+    _no_evidence_reported: bool = field(default=False, repr=False)
 
     @classmethod
     def resolve(cls, cli_value: bool | None = None) -> CheckPackageRun:
@@ -230,6 +235,7 @@ class CheckPackageRun:
         the legacy verifier. A resumed run installs what ``load`` read from
         the journal (read here when the run was not loaded as a resume).
         """
+        self.runtime_backend = runtime_backend
         if resume and not self.resuming:
             await self._load_resume(event_store, execution_id)
         if self.resuming:
@@ -436,6 +442,7 @@ class CheckPackageRun:
                 execution_id=tracker.execution_id,
                 session_id=tracker.session_id,
                 terminal_status=status,
+                surface="mcp_execute",
             )
         except Exception:  # noqa: BLE001 - enrichment must not fail the tool result
             return {}
@@ -568,18 +575,33 @@ class CheckPackageRun:
             return "package_accepted_over_legacy_reject"
         return "package_rejected_over_legacy_accept"
 
-    def finish(self, terminal_status: str | None) -> None:
+    def finish(self, terminal_status: str | None, *, surface: str | None = None) -> None:
         """Close the run's check package record once the final verdict exists.
 
         On a terminal status (``completed``, ``failed``, ``cancelled``; never
         ``paused``) after the authority decided, the in-process state that
         still holds the held-out cases is dropped (the authority already did
-        for its own).
+        for its own), and the criteria accepted without evidence are counted
+        once per run (``report_no_evidence``; ``surface`` names the caller).
         """
         if terminal_status in ("completed", "failed", "cancelled") and (
             self.authority is None or self.authority.outcome is not None
         ):
             forget_live_state(self.state)
+        outcome = self._outcome()
+        if (
+            terminal_status in ("completed", "failed", "cancelled")
+            and outcome is not None
+            and not self._no_evidence_reported
+        ):
+            self._no_evidence_reported = True
+            report_no_evidence(
+                outcome,
+                surface=surface,
+                check_package="on" if self.enabled or self.resumed is not None else "off",
+                check_package_status=self.status,
+                runtime_backend=self.runtime_backend,
+            )
 
     async def outcome_meta(
         self,
@@ -589,9 +611,10 @@ class CheckPackageRun:
         session_id: str | None,
         terminal_status: str | None,
         verdict_available: bool = True,
+        surface: str | None = None,
     ) -> dict[str, str]:
         """The closed-value summary of this run's check package outcome (local only)."""
-        self.finish(terminal_status)
+        self.finish(terminal_status, surface=surface)
         legacy_verdict = self._legacy_verdict(terminal_status, verdict_available=verdict_available)
         meta = {
             "check_package": "on" if self.enabled or self.resumed is not None else "off",
