@@ -7,6 +7,8 @@ import json
 import pytest
 
 from ouroboros.providers.claude_cli_output import (
+    CLAUDE_INIT_MODEL_SOURCE,
+    CLAUDE_MODEL_USAGE_SOURCE,
     MAX_CLAUDE_CLI_EVENTS,
     MAX_CLAUDE_CLI_OUTPUT_CHARS,
     ClaudeCliOutputError,
@@ -698,3 +700,70 @@ def test_rejects_excessive_event_count() -> None:
 
     with pytest.raises(ClaudeCliOutputError, match="event count"):
         normalize_claude_cli_output(json.dumps(events))
+
+
+_OPUS_USAGE = {"inputTokens": 3, "outputTokens": 1, "canonicalModel": "claude-opus-5-5"}
+_OMIT_MODEL_USAGE = object()
+
+
+def test_init_event_model_is_the_reported_model() -> None:
+    events = _events(_result(modelUsage={"claude-opus-5-5-20260901": _OPUS_USAGE}))
+    events[0]["model"] = "claude-opus-5-5"
+
+    normalized = normalize_claude_cli_output("\n".join(json.dumps(event) for event in events))
+
+    # The init event wins over the billed ``modelUsage`` key when both exist.
+    assert normalized.model == "claude-opus-5-5"
+    assert normalized.model_source == CLAUDE_INIT_MODEL_SOURCE
+
+
+def test_json_envelope_reports_its_single_model_usage_key() -> None:
+    payload = _result(modelUsage={"claude-haiku-4-5-20251001": _OPUS_USAGE})
+
+    normalized = normalize_claude_cli_output(json.dumps(payload))
+
+    assert normalized.model == "claude-haiku-4-5-20251001"
+    assert normalized.model_source == CLAUDE_MODEL_USAGE_SOURCE
+
+
+@pytest.mark.parametrize(
+    "model_usage",
+    [
+        pytest.param(_OMIT_MODEL_USAGE, id="missing"),
+        pytest.param({}, id="empty"),
+        pytest.param({"claude-opus-5-5": _OPUS_USAGE, "claude-haiku-4-5": {}}, id="two-keys"),
+        pytest.param({"not a model id": {}}, id="whitespace-key"),
+        pytest.param(["claude-opus-5-5"], id="not-an-object"),
+    ],
+)
+def test_no_single_reported_model_yields_no_model(model_usage: object) -> None:
+    payload = _result() if model_usage is _OMIT_MODEL_USAGE else _result(modelUsage=model_usage)
+
+    normalized = normalize_claude_cli_output(json.dumps(payload))
+
+    assert normalized.result == "done"
+    assert normalized.model is None
+    assert normalized.model_source is None
+
+
+@pytest.mark.parametrize("init_model", [None, "", "   ", 42, "claude opus", "x" * 257])
+def test_malformed_init_model_is_ignored_without_rejecting_the_envelope(
+    init_model: object,
+) -> None:
+    events = _events()
+    if init_model is not None:
+        events[0]["model"] = init_model
+
+    normalized = normalize_claude_cli_output(json.dumps(events))
+
+    assert normalized.result == "done"
+    assert normalized.model is None
+
+
+def test_init_event_without_a_model_falls_back_to_a_single_model_usage_key() -> None:
+    events = _events(_result(modelUsage={"claude-opus-5-5": _OPUS_USAGE}))
+
+    normalized = normalize_claude_cli_output(json.dumps(events))
+
+    assert normalized.model == "claude-opus-5-5"
+    assert normalized.model_source == CLAUDE_MODEL_USAGE_SOURCE

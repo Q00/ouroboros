@@ -19,7 +19,10 @@ from ouroboros.orchestrator.claude_worker_runtime import (
     ClaudeWorkerTransport,
     build_claude_worker_runtime,
 )
-from ouroboros.orchestrator.frugality_evidence import harvest_token_spend
+from ouroboros.orchestrator.frugality_evidence import (
+    harvest_token_spend,
+    observed_effective_model,
+)
 from ouroboros.orchestrator.worker_runtime import WorkerTurn
 
 
@@ -364,7 +367,7 @@ class TestRuntimeWiring:
         transport = runtime._transport
         observed_cwds: list[str | None] = []
 
-        async def fake_run(command, prompt, cwd):
+        async def fake_run(command, prompt, cwd, **_kwargs):
             observed_cwds.append(cwd)
             return WorkerTurn(text="ok", session_id="session-1")
 
@@ -620,7 +623,9 @@ class TestNameArgs:
 async def _capture_spawn(transport: ClaudeWorkerTransport, **kwargs) -> list[str]:
     captured: dict[str, list[str]] = {}
 
-    async def _fake_run(command: list[str], prompt: str, cwd: str | None) -> WorkerTurn:
+    async def _fake_run(
+        command: list[str], prompt: str, cwd: str | None, **_kwargs: object
+    ) -> WorkerTurn:
         captured["command"] = command
         return WorkerTurn(text="ok", session_id="child-1")
 
@@ -641,7 +646,9 @@ async def _capture_spawn(transport: ClaudeWorkerTransport, **kwargs) -> list[str
 async def _capture_resume(transport: ClaudeWorkerTransport, **kwargs) -> list[str]:
     captured: dict[str, list[str]] = {}
 
-    async def _fake_run(command: list[str], prompt: str, cwd: str | None) -> WorkerTurn:
+    async def _fake_run(
+        command: list[str], prompt: str, cwd: str | None, **_kwargs: object
+    ) -> WorkerTurn:
         captured["command"] = command
         return WorkerTurn(text="ok", session_id="s1")
 
@@ -733,6 +740,139 @@ class TestPerCallModelArg:
         transport = ClaudeWorkerTransport(cli_path="claude")
         command = await _capture_spawn(transport)
         assert "--model" not in command
+
+
+class TestModelObservation:
+    """A worker turn records the concrete model Claude reports, never the request."""
+
+    _ENVELOPE = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "result": "ok",
+        "session_id": "worker-id",
+        "usage": {"input_tokens": 5, "output_tokens": 1},
+        "modelUsage": {"claude-opus-5-5-20260901": {"inputTokens": 5, "outputTokens": 1}},
+    }
+
+    def test_single_model_usage_key_becomes_the_observation(self) -> None:
+        turn = ClaudeWorkerTransport._parse_turn(
+            json.dumps(self._ENVELOPE), "", 0, requested_model="opus"
+        )
+
+        assert turn.model_observation == {
+            "mode": "pinned",
+            "status": "observed",
+            "requested_model": "opus",
+            "effective_model": "claude-opus-5-5-20260901",
+            "source": "runtime_stream:result:event.modelUsage",
+        }
+
+    def test_unpinned_turn_is_automatic(self) -> None:
+        turn = ClaudeWorkerTransport._parse_turn(json.dumps(self._ENVELOPE), "", 0)
+
+        assert turn.model_observation is not None
+        assert turn.model_observation["mode"] == "automatic"
+        assert turn.model_observation["requested_model"] is None
+
+    def test_stream_init_model_becomes_the_observation(self) -> None:
+        events = [
+            {
+                "type": "system",
+                "subtype": "init",
+                "session_id": "worker-id",
+                "model": "claude-opus-5-5",
+            },
+            self._ENVELOPE,
+        ]
+        stdout = "\n".join(json.dumps(event) for event in events)
+
+        turn = ClaudeWorkerTransport._parse_turn(stdout, "", 0, requested_model="opus")
+
+        assert turn.model_observation is not None
+        assert turn.model_observation["effective_model"] == "claude-opus-5-5"
+        assert turn.model_observation["source"] == "runtime_stream:system.init:event.model"
+
+    @pytest.mark.parametrize(
+        "model_usage",
+        [
+            pytest.param(None, id="missing"),
+            pytest.param({"claude-opus-5-5": {}, "claude-haiku-4-5": {}}, id="two-keys"),
+        ],
+    )
+    def test_no_single_reported_model_means_no_observation(self, model_usage: object) -> None:
+        envelope = {key: value for key, value in self._ENVELOPE.items() if key != "modelUsage"}
+        if model_usage is not None:
+            envelope["modelUsage"] = model_usage
+
+        turn = ClaudeWorkerTransport._parse_turn(
+            json.dumps(envelope), "", 0, requested_model="opus"
+        )
+
+        assert turn.text == "ok"
+        assert turn.model_observation is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("model", "expected"),
+        [("opus", "opus"), ("default", None), (None, None)],
+    )
+    async def test_spawn_and_resume_pass_the_requested_model_to_the_parser(
+        self, model: str | None, expected: str | None
+    ) -> None:
+        transport = ClaudeWorkerTransport(cli_path="claude", persist_sessions=True)
+        seen: list[object] = []
+
+        async def _fake_run(command, prompt, cwd, **kwargs) -> WorkerTurn:
+            seen.append(kwargs.get("requested_model"))
+            return WorkerTurn(text="ok", session_id="s1")
+
+        transport._run = _fake_run  # type: ignore[method-assign]
+        await transport.spawn(
+            prompt="hi",
+            system_prompt=None,
+            cwd="/tmp",
+            permission_mode=None,
+            model=model,
+            reasoning_effort=None,
+        )
+        await transport.resume(session_id="s1", prompt="again", model=model)
+
+        assert seen == [expected, expected]
+
+    @pytest.mark.asyncio
+    async def test_runtime_result_carries_the_observation_to_frugality(self) -> None:
+        rt = build_claude_worker_runtime(cwd="/tmp", model="opus")
+        transport = rt._transport
+        stdout = json.dumps(self._ENVELOPE)
+
+        async def _fake_spawn(**kwargs) -> WorkerTurn:
+            return ClaudeWorkerTransport._parse_turn(stdout, "", 0, requested_model=kwargs["model"])
+
+        transport.spawn = _fake_spawn  # type: ignore[method-assign]
+
+        messages = [message async for message in rt.execute_task("hi")]
+
+        assert messages[-1].data["model_observation"]["effective_model"] == (
+            "claude-opus-5-5-20260901"
+        )
+        assert observed_effective_model(messages) == "claude-opus-5-5-20260901"
+        assert harvest_token_spend(messages) is not None
+
+    @pytest.mark.asyncio
+    async def test_runtime_result_without_observation_has_no_key(self) -> None:
+        rt = build_claude_worker_runtime(cwd="/tmp")
+        transport = rt._transport
+
+        async def _fake_spawn(**_kwargs) -> WorkerTurn:
+            return WorkerTurn(text="ok", session_id="worker-id")
+
+        transport.spawn = _fake_spawn  # type: ignore[method-assign]
+
+        messages = [message async for message in rt.execute_task("hi")]
+
+        assert "model_observation" not in messages[-1].data
+        assert observed_effective_model(messages) is None
 
 
 class TestPersistedResumeControls:
