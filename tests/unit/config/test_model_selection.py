@@ -266,6 +266,15 @@ class TestExplicitBackends:
         resolved = _resolve("qa", "litellm", invocation_model="frontier")
         assert resolved.model == DEFAULT_OPUS_MODEL
 
+    @pytest.mark.parametrize(
+        ("backend", "expected"), [("litellm", DEFAULT_SONNET_MODEL), ("copilot", "default")]
+    )
+    def test_invocation_auto_wins_over_configured_models_on_explicit_backends(
+        self, backend: str, expected: str
+    ) -> None:
+        resolved = _resolve("qa", backend, config=_CHOSEN_CONFIG, invocation_model="auto")
+        assert (resolved.model, resolved.source) == (expected, "auto")
+
     def test_copilot_keeps_configured_values_and_defaults_to_sentinel(self) -> None:
         assert _resolve("qa", "copilot", config=_CHOSEN_CONFIG).model == "gpt-5-nano"
         resolved = _resolve("qa", "copilot", config=OuroborosConfig())

@@ -21,8 +21,8 @@ setting are explicit choices and always apply.
 Resolution order (first match wins):
 
 1. ``invocation_model``: a tier name resolves through the tier table, ``auto``
-   selects the role's tier (explicit backends continue to step 3), and any
-   other value is used as given.
+   selects the role's tier (the shipped pin on litellm, ``"default"`` on
+   copilot), and any other value is used as given.
 2. ``OUROBOROS_MODEL`` / ``models.default`` when not ``auto``, same treatment.
 3. Explicit backends: the role's env vars and config fields in order, then the
    backend fallback.
@@ -429,7 +429,7 @@ def resolve_role_model(
         return ResolvedModel(key, spec.tier, canonical, model, source)
 
     requested = (invocation_model or "").strip()
-    if requested and (requested != AUTO_MODEL or selection != "explicit"):
+    if requested:
         source: ModelSource = "auto" if requested == AUTO_MODEL else "invocation"
         return resolved(_explicit_choice(requested, spec, canonical), source)
 
