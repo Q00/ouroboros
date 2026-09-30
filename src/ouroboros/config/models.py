@@ -787,14 +787,9 @@ class TelemetryConfig(BaseModel, frozen=True):
         enabled: Whether anonymous usage events may be sent. Environment
             overrides (DO_NOT_TRACK, OUROBOROS_TELEMETRY) always win over
             this flag — see config.loader.get_telemetry_enabled().
-        acceptance_no_evidence: Opt in to the ``acceptance_no_evidence``
-            counts (TELEMETRY.md). A scope expansion after the first
-            notice, so it is off by default and only an explicit ``true``
-            here enables it; every control that disables ``enabled`` still wins.
     """
 
     enabled: bool = True
-    acceptance_no_evidence: bool = False
 
 
 class SeedConfig(BaseModel, frozen=True):

@@ -43,9 +43,6 @@ from .calc_fixtures import _seed
 def captured(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, Any]]]:
     """Every event the telemetry boundary would queue, after its own folding."""
     events: list[tuple[str, dict[str, Any]]] = []
-    # Telemetry on and the event opted in; the gate is tested in test_telemetry.py.
-    monkeypatch.setattr(telemetry, "is_enabled", lambda: True)
-    monkeypatch.setattr(telemetry, "_acceptance_no_evidence_opted_in", lambda: True)
     monkeypatch.setattr(
         telemetry, "capture", lambda event, properties=None: events.append((event, properties))
     )

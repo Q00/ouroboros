@@ -1616,10 +1616,6 @@ class TestAcceptanceNoEvidence:
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "config.yaml").write_text(text, encoding="utf-8")
 
-    @pytest.fixture(autouse=True)
-    def _opted_in(self) -> None:
-        self._config("telemetry:\n  acceptance_no_evidence: true\n")
-
     @staticmethod
     def _capture(pairs: Any, **overrides: Any) -> None:
         kwargs: dict[str, Any] = {
@@ -1688,37 +1684,31 @@ class TestAcceptanceNoEvidence:
         telemetry.flush(timeout=2.0)
         assert sent == []
 
-    def test_disabled_telemetry_sends_nothing(
-        self, sent: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("DO_NOT_TRACK", "1")
+    def test_on_by_default_without_any_config(self, sent: list[dict[str, Any]]) -> None:
+        assert not (Path.home() / ".ouroboros" / "config.yaml").exists()
         self._capture([("uncovered", "no_verifier_verdict")])
         telemetry.flush(timeout=2.0)
-        assert sent == []
+        assert len(sent) == 1
 
     @pytest.mark.parametrize(
-        "config",
+        ("env", "config"),
         (
-            None,
-            "telemetry:\n  enabled: true\n",
-            "telemetry:\n  acceptance_no_evidence: false\n",
-            "telemetry: [not, a, mapping]\n",
+            ({"DO_NOT_TRACK": "1"}, None),
+            ({"OUROBOROS_TELEMETRY": "0"}, None),
+            ({}, "telemetry:\n  enabled: false\n"),
         ),
     )
-    def test_default_off_without_an_explicit_opt_in(
-        self, sent: list[dict[str, Any]], config: str | None
+    def test_every_opt_out_suppresses_it(
+        self,
+        sent: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
+        env: dict[str, str],
+        config: str | None,
     ) -> None:
-        path = Path.home() / ".ouroboros" / "config.yaml"
-        if config is None:
-            path.unlink()
-        else:
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        if config is not None:
             self._config(config)
-        self._capture([("uncovered", "no_verifier_verdict")])
-        telemetry.flush(timeout=2.0)
-        assert sent == []
-
-    def test_opt_out_wins_over_the_opt_in(self, sent: list[dict[str, Any]]) -> None:
-        self._config("telemetry:\n  enabled: false\n  acceptance_no_evidence: true\n")
         self._capture([("uncovered", "no_verifier_verdict")])
         telemetry.flush(timeout=2.0)
         assert sent == []

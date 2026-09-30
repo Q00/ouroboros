@@ -43,9 +43,10 @@ not require users to acknowledge a new notice.
   attribution, recovery actions, and subagent dispatch data; added daily
   deduplication for retained command and service activity.
 - 2026-10: added `acceptance_no_evidence`, closed-reason counts of criteria a
-  run accepted without evidence from any verifier (see the table below). Off
-  by default; sent only after an explicit opt in
-  (`telemetry.acceptance_no_evidence: true`).
+  run accepted without evidence from any verifier (see the table below). On
+  by default under the existing opt-outs: closed failure reason codes and
+  counts, the same class of data as `ac_verify_failed`, so not a scope
+  expansion.
 
 ## How to opt out
 
@@ -96,7 +97,7 @@ use. Each row below is the exact property set accepted by the serializer.
 | `workflow_outcome` | A background workflow, a terminal `ooo run`, or direct evaluation reaches a terminal result inside Ouroboros (a paused run is not terminal and emits nothing) | command, terminal_status, verified, failure_reason_code (non-success only), failure_cause (non-success `run` only; closed enum, see below), runtime_backend, app_version, os, ci, `$insert_id` |
 | `runtime_drift` | A frozen runtime authority input (Codex config, CLI executable, dispatch registry, profile routing) is observed to have changed after the runtime initialized; the run continues on the re-baselined input | kind (closed enum: `codex_config`/`cli_executable`/`skill_dispatcher`/`mcp_handler_registry`/`skill_dispatch_registry`/`profile_routing`/`baseline_unavailable`/`attestation_timeout`/`unknown`), runtime_backend, app_version, os, ci |
 | `ac_verify_failed` | The orchestrator's deterministic AC verify gate rejects an attempt (`run_verify_commands` enabled) | cause (closed enum: `invalid_contract`/`artifacts_missing`/`artifacts_missing_found_elsewhere`/`environment_unverifiable`/`timeout`/`exit_nonzero`/`output_assertion_unmatched`/`workspace_mutated`/`unknown`), runtime_backend, app_version, os, ci |
-| `acceptance_no_evidence` | Opt-in only (default off; see below). A terminal `ooo run`, MCP `execute_seed` run, or evolve generation whose acceptance the check package authority reconciled, when that decision accepted at least one criterion that no verifier had evidence for (the check package did not decide it and the legacy verifier had no evidence); at most one row per run, none when every accepted criterion had evidence. The acceptance itself is unchanged | `pair_<package_reason>__<replay_reason>` (integer count per reason pair; only non-zero pairs are sent; both reasons are closed enums, see below), criterion_count, no_evidence_count, verification_coverage (`full`/`partial`/`low`/`unknown`), surface (`cli_run`/`mcp_execute`/`evolve`/`unknown`), check_package (`on`/`off`/`unknown`), check_package_status (`admitted`/`construction_failed`/`rejected`/`not_run`/`unknown`), runtime_backend (a shipped runtime backend name, else `unknown`), app_version, os, ci |
+| `acceptance_no_evidence` | A terminal `ooo run`, MCP `execute_seed` run, or evolve generation whose acceptance the check package authority reconciled, when that decision accepted at least one criterion that no verifier had evidence for (the check package did not decide it and the legacy verifier had no evidence); at most one row per run, none when every accepted criterion had evidence. The acceptance itself is unchanged | `pair_<package_reason>__<replay_reason>` (integer count per reason pair; only non-zero pairs are sent; both reasons are closed enums, see below), criterion_count, no_evidence_count, verification_coverage (`full`/`partial`/`low`/`unknown`), surface (`cli_run`/`mcp_execute`/`evolve`/`unknown`), check_package (`on`/`off`/`unknown`), check_package_status (`admitted`/`construction_failed`/`rejected`/`not_run`/`unknown`), runtime_backend (a shipped runtime backend name, else `unknown`), app_version, os, ci |
 
 Notes:
 
@@ -126,11 +127,12 @@ Notes:
   records `verify_cause` and the local-only `verify_cwd` for per-session
   debugging.
 - `acceptance_no_evidence` counts why a run accepted criteria without
-  evidence, so coverage can be improved where it is missing. It is a scope
-  expansion after the first notice, so it is off by default and sent only
-  when `~/.ouroboros/config.yaml` sets `telemetry.acceptance_no_evidence:
-  true`; an absent, invalid, or unreadable configuration is not an opt in,
-  and every opt-out control above still wins. `package_reason`
+  evidence, so coverage can be improved where it is missing. It is on by
+  default, under every opt-out above (`DO_NOT_TRACK`, `OUROBOROS_TELEMETRY=0`,
+  `telemetry.enabled: false`). It is not a scope expansion and needs no fresh
+  notice: it sends only closed-enum verification reason codes and counts,
+  the same class of data as the default-on `ac_verify_failed` event and
+  within the "failure reason codes" the privacy contract already names. `package_reason`
   says why the check package did not decide the criterion: `uncovered` (no
   admitted check is linked to it), `no_admitted_package` (the run was decided
   with no admitted package), `no_binding`, `no_binding_after_request`,
