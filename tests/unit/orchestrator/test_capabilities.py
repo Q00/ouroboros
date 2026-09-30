@@ -167,7 +167,7 @@ _EXPECTED_OUROBOROS_REQUIRED_CONTEXT_KEYS = {
     "ouroboros_evolve_rewind": ("lineage_id", "to_generation"),
     "ouroboros_evolve_step": ("lineage_id",),
     "ouroboros_execute_seed": ("seed_path", "cwd"),
-    "ouroboros_generate_seed": ("session_id",),
+    "ouroboros_generate_seed": ("session_id", "session_context"),
     "ouroboros_interview": (
         "initial_context",
         "cwd",

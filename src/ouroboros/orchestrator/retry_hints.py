@@ -18,7 +18,12 @@ from ouroboros.orchestrator.decomposition_policy import redact_and_truncate_text
 from ouroboros.orchestrator.evidence.runtime_metadata import _STALL_SENTINEL
 from ouroboros.orchestrator.execution_runtime_scope import build_ac_runtime_identity
 from ouroboros.orchestrator.failure_taxonomy import FailureClass, classify_hard_precondition
-from ouroboros.orchestrator.parallel_executor_models import ACExecutionOutcome, ACExecutionResult
+from ouroboros.orchestrator.parallel_executor_models import (
+    ACExecutionOutcome,
+    ACExecutionResult,
+    package_failure_class,
+    package_repair,
+)
 from ouroboros.resilience.lateral import build_lateral_change_of_approach_directive
 
 if TYPE_CHECKING:
@@ -99,7 +104,14 @@ def build_assertion_safe_retry_hint(
         if outcome.reason:
             observations.append("Harness verification failed: " + outcome.reason)
         if outcome.workspace_mutated:
-            observations.append("The workspace changed while harness verification was running.")
+            observations.append(
+                "verify_command itself created, modified, or deleted workspace files. "
+                "Verification must only observe. If your tests or the program under "
+                "test write state (fixtures, JSON stores, logs, generated data), make "
+                "them write to a temporary directory instead of the workspace. "
+                "Bytecode caches and Git-ignored outputs are already exempt, so "
+                "disabling them changes nothing."
+            )
         if observations:
             sections.append(
                 "### Harness observations\n"
@@ -139,7 +151,11 @@ def build_ac_retry_prompt(
     parts: list[str] = []
     if failure_class:
         parts.append(f"### Prior failure classification\n{failure_class}")
-    if result.error != _STALL_SENTINEL:
+    if repair := package_repair(result):
+        # The frozen check package failed this criterion; its counterexample is
+        # the repair signal (held-out inputs are already withheld upstream).
+        parts.append("### Check package counterexample\n" + _sanitize_fragment(repair, spec))
+    elif result.error != _STALL_SENTINEL:
         hint = build_assertion_safe_retry_hint(
             outcome=outcome,
             result=result,
@@ -167,6 +183,9 @@ def failure_class_for_result(result: ACExecutionResult) -> str | None:
 
     if result.outcome is ACExecutionOutcome.BLOCKED:
         return FailureClass.BLOCKED.value
+    if (package_class := package_failure_class(result)) is not None:
+        # A package-owned failure; a legacy-owned one keeps the legacy class below.
+        return package_class
     for message in reversed(result.messages):
         if not (message.is_final and message.is_error):
             continue

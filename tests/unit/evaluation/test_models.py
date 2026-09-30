@@ -287,7 +287,7 @@ class TestEvaluationResult:
             execution_id="exec-1",
             stage1_result=MechanicalResult(
                 passed=False,
-                checks=(CheckResult(CheckType.LINT, False, "Failed"),),
+                checks=(CheckResult(CheckType.LINT, False, "Failed", executed=True),),
             ),
         )
         assert "Stage 1 failed" in result.failure_reason

@@ -729,6 +729,9 @@ Changes under `src/ouroboros/orchestrator/` affect runtime behavior documentatio
 | `mcp_config.py` / `mcp_tools.py` | `docs/api/mcp.md` — MCP config YAML schema |
 | `command_dispatcher.py` | `docs/architecture.md` — command dispatch model |
 | `level_context.py` | `docs/architecture.md` — level context description |
+| `evidence/command_replay.py` | `docs/contributing/verifier-evidence-policy.md`: replay selection, isolation, output-filter pipelines, claim linkage and the denylist |
+| `evidence/replay_policy.py` | `docs/contributing/verifier-evidence-policy.md`: the replay allowlist, wrapper and launcher resolution, test-target linkage and configuration narrowing |
+| `runtime/exec_sandbox.py`, `runtime/_confine_exec.py`, `runtime/_sandbox_probe.py` | The `exec_sandbox` module docstring is the contract (writable roots, metadata, network, environment, backends, probe, unavailable reasons); callers document their use of it (verifier replay: `docs/contributing/verifier-evidence-policy.md`) |
 
 **Runtime availability rule**: If `create_agent_runtime()` raises `NotImplementedError` for a backend, that backend **must not** appear in docs as a working option. Runtime backend availability is registry-owned; when `runtime_backend_choices()` or setup support changes, update the runtime capability matrix, setup docs, and per-runtime guide/gap documentation together.
 

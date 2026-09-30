@@ -20,9 +20,17 @@ from __future__ import annotations
 
 from enum import StrEnum
 from pathlib import Path
-from typing import Final, Literal
+from typing import Any, Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    ValidationError,
+    model_serializer,
+    model_validator,
+)
 import yaml
 
 _PROFILES_DIR: Final[Path] = Path(__file__).resolve().parent.parent / "profiles"
@@ -63,6 +71,22 @@ class EvidenceSchema(BaseModel):
             "PR will define an evaluator."
         ),
     )
+    optional: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Evidence field names a leaf result may include. They are kept on the "
+            "scoped record but never required (e.g. 'entry_points')."
+        ),
+    )
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_optional(self, handler: SerializerFunctionWrapHandler) -> Any:
+        # A profile without optional fields keeps the bytes it had before this
+        # field existed, so a persisted profile snapshot revalidates unchanged.
+        data = handler(self)
+        if isinstance(data, dict) and not self.optional:
+            data.pop("optional", None)
+        return data
 
 
 class ExecutionProfile(BaseModel):

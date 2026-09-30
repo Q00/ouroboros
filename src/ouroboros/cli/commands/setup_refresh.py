@@ -88,6 +88,13 @@ def refresh_runtime_artifacts() -> None:
         else:
             failed.append("pi")
 
+    omp_bridge = Path.home() / ".omp" / "agent" / "extensions" / setup._OMP_OOO_BRIDGE_FILENAME
+    if omp_bridge.exists():
+        if setup._install_omp_ooo_bridge():
+            refreshed.append("omp")
+        else:
+            failed.append("omp")
+
     gjc_expected = False
     gjc_succeeded = True
     gjc_bridge = (

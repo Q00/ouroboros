@@ -57,6 +57,7 @@ def _is_known_runtime_selector(value: object) -> bool:
         "kiro",
         "opencode",
         "pi",
+        "omp",
     }
 
 

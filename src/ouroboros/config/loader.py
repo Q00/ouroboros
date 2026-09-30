@@ -61,6 +61,7 @@ from ouroboros.config.models import (  # noqa: E402
     get_default_config,
     get_default_credentials,
 )
+from ouroboros.config.telemetry_env import telemetry_opt_out_in_env
 from ouroboros.config.untrusted_env import is_untrusted_env_denied_key
 from ouroboros.core.errors import ConfigError  # noqa: E402
 from ouroboros.orchestrator_stage import (  # noqa: E402
@@ -92,6 +93,9 @@ _GROK_LLM_BACKENDS = frozenset({"grok", "grok_cli", "grok_build"})
 # configured default model, so generic Claude default ids map to the CLI's
 # own ``"default"`` sentinel, exactly like antigravity and grok above.
 _ZCODE_LLM_BACKENDS = frozenset({"zcode", "zcode_cli"})
+# OMP (Oh My Pi, the ``omp`` CLI): Pi-family agent; its model comes from its
+# own config/roles, so generic Claude defaults map to the ``"default"`` sentinel.
+_OMP_LLM_BACKENDS = frozenset({"omp", "omp_cli"})
 # Every backend whose default model is the backend-safe ``"default"`` sentinel
 # rather than a runnable shipped id, because the CLI selects its model via
 # config (not a ``--model`` flag). Roster-level normalization must cover the
@@ -108,6 +112,7 @@ _SENTINEL_DEFAULT_BACKENDS = (
     | _ANTIGRAVITY_LLM_BACKENDS
     | _GROK_LLM_BACKENDS
     | _ZCODE_LLM_BACKENDS
+    | _OMP_LLM_BACKENDS
 )
 _ZCODE_SCRIPT_SUFFIXES = frozenset({".cjs", ".js", ".mjs"})
 _OPENCODE_BACKENDS = frozenset({"opencode", "opencode_cli"})
@@ -120,6 +125,7 @@ _GJC_DEFAULT_MODEL = "default"
 _ANTIGRAVITY_DEFAULT_MODEL = "default"
 _GROK_DEFAULT_MODEL = "default"
 _ZCODE_DEFAULT_MODEL = "default"
+_OMP_DEFAULT_MODEL = "default"
 _PLACEHOLDER_API_KEY_PREFIX = "YOUR_"
 _PLACEHOLDER_API_KEY_SUFFIX = "_API_KEY"
 _DEFAULT_MAX_PARALLEL_WORKERS = 3
@@ -815,24 +821,14 @@ def get_agent_reasoning_effort() -> str | None:
 
 
 def get_execution_model() -> str | None:
-    """Return an explicit Execute-stage model pin, if one was configured.
-
-    Environment remains the one-off highest-priority override.  The web/TUI
-    setting writes ``execution.default_model``; an empty value or the UI's
-    ``default``/``current`` sentinel deliberately means "let this runtime pick"
-    rather than a model named ``default``.
-    """
-    env_model = os.environ.get("OUROBOROS_EXECUTION_MODEL")
-    if env_model is not None:
-        stripped = env_model.strip()
-        return None if not stripped or stripped.lower() in {"default", "current"} else stripped
-    try:
-        model = load_config().execution.default_model
-    except ConfigError:
-        return None
+    """Return the explicit Execute pin, or None for unset/automatic selection."""
+    model = os.environ.get("OUROBOROS_EXECUTION_MODEL")
     if model is None:
-        return None
-    stripped = model.strip()
+        try:
+            model = load_config().execution.default_model
+        except ConfigError:
+            return None
+    stripped = "" if model is None else model.strip()
     return None if not stripped or stripped.lower() in {"default", "current"} else stripped
 
 
@@ -1409,6 +1405,15 @@ def get_pi_cli_path() -> str | None:
     return None
 
 
+def __getattr__(name: str) -> object:
+    """Lazy re-exports for the OMP CLI-path helpers (module-size split)."""
+    if name in ("get_omp_cli_path", "resolve_omp_cli_path"):
+        from ouroboros.config import _omp_cli
+
+        return getattr(_omp_cli, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 def get_gjc_cli_path() -> str | None:
     """Get GJC CLI path from environment variable or config file.
 
@@ -1550,9 +1555,7 @@ def get_telemetry_enabled() -> bool:
     back on merely because the full application config could not be
     constructed.
     """
-    if os.environ.get("DO_NOT_TRACK", "").strip().lower() in ("1", "true", "on", "yes"):
-        return False
-    if _env_flag("OUROBOROS_TELEMETRY") is False:
+    if telemetry_opt_out_in_env():
         return False
     config_path = get_config_dir() / "config.yaml"
     # ``Path.exists()`` is false for a dangling symlink. Treat that as invalid
@@ -2013,8 +2016,9 @@ def get_llm_model_for_role(
     """Resolve the configured model for a logical internal-LLM role.
 
     Stage model fields are the default source of truth: interview roles use
-    ``clarification.default_model``, evaluate/execute roles use
-    ``evaluation.semantic_model``, and reflect roles use
+    ``clarification.default_model``, execute roles use an explicit
+    ``execution.default_model`` or their backend default, evaluate
+    roles use ``evaluation.semantic_model``, and reflect roles use
     ``resilience.reflect_model``. An explicitly-pinned legacy per-role field
     (e.g. ``llm.qa_model``) still takes precedence for backward compatibility,
     and an unmapped role degrades to the evaluate model rather than raising.
@@ -2036,6 +2040,12 @@ def get_llm_model_for_role(
         return get_clarification_model(resolved_backend)
     if stage == Stage.REFLECT:
         return get_reflect_model(resolved_backend)
+    if stage == Stage.EXECUTE:
+        if (execution_model := get_execution_model()) is not None:
+            return execution_model
+        if resolved_backend in {"litellm", "openai", "openrouter"}:
+            return get_semantic_model(resolved_backend)
+        return "default"
     return get_semantic_model(resolved_backend)
 
 
@@ -2097,6 +2107,8 @@ def _default_model_for_backend(
         return _GROK_DEFAULT_MODEL
     if resolved in _ZCODE_LLM_BACKENDS:
         return _ZCODE_DEFAULT_MODEL
+    if resolved in _OMP_LLM_BACKENDS:
+        return _OMP_DEFAULT_MODEL
     return default_model
 
 

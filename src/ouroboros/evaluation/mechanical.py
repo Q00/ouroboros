@@ -17,8 +17,15 @@ from pathlib import Path
 from typing import Any
 
 from ouroboros.core.errors import ValidationError
+from ouroboros.core.project_env import with_project_venv
 from ouroboros.core.types import Result
-from ouroboros.evaluation.models import CheckResult, CheckType, MechanicalResult
+from ouroboros.evaluation.command_dispatch import prepare_command
+from ouroboros.evaluation.models import (
+    COMMAND_CHECK_TYPES,
+    CheckResult,
+    CheckType,
+    MechanicalResult,
+)
 from ouroboros.events.base import BaseEvent
 from ouroboros.events.evaluation import (
     create_stage1_completed_event,
@@ -82,12 +89,14 @@ class CommandResult:
         stdout: Standard output
         stderr: Standard error
         timed_out: Whether the command timed out
+        executed_command: Arguments passed to the subprocess launcher, when attempted
     """
 
     return_code: int
     stdout: str
     stderr: str
     timed_out: bool = False
+    executed_command: tuple[str, ...] | None = None
 
 
 async def run_command(
@@ -105,14 +114,21 @@ async def run_command(
     Returns:
         CommandResult with output and status
     """
-    env = os.environ.copy()
+    # The detector accepts a tool the project's virtualenv provides, which a
+    # task worktree reaches only through the main working tree's, so the
+    # command resolves it the same way.
+    env = os.environ.copy() if working_dir is None else with_project_venv(os.environ, working_dir)
     # The MCP server sets this sentinel to prevent recursive server spawning.
     # Mechanical verification must test the repository as a fresh process would;
     # leaking the sentinel makes CLI tests take the nested-server early exit.
     env.pop("_OUROBOROS_NESTED", None)
     try:
+        prepared_command = prepare_command(command, env)
+    except ValueError as e:
+        return CommandResult(return_code=-1, stdout="", stderr=str(e))
+    try:
         process = await asyncio.create_subprocess_exec(
-            *command,
+            *prepared_command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=working_dir,
@@ -128,6 +144,7 @@ async def run_command(
                 return_code=process.returncode or 0,
                 stdout=stdout.decode("utf-8", errors="replace"),
                 stderr=stderr.decode("utf-8", errors="replace"),
+                executed_command=prepared_command,
             )
         except TimeoutError:
             process.kill()
@@ -137,6 +154,7 @@ async def run_command(
                 stdout="",
                 stderr="Command timed out",
                 timed_out=True,
+                executed_command=prepared_command,
             )
         except asyncio.CancelledError:
             if process.returncode is None:
@@ -148,12 +166,14 @@ async def run_command(
             return_code=-1,
             stdout="",
             stderr=f"Command not found: {e}",
+            executed_command=prepared_command,
         )
     except OSError as e:
         return CommandResult(
             return_code=-1,
             stdout="",
             stderr=f"OS error: {e}",
+            executed_command=prepared_command,
         )
 
 
@@ -218,7 +238,7 @@ class MechanicalVerifier:
             Result containing MechanicalResult and events, or error
         """
         if checks is None:
-            checks = list(CheckType)
+            checks = list(COMMAND_CHECK_TYPES)
 
         events: list[BaseEvent] = []
         check_results: list[CheckResult] = []
@@ -256,6 +276,7 @@ class MechanicalVerifier:
                             passed=False,
                             message=f"Coverage {coverage_score:.1%} below threshold {self.config.coverage_threshold:.1%}",
                             details=cr.details,
+                            executed=cr.executed,
                         )
                     )
                 else:
@@ -304,6 +325,7 @@ class MechanicalVerifier:
                 passed=True,
                 message=f"Check {check_type.value} skipped (no command configured)",
                 details={"skipped": True},
+                executed=False,
             )
 
         cmd_result = await run_command(
@@ -317,9 +339,15 @@ class MechanicalVerifier:
                 check_type=check_type,
                 passed=False,
                 message=f"Check {check_type.value} timed out after {self.config.timeout_seconds}s",
+                executed=True,
                 details={
                     "timed_out": True,
                     "command": list(command),
+                    **(
+                        {"executed_command": list(cmd_result.executed_command)}
+                        if cmd_result.executed_command is not None
+                        else {}
+                    ),
                     "working_dir": str(self.config.working_dir)
                     if self.config.working_dir
                     else None,
@@ -336,6 +364,8 @@ class MechanicalVerifier:
             "stdout_tail": _output_tail(cmd_result.stdout),
             "stderr_tail": _output_tail(cmd_result.stderr),
         }
+        if cmd_result.executed_command is not None:
+            details["executed_command"] = list(cmd_result.executed_command)
 
         # Extract coverage if this was a coverage check
         if check_type == CheckType.COVERAGE and passed:
@@ -354,6 +384,7 @@ class MechanicalVerifier:
             passed=passed,
             message=message,
             details=details,
+            executed=True,
         )
 
     def _get_command_for_check(self, check_type: CheckType) -> tuple[str, ...] | None:

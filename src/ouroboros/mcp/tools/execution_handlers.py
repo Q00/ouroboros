@@ -18,6 +18,8 @@ from rich.console import Console
 import structlog
 import yaml
 
+from ouroboros.boundary.ledger import BoundaryOrderError
+from ouroboros.boundary.run_control import CheckPackageRun, NotAppliedReason, not_applied_meta
 from ouroboros.config.loader import (
     default_execution_efficiency_mode,
     get_auto_evaluate_enabled,
@@ -50,12 +52,13 @@ from ouroboros.evaluation.verification_artifacts import build_verification_artif
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.tools._dashboard import resolve_dashboard_run_url
-from ouroboros.mcp.tools.background import start_background_tool_job
+from ouroboros.mcp.tools.background import job_work_error, start_background_tool_job
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
 from ouroboros.mcp.tools.job_observer import (
     append_job_observer_inline_handoff,
     build_job_observer_contract,
 )
+from ouroboros.mcp.tools.run_failure_meta import derive_run_failure_meta, launch_error
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_PLUGIN,
     DELEGATED_TO_SUBAGENT,
@@ -179,9 +182,9 @@ def _process_local_resume_block_error(
         message = "This process-local session is already being resumed"
     else:
         message = "This process-local session is held by another live owner"
-    return MCPToolError(
+    return launch_error(
+        "launch_resume_blocked",
         message,
-        tool_name="ouroboros_execute_seed",
         is_retriable=True,
         details={
             "session_id": tracker.session_id,
@@ -604,13 +607,6 @@ def resolve_auto_evaluate(config_flag: bool, per_call_override: bool | None) -> 
 def _result_session_id(result: MCPToolResult, fallback: str | None) -> str | None:
     session_id = result.meta.get("session_id")
     return session_id if isinstance(session_id, str) and session_id else fallback
-
-
-def _result_evaluation_working_dir(result: MCPToolResult, fallback: Path) -> Path:
-    worktree_path = result.meta.get("worktree_path")
-    if isinstance(worktree_path, str) and worktree_path:
-        return Path(worktree_path)
-    return fallback
 
 
 def _plugin_verification_meta(
@@ -1192,6 +1188,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
         execution_id: str | None = None,
         session_id_override: str | None = None,
         synchronous: bool = False,
+        check_package: CheckPackageRun | None = None,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Handle a seed execution request.
 
@@ -1203,6 +1200,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
             synchronous: When True, run execution inline (blocking) instead of
                 fire-and-forget.  Used by StartExecuteSeedHandler so the Job
                 system can track the real execution lifetime.
+            check_package: The run's loaded control (StartExecuteSeedHandler's).
 
         Returns:
             Result containing execution result or error.
@@ -1222,13 +1220,13 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 resolved_runtime_backend = None
             if resolved_runtime_backend == "host":
                 return Result.err(
-                    MCPToolError(
+                    launch_error(
+                        "launch_rejected",
                         "The 'host' agent runtime dispatches execution to the "
                         "calling MCP host and requires job tracking so "
                         "job_wait/job_status can surface pending_host_dispatches. "
                         "Use ouroboros_start_execute_seed (ooo run) instead of "
                         "ouroboros_execute_seed.",
-                        tool_name="ouroboros_execute_seed",
                     )
                 )
         cwd_result = self._resolve_dispatch_cwd_result(
@@ -1299,10 +1297,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
             max_parallel_workers = get_max_parallel_workers()
         except ConfigError as e:
             return Result.err(
-                MCPToolError(
-                    f"Execution handler config error: {e}",
-                    tool_name="ouroboros_execute_seed",
-                )
+                launch_error("launch_config_error", f"Execution handler config error: {e}")
             )
 
         seed_parse = _parse_seed_yaml_for_execution_mode(
@@ -1386,6 +1381,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     "status": DELEGATED_TO_SUBAGENT,
                     "dispatch_mode": "plugin",
                     "runtime_backend": self.agent_runtime_backend,
+                    **not_applied_meta(NotAppliedReason.PLUGIN_DISPATCH),
                     "model_tier": model_tier,
                     "efficiency_mode": execution_preferences.efficiency_mode.value,
                     "frugality_assurance": execution_preferences.frugality_assurance.value,
@@ -1404,12 +1400,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
             seed = Seed.from_dict(seed_dict)
         except (ValidationError, PydanticValidationError) as e:
             log.error("mcp.tool.execute_seed.validation_error", error=str(e))
-            return Result.err(
-                MCPToolError(
-                    f"Seed validation failed: {e}",
-                    tool_name="ouroboros_execute_seed",
-                )
-            )
+            return Result.err(launch_error("launch_seed_invalid", f"Seed validation failed: {e}"))
 
         verification_working_dir = self._resolve_verification_working_dir(
             seed,
@@ -1447,9 +1438,9 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     tracker_result = await session_repo.reconstruct_session(session_id)
                     if tracker_result.is_err:
                         return Result.err(
-                            MCPToolError(
+                            launch_error(
+                                "launch_resume_blocked",
                                 f"Session resume failed: {tracker_result.error.message}",
-                                tool_name="ouroboros_execute_seed",
                             )
                         )
                     tracker = tracker_result.value
@@ -1458,9 +1449,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     try:
                         execution_preferences = _persisted_execution_preferences(tracker.progress)
                     except ValueError as exc:
-                        return Result.err(
-                            MCPToolError(str(exc), tool_name="ouroboros_execute_seed")
-                        )
+                        return Result.err(launch_error("launch_resume_blocked", str(exc)))
                     if tracker.status in (
                         SessionStatus.COMPLETED,
                         SessionStatus.CANCELLED,
@@ -1468,12 +1457,10 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     ):
                         await self._reconcile_terminal_process_local_owner(tracker)
                         return Result.err(
-                            MCPToolError(
-                                (
-                                    f"Session {tracker.session_id} is already "
-                                    f"{tracker.status.value} and cannot be resumed"
-                                ),
-                                tool_name="ouroboros_execute_seed",
+                            launch_error(
+                                "launch_resume_blocked",
+                                f"Session {tracker.session_id} is already "
+                                f"{tracker.status.value} and cannot be resumed",
                             )
                         )
                     retained_owner = await self._retained_process_local_owner(tracker)
@@ -1527,9 +1514,9 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                                 )
                                 workspace_reservation = None
                             return Result.err(
-                                MCPToolError(
+                                launch_error(
+                                    "launch_workspace_unavailable",
                                     f"Task workspace error: {e.message}",
-                                    tool_name="ouroboros_execute_seed",
                                 )
                             )
                         if retained_owner is not None:
@@ -1547,9 +1534,9 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                         )
                     except WorktreeError as e:
                         return Result.err(
-                            MCPToolError(
+                            launch_error(
+                                "launch_workspace_unavailable",
                                 f"Task workspace error: {e.message}",
-                                tool_name="ouroboros_execute_seed",
                             )
                         )
 
@@ -1674,6 +1661,15 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 )
 
                 skip_qa = arguments.get("skip_qa", False)
+                check_package = (
+                    check_package
+                    or await CheckPackageRun.load(event_store, workspace_execution_id, is_resume)
+                ).bind(
+                    runner,
+                    event_store,
+                    Path(workspace.effective_cwd) if workspace else resolved_cwd,
+                    effective_runtime_backend,
+                )
                 if not is_resume:
                     prepared = await runner.prepare_session(
                         seed,
@@ -1729,9 +1725,9 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                                     is runner
                                 )
                         return Result.err(
-                            MCPToolError(
+                            launch_error(
+                                "launch_prepare_failed",
                                 f"Execution failed: {prepared.error.message}",
-                                tool_name="ouroboros_execute_seed",
                                 is_retriable=terminal_persistence_pending,
                                 details=dict(prepared_details),
                             )
@@ -1820,6 +1816,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                                 **mark_failed_kwargs,
                             )
 
+                        await check_package.prepare_bound(_seed, _tracker.execution_id)
                         if _resume_existing:
                             result = await _runner.resume_session(_tracker.session_id, _seed)
                         else:
@@ -2045,6 +2042,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     f"{execution_preferences.frugality_assurance.value}\n"
                 )
                 message += _run_only_verification_text(tracker.session_id)
+                message += "".join(f"{line}\n" for line in check_package.render_outcome())
                 # Best-effort live dashboard URL (singleton daemon, reused across
                 # runs; default on, opt out via OUROBOROS_DASHBOARD=0). Offloaded
                 # to a thread so the healthz/first-spawn wait never blocks the loop.
@@ -2090,6 +2088,19 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 }
                 if success is not None:
                     meta["success"] = success
+                meta.update(await check_package.meta_for(tracker, session_status))
+                if synchronous and session_status in {
+                    SessionStatus.FAILED,
+                    SessionStatus.CANCELLED,
+                }:
+                    failure_meta = await derive_run_failure_meta(
+                        event_store,
+                        session_id=tracker.session_id,
+                        execution_id=tracker.execution_id,
+                        session_status=session_status,
+                    )
+                    meta.update(failure_meta)
+                    message += f"Failure Cause: {failure_meta['failure_cause']}\n"
                 if session_status == SessionStatus.PAUSED:
                     meta["paused"] = True
                     meta.update(pause_metadata)
@@ -2674,6 +2685,7 @@ class StartExecuteSeedHandler:
                 "status": DELEGATED_TO_PLUGIN,
                 "dispatch_mode": "plugin",
                 "runtime_backend": self.agent_runtime_backend,
+                **not_applied_meta(NotAppliedReason.PLUGIN_DISPATCH),
                 "efficiency_mode": execution_preferences.efficiency_mode.value,
                 "frugality_assurance": execution_preferences.frugality_assurance.value,
                 **({} if is_resume else _plugin_fat_harness_downgrade_meta(execution_mode)),
@@ -2726,6 +2738,10 @@ class StartExecuteSeedHandler:
             configured_auto_evaluate=get_auto_evaluate_enabled(),
             configured_auto_evolve=get_auto_evolve_enabled(),
         )
+        try:  # one loaded run control answers for the job; Execute runs under it
+            check_package = await CheckPackageRun.load(self._event_store, execution_id, is_resume)
+        except BoundaryOrderError as exc:
+            return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_execute_seed"))
 
         # The shared pipeline owns the ``should_cancel()`` pre-work guard.
         async def _runner(_handle) -> MCPToolResult:
@@ -2734,9 +2750,10 @@ class StartExecuteSeedHandler:
                 execution_id=execution_id,
                 session_id_override=new_session_id,
                 synchronous=True,
+                check_package=check_package,
             )
             if result.is_err:
-                raise RuntimeError(str(result.error))
+                raise job_work_error(result.error)
             run_result = result.value
             run_session_id = _result_session_id(
                 run_result,
@@ -2751,7 +2768,7 @@ class StartExecuteSeedHandler:
                     run_result,
                     session_id=run_session_id,
                     seed_content=seed_content,
-                    working_dir=_result_evaluation_working_dir(
+                    working_dir=run_evaluate_chain.result_evaluation_working_dir(
                         run_result,
                         resolved_cwd,
                     ),
@@ -2770,7 +2787,7 @@ class StartExecuteSeedHandler:
             links=JobLinks(
                 session_id=session_id or new_session_id,
                 execution_id=execution_id,
-                preserve_runner_result=auto_evaluate_enabled,
+                preserve_runner_result=auto_evaluate_enabled or check_package.keeps_runner_result(),
             ),
             work_fn=_runner,
             cancelled_text="Seed execution cancelled before restart work began.",
@@ -2838,6 +2855,7 @@ class StartExecuteSeedHandler:
             "frugality_assurance": execution_preferences.frugality_assurance.value,
             "job_observer": observer,
             **_run_only_verification_meta(snapshot.links.session_id),
+            **check_package.pending_meta(),
         }
         if idempotency_key:
             self._idempotency_meta[idempotency_key] = dict(meta)

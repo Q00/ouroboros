@@ -184,6 +184,7 @@ class _SuccessfulExecuteHandler:
         execution_id: str | None = None,
         session_id_override: str | None = None,
         synchronous: bool = False,
+        check_package: Any = None,
     ) -> Result[MCPToolResult, Any]:
         assert synchronous is True
         session_id = session_id_override or arguments.get("session_id") or "orch_fake"
@@ -221,12 +222,14 @@ class _FailedExecuteHandler(_SuccessfulExecuteHandler):
         execution_id: str | None = None,
         session_id_override: str | None = None,
         synchronous: bool = False,
+        check_package: Any = None,
     ) -> Result[MCPToolResult, Any]:
         result = await super().handle(
             arguments,
             execution_id=execution_id,
             session_id_override=session_id_override,
             synchronous=synchronous,
+            check_package=check_package,
         )
         assert result.is_ok
         meta = {**result.value.meta, "success": False, "status": "failed"}

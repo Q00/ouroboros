@@ -276,6 +276,7 @@ installation fails, see
 | Kiro CLI backend | Python >= 3.12, `kiro-cli` on PATH (signed in to Kiro), plus `pipx install 'ouroboros-ai[mcp]'` or `uv tool install 'ouroboros-ai[mcp]'`. Then `ouroboros setup --runtime kiro` registers the isolated Ouroboros MCP server in `~/.kiro/settings/mcp.json` |
 | GitHub Copilot CLI backend | Python >= 3.12, `copilot` on PATH, `gh` on PATH (`gh auth login`), plus `pipx install 'ouroboros-ai[mcp]'` or `uv tool install 'ouroboros-ai[mcp]'`. Then `ouroboros setup --runtime copilot` live-discovers available models, picks a default, and registers the Ouroboros MCP server in `~/.copilot/mcp-config.json` |
 | Pi CLI backend | Python >= 3.12, `pi` on PATH or `orchestrator.pi_cli_path` configured. Use `runtime_backend: pi` for workflow execution. Use `llm.backend: pi` only when authoring/evaluation flows can accept Pi's adapter-level JSON extraction and schema validation rather than native `--output-schema` enforcement |
+| OMP CLI backend | Python >= 3.12, `omp` on PATH or `orchestrator.omp_cli_path` configured. Use `runtime_backend: omp` for workflow execution; OMP resumes sessions with its native `--resume` flag and picks its own configured model (roles `smol`/`slow`/`plan`) unless an explicit `--model` override is passed. `ouroboros setup --runtime omp` also installs the interactive `ooo` bridge into `~/.omp/agent/extensions/` |
 
 ---
 
@@ -302,7 +303,7 @@ orchestrator:
   runtime_backend: claude   # default SDK runtime on MCP 1.x
 
 llm:
-  backend: claude_code      # claude_code | codex | litellm | copilot | opencode | gemini | goose | kiro | pi
+  backend: claude_code      # claude_code | codex | litellm | copilot | opencode | gemini | goose | kiro | pi | omp
 
 logging:
   level: info
@@ -420,7 +421,9 @@ See [TUI Usage Guide](guides/tui-usage.md) for keyboard shortcuts and screen det
 
 ### Step 4: Review
 
-`ooo run` (or `ouroboros run`) prints a session summary with the QA verdict when complete.
+`ooo run` (or `ouroboros run`) prints a session summary with the QA verdict when complete, then
+continues into formal evaluation and, when the evaluation is not approved, a bounded Ralph loop.
+`ouroboros run` waits for both and prints their results; pass `--no-auto-evaluate` to stop after the run.
 
 Useful follow-ups:
 
@@ -481,6 +484,7 @@ For backend-specific configuration:
 - [Kiro CLI runtime guide](runtime-guides/kiro.md)
 - [GitHub Copilot CLI runtime guide](runtime-guides/copilot.md)
 - [Pi CLI runtime guide](runtime-guides/pi.md)
+- [OMP CLI runtime guide](runtime-guides/omp.md)
 - [Pi JSON mode documentation](https://pi.dev/docs/latest/json)
 
 ---
@@ -570,6 +574,7 @@ ouroboros cancel execution <session_id>
 1. **Validate first** -- `ouroboros run seed.yaml --dry-run` checks YAML and schema before executing
 2. **Monitor with the TUI** -- run `ouroboros monitor` in a separate terminal during long workflows
 3. **Keep QA enabled** -- post-execution QA runs automatically unless you pass `--no-qa`
+4. **Let evaluation run** -- formal evaluation (and Ralph when it is not approved) follows every completed or failed run unless you pass `--no-auto-evaluate` or set `execution.auto_evaluate: false`
 
 ---
 

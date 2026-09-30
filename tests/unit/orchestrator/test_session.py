@@ -219,6 +219,24 @@ class TestSessionRepository:
         assert event.data["seed_goal"] == "Ship the OpenCode runtime"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("gate_forced", [True, False])
+    async def test_create_session_persists_gate_provenance(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+        gate_forced: bool,
+    ) -> None:
+        result = await repository.create_session(
+            execution_id="exec_123",
+            seed_id="seed_456",
+            gate_forced=gate_forced,
+        )
+
+        assert result.is_ok
+        event = mock_event_store.append.call_args[0][0]
+        assert event.data["gate_forced"] is gate_forced
+
+    @pytest.mark.asyncio
     async def test_create_session_persists_project_identity_atomically(
         self,
         repository: SessionRepository,

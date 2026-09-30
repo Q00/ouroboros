@@ -354,3 +354,33 @@ def test_built_wheel_ships_builtin_interview_adapter_packs_once_and_loadable(
             assert loaded["name"] == Path(path).stem
             assert loaded["schema_version"] == 1
             assert loaded["glossary_terms"]
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(shutil.which("uv") is None, reason="uv not on PATH")
+def test_built_wheel_maintain_skill_has_executable_review_contract(tmp_path: Path) -> None:
+    """The installed skill must not depend on checkout-only policy or invalid gh syntax."""
+    out_dir = tmp_path / "dist"
+    result = subprocess.run(
+        ["uv", "build", "--wheel", "--out-dir", str(out_dir)],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    wheels = list(out_dir.glob("*.whl"))
+    assert len(wheels) == 1
+
+    with zipfile.ZipFile(wheels[0]) as archive:
+        maintain_path = "ouroboros/skills/maintain/SKILL.md"
+        assert archive.namelist().count(maintain_path) == 1
+        maintain = archive.read(maintain_path).decode("utf-8")
+
+    assert "## Review boundary" in maintain
+    assert "For each finding, ask with evidence:" in maintain
+    assert "stop and have a maintainer decide whether this PR expands, splits" in maintain
+    assert "../../CONTRIBUTING.md" not in maintain
+    assert "Include `-R Q00/ouroboros` on repository-aware" in maintain
+    assert "`gh auth status` is host-scoped and does not accept `-R`" in maintain

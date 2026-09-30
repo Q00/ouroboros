@@ -1,9 +1,12 @@
-"""Integration test: trigger_consensus bypasses Stage 2 threshold gate.
+"""Integration test: trigger_consensus asks Stage 3 for a second opinion.
 
-Verifies the reporter's exact scenario from #230:
-  Stage 2 scores 0.72 → normally REJECTED → with trigger_consensus=True → Stage 3 runs.
+The reporter's scenario from #230 (Stage 2 scores 0.72, trigger_consensus=True)
+still runs Stage 3. Since #2449, model review is advisory: Stage 3 can withhold
+approval and its votes are reported, but a consensus approval cannot lift a
+Stage 2 block or grant acceptance without executed Stage 1 evidence.
 
 See: https://github.com/Q00/ouroboros/issues/230
+See: https://github.com/Q00/ouroboros/issues/2449
 """
 
 from __future__ import annotations
@@ -14,10 +17,19 @@ import pytest
 
 from ouroboros.core.types import Result
 from ouroboros.evaluation.models import (
+    AcceptanceState,
+    CheckResult,
+    CheckType,
     ConsensusResult,
     EvaluationContext,
+    MechanicalResult,
     SemanticResult,
     Vote,
+)
+
+EXECUTED_STAGE1 = MechanicalResult(
+    passed=True,
+    checks=(CheckResult(check_type=CheckType.TEST, passed=True, message="ok", executed=True),),
 )
 from ouroboros.evaluation.pipeline import EvaluationPipeline, PipelineConfig
 
@@ -90,9 +102,30 @@ class TestTriggerConsensusIntegration:
         pipeline._consensus.evaluate.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_low_score_approved_with_trigger_consensus(self) -> None:
-        """Score 0.72 + trigger_consensus=True → Stage 3 runs → APPROVED."""
+    async def test_low_score_consensus_approval_cannot_lift_stage2_block(self) -> None:
+        """Score 0.72 + trigger_consensus=True → Stage 3 runs, but approval is withheld."""
         pipeline = _make_pipeline(stage2_score=0.72, consensus_approved=True)
+        context = EvaluationContext(
+            execution_id="e1",
+            seed_id="s1",
+            current_ac="ac1",
+            artifact="code",
+            trigger_consensus=True,
+        )
+
+        result = await pipeline.evaluate(context, stage1_result=EXECUTED_STAGE1)
+        assert result.is_ok
+        pipeline._consensus.evaluate.assert_called_once()
+        assert result.value.stage3_result is not None
+        assert result.value.stage3_result.approved is True
+        assert result.value.final_approved is False
+        assert result.value.acceptance_state is AcceptanceState.REJECTED
+        assert "semantic score 0.72" in (result.value.failure_reason or "")
+
+    @pytest.mark.asyncio
+    async def test_consensus_approval_without_executed_evidence_is_unverified(self) -> None:
+        """A compliant Stage 2 plus an approving Stage 3 still cannot grant acceptance."""
+        pipeline = _make_pipeline(stage2_score=0.9, consensus_approved=True)
         context = EvaluationContext(
             execution_id="e1",
             seed_id="s1",
@@ -103,8 +136,26 @@ class TestTriggerConsensusIntegration:
 
         result = await pipeline.evaluate(context)
         assert result.is_ok
-        assert result.value.final_approved is True
         pipeline._consensus.evaluate.assert_called_once()
+        assert result.value.final_approved is False
+        assert result.value.acceptance_state is AcceptanceState.UNVERIFIED
+
+    @pytest.mark.asyncio
+    async def test_consensus_approval_with_executed_evidence_is_approved(self) -> None:
+        """Executed evidence grants; neither model stage withheld."""
+        pipeline = _make_pipeline(stage2_score=0.9, consensus_approved=True)
+        context = EvaluationContext(
+            execution_id="e1",
+            seed_id="s1",
+            current_ac="ac1",
+            artifact="code",
+            trigger_consensus=True,
+        )
+
+        result = await pipeline.evaluate(context, stage1_result=EXECUTED_STAGE1)
+        assert result.is_ok
+        assert result.value.final_approved is True
+        assert result.value.acceptance_state is AcceptanceState.APPROVED
 
     @pytest.mark.asyncio
     async def test_compliance_fail_bypassed_with_trigger_consensus(self) -> None:

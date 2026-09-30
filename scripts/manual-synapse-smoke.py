@@ -42,7 +42,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "backend",
-        choices=("codex", "claude", "claude_mcp", "opencode", "goose", "pi", "hermes"),
+        choices=("codex", "claude", "claude_mcp", "opencode", "goose", "pi", "omp", "hermes"),
     )
     parser.add_argument(
         "--mode",

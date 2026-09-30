@@ -2752,6 +2752,10 @@ class EventStore:
                 },
             ) from e
 
+    async def resolve_execution_id_for_session(self, session_id: str) -> str | None:
+        """Return the execution ID a session's start event names, if any."""
+        return await self._resolve_execution_id_for_session(session_id)
+
     async def _resolve_execution_id_for_session(self, session_id: str) -> str | None:
         """Return the execution ID referenced by a session start event, if present."""
         if self._engine is None:

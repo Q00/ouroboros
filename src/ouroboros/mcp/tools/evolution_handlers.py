@@ -32,6 +32,7 @@ from ouroboros.core.types import Result
 from ouroboros.core.worktree import (
     TaskWorkspace,
     WorktreeError,
+    checkpoint_managed_worktree,
     is_git_repo,
     maybe_restore_task_workspace,
     release_lock,
@@ -48,6 +49,7 @@ from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.tools.background import (
     BackgroundJobAcceptanceState,
+    job_work_error,
     start_background_tool_job,
 )
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
@@ -802,11 +804,20 @@ class EvolveStepHandler(BridgeAwareMixin):
         if execute and (
             effective_source_project_dir is None or is_git_repo(effective_source_project_dir)
         ):
+            source_cwd = effective_source_project_dir or os.getcwd()
             try:
+                # A generation that ran in a task worktree Ouroboros manages
+                # (a chained evaluation's run, an ``ooo auto`` worktree) left
+                # its work uncommitted there. Record it on that task branch so
+                # the lineage worktree starts from it; any other checkout is
+                # never committed and keeps the dirty-checkout refusal.
+                checkpoint_managed_worktree(
+                    source_cwd, message=f"ooo: generation checkpoint for {lineage_id}"
+                )
                 workspace = maybe_restore_task_workspace(
                     lineage_id,
                     persisted=None,
-                    fallback_source_cwd=effective_source_project_dir or os.getcwd(),
+                    fallback_source_cwd=source_cwd,
                     allow_untracked_evidence=True,
                 )
             except WorktreeError as e:
@@ -1711,7 +1722,7 @@ class StartEvolveStepHandler:
         async def _runner(_handle) -> MCPToolResult:
             result = await self._evolve_handler.handle(arguments)
             if result.is_err:
-                raise RuntimeError(str(result.error))
+                raise job_work_error(result.error)
             return result.value
 
         background_acceptance = BackgroundJobAcceptanceState()

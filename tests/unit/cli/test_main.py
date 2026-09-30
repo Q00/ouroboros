@@ -575,6 +575,42 @@ class TestWorkflowIRCommands:
         assert "Edges: 2" in result.output
         assert "Validation: ok" in result.output
 
+    def test_workflow_ir_inspect_preserves_criterion_semantic_ac_key(self, tmp_path: Path) -> None:
+        """A ``{criterion, semantic_ac_key}`` entry keeps its persisted identity (#2338).
+
+        The loader used to reduce such a mapping to the bare criterion string, so
+        Seed re-derived a fresh hash from the text and the explicit key was lost.
+        """
+        from ouroboros.cli.commands.workflow_ir import _load_seed
+
+        seed_file = tmp_path / "seed.yaml"
+        seed_file.write_text(
+            "\n".join(
+                [
+                    "goal: Inspect Workflow IR",
+                    "acceptance_criteria:",
+                    "  - criterion: A",
+                    "    semantic_ac_key: ac_a123456789abcdef",
+                    "ontology_schema:",
+                    "  name: Receipt",
+                    "  description: A reconciliation receipt",
+                    "  fields: []",
+                    "metadata:",
+                    "  seed_id: seed_cli_semantic_key",
+                    "  ambiguity_score: 0.1",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        loaded = _load_seed(seed_file)
+        result = runner.invoke(app, ["workflow-ir", "inspect", str(seed_file), "--json"])
+
+        assert loaded.acceptance_criteria[0].description == "A"
+        assert loaded.acceptance_criteria[0].semantic_ac_key == "ac_a123456789abcdef"
+        assert result.exit_code == 0
+        assert '"ok": true' in result.output
+
     def test_workflow_ir_inspect_rejects_blank_ac(self, tmp_path: Path) -> None:
         seed_file = tmp_path / "seed.yaml"
         seed_file.write_text(

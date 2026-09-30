@@ -50,6 +50,8 @@ For Codex-backed Ouroboros workflows:
 | Consensus simple voting | `consensus.models` |
 | Consensus deliberative roles | `consensus.advocate_model`, `consensus.devil_model`, `consensus.judge_model` |
 
+`execution.default_model` covers the EXECUTE-stage planning roles (`atomicity`, `decomposition`, `agent_runtime_implementation`) alongside Execute-stage runtime calls. An explicit model id (or `OUROBOROS_EXECUTION_MODEL`) pins those roles. When it is unset or set to `default`/`current`, CLI backends choose their own default; LiteLLM retains its provider-qualified semantic model because it has no model-free default.
+
 > **Recommended baseline:** use **Use Codex default model**. Setup assigns each Ouroboros role a per-invocation reasoning effort (fast: low, standard: medium, deep: high, frontier: xhigh) without pinning a Codex model, so Codex's current default remains in control.
 
 ### Portable Task Profiles
@@ -156,6 +158,7 @@ url = "http://127.0.0.1:12000/mcp"
 | `drift` | `DriftConfig` | Drift monitoring thresholds |
 | `runtime_controls` | `RuntimeControlsConfig` | Long-running workflow liveness and progress controls |
 | `logging` | `LoggingConfig` | Log level, path, and verbosity |
+| `boundary` | `BoundaryConfig` | Check package boundary of `ooo run` (on by default) |
 
 ---
 
@@ -165,7 +168,7 @@ Controls how Ouroboros launches and communicates with the agent runtime backend.
 
 ```yaml
 orchestrator:
-  runtime_backend: claude       # "claude" | "claude_mcp" | "codex" | "opencode" | "hermes" | "gemini" | "kiro" | "copilot" | "pi" | "gjc" | "antigravity" | "grok" | "zcode"
+  runtime_backend: claude       # "claude" | "claude_mcp" | "codex" | "opencode" | "hermes" | "gemini" | "kiro" | "copilot" | "pi" | "omp" | "gjc" | "antigravity" | "grok" | "zcode"
   permission_mode: acceptEdits  # "default" | "acceptEdits" | "bypassPermissions"
   opencode_permission_mode: bypassPermissions
   max_parallel_workers: 3       # Maximum concurrent AC workers
@@ -174,13 +177,14 @@ orchestrator:
   opencode_cli_path: null       # Path to OpenCode CLI binary; null = resolve from PATH
   copilot_cli_path: null        # Path to Copilot CLI binary; null = resolve from PATH
   pi_cli_path: null             # Path to Pi CLI binary; null = resolve from PATH
+  omp_cli_path: null            # Path to OMP (Oh My Pi) CLI binary; null = resolve from PATH
   zcode_cli_path: null          # Path to zcode.cjs or a zcode executable
   default_max_turns: 10
 ```
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `runtime_backend` | `"claude_mcp"` \| `"claude"` \| `"codex"` \| `"opencode"` \| `"hermes"` \| `"gemini"` \| `"kiro"` \| `"copilot"` \| `"pi"` \| `"gjc"` \| `"antigravity"` \| `"grok"` \| `"zcode"` | `"claude"` | The agent runtime backend used for workflow execution. `claude` is the default Agent SDK runtime in an MCP 1.x environment. `claude_mcp` is the explicit out-of-process CLI worker used by the isolated MCP 2 server. Overridable via `OUROBOROS_AGENT_RUNTIME`. See [runtime capability matrix](runtime-capability-matrix.md). |
+| `runtime_backend` | `"claude_mcp"` \| `"claude"` \| `"codex"` \| `"opencode"` \| `"hermes"` \| `"gemini"` \| `"kiro"` \| `"copilot"` \| `"pi"` \| `"omp"` \| `"gjc"` \| `"antigravity"` \| `"grok"` \| `"zcode"` | `"claude"` | The agent runtime backend used for workflow execution. `claude` is the default Agent SDK runtime in an MCP 1.x environment. `claude_mcp` is the explicit out-of-process CLI worker used by the isolated MCP 2 server. Overridable via `OUROBOROS_AGENT_RUNTIME`. See [runtime capability matrix](runtime-capability-matrix.md). |
 | `permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"acceptEdits"` | Stored permission preference. Runner-driven seed execution forces the native `bypassPermissions` equivalent for both fresh and resumed dispatches wherever the backend exposes an approval surface; persisted handles cannot downgrade it. Pi and GJC expose no separate approval flag and run headlessly without an approval dialogue. |
 | `opencode_permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"bypassPermissions"` | Permission mode when using the OpenCode runtime. Overridable via `OUROBOROS_OPENCODE_PERMISSION_MODE`. |
 | `max_parallel_workers` | `int >= 1` | `3` | Maximum Acceptance Criteria workers the adaptive dispatch window may reach. Overridable via `OUROBOROS_MAX_PARALLEL_WORKERS`. Invalid explicit values fail instead of falling back to the default. The native Claude backend starts at this value and is paced by its RPM/TPM bucket. CLI runtimes whose underlying LLM limits are unknown (`hermes`, `codex`, `gemini`, `opencode`, ...) start at 1, halve the window on 429 pressure, honor `Retry-After`, and add one worker after sustained success until this ceiling. |
@@ -189,6 +193,7 @@ orchestrator:
 | `opencode_cli_path` | `string \| null` | `null` | Absolute path to the OpenCode CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_OPENCODE_CLI_PATH`. |
 | `copilot_cli_path` | `string \| null` | `null` | Absolute path to the GitHub Copilot CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_COPILOT_CLI_PATH`. |
 | `pi_cli_path` | `string \| null` | `null` | Absolute path to the Pi CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_PI_CLI_PATH`. |
+| `omp_cli_path` | `string \| null` | `null` | Absolute path to the OMP (Oh My Pi) CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_OMP_CLI_PATH`. |
 | `zcode_cli_path` | `string \| null` | `null` | Path to the Zcode app-bundle `zcode.cjs` script, a standalone script, or a directly executable `zcode` wrapper. Official app bundles use their bundled Electron/Node runtime. Resolution falls back to the macOS app bundle, then `PATH`. Overridable via `OUROBOROS_ZCODE_CLI_PATH`. |
 | `ourocode_cli_path` | `string \| null` | `null` | Absolute path to the ourocode CLI binary (`~` is expanded). Used by the LLM-only `ourocode` backend; when `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_OUROCODE_CLI_PATH`. |
 | `dsh_cli_path` | `string \| null` | `null` | Absolute path to the DeepSeek Harness ACP server binary `dsh-acp-demo` (`~` is expanded). Used by the LLM-only `dsh` backend; when `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_DSH_CLI_PATH`. |
@@ -214,7 +219,7 @@ llm:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `backend` | `"claude"` \| `"claude_code"` \| `"litellm"` \| `"codex"` \| `"opencode"` \| `"hermes"` \| `"gemini"` \| `"kiro"` \| `"copilot"` \| `"goose"` \| `"pi"` \| `"ourocode"` \| `"gjc"` \| `"zcode"` \| `"dsh"` | `"claude_code"` | Default backend for LLM-only flows. Overridable via `OUROBOROS_LLM_BACKEND`. `ourocode` and `dsh` are LLM-only and are not valid for `orchestrator.runtime_backend`. `dsh` additionally requires `orchestrator.dsh_config_path`; see [the DeepSeek Harness guide](guides/deepseek-harness.md). The runtime alias `deepseek_harness` is **not** accepted here — this field is validated against the literals above, so persist `dsh`. |
+| `backend` | `"claude"` \| `"claude_code"` \| `"litellm"` \| `"codex"` \| `"opencode"` \| `"hermes"` \| `"gemini"` \| `"kiro"` \| `"copilot"` \| `"goose"` \| `"pi"` \| `"omp"` \| `"ourocode"` \| `"gjc"` \| `"zcode"` \| `"dsh"` | `"claude_code"` | Default backend for LLM-only flows. Overridable via `OUROBOROS_LLM_BACKEND`. `ourocode` and `dsh` are LLM-only and are not valid for `orchestrator.runtime_backend`. `dsh` additionally requires `orchestrator.dsh_config_path`; see [the DeepSeek Harness guide](guides/deepseek-harness.md). The runtime alias `deepseek_harness` is **not** accepted here — this field is validated against the literals above, so persist `dsh`. |
 | `permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"default"` | Permission mode for non-OpenCode LLM flows. Overridable via `OUROBOROS_LLM_PERMISSION_MODE`. |
 | `opencode_permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"acceptEdits"` | Permission mode for OpenCode-backed LLM flows. Overridable via `OUROBOROS_OPENCODE_PERMISSION_MODE`. |
 | `qa_model` | `string` | `"claude-sonnet-4-6"` | Model used for post-execution QA verdict generation. Overridable via `OUROBOROS_QA_MODEL`. |
@@ -371,9 +376,12 @@ execution:
 |--------|------|---------|-------------|
 | `max_iterations_per_ac` | `int >= 1` | `10` | Maximum number of execution iterations for a single acceptance criterion before the system escalates or declares failure. |
 | `retrospective_interval` | `int >= 1` | `3` | Number of iterations between automatic retrospective evaluations. |
-| `auto_evaluate` | `bool` | `true` | Enqueue formal 3-stage evaluation after a completed background run has a session and artifact. This includes unsuccessful AC execution; handler-level failures without an evaluable run are excluded. |
-| `auto_evolve` | `bool` | `true` | When formal evaluation returns an explicit rejection, seed a generation-1 lineage snapshot and enqueue a bounded Ralph continuation. Per-call `auto_evolve` overrides this setting. |
+| `auto_evaluate` | `bool` | `true` | Enqueue formal 3-stage evaluation after a completed background run has a session and artifact. This includes unsuccessful AC execution; handler-level failures without an evaluable run are excluded. Applies to MCP `ooo run` and to the terminal `ouroboros run`, which waits for the evaluation; `ouroboros run --auto-evaluate/--no-auto-evaluate` overrides it for one run. |
+| `auto_evolve` | `bool` | `true` | When formal evaluation returns an explicit rejection, seed a generation-1 lineage snapshot and enqueue a bounded Ralph continuation. Per-call `auto_evolve` overrides this setting. The terminal `ouroboros run` follows the same rule and waits for the Ralph job; `ouroboros run --auto-evolve/--no-auto-evolve` overrides it for one run. |
 | `auto_evolve_max_generations` | `int` | `3` | Maximum generations for automatically chained Ralph work. Values are clamped to Ralph's supported `1..10` range. |
+| `run_verify_commands` | `bool` | `true` | Check an AC's success contract (expected artifacts and `verify_command`) before accepting it. While on, the evidence verifier may also replay allowlisted commands the worker ran, in a copy of the workspace under the execution sandbox (writes only inside the copy, no network; nothing is replayed where the sandbox is unavailable), to corroborate `tests_passed` and `commands_run` claims the transcript alone cannot prove (see [Verifier Evidence Policy](contributing/verifier-evidence-policy.md#replay-first-corroboration)). Off: nothing is executed by the harness. |
+| `verify_command_timeout_seconds` | `int >= 1` | `600` | Timeout for each `verify_command` run and each replayed command. |
+| `exec_sandbox` | `bool` | `true` | Confine the commands the controller runs on its own authority (verifier replay) with the execution sandbox: writes (content, names and metadata) only beneath the workspace copy and a per-run temp directory, no non-loopback network, an allowlisted environment (`sandbox-exec` on macOS; Landlock plus a seccomp metadata filter on Linux, where metadata inside the copy is read-only too; a per-run AppContainer on Windows, where loopback reaches only the command's own processes, the `NUL` device is unavailable, batch files (`.cmd`, `.bat`) cannot run and are left indeterminate, and reads are limited to what is granted). On Windows the controller's interpreter and the live dependency trees a workspace copy links to are granted read and execute to one Ouroboros capability SID; that grant is persistent, is recorded in `~/.ouroboros/exec-sandbox/read-grants.jsonl`, and is removed with `python -c "from ouroboros.runtime.exec_sandbox import remove_persistent_read_grants as r; print(r())"` (run it while no Ouroboros command is running). Where no backend works, nothing is run and the outcome is indeterminate (`sandbox_unavailable`). **Unsafe when `false`:** those commands run unconfined, able to write anywhere the user can and to use the network. `OUROBOROS_EXEC_SANDBOX` overrides it; a project `.env` cannot. The effective value is sealed when a run starts, and resuming it with a different value is refused. |
 | `default_model` | `string \| null` | `null` | Optional Execute-stage model pin. `null`, an empty value, `"default"`, or `"current"` means Ouroboros does not pass a concrete `--model`; the selected runtime keeps its own current/default model. `OUROBOROS_EXECUTION_MODEL` has highest precedence, and a present empty env var explicitly clears the saved pin for that process. |
 | `project_guidance` | `list[string]` | `[]` | Guidance IDs loaded from `<project-root>/.ouroboros/guidance/<id>/GUIDANCE.md` and appended to execution system prompts. This option is config-only and has no environment-variable override. |
 | `default_policy` | `"ask"` \| `"efficient"` \| `"quality_first"` | `"ask"` | Persistent default execution policy for fresh runs. `ask` preserves the host's interactive efficiency prompt exactly. `efficient` resolves omitted arguments to `adaptive`/`observe` and `quality_first` to `quality_first`/`off` without asking. Explicit invocation arguments always win, resumed sessions keep their persisted immutable contract, and `strict` frugality assurance never derives from this setting. |
@@ -401,6 +409,140 @@ and fails closed if the files changed. A runtime that ignores system prompts als
 rejects runs with enabled project guidance.
 
 ---
+
+## `boundary`
+
+The check package boundary of `ooo run` (CLI and `ouroboros_execute_seed`),
+on by default for every run it applies to (a fresh run; a resumed session
+keeps the boundary it started with): before the worker starts, a read-only
+model call writes executable checks for the acceptance criteria, and each
+check is admitted only if it behaves as declared on the current tree. After the worker stops, the package decides
+the criteria it covers, before the session's terminal status is recorded; the
+existing verifier's verdict is kept as advisory for those criteria and decides
+the others. Edits the worker makes to test configuration inside the workspace
+(for example `pytest.ini`, `conftest.py`, or Django's `tests/test_sqlite.py`)
+can make the existing verifier accept; the check package's oracle checks are
+unaffected, because they call the implementation through the product harness
+and do not read workspace test configuration (a model-written script check
+that runs the project's test runner would read it).
+
+MCP results: `ouroboros_start_execute_seed` reports the closed-value summary
+(`check_package`, `check_package_status`, `package_verdict`, `legacy_verdict`,
+`reconciliation`, `verification_coverage`) in its job result, with or without
+`auto_evaluate`. The receipts of `ouroboros_start_execute_seed` and of a
+background `ouroboros_execute_seed` call carry `check_package` and
+`check_package_status: pending` (`off` and `not_run` when the check package is
+off; the decision is then the session's terminal status, which the package
+reconciled before it was recorded). A resumed session's receipt reports the
+mode the run started with, read from its journal before the receipt is
+returned; if the journal cannot be read, the resume is refused. An execution
+dispatched to the OpenCode plugin (a child session outside this process) is
+not governed: its result carries `check_package: not_applied` with
+`check_package_reason: plugin_dispatch`.
+
+Before the package is frozen, each oracle's stated expected values are
+compared with a reference implementation the constructor writes in the same
+reply, run in the same isolated target processes: a held-out case that
+disagrees is dropped (`oracle_inconsistent`; an oracle left with no held-out
+case is dropped too, since only a held-out case can verify a pass), and a
+criterion whose reference
+does not reproduce a case the constructor declared as stated in the Seed, or
+has no reference that runs, is reported as unverified
+(`reference_contradicts_stated_case`,
+`reference_unavailable`). This catches a slip in a stated value; it does not
+catch a misreading of the criterion that the cases and the reference share.
+
+What an oracle observation proves. The candidate's code runs inside each
+target process, so it can write the process's report itself (the frame
+nonce is a parsing convention, not an authority boundary). A report is
+therefore evidence of what the candidate's code computed for the inputs it
+was sent, never proof that the bound function ran: the identity of the bound
+callable is not proven, and a candidate that computes the right outputs
+elsewhere in its code passes. That is why every oracle
+must carry at least one held-out case (a reply without one is refused,
+`oracle_without_held_out_case`) and why only a passing held-out case of a
+reproduction oracle verifies a criterion: its inputs reach the candidate only
+in the final verification, so matching its expected value means computing the
+rule's output for an input the candidate had never seen. A report can only
+make a case pass, never fail one the candidate's code passes, and admission
+runs the base checkout's code, so neither admission nor a failure depends on
+it.
+
+Admission is per check: a reproduction check that already passes on the
+current tree, or a preservation check that already fails on it, is excluded on
+its own (`repro_passes_on_base`, `preservation_fails_on_base`) and the rest of
+the package is admitted. A criterion keeps the package's authority only while
+an admitted check covers it (for a bug-fix criterion, an admitted reproduction
+check). For the criteria left without an admitted check, one more constructor
+call, before the worker starts, asks for replacement checks and says why the
+earlier ones were excluded; the replacements go through the same admission.
+The constructor is asked for a check for every criterion. Whether an
+admitted check covers a criterion is the only thing that decides who judges
+it; nothing classifies criteria by kind, and the reason a criterion was left
+uncovered is descriptive only.
+
+Every criterion the package cannot verify (no admitted check, or no binding)
+is decided by the existing verifier: its rejection fails the
+run (exit 1) and is shown as legacy-decided. Only a criterion neither verifier
+had evidence for (for example the existing verifier's transcript was
+unavailable) is accepted as unverified; the run then prints an
+insufficient-verification warning, as it does when half or more of the
+criteria were not decided by the package.
+
+```yaml
+boundary:
+  check_package: off              # on | off; unset = on
+  constructor_timeout_seconds: 600
+  check_timeout_seconds: 120
+  max_construction_attempts: 2
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `check_package` | `"on"` \| `"off"` \| unset | unset (on) | `off` turns the check package off for every run; unset or `on` keeps it on. `--check-package/--no-check-package` and `OUROBOROS_CHECK_PACKAGE` take precedence, in that order. A bare YAML `on`/`off` is accepted. If `config.yaml` cannot be read, the check package is off for runs that set neither the flag nor the variable, since the unreadable file may hold an `off`; with no `config.yaml` at all the default (on) applies. The setting does not depend on telemetry. |
+| `constructor_timeout_seconds` | `int` (30..3600) | `600` | Wall-clock budget of one constructor call. |
+| `check_timeout_seconds` | `int` (5..1800) | `120` | Per-check timeout during admission and verification. |
+| `max_construction_attempts` | `int` (1..5) | `2` | Package versions tried before the worker starts; a version that is not admitted is superseded by the next. The one replacement call for criteria left without an admitted check adds a version outside this budget. |
+
+Checks are model-written Python scripts. They run on throwaway copies of the
+project, with the project's virtualenv interpreter when one is found (else
+`python3`), a per-check timeout, and confined by the execution sandbox (see
+`execution.exec_sandbox`): a check can write only beneath its own copy and a
+scratch directory that is removed afterwards, has no non-loopback network, and
+gets an environment built from an allowlist (`PATH`, the locale variables,
+`TZ`, a few Python I/O settings, and on Windows the system variables a process
+needs; `HOME` and the temp directory in the scratch directory; `VIRTUAL_ENV`
+when the interpreter is a virtualenv's). The same applies to the processes
+that run the implementation under an oracle check and to the constructor's
+reference implementation. Where the sandbox cannot confine a check, the check
+is undecided and nothing runs. Reads are not restricted: a check can read
+files you can read, and on macOS (where `sandbox-exec` cannot deny
+`KERN_PROCARGS2`) the arguments and environment of your other processes,
+Ouroboros included; under Landlock on Linux it cannot. Turn the check package
+off where that matters. A project `.env` cannot set
+`OUROBOROS_CHECK_PACKAGE`.
+
+Constructor runtimes: the constructor's model call must keep no session on
+disk (its reply holds the held-out cases), so it runs only on runtimes with a
+no-persistence mode: Claude Code (`--no-session-persistence`, through the Agent
+SDK or the `claude -p` worker of `--runtime claude-cli`) and Codex CLI
+(`codex exec --ephemeral`). With any other runtime the run has no check
+package (`constructor_session_not_ephemeral:<backend>`, before any model call)
+and the existing verifier decides every criterion, deterministically.
+
+A resumed run keeps the mode and the `boundary` settings it started with
+(`check_timeout_seconds` is recorded on the run's
+`boundary.check_package.enabled` journal record): changing the switch or the
+config between the start and the resume changes nothing for that run.
+
+On resume the package decision is recovered from the journal alone. A journal
+the run could not have written (a missing, duplicated or conflicting record,
+or a gap in the package versions) leaves every criterion undecided
+(`boundary_record_missing`) and runs no check. When the same process still
+holds the admitted package, its full decision runs, held-out cases included.
+In another process the held-out cases are gone (they are never written to
+disk), so no check runs: covered criteria are undecided
+(`held_out_unavailable`) and the existing verifier decides the rest.
 
 ## `resilience`
 
@@ -632,6 +774,7 @@ All environment variables have higher priority than the corresponding `config.ya
 | `OUROBOROS_AGENT_RUNTIME` | `orchestrator.runtime_backend` | Active runtime backend (`claude_mcp` for Claude CLI, `claude` for the isolated SDK runtime, or another supported runtime). |
 | `OUROBOROS_AGENT_PERMISSION_MODE` | `orchestrator.permission_mode` | Stored permission preference; runner-driven seed execution forces the native `bypassPermissions` equivalent for fresh and resumed dispatches on approval-aware backends. Pi and GJC have no separate approval flag. |
 | `OUROBOROS_OPENCODE_PERMISSION_MODE` | `orchestrator.opencode_permission_mode` | Stored OpenCode preference. Seed execution still forces `bypassPermissions`, translated to `--dangerously-skip-permissions`. |
+| `OUROBOROS_EXEC_SANDBOX` | `execution.exec_sandbox` | Execution sandbox for controller-run commands; on by default. `off` (or `0`, `false`, `no`) is **unsafe**: verifier replay then runs unconfined, able to write outside its workspace copy and to use the network. Honored only from trusted sources (process environment, `~/.ouroboros/.env`); a project `.env` cannot set it. |
 | `OUROBOROS_MODEL_TIER_ROUTING` | _(routing kill switch)_ | Model-tier routing is enabled by default. Set to `0`, `off`, or `false` (case- and whitespace-insensitive) to disable routing and emit no routing events. |
 | `OUROBOROS_SHADOW_REPLAY` | _(experiment arm)_ | Default OFF. Only `1`, `true`, or `on` arms the opt-in shadow-baseline harness. Current live decompositions lack deterministic MECE attestation and are skipped before baseline model dispatch; bundled runtimes also lack the complete filesystem/external-effect isolation attestation, so production emits no shadow baseline today. |
 | `OUROBOROS_MAX_PARALLEL_WORKERS` | `orchestrator.max_parallel_workers` | Requested maximum concurrent Acceptance Criteria workers for parallel execution. Must be a positive integer. |
@@ -643,9 +786,11 @@ All environment variables have higher priority than the corresponding `config.ya
 | `OUROBOROS_CODEX_CLI_PATH` | `orchestrator.codex_cli_path` | Path to the Codex CLI binary. |
 | `OUROBOROS_OPENCODE_CLI_PATH` | `orchestrator.opencode_cli_path` | Path to the OpenCode CLI binary. |
 | `OUROBOROS_PI_CLI_PATH` | `orchestrator.pi_cli_path` | Path to the Pi CLI binary. |
+| `OUROBOROS_OMP_CLI_PATH` | `orchestrator.omp_cli_path` | Path to the OMP (Oh My Pi) CLI binary. |
 | `OUROBOROS_OUROCODE_CLI_PATH` | `orchestrator.ourocode_cli_path` | Path to the ourocode CLI binary used by the LLM-only `ourocode` backend. |
 | `OUROBOROS_DSH_CLI_PATH` | `orchestrator.dsh_cli_path` | Path to the `dsh-acp-demo` binary used by the LLM-only `dsh` backend. |
 | `OUROBOROS_DSH_CONFIG_PATH` | `orchestrator.dsh_config_path` | Absolute path to the trusted Cordis composition the `dsh` backend loads. Required by that backend. |
+| `OUROBOROS_CHECK_PACKAGE` | `boundary.check_package` | `on` or `off` for the `ooo run` check package boundary (on by default); overrides config, and is overridden by `--check-package/--no-check-package`. Only the exact value `on` turns it on: any other set value (`off`, an alias such as `1`, `true`, `yes` or `ON`, empty or whitespace) means `off`. Not accepted from a project `.env`. |
 | `OUROBOROS_SKIP_VERSION_CHECK` | *(none)* | Controls the Claude Agent SDK per-call version compatibility check. Defaults to `"1"` (skip the check, saving ~0.3-0.8 s per LLM call). Set to `"0"` to re-enable the check for debugging version-mismatch issues. Maps to `CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK` internally. |
 
 ### LLM Flow
@@ -679,7 +824,7 @@ All environment variables have higher priority than the corresponding `config.ya
 |----------|---------|-------------|
 | `OUROBOROS_EXECUTION_MODEL` | `null` (runtime default) | Model used for agent execution inside the MCP evolve loop. Applies to runtimes that expose a per-call model override; unset it to preserve automatic runtime selection. |
 | `OUROBOROS_VALIDATION_MODEL` | `null` (runtime default) | Model used for import/validation fix passes during MCP evolution. Applies to runtimes that expose a per-call model override; unset it to preserve automatic runtime selection. |
-| `OUROBOROS_EVOLVE_STAGE1` | `"false"` | Set to `"true"` to enable Stage 1 mechanical checks (lint/build/test) during MCP evolution. |
+| `OUROBOROS_EVOLVE_STAGE1` | `"true"` | Stage 1 mechanical checks (lint/build/test from `.ouroboros/mechanical.toml`, authored by the detector when missing) for an evolve generation whose output has no `### Task N` markers. On by default because these executed checks are the only thing that can approve such a generation; semantic review there is advisory feedback. Set to `"false"` (or `"0"`) to skip them: every such generation is then unverified, never approved. Accepted values are `true`/`1` and `false`/`0`; any other value is logged and ignored. Honored only from trusted sources (process environment, `~/.ouroboros/.env`); a project `.env` cannot set it. |
 | `OUROBOROS_MCP_TOOL_TIMEOUT_SECONDS` | `runtime_controls.mcp_tool_timeout_seconds` | Adapter-level MCP timeout for progress-aware tools. `0` disables the wall-clock cap. |
 | `OUROBOROS_GENERATION_IDLE_TIMEOUT_SECONDS` | `runtime_controls.generation_idle_timeout_seconds` | Idle timeout when no generation/execution activity is observed. |
 | `OUROBOROS_GENERATION_NO_PROGRESS_TIMEOUT_SECONDS` | `runtime_controls.generation_no_progress_timeout_seconds` | Timeout when activity continues without material progress. |
@@ -880,6 +1025,20 @@ llm:
 
 Pi is available as an agent runtime backend and, when the Pi LLM adapter is installed, an LLM-only backend for interview, ambiguity scoring, seed-extraction, and structured JSON flows. `ouroboros setup --runtime pi` records the Pi executable and installs a managed Pi extension at `~/.pi/agent/extensions/ouroboros-ooo-bridge.ts`, so interactive Pi/roach-pi sessions can route exact-prefix `ooo ...` input back into Ouroboros after Pi restart or `/reload`. The Pi LLM adapter supports structured `response_format` requests through prompt-level JSON/schema instructions plus adapter-side extraction and validation; Pi does not expose a Codex-style native `--output-schema` hard-enforcement flag. The runtime uses documented JSON mode (`pi --mode json <prompt>`) and preserves Pi native session IDs for targeted resume.
 
+### OMP CLI Runtime
+
+```yaml
+# ~/.ouroboros/config.yaml
+orchestrator:
+  runtime_backend: omp
+  omp_cli_path: null                      # omit if `omp` is already on PATH
+
+llm:
+  backend: omp
+```
+
+OMP (Oh My Pi) is available as an agent runtime backend and an LLM-only backend for interview, ambiguity scoring, seed-extraction, and structured JSON flows. `ouroboros setup --runtime omp` records the OMP executable and installs a managed OMP extension at `~/.omp/agent/extensions/ouroboros-ooo-bridge.ts`, so interactive OMP sessions can route exact-prefix `ooo ...` input back into Ouroboros after an OMP restart (dispatch timeout: `OUROBOROS_OMP_BRIDGE_TIMEOUT_MS`). The OMP LLM adapter supports structured `response_format` requests through prompt-level JSON/schema instructions plus adapter-side extraction and validation; OMP does not expose a hard `--output-schema` flag. The runtime uses documented JSON mode (`omp --mode json <prompt>`) and resumes prior sessions natively with `--resume <id>`. OMP selects its own model (roles `smol`/`slow`/`plan`) unless an explicit `--model` override is passed; the generic `default` sentinel is never forwarded. See the [OMP CLI runtime guide](runtime-guides/omp.md).
+
 ### Full Config Skeleton
 
 ```yaml
@@ -892,6 +1051,7 @@ orchestrator:
   codex_cli_path: null
   opencode_cli_path: null
   pi_cli_path: null
+  omp_cli_path: null
   ourocode_cli_path: null
   default_max_turns: 10
 

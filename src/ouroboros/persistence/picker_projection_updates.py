@@ -11,6 +11,9 @@ from sqlalchemy import Column, Integer, MetaData, literal_column
 
 from ouroboros.events.base import BaseEvent
 from ouroboros.persistence.picker_indexes import (
+    PICKER_INTERVIEW_ROOT_EVENT_TYPE,
+    PICKER_INTERVIEW_ROOT_TABLE,
+    PICKER_INTERVIEW_ROOT_VALID_SQL,
     PICKER_PROGRESS_EVENT_TYPES,
     PICKER_PROGRESS_TABLE,
     PICKER_PROJECTION_VERSION,
@@ -27,7 +30,9 @@ from ouroboros.persistence.picker_indexes import (
 from ouroboros.persistence.schema import events_table
 
 _START_EVENT_TYPE = "orchestrator.session.started"
-_RELEVANT_TYPES = frozenset((*PICKER_PROGRESS_EVENT_TYPES, _START_EVENT_TYPE))
+_RELEVANT_TYPES = frozenset(
+    (*PICKER_PROGRESS_EVENT_TYPES, _START_EVENT_TYPE, PICKER_INTERVIEW_ROOT_EVENT_TYPE)
+)
 _write_metadata = MetaData()
 _fenced_event_writes = events_table.to_metadata(_write_metadata)
 _fenced_event_writes.append_column(Column("picker_projection_version", Integer))
@@ -137,6 +142,14 @@ async def _write_projection_rows(conn: Any, rows: Sequence[Any]) -> None:
     for row in rows:
         rowid = int(row[0])
         event_type = str(row[2])
+        if event_type == PICKER_INTERVIEW_ROOT_EVENT_TYPE:
+            if bool(row[8]):
+                await conn.exec_driver_sql(
+                    f"INSERT INTO {PICKER_INTERVIEW_ROOT_TABLE} (event_rowid, interview_id) "
+                    "VALUES (?, ?)",
+                    (rowid, row[1]),
+                )
+            continue
         if event_type == _START_EVENT_TYPE:
             starts.append((rowid, row[6], row[7]))
             continue
@@ -165,7 +178,8 @@ async def _project_inserted_ids(conn: Any, event_ids: Sequence[str]) -> None:
             f"{VALID_JSON_SQL} AS is_valid, {RUNNING_PROGRESS_SQL} AS is_running, "
             f"({WORKFLOW_PROGRESS_SCOPE_SQL} AND {WORKFLOW_SNAPSHOT_SQL}) AS is_snapshot, "
             f"{PICKER_START_EXECUTION_ID_SQL} AS start_execution_id, "
-            f"{PICKER_START_SESSION_ID_SQL} AS start_session_id "
+            f"{PICKER_START_SESSION_ID_SQL} AS start_session_id, "
+            f"({PICKER_INTERVIEW_ROOT_VALID_SQL}) AS is_interview_root "
             "FROM json_each(?) AS requested "
             "JOIN events ON events.id = requested.value",
             (json.dumps(event_ids),),
@@ -183,10 +197,17 @@ async def _project_inserted_range(conn: Any, first_rowid: int, last_rowid: int) 
             f"{VALID_JSON_SQL} AS is_valid, {RUNNING_PROGRESS_SQL} AS is_running, "
             f"({WORKFLOW_PROGRESS_SCOPE_SQL} AND {WORKFLOW_SNAPSHOT_SQL}) AS is_snapshot, "
             f"{PICKER_START_EXECUTION_ID_SQL} AS start_execution_id, "
-            f"{PICKER_START_SESSION_ID_SQL} AS start_session_id "
+            f"{PICKER_START_SESSION_ID_SQL} AS start_session_id, "
+            f"({PICKER_INTERVIEW_ROOT_VALID_SQL}) AS is_interview_root "
             "FROM events WHERE rowid BETWEEN ? AND ? "
-            "AND event_type IN (?, ?, ?)",
-            (first_rowid, last_rowid, _START_EVENT_TYPE, *PICKER_PROGRESS_EVENT_TYPES),
+            "AND event_type IN (?, ?, ?, ?)",
+            (
+                first_rowid,
+                last_rowid,
+                _START_EVENT_TYPE,
+                *PICKER_PROGRESS_EVENT_TYPES,
+                PICKER_INTERVIEW_ROOT_EVENT_TYPE,
+            ),
         )
     ).fetchall()
     if len(rows) != last_rowid - first_rowid + 1:

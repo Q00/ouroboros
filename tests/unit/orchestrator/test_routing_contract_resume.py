@@ -86,11 +86,21 @@ def _init_git_repo(root: Path) -> None:
     )
 
 
+def _project_dir() -> str:
+    """Return the default project directory, created: project identity
+    requires it to exist, and a runtime built here, not through ``_adapter``,
+    may be the first test on an xdist worker."""
+    Path("/tmp/project").mkdir(parents=True, exist_ok=True)
+    return "/tmp/project"
+
+
 def _adapter(
     cwd: str = "/tmp/project",
     *,
     constructor_model: str | None = "constructor-sonnet",
 ) -> MagicMock:
+    if cwd == "/tmp/project":
+        Path(cwd).mkdir(parents=True, exist_ok=True)
     adapter = MagicMock()
     adapter.runtime_backend = "claude"
     adapter.llm_backend = "anthropic"
@@ -546,7 +556,7 @@ def test_v9_inputs_freeze_context_profile_parent_lineage_pause_and_runtime_capab
     inputs = contract["execution_inputs"]
     semantics = contract["execution_semantics"]
     assert inputs["schema_version"] == 2
-    assert semantics["version"] == 7
+    assert semantics["version"] == CURRENT_EXECUTION_SEMANTICS_VERSION
     assert semantics["verify_shell_identity"] is None or isinstance(
         semantics["verify_shell_identity"], dict
     )
@@ -994,6 +1004,75 @@ def test_v5_lexical_shell_path_migrates_to_unavailable_identity() -> None:
     migrated = resumed._execution_contract["execution_semantics"]
     assert migrated["version"] == CURRENT_EXECUTION_SEMANTICS_VERSION
     assert migrated["verify_shell_identity"] is None
+
+
+def test_execution_semantics_seal_the_exec_sandbox_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OUROBOROS_EXEC_SANDBOX", "on")
+    confined = _runner()
+    monkeypatch.setenv("OUROBOROS_EXEC_SANDBOX", "off")
+    unconfined = _runner()
+
+    assert confined._execution_semantics_contract()["exec_sandbox_enabled"] is True
+    assert unconfined._execution_semantics_contract()["exec_sandbox_enabled"] is False
+
+
+@pytest.mark.parametrize(("sealed", "live"), [("on", "off"), ("off", "on")])
+def test_resume_rejects_changed_exec_sandbox_policy(
+    monkeypatch: pytest.MonkeyPatch, sealed: str, live: str
+) -> None:
+    monkeypatch.setenv("OUROBOROS_EXEC_SANDBOX", sealed)
+    original = _runner()
+    persisted = original._build_execution_contract(project_identity=original._project_identity())
+
+    monkeypatch.setenv("OUROBOROS_EXEC_SANDBOX", live)
+    with pytest.raises(OrchestratorError, match="changed execution semantics"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
+@pytest.mark.parametrize(("live", "resumes"), [("on", True), ("off", False)])
+def test_v7_execution_semantics_migrate_to_the_confined_sandbox_policy(
+    monkeypatch: pytest.MonkeyPatch, live: str, resumes: bool
+) -> None:
+    monkeypatch.setenv("OUROBOROS_EXEC_SANDBOX", "on")
+    original = _runner()
+    persisted = copy.deepcopy(
+        original._build_execution_contract(project_identity=original._project_identity())
+    )
+    semantics = persisted["execution_semantics"]
+    semantics["version"] = 7
+    del semantics["exec_sandbox_enabled"]
+    persisted["frugality_proof"]["execution_semantics_fingerprint"] = (
+        OrchestratorRunner._execution_semantics_fingerprint(semantics)
+    )
+
+    monkeypatch.setenv("OUROBOROS_EXEC_SANDBOX", live)
+    resumed = _runner()
+    if not resumes:
+        # A v7 run resumes confined; a controller switched off is drift.
+        with pytest.raises(OrchestratorError, match="changed execution semantics"):
+            resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+        return
+    resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+    migrated = resumed._execution_contract["execution_semantics"]
+    assert migrated["version"] == CURRENT_EXECUTION_SEMANTICS_VERSION
+    assert migrated["exec_sandbox_enabled"] is True
+
+
+def test_v7_sandbox_migration_rejects_unsealed_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OUROBOROS_EXEC_SANDBOX", "on")
+    original = _runner()
+    persisted = copy.deepcopy(
+        original._build_execution_contract(project_identity=original._project_identity())
+    )
+    persisted["execution_semantics"]["version"] = 7
+    del persisted["execution_semantics"]["exec_sandbox_enabled"]
+
+    with pytest.raises(OrchestratorError, match="invalid pre-exec-sandbox contract"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
 
 def test_resume_rejects_changed_verify_shell_authority() -> None:
@@ -1689,7 +1768,7 @@ def test_codex_dynamic_profiles_do_not_create_a_portable_resume_identity() -> No
     original_runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     original_runtime._runtime_profile = "zep-runtime"
     original_runtime._codex_profile = "zep-proxy-a"
@@ -1703,7 +1782,7 @@ def test_codex_dynamic_profiles_do_not_create_a_portable_resume_identity() -> No
     resumed_runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     resumed_runtime._runtime_profile = "zep-runtime"
     resumed_runtime._codex_profile = "zep-proxy-b"
@@ -1781,7 +1860,7 @@ def test_runner_rejects_untrusted_codex_runtime_subclass_identity() -> None:
     runtime = SpoofedCodexRuntime(
         cli_path="/bin/echo",
         model="spoofed",
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     runner = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
 
@@ -1792,7 +1871,7 @@ def test_codex_resolved_fallback_state_stays_out_of_durable_runtime_identity() -
     original_runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     original_runtime._resolved_fallback_model = "gpt-original"
     original_runtime._resolved_fallback_profile = None
@@ -1812,7 +1891,7 @@ def test_codex_resolved_fallback_state_stays_out_of_durable_runtime_identity() -
     resumed_runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     resumed_runtime._resolved_fallback_model = "gpt-changed"
     resumed_runtime._resolved_fallback_profile = None
@@ -1840,7 +1919,7 @@ def test_codex_profile_name_alone_stays_process_local(
     runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     runtime._codex_profile = "same-name-mutable-profile"
     runtime._resolved_fallback_model = None
@@ -1861,7 +1940,7 @@ def test_automatic_codex_default_resume_requires_observed_model(
     original_runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     original_runtime._runtime_profile = None
     original_runtime._codex_profile = None
@@ -1885,7 +1964,7 @@ def test_automatic_codex_default_resume_requires_observed_model(
     resumed_runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     resumed_runtime._runtime_profile = None
     resumed_runtime._codex_profile = None
@@ -1912,7 +1991,7 @@ def test_automatic_codex_default_resume_rejects_a_different_executable_path(
         cli.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         cli.chmod(0o755)
 
-    original_runtime = CodexCliRuntime(cli_path=first_cli, model=None, cwd="/tmp/project")
+    original_runtime = CodexCliRuntime(cli_path=first_cli, model=None, cwd=_project_dir())
     original_runtime._runtime_profile = None
     original_runtime._codex_profile = None
     original_runtime._resolved_fallback_model = None
@@ -1929,7 +2008,7 @@ def test_automatic_codex_default_resume_rejects_a_different_executable_path(
     persisted_identity = persisted["model_routing"]["runtime_execution"]["identity"]
     assert persisted_identity["cli_executable_path"] == str(first_cli.absolute())
 
-    resumed_runtime = CodexCliRuntime(cli_path=second_cli, model=None, cwd="/tmp/project")
+    resumed_runtime = CodexCliRuntime(cli_path=second_cli, model=None, cwd=_project_dir())
     resumed_runtime._runtime_profile = None
     resumed_runtime._codex_profile = None
     resumed_runtime._resolved_fallback_model = None
@@ -1953,7 +2032,7 @@ def test_automatic_codex_default_resume_rejects_in_place_cli_upgrade(
     cli.write_text("#!/bin/sh\necho codex 1.0\n", encoding="utf-8")
     cli.chmod(0o755)
 
-    original_runtime = CodexCliRuntime(cli_path=cli, model=None, cwd="/tmp/project")
+    original_runtime = CodexCliRuntime(cli_path=cli, model=None, cwd=_project_dir())
     original_runtime._runtime_profile = None
     original_runtime._codex_profile = None
     original_runtime._resolved_fallback_model = None
@@ -1968,7 +2047,7 @@ def test_automatic_codex_default_resume_rejects_in_place_cli_upgrade(
     )
 
     cli.write_text("#!/bin/sh\necho codex 2.0\n", encoding="utf-8")
-    resumed_runtime = CodexCliRuntime(cli_path=cli, model=None, cwd="/tmp/project")
+    resumed_runtime = CodexCliRuntime(cli_path=cli, model=None, cwd=_project_dir())
     resumed_runtime._runtime_profile = None
     resumed_runtime._codex_profile = None
     resumed_runtime._resolved_fallback_model = None
@@ -1991,7 +2070,7 @@ def test_automatic_codex_default_resume_rejects_same_version_changed_executable(
     cli.write_text("#!/bin/sh\n# one\necho codex 1.0\n", encoding="utf-8")
     cli.chmod(0o755)
 
-    original_runtime = CodexCliRuntime(cli_path=cli, model=None, cwd="/tmp/project")
+    original_runtime = CodexCliRuntime(cli_path=cli, model=None, cwd=_project_dir())
     original_runtime._runtime_profile = None
     original_runtime._codex_profile = None
     original_runtime._resolved_fallback_model = None
@@ -2006,7 +2085,7 @@ def test_automatic_codex_default_resume_rejects_same_version_changed_executable(
     )
 
     cli.write_text("#!/bin/sh\n# two\necho codex 1.0\n", encoding="utf-8")
-    resumed_runtime = CodexCliRuntime(cli_path=cli, model=None, cwd="/tmp/project")
+    resumed_runtime = CodexCliRuntime(cli_path=cli, model=None, cwd=_project_dir())
     resumed_runtime._runtime_profile = None
     resumed_runtime._codex_profile = None
     resumed_runtime._resolved_fallback_model = None
@@ -2026,7 +2105,7 @@ def test_non_codex_subclass_does_not_inherit_codex_profile_as_model_identity(
     runtime = GooseCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     runtime._codex_profile = "irrelevant-codex-profile"
     runtime._resolved_fallback_model = "irrelevant-codex-model"
@@ -2052,8 +2131,8 @@ def test_non_codex_runtime_identity_tracks_executable_path(
     second_cli.write_text("#!/bin/sh\necho gemini-b\n", encoding="utf-8")
     first_cli.chmod(0o755)
     second_cli.chmod(0o755)
-    true_runtime = GeminiCLIRuntime(cli_path=first_cli, model="gemini-pro", cwd="/tmp/project")
-    false_runtime = GeminiCLIRuntime(cli_path=second_cli, model="gemini-pro", cwd="/tmp/project")
+    true_runtime = GeminiCLIRuntime(cli_path=first_cli, model="gemini-pro", cwd=_project_dir())
+    false_runtime = GeminiCLIRuntime(cli_path=second_cli, model="gemini-pro", cwd=_project_dir())
 
     true_identity = true_runtime.execution_identity_contract()
     false_identity = false_runtime.execution_identity_contract()
@@ -2071,12 +2150,12 @@ def test_copilot_runtime_identity_tracks_native_agent_precedence(
     model_runtime = CopilotCliRuntime(
         cli_path="/bin/echo",
         model="claude-opus-4.6",
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     agent_runtime = CopilotCliRuntime(
         cli_path="/bin/echo",
         model="claude-opus-4.6",
-        cwd="/tmp/project",
+        cwd=_project_dir(),
         runtime_profile="worker",
     )
 
@@ -2102,7 +2181,7 @@ def test_runtime_model_sentinel_is_not_persisted_as_a_constructor_pin(
     runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model="default",
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     runner = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
     persisted = runner._build_execution_contract(
@@ -2141,7 +2220,7 @@ def test_codex_profile_file_changes_do_not_create_a_portable_runtime_identity(
     original_runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     original_runtime._codex_profile = "stable-name"
     original = OrchestratorRunner(original_runtime, AsyncMock(), MagicMock())
@@ -2153,7 +2232,7 @@ def test_codex_profile_file_changes_do_not_create_a_portable_runtime_identity(
     resumed_runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     resumed_runtime._codex_profile = "stable-name"
     resumed_contract = OrchestratorRunner(
@@ -2185,7 +2264,7 @@ def test_codex_home_changes_do_not_create_a_portable_runtime_identity(
     original_runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     original_contract = OrchestratorRunner(
         original_runtime,
@@ -2204,7 +2283,7 @@ def test_codex_home_changes_do_not_create_a_portable_runtime_identity(
     resumed_runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     resumed_contract = OrchestratorRunner(
         resumed_runtime,
@@ -2227,7 +2306,7 @@ def test_contract_build_records_codex_runtime_execution_identity() -> None:
     runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
 
     contract = OrchestratorRunner(
@@ -2253,7 +2332,7 @@ def test_resume_rejects_unobserved_runtime_identity_for_pinned_codex_v9() -> Non
     runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model="gpt-5",
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     original = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
     persisted = original._build_execution_contract(
@@ -2286,7 +2365,7 @@ def test_codex_runtime_with_custom_skills_dir_is_not_portable_identity(tmp_path:
     runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
         skills_dir=tmp_path,
     )
 
@@ -2306,7 +2385,7 @@ def test_codex_runtime_with_custom_skill_dispatcher_is_not_portable_identity() -
     runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
         skill_dispatcher=_dispatcher,
     )
 
@@ -2335,7 +2414,7 @@ def test_codex_runtime_with_spoofed_dispatcher_identity_is_not_portable() -> Non
     runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
         skill_dispatcher=_SpoofedDispatcher().dispatch,
     )
 
@@ -2354,7 +2433,7 @@ def test_factory_codex_runtime_records_portable_dispatcher_identity() -> None:
         "ouroboros.orchestrator.runtime_factory.get_codex_cli_path",
         return_value="/bin/echo",
     ):
-        runtime = create_agent_runtime(backend="codex", cwd="/tmp/project")
+        runtime = create_agent_runtime(backend="codex", cwd=_project_dir())
 
     contract = OrchestratorRunner(
         runtime,
@@ -2382,13 +2461,13 @@ def test_factory_codex_runtime_identity_tracks_cli_path_drift() -> None:
         "ouroboros.orchestrator.runtime_factory.get_codex_cli_path",
         return_value="/bin/echo",
     ):
-        original_runtime = create_agent_runtime(backend="codex", cwd="/tmp/project")
+        original_runtime = create_agent_runtime(backend="codex", cwd=_project_dir())
 
     with patch(
         "ouroboros.orchestrator.runtime_factory.get_codex_cli_path",
         return_value="/bin/true",
     ):
-        drifted_runtime = create_agent_runtime(backend="codex", cwd="/tmp/project")
+        drifted_runtime = create_agent_runtime(backend="codex", cwd=_project_dir())
 
     original_identity = original_runtime.execution_identity_contract()
     drifted_identity = drifted_runtime.execution_identity_contract()
@@ -2408,7 +2487,10 @@ def test_trusted_codex_family_runtime_rejects_executable_content_drift(
     runtime_cls: type[CodexCliRuntime],
     tmp_path: Path,
 ) -> None:
-    """Every portable Codex-family runtime must guard command-time binary drift."""
+    """Every portable Codex-family runtime observes command-time binary drift.
+
+    Detection is shared; the response is observe + re-attest, not a failed AC.
+    """
     cli = tmp_path / "runtime-cli"
     cli.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     cli.chmod(0o755)
@@ -2417,17 +2499,16 @@ def test_trusted_codex_family_runtime_rejects_executable_content_drift(
     cli.write_text("#!/bin/sh\necho changed\nexit 0\n", encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="CLI executable changed"):
-        runtime._build_command(
-            str(tmp_path / "last-message.txt"),
-            prompt="hello",
-        )
+        runtime._verify_cli_executable_identity_unchanged()
+    assert runtime._build_command(str(tmp_path / "last-message.txt"), prompt="hello")
+    assert runtime._drift.epoch == 1
 
 
 def test_zcode_runtime_is_not_trusted_as_portable_identity() -> None:
     runtime = ZcodeCLIRuntime(
         cli_path="/tmp/zcode.cjs",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
 
     contract = OrchestratorRunner(
@@ -2469,14 +2550,16 @@ def test_codex_profile_reasoning_effort_drift_is_rejected_before_command_build(
     )
 
     with patch("ouroboros.providers.profiles.load_config", return_value=original_config):
-        runtime = CodexCliRuntime(cli_path="/bin/echo", model=None, cwd="/tmp/project")
+        runtime = CodexCliRuntime(cli_path="/bin/echo", model=None, cwd=_project_dir())
         original_command = runtime._build_command("/tmp/output", runtime_handle=handle)
 
     expected_effort = "xhigh" if original_provider_effort else "high"
     assert f"model_reasoning_effort={expected_effort}" in original_command
     with patch("ouroboros.providers.profiles.load_config", return_value=drifted_config):
-        with pytest.raises(RuntimeError, match="profile routing changed"):
-            runtime._build_command("/tmp/output", runtime_handle=handle)
+        drifted_command = runtime._build_command("/tmp/output", runtime_handle=handle)
+    # Observed, not fatal: threads retire and the drifted effort is honored.
+    assert runtime._drift.epoch >= 1
+    assert "model_reasoning_effort=low" in drifted_command
 
 
 def test_provider_neutral_llm_profile_model_changes_runtime_identity() -> None:
@@ -2491,9 +2574,9 @@ def test_provider_neutral_llm_profile_model_changes_runtime_identity() -> None:
     )
 
     with patch("ouroboros.providers.profiles.load_config", return_value=original_config):
-        original_runtime = CodexCliRuntime(cli_path="/bin/echo", model=None, cwd="/tmp/project")
+        original_runtime = CodexCliRuntime(cli_path="/bin/echo", model=None, cwd=_project_dir())
     with patch("ouroboros.providers.profiles.load_config", return_value=drifted_config):
-        drifted_runtime = CodexCliRuntime(cli_path="/bin/echo", model=None, cwd="/tmp/project")
+        drifted_runtime = CodexCliRuntime(cli_path="/bin/echo", model=None, cwd=_project_dir())
 
     assert (
         original_runtime.execution_identity_contract()["profile_resolution_fingerprint"]
@@ -2518,7 +2601,7 @@ def test_unselected_native_codex_profile_changes_runtime_identity(
         patch("ouroboros.codex.home.resolve_codex_home", return_value=codex_home),
         patch("ouroboros.providers.profiles.load_config", return_value=base_config),
     ):
-        original_runtime = CodexCliRuntime(cli_path="/bin/echo", model=None, cwd="/tmp/project")
+        original_runtime = CodexCliRuntime(cli_path="/bin/echo", model=None, cwd=_project_dir())
 
     config_toml.write_text(
         'model = "gpt-5"\n\n[profiles.unselected]\nmodel = "gpt-b"\n',
@@ -2528,7 +2611,7 @@ def test_unselected_native_codex_profile_changes_runtime_identity(
         patch("ouroboros.codex.home.resolve_codex_home", return_value=codex_home),
         patch("ouroboros.providers.profiles.load_config", return_value=base_config),
     ):
-        drifted_runtime = CodexCliRuntime(cli_path="/bin/echo", model=None, cwd="/tmp/project")
+        drifted_runtime = CodexCliRuntime(cli_path="/bin/echo", model=None, cwd=_project_dir())
 
     assert (
         original_runtime.execution_identity_contract()["codex_config_fingerprint"]
@@ -2561,7 +2644,7 @@ def test_runtime_selector_validation_rejects_changed_resume_handle(
     runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     runner = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
     runner._execution_contract = runner._build_execution_contract(
@@ -2576,7 +2659,7 @@ def test_runtime_selector_validation_accepts_default_handle() -> None:
     runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     runner = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
     runner._execution_contract = runner._build_execution_contract(
@@ -2595,7 +2678,7 @@ def test_contract_build_binds_inherited_runtime_handle_selector() -> None:
     runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model="gpt-pinned",
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     handle = RuntimeHandle(
         backend="codex_cli",
@@ -2630,7 +2713,7 @@ def test_restore_accepts_same_bound_runtime_handle_selector() -> None:
     runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model="gpt-pinned",
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     handle = RuntimeHandle(
         backend="codex_cli",
@@ -2656,7 +2739,7 @@ def test_restore_rejects_different_bound_runtime_handle_selector() -> None:
     runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model="gpt-pinned",
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     original_handle = RuntimeHandle(
         backend="codex_cli",
@@ -2707,7 +2790,7 @@ def test_non_codex_runtime_rejects_cross_backend_handle() -> None:
     runtime = GooseCliRuntime(
         cli_path="/bin/echo",
         model="pinned-goose-model",
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     runner = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
 
@@ -2740,7 +2823,7 @@ def test_codex_runner_forces_native_bypass_flag() -> None:
         cli_path="/bin/echo",
         permission_mode="acceptEdits",
         model="gpt-pinned",
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     OrchestratorRunner(runtime, AsyncMock(), MagicMock())
 
@@ -2754,7 +2837,7 @@ def test_codex_command_consumes_frozen_fallback_model(
     runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     runtime._resolved_fallback_model = "gpt-frozen"
     runtime._resolved_fallback_profile = None

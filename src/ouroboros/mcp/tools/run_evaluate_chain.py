@@ -42,6 +42,14 @@ def is_evaluable_run_result(result: MCPToolResult) -> bool:
     return status in {"completed", "failed"} and bool(result.text_content.strip())
 
 
+def result_evaluation_working_dir(result: MCPToolResult, fallback: Path) -> Path:
+    """The directory a chained evaluation judges: the run's worktree, else ``fallback``."""
+    worktree_path = result.meta.get("worktree_path")
+    if isinstance(worktree_path, str) and worktree_path:
+        return Path(worktree_path)
+    return fallback
+
+
 def _append_text(result: MCPToolResult, text: str, meta: dict[str, Any]) -> MCPToolResult:
     return MCPToolResult(
         content=(*result.content, MCPContentItem(type=ContentType.TEXT, text=text)),

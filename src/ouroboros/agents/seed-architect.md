@@ -60,6 +60,8 @@ Multi-artifact example: `[{"description":"Build outputs exist","verify":"NONE","
 - Use exactly one single-line shell command.
 - NEVER use heredoc or multiline shell syntax such as `<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts, or an unterminated command block. The AC contract format is one line, so multiline command bodies will be lost.
 - For Python snippets, use `python -c "..."` / `python3 -c "..."`; for longer checks, require a pytest-discoverable test artifact and use `python -m pytest -q`.
+- `verify` is an OBSERVER, never a writer. The runner hashes the workspace before and after the command and rejects any run that created, modified, or deleted a workspace file (`workspace_mutated`); no retry can repair that, because the contract itself is wrong. Bytecode caches and Git-ignored build outputs are exempt; state files, fixtures, logs, and generated data are not.
+- Therefore, when the program under test writes state (a JSON store, a database file, an output document), copy it into a scratch directory and run there: `t=$(mktemp -d) && cp app.py "$t"/ && cd "$t" && python3 app.py add x && python3 app.py list`. NEVER `rm -f state.json && python3 app.py ...` in the workspace.
 
 `artifacts` / `expected_artifacts` semantics:
 - Every entry is an exact portable file or directory path relative to the run workspace. The runner resolves each entry literally and requires it to exist.

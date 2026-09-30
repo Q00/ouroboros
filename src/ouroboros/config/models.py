@@ -140,6 +140,7 @@ class LLMConfig(BaseModel, frozen=True):
         "hermes",
         "goose",
         "pi",
+        "omp",
         "ourocode",
         "dsh",
         "gjc",
@@ -241,6 +242,11 @@ class ExecutionConfig(BaseModel, frozen=True):
             must exist under the run workspace and ``verify_command`` must exit
             0 (plus any ``output_assertion``). On by default.
         verify_command_timeout_seconds: Timeout for an AC verify command.
+        exec_sandbox: Whether commands the controller runs on its own
+            authority (legacy-verifier replay) are confined by the execution
+            sandbox (``runtime/exec_sandbox.py``). On by default. ``false`` is
+            unsafe: those commands then run unconfined, able to write outside
+            their workspace copy and to use the network.
         ac_retry_attempts: How many times a failed AC is re-dispatched before
             it is marked FAILED (per-AC, excludes stall retries).
         cross_harness_redispatch: Whether a terminally failing AC may be
@@ -275,6 +281,7 @@ class ExecutionConfig(BaseModel, frozen=True):
     default_model: str | None = None
     run_verify_commands: bool = True
     verify_command_timeout_seconds: int = Field(default=600, ge=1)
+    exec_sandbox: bool = True
     ac_retry_attempts: int = Field(default=2, ge=0)
     cross_harness_redispatch: bool = False
     n_version_tournament: bool = False
@@ -493,6 +500,8 @@ VALID_RUNTIME_BACKENDS = frozenset(
         "goose_cli",
         "pi",
         "pi_cli",
+        "omp",
+        "omp_cli",
         "gjc",
         "gjc_cli",
         "antigravity",
@@ -668,6 +677,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
         "copilot",
         "goose",
         "pi",
+        "omp",
         "gjc",
         "antigravity",
         "grok",
@@ -711,6 +721,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
     kiro_cli_path: str | None = None
     goose_cli_path: str | None = None
     pi_cli_path: str | None = None
+    omp_cli_path: str | None = None
     gjc_cli_path: str | None = None
     antigravity_cli_path: str | None = None
     grok_cli_path: str | None = None
@@ -745,6 +756,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
         "kiro_cli_path",
         "goose_cli_path",
         "pi_cli_path",
+        "omp_cli_path",
         "gjc_cli_path",
         "antigravity_cli_path",
         "grok_cli_path",
@@ -797,6 +809,38 @@ class SeedConfig(BaseModel, frozen=True):
     verify_command_gate: Literal["warn", "block"] = "warn"
 
 
+class BoundaryConfig(BaseModel, frozen=True):
+    """Pre-dispatch check package for ``ooo run`` (on by default).
+
+    Attributes:
+        check_package: ``on`` makes a new ``ooo run`` construct a check package
+            from the Seed's acceptance criteria before the worker starts, admit
+            it on the base checkout, and verify the finished workspace against
+            it. ``off`` leaves the run path unchanged. Unset (default) means
+            ``on`` (``ouroboros.boundary.switch``).
+        constructor_timeout_seconds: Wall-clock budget of one read-only
+            constructor model call.
+        check_timeout_seconds: Per-check command timeout during admission and
+            candidate verification.
+        max_construction_attempts: Package versions tried before the worker
+            starts. A version that is not admitted is superseded by the next
+            one; 1 means no regeneration.
+    """
+
+    check_package: Literal["off", "on"] | None = None
+    constructor_timeout_seconds: int = Field(default=600, ge=30, le=3600)
+    check_timeout_seconds: int = Field(default=120, ge=5, le=1800)
+    max_construction_attempts: int = Field(default=2, ge=1, le=5)
+
+    @field_validator("check_package", mode="before")
+    @classmethod
+    def _yaml_booleans(cls, value: Any) -> Any:
+        # YAML 1.1 reads a bare ``on`` / ``off`` as a boolean.
+        if isinstance(value, bool):
+            return "on" if value else "off"
+        return value
+
+
 class OuroborosConfig(BaseModel, frozen=True):
     """Top-level Ouroboros configuration.
 
@@ -818,6 +862,7 @@ class OuroborosConfig(BaseModel, frozen=True):
         runtime_controls: Long-running workflow timeout/progress controls
         logging: Logging configuration
         seed: Seed-authoring gates applied before execution
+        boundary: Pre-dispatch check package for ``ooo run`` (on by default)
     """
 
     economics: EconomicsConfig = Field(default_factory=EconomicsConfig)
@@ -836,6 +881,7 @@ class OuroborosConfig(BaseModel, frozen=True):
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     seed: SeedConfig = Field(default_factory=SeedConfig)
+    boundary: BoundaryConfig = Field(default_factory=BoundaryConfig)
 
 
 def get_default_config() -> OuroborosConfig:

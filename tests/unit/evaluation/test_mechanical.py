@@ -119,7 +119,7 @@ class TestRunCommand:
     @pytest.mark.asyncio
     async def test_successful_command(self) -> None:
         """Run successful command."""
-        result = await run_command(("echo", "hello"), timeout=5)
+        result = await run_command((sys.executable, "-c", "print('hello')"), timeout=5)
         assert result.return_code == 0
         assert "hello" in result.stdout
         assert result.timed_out is False
@@ -168,8 +168,8 @@ class TestRunCommand:
     @pytest.mark.asyncio
     async def test_failed_command(self) -> None:
         """Run failing command."""
-        result = await run_command(("false",), timeout=5)
-        assert result.return_code != 0
+        result = await run_command((sys.executable, "-c", "raise SystemExit(7)"), timeout=5)
+        assert result.return_code == 7
 
     @pytest.mark.asyncio
     async def test_command_not_found(self) -> None:
@@ -403,3 +403,25 @@ class TestRunMechanicalVerification:
             )
 
             assert result.is_ok
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX virtualenv layout")
+def test_run_command_resolves_tools_from_the_main_worktree_venv(tmp_path) -> None:
+    """A task worktree lacks the gitignored ``.venv``; the command uses the main tree's."""
+    main = tmp_path / "project"
+    bin_dir = main / ".venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    (main / ".venv" / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    for name, body in (("python3", ""), ("projtool", "echo PROJECT_VENV_TOOL")):
+        (bin_dir / name).write_text(f"#!/bin/sh\n{body}\n")
+        (bin_dir / name).chmod(0o755)
+    gitdir = main / ".git" / "worktrees" / "orch_1"
+    gitdir.mkdir(parents=True)
+    worktree = tmp_path / "worktrees" / "orch_1"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: {gitdir}\n")
+
+    result = asyncio.run(run_command(("projtool",), timeout=30, working_dir=worktree))
+
+    assert result.return_code == 0, result.stderr
+    assert "PROJECT_VENV_TOOL" in result.stdout

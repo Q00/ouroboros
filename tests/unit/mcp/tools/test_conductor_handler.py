@@ -264,3 +264,56 @@ async def test_successor_budget_is_one_per_attention_and_two_per_root(store: Eve
     )
     assert root_exhausted.is_err
     assert "root job" in root_exhausted.error.message
+
+
+@pytest.mark.asyncio
+async def test_advisory_read_only_decision_records_without_governance_gates(
+    store: EventStore,
+) -> None:
+    """Grounded-lateral RFC P3: an accepted lateral recommendation persists as
+    a read-only ADR — no closed-ownership, predecessor, or budget requirements."""
+    handler = RecordConductorDecisionHandler(store)
+
+    result = await handler.handle(
+        {
+            "decision_id": "fanout_abc123",
+            "phase": "selected",
+            "attention_event_id": "fanout_abc123",
+            "evidence_event_ids": ["fanout_abc123"],
+            "selected_action": "Adopt Postgres over SQLite",
+            "verification_summary": (
+                "Grounds: concurrent writers required. Dissent: ops overhead. "
+                "Flip: single-writer embedded deployment."
+            ),
+            "selected_effect": "read_only",
+            "actor_mode": "advisory",
+            "engine_ownership_state": "active",
+        }
+    )
+
+    assert result.is_ok, result
+    events = await store.replay("conductor_decision", "fanout_abc123")
+    assert len(events) == 1
+    assert events[0].data.get("actor_mode") == "advisory"
+    assert events[0].data.get("selected_action") == "Adopt Postgres over SQLite"
+
+
+@pytest.mark.asyncio
+async def test_advisory_actor_cannot_carry_a_relaxing_directive(store: EventStore) -> None:
+    handler = RecordConductorDecisionHandler(store)
+
+    result = await handler.handle(
+        _selected(
+            decision_id="adv_relax",
+            actor_mode="advisory",
+            conductor_directive={
+                "source_attention_event_id": "attention_1",
+                "instruction": "Loosen the acceptance criteria.",
+                "rejected_reasons": ["too strict"],
+                "deterministic": False,
+            },
+        )
+    )
+
+    assert result.is_err
+    assert "deterministic non-relaxing directive" in str(result.error)

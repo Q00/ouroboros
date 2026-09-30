@@ -34,6 +34,7 @@ from ouroboros.bigbang.interview import (
     prompt_safe_initial_context,
 )
 from ouroboros.bigbang.requirement_distillation import (
+    anchor_promoted_requirements,
     apply_requirement_distillation,
     build_promoted_reference_seed,
     build_requirement_distillation,
@@ -66,6 +67,10 @@ _MAX_EXTRACTION_RETRIES = 1
 _AC_RESERVED_FIELD_NAMES = ("verify", "artifacts", "expect")
 _AC_FIELD_NAME_OBFUSCATORS = frozenset({"'", '"', "\\"})
 _WORD_APOSTROPHE_SUFFIXES = frozenset({"d", "ll", "m", "re", "s", "t", "ve"})
+# Some CLI agents prefix emitted lines with a wall-clock stamp ("[13:57:34] GOAL: ...").
+# It breaks the line-anchored field prefixes, and the preamble scan then drops
+# the whole GOAL line as conversational text.
+_LINE_TIMESTAMP_RE = re.compile(r"^\[\d{2}:\d{2}:\d{2}\]\s*", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -1725,6 +1730,7 @@ class SeedGenerator:
                     state,
                     distillation,
                     ambiguity_score=ambiguity_score.overall_score,
+                    gate_forced=force,
                 )
             )
 
@@ -1744,10 +1750,23 @@ class SeedGenerator:
                 )
             )
         requirements = applied.requirements
+        # Verbatim-anchor backstop (grounded-lateral RFC D6): re-append any
+        # user-committed promoted requirement the LLM extraction dropped or
+        # re-worded. This is the one chokepoint every entry path shares —
+        # interview, auto, and host-context all converge here or on the fully
+        # deterministic builders.
+        requirements, anchored_count = anchor_promoted_requirements(requirements, applied.promotion)
+        if anchored_count:
+            log.info(
+                "seed.generation.anchor_backstop",
+                interview_id=state.interview_id,
+                appended=anchored_count,
+            )
 
         # Create metadata
         metadata = SeedMetadata(
             ambiguity_score=ambiguity_score.overall_score,
+            gate_forced=force,
             interview_id=state.interview_id,
             parent_seed_id=parent_seed.metadata.seed_id if parent_seed else None,
         )
@@ -2175,7 +2194,7 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
         Returns:
             Cleaned response starting from first recognized prefix.
         """
-        text = response.strip()
+        text = _LINE_TIMESTAMP_RE.sub("", response.strip())
 
         # Strip markdown code block markers
         code_block_match = re.search(r"```(?:\w*)\n(.*?)```", text, re.DOTALL)

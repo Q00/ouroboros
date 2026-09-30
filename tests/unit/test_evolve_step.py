@@ -1515,7 +1515,11 @@ class TestEvolveStepGen2:
         seed_generator.generate_from_reflect.assert_not_called()
         executor.assert_awaited_once()
         assert executor.await_args.args[0] == seed_v2
-        evaluator.assert_awaited_once_with(seed_v2, "verified output")
+        evaluator.assert_awaited_once_with(
+            seed_v2,
+            "verified output",
+            execution_id=loop_support.generation_execution_id("lin_verification_handoff", 4),
+        )
 
     @pytest.mark.asyncio
     async def test_hard_crash_after_reflect_without_provenance_fails_closed(self) -> None:
@@ -1671,7 +1675,11 @@ class TestEvolveStepGen2:
         wonder_engine.wonder.assert_not_awaited()
         reflect_engine.reflect.assert_not_awaited()
         executor.assert_awaited_once()
-        evaluator.assert_awaited_once_with(seed_v2, "verified output")
+        evaluator.assert_awaited_once_with(
+            seed_v2,
+            "verified output",
+            execution_id=loop_support.generation_execution_id("lin_atomic_handoff", 4),
+        )
 
     @pytest.mark.asyncio
     async def test_concurrent_same_lineage_replays_one_ontology_stable_winner(self) -> None:
@@ -1929,7 +1937,11 @@ class TestEvolveStepGen2:
         assert result.value.generation_result.frozen_ac_indices == ()
         reflect_engine.reflect.assert_not_awaited()
         executor.assert_awaited_once()
-        evaluator.assert_awaited_once_with(seed, "fresh execution")
+        evaluator.assert_awaited_once_with(
+            seed,
+            "fresh execution",
+            execution_id=loop_support.generation_execution_id("lin_unknown_pass", 2),
+        )
 
     @pytest.mark.asyncio
     async def test_resume_preserves_ambiguous_legacy_unstructured_ac_list(self) -> None:
@@ -2261,7 +2273,15 @@ class TestEvolveStepGen2:
         wonder_engine.wonder.assert_not_awaited()
         reflect_engine.reflect.assert_not_awaited()
         seed_generator.generate_from_reflect.assert_not_called()
-        evaluator.assert_awaited_once_with(candidate, "fresh execution")
+        evaluator.assert_awaited_once()
+        assert evaluator.await_args.args == (candidate, "fresh execution")
+        kwargs = evaluator.await_args.kwargs
+        assert kwargs["execution_id"] == loop_support.generation_execution_id(
+            "lin_seeding_resume_focus", 2
+        )
+        # The frozen node's previous pass is carried to the evaluator.
+        assert list(kwargs["carried_ac_results"]) == [0]
+        assert kwargs["carried_ac_results"][0].authoritative_pass
 
 
 class TestEvolveStepConvergence:
@@ -3179,7 +3199,11 @@ class TestEvolveStepResume:
         assert result.value.generation_result.seed == candidate
         assert result.value.generation_result.execution_output == "durable execution"
         executor.assert_not_awaited()
-        evaluator.assert_awaited_once_with(candidate, "durable execution")
+        evaluator.assert_awaited_once_with(
+            candidate,
+            "durable execution",
+            execution_id=loop_support.generation_execution_id(lineage_id, 2),
+        )
         replayed = await store.replay_lineage(lineage_id)
         assert (
             sum(
@@ -3570,6 +3594,59 @@ class TestEvolveStepHandler:
         assert result.value.meta["action"] == "converged"
         assert result.value.meta["converged"] is True
         assert result.value.meta["qa_attempted"] is False
+
+    @pytest.mark.asyncio
+    async def test_handler_records_the_source_generation_before_the_lineage_workspace(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The lineage worktree starts from the source generation's recorded work."""
+        from ouroboros.mcp.tools.definitions import EvolveStepHandler
+
+        store = await create_event_store()
+        seed = make_seed()
+        gen_result = GenerationResult(
+            generation_number=1,
+            seed=seed,
+            evaluation_summary=make_eval_summary(),
+            phase=GenerationPhase.COMPLETED,
+            success=True,
+        )
+        handler = EvolveStepHandler(evolutionary_loop=make_loop(store, gen_result=gen_result))
+        order: list[str] = []
+
+        def _checkpoint(path: str, *, message: str) -> None:
+            order.append(f"checkpoint:{path}")
+
+        def _restore(lineage_id: str, **kwargs: object) -> None:
+            order.append(f"restore:{kwargs['fallback_source_cwd']}")
+
+        import yaml
+
+        source = tmp_path / "gen1"
+        source.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=source, check=True)
+        with (
+            patch(
+                "ouroboros.mcp.tools.evolution_handlers.checkpoint_managed_worktree",
+                side_effect=_checkpoint,
+            ),
+            patch(
+                "ouroboros.mcp.tools.evolution_handlers.maybe_restore_task_workspace",
+                side_effect=_restore,
+            ),
+        ):
+            result = await handler.handle(
+                {
+                    "lineage_id": "lin_checkpoint",
+                    "seed_content": yaml.dump(seed.to_dict()),
+                    "project_dir": str(source),
+                    "skip_qa": True,
+                }
+            )
+
+        assert result.is_ok
+        assert order == [f"checkpoint:{source}", f"restore:{source}"]
 
     @pytest.mark.asyncio
     async def test_public_benchmark_control_isolation_gates_fail_closed(

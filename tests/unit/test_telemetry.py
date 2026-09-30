@@ -18,7 +18,7 @@ import uuid
 import pytest
 
 from ouroboros import telemetry
-from ouroboros.config.loader import get_telemetry_enabled
+from ouroboros.config.loader import get_telemetry_enabled, telemetry_opt_out_in_env
 
 
 @pytest.fixture(autouse=True)
@@ -214,6 +214,30 @@ class TestOptOut:
         telemetry.capture("command_run", {"command": "run"})
         telemetry.flush(timeout=1.0)
         assert events == []
+
+
+class TestTelemetryOptOutInEnv:
+    """The env half of the telemetry opt-out contract, persisted by setup."""
+
+    def test_do_not_track_truthy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DO_NOT_TRACK", "1")
+        monkeypatch.delenv("OUROBOROS_TELEMETRY", raising=False)
+        assert telemetry_opt_out_in_env() is True
+
+    def test_ouroboros_telemetry_falsy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+        monkeypatch.setenv("OUROBOROS_TELEMETRY", "off")
+        assert telemetry_opt_out_in_env() is True
+
+    def test_ouroboros_telemetry_1_is_not_an_opt_out(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+        monkeypatch.setenv("OUROBOROS_TELEMETRY", "1")
+        assert telemetry_opt_out_in_env() is False
+
+    def test_unset_env_is_not_an_opt_out(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+        monkeypatch.delenv("OUROBOROS_TELEMETRY", raising=False)
+        assert telemetry_opt_out_in_env() is False
 
 
 class TestDistinctId:
@@ -619,6 +643,54 @@ class TestCapture:
         assert command["properties"]["status"] == "blocked"
         assert "error_type" not in command["properties"]
 
+    def test_seed_origin_is_kept_only_from_the_closed_set(self, sent: list[dict[str, Any]]) -> None:
+        """``origin`` answers one question: is the interview-less path used."""
+        telemetry.capture_tool_call(
+            "ouroboros_generate_seed", ok=True, origin="session_context_gap"
+        )
+        telemetry.flush(timeout=2.0)
+
+        props = next(event["properties"] for event in sent if event["event"] == "command_run")
+        assert props["command"] == "seed"
+        assert props["origin"] == "session_context_gap"
+
+    def test_seed_origin_outside_closed_set_is_dropped(self, sent: list[dict[str, Any]]) -> None:
+        telemetry.capture_tool_call(
+            "ouroboros_generate_seed", ok=True, origin="/home/alice/private-seed"
+        )
+        telemetry.flush(timeout=2.0)
+
+        props = next(event["properties"] for event in sent if event["event"] == "command_run")
+        assert "origin" not in props
+
+    def test_origin_is_dropped_for_every_other_command(self, sent: list[dict[str, Any]]) -> None:
+        telemetry.capture_tool_call("ouroboros_start_execute_seed", ok=True, origin="interview")
+        telemetry.flush(timeout=2.0)
+
+        props = next(event["properties"] for event in sent if event["event"] == "command_run")
+        assert props["command"] == "run"
+        assert "origin" not in props
+
+    def test_seed_rows_with_different_origins_are_not_collapsed_by_daily_dedupe(
+        self, sent: list[dict[str, Any]]
+    ) -> None:
+        """One user can take both entrances in a day; each is its own row."""
+        telemetry.capture_tool_call("ouroboros_generate_seed", ok=True, origin="interview")
+        telemetry.capture_tool_call("ouroboros_generate_seed", ok=True, origin="session_context")
+        telemetry.capture_tool_call("ouroboros_generate_seed", ok=True, origin="session_context")
+        telemetry.flush(timeout=2.0)
+
+        rows = [event["properties"] for event in sent if event["event"] == "command_run"]
+        assert [row["origin"] for row in rows] == [
+            "interview",
+            "session_context",
+            "session_context",
+        ]
+        # PostHog folds rows on ``$insert_id``: the two entrances keep distinct
+        # ids, the repeated entrance shares one.
+        assert rows[0]["$insert_id"] != rows[1]["$insert_id"]
+        assert rows[1]["$insert_id"] == rows[2]["$insert_id"]
+
     def test_successful_internal_and_polling_commands_are_dropped(
         self, sent: list[dict[str, Any]]
     ) -> None:
@@ -722,6 +794,83 @@ class TestCapture:
         assert props["terminal_status"] == "failed"
         assert props["failure_reason_code"] == "validation"
         assert "secret" not in json.dumps(sent[0])
+
+    def test_failed_run_forwards_closed_failure_cause(self, sent: list[dict[str, Any]]) -> None:
+        telemetry.capture_job_outcome(
+            "job-private-id",
+            "execute_seed",
+            terminal_status="failed",
+            result_meta={
+                "failure_reason_code": "validation",
+                "failure_cause": "verify_workspace_mutated",
+            },
+        )
+        telemetry.flush(timeout=2.0)
+
+        props = sent[0]["properties"]
+        assert props["failure_reason_code"] == "validation"
+        assert props["failure_cause"] == "verify_workspace_mutated"
+
+    def test_failed_run_forwards_launch_cause(self, sent: list[dict[str, Any]]) -> None:
+        telemetry.capture_job_outcome(
+            "job-private-id",
+            "execute_seed",
+            terminal_status="failed",
+            result_meta={
+                "failure_reason_code": "config",
+                "failure_cause": "launch_workspace_unavailable",
+            },
+        )
+        telemetry.flush(timeout=2.0)
+
+        props = sent[0]["properties"]
+        assert props["failure_reason_code"] == "config"
+        assert props["failure_cause"] == "launch_workspace_unavailable"
+
+    def test_unaudited_failure_cause_folds_to_unknown(self, sent: list[dict[str, Any]]) -> None:
+        telemetry.capture_job_outcome(
+            "job-private-id",
+            "execute_seed",
+            terminal_status="failed",
+            result_meta={"failure_cause": "verify_command: pytest /Users/private/project"},
+        )
+        telemetry.flush(timeout=2.0)
+
+        props = sent[0]["properties"]
+        assert props["failure_cause"] == "unknown"
+        assert "private" not in json.dumps(sent[0])
+
+    def test_successful_outcome_carries_no_failure_cause(self, sent: list[dict[str, Any]]) -> None:
+        telemetry.capture_job_outcome(
+            "job-private-id",
+            "execute_seed",
+            terminal_status="completed",
+            result_meta={"failure_cause": "verify_exit_nonzero"},
+        )
+        telemetry.flush(timeout=2.0)
+
+        assert "failure_cause" not in sent[0]["properties"]
+        assert "failure_reason_code" not in sent[0]["properties"]
+
+    def test_runtime_drift_keeps_closed_kind_only(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        _no_ambient_frontdoor_or_ci(monkeypatch)
+        telemetry.set_context(runtime_backend="codex")
+        telemetry.capture_runtime_drift("cli_executable")
+        telemetry.capture_runtime_drift("/Users/private/codex was replaced")
+        telemetry.flush(timeout=2.0)
+
+        assert [event["event"] for event in sent] == ["runtime_drift", "runtime_drift"]
+        assert sent[0]["properties"]["kind"] == "cli_executable"
+        assert sent[1]["properties"]["kind"] == "unknown"
+        assert set(sent[0]["properties"]) == {
+            "kind",
+            "runtime_backend",
+            "app_version",
+            "os",
+        }
+        assert "private" not in json.dumps(sent)
 
     def test_never_raises_when_post_fails(
         self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
