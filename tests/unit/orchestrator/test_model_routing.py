@@ -29,6 +29,7 @@ from ouroboros.orchestrator.model_routing import (
     tier_from_model_tier_arg,
     tier_from_profile_hint,
 )
+from ouroboros.orchestrator.resolved_models import resolve_route_economics
 
 
 def _economics(**overrides: object) -> EconomicsConfig:
@@ -793,3 +794,74 @@ class TestResolveExecuteModel:
         assert decision.mode == "none"
         assert decision.model is None
         assert kwargs == {}
+
+
+class TestResolveRouteEconomics:
+    """Under ``auto`` each tier runs the backend's latest model of that tier."""
+
+    @staticmethod
+    def _router_models(economics: EconomicsConfig, backend: str) -> dict[str, str]:
+        router = build_model_router(economics, runtime_backend=backend)
+        assert router is not None
+        return dict(router.tier_models)
+
+    def test_auto_routes_claude_tiers_to_aliases(self) -> None:
+        resolved = resolve_route_economics(_economics(), runtime_backend="claude", pinned=False)
+
+        assert self._router_models(resolved, "claude") == {
+            "frugal": "haiku",
+            "standard": "sonnet",
+            "frontier": "opus",
+        }
+        # The ladder's shape and costs stay configuration.
+        assert {name: tier.cost_factor for name, tier in resolved.tiers.items()} == {
+            "frugal": 1,
+            "standard": 10,
+            "frontier": 30,
+        }
+
+    @pytest.mark.parametrize("backend", ["codex_cli", "codex_mcp", "gemini_cli"])
+    def test_auto_routes_sentinel_backends_to_default(self, backend: str) -> None:
+        shipped = get_default_config().economics
+        resolved = resolve_route_economics(shipped, runtime_backend=backend, pinned=False)
+
+        models = self._router_models(resolved, backend)
+        assert models
+        assert set(models.values()) == {"default"}
+        assert set(models) == set(self._router_models(shipped, backend))
+
+    def test_auto_keeps_other_providers_entries(self) -> None:
+        shipped = get_default_config().economics
+        resolved = resolve_route_economics(shipped, runtime_backend="claude", pinned=False)
+
+        assert self._router_models(resolved, "codex_cli") == self._router_models(
+            shipped, "codex_cli"
+        )
+
+    def test_pinned_ladder_is_used_verbatim(self) -> None:
+        economics = _economics()
+
+        resolved = resolve_route_economics(economics, runtime_backend="claude", pinned=True)
+
+        assert resolved is economics
+        assert self._router_models(resolved, "claude") == {
+            "frugal": "haiku-x",
+            "standard": "sonnet-x",
+            "frontier": "opus-x",
+        }
+
+    def test_explicit_backend_keeps_configured_ladder(self) -> None:
+        economics = _economics()
+
+        assert (
+            resolve_route_economics(economics, runtime_backend="litellm", pinned=False) is economics
+        )
+
+    def test_unmapped_backend_is_unchanged(self) -> None:
+        economics = _economics()
+
+        assert (
+            resolve_route_economics(economics, runtime_backend="opencode", pinned=False)
+            is economics
+        )
+        assert resolve_route_economics(economics, runtime_backend=None, pinned=False) is economics
