@@ -32,6 +32,31 @@ class TestVendorMapping:
         assert ri.model_vendor("") == "unknown"
 
 
+class TestVoterVendor:
+    def test_alias_models_take_the_backend_vendor(self) -> None:
+        for alias in ("opus", "sonnet", "haiku"):
+            assert ri.voter_vendor(alias, "claude") == "anthropic"
+            assert ri.voter_vendor(alias, "claude_code") == "anthropic"
+        # Without a backend the bare alias carries no vendor marker.
+        assert ri.voter_vendor("opus", None) == "unknown"
+
+    def test_sentinel_takes_the_backend_vendor(self) -> None:
+        assert ri.voter_vendor("default", "codex") == "openai"
+        assert ri.voter_vendor("default", "gemini") == "google"
+        # A known backend without a vendor family stays unknown, whatever the id.
+        assert ri.voter_vendor("gpt-4o", "dsh") == "unknown"
+
+    def test_explicit_backends_infer_from_the_model_id(self) -> None:
+        assert ri.voter_vendor("openrouter/google/gemini-2.5-pro", "litellm") == "google"
+        assert ri.voter_vendor("openrouter/openai/gpt-4o", "litellm") == "openai"
+        assert ri.voter_vendor("default", "litellm") == "unknown"
+        assert ri.voter_vendor("default", "copilot") == "unknown"
+
+    def test_unknown_backend_infers_from_the_model_id(self) -> None:
+        assert ri.voter_vendor("gpt-4o", "nonesuch") == "openai"
+        assert ri.voter_vendor("gpt-4o", None) == ri.model_vendor("gpt-4o")
+
+
 class TestFilterVoterModels:
     def test_drops_same_vendor_when_jury_stays_viable(self) -> None:
         voters = ["anthropic/claude", "openai/gpt-4o", "google/gemini"]
@@ -119,6 +144,52 @@ class TestResolveIndependence:
         )
         assert result.status == ri.INDEPENDENT
         assert result.is_independent is True
+
+    def test_claude_alias_roster_is_independent_of_a_codex_executor(self) -> None:
+        result = ri.resolve_reviewer_independence(
+            "codex",
+            ["opus", "sonnet"],
+            configured_backends=["codex", "claude"],
+            voter_backend="claude",
+        )
+        assert result.status == ri.INDEPENDENT
+        assert result.voter_vendors == ("anthropic",)
+
+    def test_claude_alias_roster_is_same_vendor_for_a_claude_executor(self) -> None:
+        result = ri.resolve_reviewer_independence(
+            "claude",
+            ["opus", "sonnet"],
+            configured_backends=["codex", "claude"],
+            voter_backend="claude",
+        )
+        assert result.status == ri.SAME_VENDOR
+        assert result.filtered_voters == ("opus", "sonnet")
+
+    def test_codex_default_roster_is_same_vendor_for_a_codex_executor(self) -> None:
+        result = ri.resolve_reviewer_independence(
+            "codex",
+            ["default", "default", "default"],
+            configured_backends=["codex", "claude"],
+            voter_backend="codex",
+        )
+        assert result.status == ri.SAME_VENDOR
+        assert result.voter_vendors == ("openai",)
+
+    def test_litellm_roster_is_classified_by_model_id(self) -> None:
+        voters = [
+            "openrouter/openai/gpt-4o",
+            "openrouter/anthropic/claude-opus-4.8",
+            "openrouter/google/gemini-2.5-pro",
+        ]
+        with_backend = ri.resolve_reviewer_independence(
+            "claude", voters, configured_backends=["claude", "codex"], voter_backend="litellm"
+        )
+        without_backend = ri.resolve_reviewer_independence(
+            "claude", voters, configured_backends=["claude", "codex"]
+        )
+        assert with_backend == without_backend
+        assert with_backend.status == ri.INDEPENDENT
+        assert "openrouter/anthropic/claude-opus-4.8" not in with_backend.filtered_voters
 
     def test_unmappable_executor_vendor_is_unverified(self) -> None:
         # Executor backend not in the vendor map: independence is unprovable in

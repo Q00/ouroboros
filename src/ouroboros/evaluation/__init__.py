@@ -32,7 +32,6 @@ Classes:
 """
 
 from ouroboros.evaluation.consensus import (
-    DEFAULT_CONSENSUS_MODELS,
     ConsensusConfig,
     ConsensusEvaluator,
     DeliberativeConfig,
@@ -123,7 +122,6 @@ __all__ = [
     "SemanticEvaluator",
     "run_semantic_evaluation",
     # Stage 3 - Simple Consensus
-    "DEFAULT_CONSENSUS_MODELS",
     "ConsensusConfig",
     "ConsensusEvaluator",
     "run_consensus_evaluation",

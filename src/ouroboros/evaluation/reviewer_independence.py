@@ -40,6 +40,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from ouroboros.backends import get_backend_capability
+from ouroboros.config.model_selection import backend_model_selection
 
 # Minimum voters a consensus jury needs to remain meaningful. We never filter a
 # roster below this, even to gain independence — votes beat purity.
@@ -76,7 +77,8 @@ _BACKEND_VENDOR: dict[str, str] = {
 
 # Substring heuristics for mapping a *model* string to a vendor family. Checked
 # in order; the first hit wins. Covers both bare ("gpt-4o") and namespaced
-# ("openrouter/anthropic/claude-3.5") model identifiers.
+# ("openrouter/anthropic/claude-3.5") model identifiers. Only consulted when the
+# voters' backend is unknown or takes provider-owned ids (see ``voter_vendor``).
 _MODEL_VENDOR_MARKERS: tuple[tuple[str, str], ...] = (
     ("anthropic", "anthropic"),
     ("claude", "anthropic"),
@@ -137,6 +139,24 @@ def model_vendor(model: str | None) -> str:
     return _UNKNOWN_VENDOR
 
 
+def voter_vendor(model: str | None, voter_backend: str | None) -> str:
+    """Map a voter to its vendor family (``"unknown"`` if unmappable).
+
+    A backend that picks its own model (a tier alias such as ``opus`` or the
+    ``"default"`` sentinel) runs it from the backend's vendor, so the backend
+    decides, and a backend with no vendor family stays unknown. Explicit
+    backends (``litellm``, ``copilot``) take provider-owned ids, and an
+    unrecognized backend says nothing, so the model id decides there.
+    """
+    if (
+        voter_backend
+        and get_backend_capability(voter_backend) is not None
+        and backend_model_selection(voter_backend) != "explicit"
+    ):
+        return backend_vendor(voter_backend) or _UNKNOWN_VENDOR
+    return model_vendor(model)
+
+
 def _distinct_configured_vendors(configured_backends: Iterable[str]) -> set[str]:
     vendors: set[str] = set()
     for backend in configured_backends:
@@ -149,6 +169,8 @@ def _distinct_configured_vendors(configured_backends: Iterable[str]) -> set[str]
 def filter_voter_models(
     voter_models: Sequence[str],
     executor_backend: str | None,
+    *,
+    voter_backend: str | None = None,
 ) -> tuple[str, ...]:
     """Drop voters *known* to share the executor's vendor, preserving a viable jury.
 
@@ -159,13 +181,15 @@ def filter_voter_models(
     Unknown-vendor voters are never dropped: an unmappable model (e.g. Codex's
     ``"default"`` sentinel) cannot be proven same-vendor, so removing it would
     discard a potentially-independent vote on no evidence.
+
+    ``voter_backend`` is the backend the voters run on; see :func:`voter_vendor`.
     """
     executor_vendor = backend_vendor(executor_backend)
     models = tuple(voter_models)
     if executor_vendor is None or not models:
         return models
     # ``unknown`` vendors survive this comparison by design (see docstring).
-    kept = tuple(m for m in models if model_vendor(m) != executor_vendor)
+    kept = tuple(m for m in models if voter_vendor(m, voter_backend) != executor_vendor)
     if len(kept) >= _MIN_VIABLE_VOTERS:
         return kept
     return models
@@ -175,6 +199,8 @@ def resolve_reviewer_independence(
     executor_backend: str | None,
     voter_models: Sequence[str],
     configured_backends: Sequence[str],
+    *,
+    voter_backend: str | None = None,
 ) -> ReviewerIndependence:
     """Classify reviewer independence and return the (post-filter) voter roster.
 
@@ -190,6 +216,8 @@ def resolve_reviewer_independence(
       voter, but the roster carries unknown-vendor voters (or the executor's own
       vendor is unmappable).
     * ``same_vendor`` — every voter vendor is known and matches the executor's.
+
+    ``voter_backend`` is the backend the voters run on; see :func:`voter_vendor`.
     """
     executor_vendor = backend_vendor(executor_backend)
     configured_vendors = _distinct_configured_vendors(configured_backends)
@@ -199,12 +227,12 @@ def resolve_reviewer_independence(
         return ReviewerIndependence(
             status=UNAVAILABLE,
             executor_vendor=executor_vendor,
-            voter_vendors=tuple(sorted({model_vendor(m) for m in voters})),
+            voter_vendors=tuple(sorted({voter_vendor(m, voter_backend) for m in voters})),
             filtered_voters=voters,
         )
 
-    filtered = filter_voter_models(voter_models, executor_backend)
-    filtered_vendors = tuple(sorted({model_vendor(m) for m in filtered}))
+    filtered = filter_voter_models(voter_models, executor_backend, voter_backend=voter_backend)
+    filtered_vendors = tuple(sorted({voter_vendor(m, voter_backend) for m in filtered}))
     has_unknown = _UNKNOWN_VENDOR in filtered_vendors
     # Independence must be POSITIVELY proven: a voter whose vendor is known and
     # different from the executor's. ``unknown`` never counts as different.
@@ -235,4 +263,5 @@ __all__ = [
     "filter_voter_models",
     "model_vendor",
     "resolve_reviewer_independence",
+    "voter_vendor",
 ]

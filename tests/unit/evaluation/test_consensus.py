@@ -1,13 +1,18 @@
 """Tests for Stage 3 multi-model consensus evaluation."""
 
 import json
-from unittest.mock import AsyncMock
+import os
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from ouroboros.config.model_selection import SHIPPED_CONSENSUS_ROSTER
+from ouroboros.config.models import ConsensusConfig as ConsensusSettings
+from ouroboros.config.models import OuroborosConfig
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.ontology_aspect import AnalysisResult
 from ouroboros.core.types import Result
+from ouroboros.evaluation import consensus as consensus_module
 from ouroboros.evaluation.consensus import (
     ConsensusConfig,
     ConsensusEvaluator,
@@ -214,6 +219,143 @@ class TestConsensusConfig:
         )
         assert len(config.models) == 4
         assert config.majority_threshold == 0.75
+
+
+def _vote_response() -> Result[CompletionResponse, ProviderError]:
+    return Result.ok(
+        CompletionResponse(
+            content='{"approved": true, "confidence": 0.9, "reasoning": "Good"}',
+            model="test",
+            usage=UsageInfo(0, 0, 0),
+        )
+    )
+
+
+def _consensus_config(
+    backend: str, config: OuroborosConfig | None = None, **env: str
+) -> ConsensusConfig:
+    """Build the implicit roster for ``backend`` under ``env`` and ``config``."""
+    with (
+        patch.dict(os.environ, {"OUROBOROS_LLM_BACKEND": backend, **env}, clear=True),
+        patch(
+            "ouroboros.config.loader.load_config",
+            return_value=config or OuroborosConfig(),
+        ),
+    ):
+        return ConsensusConfig()
+
+
+class TestConsensusRosterResolution:
+    """The implicit roster resolves per config, never frozen at import."""
+
+    def test_no_import_time_roster(self) -> None:
+        assert not hasattr(consensus_module, "DEFAULT_CONSENSUS_MODELS")
+
+    def test_roster_follows_env_and_config_after_import(self) -> None:
+        custom = OuroborosConfig(consensus=ConsensusSettings(models=("a", "b")))
+        assert _consensus_config("litellm").models == SHIPPED_CONSENSUS_ROSTER
+        assert _consensus_config("litellm", custom).models == ("a", "b")
+        assert _consensus_config("litellm", OUROBOROS_CONSENSUS_MODELS="x, y").models == (
+            "x",
+            "y",
+        )
+        assert _consensus_config("claude", custom).models == ("opus",) * 3
+        assert _consensus_config("claude", custom, OUROBOROS_PIN_MODELS="1").models == (
+            "a",
+            "b",
+        )
+
+    def test_claude_auto_roster_is_the_frontier_alias(self) -> None:
+        config = _consensus_config("claude")
+        assert config.models == ("opus", "opus", "opus")
+        assert config.backend == "claude"
+        assert config.models_are_explicit is False
+
+    def test_sentinel_backend_roster_is_default(self) -> None:
+        config = _consensus_config("codex")
+        assert config.models == ("default",) * 3
+        assert config.backend == "codex"
+
+    def test_explicit_roster_has_no_resolved_backend(self) -> None:
+        assert ConsensusConfig(models=("m1", "m2")).backend is None
+
+    @pytest.mark.asyncio
+    async def test_claude_auto_uses_single_model_perspectives(self) -> None:
+        mock_llm = AsyncMock()
+        mock_llm.complete.return_value = _vote_response()
+        evaluator = ConsensusEvaluator(mock_llm, _consensus_config("claude"))
+        context = EvaluationContext(
+            execution_id="exec-1", seed_id="seed-1", current_ac="AC", artifact="code"
+        )
+
+        result = await evaluator.evaluate(context)
+
+        assert result.is_ok
+        consensus, _ = result.value
+        assert consensus.is_single_model is True
+        assert [vote.model for vote in consensus.votes] == [
+            "session/advocate",
+            "session/devil-advocate",
+            "session/judge",
+        ]
+        roles = {call.args[1].role for call in mock_llm.complete.call_args_list}
+        assert roles == {"consensus_perspective"}
+
+    @pytest.mark.asyncio
+    async def test_multi_model_classifies_voters_by_the_roster_backend(self) -> None:
+        mock_llm = AsyncMock()
+        mock_llm.complete.return_value = _vote_response()
+        evaluator = ConsensusEvaluator(mock_llm, _consensus_config("codex"))
+        context = EvaluationContext(
+            execution_id="exec-1",
+            seed_id="seed-1",
+            current_ac="AC",
+            artifact="code",
+            executor_backend="codex",
+        )
+
+        with patch(
+            "ouroboros.orchestrator.runtime_picker.available_runtime_backends",
+            return_value=("codex", "claude"),
+        ):
+            result = await evaluator.evaluate(context)
+
+        assert result.is_ok
+        consensus, _ = result.value
+        # "default" on codex is an OpenAI model, the executor's own vendor.
+        assert consensus.reviewer_independence == "same_vendor"
+
+    @pytest.mark.parametrize(
+        ("backend", "env", "multi_model"),
+        [
+            ("claude", {"OUROBOROS_CONSENSUS_MODELS": "opus,sonnet"}, False),
+            (
+                "claude",
+                {"OUROBOROS_PIN_MODELS": "1", "OUROBOROS_CONSENSUS_MODELS": "opus,sonnet"},
+                True,
+            ),
+            ("codex", {}, True),
+            ("litellm", {}, False),
+            ("litellm", {"OPENROUTER_API_KEY": "sk-or-real"}, True),
+        ],
+        ids=[
+            "claude-auto-ignores-unpinned-roster",
+            "claude-pinned-distinct-roster",
+            "sentinel-default-votes",
+            "litellm-openrouter-without-key",
+            "litellm-openrouter-with-key",
+        ],
+    )
+    def test_mode_selection(
+        self,
+        backend: str,
+        env: dict[str, str],
+        multi_model: bool,
+    ) -> None:
+        consensus_config = _consensus_config(backend, **env)
+        evaluator = ConsensusEvaluator(AsyncMock(), consensus_config)
+        with patch.dict(os.environ, env, clear=True):
+            assert evaluator._should_use_multi_model() is multi_model
 
 
 class TestConsensusEvaluator:
