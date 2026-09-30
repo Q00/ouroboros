@@ -99,6 +99,7 @@ from ouroboros.config._model_defaults import (
     DEFAULT_SONNET_MODEL,
     recognized_shipped_defaults,
 )
+from ouroboros.config.model_selection import AUTO_MODEL
 from ouroboros.core.errors import ConfigError
 from ouroboros.persistence.brownfield import BrownfieldStore
 
@@ -3543,7 +3544,10 @@ def _apply_copilot_default_model(
     for section_name, key, shipped_default in _COPILOT_DEFAULT_MODEL_TARGETS:
         section = _ensure_mapping_section(config_dict, section_name)
         current = section.get(key)
-        if current is None or current in recognized_shipped_defaults(shipped_default):
+        if current is None or current in (
+            AUTO_MODEL,
+            *recognized_shipped_defaults(shipped_default),
+        ):
             section[key] = chosen_model
 
     for section_name, key, shipped_default in _COPILOT_DEFAULT_MODEL_LIST_TARGETS:

@@ -4,14 +4,11 @@ Settings surfaces (the ``ouroboros config`` GUI, ourocode) need to offer
 model choices per runtime backend without hardcoding model ids in UI code.
 This module owns that catalog as a sibling of the capability registry.
 
-The static catalog deliberately **mirrors** the backend-default-model
-mapping in ``ouroboros.config.loader._default_model_for_backend``: backends
-that cannot run Claude model ids get the ``"default"`` sentinel (the CLI's
-own configured model), everything else gets the shipped Claude defaults.
-A unit test locks the mirror so the two cannot drift silently. The mapping
-is duplicated here instead of imported because ``config.loader`` imports
-``ouroboros.backends`` — a module-level import in this direction would be
-circular.
+Each catalog also declares how its backend turns a model tier into a model
+(``model_selection``), which ``ouroboros.config.model_selection`` reads to
+resolve every role's model: ``alias`` backends accept the Claude tier aliases,
+``sentinel`` backends receive ``"default"`` (the CLI's own configured model),
+and ``explicit`` backends take provider-owned ids as configured.
 
 Dynamic refresh is an explicit opt-in hook: a backend may declare a
 ``list_command`` argv whose stdout is parsed into callable model ids. OpenCode,
@@ -29,20 +26,37 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+from typing import Literal
 
 from ouroboros.backends.capabilities import (
     get_backend_capability,
     runtime_backend_choices,
 )
 from ouroboros.codex.home import resolve_codex_home
-from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL, DEFAULT_SONNET_MODEL
+from ouroboros.config._model_defaults import (
+    DEFAULT_HAIKU_MODEL,
+    DEFAULT_OPUS_MODEL,
+    DEFAULT_SONNET_MODEL,
+)
 
-# Backends whose runnable model is the CLI's own configured default rather
-# than a Claude model id. Mirrors the loader's sentinel frozensets
-# (_CODEX_LLM_BACKENDS et al.); the mirror is locked by a unit test.
-_SENTINEL_MODEL_BACKENDS = frozenset(
+# How a backend turns a model tier into a model:
+# - "alias": the Claude CLI accepts ``haiku``/``sonnet``/``opus`` and resolves
+#   each to its newest model.
+# - "sentinel": the backend picks its own model; it receives ``"default"``.
+# - "explicit": model ids are provider-owned (litellm routes) or come from the
+#   backend's own discovery catalog (copilot), so configured values are kept.
+ModelSelection = Literal["alias", "sentinel", "explicit"]
+
+_ALIAS_MODEL_BACKENDS = frozenset({"claude", "claude_mcp"})
+_EXPLICIT_MODEL_BACKENDS = frozenset({"litellm", "copilot"})
+
+# Backends whose catalog starts with the ``"default"`` sentinel: every backend
+# that selects its own model, plus copilot, whose unset value has always been
+# the sentinel.
+_DEFAULT_FIRST_MODEL_BACKENDS = frozenset(
     {
         "codex",
+        "codex_mcp",
         "opencode",
         "kiro",
         "copilot",
@@ -53,6 +67,9 @@ _SENTINEL_MODEL_BACKENDS = frozenset(
         "antigravity",
         "grok",
         "zcode",
+        "gemini",
+        "goose",
+        "host",
     }
 )
 
@@ -72,6 +89,8 @@ class BackendModelCatalog:
             backends whose model space is free-form (e.g. litellm provider
             routes) — UIs must always offer a free-text custom entry on top
             of this tuple regardless of its length.
+        model_selection: How this backend turns a model tier into a model
+            (see ``ModelSelection``).
         list_args: Optional primary CLI subcommand argv (appended to the
             resolved backend binary) whose stdout is parsed into available
             model ids. ``None`` means dynamic listing is unsupported and
@@ -80,19 +99,19 @@ class BackendModelCatalog:
 
     backend: str
     models: tuple[str, ...]
+    model_selection: ModelSelection
     list_args: tuple[str, ...] | None = None
 
     @property
     def default_model(self) -> str:
-        """Best default model id, matching the loader's backend mapping."""
+        """First listed model id, or the sentinel for a custom-entry-only catalog."""
         return self.models[0] if self.models else DEFAULT_MODEL_SENTINEL
 
 
-# Hand-curated additions per backend, appended after the loader-mirroring
-# default entry. Keep entries verifiable: the codex ids below were confirmed
+# Hand-curated additions per backend, appended after the default entry. Keep entries verifiable: the codex ids below were confirmed
 # against a live `opencode models` listing of the OpenAI catalog.
 _EXTRA_KNOWN_MODELS: dict[str, tuple[str, ...]] = {
-    "claude": ("claude-haiku-4-5-20251001",),
+    "claude": (DEFAULT_HAIKU_MODEL,),
     "codex": ("gpt-5-codex", "gpt-5", "gpt-5-mini"),
     # Grok Build model slugs, after the CLI-owned "default" sentinel. Verified
     # against a live `grok models` listing (grok-build, grok-composer-2.5-fast).
@@ -206,7 +225,7 @@ _LIST_PARSERS: dict[str, Callable[[str], tuple[str, ...]]] = {
 def _build_catalogs() -> dict[str, BackendModelCatalog]:
     catalogs: dict[str, BackendModelCatalog] = {}
     for name in runtime_backend_choices():
-        if name in _SENTINEL_MODEL_BACKENDS:
+        if name in _DEFAULT_FIRST_MODEL_BACKENDS:
             models: tuple[str, ...] = (DEFAULT_MODEL_SENTINEL,)
         else:
             models = (DEFAULT_OPUS_MODEL, DEFAULT_SONNET_MODEL)
@@ -214,21 +233,35 @@ def _build_catalogs() -> dict[str, BackendModelCatalog]:
         catalogs[name] = BackendModelCatalog(
             backend=name,
             models=models,
+            model_selection=_model_selection(name),
             list_args=_LIST_ARGS.get(name),
         )
     # LLM-only backends: litellm model ids are provider/backend-owned
     # free-form strings, so the catalog is custom-entry-only. ourocode ACP maps
     # known backend selectors only; keep its catalog explicit so settings
     # surfaces do not imply arbitrary model-id support.
-    catalogs["litellm"] = BackendModelCatalog(backend="litellm", models=())
+    # ourocode rejects raw model ids and aliases, so it resolves as a sentinel
+    # backend (``"default"`` selects its OAuth Claude).
+    catalogs["litellm"] = BackendModelCatalog(
+        backend="litellm", models=(), model_selection="explicit"
+    )
     catalogs["ourocode"] = BackendModelCatalog(
         backend="ourocode",
         models=("claude", "claude_api", "codex", "gemini"),
+        model_selection="sentinel",
     )
     # dsh's model choice lives in its Cordis composition file; the ACP wire
     # has no per-session model parameter, so the catalog is custom-entry-only.
-    catalogs["dsh"] = BackendModelCatalog(backend="dsh", models=())
+    catalogs["dsh"] = BackendModelCatalog(backend="dsh", models=(), model_selection="sentinel")
     return catalogs
+
+
+def _model_selection(name: str) -> ModelSelection:
+    if name in _ALIAS_MODEL_BACKENDS:
+        return "alias"
+    if name in _EXPLICIT_MODEL_BACKENDS:
+        return "explicit"
+    return "sentinel"
 
 
 _CATALOGS: dict[str, BackendModelCatalog] = _build_catalogs()
@@ -255,7 +288,7 @@ def model_choices(backend: str) -> tuple[str, ...]:
 def uses_default_model_sentinel(backend: str) -> bool:
     """Whether ``"default"`` is a safe persisted model value for this backend."""
     capability = get_backend_capability(backend)
-    return capability is not None and capability.name in _SENTINEL_MODEL_BACKENDS
+    return capability is not None and capability.name in _DEFAULT_FIRST_MODEL_BACKENDS
 
 
 def refresh_models(
@@ -416,6 +449,7 @@ def configured_default_model(backend: str) -> str | None:
 __all__ = [
     "DEFAULT_MODEL_SENTINEL",
     "BackendModelCatalog",
+    "ModelSelection",
     "configured_default_model",
     "detect_backend_cli",
     "get_model_catalog",

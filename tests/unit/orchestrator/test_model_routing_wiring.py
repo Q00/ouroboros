@@ -1028,9 +1028,20 @@ class TestRunnerRouterConstruction:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("OUROBOROS_MODEL_TIER_ROUTING", raising=False)
+        monkeypatch.setenv("OUROBOROS_PIN_MODELS", "1")
         monkeypatch.setenv("OUROBOROS_EXECUTION_MODEL", "claude-opus-4-8")
         runner = self._runner(self._adapter("claude"))
         assert runner._model_router is None
+
+    def test_unpinned_execution_model_env_keeps_router(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without ``models.pin`` a persisted Execute id is not a pin."""
+        monkeypatch.delenv("OUROBOROS_MODEL_TIER_ROUTING", raising=False)
+        monkeypatch.delenv("OUROBOROS_PIN_MODELS", raising=False)
+        monkeypatch.setenv("OUROBOROS_EXECUTION_MODEL", "claude-opus-4-8")
+        runner = self._runner(self._adapter("claude"))
+        assert runner._model_router is not None
 
     def test_default_builds_router_for_adapter_backend(
         self, monkeypatch: pytest.MonkeyPatch

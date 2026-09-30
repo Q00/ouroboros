@@ -22,8 +22,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import Field
 import structlog
 
-from ouroboros.config._model_defaults import DEFAULT_SONNET_MODEL
-from ouroboros.config.loader import get_execution_model
+from ouroboros.config.loader import resolve_execution_model, resolve_runtime_model
 from ouroboros.core.seed import ac_text, ac_texts
 from ouroboros.core.types import Result
 from ouroboros.events.io import new_call_id
@@ -1835,10 +1834,8 @@ def create_ouroboros_server(
 
     # Wire real execution/evaluation callables for evolve_step so that
     # generation quality is validated, not only ontology deltas.
-    # Use Sonnet for execution (frugal) — Opus is overkill for code generation.
-    execution_model = get_execution_model()
-    if execution_model is None and execute_runtime_backend == "claude":
-        execution_model = DEFAULT_SONNET_MODEL
+    # Execution runs on the standard tier; Opus is overkill for code generation.
+    execution_model = resolve_execution_model(execute_runtime_backend)
     # Use stderr console: in MCP stdio mode, stdout is the JSON-RPC channel.
     # Any non-protocol output on stdout corrupts the MCP communication.
     # Stage 1 (mechanical lint/build/test) is the only executed evidence on the
@@ -2139,10 +2136,8 @@ def create_ouroboros_server(
             )
 
         max_attempts = BUILTIN_COLLECTION_ATTEMPT_LIMIT
-        # Use Sonnet for validation fixes — import error resolution doesn't need Opus
-        validation_model = os.environ.get("OUROBOROS_VALIDATION_MODEL") or execution_model
-        if validation_model is None and execute_runtime_backend == "claude":
-            validation_model = DEFAULT_SONNET_MODEL
+        # Validation fixes run on the standard tier; import errors don't need Opus.
+        validation_model = resolve_runtime_model("validation", execute_runtime_backend)
         host_dispatch.reject_host_runtime_for_evolve(execute_runtime_backend, phase="validation")
         validation_adapter = await create_agent_runtime_async(
             create_agent_runtime,

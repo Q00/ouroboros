@@ -10,7 +10,7 @@ from typer.testing import CliRunner
 import yaml
 
 from ouroboros.cli.commands.config import app
-from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL, DEFAULT_SONNET_MODEL
+from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL
 
 runner = CliRunner()
 
@@ -122,6 +122,8 @@ def _show_env(monkeypatch, tmp_path, config: dict) -> None:
         "OUROBOROS_EXECUTION_MODEL",
         "OUROBOROS_SEMANTIC_MODEL",
         "OUROBOROS_REFLECT_MODEL",
+        "OUROBOROS_MODEL",
+        "OUROBOROS_PIN_MODELS",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -268,6 +270,7 @@ def test_show_json_preserves_env_stage_model_pin_for_codex(monkeypatch, tmp_path
     import json
 
     _show_env(monkeypatch, tmp_path, {"orchestrator": {"runtime_backend": "codex"}})
+    monkeypatch.setenv("OUROBOROS_PIN_MODELS", "1")
     monkeypatch.setenv("OUROBOROS_CLARIFICATION_MODEL", "claude-opus-4-8")
     monkeypatch.setattr(
         "ouroboros.backends.model_catalog.installed_backends",
@@ -372,7 +375,7 @@ def test_show_json_uses_completion_backend_for_runtime_only_stage_agent(
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["stages"]["interview"]["agent"] == "antigravity"
-    assert payload["stages"]["interview"]["model"] == DEFAULT_OPUS_MODEL
+    assert payload["stages"]["interview"]["model"] == "opus"
     assert payload["stages"]["interview"]["model_source"] == "config → backend default"
 
 
@@ -400,7 +403,7 @@ def test_show_json_uses_llm_fallback_for_inherited_runtime_only_agent(
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["stages"]["interview"]["agent"] == "antigravity"
-    assert payload["stages"]["interview"]["model"] == DEFAULT_OPUS_MODEL
+    assert payload["stages"]["interview"]["model"] == "opus"
     assert payload["stages"]["interview"]["model_source"] == "config → backend default"
 
 
@@ -429,7 +432,7 @@ def test_show_json_normalizes_execute_current_sentinel_through_loader(
 
     assert result.exit_code == 0, result.output
     execute = json.loads(result.output)["stages"]["execute"]
-    assert execute["model"] == DEFAULT_SONNET_MODEL
+    assert execute["model"] == "sonnet"
     assert execute["model_source"] == "config → backend default"
 
 
@@ -549,7 +552,7 @@ def test_show_json_honors_explicit_claude_llm_env_under_codex_agent(monkeypatch,
         "source": "env OUROBOROS_LLM_BACKEND ⚠",
     }
     assert payload["stages"]["interview"]["agent"] == "codex"
-    assert payload["stages"]["interview"]["model"] == DEFAULT_OPUS_MODEL
+    assert payload["stages"]["interview"]["model"] == "opus"
     assert payload["stages"]["interview"]["model_source"] == "config → backend default"
 
 

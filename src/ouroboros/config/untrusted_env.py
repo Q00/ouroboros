@@ -274,6 +274,26 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # disables tier routing by design, so an untrusted project .env must not
         # be able to force an arbitrary model or bypass the frugality policy.
         "OUROBOROS_EXECUTION_MODEL",
+        # Every other model choice is the same trust class: the global model
+        # and the pin switch that makes persisted ids run, plus each role's
+        # model variable (``config.model_selection.MODEL_ENV_VARS``).
+        "OUROBOROS_MODEL",
+        "OUROBOROS_PIN_MODELS",
+        "OUROBOROS_CLARIFICATION_MODEL",
+        "OUROBOROS_QA_MODEL",
+        "OUROBOROS_DEPENDENCY_ANALYSIS_MODEL",
+        "OUROBOROS_ONTOLOGY_ANALYSIS_MODEL",
+        "OUROBOROS_CONTEXT_COMPRESSION_MODEL",
+        "OUROBOROS_WONDER_MODEL",
+        "OUROBOROS_REFLECT_MODEL",
+        "OUROBOROS_SEMANTIC_MODEL",
+        "OUROBOROS_ASSERTION_EXTRACTION_MODEL",
+        "OUROBOROS_DETECTOR_MODEL",
+        "OUROBOROS_VALIDATION_MODEL",
+        "OUROBOROS_CONSENSUS_MODELS",
+        "OUROBOROS_CONSENSUS_ADVOCATE_MODEL",
+        "OUROBOROS_CONSENSUS_DEVIL_MODEL",
+        "OUROBOROS_CONSENSUS_JUDGE_MODEL",
         # Model-tier experiment controls are the same trust class: a cloned repo
         # must not disable routing or opt the user into shadow replay, which
         # re-executes successful children and can double token spend.

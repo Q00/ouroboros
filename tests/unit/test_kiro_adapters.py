@@ -807,9 +807,10 @@ class TestOuroborosRuntimeFallback:
         assert get_agent_runtime_backend() == "kiro"
 
     def test_kiro_model_defaults_to_sentinel(self) -> None:
-        from ouroboros.config.loader import _default_model_for_backend
+        from ouroboros.config.model_selection import resolve_role_model
 
-        assert _default_model_for_backend("claude-sonnet-4-20250514", backend="kiro") == "default"
+        resolved = resolve_role_model("qa", backend="kiro", pinned=False)
+        assert resolved.model == "default"
 
 
 # ===========================================================================
