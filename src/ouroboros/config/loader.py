@@ -761,11 +761,13 @@ def get_agent_reasoning_effort() -> str | None:
 def get_execution_model(runtime_backend: str | None = None) -> str | None:
     """Return the pinned Execute model, or None when models resolve automatically.
 
-    On explicit backends a configured Execute model is a pin without ``models.pin``.
-    """
-    if runtime_backend and backend_model_selection(runtime_backend) == "explicit":
-        chosen = resolve_role_model("execute", backend=runtime_backend)
-        return chosen.model if chosen.source == "configured" else None
+    A non-auto ``models.default`` / ``OUROBOROS_MODEL``, or a configured Execute model
+    on an explicit backend, is a pin, so tier routing never overrides it."""
+    chosen = resolve_role_model("execute", backend=runtime_backend)
+    if chosen.source == "configured" and (
+        chosen.model != "default" or backend_model_selection(runtime_backend) == "explicit"
+    ):
+        return chosen.model
     if not pin_models_enabled():
         return None
     resolved = resolve_role_model("execute", backend=None, pinned=True)

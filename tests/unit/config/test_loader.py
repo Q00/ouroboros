@@ -2731,6 +2731,20 @@ class TestGetExecutionModel:
         ):
             assert get_execution_model() is None
 
+    @pytest.mark.parametrize(
+        ("backend", "expected"), [("claude", "opus"), ("codex", None), ("litellm", "claude-opus-5")]
+    )
+    def test_global_model_choice_pins_execute(
+        self, monkeypatch: pytest.MonkeyPatch, backend: str, expected: str | None
+    ) -> None:
+        from ouroboros.config.loader import get_execution_model
+
+        monkeypatch.delenv("OUROBOROS_PIN_MODELS", raising=False)
+        monkeypatch.delenv("OUROBOROS_EXECUTION_MODEL", raising=False)
+        monkeypatch.setenv("OUROBOROS_MODEL", "frontier")
+        with patch("ouroboros.config.loader.load_config", return_value=OuroborosConfig()):
+            assert get_execution_model(backend) == expected
+
     def test_env_model_overrides_persisted_pin(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from ouroboros.config.loader import get_execution_model
 

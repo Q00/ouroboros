@@ -1033,6 +1033,20 @@ class TestRunnerRouterConstruction:
         runner = self._runner(self._adapter("claude"))
         assert runner._model_router is None
 
+    @pytest.mark.parametrize("choice", ("frontier", "claude-opus-5-5"))
+    def test_global_model_choice_is_an_execution_pin(
+        self, monkeypatch: pytest.MonkeyPatch, choice: str
+    ) -> None:
+        """``--model`` / ``models.default`` applies to Execute; routing must not override it."""
+        monkeypatch.delenv("OUROBOROS_MODEL_TIER_ROUTING", raising=False)
+        monkeypatch.delenv("OUROBOROS_PIN_MODELS", raising=False)
+        monkeypatch.delenv("OUROBOROS_EXECUTION_MODEL", raising=False)
+        monkeypatch.setenv("OUROBOROS_MODEL", choice)
+        runner = self._runner(self._adapter("claude"))
+        assert runner._model_router is None
+        assert runner._model_pin == ("opus" if choice == "frontier" else choice)
+        assert runner._model_routing_override_explicit is True
+
     def test_unpinned_execution_model_env_keeps_router(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
