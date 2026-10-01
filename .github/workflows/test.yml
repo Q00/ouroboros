@@ -156,6 +156,9 @@ jobs:
       - name: Run native Windows plugin hook tests
         run: uv run --python 3.12 --no-sync pytest tests/unit/scripts/test_windows_plugin_hooks.py -n 0 -q
 
+      - name: TEMP probe diagnostics
+        run: uv run --python 3.12 --no-sync python -c "from ouroboros.runtime import exec_sandbox as e; print('BACKEND', e.filesystem_backend())"
+
       - name: Run the runtime sandbox tests
         env:
           PYTHONFAULTHANDLER: "1"
