@@ -2,14 +2,28 @@
 
 Two process roles and one in-process role.
 
-target <nonce> <call_kind> <symbol>
+target <nonce> <call_kind> <symbol> <setup>
     Runs in the project interpreter (-I -B) with the checkout copy under test
-    as cwd. It imports and resolves the symbol, then writes the frame
+    as cwd. It first makes the oracle's declared setup calls (``setup``, a
+    JSON list of ``{"symbol", "args", "kwargs"}``; each symbol must resolve to
+    a callable defined in the checkout, like the target), so a library that
+    must be configured before use (``settings.configure(...)``, then
+    ``django.setup()``) can be called. A setup call that fails is reported as
+    ``import_error`` with a ``setup:`` detail, never as ``missing``. It then
+    imports and resolves the symbol, then writes the frame
     '<nonce> {"phase": "resolved", ...}' (``resolve`` is ``ok``, ``missing``,
     ``import_error``, or ``unprovable`` where the platform cannot prove the
     code is a checkout file without following links). Only after that frame does the
     controller send ONE call on stdin: the inputs, never an expectation. The
-    observation is written as '<nonce> {"phase": "result", ...}'. Frames go to
+    observation is written as '<nonce> {"phase": "result", ...}'. An input
+    may name an object instead of spelling a JSON value: a JSON object whose
+    only key is ``"$symbol"`` (``SYMBOL_REF``) holding a dotted import path is
+    replaced by the object that path imports (a class such as
+    ``django.db.models.Model``), anywhere inside the arguments or ``init``.
+    An input that does not resolve ends the process without a result frame
+    (a crash: indeterminate on the base, a failed case on a candidate).
+    A returned ``set`` or ``frozenset`` is reported as the list of its items
+    sorted by their JSON text, as a tuple is reported as a list. Frames go to
     the process's original stdout; everything the target code prints goes to
     stderr, which the controller discards. The candidate's code runs in this
     same process once it is imported, so it can write frames itself: a frame
@@ -46,6 +60,8 @@ import sys
 from typing import Any
 
 MAX_REPR = 300
+SYMBOL_REF = "$symbol"
+"""The key of an input that names an importable object instead of a JSON value."""
 
 
 # ---------------------------------------------------------------- target role
@@ -72,6 +88,11 @@ def _plain(value: Any, depth: int = 0) -> Any:
         return value
     if isinstance(value, (list, tuple)):
         return [_plain(item, depth + 1) for item in value]
+    if isinstance(value, (set, frozenset)):
+        # No JSON form keeps a set; its items sorted by their JSON text are
+        # one deterministic list, whatever the iteration order was.
+        items = [_plain(item, depth + 1) for item in value]
+        return sorted(items, key=lambda item: json.dumps(item, sort_keys=True))
     if isinstance(value, dict):
         if not all(isinstance(key, str) for key in value):
             raise TypeError("non-string key")
@@ -79,7 +100,46 @@ def _plain(value: Any, depth: int = 0) -> Any:
     raise TypeError(type(value).__name__)
 
 
-def _resolve(symbol: str, kind: str) -> Any:
+def symbol_ref(value: Any) -> str | None:
+    """The dotted path ``value`` names when it is a symbol reference, else ``None``."""
+    if isinstance(value, dict) and len(value) == 1 and SYMBOL_REF in value:
+        name = value[SYMBOL_REF]
+        return name if isinstance(name, str) else ""
+    return None
+
+
+def symbol_refs(value: Any, depth: int = 0) -> list[str]:
+    """Every symbol reference inside a JSON input value, in order."""
+    if depth > 50:
+        raise ValueError("too deep")
+    name = symbol_ref(value)
+    if name is not None:
+        return [name]
+    if isinstance(value, list):
+        return [ref for item in value for ref in symbol_refs(item, depth + 1)]
+    if isinstance(value, dict):
+        return [ref for item in value.values() for ref in symbol_refs(item, depth + 1)]
+    return []
+
+
+def named_inputs(value: Any) -> Any:
+    """``value`` with every symbol reference replaced by its dotted path (a string).
+
+    What a reference implementation receives: it runs without the project,
+    so it gets the name of the object, never the object.
+    """
+    name = symbol_ref(value)
+    if name is not None:
+        return name
+    if isinstance(value, list):
+        return [named_inputs(item) for item in value]
+    if isinstance(value, dict):
+        return {key: named_inputs(item) for key, item in value.items()}
+    return value
+
+
+def _lookup(symbol: str) -> tuple[Any, Any, int, list[str]]:
+    """``(module, object, split, parts)`` for an importable dotted ``symbol``."""
     import importlib
 
     parts = symbol.split(".")
@@ -97,19 +157,43 @@ def _resolve(symbol: str, kind: str) -> Any:
             if not hasattr(target, name):
                 raise _Missing(symbol + ": " + name + " not found")
             target = getattr(target, name)
-        if kind == "method":
-            if len(parts) - split != 2:
-                raise _Missing(symbol + ": not module.Class.method")
-            owner = module
-            for name in parts[split:-1]:
-                owner = getattr(owner, name)
-            _require_inside_checkout(symbol, target, owner)
-            return (owner, parts[-1])
-        if not callable(target):
-            raise _Missing(symbol + ": not callable")
-        _require_inside_checkout(symbol, target, None)
-        return target
+        return module, target, split, parts
     raise _Missing(symbol + ": module not found")
+
+
+def _inputs(value: Any) -> Any:
+    """``value`` with every symbol reference replaced by the object it imports."""
+    name = symbol_ref(value)
+    if name is not None:
+        return _lookup(name)[1]
+    if isinstance(value, list):
+        return [_inputs(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _inputs(item) for key, item in value.items()}
+    return value
+
+
+def _setup(calls: list[dict[str, Any]]) -> None:
+    """Make the oracle's declared setup calls, each to a callable of the checkout."""
+    for call in calls:
+        target = _resolve(call["symbol"], "function")
+        target(*_inputs(call.get("args") or []), **_inputs(call.get("kwargs") or {}))
+
+
+def _resolve(symbol: str, kind: str) -> Any:
+    module, target, split, parts = _lookup(symbol)
+    if kind == "method":
+        if len(parts) - split != 2:
+            raise _Missing(symbol + ": not module.Class.method")
+        owner = module
+        for name in parts[split:-1]:
+            owner = getattr(owner, name)
+        _require_inside_checkout(symbol, target, owner)
+        return (owner, parts[-1])
+    if not callable(target):
+        raise _Missing(symbol + ": not callable")
+    _require_inside_checkout(symbol, target, None)
+    return target
 
 
 def _defining_file(target: Any, owner: Any) -> str | None:
@@ -232,7 +316,7 @@ def _read_all(fd: int) -> str:
     return b"".join(chunks).decode("utf-8")
 
 
-def _target(nonce: str, kind: str, symbol: str) -> None:
+def _target(nonce: str, kind: str, symbol: str, setup: str) -> None:
     # Frames use a private copy of the original stdout; fd 1 now points to
     # stderr, so nothing the target code prints can look like a frame.
     frames = os.dup(1)
@@ -247,6 +331,22 @@ def _target(nonce: str, kind: str, symbol: str) -> None:
     for path in (os.path.join(cwd, "src"), cwd):
         if path not in sys.path:
             sys.path.insert(0, path)
+    try:
+        _setup(json.loads(setup))
+    except _Unprovable as exc:
+        frame({"phase": "resolved", "resolve": "unprovable", "detail": str(exc)[:500]})
+        os._exit(0)
+    except BaseException as exc:
+        # A failed setup is never the target missing: on the base it is
+        # indeterminate, on a candidate it fails every case.
+        frame(
+            {
+                "phase": "resolved",
+                "resolve": "import_error",
+                "detail": ("setup: " + type(exc).__name__ + ": " + str(exc))[:500],
+            }
+        )
+        os._exit(0)
     try:
         target = _resolve(symbol, kind)
     except _Missing as exc:
@@ -267,6 +367,12 @@ def _target(nonce: str, kind: str, symbol: str) -> None:
         os._exit(0)
     frame({"phase": "resolved", "resolve": "ok", "detail": ""})
     call = json.loads(_read_all(0))
+    try:
+        for key in ("args", "kwargs", "init"):
+            call[key] = _inputs(call.get(key))
+    except BaseException:
+        # An input that names nothing importable: no observation at all.
+        os._exit(3)
     frame({"phase": "result", "entry": _run(target, kind, call)})
     os._exit(0)
 
@@ -624,11 +730,13 @@ def compare(request: dict[str, Any]) -> dict[str, Any]:
 def main() -> None:
     role = sys.argv[1] if len(sys.argv) > 1 else ""
     if role == "target":
-        _target(sys.argv[2], sys.argv[3], sys.argv[4])
+        _target(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5] if len(sys.argv) > 5 else "[]")
     elif role == "cli":
         _cli(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6:])
     else:
-        sys.stderr.write("usage: harness target <nonce> <kind> <symbol> | cli <nonce> ...\n")
+        sys.stderr.write(
+            "usage: harness target <nonce> <kind> <symbol> <setup> | cli <nonce> ...\n"
+        )
         sys.exit(2)
 
 
