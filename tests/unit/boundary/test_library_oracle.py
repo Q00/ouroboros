@@ -77,6 +77,14 @@ WRITER = (
     "        if value is Model:\n"
     "            return 'base.Model', {IMPORTS}\n"
     "        return value.__name__, set()\n"
+    "\n"
+    "\n"
+    "class TypeWriter:\n"
+    "    def __init__(self, value):\n"
+    "        self.value = value\n"
+    "\n"
+    "    def serialize(self):\n"
+    "        return Writer.serialize(self.value)\n"
 )
 BUGGY_WRITER = WRITER.replace("{IMPORTS}", "set()")
 FIXED_WRITER = WRITER.replace("{IMPORTS}", "{'from confpkg import base'}")
@@ -307,6 +315,45 @@ async def test_setup_and_references_reproduce_on_the_base_and_pass_the_fix(tmp_p
         (True, True),
         (True, True),
     ]
+
+
+async def test_a_method_oracle_takes_object_inputs_in_init(tmp_path: Path) -> None:
+    # The TypeSerializer(models.Model).serialize() shape: the object is the
+    # class's argument, not the method's.
+    reference = REFERENCE + (
+        "\n\nclass TypeWriter:\n"
+        "    def __init__(self, value):\n"
+        "        self.value = value\n"
+        "\n"
+        "    def serialize(self):\n"
+        "        return serialize(self.value)\n"
+    )
+    oracle = {
+        **_oracle(setup=SETUP),
+        "call_kind": "method",
+        "params": [],
+        "default_binding": {"symbol": "confpkg.writer.TypeWriter.serialize"},
+        "reference": {"source": reference, "symbol": "TypeWriter.serialize"},
+        "cases": [{**case, "args": {}, "init": case["args"]} for case in _oracle()["cases"]],
+    }
+    repo = _write_library(tmp_path / "repo", BUGGY_WRITER)
+    _spec, base = await _run(repo, oracle, on_base=True)
+    assert base.return_code == 1 and base.result is not None
+    assert base.result["resolve"] == "ok"
+    _write_library(repo, FIXED_WRITER)
+    _spec, fixed = await _run(repo, oracle, on_base=False)
+    assert fixed.return_code == 0
+
+    reply = _reply(oracle)
+    package = package_from_reply(reply, _seed(), input_digest="1" * 64, generator="t")
+    _checked, report = await check_references(
+        package,
+        references_from_reply(reply),
+        seed=_seed(),
+        interpreter=pin_interpreter(sys.executable, "test"),
+        timeout_seconds=60,
+    )
+    assert report.uncovered == {} and report.excluded == {}
 
 
 async def test_the_reference_receives_dotted_paths_and_runs_without_setup(
