@@ -459,7 +459,8 @@ class TestConfigShowModels:
             resilience={"reflect_model": "my-research-model"},
         )
         result = self._invoke("show")
-        text = self._text(result)
+        # Rich wraps long lines at the console width; compare with whitespace collapsed.
+        text = " ".join(self._text(result).split())
         assert "ignored (pin off):" in text
         assert (
             "evaluation.semantic_model: claude-opus-4-6, set models.pin: true to use "
