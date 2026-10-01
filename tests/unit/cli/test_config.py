@@ -418,6 +418,11 @@ class TestConfigShowModels:
         monkeypatch.setattr("ouroboros.config.loader.get_config_dir", lambda: config_dir)
         for name in ("OUROBOROS_MODEL", "OUROBOROS_PIN_MODELS", "OUROBOROS_SEMANTIC_MODEL"):
             monkeypatch.delenv(name, raising=False)
+        # The table is asserted cell by cell; keep Rich from truncating columns
+        # on a narrow test console.
+        from ouroboros.cli.formatters import console
+
+        monkeypatch.setattr(console, "_width", 200)
 
     @staticmethod
     def _invoke(*args: str) -> Result:
