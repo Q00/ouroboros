@@ -99,6 +99,7 @@ from ouroboros.config._model_defaults import (
     DEFAULT_SONNET_MODEL,
     recognized_shipped_defaults,
 )
+from ouroboros.config.model_selection import AUTO_MODEL
 from ouroboros.core.errors import ConfigError
 from ouroboros.persistence.brownfield import BrownfieldStore
 
@@ -454,6 +455,7 @@ _CODEX_MCP_SECTION_TEMPLATE = """# Ouroboros MCP hookup for Codex CLI.
 
 [mcp_servers.ouroboros]
 {command_lines}
+startup_timeout_sec = 180
 
 [mcp_servers.ouroboros.env]
 OUROBOROS_AGENT_RUNTIME = "codex"
@@ -767,7 +769,10 @@ def _is_setup_managed_codex_mcp_entry(
     env = entry.get("env")
     if env is not None and env != _CODEX_MANAGED_MCP_ENV and env != _CODEX_HOST_MCP_ENV:
         return False
-    if set(entry) - {"command", "args", "env"}:
+    if set(entry) - {"command", "args", "env", "startup_timeout_sec"}:
+        return False
+    timeout = entry.get("startup_timeout_sec", 180)
+    if timeout != 180:
         return False
 
     if Path(command).name == "uvx":
@@ -3539,7 +3544,10 @@ def _apply_copilot_default_model(
     for section_name, key, shipped_default in _COPILOT_DEFAULT_MODEL_TARGETS:
         section = _ensure_mapping_section(config_dict, section_name)
         current = section.get(key)
-        if current is None or current in recognized_shipped_defaults(shipped_default):
+        if current is None or current in (
+            AUTO_MODEL,
+            *recognized_shipped_defaults(shipped_default),
+        ):
             section[key] = chosen_model
 
     for section_name, key, shipped_default in _COPILOT_DEFAULT_MODEL_LIST_TARGETS:

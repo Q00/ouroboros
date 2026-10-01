@@ -278,3 +278,17 @@ async def close_test_owned_stores(monkeypatch):
                     await close_result
                 except Exception:
                     pass
+
+
+@pytest.fixture(autouse=True)
+def reset_ignored_model_warning():
+    """Make the once-per-process ignored-model warning independent of test order.
+
+    ``config.model_selection`` warns only on the first ignored persisted model id
+    in a process. Under ``pytest -n`` that first call would otherwise land in
+    whichever test a worker happens to run first. Reset it per test so a test
+    that reads CLI output sees the same stream alone or in the full suite.
+    """
+    selection_mod = sys.modules.get("ouroboros.config.model_selection")
+    if selection_mod is not None:
+        selection_mod.reset_ignored_model_warning()

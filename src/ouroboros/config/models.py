@@ -9,6 +9,7 @@ Classes:
     ProviderCredentials: API credentials for a single provider
     CredentialsConfig: All provider credentials
     LLMConfig: Shared LLM backend/model defaults
+    ModelsConfig: Automatic model selection and pinning
     EconomicsConfig: Economic model with tier definitions
     ClarificationConfig: Phase 0 configuration
     ExecutionConfig: Phase 2 configuration
@@ -30,7 +31,6 @@ from pydantic import BaseModel, Field, field_validator
 import yaml
 
 from ouroboros.config._model_defaults import (
-    DEFAULT_CONSENSUS_OPUS_MODEL,
     DEFAULT_HAIKU_MODEL,
     DEFAULT_OPUS_MODEL,
     DEFAULT_SONNET_MODEL,
@@ -148,14 +148,13 @@ class LLMConfig(BaseModel, frozen=True):
     ] = "claude_code"
     permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "default"
     opencode_permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "acceptEdits"
-    qa_model: str = DEFAULT_SONNET_MODEL
-    # Dependency and ontology analysis are bounded structured-extraction tasks;
-    # Sonnet is sufficient and Opus is waste. (The "stable tier for reproducible
-    # grading" rationale covers evaluation/consensus, not these.) Effort-first:
-    # the floor should not start at the most expensive tier.
-    dependency_analysis_model: str = DEFAULT_SONNET_MODEL
-    ontology_analysis_model: str = DEFAULT_SONNET_MODEL
-    context_compression_model: str = "gpt-4"
+    # Model fields default to "auto" (the latest model of the role's tier; see
+    # ``ouroboros.config.model_selection``). Dependency and ontology analysis
+    # are bounded structured-extraction tasks, so their tier is standard.
+    qa_model: str = "auto"
+    dependency_analysis_model: str = "auto"
+    ontology_analysis_model: str = "auto"
+    context_compression_model: str = "auto"
 
 
 class LLMProviderProfileConfig(BaseModel, frozen=True):
@@ -207,6 +206,24 @@ class LLMTaskProfileConfig(BaseModel, frozen=True):
         return providers
 
 
+class ModelsConfig(BaseModel, frozen=True):
+    """How every role's model is chosen.
+
+    Attributes:
+        default: ``auto`` (the latest model of each role's tier for the active
+            backend), a tier name (``frugal``/``standard``/``frontier``) applied
+            to every role, or a model id applied to every role.
+        pin: Run the concrete model ids persisted in role fields and
+            ``OUROBOROS_*_MODEL`` variables on every backend. Off by default:
+            those ids are then ignored except on backends whose ids are
+            provider-owned (``litellm``, ``copilot``). Turn on for research
+            or reproducibility.
+    """
+
+    default: str = "auto"
+    pin: bool = False
+
+
 class ClarificationConfig(BaseModel, frozen=True):
     """Phase 0 (Big Bang) configuration.
 
@@ -220,7 +237,7 @@ class ClarificationConfig(BaseModel, frozen=True):
     ambiguity_threshold: float = Field(default=0.2, ge=0.0, le=1.0)
     max_interview_rounds: int = Field(default=10, ge=1)
     model_tier: Literal["frugal", "standard", "frontier"] = "standard"
-    default_model: str = DEFAULT_OPUS_MODEL
+    default_model: str = "auto"
 
 
 class ExecutionConfig(BaseModel, frozen=True):
@@ -352,8 +369,8 @@ class ResilienceConfig(BaseModel, frozen=True):
     lateral_thinking_enabled: bool = True
     lateral_model_tier: Literal["frugal", "standard", "frontier"] = "frontier"
     lateral_temperature: float = Field(default=0.8, ge=0.0, le=2.0)
-    wonder_model: str = DEFAULT_OPUS_MODEL
-    reflect_model: str = DEFAULT_OPUS_MODEL
+    wonder_model: str = "auto"
+    reflect_model: str = "auto"
 
 
 class EvaluationConfig(BaseModel, frozen=True):
@@ -374,8 +391,8 @@ class EvaluationConfig(BaseModel, frozen=True):
     stage3_enabled: bool = True
     satisfaction_threshold: float = Field(default=0.8, ge=0.0, le=1.0)
     uncertainty_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
-    semantic_model: str = DEFAULT_OPUS_MODEL
-    assertion_extraction_model: str = DEFAULT_SONNET_MODEL
+    semantic_model: str = "auto"
+    assertion_extraction_model: str = "auto"
 
 
 class ConsensusConfig(BaseModel, frozen=True):
@@ -394,14 +411,10 @@ class ConsensusConfig(BaseModel, frozen=True):
     min_models: int = Field(default=3, ge=2)
     threshold: float = Field(default=0.67, ge=0.0, le=1.0)
     diversity_required: bool = True
-    models: tuple[str, ...] = (
-        "openrouter/openai/gpt-4o",
-        DEFAULT_CONSENSUS_OPUS_MODEL,
-        "openrouter/google/gemini-2.5-pro",
-    )
-    advocate_model: str = DEFAULT_CONSENSUS_OPUS_MODEL
-    devil_model: str = "openrouter/openai/gpt-4o"
-    judge_model: str = "openrouter/google/gemini-2.5-pro"
+    models: tuple[str, ...] = ("auto",)
+    advocate_model: str = "auto"
+    devil_model: str = "auto"
+    judge_model: str = "auto"
 
 
 class PersistenceConfig(BaseModel, frozen=True):
@@ -850,6 +863,7 @@ class OuroborosConfig(BaseModel, frozen=True):
     Attributes:
         economics: Economic model and tier configuration
         llm: Shared LLM backend and model configuration
+        models: Automatic model selection and the explicit pin switch
         clarification: Phase 0 (Big Bang) configuration
         execution: Phase 2 configuration
         resilience: Phase 3 configuration
@@ -867,6 +881,7 @@ class OuroborosConfig(BaseModel, frozen=True):
 
     economics: EconomicsConfig = Field(default_factory=EconomicsConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    models: ModelsConfig = Field(default_factory=ModelsConfig)
     clarification: ClarificationConfig = Field(default_factory=ClarificationConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     resilience: ResilienceConfig = Field(default_factory=ResilienceConfig)

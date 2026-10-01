@@ -1605,3 +1605,120 @@ class TestAcVerifyFailed:
         from ouroboros.orchestrator.verify_gate_outcome import _VERIFY_GATE_CAUSES
 
         assert telemetry._AC_VERIFY_CAUSES == _VERIFY_GATE_CAUSES
+
+
+class TestAcceptanceNoEvidence:
+    """Closed-vocabulary counts of criteria accepted without evidence."""
+
+    @staticmethod
+    def _config(text: str) -> None:
+        config_dir = Path.home() / ".ouroboros"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "config.yaml").write_text(text, encoding="utf-8")
+
+    @staticmethod
+    def _capture(pairs: Any, **overrides: Any) -> None:
+        kwargs: dict[str, Any] = {
+            "criterion_count": 4,
+            "verification_coverage": "low",
+            "surface": "cli_run",
+            "check_package": "on",
+            "check_package_status": "admitted",
+            "runtime_backend": "codex",
+        }
+        kwargs.update(overrides)
+        telemetry.capture_acceptance_no_evidence(pairs, **kwargs)
+
+    def test_counts_each_reason_pair(self, sent: list[dict[str, Any]]) -> None:
+        self._capture(
+            [
+                ("uncovered", "no_verifier_verdict"),
+                ("uncovered", "no_verifier_verdict"),
+                ("no_binding", "transcript_unavailable"),
+            ]
+        )
+        telemetry.flush(timeout=2.0)
+
+        assert len(sent) == 1
+        assert sent[0]["event"] == "acceptance_no_evidence"
+        props = sent[0]["properties"]
+        assert props["pair_uncovered__no_verifier_verdict"] == 2
+        assert props["pair_no_binding__transcript_unavailable"] == 1
+        assert props["no_evidence_count"] == 3
+        assert props["criterion_count"] == 4
+        assert props["verification_coverage"] == "low"
+        assert props["surface"] == "cli_run"
+        assert props["check_package"] == "on"
+        assert props["check_package_status"] == "admitted"
+        assert props["runtime_backend"] == "codex"
+        assert set(props) <= telemetry._ACCEPTANCE_NO_EVIDENCE_KEYS
+
+    def test_folds_unaudited_values_to_unknown(self, sent: list[dict[str, Any]]) -> None:
+        hostile = "/private/seed.yaml: add(2, 3) returns 5"
+        self._capture(
+            [(hostile, hostile), (None, None)],
+            verification_coverage=hostile,
+            surface=hostile,
+            check_package=hostile,
+            check_package_status=hostile,
+            runtime_backend=hostile,
+        )
+        telemetry.flush(timeout=2.0)
+
+        props = sent[0]["properties"]
+        assert props["pair_unknown__unknown"] == 2
+        for key in (
+            "verification_coverage",
+            "surface",
+            "check_package",
+            "check_package_status",
+            "runtime_backend",
+        ):
+            assert props[key] == "unknown"
+        assert hostile not in json.dumps(sent[0])
+
+    def test_sends_nothing_without_a_no_evidence_acceptance(
+        self, sent: list[dict[str, Any]]
+    ) -> None:
+        self._capture([])
+        telemetry.flush(timeout=2.0)
+        assert sent == []
+
+    def test_on_by_default_without_any_config(self, sent: list[dict[str, Any]]) -> None:
+        assert not (Path.home() / ".ouroboros" / "config.yaml").exists()
+        self._capture([("uncovered", "no_verifier_verdict")])
+        telemetry.flush(timeout=2.0)
+        assert len(sent) == 1
+
+    @pytest.mark.parametrize(
+        ("env", "config"),
+        (
+            ({"DO_NOT_TRACK": "1"}, None),
+            ({"OUROBOROS_TELEMETRY": "0"}, None),
+            ({}, "telemetry:\n  enabled: false\n"),
+        ),
+    )
+    def test_every_opt_out_suppresses_it(
+        self,
+        sent: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
+        env: dict[str, str],
+        config: str | None,
+    ) -> None:
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        if config is not None:
+            self._config(config)
+        self._capture([("uncovered", "no_verifier_verdict")])
+        telemetry.flush(timeout=2.0)
+        assert sent == []
+
+    def test_never_raises(self, sent: list[dict[str, Any]]) -> None:
+        def broken() -> Any:
+            yield ("uncovered", "no_verifier_verdict")
+            raise RuntimeError("boom")
+
+        self._capture(broken())
+        self._capture(None)
+        telemetry.flush(timeout=2.0)
+        assert sent == []

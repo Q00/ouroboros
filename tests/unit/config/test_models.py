@@ -6,11 +6,6 @@ from typing import get_args
 from pydantic import ValidationError
 import pytest
 
-from ouroboros.config._model_defaults import (
-    DEFAULT_CONSENSUS_OPUS_MODEL,
-    DEFAULT_OPUS_MODEL,
-    DEFAULT_SONNET_MODEL,
-)
 from ouroboros.config.models import (
     VALID_RUNTIME_BACKENDS,
     ClarificationConfig,
@@ -183,6 +178,21 @@ class TestClarificationConfig:
         assert config.ambiguity_threshold == 0.2
         assert config.max_interview_rounds == 10
         assert config.model_tier == "standard"
+        assert config.default_model == "auto"
+
+
+class TestModelsConfig:
+    """Test the automatic model selection section."""
+
+    def test_models_config_defaults_to_auto_without_pin(self) -> None:
+        config = OuroborosConfig()
+        assert config.models.default == "auto"
+        assert config.models.pin is False
+
+    def test_models_config_accepts_pin(self) -> None:
+        config = OuroborosConfig.model_validate({"models": {"default": "frontier", "pin": True}})
+        assert config.models.default == "frontier"
+        assert config.models.pin is True
 
     def test_clarification_ambiguity_threshold_bounds(self) -> None:
         """ClarificationConfig ambiguity_threshold must be in [0, 1]."""
@@ -212,12 +222,12 @@ class TestLLMConfig:
         assert config.backend == "claude_code"
         assert config.permission_mode == "default"
         assert config.opencode_permission_mode == "acceptEdits"
-        assert config.qa_model == DEFAULT_SONNET_MODEL
-        # Frugality: bounded structured-extraction meta-tasks default to Sonnet,
-        # not Opus (effort-first floor should not start at the priciest tier).
-        assert config.dependency_analysis_model == DEFAULT_SONNET_MODEL
-        assert config.ontology_analysis_model == DEFAULT_SONNET_MODEL
-        assert config.context_compression_model == "gpt-4"
+        assert config.qa_model == "auto"
+        # Every model field defaults to automatic selection; the standard tier
+        # for these meta-tasks lives in ``config.model_selection.ROLE_TIERS``.
+        assert config.dependency_analysis_model == "auto"
+        assert config.ontology_analysis_model == "auto"
+        assert config.context_compression_model == "auto"
 
     def test_llm_config_accepts_claude_shorthand(self) -> None:
         """LLMConfig accepts 'claude' as a backend alias."""
@@ -398,8 +408,8 @@ class TestResilienceConfig:
         assert config.lateral_thinking_enabled is True
         assert config.lateral_model_tier == "frontier"
         assert config.lateral_temperature == 0.8
-        assert config.wonder_model == DEFAULT_OPUS_MODEL
-        assert config.reflect_model == DEFAULT_OPUS_MODEL
+        assert config.wonder_model == "auto"
+        assert config.reflect_model == "auto"
 
     def test_resilience_temperature_bounds(self) -> None:
         """ResilienceConfig lateral_temperature must be in [0, 2]."""
@@ -472,8 +482,8 @@ class TestEvaluationConfig:
         assert config.stage3_enabled is True
         assert config.satisfaction_threshold == 0.8
         assert config.uncertainty_threshold == 0.3
-        assert config.semantic_model == DEFAULT_OPUS_MODEL
-        assert config.assertion_extraction_model == DEFAULT_SONNET_MODEL
+        assert config.semantic_model == "auto"
+        assert config.assertion_extraction_model == "auto"
 
 
 class TestConsensusConfig:
@@ -496,10 +506,10 @@ class TestConsensusConfig:
         assert config.min_models == 3
         assert config.threshold == 0.67
         assert config.diversity_required is True
-        assert len(config.models) == 3
-        assert config.advocate_model == DEFAULT_CONSENSUS_OPUS_MODEL
-        assert config.devil_model == "openrouter/openai/gpt-4o"
-        assert config.judge_model == "openrouter/google/gemini-2.5-pro"
+        assert config.models == ("auto",)
+        assert config.advocate_model == "auto"
+        assert config.devil_model == "auto"
+        assert config.judge_model == "auto"
 
     def test_consensus_min_models_minimum(self) -> None:
         """ConsensusConfig min_models must be >= 2."""

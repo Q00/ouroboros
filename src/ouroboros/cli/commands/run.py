@@ -630,7 +630,8 @@ async def _record_cli_run_outcome(
     outcome id is fresh per invocation because ``--resume`` reuses the
     execution id and each attempt is its own outcome. ``check_package_run``
     (``boundary/run_control.py``) closes its record at the same terminal
-    status; nothing from it is sent. Never raises.
+    status and sends only its anonymous no-evidence count
+    (``acceptance_no_evidence``). Never raises.
     """
     from ouroboros.mcp.tools.run_failure_meta import derive_run_failure_meta
     from ouroboros.orchestrator.session import SessionStatus
@@ -677,7 +678,7 @@ async def _record_cli_run_outcome(
         if check_package_run is not None:
             try:
                 # A paused run returned above: the final verdict exists.
-                check_package_run.finish(terminal_status)
+                check_package_run.finish(terminal_status, surface="cli_run")
             except Exception:
                 pass
         usage_telemetry.capture_job_outcome(

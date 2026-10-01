@@ -1017,10 +1017,10 @@ class OrchestratorRunner:
         # it). The DEFAULT sonnet fallback that execution_handlers/run.py pass to
         # create_agent_runtime is a shipped default, not a user pin; explicit
         # environment or persisted Execute-stage pins both count here.
-        _model_pin = get_execution_model()
+        _runtime_backend = str(getattr(adapter, "runtime_backend", "")).strip().lower()
+        _model_pin = get_execution_model(_runtime_backend)
         self._model_routing_disabled = _model_routing_disabled
         self._model_pin = _model_pin
-        _runtime_backend = str(getattr(adapter, "runtime_backend", "")).strip().lower()
         _model_routing_explicit = bool(
             _model_routing_env is not None and _model_routing_env.strip()
         )
@@ -1071,6 +1071,17 @@ class OrchestratorRunner:
         # Routing B compatibility bridge rebuilds its immutable registry from
         # this snapshot at the effect boundary, so a mutable/resumed router can
         # never introduce an unconfigured model or cost.
+        from ouroboros.config.model_selection import pin_models_enabled
+        from ouroboros.orchestrator.resolved_models import resolve_route_economics
+
+        # Under ``auto`` each tier runs on the backend's latest model of that tier;
+        # the configured ladder is kept for replaying pre-upgrade contracts.
+        self._configured_route_economics = _economics_config
+        _economics_config = resolve_route_economics(
+            _economics_config,
+            runtime_backend=getattr(adapter, "runtime_backend", None),
+            pinned=pin_models_enabled(_config),
+        )
         self._route_economics = _economics_config
         _execution_config = _config.execution
         self._run_verify_commands = _execution_config.run_verify_commands
@@ -5602,6 +5613,7 @@ class OrchestratorRunner:
     ) -> dict[str, Any]:
         """Build the durable resolved inputs shared by resume and proof cohorting."""
         from ouroboros.orchestrator.model_routing import serialize_model_router
+        from ouroboros.orchestrator.resolved_models import resolved_models_contract
         from ouroboros.orchestrator.route_compat import (
             build_route_compat_projection,
             serialize_route_compat_contract,
@@ -5640,6 +5652,11 @@ class OrchestratorRunner:
         # change cannot silently alter ``model_reasoning_effort`` on resume.
         routing_contract["base_reasoning_effort"] = self._reasoning_effort
         routing_contract["constructor_model"] = self._constructor_model_contract()
+        routing_contract["resolved_models"] = resolved_models_contract(
+            self._route_economics,
+            runtime_backend=getattr(self._adapter, "runtime_backend", None),
+            execute_model=routing_contract["constructor_model"].get("model"),
+        )
         routing_contract["runtime_execution"] = self._runtime_execution_identity_contract(
             runtime_handle
         )
@@ -6244,6 +6261,8 @@ class OrchestratorRunner:
         persisted_execution_semantics_fingerprint = raw_proof.get("execution_semantics_fingerprint")
         persisted_execution_inputs_fingerprint = raw_proof.get("execution_inputs_fingerprint")
         persisted_seed_fingerprint = raw_proof.get("seed_fingerprint")
+        from ouroboros.orchestrator import resolved_models as model_replay
+
         persisted_constructor_model = raw_routing.get("constructor_model")
         persisted_runtime_execution = raw_routing.get("runtime_execution")
         persisted_runtime_backend = raw_routing.get("runtime_backend")
@@ -6317,6 +6336,7 @@ class OrchestratorRunner:
                 self._valid_constructor_model_contract(persisted_constructor_model)
                 or (prepared_live_execution and persisted_constructor_model == {"observed": False})
             )
+            or not model_replay.valid_resolved_models(raw_routing.get("resolved_models"))
             or not self._valid_runtime_execution_identity_contract(persisted_runtime_execution)
             or not (
                 isinstance(persisted_runtime_backend, str)
@@ -6526,6 +6546,17 @@ class OrchestratorRunner:
                     "hint": "Start a new session for changed goals, constraints, or ACs.",
                 },
             )
+        # Replay the models the run started on instead of resolving them again.
+        persisted_resolved = raw_routing.get("resolved_models") or {}
+        runtime_backend = getattr(self._adapter, "runtime_backend", None)
+        if not self._model_routing_override_explicit:
+            model_replay.replay_constructor_model(
+                self._adapter,
+                runtime_backend=runtime_backend,
+                persisted=persisted_resolved.get(
+                    "execute", persisted_constructor_model.get("model")
+                ),
+            )
         current_constructor_model = self._constructor_model_contract()
         if persisted_constructor_model != current_constructor_model:
             raise OrchestratorError(
@@ -6586,6 +6617,16 @@ class OrchestratorRunner:
             persisted_requested_model_tier = (
                 restored_router.base_tier if restored_router is not None else None
             )
+        replayed_economics = model_replay.replay_route_economics(
+            self._route_economics,
+            self._configured_route_economics,
+            runtime_backend=runtime_backend,
+            persisted_tiers=persisted_resolved.get(
+                "tiers", restored_router.tier_models if restored_router is not None else {}
+            ),
+        )
+        if replayed_economics is not None and not self._model_routing_override_explicit:
+            self._route_economics = replayed_economics
         authoritative_router = self._authoritative_model_router(
             persisted_preferences,
             requested_model_tier=persisted_requested_model_tier,

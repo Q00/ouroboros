@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from importlib import metadata
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -285,7 +286,7 @@ def _check_auto_dispatch_surface(codex_dir: Path, *, live_mcp: bool = False) -> 
 
     _check_mcp_schema_surface(ouroboros_entry, failures)
     _check_mcp_activation_surface(ouroboros_entry, failures)
-    _check_mcp_execution_surface(ouroboros_entry, failures)
+    startup_timeout = _check_mcp_execution_surface(ouroboros_entry, failures)
 
     url = ouroboros_entry.get("url")
     if isinstance(url, str) and url.strip():
@@ -349,7 +350,7 @@ def _check_auto_dispatch_surface(codex_dir: Path, *, live_mcp: bool = False) -> 
             )
 
     if live_mcp and command_entry is not None and not failures:
-        _check_live_mcp_tool_exposure(command_entry, failures)
+        _check_live_mcp_tool_exposure(command_entry, failures, startup_timeout)
 
     if failures:
         print_warning(
@@ -573,7 +574,7 @@ def _check_mcp_activation_surface(
 
 def _check_mcp_execution_surface(
     ouroboros_entry: Mapping[str, object], failures: list[str]
-) -> None:
+) -> float:
     """Reject Codex execution controls that the doctor probe cannot reproduce.
 
     The live probe deliberately supports only the launcher, argv, and explicit
@@ -585,7 +586,6 @@ def _check_mcp_execution_surface(
         "cwd": "the stdio process working directory",
         "env_vars": "which ambient environment variables Codex forwards",
         "experimental_environment": "the Codex execution environment",
-        "startup_timeout_sec": "the Codex MCP initialization deadline",
         "startup_timeout_ms": "the legacy Codex MCP initialization deadline",
         "tool_timeout_sec": "the Codex MCP tool-call deadline",
     }
@@ -595,6 +595,20 @@ def _check_mcp_execution_surface(
                 f"[mcp_servers.ouroboros].{field} is unsupported by doctor because "
                 f"it changes {effect}; remove it before verifying this MCP contract"
             )
+
+    startup_timeout = ouroboros_entry.get("startup_timeout_sec", 30.0)
+    if isinstance(startup_timeout, bool) or not isinstance(startup_timeout, (int, float)):
+        failures.append(
+            "[mcp_servers.ouroboros].startup_timeout_sec must be a finite positive number"
+        )
+        return 30.0
+    timeout = float(startup_timeout)
+    if not math.isfinite(timeout) or timeout <= 0:
+        failures.append(
+            "[mcp_servers.ouroboros].startup_timeout_sec must be a finite positive number"
+        )
+        return 30.0
+    return timeout
 
 
 def _check_mcp_runtime_dependency_surface(
@@ -885,7 +899,7 @@ def _check_codex_runtime_env(
 
 
 def _check_live_mcp_tool_exposure(
-    command_entry: _CodexMCPCommandEntry, failures: list[str]
+    command_entry: _CodexMCPCommandEntry, failures: list[str], startup_timeout: float
 ) -> None:
     """Verify Codex's configured stdio command can initialize and list tools."""
     try:
@@ -894,6 +908,7 @@ def _check_live_mcp_tool_exposure(
                 command_entry.command,
                 command_entry.args,
                 command_entry.env,
+                startup_timeout,
             )
         )
     except Exception as exc:
@@ -908,7 +923,10 @@ def _check_live_mcp_tool_exposure(
 
 
 async def _list_stdio_mcp_tool_names(
-    command: str, args: tuple[str, ...], env: dict[str, str]
+    command: str,
+    args: tuple[str, ...],
+    env: dict[str, str],
+    startup_timeout: float = 30.0,
 ) -> frozenset[str]:
     """Launch a stdio MCP server and return the names exposed by list_tools().
 
@@ -921,10 +939,12 @@ async def _list_stdio_mcp_tool_names(
     interpreter to have installed the optional local ``mcp`` extra.
     """
     try:
-        return await _list_stdio_mcp_tool_names_with_framing(command, args, env, framing="jsonl")
+        return await _list_stdio_mcp_tool_names_with_framing(
+            command, args, env, framing="jsonl", startup_timeout=startup_timeout
+        )
     except _StdioMcpFramingProbeFailed:
         return await _list_stdio_mcp_tool_names_with_framing(
-            command, args, env, framing="content-length"
+            command, args, env, framing="content-length", startup_timeout=startup_timeout
         )
 
 
@@ -934,6 +954,7 @@ async def _list_stdio_mcp_tool_names_with_framing(
     env: dict[str, str],
     *,
     framing: str,
+    startup_timeout: float = 30.0,
 ) -> frozenset[str]:
     """Launch a stdio MCP server with one wire framing and return tool names."""
     process_env = os.environ.copy()
@@ -975,7 +996,7 @@ async def _list_stdio_mcp_tool_names_with_framing(
             await _read_stdio_mcp_response(
                 proc,
                 request_id=1,
-                timeout=30.0,
+                timeout=startup_timeout,
                 stderr_buffer=stderr_buffer,
                 framing=framing,
             )

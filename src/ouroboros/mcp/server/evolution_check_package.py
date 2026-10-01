@@ -84,7 +84,7 @@ class GenerationCheckPackages:
         terminal = "completed" if getattr(value, "success", False) else "failed"
         if value is not None and not value.success and value.summary.get("cancelled"):
             terminal = "cancelled"
-        check_package.finish(terminal)
+        check_package.finish(terminal, surface="evolve")
         return result
 
     async def decide(

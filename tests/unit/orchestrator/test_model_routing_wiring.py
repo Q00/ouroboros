@@ -1028,9 +1028,20 @@ class TestRunnerRouterConstruction:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("OUROBOROS_MODEL_TIER_ROUTING", raising=False)
+        monkeypatch.setenv("OUROBOROS_PIN_MODELS", "1")
         monkeypatch.setenv("OUROBOROS_EXECUTION_MODEL", "claude-opus-4-8")
         runner = self._runner(self._adapter("claude"))
         assert runner._model_router is None
+
+    def test_unpinned_execution_model_env_keeps_router(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without ``models.pin`` a persisted Execute id is not a pin."""
+        monkeypatch.delenv("OUROBOROS_MODEL_TIER_ROUTING", raising=False)
+        monkeypatch.delenv("OUROBOROS_PIN_MODELS", raising=False)
+        monkeypatch.setenv("OUROBOROS_EXECUTION_MODEL", "claude-opus-4-8")
+        runner = self._runner(self._adapter("claude"))
+        assert runner._model_router is not None
 
     def test_default_builds_router_for_adapter_backend(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1055,7 +1066,7 @@ class TestRunnerRouterConstruction:
         empty_config = OuroborosConfig()
 
         monkeypatch.setattr("ouroboros.providers.profiles.load_config", lambda: empty_config)
-        monkeypatch.setattr("ouroboros.config.get_execution_model", lambda: None)
+        monkeypatch.setattr("ouroboros.config.get_execution_model", lambda _backend=None: None)
 
         public_tier, automatic_override, delegated_tier = _resolve_model_tier_request({})
         assert (public_tier, automatic_override, delegated_tier) == (None, None, None)
@@ -1108,6 +1119,7 @@ class TestRunnerRouterConstruction:
         """Fill only empty tiers; preserve every explicit non-tier economics knob."""
         monkeypatch.delenv("OUROBOROS_MODEL_TIER_ROUTING", raising=False)
         monkeypatch.delenv("OUROBOROS_EXECUTION_MODEL", raising=False)
+        monkeypatch.setenv("OUROBOROS_PIN_MODELS", "1")
         loaded_economics = EconomicsConfig(
             default_tier="frontier",
             escalation_threshold=7,
@@ -1139,9 +1151,10 @@ class TestRunnerRouterConstruction:
     def test_non_empty_custom_tiers_are_preserved_exactly(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Any non-empty user ladder remains authoritative, even when custom."""
+        """A pinned non-empty user ladder remains authoritative, even when custom."""
         monkeypatch.delenv("OUROBOROS_MODEL_TIER_ROUTING", raising=False)
         monkeypatch.delenv("OUROBOROS_EXECUTION_MODEL", raising=False)
+        monkeypatch.setenv("OUROBOROS_PIN_MODELS", "1")
         monkeypatch.setattr(
             "ouroboros.config.load_config",
             lambda: OuroborosConfig(economics=_economics()),
@@ -1155,6 +1168,66 @@ class TestRunnerRouterConstruction:
             "standard": "sonnet-x",
             "frontier": "opus-x",
         }
+
+    def test_auto_routes_custom_ladder_to_claude_tier_aliases(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unpinned, the ladder keeps its tiers and costs but runs the tier aliases."""
+        monkeypatch.delenv("OUROBOROS_MODEL_TIER_ROUTING", raising=False)
+        monkeypatch.delenv("OUROBOROS_EXECUTION_MODEL", raising=False)
+        monkeypatch.delenv("OUROBOROS_PIN_MODELS", raising=False)
+        monkeypatch.setattr(
+            "ouroboros.config.load_config",
+            lambda: OuroborosConfig(economics=_economics()),
+        )
+
+        runner = self._runner(self._adapter("claude"))
+
+        assert runner._model_router is not None
+        assert dict(runner._model_router.tier_models) == {
+            "frugal": "haiku",
+            "standard": "sonnet",
+            "frontier": "opus",
+        }
+        assert runner._route_economics.tiers["standard"].cost_factor == (
+            _economics().tiers["standard"].cost_factor
+        )
+        assert runner._configured_route_economics == _economics()
+
+    def test_auto_routes_sentinel_backend_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A backend that picks its own model receives the sentinel for every tier."""
+        monkeypatch.delenv("OUROBOROS_MODEL_TIER_ROUTING", raising=False)
+        monkeypatch.delenv("OUROBOROS_EXECUTION_MODEL", raising=False)
+        monkeypatch.delenv("OUROBOROS_PIN_MODELS", raising=False)
+        monkeypatch.setattr("ouroboros.config.load_config", get_default_config)
+
+        runner = self._runner(self._adapter("gemini_cli"))
+
+        assert runner._model_router is not None
+        # The shipped ladder has google entries for frugal and standard only.
+        assert dict(runner._model_router.tier_models) == {
+            "frugal": "default",
+            "standard": "default",
+        }
+
+    def test_runner_passes_runtime_backend_to_execution_pin(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An explicit backend's configured Execute model is a pin for routing."""
+        monkeypatch.delenv("OUROBOROS_MODEL_TIER_ROUTING", raising=False)
+        seen: list[object] = []
+
+        def _pin(runtime_backend: str | None = None) -> str | None:
+            seen.append(runtime_backend)
+            return "configured-model"
+
+        monkeypatch.setattr("ouroboros.config.get_execution_model", _pin)
+
+        runner = self._runner(self._adapter("claude"))
+
+        assert seen == ["claude"]
+        assert runner._model_pin == "configured-model"
+        assert runner._model_router is None
 
     def test_unmapped_backend_stays_dormant(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("OUROBOROS_MODEL_TIER_ROUTING", raising=False)
