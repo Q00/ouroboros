@@ -355,7 +355,7 @@ economics:
 | `default_tier` | `"frugal"` \| `"standard"` \| `"frontier"` | `"frugal"` | The starting tier used when no task-specific override applies. |
 | `escalation_threshold` | `int >= 1` | `2` | The retry attempt at which tier escalation begins. From this attempt onward the tier climbs one notch per retry (progressive), capped at the frontier tier. Top-level and untrusted decomposed work start at the base tier. Only a decomposed child with explicit trust authorization starts one tier lower, so that trusted-child ladder may require one additional retry to reach the same frontier ceiling. Current live decomposition supplies no such trust authorization. |
 | `downgrade_success_streak` | `int >= 1` | `5` | Number of consecutive successes at the current tier before downgrading to the previous tier. |
-| `tiers` | `dict[str, TierConfig]` | (see above) | Tier definitions keyed by name. Model-tier routing keeps each tier's shape and cost, but the model ids listed here apply only with [`models.pin: true`](#models); otherwise each tier runs the latest model of that tier (Claude: `haiku`/`sonnet`/`opus`; runtimes that choose their own model: `default`). A resumed run replays the models it started on. |
+| `tiers` | `dict[str, TierConfig]` | (see above) | Tier definitions keyed by name. Model-tier routing keeps each tier's shape and cost, but the model ids listed here apply only with [`models.pin: true`](#models) or on backends that keep configured model ids (`litellm`, `copilot`); otherwise each tier runs the latest model of that tier (Claude: `haiku`/`sonnet`/`opus`; runtimes that choose their own model: `default`). A resumed run replays the models it started on. |
 
 **`TierConfig` fields:**
 
