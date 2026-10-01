@@ -2783,6 +2783,33 @@ class TestGetExecutionModel:
         ):
             assert get_execution_model() is None
 
+    @pytest.mark.parametrize("backend", ("litellm", "copilot"))
+    def test_explicit_backend_configured_execute_model_is_a_pin(
+        self, monkeypatch: pytest.MonkeyPatch, backend: str
+    ) -> None:
+        from ouroboros.config.loader import get_execution_model
+
+        monkeypatch.delenv("OUROBOROS_PIN_MODELS", raising=False)
+        monkeypatch.delenv("OUROBOROS_EXECUTION_MODEL", raising=False)
+        with patch(
+            "ouroboros.config.loader.load_config",
+            return_value=OuroborosConfig(execution=ExecutionConfig(default_model="saved-model")),
+        ):
+            assert get_execution_model(backend) == "saved-model"
+            assert get_execution_model("claude") is None
+            assert get_execution_model() is None
+
+    @pytest.mark.parametrize("backend", ("litellm", "copilot"))
+    def test_explicit_backend_fallback_is_not_a_pin(
+        self, monkeypatch: pytest.MonkeyPatch, backend: str
+    ) -> None:
+        from ouroboros.config.loader import get_execution_model
+
+        monkeypatch.delenv("OUROBOROS_PIN_MODELS", raising=False)
+        monkeypatch.delenv("OUROBOROS_EXECUTION_MODEL", raising=False)
+        with patch("ouroboros.config.loader.load_config", return_value=OuroborosConfig()):
+            assert get_execution_model(backend) is None
+
 
 class TestConfigEncodingLocaleIndependence:
     """#1831: config/credentials I/O must not depend on the process locale."""

@@ -47,6 +47,7 @@ import yaml
 
 from ouroboros.backends import get_backend_capability
 from ouroboros.config.model_selection import (
+    backend_model_selection,
     pin_models_enabled,
     resolve_consensus_roster,
     resolve_role_model,
@@ -758,8 +759,14 @@ def get_agent_reasoning_effort() -> str | None:
         return None
 
 
-def get_execution_model() -> str | None:
-    """Return the pinned Execute model, or None when models resolve automatically."""
+def get_execution_model(runtime_backend: str | None = None) -> str | None:
+    """Return the pinned Execute model, or None when models resolve automatically.
+
+    On explicit backends a configured Execute model is a pin without ``models.pin``.
+    """
+    if runtime_backend and backend_model_selection(runtime_backend) == "explicit":
+        chosen = resolve_role_model("execute", backend=runtime_backend)
+        return chosen.model if chosen.source == "configured" else None
     if not pin_models_enabled():
         return None
     resolved = resolve_role_model("execute", backend=None, pinned=True)

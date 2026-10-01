@@ -12,6 +12,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from ouroboros.config._model_defaults import (
+    DEFAULT_HAIKU_MODEL,
+    DEFAULT_OPUS_MODEL,
+    DEFAULT_SONNET_MODEL,
+)
 from ouroboros.config.models import (
     EconomicsConfig,
     ModelConfig,
@@ -235,7 +240,7 @@ def _assert_runtime_identity_observed(contract: dict[str, object]) -> dict[str, 
 def _clear_model_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OUROBOROS_MODEL_TIER_ROUTING", raising=False)
     monkeypatch.delenv("OUROBOROS_EXECUTION_MODEL", raising=False)
-    monkeypatch.setattr("ouroboros.config.get_execution_model", lambda: None)
+    monkeypatch.setattr("ouroboros.config.get_execution_model", lambda _backend=None: None)
     monkeypatch.setattr("ouroboros.config.load_config", get_default_config)
 
 
@@ -1764,6 +1769,180 @@ def test_constructor_model_pin_is_persisted_and_mismatch_is_rejected() -> None:
         )
 
 
+_CONCRETE_TIERS = {
+    "frugal": DEFAULT_HAIKU_MODEL,
+    "standard": DEFAULT_SONNET_MODEL,
+    "frontier": DEFAULT_OPUS_MODEL,
+}
+_ALIAS_TIERS = {"frugal": "haiku", "standard": "sonnet", "frontier": "opus"}
+
+
+def _pre_upgrade_contract(contract: dict) -> dict:
+    """Return ``contract`` in the 0.55.x shape: no ``resolved_models`` key."""
+    legacy = copy.deepcopy(contract)
+    routing = legacy["model_routing"]
+    del routing["resolved_models"]
+    legacy["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
+        routing
+    )
+    return legacy
+
+
+def test_pre_upgrade_concrete_contract_resumes_on_its_persisted_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run started before ``auto`` replays its concrete ids instead of resolving again."""
+    monkeypatch.setenv("OUROBOROS_PIN_MODELS", "1")
+    original = _runner(constructor_model=DEFAULT_SONNET_MODEL)
+    assert original._model_router is not None
+    assert dict(original._model_router.tier_models) == _CONCRETE_TIERS
+    persisted = _pre_upgrade_contract(
+        original._build_execution_contract(
+            project_identity=original._project_identity(), seed=_seed()
+        )
+    )
+
+    monkeypatch.delenv("OUROBOROS_PIN_MODELS")
+    resumed = _runner(constructor_model="sonnet")
+    assert resumed._model_router is not None
+    assert dict(resumed._model_router.tier_models) == _ALIAS_TIERS
+
+    changed = resumed._restore_execution_contract(
+        {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+        seed=_seed(),
+    )
+
+    assert changed is False
+    assert resumed._execution_contract == persisted
+    assert dict(resumed._model_router.tier_models) == _CONCRETE_TIERS
+    assert resumed._adapter._model == DEFAULT_SONNET_MODEL
+    projection = resumed._execution_contract["model_routing"]["route_compat"]["projection"]
+    assert [c["model"] for c in projection["registry"]["candidates"]] == list(
+        _CONCRETE_TIERS.values()
+    )
+
+
+@pytest.mark.parametrize("pin_on_resume", [False, True])
+def test_auto_contract_resumes_on_the_same_aliases(
+    monkeypatch: pytest.MonkeyPatch, pin_on_resume: bool
+) -> None:
+    monkeypatch.delenv("OUROBOROS_PIN_MODELS", raising=False)
+    original = _runner(constructor_model="sonnet")
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
+    assert persisted["model_routing"]["resolved_models"] == {
+        "execute": "sonnet",
+        "tiers": dict(sorted(_ALIAS_TIERS.items())),
+    }
+    fingerprint = persisted["frugality_proof"]["routing_fingerprint"]
+
+    if pin_on_resume:
+        monkeypatch.setenv("OUROBOROS_PIN_MODELS", "1")
+    resumed = _runner(constructor_model="sonnet")
+    changed = resumed._restore_execution_contract(
+        {EXECUTION_CONTRACT_PROGRESS_KEY: copy.deepcopy(persisted)},
+        seed=_seed(),
+    )
+
+    assert changed is False
+    assert resumed._execution_contract == persisted
+    assert resumed._execution_contract["frugality_proof"]["routing_fingerprint"] == fingerprint
+    assert resumed._model_router is not None
+    assert dict(resumed._model_router.tier_models) == _ALIAS_TIERS
+    assert resumed._adapter._model == "sonnet"
+
+
+def test_auto_sentinel_ladder_keeps_an_enabled_route_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tiers that share the ``default`` sentinel still form a Route B registry."""
+    monkeypatch.delenv("OUROBOROS_PIN_MODELS", raising=False)
+
+    def _gemini_runner() -> OrchestratorRunner:
+        # A constructor model keeps the unrelated effective-model guard satisfied.
+        adapter = _adapter(constructor_model="gemini-constructor")
+        adapter.runtime_backend = "gemini_cli"
+        return OrchestratorRunner(adapter, AsyncMock(), MagicMock())
+
+    original = _gemini_runner()
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
+    routing = persisted["model_routing"]
+    assert routing["enabled"] is True
+    assert routing["resolved_models"]["tiers"] == {"frugal": "default", "standard": "default"}
+    projection = routing["route_compat"]["projection"]
+    assert projection is not None
+    assert [c["model"] for c in projection["registry"]["candidates"]] == ["default", "default"]
+
+    resumed = _gemini_runner()
+    changed = resumed._restore_execution_contract(
+        {EXECUTION_CONTRACT_PROGRESS_KEY: copy.deepcopy(persisted)},
+        seed=_seed(),
+    )
+
+    assert changed is False
+    assert resumed._execution_contract == persisted
+
+
+def test_resume_rejects_resolved_tier_the_config_cannot_produce() -> None:
+    original = _runner(constructor_model="sonnet")
+    persisted = copy.deepcopy(
+        original._build_execution_contract(
+            project_identity=original._project_identity(), seed=_seed()
+        )
+    )
+    routing = persisted["model_routing"]
+    routing["resolved_models"]["tiers"]["standard"] = "never-configured"
+    routing["router"]["tier_models"]["standard"] = "never-configured"
+    persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
+        routing
+    )
+
+    with pytest.raises(OrchestratorError, match="changed model-routing policy"):
+        _runner(constructor_model="sonnet")._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+
+
+def test_resume_rejects_malformed_resolved_models() -> None:
+    original = _runner(constructor_model="sonnet")
+    persisted = copy.deepcopy(
+        original._build_execution_contract(
+            project_identity=original._project_identity(), seed=_seed()
+        )
+    )
+    routing = persisted["model_routing"]
+    routing["resolved_models"]["tiers"]["bananas"] = "sonnet"
+    persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
+        routing
+    )
+
+    with pytest.raises(OrchestratorError, match="invalid execution contract"):
+        _runner(constructor_model="sonnet")._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+
+
+def test_automatic_constructor_does_not_replay_an_unconfigured_model() -> None:
+    """Replay is bounded: an automatic adapter adopts only a model config could run."""
+    original = _runner(constructor_model="claude-sonnet-original")
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
+
+    resumed = _runner(constructor_model="sonnet")
+    with pytest.raises(OrchestratorError, match="different constructor model"):
+        resumed._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+    assert resumed._adapter._model == "sonnet"
+
+
 def test_codex_dynamic_profiles_do_not_create_a_portable_resume_identity() -> None:
     original_runtime = CodexCliRuntime(
         cli_path="/bin/echo",
@@ -1936,7 +2115,7 @@ def test_automatic_codex_default_resume_requires_observed_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Fingerprints alone do not prove the App/CLI-selected concrete model."""
-    monkeypatch.setattr("ouroboros.config.get_execution_model", lambda: None)
+    monkeypatch.setattr("ouroboros.config.get_execution_model", lambda _backend=None: None)
     original_runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
@@ -1984,7 +2163,7 @@ def test_automatic_codex_default_resume_rejects_a_different_executable_path(
     tmp_path: Path,
 ) -> None:
     """The automatic default is bound to its resolved Codex executable."""
-    monkeypatch.setattr("ouroboros.config.get_execution_model", lambda: None)
+    monkeypatch.setattr("ouroboros.config.get_execution_model", lambda _backend=None: None)
     first_cli = tmp_path / "codex-a"
     second_cli = tmp_path / "codex-b"
     for cli in (first_cli, second_cli):
@@ -2027,7 +2206,7 @@ def test_automatic_codex_default_resume_rejects_in_place_cli_upgrade(
     tmp_path: Path,
 ) -> None:
     """The same executable path must not conceal a changed Codex version."""
-    monkeypatch.setattr("ouroboros.config.get_execution_model", lambda: None)
+    monkeypatch.setattr("ouroboros.config.get_execution_model", lambda _backend=None: None)
     cli = tmp_path / "codex"
     cli.write_text("#!/bin/sh\necho codex 1.0\n", encoding="utf-8")
     cli.chmod(0o755)
@@ -2065,7 +2244,7 @@ def test_automatic_codex_default_resume_rejects_same_version_changed_executable(
     tmp_path: Path,
 ) -> None:
     """A wrapper with unchanged --version output must not hide changed bytes."""
-    monkeypatch.setattr("ouroboros.config.get_execution_model", lambda: None)
+    monkeypatch.setattr("ouroboros.config.get_execution_model", lambda _backend=None: None)
     cli = tmp_path / "codex"
     cli.write_text("#!/bin/sh\n# one\necho codex 1.0\n", encoding="utf-8")
     cli.chmod(0o755)

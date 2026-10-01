@@ -60,7 +60,7 @@ Validate every persona name against the lateral pool above. If invalid, emit a b
 
 ### Step 2 — Gather required context **before** the MCP call
 
-`ouroboros_lateral_think` hard-fails if either `problem_context` or `current_approach` is empty (`evaluation_handlers.py:1324, 1333`). A bare `ooo lateral` from a fresh session has neither — calling MCP directly would crash before any persona work. Resolve both fields *before* Step 3, in this order:
+`ouroboros_lateral_think` hard-fails if either `problem_context` or `current_approach` is empty (`LateralThinkHandler.handle` in `src/ouroboros/mcp/tools/lateral_think_handler.py`). A bare `ooo lateral` from a fresh session has neither — calling MCP directly would crash before any persona work. Resolve both fields *before* Step 3, in this order:
 
 1. **Reuse session state.** If a parent SKILL is invoking this one (autonomous chain) or the current Claude Code / Codex session has clearly recent stuck-point context, extract it. Build:
    - `problem_context` — what the user is stuck on (1–3 sentences, current state of the world).
@@ -83,18 +83,18 @@ Per the `ooo` routing contract in `src/ouroboros/codex/ouroboros.md`, every `ooo
    - **Debate**: `personas=[...]`, `problem_context`, `current_approach`, `failed_attempts`.
 3. If the tool is not callable even after discovery — neither already exposed nor loadable (an empty discovery result for an already-exposed tool is expected, not a failure) — **stop and report that the MCP dispatch surface is broken** — same rule the contract applies to `ooo auto`. Do not improvise a sub-agent fan-out as a workaround; that bypasses the contract the bot review explicitly flagged.
 
-The MCP call is cheap. The handler's inline path is a *deterministic prompt builder* — it constructs per-persona reframing prompts via `LateralThinker.generate_alternative` (`src/ouroboros/mcp/tools/evaluation_handlers.py:1444+`); it does not run an LLM rollout.
+The MCP call is cheap. The handler's inline path is a *deterministic prompt builder* — it constructs per-persona reframing prompts via `LateralThinker.generate_alternative` (`LateralThinkHandler.handle` in `src/ouroboros/mcp/tools/lateral_think_handler.py`); it does not run an LLM rollout.
 
 ### Step 4 — Branch on the handler's response shape
 
-The handler picks one of two response shapes based on `should_dispatch_via_plugin(...)` (`src/ouroboros/mcp/tools/subagent.py:186-218`). You do not choose; you observe and act. The envelope key further depends on the mode you called with — solo and debate are not symmetric:
+The handler picks one of two response shapes based on `should_dispatch_via_plugin(...)` (`src/ouroboros/mcp/tools/subagent.py`). You do not choose; you observe and act. The envelope key further depends on the mode you called with — solo and debate are not symmetric:
 
 | Mode | Plugin response | Inline response |
 |---|---|---|
-| Solo (`persona=...`) | single `_subagent` envelope (one object) — `evaluation_handlers.py:1536-1563` | single `# Lateral Thinking: <approach>` block in `content` |
-| Debate (`personas=[...]`) | `_subagents` array (N objects) — `evaluation_handlers.py:1414+` | N blocks joined by `\n\n---\n\n` in `content`, **plus** an appended hidden dispatch block carrying the same canonical N payloads (see "Inline dispatch block" below) |
+| Solo (`persona=...`) | single `_subagent` envelope (one object) — `build_subagent_result` in `subagent.py` | single `# Lateral Thinking: <approach>` block in `content` |
+| Debate (`personas=[...]`) | `_subagents` array (N objects) — `build_multi_subagent_result` in `subagent.py` | N blocks joined by `\n\n---\n\n` in `content`, **plus** an appended hidden dispatch block carrying the same canonical N payloads (see "Inline dispatch block" below) |
 
-**Inline dispatch block (debate, inline response only).** The handler appends a versioned, sentinel-bracketed dispatch block to the end of `content` as a compatibility fallback for clients and runtimes that consume only textual content. MCP SDK v2 preserves structured metadata, while the inline block lets text-only consumers recover the same canonical payloads (`src/ouroboros/mcp/server/adapter.py:923`, `src/ouroboros/mcp/tools/subagent.py:141-144`). Format:
+**Inline dispatch block (debate, inline response only).** The handler appends a versioned, sentinel-bracketed dispatch block to the end of `content` as a compatibility fallback for clients and runtimes that consume only textual content. MCP SDK v2 preserves structured metadata, while the inline block lets text-only consumers recover the same canonical payloads (written by `LateralThinkHandler.handle` in `src/ouroboros/mcp/tools/lateral_think_handler.py`, read back by `_inline_lateral_dispatch_payload` in `src/ouroboros/mcp/tools/subagent.py`). Format:
 
 ```
 <!-- ouroboros-lateral-inline-dispatch-v1 base64
@@ -125,11 +125,11 @@ The plugin runtime spawns Task panes automatically from whichever envelope the h
 
 ##### Solo (plugin)
 
-The response carries a single `_subagent` object (singular) — `{tool_name, title, prompt, agent, model, context}` — produced by `build_subagent_result` (`evaluation_handlers.py:1554+`). The plugin spawns one Task pane. Await its single result, then present the persona's reframing.
+The response carries a single `_subagent` object (singular) — `{tool_name, title, prompt, agent, model, context}` — produced by `build_subagent_result` (`src/ouroboros/mcp/tools/subagent.py`). The plugin spawns one Task pane. Await its single result, then present the persona's reframing.
 
 ##### Debate (plugin)
 
-The response carries a `_subagents` array (plural) — `[{tool_name, title, prompt, agent, model, context}, ...]` — produced by `build_multi_subagent_result` (`evaluation_handlers.py:1419+`). The plugin spawns N Task panes in parallel. Await all N results, then synthesize per the **Synthesize** block below.
+The response carries a `_subagents` array (plural) — `[{tool_name, title, prompt, agent, model, context}, ...]` — produced by `build_multi_subagent_result` (`src/ouroboros/mcp/tools/subagent.py`). The plugin spawns N Task panes in parallel. Await all N results, then synthesize per the **Synthesize** block below.
 
 If you expected plugin mode but the response is inline text (neither `_subagent` nor `_subagents`), you are not actually in plugin mode — fall through to Shape B; do not wait for an envelope that will not arrive.
 
