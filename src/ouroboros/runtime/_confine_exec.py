@@ -2,8 +2,8 @@
 
 Run as a standalone script, never imported into the controller:
 
-    python -I -S -B _confine_exec.py [--loopback-up] [--require-loopback-only] [--landlock]
-        --root DIR DEV INO ... -- ARGV...
+    python -I -S -B _confine_exec.py [--private-shm] [--loopback-up] [--require-loopback-only]
+        [--landlock] --root DIR DEV INO ... -- ARGV...
 
 It is the last step of every ``ouroboros.runtime.exec_sandbox`` backend. It is
 started with a fixed bootstrap environment, so nothing the command's own
@@ -17,6 +17,14 @@ before confinement. The command's environment arrives as JSON in
   validated (same device and inode), or nothing runs; and once the
   restriction below is in place, no regular file beneath a root may have
   another hard link (it may be outside), or nothing runs;
+- on Linux with ``--private-shm`` (the helper runs in a new user and mount
+  namespace, ``unshare --user --map-root-user --mount``), a fresh tmpfs is
+  mounted over ``/dev/shm`` before anything else, with the size of the
+  ``/dev/shm`` it covers; it is private to this namespace (``unshare`` makes
+  the namespace's mounts private, so nothing propagates to the host), the
+  command's POSIX shared memory and semaphores live there, and it disappears
+  with the namespace. It becomes one more writable root; the host's
+  ``/dev/shm`` stays outside the roots and is not even visible at that path;
 - on Linux (``--landlock``), a Landlock ruleset that handles every filesystem
   right that creates, changes, truncates or removes something and grants them
   only beneath those verified root descriptors (plus writing to ``/dev/null`` and a
@@ -53,6 +61,9 @@ _SYS_LANDLOCK_RESTRICT_SELF = 446
 _LANDLOCK_CREATE_RULESET_VERSION = 1
 _LANDLOCK_RULE_PATH_BENEATH = 1
 _PR_SET_NO_NEW_PRIVS = 38
+_MS_NOSUID = 0x2
+_MS_NODEV = 0x4
+SHM_DIRECTORY = "/dev/shm"
 # ``os.O_PATH`` exists only on Linux builds of Python.
 _O_PATH: int = getattr(os, "O_PATH", 0o10000000)
 
@@ -256,6 +267,41 @@ def refuse_root_aliases(root_fds: list[int]) -> None:
                     raise SandboxError(
                         f"{os.path.join(dirpath, name)} in a writable root is a device node"
                     )
+
+
+def mount_private_shm() -> int:
+    """Mount a fresh tmpfs over ``/dev/shm``; return an ``O_PATH`` descriptor of it.
+
+    Needs ``CAP_SYS_ADMIN`` in a mount namespace this process owns (the mapped
+    root of ``unshare --user --map-root-user --mount``). The new mount must be
+    a different filesystem from the directory it covers, or nothing runs.
+    """
+    try:
+        covered = os.lstat(SHM_DIRECTORY)
+        size = os.statvfs(SHM_DIRECTORY)
+    except OSError as exc:
+        raise SandboxError(f"{SHM_DIRECTORY} cannot be examined: {exc.strerror}") from None
+    if not stat.S_ISDIR(covered.st_mode):
+        raise SandboxError(f"{SHM_DIRECTORY} is not a directory")
+    options = "mode=1777"
+    if size.f_blocks:
+        options += f",size={size.f_blocks * size.f_frsize}"
+    libc = ctypes.CDLL(None, use_errno=True)
+    _check(
+        libc.mount(
+            b"tmpfs",
+            SHM_DIRECTORY.encode(),
+            b"tmpfs",
+            ctypes.c_ulong(_MS_NOSUID | _MS_NODEV),
+            options.encode(),
+        ),
+        f"mount(tmpfs, {SHM_DIRECTORY})",
+    )
+    fd = os.open(SHM_DIRECTORY, _O_PATH | os.O_NOFOLLOW | os.O_DIRECTORY | os.O_CLOEXEC)
+    if os.fstat(fd).st_dev == covered.st_dev:
+        os.close(fd)
+        raise SandboxError(f"{SHM_DIRECTORY} is not the private mount")
+    return fd
 
 
 def restrict_writes(root_fds: list[int]) -> int:
@@ -511,7 +557,10 @@ def require_loopback_only() -> None:
 
 def _parse(
     arguments: list[str],
-) -> tuple[bool, bool, bool, list[tuple[str, int, int]], list[str]]:
+) -> tuple[bool, bool, bool, bool, list[tuple[str, int, int]], list[str]]:
+    private_shm = bool(arguments) and arguments[0] == "--private-shm"
+    if private_shm:
+        arguments = arguments[1:]
     loopback = bool(arguments) and arguments[0] == "--loopback-up"
     if loopback:
         arguments = arguments[1:]
@@ -532,12 +581,12 @@ def _parse(
         index += 4
     if index >= len(arguments) or arguments[index] != "--" or index + 1 >= len(arguments):
         raise SandboxError(
-            "usage: [--loopback-up] [--require-loopback-only] [--landlock] "
+            "usage: [--private-shm] [--loopback-up] [--require-loopback-only] [--landlock] "
             "--root DIR DEV INO ... -- ARGV..."
         )
     if not roots:
         raise SandboxError("at least one --root is required")
-    return loopback, offline, landlock, roots, arguments[index + 1 :]
+    return private_shm, loopback, offline, landlock, roots, arguments[index + 1 :]
 
 
 def _command_environment() -> dict[str, str]:
@@ -557,10 +606,12 @@ def _command_environment() -> dict[str, str]:
 
 def main(arguments: list[str]) -> int:
     try:
-        loopback, offline, landlock, roots, command = _parse(arguments)
+        private_shm, loopback, offline, landlock, roots, command = _parse(arguments)
         env = _command_environment()
         root_fds = open_verified_roots(roots)
         try:
+            if private_shm:
+                root_fds.append(mount_private_shm())
             if loopback:
                 bring_loopback_up()
             if landlock:

@@ -592,6 +592,159 @@ class TestUnavailable:
         assert result.reason is SandboxUnavailableReason.INVALID_WRITABLE_ROOT
 
 
+_SHM_WORKLOAD = """
+import ctypes, multiprocessing, os, sys
+from multiprocessing import shared_memory
+token = sys.argv[1]
+assert not os.path.exists('/dev/shm/' + token + '-host'), 'host /dev/shm is visible'
+lock = multiprocessing.Lock()
+with lock:
+    pass
+value = multiprocessing.Value('i', 7)
+block = shared_memory.SharedMemory(create=True, size=4096)
+block.buf[0] = 1
+block.close()
+block.unlink()
+with open('/dev/shm/' + token, 'w') as handle:
+    handle.write('private')
+libc = ctypes.CDLL(None, use_errno=True)
+assert libc.umount2(b'/dev/shm', 2) != 0, 'the private mount could be detached'
+print(value.value)
+"""
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/dev/shm is Linux only")
+class TestPrivateDevShm:
+    """A confined command gets its own ``/dev/shm``, never the host's."""
+
+    @pytest.mark.parametrize("deny_network", [True, False])
+    def test_multiprocessing_works_and_nothing_reaches_the_host(
+        self, layout: dict[str, Path], deny_network: bool
+    ) -> None:
+        _require_backend(deny_network=deny_network)
+        if exec_sandbox._private_shm_unshare() is None:
+            pytest.skip("no unprivileged user and mount namespace on this host")
+        host_shm = Path("/dev/shm")
+        token = f"ouroboros-shm-test-{os.getpid()}-{os.urandom(4).hex()}"
+        planted = host_shm / f"{token}-host"
+        planted.write_text("host", encoding="utf-8")
+        try:
+            command = confine(
+                _python(_SHM_WORKLOAD, token),
+                cwd=str(layout["copy"]),
+                writable_roots=(str(layout["copy"]),),
+                temp_dir=str(layout["temp"]),
+                deny_network=deny_network,
+            )
+            assert isinstance(command, ConfinedCommand) and command.private_dev_shm
+
+            result = _run(command)
+
+            assert result.returncode == 0, result.stderr
+            assert result.stdout.strip() == "7"
+            assert not (host_shm / token).exists()
+            assert planted.read_text(encoding="utf-8") == "host"
+        finally:
+            planted.unlink(missing_ok=True)
+
+    def test_without_a_mount_namespace_dev_shm_stays_read_only(
+        self, layout: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _require_backend()
+        monkeypatch.setattr(exec_sandbox, "_private_shm_unshare", lambda: None)
+        token = f"ouroboros-shm-test-{os.getpid()}-{os.urandom(4).hex()}"
+        code = (
+            "import sys\n"
+            "try:\n"
+            "    open('/dev/shm/' + sys.argv[1], 'w').close()\n"
+            "except OSError:\n"
+            "    sys.exit(0)\n"
+            "sys.exit(9)\n"
+        )
+        command = confine(
+            _python(code, token),
+            cwd=str(layout["copy"]),
+            writable_roots=(str(layout["copy"]),),
+            temp_dir=str(layout["temp"]),
+            deny_network=False,
+        )
+        assert isinstance(command, ConfinedCommand) and not command.private_dev_shm
+
+        result = _run(command)
+
+        assert result.returncode == 0, result.stderr
+        assert not (Path("/dev/shm") / token).exists()
+
+
+class TestPrivateDevShmArgv:
+    @pytest.mark.parametrize(
+        ("interfaces", "shm", "expected"),
+        [
+            ([(1, "lo")], None, ("--require-loopback-only",)),
+            (
+                [(1, "lo")],
+                "/usr/bin/unshare",
+                ("/usr/bin/unshare", "--user", "--map-root-user", "--mount", "--"),
+            ),
+            (
+                [(1, "lo"), (2, "eth0")],
+                "/usr/bin/unshare",
+                ("unshare", "--user", "--map-root-user", "--mount", "--net", "--"),
+            ),
+            (
+                [(1, "lo"), (2, "eth0")],
+                None,
+                ("unshare", "--user", "--map-root-user", "--net", "--"),
+            ),
+        ],
+    )
+    def test_the_mount_namespace_is_independent_of_the_network_plan(
+        self,
+        layout: dict[str, Path],
+        monkeypatch: pytest.MonkeyPatch,
+        interfaces: list[tuple[int, str]],
+        shm: str | None,
+        expected: tuple[str, ...],
+    ) -> None:
+        monkeypatch.setattr(exec_sandbox, "filesystem_backend", lambda: SandboxBackend.LANDLOCK)
+        monkeypatch.setattr(exec_sandbox.socket, "if_nameindex", lambda: interfaces)
+        monkeypatch.setattr(
+            exec_sandbox,
+            "_unshare_prefix",
+            lambda: ("unshare", "--user", "--map-root-user", "--net", "--"),
+        )
+        monkeypatch.setattr(exec_sandbox, "_private_shm_unshare", lambda: shm)
+
+        command = confine(
+            ("true",),
+            cwd=str(layout["copy"]),
+            writable_roots=(str(layout["copy"]),),
+            temp_dir=str(layout["temp"]),
+        )
+
+        assert isinstance(command, ConfinedCommand)
+        assert command.private_dev_shm is (shm is not None)
+        assert ("--private-shm" in command.argv) is (shm is not None)
+        if expected[0] == "--require-loopback-only":
+            assert command.argv[0] == exec_sandbox._interpreter()
+            assert "--user" not in command.argv
+        else:
+            assert command.argv[: len(expected)] == expected
+
+    def test_the_helper_accepts_the_private_shm_option(self) -> None:
+        parsed = _confine_exec._parse(
+            ["--private-shm", "--require-loopback-only", "--landlock"]
+            + ["--root", "/r", "1", "2", "--", "true"]
+        )
+
+        assert parsed == (True, False, True, True, [("/r", 1, 2)], ["true"])
+
+    def test_no_private_shm_off_linux(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(exec_sandbox.sys, "platform", "darwin")
+
+        assert exec_sandbox._private_shm_unshare.__wrapped__() is None  # type: ignore[attr-defined]
+
+
 class TestNetworkPlan:
     @pytest.mark.parametrize(
         ("interfaces", "unshare", "plan"),

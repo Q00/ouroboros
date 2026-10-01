@@ -758,6 +758,7 @@ async def _replay_one(
             argv=candidate.argv,
             mutated=mutated,
             network_isolated=confined.network_denied,
+            private_dev_shm=confined.private_dev_shm,
             transcript_returncode=candidate.transcript_returncode,
             env_delta=tuple(sorted(candidate.env_delta.items())),
             scrubbed_environment=scrubbed,
