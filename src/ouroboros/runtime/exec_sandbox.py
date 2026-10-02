@@ -133,7 +133,8 @@ Backends:
   every mount in the namespace read-only and stacks a writable clone of each
   verified root on the root itself, so those changes succeed inside the
   roots and fail with ``EROFS`` everywhere else, and the filter leaves them
-  out. Where it does not, the filter denies them too; it cannot see paths,
+  out; the helper then drops ``CAP_SYS_ADMIN`` from its bounding set, so the
+  command cannot change the mounts back. Where it does not, the filter denies them too; it cannot see paths,
   so they are denied inside the writable roots as well (``touch`` on an
   existing file, ``shutil.copy2``/``copystat``, a test runner's cache, tar
   extraction that restores modes), and such a command fails, which fails
@@ -823,11 +824,16 @@ def _unshare_prefix() -> tuple[str, ...] | None:
 
 
 # Run by the private mounts probe as ``CODE INSIDE OUTSIDE``: a file in the
-# private ``/dev/shm``, a mode change inside the root that must succeed and
-# one outside that must fail with EROFS.
+# private ``/dev/shm``, clearing read-only on every mount (mount_setattr)
+# refused, a mode change inside the root that must succeed and one outside
+# that must fail with EROFS.
 _PRIVATE_MOUNTS_PROBE = """
-import errno, os, sys
+import ctypes, errno, os, struct, sys
 os.close(os.open('/dev/shm/probe', os.O_CREAT | os.O_WRONLY, 0o600))
+attr = ctypes.create_string_buffer(struct.pack('=QQQQ', 0, 1, 0, 0), 32)
+syscall = ctypes.CDLL(None).syscall
+if syscall(ctypes.c_long(442), -100, b'/', ctypes.c_uint(0x8000), attr, ctypes.c_size_t(32)) >= 0:
+    sys.exit(5)
 os.chmod(sys.argv[1], 0o640)
 try:
     os.chmod(sys.argv[2], 0o640)
@@ -843,8 +849,9 @@ def _private_mounts_unshare() -> str | None:
 
     Probed end to end with the very argv a command uses: a new user and mount
     namespace, the helper making every mount read-only, stacking the writable
-    root and mounting the tmpfs over ``/dev/shm``; then a file created in it,
-    a mode change inside the root and one outside refused. Linux only; None
+    root, mounting the tmpfs over ``/dev/shm`` and dropping its mount
+    authority; then a file created in it, clearing read-only on the mounts
+    refused, a mode change inside the root and one outside refused. Linux only; None
     wherever any step fails (no ``unshare``, no unprivileged user namespaces,
     a seccomp or LSM policy denying them or a mount, no ``/dev/shm``), and the
     command then runs without them.

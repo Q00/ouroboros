@@ -30,7 +30,10 @@ before confinement. The command's environment arrives as JSON in
   read-only mount refuses every change to an inode beneath it (``EROFS``),
   metadata included, so outside the roots mode, timestamps and extended
   attributes cannot change while inside they can; the seccomp filter below
-  then leaves those syscall families to the mounts;
+  then leaves those syscall families to the mounts. Then ``CAP_SYS_ADMIN``
+  leaves the bounding set, so the command and everything it runs hold no
+  authority over this namespace's mounts and cannot undo them (a user
+  namespace it creates copies them with read-only locked);
 - on Linux (``--landlock``), a Landlock ruleset that handles every filesystem
   right that creates, changes, truncates or removes something and grants them
   only beneath those verified root descriptors (plus writing to ``/dev/null`` and a
@@ -81,6 +84,8 @@ _OPEN_TREE_CLONE = 0x1
 _MOVE_MOUNT_F_EMPTY_PATH = 0x4
 _MOVE_MOUNT_T_EMPTY_PATH = 0x40
 _MOUNT_ATTR_RDONLY = 0x1
+_PR_CAPBSET_DROP = 24
+_CAP_SYS_ADMIN = 21
 SHM_DIRECTORY = "/dev/shm"
 # ``os.O_PATH`` exists only on Linux builds of Python.
 _O_PATH: int = getattr(os, "O_PATH", 0o10000000)
@@ -391,6 +396,36 @@ def stack_writable_roots(roots: list[tuple[str, int, int]], root_fds: list[int])
         finally:
             os.close(clone)
     os.chdir(os.getcwd())
+
+
+def drop_mount_authority() -> None:
+    """Remove ``CAP_SYS_ADMIN`` from the bounding set; refuse if it could return.
+
+    The command is exec'd as the namespace's root, whose permitted set after
+    exec is the bounding set plus its inheritable set. Dropping the
+    capability from the first and refusing when it is in the second leaves
+    the command no way to change this namespace's mounts (every mount
+    operation needs ``CAP_SYS_ADMIN`` over it), and nothing it execs can
+    regain it.
+    """
+    libc = ctypes.CDLL(None, use_errno=True)
+    _check(
+        libc.prctl(
+            ctypes.c_int(_PR_CAPBSET_DROP),
+            ctypes.c_ulong(_CAP_SYS_ADMIN),
+            ctypes.c_ulong(0),
+            ctypes.c_ulong(0),
+            ctypes.c_ulong(0),
+        ),
+        "prctl(PR_CAPBSET_DROP)",
+    )
+    with open("/proc/self/status", encoding="ascii") as handle:
+        sets = dict(line.split(":", 1) for line in handle if line.startswith("Cap"))
+    if (
+        int(sets["CapBnd"], 16) >> _CAP_SYS_ADMIN & 1
+        or int(sets["CapInh"], 16) >> _CAP_SYS_ADMIN & 1
+    ):
+        raise SandboxError("CAP_SYS_ADMIN could survive exec")
 
 
 def _beneath(path: str, parent: str) -> bool:
@@ -737,6 +772,7 @@ def main(arguments: list[str]) -> int:
                 make_mounts_read_only()
                 stack_writable_roots(roots, root_fds)
                 root_fds.append(mount_private_shm())
+                drop_mount_authority()
             if loopback:
                 bring_loopback_up()
             if landlock:

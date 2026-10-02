@@ -753,6 +753,40 @@ class TestMetadataInsideRoots:
         assert (after.st_mode, after.st_mtime_ns) == (before.st_mode, before.st_mtime_ns)
         assert stat.S_IMODE(os.stat(layout["copy"] / "inside").st_mode) == 0o600
 
+    def test_the_command_cannot_make_an_outside_mount_writable_again(
+        self, layout: dict[str, Path]
+    ) -> None:
+        _require_private_mounts(deny_network=True)
+        outside = layout["outside"].resolve()
+        victim = outside / "victim"
+        victim.write_text("keep", encoding="utf-8")
+        victim.chmod(0o600)
+        code = (
+            "import ctypes, errno, os, struct, sys\n"
+            "libc = ctypes.CDLL(None, use_errno=True)\n"
+            "attr = ctypes.create_string_buffer(struct.pack('=QQQQ', 0, 1, 0, 0), 32)\n"
+            "def writable(fd, path, flags):\n"
+            "    return libc.syscall(ctypes.c_long(442), ctypes.c_int(fd), ctypes.c_char_p(path),\n"
+            "                        ctypes.c_uint(flags), attr, ctypes.c_size_t(32)) >= 0\n"
+            "assert not writable(-100, b'/', 0x8000), 'cleared read-only on every mount'\n"
+            "clone = libc.syscall(ctypes.c_long(428), ctypes.c_int(-100),\n"
+            "                     ctypes.c_char_p(sys.argv[1].encode()), ctypes.c_uint(0x80001))\n"
+            "assert clone < 0, 'cloned an outside mount'\n"
+            "os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWNS)\n"
+            "assert not writable(-100, b'/', 0x8000), 'cleared read-only in a new namespace'\n"
+            "try:\n"
+            "    os.chmod(os.path.join(sys.argv[1], 'victim'), 0o644)\n"
+            "except OSError as exc:\n"
+            "    assert exc.errno == errno.EROFS, exc\n"
+            "else:\n"
+            "    sys.exit('changed a file outside the writable roots')\n"
+        )
+
+        result = _run(self._confine(layout, _python(code, str(outside))))
+
+        assert result.returncode == 0, result.stderr
+        assert stat.S_IMODE(os.stat(victim).st_mode) == 0o600
+
     def test_copytree_keeps_modes_and_times_inside_the_copy(self, layout: dict[str, Path]) -> None:
         _require_private_mounts(deny_network=True)
         source = layout["copy"] / "source"
