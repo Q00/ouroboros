@@ -11,7 +11,9 @@ Before any worker starts, and before the package is frozen, the controller
 runs the reference on every case input through the product harness
 (``oracle_run.run_oracle_check``: one isolated target process per case under
 the same caps, in a scratch directory holding only the reference module, the
-comparison inside the controller) and compares:
+comparison inside the controller; the oracle's setup calls are not made there,
+and a symbol reference in a case's inputs reaches the reference as its
+dotted path) and compares:
 
 - a held-out case whose stated expectation disagrees with the reference is
   excluded (``oracle_inconsistent``): it is not in the frozen package, so it
@@ -179,6 +181,7 @@ async def _disagreeing_cases(
             env=env,
             interpreter=interpreter,
             binding=_reference_binding(spec, reference),
+            reference_run=True,
         )
     finally:
         shutil.rmtree(scratch, ignore_errors=True)

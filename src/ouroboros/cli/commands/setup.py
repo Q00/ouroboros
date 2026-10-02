@@ -86,9 +86,6 @@ from ouroboros.cli.setup_model_config import (
 from ouroboros.cli.setup_model_config import (
     is_shipped_default_roster as _is_shipped_default_roster,
 )
-from ouroboros.cli.setup_model_config import (
-    neutralize_fresh_codex_model_defaults as _neutralize_fresh_codex_model_defaults,
-)
 from ouroboros.cli.windows_codex_mcp import apply_windows_codex_mcp_mode, is_native_windows
 from ouroboros.codex.cli_policy import resolve_codex_cli_path
 from ouroboros.codex.home import resolve_codex_home
@@ -99,6 +96,7 @@ from ouroboros.config._model_defaults import (
     DEFAULT_SONNET_MODEL,
     recognized_shipped_defaults,
 )
+from ouroboros.config.model_selection import AUTO_MODEL
 from ouroboros.core.errors import ConfigError
 from ouroboros.persistence.brownfield import BrownfieldStore
 
@@ -454,6 +452,7 @@ _CODEX_MCP_SECTION_TEMPLATE = """# Ouroboros MCP hookup for Codex CLI.
 
 [mcp_servers.ouroboros]
 {command_lines}
+startup_timeout_sec = 180
 
 [mcp_servers.ouroboros.env]
 OUROBOROS_AGENT_RUNTIME = "codex"
@@ -767,7 +766,10 @@ def _is_setup_managed_codex_mcp_entry(
     env = entry.get("env")
     if env is not None and env != _CODEX_MANAGED_MCP_ENV and env != _CODEX_HOST_MCP_ENV:
         return False
-    if set(entry) - {"command", "args", "env"}:
+    if set(entry) - {"command", "args", "env", "startup_timeout_sec"}:
+        return False
+    timeout = entry.get("startup_timeout_sec", 180)
+    if timeout != 180:
         return False
 
     if Path(command).name == "uvx":
@@ -2761,10 +2763,9 @@ def _setup_codex(
     """Configure Ouroboros for the Codex runtime."""
     from ouroboros.config.loader import (
         ensure_config_dir,
-        get_default_config,
         telemetry_opt_out_in_env,
     )
-    from ouroboros.config.models import get_config_dir, get_default_credentials
+    from ouroboros.config.models import fresh_config_data, get_config_dir, get_default_credentials
 
     codex_home = resolve_codex_home()
     config_dir_candidate = get_config_dir()
@@ -2802,7 +2803,7 @@ def _setup_codex(
             print_error(f"Could not read config.yaml; aborting without changes: {exc}")
             return False
     else:
-        config_dict = get_default_config().model_dump(mode="json")
+        config_dict = fresh_config_data()
 
     if not isinstance(config_dict, dict):
         _restore_created_directory_topology(setup_directory_topology_snapshot)
@@ -2831,9 +2832,6 @@ def _setup_codex(
                 raise ValueError("Invalid non-mapping 'telemetry' section in config.yaml.")
             telemetry_config = _ensure_mapping_section(config_dict, "telemetry")
             telemetry_config["enabled"] = False
-
-        if fresh_config:
-            _neutralize_fresh_codex_model_defaults(config_dict)
 
         added_profiles, updated_profiles, added_role_profiles = _install_codex_default_llm_profiles(
             config_dict,
@@ -3109,7 +3107,7 @@ def _register_hermes_mcp_server(*, detected: dict[str, object] | None = None) ->
 def _setup_hermes(hermes_path: str) -> bool:
     """Configure Ouroboros for the Hermes runtime."""
     from ouroboros.config.loader import create_default_config, ensure_config_dir
-    from ouroboros.config.models import get_default_config
+    from ouroboros.config.models import fresh_config_data
 
     detected = _detect_mcp_entry()
     if detected is None:
@@ -3126,7 +3124,7 @@ def _setup_hermes(hermes_path: str) -> bool:
     if not config_was_missing:
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     else:
-        config_dict = get_default_config().model_dump(mode="json")
+        config_dict = fresh_config_data()
 
     if not isinstance(config_dict, dict):
         print_warning("~/.ouroboros/config.yaml top-level is not a mapping — resetting.")
@@ -3343,7 +3341,7 @@ def _setup_kiro(kiro_path: str) -> bool:
     hand-editing any config file.
     """
     from ouroboros.config.loader import create_default_config, ensure_config_dir
-    from ouroboros.config.models import get_default_config
+    from ouroboros.config.models import fresh_config_data
 
     detected = _detect_mcp_entry_for_kiro()
     if detected is None:
@@ -3360,7 +3358,7 @@ def _setup_kiro(kiro_path: str) -> bool:
     if not config_was_missing:
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     else:
-        config_dict = get_default_config().model_dump(mode="json")
+        config_dict = fresh_config_data()
 
     if not isinstance(config_dict, dict):
         print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting Kiro setup.")
@@ -3539,7 +3537,10 @@ def _apply_copilot_default_model(
     for section_name, key, shipped_default in _COPILOT_DEFAULT_MODEL_TARGETS:
         section = _ensure_mapping_section(config_dict, section_name)
         current = section.get(key)
-        if current is None or current in recognized_shipped_defaults(shipped_default):
+        if current is None or current in (
+            AUTO_MODEL,
+            *recognized_shipped_defaults(shipped_default),
+        ):
             section[key] = chosen_model
 
     for section_name, key, shipped_default in _COPILOT_DEFAULT_MODEL_LIST_TARGETS:
@@ -3561,8 +3562,9 @@ def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> bool:
     registers the MCP server in ``~/.copilot/mcp-config.json``.
     """
     from ouroboros.config.loader import create_default_config, ensure_config_dir
-    from ouroboros.config.models import get_default_config
+    from ouroboros.config.models import fresh_config_data
     from ouroboros.copilot.model_discovery import (
+        latest_opus_model,
         list_copilot_models,
         used_fallback,
     )
@@ -3582,7 +3584,7 @@ def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> bool:
     if not config_was_missing:
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     else:
-        config_dict = get_default_config().model_dump(mode="json")
+        config_dict = fresh_config_data()
 
     if not isinstance(config_dict, dict):
         print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting Copilot setup.")
@@ -3601,10 +3603,7 @@ def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> bool:
         print_error("No Copilot models available; cannot pick a default.")
         return False
 
-    preferred_default = next(
-        (m.id for m in models if m.id.startswith("claude-opus-4.6")),
-        models[0].id,
-    )
+    preferred_default = latest_opus_model(models) or models[0].id
 
     if non_interactive:
         chosen_model = preferred_default

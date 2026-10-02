@@ -265,17 +265,19 @@ class CheckConstructor:
     def _observed_generator(self, messages: Sequence[Any], requested: str) -> str:
         """The model the runtime reported it used, else ``requested``.
 
-        Codex reports its effective model on lifecycle events, surfaced as a
-        ``model.observed`` message; that is evidence of the author, whereas a
-        requested ``default`` only means "whatever the CLI's own config picks".
+        Runtimes report their effective model under ``model_observation``:
+        Codex on a ``model.observed`` message, Claude on its SDK ``init``
+        message or on a worker turn's result message.
+        That report is evidence of the author even under a pin, because a
+        pinned alias such as ``opus`` names a family, not the model that ran;
+        a requested ``default`` only means "whatever the CLI's own config
+        picks". Without a report the requested label is recorded unchanged.
         """
-        if self._model:
-            return requested
         for message in messages:
-            data = getattr(message, "data", None) or {}
-            if data.get("subtype") != "model.observed":
+            data = getattr(message, "data", None)
+            observation = data.get("model_observation") if isinstance(data, Mapping) else None
+            if not isinstance(observation, Mapping):
                 continue
-            observation = data.get("model_observation") or {}
             model = _concrete_model(observation.get("effective_model"))
             if model:
                 return f"{self._backend}:{model}"

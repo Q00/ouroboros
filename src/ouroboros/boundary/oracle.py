@@ -26,6 +26,15 @@ runs, against frozen expectations held in memory. A workspace interpreter,
 on disk can therefore change what the target returns, not the comparison. It
 never derives an expectation from the artifact.
 
+Library targets: a case input may name an importable object instead of a
+JSON value (``{"$symbol": "package.module.Name"}``, ``harness.SYMBOL_REF``),
+and an oracle may declare ``setup``: calls of checkout callables, with JSON
+arguments, that the harness makes in the target process before it resolves
+the target (a library that must be configured first). Both are data the
+constructor writes; the harness that interprets them is the product's, and
+both are frozen in ``oracle.json`` with the cases. Neither applies to a CLI
+oracle, whose inputs are command-line text.
+
 Held-out cases: the constructor declares, per case, whether the case is one
 the specification states (``held_out: false``) or one it withheld
 (``held_out: true``); the product records that declaration as it is and never
@@ -50,7 +59,14 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ouroboros.boundary.binding import BINDING_GRAMMAR, Binding, CallKind, CheckTier
+from ouroboros.boundary.binding import (
+    BINDING_GRAMMAR,
+    Binding,
+    CallKind,
+    CheckTier,
+    is_dotted_symbol,
+)
+from ouroboros.boundary.harness import symbol_refs
 
 ORACLE_SCHEMA = "ouroboros.oracle.v1"
 ORACLE_DIR = ".ouroboros_checks/oracle"
@@ -202,6 +218,35 @@ def target_module(binding: Binding) -> str | None:
     return binding.symbol.split(".")[0]
 
 
+def _require_symbol_refs(value: Any) -> None:
+    """Every symbol reference inside ``value`` names a dotted import path."""
+    if not all(is_dotted_symbol(name) for name in symbol_refs(value)):
+        raise ValueError("a symbol reference names a dotted import path")
+
+
+class SetupCall(BaseModel):
+    """One declared setup call: a checkout callable and its JSON arguments."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    symbol: str
+    args: list[Any] = Field(default_factory=list)
+    kwargs: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("symbol")
+    @classmethod
+    def _symbol(cls, value: str) -> str:
+        if not is_dotted_symbol(value):
+            raise ValueError("a setup call names a dotted import path")
+        return value
+
+    @field_validator("args", "kwargs")
+    @classmethod
+    def _plain_args(cls, value: Any) -> Any:
+        _require_symbol_refs(_json_value(value))
+        return value
+
+
 class OracleSpec(BaseModel):
     """The frozen oracle of one criterion, executed by one check."""
 
@@ -215,6 +260,8 @@ class OracleSpec(BaseModel):
     cases: tuple[OracleCase, ...] = Field(..., min_length=1)
     target_named_in_criterion: bool = False
     """The constructor declared that the criterion names the default symbol."""
+    setup: tuple[SetupCall, ...] = ()
+    """Calls the harness makes, in order, before it resolves the target."""
 
     @model_validator(mode="after")
     def _consistent(self) -> OracleSpec:
@@ -243,6 +290,14 @@ class OracleSpec(BaseModel):
                 raise ValueError(f"{self.check_id}: case {case.case_id} expectation kind")
             if case.init is not None and self.call_kind is not CallKind.METHOD:
                 raise ValueError(f"{self.check_id}: init is only valid for method oracles")
+            refs = symbol_refs(case.args) + symbol_refs(case.init)
+            if refs and self.call_kind is CallKind.CLI:
+                raise ValueError(f"{self.check_id}: a CLI case takes no symbol reference")
+            _require_symbol_refs([case.args, case.init])
+        if self.setup and self.call_kind is CallKind.CLI:
+            raise ValueError(
+                f"{self.check_id}: setup is only valid for function and method oracles"
+            )
         binding = self.default_binding
         if binding.criterion_key != self.criterion_key or binding.call_kind is not self.call_kind:
             raise ValueError(f"{self.check_id}: default binding does not match the oracle")
@@ -296,19 +351,24 @@ def oracle_data(oracles: Sequence[OracleSpec]) -> dict[str, Any]:
     return {
         "schema_version": ORACLE_SCHEMA,
         "binding_grammar": BINDING_GRAMMAR,
-        "oracles": [
-            {
-                "criterion_key": spec.criterion_key,
-                "check_id": spec.check_id,
-                "call_kind": spec.call_kind.value,
-                "params": list(spec.params),
-                "failure_signature": spec.failure_signature,
-                "default_binding": spec.default_binding.to_dict(),
-                "cases": [case.model_dump(mode="json") for case in spec.cases],
-            }
-            for spec in oracles
-        ],
+        "oracles": [_oracle_entry(spec) for spec in oracles],
     }
+
+
+def _oracle_entry(spec: OracleSpec) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "criterion_key": spec.criterion_key,
+        "check_id": spec.check_id,
+        "call_kind": spec.call_kind.value,
+        "params": list(spec.params),
+        "failure_signature": spec.failure_signature,
+        "default_binding": spec.default_binding.to_dict(),
+        "cases": [case.model_dump(mode="json") for case in spec.cases],
+    }
+    if spec.setup:
+        # Only when declared: an oracle without setup freezes the same bytes as before.
+        entry["setup"] = [call.model_dump(mode="json") for call in spec.setup]
+    return entry
 
 
 def oracle_data_text(oracles: Sequence[OracleSpec]) -> str:
@@ -434,6 +494,7 @@ __all__ = [
     "OracleResult",
     "OracleExpectation",
     "OracleSpec",
+    "SetupCall",
     "case_id_for",
     "case_position",
     "failed_heldout_only",

@@ -35,6 +35,7 @@ from ouroboros.core.session_signal import SessionSignalCapabilities
 from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.backend_limits import resolve_backend_limits
+from ouroboros.orchestrator.claude_model_observation import claude_init_data
 from ouroboros.orchestrator.rate_limit import (
     DEFAULT_ANTHROPIC_RPM_CEILING,
     DEFAULT_ANTHROPIC_TPM_CEILING,
@@ -1677,7 +1678,7 @@ class ClaudeAgentAdapter:
                 # Stream messages from SDK
                 session_id: str | None = None
                 async for sdk_message in query(prompt=prompt, options=options):
-                    agent_message = self._convert_message(sdk_message)
+                    agent_message = self._convert_message(sdk_message, effective_model)
 
                     # Capture session ID from init message
                     session_id = getattr(sdk_message, "session_id", None) or agent_message.data.get(
@@ -1787,11 +1788,11 @@ class ClaudeAgentAdapter:
             return text[:limit]
         return {"chars": len(text), "sha256": hashlib.sha256(text.encode()).hexdigest()}
 
-    def _convert_message(self, sdk_message: Any) -> AgentMessage:
+    def _convert_message(self, sdk_message: Any, model: str | None = None) -> AgentMessage:
         """Convert SDK message to internal AgentMessage format.
 
         Args:
-            sdk_message: Message from Claude Agent SDK.
+            sdk_message: Message from Claude Agent SDK; ``model`` is the one requested.
 
         Returns:
             Normalized AgentMessage.
@@ -1881,9 +1882,8 @@ class ClaudeAgentAdapter:
             subtype = getattr(sdk_message, "subtype", "")
             msg_data = getattr(sdk_message, "data", {})
             if subtype == "init":
-                session_id = msg_data.get("session_id")
-                content = f"Session initialized: {session_id}"
-                data["session_id"] = session_id
+                data.update(claude_init_data(msg_data, requested_model=model))
+                content = f"Session initialized: {data['session_id']}"
             else:
                 content = f"System: {subtype}"
             data["subtype"] = subtype

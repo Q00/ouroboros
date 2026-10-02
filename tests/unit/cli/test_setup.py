@@ -333,6 +333,7 @@ class TestCodexSetup:
         assert "~/.ouroboros/config.yaml" in contents
         assert "This file is only for the Codex MCP/env registration block." in contents
         assert "[mcp_servers.ouroboros]" in contents
+        assert tomllib.loads(contents)["mcp_servers"]["ouroboros"]["startup_timeout_sec"] == 180
         assert 'OUROBOROS_AGENT_RUNTIME = "codex"' in contents
         assert 'OUROBOROS_LLM_BACKEND = "codex"' in contents
         assert "tool_timeout_sec" not in contents
@@ -424,6 +425,7 @@ class TestCodexSetup:
 
         assert f"command = {json.dumps(sys.executable)}" in contents
         assert "/stale/venv/bin/python" not in contents
+        assert tomllib.loads(contents)["mcp_servers"]["ouroboros"]["startup_timeout_sec"] == 180
 
     def test_register_codex_mcp_server_preserves_operator_comment_in_legacy_uvx_table(
         self,
@@ -820,6 +822,30 @@ class TestCodexSetup:
         assert contents.count("[mcp_servers.ouroboros.env]") == 1
         assert 'OUROBOROS_AGENT_RUNTIME = "claude"' in contents
         assert "tool_timeout_sec = 600" in contents
+
+    def test_register_codex_mcp_server_preserves_user_selected_startup_timeout(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Automatic setup leaves non-default startup budgets under user ownership."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        original = (
+            "[mcp_servers.ouroboros]\n"
+            'command = "uvx"\n'
+            'args = ["--isolated", "--python", ">=3.12", "--from", '
+            '"ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]\n'
+            "startup_timeout_sec = 240\n"
+            "[mcp_servers.ouroboros.env]\n"
+            'OUROBOROS_AGENT_RUNTIME = "codex"\n'
+            'OUROBOROS_LLM_BACKEND = "codex"\n'
+        )
+        codex_config.write_text(original, encoding="utf-8")
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            setup_cmd._register_codex_mcp_server()
+
+        assert codex_config.read_text(encoding="utf-8") == original
 
     def test_register_codex_mcp_server_preserves_url_config_by_default(
         self,
@@ -2354,6 +2380,31 @@ class TestCodexSetup:
         assert credentials_path.exists()
         if os.name != "nt":
             assert credentials_path.stat().st_mode & 0o777 == 0o600
+
+    def test_setup_codex_fresh_config_has_one_model_switch(self, tmp_path: Path) -> None:
+        """A fresh config says ``models.default: auto`` and holds no per-role model ids."""
+        from ouroboros.config.model_selection import ROLE_MODEL_CONFIG_PATHS
+
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._register_codex_mcp_server", return_value=True),
+            patch("ouroboros.cli.commands.setup._install_codex_artifacts", return_value=True),
+            patch("ouroboros.cli.commands.setup._retire_codex_default_profiles"),
+            patch(
+                "ouroboros.cli.commands.setup._register_codex_worker_profile",
+                return_value=True,
+            ),
+        ):
+            assert setup_cmd._setup_codex("/usr/local/bin/codex") is True
+
+        config = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert config["models"] == {"default": "auto", "pin": False}
+        for section, field in ROLE_MODEL_CONFIG_PATHS:
+            assert field not in config.get(section, {}), f"{section}.{field}"
 
     def test_setup_codex_persists_do_not_track_opt_out_in_config(
         self,
@@ -10025,16 +10076,14 @@ class TestHostRuntimeSetup:
         codex_dir = tmp_path / ".codex"
         codex_dir.mkdir()
         codex_config = codex_dir / "config.toml"
-        codex_config.write_text(
-            setup_cmd._CODEX_MCP_SECTION_TEMPLATE.format(
-                command_lines=(
-                    'command = "ouroboros"\n'
-                    'args = ["mcp", "serve", "--runtime", "codex", '
-                    '"--llm-backend", "codex"]'
-                )
-            ),
-            encoding="utf-8",
-        )
+        legacy_codex_config = setup_cmd._CODEX_MCP_SECTION_TEMPLATE.format(
+            command_lines=(
+                'command = "ouroboros"\n'
+                'args = ["mcp", "serve", "--runtime", "codex", '
+                '"--llm-backend", "codex"]'
+            )
+        ).replace("startup_timeout_sec = 180\n", "")
+        codex_config.write_text(legacy_codex_config, encoding="utf-8")
 
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
@@ -10055,6 +10104,7 @@ class TestHostRuntimeSetup:
             "OUROBOROS_AGENT_RUNTIME": "host",
             "OUROBOROS_LLM_BACKEND": "codex",
         }
+        assert entry["startup_timeout_sec"] == 180
         data = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
         assert data["orchestrator"]["runtime_backend"] == "host"
 
@@ -10801,6 +10851,37 @@ class TestCopilotSetup:
         )
         mock_register.assert_called_once()
         assert mock_register.call_args.kwargs["detected"]["command"] in {"uvx", "pipx"}
+
+    def test_setup_copilot_fresh_config_recommends_the_newest_opus(self, tmp_path: Path) -> None:
+        """Copilot is an explicit backend: fresh setup writes its chosen model,
+        recommending the newest Opus in the catalog, next to ``models.default: auto``."""
+        from ouroboros.copilot.model_discovery import CopilotModel
+
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        catalog = [
+            CopilotModel(id="claude-opus-4.6", family="claude-opus-4.6"),
+            CopilotModel(id="claude-opus-5", family="claude-opus-5"),
+            CopilotModel(id="claude-opus-4.8", family="claude-opus-4.8"),
+            CopilotModel(id="gpt-5.4", family="gpt-5.4"),
+        ]
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.copilot.model_discovery.list_copilot_models",
+                return_value=catalog,
+            ),
+            patch("ouroboros.copilot.model_discovery.used_fallback", return_value=False),
+            patch("ouroboros.cli.commands.setup._register_copilot_mcp_server"),
+        ):
+            setup_cmd._setup_copilot("/opt/bin/copilot", non_interactive=True)
+
+        config = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert config["models"] == {"default": "auto", "pin": False}
+        assert config["clarification"]["default_model"] == "claude-opus-5"
+        assert config["evaluation"]["semantic_model"] == "claude-opus-5"
 
     def test_setup_copilot_replaces_shipped_default_model_fields(self, tmp_path: Path) -> None:
         """Fresh/default configs should honor the model selected during setup."""

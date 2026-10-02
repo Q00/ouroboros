@@ -162,6 +162,7 @@ def _load_config(*, validate_event_store: bool = True) -> tuple[dict, Path]:
         "evaluation",
         "consensus",
         "drift",
+        "models",
     )
     for section in _MAPPING_SECTIONS:
         val = data.get(section)
@@ -301,7 +302,7 @@ def _normalize_runtime_backend_for_display(backend: object) -> str:
 
 def _is_automatic_model_value(value: str) -> bool:
     """Whether an effective model value delegates choice to the runtime."""
-    return value.strip().lower() in {"backend default", "default", "current"}
+    return value.strip().lower() in {"auto", "backend default", "default", "current"}
 
 
 def _display_stage_model(model: str, source: str, runtime_backend: str) -> tuple[str, str]:
@@ -464,6 +465,140 @@ def _config_stage_model_fields() -> dict[object, _ConfigStageModelField]:
     return fields
 
 
+# Rows of the models table: (row name, resolver role, backend role). A ``None``
+# backend role means the Execute runtime backend; the check package is built
+# with the Execute model on that backend (``CheckPackageRun.bind``).
+_MODEL_ROWS: tuple[tuple[str, str, str | None], ...] = (
+    ("interview", "interview", "interview"),
+    ("execute", "execute", None),
+    ("check_package", "execute", None),
+    ("decomposition", "decomposition", "decomposition"),
+    ("validation", "validation", None),
+    ("semantic_evaluation", "semantic_evaluation", "semantic_evaluation"),
+    ("qa", "qa", "qa"),
+    ("assertion_extraction", "assertion_extraction", "assertion_extraction"),
+    ("mechanical_detection", "mechanical_detection", "mechanical_detection"),
+    ("dependency_analysis", "dependency_analysis", "dependency_analysis"),
+    ("ontology_analysis", "ontology_analysis", "ontology_analysis"),
+    ("consensus", "consensus", "consensus"),
+    ("consensus_advocate", "consensus_advocate", "consensus"),
+    ("consensus_devil", "consensus_devil", "consensus"),
+    ("consensus_judge", "consensus_judge", "consensus"),
+    ("wonder", "wonder", "wonder"),
+    ("reflect", "reflect", "reflect"),
+    ("context_compression", "context_compression", "context_compression"),
+    ("brownfield_scan", "brownfield_scan", "brownfield"),
+)
+_PIN_HINT = "set models.pin: true to use"
+
+
+def _execute_runtime_backend(data: dict) -> str:
+    """The runtime backend the Execute stage runs on, as the stage table shows it."""
+    from ouroboros.config_tui.fields import GLOBAL_RUNTIME_FIELD, get_value
+
+    agent_value, _source = _effective_value(
+        GLOBAL_RUNTIME_FIELD.env_vars,
+        get_value(data, GLOBAL_RUNTIME_FIELD.key),
+        "claude",
+    )
+    return _normalize_runtime_backend_for_display(
+        get_value(data, "orchestrator.runtime_profile.stages.execute")
+        or get_value(data, "orchestrator.runtime_profile.default")
+        or agent_value
+    )
+
+
+def _models_view_data(data: dict) -> dict:
+    """Which model each role runs on, and persisted ids skipped because pin is off."""
+    from ouroboros.config.loader import get_llm_backend_for_role
+    from ouroboros.config.model_selection import (
+        AUTO_MODEL,
+        ignored_model_setting,
+        pin_models_enabled,
+        resolve_role_model,
+    )
+    from ouroboros.config_tui.fields import MODELS_DEFAULT_FIELD, get_value
+
+    default, default_source = _effective_value(
+        MODELS_DEFAULT_FIELD.env_vars, get_value(data, MODELS_DEFAULT_FIELD.key), AUTO_MODEL
+    )
+    default = default.strip() or AUTO_MODEL  # blank means unset, as in the resolver
+    pin = pin_models_enabled()
+    if default != AUTO_MODEL:
+        header = f"models: {default} for every role ({default_source})"
+    else:
+        header = "models: pinned" if pin else "models: auto (pin off)"
+    execute_backend = _execute_runtime_backend(data)
+    roles: list[dict[str, str]] = []
+    ignored: dict[tuple[str, str, str], dict] = {}
+    for name, role, backend_role in _MODEL_ROWS:
+        backend = (
+            execute_backend if backend_role is None else get_llm_backend_for_role(backend_role)
+        )
+        resolved = resolve_role_model(role, backend=backend)
+        roles.append(
+            {
+                "role": name,
+                "tier": resolved.tier,
+                "backend": resolved.backend,
+                "model": resolved.model,
+                "source": resolved.source,
+            }
+        )
+        skipped = ignored_model_setting(role, backend=backend)
+        if skipped is None:
+            continue
+        hint = _PIN_HINT
+        if skipped.pinned_model != skipped.value:
+            # An untouched older shipped default: pin runs the current shipped id.
+            hint = f"{_PIN_HINT} (pin runs {skipped.pinned_model})"
+        entry = ignored.setdefault(
+            (skipped.setting, skipped.value, skipped.pinned_model),
+            {
+                "setting": skipped.setting,
+                "value": skipped.value,
+                "pinned_model": skipped.pinned_model,
+                "hint": hint,
+                "roles": [],
+            },
+        )
+        entry["roles"].append(name)
+    return {
+        "default": {"value": default, "source": default_source},
+        "pin": pin,
+        "header": header,
+        "roles": roles,
+        "ignored": list(ignored.values()),
+    }
+
+
+def _render_models_view(data: dict) -> None:
+    """Print the models header, the per-role table, and the ignored list."""
+    view = _models_view_data(data)
+    console.print(f"[bold]{escape(view['header'])}[/bold]", highlight=False)
+    table = create_table("Models", show_lines=False)
+    for column in ("Role", "Tier", "Backend", "Resolved model"):
+        table.add_column(column, style="cyan" if column == "Role" else None)
+    table.add_column("Source", style="dim")
+    for row in view["roles"]:
+        table.add_row(row["role"], row["tier"], row["backend"], escape(row["model"]), row["source"])
+    print_table(table)
+    if view["ignored"]:
+        console.print("[yellow]ignored (pin off):[/yellow]", highlight=False)
+        for entry in view["ignored"]:
+            console.print(
+                f"  {escape(entry['setting'])}: {escape(entry['value'])}, "
+                f"{escape(entry['hint'])} [dim](roles: {', '.join(entry['roles'])})[/dim]",
+                highlight=False,
+            )
+    console.print(
+        "[dim]Change models: `ouroboros config set models.default "
+        "<auto|frugal|standard|frontier|model id>`; `ouroboros config set models.pin true` "
+        "runs the per-role ids saved in config.[/dim]",
+        highlight=False,
+    )
+
+
 def _effective_view_data(data: dict, config_path: Path) -> dict:
     """Machine-readable effective view (what `show --json` emits)."""
     from ouroboros.backends.model_catalog import installed_backends
@@ -526,6 +661,7 @@ def _effective_view_data(data: dict, config_path: Path) -> dict:
             "llm_backend": {"value": llm_value, "source": llm_source},
         },
         "stages": stages,
+        "models": _models_view_data(data),
         "environment": {
             "config_path": str(config_path),
             "cli_path": _resolve_cli_path(data),
@@ -570,6 +706,7 @@ def _render_effective_view(data: dict, config_path: Path) -> None:
     )
     defaults_table.add_row("LLM backend (internal calls)", llm_value, llm_source)
     print_table(defaults_table)
+    _render_models_view(data)
 
     stages_table = create_table("Per-stage overrides", show_lines=False)
     stages_table.add_column("Stage", style="cyan")
@@ -914,11 +1051,10 @@ def init() -> None:
         create_default_config(config_dir, overwrite=False)
     else:
         # Partial init — only create the missing file(s)
-        from ouroboros.config.models import get_default_config, get_default_credentials
+        from ouroboros.config.models import fresh_config_data, get_default_credentials
 
         if not has_config:
-            default_config = get_default_config()
-            config_dict = default_config.model_dump(mode="json")
+            config_dict = fresh_config_data()
             config_path.write_text(
                 yaml.dump(config_dict, default_flow_style=False, sort_keys=False), encoding="utf-8"
             )
@@ -984,6 +1120,8 @@ def set_value(
 
     [dim]Examples:[/dim]
     [dim]    ouroboros config set logging.level debug[/dim]
+    [dim]    ouroboros config set models.default frontier[/dim]
+    [dim]    ouroboros config set models.pin true[/dim]
     [dim]    ouroboros config set orchestrator.runtime_backend codex[/dim]
     """
     repairing_event_store_path = key == "persistence.database_path"
@@ -1006,17 +1144,25 @@ def set_value(
 
     old_value = target.get(keys[-1])
 
-    # Infer type from existing value to avoid string/int/bool mismatches
+    # Infer type from the existing value, else from the schema default (a key
+    # absent from the file, such as ``models.pin``), to avoid string/int/bool
+    # mismatches.
+    type_reference = old_value
+    if type_reference is None:
+        from ouroboros.config.models import get_default_config
+        from ouroboros.config_tui.fields import get_value
+
+        type_reference = get_value(get_default_config().model_dump(mode="json"), key)
     parsed_value: str | int | float | bool = value
-    if old_value is not None:
-        if isinstance(old_value, bool):
+    if type_reference is not None:
+        if isinstance(type_reference, bool):
             parsed_value = value.lower() in ("true", "1", "yes")
-        elif isinstance(old_value, int):
+        elif isinstance(type_reference, int):
             try:
                 parsed_value = int(value)
             except ValueError:
                 pass
-        elif isinstance(old_value, float):
+        elif isinstance(type_reference, float):
             try:
                 parsed_value = float(value)
             except ValueError:

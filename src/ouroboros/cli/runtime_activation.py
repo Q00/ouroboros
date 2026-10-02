@@ -1430,8 +1430,8 @@ def activate_claude_runtime(
     from ouroboros.config.models import (
         CredentialsConfig,
         OuroborosConfig,
+        fresh_config_data,
         get_config_dir,
-        get_default_config,
         get_default_credentials,
     )
 
@@ -1449,7 +1449,7 @@ def activate_claude_runtime(
             _require_file_target(credentials_path, credentials_generation)
 
             config = (
-                get_default_config().model_dump(mode="json")
+                fresh_config_data()
                 if config_generation.kind == "missing"
                 else _yaml_mapping(config_path, config_generation)
             )

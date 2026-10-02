@@ -160,6 +160,15 @@ def _validate_symbol(symbol: object, call_kind: CallKind) -> str:
     return symbol
 
 
+def is_dotted_symbol(value: object) -> bool:
+    """Whether ``value`` is a dotted import path the binding grammar accepts (``a.b``)."""
+    try:
+        _validate_symbol(value, CallKind.FUNCTION)
+    except BindingError:
+        return False
+    return True
+
+
 def _validate_arg_map_values(arg_map: Mapping[str, object], call_kind: CallKind) -> None:
     """The grammar of ``arg_map`` values: unique positions from 0, or unique names."""
     positions: list[int] = []

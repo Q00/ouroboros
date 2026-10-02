@@ -11,6 +11,13 @@ def test_stage_model_fields_cover_configurable_stage_models_only() -> None:
     assert fields.STAGE_MODEL_FIELDS[Stage.EXECUTE].key == "execution.default_model"
 
 
+def test_models_fields_are_the_one_switch_and_the_pin() -> None:
+    assert fields.MODELS_DEFAULT_FIELD.key == "models.default"
+    assert fields.MODELS_DEFAULT_FIELD.env_vars == ("OUROBOROS_MODEL",)
+    assert fields.MODELS_PIN_FIELD.key == "models.pin"
+    assert fields.MODELS_PIN_FIELD.env_vars == ("OUROBOROS_PIN_MODELS",)
+
+
 def test_stage_runtime_field_targets_runtime_profile() -> None:
     field = fields.stage_runtime_field(Stage.EXECUTE)
     assert field.key == "orchestrator.runtime_profile.stages.execute"

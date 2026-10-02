@@ -54,7 +54,7 @@ def setup_omp(omp_path: str) -> bool:
     # (same pattern as ooo_bridges' atomic-writer seam).
     from ouroboros.cli.commands.setup import _commit_runtime_activation
     from ouroboros.config.loader import create_default_config, ensure_config_dir
-    from ouroboros.config.models import get_default_config
+    from ouroboros.config.models import fresh_config_data
 
     config_dir = ensure_config_dir()
     config_path = config_dir / "config.yaml"
@@ -63,7 +63,7 @@ def setup_omp(omp_path: str) -> bool:
     if not config_was_missing:
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     else:
-        config_dict = get_default_config().model_dump(mode="json")
+        config_dict = fresh_config_data()
 
     if not isinstance(config_dict, dict):
         print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting OMP setup.")

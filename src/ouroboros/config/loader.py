@@ -34,7 +34,6 @@ Functions:
     get_zcode_cli_path: Get zcode CLI path from env var or config
 """
 
-from collections.abc import Callable
 import math
 import os
 from pathlib import Path
@@ -47,18 +46,18 @@ from pydantic import ValidationError as PydanticValidationError
 import yaml
 
 from ouroboros.backends import get_backend_capability
-from ouroboros.config._model_defaults import (  # noqa: E402
-    DEFAULT_CONSENSUS_OPUS_MODEL,
-    DEFAULT_OPUS_MODEL,
-    DEFAULT_SONNET_MODEL,
-    recognized_shipped_defaults,
+from ouroboros.config.model_selection import (
+    backend_model_selection,
+    pin_models_enabled,
+    resolve_consensus_roster,
+    resolve_role_model,
 )
 from ouroboros.config.models import (  # noqa: E402
     CredentialsConfig,
     OuroborosConfig,
     RuntimeControlsConfig,
+    fresh_config_data,
     get_config_dir,
-    get_default_config,
     get_default_credentials,
 )
 from ouroboros.config.telemetry_env import telemetry_opt_out_in_env
@@ -67,76 +66,16 @@ from ouroboros.core.errors import ConfigError  # noqa: E402
 from ouroboros.orchestrator_stage import (  # noqa: E402
     Stage,
     UnknownLLMRoleError,
-    normalize_llm_role,
     parse_stage,
     resolve_runtime_for_llm_role,
     resolve_runtime_for_stage,
-    stage_for_llm_role,
 )
 
-_CODEX_LLM_BACKENDS = frozenset({"codex", "codex_cli", "opencode", "opencode_cli"})
-_KIRO_LLM_BACKENDS = frozenset({"kiro", "kiro_cli"})
-_COPILOT_LLM_BACKENDS = frozenset({"copilot", "copilot_cli"})
-_HERMES_LLM_BACKENDS = frozenset({"hermes", "hermes_cli"})
-_PI_LLM_BACKENDS = frozenset({"pi", "pi_cli"})
-_GJC_LLM_BACKENDS = frozenset({"gjc", "gjc_cli"})
-# Antigravity (`agy`) is runtime-only and Claude-incapable: it runs its own
-# Gemini/Claude models, so generic Claude default ids map to the CLI's own
-# configured default (the "default" sentinel), exactly like the other
-# non-Claude CLI backends above.
-_ANTIGRAVITY_LLM_BACKENDS = frozenset({"antigravity", "agy"})
-# Grok Build (`grok`) is runtime-only and Claude-incapable: it runs xAI's own
-# Grok models, so generic Claude default ids map to the CLI's own configured
-# default (the "default" sentinel).
-_GROK_LLM_BACKENDS = frozenset({"grok", "grok_cli", "grok_build"})
-# Zcode (Z.ai GLM-5) is runtime-only and Claude-incapable: it runs its own
-# configured default model, so generic Claude default ids map to the CLI's
-# own ``"default"`` sentinel, exactly like antigravity and grok above.
-_ZCODE_LLM_BACKENDS = frozenset({"zcode", "zcode_cli"})
-# OMP (Oh My Pi, the ``omp`` CLI): Pi-family agent; its model comes from its
-# own config/roles, so generic Claude defaults map to the ``"default"`` sentinel.
-_OMP_LLM_BACKENDS = frozenset({"omp", "omp_cli"})
-# Every backend whose default model is the backend-safe ``"default"`` sentinel
-# rather than a runnable shipped id, because the CLI selects its model via
-# config (not a ``--model`` flag). Roster-level normalization must cover the
-# same set as the element-wise mapping in ``_default_model_for_backend``;
-# otherwise a shipped default roster leaks unrunnable ids for any backend
-# added after the original Codex/Copilot/Hermes trio.
-_SENTINEL_DEFAULT_BACKENDS = (
-    _CODEX_LLM_BACKENDS
-    | _KIRO_LLM_BACKENDS
-    | _COPILOT_LLM_BACKENDS
-    | _HERMES_LLM_BACKENDS
-    | _PI_LLM_BACKENDS
-    | _GJC_LLM_BACKENDS
-    | _ANTIGRAVITY_LLM_BACKENDS
-    | _GROK_LLM_BACKENDS
-    | _ZCODE_LLM_BACKENDS
-    | _OMP_LLM_BACKENDS
-)
 _ZCODE_SCRIPT_SUFFIXES = frozenset({".cjs", ".js", ".mjs"})
 _OPENCODE_BACKENDS = frozenset({"opencode", "opencode_cli"})
-_CODEX_DEFAULT_MODEL = "default"
-_KIRO_DEFAULT_MODEL = "default"
-_COPILOT_DEFAULT_MODEL = "default"
-_HERMES_DEFAULT_MODEL = "default"
-_PI_DEFAULT_MODEL = "default"
-_GJC_DEFAULT_MODEL = "default"
-_ANTIGRAVITY_DEFAULT_MODEL = "default"
-_GROK_DEFAULT_MODEL = "default"
-_ZCODE_DEFAULT_MODEL = "default"
-_OMP_DEFAULT_MODEL = "default"
 _PLACEHOLDER_API_KEY_PREFIX = "YOUR_"
 _PLACEHOLDER_API_KEY_SUFFIX = "_API_KEY"
 _DEFAULT_MAX_PARALLEL_WORKERS = 3
-_DEFAULT_CONSENSUS_MODELS = (
-    "openrouter/openai/gpt-4o",
-    DEFAULT_CONSENSUS_OPUS_MODEL,
-    "openrouter/google/gemini-2.5-pro",
-)
-_DEFAULT_CONSENSUS_ADVOCATE_MODEL = DEFAULT_CONSENSUS_OPUS_MODEL
-_DEFAULT_CONSENSUS_DEVIL_MODEL = "openrouter/openai/gpt-4o"
-_DEFAULT_CONSENSUS_JUDGE_MODEL = "openrouter/google/gemini-2.5-pro"
 _DEFAULT_USAGE_LIMIT_PAUSE_HOURS = 5.0
 _SECONDS_PER_HOUR = 3600
 MAX_USAGE_LIMIT_PAUSE_SECONDS = 365 * 24 * _SECONDS_PER_HOUR
@@ -347,8 +286,7 @@ def create_default_config(
             )
 
     # Create config.yaml
-    default_config = get_default_config()
-    config_dict = _model_to_yaml_dict(default_config)
+    config_dict = fresh_config_data()
     with config_path.open("w", encoding="utf-8") as f:
         yaml.dump(
             config_dict,
@@ -820,26 +758,31 @@ def get_agent_reasoning_effort() -> str | None:
         return None
 
 
-def get_execution_model() -> str | None:
-    """Return the explicit Execute pin, or None for unset/automatic selection."""
-    model = os.environ.get("OUROBOROS_EXECUTION_MODEL")
-    if model is None:
-        try:
-            model = load_config().execution.default_model
-        except ConfigError:
-            return None
-    stripped = "" if model is None else model.strip()
-    return None if not stripped or stripped.lower() in {"default", "current"} else stripped
+def get_execution_model(runtime_backend: str | None = None) -> str | None:
+    """Return the pinned Execute model, or None when models resolve automatically.
+
+    A non-auto ``models.default`` / ``OUROBOROS_MODEL``, or a configured Execute model
+    on an explicit backend, is a pin, so tier routing never overrides it."""
+    chosen = resolve_role_model("execute", backend=runtime_backend)
+    if chosen.source == "configured" and (
+        chosen.model != "default" or backend_model_selection(runtime_backend) == "explicit"
+    ):
+        return chosen.model
+    if not pin_models_enabled():
+        return None
+    resolved = resolve_role_model("execute", backend=None, pinned=True)
+    return resolved.model if resolved.source == "pin" else None
+
+
+def resolve_runtime_model(role: str, runtime_backend: str | None) -> str | None:
+    """Resolve a runtime-stage model; ``None`` lets the runtime use its own default."""
+    model = resolve_role_model(role, backend=runtime_backend).model
+    return None if model == "default" else model
 
 
 def resolve_execution_model(runtime_backend: str | None) -> str | None:
-    """Resolve the exact Execute-stage model pin shared by CLI, MCP, and config views."""
-    execution_model = get_execution_model()
-    if execution_model is not None:
-        return execution_model
-    if (runtime_backend or "").strip().lower() in {"claude", "claude_code"}:
-        return DEFAULT_SONNET_MODEL
-    return None
+    """Resolve the Execute-stage model shared by CLI, MCP, and config views."""
+    return resolve_runtime_model("execute", runtime_backend)
 
 
 def _parse_max_parallel_workers(value: Any, *, config_key: str) -> int:
@@ -1931,122 +1874,26 @@ def get_llm_backend_for_role(
     return _guard_llm_completion_backend(resolved)
 
 
-# Legacy per-role model fields kept for backward compatibility. The stage
-# model is the default, but a user who explicitly pinned one of these (env var,
-# or a config field set away from its shipped default) still has it honored
-# instead of silently dropped. Maps role -> (env var, field accessor, shipped
-# default, dedicated getter name). The getter — resolved lazily because it is
-# defined later in this module — applies the role's own backend normalization
-# (e.g. snapping an opus pin to the "default" sentinel on codex backends).
-# ``mechanical_detection`` reuses the assertion-extraction getter (its historical
-# model source) to avoid recursing through ``get_mechanical_detector_model``.
-_LEGACY_ROLE_MODEL_FIELDS: dict[str, tuple[str, Callable[["OuroborosConfig"], str], str, str]] = {
-    "qa": ("OUROBOROS_QA_MODEL", lambda c: c.llm.qa_model, DEFAULT_SONNET_MODEL, "get_qa_model"),
-    "assertion_extraction": (
-        "OUROBOROS_ASSERTION_EXTRACTION_MODEL",
-        lambda c: c.evaluation.assertion_extraction_model,
-        DEFAULT_SONNET_MODEL,
-        "get_assertion_extraction_model",
-    ),
-    "mechanical_detection": (
-        "OUROBOROS_DETECTOR_MODEL",
-        lambda c: c.evaluation.assertion_extraction_model,
-        DEFAULT_SONNET_MODEL,
-        "get_assertion_extraction_model",
-    ),
-    "dependency_analysis": (
-        "OUROBOROS_DEPENDENCY_ANALYSIS_MODEL",
-        lambda c: c.llm.dependency_analysis_model,
-        DEFAULT_SONNET_MODEL,
-        "get_dependency_analysis_model",
-    ),
-    "ontology_analysis": (
-        "OUROBOROS_ONTOLOGY_ANALYSIS_MODEL",
-        lambda c: c.llm.ontology_analysis_model,
-        DEFAULT_SONNET_MODEL,
-        "get_ontology_analysis_model",
-    ),
-    "context_compression": (
-        "OUROBOROS_CONTEXT_COMPRESSION_MODEL",
-        lambda c: c.llm.context_compression_model,
-        "gpt-4",
-        "get_context_compression_model",
-    ),
-    "wonder": (
-        "OUROBOROS_WONDER_MODEL",
-        lambda c: c.resilience.wonder_model,
-        DEFAULT_OPUS_MODEL,
-        "get_wonder_model",
-    ),
-}
-
-
-def _explicit_legacy_role_model(role: str, backend: str | None) -> str | None:
-    """Return an explicitly-set legacy per-role model override, or ``None``.
-
-    "Explicit" means the role's env var is set, or its dedicated config field
-    differs from the shipped default. This preserves pre-existing configs that
-    pinned a per-role model before the stage-model consolidation. Resolution is
-    delegated to the role's dedicated getter so backend normalization stays
-    identical to the legacy path.
-    """
-    entry = _LEGACY_ROLE_MODEL_FIELDS.get(normalize_llm_role(role))
-    if entry is None:
-        return None
-    env_var, field_getter, shipped_default, getter_name = entry
-    # Env var wins and is returned raw, matching the legacy getters.
-    if os.environ.get(env_var, "").strip():
-        return os.environ[env_var].strip()
-    try:
-        config = load_config()
-    except ConfigError:
-        return None
-    if field_getter(config) != shipped_default:
-        getter: Callable[[str | None], str] = globals()[getter_name]
-        return getter(backend)
-    return None
-
-
 def get_llm_model_for_role(
     role: str,
     *,
     backend: str | None = None,
     explicit_model: str | None = None,
 ) -> str:
-    """Resolve the configured model for a logical internal-LLM role.
+    """Resolve the model for a logical internal-LLM role (see ``config.model_selection``).
 
-    Stage model fields are the default source of truth: interview roles use
-    ``clarification.default_model``, execute roles use an explicit
-    ``execution.default_model`` or their backend default, evaluate
-    roles use ``evaluation.semantic_model``, and reflect roles use
-    ``resilience.reflect_model``. An explicitly-pinned legacy per-role field
-    (e.g. ``llm.qa_model``) still takes precedence for backward compatibility,
-    and an unmapped role degrades to the evaluate model rather than raising.
+    ``explicit_model`` is the per-invocation choice. An unmapped role degrades
+    to the evaluation role rather than raising.
     """
-    if explicit_model:
-        return explicit_model
-
     resolved_backend = backend or get_llm_backend_for_role(role)
-
-    legacy_override = _explicit_legacy_role_model(role, resolved_backend)
-    if legacy_override is not None:
-        return legacy_override
-
     try:
-        stage = stage_for_llm_role(role)
+        return resolve_role_model(
+            role, backend=resolved_backend, invocation_model=explicit_model
+        ).model
     except UnknownLLMRoleError:
-        return get_semantic_model(resolved_backend)
-    if stage == Stage.INTERVIEW:
-        return get_clarification_model(resolved_backend)
-    if stage == Stage.REFLECT:
-        return get_reflect_model(resolved_backend)
-    if stage == Stage.EXECUTE:
-        if (execution_model := get_execution_model()) is not None:
-            return execution_model
-        if resolved_backend in {"litellm", "openai", "openrouter"}:
-            return get_semantic_model(resolved_backend)
-        return "default"
-    return get_semantic_model(resolved_backend)
+        return resolve_role_model(
+            "semantic_evaluation", backend=resolved_backend, invocation_model=explicit_model
+        ).model
 
 
 def get_llm_permission_mode(backend: str | None = None) -> str:
@@ -2077,350 +1924,76 @@ def get_llm_permission_mode(backend: str | None = None) -> str:
         return "acceptEdits" if _uses_opencode_backend(backend) else "default"
 
 
-def _resolve_llm_backend_for_models(backend: str | None = None) -> str:
-    """Resolve the effective backend name for backend-aware model defaults."""
-    return (backend or get_llm_backend()).strip().lower()
-
-
-def _default_model_for_backend(
-    default_model: str,
-    *,
-    backend: str | None = None,
-) -> str:
-    """Map generic defaults to a backend-safe sentinel when needed."""
-    resolved = _resolve_llm_backend_for_models(backend)
-    if resolved in _CODEX_LLM_BACKENDS:
-        return _CODEX_DEFAULT_MODEL
-    if resolved in _KIRO_LLM_BACKENDS:
-        return _KIRO_DEFAULT_MODEL
-    if resolved in _COPILOT_LLM_BACKENDS:
-        return _COPILOT_DEFAULT_MODEL
-    if resolved in _HERMES_LLM_BACKENDS:
-        return _HERMES_DEFAULT_MODEL
-    if resolved in _PI_LLM_BACKENDS:
-        return _PI_DEFAULT_MODEL
-    if resolved in _GJC_LLM_BACKENDS:
-        return _GJC_DEFAULT_MODEL
-    if resolved in _ANTIGRAVITY_LLM_BACKENDS:
-        return _ANTIGRAVITY_DEFAULT_MODEL
-    if resolved in _GROK_LLM_BACKENDS:
-        return _GROK_DEFAULT_MODEL
-    if resolved in _ZCODE_LLM_BACKENDS:
-        return _ZCODE_DEFAULT_MODEL
-    if resolved in _OMP_LLM_BACKENDS:
-        return _OMP_DEFAULT_MODEL
-    return default_model
-
-
-def _default_models_for_backend(
-    default_models: tuple[str, ...],
-    *,
-    backend: str | None = None,
-) -> tuple[str, ...]:
-    """Map a tuple of default models to backend-safe defaults."""
-    return tuple(_default_model_for_backend(model, backend=backend) for model in default_models)
-
-
-def _normalize_configured_model_for_backend(
-    configured_model: str,
-    *,
-    default_model: str,
-    backend: str | None = None,
-    extra_shipped_defaults: tuple[str, ...] = (),
-) -> str:
-    """Normalize config-backed models while preserving backend-safe defaults."""
-    candidate = configured_model.strip()
-    if not candidate:
-        return _default_model_for_backend(default_model, backend=backend)
-
-    # Recognize the current shipped default AND prior-release shipped defaults
-    # (#1324): a config persisted before a pin bump still holds the old literal,
-    # and it must normalize exactly like the current default would. Genuinely
-    # explicit, never-shipped ids are absent from this set and are preserved
-    # verbatim.
-    is_shipped_default = candidate in (
-        *recognized_shipped_defaults(default_model),
-        *extra_shipped_defaults,
-    )
-    if is_shipped_default:
-        # A recognized shipped default — current or prior-release — is a pin
-        # the user never chose, so every backend maps it to its own default:
-        # Claude-incapable backends keep their sentinel as before, and
-        # Claude-capable backends now take the current default pin instead of
-        # leaking a retired id to the API (#2069). Never-shipped ids are
-        # deliberate user pins and fall through verbatim.
-        return _default_model_for_backend(default_model, backend=backend)
-
-    return candidate
-
-
-def _normalize_configured_models_for_backend(
-    configured_models: tuple[str, ...] | list[str],
-    *,
-    default_models: tuple[str, ...],
-    backend: str | None = None,
-) -> tuple[str, ...]:
-    """Normalize config-backed model rosters while preserving explicit overrides."""
-    normalized = tuple(model.strip() for model in configured_models if model.strip())
-    if not normalized:
-        return _default_models_for_backend(default_models, backend=backend)
-
-    # Match the shipped roster element-wise against current + legacy shipped
-    # defaults (#1324), so a roster persisted before a pin bump (e.g. the old
-    # OpenRouter Opus slug in the consensus slot) resolves exactly like the
-    # current shipped roster. Claude-incapable backends receive their safe
-    # sentinel; Claude-capable backends receive the current provider pin rather
-    # than replaying a retired model id.
-    is_shipped_roster = len(normalized) == len(default_models) and all(
-        candidate in recognized_shipped_defaults(default)
-        for candidate, default in zip(normalized, default_models, strict=True)
-    )
-    if is_shipped_roster:
-        return _default_models_for_backend(default_models, backend=backend)
-
-    return normalized
-
-
-def _parse_model_list(value: str) -> tuple[str, ...]:
-    """Parse a comma-separated model list from an environment variable."""
-    return tuple(part.strip() for part in value.split(",") if part.strip())
+def _role_model(role: str, backend: str | None) -> str:
+    """Resolve ``role`` on ``backend`` (default: the shared LLM backend)."""
+    return resolve_role_model(role, backend=backend or get_llm_backend()).model
 
 
 def get_clarification_model(backend: str | None = None) -> str:
-    """Get clarification model from environment variable or config."""
-    env_model = os.environ.get("OUROBOROS_CLARIFICATION_MODEL", "").strip()
-    if env_model:
-        return env_model
-
-    try:
-        config = load_config()
-        return _normalize_configured_model_for_backend(
-            config.clarification.default_model,
-            default_model=DEFAULT_OPUS_MODEL,
-            backend=backend,
-        )
-    except ConfigError:
-        return _default_model_for_backend(DEFAULT_OPUS_MODEL, backend=backend)
+    """Get the interview and seed model."""
+    return _role_model("clarification", backend)
 
 
 def get_qa_model(backend: str | None = None) -> str:
-    """Get QA model from environment variable or config."""
-    env_model = os.environ.get("OUROBOROS_QA_MODEL", "").strip()
-    if env_model:
-        return env_model
-
-    try:
-        config = load_config()
-        return _normalize_configured_model_for_backend(
-            config.llm.qa_model,
-            default_model=DEFAULT_SONNET_MODEL,
-            backend=backend,
-        )
-    except ConfigError:
-        return _default_model_for_backend(DEFAULT_SONNET_MODEL, backend=backend)
+    """Get the QA verdict model."""
+    return _role_model("qa", backend)
 
 
 def get_dependency_analysis_model(backend: str | None = None) -> str:
-    """Get dependency analysis model from environment variable or config."""
-    env_model = os.environ.get("OUROBOROS_DEPENDENCY_ANALYSIS_MODEL", "").strip()
-    if env_model:
-        return env_model
-
-    try:
-        config = load_config()
-        return _normalize_configured_model_for_backend(
-            config.llm.dependency_analysis_model,
-            default_model=DEFAULT_SONNET_MODEL,
-            backend=backend,
-            extra_shipped_defaults=recognized_shipped_defaults(DEFAULT_OPUS_MODEL),
-        )
-    except ConfigError:
-        return _default_model_for_backend(DEFAULT_SONNET_MODEL, backend=backend)
+    """Get the dependency analysis model."""
+    return _role_model("dependency_analysis", backend)
 
 
 def get_ontology_analysis_model(backend: str | None = None) -> str:
-    """Get ontology analysis model from environment variable or config."""
-    env_model = os.environ.get("OUROBOROS_ONTOLOGY_ANALYSIS_MODEL", "").strip()
-    if env_model:
-        return env_model
-
-    try:
-        config = load_config()
-        return _normalize_configured_model_for_backend(
-            config.llm.ontology_analysis_model,
-            default_model=DEFAULT_SONNET_MODEL,
-            backend=backend,
-            extra_shipped_defaults=recognized_shipped_defaults(DEFAULT_OPUS_MODEL),
-        )
-    except ConfigError:
-        return _default_model_for_backend(DEFAULT_SONNET_MODEL, backend=backend)
+    """Get the ontology analysis model."""
+    return _role_model("ontology_analysis", backend)
 
 
 def get_context_compression_model(backend: str | None = None) -> str:
-    """Get workflow context compression model from environment variable or config."""
-    env_model = os.environ.get("OUROBOROS_CONTEXT_COMPRESSION_MODEL", "").strip()
-    if env_model:
-        return env_model
-
-    try:
-        config = load_config()
-        return _normalize_configured_model_for_backend(
-            config.llm.context_compression_model,
-            default_model="gpt-4",
-            backend=backend,
-        )
-    except ConfigError:
-        return _default_model_for_backend("gpt-4", backend=backend)
+    """Get the workflow context compression model."""
+    return _role_model("context_compression", backend)
 
 
 def get_wonder_model(backend: str | None = None) -> str:
-    """Get Wonder model from environment variable or config."""
-    env_model = os.environ.get("OUROBOROS_WONDER_MODEL", "").strip()
-    if env_model:
-        return env_model
-
-    try:
-        config = load_config()
-        return _normalize_configured_model_for_backend(
-            config.resilience.wonder_model,
-            default_model=DEFAULT_OPUS_MODEL,
-            backend=backend,
-        )
-    except ConfigError:
-        return _default_model_for_backend(DEFAULT_OPUS_MODEL, backend=backend)
+    """Get the Wonder model."""
+    return _role_model("wonder", backend)
 
 
 def get_reflect_model(backend: str | None = None) -> str:
-    """Get Reflect model from environment variable or config."""
-    env_model = os.environ.get("OUROBOROS_REFLECT_MODEL", "").strip()
-    if env_model:
-        return env_model
-
-    try:
-        config = load_config()
-        return _normalize_configured_model_for_backend(
-            config.resilience.reflect_model,
-            default_model=DEFAULT_OPUS_MODEL,
-            backend=backend,
-        )
-    except ConfigError:
-        return _default_model_for_backend(DEFAULT_OPUS_MODEL, backend=backend)
+    """Get the Reflect model."""
+    return _role_model("reflect", backend)
 
 
 def get_semantic_model(backend: str | None = None) -> str:
-    """Get semantic evaluation model from environment variable or config."""
-    env_model = os.environ.get("OUROBOROS_SEMANTIC_MODEL", "").strip()
-    if env_model:
-        return env_model
-
-    try:
-        config = load_config()
-        return _normalize_configured_model_for_backend(
-            config.evaluation.semantic_model,
-            default_model=DEFAULT_OPUS_MODEL,
-            backend=backend,
-        )
-    except ConfigError:
-        return _default_model_for_backend(DEFAULT_OPUS_MODEL, backend=backend)
+    """Get the semantic evaluation model."""
+    return _role_model("semantic_evaluation", backend)
 
 
 def get_assertion_extraction_model(backend: str | None = None) -> str:
-    """Get verification assertion extraction model from environment variable or config."""
-    env_model = os.environ.get("OUROBOROS_ASSERTION_EXTRACTION_MODEL", "").strip()
-    if env_model:
-        return env_model
-
-    try:
-        config = load_config()
-        return _normalize_configured_model_for_backend(
-            config.evaluation.assertion_extraction_model,
-            default_model=DEFAULT_SONNET_MODEL,
-            backend=backend,
-        )
-    except ConfigError:
-        return _default_model_for_backend(DEFAULT_SONNET_MODEL, backend=backend)
+    """Get the verification assertion extraction model."""
+    return _role_model("assertion_extraction", backend)
 
 
 def get_mechanical_detector_model(backend: str | None = None) -> str:
-    """Resolve the model used by the mechanical.toml AI detector.
-
-    The public helper remains for legacy imports, but the configured model
-    source is now the Evaluate stage model (``evaluation.semantic_model``).
-    """
-    env_model = os.environ.get("OUROBOROS_DETECTOR_MODEL", "").strip()
-    if env_model:
-        return env_model
+    """Resolve the model used by the mechanical.toml AI detector."""
     return get_llm_model_for_role("mechanical_detection", backend=backend)
 
 
 def get_consensus_models(backend: str | None = None) -> tuple[str, ...]:
-    """Get consensus stage model roster from environment variable or config."""
-    env_models = os.environ.get("OUROBOROS_CONSENSUS_MODELS", "").strip()
-    if env_models:
-        parsed = _parse_model_list(env_models)
-        if parsed:
-            return parsed
-
-    try:
-        config = load_config()
-        if config.consensus.models:
-            return _normalize_configured_models_for_backend(
-                config.consensus.models,
-                default_models=_DEFAULT_CONSENSUS_MODELS,
-                backend=backend,
-            )
-    except ConfigError:
-        pass
-
-    return _default_models_for_backend(_DEFAULT_CONSENSUS_MODELS, backend=backend)
+    """Get the stage-3 consensus voting roster."""
+    return resolve_consensus_roster(backend=backend or get_llm_backend())
 
 
 def get_consensus_advocate_model(backend: str | None = None) -> str:
-    """Get deliberative advocate model from environment variable or config."""
-    env_model = os.environ.get("OUROBOROS_CONSENSUS_ADVOCATE_MODEL", "").strip()
-    if env_model:
-        return env_model
-
-    try:
-        config = load_config()
-        return _normalize_configured_model_for_backend(
-            config.consensus.advocate_model,
-            default_model=_DEFAULT_CONSENSUS_ADVOCATE_MODEL,
-            backend=backend,
-        )
-    except ConfigError:
-        return _default_model_for_backend(_DEFAULT_CONSENSUS_ADVOCATE_MODEL, backend=backend)
+    """Get the deliberative advocate model."""
+    return _role_model("consensus_advocate", backend)
 
 
 def get_consensus_devil_model(backend: str | None = None) -> str:
-    """Get deliberative devil model from environment variable or config."""
-    env_model = os.environ.get("OUROBOROS_CONSENSUS_DEVIL_MODEL", "").strip()
-    if env_model:
-        return env_model
-
-    try:
-        config = load_config()
-        return _normalize_configured_model_for_backend(
-            config.consensus.devil_model,
-            default_model=_DEFAULT_CONSENSUS_DEVIL_MODEL,
-            backend=backend,
-        )
-    except ConfigError:
-        return _default_model_for_backend(_DEFAULT_CONSENSUS_DEVIL_MODEL, backend=backend)
+    """Get the deliberative devil model."""
+    return _role_model("consensus_devil", backend)
 
 
 def get_consensus_judge_model(backend: str | None = None) -> str:
-    """Get deliberative judge model from environment variable or config."""
-    env_model = os.environ.get("OUROBOROS_CONSENSUS_JUDGE_MODEL", "").strip()
-    if env_model:
-        return env_model
-
-    try:
-        config = load_config()
-        return _normalize_configured_model_for_backend(
-            config.consensus.judge_model,
-            default_model=_DEFAULT_CONSENSUS_JUDGE_MODEL,
-            backend=backend,
-        )
-    except ConfigError:
-        return _default_model_for_backend(_DEFAULT_CONSENSUS_JUDGE_MODEL, backend=backend)
+    """Get the deliberative judge model."""
+    return _role_model("consensus_judge", backend)

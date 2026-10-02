@@ -257,12 +257,16 @@ def _migrate_codex_entry(setup: Any) -> bool:
         elif arg.startswith("--runtime="):
             args[index] = "--runtime=host"
     migrated["args"] = args
+    migrated.setdefault("startup_timeout_sec", 180)
     env = migrated.get("env")
     migrated_env = dict(env) if isinstance(env, dict) else {}
     migrated_env["OUROBOROS_AGENT_RUNTIME"] = "host"
     lines = [*setup._CODEX_MCP_COMMENT_LINES, "", "[mcp_servers.ouroboros]"]
     for key in ("command", "args"):
         lines.append(f"{key} = {setup._render_toml_value(migrated[key])}")
+    lines.append(
+        "startup_timeout_sec = " + setup._render_toml_value(migrated["startup_timeout_sec"])
+    )
     lines.extend(("", "[mcp_servers.ouroboros.env]"))
     lines.extend(
         f"{setup._render_toml_key(str(key))} = {setup._render_toml_value(value)}"
@@ -356,13 +360,13 @@ def _migrate_launchers(setup: Any) -> bool:
 def setup_host(setup: Any) -> bool:
     """Configure the CLI-less host runtime and reconcile setup-owned launchers."""
     from ouroboros.config.loader import create_default_config, ensure_config_dir
-    from ouroboros.config.models import get_default_config
+    from ouroboros.config.models import fresh_config_data
 
     config_dir = ensure_config_dir()
     config_path = config_dir / "config.yaml"
     missing = not config_path.exists()
     config = (
-        get_default_config().model_dump(mode="json")
+        fresh_config_data()
         if missing
         else yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     )

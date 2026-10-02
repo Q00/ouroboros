@@ -81,6 +81,7 @@ from ouroboros.boundary.acceptance import (
     CriterionVerdict,
     ExistingOutcome,
     Governor,
+    LegacyNoEvidenceReason,
     PackageCriterionStatus,
     criterion_verdicts,
     reconcile_acceptance,
@@ -104,6 +105,7 @@ from ouroboros.boundary.run_wiring import (
     repair_text,
     verify_check_package,
 )
+from ouroboros.orchestrator.failure_taxonomy import FailureClass
 from ouroboros.orchestrator.parallel_executor_models import (
     PACKAGE_FAILURE_CLASS_PREFIX,
     CheckPackageOwner,
@@ -247,6 +249,28 @@ def _legacy_evidence(result: Any) -> bool:
     return bool(subs) and all(_legacy_evidence(sub) for sub in subs)
 
 
+def _legacy_no_evidence_reason(result: Any) -> LegacyNoEvidenceReason:
+    """Why ``_legacy_evidence`` found no evidence for ``result``; call it only then.
+
+    Read from the same typed fields: the root's own unverifiable environment
+    or unavailable transcript first, then the first sub-result without
+    evidence of a decomposed root, then the root's verdict. Decides nothing.
+    """
+    gate = getattr(result, "verify_gate_outcome", None)
+    if gate is not None and bool(getattr(gate, "environment_unverifiable", False)):
+        return LegacyNoEvidenceReason.ENVIRONMENT_UNVERIFIABLE
+    verdict = getattr(result, "atomic_verifier_verdict", None)
+    failure_class = getattr(verdict, "failure_class", None) if verdict is not None else None
+    if failure_class == FailureClass.TRANSCRIPT_MISSING_INFRASTRUCTURE.value:
+        return LegacyNoEvidenceReason.TRANSCRIPT_UNAVAILABLE
+    for sub in tuple(getattr(result, "sub_results", ()) or ()):
+        if not _legacy_evidence(sub):
+            return _legacy_no_evidence_reason(sub)
+    if verdict is None:
+        return LegacyNoEvidenceReason.NO_VERIFIER_VERDICT
+    return LegacyNoEvidenceReason.VERIFIER_VERDICT_NOT_PASSED
+
+
 def _legacy_owned(reconciliation: AcceptanceReconciliation) -> AcceptanceReconciliation:
     """The reconciliation of a run with no admitted package: the legacy verifier owns it.
 
@@ -310,13 +334,15 @@ def existing_outcomes_from_results(
             terminal = "failed" if outcome == "failed" else "completed"
         else:
             outcome, terminal = base, "not_attempted"
+        no_evidence = outcome in _ACCEPTED_OUTCOMES and not _legacy_evidence(result)
         outcomes[index] = ExistingOutcome(
             root_ac_index=index,
             outcome=outcome,
             disposition="accepted" if outcome in _ACCEPTED_OUTCOMES else outcome,
             terminal_status=terminal,
             failure_class=failure_class,
-            no_evidence=outcome in _ACCEPTED_OUTCOMES and not _legacy_evidence(result),
+            no_evidence=no_evidence,
+            no_evidence_reason=_legacy_no_evidence_reason(result) if no_evidence else None,
         )
     return outcomes
 

@@ -341,7 +341,7 @@ consensus:
   judge_model: gpt-5.4
 ```
 
-`ouroboros setup --runtime codex` uses `~/.codex/config.toml` only for the Codex MCP/env hookup and installs managed Ouroboros rules/skills into `~/.codex/`. Existing URL/custom Ouroboros MCP entries are preserved by default; run `ouroboros codex refresh` when you only need to refresh `~/.codex/rules/ouroboros*.md` and `~/.codex/skills/ouroboros-*`.
+`ouroboros setup --runtime codex` uses `~/.codex/config.toml` only for the Codex MCP/env hookup and installs managed Ouroboros rules/skills into `~/.codex/`. Setup-managed stdio entries include `startup_timeout_sec = 180` for cold starts. Existing URL/custom Ouroboros MCP entries and user-selected non-default timeouts are preserved by default; run `ouroboros codex refresh` when you only need to refresh `~/.codex/rules/ouroboros*.md` and `~/.codex/skills/ouroboros-*`.
 
 ### Environment Variables
 

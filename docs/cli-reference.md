@@ -388,6 +388,8 @@ ouroboros init [start] [OPTIONS] [CONTEXT]
 | `--runtime TEXT` | Agent runtime backend for the workflow execution step after seed generation. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `omp`, `gjc`, `antigravity`, `grok`, `zcode`. Custom adapters registered in `runtime_factory.py` are also accepted. |
 | `--llm-backend TEXT` | LLM backend for interview, ambiguity scoring, and seed generation (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `omp`, `zcode`, `dsh`). `dsh` needs two more settings — see [the DeepSeek Harness guide](guides/deepseek-harness.md). |
 | `-d, --debug` | Show verbose logs including debug messages |
+| `-m, --model TEXT` | Model for every role in this command: `auto` (latest of each role's tier), `frugal`, `standard`, `frontier`, or a model id. Tier names work on every backend; Claude aliases such as `opus` only on Claude backends. Default: `models.default` in config (`auto`) |
+| `--pin-models/--no-pin-models` | Run the per-role model ids saved in config for this command (research and reproducibility). Default: `models.pin` in config (off) |
 
 **Examples:**
 
@@ -406,6 +408,9 @@ ouroboros init --orchestrator --runtime codex "Build a REST API"
 
 # Use Codex as the LLM backend for interview and seed generation
 ouroboros init --llm-backend codex "Build a REST API"
+
+# Run the interview and seed generation on the frontier tier
+ouroboros init start --model frontier "Build a REST API"
 
 # Resume an interrupted interview
 ouroboros init start --resume interview_20260116_120000
@@ -469,6 +474,8 @@ ouroboros run [workflow] [OPTIONS] SEED_FILE
 | `--auto-evaluate/--no-auto-evaluate` | After the run finishes (completed or failed), enqueue formal evaluation of the directory the run executed in (inside its task worktree) and wait for its result, as `ooo run` does. A paused or cancelled run is not evaluated. Default: `execution.auto_evaluate` in config (on) |
 | `--auto-evolve/--no-auto-evolve` | When formal evaluation is not approved, continue into the bounded Ralph job the evaluation chains and wait for its result. Default: `execution.auto_evolve` in config (on) |
 | `--check-package/--no-check-package` | Build executable checks from the acceptance criteria before the worker starts, admit them on the current tree, and let them decide the criteria they cover (the existing verifier stays advisory for those and decides the rest). On by default; `--no-check-package` opts out for this run. Default: `OUROBOROS_CHECK_PACKAGE` (only the exact value `on` turns it on; any other set value, such as `1`, `true` or `ON`, means off), then `boundary.check_package` in config, then on. The checks are model-written Python scripts: they run on throwaway copies of the project with the project's interpreter, a per-check timeout, and an allowlisted environment, confined by the execution sandbox (they can write only inside their copy and a scratch directory, and have no network); they can read files you can read. Where the sandbox is unavailable, a check is undecided and does not run. The same switch applies to `ooo run` from a plugin host, meaning the in-process `ouroboros_execute_seed` / `ouroboros_start_execute_seed` path; an execution dispatched to the OpenCode plugin's child session is not governed and reports `check_package: not_applied`. Only Claude Code and Codex CLI can construct checks; with another runtime the existing verifier decides the run. |
+| `-m, --model TEXT` | Model for every role in this run, the check package and the evaluation it continues into included: `auto` (latest of each role's tier), `frugal`, `standard`, `frontier`, or a model id. Tier names work on every backend; Claude aliases such as `opus` only on Claude backends. Default: `models.default` in config (`auto`) |
+| `--pin-models/--no-pin-models` | Run the per-role model ids saved in config for this run (research and reproducibility). Default: `models.pin` in config (off) |
 | `-d, --debug` | Show logs and agent thinking (verbose output) |
 
 **Examples:**
@@ -497,6 +504,9 @@ ouroboros run seed.yaml --no-auto-evaluate
 
 # Evaluate, but do not continue a rejected evaluation into Ralph
 ouroboros run seed.yaml --no-auto-evolve
+
+# Run every role on the frontier tier
+ouroboros run seed.yaml --model frontier
 
 # Opt out of the check package for this run (or: OUROBOROS_CHECK_PACKAGE=off,
 # or boundary.check_package: off in ~/.ouroboros/config.yaml)
@@ -662,12 +672,24 @@ persist into `orchestrator.runtime_profile.stages`. The shipped presets:
 > already encodes in `consensus.diversity_required`. A preset may reference a
 > backend whose CLI is not installed; staging still works and the per-card
 > warning flags it. Pick the preset closest to your subscriptions, then tune
-> individual cards. Model-tier presets (Frugal / Balanced / Frontier) sit in a
-> separate row and stage per-stage models rather than backends.
+> individual cards. Model presets (Auto / Frugal / Standard / Frontier) sit in
+> the Defaults band and set the one `models.default` switch; the field under
+> them takes any model id. The **Pin per-role model ids** switch sets
+> `models.pin`, and the per-stage model ids it applies are grouped under
+> **Advanced**.
 
 ### `config show`
 
 Display current configuration summary, or a specific section.
+
+The summary includes a models table: one row per role (the check package runs
+on the Execute model) with its tier, backend, resolved model, and source
+(`auto`, `pin`, `invocation`, `configured`, or `shipped_fallback`), under a
+`models: auto (pin off)`, `models: pinned`, or
+`models: <value> for every role (<source>)` header. Saved per-role model ids
+that are not applied because pin is off are listed under `ignored (pin off)`,
+each with the hint `set models.pin: true to use`. `--json` emits the same data
+under the `models` key.
 
 ```bash
 ouroboros config show [SECTION]
@@ -682,8 +704,11 @@ ouroboros config show [SECTION]
 **Examples:**
 
 ```bash
-# Show configuration summary (backend, CLI path, DB, log level)
+# Show configuration summary (backend, models, CLI path, DB, log level)
 ouroboros config show
+
+# Machine-readable view; the models table is under the "models" key
+ouroboros config show --json
 
 # Show only orchestrator section
 ouroboros config show orchestrator
@@ -755,6 +780,12 @@ ouroboros config set logging.level debug
 
 # Override LLM backend separately from runtime backend
 ouroboros config set llm.backend litellm
+
+# One model switch for every role: auto, frugal, standard, frontier, or a model id
+ouroboros config set models.default frontier
+
+# Run the per-role model ids saved in config (research and reproducibility)
+ouroboros config set models.pin true
 ```
 
 ### `config validate`

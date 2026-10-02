@@ -422,6 +422,24 @@ def artifact_verdict(statuses: Iterable[PackageCriterionStatus]) -> ArtifactVerd
     return ArtifactVerdict(artifact_verdict_of(status.value for status in statuses))
 
 
+class LegacyNoEvidenceReason(StrEnum):
+    """Why the legacy verifier accepted a criterion without evidence (closed set).
+
+    Decided where ``ExistingOutcome.no_evidence`` is
+    (``authority.existing_outcomes_from_results``) from the result's typed
+    fields; it decides nothing and is recorded for anonymous telemetry only.
+    """
+
+    ENVIRONMENT_UNVERIFIABLE = "environment_unverifiable"
+    """The ``verify_command`` environment could not run the command."""
+    TRANSCRIPT_UNAVAILABLE = "transcript_unavailable"
+    """The runtime transcript was unavailable (``TRANSCRIPT_MISSING_INFRASTRUCTURE``)."""
+    NO_VERIFIER_VERDICT = "no_verifier_verdict"
+    """No verifier verdict was recorded for the attempt."""
+    VERIFIER_VERDICT_NOT_PASSED = "verifier_verdict_not_passed"
+    """A verdict that did not pass, with no rejection the executor made."""
+
+
 @dataclass(frozen=True, slots=True)
 class ExistingOutcome:
     """The existing harness's final decision for one root criterion."""
@@ -434,6 +452,8 @@ class ExistingOutcome:
     no_evidence: bool = False
     """The legacy verifier accepted without evidence (no verdict, transcript
     unavailable, environment unverifiable); never set on a rejection."""
+    no_evidence_reason: LegacyNoEvidenceReason | None = None
+    """Why ``no_evidence`` is set; ``None`` when it is not. Decides nothing."""
 
     @property
     def passed(self) -> bool:

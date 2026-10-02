@@ -55,6 +55,8 @@ class WorkerTurn:
             the turn, surfaced as ``assistant`` messages for TUI/telemetry.
         usage: Optional provider-reported token counters for attribution. Values
             remain raw here and are validated by the proof producer before use.
+        model_observation: Optional runtime-reported model, in the shared
+            ``model_observation`` shape, forwarded on the result message.
     """
 
     text: str
@@ -63,6 +65,7 @@ class WorkerTurn:
     error: str | None = None
     tool_events: tuple[tuple[str, str], ...] = ()
     usage: dict[str, Any] | None = None
+    model_observation: dict[str, str | None] | None = None
 
 
 class LeaderDrivenWorkerTransport(Protocol):
@@ -322,6 +325,11 @@ class LeaderDrivenWorkerRuntime:
                 "session_id": turn.session_id,
                 **({"error": turn.error} if turn.error else {}),
                 **({"usage": turn.usage} if turn.usage is not None else {}),
+                **(
+                    {"model_observation": turn.model_observation}
+                    if turn.model_observation is not None
+                    else {}
+                ),
             },
             resume_handle=handle,
         )
