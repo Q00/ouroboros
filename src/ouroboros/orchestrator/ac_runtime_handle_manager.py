@@ -764,6 +764,17 @@ class ACRuntimeHandleManager:
                     raise AmbiguousACExecutionError(
                         "latest AC dispatch is a SessionSignal follow-up whose phase cannot be resumed"
                     )
+                # The evidence turn's prompt is rebuilt from the primary
+                # transcript, which a restarted process does not hold: fail
+                # closed the same way.
+                if (
+                    latest_dispatch_kind == "evidence_turn"
+                    and last_dispatch_index > last_seal_index
+                    and last_dispatch_index > last_terminal_index
+                ):
+                    raise AmbiguousACExecutionError(
+                        "latest AC dispatch is an evidence turn whose phase cannot be resumed"
+                    )
 
             for event in reversed(events):
                 event_data = event.data if isinstance(event.data, dict) else {}
@@ -1105,7 +1116,7 @@ class ACRuntimeHandleManager:
                 if predecessor != previous_dispatch_id:
                     raise AmbiguousACExecutionError("AC dispatch predecessor chain is invalid")
                 dispatch_kind = event_data.get("dispatch_kind")
-                if dispatch_kind not in {"primary", "session_signal_followup"}:
+                if dispatch_kind not in {"primary", "session_signal_followup", "evidence_turn"}:
                     raise AmbiguousACExecutionError("AC dispatch kind is invalid")
                 signal_fields = (
                     event_data.get("signal_id"),
@@ -1130,6 +1141,17 @@ class ACRuntimeHandleManager:
                     ):
                         raise AmbiguousACExecutionError(
                             "SessionSignal follow-up dispatch identity is invalid"
+                        )
+                if dispatch_kind == "evidence_turn":
+                    signal_id, signal_mode, follow_up_input_digest = signal_fields
+                    if (
+                        signal_id is not None
+                        or signal_mode is not None
+                        or not isinstance(follow_up_input_digest, str)
+                        or not re.fullmatch(r"sha256:[0-9a-f]{64}", follow_up_input_digest)
+                    ):
+                        raise AmbiguousACExecutionError(
+                            "evidence turn dispatch identity is invalid"
                         )
                 runtime_payload = event_data.get("runtime")
                 if isinstance(runtime_payload, dict):

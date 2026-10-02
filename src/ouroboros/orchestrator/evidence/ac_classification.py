@@ -353,6 +353,7 @@ def _scoped_evidence_record_for_ac(
     return EvidenceRecord(
         data={field: value for field, value in record.data.items() if field in allowed_fields},
         source=record.source,
+        cited=record.cited,
     )
 
 

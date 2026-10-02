@@ -83,8 +83,13 @@ class _FinalMessageRuntime:
         resume_session_id: str | None = None,
     ) -> Any:
         del tools, system_prompt, resume_session_id
-        self.last_prompt = prompt
-        for message in self._support_messages:
+        # The controller's evidence turn on the finished session is answered
+        # with the final message alone (no call numbers): the record keeps the
+        # command-string path, and ``last_prompt`` stays the task prompt.
+        evidence_turn = prompt.startswith("[EVIDENCE TURN")
+        if not evidence_turn:
+            self.last_prompt = prompt
+        for message in () if evidence_turn else self._support_messages:
             if message.tool_name in {"Edit", "Write"} and "subtype" not in message.data:
                 message = replace(
                     message,

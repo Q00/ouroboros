@@ -6,6 +6,11 @@ from pathlib import Path
 
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.evidence.ac_classification import _effective_evidence_schema_for_ac
+from ouroboros.orchestrator.evidence.cited_evidence import (
+    CITABLE_FIELDS,
+    CitedEvidence,
+    verify_cited_record,
+)
 from ouroboros.orchestrator.evidence.claims import (
     _runtime_messages_have_masked_test_command_form,
     _runtime_messages_support_claim,
@@ -60,12 +65,19 @@ def _verify_atomic_evidence_against_runtime_messages(
     has_success_contract: bool = False,
     has_expected_artifacts: bool = False,
     verify_gate_active: bool = False,
+    skip_fields: frozenset[str] = frozenset(),
 ) -> VerifierVerdict:
     """Verify leaf evidence is backed by runtime transcript events.
 
     The verifier deliberately ignores the final result message so accepted
     evidence cannot be supported only by the leaf's self-report. A declared
     verify command is additive and does not remove transcript obligations.
+
+    A record the evidence turn produced (``typed_evidence.cited``) proves its
+    command fields by the call numbers the worker cited
+    (``cited_evidence.verify_cited_record``); this function then verifies only
+    its other fields (``skip_fields``). A record without citations takes the
+    command-string path below, unchanged.
     """
     effective_schema = _effective_evidence_schema_for_ac(
         execution_profile,
@@ -102,6 +114,26 @@ def _verify_atomic_evidence_against_runtime_messages(
             failure_class=FailureClass.TRANSCRIPT_MISSING_INFRASTRUCTURE.value,
         )
 
+    if isinstance(typed_evidence.cited, CitedEvidence) and not skip_fields:
+        return verify_cited_record(
+            typed_evidence.cited,
+            messages=support_messages,
+            required_fields=effective_schema.required,
+            task_cwd=task_cwd or adapter_working_directory,
+            verify_other_fields=lambda: _verify_atomic_evidence_against_runtime_messages(
+                messages=messages,
+                typed_evidence=typed_evidence,
+                ac_content=ac_content,
+                execution_profile=execution_profile,
+                task_cwd=task_cwd,
+                adapter_working_directory=adapter_working_directory,
+                has_success_contract=has_success_contract,
+                has_expected_artifacts=has_expected_artifacts,
+                verify_gate_active=verify_gate_active,
+                skip_fields=frozenset(CITABLE_FIELDS),
+            ),
+        )
+
     unsupported: list[str] = []
     evidence_form_mismatches: list[str] = []
     # Observed runs whose script is absent from the artifact: not replayable,
@@ -118,8 +150,8 @@ def _verify_atomic_evidence_against_runtime_messages(
             _runtime_support_messages_for_field("commands_run", support_messages),
         )
     )
-    required_fields = set(effective_schema.required)
-    fields_to_verify = list(effective_schema.required)
+    required_fields = set(effective_schema.required) - skip_fields
+    fields_to_verify = [name for name in effective_schema.required if name not in skip_fields]
     workspace_cwd = task_cwd or adapter_working_directory
 
     for field_name in fields_to_verify:

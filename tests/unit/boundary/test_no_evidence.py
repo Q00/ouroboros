@@ -13,6 +13,7 @@ from ouroboros import telemetry
 from ouroboros.boundary import no_evidence
 from ouroboros.boundary.acceptance import (
     NO_HELD_OUT_CASE,
+    AcceptedBy,
     CriterionVerdict,
     ExistingOutcome,
     LegacyNoEvidenceReason,
@@ -41,10 +42,14 @@ from .calc_fixtures import _seed
 
 @pytest.fixture
 def captured(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, Any]]]:
-    """Every event the telemetry boundary would queue, after its own folding."""
+    """Every ``acceptance_no_evidence`` event the telemetry boundary would queue."""
     events: list[tuple[str, dict[str, Any]]] = []
     monkeypatch.setattr(
-        telemetry, "capture", lambda event, properties=None: events.append((event, properties))
+        telemetry,
+        "capture",
+        lambda event, properties=None: (
+            events.append((event, properties)) if event == "acceptance_no_evidence" else None
+        ),
     )
     return events
 
@@ -82,6 +87,12 @@ def test_the_replay_reason_is_read_from_the_results_typed_fields() -> None:
     )
     assert _reason(_legacy_result(atomic_verifier_verdict=script_absent)) is (
         LegacyNoEvidenceReason.SCRIPT_ABSENT_FROM_ARTIFACT
+    )
+    withheld = SimpleNamespace(
+        passed=False, failure_class=FailureClass.CITED_EVIDENCE_WITHHELD.value
+    )
+    assert _reason(_legacy_result(atomic_verifier_verdict=withheld)) is (
+        LegacyNoEvidenceReason.CITED_EVIDENCE_WITHHELD
     )
     assert _reason(_legacy_result(atomic_verifier_verdict=transcript)) is (
         LegacyNoEvidenceReason.TRANSCRIPT_UNAVAILABLE
@@ -287,3 +298,45 @@ async def test_an_unadmitted_run_names_no_admitted_package(
     assert props["pair_no_admitted_package__no_verifier_verdict"] == 1
     assert props["surface"] == "evolve"
     assert props["check_package_status"] == "construction_failed"
+
+
+def test_the_evidence_path_is_read_from_the_verdict() -> None:
+    def path(**fields: Any) -> Any:
+        return existing_outcomes_from_results(SimpleNamespace(results=(_legacy_result(**fields),)))[
+            0
+        ].evidence_path
+
+    cited = SimpleNamespace(passed=True, decided_by="call_citations")
+    strings = SimpleNamespace(passed=True, decided_by="")
+    gate = SimpleNamespace(passed=True, environment_unverifiable=False)
+    assert path(atomic_verifier_verdict=cited) is AcceptedBy.TRANSCRIPT_EVIDENCE
+    assert path(atomic_verifier_verdict=strings) is AcceptedBy.COMMAND_STRINGS
+    assert path(verify_gate_outcome=gate) is AcceptedBy.VERIFY_COMMAND
+    assert path() is None
+
+
+def test_accepted_by_separates_transcript_evidence_from_the_package() -> None:
+    def outcome(evidence_path: AcceptedBy | None, *, no_evidence: bool = False) -> Any:
+        return ExistingOutcome(
+            root_ac_index=0,
+            outcome="succeeded",
+            disposition="accepted",
+            terminal_status="completed",
+            no_evidence=no_evidence,
+            evidence_path=evidence_path,
+        )
+
+    def accepted_by(status: PackageCriterionStatus, prior: ExistingOutcome) -> Any:
+        reconciliation = reconcile_acceptance(
+            ["ac_0"], {"ac_0": status}, {0: prior}, existing_run_accepted=True
+        )
+        return reconciliation.decisions[0].accepted_by
+
+    cited = outcome(AcceptedBy.TRANSCRIPT_EVIDENCE)
+    assert accepted_by(PackageCriterionStatus.PASS, cited) is AcceptedBy.CHECK_PACKAGE
+    assert accepted_by(PackageCriterionStatus.UNCOVERED, cited) is AcceptedBy.TRANSCRIPT_EVIDENCE
+    assert (
+        accepted_by(PackageCriterionStatus.UNVERIFIED, outcome(None, no_evidence=True))
+        is AcceptedBy.NO_EVIDENCE
+    )
+    assert accepted_by(PackageCriterionStatus.FAIL, cited) is None
