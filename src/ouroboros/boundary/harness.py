@@ -580,6 +580,8 @@ def _cli(nonce: str, kind: str, name: str, workdir: str, count: str, rest: list[
     parts = name.split(".")
     packages = parts if len(files) == len(parts) + 1 else parts[:-1]
     sys.path.insert(0, os.getcwd())
+    # Package initializers are target code: they run in the case directory too.
+    _enter(workdir)
     for index, (path, source) in enumerate(files[: len(packages)]):
         dotted = ".".join(packages[: index + 1])
         spec = bootstrap.ModuleSpec(dotted, loader(dotted, path), origin=path, is_package=True)
@@ -602,7 +604,6 @@ def _cli(nonce: str, kind: str, name: str, workdir: str, count: str, rest: list[
         __spec__=spec,
     )
     sys.argv = [path, *arguments]
-    _enter(workdir)
     _run_main(path, source, main)
 
 

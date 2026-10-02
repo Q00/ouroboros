@@ -621,6 +621,34 @@ async def test_command_case_files_reproduce_on_the_base_and_pass_the_fix(tmp_pat
     assert report.uncovered == {} and report.excluded == {} and checked is package
 
 
+async def test_a_module_command_runs_its_package_initializer_in_the_case_directory(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    (repo / "todo").mkdir(parents=True)
+    # The package initializer reads the case file: it is target code too.
+    (repo / "todo" / "__init__.py").write_text(
+        "with open('marker.txt', encoding='utf-8') as handle:\n    MARK = handle.read()\n"
+    )
+    (repo / "todo" / "tool.py").write_text(
+        "import sys\nfrom todo import MARK\n\nprint(MARK + ':' + sys.argv[1])\n"
+    )
+    oracle = {
+        **_todo_oracle(),
+        "default_binding": {"symbol": "-m todo.tool", "arg_map": {"path": 0}},
+        "cases": [
+            {
+                "held_out": True,
+                "args": {"path": "x"},
+                "files": {"marker.txt": "seen"},
+                "expect": {"kind": "cli", "exit_code": 0, "stdout": "seen:x"},
+            }
+        ],
+    }
+    _spec, run = await _run(repo, oracle, on_base=False, seed=_todo_seed())
+    assert run.return_code == 0, run.output
+
+
 # --------------------------------------------------------------------------
 # The constructor path end to end
 
