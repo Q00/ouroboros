@@ -99,6 +99,31 @@ _EVOLVE_HANDLER_DEFAULTS: dict[str, object] = {
 }
 
 
+def _plugin_evolve_options_error(
+    arguments: dict[str, Any],
+    runtime_backend: str | None,
+    opencode_mode: str | None,
+) -> str | None:
+    """Reject checkpoint/recovery options the plugin payload cannot honor."""
+    if not should_dispatch_via_plugin(runtime_backend, opencode_mode):
+        return None
+    unsupported = [
+        name
+        for name in (
+            "commit_policy",
+            "auto_session_id",
+            "execution_id",
+            "checkpoint_commits",
+            "checkpoint_attempted_ac_ids",
+            "recover_expired_claim",
+        )
+        if arguments.get(name, _EVOLVE_HANDLER_DEFAULTS[name]) != _EVOLVE_HANDLER_DEFAULTS[name]
+    ]
+    if unsupported:
+        return f"{', '.join(unsupported)} require the in-process evolve runtime"
+    return None
+
+
 async def _benchmark_control_error(
     arguments: dict[str, Any],
     *,
@@ -379,7 +404,9 @@ class EvolveStepHandler(BridgeAwareMixin):
                 "Returns generation result, convergence signal, and next action "
                 "(continue/converged/ontology_stable/stagnated/exhausted/failed). "
                 "ontology_stable is a non-success handoff; rerun the same lineage "
-                "with execute=true to perform Execute→Evaluate."
+                "with execute=true to perform Execute→Evaluate. "
+                "Checkpoint metadata and expired-claim recovery require the in-process "
+                "runtime; plugin delegation rejects non-default values for these options."
             ),
             parameters=(
                 MCPToolParameter(
@@ -527,6 +554,11 @@ class EvolveStepHandler(BridgeAwareMixin):
                 )
             )
         event_store = self.event_store or getattr(self.evolutionary_loop, "event_store", None)
+        plugin_error = _plugin_evolve_options_error(
+            arguments, self.agent_runtime_backend, self.opencode_mode
+        )
+        if plugin_error is not None:
+            return Result.err(MCPToolError(plugin_error, tool_name="ouroboros_evolve_step"))
         benchmark_control = arguments.get("benchmark_control", False)
         if not isinstance(event_store, EventStore):
             if benchmark_control is not False:
@@ -1594,7 +1626,9 @@ class StartEvolveStepHandler:
                 "immediately for later status checks. "
                 "In plugin mode, evolution is delegated to an OpenCode Task pane and "
                 "job_id is None — results appear in the Task pane instead of being "
-                "pollable via job_status/job_result."
+                "pollable via job_status/job_result. "
+                "Checkpoint metadata and expired-claim recovery require the in-process "
+                "runtime; plugin delegation rejects non-default values for these options."
             ),
             parameters=EvolveStepHandler().definition.parameters,
         )
@@ -1611,6 +1645,11 @@ class StartEvolveStepHandler:
                     tool_name="ouroboros_start_evolve_step",
                 )
             )
+        plugin_error = _plugin_evolve_options_error(
+            arguments, self.agent_runtime_backend, self.opencode_mode
+        )
+        if plugin_error is not None:
+            return Result.err(MCPToolError(plugin_error, tool_name="ouroboros_start_evolve_step"))
         benchmark_control = arguments.get("benchmark_control", False)
         if type(benchmark_control) is not bool:
             return Result.err(
