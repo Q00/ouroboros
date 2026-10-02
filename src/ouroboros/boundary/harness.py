@@ -7,8 +7,8 @@ target <nonce> <call_kind> <symbol> <setup>
     as cwd. It first makes the oracle's declared setup calls (``setup``, a
     JSON list of ``{"symbol", "args", "kwargs"}``; each symbol must resolve to
     a callable defined in the checkout, like the target), so a library that
-    must be configured before use (``settings.configure(...)``, then
-    ``django.setup()``) can be called. A setup call that fails is reported as
+    must be configured before use (``pkg.conf.configure(...)``, then
+    ``pkg.setup()``) can be called. A setup call that fails is reported as
     ``import_error`` with a ``setup:`` detail, never as ``missing``. It then
     imports and resolves the symbol, then writes the frame
     '<nonce> {"phase": "resolved", ...}' (``resolve`` is ``ok``, ``missing``,
@@ -19,9 +19,16 @@ target <nonce> <call_kind> <symbol> <setup>
     may name an object instead of spelling a JSON value: a JSON object whose
     only key is ``"$symbol"`` (``SYMBOL_REF``) holding a dotted import path is
     replaced by the object that path imports (a class such as
-    ``django.db.models.Model``), anywhere inside the arguments or ``init``.
-    An input that does not resolve ends the process without a result frame
-    (a crash: indeterminate on the base, a failed case on a candidate).
+    ``pkg.base.Model``), anywhere inside the arguments or ``init``. An input
+    may also be built by a chain of calls (``CALL_REF``: ``{"$call":
+    "pkg.Factory", "args", "kwargs", "then": [read, ...]}``, the grammar of
+    ``boundary/call_grammar.py``), and a method's receiver may be one
+    (``receiver``; it must be an instance of the bound class). An input that
+    does not resolve or build ends the process without a result frame
+    (exit 3, a crash: indeterminate on the base, a failed case on a
+    candidate). A returned value is read through the case's projection
+    (``project``, a list of reads) before it is reported; a read that fails
+    ends the process without a result frame too (exit 4).
     A returned ``set`` or ``frozenset`` is reported as the list of its items
     sorted by their JSON text, as a tuple is reported as a list. Frames go to
     the process's original stdout; everything the target code prints goes to
@@ -31,9 +38,10 @@ target <nonce> <call_kind> <symbol> <setup>
     callable ran. The nonce only keeps the target's own prints apart from its
     report (see ``boundary/oracle_run.py``, "What an observation is").
 
-cli <nonce> <script|module> <name> <count> <proven files> <args>
+cli <nonce> <script|module> <name> <workdir> <count> <proven files> <args>
     Runs a CLI oracle's target from the bytes of the files the controller
-    proved, never from a pathname opened anew (see the cli role below).
+    proved, never from a pathname opened anew (see the cli role below), in
+    ``workdir`` (the case's files, written by the controller) when given.
 
 compare(request)
     Called inside the controller process (never a separate process), which
@@ -62,6 +70,13 @@ from typing import Any
 MAX_REPR = 300
 SYMBOL_REF = "$symbol"
 """The key of an input that names an importable object instead of a JSON value."""
+CALL_REF = "$call"
+"""The key of an input built by calling an importable callable (then reads on the result)."""
+CALL_KEYS = frozenset({CALL_REF, "args", "kwargs", "then"})
+PARAM_REF = "$param"
+"""The key of a template value that stands for a case's declared parameter (controller side)."""
+INPUT_FAILED_EXIT = 3
+PROJECTION_FAILED_EXIT = 4
 
 
 # ---------------------------------------------------------------- target role
@@ -106,6 +121,38 @@ def symbol_ref(value: Any) -> str | None:
         name = value[SYMBOL_REF]
         return name if isinstance(name, str) else ""
     return None
+
+
+def call_ref(value: Any) -> str | None:
+    """The factory path ``value`` names when it is a ``$call`` node, else ``None``."""
+    if isinstance(value, dict) and CALL_REF in value:
+        name = value[CALL_REF]
+        return name if isinstance(name, str) else ""
+    return None
+
+
+def param_ref(value: Any) -> str | None:
+    """The parameter ``value`` names when it is a ``$param`` reference, else ``None``."""
+    if isinstance(value, dict) and len(value) == 1 and PARAM_REF in value:
+        name = value[PARAM_REF]
+        return name if isinstance(name, str) else ""
+    return None
+
+
+def bind_params(value: Any, params: dict[str, Any]) -> Any:
+    """``value`` with every ``$param`` reference replaced by that parameter's case value.
+
+    Done by the controller before a call is sent: a target receives case data
+    and ``$call``/``$symbol`` nodes, never a ``$param``.
+    """
+    name = param_ref(value)
+    if name is not None:
+        return params[name]
+    if isinstance(value, list):
+        return [bind_params(item, params) for item in value]
+    if isinstance(value, dict):
+        return {key: bind_params(item, params) for key, item in value.items()}
+    return value
 
 
 def symbol_refs(value: Any, depth: int = 0) -> list[str]:
@@ -162,14 +209,39 @@ def _lookup(symbol: str) -> tuple[Any, Any, int, list[str]]:
 
 
 def _inputs(value: Any) -> Any:
-    """``value`` with every symbol reference replaced by the object it imports."""
+    """``value`` with every symbol reference and ``$call`` node replaced by its object."""
     name = symbol_ref(value)
     if name is not None:
         return _lookup(name)[1]
+    factory = call_ref(value)
+    if factory is not None:
+        built = _lookup(factory)[1](
+            *_inputs(value.get("args") or []), **_inputs(value.get("kwargs") or {})
+        )
+        return _apply_reads(built, value.get("then") or [])
+    if param_ref(value) is not None:
+        raise ValueError("an unbound $param reached the target")
     if isinstance(value, list):
         return [_inputs(item) for item in value]
     if isinstance(value, dict):
         return {key: _inputs(item) for key, item in value.items()}
+    return value
+
+
+def _apply_reads(value: Any, reads: list[dict[str, Any]]) -> Any:
+    """``value`` after each read in order (``boundary/call_grammar.py``)."""
+    for step in reads:
+        if "attr" in step:
+            value = getattr(value, step["attr"])
+        elif "item" in step:
+            value = value[step["item"]]
+        elif "each" in step:
+            value = [_apply_reads(item, step["each"]) for item in value]
+        else:
+            result = getattr(value, step["method"])(
+                *_inputs(step.get("args") or []), **_inputs(step.get("kwargs") or {})
+            )
+            value = value if step.get("keep") else result
     return value
 
 
@@ -286,7 +358,10 @@ def _run(target: Any, kind: str, call: dict[str, Any]) -> dict[str, Any]:
     try:
         if kind == "method":
             owner, name = target
-            instance = owner(**(call.get("init") or {}))
+            if "receiver" in call:
+                instance = call["receiver"]
+            else:
+                instance = owner(**(call.get("init") or {}))
             value = getattr(instance, name)(*call["args"], **call["kwargs"])
         else:
             value = target(*call["args"], **call["kwargs"])
@@ -297,6 +372,12 @@ def _run(target: Any, kind: str, call: dict[str, Any]) -> dict[str, Any]:
             "exception": [klass.__name__ for klass in type(exc).__mro__],
             "repr": (type(exc).__name__ + ": " + str(exc))[:MAX_REPR],
         }
+    if call.get("project"):
+        try:
+            value = _apply_reads(value, call["project"])
+        except BaseException:
+            # A read the returned value does not support: no observation.
+            os._exit(PROJECTION_FAILED_EXIT)
     entry = {"case_id": call["case_id"], "outcome": "returned", "repr": repr(value)[:MAX_REPR]}
     try:
         entry["value"] = _plain(value)
@@ -368,21 +449,29 @@ def _target(nonce: str, kind: str, symbol: str, setup: str) -> None:
     frame({"phase": "resolved", "resolve": "ok", "detail": ""})
     call = json.loads(_read_all(0))
     try:
-        for key in ("args", "kwargs", "init"):
-            call[key] = _inputs(call.get(key))
+        for key in ("args", "kwargs", "init", "receiver"):
+            if key in call:
+                call[key] = _inputs(call[key])
+        if "receiver" in call and (kind != "method" or not isinstance(call["receiver"], target[0])):
+            # The bound method is called only on an instance of its class.
+            raise TypeError("receiver is not an instance of the bound class")
     except BaseException:
-        # An input that names nothing importable: no observation at all.
-        os._exit(3)
+        # An input that names nothing importable or does not build: no observation at all.
+        os._exit(INPUT_FAILED_EXIT)
     frame({"phase": "result", "entry": _run(target, kind, call)})
     os._exit(0)
 
 
 # ------------------------------------------------------------------- cli role
 #
-# cli <nonce> <script|module> <name> <count> (<path> <device> <inode> <sha256>){count} <arg>...
-#     Runs a CLI oracle's target in the project interpreter (-I -B), with the
-#     checkout copy under test as cwd: ``python <name> <arg>...`` for a
-#     script, ``python -m <name> <arg>...`` for a module. The controller has
+# cli <nonce> <script|module> <name> <workdir> <count> (<path> <device> <inode> <sha256>){count}
+#     <arg>...
+#     Runs a CLI oracle's target in the project interpreter (-I -B), started
+#     with the checkout copy under test as cwd: ``python <name> <arg>...`` for
+#     a script, ``python -m <name> <arg>...`` for a module. A non-empty
+#     ``workdir`` (the case's files, written there by the controller, never in
+#     the checkout) becomes the working directory after the files are proven
+#     and the import path is set, immediately before the target runs. The controller has
 #     proven each file (its checkout-relative path, device, inode and the
 #     SHA-256 of its bytes; never an expected value); each is opened here
 #     again without following a link, must be that same file holding those
@@ -446,7 +535,12 @@ def _run_main(path: str, source: bytes, main: Any) -> None:
     exec(compile(source, path, "exec", dont_inherit=True), main.__dict__)
 
 
-def _cli(nonce: str, kind: str, name: str, count: str, rest: list[str]) -> None:
+def _enter(workdir: str) -> None:
+    if workdir:
+        os.chdir(workdir)
+
+
+def _cli(nonce: str, kind: str, name: str, workdir: str, count: str, rest: list[str]) -> None:
     def frame(payload: dict[str, Any]) -> None:
         data = ("\n" + nonce + " " + json.dumps(payload) + "\n").encode("utf-8")
         while data:
@@ -477,6 +571,7 @@ def _cli(nonce: str, kind: str, name: str, count: str, rest: list[str]) -> None:
         )
         sys.argv = [name, *arguments]
         sys.path.insert(0, os.path.dirname(path))
+        _enter(workdir)
         _run_main(path, source, main)
         return
     # As ``python -m <name>`` runs it: the working directory first on the
@@ -507,10 +602,24 @@ def _cli(nonce: str, kind: str, name: str, count: str, rest: list[str]) -> None:
         __spec__=spec,
     )
     sys.argv = [path, *arguments]
+    _enter(workdir)
     _run_main(path, source, main)
 
 
 # ---------------------------------------------------------- shared call shape
+
+
+def call_inputs(spec: dict[str, Any], args: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
+    """The target call's parameter names and values for one case's ``args``.
+
+    Without ``inputs`` they are the declared params and the case's values;
+    with ``inputs`` they are its names and templates, each ``$param`` bound to
+    the case's value.
+    """
+    inputs = spec.get("inputs")
+    if inputs is None:
+        return list(spec["params"]), args
+    return list(inputs), {name: bind_params(inputs[name], args) for name in inputs}
 
 
 def split_args(
@@ -625,12 +734,18 @@ def _judge_python(
     expect = case["expect"]
     if expect["kind"] == "raises":
         expected_text = "to raise " + expect["exception"]
+    elif expect["kind"] == "no_raise":
+        expected_text = "to return"
     else:
         expected_text = _short(expect["value"])
     if entry is None:
         return False, call_text + ": no observation"
     if entry["outcome"] in ABNORMAL:
         return False, _abnormal(entry, call_text, expected_text)
+    if expect["kind"] == "no_raise":
+        if entry["outcome"] == "returned":
+            return True, ""
+        return False, call_text + ": expected to return, raised " + entry["repr"]
     if expect["kind"] == "raises":
         if entry["outcome"] == "raised" and expect["exception"] in entry["exception"]:
             return True, ""
@@ -688,9 +803,8 @@ def compare(request: dict[str, Any]) -> dict[str, Any]:
             if spec["call_kind"] == "cli":
                 call_text = (entry or {}).get("call") or case["case_id"]
             else:
-                args, kwargs = split_args(
-                    spec["params"], binding.get("arg_map") or {}, case["args"]
-                )
+                names, values = call_inputs(spec, case["args"])
+                args, kwargs = split_args(names, binding.get("arg_map") or {}, values)
                 call_text = _render_call(binding["symbol"], args, kwargs)
             if resolve in ("missing", "import_error"):
                 passed, text = False, call_text + ": " + detail
@@ -732,7 +846,7 @@ def main() -> None:
     if role == "target":
         _target(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5] if len(sys.argv) > 5 else "[]")
     elif role == "cli":
-        _cli(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6:])
+        _cli(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6], sys.argv[7:])
     else:
         sys.stderr.write(
             "usage: harness target <nonce> <kind> <symbol> <setup> | cli <nonce> ...\n"
