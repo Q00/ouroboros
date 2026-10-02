@@ -622,7 +622,7 @@ class TestPrivateDevShm:
         self, layout: dict[str, Path], deny_network: bool
     ) -> None:
         _require_backend(deny_network=deny_network)
-        if exec_sandbox._private_shm_unshare() is None:
+        if exec_sandbox._private_mounts_unshare() is None:
             pytest.skip("no unprivileged user and mount namespace on this host")
         host_shm = Path("/dev/shm")
         token = f"ouroboros-shm-test-{os.getpid()}-{os.urandom(4).hex()}"
@@ -651,7 +651,7 @@ class TestPrivateDevShm:
         self, layout: dict[str, Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _require_backend()
-        monkeypatch.setattr(exec_sandbox, "_private_shm_unshare", lambda: None)
+        monkeypatch.setattr(exec_sandbox, "_private_mounts_unshare", lambda: None)
         token = f"ouroboros-shm-test-{os.getpid()}-{os.urandom(4).hex()}"
         code = (
             "import sys\n"
@@ -674,6 +674,160 @@ class TestPrivateDevShm:
 
         assert result.returncode == 0, result.stderr
         assert not (Path("/dev/shm") / token).exists()
+
+
+def _require_private_mounts(*, deny_network: bool = False) -> None:
+    _require_backend(deny_network=deny_network)
+    if exec_sandbox._private_mounts_unshare() is None:
+        pytest.skip("no unprivileged user and mount namespace on this host")
+
+
+# Run in the copy with ``OUTSIDE`` as argv[1]: each metadata change on a file
+# in the working directory (by relative and by absolute path) must succeed,
+# and the same change on a file outside must fail with EROFS.
+_METADATA_WORKLOAD = """
+import errno, os, sys
+outside = os.path.join(sys.argv[1], 'victim')
+open('inside', 'w').close()
+inside = os.path.abspath('inside')
+
+def setxattr(path):
+    try:
+        os.setxattr(path, 'user.ouroboros_test', b'1')
+    except OSError as exc:
+        if exc.errno not in (errno.ENOTSUP, errno.EOPNOTSUPP):
+            raise
+
+changes = {
+    'chmod': lambda path: os.chmod(path, 0o640),
+    'utime': lambda path: os.utime(path, (1_000_000, 1_000_000)),
+    'setxattr': setxattr,
+}
+for name, change in changes.items():
+    change('inside')
+    change(inside)
+    try:
+        change(outside)
+    except OSError as exc:
+        assert exc.errno == errno.EROFS, (name, exc)
+    else:
+        sys.exit(f'{name} changed a file outside the writable roots')
+fd = os.open(inside, os.O_RDONLY)
+os.fchmod(fd, 0o600)
+os.close(fd)
+"""
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux mount namespaces")
+class TestMetadataInsideRoots:
+    """Mode, timestamps and extended attributes change inside the roots only."""
+
+    def _confine(self, layout: dict[str, Path], argv: tuple[str, ...]) -> ConfinedCommand:
+        command = confine(
+            argv,
+            cwd=str(layout["copy"].resolve()),
+            writable_roots=(str(layout["copy"]),),
+            temp_dir=str(layout["temp"]),
+            deny_network=True,
+        )
+        assert isinstance(command, ConfinedCommand)
+        return command
+
+    def test_metadata_changes_inside_succeed_and_outside_fail(
+        self, layout: dict[str, Path]
+    ) -> None:
+        _require_private_mounts(deny_network=True)
+        outside = layout["outside"].resolve()
+        victim = outside / "victim"
+        victim.write_text("keep", encoding="utf-8")
+        victim.chmod(0o600)
+        os.utime(victim, (2_000_000, 2_000_000))
+        before = os.stat(victim)
+        command = self._confine(layout, _python(_METADATA_WORKLOAD, str(outside)))
+        assert command.metadata_writes_in_roots
+
+        result = _run(command)
+
+        assert result.returncode == 0, result.stderr
+        after = os.stat(victim)
+        assert (after.st_mode, after.st_mtime_ns) == (before.st_mode, before.st_mtime_ns)
+        assert stat.S_IMODE(os.stat(layout["copy"] / "inside").st_mode) == 0o600
+
+    def test_copytree_keeps_modes_and_times_inside_the_copy(self, layout: dict[str, Path]) -> None:
+        _require_private_mounts(deny_network=True)
+        source = layout["copy"] / "source"
+        (source / "package").mkdir(parents=True)
+        (source / "package" / "module.py").write_text("x = 1\n", encoding="utf-8")
+        (source / "package" / "module.py").chmod(0o750)
+        os.utime(source / "package" / "module.py", (3_000_000, 3_000_000))
+        code = "import shutil; shutil.copytree('source', 'target')"
+
+        result = _run(self._confine(layout, _python(code)))
+
+        assert result.returncode == 0, result.stderr
+        copied = os.stat(layout["copy"] / "target" / "package" / "module.py")
+        assert stat.S_IMODE(copied.st_mode) == 0o750
+        assert copied.st_mtime_ns == 3_000_000 * 10**9
+
+    def test_pytest_writes_its_cache_with_warnings_as_errors(self, layout: dict[str, Path]) -> None:
+        _require_private_mounts(deny_network=True)
+        (layout["copy"] / "test_sample.py").write_text(
+            "def test_passes():\n    assert True\n", encoding="utf-8"
+        )
+        argv = (sys.executable, "-I", "-m", "pytest", "-q", "-W", "error", "-p", "cacheprovider")
+
+        result = _run(self._confine(layout, (*argv, "test_sample.py")))
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (layout["copy"] / ".pytest_cache" / "v").is_dir()
+
+    def test_renaming_from_one_root_into_another_crosses_mounts(
+        self, layout: dict[str, Path]
+    ) -> None:
+        _require_private_mounts(deny_network=True)
+        code = (
+            "import errno, os, shutil, tempfile\n"
+            "fd, name = tempfile.mkstemp(); os.write(fd, b'moved'); os.close(fd)\n"
+            "try:\n"
+            "    os.replace(name, 'replaced')\n"
+            "except OSError as exc:\n"
+            "    assert exc.errno == errno.EXDEV, exc\n"
+            "else:\n"
+            "    raise SystemExit('rename crossed roots')\n"
+            "shutil.move(name, 'moved')\n"
+        )
+
+        result = _run(self._confine(layout, _python(code)))
+
+        assert result.returncode == 0, result.stderr
+        assert (layout["copy"] / "moved").read_text(encoding="utf-8") == "moved"
+
+    def test_without_a_mount_namespace_metadata_is_denied_inside_too(
+        self, layout: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _require_backend()
+        monkeypatch.setattr(exec_sandbox, "_private_mounts_unshare", lambda: None)
+        code = (
+            "import os, sys\n"
+            "open('inside', 'w').close()\n"
+            "try:\n"
+            "    os.chmod('inside', 0o640)\n"
+            "except PermissionError:\n"
+            "    sys.exit(0)\n"
+            "sys.exit(9)\n"
+        )
+        command = confine(
+            _python(code),
+            cwd=str(layout["copy"].resolve()),
+            writable_roots=(str(layout["copy"]),),
+            temp_dir=str(layout["temp"]),
+            deny_network=False,
+        )
+        assert isinstance(command, ConfinedCommand) and not command.metadata_writes_in_roots
+
+        result = _run(command)
+
+        assert result.returncode == 0, result.stderr
 
 
 class TestPrivateDevShmArgv:
@@ -713,7 +867,7 @@ class TestPrivateDevShmArgv:
             "_unshare_prefix",
             lambda: ("unshare", "--user", "--map-root-user", "--net", "--"),
         )
-        monkeypatch.setattr(exec_sandbox, "_private_shm_unshare", lambda: shm)
+        monkeypatch.setattr(exec_sandbox, "_private_mounts_unshare", lambda: shm)
 
         command = confine(
             ("true",),
@@ -724,25 +878,26 @@ class TestPrivateDevShmArgv:
 
         assert isinstance(command, ConfinedCommand)
         assert command.private_dev_shm is (shm is not None)
-        assert ("--private-shm" in command.argv) is (shm is not None)
+        assert command.metadata_writes_in_roots is (shm is not None)
+        assert ("--private-mounts" in command.argv) is (shm is not None)
         if expected[0] == "--require-loopback-only":
             assert command.argv[0] == exec_sandbox._interpreter()
             assert "--user" not in command.argv
         else:
             assert command.argv[: len(expected)] == expected
 
-    def test_the_helper_accepts_the_private_shm_option(self) -> None:
+    def test_the_helper_accepts_the_private_mounts_option(self) -> None:
         parsed = _confine_exec._parse(
-            ["--private-shm", "--require-loopback-only", "--landlock"]
+            ["--private-mounts", "--require-loopback-only", "--landlock"]
             + ["--root", "/r", "1", "2", "--", "true"]
         )
 
         assert parsed == (True, False, True, True, [("/r", 1, 2)], ["true"])
 
-    def test_no_private_shm_off_linux(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_no_private_mounts_off_linux(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(exec_sandbox.sys, "platform", "darwin")
 
-        assert exec_sandbox._private_shm_unshare.__wrapped__() is None  # type: ignore[attr-defined]
+        assert exec_sandbox._private_mounts_unshare.__wrapped__() is None  # type: ignore[attr-defined]
 
 
 class TestNetworkPlan:
@@ -1114,6 +1269,36 @@ class TestMetadataFilter:
         assert verdict(fchmod) == eperm
         assert verdict(read) == allow
         assert verdict(read, audit_arch=0x40000003) == eperm  # i386 compat call
+
+    @pytest.mark.parametrize(
+        ("machine", "arch", "fchmod", "utimensat", "fsetxattr", "fchown", "io_uring_setup"),
+        [
+            ("x86_64", 0xC000003E, 91, 280, 190, 93, 425),
+            ("aarch64", 0xC00000B7, 52, 88, 7, 55, 425),
+        ],
+    )
+    def test_read_only_mounts_take_over_mode_times_and_xattrs_only(
+        self,
+        machine: str,
+        arch: int,
+        fchmod: int,
+        utimensat: int,
+        fsetxattr: int,
+        fchown: int,
+        io_uring_setup: int,
+    ) -> None:
+        allow, eperm = 0x7FFF0000, 0x00050001
+        confined = _confine_exec.metadata_filter(machine, mounts_confine=True)
+        everywhere = _confine_exec.metadata_filter(machine)
+
+        def verdict(program: list[tuple[int, int, int, int]], nr: int) -> int:
+            return self._evaluate(program, {0: nr, 4: arch})
+
+        for number in (fchmod, utimensat, fsetxattr, 452, 463, 466):
+            assert verdict(confined, number) == allow
+            assert verdict(everywhere, number) == eperm
+        for number in (fchown, io_uring_setup):
+            assert verdict(confined, number) == eperm
 
     def test_unknown_architecture_is_refused(self) -> None:
         with pytest.raises(_confine_exec.SandboxError):

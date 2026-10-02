@@ -48,7 +48,14 @@ a check package exchanges frames over stdin and stdout). Under confinement:
   "Read-only" covers content, names (create, remove, rename, link) and
   metadata the process sets (mode, ownership, timestamps, extended
   attributes, inode flags; on Windows, file attributes, alternate data
-  streams and the DACL). The access time the kernel records when a
+  streams and the DACL). Inside the roots, mode, timestamps and extended
+  attributes can change (``ConfinedCommand.metadata_writes_in_roots``)
+  except on a Linux host without an unprivileged mount namespace, where
+  they are denied inside the roots too (see the Linux backend). Where a
+  Linux command has the mount namespace, each root is its own mount, so a
+  rename or hard link from one root to another (the copy and the temp
+  directory) fails with ``EXDEV``; ``shutil.move`` and ``mv`` fall back to
+  copying, ``os.replace`` does not. The access time the kernel records when a
   permitted read happens is part of read access, not a write the process
   performs: it changes under ``sandbox-exec`` with every write denied as
   well, and only a mount option (``noatime``) can stop it.
@@ -115,16 +122,25 @@ Backends:
 - **Linux**: Landlock (ABI 3, Linux 6.2, or newer: below it truncation
   cannot be denied) plus a seccomp filter, both applied by the helper
   ``_confine_exec.py`` before it execs the command. Landlock does not mediate
-  metadata changes, so the filter denies the chmod, chown, utime and xattr
-  syscall families and io_uring, and admits ``ioctl`` only for an allowlist
-  of fd and terminal queries (every other request, such as chattr flags,
-  fs-verity or fscrypt policies, is denied). It cannot see paths,
-  so on Linux metadata changes are denied inside the writable roots too
-  (``touch`` on an existing file, ``shutil.copy2``/``copystat``, cargo's
-  fingerprint timestamps, tar extraction that restores modes); such a
-  command fails, which fails closed. On macOS the same helper runs inside ``sandbox-exec``
-  and only applies the command's environment. It is unprivileged and needs no mount or user
-  namespace, so it works in containers. ``confine`` selects one
+  metadata changes (no ABI has a right for mode, timestamps or extended
+  attributes), so the filter denies the chown syscall family and io_uring,
+  and admits ``ioctl`` only for an allowlist of fd and terminal queries
+  (every other request, such as chattr flags, fs-verity or fscrypt
+  policies, is denied). The mode, timestamp and extended attribute families
+  are confined by one of two paths, recorded as
+  ``ConfinedCommand.metadata_writes_in_roots``. Where an unprivileged user
+  and mount namespace works (probed once, end to end), the helper makes
+  every mount in the namespace read-only and stacks a writable clone of each
+  verified root on the root itself, so those changes succeed inside the
+  roots and fail with ``EROFS`` everywhere else, and the filter leaves them
+  out. Where it does not, the filter denies them too; it cannot see paths,
+  so they are denied inside the writable roots as well (``touch`` on an
+  existing file, ``shutil.copy2``/``copystat``, a test runner's cache, tar
+  extraction that restores modes), and such a command fails, which fails
+  closed. On macOS the same helper runs inside ``sandbox-exec``
+  and only applies the command's environment. Landlock and the filter are
+  unprivileged and need no mount or user namespace, so the backend works in
+  containers. ``confine`` selects one
   ``NetworkPlan``: a new unprivileged network namespace
   (``unshare --user --map-root-user --net``, with ``lo`` brought up), or the
   current one when it has only loopback (a container started with
@@ -132,9 +148,10 @@ Backends:
   ``unshare`` capability is), and the parent's choice is never the proof:
   the helper checks that its namespace has only ``lo`` immediately before
   exec and runs nothing otherwise. Independently of the network plan, when
-  ``unshare --user --map-root-user --mount`` and a tmpfs mount inside it work
-  here (probed once, end to end), the helper also starts in a new mount
-  namespace and mounts the private ``/dev/shm`` (see the helper). Any new
+  ``unshare --user --map-root-user --mount``, the read-only mounts and a
+  tmpfs mount inside it work here (probed once, end to end), the helper also
+  starts in a new mount namespace, applies the mounts above and mounts the
+  private ``/dev/shm`` (see the helper). Any new
   user namespace maps the user to root inside it: the command sees uid 0 but
   has no privilege over anything the user does not own.
 - **Windows**: an AppContainer, set up by the launcher
@@ -373,6 +390,11 @@ class ConfinedCommand:
     """Whether the command cannot read other processes' environments (Landlock, AppContainer)."""
     private_dev_shm: bool = False
     """Linux: whether the command gets its own writable tmpfs at ``/dev/shm``."""
+    metadata_writes_in_roots: bool = False
+    """Whether mode, timestamps and extended attributes can change inside the
+    writable roots (outside them they never can). False only on Linux without
+    an unprivileged mount namespace, where the seccomp filter denies them
+    everywhere."""
 
 
 def _darwin_profile(root_count: int, *, deny_network: bool) -> str:
@@ -506,9 +528,9 @@ def _backend_argv(
             part for index, (path, _, _) in enumerate(roots) for part in ("-D", f"W{index}={path}")
         ]
         return (executable, "-p", profile, *params, "--", *helper, *claims, "--", *argv)
-    executable = _private_shm_unshare()
+    executable = _private_mounts_unshare()
     namespaces: tuple[str, ...] = ("--mount",) if executable else ()
-    flags: tuple[str, ...] = ("--private-shm",) if executable else ()
+    flags: tuple[str, ...] = ("--private-mounts",) if executable else ()
     if network is NetworkPlan.NEW_NAMESPACE:
         unshare = _unshare_prefix()
         if unshare is None:  # pragma: no cover - the plan was selected from it
@@ -800,32 +822,55 @@ def _unshare_prefix() -> tuple[str, ...] | None:
     return prefix if result.returncode == 0 else None
 
 
+# Run by the private mounts probe as ``CODE INSIDE OUTSIDE``: a file in the
+# private ``/dev/shm``, a mode change inside the root that must succeed and
+# one outside that must fail with EROFS.
+_PRIVATE_MOUNTS_PROBE = """
+import errno, os, sys
+os.close(os.open('/dev/shm/probe', os.O_CREAT | os.O_WRONLY, 0o600))
+os.chmod(sys.argv[1], 0o640)
+try:
+    os.chmod(sys.argv[2], 0o640)
+except OSError as exc:
+    sys.exit(0 if exc.errno == errno.EROFS else 3)
+sys.exit(4)
+"""
+
+
 @functools.cache
-def _private_shm_unshare() -> str | None:
-    """The trusted ``unshare`` if a private ``/dev/shm`` works here; probed once.
+def _private_mounts_unshare() -> str | None:
+    """The trusted ``unshare`` if the helper's private mounts work here; probed once.
 
     Probed end to end with the very argv a command uses: a new user and mount
-    namespace, the helper mounting the tmpfs over ``/dev/shm``, and a file
-    created in it. Linux only; None wherever any step fails (no ``unshare``,
-    no unprivileged user namespaces, a seccomp or LSM policy denying them or
-    the mount, no ``/dev/shm``), and the command then runs without one.
+    namespace, the helper making every mount read-only, stacking the writable
+    root and mounting the tmpfs over ``/dev/shm``; then a file created in it,
+    a mode change inside the root and one outside refused. Linux only; None
+    wherever any step fails (no ``unshare``, no unprivileged user namespaces,
+    a seccomp or LSM policy denying them or a mount, no ``/dev/shm``), and the
+    command then runs without them.
     """
     if not sys.platform.startswith("linux"):
         return None
     executable = _trusted_launcher("unshare")
     if executable is None:
         return None
-    root = tempfile.mkdtemp(prefix="ouroboros-shm-probe-")
+    root = tempfile.mkdtemp(prefix="ouroboros-mounts-probe-")
     try:
-        path, device, inode = _claim_root(os.path.realpath(root))
-        code = "import os; os.close(os.open('/dev/shm/probe', os.O_CREAT | os.O_WRONLY, 0o600))"
+        inside, outside = os.path.join(root, "inside"), os.path.join(root, "outside")
+        os.mkdir(inside)
+        for name in (os.path.join(inside, "file"), outside):
+            with open(name, "w"):
+                pass
+            os.chmod(name, 0o600)
+        path, device, inode = _claim_root(os.path.realpath(inside))
         argv = (
             *_unshare_argv(executable, "--mount"),
             *_helper_argv(),
-            "--private-shm",
+            "--private-mounts",
             *("--root", path, str(device), str(inode)),
             "--",
-            *(_interpreter(), "-I", "-S", "-c", code),
+            *(_interpreter(), "-I", "-S", "-c", _PRIVATE_MOUNTS_PROBE),
+            *(os.path.join(path, "file"), os.path.realpath(outside)),
         )
         result = subprocess.run(  # noqa: S603 - fixed argv, no shell
             argv,
@@ -840,7 +885,7 @@ def _private_shm_unshare() -> str | None:
         shutil.rmtree(root, ignore_errors=True)
     if result.returncode != 0:
         log.info(
-            "exec_sandbox.private_shm_unavailable",
+            "exec_sandbox.private_mounts_unavailable",
             returncode=result.returncode,
             stderr=result.stderr.decode("utf-8", errors="replace")[-500:],
         )
@@ -955,6 +1000,7 @@ def confine(
             writable_roots=tuple(roots),
             network_denied=False,
             isolates_process_environments=False,
+            metadata_writes_in_roots=True,
         )
     backend = filesystem_backend()
     if backend is None:
@@ -983,6 +1029,7 @@ def confine(
         if os.path.splitext(command[0])[1].lower() in (".cmd", ".bat"):
             return SandboxUnavailable(SandboxUnavailableReason.WINDOWS_BATCH_FILE, command[0])
         readable = _windows_read_paths(roots)
+    private_mounts = backend is SandboxBackend.LANDLOCK and _private_mounts_unshare() is not None
     return ConfinedCommand(
         argv=_backend_argv(backend, command, claims, network, readable),
         env=_bootstrap_environment(env),
@@ -993,7 +1040,8 @@ def confine(
         network_denied=network is not NetworkPlan.ALLOW,
         isolates_process_environments=backend
         in (SandboxBackend.LANDLOCK, SandboxBackend.APPCONTAINER),
-        private_dev_shm=backend is SandboxBackend.LANDLOCK and _private_shm_unshare() is not None,
+        private_dev_shm=private_mounts,
+        metadata_writes_in_roots=backend is not SandboxBackend.LANDLOCK or private_mounts,
     )
 
 
