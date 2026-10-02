@@ -1352,7 +1352,7 @@ if [ "$HAS_UV" = true ]; then
       )
       ;;
     "[mcp,tui]")
-      UV_ARGS+=(--with "mcp==2.0.0")
+      UV_ARGS+=(--with "mcp==2.2.0")
       ;;
     "[all]")
       UV_ARGS+=(

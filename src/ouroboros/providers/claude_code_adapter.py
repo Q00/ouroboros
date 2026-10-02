@@ -5,7 +5,7 @@ authentication instead of requiring separate API keys.
 
 It has two transports and prefers the Claude Agent SDK. When the SDK cannot be
 imported it falls back to the ``claude`` CLI in print mode, because the SDK
-requires ``mcp<2.0.0`` while the MCP protocol server requires ``mcp==2.0.0`` --
+requires ``mcp<2.0.0`` while the MCP protocol server requires ``mcp==2.2.0`` --
 so in a server process built from the ``[mcp]`` extra there is no SDK to import
 and the backend could previously generate nothing at all (Q00/ouroboros#1839).
 Policy is shared rather than duplicated: model normalization, turn budget,
@@ -655,7 +655,7 @@ class ClaudeCodeAdapter:
         """Run one completion through the ``claude`` CLI in print mode.
 
         The Python SDK is not always installable beside the caller. It requires
-        ``mcp<2.0.0``, and the MCP protocol server requires ``mcp==2.0.0``, so a
+        ``mcp<2.0.0``, and the MCP protocol server requires ``mcp==2.2.0``, so a
         server process built from the ``[mcp]`` extra has no SDK to import — and
         a user whose backend is ``claude`` then cannot generate anything at all
         (Q00/ouroboros#1839).

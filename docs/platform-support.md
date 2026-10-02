@@ -96,7 +96,7 @@ The package profile is a process contract, not a dependency-pin workaround:
 |-------|-------------------|----------------|-----------------------|
 | `[claude]` | Default in-process Claude Agent SDK runtime | Exact SDK/Anthropic pins and MCP 1.x graph | **No** — separate process/environment |
 | `[claude-cli]` | Claude CLI subprocess for completions and agent workers | None | Yes |
-| `[mcp]` | MCP 2 server/client process | `mcp==2.0.0` | Yes, with CLI profiles |
+| `[mcp]` | MCP 2 server/client process | `mcp==2.2.0` | Yes, with CLI profiles |
 | `[claude-sdk]` | Explicit alias for the Claude Agent SDK runtime | Same exact SDK/Anthropic pins and MCP 1.x graph | **No** — separate process/environment |
 | `[all]` | MCP 1.x application bundle | Includes `[claude]`; excludes MCP 2 | **No** — run `[mcp]` separately |
 

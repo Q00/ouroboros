@@ -701,7 +701,7 @@ class TestDoctorCommand:
 
     def test_human_output_shows_symbols(self):
         app = _make_app()
-        check_result = CheckResult(name="mcp", status="pass", message="mcp 2.0.0")
+        check_result = CheckResult(name="mcp", status="pass", message="mcp 2.2.0")
         with patch(
             "ouroboros.cli.commands.mcp_doctor._ALL_CHECKS",
             [lambda: check_result],
@@ -768,7 +768,7 @@ class TestDoctorCommand:
             status="warn",
             message="claude-agent-sdk not installed (not required for codex runtime)",
         )
-        pass_result = CheckResult(name="mcp_import", status="pass", message="mcp 2.0.0")
+        pass_result = CheckResult(name="mcp_import", status="pass", message="mcp 2.2.0")
         with patch(
             "ouroboros.cli.commands.mcp_doctor._ALL_CHECKS",
             [lambda: pass_result, lambda: warn_result],

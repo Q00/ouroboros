@@ -51,7 +51,7 @@
           - --from
           - 'ouroboros-ai[mcp]'
           - --with
-          - 'mcp==2.0.0'
+          - 'mcp==2.2.0'
           - ouroboros
           - mcp
           - serve
