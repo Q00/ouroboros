@@ -45,8 +45,12 @@ One oracle check runs as follows:
    bound script or module: before every case the controller proves its
    files are regular files of the checkout (``_cli_target_files``), and the
    harness ``cli`` role runs the bytes of exactly those files, found again
-   by identity in the target process, never a pathname opened anew. When
-   the case is over, the controller kills the
+   by identity in the target process, never a pathname opened anew. A CLI
+   case's ``files`` are written by the controller into a fresh directory in
+   the check's scratch directory (never the checkout copy), created without
+   following a link, and that directory becomes the command's working
+   directory just before the target runs. When the case is over, the
+   controller kills the
    target's whole process group (on Linux also every process still in its
    session), closes its own ends of the pipes, and waits, bounded, for the
    group to be empty. One absolute deadline, taken before anything starts,
@@ -111,6 +115,7 @@ from pathlib import Path
 import secrets
 import signal
 import sys
+import tempfile
 import time
 from typing import Any
 
@@ -659,7 +664,12 @@ def _cli_target_files(cwd: Path, symbol: str) -> _NotProven | tuple[tuple[str, R
 
 
 def _cli_launch(
-    python: str, harness: str, nonce: str, symbol: str, proven: Sequence[tuple[str, RegularFile]]
+    python: str,
+    harness: str,
+    nonce: str,
+    symbol: str,
+    proven: Sequence[tuple[str, RegularFile]],
+    workdir: str = "",
 ) -> list[str]:
     """The argv of the harness ``cli`` role running ``symbol`` from the ``proven`` files."""
     kind, name = ("module", symbol[3:]) if symbol.startswith("-m ") else ("script", symbol)
@@ -683,9 +693,41 @@ def _cli_launch(
         nonce,
         kind,
         name,
+        workdir,
         str(len(proven)),
         *identities,
     ]
+
+
+def write_case_files(parent: Path, files: Mapping[str, str]) -> Path:
+    """A fresh directory in ``parent`` holding ``files``, created without following a link.
+
+    ``parent`` is the check's scratch directory, which target processes can
+    write: every directory is created and opened by name from the one before
+    it with ``O_NOFOLLOW``, and every file is created exclusively, so a link
+    planted there cannot redirect a write of the controller's. Paths are
+    already validated (``call_grammar.check_case_files``).
+    """
+    root = Path(tempfile.mkdtemp(prefix="case-", dir=parent))
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    for relative, text in files.items():
+        *directories, name = relative.split("/")
+        held = [os.open(root, directory_flags)]
+        try:
+            for part in directories:
+                try:
+                    os.mkdir(part, 0o700, dir_fd=held[-1])
+                except FileExistsError:
+                    pass
+                held.append(os.open(part, directory_flags, dir_fd=held[-1]))
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(name, flags, 0o600, dir_fd=held[-1])
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(text)
+        finally:
+            for descriptor in reversed(held):
+                os.close(descriptor)
+    return root
 
 
 async def _feed(process: asyncio.subprocess.Process, data: bytes) -> None:
@@ -796,13 +838,18 @@ async def _observe(
     *,
     on_base: bool,
     reference_run: bool = False,
+    scratch: Path | None = None,
 ) -> tuple[str, str, dict[str, dict[str, Any]], bool]:
     """Run ``cases`` by ``deadline``; return ``(resolve, detail, observations, timed_out)``.
 
     Each case gets an equal share of the time left before ``deadline``
     (event loop time). Raises ``_Unavailable`` when the entry point refuses
-    a process. ``reference_run`` (the reference check) makes no setup call
-    and sends every symbol reference as its dotted path.
+    a process. ``reference_run`` (the reference check) makes no setup call,
+    sends every symbol reference as its dotted path, and calls the reference
+    with the declared params: it never builds ``inputs`` or a ``receiver``
+    and applies no projection. A CLI case's files (case data, like its
+    arguments) are written in ``scratch`` for the target and the reference
+    alike.
     """
     arg_map = dict(binding.arg_map)
     setup = [] if reference_run else [call.model_dump(mode="json") for call in oracle.setup]
@@ -824,7 +871,10 @@ async def _observe(
             else:
                 nonce = secrets.token_hex(16)
                 tail = argv[4:] if binding.symbol.startswith("-m ") else argv[3:]
-                launch = _cli_launch(python, harness, nonce, binding.symbol, proven)
+                workdir = ""
+                if case.files and scratch is not None:
+                    workdir = str(write_case_files(scratch, case.files))
+                launch = _cli_launch(python, harness, nonce, binding.symbol, proven, workdir)
                 outcome = await _cli_case(
                     _prepared(prepare, [*launch, *tail]),
                     case.stdin or "",
@@ -833,13 +883,21 @@ async def _observe(
                     nonce,
                 )
         else:
-            inputs, init = case.args, case.init
+            kind = oracle.call_kind.value
+            extra: dict[str, Any] = {}
             if reference_run:
-                inputs, init = (
-                    harness_module.named_inputs(inputs),
-                    harness_module.named_inputs(init),
+                # The reference takes the declared params as JSON data.
+                names, values = list(oracle.params), harness_module.named_inputs(case.args)
+                init = harness_module.named_inputs(case.init)
+                if oracle.receiver is not None:
+                    kind = CallKind.FUNCTION.value
+            else:
+                names, values = harness_module.call_inputs(
+                    {"params": oracle.params, "inputs": oracle.inputs}, case.args
                 )
-            args, kwargs = harness_module.split_args(list(oracle.params), arg_map, inputs)
+                init = case.init
+                extra = oracle.call_frame(case)
+            args, kwargs = harness_module.split_args(names, arg_map, values)
             nonce = secrets.token_hex(16)
             argv = [
                 python,
@@ -849,11 +907,17 @@ async def _observe(
                 harness,
                 "target",
                 nonce,
-                oracle.call_kind.value,
+                kind,
                 binding.symbol,
                 json.dumps(setup),
             ]
-            call = {"case_id": case.case_id, "args": args, "kwargs": kwargs, "init": init}
+            call = {
+                "case_id": case.case_id,
+                "args": args,
+                "kwargs": kwargs,
+                "init": init,
+                **extra,
+            }
             outcome = await _python_case(_prepared(prepare, argv), nonce, call, case_deadline)
         entry = dict(outcome.entry or {})
         if on_base:
@@ -1018,6 +1082,7 @@ async def run_oracle_check(
                 deadline,
                 on_base=on_base,
                 reference_run=reference_run,
+                scratch=scratch,
             )
         result: dict[str, Any] | None = None
         if _decided(resolve, on_base=on_base):

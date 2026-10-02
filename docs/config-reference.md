@@ -491,7 +491,7 @@ check is admitted only if it behaves as declared on the current tree. After the 
 the criteria it covers, before the session's terminal status is recorded; the
 existing verifier's verdict is kept as advisory for those criteria and decides
 the others. Edits the worker makes to test configuration inside the workspace
-(for example `pytest.ini`, `conftest.py`, or Django's `tests/test_sqlite.py`)
+(for example `pytest.ini`, `conftest.py`, or a test settings module)
 can make the existing verifier accept; the check package's oracle checks are
 unaffected, because they call the implementation through the product harness
 and do not read workspace test configuration (a model-written script check
@@ -528,13 +528,36 @@ project, including a classmethod. A case input that is an object rather than
 a JSON value is written as `{"$symbol": "package.module.Name"}` (at any depth
 in the arguments or a method's `init`); the harness imports it and passes the
 object. An oracle may declare `setup`, calls of callables defined in the
-project with JSON arguments (for Django, `django.conf.settings.configure`
-then `django.setup`), which the harness makes before it resolves the target.
-A setup call that fails, or an input that names nothing, leaves the base run
-indeterminate, never a reproduction failure. A returned set compares as the
-list of its items sorted by their JSON text. The reference check makes no
-setup call and gives the reference each object input as its dotted path.
-Command oracles take neither.
+project with JSON arguments (for example a library's `configure` function,
+then its plugin loader), which the harness makes before it resolves the
+target. A setup call that fails, or an input that names nothing, leaves the
+base run indeterminate, never a reproduction failure. A returned set
+compares as the list of its items sorted by their JSON text. The reference
+check makes no setup call and gives the reference each object input as its
+dotted path. Command oracles take neither.
+
+Built calls. A case's `args` are the JSON data of the oracle's declared
+`params`, and the reference takes exactly those. An oracle may declare how
+the target's call is built from them: `inputs` (the call's parameters, each
+a template: JSON, `{"$symbol": ...}`, `{"$param": "name"}`, or a call chain
+`{"$call": "pkg.Factory", "args": [...], "kwargs": {...}, "then": [read,
+...]}` that builds an object such as a fitted model), `receiver` (a method
+oracle's instance, built the same way and required to be an instance of the
+bound class), and `project` (reads applied to each returned value before it
+is compared: `{"attr"}`, `{"method", "args", "kwargs", "keep"}`, `{"item"}`,
+`{"each": [...]}`). A case may expect `no_raise`; it can fail a candidate,
+but its pass never verifies a criterion, since a target that returns
+anything passes it. A command case may carry `files`, which the controller
+writes into a fresh directory in the check's scratch directory (never the
+checkout copy) that becomes the command's working directory. An input, a
+receiver or a projection read that fails leaves the base run indeterminate
+and fails the case on a candidate. The reference check never builds
+`inputs` or a `receiver`, applies no projection (the reference returns the
+projected value); a command case's files are case data and are written for
+the reference too. A method oracle with a built receiver
+needs a function reference, otherwise the criterion is
+`reference_unavailable`. Each new field is frozen in `oracle.json` only when
+declared, so an oracle without one freezes the same data as before.
 
 What an oracle observation proves. The candidate's code runs inside each
 target process, so it can write the process's report itself (the frame

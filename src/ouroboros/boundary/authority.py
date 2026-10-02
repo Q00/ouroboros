@@ -632,7 +632,7 @@ def _binding_rejected_message(item: Any, package: Any) -> str:
     """Repair text for a declared entry point that was rejected (no oracle values)."""
     binding = item.binding or {}
     spec = next((o for o in package.oracles if o.check_id in item.check_ids), None)
-    params = ", ".join(spec.params) if spec is not None else ""
+    params = ", ".join(spec.call_params) if spec is not None else ""
     lines = [
         f"Your declared entry point for this criterion was rejected: {item.reason}.",
         f"Declared: {binding.get('call_kind')} {binding.get('symbol')}"
