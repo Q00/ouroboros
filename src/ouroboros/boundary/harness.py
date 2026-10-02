@@ -26,7 +26,7 @@ target <nonce> <call_kind> <symbol> <setup>
     (``receiver``; it must be an instance of the bound class). An input that
     does not resolve or build ends the process without a result frame
     (exit 3, a crash: indeterminate on the base, a failed case on a
-    candidate). A returned value is read through the case's projection
+    candidate). A returned value is read through the oracle's projection
     (``project``, a list of reads) before it is reported; a read that fails
     ends the process without a result frame too (exit 4).
     A returned ``set`` or ``frozenset`` is reported as the list of its items
