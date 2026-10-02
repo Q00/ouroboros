@@ -21,11 +21,14 @@ from ouroboros.boundary.binding import (
     CHECK_DIR,
     BindingError,
     CallKind,
+    is_dotted_symbol,
     parse_binding,
 )
+from ouroboros.boundary.harness import symbol_refs
 from ouroboros.boundary.oracle import (
     OracleCase,
     OracleSpec,
+    SetupCall,
     case_id_for,
     is_oracle_file,
 )
@@ -62,6 +65,7 @@ def build_oracle_spec(
     default_binding: Mapping[str, Any],
     cases: Sequence[Mapping[str, Any]],
     target_named_in_criterion: bool = False,
+    setup: Sequence[Mapping[str, Any]] = (),
 ) -> OracleSpec:
     """Validate one criterion's oracle data and freeze it.
 
@@ -71,7 +75,8 @@ def build_oracle_spec(
     ``c2``, ... in the given order); a ``case_id`` in ``cases`` is ignored,
     so no identifier the caller chose is frozen. ``target_named_in_criterion``
     is frozen too; the tier itself comes from the admission base run
-    (``OracleSpec.base_run_tier``).
+    (``OracleSpec.base_run_tier``). ``setup`` is the oracle's declared setup
+    calls (``{"symbol", "args", "kwargs"}``), frozen in order.
     """
     keys = seed_criterion_keys(seed)
     if not 0 <= criterion_index < len(keys):
@@ -94,6 +99,7 @@ def build_oracle_spec(
             OracleCase.model_validate({**dict(case), "case_id": case_id_for(position)})
             for position, case in enumerate(cases, start=1)
         )
+        calls = tuple(SetupCall.model_validate(dict(call)) for call in setup)
     except BindingError as exc:
         raise CheckPackageError(f"{check_id}: default binding: {exc.reason}") from exc
     except (ValidationError, ValueError, TypeError) as exc:
@@ -107,6 +113,7 @@ def build_oracle_spec(
             default_binding=binding,
             cases=parsed,
             target_named_in_criterion=target_named_in_criterion,
+            setup=calls,
         )
     except (ValidationError, ValueError) as exc:
         raise CheckPackageError(f"{check_id}: oracle does not match the schema: {exc}") from exc
@@ -189,6 +196,10 @@ class ReplyFailure(StrEnum):
     ORACLE_WITHOUT_HELD_OUT_CASE = "oracle_without_held_out_case"
     """Every oracle declares at least one held-out case (only those can verify a pass)."""
     TARGET_NAMED_NOT_BOOLEAN = "target_named_not_boolean"
+    SYMBOL_REF_INVALID = "symbol_ref_invalid"
+    """A ``{"$symbol": ...}`` input does not name a dotted import path."""
+    SETUP_INVALID = "setup_invalid"
+    """An oracle's ``setup`` is not a list of ``{"symbol", "args", "kwargs"}`` calls."""
     ORACLE_INVALID = "oracle_invalid"
     FILE_INVALID = "file_invalid"
     ARGV_INVALID = "argv_invalid"
@@ -254,6 +265,13 @@ def _entries(reply: Mapping[str, Any], section: str) -> list[dict[str, Any]]:
     return [dict(item) for item in raw]
 
 
+def _refs_valid(value: object) -> bool:
+    try:
+        return all(is_dotted_symbol(name) for name in symbol_refs(value))
+    except ValueError:
+        return False
+
+
 def _check_case(case: object) -> None:
     if not isinstance(case, Mapping):
         raise ReplyError(ReplyFailure.CASE_SHAPE)
@@ -265,6 +283,28 @@ def _check_case(case: object) -> None:
         and _optional_str(case.get("stdin")),
         ReplyFailure.CASE_SHAPE,
     )
+    _require(
+        _refs_valid([dict(case.get("args") or {}), dict(case.get("init") or {})]),
+        ReplyFailure.SYMBOL_REF_INVALID,
+    )
+
+
+def _check_setup(setup: object) -> None:
+    if not isinstance(setup, list):
+        raise ReplyError(ReplyFailure.SETUP_INVALID)
+    for call in setup:
+        _require(
+            isinstance(call, Mapping)
+            and set(call) <= {"symbol", "args", "kwargs"}
+            and is_dotted_symbol(call.get("symbol"))
+            and isinstance(call.get("args", []), list)
+            and isinstance(call.get("kwargs", {}), Mapping),
+            ReplyFailure.SETUP_INVALID,
+        )
+        _require(
+            _refs_valid([call.get("args", []), dict(call.get("kwargs", {}))]),
+            ReplyFailure.SYMBOL_REF_INVALID,
+        )
 
 
 def _check_oracle(entry: Mapping[str, Any]) -> None:
@@ -280,6 +320,7 @@ def _check_oracle(entry: Mapping[str, Any]) -> None:
         isinstance(entry.get("target_named_in_criterion"), bool),
         ReplyFailure.TARGET_NAMED_NOT_BOOLEAN,
     )
+    _check_setup(entry.get("setup", []))
     cases = entry.get("cases")
     if not isinstance(cases, list) or not cases:
         raise ReplyError(ReplyFailure.CASE_SHAPE)
@@ -411,6 +452,7 @@ def _oracle_from_entry(
             default_binding=dict(raw["default_binding"]),
             cases=list(raw["cases"]),
             target_named_in_criterion=raw["target_named_in_criterion"],
+            setup=list(raw.get("setup") or ()),
         )
     except CheckPackageError as exc:
         raise ReplyError(
