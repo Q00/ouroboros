@@ -523,6 +523,19 @@ has no reference that runs, is reported as unverified
 `reference_unavailable`). This catches a slip in a stated value; it does not
 catch a misreading of the criterion that the cases and the reference share.
 
+Library entry points. An oracle's target is any importable callable of the
+project, including a classmethod. A case input that is an object rather than
+a JSON value is written as `{"$symbol": "package.module.Name"}` (at any depth
+in the arguments or a method's `init`); the harness imports it and passes the
+object. An oracle may declare `setup`, calls of callables defined in the
+project with JSON arguments (for Django, `django.conf.settings.configure`
+then `django.setup`), which the harness makes before it resolves the target.
+A setup call that fails, or an input that names nothing, leaves the base run
+indeterminate, never a reproduction failure. A returned set compares as the
+list of its items sorted by their JSON text. The reference check makes no
+setup call and gives the reference each object input as its dotted path.
+Command oracles take neither.
+
 What an oracle observation proves. The candidate's code runs inside each
 target process, so it can write the process's report itself (the frame
 nonce is a parsing convention, not an authority boundary). A report is

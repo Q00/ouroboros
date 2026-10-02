@@ -34,9 +34,10 @@ depends on the frames.
 One oracle check runs as follows:
 
 1. **Target**, one process per case, in the project interpreter
-   (``<interpreter> -I -B -c <harness> target <nonce> <call_kind> <symbol>``)
-   with the checkout copy as cwd, in its own session and process group. It
-   imports and resolves the bound symbol and writes a ``resolved`` frame; only
+   (``<interpreter> -I -B -c <harness> target <nonce> <call_kind> <symbol>
+   <setup>``) with the checkout copy as cwd, in its own session and process
+   group. It makes the oracle's declared setup calls, imports and resolves
+   the bound symbol, and writes a ``resolved`` frame; only
    then does the controller send that case's inputs on stdin. It writes the
    observation as a ``result`` frame. Frames are JSON after a per-process
    random nonce on a pipe; every other line is ignored, and the target code's
@@ -794,14 +795,17 @@ async def _observe(
     deadline: float,
     *,
     on_base: bool,
+    reference_run: bool = False,
 ) -> tuple[str, str, dict[str, dict[str, Any]], bool]:
     """Run ``cases`` by ``deadline``; return ``(resolve, detail, observations, timed_out)``.
 
     Each case gets an equal share of the time left before ``deadline``
     (event loop time). Raises ``_Unavailable`` when the entry point refuses
-    a process.
+    a process. ``reference_run`` (the reference check) makes no setup call
+    and sends every symbol reference as its dotted path.
     """
     arg_map = dict(binding.arg_map)
+    setup = [] if reference_run else [call.model_dump(mode="json") for call in oracle.setup]
     observations: dict[str, dict[str, Any]] = {}
     loop = asyncio.get_running_loop()
     for position, case in enumerate(cases):
@@ -829,7 +833,13 @@ async def _observe(
                     nonce,
                 )
         else:
-            args, kwargs = harness_module.split_args(list(oracle.params), arg_map, case.args)
+            inputs, init = case.args, case.init
+            if reference_run:
+                inputs, init = (
+                    harness_module.named_inputs(inputs),
+                    harness_module.named_inputs(init),
+                )
+            args, kwargs = harness_module.split_args(list(oracle.params), arg_map, inputs)
             nonce = secrets.token_hex(16)
             argv = [
                 python,
@@ -841,8 +851,9 @@ async def _observe(
                 nonce,
                 oracle.call_kind.value,
                 binding.symbol,
+                json.dumps(setup),
             ]
-            call = {"case_id": case.case_id, "args": args, "kwargs": kwargs, "init": case.init}
+            call = {"case_id": case.case_id, "args": args, "kwargs": kwargs, "init": init}
             outcome = await _python_case(_prepared(prepare, argv), nonce, call, case_deadline)
         entry = dict(outcome.entry or {})
         if on_base:
@@ -941,6 +952,7 @@ async def run_oracle_check(
     scratch_parent: Path | None = None,
     writable_root: Path | None = None,
     include_held_out: bool = True,
+    reference_run: bool = False,
 ) -> OracleRun:
     """Run one oracle check on the checkout copy at ``cwd`` (see the module docstring).
 
@@ -952,6 +964,9 @@ async def run_oracle_check(
     allowlisted
     values, and a scratch directory in ``scratch_parent``. With
     ``include_held_out`` false the held-out cases are neither run nor judged.
+    ``reference_run`` is the reference check's run (``reference_check.py``):
+    the reference has no project, so no setup call is made and each symbol
+    reference in a case's inputs reaches it as its dotted path.
 
     Never raises: an unexpected controller error is an indeterminate check,
     never a verdict and never a reason to fall back to another verifier.
@@ -1002,6 +1017,7 @@ async def run_oracle_check(
                 pinned.path,
                 deadline,
                 on_base=on_base,
+                reference_run=reference_run,
             )
         result: dict[str, Any] | None = None
         if _decided(resolve, on_base=on_base):

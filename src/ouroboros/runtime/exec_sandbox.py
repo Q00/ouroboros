@@ -21,6 +21,20 @@ a check package exchanges frames over stdin and stdout). Under confinement:
   the ``NUL`` device at all, so a command that redirects to it fails).
   Everything else, including the live workspace, the user's home directory
   and the system temp directory, is read-only.
+- **Shared memory** (``ConfinedCommand.private_dev_shm``): on Linux, POSIX
+  shared memory and semaphores (``shm_open``, ``sem_open``, and so
+  ``multiprocessing`` locks, queues and ``SharedMemory``) are files in
+  ``/dev/shm``, at a path no environment variable redirects. Where an
+  unprivileged user and mount namespace works, the command gets a fresh
+  tmpfs of its own at ``/dev/shm`` (writable, isolated from the host's
+  ``/dev/shm`` and from every other command, gone when the command's
+  namespace ends); the host's ``/dev/shm`` is never writable. Where it does
+  not (a container under Docker's default seccomp profile), ``/dev/shm`` is
+  read-only like the rest, so a command that needs it fails, which fails
+  closed. On macOS these are kernel objects, not files: ``sandbox-exec``
+  leaves them available and cannot make their names private, so they are in
+  the user's IPC namespace (outside this boundary). An AppContainer has its
+  own named-object namespace, which is private already.
   Each root is claimed by identity: ``confine`` records its real path,
   device and inode, and the helper opens it without following a symlink and
   refuses to run the command unless it is still that directory (on Linux the
@@ -117,7 +131,12 @@ Backends:
   ``--network none``). The namespace state is never cached (only the
   ``unshare`` capability is), and the parent's choice is never the proof:
   the helper checks that its namespace has only ``lo`` immediately before
-  exec and runs nothing otherwise.
+  exec and runs nothing otherwise. Independently of the network plan, when
+  ``unshare --user --map-root-user --mount`` and a tmpfs mount inside it work
+  here (probed once, end to end), the helper also starts in a new mount
+  namespace and mounts the private ``/dev/shm`` (see the helper). Any new
+  user namespace maps the user to root inside it: the command sees uid 0 but
+  has no privilege over anything the user does not own.
 - **Windows**: an AppContainer, set up by the launcher
   ``_confine_windows.py``, which stays outside the container, starts the
   command inside it and waits for it (an AppContainer is applied when a
@@ -352,6 +371,8 @@ class ConfinedCommand:
     network_denied: bool
     isolates_process_environments: bool
     """Whether the command cannot read other processes' environments (Landlock, AppContainer)."""
+    private_dev_shm: bool = False
+    """Linux: whether the command gets its own writable tmpfs at ``/dev/shm``."""
 
 
 def _darwin_profile(root_count: int, *, deny_network: bool) -> str:
@@ -475,7 +496,7 @@ def _backend_argv(
             options += ["--read", path]
         launcher = (_interpreter(), "-I", "-S", "-B", str(_WINDOWS_LAUNCHER))
         return (*launcher, *options, *claims, "--", *argv)
-    helper = (_interpreter(), "-I", "-S", "-B", str(_CONFINE_HELPER))
+    helper = _helper_argv()
     if backend is SandboxBackend.SANDBOX_EXEC:
         executable = _trusted_launcher("sandbox-exec")
         if executable is None:  # pragma: no cover - the backend was probed with it
@@ -485,18 +506,31 @@ def _backend_argv(
             part for index, (path, _, _) in enumerate(roots) for part in ("-D", f"W{index}={path}")
         ]
         return (executable, "-p", profile, *params, "--", *helper, *claims, "--", *argv)
+    executable = _private_shm_unshare()
+    namespaces: tuple[str, ...] = ("--mount",) if executable else ()
+    flags: tuple[str, ...] = ("--private-shm",) if executable else ()
     if network is NetworkPlan.NEW_NAMESPACE:
         unshare = _unshare_prefix()
         if unshare is None:  # pragma: no cover - the plan was selected from it
             raise RuntimeError("unshare is not available")
+        executable = unshare[0]
+        namespaces += ("--net",)
         # A fresh namespace starts with ``lo`` down; bring it up so only
         # non-loopback traffic is denied.
-        prefix: tuple[str, ...] = (*unshare, *helper, "--loopback-up", "--require-loopback-only")
+        flags += ("--loopback-up", "--require-loopback-only")
     elif network is NetworkPlan.CURRENT_NAMESPACE:
-        prefix = (*helper, "--require-loopback-only")
-    else:
-        prefix = helper
-    return (*prefix, "--landlock", *claims, "--", *argv)
+        flags += ("--require-loopback-only",)
+    launcher = _unshare_argv(executable, *namespaces) if executable else ()
+    return (*launcher, *helper, *flags, "--landlock", *claims, "--", *argv)
+
+
+def _helper_argv() -> tuple[str, ...]:
+    return (_interpreter(), "-I", "-S", "-B", str(_CONFINE_HELPER))
+
+
+def _unshare_argv(executable: str, *namespaces: str) -> tuple[str, ...]:
+    """``unshare`` into a new user namespace (the user mapped to root) plus ``namespaces``."""
+    return (executable, "--user", "--map-root-user", *namespaces, "--")
 
 
 def _appcontainer_name() -> str:
@@ -752,7 +786,7 @@ def _unshare_prefix() -> tuple[str, ...] | None:
     executable = _trusted_launcher("unshare")
     if executable is None:
         return None
-    prefix = (executable, "--user", "--map-root-user", "--net", "--")
+    prefix = _unshare_argv(executable, "--net")
     try:
         result = subprocess.run(  # noqa: S603 - fixed argv, no shell
             [*prefix, _interpreter(), "-I", "-S", "-c", "pass"],
@@ -764,6 +798,54 @@ def _unshare_prefix() -> tuple[str, ...] | None:
     except (OSError, subprocess.SubprocessError):
         return None
     return prefix if result.returncode == 0 else None
+
+
+@functools.cache
+def _private_shm_unshare() -> str | None:
+    """The trusted ``unshare`` if a private ``/dev/shm`` works here; probed once.
+
+    Probed end to end with the very argv a command uses: a new user and mount
+    namespace, the helper mounting the tmpfs over ``/dev/shm``, and a file
+    created in it. Linux only; None wherever any step fails (no ``unshare``,
+    no unprivileged user namespaces, a seccomp or LSM policy denying them or
+    the mount, no ``/dev/shm``), and the command then runs without one.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    executable = _trusted_launcher("unshare")
+    if executable is None:
+        return None
+    root = tempfile.mkdtemp(prefix="ouroboros-shm-probe-")
+    try:
+        path, device, inode = _claim_root(os.path.realpath(root))
+        code = "import os; os.close(os.open('/dev/shm/probe', os.O_CREAT | os.O_WRONLY, 0o600))"
+        argv = (
+            *_unshare_argv(executable, "--mount"),
+            *_helper_argv(),
+            "--private-shm",
+            *("--root", path, str(device), str(inode)),
+            "--",
+            *(_interpreter(), "-I", "-S", "-c", code),
+        )
+        result = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            argv,
+            env=_bootstrap_environment({"PATH": os.defpath}),
+            capture_output=True,
+            timeout=_PROBE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    if result.returncode != 0:
+        log.info(
+            "exec_sandbox.private_shm_unavailable",
+            returncode=result.returncode,
+            stderr=result.stderr.decode("utf-8", errors="replace")[-500:],
+        )
+        return None
+    return executable
 
 
 def sandbox_unavailable_reason(
@@ -911,6 +993,7 @@ def confine(
         network_denied=network is not NetworkPlan.ALLOW,
         isolates_process_environments=backend
         in (SandboxBackend.LANDLOCK, SandboxBackend.APPCONTAINER),
+        private_dev_shm=backend is SandboxBackend.LANDLOCK and _private_shm_unshare() is not None,
     )
 
 
