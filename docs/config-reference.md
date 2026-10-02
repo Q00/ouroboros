@@ -553,9 +553,13 @@ runs the base checkout's code, so neither admission nor a failure depends on
 it.
 
 Admission is per check: a reproduction check that already passes on the
-current tree, or a preservation check that already fails on it, is excluded on
-its own (`repro_passes_on_base`, `preservation_fails_on_base`) and the rest of
-the package is admitted. A criterion keeps the package's authority only while
+current tree, a preservation check that already fails on it, or a check whose
+own run there decided nothing (it failed before its own assertion, timed out,
+could not start, or flooded its output) is excluded on its own
+(`repro_passes_on_base`, `preservation_fails_on_base`, `indeterminate_on_base`)
+and the rest of the package is admitted. A failure every check shares (the
+pinned interpreter or the sandbox unavailable, a changed file, a failed
+precondition) still leaves the whole package unadmitted. A criterion keeps the package's authority only while
 an admitted check covers it (for a bug-fix criterion, an admitted reproduction
 check). For the criteria left without an admitted check, one more constructor
 call, before the worker starts, asks for replacement checks and says why the
