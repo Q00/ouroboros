@@ -26,7 +26,9 @@ status once the worker has stopped:
   nothing; a held-out case's inputs reach the candidate only in the terminal
   verification, so a match means the candidate produced the rule's output
   for an input it had never seen. Every oracle carries at least one
-  held-out case for this reason (``oracle.OracleSpec``);
+  held-out case for this reason (``oracle.OracleSpec``). A ``no_raise``
+  case states no output, so a target that returns anything passes it: it
+  can fail a candidate, but its pass never verifies (``OracleCase.verifies``);
 - ``fail``: a linked check was violated; its counterexample is reported;
 - ``indeterminate``: a check could not be judged (timeout, launch failure,
   protected-byte mutation, no failure signature, untrusted verification), or
@@ -207,6 +209,18 @@ def _base_failing_held_out_passed(execution: CheckExecution, base_failing: froze
     )
 
 
+def _verifying(
+    package: CheckPackage, base_failing: Mapping[str, frozenset[str]]
+) -> dict[str, frozenset[str]]:
+    """``base_failing`` without the cases whose pass cannot verify (``no_raise``)."""
+    kept: dict[str, frozenset[str]] = {}
+    for check_id, case_ids in base_failing.items():
+        spec = package.oracle_for(check_id)
+        verifying = {case.case_id for case in spec.cases if case.verifies} if spec else set()
+        kept[check_id] = frozenset(case_ids & verifying)
+    return kept
+
+
 def rerunnable_checks(verification: CandidateVerification) -> tuple[str, ...]:
     """Checks whose indeterminate result one zero-model re-run may resolve (R3)."""
     return tuple(
@@ -283,7 +297,7 @@ def criterion_verdicts(
     roles = {check.check_id: check.role for check in package.checks}
     excluded: dict[str, str] = dict(admission.excluded_checks or {})
     lost = criteria_without_admitted_check(package, excluded)
-    base_failing = base_failing_held_out(admission.checks, excluded)
+    base_failing = _verifying(package, base_failing_held_out(admission.checks, excluded))
     verdicts: dict[str, CriterionVerdict] = {}
     for key, all_check_ids in linked.items():
         check_ids = [check_id for check_id in all_check_ids if check_id not in excluded]
