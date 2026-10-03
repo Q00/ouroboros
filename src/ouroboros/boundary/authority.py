@@ -30,12 +30,19 @@ While the worker runs (``CheckPackageGate``, installed as the executor's
   worker's code runs in while a later attempt could still use it, and a
   repair message never mentions held-out cases. A gate run is a repair
   signal, never a verified pass (``acceptance.criterion_verdicts`` needs a
-  passing held-out case).
+  passing held-out case);
+- an attempt of a criterion the package leaves undecided (uncovered, or
+  unverified for a reason the final verification cannot change) is sent back
+  the same way when an artifact check fails the workspace; the repair names
+  the failing tests only.
 
 After the worker stops (``CheckPackageAuthority.__call__``):
 
 1. ``verify_check_package`` records the final bindings, verifies the
-   finished workspace, and records verification and selection;
+   finished workspace, and records verification and selection; the artifact
+   checks (``boundary/base_regression.py``) then fail every criterion the
+   package left unverified or uncovered when the base's own tests regress or
+   a test the worker added fails;
 2. ``reconcile_acceptance`` decides every criterion (pass accepts, fail and
    indeterminate reject, a criterion the worker never attempted is not
    accepted; an unverified or uncovered criterion is decided
@@ -77,14 +84,22 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from ouroboros.boundary.acceptance import (
+    NO_HELD_OUT_CASE,
     AcceptanceReconciliation,
     CriterionVerdict,
     ExistingOutcome,
     Governor,
     LegacyNoEvidenceReason,
     PackageCriterionStatus,
+    artifact_verdict,
     criterion_verdicts,
     reconcile_acceptance,
+)
+from ouroboros.boundary.base_regression import (
+    ArtifactChecks,
+    ArtifactFinding,
+    apply_findings,
+    repair_message,
 )
 from ouroboros.boundary.binding import CheckTier, declared_entry_points, entry_points_request
 from ouroboros.boundary.binding_flow import (
@@ -94,12 +109,13 @@ from ouroboros.boundary.binding_flow import (
 )
 from ouroboros.boundary.events import ReconciliationPayload
 from ouroboros.boundary.ledger import BoundaryLedger
-from ouroboros.boundary.package import seed_criterion_keys, seed_digest
+from ouroboros.boundary.package import CheckRole, seed_criterion_keys, seed_digest
 from ouroboros.boundary.per_check import criteria_without_admitted_check
 from ouroboros.boundary.run_wiring import (
     BoundaryRunState,
     BoundaryVerdict,
     CheckPackageSettings,
+    Counterexample,
     _counterexamples,
     forget_live_state,
     repair_text,
@@ -125,6 +141,7 @@ PACKAGE_REJECTION_ERROR = "check_package: the finished workspace fails the froze
 PACKAGE_INDETERMINATE_ERROR = (
     "check_package: the frozen check package could not decide this criterion"
 )
+ARTIFACT_CHECK_ERROR = "check_package: the finished workspace fails a controller-run check"
 LEGACY_REJECTION_ERROR = "legacy verifier rejected this criterion"
 LEGACY_DECIDED_PREFIX = "legacy-decided"
 NO_BINDING = "no_binding"
@@ -398,6 +415,8 @@ def apply_reconciliation(parallel_result: Any, reconciliation: AcceptanceReconci
         ):
             if decision.legacy_decided:
                 error = legacy_decided_error(result, decision.reason)
+            elif decision.artifact_check is not None:
+                error = f"{ARTIFACT_CHECK_ERROR} ({decision.artifact_check.value})"
             elif decision.package_status is PackageCriterionStatus.FAIL:
                 error = PACKAGE_REJECTION_ERROR
             else:
@@ -450,6 +469,8 @@ class CheckPackageGate:
         # Attempts the legacy verifier failed on a criterion no admitted
         # check covers (it decides those criteria, retries included).
         self.legacy_failures = 0
+        # Attempts an artifact check sent back with its failing tests.
+        self.artifact_repairs = 0
         # One decision per attempt: settlement paths hand the same attempt to
         # the gate again; they get the stored decision, not a new verification.
         # An attempt is the whole result handed over (a cross-harness alternate
@@ -504,8 +525,10 @@ class CheckPackageGate:
             # No admitted check covers it (uncovered, or every check
             # excluded at admission): the legacy verifier decides
             # it, so its rejection fails the attempt and drives the retry,
-            # exactly as with the check package off.
-            return self._legacy_decides(result)
+            # exactly as with the check package off. An attempt it keeps is
+            # one the artifact checks may still send back.
+            decided = self._legacy_decides(result)
+            return decided if decided is not result else await self._artifact_repair(result)
         entries = authority.remember_declaration(key, _declared_from(result))
         assignments, results = await assign_tiers(
             package,
@@ -553,7 +576,7 @@ class CheckPackageGate:
             # The criterion needs a late binding and the worker declared none.
             # Ask once, declaration only, within the retry budget.
             if key in authority.binding_requested:
-                return result
+                return await self._artifact_repair(result)
             if not authority.repair_follows(retry_attempt):
                 authority.binding_budget_exhausted.add(key)
                 return result
@@ -569,6 +592,11 @@ class CheckPackageGate:
             # reason names no oracle value.
             return self._repair(result, _binding_rejected_message(item, package))
         if item.status is not PackageCriterionStatus.FAIL:
+            if item.status.is_unverified and item.reason != NO_HELD_OUT_CASE:
+                # Unverified for good (the final verification cannot change
+                # it, unlike a reproduction oracle the gate ran on visible
+                # cases only): the artifact checks may send it back.
+                return await self._artifact_repair(result)
             return result
         partial = BoundaryVerdict(
             verdict="fail",
@@ -584,6 +612,21 @@ class CheckPackageGate:
             },
         )
         message = repair_text(partial, key) or PACKAGE_REJECTION_ERROR
+        return self._repair(result, message)
+
+    async def _artifact_repair(self, result: Any) -> Any:
+        """Send the attempt back with the failing test names when an artifact check fails it.
+
+        Only for a criterion the package leaves undecided; the message names
+        the failing tests, never how they were selected.
+        """
+        checks = self._authority.artifact_checks
+        if checks is None:
+            return result
+        message = repair_message(await checks.findings(self._authority.candidate))
+        if message is None:
+            return result
+        self.artifact_repairs += 1
         return self._repair(result, message)
 
     @staticmethod
@@ -677,6 +720,19 @@ class CheckPackageAuthority:
         self.installed = False
         # One base run per late binding across repair attempts and the end.
         self.base_runs: dict[str, Any] = {}
+        # The controller-run artifact checks (``boundary/base_regression.py``),
+        # when the run contract turned them on; their final findings.
+        self.artifact_checks: ArtifactChecks | None = (
+            ArtifactChecks(
+                base=state.base_snapshot,
+                base_digest=state.admission.base_tree_digest if state.admission else None,
+                interpreter=state.interpreter,
+                timeout_seconds=state.contract.check_timeout_seconds,
+            )
+            if state.contract.base_regression
+            else None
+        )
+        self.artifact_findings: tuple[ArtifactFinding, ...] = ()
         # The worker's latest declared entry point per criterion. A later
         # attempt that declares nothing does not withdraw it: otherwise a
         # worker could turn a failing criterion into an unverified one by
@@ -863,6 +919,7 @@ class CheckPackageAuthority:
             verdict = _label_missing_bindings(
                 verdict, self.binding_requested, self.binding_budget_exhausted
             )
+            verdict = await self._with_artifact_checks(keys, verdict)
             # Without an admitted package ``verdict.verdicts`` is empty: every
             # criterion is uncovered and the legacy verifier decides it.
             reconciliation = reconcile_acceptance(
@@ -895,6 +952,44 @@ class CheckPackageAuthority:
                 error_type=type(exc).__name__,
             )
             return await self._undecided(keys, parallel_result, type(exc).__name__)
+
+    async def _with_artifact_checks(
+        self, keys: Sequence[str], verdict: BoundaryVerdict
+    ) -> BoundaryVerdict:
+        """Fail the criteria the package left undecided when an artifact check fails the candidate.
+
+        Runs after the package's own verification. A failing check is
+        reported as a preservation counterexample naming its failing tests.
+        """
+        if self.artifact_checks is None or verdict.package_id is None:
+            return verdict
+        self.artifact_findings = await self.artifact_checks.findings(self.candidate)
+        verdicts = apply_findings(verdict.verdicts, keys, self.artifact_findings)
+        rejecting = [finding for finding in self.artifact_findings if finding.rejects]
+        if not rejecting:
+            return verdict
+        overall = artifact_verdict(item.status for item in verdicts.values())
+        return replace(
+            verdict,
+            verdict=overall.value,
+            reasons=(*verdict.reasons, *(finding.reason for finding in rejecting)),
+            counterexamples=(
+                *verdict.counterexamples,
+                *(
+                    Counterexample(
+                        check_id=finding.check.value,
+                        role=CheckRole.PRESERVATION.value,
+                        reason=finding.reason,
+                        return_code=None,
+                        output_tail="\n".join(finding.failed),
+                    )
+                    for finding in rejecting
+                ),
+            ),
+            criteria={key: item.status for key, item in verdicts.items()},
+            verdicts=verdicts,
+            artifact_verdict=overall,
+        )
 
     async def _undecided(self, keys: tuple[str, ...], parallel_result: Any, error: str) -> Any:
         """Decide without the package: covered criteria undecided, the rest legacy-decided."""

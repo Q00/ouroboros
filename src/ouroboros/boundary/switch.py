@@ -26,6 +26,7 @@ from typing import Any
 
 import structlog
 
+from ouroboros.boundary.base_regression import BASE_REGRESSION_DEFAULT
 from ouroboros.boundary.run_wiring import CheckPackageSettings
 
 CHECK_PACKAGE_ENV = "OUROBOROS_CHECK_PACKAGE"
@@ -98,7 +99,8 @@ def resolve_check_package_settings(cli_value: bool | None = None) -> CheckPackag
     """Resolve the switch and the budgets for one run.
 
     Budgets always come from ``boundary`` in config (their defaults when the
-    config cannot be read).
+    config cannot be read), and so does ``base_regression`` (unset:
+    ``BASE_REGRESSION_DEFAULT``).
     """
     try:
         config = _load_boundary_config()
@@ -111,6 +113,11 @@ def resolve_check_package_settings(cli_value: bool | None = None) -> CheckPackag
         constructor_timeout_seconds=config.constructor_timeout_seconds,
         check_timeout_seconds=config.check_timeout_seconds,
         max_construction_attempts=config.max_construction_attempts,
+        base_regression=(
+            BASE_REGRESSION_DEFAULT
+            if config.base_regression is None
+            else config.base_regression == "on"
+        ),
     )
 
 

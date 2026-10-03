@@ -29,7 +29,9 @@ status once the worker has stopped:
   held-out case for this reason (``oracle.OracleSpec``). A ``no_raise``
   case states no output, so a target that returns anything passes it: it
   can fail a candidate, but its pass never verifies (``OracleCase.verifies``);
-- ``fail``: a linked check was violated; its counterexample is reported;
+- ``fail``: a linked check was violated; its counterexample is reported.
+  Also an artifact check's executed failure on a criterion the package left
+  unverified or uncovered (see below);
 - ``indeterminate``: a check could not be judged (timeout, launch failure,
   protected-byte mutation, no failure signature, untrusted verification), or
   a worker-declared binding was invalid (``binding_invalid:*``,
@@ -60,9 +62,24 @@ reason it has no admitted check, is decided by the legacy verifier instead:
 its rejection fails the criterion and the run (``governed_by: existing_verifier``,
 "legacy-decided"). Only a criterion for which the legacy verifier has no
 evidence either (``ExistingOutcome.no_evidence``: transcript unavailable,
-environment unverifiable, no verifier verdict) stays ``unverified`` and is
-accepted; the run then reports insufficient verification
-(``verification_coverage``).
+environment unverifiable, no verifier verdict, or worker-cited transcript
+calls of which none qualifies, ``NO_CALL_EVIDENCE``, which is no evidence and
+never fabrication) stays ``unverified`` and is accepted; the run then reports
+insufficient verification (``verification_coverage``).
+
+Artifact checks (``boundary/base_regression.py``, on unless
+``boundary.base_regression: off``). The controller also checks the whole
+candidate itself: the base tree's existing tests that pair with or import a
+changed module, restored to their base bytes and run on the base twice and on
+the candidate once, and each test file the worker added. An executed failure
+(a test that passed on both base runs fails on the candidate, or an added
+test file's run exits 1 with a failing test) fails every criterion the
+package left ``unverified`` or ``uncovered`` (``CriterionVerdict.artifact_check``)
+before the legacy rule applies, so the legacy verifier cannot accept it; a
+verified ``pass``, a package ``fail`` and an ``indeterminate`` criterion keep
+the package's verdict. A check with no observation (a timeout, a base on
+which the runner wrote no report, no selected file, a project runner it does
+not drive, a run the sandbox could not confine) decides nothing.
 
 Artifact verdict (precedence): ``fail`` if any criterion fails; else
 ``indeterminate`` if any is indeterminate; else ``pass`` if at least one

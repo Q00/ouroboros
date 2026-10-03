@@ -600,12 +600,25 @@ unavailable) is accepted as unverified; the run then prints an
 insufficient-verification warning, as it does when half or more of the
 criteria were not decided by the package.
 
+With an admitted package, the controller also runs two checks of the whole
+finished workspace (`base_regression`): the project's existing test files
+that pair with or import a changed module, restored to their original bytes
+and run with pytest on the original tree twice and on the finished workspace
+once, and each test file the worker added. A test that passed on both
+original runs and fails on the finished workspace, or an added test file
+whose run fails, fails every criterion the package could not verify; while
+the worker runs, the failing test names are sent back as a repair. A
+criterion the package verified keeps its verdict, and a check that observed
+nothing (a timeout, no matching test file, a project whose own test runner is
+not pytest) decides nothing.
+
 ```yaml
 boundary:
   check_package: off              # on | off; unset = on
   constructor_timeout_seconds: 600
   check_timeout_seconds: 120
   max_construction_attempts: 2
+  base_regression: on             # on | off; unset = on
 ```
 
 | Option | Type | Default | Description |
@@ -614,6 +627,7 @@ boundary:
 | `constructor_timeout_seconds` | `int` (30..3600) | `600` | Wall-clock budget of one constructor call. |
 | `check_timeout_seconds` | `int` (5..1800) | `120` | Per-check timeout during admission and verification. |
 | `max_construction_attempts` | `int` (1..5) | `2` | Package versions tried before the worker starts; a version that is not admitted is superseded by the next. The one replacement call for criteria left without an admitted check adds a version outside this budget. |
+| `base_regression` | `"on"` \| `"off"` \| unset | unset (on) | `off` turns off both whole-workspace checks (existing tests, and test files the worker added). Each test run uses `check_timeout_seconds`. Recorded on the run when it starts; a resumed run does not run these checks. A bare YAML `on`/`off` is accepted. |
 
 Checks are model-written Python scripts. They run on throwaway copies of the
 project, with the project's virtualenv interpreter when one is found (else

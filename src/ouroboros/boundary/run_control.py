@@ -505,6 +505,11 @@ class CheckPackageRun:
                 "Attempts the legacy verifier rejected on legacy-decided criteria: "
                 f"{self.authority.gate.legacy_failures}."
             )
+        if self.authority.gate.artifact_repairs:
+            lines.append(
+                "Repairs driven by failing existing or added tests: "
+                f"{self.authority.gate.artifact_repairs}."
+            )
         reconciliation = outcome.reconciliation
         if reconciliation is not None:
             from ouroboros.boundary.acceptance import render_reconciliation
