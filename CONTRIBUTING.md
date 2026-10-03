@@ -718,6 +718,8 @@ Changes under `src/ouroboros/orchestrator/` affect runtime behavior documentatio
 | `runtime_factory.py` | `docs/runtime-capability-matrix.md`, `docs/runtime-guides/claude-code.md`, `docs/runtime-guides/codex.md` — if a backend is added, removed, or changes its `NotImplementedError` status |
 | `adapter.py` (`ClaudeAgentAdapter`) | `docs/runtime-guides/claude-code.md` — permission modes, session flow |
 | `codex_cli_runtime.py` (`CodexCliRuntime`) | `docs/runtime-guides/codex.md` — permission modes, `--runtime codex` behavior |
+| `copilot_acp_runtime.py` (`CopilotAcpRuntime`) | `docs/runtime-guides/copilot-acp.md`, `docs/runtime-guides/copilot.md`, `docs/runtime-capability-matrix.md` — transport selection, streaming, permissions, fallback |
+| `runtime_message_projection.py` | `docs/architecture.md` — normalized progress, delta persistence and replay metadata |
 | `opencode_runtime.py` (`OpenCodeRuntime`) | `docs/runtime-capability-matrix.md`, `docs/runtime-guides/opencode.md` — permission modes, `--runtime opencode` behavior |
 | `runner.py` (`OrchestratorRunner`) | `docs/architecture.md` — orchestration lifecycle; `docs/getting-started.md` — session ID output, resume flow |
 | `parallel_executor.py` | `docs/cli-reference.md` — `--sequential` flag behavior; `docs/architecture.md` — parallel execution strategy |

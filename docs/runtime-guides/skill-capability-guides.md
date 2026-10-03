@@ -40,7 +40,7 @@ its rendered guide or a documented fallback.
 | OpenCode | Global `AGENTS.md` in the active OpenCode config directory | Installed by OpenCode setup for plugin and subprocess modes. |
 | Gemini | `~/.gemini/GEMINI.md` | Installed by Gemini setup as a managed section in the global Gemini memory file. |
 | Kiro | `~/.kiro/steering/ouroboros-skill-capability-guide.md` | Installed by Kiro setup as a global steering file. |
-| Copilot | `~/.copilot/ouroboros-instructions/AGENTS.md` | Installed by Copilot setup; Ouroboros Copilot runtime also injects that directory through `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`. |
+| Copilot | `~/.copilot/ouroboros-instructions/AGENTS.md` | Installed by Copilot setup; both CLI and experimental [ACP](copilot-acp.md) transports inject that directory through `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` and reuse existing skill interception. |
 | GJC | `<agent-dir>/rules/ouroboros-skill-capability-guide.md` | Installed by GJC setup as a setup-owned, renderer-generated capability artifact. |
 | Antigravity | No setup-owned capability artifact yet | Known gap: Antigravity (the `agy` binary, Google's Gemini CLI successor) can be selected as a runtime, but setup does not yet install a durable agy-owned instruction artifact. Use `render_backend_skill_capability_guide("antigravity")` when building Antigravity prompts until a stable artifact surface exists. |
 | Grok | No setup-owned capability artifact yet | Known gap: Grok Build (the `grok` binary) can be selected as a runtime, but setup does not yet install a durable grok-owned instruction artifact. Use `render_backend_skill_capability_guide("grok")` when building Grok prompts until a stable artifact surface exists. |

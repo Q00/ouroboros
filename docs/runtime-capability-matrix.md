@@ -69,6 +69,24 @@ These capabilities depend on the runtime backend's native features and execution
 
 ### Parameter handling (negotiation)
 
+#### Copilot transport comparison
+
+Both rows select backend `copilot`; set `orchestrator.copilot_transport` to choose
+the transport. The existing Copilot columns above describe the default CLI.
+
+| Transport | Invocation | Live runtime events | Tool restriction | Permissions | Native resume |
+|-----------|------------|---------------------|------------------|-------------|---------------|
+| `cli` (default) | `copilot -p` | No first-class ACP activity | Existing CLI policy / prompt guidance | Existing Copilot CLI mapping | No |
+| `acp` (experimental) | `copilot --acp --stdio` | Text deltas, tool starts/progress/results, permission audit, final result; persisted through existing events | Native exact envelope, including empty | One-shot ACP decisions; bypass capped to acceptEdits (`translated`) | No |
+
+ACP reuses skill dispatch, model/profile selection and translated system prompts.
+Its `structured_output=True` capability means structured runtime events, not a
+JSON output-schema flag. LLM-only calls still use `CopilotCliLLMAdapter`. See the
+[ACP guide](runtime-guides/copilot-acp.md) for opt-in configuration, bounded
+read-only fallback, authentication, and correlation limitations.
+
+#### Execution parameters
+
 Beyond the feature flags above, `RuntimeCapabilities` declares how each runtime honors the
 execution **parameters** Ouroboros passes to `execute_task` — `system_prompt`, the `tools`
 allow-list, and `permission_mode`. Each is one of:
