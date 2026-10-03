@@ -55,12 +55,26 @@ own runner is not pytest, a run the sandbox could not confine, or a changed
 module the run imported from outside its copy (an editable install of the
 live workspace, for example: the run would not test the copy's code).
 
-Every run is pytest started by the controller's bootstrap
-(``footprint.PYTEST_BOOTSTRAP``, which sets ``sys.path`` as ``python -m
-pytest`` does) with the run's pinned interpreter, on a throwaway copy,
-through the check execution entry point (``check_env.check_command``):
-confined by the execution sandbox, without network, under the run contract's
-per-check timeout. Its report and its record go to the run's scratch
+Any project, not only one pytest drives. Besides the Python test files
+above, a change selects the test files paired with its other sources by path
+(``target_commands.select_other_tests``: ``foo_test.go``, ``x.test.ts``,
+``FooTest.java``, ``tests/foo.rs``). Each selected file is a target run by a
+test command taken, as data, from the Seed's ``verify_command``, the
+constructor's declared ``test_command``, the worker's own test invocations or
+a built-in default, and used only once admitted on the base: it exits 0 on
+two base copies and fails when the target is replaced with unparseable bytes
+(``target_commands.judge_admission``). Its exit status decides per target
+(the floor: 0 on both base runs, nonzero on the candidate and again on a
+rerun), or its JUnit report per test when it writes one (``{report}``). A
+Python target without an admitted declared command takes the product's own
+pytest run, the JUnit tier's pytest instance (per-test results, the
+configuration hardening below, and the footprint exemption, which is Python
+only). A target nothing admitted observes is no observation. The pytest run
+is started by the controller's bootstrap (``footprint.PYTEST_BOOTSTRAP``,
+which sets ``sys.path`` as ``python -m pytest`` does). Every run uses the
+run's pinned interpreter, on a throwaway copy, through the check execution
+entry point (``check_env.check_command``): confined by the execution
+sandbox, without network, under the run contract's per-check timeout. Its report and its record go to the run's scratch
 directory, outside the copy. Per-test outcomes come from the runner's JUnit
 XML report, never from its console text. A report is written by code the
 candidate controls, so a forged report can only hide a failure; it can never
@@ -109,6 +123,21 @@ from ouroboros.boundary.footprint import (
     read_run_record,
     read_source,
     write_plan,
+)
+from ouroboros.boundary.target_commands import (
+    CANARY,
+    Admission,
+    AdmissionCache,
+    CommandRun,
+    CommandSource,
+    TargetCommand,
+    Tier,
+    changed_other_sources,
+    command_set,
+    default_commands,
+    is_paired_test,
+    judge_admission,
+    select_other_tests,
 )
 from ouroboros.boundary.tree import (
     UNREADABLE,
@@ -175,6 +204,7 @@ class ArtifactCheckOutcome(StrEnum):
     NO_SELECTED_FILES = "no_selected_files"
     """No base test file pairs with or imports a changed module, or no test file was added."""
     UNSUPPORTED_RUNNER = "unsupported_runner"
+    """No command can run the selected targets (none declared, none built in)."""
     NOT_A_TEST_RESULT = "not_a_test_result"
     """A worker test file whose run exited with neither 0 nor 1."""
     UNAVAILABLE = "unavailable"
@@ -183,6 +213,9 @@ class ArtifactCheckOutcome(StrEnum):
     """A changed module was imported from outside the run's copy: the run did not test it."""
     NOT_RUN = "not_run"
     """The check's mode is ``off``."""
+    NO_ADMITTED_COMMAND = "no_admitted_command"
+    """Commands exist for the selected targets, but none passed admission on the base
+    (``target_commands.judge_admission``): nothing observed the targets."""
 
 
 class ArtifactEffect(StrEnum):
@@ -761,9 +794,14 @@ class ArtifactChecks:
         timeout_seconds: int,
         run_regression: bool = True,
         run_worker_tests: bool = True,
+        seed_commands: Sequence[str] = (),
+        constructor_command: str | None = None,
     ) -> None:
         self._run_regression = run_regression
         self._run_worker_tests = run_worker_tests
+        self._seed_commands = tuple(seed_commands)
+        self._constructor_command = constructor_command
+        self._admissions = AdmissionCache()
         self._base = base
         self._base_digest = base_digest
         self._interpreter = interpreter
@@ -771,7 +809,9 @@ class ArtifactChecks:
         self._base_manifest: dict[str, str] | None = None
         self._base_runs: dict[tuple[str, tuple[str, ...]], _Base] = {}
         self._base_attempts: dict[tuple[str, tuple[str, ...]], int] = {}
-        self._findings: dict[str, tuple[ArtifactFinding, ArtifactFinding]] = {}
+        self._findings: dict[
+            tuple[str, tuple[str, ...]], tuple[ArtifactFinding, ArtifactFinding]
+        ] = {}
         self._changed: dict[str, ChangedCode] = {}
         self._lock = asyncio.Lock()
 
@@ -816,11 +856,16 @@ class ArtifactChecks:
                 )
                 if path.endswith(".py") and not is_test_path(path)
             ]
-            if any(
+            others = changed_other_sources(
+                (*changed_paths(base_manifest, manifest), *added_paths(base_manifest, manifest))
+            )
+            if others or any(
                 not _regular(manifest.get(path)) or not _regular(base_manifest.get(path, ""))
                 for path in touched
                 if path in manifest
             ):
+                # A changed source no Python footprint covers (another
+                # language, a link, an unreadable file) is outside every function.
                 self._changed[digest] = ChangedCode(outside_functions=True)
             else:
                 self._changed[digest] = await asyncio.to_thread(
@@ -832,47 +877,56 @@ class ArtifactChecks:
                 )
         return self._changed[digest]
 
-    async def findings(self, candidate: Path) -> tuple[ArtifactFinding, ArtifactFinding]:
-        """The base regression and worker-test findings for ``candidate`` as it is now."""
+    async def findings(
+        self, candidate: Path, transcript: Sequence[str] = ()
+    ) -> tuple[ArtifactFinding, ArtifactFinding]:
+        """The base regression and worker-test findings for ``candidate`` as it is now.
+
+        ``transcript`` holds the worker's recorded test invocations
+        (``target_commands.transcript_commands``), one source of commands.
+        """
         async with self._lock:
             try:
-                return await self._findings_for(candidate.resolve())
+                return await self._findings_for(candidate.resolve(), tuple(transcript))
             except Exception:  # noqa: BLE001 - an optional check never fails the decision
                 return _unavailable()
 
-    async def _findings_for(self, candidate: Path) -> tuple[ArtifactFinding, ArtifactFinding]:
+    async def _findings_for(
+        self, candidate: Path, transcript: tuple[str, ...]
+    ) -> tuple[ArtifactFinding, ArtifactFinding]:
         base = await asyncio.to_thread(self._pinned_base)
         if base is None:
             return _unavailable()
         manifest = await asyncio.to_thread(tree_manifest, candidate)
         digest = manifest_digest(manifest)
-        cached = self._findings.get(digest)
+        cached = self._findings.get((digest, transcript))
         if cached is not None:
             return cached
         assert self._base_manifest is not None
         if UNREADABLE in manifest.values():
             return _unavailable()
-        if _PROJECT_RUNNERS & set(self._base_manifest):
-            unsupported = ArtifactCheckOutcome.UNSUPPORTED_RUNNER
-            found = (
-                ArtifactFinding(ArtifactCheck.BASE_REGRESSION, unsupported),
-                ArtifactFinding(ArtifactCheck.WORKER_TESTS, unsupported),
+        changed = await self._changed_code(base, candidate, manifest)
+        not_run = ArtifactCheckOutcome.NOT_RUN
+        project_runner = bool(_PROJECT_RUNNERS & set(self._base_manifest))
+        if not self._run_worker_tests:
+            worker = ArtifactFinding(ArtifactCheck.WORKER_TESTS, not_run)
+        elif project_runner:
+            # The worker-test gate runs added files with pytest only.
+            worker = ArtifactFinding(
+                ArtifactCheck.WORKER_TESTS, ArtifactCheckOutcome.UNSUPPORTED_RUNNER
             )
         else:
-            changed = await self._changed_code(base, candidate, manifest)
-            not_run = ArtifactCheckOutcome.NOT_RUN
-            found = (
-                await self._regression(base, candidate, manifest, changed)
-                if self._run_regression
-                else ArtifactFinding(ArtifactCheck.BASE_REGRESSION, not_run),
-                await self._worker_tests(candidate, added_paths(self._base_manifest, manifest))
-                if self._run_worker_tests
-                else ArtifactFinding(ArtifactCheck.WORKER_TESTS, not_run),
-            )
+            worker = await self._worker_tests(candidate, added_paths(self._base_manifest, manifest))
+        found = (
+            await self._regression(base, candidate, manifest, changed, transcript)
+            if self._run_regression
+            else ArtifactFinding(ArtifactCheck.BASE_REGRESSION, not_run),
+            worker,
+        )
         if await asyncio.to_thread(tree_manifest, candidate) == manifest:
             # Kept only for the tree it observed: a workspace that changed
             # while the checks ran is checked again on its next call.
-            self._findings[digest] = found
+            self._findings[(digest, transcript)] = found
         return found
 
     def _pinned_base(self) -> Path | None:
@@ -892,17 +946,110 @@ class ArtifactChecks:
         candidate: Path,
         manifest: Mapping[str, str],
         changed: ChangedCode,
+        transcript: tuple[str, ...] = (),
     ) -> ArtifactFinding:
+        """Every selected target, through the product's pytest run or an admitted command.
+
+        A Python target takes an admitted declared command first (Seed,
+        constructor, transcript), then the product's pytest run (unless the
+        project has its own runner pytest cannot drive), then a built-in
+        command. Any other target takes an admitted command. A target nothing
+        admitted observes is no observation, never a decision.
+        """
         check = ArtifactCheck.BASE_REGRESSION
-        assert self._base_manifest is not None and self._base_digest is not None
-        paths = changed_paths(self._base_manifest, manifest)
-        selected = await asyncio.to_thread(select_tests, self._base_manifest, paths, base_root=base)
+        base_manifest = self._base_manifest
+        assert base_manifest is not None
+        paths = changed_paths(base_manifest, manifest)
+        python = await asyncio.to_thread(select_tests, base_manifest, paths, base_root=base)
+        others = select_other_tests(base_manifest, paths)
+        selected = tuple(sorted({*python, *others}))
         if not selected:
             return ArtifactFinding(check, ArtifactCheckOutcome.NO_SELECTED_FILES)
+        project_runner = bool(_PROJECT_RUNNERS & set(base_manifest))
+        commands = command_set(
+            seed_commands=self._seed_commands,
+            constructor_command=self._constructor_command,
+            transcript=transcript,
+            test_files={*base_test_files(base_manifest), *filter(is_paired_test, base_manifest)},
+            defaults=default_commands(
+                base_manifest,
+                lambda path: read_source(base / path),
+                python_targets=project_runner,
+            ),
+        )
+        admitted: dict[str, Admission] = {}
+        tried: set[str] = set()
+        for target in selected:
+            candidates = commands.for_target(target)
+            if target in python and not project_runner:
+                # The product's pytest run is the default for a Python target.
+                candidates = tuple(c for c in candidates if c.source is not CommandSource.DEFAULT)
+            if candidates:
+                tried.add(target)
+            for command in candidates:
+                admission = await self._admit(base, command, target)
+                if admission.admitted:
+                    admitted[target] = admission
+                    break
+        pytest_targets = () if project_runner else tuple(t for t in python if t not in admitted)
+        regressed: list[str] = []
+        footprints: dict[str, frozenset[FunctionKey]] = {}
+        unobserved: list[ArtifactCheckOutcome] = []
+        observed = False
+        if pytest_targets:
+            outcome, found, prints = await self._pytest_regression(
+                base, candidate, manifest, changed, pytest_targets, paths
+            )
+            if outcome is None:
+                observed = True
+                regressed.extend(found)
+                footprints.update(prints)
+            else:
+                unobserved.append(outcome)
+        for target, admission in sorted(admitted.items()):
+            outcome, found = await self._command_regression(
+                base, candidate, manifest, selected, target, admission
+            )
+            if outcome is None:
+                observed = True
+                regressed.extend(found)
+            else:
+                unobserved.append(outcome)
+        left = [t for t in selected if t not in admitted and t not in pytest_targets]
+        if left:
+            unobserved.append(
+                ArtifactCheckOutcome.NO_ADMITTED_COMMAND
+                if any(t in tried for t in left)
+                else ArtifactCheckOutcome.UNSUPPORTED_RUNNER
+            )
+        if regressed:
+            return ArtifactFinding(
+                check,
+                ArtifactCheckOutcome.REJECTED,
+                tuple(sorted(regressed)),
+                selected,
+                footprints,
+                changed=changed,
+            )
+        if observed or not unobserved:
+            return ArtifactFinding(check, ArtifactCheckOutcome.PASSED, selected=selected)
+        return ArtifactFinding(check, unobserved[0], selected=selected)
+
+    async def _pytest_regression(
+        self,
+        base: Path,
+        candidate: Path,
+        manifest: Mapping[str, str],
+        changed: ChangedCode,
+        selected: tuple[str, ...],
+        paths: Sequence[str],
+    ) -> tuple[ArtifactCheckOutcome | None, tuple[str, ...], dict[str, frozenset[FunctionKey]]]:
+        """The product's pytest run of ``selected``: ``(why unobserved, regressed, footprints)``."""
+        assert self._base_manifest is not None
         modules = tuple(dotted_module(path) for path in changed_sources(paths))
         side = await self._base_side(base, selected, modules)
         if side.outcome is not None:
-            return ArtifactFinding(check, side.outcome, selected=selected)
+            return side.outcome, (), {}
         watched = changed.functions if changed.functions and not changed.outside_functions else None
         restored = (*selected, *_conftests_above(selected, self._base_manifest))
         with tempfile.TemporaryDirectory(prefix="ouroboros-regression-") as work:
@@ -912,7 +1059,7 @@ class ArtifactChecks:
                 _prepare_candidate_copy, copy_root, base, self._base_manifest, manifest, restored
             )
             if not prepared:
-                return ArtifactFinding(check, ArtifactCheckOutcome.UNAVAILABLE, selected=selected)
+                return ArtifactCheckOutcome.UNAVAILABLE, (), {}
             config = controller_config(copy_root, Path(work))
             run = await _pytest(
                 copy_root,
@@ -926,10 +1073,9 @@ class ArtifactChecks:
             )
             failing = _unobserved(run)
             if failing is not None:
-                return ArtifactFinding(check, failing, selected=selected)
+                return failing, (), {}
             if run.record.imported_outside:
-                outcome = ArtifactCheckOutcome.IMPORTED_OUTSIDE_COPY
-                return ArtifactFinding(check, outcome, selected=selected)
+                return ArtifactCheckOutcome.IMPORTED_OUTSIDE_COPY, (), {}
             regressed = regressions(side.stable, run.statuses)
             # Each failing test once more, alone (the copy still holds the
             # base bytes): one that passes now is not a regression.
@@ -946,11 +1092,83 @@ class ArtifactChecks:
                 if _unobserved(rerun) is None and rerun.statuses is not None:
                     passed = {test for test, status in rerun.statuses.items() if status == _PASS}
                     regressed = tuple(test for test in regressed if test not in passed)
-        outcome = ArtifactCheckOutcome.REJECTED if regressed else ArtifactCheckOutcome.PASSED
         footprints = {
             test: run.record.footprints[test] for test in regressed if test in run.record.footprints
         }
-        return ArtifactFinding(check, outcome, regressed, selected, footprints, changed=changed)
+        return None, regressed, footprints
+
+    async def _admit(self, base: Path, command: TargetCommand, target: str) -> Admission:
+        """Admission of ``command`` for ``target`` on the base, cached per base digest."""
+        assert self._base_digest is not None
+        key = (self._base_digest, command.template, target)
+        cached = self._admissions.get(key)
+        if cached is not None:
+            return cached
+        runs = []
+        for canary in (False, False, True):
+            with tempfile.TemporaryDirectory(prefix="ouroboros-admission-") as work:
+                copy_root = Path(work) / "base"
+                await asyncio.to_thread(copy_checkout, base, copy_root)
+                if canary and not await asyncio.to_thread(_write_canary, copy_root, target):
+                    runs.append(CommandRun(None, unavailable=True))
+                    continue
+                runs.append(
+                    await _run_command(copy_root, command, target, self._interpreter, self._timeout)
+                )
+        admission = judge_admission(command, runs[:2], runs[2])
+        self._admissions.put(key, admission)
+        return admission
+
+    async def _command_regression(
+        self,
+        base: Path,
+        candidate: Path,
+        manifest: Mapping[str, str],
+        selected: tuple[str, ...],
+        target: str,
+        admission: Admission,
+    ) -> tuple[ArtifactCheckOutcome | None, tuple[str, ...]]:
+        """An admitted command's run of ``target`` on the candidate, rerun once when it fails.
+
+        On the exit tier a nonzero exit regresses the target (its id is the
+        target path); on the JUnit tier each stable base test that fails or
+        is missing regresses.
+        """
+        assert self._base_manifest is not None and admission.command is not None
+        restored = (*selected, *_conftests_above(selected, self._base_manifest))
+        with tempfile.TemporaryDirectory(prefix="ouroboros-regression-") as work:
+            copy_root = Path(work) / "candidate"
+            await asyncio.to_thread(copy_checkout, candidate, copy_root)
+            prepared = await asyncio.to_thread(
+                _prepare_candidate_copy, copy_root, base, self._base_manifest, manifest, restored
+            )
+            if not prepared:
+                return ArtifactCheckOutcome.UNAVAILABLE, ()
+            regressed: tuple[str, ...] = ()
+            for attempt in range(2):
+                run = await _run_command(
+                    copy_root, admission.command, target, self._interpreter, self._timeout
+                )
+                if not run.observed:
+                    if attempt == 0:
+                        return (
+                            ArtifactCheckOutcome.TIMEOUT
+                            if run.timed_out
+                            else ArtifactCheckOutcome.UNAVAILABLE
+                        ), ()
+                    break
+                if admission.tier is Tier.JUNIT:
+                    failing = tuple(
+                        test for test in admission.stable if (run.statuses or {}).get(test) != _PASS
+                    )
+                else:
+                    failing = (target,) if run.exit_code != 0 else ()
+                # A rerun keeps only what fails again.
+                regressed = failing if attempt == 0 else tuple(t for t in regressed if t in failing)
+                if not regressed:
+                    break
+                await asyncio.to_thread(restore_base_bytes, copy_root, base, restored)
+        return None, regressed
 
     async def _base_side(
         self, base: Path, selected: tuple[str, ...], modules: Sequence[str]
@@ -1024,6 +1242,63 @@ class ArtifactChecks:
             return ArtifactFinding(check, ArtifactCheckOutcome.REJECTED, tuple(failed), files)
         outcome = unobserved[0] if unobserved else ArtifactCheckOutcome.PASSED
         return ArtifactFinding(check, outcome, selected=files)
+
+
+async def _run_command(
+    root: Path,
+    command: TargetCommand,
+    target: str,
+    interpreter: CheckInterpreter,
+    timeout: int,
+) -> CommandRun:
+    """Run an admitted (or candidate for admission) command for ``target`` in ``root``.
+
+    Confined like every check process, without a shell; a report it writes
+    to ``{report}`` (in the scratch directory, outside the copy) is read for
+    per-test results. Its console output is never read.
+    """
+    root = root.resolve()
+    with check_scratch(root.parent) as scratch:
+        report = scratch / f"report-{secrets.token_hex(8)}.xml"
+        argv = command.argv(target, str(report))
+        if argv is None:
+            return CommandRun(None, unavailable=True)
+        prepared = check_command(
+            argv, cwd=root, writable_root=root, interpreter=interpreter, scratch=scratch
+        )
+        if isinstance(prepared, CheckUnavailable):
+            return CommandRun(None, unavailable=True)
+        completed = await _run_in_environment(prepared, timeout)
+        if completed.unavailable is not None or completed.output_overflow:
+            return CommandRun(None, unavailable=True)
+        if completed.launch_error is not None:
+            # The program does not exist here: not a command for this host.
+            return CommandRun(None, unavailable=True)
+        if completed.timed_out:
+            return CommandRun(completed.return_code, timed_out=True)
+        statuses = None
+        if command.writes_report:
+            try:
+                status = os.lstat(report)
+                if stat.S_ISREG(status.st_mode) and status.st_size <= _REPORT_LIMIT:
+                    statuses = parse_junit(report.read_bytes())
+            except OSError:
+                statuses = None
+        return CommandRun(completed.return_code, statuses)
+
+
+def _write_canary(copy_root: Path, target: str) -> bool:
+    """Replace ``target`` in a throwaway base copy with bytes no language parses."""
+    directory = _real_directory(copy_root, posixpath.dirname(target))
+    if directory is None:
+        return False
+    path = directory / posixpath.basename(target)
+    if os.path.lexists(path):
+        if stat.S_ISDIR(os.lstat(path).st_mode):
+            return False
+        os.unlink(path)
+    path.write_bytes(CANARY)
+    return True
 
 
 def _unobserved(run: _Run) -> ArtifactCheckOutcome | None:

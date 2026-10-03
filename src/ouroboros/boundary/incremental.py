@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any
 from ouroboros.boundary.constructor_session import disable_session_persistence
 from ouroboros.boundary.oracle_build import normalize_reply, reply_failure_reason
 from ouroboros.boundary.package import CheckPackageError
+from ouroboros.boundary.target_commands import declared_test_command
 
 if TYPE_CHECKING:
     from ouroboros.core.seed import Seed
@@ -46,6 +47,8 @@ class CriterionPiece:
     reason: str | None = None
     input_digest: str | None = None
     generator: str | None = None
+    test_command: str | None = None
+    """The test command template the reply declared (``target_commands``)."""
 
 
 def restrict_reply_to(reply: Mapping[str, Any], criteria: Collection[int]) -> dict[str, Any]:
@@ -213,7 +216,8 @@ async def construct_pieces(
                 generator=label,
             )
         try:
-            restricted = restrict_reply(normalize_reply(extract(reply)), number)
+            raw = extract(reply)
+            restricted = restrict_reply(normalize_reply(raw), number)
             validate(restricted)
             return CriterionPiece(
                 number,
@@ -221,6 +225,7 @@ async def construct_pieces(
                 reply=restricted,
                 input_digest=digest,
                 generator=label,
+                test_command=declared_test_command(raw),
             )
         except CheckPackageError as exc:
             return CriterionPiece(

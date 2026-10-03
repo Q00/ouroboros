@@ -586,6 +586,20 @@ verify, but only when a package was admitted; without one the worker is
 told once which tests regressed, and a regression left at the end is
 recorded while the criteria stay unverified (a test can legitimately pin
 behaviour the change is meant to alter, and nothing then adjudicates it).
+The existing tests need not be pytest tests. Test files paired with a
+changed Go, JavaScript or TypeScript, Java or Kotlin, or Rust source by name
+(`foo_test.go`, `x.test.ts`, `FooTest.java`, `tests/foo.rs`) are selected
+too, and each selected file is run by a test command: a criterion's
+`verify_command` that names it, the test command the check constructor may
+declare, the worker's own test runs, or a default the repository's files
+imply (Django's `tests/runtests.py`, SymPy's `bin/test`, `manage.py`,
+`package.json`'s `test` script, `go.mod`, `Cargo.toml`). A command is used
+for a file only after it passes twice on the original tree and fails when
+the file is replaced with unparseable bytes, which a command that does not
+really run the file cannot do; its exit status then decides for the whole
+file, or its JUnit report per test when it writes one. A file no command
+passes that check for is not observed.
+
 An added test file whose run fails, in `decide` mode, fails every criterion
 the package could not verify (every criterion, when no package was
 admitted). While the worker runs, the failing test names are sent back as a
