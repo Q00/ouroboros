@@ -759,3 +759,86 @@ async def test_run_control_installs_the_checks_without_an_admitted_package(
         )
         assert (runner.acceptance_authority is not None) is installed
         assert run.status == "construction_failed"
+
+
+async def _resume(store: Any, execution_id: str, seed: Any, repo: Path, parallel: Any) -> Any:
+    from ouroboros.boundary.resume import ResumedCheckPackageAuthority, load_resumed_boundary
+
+    boundary = await load_resumed_boundary(store, execution_id)
+    if boundary is None:
+        return None, None
+    resumed = ResumedCheckPackageAuthority(boundary, event_store=store, candidate_checkout=repo)
+    return resumed, await resumed(seed=seed, execution_id=execution_id, parallel_result=parallel)
+
+
+async def _never_run(*_args: Any, **_kwargs: Any) -> Any:
+    raise AssertionError("a resumed run never runs the artifact checks again")
+
+
+async def test_a_resume_replays_the_recorded_fails_from_the_journal(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    criteria = ("add(2, 3) returns 5", "the docs describe add")
+    seed, authority = await _calc_authority(store, tmp_path, monkeypatch, criteria=criteria)
+    _result, parallel = _succeeded(2)
+    await authority(seed=seed, execution_id="exec_regression", parallel_result=parallel)
+    monkeypatch.setattr(br, "_pytest", _never_run)
+
+    resumed, decided = await _resume(store, "exec_regression", seed, authority.candidate, parallel)
+
+    # Covered: undecided without the held-out cases; uncovered: the recorded fail replays.
+    covered, uncovered = resumed.outcome.reconciliation.decisions
+    assert covered.package_status is PackageCriterionStatus.INDETERMINATE
+    assert covered.artifact_check is None
+    assert uncovered.package_status is PackageCriterionStatus.FAIL
+    assert uncovered.artifact_check is ArtifactCheck.BASE_REGRESSION
+    assert not decided.all_succeeded
+
+
+async def test_a_resume_with_no_admitted_package_replays_the_recorded_fails(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ouroboros.boundary.events import BOUNDARY_AGGREGATE_TYPE
+    from ouroboros.boundary.resume import NO_ADMITTED_PACKAGE
+
+    seed, authority = await _calc_authority(store, tmp_path, monkeypatch, constructor=_no_package())
+    _result, parallel = _succeeded()
+    await authority(seed=seed, execution_id="exec_regression", parallel_result=parallel)
+    recorded = len(await store.replay(BOUNDARY_AGGREGATE_TYPE, authority.state.boundary_id))
+    monkeypatch.setattr(br, "_pytest", _never_run)
+
+    resumed, decided = await _resume(store, "exec_regression", seed, authority.candidate, parallel)
+
+    assert resumed.boundary.reason == NO_ADMITTED_PACKAGE
+    (decision,) = resumed.outcome.reconciliation.decisions
+    assert decision.artifact_check is ArtifactCheck.BASE_REGRESSION and not decided.all_succeeded
+    # The live decision already journaled the fail: the resume writes nothing more.
+    events = await store.replay(BOUNDARY_AGGREGATE_TYPE, authority.state.boundary_id)
+    assert len(events) == recorded
+
+
+async def test_a_journal_without_recorded_fails_resumes_as_before(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ouroboros.boundary.resume import load_resumed_boundary
+
+    monkeypatch.setattr(br, "_pytest", _never_run)
+    # No package and nothing recorded (an old journal, or checks that observed
+    # nothing): no resumed authority, the legacy verifier decides as before.
+    await _calc_authority(store, tmp_path / "a", monkeypatch, constructor=_no_package())
+    assert await load_resumed_boundary(store, "exec_regression") is None
+
+    # A package, and the controller died before its decision was journaled:
+    # nothing to replay, so the uncovered criterion is the legacy verifier's.
+    criteria = ("add(2, 3) returns 5", "the docs describe add")
+    seed, authority = await _calc_authority(
+        store, tmp_path / "b", monkeypatch, criteria=criteria, execution_id="exec_old"
+    )
+    _result, parallel = _succeeded(2)
+
+    resumed, _decided = await _resume(store, "exec_old", seed, authority.candidate, parallel)
+
+    assert resumed.boundary.recorded_artifact_checks == ()
+    covered, uncovered = resumed.outcome.reconciliation.decisions
+    assert covered.artifact_check is None and covered.reason == "script_check_advisory"
+    assert uncovered.artifact_check is None and uncovered.accepted

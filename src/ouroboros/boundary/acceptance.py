@@ -81,7 +81,8 @@ the package's verdict. A check with no observation (a timeout, a base on
 which the runner wrote no report, no selected file, a project runner it does
 not drive, a run the sandbox could not confine) decides nothing. They run
 with no admitted package too: every criterion is then uncovered, so a failure
-fails them all, recorded on the version sealed without a package.
+fails them all, recorded on the version sealed without a package; a resumed
+run replays the recorded fails and never runs the checks again.
 
 Artifact verdict (precedence): ``fail`` if any criterion fails; else
 ``indeterminate`` if any is indeterminate; else ``pass`` if at least one

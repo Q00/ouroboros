@@ -46,6 +46,7 @@ from ouroboros.boundary.base_regression import report_artifact_checks
 from ouroboros.boundary.ledger import BoundaryLedger, BoundaryOrderError
 from ouroboros.boundary.no_evidence import report_no_evidence
 from ouroboros.boundary.resume import (
+    NO_ADMITTED_PACKAGE,
     ResumedBoundary,
     ResumedCheckPackageAuthority,
     load_resumed_boundary,
@@ -358,6 +359,11 @@ class CheckPackageRun:
                 "Check package: resumed run whose boundary records are missing "
                 f"({boundary.reason}); every criterion is undecided."
             ]
+        if boundary.reason == NO_ADMITTED_PACKAGE:
+            return [
+                "Check package: resumed run with no admitted package; the artifact-check "
+                "fails the run recorded are replayed, the legacy verifier decides the rest."
+            ]
         if boundary.source == "memory":
             return [
                 "Check package: resumed run; the package decision is recomputed on the "
@@ -465,7 +471,10 @@ class CheckPackageRun:
         """``check_package_status`` of the outcome summary (``outcome_meta``)."""
         if self.resumed is not None:
             # Only a run whose worker was bound to an admitted package resumes
-            # with a package decision.
+            # with a package decision; one bound to none resumes only to replay
+            # its recorded artifact-check fails.
+            if self.resumed.boundary.reason == NO_ADMITTED_PACKAGE:
+                return "construction_failed"
             return "admitted"
         if not self.enabled or not self.attempted:
             return "not_run"
