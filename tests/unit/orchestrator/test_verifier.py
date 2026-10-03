@@ -168,6 +168,21 @@ class TestVerifierVerdict:
         assert verdict.status is VerifierStatus.UNAVAILABLE
         assert verdict.retry_admission is RetryAdmission.ACCEPT
 
+    def test_cited_evidence_withheld_defaults_to_unavailable_accept(self) -> None:
+        verdict = VerifierVerdict(
+            passed=False,
+            reasons=("no_evidence: cited_evidence_withheld: no proven citation",),
+            failure_class="CITED_EVIDENCE_WITHHELD",
+            decided_by="call_citations",
+        )
+
+        assert verdict.status is VerifierStatus.UNAVAILABLE
+        assert verdict.retry_admission is RetryAdmission.ACCEPT
+
+    def test_decided_by_is_a_closed_vocabulary(self) -> None:
+        with pytest.raises(ValueError, match="evidence path"):
+            VerifierVerdict(passed=True, decided_by="worker_said_so")
+
     @pytest.mark.parametrize(
         ("failure_class", "status", "retry_admission"),
         [

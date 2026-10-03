@@ -132,7 +132,12 @@ def build_post_block(profile: ExecutionProfile) -> str:
         "tests_passed, copy the exact successful test command from commands_run; "
         "never use a test ID, a prose label such as 'manual verification', or a "
         "command you intended but did not run. If the required command has not "
-        "run successfully, run it before emitting the evidence record.\n\n"
+        "run successfully, run it before emitting the evidence record. Run each "
+        "check as its own shell call (one command per call), keep any script you "
+        "run as a check in the workspace, and list under tests_passed only a "
+        "command whose latest run passed. If the controller then shows you its "
+        "own numbered record of your shell calls, cite this evidence by call "
+        "number.\n\n"
         "If a required precondition is unavailable, emit this typed "
         "terminal blocker shape instead of prose or partial evidence: "
         '{"status":"blocked","blocker":{"code":"<one of: '

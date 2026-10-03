@@ -97,15 +97,28 @@ _VALID_FAILURE_CLASSES: frozenset[str] = frozenset(
         # module, so the vocabulary cannot be derived from the enum here.
         "TRANSCRIPT_MISSING_INFRASTRUCTURE",
         "SCRIPT_ABSENT_FROM_ARTIFACT",
+        "CITED_EVIDENCE_WITHHELD",
     }
 )
 
 # Failure classes of a verifier that had no evidence to judge, not a
-# rejection: the transcript was lost, or every unproven claim is a recorded
-# run that cannot be replayed because its script left the workspace.
+# rejection: the transcript was lost, every unproven claim is a recorded run
+# that cannot be replayed because its script left the workspace, or no call
+# the worker cited by number could be proven (and none was fabricated).
 _UNAVAILABLE_FAILURE_CLASSES: frozenset[str] = frozenset(
-    {"TRANSCRIPT_MISSING_INFRASTRUCTURE", "SCRIPT_ABSENT_FROM_ARTIFACT"}
+    {
+        "TRANSCRIPT_MISSING_INFRASTRUCTURE",
+        "SCRIPT_ABSENT_FROM_ARTIFACT",
+        "CITED_EVIDENCE_WITHHELD",
+    }
 )
+
+# Which evidence path decided a verdict (``VerifierVerdict.decided_by``): the
+# worker cited the controller's own recorded calls by number in the evidence
+# turn, or (records produced without an evidence turn) the worker's command
+# strings were matched against the transcript.
+EVIDENCE_PATH_CITATIONS = "call_citations"
+EVIDENCE_PATH_STRINGS = "command_strings"
 
 
 class VerifierStatus(StrEnum):
@@ -152,6 +165,11 @@ class VerifierVerdict:
             pass rests on the other, proven claims, never on these.
         retry_admission: Machine-readable next-action admission. Defaults to
             ACCEPT for passes and the H7 recovery policy for failures.
+        decided_by: The evidence path that decided the verdict
+            (``EVIDENCE_PATH_CITATIONS``); empty for the command-string path.
+        withheld: Cited calls that proved nothing and are not fabrication,
+            each as ``withheld: <field>: [<number>] <reason>``. Recorded on a
+            pass as well: a pass rests on the proven citations only.
     """
 
     passed: bool
@@ -161,6 +179,8 @@ class VerifierVerdict:
     evidence_used: tuple[str, ...] = ()
     retry_admission: RetryAdmission | str | None = None
     not_replayed: tuple[str, ...] = ()
+    decided_by: str = ""
+    withheld: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         status = _normalize_verifier_status(
@@ -214,8 +234,8 @@ class VerifierVerdict:
         )
         if unavailable_claimed and not unavailable_valid:
             raise VerifierContractError(
-                "UNAVAILABLE requires TRANSCRIPT_MISSING_INFRASTRUCTURE or "
-                "SCRIPT_ABSENT_FROM_ARTIFACT, and ACCEPT"
+                "UNAVAILABLE requires TRANSCRIPT_MISSING_INFRASTRUCTURE, "
+                "SCRIPT_ABSENT_FROM_ARTIFACT or CITED_EVIDENCE_WITHHELD, and ACCEPT"
             )
         if self.passed and status is not VerifierStatus.PASS:
             msg = "VerifierVerdict(passed=True) must have status PASS"
@@ -237,6 +257,10 @@ class VerifierVerdict:
         object.__setattr__(self, "retry_admission", retry_admission)
         object.__setattr__(self, "evidence_used", _normalize_evidence_used(self.evidence_used))
         object.__setattr__(self, "not_replayed", _normalize_evidence_used(self.not_replayed))
+        object.__setattr__(self, "withheld", _normalize_evidence_used(self.withheld))
+        if self.decided_by not in {"", EVIDENCE_PATH_CITATIONS, EVIDENCE_PATH_STRINGS}:
+            msg = f"VerifierVerdict.decided_by={self.decided_by!r} is not a known evidence path"
+            raise VerifierContractError(msg)
 
 
 def _normalize_verifier_status(

@@ -208,8 +208,14 @@ class CriterionDecisionRecord(_Payload):
     when that verifier rejected the attempt, and it never accepts a criterion
     the existing verifier rejected. ``False`` for every status but ``pass``.
     """
+    accepted_by: str | None = None
+    """What an accepted criterion rests on (``acceptance.AcceptedBy``); absent
+    on records written before it existed, ``None`` when not accepted."""
 
 
+_ACCEPTED_BY = frozenset(
+    {"check_package", "transcript_evidence", "command_strings", "verify_command", "no_evidence"}
+)
 _DECISION_STATUSES = frozenset({"pass", "fail", "indeterminate", "unverified", "uncovered"})
 _GOVERNORS = frozenset({"check_package", "execution", "existing_verifier"})
 _PACKAGE_ACCEPTS = frozenset({"pass", "unverified", "uncovered"})
@@ -290,6 +296,10 @@ class ReconciliationPayload(_Payload):
                     raise ValueError("the existing verifier decides only what the package did not")
             if item.accepted != expected:
                 raise ValueError("a criterion's acceptance disagrees with what decided it")
+            if item.accepted_by is not None and (
+                item.accepted_by not in _ACCEPTED_BY or not item.accepted
+            ):
+                raise ValueError("accepted_by names an unknown basis or a rejected criterion")
             if self.undecided_reason and status not in _UNDECIDED_STATUSES:
                 raise ValueError("an undecided decision carries only indeterminate or uncovered")
         if self.run_accepted != (bool(self.criteria) and all(i.accepted for i in self.criteria)):

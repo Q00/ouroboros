@@ -129,6 +129,12 @@ class EvidenceRecord:
 
     data: dict[str, Any] = field(default_factory=dict)
     source: str = ""
+    cited: Any = field(default=None, compare=False)
+    """The evidence turn's citations (``evidence.cited_evidence.CitedEvidence``).
+
+    Set only by the controller after the evidence turn, never parsed from the
+    worker's JSON, so a worker cannot supply it. None for a record produced
+    without an evidence turn (the command-string path decides it)."""
 
     def get(self, name: str, default: Any = None) -> Any:
         return self.data.get(name, default)

@@ -77,6 +77,7 @@ _FAILURE_CLASS_VALUES = frozenset(
         "blocked",
         "transcript_missing_infrastructure",
         "script_absent_from_artifact",
+        "cited_evidence_withheld",
     }
 )
 SWITCH_TEXT = (

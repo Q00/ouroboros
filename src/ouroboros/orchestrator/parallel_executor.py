@@ -294,6 +294,10 @@ from ouroboros.orchestrator.evidence.typed_evidence import (  # noqa: F401
     _typed_evidence_is_usable_for_sibling_reconciliation,
     _typed_file_evidence_proves_current_existence,
 )
+from ouroboros.orchestrator.evidence.typed_evidence_event import (
+    typed_evidence_event_details,
+    verifier_rejection_log_fields,
+)
 from ouroboros.orchestrator.evidence.verification import (
     _verify_atomic_evidence_against_runtime_messages,
 )
@@ -304,6 +308,10 @@ from ouroboros.orchestrator.evidence_schema import (
     ValidationResult,
     extract_evidence,
     validate_evidence,
+)
+from ouroboros.orchestrator.evidence_turn_dispatch import (
+    EvidenceTurnBoundary,
+    run_evidence_turn,
 )
 from ouroboros.orchestrator.execution_authority import (
     ExecutionAuthorityContract,
@@ -9081,10 +9089,41 @@ Respond with either ATOMIC or the structured JSON object only.
                         dispatch_state.success = primary_turn.success
                         dispatch_state.final_message = primary_turn.final_message
 
-                runtime_handle = dispatch_state.runtime_handle
-                ac_session_id = dispatch_state.ac_session_id
-                final_message = dispatch_state.final_message
-                success = dispatch_state.success
+            evidence_turn = await run_evidence_turn(
+                self,
+                dispatch_state,
+                EvidenceTurnBoundary(
+                    active_dispatch_id,
+                    capsule.fingerprint,
+                    request_authority_digest,
+                    runtime_identity,
+                    execution_context_id,
+                    session_id,
+                    _stream_provider_call,
+                    _seal_dispatch,
+                    lambda handle: self._remember_ac_runtime_handle(
+                        ac_index,
+                        handle,
+                        execution_context_id=execution_context_id,
+                        is_sub_ac=is_sub_ac,
+                        parent_ac_index=parent_ac_index,
+                        sub_ac_index=sub_ac_index,
+                        node_identity=node_identity,
+                        retry_attempt=retry_attempt,
+                    ),
+                    _BatchInterruptedForRecoverablePause,
+                ),
+                ac_content=ac_content,
+                spec=ac_spec,
+                tools=tools,
+            )
+            active_dispatch_id = evidence_turn.active_dispatch_id
+            if evidence_turn.route_drift:
+                return await _terminalize_route_drift(active_dispatch_id)
+            runtime_handle = dispatch_state.runtime_handle
+            ac_session_id = dispatch_state.ac_session_id
+            final_message = dispatch_state.final_message
+            success = dispatch_state.success
 
             self._remember_ac_runtime_handle(
                 ac_index,
@@ -9146,6 +9185,8 @@ Respond with either ATOMIC or the structured JSON object only.
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
             )
+            if typed_evidence is not None and evidence_turn.cited is not None:
+                typed_evidence = replace(typed_evidence, cited=evidence_turn.cited)
             verifier_verdict = _invoke_execution_authority_entry(
                 self,
                 _FOUNDATION_A_ENTRY_RUN_ATOMIC_VERIFIER_PASS,
@@ -9219,30 +9260,8 @@ Respond with either ATOMIC or the structured JSON object only.
                     ac_index=ac_index,
                     depth=depth,
                     reason=fat_harness_error,
-                    typed_evidence_present=typed_evidence is not None,
-                    typed_evidence_valid=(
-                        typed_validation.ok if typed_validation is not None else False
-                    ),
-                    verifier_ran=verifier_verdict is not None,
-                    verifier_passed=(
-                        verifier_verdict.passed if verifier_verdict is not None else False
-                    ),
-                    verifier_reasons=(
-                        list(verifier_verdict.reasons) if verifier_verdict is not None else []
-                    ),
-                    verifier_failure_class=(
-                        verifier_verdict.failure_class if verifier_verdict is not None else None
-                    ),
-                    verifier_status=(
-                        verifier_verdict.status.value if verifier_verdict is not None else None
-                    ),
-                    retry_admission=(
-                        verifier_verdict.retry_admission.value
-                        if verifier_verdict is not None
-                        else None
-                    ),
-                    verifier_evidence_used=(
-                        list(verifier_verdict.evidence_used) if verifier_verdict is not None else []
+                    **verifier_rejection_log_fields(
+                        typed_evidence, typed_validation, verifier_verdict
                     ),
                 )
                 result_final_message = (
@@ -12933,40 +12952,18 @@ Respond with either ATOMIC or the structured JSON object only.
             "verifier_ran": verifier_verdict is not None,
             "verifier_passed": verifier_verdict.passed if verifier_verdict is not None else False,
         }
-        if verifier_verdict is not None:
-            data["verifier_reasons"] = list(verifier_verdict.reasons)
-            data["verifier_failure_class"] = verifier_verdict.failure_class
-            data["verifier_status"] = verifier_verdict.status.value
-            data["retry_admission"] = verifier_verdict.retry_admission.value
-            data["verifier_evidence_used"] = list(verifier_verdict.evidence_used)
-            data["verifier_not_replayed"] = list(verifier_verdict.not_replayed)
-        if typed_evidence is not None:
-            data["typed_evidence_fields"] = sorted(typed_evidence.data)
-            data["ignored_out_of_scope_evidence_fields"] = list(
-                _out_of_scope_evidence_fields_for_ac(
-                    self._execution_profile,
-                    ac_content,
-                    typed_evidence,
-                    has_success_contract=has_success_contract,
-                    has_expected_artifacts=has_expected_artifacts,
-                    verify_gate_active=verify_gate_active,
-                )
-            )
-            data["ignored_out_of_scope_evidence"] = _out_of_scope_evidence_values_for_ac(
+        data.update(
+            typed_evidence_event_details(
                 self._execution_profile,
                 ac_content,
-                typed_evidence,
+                typed_evidence=typed_evidence,
+                typed_validation=typed_validation,
+                verifier_verdict=verifier_verdict,
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
             )
-        if typed_validation is not None:
-            data["missing_fields"] = list(typed_validation.missing_fields)
-            data["rejected_by"] = list(typed_validation.rejected_by)
-            data["blocker"] = (
-                typed_validation.blocker.summary() if typed_validation.blocker is not None else None
-            )
-
+        )
         await self._event_emitter.emit_atomic_typed_evidence_observed(
             runtime_identity=runtime_identity,
             data=data,

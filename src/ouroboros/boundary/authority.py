@@ -78,6 +78,7 @@ import structlog
 
 from ouroboros.boundary.acceptance import (
     AcceptanceReconciliation,
+    AcceptedBy,
     CriterionVerdict,
     ExistingOutcome,
     Governor,
@@ -113,6 +114,7 @@ from ouroboros.orchestrator.parallel_executor_models import (
     failed_by_the_package_gate_alone,
     legacy_owned,
 )
+from ouroboros.orchestrator.verifier import EVIDENCE_PATH_CITATIONS
 
 if TYPE_CHECKING:
     from ouroboros.core.seed import Seed
@@ -249,6 +251,32 @@ def _legacy_evidence(result: Any) -> bool:
     return bool(subs) and all(_legacy_evidence(sub) for sub in subs)
 
 
+def _legacy_evidence_path(result: Any) -> AcceptedBy | None:
+    """Which evidence ``_legacy_evidence`` found for ``result``; call it only then.
+
+    The criterion's own verify command, then its verifier verdict (the
+    evidence turn's citations or the command-string path, from
+    ``VerifierVerdict.decided_by``); a decomposed root takes the command-string
+    path when any sub-result does, else the first sub-result's path.
+    """
+    gate = getattr(result, "verify_gate_outcome", None)
+    if (
+        gate is not None
+        and bool(getattr(gate, "passed", False))
+        and not bool(getattr(gate, "environment_unverifiable", False))
+    ):
+        return AcceptedBy.VERIFY_COMMAND
+    verdict = getattr(result, "atomic_verifier_verdict", None)
+    if verdict is not None and bool(getattr(verdict, "passed", False)):
+        if getattr(verdict, "decided_by", "") == EVIDENCE_PATH_CITATIONS:
+            return AcceptedBy.TRANSCRIPT_EVIDENCE
+        return AcceptedBy.COMMAND_STRINGS
+    paths = [_legacy_evidence_path(sub) for sub in tuple(getattr(result, "sub_results", ()) or ())]
+    if AcceptedBy.COMMAND_STRINGS in paths:
+        return AcceptedBy.COMMAND_STRINGS
+    return next((path for path in paths if path is not None), None)
+
+
 def _legacy_no_evidence_reason(result: Any) -> LegacyNoEvidenceReason:
     """Why ``_legacy_evidence`` found no evidence for ``result``; call it only then.
 
@@ -265,6 +293,8 @@ def _legacy_no_evidence_reason(result: Any) -> LegacyNoEvidenceReason:
         return LegacyNoEvidenceReason.TRANSCRIPT_UNAVAILABLE
     if failure_class == FailureClass.SCRIPT_ABSENT_FROM_ARTIFACT.value:
         return LegacyNoEvidenceReason.SCRIPT_ABSENT_FROM_ARTIFACT
+    if failure_class == FailureClass.CITED_EVIDENCE_WITHHELD.value:
+        return LegacyNoEvidenceReason.CITED_EVIDENCE_WITHHELD
     for sub in tuple(getattr(result, "sub_results", ()) or ()):
         if not _legacy_evidence(sub):
             return _legacy_no_evidence_reason(sub)
@@ -345,6 +375,11 @@ def existing_outcomes_from_results(
             failure_class=failure_class,
             no_evidence=no_evidence,
             no_evidence_reason=_legacy_no_evidence_reason(result) if no_evidence else None,
+            evidence_path=(
+                _legacy_evidence_path(result)
+                if outcome in _ACCEPTED_OUTCOMES and not no_evidence
+                else None
+            ),
         )
     return outcomes
 

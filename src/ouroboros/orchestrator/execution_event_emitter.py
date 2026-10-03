@@ -172,7 +172,7 @@ class ExecutionEventEmitter:
             raise ValueError("previous AC dispatch id is invalid")
         if session_origin not in {"fresh", "restored_same_attempt"}:
             raise ValueError("AC dispatch session origin is invalid")
-        if dispatch_kind not in {"primary", "session_signal_followup"}:
+        if dispatch_kind not in {"primary", "session_signal_followup", "evidence_turn"}:
             raise ValueError("AC dispatch kind is invalid")
         if dispatch_kind == "primary" and any(
             value is not None for value in (signal_id, signal_mode, follow_up_input_digest)
@@ -184,6 +184,12 @@ class ExecutionEventEmitter:
                 for value in (signal_id, signal_mode, follow_up_input_digest)
             ) or not re.fullmatch(r"sha256:[0-9a-f]{64}", follow_up_input_digest or ""):
                 raise ValueError("signal follow-up dispatch metadata is invalid")
+        if dispatch_kind == "evidence_turn" and (
+            signal_id is not None
+            or signal_mode is not None
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", follow_up_input_digest or "")
+        ):
+            raise ValueError("evidence turn dispatch metadata is invalid")
         if not isinstance(capsule_fingerprint, str) or not re.fullmatch(
             r"sha256:[0-9a-f]{64}", capsule_fingerprint
         ):

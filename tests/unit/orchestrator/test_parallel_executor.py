@@ -4714,6 +4714,10 @@ class _FinalMessageRuntime:
         self.call_count = 0
         self.last_prompt: str | None = None
         self.last_system_prompt: str | None = None
+        # The controller's evidence turn on the finished session. This stub
+        # answers it with its final message again, which cites no call number,
+        # so the record keeps the command-string path these tests pin.
+        self.evidence_turn_prompts: list[str] = []
 
     @property
     def runtime_backend(self) -> str:
@@ -4737,6 +4741,10 @@ class _FinalMessageRuntime:
     ):
         del tools, resume_session_id
         self.call_count += 1
+        if prompt.startswith("[EVIDENCE TURN"):
+            self.evidence_turn_prompts.append(prompt)
+            yield self._final_result(resume_handle)
+            return
         self.last_prompt = prompt
         self.last_system_prompt = system_prompt
         for message in self._support_messages:
@@ -4768,7 +4776,10 @@ class _FinalMessageRuntime:
                 )
                 if completed.returncode != 0:
                     raise RuntimeError(f"scripted support command failed: {command}")
-        yield AgentMessage(
+        yield self._final_result(resume_handle)
+
+    def _final_result(self, resume_handle: RuntimeHandle | None) -> AgentMessage:
+        return AgentMessage(
             type="result",
             content=self._final_message,
             data={"subtype": "success" if self._success else "error"},
@@ -11627,6 +11638,7 @@ class TestParallelACExecutor:
             verifier_status="FAIL",
             retry_admission="ESCALATE_MODEL",
             verifier_evidence_used=[],
+            verifier_decided_by="command_strings",
         )
 
         assert result.success is False

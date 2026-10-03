@@ -47,6 +47,11 @@ not require users to acknowledge a new notice.
   by default under the existing opt-outs: closed failure reason codes and
   counts, the same class of data as `ac_verify_failed`, so not a scope
   expansion.
+- 2026-10: added `acceptance_basis`, per decided run the count of accepted
+  criteria by what the acceptance rests on (a closed enum, see the table
+  below), so acceptances on the evidence turn's cited transcript calls are
+  counted apart from check-package acceptances. Same opt-outs and the same
+  class of data as `acceptance_no_evidence`.
 
 ## How to opt out
 
@@ -98,6 +103,7 @@ use. Each row below is the exact property set accepted by the serializer.
 | `runtime_drift` | A frozen runtime authority input (Codex config, CLI executable, dispatch registry, profile routing) is observed to have changed after the runtime initialized; the run continues on the re-baselined input | kind (closed enum: `codex_config`/`cli_executable`/`skill_dispatcher`/`mcp_handler_registry`/`skill_dispatch_registry`/`profile_routing`/`baseline_unavailable`/`attestation_timeout`/`unknown`), runtime_backend, app_version, os, ci |
 | `ac_verify_failed` | The orchestrator's deterministic AC verify gate rejects an attempt (`run_verify_commands` enabled) | cause (closed enum: `invalid_contract`/`artifacts_missing`/`artifacts_missing_found_elsewhere`/`environment_unverifiable`/`timeout`/`exit_nonzero`/`output_assertion_unmatched`/`workspace_mutated`/`unknown`), runtime_backend, app_version, os, ci |
 | `acceptance_no_evidence` | A terminal `ooo run`, MCP `execute_seed` run, or evolve generation whose acceptance the check package authority reconciled, when that decision accepted at least one criterion that no verifier had evidence for (the check package did not decide it and the legacy verifier had no evidence); at most one row per run, none when every accepted criterion had evidence. The acceptance itself is unchanged | `pair_<package_reason>__<replay_reason>` (integer count per reason pair; only non-zero pairs are sent; both reasons are closed enums, see below), criterion_count, no_evidence_count, verification_coverage (`full`/`partial`/`low`/`unknown`), surface (`cli_run`/`mcp_execute`/`evolve`/`unknown`), check_package (`on`/`off`/`unknown`), check_package_status (`admitted`/`construction_failed`/`rejected`/`not_run`/`unknown`), runtime_backend (a shipped runtime backend name, else `unknown`), app_version, os, ci |
+| `acceptance_basis` | The same terminal reconciliation as `acceptance_no_evidence`, when it accepted at least one criterion; at most one row per run. The acceptance itself is unchanged | `accepted_by_<basis>` (integer count per basis, `check_package`/`transcript_evidence`/`command_strings`/`verify_command`/`no_evidence`/`unknown`; only non-zero counts are sent), criterion_count, accepted_count, surface (`cli_run`/`mcp_execute`/`evolve`/`unknown`), check_package (`on`/`off`/`unknown`), runtime_backend (a shipped runtime backend name, else `unknown`), app_version, os, ci |
 
 Notes:
 
@@ -142,7 +148,9 @@ Notes:
   failed), `no_reproduction_check` (only preservation checks passed), or
   `unknown`. `replay_reason` says why the legacy verifier had no evidence:
   `environment_unverifiable`, `transcript_unavailable`, `no_verifier_verdict`,
-  `verifier_verdict_not_passed`, `no_legacy_record`, or `unknown`. Both are
+  `verifier_verdict_not_passed`, `cited_evidence_withheld` (the worker cited
+  recorded calls by number and none could be proven, none fabricated),
+  `no_legacy_record`, or `unknown`. Both are
   read from the product's typed decision state, never from text, and anything
   else folds to `unknown` before serialization. The event never carries a
   criterion, check, binding, path, or identifier. A run whose check package
@@ -219,7 +227,7 @@ Collection is triggered only at these audited call sites:
   `ChecklistVerifyHandler`'s nested multi-AC delegation; suppresses it when
   the same handler runs behind the job-backed `ouroboros_start_evaluate` path;
 - [`src/ouroboros/boundary/run_control.py`](src/ouroboros/boundary/run_control.py):
-  once per decided run, the `acceptance_no_evidence` counts
+  once per decided run, the `acceptance_no_evidence` and `acceptance_basis` counts
   ([`src/ouroboros/boundary/no_evidence.py`](src/ouroboros/boundary/no_evidence.py));
 - [`scripts/install.sh`](scripts/install.sh) — successful install completion.
   [`scripts/install.ps1`](scripts/install.ps1), the Windows installer, emits
