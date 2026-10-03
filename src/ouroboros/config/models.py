@@ -838,8 +838,8 @@ class BoundaryConfig(BaseModel, frozen=True):
         max_construction_attempts: Package versions tried before the worker
             starts. A version that is not admitted is superseded by the next
             one; 1 means no regeneration.
-        base_regression: ``on`` makes a run with an admitted package also run
-            the base tree's own tests that pair with or import the changed
+        base_regression: ``on`` makes a run, with or without an admitted
+            package, also run the base tree's own tests that pair with or import the changed
             modules, on the base and on the finished workspace, and the test
             files the worker added; a failure fails the criteria the package
             left unverified or uncovered (``ouroboros.boundary.base_regression``).

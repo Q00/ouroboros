@@ -186,6 +186,8 @@ class BoundaryRunState:
     package_path: Path | None = None
     criterion_keys: tuple[str, ...] = ()
     base_snapshot: Path | None = None
+    base_snapshot_digest: str | None = None
+    """The snapshot's tree digest when it was taken, for a run no admission pins it for."""
     reference_check: ReferenceCheck | None = None
     """What the reference check excluded from the bound version (``None``: not run)."""
     exclusions: tuple[tuple[str, str, str], ...] = ()
@@ -449,17 +451,20 @@ async def prepare_check_package(
 
     admitted = admission is not None and admission.verdict is PackageVerdict.ADMITTED
     snapshot: Path | None = None
+    snapshot_digest: str | None = None
     tiers = admission.check_tiers if admission is not None else None
-    if admitted and (
-        contract.base_regression
-        or any(tier == CheckTier.U.value for tier in (tiers or {}).values())
+    if contract.base_regression or (
+        admitted and any(tier == CheckTier.U.value for tier in (tiers or {}).values())
     ):
         # A late binding is validated against the base after the worker has
-        # stopped, and the artifact checks run the base's own tests then; keep
-        # the base outside every checkout until then. Taken before the actor
-        # start: the journal records a worker start only once everything that
-        # start depends on exists.
+        # stopped, and the artifact checks run the base's own tests then,
+        # admitted package or not; keep the base outside every checkout until
+        # then. Taken before the actor start: the journal records a worker
+        # start only once everything that start depends on exists.
         snapshot = snapshot_base(base, store)
+        if not admitted:
+            # No admission digest pins the base: pin the snapshot as taken.
+            snapshot_digest = tree_digest(snapshot)
     state = BoundaryRunState(
         execution_id=execution_id,
         boundary_id=bound,
@@ -475,6 +480,7 @@ async def prepare_check_package(
         contract=contract,
         criterion_keys=keys,
         base_snapshot=snapshot,
+        base_snapshot_digest=snapshot_digest,
         reference_check=reference_check,
         exclusions=tuple(sealer.exclusions),
         replacement_calls=replacement.calls,

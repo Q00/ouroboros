@@ -488,7 +488,15 @@ async def store():
     await event_store.close()
 
 
-async def _calc_authority(store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+async def _calc_authority(
+    store: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    criteria: tuple[str, ...] = ("add(2, 3) returns 5",),
+    constructor: Any = None,
+    execution_id: str = "exec_regression",
+) -> Any:
     from ouroboros.boundary import run_wiring
     from ouroboros.boundary.authority import CheckPackageAuthority
     from ouroboros.boundary.run_wiring import CheckPackageSettings, prepare_check_package
@@ -507,13 +515,18 @@ async def _calc_authority(store: Any, tmp_path: Path, monkeypatch: pytest.Monkey
     monkeypatch.setattr(
         run_wiring, "resolve_check_interpreter", lambda _base: pin_interpreter(sys.executable, "t")
     )
-    seed = _seed("add(2, 3) returns 5")
+    seed = _seed(*criteria)
     settings = CheckPackageSettings(enabled=True, base_regression=True)
+    if constructor is None:
+        uncovered = tuple(range(2, len(criteria) + 1))
+        constructor = FakeConstructor(
+            _ok(_package(seed, "repro_add", BUGFIX_SCRIPT, uncovered=uncovered))
+        )
     state = await prepare_check_package(
         seed,
         event_store=store,
-        constructor=FakeConstructor(_ok(_package(seed, "repro_add", BUGFIX_SCRIPT))),
-        execution_id="exec_regression",
+        constructor=constructor,
+        execution_id=execution_id,
         base_checkout=repo,
         worker_workspace=repo,
         runtime_label="codex",
@@ -526,18 +539,24 @@ async def _calc_authority(store: Any, tmp_path: Path, monkeypatch: pytest.Monkey
     return seed, authority
 
 
-def _succeeded() -> Any:
+def _succeeded(count: int = 1) -> Any:
     from ouroboros.orchestrator.parallel_executor_models import (
         ACExecutionOutcome,
         ACExecutionResult,
         ParallelExecutionResult,
     )
 
-    result = ACExecutionResult(
-        ac_index=0, ac_content="criterion 0", success=True, outcome=ACExecutionOutcome.SUCCEEDED
+    results = tuple(
+        ACExecutionResult(
+            ac_index=index,
+            ac_content=f"criterion {index}",
+            success=True,
+            outcome=ACExecutionOutcome.SUCCEEDED,
+        )
+        for index in range(count)
     )
-    return result, ParallelExecutionResult(
-        results=(result,), success_count=1, failure_count=0, externally_satisfied_count=0
+    return results[0], ParallelExecutionResult(
+        results=results, success_count=count, failure_count=0, externally_satisfied_count=0
     )
 
 
@@ -647,3 +666,96 @@ async def test_a_check_that_breaks_leaves_the_package_decision_intact(
     (decision,) = authority.outcome.reconciliation.decisions
     assert decision.artifact_check is None and decision.reason == "script_check_advisory"
     assert decided.all_succeeded
+
+
+# --------------------------------------------------------------------------
+# With no admitted package, and on resume
+
+
+def _no_package() -> Any:
+    from ouroboros.boundary.constructor import ConstructionOutcome
+
+    from .fake_constructors import FakeConstructor
+
+    outage = ConstructionOutcome(None, "constructor_timeout", "1" * 64, "fake")
+    return FakeConstructor(outage, outage)
+
+
+async def test_with_no_admitted_package_a_regression_fails_every_criterion_and_is_journaled(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ouroboros.boundary.authority import ARTIFACT_CHECK_ERROR
+    from ouroboros.boundary.events import ACCEPTANCE_RECONCILED, BOUNDARY_AGGREGATE_TYPE
+
+    criteria = ("add(2, 3) returns 5", "the docs describe add")
+    seed, authority = await _calc_authority(
+        store, tmp_path, monkeypatch, criteria=criteria, constructor=_no_package()
+    )
+    assert not authority.state.admitted and authority.state.base_snapshot_digest is not None
+    _result, parallel = _succeeded(2)
+
+    decided = await authority(seed=seed, execution_id="exec_regression", parallel_result=parallel)
+
+    assert authority.outcome is not None and authority.outcome.error is None
+    decisions = authority.outcome.reconciliation.decisions
+    assert [d.artifact_check for d in decisions] == [ArtifactCheck.BASE_REGRESSION] * 2
+    assert all(d.governed_by is Governor.CHECK_PACKAGE and not d.accepted for d in decisions)
+    assert decided.results[1].error == f"{ARTIFACT_CHECK_ERROR} (base_regression)"
+    events = await store.replay(BOUNDARY_AGGREGATE_TYPE, authority.state.boundary_id)
+    assert events[-1].type == ACCEPTANCE_RECONCILED
+    assert events[-1].data["package_id"] is None
+
+
+async def test_with_no_admitted_package_no_observation_leaves_the_legacy_run(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ouroboros.boundary.events import ACCEPTANCE_RECONCILED, BOUNDARY_AGGREGATE_TYPE
+
+    async def no_pytest(*_args: Any, **_kwargs: Any) -> Any:
+        return br._Run(None, 1)  # ``No module named pytest``: the runner wrote no report
+
+    seed, authority = await _calc_authority(store, tmp_path, monkeypatch, constructor=_no_package())
+    monkeypatch.setattr(br, "_pytest", no_pytest)
+    _result, parallel = _succeeded()
+
+    decided = await authority(seed=seed, execution_id="exec_regression", parallel_result=parallel)
+
+    assert decided.all_succeeded
+    assert authority.artifact_findings[0].outcome is Outcome.BASE_RUNNER_CRASH
+    (decision,) = authority.outcome.reconciliation.decisions
+    assert decision.governed_by is Governor.EXISTING_VERIFIER and decision.artifact_check is None
+    events = await store.replay(BOUNDARY_AGGREGATE_TYPE, authority.state.boundary_id)
+    assert ACCEPTANCE_RECONCILED not in {event.type for event in events}
+
+
+async def test_run_control_installs_the_checks_without_an_admitted_package(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from ouroboros.boundary import run_wiring
+    from ouroboros.boundary.run_control import CheckPackageRun
+    from ouroboros.boundary.run_wiring import CheckPackageSettings
+
+    from .calc_fixtures import _seed
+
+    repo = _tree(tmp_path / "repo", {"calc.py": "def add(a, b):\n    return a - b\n"})
+    monkeypatch.setattr(
+        run_wiring, "default_store_dir", lambda execution_id: tmp_path / "store" / execution_id
+    )
+    for switch, installed in ((True, True), (False, False)):
+        runner = SimpleNamespace(acceptance_authority=None)
+        run = CheckPackageRun(CheckPackageSettings(enabled=True, base_regression=switch))
+        await run.prepare(
+            runner,
+            _seed("add(2, 3) returns 5"),
+            event_store=store,
+            execution_id=f"exec_switch_{switch}",
+            worker_dir=repo,
+            runtime_backend="codex",
+            model=None,
+            resume=False,
+            constructor_factory=lambda **_kwargs: _no_package(),
+        )
+        assert (runner.acceptance_authority is not None) is installed
+        assert run.status == "construction_failed"

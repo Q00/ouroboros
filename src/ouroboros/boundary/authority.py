@@ -298,11 +298,12 @@ def _legacy_owned(reconciliation: AcceptanceReconciliation) -> AcceptanceReconci
     Every criterion is uncovered, so the package governs nothing: an attempted
     criterion the reconciliation would attribute to the package (a legacy
     acceptance without evidence) is decided by the legacy verifier, exactly as
-    with the check package off. Acceptance is unchanged.
+    with the check package off. Acceptance is unchanged. Only a fail an
+    artifact check made (``boundary/base_regression.py``) stays the boundary's.
     """
     decisions = tuple(
         replace(decision, governed_by=Governor.EXISTING_VERIFIER)
-        if decision.governed_by is Governor.CHECK_PACKAGE
+        if decision.governed_by is Governor.CHECK_PACKAGE and decision.artifact_check is None
         else decision
         for decision in reconciliation.decisions
     )
@@ -725,7 +726,11 @@ class CheckPackageAuthority:
         self.artifact_checks: ArtifactChecks | None = (
             ArtifactChecks(
                 base=state.base_snapshot,
-                base_digest=state.admission.base_tree_digest if state.admission else None,
+                base_digest=(
+                    state.admission.base_tree_digest
+                    if state.admission is not None
+                    else state.base_snapshot_digest
+                ),
                 interpreter=state.interpreter,
                 timeout_seconds=state.contract.check_timeout_seconds,
             )
@@ -931,7 +936,17 @@ class CheckPackageAuthority:
             )
             if verdict.package_id is None:
                 reconciliation = _legacy_owned(reconciliation)
-            else:
+            if verdict.package_id is None and any(
+                decision.artifact_check for decision in reconciliation.decisions
+            ):
+                # No package to cite: the artifact checks' fails are recorded
+                # on the version sealed without one, so a resume replays them.
+                await BoundaryLedger(self._event_store).record_acceptance_reconciled(
+                    self._state.boundary_id,
+                    package_id=None,
+                    reconciliation=reconciliation.to_payload(),
+                )
+            elif verdict.package_id is not None:
                 await BoundaryLedger(self._event_store).record_acceptance_reconciled(
                     self._state.boundary_id,
                     package_id=verdict.package_id,
@@ -958,10 +973,12 @@ class CheckPackageAuthority:
     ) -> BoundaryVerdict:
         """Fail the criteria the package left undecided when an artifact check fails the candidate.
 
-        Runs after the package's own verification. A failing check is
-        reported as a preservation counterexample naming its failing tests.
+        Runs after the package's own verification; with no admitted package
+        every criterion is uncovered, so a failing check fails all of them. A
+        failing check is reported as a preservation counterexample naming its
+        failing tests.
         """
-        if self.artifact_checks is None or verdict.package_id is None:
+        if self.artifact_checks is None:
             return verdict
         self.artifact_findings = await self.artifact_checks.findings(self.candidate)
         verdicts = apply_findings(verdict.verdicts, keys, self.artifact_findings)

@@ -32,7 +32,9 @@ admitted package left ``unverified`` or ``uncovered`` (an artifact-level
 finding: no criterion is matched to a test by its text), through the existing
 ``fail`` route (``acceptance.CriterionVerdict.artifact_check``), and while the
 worker runs the gate hands the failing test names to bounded repair. A
-verified pass keeps the package's authority. Anything else is no observation
+verified pass keeps the package's authority. With no admitted package every
+criterion is uncovered, so an executed failure fails them all (no gate runs
+then, so there is no repair turn). Anything else is no observation
 and decides nothing, with its reason (``ArtifactCheckOutcome``): a timeout,
 a base on which the runner wrote no report, no selected file, a project whose
 own runner is not pytest, or a run the sandbox could not confine.

@@ -154,8 +154,10 @@ Notes:
   read from the product's typed decision state, never from text, and anything
   else folds to `unknown` before serialization. The event never carries a
   criterion, check, binding, path, or identifier. A run whose check package
-  was off, not admitted before the worker started, or not consulted by its
-  execution path is not reconciled, so it sends no row.
+  was off, or not consulted by its execution path, is not reconciled, so it
+  sends no row; nor is one with no admitted package while
+  `boundary.base_regression` is off (with it on, such a run is reconciled for
+  the artifact checks, and its criteria report `no_admitted_package`).
 - `acceptance_artifact_checks` reports, for each controller-run artifact
   check (`base_regression`: the base tree's existing tests that pair with or
   import a changed module; `worker_tests`: the test files the worker added),

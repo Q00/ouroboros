@@ -289,12 +289,17 @@ class CheckPackageRun:
                 "the existing verifier decides this run.",
             ]
         self.state = state
-        if not state.admitted:
+        if not state.admitted and not (
+            state.contract.base_regression and state.base_snapshot is not None
+        ):
             # No admitted package: this run is the legacy run, exactly as with
             # the check package off. Nothing is
             # installed on the runner; the outcome summary keeps the failure
             # status and reports reconciliation=fallback_to_legacy.
             return [*lines, *render_preparation(state)]
+        # With no admitted package the authority installs no gate: the legacy
+        # verifier decides every attempt, and at the end the artifact checks
+        # may still fail the (all uncovered) criteria.
         self.authority = CheckPackageAuthority(
             state, self.settings, event_store=event_store, candidate_checkout=worker_dir
         )
@@ -475,9 +480,10 @@ class CheckPackageRun:
         """Lines describing what the package decided (empty when it did not run)."""
         if self.resumed is not None:
             return self.resumed.render()
+        if self.state is not None and not self.state.admitted:
+            lines = [unavailable_line(self.state), _no_package_coverage_line(self.state)]
+            return lines + self._artifact_check_lines()
         if self.authority is None:
-            if self.state is not None and not self.state.admitted:
-                return [unavailable_line(self.state), _no_package_coverage_line(self.state)]
             return []
         outcome = self.authority.outcome
         if outcome is None:
@@ -527,6 +533,23 @@ class CheckPackageRun:
                 lines.append("The finished workspace fails the frozen check package.")
         return lines
 
+    def _artifact_check_lines(self) -> list[str]:
+        """What the artifact checks failed on a run with no admitted package (else nothing)."""
+        outcome = self.authority.outcome if self.authority is not None else None
+        reconciliation = outcome.reconciliation if outcome is not None else None
+        if reconciliation is None or not any(d.artifact_check for d in reconciliation.decisions):
+            return []
+        from ouroboros.boundary.acceptance import render_reconciliation
+
+        assert outcome is not None and outcome.verdict is not None
+        return [
+            *(
+                f"- {example.check_id} ({example.role}): {example.reason}\n{example.output_tail}"
+                for example in outcome.verdict.counterexamples
+            ),
+            *render_reconciliation(reconciliation),
+        ]
+
     def _coverage(self) -> str | None:
         """``verification_coverage``: ``low`` when the package decided nothing (switch on)."""
         if self.status == "not_run" and self.resumed is None:
@@ -570,6 +593,13 @@ class CheckPackageRun:
         if outcome is None or outcome.reconciliation is None:
             return "fallback_to_legacy"
         reconciliation = outcome.reconciliation
+        if (
+            self.state is not None
+            and not self.state.admitted
+            and not any(d.artifact_check for d in reconciliation.decisions)
+        ):
+            # No admitted package and no artifact check decided: the legacy run.
+            return "fallback_to_legacy"
         rejected = [d for d in reconciliation.decisions if not d.accepted]
         if rejected and all(d.legacy_decided for d in rejected):
             # Every rejection came from the legacy verifier on a criterion the
