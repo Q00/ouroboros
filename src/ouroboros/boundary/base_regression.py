@@ -85,6 +85,7 @@ import shutil
 import stat
 import tempfile
 import tomllib
+from typing import Literal
 from xml.etree import ElementTree
 
 from ouroboros import telemetry as usage_telemetry
@@ -119,10 +120,24 @@ from ouroboros.boundary.tree import (
 )
 from ouroboros.orchestrator.evidence.call_citation import is_test_path
 
-BASE_REGRESSION_DEFAULT = True
-"""Whether the artifact checks run when nothing configures them (``boundary.base_regression``).
 
-The one place the default lives: flip it here to turn both checks off by default."""
+class ArtifactCheckMode(StrEnum):
+    """How an artifact check acts (``boundary.base_regression``, ``boundary.worker_test_gate``)."""
+
+    DECIDE = "decide"
+    """Run it and let an executed failure decide (the regression check: only
+    with an admitted package; see ``decides``)."""
+    RECORD = "record"
+    """Run it and record what it would have decided; it decides nothing and
+    sends no repair turn."""
+    OFF = "off"
+    """Do not run it."""
+
+
+BASE_REGRESSION_DEFAULT: Literal["decide", "record", "off"] = "decide"
+"""The base regression check's mode when nothing configures it. The one place it lives."""
+WORKER_TEST_GATE_DEFAULT: Literal["decide", "record", "off"] = "record"
+"""The worker-test gate's mode when nothing configures it. The one place it lives."""
 
 REGRESSION_REASON = "base_regression"
 """``CriterionVerdict.reason`` of a criterion the base regression failed."""
@@ -166,6 +181,47 @@ class ArtifactCheckOutcome(StrEnum):
     """Nothing ran: the sandbox, the pinned interpreter or the base snapshot refused it."""
     IMPORTED_OUTSIDE_COPY = "imported_outside_copy"
     """A changed module was imported from outside the run's copy: the run did not test it."""
+    NOT_RUN = "not_run"
+    """The check's mode is ``off``."""
+
+
+class ArtifactEffect(StrEnum):
+    """What a check's finding did to the run (closed set; telemetry reports it)."""
+
+    DECIDED = "decided"
+    """It failed the criteria the package left undecided."""
+    RECORDED = "recorded"
+    """``record`` mode: it would have decided, and only that was recorded."""
+    UNADJUDICATED = "regression_unadjudicated"
+    """``decide`` mode, no admitted package: a regression nothing adjudicates. The
+    worker had one repair turn; the criteria stay unverified."""
+    NONE = "none"
+    """Nothing to decide: it found nothing, observed nothing, or did not run."""
+
+
+def decides(finding: ArtifactFinding, mode: ArtifactCheckMode, *, admitted: bool) -> bool:
+    """Whether ``finding`` fails criteria: ``decide`` mode, and a regression only with a package.
+
+    About one task in five legitimately changes behaviour an existing test
+    pins; only an admitted oracle can adjudicate that, so without a package a
+    regression never fails anything.
+    """
+    return (
+        finding.rejects
+        and mode is ArtifactCheckMode.DECIDE
+        and (admitted or finding.check is ArtifactCheck.WORKER_TESTS)
+    )
+
+
+def effect(finding: ArtifactFinding, mode: ArtifactCheckMode, *, admitted: bool) -> ArtifactEffect:
+    """What ``finding`` did to the run under ``mode`` (``decides`` is the deciding rule)."""
+    if not finding.rejects:
+        return ArtifactEffect.NONE
+    if decides(finding, mode, admitted=admitted):
+        return ArtifactEffect.DECIDED
+    if mode is ArtifactCheckMode.DECIDE:
+        return ArtifactEffect.UNADJUDICATED
+    return ArtifactEffect.RECORDED
 
 
 class Exemption(StrEnum):
@@ -703,7 +759,11 @@ class ArtifactChecks:
         base_digest: str | None,
         interpreter: CheckInterpreter,
         timeout_seconds: int,
+        run_regression: bool = True,
+        run_worker_tests: bool = True,
     ) -> None:
+        self._run_regression = run_regression
+        self._run_worker_tests = run_worker_tests
         self._base = base
         self._base_digest = base_digest
         self._interpreter = interpreter
@@ -800,9 +860,14 @@ class ArtifactChecks:
             )
         else:
             changed = await self._changed_code(base, candidate, manifest)
+            not_run = ArtifactCheckOutcome.NOT_RUN
             found = (
-                await self._regression(base, candidate, manifest, changed),
-                await self._worker_tests(candidate, added_paths(self._base_manifest, manifest)),
+                await self._regression(base, candidate, manifest, changed)
+                if self._run_regression
+                else ArtifactFinding(ArtifactCheck.BASE_REGRESSION, not_run),
+                await self._worker_tests(candidate, added_paths(self._base_manifest, manifest))
+                if self._run_worker_tests
+                else ArtifactFinding(ArtifactCheck.WORKER_TESTS, not_run),
             )
         if await asyncio.to_thread(tree_manifest, candidate) == manifest:
             # Kept only for the tree it observed: a workspace that changed
@@ -1080,17 +1145,30 @@ def repair_message(findings: Sequence[ArtifactFinding]) -> str | None:
 def report_artifact_checks(
     findings: Sequence[ArtifactFinding],
     *,
+    modes: Mapping[ArtifactCheck, ArtifactCheckMode],
+    effects: Mapping[ArtifactCheck, ArtifactEffect],
+    would_fail: int,
     failed_criteria: int,
     criterion_count: int,
     repairs: int,
     surface: str | None,
     runtime_backend: str | None,
 ) -> None:
-    """Send one ``acceptance_artifact_checks`` event for a decided run. Never raises."""
+    """Send one ``acceptance_artifact_checks`` event for a decided run. Never raises.
+
+    With each check's mode and what its finding did (``ArtifactEffect``), and
+    how many criteria the findings that did not decide would have failed.
+    """
     try:
         outcomes = {finding.check: finding.outcome.value for finding in findings}
         regression = next((f for f in findings if f.check is ArtifactCheck.BASE_REGRESSION), None)
+        none = ArtifactEffect.NONE
         usage_telemetry.capture_acceptance_artifact_checks(
+            base_regression_mode=modes[ArtifactCheck.BASE_REGRESSION].value,
+            worker_test_gate_mode=modes[ArtifactCheck.WORKER_TESTS].value,
+            base_regression_effect=effects.get(ArtifactCheck.BASE_REGRESSION, none).value,
+            worker_tests_effect=effects.get(ArtifactCheck.WORKER_TESTS, none).value,
+            would_fail_criteria=would_fail,
             base_regression=outcomes.get(ArtifactCheck.BASE_REGRESSION),
             worker_tests=outcomes.get(ArtifactCheck.WORKER_TESTS),
             failed_criteria=failed_criteria,
@@ -1114,7 +1192,12 @@ __all__ = [
     "REGRESSION_REASON",
     "WORKER_TESTS_REASON",
     "WORKER_TEST_FILES",
+    "ArtifactCheckMode",
     "ArtifactCheckOutcome",
+    "ArtifactEffect",
+    "WORKER_TEST_GATE_DEFAULT",
+    "decides",
+    "effect",
     "ArtifactChecks",
     "ArtifactFinding",
     "Exemption",

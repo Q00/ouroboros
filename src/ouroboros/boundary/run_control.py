@@ -42,7 +42,7 @@ from ouroboros.boundary.authority import (
     AuthorityOutcome,
     CheckPackageAuthority,
 )
-from ouroboros.boundary.base_regression import report_artifact_checks
+from ouroboros.boundary.base_regression import ArtifactEffect, report_artifact_checks
 from ouroboros.boundary.ledger import BoundaryLedger, BoundaryOrderError
 from ouroboros.boundary.no_evidence import report_no_evidence
 from ouroboros.boundary.resume import (
@@ -290,9 +290,9 @@ class CheckPackageRun:
                 "the existing verifier decides this run.",
             ]
         self.state = state
-        if not state.admitted and not (
-            state.contract.base_regression and state.base_snapshot is not None
-        ):
+        modes = {state.contract.base_regression, state.contract.worker_test_gate}
+        checks_on = modes != {"off"}
+        if not state.admitted and not (checks_on and state.base_snapshot is not None):
             # No admitted package: this run is the legacy run, exactly as with
             # the check package off. Nothing is
             # installed on the runner; the outcome summary keeps the failure
@@ -540,14 +540,18 @@ class CheckPackageRun:
                 )
             elif outcome.legacy_run_accepted and not reconciliation.run_accepted:
                 lines.append("The finished workspace fails the frozen check package.")
+        lines.extend(self._undecided_finding_lines())
         return lines
 
     def _artifact_check_lines(self) -> list[str]:
-        """What the artifact checks failed on a run with no admitted package (else nothing)."""
+        """What the artifact checks failed, or found without deciding, on a run with no package."""
         outcome = self.authority.outcome if self.authority is not None else None
         reconciliation = outcome.reconciliation if outcome is not None else None
-        if reconciliation is None or not any(d.artifact_check for d in reconciliation.decisions):
+        if reconciliation is None:
             return []
+        lines = self._undecided_finding_lines()
+        if not any(d.artifact_check for d in reconciliation.decisions):
+            return lines
         from ouroboros.boundary.acceptance import render_reconciliation
 
         assert outcome is not None and outcome.verdict is not None
@@ -556,8 +560,27 @@ class CheckPackageRun:
                 f"- {example.check_id} ({example.role}): {example.reason}\n{example.output_tail}"
                 for example in outcome.verdict.counterexamples
             ),
+            *lines,
             *render_reconciliation(reconciliation),
         ]
+
+    def _undecided_finding_lines(self) -> list[str]:
+        """The findings that decided nothing: unadjudicated regressions and recorded findings."""
+        authority = self.authority
+        if authority is None:
+            return []
+        lines = []
+        for finding in authority.artifact_findings:
+            effect = authority.artifact_effects.get(finding.check)
+            names = ", ".join(finding.failed[:10])
+            if effect is ArtifactEffect.UNADJUDICATED:
+                lines.append(
+                    "Existing tests passed on the base and fail on the finished workspace, and no "
+                    f"admitted package adjudicates them ({names}); the criteria stay unverified."
+                )
+            elif effect is ArtifactEffect.RECORDED:
+                lines.append(f"Recorded only ({finding.check.value}, decides nothing): {names}.")
+        return lines
 
     def _coverage(self) -> str | None:
         """``verification_coverage``: ``low`` when the package decided nothing (switch on)."""
@@ -662,6 +685,9 @@ class CheckPackageRun:
             return
         report_artifact_checks(
             authority.artifact_findings,
+            modes=authority.artifact_modes,
+            effects=authority.artifact_effects,
+            would_fail=authority.artifact_would_fail,
             failed_criteria=sum(1 for d in reconciliation.decisions if d.artifact_check),
             criterion_count=len(reconciliation.decisions),
             repairs=authority.gate.artifact_repairs,

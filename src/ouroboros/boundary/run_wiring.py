@@ -59,7 +59,7 @@ from ouroboros.boundary.acceptance import (
     criterion_verdicts,
 )
 from ouroboros.boundary.admission import admit_check_package
-from ouroboros.boundary.base_regression import BASE_REGRESSION_DEFAULT
+from ouroboros.boundary.base_regression import BASE_REGRESSION_DEFAULT, WORKER_TEST_GATE_DEFAULT
 from ouroboros.boundary.binding import CheckTier, TierAssignment
 from ouroboros.boundary.binding_flow import (
     DeclaredBindingResult,
@@ -78,7 +78,12 @@ from ouroboros.boundary.coverage import (
     replacement_targets,
     why_excluded,
 )
-from ouroboros.boundary.events import ReferenceCheckPayload, RunContract, boundary_version_id
+from ouroboros.boundary.events import (
+    ArtifactCheckModeName,
+    ReferenceCheckPayload,
+    RunContract,
+    boundary_version_id,
+)
 from ouroboros.boundary.footprint import OracleFootprint
 from ouroboros.boundary.ledger import BoundaryLedger
 from ouroboros.boundary.oracle import OracleResult, OracleSpec
@@ -126,8 +131,10 @@ class CheckPackageSettings:
     constructor_timeout_seconds: int = 600
     check_timeout_seconds: int = 120
     max_construction_attempts: int = 2
-    base_regression: bool = BASE_REGRESSION_DEFAULT
-    """Run the artifact checks (``boundary/base_regression.py``); recorded on the run contract."""
+    base_regression: ArtifactCheckModeName = BASE_REGRESSION_DEFAULT
+    """How the base regression check acts (``boundary/base_regression.py``); on the run contract."""
+    worker_test_gate: ArtifactCheckModeName = WORKER_TEST_GATE_DEFAULT
+    """How the worker-test gate acts; recorded on the run contract."""
 
     @property
     def attempts(self) -> int:
@@ -356,6 +363,7 @@ async def prepare_check_package(
     contract = RunContract(
         check_timeout_seconds=settings.check_timeout_seconds,
         base_regression=settings.base_regression,
+        worker_test_gate=settings.worker_test_gate,
     )
     await ledger.record_check_package_enabled(execution_id, contract)
     store = private_store_dir(store_dir or default_store_dir(execution_id))
@@ -454,8 +462,10 @@ async def prepare_check_package(
     snapshot: Path | None = None
     snapshot_digest: str | None = None
     tiers = admission.check_tiers if admission is not None else None
-    if contract.base_regression or (
-        admitted and any(tier == CheckTier.U.value for tier in (tiers or {}).values())
+    if (
+        contract.base_regression != "off"
+        or contract.worker_test_gate != "off"
+        or (admitted and any(tier == CheckTier.U.value for tier in (tiers or {}).values()))
     ):
         # A late binding is validated against the base after the worker has
         # stopped, and the artifact checks run the base's own tests then,

@@ -65,15 +65,22 @@ calls of which none qualifies, ``NO_CALL_EVIDENCE``, which is no evidence and
 never fabrication) stays ``unverified`` and is accepted; the run then reports
 insufficient verification (``verification_coverage``).
 
-Artifact checks (``boundary/base_regression.py``, on unless
-``boundary.base_regression: off``). The controller also checks the whole
-candidate itself: the base tree's existing tests that pair with or import a
-changed module, restored to their base bytes and run on the base twice and on
-the candidate once, and each test file the worker added. An executed failure
-(a test that passed on both base runs fails on the candidate, or an added
-test file's run exits 1 with a failing test) fails every criterion the
-package left ``unverified`` or ``uncovered`` (``CriterionVerdict.artifact_check``)
-before the legacy rule applies, so the legacy verifier cannot accept it; a
+Artifact checks (``boundary/base_regression.py``). The controller also
+checks the whole candidate itself: the base tree's existing tests that pair
+with or import a changed module, restored to their base bytes and run on the
+base twice and on the candidate once (``boundary.base_regression``), and each
+test file the worker added (``boundary.worker_test_gate``). Each has a mode:
+``decide``, ``record`` (run and record what it would have decided, decide
+nothing) or ``off``. In ``decide`` mode an executed failure (a test that
+passed on both base runs fails on the candidate, or an added test file's run
+exits 1 with a failing test) fails every criterion the package left
+``unverified`` or ``uncovered`` (``CriterionVerdict.artifact_check``) before
+the legacy rule applies, so the legacy verifier cannot accept it; a
+regression does so only with an admitted package (``base_regression.decides``):
+without one nothing adjudicates a test that pins behaviour the criteria
+change, so the worker gets one repair turn naming the regressed tests and a
+regression left at the end is recorded (``regression_unadjudicated``) while
+the criteria stay unverified and are accepted under the no-evidence rule; a
 verified ``pass``, a package ``fail`` and an ``indeterminate`` criterion keep
 the package's verdict, and so does a criterion the worker never attempted.
 A regressed test is exempt (``base_regression.regressions_to_keep``) when
@@ -87,9 +94,10 @@ exempt the check decides nothing. A check with no observation (a timeout, a
 base on which the runner wrote no report, no selected file, a project
 runner it does not drive, a run the sandbox could not confine, a changed
 module imported from outside the run's copy) decides nothing. They run
-with no admitted package too: every criterion is then uncovered, so a failure
-fails them all, recorded on the version sealed without a package; a resumed
-run replays the recorded fails and never runs the checks again.
+with no admitted package too: every criterion is then uncovered, so a
+worker-test failure in ``decide`` mode fails them all, recorded on the version
+sealed without a package; a resumed run replays the recorded fails (never a
+regression without a package) and never runs the checks again.
 
 Artifact verdict (precedence): ``fail`` if any criterion fails; else
 ``indeterminate`` if any is indeterminate; else ``pass`` if at least one

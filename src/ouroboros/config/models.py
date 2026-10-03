@@ -838,26 +838,42 @@ class BoundaryConfig(BaseModel, frozen=True):
         max_construction_attempts: Package versions tried before the worker
             starts. A version that is not admitted is superseded by the next
             one; 1 means no regeneration.
-        base_regression: ``on`` makes a run, with or without an admitted
-            package, also run the base tree's own tests that pair with or import the changed
-            modules, on the base and on the finished workspace, and the test
-            files the worker added; a failure fails the criteria the package
-            left unverified or uncovered (``ouroboros.boundary.base_regression``).
-            Unset (default) means ``BASE_REGRESSION_DEFAULT`` there.
+        base_regression: How the base regression check acts
+            (``ouroboros.boundary.base_regression``): ``decide`` runs the base
+            tree's own tests that pair with or import the changed modules on
+            the base and on the finished workspace and, with an admitted
+            package, fails the criteria the package left unverified or
+            uncovered (without one it only sends the worker one repair turn
+            and records the regression); ``record`` runs it and records what
+            it would have decided; ``off`` does not run it. Unset means
+            ``BASE_REGRESSION_DEFAULT`` there; a YAML boolean means
+            ``decide`` or ``off``.
+        worker_test_gate: How the worker-test gate (the test files the worker
+            added, run by the controller) acts, with the same three modes.
+            Unset means ``WORKER_TEST_GATE_DEFAULT``.
     """
 
     check_package: Literal["off", "on"] | None = None
     constructor_timeout_seconds: int = Field(default=600, ge=30, le=3600)
     check_timeout_seconds: int = Field(default=120, ge=5, le=1800)
     max_construction_attempts: int = Field(default=2, ge=1, le=5)
-    base_regression: Literal["off", "on"] | None = None
+    base_regression: Literal["decide", "record", "off"] | None = None
+    worker_test_gate: Literal["decide", "record", "off"] | None = None
 
-    @field_validator("check_package", "base_regression", mode="before")
+    @field_validator("check_package", mode="before")
     @classmethod
     def _yaml_booleans(cls, value: Any) -> Any:
         # YAML 1.1 reads a bare ``on`` / ``off`` as a boolean.
         if isinstance(value, bool):
             return "on" if value else "off"
+        return value
+
+    @field_validator("base_regression", "worker_test_gate", mode="before")
+    @classmethod
+    def _yaml_booleans_as_modes(cls, value: Any) -> Any:
+        # A bare ``on`` / ``off`` (a YAML boolean) is ``decide`` / ``off``.
+        if isinstance(value, bool):
+            return "decide" if value else "off"
         return value
 
 

@@ -570,6 +570,9 @@ async def _calc_authority(
     criteria: tuple[str, ...] = ("add(2, 3) returns 5",),
     constructor: Any = None,
     execution_id: str = "exec_regression",
+    base_regression: str = "decide",
+    worker_test_gate: str = "record",
+    added_test: str | None = None,
 ) -> Any:
     from ouroboros.boundary import run_wiring
     from ouroboros.boundary.authority import CheckPackageAuthority
@@ -590,7 +593,9 @@ async def _calc_authority(
         run_wiring, "resolve_check_interpreter", lambda _base: pin_interpreter(sys.executable, "t")
     )
     seed = _seed(*criteria)
-    settings = CheckPackageSettings(enabled=True, base_regression=True)
+    settings = CheckPackageSettings(
+        enabled=True, base_regression=base_regression, worker_test_gate=worker_test_gate
+    )
     if constructor is None:
         uncovered = tuple(range(2, len(criteria) + 1))
         constructor = FakeConstructor(
@@ -610,6 +615,8 @@ async def _calc_authority(
     assert state.base_snapshot is not None and state.contract.base_regression
     authority = CheckPackageAuthority(state, settings, event_store=store, candidate_checkout=repo)
     (repo / "calc.py").write_text("def add(a, b):\n    return a + b\n")
+    if added_test is not None:
+        (repo / "tests/test_added.py").write_text(added_test)
     return seed, authority
 
 
@@ -705,6 +712,11 @@ async def test_a_decided_run_reports_what_the_artifact_checks_observed_once(
             "repairs": 0,
             "exemption": "no_passing_oracle",
             "exempted_tests": 0,
+            "base_regression_mode": "decide",
+            "worker_test_gate_mode": "record",
+            "base_regression_effect": "decided",
+            "worker_tests_effect": "none",
+            "would_fail_criteria": 0,
             "surface": "cli_run",
             "runtime_backend": "codex",
         }
@@ -757,31 +769,51 @@ def _no_package() -> Any:
     return FakeConstructor(outage, outage)
 
 
-async def test_with_no_admitted_package_a_regression_fails_every_criterion_and_is_journaled(
+FAILING_ADDED = "from calc import add\ndef test_added():\n    assert add(1, 1) == 3\n"
+
+
+async def test_without_a_package_a_regression_never_fails_anything(
     store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ouroboros.boundary.authority import ARTIFACT_CHECK_ERROR
+    from types import SimpleNamespace
+
     from ouroboros.boundary.events import ACCEPTANCE_RECONCILED, BOUNDARY_AGGREGATE_TYPE
+    from ouroboros.boundary.run_control import CheckPackageRun
+    from ouroboros.orchestrator.parallel_executor_models import package_repair
 
     criteria = ("add(2, 3) returns 5", "the docs describe add")
     seed, authority = await _calc_authority(
         store, tmp_path, monkeypatch, criteria=criteria, constructor=_no_package()
     )
-    assert not authority.state.admitted and authority.state.base_snapshot_digest is not None
-    _result, parallel = _succeeded(2)
+    executor = SimpleNamespace()
+    authority.install(executor)
+    assert authority.installed  # the repair turn needs the gate
+    first, parallel = _succeeded(2)
+
+    # One repair turn, naming the regressed tests, and only one.
+    sent = await authority.gate(seed=seed, ac_index=0, result=first, execution_id="exec_regression")
+    repair = package_repair(sent)
+    assert repair is not None and "tests.test_calc::test_pins_subtraction" in repair
+    again = await authority.gate(
+        seed=seed, ac_index=1, result=parallel.results[1], execution_id="exec_regression"
+    )
+    assert again is parallel.results[1]
 
     decided = await authority(seed=seed, execution_id="exec_regression", parallel_result=parallel)
 
-    assert authority.outcome is not None and authority.outcome.error is None
-    decisions = authority.outcome.reconciliation.decisions
-    assert [d.artifact_check for d in decisions] == [ArtifactCheck.BASE_REGRESSION] * 2
-    # No package, so no passing oracle: nothing is exempt.
-    assert authority.artifact_findings[0].exemption is br.Exemption.NO_PASSING_ORACLE
-    assert all(d.governed_by is Governor.CHECK_PACKAGE and not d.accepted for d in decisions)
-    assert decided.results[1].error == f"{ARTIFACT_CHECK_ERROR} (base_regression)"
+    assert authority.artifact_findings[0].rejects
+    assert (
+        authority.artifact_effects[ArtifactCheck.BASE_REGRESSION] is br.ArtifactEffect.UNADJUDICATED
+    )
+    assert authority.artifact_would_fail == 2
+    for decision in authority.outcome.reconciliation.decisions:
+        assert decision.package_status is PackageCriterionStatus.UNCOVERED
+        assert decision.artifact_check is None and decision.accepted
+    assert decided.all_succeeded
     events = await store.replay(BOUNDARY_AGGREGATE_TYPE, authority.state.boundary_id)
-    assert events[-1].type == ACCEPTANCE_RECONCILED
-    assert events[-1].data["package_id"] is None
+    assert ACCEPTANCE_RECONCILED not in {event.type for event in events}
+    run = CheckPackageRun(authority.settings, state=authority.state, authority=authority)
+    assert any("no admitted package adjudicates" in line for line in run.render_outcome())
 
 
 async def test_with_no_admitted_package_no_observation_leaves_the_legacy_run(
@@ -821,14 +853,18 @@ async def test_run_control_installs_the_checks_without_an_admitted_package(
     monkeypatch.setattr(
         run_wiring, "default_store_dir", lambda execution_id: tmp_path / "store" / execution_id
     )
-    for switch, installed in ((True, True), (False, False)):
+    modes = (("decide", "off", True), ("off", "record", True), ("off", "off", False))
+    for regression, worker, installed in modes:
         runner = SimpleNamespace(acceptance_authority=None)
-        run = CheckPackageRun(CheckPackageSettings(enabled=True, base_regression=switch))
+        settings = CheckPackageSettings(
+            enabled=True, base_regression=regression, worker_test_gate=worker
+        )
+        run = CheckPackageRun(settings)
         await run.prepare(
             runner,
             _seed("add(2, 3) returns 5"),
             event_store=store,
-            execution_id=f"exec_switch_{switch}",
+            execution_id=f"exec_switch_{regression}_{worker}",
             worker_dir=repo,
             runtime_backend="codex",
             model=None,
@@ -879,7 +915,14 @@ async def test_a_resume_with_no_admitted_package_replays_the_recorded_fails(
     from ouroboros.boundary.events import BOUNDARY_AGGREGATE_TYPE
     from ouroboros.boundary.resume import NO_ADMITTED_PACKAGE
 
-    seed, authority = await _calc_authority(store, tmp_path, monkeypatch, constructor=_no_package())
+    seed, authority = await _calc_authority(
+        store,
+        tmp_path,
+        monkeypatch,
+        constructor=_no_package(),
+        worker_test_gate="decide",
+        added_test=FAILING_ADDED,
+    )
     _result, parallel = _succeeded()
     await authority(seed=seed, execution_id="exec_regression", parallel_result=parallel)
     recorded = len(await store.replay(BOUNDARY_AGGREGATE_TYPE, authority.state.boundary_id))
@@ -889,7 +932,7 @@ async def test_a_resume_with_no_admitted_package_replays_the_recorded_fails(
 
     assert resumed.boundary.reason == NO_ADMITTED_PACKAGE
     (decision,) = resumed.outcome.reconciliation.decisions
-    assert decision.artifact_check is ArtifactCheck.BASE_REGRESSION and not decided.all_succeeded
+    assert decision.artifact_check is ArtifactCheck.WORKER_TESTS and not decided.all_succeeded
     # The live decision already journaled the fail: the resume writes nothing more.
     events = await store.replay(BOUNDARY_AGGREGATE_TYPE, authority.state.boundary_id)
     assert len(events) == recorded
@@ -1198,7 +1241,7 @@ async def _oracle_authority(
     seed = _seed("clamp(15, 0, 10) returns 10", "the helpers are documented")
     reply = {"oracles": [CLAMP_ORACLE], "uncovered": [{"criterion": 2, "reason": "docs"}]}
     package = package_from_reply(reply, seed, input_digest="1" * 64, generator="fake")
-    settings = CheckPackageSettings(enabled=True, base_regression=True)
+    settings = CheckPackageSettings(enabled=True, base_regression="decide")
     state = await prepare_check_package(
         seed,
         event_store=store,
@@ -1341,9 +1384,16 @@ async def test_a_blocked_criterion_beside_a_verified_pass_keeps_the_decision(
 async def test_a_blocked_criterion_without_a_package_or_on_resume_keeps_the_decision(
     store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Without a package only a worker-test fail decides: the gate in decide mode.
     criteria = ("add(2, 3) returns 5", "the docs describe add")
     seed, authority = await _calc_authority(
-        store, tmp_path, monkeypatch, criteria=criteria, constructor=_no_package()
+        store,
+        tmp_path,
+        monkeypatch,
+        criteria=criteria,
+        constructor=_no_package(),
+        worker_test_gate="decide",
+        added_test=FAILING_ADDED,
     )
     _result, parallel = _succeeded(2)
     await authority(seed=seed, execution_id="exec_regression", parallel_result=parallel)
@@ -1355,7 +1405,7 @@ async def test_a_blocked_criterion_without_a_package_or_on_resume_keeps_the_deci
 
     assert resumed.outcome.error is None
     failed, blocked = resumed.outcome.reconciliation.decisions
-    assert failed.artifact_check is ArtifactCheck.BASE_REGRESSION
+    assert failed.artifact_check is ArtifactCheck.WORKER_TESTS
     assert blocked.governed_by is Governor.EXECUTION and blocked.artifact_check is None
 
     other = tmp_path / "live"
@@ -1367,6 +1417,8 @@ async def test_a_blocked_criterion_without_a_package_or_on_resume_keeps_the_deci
         criteria=criteria,
         constructor=_no_package(),
         execution_id="exec_live_blocked",
+        worker_test_gate="decide",
+        added_test=FAILING_ADDED,
     )
     monkeypatch.undo()
     monkeypatch.setattr(
@@ -1376,7 +1428,7 @@ async def test_a_blocked_criterion_without_a_package_or_on_resume_keeps_the_deci
     await live(seed=seed, execution_id="exec_live_blocked", parallel_result=_with_blocked(2, 1))
     assert live.outcome.error is None
     failed, blocked = live.outcome.reconciliation.decisions
-    assert failed.artifact_check is ArtifactCheck.BASE_REGRESSION
+    assert failed.artifact_check is ArtifactCheck.WORKER_TESTS
     assert blocked.artifact_check is None
 
 
@@ -1486,3 +1538,76 @@ async def test_a_timed_out_base_is_tried_once_more_then_kept(
     assert first.outcome is Outcome.TIMEOUT
     assert second.outcome is third.outcome is Outcome.PASSED
     assert [call[0] for call in runner.calls].count("base") == 4
+
+
+async def test_a_resume_without_a_package_never_replays_a_regression_as_a_fail(
+    store: Any, tmp_path: Path
+) -> None:
+    from ouroboros.boundary.package import seed_criterion_keys
+    from ouroboros.boundary.resume import NO_ADMITTED_PACKAGE, ResumedBoundary, decide_resumed
+
+    from .calc_fixtures import _seed
+
+    seed = _seed("add(2, 3) returns 5")
+    (key,) = seed_criterion_keys(seed)
+    boundary = ResumedBoundary(
+        execution_id="exec_x",
+        boundary_id="exec_x/check_package/v1",
+        package_id="",
+        covered=(),
+        reason=NO_ADMITTED_PACKAGE,
+        recorded_artifact_checks=((key, ArtifactCheck.BASE_REGRESSION),),
+    )
+    verdict = await decide_resumed(boundary, seed=seed, candidate=tmp_path, event_store=store)
+    assert verdict.verdicts[key].status is PackageCriterionStatus.UNCOVERED
+
+
+async def test_record_mode_runs_records_and_never_decides(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    seed, authority = await _calc_authority(
+        store, tmp_path, monkeypatch, base_regression="record", added_test=FAILING_ADDED
+    )
+    authority.install(SimpleNamespace())
+    first, parallel = _succeeded()
+
+    # No repair turn in record mode, for either check.
+    assert (
+        await authority.gate(seed=seed, ac_index=0, result=first, execution_id="exec_regression")
+        is first
+    )
+
+    decided = await authority(seed=seed, execution_id="exec_regression", parallel_result=parallel)
+
+    regression, worker = authority.artifact_findings
+    assert regression.rejects and worker.rejects
+    assert authority.artifact_effects == {
+        ArtifactCheck.BASE_REGRESSION: br.ArtifactEffect.RECORDED,
+        ArtifactCheck.WORKER_TESTS: br.ArtifactEffect.RECORDED,
+    }
+    assert authority.artifact_would_fail == 1
+    (decision,) = authority.outcome.reconciliation.decisions
+    assert decision.artifact_check is None and decision.accepted and decided.all_succeeded
+
+
+async def test_the_two_switches_are_independent(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed, authority = await _calc_authority(
+        store,
+        tmp_path,
+        monkeypatch,
+        base_regression="off",
+        worker_test_gate="decide",
+        added_test=FAILING_ADDED,
+    )
+    _first, parallel = _succeeded()
+
+    await authority(seed=seed, execution_id="exec_regression", parallel_result=parallel)
+
+    regression, worker = authority.artifact_findings
+    assert regression.outcome is Outcome.NOT_RUN and worker.rejects
+    (decision,) = authority.outcome.reconciliation.decisions
+    assert decision.artifact_check is ArtifactCheck.WORKER_TESTS and not decision.accepted

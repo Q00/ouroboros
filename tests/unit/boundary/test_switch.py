@@ -82,6 +82,7 @@ def test_switch_precedence_cli_then_env_then_config(monkeypatch: pytest.MonkeyPa
             check_timeout_seconds=60,
             max_construction_attempts=3,
             base_regression="off",
+            worker_test_gate="decide",
         )
     )
     with patch("ouroboros.boundary.switch._load_boundary_config", return_value=config.boundary):
@@ -90,7 +91,7 @@ def test_switch_precedence_cli_then_env_then_config(monkeypatch: pytest.MonkeyPa
         monkeypatch.setenv("OUROBOROS_CHECK_PACKAGE", "on")
         settings = resolve_check_package_settings(None)
         assert settings.enabled is True and settings.max_construction_attempts == 3
-        assert settings.base_regression is False
+        assert (settings.base_regression, settings.worker_test_gate) == ("off", "decide")
         assert resolve_check_package_settings(False).enabled is False
         monkeypatch.setenv("OUROBOROS_CHECK_PACKAGE", "off")
         assert resolve_check_package_settings(True).enabled is True
@@ -107,15 +108,28 @@ def test_unset_switch_is_on_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_unset_base_regression_takes_the_one_default() -> None:
-    from ouroboros.boundary.base_regression import BASE_REGRESSION_DEFAULT
+    from ouroboros.boundary.base_regression import (
+        BASE_REGRESSION_DEFAULT,
+        WORKER_TEST_GATE_DEFAULT,
+    )
     from ouroboros.config.models import BoundaryConfig
 
     with patch("ouroboros.boundary.switch._load_boundary_config", return_value=BoundaryConfig()):
-        assert resolve_check_package_settings(None).base_regression is BASE_REGRESSION_DEFAULT
-    configured = BoundaryConfig.model_validate({"base_regression": False})
-    assert configured.base_regression == "off"
+        settings = resolve_check_package_settings(None)
+    assert (settings.base_regression, settings.worker_test_gate) == ("decide", "record")
+    assert (BASE_REGRESSION_DEFAULT, WORKER_TEST_GATE_DEFAULT) == ("decide", "record")
+    # The two switches are independent; a YAML boolean reads as decide or off.
+    configured = BoundaryConfig.model_validate({"base_regression": False, "worker_test_gate": True})
+    assert (configured.base_regression, configured.worker_test_gate) == ("off", "decide")
     with patch("ouroboros.boundary.switch._load_boundary_config", return_value=configured):
-        assert resolve_check_package_settings(None).base_regression is False
+        settings = resolve_check_package_settings(None)
+    assert (settings.base_regression, settings.worker_test_gate) == ("off", "decide")
+    recorded = BoundaryConfig.model_validate({"base_regression": "record"})
+    with patch("ouroboros.boundary.switch._load_boundary_config", return_value=recorded):
+        settings = resolve_check_package_settings(None)
+    assert (settings.base_regression, settings.worker_test_gate) == ("record", "record")
+    with pytest.raises(ValueError):
+        BoundaryConfig.model_validate({"base_regression": "on"})
 
 
 def test_unreadable_config_never_turns_the_default_on(monkeypatch: pytest.MonkeyPatch) -> None:
