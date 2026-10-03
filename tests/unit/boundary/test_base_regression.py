@@ -158,7 +158,9 @@ class _Runner:
         self.base, self.candidate = list(base), list(candidate)
         self.calls: list[tuple[str, tuple[str, ...], str | None]] = []
 
-    async def __call__(self, root: Path, files: Any, interpreter: Any, timeout: int) -> Any:
+    async def __call__(
+        self, root: Path, files: Any, interpreter: Any, timeout: int, **_options: Any
+    ) -> Any:
         kind = root.name
         seen = (root / TEST_FILE).read_text() if (root / TEST_FILE).exists() else None
         self.calls.append((kind, tuple(files), seen))
@@ -612,3 +614,36 @@ async def test_a_decided_run_reports_what_the_artifact_checks_observed_once(
             "runtime_backend": "codex",
         }
     ]
+
+
+async def test_an_added_test_file_that_cannot_be_collected_is_no_test_result(
+    tmp_path: Path,
+) -> None:
+    base = _tree(tmp_path / "base", BASE_TREE)
+    candidate = _tree(tmp_path / "work", BASE_TREE)
+    (candidate / "calc/tests/test_added.py").write_text(
+        "import no_such_module\ndef test_new():\n    pass\n"
+    )
+
+    _regression, worker = await _checks(base).findings(candidate)
+
+    assert worker.outcome is Outcome.NOT_A_TEST_RESULT and worker.failed == ()
+
+
+async def test_a_check_that_breaks_leaves_the_package_decision_intact(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def broken(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("runner exploded")
+
+    seed, authority = await _calc_authority(store, tmp_path, monkeypatch)
+    monkeypatch.setattr(br, "_pytest", broken)
+    _result, parallel = _succeeded()
+
+    decided = await authority(seed=seed, execution_id="exec_regression", parallel_result=parallel)
+
+    assert authority.outcome is not None and authority.outcome.error is None
+    assert {finding.outcome for finding in authority.artifact_findings} == {Outcome.UNAVAILABLE}
+    (decision,) = authority.outcome.reconciliation.decisions
+    assert decision.artifact_check is None and decision.reason == "script_check_advisory"
+    assert decided.all_succeeded
