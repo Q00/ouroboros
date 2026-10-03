@@ -196,6 +196,10 @@ class BoundaryRunState:
     base_snapshot: Path | None = None
     base_snapshot_digest: str | None = None
     """The snapshot's tree digest when it was taken, for a run no admission pins it for."""
+    verify_commands: tuple[str, ...] = ()
+    """The Seed criteria's ``verify_command`` strings: one source of test commands."""
+    test_command: str | None = None
+    """The test command template a constructor reply declared (``target_commands``)."""
     reference_check: ReferenceCheck | None = None
     """What the reference check excluded from the bound version (``None``: not run)."""
     exclusions: tuple[tuple[str, str, str], ...] = ()
@@ -383,10 +387,12 @@ async def prepare_check_package(
     interpreter = resolve_check_interpreter(base)
     sealer = _Sealer(ledger, seed, base, store, contract, interpreter, execution_id)
     reference_check: ReferenceCheck | None = None
+    test_command: str | None = None
 
     for attempt in range(1, settings.attempts + 1):
         boundary_id = boundary_version_id(execution_id, attempt)
         outcome = await constructor.construct(seed, base, feedback=feedback)
+        test_command = getattr(outcome, "test_command", None) or test_command
         package, admission, package_path = outcome.package, None, None
         references = getattr(outcome, "references", None)
         reference_check = None
@@ -492,6 +498,14 @@ async def prepare_check_package(
         criterion_keys=keys,
         base_snapshot=snapshot,
         base_snapshot_digest=snapshot_digest,
+        verify_commands=tuple(
+            command
+            for command in (
+                getattr(spec, "verify_command", None) for spec in seed.acceptance_criteria
+            )
+            if command
+        ),
+        test_command=test_command,
         reference_check=reference_check,
         exclusions=tuple(sealer.exclusions),
         replacement_calls=replacement.calls,

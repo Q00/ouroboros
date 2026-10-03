@@ -70,7 +70,9 @@ insufficient verification (``verification_coverage``).
 Artifact checks (``boundary/base_regression.py``). The controller also
 checks the whole candidate itself: the base tree's existing tests that pair
 with or import a changed module, restored to their base bytes and run on the
-base twice and on the candidate once (``boundary.base_regression``), and each
+base twice and on the candidate once (``boundary.base_regression``; through
+the product's pytest run or any test command admitted on the base, per test
+or per file by exit status, ``boundary/target_commands.py``), and each
 test file the worker added (``boundary.worker_test_gate``). Each has a mode:
 ``decide``, ``record`` (run and record what it would have decided, decide
 nothing) or ``off``. In ``decide`` mode an executed failure (a test that

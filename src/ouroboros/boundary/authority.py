@@ -129,6 +129,7 @@ from ouroboros.boundary.run_wiring import (
     repair_text,
     verify_check_package,
 )
+from ouroboros.boundary.target_commands import transcript_commands
 from ouroboros.orchestrator.failure_taxonomy import FailureClass
 from ouroboros.orchestrator.parallel_executor_models import (
     PACKAGE_FAILURE_CLASS_PREFIX,
@@ -641,7 +642,8 @@ class CheckPackageGate:
         checks = authority.artifact_checks
         if checks is None:
             return result
-        findings = await checks.findings(authority.candidate)
+        transcript = transcript_commands((result,), str(authority.candidate))
+        findings = await checks.findings(authority.candidate, transcript)
         # Exempt by what the oracles passing in this run's gate runs entered
         # (visible cases); the final decision uses the final verification's.
         entered = authority.gate_oracle_entered()
@@ -775,6 +777,8 @@ class CheckPackageAuthority:
                 timeout_seconds=state.contract.check_timeout_seconds,
                 run_regression=self.artifact_modes[ArtifactCheck.BASE_REGRESSION] is not off,
                 run_worker_tests=self.artifact_modes[ArtifactCheck.WORKER_TESTS] is not off,
+                seed_commands=state.verify_commands,
+                constructor_command=state.test_command,
             )
             if any(mode is not off for mode in self.artifact_modes.values())
             else None
@@ -1010,7 +1014,10 @@ class CheckPackageAuthority:
             attempted = attempted_keys(
                 keys, legacy, existing_run_accepted=bool(parallel_result.all_succeeded)
             )
-            verdict = await self._with_artifact_checks(keys, verdict, probe, attempted)
+            transcript = transcript_commands(
+                getattr(parallel_result, "results", ()) or (), str(self.candidate)
+            )
+            verdict = await self._with_artifact_checks(keys, verdict, probe, attempted, transcript)
             # Without an admitted package ``verdict.verdicts`` is empty: every
             # criterion is uncovered and the legacy verifier decides it.
             reconciliation = reconcile_acceptance(
@@ -1060,6 +1067,7 @@ class CheckPackageAuthority:
         verdict: BoundaryVerdict,
         probe: OracleFootprint | None,
         attempted: Collection[str],
+        transcript: Sequence[str] = (),
     ) -> BoundaryVerdict:
         """Fail the criteria the package left undecided when an artifact check fails the candidate.
 
@@ -1070,7 +1078,7 @@ class CheckPackageAuthority:
         """
         if self.artifact_checks is None:
             return verdict
-        findings = await self.artifact_checks.findings(self.candidate)
+        findings = await self.artifact_checks.findings(self.candidate, transcript)
         # The footprint exemption: by what the oracle checks that passed this
         # final verification entered (none passed, or no package: nothing exempt).
         entered = probe.passed(verdict.oracle_results) if probe is not None else None

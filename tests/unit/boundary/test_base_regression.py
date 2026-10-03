@@ -368,7 +368,10 @@ async def test_no_selected_file_and_an_unsupported_runner_are_reasons(
     regression, worker = await _checks(base).findings(candidate)
     assert (regression.outcome, worker.outcome) == (Outcome.NO_SELECTED_FILES,) * 2
 
+    # A project runner pytest cannot drive, and no command that can name the
+    # target (Django's labels name files under ``tests/`` only).
     runner_base = _tree(tmp_path / "django", {**BASE_TREE, "tests/runtests.py": ""})
+    (candidate / "calc/ops.py").write_text("def add(a, b):\n    return a + b\n")
     regression, worker = await _checks(runner_base).findings(candidate)
     assert (regression.outcome, worker.outcome) == (Outcome.UNSUPPORTED_RUNNER,) * 2
 
