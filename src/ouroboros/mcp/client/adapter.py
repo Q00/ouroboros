@@ -17,7 +17,11 @@ import structlog
 
 from ouroboros.core.retry import retry_async
 from ouroboros.core.types import Result
-from ouroboros.mcp.client.sdk_factory import SDKClientResources, build_sdk_client
+from ouroboros.mcp.client.sdk_factory import (
+    SDKClientResources,
+    TransportLifecycle,
+    build_sdk_client,
+)
 from ouroboros.mcp.errors import MCPClientError, MCPConnectionError, MCPTimeoutError
 from ouroboros.mcp.types import (
     MCPCapabilities,
@@ -37,6 +41,24 @@ from ouroboros.mcp.types import (
 log = structlog.get_logger(__name__)
 
 RETRIABLE_EXCEPTIONS = (TimeoutError, ConnectionError, OSError)
+
+
+def _record_cleanup_failure(primary: BaseException, cleanup: BaseException) -> None:
+    """Record secondary teardown failure without replacing the primary error."""
+    try:
+        primary.add_note(f"MCP cleanup also failed ({type(cleanup).__name__}): {cleanup}")
+    except (asyncio.CancelledError, KeyboardInterrupt, GeneratorExit):
+        raise
+    except BaseException:
+        pass
+    try:
+        log.warning("mcp.cleanup_during_exception_failed", error=cleanup)
+    except (asyncio.CancelledError, KeyboardInterrupt, GeneratorExit):
+        raise
+    except BaseException:
+        # Logging is best-effort during exception unwinding. In particular, a
+        # broken logging sink must not replace the error from the context body.
+        pass
 
 
 def _freeze_json(value: Any) -> Any:
@@ -98,6 +120,8 @@ class MCPClientAdapter:
         self._server_info: MCPServerInfo | None = None
         self._server_snapshot: MCPServerSnapshot | None = None
         self._config: MCPServerConfig | None = None
+        self._transport_lifecycle = TransportLifecycle()
+        self._cleanup_error: MCPClientError | None = None
 
     async def __aenter__(self) -> Self:
         return self
@@ -108,7 +132,25 @@ class MCPClientAdapter:
         exc_val: BaseException | None,
         exc_tb: Any,
     ) -> None:
-        await self.disconnect()
+        try:
+            result = await self.disconnect()
+        except (asyncio.CancelledError, KeyboardInterrupt, GeneratorExit):
+            raise
+        except BaseException as cleanup_error:
+            if exc_val is None:
+                raise
+            _record_cleanup_failure(exc_val, cleanup_error)
+            return None
+        if result.is_err:
+            if exc_val is not None:
+                _record_cleanup_failure(exc_val, result.error)
+            else:
+                raise result.error
+
+    @property
+    def transport_entered(self) -> bool:
+        """Whether the latest connection established streams before discovery."""
+        return self._transport_lifecycle.entered
 
     @property
     def is_connected(self) -> bool:
@@ -136,6 +178,8 @@ class MCPClientAdapter:
                 log.warning("mcp.disconnect_before_connect_failed", error=disconnected.error)
 
         self._config = config
+        self._transport_lifecycle = TransportLifecycle()
+        self._cleanup_error = None
 
         @retry_async(
             on=RETRIABLE_EXCEPTIONS,
@@ -179,6 +223,7 @@ class MCPClientAdapter:
         resources: SDKClientResources | None = None
         try:
             resources = build_sdk_client(config)
+            self._transport_lifecycle = resources.transport_lifecycle
             # Publish owned resources before entering so a partial failure can
             # always be cleaned by one atomic reset path.
             self._client = resources.client
@@ -200,7 +245,12 @@ class MCPClientAdapter:
             # The high-level Client unwinds its own transport.  Ouroboros still
             # closes its explicitly owned HTTP client, even if Client teardown fails.
             if resources is not None:
-                await self._reset_connection_state()
+                try:
+                    await self._reset_connection_state()
+                except Exception as cleanup_exc:
+                    self._cleanup_error = MCPClientError.from_exception(
+                        cleanup_exc, server_name=config.name
+                    )
             raise
 
     async def _reset_connection_state(self) -> None:
@@ -279,6 +329,8 @@ class MCPClientAdapter:
 
     async def disconnect(self) -> Result[None, MCPClientError]:
         if self._client is None and self._http_client is None:
+            if self._cleanup_error is not None:
+                return Result.err(self._cleanup_error)
             return Result.ok(None)
         server_name = self._config.name if self._config else None
         try:
@@ -286,7 +338,8 @@ class MCPClientAdapter:
             log.info("mcp.disconnected", server=server_name or "unknown")
             return Result.ok(None)
         except Exception as exc:
-            return Result.err(MCPClientError.from_exception(exc, server_name=server_name))
+            self._cleanup_error = MCPClientError.from_exception(exc, server_name=server_name)
+            return Result.err(self._cleanup_error)
 
     def _ensure_connected(self) -> Result[None, MCPClientError]:
         if self._client is None:
