@@ -838,14 +838,21 @@ class BoundaryConfig(BaseModel, frozen=True):
         max_construction_attempts: Package versions tried before the worker
             starts. A version that is not admitted is superseded by the next
             one; 1 means no regeneration.
+        base_regression: ``on`` makes a run with an admitted package also run
+            the base tree's own tests that pair with or import the changed
+            modules, on the base and on the finished workspace, and the test
+            files the worker added; a failure fails the criteria the package
+            left unverified or uncovered (``ouroboros.boundary.base_regression``).
+            Unset (default) means ``BASE_REGRESSION_DEFAULT`` there.
     """
 
     check_package: Literal["off", "on"] | None = None
     constructor_timeout_seconds: int = Field(default=600, ge=30, le=3600)
     check_timeout_seconds: int = Field(default=120, ge=5, le=1800)
     max_construction_attempts: int = Field(default=2, ge=1, le=5)
+    base_regression: Literal["off", "on"] | None = None
 
-    @field_validator("check_package", mode="before")
+    @field_validator("check_package", "base_regression", mode="before")
     @classmethod
     def _yaml_booleans(cls, value: Any) -> Any:
         # YAML 1.1 reads a bare ``on`` / ``off`` as a boolean.

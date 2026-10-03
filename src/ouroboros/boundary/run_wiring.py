@@ -59,6 +59,7 @@ from ouroboros.boundary.acceptance import (
     criterion_verdicts,
 )
 from ouroboros.boundary.admission import admit_check_package
+from ouroboros.boundary.base_regression import BASE_REGRESSION_DEFAULT
 from ouroboros.boundary.binding import CheckTier, TierAssignment
 from ouroboros.boundary.binding_flow import (
     DeclaredBindingResult,
@@ -124,6 +125,8 @@ class CheckPackageSettings:
     constructor_timeout_seconds: int = 600
     check_timeout_seconds: int = 120
     max_construction_attempts: int = 2
+    base_regression: bool = BASE_REGRESSION_DEFAULT
+    """Run the artifact checks (``boundary/base_regression.py``); recorded on the run contract."""
 
     @property
     def attempts(self) -> int:
@@ -347,7 +350,10 @@ async def prepare_check_package(
     # First, before anything that can fail: the run had the check package on.
     # A resume reads it back, so a missing boundary is undecided, never legacy.
     # The one run contract: admission and every later check read its timeout.
-    contract = RunContract(check_timeout_seconds=settings.check_timeout_seconds)
+    contract = RunContract(
+        check_timeout_seconds=settings.check_timeout_seconds,
+        base_regression=settings.base_regression,
+    )
     await ledger.record_check_package_enabled(execution_id, contract)
     store = private_store_dir(store_dir or default_store_dir(execution_id))
     digest = seed_digest(seed)
@@ -444,11 +450,15 @@ async def prepare_check_package(
     admitted = admission is not None and admission.verdict is PackageVerdict.ADMITTED
     snapshot: Path | None = None
     tiers = admission.check_tiers if admission is not None else None
-    if admitted and any(tier == CheckTier.U.value for tier in (tiers or {}).values()):
+    if admitted and (
+        contract.base_regression
+        or any(tier == CheckTier.U.value for tier in (tiers or {}).values())
+    ):
         # A late binding is validated against the base after the worker has
-        # stopped; keep the base outside every checkout until then. Taken
-        # before the actor start: the journal records a worker start only
-        # once everything that start depends on exists.
+        # stopped, and the artifact checks run the base's own tests then; keep
+        # the base outside every checkout until then. Taken before the actor
+        # start: the journal records a worker start only once everything that
+        # start depends on exists.
         snapshot = snapshot_base(base, store)
     state = BoundaryRunState(
         execution_id=execution_id,
