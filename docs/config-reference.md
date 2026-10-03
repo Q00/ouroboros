@@ -609,6 +609,9 @@ original runs and fails on the finished workspace, or an added test file
 whose run fails, fails every criterion the package could not verify (every
 criterion, when no package was admitted); while the worker runs under an
 admitted package, the failing test names are sent back as a repair. A
+test is set aside when the only changed functions it reached were also
+reached by an admitted oracle check that passed (that oracle decides the
+changed behaviour), unless more than 20 tests broke. A
 criterion the package verified keeps its verdict, and a check that observed
 nothing (a timeout, no matching test file, a project whose own test runner is
 not pytest) decides nothing.

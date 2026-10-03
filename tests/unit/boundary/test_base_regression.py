@@ -89,8 +89,58 @@ def test_added_files_and_edited_tests_select_nothing() -> None:
     assert br.worker_test_files(added) == ("test_repro.py", "tests/test_new.py")
 
 
-def test_the_footprint_seam_keeps_every_regressed_test_for_now() -> None:
-    assert br.regressions_to_keep(("t::a", "t::b"), ("pkg.export.render",)) == ("t::a", "t::b")
+F = ("calc/ops.py", "add", 1)
+G = ("calc/ops.py", "sub", 4)
+
+
+def test_a_test_whose_footprint_lies_inside_the_passing_oracles_is_exempt() -> None:
+    kept, how = br.regressions_to_keep(("t::a",), {"t::a": frozenset({F})}, frozenset({F, G}))
+    assert (kept, how) == ((), br.Exemption.APPLIED)
+
+
+def test_a_test_entering_a_changed_function_no_passing_oracle_entered_is_kept() -> None:
+    kept, how = br.regressions_to_keep(("t::a",), {"t::a": frozenset({F, G})}, frozenset({F}))
+    assert (kept, how) == (("t::a",), br.Exemption.NONE_INSIDE)
+
+
+def test_a_test_without_a_footprint_is_kept() -> None:
+    kept, _how = br.regressions_to_keep(("t::a", "t::b"), {"t::b": frozenset()}, frozenset({F}))
+    assert kept == ("t::a",)
+
+
+def test_a_test_failing_before_any_changed_function_is_exempt() -> None:
+    kept, _how = br.regressions_to_keep(("t::a",), {"t::a": frozenset()}, frozenset())
+    assert kept == ()
+
+
+def test_mass_breakage_is_never_exempt() -> None:
+    many = tuple(f"t::{index}" for index in range(br.MASS_BREAKAGE + 1))
+    footprints = dict.fromkeys(many, frozenset({F}))
+    kept, how = br.regressions_to_keep(many, footprints, frozenset({F}))
+    assert (kept, how) == (many, br.Exemption.MASS_BREAKAGE)
+    at_the_cap = many[: br.MASS_BREAKAGE]
+    assert br.regressions_to_keep(at_the_cap, footprints, frozenset({F}))[0] == ()
+
+
+def test_without_a_passing_oracle_nothing_is_exempt() -> None:
+    kept, how = br.regressions_to_keep(("t::a",), {"t::a": frozenset()}, None)
+    assert (kept, how) == (("t::a",), br.Exemption.NO_PASSING_ORACLE)
+
+
+def test_an_all_exempt_finding_is_void_and_a_partial_one_keeps_the_rest() -> None:
+    finding = br.ArtifactFinding(
+        ArtifactCheck.BASE_REGRESSION,
+        Outcome.REJECTED,
+        ("t::a", "t::b"),
+        footprints={"t::a": frozenset({F}), "t::b": frozenset({G})},
+    )
+    void = br.exempt(finding, frozenset({F, G}))
+    assert void.outcome is Outcome.EXEMPTED and not void.rejects
+    assert void.exempted == ("t::a", "t::b") and void.failed == ()
+    partial = br.exempt(finding, frozenset({F}))
+    assert partial.rejects and partial.failed == ("t::b",) and partial.exempted == ("t::a",)
+    verdicts = {"k": _verdict("k", PackageCriterionStatus.UNVERIFIED)}
+    assert br.apply_findings(verdicts, ["k"], (void,)) == verdicts
 
 
 # --------------------------------------------------------------------------
@@ -629,6 +679,8 @@ async def test_a_decided_run_reports_what_the_artifact_checks_observed_once(
             "failed_criteria": 1,
             "criterion_count": 1,
             "repairs": 0,
+            "exemption": "no_passing_oracle",
+            "exempted_tests": 0,
             "surface": "cli_run",
             "runtime_backend": "codex",
         }
@@ -699,6 +751,8 @@ async def test_with_no_admitted_package_a_regression_fails_every_criterion_and_i
     assert authority.outcome is not None and authority.outcome.error is None
     decisions = authority.outcome.reconciliation.decisions
     assert [d.artifact_check for d in decisions] == [ArtifactCheck.BASE_REGRESSION] * 2
+    # No package, so no passing oracle: nothing is exempt.
+    assert authority.artifact_findings[0].exemption is br.Exemption.NO_PASSING_ORACLE
     assert all(d.governed_by is Governor.CHECK_PACKAGE and not d.accepted for d in decisions)
     assert decided.results[1].error == f"{ARTIFACT_CHECK_ERROR} (base_regression)"
     events = await store.replay(BOUNDARY_AGGREGATE_TYPE, authority.state.boundary_id)
@@ -842,3 +896,214 @@ async def test_a_journal_without_recorded_fails_resumes_as_before(
     covered, uncovered = resumed.outcome.reconciliation.decisions
     assert covered.artifact_check is None and covered.reason == "script_check_advisory"
     assert uncovered.artifact_check is None and uncovered.accepted
+
+
+# --------------------------------------------------------------------------
+# The footprint: changed functions, the recorders, and the exemption end to end
+
+
+def test_changed_functions_are_keyed_like_their_code_objects(tmp_path: Path) -> None:
+    from ouroboros.boundary.footprint import changed_functions
+
+    before = (
+        "def deco(f):\n    return f\n\nclass K:\n    @deco\n    def m(self):\n        return 1\n"
+    )
+    after = before.replace("return 1", "return 2") + "\ndef added():\n    return 3\n"
+    base = _tree(tmp_path / "base", {"pkg/mod.py": before})
+    candidate = _tree(
+        tmp_path / "work", {"pkg/mod.py": after, "pkg/new.py": "def n():\n    pass\n"}
+    )
+    assert changed_functions(base, candidate, ["pkg/mod.py"], ["pkg/new.py"]) == {
+        ("pkg/mod.py", "K.m", 5),  # the decorator's line, as ``co_firstlineno`` has it
+        ("pkg/mod.py", "added", 9),
+        ("pkg/new.py", "n", 1),
+    }
+
+
+def test_the_oracle_recorder_has_written_and_closed_its_record_before_a_kill(
+    tmp_path: Path,
+) -> None:
+    import os
+    import signal
+    import subprocess
+
+    from ouroboros.boundary.footprint import oracle_program, read_entered
+
+    root = _tree(
+        tmp_path / "copy",
+        {"calc/__init__.py": "", "calc/ops.py": "def add(a, b):\n    return a + b\n"},
+    )
+    record = tmp_path / "record.jsonl"
+    watched = frozenset({("calc/ops.py", "add", 1)})
+    harness = (
+        "import os, sys\nsys.path.insert(0, os.getcwd())\nfrom calc.ops import add\nadd(1, 2)\n"
+        "print('ready', flush=True)\nimport time\ntime.sleep(60)\n"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-I", "-B", "-c", oracle_program(harness, root, watched, record)],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert process.stdout is not None and process.stdout.readline().strip() == "ready"
+        os.kill(process.pid, signal.SIGKILL)
+    finally:
+        process.wait(timeout=10)
+    assert read_entered(record, watched) == watched
+
+
+async def test_the_pytest_recorder_gives_each_test_its_own_footprint(tmp_path: Path) -> None:
+    from ouroboros.boundary.footprint import changed_functions
+
+    files = {
+        "calc/__init__.py": "",
+        "calc/ops.py": "def add(a, b):\n    return a - b\n\n\ndef sub(a, b):\n    return a - b\n",
+        "calc/tests/__init__.py": "",
+        TEST_FILE: "from calc.ops import add, sub\n"
+        "def test_add():\n    assert add(5, 3) == 2\n"
+        "def test_sub():\n    assert sub(5, 3) == 2\n"
+        "def test_none():\n    assert False\n",
+    }
+    base = _tree(tmp_path / "base", files)
+    candidate = _tree(tmp_path / "work", files)
+    (candidate / "calc/ops.py").write_text(
+        "def add(a, b):\n    return a + b\n\n\ndef sub(a, b):\n    return b - a\n"
+    )
+    watched = changed_functions(base, candidate, ["calc/ops.py"])
+    import shutil
+
+    copy = tmp_path / "copy"
+    shutil.copytree(candidate, copy)
+    run = await br._pytest(
+        copy, (TEST_FILE,), pin_interpreter(sys.executable, "t"), 60, watched=watched
+    )
+    assert run.footprints == {
+        "calc.tests.test_ops::test_add": frozenset({("calc/ops.py", "add", 1)}),
+        "calc.tests.test_ops::test_sub": frozenset({("calc/ops.py", "sub", 5)}),
+        "calc.tests.test_ops::test_none": frozenset(),
+    }
+
+
+MATH_BASE = "def clamp(value, low, high):\n    if value > high:\n        return value\n    return max(low, value)\n"
+MATH_FIXED = "def clamp(value, low, high):\n    return max(low, min(high, value))\n"
+CLAMP_ORACLE = {
+    "criterion": 1,
+    "check_id": "oracle_1",
+    "role": "reproduction",
+    "call_kind": "function",
+    "params": ["value", "low", "high"],
+    "default_binding": {"symbol": "mathutils.clamp"},
+    "target_named_in_criterion": False,
+    "cases": [
+        {
+            "case_id": "stated",
+            "held_out": False,
+            "args": {"value": 15, "low": 0, "high": 10},
+            "expect": {"kind": "returns", "value": 10},
+        },
+        {
+            "case_id": "held",
+            "held_out": True,
+            "args": {"value": 20, "low": -5, "high": 7},
+            "expect": {"kind": "returns", "value": 7},
+        },
+    ],
+}
+
+
+async def _oracle_authority(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, fixed: str, test: str
+) -> Any:
+    from ouroboros.boundary import run_wiring
+    from ouroboros.boundary.authority import CheckPackageAuthority
+    from ouroboros.boundary.constructor import ConstructionOutcome
+    from ouroboros.boundary.oracle_build import package_from_reply
+    from ouroboros.boundary.run_wiring import CheckPackageSettings, prepare_check_package
+
+    from .calc_fixtures import _seed
+    from .fake_constructors import FakeConstructor
+
+    repo = _tree(
+        tmp_path / "repo",
+        {
+            "mathutils.py": MATH_BASE + "\n\ndef widen(value):\n    return value\n",
+            "tests/test_mathutils.py": test,
+        },
+    )
+    monkeypatch.setattr(
+        run_wiring, "resolve_check_interpreter", lambda _base: pin_interpreter(sys.executable, "t")
+    )
+    seed = _seed("clamp(15, 0, 10) returns 10", "the helpers are documented")
+    reply = {"oracles": [CLAMP_ORACLE], "uncovered": [{"criterion": 2, "reason": "docs"}]}
+    package = package_from_reply(reply, seed, input_digest="1" * 64, generator="fake")
+    settings = CheckPackageSettings(enabled=True, base_regression=True)
+    state = await prepare_check_package(
+        seed,
+        event_store=store,
+        constructor=FakeConstructor(ConstructionOutcome(package, None, "1" * 64, "fake")),
+        execution_id="exec_footprint",
+        base_checkout=repo,
+        worker_workspace=repo,
+        runtime_label="codex",
+        settings=settings,
+        store_dir=tmp_path / "store",
+    )
+    assert state.admitted
+    authority = CheckPackageAuthority(state, settings, event_store=store, candidate_checkout=repo)
+    (repo / "mathutils.py").write_text(fixed)
+    return seed, authority
+
+
+PINS_CLAMP = (
+    "from mathutils import clamp\ndef test_pins_clamp():\n    assert clamp(15, 0, 10) == 15\n"
+)
+
+
+async def test_a_regression_only_the_passing_oracle_adjudicates_is_exempt(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed, authority = await _oracle_authority(
+        store,
+        tmp_path,
+        monkeypatch,
+        fixed=MATH_FIXED + "\n\ndef widen(value):\n    return value\n",
+        test=PINS_CLAMP,
+    )
+    _result, parallel = _succeeded(2)
+
+    decided = await authority(seed=seed, execution_id="exec_footprint", parallel_result=parallel)
+
+    regression = authority.artifact_findings[0]
+    assert regression.outcome is Outcome.EXEMPTED
+    assert regression.exempted == ("tests.test_mathutils::test_pins_clamp",)
+    assert regression.exemption is br.Exemption.APPLIED
+    verified, docs = authority.outcome.reconciliation.decisions
+    assert verified.package_status is PackageCriterionStatus.PASS
+    assert docs.artifact_check is None and docs.accepted
+    assert decided.all_succeeded
+
+
+async def test_a_regression_through_a_change_no_passing_oracle_entered_is_kept(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    test = PINS_CLAMP.replace("assert clamp(15, 0, 10) == 15", "assert widen(clamp(5, 0, 10)) == 5")
+    seed, authority = await _oracle_authority(
+        store,
+        tmp_path,
+        monkeypatch,
+        fixed=MATH_FIXED + "\n\ndef widen(value):\n    return value + 1\n",
+        test=test.replace("import clamp", "import clamp, widen"),
+    )
+    _result, parallel = _succeeded(2)
+
+    await authority(seed=seed, execution_id="exec_footprint", parallel_result=parallel)
+
+    regression = authority.artifact_findings[0]
+    assert regression.rejects and regression.exemption is br.Exemption.NONE_INSIDE
+    assert regression.footprints["tests.test_mathutils::test_pins_clamp"] == {
+        ("mathutils.py", "clamp", 1),
+        ("mathutils.py", "widen", 5),
+    }
+    _verified, docs = authority.outcome.reconciliation.decisions
+    assert docs.artifact_check is ArtifactCheck.BASE_REGRESSION and not docs.accepted

@@ -20,7 +20,12 @@ the bytes of their files.
   fails or errors on the candidate, or vanishes behind a collection error of
   its module, regressed; a candidate on which the runner dies before it writes
   a report fails every such test. The base result is kept per (base tree
-  digest, selected files), so repeated attempts never rerun the base.
+  digest, selected files), so repeated attempts never rerun the base. A
+  regressed test whose footprint (the changed functions its failing run
+  entered, ``boundary/footprint.py``) lies inside what the admitted oracle
+  checks that passed on the candidate entered is exempt
+  (``regressions_to_keep``): the oracle adjudicates that behaviour, and the
+  old test pins what the criterion changed.
 - **Worker tests** (``ArtifactCheck.WORKER_TESTS``). Each test file the
   candidate adds is run alone on a copy of the candidate. A run that exits 1
   with a report naming a failing test fails; exit 0 passes and proves
@@ -54,7 +59,7 @@ from __future__ import annotations
 import ast
 import asyncio
 from collections.abc import Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 import os
 from pathlib import Path, PurePosixPath
@@ -70,6 +75,12 @@ from ouroboros.boundary.acceptance import ArtifactCheck, CriterionVerdict, Packa
 from ouroboros.boundary.admission import _run_argv
 from ouroboros.boundary.binding import CheckTier
 from ouroboros.boundary.check_env import CheckInterpreter
+from ouroboros.boundary.footprint import (
+    FunctionKey,
+    changed_functions,
+    pytest_bootstrap,
+    read_test_footprints,
+)
 from ouroboros.boundary.tree import (
     UNREADABLE,
     added_paths,
@@ -98,11 +109,17 @@ _REPORT_LIMIT = 32 * 1024 * 1024
 _REPAIR_NAMES = 10
 
 
+MASS_BREAKAGE = 20
+"""More regressed tests than this are never exempt: the change broke too much to adjudicate."""
+
+
 class ArtifactCheckOutcome(StrEnum):
     """What one artifact check observed on a run (closed set; telemetry reports it)."""
 
     REJECTED = "rejected"
     """An executed failure: the check failed the undecided criteria."""
+    EXEMPTED = "exempted"
+    """Every regression was exempt (``regressions_to_keep``): the finding is void."""
     PASSED = "passed"
     """The check ran and found nothing; it decides nothing."""
     TIMEOUT = "timeout"
@@ -117,6 +134,19 @@ class ArtifactCheckOutcome(StrEnum):
     """Nothing ran: the sandbox, the pinned interpreter or the base snapshot refused it."""
 
 
+class Exemption(StrEnum):
+    """How the footprint exemption treated a base regression (closed set; telemetry reports it)."""
+
+    APPLIED = "applied"
+    """At least one regressed test was exempt."""
+    NONE_INSIDE = "none_inside"
+    """A passing oracle exists, but no regressed test's footprint lies inside its own."""
+    NO_PASSING_ORACLE = "no_passing_oracle"
+    """No admitted oracle passed on this candidate (with no package, always)."""
+    MASS_BREAKAGE = "mass_breakage"
+    """More than ``MASS_BREAKAGE`` tests regressed."""
+
+
 @dataclass(frozen=True, slots=True)
 class ArtifactFinding:
     """One check's observation on one candidate tree."""
@@ -124,8 +154,14 @@ class ArtifactFinding:
     check: ArtifactCheck
     outcome: ArtifactCheckOutcome
     failed: tuple[str, ...] = ()
-    """The regressed test ids, or the worker test files that failed."""
+    """The regressed test ids that count, or the worker test files that failed."""
     selected: tuple[str, ...] = ()
+    footprints: Mapping[str, frozenset[FunctionKey]] = field(default_factory=dict)
+    """Per regressed test, the changed functions its failing run entered; a test
+    without an entry produced no footprint."""
+    exempted: tuple[str, ...] = ()
+    """Regressed tests the footprint exemption set aside."""
+    exemption: Exemption | None = None
 
     @property
     def rejects(self) -> bool:
@@ -268,19 +304,48 @@ def worker_test_files(added: Iterable[str]) -> tuple[str, ...]:
 
 
 def regressions_to_keep(
-    regressed: Sequence[str], changed_functions: Collection[str]
-) -> tuple[str, ...]:
-    """The regressed tests that count against the candidate; today every one of them.
+    regressed: Sequence[str],
+    footprints: Mapping[str, frozenset[FunctionKey]],
+    oracle_entered: frozenset[FunctionKey] | None,
+) -> tuple[tuple[str, ...], Exemption]:
+    """The regressed tests that count against the candidate, and how the exemption went.
 
-    The seam of the planned footprint exemption: a regressed test is exempt
-    when every changed function its failing run entered was also entered by a
-    passing admitted oracle, that is, the test pins behaviour the package
-    itself verified the fix to change. ``changed_functions`` will carry the
-    functions the diff changed; the follow-up records which of them each
-    failing test and each passing oracle entered, and drops exempt tests here.
+    A regressed test T is exempt when it produced a footprint and every
+    changed function its failing run entered (T_C, possibly none: a test that
+    fails before it reaches changed code) was also entered by an admitted
+    oracle check that passed on this candidate (``oracle_entered``, O_C). The
+    oracle then adjudicates the behaviour T reaches, and T pins what the
+    criterion changed. A test with no footprint is kept: only a missing or
+    forged footprint could claim an exemption. Nothing is exempt without a
+    passing oracle (``oracle_entered`` ``None``, always so with no package),
+    or when more than ``MASS_BREAKAGE`` tests regressed.
     """
-    del changed_functions
-    return tuple(regressed)
+    if oracle_entered is None:
+        return tuple(regressed), Exemption.NO_PASSING_ORACLE
+    if len(regressed) > MASS_BREAKAGE:
+        return tuple(regressed), Exemption.MASS_BREAKAGE
+    kept = tuple(
+        test
+        for test in regressed
+        if test not in footprints or not footprints[test] <= oracle_entered
+    )
+    return kept, Exemption.APPLIED if len(kept) < len(regressed) else Exemption.NONE_INSIDE
+
+
+def exempt(
+    finding: ArtifactFinding, oracle_entered: frozenset[FunctionKey] | None
+) -> ArtifactFinding:
+    """``finding`` with the footprint exemption applied (a worker-test finding is unchanged).
+
+    When every regression is exempt the finding is void (``EXEMPTED``) and
+    the package's decision stands.
+    """
+    if finding.check is not ArtifactCheck.BASE_REGRESSION or not finding.rejects:
+        return finding
+    kept, how = regressions_to_keep(finding.failed, finding.footprints, oracle_entered)
+    exempted = tuple(test for test in finding.failed if test not in kept)
+    outcome = ArtifactCheckOutcome.REJECTED if kept else ArtifactCheckOutcome.EXEMPTED
+    return replace(finding, outcome=outcome, failed=kept, exempted=exempted, exemption=how)
 
 
 # --------------------------------------------------------------------------
@@ -294,6 +359,7 @@ class _Run:
     return_code: int | None
     timed_out: bool = False
     unavailable: bool = False
+    footprints: Mapping[str, frozenset[FunctionKey]] = field(default_factory=dict)
 
 
 def parse_junit(data: bytes) -> dict[str, str] | None:
@@ -331,30 +397,28 @@ async def _pytest(
     timeout: int,
     *,
     past_collection_errors: bool = False,
+    watched: frozenset[FunctionKey] | None = None,
 ) -> _Run:
     """Run ``files`` with pytest in ``root`` (a throwaway copy) and read its report.
 
     ``past_collection_errors`` runs the other files when one fails to collect
     (the regression runs, where that error is a finding); pytest then exits 1
     for the collection error alone, so a single worker test file never uses it
-    and a file that cannot be collected keeps pytest's own exit 2.
+    and a file that cannot be collected keeps pytest's own exit 2. With
+    ``watched`` (the changed functions) pytest starts under the controller's
+    footprint plugin (``footprint.pytest_bootstrap``), which writes each
+    test's entered functions beside the report; like the report it is written
+    by code the candidate controls, so it can only ever exempt.
     """
     report = root / f".ouroboros-report-{secrets.token_hex(8)}.xml"
-    # Footprint hook (planned, not built; ``regressions_to_keep``): a
-    # controller-written pytest plugin, loaded here with ``-p`` from a file
-    # beside the report (never from the copy's own tree), that turns on
-    # ``sys.monitoring`` PY_START events for the code objects of the changed
-    # functions only, and per test (``pytest_runtest_call``) writes the
-    # qualified names it entered to a second report next to this one. The
-    # candidate run's report gives each failing test's footprint; the oracle
-    # target process (``oracle_run``) would record the same for passing
-    # admitted oracles. Like the JUnit report it is written by code the
-    # candidate controls, so a forged footprint could only claim an exemption:
-    # the rule must keep a test whenever its footprint is missing.
+    record = root / f".ouroboros-footprint-{secrets.token_hex(8)}.jsonl"
+    launcher = (
+        ("python", "-m", "pytest")
+        if watched is None
+        else ("python", "-c", pytest_bootstrap(root, watched, record))
+    )
     argv = (
-        "python",
-        "-m",
-        "pytest",
+        *launcher,
         "-p",
         "no:cacheprovider",
         "-q",
@@ -384,7 +448,8 @@ async def _pytest(
             statuses = parse_junit(report.read_bytes())
     except OSError:
         statuses = None
-    return _Run(statuses, completed.return_code)
+    footprints = read_test_footprints(record, watched) if watched is not None else {}
+    return _Run(statuses, completed.return_code, footprints=footprints)
 
 
 def _stable_passes(runs: Sequence[_Run]) -> tuple[str, ...]:
@@ -502,7 +567,42 @@ class ArtifactChecks:
         self._base_manifest: dict[str, str] | None = None
         self._base_runs: dict[tuple[str, tuple[str, ...]], _Base] = {}
         self._findings: dict[str, tuple[ArtifactFinding, ArtifactFinding]] = {}
+        self._watched: dict[str, frozenset[FunctionKey]] = {}
         self._lock = asyncio.Lock()
+
+    async def changed_functions(self, candidate: Path) -> frozenset[FunctionKey] | None:
+        """``C`` for ``candidate`` as it is now (``footprint.changed_functions``), or ``None``.
+
+        ``None`` when the base cannot be used; the caller then records no
+        oracle footprint and nothing can be exempt.
+        """
+        async with self._lock:
+            try:
+                base = self._pinned_base()
+                if base is None:
+                    return None
+                candidate = candidate.resolve()
+                manifest = tree_manifest(candidate)
+                return self._changed_functions(base, candidate, manifest)
+            except Exception:  # noqa: BLE001 - an optional observation never fails the decision
+                return None
+
+    def _changed_functions(
+        self, base: Path, candidate: Path, manifest: Mapping[str, str]
+    ) -> frozenset[FunctionKey]:
+        """The changed functions of the non-test Python files a change touched or added."""
+        digest = manifest_digest(manifest)
+        if digest not in self._watched:
+            assert self._base_manifest is not None
+            changed = [p for p in changed_paths(self._base_manifest, manifest) if p in manifest]
+            added = added_paths(self._base_manifest, manifest)
+            self._watched[digest] = changed_functions(
+                base,
+                candidate,
+                [p for p in changed if not is_test_path(p)],
+                [p for p in added if not is_test_path(p)],
+            )
+        return self._watched[digest]
 
     async def findings(self, candidate: Path) -> tuple[ArtifactFinding, ArtifactFinding]:
         """The base regression and worker-test findings for ``candidate`` as it is now."""
@@ -532,8 +632,9 @@ class ArtifactChecks:
             )
         else:
             changed = changed_paths(self._base_manifest, manifest)
+            watched = self._changed_functions(base, candidate, manifest)
             found = (
-                await self._regression(base, candidate, changed),
+                await self._regression(base, candidate, changed, watched),
                 await self._worker_tests(candidate, added_paths(self._base_manifest, manifest)),
             )
         if tree_manifest(candidate) == manifest:
@@ -554,7 +655,11 @@ class ArtifactChecks:
         return self._base
 
     async def _regression(
-        self, base: Path, candidate: Path, changed: Sequence[str]
+        self,
+        base: Path,
+        candidate: Path,
+        changed: Sequence[str],
+        watched: frozenset[FunctionKey],
     ) -> ArtifactFinding:
         check = ArtifactCheck.BASE_REGRESSION
         assert self._base_manifest is not None and self._base_digest is not None
@@ -574,15 +679,21 @@ class ArtifactChecks:
             if not restore_base_bytes(copy_root, base, restored):
                 return ArtifactFinding(check, ArtifactCheckOutcome.UNAVAILABLE, selected=selected)
             run = await _pytest(
-                copy_root, selected, self._interpreter, self._timeout, past_collection_errors=True
+                copy_root,
+                selected,
+                self._interpreter,
+                self._timeout,
+                past_collection_errors=True,
+                watched=watched,
             )
         if run.unavailable:
             return ArtifactFinding(check, ArtifactCheckOutcome.UNAVAILABLE, selected=selected)
         if run.timed_out:
             return ArtifactFinding(check, ArtifactCheckOutcome.TIMEOUT, selected=selected)
-        regressed = regressions_to_keep(regressions(side.stable, run.statuses), ())
+        regressed = regressions(side.stable, run.statuses)
         outcome = ArtifactCheckOutcome.REJECTED if regressed else ArtifactCheckOutcome.PASSED
-        return ArtifactFinding(check, outcome, regressed, selected)
+        footprints = {test: run.footprints[test] for test in regressed if test in run.footprints}
+        return ArtifactFinding(check, outcome, regressed, selected, footprints)
 
     async def _base_side(self, base: Path, selected: tuple[str, ...]) -> _Base:
         """Two runs of ``selected`` on fresh base copies; a test must pass on both."""
@@ -726,6 +837,7 @@ def report_artifact_checks(
     """Send one ``acceptance_artifact_checks`` event for a decided run. Never raises."""
     try:
         outcomes = {finding.check: finding.outcome.value for finding in findings}
+        regression = next((f for f in findings if f.check is ArtifactCheck.BASE_REGRESSION), None)
         usage_telemetry.capture_acceptance_artifact_checks(
             base_regression=outcomes.get(ArtifactCheck.BASE_REGRESSION),
             worker_tests=outcomes.get(ArtifactCheck.WORKER_TESTS),
@@ -734,6 +846,12 @@ def report_artifact_checks(
             repairs=repairs,
             surface=surface,
             runtime_backend=runtime_backend,
+            exemption=(
+                regression.exemption.value
+                if regression is not None and regression.exemption is not None
+                else None
+            ),
+            exempted_tests=len(regression.exempted) if regression is not None else 0,
         )
     except Exception:  # noqa: BLE001 - telemetry must never affect the run
         pass
@@ -746,6 +864,9 @@ __all__ = [
     "ArtifactCheckOutcome",
     "ArtifactChecks",
     "ArtifactFinding",
+    "Exemption",
+    "MASS_BREAKAGE",
+    "exempt",
     "apply_findings",
     "base_test_files",
     "imported_names",

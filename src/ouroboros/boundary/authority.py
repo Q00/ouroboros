@@ -99,6 +99,7 @@ from ouroboros.boundary.base_regression import (
     ArtifactChecks,
     ArtifactFinding,
     apply_findings,
+    exempt,
     repair_message,
 )
 from ouroboros.boundary.binding import CheckTier, declared_entry_points, entry_points_request
@@ -108,6 +109,7 @@ from ouroboros.boundary.binding_flow import (
     verify_with_bindings,
 )
 from ouroboros.boundary.events import ReconciliationPayload
+from ouroboros.boundary.footprint import FunctionKey, OracleFootprint
 from ouroboros.boundary.ledger import BoundaryLedger
 from ouroboros.boundary.package import CheckRole, seed_criterion_keys, seed_digest
 from ouroboros.boundary.per_check import criteria_without_admitted_check
@@ -544,6 +546,7 @@ class CheckPackageGate:
             base_run_cache=authority.base_runs,
         )
         subset = {check_id: assignments[check_id] for check_id in check_ids}
+        probe = await authority.oracle_footprint()
         bound = await verify_with_bindings(
             package,
             authority.candidate,
@@ -551,8 +554,10 @@ class CheckPackageGate:
             contract=state.contract,
             interpreter=state.interpreter,
             include_held_out=False,
+            footprint=probe,
         )
         verification = bound.effective
+        authority.remember_oracle_footprint(probe, verification)
         verdicts = criterion_verdicts(
             package, verification, admission=state.admission, assignments=subset
         )
@@ -624,7 +629,11 @@ class CheckPackageGate:
         checks = self._authority.artifact_checks
         if checks is None:
             return result
-        message = repair_message(await checks.findings(self._authority.candidate))
+        findings = await checks.findings(self._authority.candidate)
+        # Exempt by what the oracles passing in this run's gate runs entered
+        # (visible cases); the final decision uses the final verification's.
+        entered = self._authority.gate_oracle_entered()
+        message = repair_message(tuple(exempt(finding, entered) for finding in findings))
         if message is None:
             return result
         self.artifact_repairs += 1
@@ -738,6 +747,9 @@ class CheckPackageAuthority:
             else None
         )
         self.artifact_findings: tuple[ArtifactFinding, ...] = ()
+        # Per oracle check that passed its latest gate run: the changed
+        # functions it entered (the gate's footprint exemption).
+        self.gate_oracle_footprints: dict[str, frozenset[FunctionKey]] = {}
         # The worker's latest declared entry point per criterion. A later
         # attempt that declares nothing does not withdraw it: otherwise a
         # worker could turn a failing criterion into an unverified one by
@@ -751,6 +763,36 @@ class CheckPackageAuthority:
         self.binding_budget_exhausted: set[str] = set()
         # Set once the terminal verification starts (held-out cases may run).
         self._terminal_started = False
+
+    async def oracle_footprint(self) -> OracleFootprint | None:
+        """A probe recording which changed functions the oracle checks enter, or ``None``.
+
+        Only with an admitted package and the artifact checks on: the probe is
+        what the footprint exemption compares regressed tests against.
+        """
+        if self.artifact_checks is None or self._state.package is None:
+            return None
+        watched = await self.artifact_checks.changed_functions(self.candidate)
+        return None if watched is None else OracleFootprint(watched)
+
+    def remember_oracle_footprint(self, probe: OracleFootprint | None, verification: Any) -> None:
+        """Keep, per oracle check of a gate run, what it entered when it passed."""
+        if probe is None or verification is None:
+            return
+        for check in verification.checks:
+            if check.oracle_result is None:
+                continue
+            passed = probe.passed({check.check_id: check.oracle_result})
+            if passed is None:
+                self.gate_oracle_footprints.pop(check.check_id, None)
+            else:
+                self.gate_oracle_footprints[check.check_id] = passed
+
+    def gate_oracle_entered(self) -> frozenset[FunctionKey] | None:
+        """What the oracle checks passing in this run's gate runs entered; ``None``: none passed."""
+        if not self.gate_oracle_footprints:
+            return None
+        return frozenset().union(*self.gate_oracle_footprints.values())
 
     def repair_follows(self, retry_attempt: int) -> bool:
         """Whether a repair attempt follows ``retry_attempt`` (unknown budget: yes)."""
@@ -914,17 +956,19 @@ class CheckPackageAuthority:
                 entries = self.remember_declaration(keys[index], _declared_from(result))
                 if entries:
                     declared = {**declared, keys[index]: entries}
+            probe = await self.oracle_footprint()
             verdict = await verify_check_package(
                 self._state,
                 event_store=self._event_store,
                 candidate_checkout=self._candidate,
                 declared_entry_points=declared,
                 base_run_cache=self.base_runs,
+                footprint=probe,
             )
             verdict = _label_missing_bindings(
                 verdict, self.binding_requested, self.binding_budget_exhausted
             )
-            verdict = await self._with_artifact_checks(keys, verdict)
+            verdict = await self._with_artifact_checks(keys, verdict, probe)
             # Without an admitted package ``verdict.verdicts`` is empty: every
             # criterion is uncovered and the legacy verifier decides it.
             reconciliation = reconcile_acceptance(
@@ -969,7 +1013,7 @@ class CheckPackageAuthority:
             return await self._undecided(keys, parallel_result, type(exc).__name__)
 
     async def _with_artifact_checks(
-        self, keys: Sequence[str], verdict: BoundaryVerdict
+        self, keys: Sequence[str], verdict: BoundaryVerdict, probe: OracleFootprint | None
     ) -> BoundaryVerdict:
         """Fail the criteria the package left undecided when an artifact check fails the candidate.
 
@@ -980,7 +1024,11 @@ class CheckPackageAuthority:
         """
         if self.artifact_checks is None:
             return verdict
-        self.artifact_findings = await self.artifact_checks.findings(self.candidate)
+        findings = await self.artifact_checks.findings(self.candidate)
+        # The footprint exemption: by what the oracle checks that passed this
+        # final verification entered (none passed, or no package: nothing exempt).
+        entered = probe.passed(verdict.oracle_results) if probe is not None else None
+        self.artifact_findings = tuple(exempt(finding, entered) for finding in findings)
         verdicts = apply_findings(verdict.verdicts, keys, self.artifact_findings)
         rejecting = [finding for finding in self.artifact_findings if finding.rejects]
         if not rejecting:

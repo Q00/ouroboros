@@ -1780,9 +1780,24 @@ class TestAcceptanceArtifactChecks:
         assert hostile not in json.dumps(sent[0])
 
     def test_the_vocabulary_matches_the_product(self) -> None:
-        from ouroboros.boundary.base_regression import ArtifactCheckOutcome
+        from ouroboros.boundary.base_regression import ArtifactCheckOutcome, Exemption
 
         assert {item.value for item in ArtifactCheckOutcome} == telemetry._ARTIFACT_CHECK_OUTCOMES
+        assert {item.value for item in Exemption} == telemetry._ARTIFACT_EXEMPTIONS
+
+    def test_reports_how_many_regressions_the_exemption_set_aside(
+        self, sent: list[dict[str, Any]]
+    ) -> None:
+        self._capture(base_regression="exempted", exemption="applied", exempted_tests=3)
+        self._capture(exemption="/private/path", exempted_tests=0)
+        telemetry.flush(timeout=2.0)
+        first, second = (row["properties"] for row in sent)
+        assert (first["base_regression"], first["exemption"], first["exempted_tests"]) == (
+            "exempted",
+            "applied",
+            3,
+        )
+        assert second["exemption"] == "unknown"
 
     def test_an_opt_out_suppresses_it(
         self, sent: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
