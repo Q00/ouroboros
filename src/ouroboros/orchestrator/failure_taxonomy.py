@@ -58,6 +58,11 @@ class FailureClass(StrEnum):
             worker ran and deleted). The run cannot be replayed, so the
             criterion has no evidence; it is not fabrication and not a
             worker rejection.
+        NO_CALL_EVIDENCE: The worker cited transcript calls by number and none
+            of them qualifies as evidence (``evidence.call_citation``): the
+            calls exist and the transcript recorded them, but none is a
+            replayed, passing base-tree test that runs the changed code. The
+            criterion has no evidence; it is not fabrication.
     """
 
     EVIDENCE_MISSING = "EVIDENCE_MISSING"
@@ -68,6 +73,7 @@ class FailureClass(StrEnum):
     BLOCKED = "BLOCKED"
     TRANSCRIPT_MISSING_INFRASTRUCTURE = "TRANSCRIPT_MISSING_INFRASTRUCTURE"
     SCRIPT_ABSENT_FROM_ARTIFACT = "SCRIPT_ABSENT_FROM_ARTIFACT"
+    NO_CALL_EVIDENCE = "NO_CALL_EVIDENCE"
 
 
 _HARD_PRECONDITION_VALUE_KEY_TOKENS = frozenset(
@@ -278,6 +284,13 @@ _POLICY_TABLE: dict[FailureClass, RecoveryPolicy] = {
             "The transcript recorded the claimed run, but its script is gone "
             "from the workspace, so it cannot be replayed. Preserve the work as "
             "unverified instead of repeating it."
+        ),
+    ),
+    FailureClass.NO_CALL_EVIDENCE: RecoveryPolicy(
+        action=RecoveryAction.CONTINUE,
+        rationale=(
+            "The cited transcript calls are real but none qualifies as evidence. "
+            "Preserve the work as unverified instead of repeating it."
         ),
     ),
 }

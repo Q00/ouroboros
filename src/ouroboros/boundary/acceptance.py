@@ -439,6 +439,9 @@ class LegacyNoEvidenceReason(StrEnum):
     SCRIPT_ABSENT_FROM_ARTIFACT = "script_absent_from_artifact"
     """Every unproven claim is a recorded run whose script left the workspace,
     so it was not replayed (``SCRIPT_ABSENT_FROM_ARTIFACT``)."""
+    NO_CALL_EVIDENCE = "no_call_evidence"
+    """The worker cited transcript calls by number and none qualified as
+    evidence (``NO_CALL_EVIDENCE``)."""
     VERIFIER_VERDICT_NOT_PASSED = "verifier_verdict_not_passed"
     """A verdict that did not pass, with no rejection the executor made."""
 

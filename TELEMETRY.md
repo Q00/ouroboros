@@ -141,7 +141,9 @@ Notes:
   `no_held_out_case` (no reproduction oracle passed a held-out case the base
   failed), `no_reproduction_check` (only preservation checks passed), or
   `unknown`. `replay_reason` says why the legacy verifier had no evidence:
-  `environment_unverifiable`, `transcript_unavailable`, `no_verifier_verdict`,
+  `environment_unverifiable`, `transcript_unavailable`,
+  `script_absent_from_artifact`, `no_call_evidence` (no transcript call the
+  worker cited qualified as evidence), `no_verifier_verdict`,
   `verifier_verdict_not_passed`, `no_legacy_record`, or `unknown`. Both are
   read from the product's typed decision state, never from text, and anything
   else folds to `unknown` before serialization. The event never carries a

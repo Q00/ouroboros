@@ -265,6 +265,8 @@ def _legacy_no_evidence_reason(result: Any) -> LegacyNoEvidenceReason:
         return LegacyNoEvidenceReason.TRANSCRIPT_UNAVAILABLE
     if failure_class == FailureClass.SCRIPT_ABSENT_FROM_ARTIFACT.value:
         return LegacyNoEvidenceReason.SCRIPT_ABSENT_FROM_ARTIFACT
+    if failure_class == FailureClass.NO_CALL_EVIDENCE.value:
+        return LegacyNoEvidenceReason.NO_CALL_EVIDENCE
     for sub in tuple(getattr(result, "sub_results", ()) or ()):
         if not _legacy_evidence(sub):
             return _legacy_no_evidence_reason(sub)
