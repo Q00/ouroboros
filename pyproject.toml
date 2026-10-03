@@ -81,7 +81,7 @@ claude-sdk = ["claude-agent-sdk==0.2.144", "anthropic==1.0.0", "mcp==1.28.1"]
 copilot = []
 litellm = ["litellm==1.91.0; python_version < '3.14'"]
 dashboard = []
-mcp = ["mcp==2.0.0"]
+mcp = ["mcp==2.2.0"]
 tui = ["textual==8.2.8", "textual-serve==1.1.3"]
 # `[all]` remains the MCP 1.x application bundle. The MCP 2 server profile is
 # explicit and isolated; `[all,mcp]` is intentionally unsupported.
@@ -174,7 +174,7 @@ litellm-test = [
     "ouroboros-ai[litellm]",
 ]
 mcp-test = [
-    "mcp==2.0.0",
+    "mcp==2.2.0",
 ]
 claude-sdk-test = [
     "ouroboros-ai[claude-sdk]",
