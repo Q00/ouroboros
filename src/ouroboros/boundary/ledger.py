@@ -14,7 +14,7 @@ time to the event about to be appended and at replay time by
    the frozen manifest must be one the product writes (``frozen_manifest``)
    and an ``admitted`` receipt one admission can write
    (``admitted_exclusions``: a tier and one result per check, exclusions only
-   for a role violation on the base);
+   for a role violation or a per-check indeterminate result on the base);
 3. ``record_actor_started`` refuses to start a worker until every boundary it
    binds is sealed (and, with a package, admitted) and not superseded, and
    every later version of its run was abandoned in its favor, and
@@ -140,11 +140,11 @@ from ouroboros.boundary.package import (
 from ouroboros.boundary.per_check import (
     ALL_CHECKS_EXCLUDED,
     EXCLUDED_STATUS_HINT,
-    EXCLUSION_REASONS,
     HELD_OUT_NOT_DISCRIMINATING,
     ROLE_EXCLUSION_REASONS,
     base_failing_held_out,
     criteria_without_admitted_check,
+    exclusion_reason,
     held_out_all_passed,
 )
 from ouroboros.boundary.receipts import (
@@ -394,9 +394,9 @@ def admitted_exclusions(manifest: FrozenManifest, data: Mapping[str, Any]) -> fr
     ``U`` for an oracle check, ``S`` for a script check, ``C`` for either when
     excluded); one result per check with the manifest's role; every
     excluded check (tier ``C``) exactly an ``excluded_checks`` entry,
-    ``violated`` for a base reason its role allows and carrying the
-    exclusion reason that base reason maps to (``per_check.EXCLUSION_REASONS``;
-    ``held_out_not_discriminating`` only for a reproduction oracle whose base
+    carrying the exclusion reason its recorded status and base reason give
+    (``per_check.exclusion_reason``), one its role allows
+    (``held_out_not_discriminating`` only for a reproduction oracle whose base
     run passed every held-out case); every other check ``expected``; and at
     least one check not excluded.
     """
@@ -431,10 +431,9 @@ def admitted_exclusions(manifest: FrozenManifest, data: Mapping[str, Any]) -> fr
         if item.get("role") != check.role.value:
             raise BoundaryOrderError("an admission result names another role")
         if check.check_id in excluded:
-            reason = EXCLUSION_REASONS.get(str(item.get("reason")))
+            reason = exclusion_reason(str(item.get("status")), str(item.get("reason")))
             if (
-                item.get("status") != "violated"
-                or reason not in ROLE_EXCLUSION_REASONS[check.role]
+                reason not in ROLE_EXCLUSION_REASONS[check.role]
                 or recorded[check.check_id] != reason
                 or (
                     reason == HELD_OUT_NOT_DISCRIMINATING
@@ -1050,10 +1049,11 @@ def _require_derived_receipt(
     undecided check as ``<reason>:<check id>``; the verdict is undecided on a
     precondition or a mutation, else rejected (fail) on a violated check,
     else undecided on an undecided one, else admitted (pass). On the base,
-    ``per_check.per_check_admission`` then admits a rejected package whose
-    every unmet check was violated for an exclusion reason, excluding those
-    checks (tier ``C``, ``excluded_checks``), or, when that would exclude
-    every check, keeps it rejected and adds ``all_checks_excluded``. Each
+    ``per_check.per_check_admission`` then admits a rejected or undecided
+    package (no precondition, no mutation) whose every unmet check has an
+    exclusion reason (``per_check.exclusion_reason``), excluding those checks
+    (tier ``C``, ``excluded_checks``), or, when that would exclude every
+    check, keeps its verdict and adds ``all_checks_excluded``. Each
     check's tier is its base tier (``_base_tier``) and ``check_tiers`` maps
     every check to it, ``C`` for an excluded one.
     """
@@ -1086,10 +1086,10 @@ def _require_derived_receipt(
         verdict = good
     excluded: dict[str, str] = {}
     derived_all = False
-    if on_base and verdict == bad:
+    if on_base and verdict != good and not (body[:split] or mutation):
         unmet = [c for c in checks if c.status is not CheckStatus.EXPECTED]
-        mapped = {c.check_id: EXCLUSION_REASONS.get(c.reason) for c in unmet}
-        if all(c.status is CheckStatus.VIOLATED for c in unmet) and None not in mapped.values():
+        mapped = {c.check_id: exclusion_reason(c.status, c.reason) for c in unmet}
+        if None not in mapped.values():
             if len(unmet) == len(checks):
                 derived_all = True
             else:

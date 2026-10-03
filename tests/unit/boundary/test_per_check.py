@@ -11,14 +11,20 @@ from typing import Any
 
 import pytest
 
+from ouroboros.boundary.acceptance import PackageCriterionStatus, criterion_verdicts
 from ouroboros.boundary.admission import admit_check_package
+from ouroboros.boundary.binding import CHECK_DIR
+from ouroboros.boundary.check_env import INTERPRETER_CHANGED
+from ouroboros.boundary.coverage import replacement_targets
 from ouroboros.boundary.oracle_build import package_from_reply
 from ouroboros.boundary.per_check import (
     ALL_CHECKS_EXCLUDED,
+    INDETERMINATE_ON_BASE,
     per_check_admission,
 )
-from ouroboros.boundary.receipts import PackageVerdict
+from ouroboros.boundary.receipts import CheckStatus, PackageVerdict
 from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
+from ouroboros.runtime.exec_sandbox import SandboxUnavailableReason
 
 BUGGY = "def clamp(value, low, high):\n    if value > high:\n        return value\n    return max(low, value)\n"
 FIXED = "def clamp(value, low, high):\n    return max(low, min(high, value))\n"
@@ -147,3 +153,88 @@ WILLING = "The user is willing to assist with debugging the issue."
 
 def _dev_seed() -> Seed:
     return _seed(DJANGO_UNDER, WILLING)
+
+
+# A reproduction script for criterion 2 that fails before its own assertion
+# (no failure signature): the shape of ``script_2_1`` in the v0.55.4 dev run
+# (django__django-14580), where the child raised the bug outside the guard.
+_UNSIGNED_PATH = f"{CHECK_DIR}/repro_2.py"
+UNSIGNED_REPRO_2 = {
+    "check_id": "repro_2",
+    "role": "reproduction",
+    "argv": ["python3", _UNSIGNED_PATH],
+    "target_named_in_criterion": False,
+    "cwd": ".",
+    "failure_signature": "OUROBOROS_CHECK_FAILED:repro_2",
+    "assertions": [{"criterion": 2, "locator": "main assertion"}],
+}
+UNSIGNED_FILE = {
+    "path": _UNSIGNED_PATH,
+    "content": "raise RuntimeError('raised before the guarded assertion')\n",
+}
+
+
+def _valid_and_undecided(seed: Seed) -> Any:
+    return package_from_reply(
+        {"oracles": [GOOD_REPRO_1], "checks": [UNSIGNED_REPRO_2], "files": [UNSIGNED_FILE]},
+        seed,
+        input_digest="1" * 64,
+        generator="fake",
+    )
+
+
+async def test_an_undecided_check_is_excluded_and_the_valid_one_admitted(repo: Path) -> None:
+    seed = _seed("clamp(15, 0, 10) returns 10", "clamp(5, 0, 10) returns 5")
+    package = _valid_and_undecided(seed)
+    undecided = next(c.check_id for c in package.checks if c.check_id != "oracle_1")
+    admission = await admit_check_package(package, repo)
+
+    by_id = {check.check_id: check for check in admission.checks}
+    assert by_id["oracle_1"].status is CheckStatus.EXPECTED
+    assert by_id[undecided].status is CheckStatus.INDETERMINATE
+    assert by_id[undecided].reason == "failure_signature_absent"
+    assert admission.verdict is PackageVerdict.ADMITTED
+    assert admission.excluded_checks == {undecided: INDETERMINATE_ON_BASE}
+    assert admission.check_tiers is not None and admission.check_tiers[undecided] == "C"
+
+    # Criterion 2 lost its only check: uncovered, decided by the existing
+    # verifier, and a target of the replacement call; criterion 1 keeps its
+    # admitted reproduction oracle.
+    verdicts = criterion_verdicts(package, None, admission=admission)
+    first, second = package.criterion_keys
+    assert verdicts[first].status is not PackageCriterionStatus.UNCOVERED
+    assert verdicts[second].status is PackageCriterionStatus.UNCOVERED
+    assert verdicts[second].reason == f"uncovered:{INDETERMINATE_ON_BASE}"
+    assert replacement_targets(package, admission.excluded_checks) == {
+        second: INDETERMINATE_ON_BASE
+    }
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        INTERPRETER_CHANGED,
+        SandboxUnavailableReason.SANDBOX_UNAVAILABLE.value,
+        "protected_bytes_mutated",
+    ],
+)
+async def test_a_shared_environment_failure_still_refuses_the_version(
+    repo: Path, reason: str
+) -> None:
+    """Only a result about the one check is excluded; the environment's is not."""
+    seed = _seed("clamp(15, 0, 10) returns 10", "clamp(5, 0, 10) returns 5")
+    package = _valid_and_undecided(seed)
+    raw = await admit_check_package(package, repo)
+    undecided = next(c.check_id for c in raw.checks if c.check_id != "oracle_1")
+    shared = raw.model_copy(
+        update={
+            "verdict": PackageVerdict.INDETERMINATE,
+            "excluded_checks": None,
+            "reasons": (f"{reason}:{undecided}",),
+            "checks": tuple(
+                c.model_copy(update={"reason": reason}) if c.check_id == undecided else c
+                for c in raw.checks
+            ),
+        }
+    )
+    assert per_check_admission(shared) is shared
