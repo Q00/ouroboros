@@ -141,6 +141,19 @@ class VerificationCoverage(StrEnum):
     """Half or more were not decided by the package, or a criterion is unverified."""
 
 
+class ArtifactCheck(StrEnum):
+    """A controller-run check of the whole artifact (``boundary/base_regression.py``).
+
+    It only fails: an executed failure fails every criterion the package left
+    unverified or uncovered (``CriterionVerdict.artifact_check``).
+    """
+
+    BASE_REGRESSION = "base_regression"
+    """Existing tests that passed on the base fail on the candidate."""
+    WORKER_TESTS = "worker_tests"
+    """A test file the worker added fails when the controller runs it."""
+
+
 class ArtifactVerdict(StrEnum):
     """Artifact-level verdict, by precedence."""
 
@@ -167,6 +180,8 @@ class CriterionVerdict:
     passed a held-out case through a tier ``A`` binding. ``False`` unless
     ``status`` is ``pass``. It, not ``tier``, decides corroboration; it has no
     default, so every verdict states its provenance."""
+    artifact_check: ArtifactCheck | None = field(default=None, kw_only=True)
+    """The artifact check that failed this otherwise undecided criterion, if any."""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -179,6 +194,7 @@ class CriterionVerdict:
             "binding": self.binding,
             "binding_source": self.binding_source,
             "declared_binding_pass": self.declared_binding_pass,
+            **({"artifact_check": self.artifact_check.value} if self.artifact_check else {}),
         }
 
 
@@ -543,6 +559,8 @@ class CriterionDecision:
     failed_outside_package: bool = field(default=False, kw_only=True)
     """Not accepted because the worker's attempt failed a gate the package does
     not decide (``ExistingOutcome.failed_outside_package``); display only."""
+    artifact_check: ArtifactCheck | None = field(default=None, kw_only=True)
+    """The artifact check that failed this criterion (``CriterionVerdict``)."""
 
     @property
     def legacy_decided(self) -> bool:
@@ -569,6 +587,7 @@ class CriterionDecision:
             "accepted": self.accepted,
             "governed_by": self.governed_by.value,
             "declared_binding_pass": self.declared_binding_pass,
+            **({"artifact_check": self.artifact_check.value} if self.artifact_check else {}),
         }
 
 
@@ -729,6 +748,7 @@ def reconcile_acceptance(
                 binding=verdict.binding,
                 declared_binding_pass=verdict.declared_binding_pass,
                 failed_outside_package=prior is not None and prior.failed_outside_package,
+                artifact_check=verdict.artifact_check,
             )
         )
     run_accepted = bool(decisions) and all(decision.accepted for decision in decisions)

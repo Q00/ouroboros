@@ -1222,6 +1222,8 @@ def _require_supported_statuses(
         if keys[item.root_ac_index] != item.criterion_key:
             raise BoundaryOrderError("a decision's root index names another criterion")
         supported, declared = _supported(state, item.criterion_key, lost)
+        if item.artifact_check is not None and supported in ("unverified", "uncovered"):
+            supported = "fail"  # an executed artifact check failed what the package left undecided
         if item.package_status not in _SUPPORTED_STATUSES[supported] or (
             item.package_status == "pass" and item.declared_binding_pass != declared
         ):
@@ -1359,7 +1361,7 @@ def _require_unverified_decision(state: VersionState, record: ReconciledRecord) 
 
     Allowed only when the final bindings left no check runnable, or when the
     decision says the package could not decide (``undecided_reason``) after
-    the worker started; either way no criterion is a pass or a fail.
+    the worker started; either way no criterion is a pass or a package fail.
     """
     if state.final_bindings and not state.runnable:
         allowed = _UNRUN_STATUSES
@@ -1367,7 +1369,7 @@ def _require_unverified_decision(state: VersionState, record: ReconciledRecord) 
         allowed = _UNDECIDED_STATUSES
     else:
         raise BoundaryOrderError("acceptance must cite a verification of the frozen package")
-    statuses = {item.package_status for item in record.criteria}
+    statuses = {item.package_status for item in record.criteria if item.artifact_check is None}
     if not statuses <= allowed:
         raise BoundaryOrderError(
             "a decision recorded without a candidate verification claims a verified status"
