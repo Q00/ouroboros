@@ -47,6 +47,11 @@ not require users to acknowledge a new notice.
   by default under the existing opt-outs: closed failure reason codes and
   counts, the same class of data as `ac_verify_failed`, so not a scope
   expansion.
+- 2026-10: added `acceptance_artifact_checks`, the closed outcome of each
+  controller-run artifact check (base regression, worker tests) of a decided
+  run, with counts. On by default under the existing opt-outs: closed reason
+  codes and counts of the same class as `acceptance_no_evidence`, so not a
+  scope expansion.
 
 ## How to opt out
 
@@ -98,6 +103,7 @@ use. Each row below is the exact property set accepted by the serializer.
 | `runtime_drift` | A frozen runtime authority input (Codex config, CLI executable, dispatch registry, profile routing) is observed to have changed after the runtime initialized; the run continues on the re-baselined input | kind (closed enum: `codex_config`/`cli_executable`/`skill_dispatcher`/`mcp_handler_registry`/`skill_dispatch_registry`/`profile_routing`/`baseline_unavailable`/`attestation_timeout`/`unknown`), runtime_backend, app_version, os, ci |
 | `ac_verify_failed` | The orchestrator's deterministic AC verify gate rejects an attempt (`run_verify_commands` enabled) | cause (closed enum: `invalid_contract`/`artifacts_missing`/`artifacts_missing_found_elsewhere`/`environment_unverifiable`/`timeout`/`exit_nonzero`/`output_assertion_unmatched`/`workspace_mutated`/`unknown`), runtime_backend, app_version, os, ci |
 | `acceptance_no_evidence` | A terminal `ooo run`, MCP `execute_seed` run, or evolve generation whose acceptance the check package authority reconciled, when that decision accepted at least one criterion that no verifier had evidence for (the check package did not decide it and the legacy verifier had no evidence); at most one row per run, none when every accepted criterion had evidence. The acceptance itself is unchanged | `pair_<package_reason>__<replay_reason>` (integer count per reason pair; only non-zero pairs are sent; both reasons are closed enums, see below), criterion_count, no_evidence_count, verification_coverage (`full`/`partial`/`low`/`unknown`), surface (`cli_run`/`mcp_execute`/`evolve`/`unknown`), check_package (`on`/`off`/`unknown`), check_package_status (`admitted`/`construction_failed`/`rejected`/`not_run`/`unknown`), runtime_backend (a shipped runtime backend name, else `unknown`), app_version, os, ci |
+| `acceptance_artifact_checks` | A terminal `ooo run`, MCP `execute_seed` run, or evolve generation whose acceptance the check package authority reconciled with the artifact checks on (`boundary.base_regression`); at most one row per run. It reports what the checks observed and decides nothing | base_regression and worker_tests (each a closed enum: `rejected`/`passed`/`timeout`/`base_runner_crash`/`no_selected_files`/`unsupported_runner`/`not_a_test_result`/`unavailable`/`unknown`, see below), failed_criteria, criterion_count, repairs, surface (`cli_run`/`mcp_execute`/`evolve`/`unknown`), runtime_backend (a shipped runtime backend name, else `unknown`), app_version, os, ci |
 
 Notes:
 
@@ -150,6 +156,21 @@ Notes:
   criterion, check, binding, path, or identifier. A run whose check package
   was off, not admitted before the worker started, or not consulted by its
   execution path is not reconciled, so it sends no row.
+- `acceptance_artifact_checks` reports, for each controller-run artifact
+  check (`base_regression`: the base tree's existing tests that pair with or
+  import a changed module; `worker_tests`: the test files the worker added),
+  whether it decided (`rejected`: it failed the criteria the check package
+  left undecided), ran and found nothing (`passed`), or had no observation
+  and why: `timeout`, `base_runner_crash` (the runner wrote no report on the
+  base), `no_selected_files`, `unsupported_runner` (the project's own runner
+  is not driven), `not_a_test_result` (an added test file's run exited with
+  neither 0 nor 1), or `unavailable` (the sandbox, the pinned interpreter or
+  the base snapshot refused the run). `failed_criteria` counts the criteria
+  the checks failed in the final decision and `repairs` the attempts they
+  sent back to the worker. On by default under every opt-out above, for the
+  same reason as `acceptance_no_evidence`. It never carries a test name, file,
+  path, criterion, or identifier; outcomes come from the product's typed
+  state and anything else folds to `unknown`.
 - `ref` is one of `direct`, `readme`, `readme-hero`, `readme-ko`,
   `readme-hero-ko`, `readme-zh`, `readme-hero-zh`, or `docs-getting-started`.
   Every other value folds to `direct` before serialization.
@@ -222,7 +243,9 @@ Collection is triggered only at these audited call sites:
   the same handler runs behind the job-backed `ouroboros_start_evaluate` path;
 - [`src/ouroboros/boundary/run_control.py`](src/ouroboros/boundary/run_control.py):
   once per decided run, the `acceptance_no_evidence` counts
-  ([`src/ouroboros/boundary/no_evidence.py`](src/ouroboros/boundary/no_evidence.py));
+  ([`src/ouroboros/boundary/no_evidence.py`](src/ouroboros/boundary/no_evidence.py))
+  and the `acceptance_artifact_checks` outcomes
+  ([`src/ouroboros/boundary/base_regression.py`](src/ouroboros/boundary/base_regression.py));
 - [`scripts/install.sh`](scripts/install.sh) — successful install completion.
   [`scripts/install.ps1`](scripts/install.ps1), the Windows installer, emits
   neither `install_started` nor `install_completed`. The `ouroboros setup`

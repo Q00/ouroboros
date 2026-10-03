@@ -579,3 +579,36 @@ async def test_the_final_decision_fails_an_unverified_criterion_and_the_journal_
     events = await store.replay(BOUNDARY_AGGREGATE_TYPE, "exec_regression/check_package/v1")
     assert events[-1].type == ACCEPTANCE_RECONCILED
     assert events[-1].data["criteria"][0]["artifact_check"] == "base_regression"
+
+
+async def test_a_decided_run_reports_what_the_artifact_checks_observed_once(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ouroboros import telemetry
+    from ouroboros.boundary.run_control import CheckPackageRun
+
+    captured: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        telemetry, "capture", lambda event, properties=None: captured.append((event, properties))
+    )
+    seed, authority = await _calc_authority(store, tmp_path, monkeypatch)
+    _result, parallel = _succeeded()
+    await authority(seed=seed, execution_id="exec_regression", parallel_result=parallel)
+    run = CheckPackageRun(authority.settings, state=authority.state, authority=authority)
+    run.attempted, run.runtime_backend = True, "codex"
+
+    run.finish("failed", surface="cli_run")
+    run.finish("failed", surface="cli_run")
+
+    rows = [props for event, props in captured if event == "acceptance_artifact_checks"]
+    assert rows == [
+        {
+            "base_regression": "rejected",
+            "worker_tests": "no_selected_files",
+            "failed_criteria": 1,
+            "criterion_count": 1,
+            "repairs": 0,
+            "surface": "cli_run",
+            "runtime_backend": "codex",
+        }
+    ]

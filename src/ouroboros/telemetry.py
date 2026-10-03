@@ -452,6 +452,36 @@ _ACCEPTANCE_NO_EVIDENCE_KEYS = frozenset(
         for replay_reason in _NO_EVIDENCE_REPLAY_REASONS | {_UNKNOWN_NO_EVIDENCE_VALUE}
     }
 )
+# The controller-run artifact checks of a decided run (boundary/base_regression.py):
+# what each observed, closed tokens and counts only. SSOT pairing with
+# ``base_regression.ArtifactCheckOutcome``; edit them together. Never a test
+# name, file, path, or criterion.
+_ARTIFACT_CHECK_OUTCOMES = frozenset(
+    {
+        "rejected",
+        "passed",
+        "timeout",
+        "base_runner_crash",
+        "no_selected_files",
+        "unsupported_runner",
+        "not_a_test_result",
+        "unavailable",
+    }
+)
+_ACCEPTANCE_ARTIFACT_CHECKS_KEYS = frozenset(
+    {
+        "base_regression",
+        "worker_tests",
+        "failed_criteria",
+        "criterion_count",
+        "repairs",
+        "surface",
+        "runtime_backend",
+        "app_version",
+        "os",
+        "ci",
+    }
+)
 # Bound on any single string property. Dropped, not truncated -- a truncated
 # value could still leak the start of a prompt or path.
 _MAX_PROPERTY_STR_LEN = 200
@@ -1001,6 +1031,8 @@ def _resolve_allowed_keys(event: str, properties: dict[str, Any] | None) -> froz
         return _RUNTIME_DRIFT_KEYS
     if event == "acceptance_no_evidence":
         return _ACCEPTANCE_NO_EVIDENCE_KEYS
+    if event == "acceptance_artifact_checks":
+        return _ACCEPTANCE_ARTIFACT_CHECKS_KEYS
     return None
 
 
@@ -1206,6 +1238,42 @@ def capture_acceptance_no_evidence(
                 "surface": _fold(surface, _NO_EVIDENCE_SURFACES),
                 "check_package": _fold(check_package, _NO_EVIDENCE_CHECK_PACKAGE),
                 "check_package_status": _fold(check_package_status, _NO_EVIDENCE_PACKAGE_STATUSES),
+                "runtime_backend": _canonical_runtime_backend(runtime_backend),
+            },
+        )
+    except Exception:
+        pass
+
+
+def capture_acceptance_artifact_checks(
+    *,
+    base_regression: str | None,
+    worker_tests: str | None,
+    failed_criteria: int,
+    criterion_count: int,
+    repairs: int,
+    surface: str | None,
+    runtime_backend: str | None,
+) -> None:
+    """Capture what the controller-run artifact checks observed on one decided run.
+
+    ``base_regression`` and ``worker_tests`` are each check's outcome: it
+    decided (``rejected``), ran and found nothing (``passed``), or had no
+    observation and why; anything outside the audited vocabulary folds to
+    ``unknown``. ``failed_criteria`` counts the criteria the checks failed in
+    the final decision and ``repairs`` the attempts they sent back to the
+    worker. Never raises.
+    """
+    try:
+        capture(
+            "acceptance_artifact_checks",
+            {
+                "base_regression": _fold(base_regression, _ARTIFACT_CHECK_OUTCOMES),
+                "worker_tests": _fold(worker_tests, _ARTIFACT_CHECK_OUTCOMES),
+                "failed_criteria": failed_criteria,
+                "criterion_count": criterion_count,
+                "repairs": repairs,
+                "surface": _fold(surface, _NO_EVIDENCE_SURFACES),
                 "runtime_backend": _canonical_runtime_backend(runtime_backend),
             },
         )
