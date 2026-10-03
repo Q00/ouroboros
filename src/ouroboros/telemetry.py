@@ -459,6 +459,7 @@ _ACCEPTANCE_NO_EVIDENCE_KEYS = frozenset(
 _ARTIFACT_CHECK_OUTCOMES = frozenset(
     {
         "rejected",
+        "exempted",
         "passed",
         "timeout",
         "base_runner_crash",
@@ -468,10 +469,15 @@ _ARTIFACT_CHECK_OUTCOMES = frozenset(
         "unavailable",
     }
 )
+# How the footprint exemption treated a base regression. SSOT pairing with
+# ``base_regression.Exemption``; edit them together.
+_ARTIFACT_EXEMPTIONS = frozenset({"applied", "none_inside", "no_passing_oracle", "mass_breakage"})
 _ACCEPTANCE_ARTIFACT_CHECKS_KEYS = frozenset(
     {
         "base_regression",
         "worker_tests",
+        "exemption",
+        "exempted_tests",
         "failed_criteria",
         "criterion_count",
         "repairs",
@@ -1254,6 +1260,8 @@ def capture_acceptance_artifact_checks(
     repairs: int,
     surface: str | None,
     runtime_backend: str | None,
+    exemption: str | None = None,
+    exempted_tests: int = 0,
 ) -> None:
     """Capture what the controller-run artifact checks observed on one decided run.
 
@@ -1262,7 +1270,9 @@ def capture_acceptance_artifact_checks(
     observation and why; anything outside the audited vocabulary folds to
     ``unknown``. ``failed_criteria`` counts the criteria the checks failed in
     the final decision and ``repairs`` the attempts they sent back to the
-    worker. Never raises.
+    worker. ``exemption`` is how the footprint exemption treated a base
+    regression (absent when nothing regressed) and ``exempted_tests`` how many
+    regressed tests it set aside. Never raises.
     """
     try:
         capture(
@@ -1273,6 +1283,8 @@ def capture_acceptance_artifact_checks(
                 "failed_criteria": failed_criteria,
                 "criterion_count": criterion_count,
                 "repairs": repairs,
+                "exemption": None if exemption is None else _fold(exemption, _ARTIFACT_EXEMPTIONS),
+                "exempted_tests": exempted_tests,
                 "surface": _fold(surface, _NO_EVIDENCE_SURFACES),
                 "runtime_backend": _canonical_runtime_backend(runtime_backend),
             },

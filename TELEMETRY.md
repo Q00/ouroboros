@@ -103,7 +103,7 @@ use. Each row below is the exact property set accepted by the serializer.
 | `runtime_drift` | A frozen runtime authority input (Codex config, CLI executable, dispatch registry, profile routing) is observed to have changed after the runtime initialized; the run continues on the re-baselined input | kind (closed enum: `codex_config`/`cli_executable`/`skill_dispatcher`/`mcp_handler_registry`/`skill_dispatch_registry`/`profile_routing`/`baseline_unavailable`/`attestation_timeout`/`unknown`), runtime_backend, app_version, os, ci |
 | `ac_verify_failed` | The orchestrator's deterministic AC verify gate rejects an attempt (`run_verify_commands` enabled) | cause (closed enum: `invalid_contract`/`artifacts_missing`/`artifacts_missing_found_elsewhere`/`environment_unverifiable`/`timeout`/`exit_nonzero`/`output_assertion_unmatched`/`workspace_mutated`/`unknown`), runtime_backend, app_version, os, ci |
 | `acceptance_no_evidence` | A terminal `ooo run`, MCP `execute_seed` run, or evolve generation whose acceptance the check package authority reconciled, when that decision accepted at least one criterion that no verifier had evidence for (the check package did not decide it and the legacy verifier had no evidence); at most one row per run, none when every accepted criterion had evidence. The acceptance itself is unchanged | `pair_<package_reason>__<replay_reason>` (integer count per reason pair; only non-zero pairs are sent; both reasons are closed enums, see below), criterion_count, no_evidence_count, verification_coverage (`full`/`partial`/`low`/`unknown`), surface (`cli_run`/`mcp_execute`/`evolve`/`unknown`), check_package (`on`/`off`/`unknown`), check_package_status (`admitted`/`construction_failed`/`rejected`/`not_run`/`unknown`), runtime_backend (a shipped runtime backend name, else `unknown`), app_version, os, ci |
-| `acceptance_artifact_checks` | A terminal `ooo run`, MCP `execute_seed` run, or evolve generation whose acceptance the check package authority reconciled with the artifact checks on (`boundary.base_regression`); at most one row per run. It reports what the checks observed and decides nothing | base_regression and worker_tests (each a closed enum: `rejected`/`passed`/`timeout`/`base_runner_crash`/`no_selected_files`/`unsupported_runner`/`not_a_test_result`/`unavailable`/`unknown`, see below), failed_criteria, criterion_count, repairs, surface (`cli_run`/`mcp_execute`/`evolve`/`unknown`), runtime_backend (a shipped runtime backend name, else `unknown`), app_version, os, ci |
+| `acceptance_artifact_checks` | A terminal `ooo run`, MCP `execute_seed` run, or evolve generation whose acceptance the check package authority reconciled with the artifact checks on (`boundary.base_regression`); at most one row per run. It reports what the checks observed and decides nothing | base_regression and worker_tests (each a closed enum: `rejected`/`exempted`/`passed`/`timeout`/`base_runner_crash`/`no_selected_files`/`unsupported_runner`/`not_a_test_result`/`unavailable`/`unknown`, see below), exemption (`applied`/`none_inside`/`no_passing_oracle`/`mass_breakage`/`unknown`, only when a base regression was found), exempted_tests, failed_criteria, criterion_count, repairs, surface (`cli_run`/`mcp_execute`/`evolve`/`unknown`), runtime_backend (a shipped runtime backend name, else `unknown`), app_version, os, ci |
 
 Notes:
 
@@ -169,7 +169,12 @@ Notes:
   neither 0 nor 1), or `unavailable` (the sandbox, the pinned interpreter or
   the base snapshot refused the run). `failed_criteria` counts the criteria
   the checks failed in the final decision and `repairs` the attempts they
-  sent back to the worker. On by default under every opt-out above, for the
+  sent back to the worker. `exemption` says how the footprint exemption
+  treated a base regression (`applied`: some regressed tests only reached
+  changed functions a passing admitted oracle also reached; `none_inside`;
+  `no_passing_oracle`; `mass_breakage`: more than 20 tests regressed) and
+  `exempted_tests` how many it set aside; `exempted` as the outcome means
+  every regression was set aside, so the check decided nothing. On by default under every opt-out above, for the
   same reason as `acceptance_no_evidence`. It never carries a test name, file,
   path, criterion, or identifier; outcomes come from the product's typed
   state and anything else folds to `unknown`.

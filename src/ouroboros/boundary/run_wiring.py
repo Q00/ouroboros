@@ -79,6 +79,7 @@ from ouroboros.boundary.coverage import (
     why_excluded,
 )
 from ouroboros.boundary.events import ReferenceCheckPayload, RunContract, boundary_version_id
+from ouroboros.boundary.footprint import OracleFootprint
 from ouroboros.boundary.ledger import BoundaryLedger
 from ouroboros.boundary.oracle import OracleResult, OracleSpec
 from ouroboros.boundary.package import (
@@ -715,6 +716,7 @@ async def verify_check_package(
     declared_entry_points: Mapping[str, Sequence[Any]] | None = None,
     base_run_cache: dict[str, Any] | None = None,
     phase: Literal["final", "resumed"] = "final",
+    footprint: OracleFootprint | None = None,
 ) -> BoundaryVerdict:
     """Bind, then run the unchanged package on the candidate; record everything.
 
@@ -725,6 +727,8 @@ async def verify_check_package(
     (``boundary.binding.recorded``), candidate verification (plus one R3
     re-run of transiently indeterminate checks). A resumed run records its own
     bindings (``phase="resumed"``) and verification the same way.
+    ``footprint`` collects which changed functions each oracle check entered
+    (``boundary/footprint.py``); it decides nothing here.
 
     Without an admitted package the verdict is ``unavailable`` with no
     per-criterion verdicts: every criterion is uncovered, so the legacy
@@ -762,6 +766,7 @@ async def verify_check_package(
         assignments,
         contract=state.contract,
         interpreter=state.interpreter,
+        footprint=footprint,
     )
     receipt: Path | None = None
     for run in (bound.first, bound.rerun):

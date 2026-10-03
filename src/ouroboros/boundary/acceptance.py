@@ -75,7 +75,12 @@ test file's run exits 1 with a failing test) fails every criterion the
 package left ``unverified`` or ``uncovered`` (``CriterionVerdict.artifact_check``)
 before the legacy rule applies, so the legacy verifier cannot accept it; a
 verified ``pass``, a package ``fail`` and an ``indeterminate`` criterion keep
-the package's verdict. A check with no observation (a timeout, a base on
+the package's verdict. A regressed test is exempt (``base_regression.regressions_to_keep``)
+when its failing run produced a footprint and every changed function it
+entered was also entered by an admitted oracle check that passed on the
+candidate; with more than 20 regressions, or no passing oracle, nothing is
+exempt, and when every regression is exempt the check decides nothing. A
+check with no observation (a timeout, a base on
 which the runner wrote no report, no selected file, a project runner it does
 not drive, a run the sandbox could not confine) decides nothing. They run
 with no admitted package too: every criterion is then uncovered, so a failure
