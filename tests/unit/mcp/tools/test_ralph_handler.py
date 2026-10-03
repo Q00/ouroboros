@@ -58,12 +58,13 @@ class _BlockingEvolveHandler:
     """Fake evolve handler that blocks until the Ralph job is cancelled."""
 
     started: asyncio.Event = field(default_factory=asyncio.Event)
+    release: asyncio.Event = field(default_factory=asyncio.Event)
     calls: int = 0
 
     async def handle(self, arguments: dict[str, Any]):  # noqa: ARG002 - protocol fixture
         self.calls += 1
         self.started.set()
-        await asyncio.sleep(60)
+        await self.release.wait()
         return Result.ok(
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text="late"),),
