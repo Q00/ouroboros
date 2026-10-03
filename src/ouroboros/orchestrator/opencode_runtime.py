@@ -49,6 +49,7 @@ from ouroboros.orchestrator.adapter import (
     resolve_worker_cwd,
     worker_cwd_failure_message,
 )
+from ouroboros.orchestrator.interview_session import InterviewSessionTransition
 from ouroboros.orchestrator.opencode_event_normalizer import (
     OpenCodeEventContext,
     OpenCodeEventNormalizer,
@@ -77,7 +78,6 @@ _MAX_LINE_BUFFER_BYTES = 50 * 1024 * 1024  # 50 MB
 # are removed.
 _CHILD_ENV_STRIP_KEYS = DEFAULT_OUROBOROS_STRIP_KEYS
 
-_INTERVIEW_SESSION_METADATA_KEY = "ouroboros_interview_session_id"
 _STDOUT_IDLE_TIMEOUT_ENV = "OUROBOROS_OPENCODE_STDOUT_IDLE_TIMEOUT"
 
 
@@ -835,35 +835,8 @@ class OpenCodeRuntime:
         intercept: Resolved,
         current_handle: RuntimeHandle | None,
     ) -> dict[str, Any]:
-        """Build the MCP argument payload for an intercepted skill.
-
-        For ``ouroboros_interview`` tools, injects the persisted
-        interview session ID and the first positional argument as
-        ``answer`` when available.
-
-        Args:
-            intercept: Resolved skill intercept metadata.
-            current_handle: Active runtime handle carrying session
-                metadata, or ``None``.
-
-        Returns:
-            Dict of MCP tool arguments ready for dispatch.
-        """
-        if intercept.mcp_tool != "ouroboros_interview" or current_handle is None:
-            return dict(intercept.mcp_args)
-
-        session_id = current_handle.metadata.get(_INTERVIEW_SESSION_METADATA_KEY)
-        if not isinstance(session_id, str) or not session_id.strip():
-            return dict(intercept.mcp_args)
-
-        # Resume turn: drop initial_context so InterviewHandler branches on
-        # session_id instead of starting a new interview.
-        arguments: dict[str, Any] = dict(intercept.mcp_args)
-        arguments.pop("initial_context", None)
-        arguments["session_id"] = session_id.strip()
-        if intercept.first_argument is not None:
-            arguments["answer"] = intercept.first_argument
-        return arguments
+        """Build arguments through the shared interview transition contract."""
+        return InterviewSessionTransition(intercept, current_handle).tool_arguments()
 
     def _build_resume_handle(
         self,
@@ -871,42 +844,13 @@ class OpenCodeRuntime:
         intercept: Resolved,
         tool_result: Any,
     ) -> RuntimeHandle | None:
-        """Attach interview session metadata to the runtime handle.
-
-        After an ``ouroboros_interview`` tool call, persists the
-        returned ``session_id`` into the handle's metadata so
-        subsequent turns can resume the same interview.
-
-        Args:
-            current_handle: Existing handle, or ``None``.
-            intercept: Skill intercept metadata.
-            tool_result: MCP tool result containing a ``meta`` dict.
-
-        Returns:
-            Updated or new
-            :class:`~ouroboros.orchestrator.adapter.RuntimeHandle`,
-            or ``None`` if no session ID was found.
-        """
-        if intercept.mcp_tool != "ouroboros_interview":
-            return current_handle
-
-        session_id = tool_result.meta.get("session_id")
-        if not isinstance(session_id, str) or not session_id.strip():
-            return current_handle
-
-        metadata = dict(current_handle.metadata) if current_handle is not None else {}
-        metadata[_INTERVIEW_SESSION_METADATA_KEY] = session_id.strip()
-        updated_at = datetime.now(UTC).isoformat()
-
-        if current_handle is not None:
-            return replace(current_handle, metadata=metadata, updated_at=updated_at)
-
-        return RuntimeHandle(
+        """Retain session-local interview state through the shared transition."""
+        return InterviewSessionTransition(intercept, current_handle).resume_handle(
+            tool_result.meta,
             backend=self.runtime_backend,
             cwd=self.working_directory,
             approval_mode=self.permission_mode,
-            updated_at=updated_at,
-            metadata=metadata,
+            log_namespace="opencode_runtime",
         )
 
     async def _dispatch_skill_intercept_locally(

@@ -60,10 +60,17 @@ class InterviewTurnPlanner:
         additional_scoring_context: str = "",
         extra_response_contract: str = "",
         additional_untrusted_context: str = "",
+        language_calibration: Any | None = None,
     ) -> Result[InterviewTurnPlan, ProviderError | ValidationError]:
         """Plan one turn without concurrent backend calls."""
         score_view = scoring_state or state
-        prepared_result = self.engine.prepare_next_question(state)
+        if language_calibration is None:
+            prepared_result = self.engine.prepare_next_question(state)
+        else:
+            prepared_result = self.engine.prepare_next_question(
+                state,
+                language_calibration=language_calibration,
+            )
         if prepared_result.is_err:
             return Result.err(prepared_result.error)
         prepared = prepared_result.value

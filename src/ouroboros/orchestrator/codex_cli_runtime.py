@@ -70,6 +70,10 @@ from ouroboros.orchestrator.frugality_runtime_attestation import (
     clear_attested_codex_child_environment,
     codex_cli_runtime_attestation,
 )
+from ouroboros.orchestrator.interview_session import (
+    InterviewSessionTransition,
+    interview_transition_digest,
+)
 from ouroboros.orchestrator.runtime_drift import DRIFT_EPOCH_UNKNOWN, RuntimeDriftLedger
 from ouroboros.orchestrator.skill_tool_mapping import discover_skill_tool_mappings
 from ouroboros.providers.base import CompletionConfig
@@ -169,8 +173,6 @@ def _normalized_usage(obj: object) -> dict[str, int | float] | None:
         result[key] = value
     return result or None
 
-
-_INTERVIEW_SESSION_METADATA_KEY = "ouroboros_interview_session_id"
 
 _SAFE_SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 # Effort levels Codex's ``model_reasoning_effort`` config key accepts. Used to
@@ -1142,13 +1144,10 @@ class CodexCliRuntime:
         ]
         return self._hash_json_payload(payload)
 
-    def _fingerprint_skill_dispatcher(
-        self,
-        dispatcher: SkillDispatchHandler | None,
-    ) -> str:
-        """Fingerprint the process-local dispatch callable bound at startup."""
+    def _fingerprint_skill_dispatcher(self, dispatcher: SkillDispatchHandler | None) -> str:
+        """Fingerprint the bound callable or packaged transition implementation."""
         if dispatcher is None:
-            return "packaged"
+            return f"packaged:{interview_transition_digest()}"
         owner = getattr(dispatcher, "__self__", None)
         stable_identity = getattr(owner, "stable_identity_contract", None)
         if callable(stable_identity):
@@ -1672,22 +1671,8 @@ class CodexCliRuntime:
         intercept: Resolved,
         current_handle: RuntimeHandle | None,
     ) -> dict[str, Any]:
-        """Build the MCP argument payload for an intercepted skill."""
-        if intercept.mcp_tool != "ouroboros_interview" or current_handle is None:
-            return dict(intercept.mcp_args)
-
-        session_id = current_handle.metadata.get(_INTERVIEW_SESSION_METADATA_KEY)
-        if not isinstance(session_id, str) or not session_id.strip():
-            return dict(intercept.mcp_args)
-
-        # Resume turn: drop initial_context so InterviewHandler branches on
-        # session_id instead of starting a new interview.
-        arguments: dict[str, Any] = dict(intercept.mcp_args)
-        arguments.pop("initial_context", None)
-        arguments["session_id"] = session_id.strip()
-        if intercept.first_argument is not None:
-            arguments["answer"] = intercept.first_argument
-        return arguments
+        """Build arguments through the shared interview transition contract."""
+        return InterviewSessionTransition(intercept, current_handle).tool_arguments()
 
     def _build_resume_handle(
         self,
@@ -1695,33 +1680,13 @@ class CodexCliRuntime:
         intercept: Resolved,
         tool_result: Any,
     ) -> RuntimeHandle | None:
-        """Attach interview session metadata to the runtime handle."""
-        if intercept.mcp_tool != "ouroboros_interview":
-            return current_handle
-
-        session_id = tool_result.meta.get("session_id")
-        if not isinstance(session_id, str) or not session_id.strip():
-            if session_id is not None:
-                log.warning(
-                    "codex_cli_runtime.resume_handle.invalid_session_id",
-                    session_id_type=type(session_id).__name__,
-                    session_id_value=repr(session_id),
-                )
-            return current_handle
-
-        metadata = dict(current_handle.metadata) if current_handle is not None else {}
-        metadata[_INTERVIEW_SESSION_METADATA_KEY] = session_id.strip()
-        updated_at = datetime.now(UTC).isoformat()
-
-        if current_handle is not None:
-            return replace(current_handle, metadata=metadata, updated_at=updated_at)
-
-        return RuntimeHandle(
+        """Retain session-local interview state through the shared transition."""
+        return InterviewSessionTransition(intercept, current_handle).resume_handle(
+            tool_result.meta,
             backend=self.runtime_backend,
             cwd=self.working_directory,
             approval_mode=self.permission_mode,
-            updated_at=updated_at,
-            metadata=metadata,
+            log_namespace="codex_cli_runtime",
         )
 
     async def _dispatch_skill_intercept_locally(
