@@ -824,6 +824,7 @@ class SessionRepository:
         project_identity: ProjectIdentity | None = None,
         project_workspace: str | None = None,
         project_task_workspace: TaskWorkspace | None = None,
+        interview_id: str | None = None,
     ) -> Result[SessionTracker, PersistenceError]:
         """Create a new session and persist start event.
 
@@ -831,6 +832,8 @@ class SessionRepository:
             execution_id: Workflow execution ID.
             seed_id: Seed ID being executed.
             session_id: Optional custom session ID.
+            interview_id: Optional nonblank source interview aggregate ID.
+                Omission preserves the legacy session-start event shape.
             seed_goal: Optional goal text to persist with the start event.
             runtime_backend: Agent runtime backend (claude/codex/hermes/…), persisted
                 so observers (the live dashboard) can tag the run's provider even for
@@ -867,11 +870,19 @@ class SessionRepository:
         )
         tracker = SessionTracker.create(execution_id, seed_id, session_id)
 
+        if interview_id is not None:
+            if not isinstance(interview_id, str) or not interview_id.strip():
+                raise ValueError("interview_id must be a nonblank string")
+            if interview_id != interview_id.strip():
+                raise ValueError("interview_id must not contain surrounding whitespace")
+
         event_data = {
             "execution_id": execution_id,
             "seed_id": seed_id,
             "start_time": tracker.start_time.isoformat(),
         }
+        if interview_id is not None:
+            event_data["interview_id"] = interview_id
         if acceptance_root_indices is not None:
             event_data[ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY] = _normalize_acceptance_root_indices(
                 acceptance_root_indices
