@@ -403,7 +403,7 @@ async def test_worker_preserves_live_job_after_postaccept_receipt_failure(
         database_url=f"sqlite+aiosqlite:///{tmp_path / 'worker-postaccept.db'}",
         cwd=str(tmp_path),
     )
-    state: dict[str, object] = {"runner_calls": 0, "live_before_failure": False}
+    state: dict[str, int | bool] = {"runner_calls": 0, "live_before_failure": False}
     final: dict[str, object] = {}
 
     class ReceiptFailureManager(JobManager):
