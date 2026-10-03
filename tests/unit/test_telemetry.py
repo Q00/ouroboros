@@ -1722,3 +1722,72 @@ class TestAcceptanceNoEvidence:
         self._capture(None)
         telemetry.flush(timeout=2.0)
         assert sent == []
+
+
+class TestAcceptanceArtifactChecks:
+    """Closed-vocabulary outcomes of the controller-run artifact checks."""
+
+    @staticmethod
+    def _capture(**overrides: Any) -> None:
+        kwargs: dict[str, Any] = {
+            "base_regression": "rejected",
+            "worker_tests": "no_selected_files",
+            "failed_criteria": 2,
+            "criterion_count": 3,
+            "repairs": 1,
+            "surface": "cli_run",
+            "runtime_backend": "codex",
+        }
+        kwargs.update(overrides)
+        telemetry.capture_acceptance_artifact_checks(**kwargs)
+
+    def test_reports_what_each_check_observed(self, sent: list[dict[str, Any]]) -> None:
+        self._capture()
+        telemetry.flush(timeout=2.0)
+
+        assert len(sent) == 1
+        assert sent[0]["event"] == "acceptance_artifact_checks"
+        props = sent[0]["properties"]
+        assert props["base_regression"] == "rejected"
+        assert props["worker_tests"] == "no_selected_files"
+        assert (props["failed_criteria"], props["criterion_count"], props["repairs"]) == (2, 3, 1)
+        assert props["surface"] == "cli_run"
+        assert props["runtime_backend"] == "codex"
+        assert set(props) <= telemetry._ACCEPTANCE_ARTIFACT_CHECKS_KEYS
+
+    @pytest.mark.parametrize(
+        "reason",
+        ("timeout", "base_runner_crash", "no_selected_files", "unsupported_runner", "unavailable"),
+    )
+    def test_reports_why_a_check_had_no_observation(
+        self, sent: list[dict[str, Any]], reason: str
+    ) -> None:
+        self._capture(base_regression=reason, worker_tests="not_a_test_result", failed_criteria=0)
+        telemetry.flush(timeout=2.0)
+        props = sent[0]["properties"]
+        assert props["base_regression"] == reason
+        assert props["worker_tests"] == "not_a_test_result"
+
+    def test_folds_unaudited_values_to_unknown(self, sent: list[dict[str, Any]]) -> None:
+        hostile = "tests/test_calc.py::test_add"
+        self._capture(
+            base_regression=hostile, worker_tests=None, surface=hostile, runtime_backend=hostile
+        )
+        telemetry.flush(timeout=2.0)
+        props = sent[0]["properties"]
+        for key in ("base_regression", "worker_tests", "surface", "runtime_backend"):
+            assert props[key] == "unknown"
+        assert hostile not in json.dumps(sent[0])
+
+    def test_the_vocabulary_matches_the_product(self) -> None:
+        from ouroboros.boundary.base_regression import ArtifactCheckOutcome
+
+        assert {item.value for item in ArtifactCheckOutcome} == telemetry._ARTIFACT_CHECK_OUTCOMES
+
+    def test_an_opt_out_suppresses_it(
+        self, sent: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("DO_NOT_TRACK", "1")
+        self._capture()
+        telemetry.flush(timeout=2.0)
+        assert sent == []

@@ -63,6 +63,7 @@ import stat
 import tempfile
 from xml.etree import ElementTree
 
+from ouroboros import telemetry as usage_telemetry
 from ouroboros.boundary.acceptance import ArtifactCheck, CriterionVerdict, PackageCriterionStatus
 from ouroboros.boundary.admission import _run_argv
 from ouroboros.boundary.binding import CheckTier
@@ -665,6 +666,31 @@ def repair_message(findings: Sequence[ArtifactFinding]) -> str | None:
     return "\n".join(lines)
 
 
+def report_artifact_checks(
+    findings: Sequence[ArtifactFinding],
+    *,
+    failed_criteria: int,
+    criterion_count: int,
+    repairs: int,
+    surface: str | None,
+    runtime_backend: str | None,
+) -> None:
+    """Send one ``acceptance_artifact_checks`` event for a decided run. Never raises."""
+    try:
+        outcomes = {finding.check: finding.outcome.value for finding in findings}
+        usage_telemetry.capture_acceptance_artifact_checks(
+            base_regression=outcomes.get(ArtifactCheck.BASE_REGRESSION),
+            worker_tests=outcomes.get(ArtifactCheck.WORKER_TESTS),
+            failed_criteria=failed_criteria,
+            criterion_count=criterion_count,
+            repairs=repairs,
+            surface=surface,
+            runtime_backend=runtime_backend,
+        )
+    except Exception:  # noqa: BLE001 - telemetry must never affect the run
+        pass
+
+
 __all__ = [
     "BASE_REGRESSION_DEFAULT",
     "REGRESSION_REASON",
@@ -681,6 +707,7 @@ __all__ = [
     "regressions",
     "regressions_to_keep",
     "repair_message",
+    "report_artifact_checks",
     "restore_base_bytes",
     "select_tests",
     "undecided_by_package",

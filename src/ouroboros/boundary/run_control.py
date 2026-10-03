@@ -7,7 +7,9 @@ covers before the terminal status is persisted, and afterwards renders the
 outcome and a closed-value summary of it (``outcome_meta``) that the MCP
 ``execute_seed`` result carries. The only telemetry is one anonymous
 ``acceptance_no_evidence`` count per decided run of the criteria accepted
-without evidence and why (``boundary/no_evidence.py``); it decides nothing.
+without evidence and why (``boundary/no_evidence.py``), and one
+``acceptance_artifact_checks`` row of what the controller-run artifact checks
+observed (``boundary/base_regression.py``); neither decides anything.
 
 With the switch ``off`` nothing here calls a model, writes an event, or
 touches the runner: the run is the legacy run.
@@ -40,6 +42,7 @@ from ouroboros.boundary.authority import (
     AuthorityOutcome,
     CheckPackageAuthority,
 )
+from ouroboros.boundary.base_regression import report_artifact_checks
 from ouroboros.boundary.ledger import BoundaryLedger, BoundaryOrderError
 from ouroboros.boundary.no_evidence import report_no_evidence
 from ouroboros.boundary.resume import (
@@ -589,7 +592,8 @@ class CheckPackageRun:
         ``paused``) after the authority decided, the in-process state that
         still holds the held-out cases is dropped (the authority already did
         for its own), and the criteria accepted without evidence are counted
-        once per run (``report_no_evidence``; ``surface`` names the caller).
+        once per run (``report_no_evidence``; ``surface`` names the caller),
+        with what the artifact checks observed (``report_artifact_checks``).
         """
         if terminal_status in ("completed", "failed", "cancelled") and (
             self.authority is None or self.authority.outcome is not None
@@ -609,6 +613,22 @@ class CheckPackageRun:
                 check_package_status=self.status,
                 runtime_backend=self.runtime_backend,
             )
+            self._report_artifact_checks(outcome, surface)
+
+    def _report_artifact_checks(self, outcome: AuthorityOutcome, surface: str | None) -> None:
+        """One ``acceptance_artifact_checks`` row when this run's authority ran the checks."""
+        authority = self.authority
+        reconciliation = outcome.reconciliation
+        if authority is None or not authority.artifact_findings or reconciliation is None:
+            return
+        report_artifact_checks(
+            authority.artifact_findings,
+            failed_criteria=sum(1 for d in reconciliation.decisions if d.artifact_check),
+            criterion_count=len(reconciliation.decisions),
+            repairs=authority.gate.artifact_repairs,
+            surface=surface,
+            runtime_backend=self.runtime_backend,
+        )
 
     async def outcome_meta(
         self,
