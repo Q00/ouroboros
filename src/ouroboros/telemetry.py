@@ -468,8 +468,13 @@ _ARTIFACT_CHECK_OUTCOMES = frozenset(
         "not_a_test_result",
         "unavailable",
         "imported_outside_copy",
+        "not_run",
     }
 )
+# Each check's mode and what its finding did. SSOT pairing with
+# ``base_regression.ArtifactCheckMode`` and ``ArtifactEffect``.
+_ARTIFACT_CHECK_MODES = frozenset({"decide", "record", "off"})
+_ARTIFACT_EFFECTS = frozenset({"decided", "recorded", "regression_unadjudicated", "none"})
 # How the footprint exemption treated a base regression. SSOT pairing with
 # ``base_regression.Exemption``; edit them together.
 _ARTIFACT_EXEMPTIONS = frozenset(
@@ -489,6 +494,11 @@ _ACCEPTANCE_ARTIFACT_CHECKS_KEYS = frozenset(
         "worker_tests",
         "exemption",
         "exempted_tests",
+        "base_regression_mode",
+        "worker_test_gate_mode",
+        "base_regression_effect",
+        "worker_tests_effect",
+        "would_fail_criteria",
         "failed_criteria",
         "criterion_count",
         "repairs",
@@ -1273,6 +1283,11 @@ def capture_acceptance_artifact_checks(
     runtime_backend: str | None,
     exemption: str | None = None,
     exempted_tests: int = 0,
+    base_regression_mode: str | None = None,
+    worker_test_gate_mode: str | None = None,
+    base_regression_effect: str | None = None,
+    worker_tests_effect: str | None = None,
+    would_fail_criteria: int = 0,
 ) -> None:
     """Capture what the controller-run artifact checks observed on one decided run.
 
@@ -1283,7 +1298,12 @@ def capture_acceptance_artifact_checks(
     the final decision and ``repairs`` the attempts they sent back to the
     worker. ``exemption`` is how the footprint exemption treated a base
     regression (absent when nothing regressed) and ``exempted_tests`` how many
-    regressed tests it set aside. Never raises.
+    regressed tests it set aside. ``*_mode`` is each check's mode
+    (``decide``/``record``/``off``) and ``*_effect`` what its finding did
+    (``decided``, ``recorded`` in record mode, ``regression_unadjudicated``
+    when a regression found without an admitted package decided nothing, or
+    ``none``); ``would_fail_criteria`` counts the criteria the findings that
+    did not decide would have failed. Never raises.
     """
     try:
         capture(
@@ -1296,6 +1316,11 @@ def capture_acceptance_artifact_checks(
                 "repairs": repairs,
                 "exemption": None if exemption is None else _fold(exemption, _ARTIFACT_EXEMPTIONS),
                 "exempted_tests": exempted_tests,
+                "base_regression_mode": _fold(base_regression_mode, _ARTIFACT_CHECK_MODES),
+                "worker_test_gate_mode": _fold(worker_test_gate_mode, _ARTIFACT_CHECK_MODES),
+                "base_regression_effect": _fold(base_regression_effect, _ARTIFACT_EFFECTS),
+                "worker_tests_effect": _fold(worker_tests_effect, _ARTIFACT_EFFECTS),
+                "would_fail_criteria": would_fail_criteria,
                 "surface": _fold(surface, _NO_EVIDENCE_SURFACES),
                 "runtime_backend": _canonical_runtime_backend(runtime_backend),
             },

@@ -121,6 +121,10 @@ class _Payload(BaseModel):
         return self.model_dump(mode="json", exclude_unset=True)
 
 
+ArtifactCheckModeName = Literal["decide", "record", "off"]
+"""How an artifact check acts (``base_regression.ArtifactCheckMode``)."""
+
+
 class RunContract(_Payload):
     """The settings that decide anything after the worker starts, fixed for the run.
 
@@ -130,11 +134,19 @@ class RunContract(_Payload):
     """
 
     check_timeout_seconds: int = Field(gt=0)
-    base_regression: bool = False
-    """Whether the controller-run artifact checks decide (``boundary/base_regression.py``).
+    base_regression: ArtifactCheckModeName = "off"
+    """How the base regression check acts (``boundary/base_regression.py``)."""
+    worker_test_gate: ArtifactCheckModeName = "off"
+    """How the worker-test gate acts. Both are ``off`` when absent, so a run
+    recorded before the settings existed resumes exactly as it started."""
 
-    ``False`` when absent, so a run recorded before the setting existed
-    resumes exactly as it started."""
+    @field_validator("base_regression", "worker_test_gate", mode="before")
+    @classmethod
+    def _switch_form(cls, value: Any) -> Any:
+        # The earlier on/off form of the setting.
+        if isinstance(value, bool):
+            return "decide" if value else "off"
+        return value
 
 
 class BaseRunRecord(_Payload):

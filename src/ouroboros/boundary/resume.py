@@ -357,8 +357,14 @@ def _verdict(
     keys: Sequence[str],
     attempted: Collection[str] | None,
 ) -> BoundaryVerdict:
-    # Replayed only onto this Seed's criteria the worker attempted.
-    verdicts = replay_recorded(verdicts, dict(boundary.recorded_artifact_checks), keys, attempted)
+    # Replayed only onto this Seed's criteria the worker attempted; without a
+    # package a regression never fails anything, whatever a journal holds.
+    recorded = {
+        key: check
+        for key, check in boundary.recorded_artifact_checks
+        if boundary.reason != NO_ADMITTED_PACKAGE or check is not ArtifactCheck.BASE_REGRESSION
+    }
+    verdicts = replay_recorded(verdicts, recorded, keys, attempted)
     overall = artifact_verdict(item.status for item in verdicts.values())
     return BoundaryVerdict(
         verdict=overall.value,

@@ -86,6 +86,7 @@ import structlog
 from ouroboros.boundary.acceptance import (
     NO_HELD_OUT_CASE,
     AcceptanceReconciliation,
+    ArtifactCheck,
     CriterionVerdict,
     ExistingOutcome,
     Governor,
@@ -97,9 +98,13 @@ from ouroboros.boundary.acceptance import (
     reconcile_acceptance,
 )
 from ouroboros.boundary.base_regression import (
+    ArtifactCheckMode,
     ArtifactChecks,
+    ArtifactEffect,
     ArtifactFinding,
     apply_findings,
+    decides,
+    effect,
     exempt,
     repair_message,
 )
@@ -145,6 +150,7 @@ PACKAGE_INDETERMINATE_ERROR = (
     "check_package: the frozen check package could not decide this criterion"
 )
 ARTIFACT_CHECK_ERROR = "check_package: the finished workspace fails a controller-run check"
+DECIDE = ArtifactCheckMode.DECIDE
 LEGACY_REJECTION_ERROR = "legacy verifier rejected this criterion"
 LEGACY_DECIDED_PREFIX = "legacy-decided"
 NO_BINDING = "no_binding"
@@ -473,8 +479,10 @@ class CheckPackageGate:
         # Attempts the legacy verifier failed on a criterion no admitted
         # check covers (it decides those criteria, retries included).
         self.legacy_failures = 0
-        # Attempts an artifact check sent back with its failing tests.
+        # Attempts an artifact check sent back with its failing tests, and
+        # whether the one repair turn of an unadjudicated regression was used.
         self.artifact_repairs = 0
+        self.unadjudicated_repair_sent = False
         # One decision per attempt: settlement paths hand the same attempt to
         # the gate again; they get the stored decision, not a new verification.
         # An attempt is the whole result handed over (a cross-harness alternate
@@ -518,8 +526,10 @@ class CheckPackageGate:
         if not getattr(result, "success", False):
             return result
         if package is None or not state.admitted:
-            # No admitted package: the legacy verifier decides every attempt.
-            return self._legacy_decides(result)
+            # No admitted package: the legacy verifier decides every attempt;
+            # one it keeps may still get the artifact checks' repair turn.
+            decided = self._legacy_decides(result)
+            return decided if decided is not result else await self._artifact_repair(result)
         keys = state.criterion_keys
         if not 0 <= ac_index < len(keys):
             return result
@@ -627,14 +637,27 @@ class CheckPackageGate:
         Only for a criterion the package leaves undecided; the message names
         the failing tests, never how they were selected.
         """
-        checks = self._authority.artifact_checks
+        authority = self._authority
+        checks = authority.artifact_checks
         if checks is None:
             return result
-        findings = await checks.findings(self._authority.candidate)
+        findings = await checks.findings(authority.candidate)
         # Exempt by what the oracles passing in this run's gate runs entered
         # (visible cases); the final decision uses the final verification's.
-        entered = self._authority.gate_oracle_entered()
-        message = repair_message(tuple(exempt(finding, entered) for finding in findings))
+        entered = authority.gate_oracle_entered()
+        admitted = authority.state.admitted
+        sent = []
+        for finding in (exempt(finding, entered) for finding in findings):
+            if not finding.rejects or authority.artifact_modes[finding.check] is not DECIDE:
+                continue
+            if not admitted and finding.check is ArtifactCheck.BASE_REGRESSION:
+                # Nothing adjudicates a regression without a package: the
+                # worker hears about it once, and it never fails anything.
+                if self.unadjudicated_repair_sent:
+                    continue
+                self.unadjudicated_repair_sent = True
+            sent.append(finding)
+        message = repair_message(tuple(sent))
         if message is None:
             return result
         self.artifact_repairs += 1
@@ -731,8 +754,15 @@ class CheckPackageAuthority:
         self.installed = False
         # One base run per late binding across repair attempts and the end.
         self.base_runs: dict[str, Any] = {}
-        # The controller-run artifact checks (``boundary/base_regression.py``),
-        # when the run contract turned them on; their final findings.
+        # The controller-run artifact checks (``boundary/base_regression.py``)
+        # in the modes the run contract recorded; their final findings, what
+        # each did, and how many criteria the ones that did not decide would
+        # have failed.
+        self.artifact_modes: dict[ArtifactCheck, ArtifactCheckMode] = {
+            ArtifactCheck.BASE_REGRESSION: ArtifactCheckMode(state.contract.base_regression),
+            ArtifactCheck.WORKER_TESTS: ArtifactCheckMode(state.contract.worker_test_gate),
+        }
+        off = ArtifactCheckMode.OFF
         self.artifact_checks: ArtifactChecks | None = (
             ArtifactChecks(
                 base=state.base_snapshot,
@@ -743,11 +773,15 @@ class CheckPackageAuthority:
                 ),
                 interpreter=state.interpreter,
                 timeout_seconds=state.contract.check_timeout_seconds,
+                run_regression=self.artifact_modes[ArtifactCheck.BASE_REGRESSION] is not off,
+                run_worker_tests=self.artifact_modes[ArtifactCheck.WORKER_TESTS] is not off,
             )
-            if state.contract.base_regression
+            if any(mode is not off for mode in self.artifact_modes.values())
             else None
         )
         self.artifact_findings: tuple[ArtifactFinding, ...] = ()
+        self.artifact_effects: dict[ArtifactCheck, ArtifactEffect] = {}
+        self.artifact_would_fail = 0
         # Per oracle check that passed its latest gate run: the changed
         # functions it entered (the gate's footprint exemption).
         self.gate_oracle_footprints: dict[str, frozenset[FunctionKey]] = {}
@@ -873,12 +907,16 @@ class CheckPackageAuthority:
     def install(self, executor: Any) -> None:
         """Make the legacy verifier advisory and the package the repair signal.
 
-        Only with an admitted package: without one the executor is left
-        untouched, so the run is exactly the legacy run (legacy rejections
-        fail attempts and drive retries), and the terminal decision
-        reconciles every criterion as uncovered from the unmodified results.
+        With an admitted package, or without one when an artifact check is in
+        ``decide`` mode (its repair turn needs the gate; every criterion is
+        then uncovered, so the legacy verifier still decides every attempt).
+        Otherwise the executor is left untouched, so the run is exactly the
+        legacy run (legacy rejections fail attempts and drive retries), and
+        the terminal decision reconciles every criterion as uncovered from
+        the unmodified results.
         """
-        if not self._state.admitted:
+        repairs = self.artifact_checks is not None and DECIDE in self.artifact_modes.values()
+        if not self._state.admitted and not repairs:
             return
         executor.check_package_gate = self.gate
         executor.check_package_interfaces = self.interfaces()
@@ -1037,8 +1075,24 @@ class CheckPackageAuthority:
         # final verification entered (none passed, or no package: nothing exempt).
         entered = probe.passed(verdict.oracle_results) if probe is not None else None
         self.artifact_findings = tuple(exempt(finding, entered) for finding in findings)
-        verdicts = apply_findings(verdict.verdicts, keys, self.artifact_findings, attempted)
-        rejecting = [finding for finding in self.artifact_findings if finding.rejects]
+        admitted = self._state.admitted
+        modes = self.artifact_modes
+        self.artifact_effects = {
+            finding.check: effect(finding, modes[finding.check], admitted=admitted)
+            for finding in self.artifact_findings
+        }
+        rejecting = [
+            finding
+            for finding in self.artifact_findings
+            if decides(finding, modes[finding.check], admitted=admitted)
+        ]
+        verdicts = apply_findings(verdict.verdicts, keys, rejecting, attempted)
+        # What the findings that did not decide would have failed (telemetry only).
+        recorded = [f for f in self.artifact_findings if f.rejects and f not in rejecting]
+        would = apply_findings(verdicts, keys, recorded, attempted)
+        self.artifact_would_fail = sum(
+            1 for key, item in would.items() if item is not verdicts.get(key)
+        )
         if not rejecting:
             return verdict
         overall = artifact_verdict(item.status for item in verdicts.values())

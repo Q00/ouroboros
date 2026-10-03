@@ -1780,10 +1780,40 @@ class TestAcceptanceArtifactChecks:
         assert hostile not in json.dumps(sent[0])
 
     def test_the_vocabulary_matches_the_product(self) -> None:
-        from ouroboros.boundary.base_regression import ArtifactCheckOutcome, Exemption
+        from ouroboros.boundary.base_regression import (
+            ArtifactCheckMode,
+            ArtifactCheckOutcome,
+            ArtifactEffect,
+            Exemption,
+        )
 
         assert {item.value for item in ArtifactCheckOutcome} == telemetry._ARTIFACT_CHECK_OUTCOMES
         assert {item.value for item in Exemption} == telemetry._ARTIFACT_EXEMPTIONS
+        assert {item.value for item in ArtifactCheckMode} == telemetry._ARTIFACT_CHECK_MODES
+        assert {item.value for item in ArtifactEffect} == telemetry._ARTIFACT_EFFECTS
+
+    def test_reports_each_modes_effect_and_what_would_have_failed(
+        self, sent: list[dict[str, Any]]
+    ) -> None:
+        self._capture(
+            base_regression_mode="decide",
+            worker_test_gate_mode="record",
+            base_regression_effect="regression_unadjudicated",
+            worker_tests_effect="recorded",
+            would_fail_criteria=2,
+        )
+        self._capture(base_regression_mode="/a/path", worker_tests_effect="maybe")
+        telemetry.flush(timeout=2.0)
+        first, second = (row["properties"] for row in sent)
+        assert (
+            first["base_regression_mode"],
+            first["worker_test_gate_mode"],
+            first["base_regression_effect"],
+            first["worker_tests_effect"],
+            first["would_fail_criteria"],
+        ) == ("decide", "record", "regression_unadjudicated", "recorded", 2)
+        assert second["base_regression_mode"] == "unknown"
+        assert second["worker_tests_effect"] == "unknown"
 
     def test_reports_how_many_regressions_the_exemption_set_aside(
         self, sent: list[dict[str, Any]]

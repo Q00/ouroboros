@@ -172,7 +172,8 @@ async def test_a_constructor_outage_leaves_the_legacy_verifier_deciding(
         CheckPackageSettings(
             enabled=True,
             max_construction_attempts=2,
-            base_regression=False,
+            base_regression="off",
+            worker_test_gate="off",
         )
     )
     lines = await run.prepare(
