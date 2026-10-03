@@ -64,6 +64,34 @@ _IDLE_TIMEOUT_ENV = "OUROBOROS_HERMES_IDLE_TIMEOUT_SECONDS"
 _CHILD_ENV_STRIP_KEYS = DEFAULT_OUROBOROS_STRIP_KEYS
 
 
+def _profile_name_from_home(profile_home: str | Path) -> str | None:
+    """Return a Hermes profile name for a canonical profile directory."""
+    try:
+        candidate = Path(profile_home).expanduser().resolve()
+        real_home = os.environ.get("HERMES_REAL_HOME", "").strip()
+        profiles_root = (
+            (Path(real_home).expanduser() if real_home else Path.home()) / ".hermes" / "profiles"
+        )
+        profiles_root = profiles_root.resolve()
+    except OSError:
+        return None
+
+    if candidate.parent != profiles_root or not (candidate / "config.yaml").is_file():
+        return None
+    return candidate.name
+
+
+def _resolve_hermes_profile(explicit: str | None) -> str | None:
+    """Resolve explicit configuration before inheriting a hosting profile."""
+    if explicit is not None and explicit.strip():
+        return explicit.strip()
+
+    hermes_home = os.environ.get("HERMES_HOME", "").strip()
+    if hermes_home:
+        return _profile_name_from_home(hermes_home)
+    return None
+
+
 def _resolve_timeout_override(
     explicit: float | None,
     env_name: str,
@@ -190,6 +218,7 @@ class HermesCliRuntime(AgentRuntime):
         skills_dir: str | Path | None = None,
         skill_dispatcher: SkillDispatchHandler | None = None,
         llm_backend: str | None = None,
+        runtime_profile: str | None = None,
         startup_output_timeout_seconds: float | None = None,
         stdout_idle_timeout_seconds: float | None = None,
     ) -> None:
@@ -201,6 +230,7 @@ class HermesCliRuntime(AgentRuntime):
         self._skills_dir = Path(skills_dir).expanduser() if skills_dir else None
         self._skill_dispatcher = skill_dispatcher
         self._llm_backend = llm_backend or self._default_llm_backend
+        self._runtime_profile = _resolve_hermes_profile(runtime_profile)
         self._builtin_mcp_handlers: dict[str, Any] | None = None
 
         # Resolve stream-loop timeouts (kwarg → env var → class default;
@@ -226,6 +256,7 @@ class HermesCliRuntime(AgentRuntime):
             cli_path=self._cli_path,
             permission_mode=self._permission_mode,
             model=model,
+            runtime_profile=self._runtime_profile,
             cwd=self._cwd,
             startup_output_timeout_seconds=self._startup_output_timeout_seconds,
             stdout_idle_timeout_seconds=self._stdout_idle_timeout_seconds,
@@ -450,7 +481,10 @@ class HermesCliRuntime(AgentRuntime):
 
         full_prompt = self._compose_prompt(prompt, system_prompt, tools)
 
-        args = [self._cli_path, "chat"]
+        args = [self._cli_path]
+        if self._runtime_profile:
+            args.extend(["--profile", self._runtime_profile])
+        args.append("chat")
         if handle and handle.native_session_id:
             args.extend(["--resume", handle.native_session_id])
 

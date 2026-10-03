@@ -21,7 +21,7 @@ from ouroboros.core.seed import (
     SeedMetadata,
 )
 from ouroboros.harness.journal import EvidenceEntry, EvidenceKind, EvidenceManifest
-from ouroboros.orchestrator.adapter import ParamSupport, RuntimeCapabilities
+from ouroboros.orchestrator.adapter import AgentMessage, ParamSupport, RuntimeCapabilities
 from ouroboros.orchestrator.decomposition_policy import (
     DecompositionChild,
     DecompositionDecisionRecord,
@@ -86,6 +86,28 @@ def _seed_with_specs(*specs: AcceptanceCriterionSpec | str) -> Seed:
         ontology_schema=OntologySchema(name="n", description="d"),
         metadata=SeedMetadata(ambiguity_score=0.05),
     )
+
+
+def test_hermes_missing_profile_credentials_are_not_retried() -> None:
+    failure = (
+        "Hermes execution failed:\nHermes isn't configured yet -- no API keys or providers found."
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content="Run the worker",
+        success=False,
+        final_message=failure,
+        messages=(
+            AgentMessage(
+                type="result",
+                content=failure,
+                data={"subtype": "error", "error_type": "RuntimeExecutionError"},
+            ),
+        ),
+        outcome=ACExecutionOutcome.FAILED,
+    )
+
+    assert is_retryable_failure(result) is False
 
 
 # ---------------------------------------------------------------------------
