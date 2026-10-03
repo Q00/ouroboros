@@ -467,11 +467,22 @@ _ARTIFACT_CHECK_OUTCOMES = frozenset(
         "unsupported_runner",
         "not_a_test_result",
         "unavailable",
+        "imported_outside_copy",
     }
 )
 # How the footprint exemption treated a base regression. SSOT pairing with
 # ``base_regression.Exemption``; edit them together.
-_ARTIFACT_EXEMPTIONS = frozenset({"applied", "none_inside", "no_passing_oracle", "mass_breakage"})
+_ARTIFACT_EXEMPTIONS = frozenset(
+    {
+        "applied",
+        "none_inside",
+        "no_passing_oracle",
+        "mass_breakage",
+        "no_changed_function",
+        "no_oracle_footprint",
+        "change_outside_functions",
+    }
+)
 _ACCEPTANCE_ARTIFACT_CHECKS_KEYS = frozenset(
     {
         "base_regression",

@@ -3,65 +3,91 @@
 A footprint is an observation of executed code, recorded by a hook the
 controller writes into the process (never read from test or criterion text):
 
-- ``changed_functions``: the functions the change touched, ``C``. Every
-  changed or added non-test Python file of the candidate is diffed line by
-  line against its base bytes (``difflib``), and a function is changed when a
-  changed line range of the candidate side falls inside its ``ast`` range
-  (decorators included). A function is keyed by ``(file, qualname, first
-  line)``, the identity its code object carries (``co_filename`` relative to
-  the checkout, ``co_qualname``, ``co_firstlineno``), never by a code object
-  id: ids are reused once an object is freed.
-- ``pytest_bootstrap``: the ``python -c`` program a regression run starts
-  pytest with, carrying an in-memory plugin that records, per test, which
-  functions of ``C`` the test entered (``sys.monitoring`` ``PY_START`` on
-  Python 3.12 and later, ``sys.setprofile`` before), one JSON line per test.
+- ``changed_code``: the functions the change touched, ``C``, and whether it
+  also changed code outside every function. Every changed or added non-test
+  Python file of the candidate is diffed line by line against its base bytes
+  (``difflib``). A function is changed when a changed line of the candidate
+  falls inside its ``ast`` range (decorators included), or a removed base line
+  falls inside a base function the candidate still defines. Any other changed
+  line that is code (not blank, not only a comment) is outside every function:
+  module or class level code, a deleted function, a removed import. Such a
+  change has no function footprint. A function is keyed by ``(file,
+  qualname, first line)``, the identity its code object carries
+  (``co_filename`` relative to the checkout, ``co_qualname``,
+  ``co_firstlineno``), never by a code object id: ids are reused once an
+  object is freed. Only regular files under ``SOURCE_LIMIT`` bytes and
+  ``DIFF_LINE_LIMIT`` lines are read; anything else counts as a change
+  outside every function.
+- ``pytest_bootstrap``: the ``python -c`` program every controller pytest run
+  starts with. It puts the checkout first on ``sys.path`` exactly as
+  ``python -m pytest`` does, and, given a plan, installs an in-memory plugin
+  that records per test its node id and which functions of ``C`` it entered
+  (``sys.monitoring`` ``PY_START`` on Python 3.12 and later,
+  ``sys.setprofile`` before), and at the end where each changed module was
+  imported from, at exit (``provenance``).
 - ``oracle_program``: the oracle harness wrapped so its target process
   records the functions of ``C`` its case entered, appended as they are first
   entered (a target is killed as soon as its case is decided, so nothing is
   left for exit).
 
-Every record is written by a process the candidate's code runs in, so a
-record is an observation the candidate could forge: it may only exempt a
-regression (``base_regression.regressions_to_keep``), never accept anything,
-and a missing or unreadable record exempts nothing. A file is always written
-through a ``with`` block, so no handle outlives its write. Records are read
-under a size cap and only keys of ``C`` are kept.
+A plan (the watched keys and where to record) reaches a process as a file in
+its scratch directory (``TMPDIR``), never in its argv; a pytest run deletes
+its plan before any test code is imported. Every record is written by a
+process the candidate's code runs in, so a record is an observation the
+candidate could forge: it may only exempt a regression
+(``base_regression.regressions_to_keep``), never accept anything, and a
+missing, unreadable or ambiguous record exempts nothing. The hook never
+raises into the code it watches, a file is always written through a ``with``
+block so no handle outlives its write, and records are read under a size cap
+keeping only keys of ``C``.
 """
 
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 import difflib
 import json
 import os
 from pathlib import Path
+import stat
 from typing import Any
 
 FunctionKey = tuple[str, str, int]
 """``(checkout-relative file, qualname, first line)`` of one function."""
 
+PYTEST_PLAN = "ouroboros-pytest-plan.json"
+"""The plan file a pytest bootstrap reads from its scratch directory (and deletes)."""
+ORACLE_PLAN = "ouroboros-oracle-plan.json"
+"""The plan file an oracle target reads from its check's scratch directory."""
+SOURCE_LIMIT = 2 * 1024 * 1024
+DIFF_LINE_LIMIT = 50_000
 _RECORD_LIMIT = 16 * 1024 * 1024
 
 
-def changed_line_ranges(base_text: str | None, candidate_text: str) -> list[tuple[int, int]]:
-    """1-based inclusive line ranges of ``candidate_text`` that differ from ``base_text``.
+@dataclass(frozen=True, slots=True)
+class ChangedCode:
+    """What a change touched: ``C``, and whether it changed code outside every function."""
 
-    An added file is one range over every line; a pure deletion marks the
-    candidate lines on both sides of where the base lines were.
-    """
-    new = candidate_text.splitlines()
-    if base_text is None:
-        return [(1, max(len(new), 1))]
-    matcher = difflib.SequenceMatcher(None, base_text.splitlines(), new, autojunk=False)
-    ranges = []
-    for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
-        if tag in ("replace", "insert"):
-            ranges.append((j1 + 1, j2))
-        elif tag == "delete":
-            ranges.append((max(j1, 1), j1 + 1))
-    return ranges
+    functions: frozenset[FunctionKey] = frozenset()
+    outside_functions: bool = False
+
+
+def read_source(path: Path) -> str | None:
+    """A regular file's text under ``SOURCE_LIMIT``, never through a link; else ``None``."""
+    try:
+        status = os.lstat(path)
+        if not stat.S_ISREG(status.st_mode) or status.st_size > SOURCE_LIMIT:
+            return None
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(descriptor, "rb") as handle:
+            data = handle.read(SOURCE_LIMIT + 1)
+    except OSError:
+        return None
+    if len(data) > SOURCE_LIMIT:
+        return None
+    return data.decode("utf-8", errors="replace")
 
 
 def function_ranges(text: str, relative: str) -> list[tuple[FunctionKey, int, int]]:
@@ -88,33 +114,80 @@ def function_ranges(text: str, relative: str) -> list[tuple[FunctionKey, int, in
     return out
 
 
-def changed_functions(
-    base: Path, candidate: Path, paths: Iterable[str], added: Iterable[str] = ()
-) -> frozenset[FunctionKey]:
-    """``C``: the functions of ``paths`` (changed) and ``added`` whose range a changed line hits."""
+def _code_lines(lines: Sequence[str], start: int, end: int) -> list[int]:
+    """1-based numbers of the lines in ``[start, end)`` (0-based) that are code."""
+    return [
+        number + 1
+        for number in range(start, end)
+        if lines[number].strip() and not lines[number].lstrip().startswith("#")
+    ]
+
+
+def _innermost(ranges: Sequence[tuple[FunctionKey, int, int]], line: int) -> FunctionKey | None:
+    inside = [(high - low, key) for key, low, high in ranges if low <= line <= high]
+    return min(inside)[1] if inside else None
+
+
+def _changed_in_file(
+    relative: str, before: str | None, after: str
+) -> tuple[set[FunctionKey], bool]:
+    """The changed functions of one file, and whether a changed code line is outside them all."""
+    new = after.splitlines()
+    old = [] if before is None else before.splitlines()
+    if len(new) > DIFF_LINE_LIMIT or len(old) > DIFF_LINE_LIMIT:
+        return set(), True
+    new_ranges = function_ranges(after, relative)
+    old_ranges = function_ranges(before, relative) if before is not None else []
+    by_qualname = {key[1]: key for key, _low, _high in new_ranges}
+    functions: set[FunctionKey] = set()
+    outside = False
+    matcher = difflib.SequenceMatcher(None, old, new, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        for line in _code_lines(new, j1, j2):
+            key = _innermost(new_ranges, line)
+            if key is None:
+                outside = True
+            else:
+                functions.add(key)
+        for line in _code_lines(old, i1, i2):
+            old_key = _innermost(old_ranges, line)
+            kept = by_qualname.get(old_key[1]) if old_key is not None else None
+            if kept is None:
+                # Module or class level code, or a function the candidate deleted.
+                outside = True
+            else:
+                functions.add(kept)
+    return functions, outside
+
+
+def changed_code(
+    base: Path,
+    candidate: Path,
+    paths: Iterable[str],
+    added: Iterable[str] = (),
+) -> ChangedCode:
+    """``C`` over ``paths`` (changed) and ``added``, and whether code outside functions changed.
+
+    A file that cannot be read safely (a link, not a regular file, too large)
+    is a change outside every function: nothing can be said about it.
+    """
     keys: set[FunctionKey] = set()
+    outside = False
     new_files = set(added)
     for relative in sorted({*paths, *new_files}):
         if not relative.endswith(".py"):
             continue
-        try:
-            text = (candidate / relative).read_text(encoding="utf-8", errors="replace")
-            before = (
-                None
-                if relative in new_files
-                else (base / relative).read_text(encoding="utf-8", errors="replace")
-            )
-        except OSError:
+        after = read_source(candidate / relative)
+        before = None if relative in new_files else read_source(base / relative)
+        if after is None or (before is None and relative not in new_files):
+            outside = True
             continue
-        ranges = changed_line_ranges(before, text)
-        for key, low, high in function_ranges(text, relative):
-            if any(start <= high and end >= low for start, end in ranges):
-                keys.add(key)
-    return frozenset(keys)
-
-
-def _keys_json(watched: Iterable[FunctionKey]) -> str:
-    return json.dumps(sorted([list(key) for key in watched]))
+        functions, outside_here = _changed_in_file(relative, before, after)
+        keys |= functions
+        outside = outside or outside_here
+    return ChangedCode(frozenset(keys), outside)
 
 
 # The hook both programs share. ``_fp_watch(root, keys)`` returns ``(start,
@@ -125,8 +198,10 @@ def _keys_json(watched: Iterable[FunctionKey]) -> str:
 # objects carry no ``co_qualname`` (before 3.11) cannot match a key, so it
 # records nothing at all: a footprint that is only empty because it could not
 # be observed must never look like one that entered no changed function.
+# Nothing here may raise into the code being watched.
 _HOOK = r"""
-import json as _fp_json, os as _fp_os, sys as _fp_sys, threading as _fp_threading
+import json as _fp_json, os as _fp_os, sys as _fp_sys, tempfile as _fp_tempfile
+import threading as _fp_threading
 
 
 def _fp_watch(root, keys):
@@ -137,15 +212,18 @@ def _fp_watch(root, keys):
     listeners = []
 
     def hit(code):
-        name = code.co_filename
-        path = files.get(name)
-        if path is None:
-            path = files[name] = _fp_os.path.realpath(name)
-        key = watched.get((path, code.co_qualname, code.co_firstlineno))
-        if key is not None and key not in entered:
-            entered.add(key)
-            for listener in listeners:
-                listener(key)
+        try:
+            name = code.co_filename
+            path = files.get(name)
+            if path is None:
+                path = files[name] = _fp_os.path.realpath(name)
+            key = watched.get((path, code.co_qualname, code.co_firstlineno))
+            if key is not None and key not in entered:
+                entered.add(key)
+                for listener in listeners:
+                    listener(key)
+        except Exception:
+            pass
 
     def start(listener=None):
         if not hasattr(start.__code__, "co_qualname"):
@@ -165,9 +243,11 @@ def _fp_watch(root, keys):
                     monitoring.register_callback(tool, monitoring.events.PY_START, on_start)
                     monitoring.set_events(tool, monitoring.events.PY_START)
                     return monitoring.restart_events
+
         def profile(frame, event, arg):
             if event == "call":
                 hit(frame.f_code)
+
         _fp_sys.setprofile(profile)
         _fp_threading.setprofile(profile)
         return lambda: None
@@ -176,75 +256,148 @@ def _fp_watch(root, keys):
 
 
 def _fp_append(path, payload):
-    with open(path, "a", encoding="utf-8") as handle:
-        handle.write(_fp_json.dumps(payload) + "\n")
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(_fp_json.dumps(payload) + "\n")
+    except Exception:
+        pass
+
+
+def _fp_plan(name, remove):
+    try:
+        path = _fp_os.path.join(_fp_tempfile.gettempdir(), name)
+        with open(path, encoding="utf-8") as handle:
+            plan = _fp_json.load(handle)
+        if remove:
+            _fp_os.unlink(path)
+        return plan
+    except Exception:
+        return None
 """
 
-
-def pytest_bootstrap(root: Path, watched: Iterable[FunctionKey], record: Path) -> str:
-    """The ``python -c`` program of a regression run: pytest with the footprint plugin.
-
-    ``sys.argv[1:]`` are pytest's arguments. For every test the plugin appends
-    ``{"test": "<classname>::<name>", "entered": [[file, qualname, line], ...]}``
-    to ``record``, naming the test as the JUnit report does. A test pytest
-    never ran has no line, and so no footprint.
-    """
-    return (
-        _HOOK
-        + f"""
+PYTEST_BOOTSTRAP = (
+    _HOOK
+    + f"""
+# ``python -m pytest`` puts the absolute working directory first on the path;
+# ``python -c`` puts ``''``, which follows a later ``chdir``.
+_fp_sys.path[0] = _fp_os.getcwd()
 import pytest as _fp_pytest
 
-_fp_start, _fp_entered = _fp_watch({str(root)!r}, {_keys_json(watched)})
-_fp_restart = _fp_start()
+_fp_plan_data = _fp_plan({PYTEST_PLAN!r}, True)
 
 
 class _FootprintPlugin:
+    def __init__(self, plan):
+        self.record = plan["record"]
+        self.root = _fp_os.path.realpath(plan["root"])
+        self.modules = list(plan.get("modules") or ())
+        self.start, self.entered = _fp_watch(plan["root"], plan.get("watched") or ())
+        self.restart = self.start() if plan.get("watched") else None
+        # At exit, not at session end: a run that dies loading a conftest
+        # still reports where it imported the changed modules from.
+        import atexit
+
+        atexit.register(self.provenance)
+
     @_fp_pytest.hookimpl(hookwrapper=True)
     def pytest_runtest_protocol(self, item, nextitem):
-        _fp_entered.clear()
-        _fp_restart()
+        self.entered.clear()
+        if self.restart is not None:
+            self.restart()
         yield
         try:
             from _pytest.junitxml import mangle_test_address
 
             names = mangle_test_address(item.nodeid)
             _fp_append(
-                {str(record)!r},
+                self.record,
                 {{
                     "test": ".".join(names[:-1]) + "::" + names[-1],
-                    "entered": sorted([list(key) for key in _fp_entered]),
+                    "nodeid": item.nodeid,
+                    "entered": (
+                        None
+                        if self.restart is None
+                        else sorted([list(key) for key in self.entered])
+                    ),
                 }},
             )
         except Exception:
             pass
 
+    def provenance(self):
+        inside = {{}}
+        for name in self.modules:
+            module = _fp_sys.modules.get(name)
+            path = getattr(module, "__file__", None) if module is not None else None
+            if path:
+                real = _fp_os.path.realpath(path)
+                inside[name] = real.startswith(self.root + _fp_os.sep)
+        _fp_append(self.record, {{"provenance": inside}})
 
-_fp_plugins = [] if _fp_restart is None else [_FootprintPlugin()]
+
+_fp_plugins = [] if _fp_plan_data is None else [_FootprintPlugin(_fp_plan_data)]
 _fp_sys.exit(_fp_pytest.main(_fp_sys.argv[1:], plugins=_fp_plugins))
 """
-    )
+)
+"""The program of every controller pytest run (``sys.argv[1:]`` are pytest's arguments)."""
 
 
-def oracle_program(harness: str, root: Path, watched: Iterable[FunctionKey], record: Path) -> str:
+def pytest_plan(
+    root: Path, record: Path, watched: Iterable[FunctionKey] | None, modules: Iterable[str]
+) -> dict[str, Any]:
+    """The plan a pytest bootstrap reads: where to record, what to watch, which modules to place.
+
+    ``watched`` ``None`` records no footprint (the base runs); a test's
+    ``entered`` is then ``null``.
+    """
+    return {
+        "root": str(root),
+        "record": str(record),
+        "watched": None if watched is None else sorted([list(key) for key in watched]),
+        "modules": sorted(modules),
+    }
+
+
+def oracle_program(harness: str) -> str:
     """The harness program of an oracle target that records the changed functions it enters.
 
-    Each key is appended to ``record`` the first time it is entered, so the
-    record holds what ran before the controller ended the process. The
-    harness itself runs unchanged, as ``__main__``, with its own arguments.
+    The plan (``ORACLE_PLAN`` in the check's scratch directory) names the
+    checkout root, the watched keys and the record; each key is appended the
+    first time it is entered, so the record holds what ran before the
+    controller ended the process. Without a readable plan nothing is
+    recorded. The harness itself always runs unchanged, as ``__main__``,
+    with its own arguments.
     """
     return (
         _HOOK
         + f"""
-_fp_start, _fp_entered = _fp_watch({str(root)!r}, {_keys_json(watched)})
-_fp_start(lambda key: _fp_append({str(record)!r}, list(key)))
+try:
+    _fp_plan_data = _fp_plan({ORACLE_PLAN!r}, False)
+    if _fp_plan_data is not None:
+        _fp_start, _fp_entered = _fp_watch(_fp_plan_data["root"], _fp_plan_data["watched"])
+        _fp_record = _fp_plan_data["record"]
+        _fp_start(lambda key: _fp_append(_fp_record, list(key)))
+except Exception:
+    pass
 exec(compile({harness!r}, "<string>", "exec"), {{"__name__": "__main__"}})
 """
     )
 
 
+def write_plan(path: Path, plan: Mapping[str, Any]) -> bool:
+    """Write a plan file for a process to read; ``False`` when it cannot be written."""
+    try:
+        with open(path, "x", encoding="utf-8") as handle:
+            json.dump(plan, handle)
+    except (OSError, TypeError, ValueError):
+        return False
+    return True
+
+
 def _read_lines(record: Path) -> list[object]:
     try:
-        if not record.is_file() or record.is_symlink() or record.stat().st_size > _RECORD_LIMIT:
+        status = os.lstat(record)
+        if not stat.S_ISREG(status.st_mode) or status.st_size > _RECORD_LIMIT:
             return []
         with open(record, encoding="utf-8", errors="replace") as handle:
             text = handle.read()
@@ -266,18 +419,48 @@ def _key(value: object, watched: frozenset[FunctionKey]) -> FunctionKey | None:
     return key if key in watched else None  # type: ignore[return-value]
 
 
-def read_test_footprints(
-    record: Path, watched: frozenset[FunctionKey]
-) -> dict[str, frozenset[FunctionKey]]:
-    """Per test id, the functions of ``watched`` it entered; a test without a line is absent."""
+@dataclass(frozen=True, slots=True)
+class RunRecord:
+    """What a pytest bootstrap recorded for one run."""
+
+    footprints: Mapping[str, frozenset[FunctionKey]] = field(default_factory=dict)
+    """Per test id, the watched functions it entered; absent: no footprint."""
+    nodeids: Mapping[str, str] = field(default_factory=dict)
+    """Per test id, the node id that selects it again."""
+    imported_outside: bool = False
+    """A changed module was imported from outside the checkout copy."""
+
+
+def read_run_record(record: Path, watched: frozenset[FunctionKey] | None) -> RunRecord:
+    """A bootstrap's record; a test id recorded twice has neither footprint nor node id."""
     footprints: dict[str, frozenset[FunctionKey]] = {}
+    nodeids: dict[str, str] = {}
+    seen: set[str] = set()
+    ambiguous: set[str] = set()
+    outside = False
     for line in _read_lines(record):
-        if not isinstance(line, dict) or not isinstance(line.get("test"), str):
+        if not isinstance(line, dict):
             continue
+        provenance = line.get("provenance")
+        if isinstance(provenance, dict):
+            outside = outside or any(value is False for value in provenance.values())
+            continue
+        test, nodeid = line.get("test"), line.get("nodeid")
+        if not isinstance(test, str) or not isinstance(nodeid, str):
+            continue
+        if test in seen:
+            ambiguous.add(test)
+            continue
+        seen.add(test)
+        nodeids[test] = nodeid
         entered = line.get("entered")
-        keys = [_key(item, watched) for item in (entered if isinstance(entered, list) else ())]
-        footprints[line["test"]] = frozenset(key for key in keys if key is not None)
-    return footprints
+        if watched is not None and isinstance(entered, list):
+            keys = [_key(item, watched) for item in entered]
+            footprints[test] = frozenset(key for key in keys if key is not None)
+    for test in ambiguous:
+        footprints.pop(test, None)
+        nodeids.pop(test, None)
+    return RunRecord(footprints, nodeids, outside)
 
 
 def read_entered(record: Path, watched: frozenset[FunctionKey]) -> frozenset[FunctionKey]:
@@ -291,45 +474,48 @@ class OracleFootprint:
     """What the oracle checks of one verification entered of ``watched`` (``C``).
 
     Handed to the verification (``oracle_run.run_oracle_check``), which fills
-    ``entered`` per check id; the caller keeps only the checks that passed.
+    ``entered`` per check id, or marks ``unrecorded`` a check whose recorder
+    could not be set up; the caller keeps only the checks that passed.
     """
 
     watched: frozenset[FunctionKey]
     entered: dict[str, set[FunctionKey]] = field(default_factory=dict)
+    unrecorded: set[str] = field(default_factory=set)
 
     def passed(self, oracle_results: Mapping[str, Any]) -> frozenset[FunctionKey] | None:
         """The functions the passing oracle checks entered; ``None`` when none passed.
 
         ``oracle_results`` maps a check id to its ``OracleResult`` on this
-        candidate; a check passed when it ran cases and every one passed.
+        candidate; a check passed when it ran cases and every one passed. A
+        passing check whose recorder failed makes the whole footprint
+        unknown (``None``): it may exempt nothing.
         """
         passing = [
             check_id
             for check_id, result in oracle_results.items()
             if result.cases and all(case.passed for case in result.cases)
         ]
-        if not passing:
+        if not passing or self.unrecorded & set(passing):
             return None
         return frozenset(key for check_id in passing for key in self.entered.get(check_id, ()))
 
 
-def record_path(directory: Path, name: str) -> Path:
-    """A fresh record path in ``directory`` (any file already there is removed first)."""
-    path = directory / name
-    if os.path.lexists(path):
-        os.unlink(path)
-    return path
-
-
 __all__ = [
+    "DIFF_LINE_LIMIT",
+    "ORACLE_PLAN",
+    "PYTEST_BOOTSTRAP",
+    "PYTEST_PLAN",
+    "SOURCE_LIMIT",
+    "ChangedCode",
     "FunctionKey",
     "OracleFootprint",
-    "changed_functions",
-    "changed_line_ranges",
+    "RunRecord",
+    "changed_code",
     "function_ranges",
     "oracle_program",
-    "pytest_bootstrap",
+    "pytest_plan",
     "read_entered",
-    "read_test_footprints",
-    "record_path",
+    "read_run_record",
+    "read_source",
+    "write_plan",
 ]

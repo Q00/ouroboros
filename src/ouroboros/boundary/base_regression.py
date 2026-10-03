@@ -15,19 +15,28 @@ the bytes of their files.
   string in it names that path, as a patch target does). It runs them on two
   fresh copies of the base snapshot and on one copy of the candidate in which
   those files, and every ``conftest.py`` above them, are restored to their
-  base bytes, so an edit the worker made to them is undone before the run. A
-  test that passed on both base runs (a flaky test passes on at most one) and
-  fails or errors on the candidate, or vanishes behind a collection error of
-  its module, regressed; a candidate on which the runner dies before it writes
-  a report fails every such test. The base result is kept per (base tree
-  digest, selected files), so repeated attempts never rerun the base. A
-  regressed test whose footprint (the changed functions its failing run
-  entered, ``boundary/footprint.py``) lies inside what the admitted oracle
-  checks that passed on the candidate entered is exempt
+  base bytes, so an edit the worker made to them is undone before the run.
+  The worker controls no pytest configuration of that run either: every
+  other ``conftest.py`` that differs from the base is deleted, the root
+  ``pytest.ini``, ``pyproject.toml``, ``tox.ini`` and ``setup.cfg`` are
+  restored to base bytes (or deleted when the base has none), and pytest runs
+  with ``-c`` naming the base's configuration file (or an empty one the
+  controller writes outside the tree), ``--rootdir`` the copy and
+  ``-o addopts=``. A test that passed on both base runs (a flaky test passes
+  on at most one), fails or errors on the candidate, and fails again when it
+  alone is rerun there, or vanishes behind a collection error of its module,
+  regressed; a candidate on which the runner dies before it writes a report
+  fails every such test. The base result is kept per (base tree digest,
+  selected files), so repeated attempts never rerun the base (a timed out or
+  refused base run is retried once). A regressed test is exempt when its
+  footprint (the changed functions its failing run entered,
+  ``boundary/footprint.py``) is not empty and lies inside what the admitted
+  oracle checks that passed on the candidate entered
   (``regressions_to_keep``): the oracle adjudicates that behaviour, and the
   old test pins what the criterion changed.
 - **Worker tests** (``ArtifactCheck.WORKER_TESTS``). Each test file the
-  candidate adds is run alone on a copy of the candidate. A run that exits 1
+  candidate adds (at most ``WORKER_TEST_FILES``, in path order) is run alone
+  on a copy of the candidate, under the worker's own configuration. A run that exits 1
   with a report naming a failing test fails; exit 0 passes and proves
   nothing; any other exit (2 usage or interrupted, 5 nothing collected) is
   not a test result.
@@ -42,16 +51,21 @@ criterion is uncovered, so an executed failure fails them all (no gate runs
 then, so there is no repair turn). Anything else is no observation
 and decides nothing, with its reason (``ArtifactCheckOutcome``): a timeout,
 a base on which the runner wrote no report, no selected file, a project whose
-own runner is not pytest, or a run the sandbox could not confine.
+own runner is not pytest, a run the sandbox could not confine, or a changed
+module the run imported from outside its copy (an editable install of the
+live workspace, for example: the run would not test the copy's code).
 
-Every run is ``python -m pytest`` with the run's pinned interpreter, on a
-throwaway copy, through the check execution entry point
-(``admission._run_argv``, ``check_env.check_command``): confined by the
-execution sandbox, without network, under the run contract's per-check
-timeout. Per-test outcomes come from the runner's JUnit XML report, never from
-its console text. A report is written by code the candidate controls, so a
-forged report can only hide a failure; it can never fail a correct artifact
-that the base's own tests do not.
+Every run is pytest started by the controller's bootstrap
+(``footprint.PYTEST_BOOTSTRAP``, which sets ``sys.path`` as ``python -m
+pytest`` does) with the run's pinned interpreter, on a throwaway copy,
+through the check execution entry point (``check_env.check_command``):
+confined by the execution sandbox, without network, under the run contract's
+per-check timeout. Its report and its record go to the run's scratch
+directory, outside the copy. Per-test outcomes come from the runner's JUnit
+XML report, never from its console text. A report is written by code the
+candidate controls, so a forged report can only hide a failure; it can never
+fail a correct artifact that the base's own tests do not. Every tree walk,
+copy and diff runs off the event loop.
 """
 
 from __future__ import annotations
@@ -59,6 +73,8 @@ from __future__ import annotations
 import ast
 import asyncio
 from collections.abc import Collection, Iterable, Mapping, Sequence
+from configparser import ConfigParser
+from configparser import Error as ConfigError
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 import os
@@ -68,18 +84,30 @@ import secrets
 import shutil
 import stat
 import tempfile
+import tomllib
 from xml.etree import ElementTree
 
 from ouroboros import telemetry as usage_telemetry
 from ouroboros.boundary.acceptance import ArtifactCheck, CriterionVerdict, PackageCriterionStatus
-from ouroboros.boundary.admission import _run_argv
+from ouroboros.boundary.admission import _run_in_environment
 from ouroboros.boundary.binding import CheckTier
-from ouroboros.boundary.check_env import CheckInterpreter
+from ouroboros.boundary.check_env import (
+    CheckInterpreter,
+    CheckUnavailable,
+    check_command,
+    check_scratch,
+)
 from ouroboros.boundary.footprint import (
+    PYTEST_BOOTSTRAP,
+    PYTEST_PLAN,
+    ChangedCode,
     FunctionKey,
-    changed_functions,
-    pytest_bootstrap,
-    read_test_footprints,
+    RunRecord,
+    changed_code,
+    pytest_plan,
+    read_run_record,
+    read_source,
+    write_plan,
 )
 from ouroboros.boundary.tree import (
     UNREADABLE,
@@ -111,6 +139,10 @@ _REPAIR_NAMES = 10
 
 MASS_BREAKAGE = 20
 """More regressed tests than this are never exempt: the change broke too much to adjudicate."""
+WORKER_TEST_FILES = 5
+"""At most this many added test files run in the worker-test gate (first in path order)."""
+_BASE_ATTEMPTS = 2
+_ROOT_CONFIGS = ("pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg")
 
 
 class ArtifactCheckOutcome(StrEnum):
@@ -132,6 +164,8 @@ class ArtifactCheckOutcome(StrEnum):
     """A worker test file whose run exited with neither 0 nor 1."""
     UNAVAILABLE = "unavailable"
     """Nothing ran: the sandbox, the pinned interpreter or the base snapshot refused it."""
+    IMPORTED_OUTSIDE_COPY = "imported_outside_copy"
+    """A changed module was imported from outside the run's copy: the run did not test it."""
 
 
 class Exemption(StrEnum):
@@ -145,6 +179,13 @@ class Exemption(StrEnum):
     """No admitted oracle passed on this candidate (with no package, always)."""
     MASS_BREAKAGE = "mass_breakage"
     """More than ``MASS_BREAKAGE`` tests regressed."""
+    NO_CHANGED_FUNCTION = "no_changed_function"
+    """The change touched no function (``C`` is empty): there is no footprint to compare."""
+    NO_ORACLE_FOOTPRINT = "no_oracle_footprint"
+    """The passing oracles entered no changed function (only a CLI oracle passed, say)."""
+    CHANGE_OUTSIDE_FUNCTIONS = "change_outside_functions"
+    """The change also touched code outside every function (module or class level, a
+    deleted function, a removed import), which no function footprint covers."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +203,8 @@ class ArtifactFinding:
     exempted: tuple[str, ...] = ()
     """Regressed tests the footprint exemption set aside."""
     exemption: Exemption | None = None
+    changed: ChangedCode = field(default_factory=ChangedCode)
+    """What the change touched (``C``), which the exemption needs."""
 
     @property
     def rejects(self) -> bool:
@@ -307,27 +350,38 @@ def regressions_to_keep(
     regressed: Sequence[str],
     footprints: Mapping[str, frozenset[FunctionKey]],
     oracle_entered: frozenset[FunctionKey] | None,
+    changed: ChangedCode,
 ) -> tuple[tuple[str, ...], Exemption]:
     """The regressed tests that count against the candidate, and how the exemption went.
 
-    A regressed test T is exempt when it produced a footprint and every
-    changed function its failing run entered (T_C, possibly none: a test that
-    fails before it reaches changed code) was also entered by an admitted
-    oracle check that passed on this candidate (``oracle_entered``, O_C). The
-    oracle then adjudicates the behaviour T reaches, and T pins what the
-    criterion changed. A test with no footprint is kept: only a missing or
-    forged footprint could claim an exemption. Nothing is exempt without a
-    passing oracle (``oracle_entered`` ``None``, always so with no package),
-    or when more than ``MASS_BREAKAGE`` tests regressed.
+    A regressed test T is exempt when it produced a footprint, the changed
+    functions its failing run entered (T_C) are not none, and every one of
+    them was also entered by an admitted oracle check that passed on this
+    candidate (``oracle_entered``, O_C): the oracle then adjudicates the
+    behaviour T reaches, and T pins what the criterion changed. A test with
+    no footprint, or one that failed before it reached changed code, is kept:
+    only a missing or forged footprint could claim that. Nothing is exempt
+    without a passing oracle (``oracle_entered`` ``None``, always so with no
+    package), when more than ``MASS_BREAKAGE`` tests regressed, when the
+    change touched no function, when it also changed code outside every
+    function (no function footprint covers it), or when the passing oracles
+    entered no changed function.
     """
-    if oracle_entered is None:
-        return tuple(regressed), Exemption.NO_PASSING_ORACLE
+    every = tuple(regressed)
     if len(regressed) > MASS_BREAKAGE:
-        return tuple(regressed), Exemption.MASS_BREAKAGE
+        return every, Exemption.MASS_BREAKAGE
+    if not changed.functions:
+        return every, Exemption.NO_CHANGED_FUNCTION
+    if changed.outside_functions:
+        return every, Exemption.CHANGE_OUTSIDE_FUNCTIONS
+    if oracle_entered is None:
+        return every, Exemption.NO_PASSING_ORACLE
+    if not oracle_entered:
+        return every, Exemption.NO_ORACLE_FOOTPRINT
     kept = tuple(
         test
         for test in regressed
-        if test not in footprints or not footprints[test] <= oracle_entered
+        if not footprints.get(test) or not footprints[test] <= oracle_entered
     )
     return kept, Exemption.APPLIED if len(kept) < len(regressed) else Exemption.NONE_INSIDE
 
@@ -342,7 +396,9 @@ def exempt(
     """
     if finding.check is not ArtifactCheck.BASE_REGRESSION or not finding.rejects:
         return finding
-    kept, how = regressions_to_keep(finding.failed, finding.footprints, oracle_entered)
+    kept, how = regressions_to_keep(
+        finding.failed, finding.footprints, oracle_entered, finding.changed
+    )
     exempted = tuple(test for test in finding.failed if test not in kept)
     outcome = ArtifactCheckOutcome.REJECTED if kept else ArtifactCheckOutcome.EXEMPTED
     return replace(finding, outcome=outcome, failed=kept, exempted=exempted, exemption=how)
@@ -359,7 +415,7 @@ class _Run:
     return_code: int | None
     timed_out: bool = False
     unavailable: bool = False
-    footprints: Mapping[str, frozenset[FunctionKey]] = field(default_factory=dict)
+    record: RunRecord = field(default_factory=RunRecord)
 
 
 def parse_junit(data: bytes) -> dict[str, str] | None:
@@ -398,58 +454,146 @@ async def _pytest(
     *,
     past_collection_errors: bool = False,
     watched: frozenset[FunctionKey] | None = None,
+    modules: Iterable[str] = (),
+    config: Path | None = None,
 ) -> _Run:
-    """Run ``files`` with pytest in ``root`` (a throwaway copy) and read its report.
+    """Run ``files`` with pytest in ``root`` (a throwaway copy) and read its report and record.
 
     ``past_collection_errors`` runs the other files when one fails to collect
     (the regression runs, where that error is a finding); pytest then exits 1
     for the collection error alone, so a single worker test file never uses it
-    and a file that cannot be collected keeps pytest's own exit 2. With
-    ``watched`` (the changed functions) pytest starts under the controller's
-    footprint plugin (``footprint.pytest_bootstrap``), which writes each
-    test's entered functions beside the report; like the report it is written
-    by code the candidate controls, so it can only ever exempt.
+    and a file that cannot be collected keeps pytest's own exit 2. ``config``
+    is the only configuration file pytest reads (``-c``, with ``--rootdir`` the
+    copy and ``addopts`` cleared); without it the copy's own configuration
+    applies (the worker-test gate). The bootstrap's plan names ``watched``
+    (the changed functions, whose per-test footprint it records) and
+    ``modules`` (whose import location it records). Report, plan and record
+    live in the run's scratch directory, outside the copy; like the report,
+    the record is written by code the candidate controls, so it can only ever
+    exempt.
     """
-    report = root / f".ouroboros-report-{secrets.token_hex(8)}.xml"
-    record = root / f".ouroboros-footprint-{secrets.token_hex(8)}.jsonl"
-    launcher = (
-        ("python", "-m", "pytest")
-        if watched is None
-        else ("python", "-c", pytest_bootstrap(root, watched, record))
+    # Resolved: pytest names tests relative to its root, and an unresolved
+    # root (a temp directory behind a link) would name them from elsewhere.
+    root = root.resolve()
+    controlled = (
+        ("-o", "addopts=", f"--rootdir={root}", "-c", str(config.resolve()))
+        if config is not None
+        else ()
     )
-    argv = (
-        *launcher,
-        "-p",
-        "no:cacheprovider",
-        "-q",
-        *(("--continue-on-collection-errors",) if past_collection_errors else ()),
-        f"--junitxml={report.name}",
-        "--",
-        *files,
-    )
-    completed = await _run_argv(
-        argv,
-        root,
-        timeout,
-        interpreter=interpreter,
-        scratch_parent=root.parent,
-        writable_root=root,
-    )
-    if completed.unavailable is not None or completed.launch_error is not None:
-        return _Run(None, None, unavailable=True)
-    if completed.timed_out:
-        return _Run(None, completed.return_code, timed_out=True)
-    if completed.output_overflow:
-        # Killed for flooding its output: whatever it would have reported is unknown.
-        return _Run(None, None, unavailable=True)
-    statuses = None
-    try:
-        if stat.S_ISREG(os.lstat(report).st_mode) and os.lstat(report).st_size <= _REPORT_LIMIT:
-            statuses = parse_junit(report.read_bytes())
-    except OSError:
+    with check_scratch(root.parent) as scratch:
+        token = secrets.token_hex(8)
+        report = scratch / f"report-{token}.xml"
+        record = scratch / f"record-{token}.jsonl"
+        write_plan(scratch / PYTEST_PLAN, pytest_plan(root, record, watched, modules))
+        argv = (
+            "python",
+            "-c",
+            PYTEST_BOOTSTRAP,
+            "-p",
+            "no:cacheprovider",
+            "-q",
+            *controlled,
+            *(("--continue-on-collection-errors",) if past_collection_errors else ()),
+            f"--junitxml={report}",
+            "--",
+            *files,
+        )
+        command = check_command(
+            argv, cwd=root, writable_root=root, interpreter=interpreter, scratch=scratch
+        )
+        if isinstance(command, CheckUnavailable):
+            return _Run(None, None, unavailable=True)
+        completed = await _run_in_environment(command, timeout)
+        if completed.unavailable is not None or completed.launch_error is not None:
+            return _Run(None, None, unavailable=True)
+        if completed.timed_out:
+            return _Run(None, completed.return_code, timed_out=True)
+        if completed.output_overflow:
+            # Killed for flooding its output: whatever it would have reported is unknown.
+            return _Run(None, None, unavailable=True)
         statuses = None
-    footprints = read_test_footprints(record, watched) if watched is not None else {}
-    return _Run(statuses, completed.return_code, footprints=footprints)
+        try:
+            status = os.lstat(report)
+            if stat.S_ISREG(status.st_mode) and status.st_size <= _REPORT_LIMIT:
+                statuses = parse_junit(report.read_bytes())
+        except OSError:
+            statuses = None
+        return _Run(statuses, completed.return_code, record=read_run_record(record, watched))
+
+
+def controller_config(root: Path, work: Path) -> Path:
+    """The one pytest configuration file of a controller run in ``root``.
+
+    The root file pytest itself would pick (``pytest.ini``, then a
+    ``pyproject.toml`` with ``[tool.pytest.ini_options]``, a ``tox.ini`` with
+    ``[pytest]``, a ``setup.cfg`` with ``[tool:pytest]``), read safely;
+    without one, an empty ``pytest.ini`` written in ``work``, outside the tree.
+    """
+    for name in _ROOT_CONFIGS:
+        text = read_source(root / name)
+        if text is None:
+            continue
+        if name == "pytest.ini":
+            return root / name
+        if name == "pyproject.toml":
+            try:
+                tool = tomllib.loads(text).get("tool", {})
+            except tomllib.TOMLDecodeError:
+                continue
+            if isinstance(tool, dict) and isinstance(tool.get("pytest"), dict):
+                if "ini_options" in tool["pytest"]:
+                    return root / name
+            continue
+        parser = ConfigParser(interpolation=None)
+        try:
+            parser.read_string(text)
+        except ConfigError:
+            continue
+        if parser.has_section("pytest" if name == "tox.ini" else "tool:pytest"):
+            return root / name
+    empty = work / f"pytest-{secrets.token_hex(4)}.ini"
+    empty.write_text("[pytest]\n", encoding="utf-8")
+    return empty
+
+
+def neutralize_config(
+    copy_root: Path,
+    base: Path,
+    base_manifest: Mapping[str, str],
+    candidate_manifest: Mapping[str, str],
+) -> bool:
+    """Take every pytest configuration of the worker's out of a candidate copy.
+
+    Every ``conftest.py`` that differs from the base (or the base lacks) is
+    deleted, and each root configuration file is restored to its base bytes
+    or deleted when the base has none. ``False`` when a path cannot be
+    handled without writing through a link.
+    """
+    for path, digest in candidate_manifest.items():
+        if posixpath.basename(path) == "conftest.py" and base_manifest.get(path) != digest:
+            if not _remove(copy_root, path):
+                return False
+    for name in _ROOT_CONFIGS:
+        if base_manifest.get(name) == candidate_manifest.get(name):
+            continue
+        if name in base_manifest:
+            if not restore_base_bytes(copy_root, base, (name,)):
+                return False
+        elif not _remove(copy_root, name):
+            return False
+    return True
+
+
+def _remove(copy_root: Path, relative: str) -> bool:
+    directory = _real_directory(copy_root, posixpath.dirname(relative))
+    if directory is None:
+        return False
+    target = directory / posixpath.basename(relative)
+    if os.path.lexists(target):
+        if stat.S_ISDIR(os.lstat(target).st_mode):
+            return False
+        os.unlink(target)
+    return True
 
 
 def _stable_passes(runs: Sequence[_Run]) -> tuple[str, ...]:
@@ -566,43 +710,67 @@ class ArtifactChecks:
         self._timeout = timeout_seconds
         self._base_manifest: dict[str, str] | None = None
         self._base_runs: dict[tuple[str, tuple[str, ...]], _Base] = {}
+        self._base_attempts: dict[tuple[str, tuple[str, ...]], int] = {}
         self._findings: dict[str, tuple[ArtifactFinding, ArtifactFinding]] = {}
-        self._watched: dict[str, frozenset[FunctionKey]] = {}
+        self._changed: dict[str, ChangedCode] = {}
         self._lock = asyncio.Lock()
 
     async def changed_functions(self, candidate: Path) -> frozenset[FunctionKey] | None:
-        """``C`` for ``candidate`` as it is now (``footprint.changed_functions``), or ``None``.
+        """``C`` for ``candidate`` as it is now (``footprint.changed_code``), or ``None``.
 
-        ``None`` when the base cannot be used; the caller then records no
-        oracle footprint and nothing can be exempt.
+        ``None`` when the base cannot be used, or when no function footprint
+        can be compared (no changed function, or a change outside every
+        function); the caller then records no oracle footprint.
         """
         async with self._lock:
             try:
-                base = self._pinned_base()
+                base = await asyncio.to_thread(self._pinned_base)
                 if base is None:
                     return None
                 candidate = candidate.resolve()
-                manifest = tree_manifest(candidate)
-                return self._changed_functions(base, candidate, manifest)
+                manifest = await asyncio.to_thread(tree_manifest, candidate)
+                changed = await self._changed_code(base, candidate, manifest)
             except Exception:  # noqa: BLE001 - an optional observation never fails the decision
                 return None
+        if not changed.functions or changed.outside_functions:
+            return None
+        return changed.functions
 
-    def _changed_functions(
+    async def _changed_code(
         self, base: Path, candidate: Path, manifest: Mapping[str, str]
-    ) -> frozenset[FunctionKey]:
-        """The changed functions of the non-test Python files a change touched or added."""
+    ) -> ChangedCode:
+        """What the change did to the non-test Python files it touched or added.
+
+        Only regular files count: a symbolic link or an unreadable entry on
+        either side is a change outside every function.
+        """
         digest = manifest_digest(manifest)
-        if digest not in self._watched:
+        if digest not in self._changed:
             assert self._base_manifest is not None
-            changed = [p for p in changed_paths(self._base_manifest, manifest) if p in manifest]
-            added = added_paths(self._base_manifest, manifest)
-            self._watched[digest] = changed_functions(
-                base,
-                candidate,
-                [p for p in changed if not is_test_path(p)],
-                [p for p in added if not is_test_path(p)],
-            )
-        return self._watched[digest]
+            base_manifest = self._base_manifest
+            touched = [
+                path
+                for path in (
+                    *changed_paths(base_manifest, manifest),
+                    *added_paths(base_manifest, manifest),
+                )
+                if path.endswith(".py") and not is_test_path(path)
+            ]
+            if any(
+                not _regular(manifest.get(path)) or not _regular(base_manifest.get(path, ""))
+                for path in touched
+                if path in manifest
+            ):
+                self._changed[digest] = ChangedCode(outside_functions=True)
+            else:
+                self._changed[digest] = await asyncio.to_thread(
+                    changed_code,
+                    base,
+                    candidate,
+                    [path for path in touched if path in manifest and path in base_manifest],
+                    [path for path in touched if path not in base_manifest],
+                )
+        return self._changed[digest]
 
     async def findings(self, candidate: Path) -> tuple[ArtifactFinding, ArtifactFinding]:
         """The base regression and worker-test findings for ``candidate`` as it is now."""
@@ -613,10 +781,10 @@ class ArtifactChecks:
                 return _unavailable()
 
     async def _findings_for(self, candidate: Path) -> tuple[ArtifactFinding, ArtifactFinding]:
-        base = self._pinned_base()
+        base = await asyncio.to_thread(self._pinned_base)
         if base is None:
             return _unavailable()
-        manifest = tree_manifest(candidate)
+        manifest = await asyncio.to_thread(tree_manifest, candidate)
         digest = manifest_digest(manifest)
         cached = self._findings.get(digest)
         if cached is not None:
@@ -631,13 +799,12 @@ class ArtifactChecks:
                 ArtifactFinding(ArtifactCheck.WORKER_TESTS, unsupported),
             )
         else:
-            changed = changed_paths(self._base_manifest, manifest)
-            watched = self._changed_functions(base, candidate, manifest)
+            changed = await self._changed_code(base, candidate, manifest)
             found = (
-                await self._regression(base, candidate, changed, watched),
+                await self._regression(base, candidate, manifest, changed),
                 await self._worker_tests(candidate, added_paths(self._base_manifest, manifest)),
             )
-        if tree_manifest(candidate) == manifest:
+        if await asyncio.to_thread(tree_manifest, candidate) == manifest:
             # Kept only for the tree it observed: a workspace that changed
             # while the checks ran is checked again on its next call.
             self._findings[digest] = found
@@ -658,26 +825,30 @@ class ArtifactChecks:
         self,
         base: Path,
         candidate: Path,
-        changed: Sequence[str],
-        watched: frozenset[FunctionKey],
+        manifest: Mapping[str, str],
+        changed: ChangedCode,
     ) -> ArtifactFinding:
         check = ArtifactCheck.BASE_REGRESSION
         assert self._base_manifest is not None and self._base_digest is not None
-        selected = select_tests(self._base_manifest, changed, base_root=base)
+        paths = changed_paths(self._base_manifest, manifest)
+        selected = await asyncio.to_thread(select_tests, self._base_manifest, paths, base_root=base)
         if not selected:
             return ArtifactFinding(check, ArtifactCheckOutcome.NO_SELECTED_FILES)
-        key = (self._base_digest, selected)
-        if key not in self._base_runs:
-            self._base_runs[key] = await self._base_side(base, selected)
-        side = self._base_runs[key]
+        modules = tuple(dotted_module(path) for path in changed_sources(paths))
+        side = await self._base_side(base, selected, modules)
         if side.outcome is not None:
             return ArtifactFinding(check, side.outcome, selected=selected)
+        watched = changed.functions if changed.functions and not changed.outside_functions else None
         restored = (*selected, *_conftests_above(selected, self._base_manifest))
         with tempfile.TemporaryDirectory(prefix="ouroboros-regression-") as work:
             copy_root = Path(work) / "candidate"
-            copy_checkout(candidate, copy_root)
-            if not restore_base_bytes(copy_root, base, restored):
+            await asyncio.to_thread(copy_checkout, candidate, copy_root)
+            prepared = await asyncio.to_thread(
+                _prepare_candidate_copy, copy_root, base, self._base_manifest, manifest, restored
+            )
+            if not prepared:
                 return ArtifactFinding(check, ArtifactCheckOutcome.UNAVAILABLE, selected=selected)
+            config = controller_config(copy_root, Path(work))
             run = await _pytest(
                 copy_root,
                 selected,
@@ -685,23 +856,62 @@ class ArtifactChecks:
                 self._timeout,
                 past_collection_errors=True,
                 watched=watched,
+                modules=modules,
+                config=config,
             )
-        if run.unavailable:
-            return ArtifactFinding(check, ArtifactCheckOutcome.UNAVAILABLE, selected=selected)
-        if run.timed_out:
-            return ArtifactFinding(check, ArtifactCheckOutcome.TIMEOUT, selected=selected)
-        regressed = regressions(side.stable, run.statuses)
+            failing = _unobserved(run)
+            if failing is not None:
+                return ArtifactFinding(check, failing, selected=selected)
+            if run.record.imported_outside:
+                outcome = ArtifactCheckOutcome.IMPORTED_OUTSIDE_COPY
+                return ArtifactFinding(check, outcome, selected=selected)
+            regressed = regressions(side.stable, run.statuses)
+            # Each failing test once more, alone (the copy still holds the
+            # base bytes): one that passes now is not a regression.
+            again = [run.record.nodeids[test] for test in regressed if test in run.record.nodeids]
+            if again and await asyncio.to_thread(restore_base_bytes, copy_root, base, restored):
+                rerun = await _pytest(
+                    copy_root,
+                    again,
+                    self._interpreter,
+                    self._timeout,
+                    modules=modules,
+                    config=config,
+                )
+                if _unobserved(rerun) is None and rerun.statuses is not None:
+                    passed = {test for test, status in rerun.statuses.items() if status == _PASS}
+                    regressed = tuple(test for test in regressed if test not in passed)
         outcome = ArtifactCheckOutcome.REJECTED if regressed else ArtifactCheckOutcome.PASSED
-        footprints = {test: run.footprints[test] for test in regressed if test in run.footprints}
-        return ArtifactFinding(check, outcome, regressed, selected, footprints)
+        footprints = {
+            test: run.record.footprints[test] for test in regressed if test in run.record.footprints
+        }
+        return ArtifactFinding(check, outcome, regressed, selected, footprints, changed=changed)
 
-    async def _base_side(self, base: Path, selected: tuple[str, ...]) -> _Base:
+    async def _base_side(
+        self, base: Path, selected: tuple[str, ...], modules: Sequence[str]
+    ) -> _Base:
+        """The base side of ``selected``, run once per base digest (a timeout or refusal twice)."""
+        assert self._base_digest is not None
+        key = (self._base_digest, selected)
+        side = self._base_runs.get(key)
+        transient = (ArtifactCheckOutcome.TIMEOUT, ArtifactCheckOutcome.UNAVAILABLE)
+        if side is not None and (
+            side.outcome not in transient or self._base_attempts[key] >= _BASE_ATTEMPTS
+        ):
+            return side
+        self._base_attempts[key] = self._base_attempts.get(key, 0) + 1
+        side = self._base_runs[key] = await self._run_base(base, selected, modules)
+        return side
+
+    async def _run_base(
+        self, base: Path, selected: tuple[str, ...], modules: Sequence[str]
+    ) -> _Base:
         """Two runs of ``selected`` on fresh base copies; a test must pass on both."""
         runs = []
         for _ in range(2):
             with tempfile.TemporaryDirectory(prefix="ouroboros-regression-") as work:
                 copy_root = Path(work) / "base"
-                copy_checkout(base, copy_root)
+                await asyncio.to_thread(copy_checkout, base, copy_root)
                 runs.append(
                     await _pytest(
                         copy_root,
@@ -709,19 +919,23 @@ class ArtifactChecks:
                         self._interpreter,
                         self._timeout,
                         past_collection_errors=True,
+                        modules=modules,
+                        config=controller_config(copy_root, Path(work)),
                     )
                 )
         if any(run.unavailable for run in runs):
             return _Base(outcome=ArtifactCheckOutcome.UNAVAILABLE)
         if any(run.timed_out for run in runs):
             return _Base(outcome=ArtifactCheckOutcome.TIMEOUT)
+        if any(run.record.imported_outside for run in runs):
+            return _Base(outcome=ArtifactCheckOutcome.IMPORTED_OUTSIDE_COPY)
         if any(run.statuses is None for run in runs):
             return _Base(outcome=ArtifactCheckOutcome.BASE_RUNNER_CRASH)
         return _Base(_stable_passes(runs))
 
     async def _worker_tests(self, candidate: Path, added: Sequence[str]) -> ArtifactFinding:
         check = ArtifactCheck.WORKER_TESTS
-        files = worker_test_files(added)
+        files = worker_test_files(added)[:WORKER_TEST_FILES]
         if not files:
             return ArtifactFinding(check, ArtifactCheckOutcome.NO_SELECTED_FILES)
         failed: list[str] = []
@@ -729,7 +943,7 @@ class ArtifactChecks:
         for path in files:
             with tempfile.TemporaryDirectory(prefix="ouroboros-worker-tests-") as work:
                 copy_root = Path(work) / "candidate"
-                copy_checkout(candidate, copy_root)
+                await asyncio.to_thread(copy_checkout, candidate, copy_root)
                 run = await _pytest(copy_root, (path,), self._interpreter, self._timeout)
             if run.unavailable:
                 unobserved.append(ArtifactCheckOutcome.UNAVAILABLE)
@@ -745,6 +959,33 @@ class ArtifactChecks:
             return ArtifactFinding(check, ArtifactCheckOutcome.REJECTED, tuple(failed), files)
         outcome = unobserved[0] if unobserved else ArtifactCheckOutcome.PASSED
         return ArtifactFinding(check, outcome, selected=files)
+
+
+def _unobserved(run: _Run) -> ArtifactCheckOutcome | None:
+    """Why a run observed nothing, or ``None`` when it did."""
+    if run.unavailable:
+        return ArtifactCheckOutcome.UNAVAILABLE
+    if run.timed_out:
+        return ArtifactCheckOutcome.TIMEOUT
+    return None
+
+
+def _regular(digest: str | None) -> bool:
+    """A manifest entry that is a readable regular file (not a link, not unreadable)."""
+    return digest is not None and digest != UNREADABLE and not digest.startswith("symlink:")
+
+
+def _prepare_candidate_copy(
+    copy_root: Path,
+    base: Path,
+    base_manifest: Mapping[str, str],
+    manifest: Mapping[str, str],
+    restored: Iterable[str],
+) -> bool:
+    """The candidate copy a regression run uses: no worker configuration, base test bytes."""
+    return neutralize_config(copy_root, base, base_manifest, manifest) and restore_base_bytes(
+        copy_root, base, restored
+    )
 
 
 def _unavailable() -> tuple[ArtifactFinding, ArtifactFinding]:
@@ -768,30 +1009,41 @@ def apply_findings(
     verdicts: Mapping[str, CriterionVerdict],
     criterion_keys: Sequence[str],
     findings: Sequence[ArtifactFinding],
+    attempted: Collection[str] | None = None,
 ) -> dict[str, CriterionVerdict]:
-    """Fail every criterion the package left undecided when a finding rejects.
+    """Fail every attempted criterion the package left undecided when a finding rejects.
 
     A verified pass, a package failure and an indeterminate criterion keep
-    the package's verdict. The first rejecting finding names the check.
+    the package's verdict, and so does a criterion the worker never attempted
+    (``attempted``: the keys of attempted criteria, ``None`` for all). The
+    first rejecting finding names the check.
     """
     rejecting = next((finding for finding in findings if finding.rejects), None)
     if rejecting is None:
         return dict(verdicts)
-    return replay_recorded(verdicts, dict.fromkeys(criterion_keys, rejecting.check))
+    recorded = dict.fromkeys(criterion_keys, rejecting.check)
+    return replay_recorded(verdicts, recorded, criterion_keys, attempted)
 
 
 def replay_recorded(
-    verdicts: Mapping[str, CriterionVerdict], recorded: Mapping[str, ArtifactCheck]
+    verdicts: Mapping[str, CriterionVerdict],
+    recorded: Mapping[str, ArtifactCheck],
+    criterion_keys: Collection[str],
+    attempted: Collection[str] | None = None,
 ) -> dict[str, CriterionVerdict]:
     """Fail each criterion ``recorded`` names with its artifact check, where still undecided.
 
     The one rule of ``apply_findings``, and how a resumed run replays the
     artifact checks a journaled decision recorded without running them again:
-    a criterion the package (or the resume) decided keeps its verdict.
+    a criterion the package (or the resume) decided keeps its verdict, a key
+    that is not one of ``criterion_keys`` is ignored, and a criterion the
+    worker never attempted (outside ``attempted``) is left alone.
     """
     out = dict(verdicts)
     for key, check in recorded.items():
         prior = verdicts.get(key)
+        if key not in criterion_keys or (attempted is not None and key not in attempted):
+            continue
         if not undecided_by_package(prior):
             continue
         out[key] = CriterionVerdict(
@@ -861,6 +1113,7 @@ __all__ = [
     "BASE_REGRESSION_DEFAULT",
     "REGRESSION_REASON",
     "WORKER_TESTS_REASON",
+    "WORKER_TEST_FILES",
     "ArtifactCheckOutcome",
     "ArtifactChecks",
     "ArtifactFinding",
@@ -869,6 +1122,8 @@ __all__ = [
     "exempt",
     "apply_findings",
     "base_test_files",
+    "controller_config",
+    "neutralize_config",
     "imported_names",
     "imports_module",
     "paired_tests",

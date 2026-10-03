@@ -75,14 +75,18 @@ test file's run exits 1 with a failing test) fails every criterion the
 package left ``unverified`` or ``uncovered`` (``CriterionVerdict.artifact_check``)
 before the legacy rule applies, so the legacy verifier cannot accept it; a
 verified ``pass``, a package ``fail`` and an ``indeterminate`` criterion keep
-the package's verdict. A regressed test is exempt (``base_regression.regressions_to_keep``)
-when its failing run produced a footprint and every changed function it
-entered was also entered by an admitted oracle check that passed on the
-candidate; with more than 20 regressions, or no passing oracle, nothing is
-exempt, and when every regression is exempt the check decides nothing. A
-check with no observation (a timeout, a base on
-which the runner wrote no report, no selected file, a project runner it does
-not drive, a run the sandbox could not confine) decides nothing. They run
+the package's verdict, and so does a criterion the worker never attempted.
+A regressed test is exempt (``base_regression.regressions_to_keep``) when
+its failing run entered at least one changed function and every changed
+function it entered was also entered by an admitted oracle check that
+passed on the candidate. Nothing is exempt with more than 20 regressions,
+no passing oracle, passing oracles that entered no changed function, no
+changed function, or a change outside every function (module or class
+level code, a deleted function, a removed import); when every regression is
+exempt the check decides nothing. A check with no observation (a timeout, a
+base on which the runner wrote no report, no selected file, a project
+runner it does not drive, a run the sandbox could not confine, a changed
+module imported from outside the run's copy) decides nothing. They run
 with no admitted package too: every criterion is then uncovered, so a failure
 fails them all, recorded on the version sealed without a package; a resumed
 run replays the recorded fails and never runs the checks again.
@@ -463,6 +467,20 @@ def artifact_verdict(statuses: Iterable[PackageCriterionStatus]) -> ArtifactVerd
     return ArtifactVerdict(artifact_verdict_of(status.value for status in statuses))
 
 
+def attempted_keys(
+    criterion_keys: Sequence[str],
+    existing: Mapping[int, ExistingOutcome],
+    *,
+    existing_run_accepted: bool,
+) -> frozenset[str]:
+    """The criteria the worker attempted, by the rule ``reconcile_acceptance`` applies."""
+    return frozenset(
+        key
+        for index, key in enumerate(criterion_keys)
+        if (existing[index].attempted if index in existing else existing_run_accepted)
+    )
+
+
 class LegacyNoEvidenceReason(StrEnum):
     """Why the legacy verifier accepted a criterion without evidence (closed set).
 
@@ -759,7 +777,10 @@ def reconcile_acceptance(
                 binding=verdict.binding,
                 declared_binding_pass=verdict.declared_binding_pass,
                 failed_outside_package=prior is not None and prior.failed_outside_package,
-                artifact_check=verdict.artifact_check,
+                # Only a fail the package governs names the artifact check that made it.
+                artifact_check=verdict.artifact_check
+                if governor is Governor.CHECK_PACKAGE
+                else None,
             )
         )
     run_accepted = bool(decisions) and all(decision.accepted for decision in decisions)

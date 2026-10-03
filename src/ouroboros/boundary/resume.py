@@ -71,6 +71,7 @@ the live run's final bindings are not written again.
 
 from __future__ import annotations
 
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, replace
 import json
 from pathlib import Path
@@ -83,6 +84,7 @@ from ouroboros.boundary.acceptance import (
     CriterionVerdict,
     PackageCriterionStatus,
     artifact_verdict,
+    attempted_keys,
     reconcile_acceptance,
     render_reconciliation,
 )
@@ -301,6 +303,7 @@ async def decide_resumed(
     candidate: Path,
     event_store: EventStore,
     declared: dict[str, list[Any]] | None = None,
+    attempted: Collection[str] | None = None,
 ) -> BoundaryVerdict:
     """The package's per-criterion verdicts on ``candidate`` (see the module docstring).
 
@@ -323,6 +326,8 @@ async def decide_resumed(
         return _verdict(
             boundary,
             {key: _undecided(key, reason) if key in covered else _uncovered(key) for key in keys},
+            keys,
+            attempted,
         )
     computed = (
         await verify_check_package(
@@ -343,11 +348,17 @@ async def decide_resumed(
             verdicts[key] = _undecided(key, BOUNDARY_RECORD_MISSING)
         else:
             verdicts[key] = item
-    return _verdict(boundary, verdicts)
+    return _verdict(boundary, verdicts, keys, attempted)
 
 
-def _verdict(boundary: ResumedBoundary, verdicts: dict[str, CriterionVerdict]) -> BoundaryVerdict:
-    verdicts = replay_recorded(verdicts, dict(boundary.recorded_artifact_checks))
+def _verdict(
+    boundary: ResumedBoundary,
+    verdicts: dict[str, CriterionVerdict],
+    keys: Sequence[str],
+    attempted: Collection[str] | None,
+) -> BoundaryVerdict:
+    # Replayed only onto this Seed's criteria the worker attempted.
+    verdicts = replay_recorded(verdicts, dict(boundary.recorded_artifact_checks), keys, attempted)
     overall = artifact_verdict(item.status for item in verdicts.values())
     return BoundaryVerdict(
         verdict=overall.value,
@@ -491,6 +502,9 @@ class ResumedCheckPackageAuthority:
             candidate=self._candidate.resolve(),
             event_store=self._event_store,
             declared=declared,
+            attempted=attempted_keys(
+                keys, legacy, existing_run_accepted=bool(parallel_result.all_succeeded)
+            ),
         )
         reconciliation = reconcile_acceptance(
             keys,

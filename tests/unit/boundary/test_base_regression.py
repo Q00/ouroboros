@@ -91,40 +91,63 @@ def test_added_files_and_edited_tests_select_nothing() -> None:
 
 F = ("calc/ops.py", "add", 1)
 G = ("calc/ops.py", "sub", 4)
+C = br.ChangedCode(frozenset({F, G}))
+
+
+def _keep(regressed: Any, footprints: Any, entered: Any, changed: Any = C) -> Any:
+    return br.regressions_to_keep(regressed, footprints, entered, changed)
 
 
 def test_a_test_whose_footprint_lies_inside_the_passing_oracles_is_exempt() -> None:
-    kept, how = br.regressions_to_keep(("t::a",), {"t::a": frozenset({F})}, frozenset({F, G}))
-    assert (kept, how) == ((), br.Exemption.APPLIED)
+    assert _keep(("t::a",), {"t::a": frozenset({F})}, frozenset({F, G})) == (
+        (),
+        br.Exemption.APPLIED,
+    )
 
 
 def test_a_test_entering_a_changed_function_no_passing_oracle_entered_is_kept() -> None:
-    kept, how = br.regressions_to_keep(("t::a",), {"t::a": frozenset({F, G})}, frozenset({F}))
-    assert (kept, how) == (("t::a",), br.Exemption.NONE_INSIDE)
+    assert _keep(("t::a",), {"t::a": frozenset({F, G})}, frozenset({F})) == (
+        ("t::a",),
+        br.Exemption.NONE_INSIDE,
+    )
 
 
 def test_a_test_without_a_footprint_is_kept() -> None:
-    kept, _how = br.regressions_to_keep(("t::a", "t::b"), {"t::b": frozenset()}, frozenset({F}))
+    kept, _how = _keep(("t::a", "t::b"), {"t::b": frozenset({F})}, frozenset({F}))
     assert kept == ("t::a",)
 
 
-def test_a_test_failing_before_any_changed_function_is_exempt() -> None:
-    kept, _how = br.regressions_to_keep(("t::a",), {"t::a": frozenset()}, frozenset())
-    assert kept == ()
+def test_a_test_failing_before_any_changed_function_is_kept() -> None:
+    # Strict: an empty footprint is what a forged or a crashed run would show.
+    assert _keep(("t::a",), {"t::a": frozenset()}, frozenset({F}))[0] == ("t::a",)
 
 
 def test_mass_breakage_is_never_exempt() -> None:
     many = tuple(f"t::{index}" for index in range(br.MASS_BREAKAGE + 1))
     footprints = dict.fromkeys(many, frozenset({F}))
-    kept, how = br.regressions_to_keep(many, footprints, frozenset({F}))
-    assert (kept, how) == (many, br.Exemption.MASS_BREAKAGE)
+    assert _keep(many, footprints, frozenset({F})) == (many, br.Exemption.MASS_BREAKAGE)
     at_the_cap = many[: br.MASS_BREAKAGE]
-    assert br.regressions_to_keep(at_the_cap, footprints, frozenset({F}))[0] == ()
+    assert _keep(at_the_cap, footprints, frozenset({F}))[0] == ()
 
 
-def test_without_a_passing_oracle_nothing_is_exempt() -> None:
-    kept, how = br.regressions_to_keep(("t::a",), {"t::a": frozenset()}, None)
-    assert (kept, how) == (("t::a",), br.Exemption.NO_PASSING_ORACLE)
+@pytest.mark.parametrize(
+    ("entered", "changed", "reason"),
+    [
+        (None, C, br.Exemption.NO_PASSING_ORACLE),
+        (frozenset(), C, br.Exemption.NO_ORACLE_FOOTPRINT),
+        (frozenset({F}), br.ChangedCode(), br.Exemption.NO_CHANGED_FUNCTION),
+        (
+            frozenset({F}),
+            br.ChangedCode(frozenset({F}), outside_functions=True),
+            br.Exemption.CHANGE_OUTSIDE_FUNCTIONS,
+        ),
+    ],
+    ids=["no_passing_oracle", "empty_oracle_footprint", "no_changed_function", "outside"],
+)
+def test_nothing_is_exempt_without_a_function_footprint_to_compare(
+    entered: Any, changed: Any, reason: Any
+) -> None:
+    assert _keep(("t::a",), {"t::a": frozenset({F})}, entered, changed) == (("t::a",), reason)
 
 
 def test_an_all_exempt_finding_is_void_and_a_partial_one_keeps_the_rest() -> None:
@@ -133,6 +156,7 @@ def test_an_all_exempt_finding_is_void_and_a_partial_one_keeps_the_rest() -> Non
         Outcome.REJECTED,
         ("t::a", "t::b"),
         footprints={"t::a": frozenset({F}), "t::b": frozenset({G})},
+        changed=C,
     )
     void = br.exempt(finding, frozenset({F, G}))
     assert void.outcome is Outcome.EXEMPTED and not void.rejects
@@ -903,7 +927,7 @@ async def test_a_journal_without_recorded_fails_resumes_as_before(
 
 
 def test_changed_functions_are_keyed_like_their_code_objects(tmp_path: Path) -> None:
-    from ouroboros.boundary.footprint import changed_functions
+    from ouroboros.boundary.footprint import changed_code
 
     before = (
         "def deco(f):\n    return f\n\nclass K:\n    @deco\n    def m(self):\n        return 1\n"
@@ -913,11 +937,87 @@ def test_changed_functions_are_keyed_like_their_code_objects(tmp_path: Path) -> 
     candidate = _tree(
         tmp_path / "work", {"pkg/mod.py": after, "pkg/new.py": "def n():\n    pass\n"}
     )
-    assert changed_functions(base, candidate, ["pkg/mod.py"], ["pkg/new.py"]) == {
-        ("pkg/mod.py", "K.m", 5),  # the decorator's line, as ``co_firstlineno`` has it
-        ("pkg/mod.py", "added", 9),
-        ("pkg/new.py", "n", 1),
-    }
+    assert changed_code(base, candidate, ["pkg/mod.py"], ["pkg/new.py"]) == br.ChangedCode(
+        frozenset(
+            {
+                ("pkg/mod.py", "K.m", 5),  # the decorator's line, as ``co_firstlineno`` has it
+                ("pkg/mod.py", "added", 9),
+                ("pkg/new.py", "n", 1),
+            }
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        ("LIMIT = 1\n\ndef f():\n    return LIMIT\n", "LIMIT = 2\n\ndef f():\n    return LIMIT\n"),
+        (
+            "class K:\n    size = 1\n\n    def f(self):\n        return 1\n",
+            "class K:\n    size = 2\n\n    def f(self):\n        return 2\n",
+        ),
+        ("def f():\n    return 1\n\n\ndef g():\n    return 2\n", "def f():\n    return 3\n"),
+        ("import os\n\ndef f():\n    return 1\n", "\ndef f():\n    return 2\n"),
+    ],
+    ids=["module_level", "class_level", "deleted_function", "removed_import"],
+)
+def test_a_change_outside_every_function_is_flagged(
+    tmp_path: Path, before: str, after: str
+) -> None:
+    from ouroboros.boundary.footprint import changed_code
+
+    base = _tree(tmp_path / "base", {"m.py": before})
+    candidate = _tree(tmp_path / "work", {"m.py": after})
+    assert changed_code(base, candidate, ["m.py"]).outside_functions
+
+
+def test_comments_and_blank_lines_are_not_a_change_outside_functions(tmp_path: Path) -> None:
+    from ouroboros.boundary.footprint import changed_code
+
+    base = _tree(tmp_path / "base", {"m.py": "def f():\n    return 1\n"})
+    candidate = _tree(tmp_path / "work", {"m.py": "# note\n\ndef f():\n    return 2\n"})
+    assert changed_code(base, candidate, ["m.py"]) == br.ChangedCode(frozenset({("m.py", "f", 3)}))
+
+
+def test_a_linked_or_oversized_source_is_a_change_outside_functions(tmp_path: Path) -> None:
+    import os
+
+    from ouroboros.boundary import footprint
+
+    base = _tree(tmp_path / "base", {"m.py": "def f():\n    return 1\n"})
+    candidate = _tree(tmp_path / "work", {"outside.py": "def f():\n    return 2\n"})
+    os.symlink(candidate / "outside.py", candidate / "m.py")
+    assert footprint.changed_code(base, candidate, ["m.py"]).outside_functions
+    big = _tree(tmp_path / "big", {"m.py": "x = 1\n" * (footprint.SOURCE_LIMIT // 6 + 1)})
+    assert footprint.read_source(big / "m.py") is None
+
+
+def _write_oracle_plan(scratch: Path, root: Path, record: Path, watched: Any) -> None:
+    from ouroboros.boundary.footprint import ORACLE_PLAN, write_plan
+
+    plan = {"root": str(root), "record": str(record), "watched": [list(k) for k in watched]}
+    assert write_plan(scratch / ORACLE_PLAN, plan)
+
+
+def _oracle_process(root: Path, scratch: Path, harness: str) -> Any:
+    import os
+    import subprocess
+
+    from ouroboros.boundary.footprint import oracle_program
+
+    return subprocess.Popen(
+        [sys.executable, "-I", "-B", "-c", oracle_program(harness)],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        text=True,
+        env={**os.environ, "TMPDIR": str(scratch)},
+    )
+
+
+ORACLE_HARNESS = (
+    "import os, sys\nsys.path.insert(0, os.getcwd())\nfrom calc.ops import add\nadd(1, 2)\n"
+    "print('ready', flush=True)\nimport time\ntime.sleep(60)\n"
+)
 
 
 def test_the_oracle_recorder_has_written_and_closed_its_record_before_a_kill(
@@ -925,26 +1025,19 @@ def test_the_oracle_recorder_has_written_and_closed_its_record_before_a_kill(
 ) -> None:
     import os
     import signal
-    import subprocess
 
-    from ouroboros.boundary.footprint import oracle_program, read_entered
+    from ouroboros.boundary.footprint import read_entered
 
     root = _tree(
         tmp_path / "copy",
         {"calc/__init__.py": "", "calc/ops.py": "def add(a, b):\n    return a + b\n"},
     )
-    record = tmp_path / "record.jsonl"
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    record = scratch / "record.jsonl"
     watched = frozenset({("calc/ops.py", "add", 1)})
-    harness = (
-        "import os, sys\nsys.path.insert(0, os.getcwd())\nfrom calc.ops import add\nadd(1, 2)\n"
-        "print('ready', flush=True)\nimport time\ntime.sleep(60)\n"
-    )
-    process = subprocess.Popen(
-        [sys.executable, "-I", "-B", "-c", oracle_program(harness, root, watched, record)],
-        cwd=root,
-        stdout=subprocess.PIPE,
-        text=True,
-    )
+    _write_oracle_plan(scratch, root, record, watched)
+    process = _oracle_process(root, scratch, ORACLE_HARNESS)
     try:
         assert process.stdout is not None and process.stdout.readline().strip() == "ready"
         os.kill(process.pid, signal.SIGKILL)
@@ -953,8 +1046,61 @@ def test_the_oracle_recorder_has_written_and_closed_its_record_before_a_kill(
     assert read_entered(record, watched) == watched
 
 
+@pytest.mark.parametrize("plan", ["absent", "unwritable_record"])
+def test_a_recorder_that_cannot_record_never_changes_the_oracle_run(
+    tmp_path: Path, plan: str
+) -> None:
+    root = _tree(
+        tmp_path / "copy",
+        {"calc/__init__.py": "", "calc/ops.py": "def add(a, b):\n    return a + b\n"},
+    )
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    if plan == "unwritable_record":
+        record = tmp_path / "missing-dir" / "record.jsonl"
+        _write_oracle_plan(scratch, root, record, {("calc/ops.py", "add", 1)})
+    harness = ORACLE_HARNESS.replace("import time\ntime.sleep(60)\n", "")
+    process = _oracle_process(root, scratch, harness)
+    out, _err = process.communicate(timeout=30)
+    assert process.returncode == 0 and out.strip() == "ready"
+
+
+def test_a_passing_oracle_whose_recorder_failed_exempts_nothing() -> None:
+    from types import SimpleNamespace
+
+    from ouroboros.boundary.footprint import OracleFootprint
+
+    passing = SimpleNamespace(cases=[SimpleNamespace(passed=True)])
+    probe = OracleFootprint(frozenset({F}), entered={"o1": {F}})
+    assert probe.passed({"o1": passing}) == frozenset({F})
+    probe.unrecorded.add("o1")
+    assert probe.passed({"o1": passing}) is None
+
+
+def test_a_test_id_recorded_twice_has_no_footprint(tmp_path: Path) -> None:
+    import json
+
+    from ouroboros.boundary.footprint import read_run_record
+
+    record = tmp_path / "record.jsonl"
+    lines = [
+        {"test": "m::a", "nodeid": "m.py::a", "entered": [list(F)]},
+        {"test": "m::a", "nodeid": "m.py::a", "entered": [list(F)]},
+        {"test": "m::b", "nodeid": "m.py::b", "entered": [list(G)]},
+        {"provenance": {"calc.ops": True}},
+    ]
+    record.write_text("".join(json.dumps(line) + "\n" for line in lines))
+    read = read_run_record(record, frozenset({F, G}))
+    assert read.footprints == {"m::b": frozenset({G})} and read.nodeids == {"m::b": "m.py::b"}
+    assert not read.imported_outside
+
+
+async def _real_run(root: Path, files: Any, **options: Any) -> Any:
+    return await br._pytest(root, files, pin_interpreter(sys.executable, "t"), 60, **options)
+
+
 async def test_the_pytest_recorder_gives_each_test_its_own_footprint(tmp_path: Path) -> None:
-    from ouroboros.boundary.footprint import changed_functions
+    from ouroboros.boundary.footprint import changed_code
 
     files = {
         "calc/__init__.py": "",
@@ -970,19 +1116,34 @@ async def test_the_pytest_recorder_gives_each_test_its_own_footprint(tmp_path: P
     (candidate / "calc/ops.py").write_text(
         "def add(a, b):\n    return a + b\n\n\ndef sub(a, b):\n    return b - a\n"
     )
-    watched = changed_functions(base, candidate, ["calc/ops.py"])
-    import shutil
-
-    copy = tmp_path / "copy"
-    shutil.copytree(candidate, copy)
-    run = await br._pytest(
-        copy, (TEST_FILE,), pin_interpreter(sys.executable, "t"), 60, watched=watched
-    )
-    assert run.footprints == {
+    watched = changed_code(base, candidate, ["calc/ops.py"]).functions
+    run = await _real_run(candidate, (TEST_FILE,), watched=watched, modules=("calc.ops",))
+    assert run.record.footprints == {
         "calc.tests.test_ops::test_add": frozenset({("calc/ops.py", "add", 1)}),
         "calc.tests.test_ops::test_sub": frozenset({("calc/ops.py", "sub", 5)}),
         "calc.tests.test_ops::test_none": frozenset(),
     }
+    assert run.record.nodeids["calc.tests.test_ops::test_add"] == f"{TEST_FILE}::test_add"
+    assert not run.record.imported_outside
+    # The report and the record live in the run's scratch directory, not the copy.
+    assert not [path for path in candidate.iterdir() if path.name.startswith(".ouroboros")]
+
+
+async def test_the_bootstrap_puts_the_checkout_on_the_path_as_python_m_does(
+    tmp_path: Path,
+) -> None:
+    # ``tests`` is no package, so only the working directory on the path
+    # reaches ``calc``: with ``python -c``'s ``''`` it would follow the chdir.
+    files = {
+        "calc/__init__.py": "",
+        "calc/extra.py": "VALUE = 1\n",
+        "tests/test_lazy.py": "import os\n"
+        "def test_lazy(tmp_path):\n    os.chdir(tmp_path)\n    import calc.extra\n"
+        "    assert calc.extra.VALUE == 1\n",
+    }
+    root = _tree(tmp_path / "copy", files)
+    run = await _real_run(root, ("tests/test_lazy.py",))
+    assert run.statuses == {"tests.test_lazy::test_lazy": "pass"}
 
 
 MATH_BASE = "def clamp(value, low, high):\n    if value > high:\n        return value\n    return max(low, value)\n"
@@ -1107,3 +1268,221 @@ async def test_a_regression_through_a_change_no_passing_oracle_entered_is_kept(
     }
     _verified, docs = authority.outcome.reconciliation.decisions
     assert docs.artifact_check is ArtifactCheck.BASE_REGRESSION and not docs.accepted
+
+
+# --------------------------------------------------------------------------
+# Review fixes: unattempted criteria, configuration, provenance, reruns, caps
+
+
+def _with_blocked(count: int, blocked: int) -> Any:
+    from ouroboros.orchestrator.parallel_executor_models import (
+        ACExecutionOutcome,
+        ACExecutionResult,
+        ParallelExecutionResult,
+    )
+
+    results = tuple(
+        ACExecutionResult(
+            ac_index=index,
+            ac_content=f"criterion {index}",
+            success=index != blocked,
+            outcome=ACExecutionOutcome.BLOCKED
+            if index == blocked
+            else ACExecutionOutcome.SUCCEEDED,
+        )
+        for index in range(count)
+    )
+    return ParallelExecutionResult(
+        results=results, success_count=count - 1, failure_count=0, blocked_count=1
+    )
+
+
+def test_an_unattempted_criterion_never_carries_an_artifact_check() -> None:
+    keys = ["k0", "k1"]
+    attempted = {"k0"}
+    verdicts = br.apply_findings({}, keys, (REJECTED,), attempted)
+    assert set(verdicts) == {"k0"}
+    # Even a verdict that carries one is not recorded on a decision the
+    # execution governs.
+    forced = br.apply_findings({}, keys, (REJECTED,))
+    legacy = {
+        0: ExistingOutcome(0, "succeeded", "accepted", "completed"),
+        1: ExistingOutcome(1, "blocked", "blocked", "not_attempted"),
+    }
+    reconciliation = reconcile_acceptance(
+        keys, forced, legacy, existing_run_accepted=False, legacy_decides_unverified=True
+    )
+    blocked = reconciliation.decisions[1]
+    assert blocked.governed_by is Governor.EXECUTION and blocked.artifact_check is None
+    reconciliation.to_payload()
+
+
+async def test_a_blocked_criterion_beside_a_verified_pass_keeps_the_decision(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    test = PINS_CLAMP.replace("assert clamp(15, 0, 10) == 15", "assert widen(clamp(5, 0, 10)) == 5")
+    seed, authority = await _oracle_authority(
+        store,
+        tmp_path,
+        monkeypatch,
+        fixed=MATH_FIXED + "\n\ndef widen(value):\n    return value + 1\n",
+        test=test.replace("import clamp", "import clamp, widen"),
+    )
+
+    await authority(seed=seed, execution_id="exec_footprint", parallel_result=_with_blocked(2, 1))
+
+    assert authority.outcome is not None and authority.outcome.error is None
+    assert authority.artifact_findings[0].rejects
+    verified, blocked = authority.outcome.reconciliation.decisions
+    assert verified.package_status is PackageCriterionStatus.PASS and verified.accepted
+    assert blocked.governed_by is Governor.EXECUTION and blocked.artifact_check is None
+
+
+async def test_a_blocked_criterion_without_a_package_or_on_resume_keeps_the_decision(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    criteria = ("add(2, 3) returns 5", "the docs describe add")
+    seed, authority = await _calc_authority(
+        store, tmp_path, monkeypatch, criteria=criteria, constructor=_no_package()
+    )
+    _result, parallel = _succeeded(2)
+    await authority(seed=seed, execution_id="exec_regression", parallel_result=parallel)
+    monkeypatch.setattr(br, "_pytest", _never_run)
+
+    resumed, decided = await _resume(
+        store, "exec_regression", seed, authority.candidate, _with_blocked(2, 1)
+    )
+
+    assert resumed.outcome.error is None
+    failed, blocked = resumed.outcome.reconciliation.decisions
+    assert failed.artifact_check is ArtifactCheck.BASE_REGRESSION
+    assert blocked.governed_by is Governor.EXECUTION and blocked.artifact_check is None
+
+    other = tmp_path / "live"
+    other.mkdir()
+    seed, live = await _calc_authority(
+        store,
+        other,
+        monkeypatch,
+        criteria=criteria,
+        constructor=_no_package(),
+        execution_id="exec_live_blocked",
+    )
+    monkeypatch.undo()
+    monkeypatch.setattr(
+        "ouroboros.boundary.run_wiring.resolve_check_interpreter",
+        lambda _base: pin_interpreter(sys.executable, "t"),
+    )
+    await live(seed=seed, execution_id="exec_live_blocked", parallel_result=_with_blocked(2, 1))
+    assert live.outcome.error is None
+    failed, blocked = live.outcome.reconciliation.decisions
+    assert failed.artifact_check is ArtifactCheck.BASE_REGRESSION
+    assert blocked.artifact_check is None
+
+
+def test_a_replay_ignores_criteria_outside_the_seed() -> None:
+    recorded = {"k0": ArtifactCheck.BASE_REGRESSION, "gone": ArtifactCheck.BASE_REGRESSION}
+    assert set(br.replay_recorded({}, recorded, ["k0"])) == {"k0"}
+
+
+async def test_the_worker_controls_no_configuration_of_the_regression_run(
+    tmp_path: Path,
+) -> None:
+    files = {
+        **BASE_TREE,
+        TEST_FILE: "from calc.ops import add\ndef test_pins():\n    assert add(5, 3) == 2\n",
+    }
+    base = _tree(tmp_path / "base", files)
+    candidate = _tree(tmp_path / "work", files)
+    (candidate / "calc/ops.py").write_text("def add(a, b):\n    return a + b\n")
+    # The worker tries to hide the failing test three ways.
+    (candidate / "conftest.py").write_text("collect_ignore_glob = ['*']\n")
+    (candidate / "calc/tests/conftest.py").write_text("collect_ignore = ['test_ops.py']\n")
+    (candidate / "pytest.ini").write_text("[pytest]\naddopts = -k nothing_matches\n")
+
+    regression, _worker = await _checks(base).findings(candidate)
+
+    assert regression.outcome is Outcome.REJECTED
+    assert regression.failed == ("calc.tests.test_ops::test_pins",)
+
+
+async def test_a_changed_module_imported_from_outside_the_copy_is_no_observation(
+    tmp_path: Path,
+) -> None:
+    outside = _tree(
+        tmp_path / "installed",
+        {"calc/__init__.py": "", "calc/ops.py": "def add(a, b):\n    return a - b\n"},
+    )
+    # As an editable install of the live workspace would: the base's own
+    # configuration puts another copy of the package first on the path.
+    files = {
+        **BASE_TREE,
+        "conftest.py": f"import sys\nsys.path.insert(0, {str(outside)!r})\nimport calc.ops\n",
+        "tests/test_ops.py": "from calc.ops import add\ndef test_pins():\n    assert add(5, 3) == 2\n",
+    }
+    base = _tree(tmp_path / "base", files)
+    candidate = _tree(tmp_path / "work", files)
+    (candidate / "calc/ops.py").write_text("def add(a, b):\n    return a + b\n")
+
+    regression, _worker = await _checks(base).findings(candidate)
+
+    assert regression.outcome is Outcome.IMPORTED_OUTSIDE_COPY and not regression.rejects
+
+
+async def test_a_failure_that_passes_when_rerun_is_not_a_regression(
+    trees: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ouroboros.boundary.footprint import RunRecord
+
+    base, candidate = trees
+    failing = dict.fromkeys(PASSING, "fail")
+    nodeids = {key: f"{TEST_FILE}::{key.split('::')[1]}" for key in PASSING}
+    rerun = {"calc.tests.test_ops::test_zero": "pass", "calc.tests.test_ops::test_one": "fail"}
+    runner = _Runner(
+        [_run(PASSING), _run(PASSING)],
+        [_run(failing, 1, record=RunRecord(nodeids=nodeids)), _run(rerun, 1)],
+    )
+    monkeypatch.setattr(br, "_pytest", runner)
+
+    regression, _worker = await _checks(base).findings(candidate)
+
+    assert regression.failed == ("calc.tests.test_ops::test_one",)
+    assert runner.calls[-1][1] == tuple(sorted(nodeids.values()))
+
+
+async def test_the_gate_runs_at_most_five_added_test_files(
+    trees: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, candidate = trees
+    (candidate / "calc/ops.py").write_text(BASE_TREE["calc/ops.py"])
+    for index in range(7):
+        (candidate / f"calc/tests/test_new_{index}.py").write_text("def test_x():\n    pass\n")
+    runner = _Runner([], [_run({"t::x": "pass"}, 0)] * 7)
+    monkeypatch.setattr(br, "_pytest", runner)
+
+    _regression, worker = await _checks(base).findings(candidate)
+
+    assert worker.selected == tuple(f"calc/tests/test_new_{i}.py" for i in range(5))
+    assert len(runner.calls) == br.WORKER_TEST_FILES
+
+
+async def test_a_timed_out_base_is_tried_once_more_then_kept(
+    trees: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, candidate = trees
+    timeout = _run(None, None, timed_out=True)
+    runner = _Runner(
+        [timeout, timeout, _run(PASSING), _run(PASSING)], [_run(PASSING), _run(PASSING)]
+    )
+    monkeypatch.setattr(br, "_pytest", runner)
+    checks = _checks(base)
+
+    first, _ = await checks.findings(candidate)
+    (candidate / "README.md").write_text("another tree\n")
+    second, _ = await checks.findings(candidate)
+    (candidate / "README.md").write_text("a third tree\n")
+    third, _ = await checks.findings(candidate)
+
+    assert first.outcome is Outcome.TIMEOUT
+    assert second.outcome is third.outcome is Outcome.PASSED
+    assert [call[0] for call in runner.calls].count("base") == 4

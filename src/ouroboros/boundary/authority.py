@@ -92,6 +92,7 @@ from ouroboros.boundary.acceptance import (
     LegacyNoEvidenceReason,
     PackageCriterionStatus,
     artifact_verdict,
+    attempted_keys,
     criterion_verdicts,
     reconcile_acceptance,
 )
@@ -968,7 +969,10 @@ class CheckPackageAuthority:
             verdict = _label_missing_bindings(
                 verdict, self.binding_requested, self.binding_budget_exhausted
             )
-            verdict = await self._with_artifact_checks(keys, verdict, probe)
+            attempted = attempted_keys(
+                keys, legacy, existing_run_accepted=bool(parallel_result.all_succeeded)
+            )
+            verdict = await self._with_artifact_checks(keys, verdict, probe, attempted)
             # Without an admitted package ``verdict.verdicts`` is empty: every
             # criterion is uncovered and the legacy verifier decides it.
             reconciliation = reconcile_acceptance(
@@ -1013,7 +1017,11 @@ class CheckPackageAuthority:
             return await self._undecided(keys, parallel_result, type(exc).__name__)
 
     async def _with_artifact_checks(
-        self, keys: Sequence[str], verdict: BoundaryVerdict, probe: OracleFootprint | None
+        self,
+        keys: Sequence[str],
+        verdict: BoundaryVerdict,
+        probe: OracleFootprint | None,
+        attempted: Collection[str],
     ) -> BoundaryVerdict:
         """Fail the criteria the package left undecided when an artifact check fails the candidate.
 
@@ -1029,7 +1037,7 @@ class CheckPackageAuthority:
         # final verification entered (none passed, or no package: nothing exempt).
         entered = probe.passed(verdict.oracle_results) if probe is not None else None
         self.artifact_findings = tuple(exempt(finding, entered) for finding in findings)
-        verdicts = apply_findings(verdict.verdicts, keys, self.artifact_findings)
+        verdicts = apply_findings(verdict.verdicts, keys, self.artifact_findings, attempted)
         rejecting = [finding for finding in self.artifact_findings if finding.rejects]
         if not rejecting:
             return verdict
