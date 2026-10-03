@@ -150,7 +150,9 @@ def _accepted(index: int, reason: LegacyNoEvidenceReason | None = None) -> Exist
 
 def _run(outcome: AuthorityOutcome) -> CheckPackageRun:
     run = CheckPackageRun(CheckPackageSettings(enabled=True))
-    run.resumed = SimpleNamespace(outcome=outcome)  # type: ignore[assignment]
+    run.resumed = SimpleNamespace(  # type: ignore[assignment]
+        outcome=outcome, boundary=SimpleNamespace(reason=None)
+    )
     run.runtime_backend = "codex"
     return run
 

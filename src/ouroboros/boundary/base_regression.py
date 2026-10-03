@@ -134,9 +134,11 @@ class ArtifactFinding:
     @property
     def reason(self) -> str:
         """The ``CriterionVerdict.reason`` of a criterion this check fails."""
-        if self.check is ArtifactCheck.BASE_REGRESSION:
-            return REGRESSION_REASON
-        return WORKER_TESTS_REASON
+        return _reason(self.check)
+
+
+def _reason(check: ArtifactCheck) -> str:
+    return REGRESSION_REASON if check is ArtifactCheck.BASE_REGRESSION else WORKER_TESTS_REASON
 
 
 # --------------------------------------------------------------------------
@@ -338,6 +340,17 @@ async def _pytest(
     and a file that cannot be collected keeps pytest's own exit 2.
     """
     report = root / f".ouroboros-report-{secrets.token_hex(8)}.xml"
+    # Footprint hook (planned, not built; ``regressions_to_keep``): a
+    # controller-written pytest plugin, loaded here with ``-p`` from a file
+    # beside the report (never from the copy's own tree), that turns on
+    # ``sys.monitoring`` PY_START events for the code objects of the changed
+    # functions only, and per test (``pytest_runtest_call``) writes the
+    # qualified names it entered to a second report next to this one. The
+    # candidate run's report gives each failing test's footprint; the oracle
+    # target process (``oracle_run``) would record the same for passing
+    # admitted oracles. Like the JUnit report it is written by code the
+    # candidate controls, so a forged footprint could only claim an exemption:
+    # the rule must keep a test whenever its footprint is missing.
     argv = (
         "python",
         "-m",
@@ -653,8 +666,20 @@ def apply_findings(
     rejecting = next((finding for finding in findings if finding.rejects), None)
     if rejecting is None:
         return dict(verdicts)
+    return replay_recorded(verdicts, dict.fromkeys(criterion_keys, rejecting.check))
+
+
+def replay_recorded(
+    verdicts: Mapping[str, CriterionVerdict], recorded: Mapping[str, ArtifactCheck]
+) -> dict[str, CriterionVerdict]:
+    """Fail each criterion ``recorded`` names with its artifact check, where still undecided.
+
+    The one rule of ``apply_findings``, and how a resumed run replays the
+    artifact checks a journaled decision recorded without running them again:
+    a criterion the package (or the resume) decided keeps its verdict.
+    """
     out = dict(verdicts)
-    for key in criterion_keys:
+    for key, check in recorded.items():
         prior = verdicts.get(key)
         if not undecided_by_package(prior):
             continue
@@ -662,10 +687,10 @@ def apply_findings(
             key,
             PackageCriterionStatus.FAIL,
             prior.tier if prior is not None else CheckTier.U,
-            rejecting.reason,
+            _reason(check),
             prior.check_ids if prior is not None else (),
             declared_binding_pass=False,
-            artifact_check=rejecting.check,
+            artifact_check=check,
         )
     return out
 
@@ -730,6 +755,7 @@ __all__ = [
     "regressions",
     "regressions_to_keep",
     "repair_message",
+    "replay_recorded",
     "report_artifact_checks",
     "restore_base_bytes",
     "select_tests",
