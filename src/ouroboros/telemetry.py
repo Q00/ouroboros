@@ -413,6 +413,7 @@ _NO_EVIDENCE_REPLAY_REASONS = frozenset(
         "environment_unverifiable",
         "transcript_unavailable",
         "script_absent_from_artifact",
+        "no_call_evidence",
         "no_verifier_verdict",
         "verifier_verdict_not_passed",
         "no_legacy_record",
@@ -449,6 +450,64 @@ _ACCEPTANCE_NO_EVIDENCE_KEYS = frozenset(
         _no_evidence_pair_key(package_reason, replay_reason)
         for package_reason in _NO_EVIDENCE_PACKAGE_REASONS | {_UNKNOWN_NO_EVIDENCE_VALUE}
         for replay_reason in _NO_EVIDENCE_REPLAY_REASONS | {_UNKNOWN_NO_EVIDENCE_VALUE}
+    }
+)
+# The controller-run artifact checks of a decided run (boundary/base_regression.py):
+# what each observed, closed tokens and counts only. SSOT pairing with
+# ``base_regression.ArtifactCheckOutcome``; edit them together. Never a test
+# name, file, path, or criterion.
+_ARTIFACT_CHECK_OUTCOMES = frozenset(
+    {
+        "rejected",
+        "exempted",
+        "passed",
+        "timeout",
+        "base_runner_crash",
+        "no_selected_files",
+        "unsupported_runner",
+        "not_a_test_result",
+        "unavailable",
+        "imported_outside_copy",
+        "not_run",
+        "no_admitted_command",
+    }
+)
+# Each check's mode and what its finding did. SSOT pairing with
+# ``base_regression.ArtifactCheckMode`` and ``ArtifactEffect``.
+_ARTIFACT_CHECK_MODES = frozenset({"decide", "record", "off"})
+_ARTIFACT_EFFECTS = frozenset({"decided", "recorded", "regression_unadjudicated", "none"})
+# How the footprint exemption treated a base regression. SSOT pairing with
+# ``base_regression.Exemption``; edit them together.
+_ARTIFACT_EXEMPTIONS = frozenset(
+    {
+        "applied",
+        "none_inside",
+        "no_passing_oracle",
+        "mass_breakage",
+        "no_changed_function",
+        "no_oracle_footprint",
+        "change_outside_functions",
+    }
+)
+_ACCEPTANCE_ARTIFACT_CHECKS_KEYS = frozenset(
+    {
+        "base_regression",
+        "worker_tests",
+        "exemption",
+        "exempted_tests",
+        "base_regression_mode",
+        "worker_test_gate_mode",
+        "base_regression_effect",
+        "worker_tests_effect",
+        "would_fail_criteria",
+        "failed_criteria",
+        "criterion_count",
+        "repairs",
+        "surface",
+        "runtime_backend",
+        "app_version",
+        "os",
+        "ci",
     }
 )
 # Bound on any single string property. Dropped, not truncated -- a truncated
@@ -1000,6 +1059,8 @@ def _resolve_allowed_keys(event: str, properties: dict[str, Any] | None) -> froz
         return _RUNTIME_DRIFT_KEYS
     if event == "acceptance_no_evidence":
         return _ACCEPTANCE_NO_EVIDENCE_KEYS
+    if event == "acceptance_artifact_checks":
+        return _ACCEPTANCE_ARTIFACT_CHECKS_KEYS
     return None
 
 
@@ -1205,6 +1266,63 @@ def capture_acceptance_no_evidence(
                 "surface": _fold(surface, _NO_EVIDENCE_SURFACES),
                 "check_package": _fold(check_package, _NO_EVIDENCE_CHECK_PACKAGE),
                 "check_package_status": _fold(check_package_status, _NO_EVIDENCE_PACKAGE_STATUSES),
+                "runtime_backend": _canonical_runtime_backend(runtime_backend),
+            },
+        )
+    except Exception:
+        pass
+
+
+def capture_acceptance_artifact_checks(
+    *,
+    base_regression: str | None,
+    worker_tests: str | None,
+    failed_criteria: int,
+    criterion_count: int,
+    repairs: int,
+    surface: str | None,
+    runtime_backend: str | None,
+    exemption: str | None = None,
+    exempted_tests: int = 0,
+    base_regression_mode: str | None = None,
+    worker_test_gate_mode: str | None = None,
+    base_regression_effect: str | None = None,
+    worker_tests_effect: str | None = None,
+    would_fail_criteria: int = 0,
+) -> None:
+    """Capture what the controller-run artifact checks observed on one decided run.
+
+    ``base_regression`` and ``worker_tests`` are each check's outcome: it
+    decided (``rejected``), ran and found nothing (``passed``), or had no
+    observation and why; anything outside the audited vocabulary folds to
+    ``unknown``. ``failed_criteria`` counts the criteria the checks failed in
+    the final decision and ``repairs`` the attempts they sent back to the
+    worker. ``exemption`` is how the footprint exemption treated a base
+    regression (absent when nothing regressed) and ``exempted_tests`` how many
+    regressed tests it set aside. ``*_mode`` is each check's mode
+    (``decide``/``record``/``off``) and ``*_effect`` what its finding did
+    (``decided``, ``recorded`` in record mode, ``regression_unadjudicated``
+    when a regression found without an admitted package decided nothing, or
+    ``none``); ``would_fail_criteria`` counts the criteria the findings that
+    did not decide would have failed. Never raises.
+    """
+    try:
+        capture(
+            "acceptance_artifact_checks",
+            {
+                "base_regression": _fold(base_regression, _ARTIFACT_CHECK_OUTCOMES),
+                "worker_tests": _fold(worker_tests, _ARTIFACT_CHECK_OUTCOMES),
+                "failed_criteria": failed_criteria,
+                "criterion_count": criterion_count,
+                "repairs": repairs,
+                "exemption": None if exemption is None else _fold(exemption, _ARTIFACT_EXEMPTIONS),
+                "exempted_tests": exempted_tests,
+                "base_regression_mode": _fold(base_regression_mode, _ARTIFACT_CHECK_MODES),
+                "worker_test_gate_mode": _fold(worker_test_gate_mode, _ARTIFACT_CHECK_MODES),
+                "base_regression_effect": _fold(base_regression_effect, _ARTIFACT_EFFECTS),
+                "worker_tests_effect": _fold(worker_tests_effect, _ARTIFACT_EFFECTS),
+                "would_fail_criteria": would_fail_criteria,
+                "surface": _fold(surface, _NO_EVIDENCE_SURFACES),
                 "runtime_backend": _canonical_runtime_backend(runtime_backend),
             },
         )

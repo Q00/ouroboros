@@ -573,12 +573,56 @@ unavailable) is accepted as unverified; the run then prints an
 insufficient-verification warning, as it does when half or more of the
 criteria were not decided by the package.
 
+Whether or not a package was admitted, the controller can also run two
+checks of the whole finished workspace: the project's existing test files
+that pair with or import a changed module, restored to their original bytes
+and run on the original tree twice and on the finished workspace once
+(`base_regression`), and each test file the worker added
+(`worker_test_gate`). Each has a mode: `decide`, `record` (run it and record
+what it would have decided, deciding nothing and sending no repair) or
+`off`. In `decide` mode a test that passed on both original runs and fails
+on the finished workspace fails every criterion the package could not
+verify, but only when a package was admitted; without one the worker is
+told once which tests regressed, and a regression left at the end is
+recorded while the criteria stay unverified (a test can legitimately pin
+behaviour the change is meant to alter, and nothing then adjudicates it).
+The existing tests need not be pytest tests. Test files paired with a
+changed Go, JavaScript or TypeScript, Java or Kotlin, or Rust source by name
+(`foo_test.go`, `x.test.ts`, `FooTest.java`, `tests/foo.rs`) are selected
+too, and each selected file is run by a test command: a criterion's
+`verify_command` that names it, the test command the check constructor may
+declare, the worker's own test runs, or a default the repository's files
+imply (Django's `tests/runtests.py`, SymPy's `bin/test`, `manage.py`,
+`package.json`'s `test` script, `go.mod`, `Cargo.toml`). A command is used
+for a file only after it passes twice on the original tree and fails when
+the file is replaced with unparseable bytes, which a command that does not
+really run the file cannot do; its exit status then decides for the whole
+file, or its JUnit report per test when it writes one. A file no command
+passes that check for is not observed.
+
+An added test file whose run fails, in `decide` mode, fails every criterion
+the package could not verify (every criterion, when no package was
+admitted). While the worker runs, the failing test names are sent back as a
+repair. A
+test is set aside when it reached changed functions and an admitted oracle
+check that passed reached every one of them (that oracle decides the
+changed behaviour); nothing is set aside when more than 20 tests broke or
+the change also touched code outside every function. The worker's own
+pytest configuration (conftest files, ini files, addopts) never applies to
+the existing tests' runs, and a test that fails only once is rerun alone
+before it counts. A
+criterion the package verified keeps its verdict, and a check that observed
+nothing (a timeout, no matching test file, a project whose own test runner is
+not pytest) decides nothing.
+
 ```yaml
 boundary:
   check_package: off              # on | off; unset = on
   constructor_timeout_seconds: 600
   check_timeout_seconds: 120
   max_construction_attempts: 2
+  base_regression: decide         # decide | record | off; unset = decide
+  worker_test_gate: record        # decide | record | off; unset = record
 ```
 
 | Option | Type | Default | Description |
@@ -587,6 +631,8 @@ boundary:
 | `constructor_timeout_seconds` | `int` (30..3600) | `600` | Wall-clock budget of one constructor call. |
 | `check_timeout_seconds` | `int` (5..1800) | `120` | Per-check timeout during admission and verification. |
 | `max_construction_attempts` | `int` (1..5) | `2` | Package versions tried before the worker starts; a version that is not admitted is superseded by the next. The one replacement call for criteria left without an admitted check adds a version outside this budget. |
+| `base_regression` | `"decide"` \| `"record"` \| `"off"` \| unset | unset (`decide`) | How the existing tests' check acts (see above). Each test run uses `check_timeout_seconds`. Recorded on the run when it starts; a resumed run does not run it. A bare YAML `on`/`off` reads as `decide`/`off`. |
+| `worker_test_gate` | `"decide"` \| `"record"` \| `"off"` \| unset | unset (`record`) | How the check of the test files the worker added acts, independently of `base_regression`. |
 
 Checks are model-written Python scripts. They run on throwaway copies of the
 project, with the project's virtualenv interpreter when one is found (else

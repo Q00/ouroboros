@@ -359,6 +359,51 @@ async def test_a_decision_the_results_do_not_support_is_refused(
     assert verify_boundary_order(await ledger.events(B)) == ()
 
 
+async def test_an_artifact_check_fails_only_what_the_package_left_undecided(
+    store, package, base_checkout
+) -> None:
+    violated = candidate_execution(package.checks[0], met=False)
+    ledger = await _script_verified(store, package, base_checkout, violated)
+    keys = package.criterion_keys
+    failed = {"accepted": False}
+    regression = {"accepted": False, "artifact_check": "base_regression"}
+    # Without the executed artifact check, a fail on an uncovered criterion is
+    # a status the recorded results do not show.
+    forged = _decision(
+        [
+            _criterion(0, keys[0], "fail"),
+            _criterion(1, keys[1], "indeterminate"),
+            _criterion(2, keys[2], "fail", **failed),
+        ]
+    )
+    with pytest.raises(BoundaryOrderError):
+        await ledger.record_acceptance_reconciled(
+            B, package_id=package.package_id, reconciliation=forged
+        )
+    # The artifact check may fail the unverified and the uncovered criterion.
+    genuine = _decision(
+        [
+            _criterion(0, keys[0], "fail"),
+            _criterion(1, keys[1], "fail", **regression),
+            _criterion(2, keys[2], "fail", **regression),
+        ]
+    )
+    await ledger.record_acceptance_reconciled(
+        B, package_id=package.package_id, reconciliation=genuine
+    )
+    assert verify_boundary_order(await ledger.events(B)) == ()
+
+
+def test_an_artifact_check_never_names_an_acceptance(package) -> None:
+    from pydantic import ValidationError
+
+    keys = package.criterion_keys
+    with pytest.raises(ValidationError):
+        _decision([_criterion(0, keys[0], "uncovered", artifact_check="base_regression")])
+    with pytest.raises(ValidationError):
+        _decision([_criterion(0, keys[0], "fail", accepted=False, artifact_check="other")])
+
+
 def _oracle_run(package: CheckPackage, passed: dict[str, bool]) -> Any:
     """The oracle check on a candidate: it met its role exactly when every case passed."""
     check = package.checks[0]

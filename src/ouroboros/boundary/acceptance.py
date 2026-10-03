@@ -27,7 +27,9 @@ status once the worker has stopped:
   verification, so a match means the candidate produced the rule's output
   for an input it had never seen. Every oracle carries at least one
   held-out case for this reason (``oracle.OracleSpec``);
-- ``fail``: a linked check was violated; its counterexample is reported;
+- ``fail``: a linked check was violated; its counterexample is reported.
+  Also an artifact check's executed failure on a criterion the package left
+  unverified or uncovered (see below);
 - ``indeterminate``: a check could not be judged (timeout, launch failure,
   protected-byte mutation, no failure signature, untrusted verification), or
   a worker-declared binding was invalid (``binding_invalid:*``,
@@ -58,9 +60,46 @@ reason it has no admitted check, is decided by the legacy verifier instead:
 its rejection fails the criterion and the run (``governed_by: existing_verifier``,
 "legacy-decided"). Only a criterion for which the legacy verifier has no
 evidence either (``ExistingOutcome.no_evidence``: transcript unavailable,
-environment unverifiable, no verifier verdict) stays ``unverified`` and is
-accepted; the run then reports insufficient verification
-(``verification_coverage``).
+environment unverifiable, no verifier verdict, or worker-cited transcript
+calls of which none qualifies, ``NO_CALL_EVIDENCE``, which is no evidence and
+never fabrication) stays ``unverified`` and is accepted; the run then reports
+insufficient verification (``verification_coverage``).
+
+Artifact checks (``boundary/base_regression.py``). The controller also
+checks the whole candidate itself: the base tree's existing tests that pair
+with or import a changed module, restored to their base bytes and run on the
+base twice and on the candidate once (``boundary.base_regression``; through
+the product's pytest run or any test command admitted on the base, per test
+or per file by exit status, ``boundary/target_commands.py``), and each
+test file the worker added (``boundary.worker_test_gate``). Each has a mode:
+``decide``, ``record`` (run and record what it would have decided, decide
+nothing) or ``off``. In ``decide`` mode an executed failure (a test that
+passed on both base runs fails on the candidate, or an added test file's run
+exits 1 with a failing test) fails every criterion the package left
+``unverified`` or ``uncovered`` (``CriterionVerdict.artifact_check``) before
+the legacy rule applies, so the legacy verifier cannot accept it; a
+regression does so only with an admitted package (``base_regression.decides``):
+without one nothing adjudicates a test that pins behaviour the criteria
+change, so the worker gets one repair turn naming the regressed tests and a
+regression left at the end is recorded (``regression_unadjudicated``) while
+the criteria stay unverified and are accepted under the no-evidence rule; a
+verified ``pass``, a package ``fail`` and an ``indeterminate`` criterion keep
+the package's verdict, and so does a criterion the worker never attempted.
+A regressed test is exempt (``base_regression.regressions_to_keep``) when
+its failing run entered at least one changed function and every changed
+function it entered was also entered by an admitted oracle check that
+passed on the candidate. Nothing is exempt with more than 20 regressions,
+no passing oracle, passing oracles that entered no changed function, no
+changed function, or a change outside every function (module or class
+level code, a deleted function, a removed import); when every regression is
+exempt the check decides nothing. A check with no observation (a timeout, a
+base on which the runner wrote no report, no selected file, a project
+runner it does not drive, a run the sandbox could not confine, a changed
+module imported from outside the run's copy) decides nothing. They run
+with no admitted package too: every criterion is then uncovered, so a
+worker-test failure in ``decide`` mode fails them all, recorded on the version
+sealed without a package; a resumed run replays the recorded fails (never a
+regression without a package) and never runs the checks again.
 
 Artifact verdict (precedence): ``fail`` if any criterion fails; else
 ``indeterminate`` if any is indeterminate; else ``pass`` if at least one
@@ -139,6 +178,19 @@ class VerificationCoverage(StrEnum):
     """Half or more were not decided by the package, or a criterion is unverified."""
 
 
+class ArtifactCheck(StrEnum):
+    """A controller-run check of the whole artifact (``boundary/base_regression.py``).
+
+    It only fails: an executed failure fails every criterion the package left
+    unverified or uncovered (``CriterionVerdict.artifact_check``).
+    """
+
+    BASE_REGRESSION = "base_regression"
+    """Existing tests that passed on the base fail on the candidate."""
+    WORKER_TESTS = "worker_tests"
+    """A test file the worker added fails when the controller runs it."""
+
+
 class ArtifactVerdict(StrEnum):
     """Artifact-level verdict, by precedence."""
 
@@ -165,6 +217,8 @@ class CriterionVerdict:
     passed a held-out case through a tier ``A`` binding. ``False`` unless
     ``status`` is ``pass``. It, not ``tier``, decides corroboration; it has no
     default, so every verdict states its provenance."""
+    artifact_check: ArtifactCheck | None = field(default=None, kw_only=True)
+    """The artifact check that failed this otherwise undecided criterion, if any."""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -177,6 +231,7 @@ class CriterionVerdict:
             "binding": self.binding,
             "binding_source": self.binding_source,
             "declared_binding_pass": self.declared_binding_pass,
+            **({"artifact_check": self.artifact_check.value} if self.artifact_check else {}),
         }
 
 
@@ -422,6 +477,20 @@ def artifact_verdict(statuses: Iterable[PackageCriterionStatus]) -> ArtifactVerd
     return ArtifactVerdict(artifact_verdict_of(status.value for status in statuses))
 
 
+def attempted_keys(
+    criterion_keys: Sequence[str],
+    existing: Mapping[int, ExistingOutcome],
+    *,
+    existing_run_accepted: bool,
+) -> frozenset[str]:
+    """The criteria the worker attempted, by the rule ``reconcile_acceptance`` applies."""
+    return frozenset(
+        key
+        for index, key in enumerate(criterion_keys)
+        if (existing[index].attempted if index in existing else existing_run_accepted)
+    )
+
+
 class LegacyNoEvidenceReason(StrEnum):
     """Why the legacy verifier accepted a criterion without evidence (closed set).
 
@@ -439,6 +508,9 @@ class LegacyNoEvidenceReason(StrEnum):
     SCRIPT_ABSENT_FROM_ARTIFACT = "script_absent_from_artifact"
     """Every unproven claim is a recorded run whose script left the workspace,
     so it was not replayed (``SCRIPT_ABSENT_FROM_ARTIFACT``)."""
+    NO_CALL_EVIDENCE = "no_call_evidence"
+    """The worker cited transcript calls by number and none qualified as
+    evidence (``NO_CALL_EVIDENCE``)."""
     VERIFIER_VERDICT_NOT_PASSED = "verifier_verdict_not_passed"
     """A verdict that did not pass, with no rejection the executor made."""
 
@@ -526,6 +598,8 @@ class CriterionDecision:
     failed_outside_package: bool = field(default=False, kw_only=True)
     """Not accepted because the worker's attempt failed a gate the package does
     not decide (``ExistingOutcome.failed_outside_package``); display only."""
+    artifact_check: ArtifactCheck | None = field(default=None, kw_only=True)
+    """The artifact check that failed this criterion (``CriterionVerdict``)."""
 
     @property
     def legacy_decided(self) -> bool:
@@ -552,6 +626,7 @@ class CriterionDecision:
             "accepted": self.accepted,
             "governed_by": self.governed_by.value,
             "declared_binding_pass": self.declared_binding_pass,
+            **({"artifact_check": self.artifact_check.value} if self.artifact_check else {}),
         }
 
 
@@ -712,6 +787,10 @@ def reconcile_acceptance(
                 binding=verdict.binding,
                 declared_binding_pass=verdict.declared_binding_pass,
                 failed_outside_package=prior is not None and prior.failed_outside_package,
+                # Only a fail the package governs names the artifact check that made it.
+                artifact_check=verdict.artifact_check
+                if governor is Governor.CHECK_PACKAGE
+                else None,
             )
         )
     run_accepted = bool(decisions) and all(decision.accepted for decision in decisions)

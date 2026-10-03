@@ -59,6 +59,7 @@ from ouroboros.boundary.acceptance import (
     criterion_verdicts,
 )
 from ouroboros.boundary.admission import admit_check_package
+from ouroboros.boundary.base_regression import BASE_REGRESSION_DEFAULT, WORKER_TEST_GATE_DEFAULT
 from ouroboros.boundary.binding import CheckTier, TierAssignment
 from ouroboros.boundary.binding_flow import (
     DeclaredBindingResult,
@@ -77,7 +78,13 @@ from ouroboros.boundary.coverage import (
     replacement_targets,
     why_excluded,
 )
-from ouroboros.boundary.events import ReferenceCheckPayload, RunContract, boundary_version_id
+from ouroboros.boundary.events import (
+    ArtifactCheckModeName,
+    ReferenceCheckPayload,
+    RunContract,
+    boundary_version_id,
+)
+from ouroboros.boundary.footprint import OracleFootprint
 from ouroboros.boundary.ledger import BoundaryLedger
 from ouroboros.boundary.oracle import OracleResult, OracleSpec
 from ouroboros.boundary.package import (
@@ -124,6 +131,10 @@ class CheckPackageSettings:
     constructor_timeout_seconds: int = 600
     check_timeout_seconds: int = 120
     max_construction_attempts: int = 2
+    base_regression: ArtifactCheckModeName = BASE_REGRESSION_DEFAULT
+    """How the base regression check acts (``boundary/base_regression.py``); on the run contract."""
+    worker_test_gate: ArtifactCheckModeName = WORKER_TEST_GATE_DEFAULT
+    """How the worker-test gate acts; recorded on the run contract."""
 
     @property
     def attempts(self) -> int:
@@ -183,6 +194,12 @@ class BoundaryRunState:
     package_path: Path | None = None
     criterion_keys: tuple[str, ...] = ()
     base_snapshot: Path | None = None
+    base_snapshot_digest: str | None = None
+    """The snapshot's tree digest when it was taken, for a run no admission pins it for."""
+    verify_commands: tuple[str, ...] = ()
+    """The Seed criteria's ``verify_command`` strings: one source of test commands."""
+    test_command: str | None = None
+    """The test command template a constructor reply declared (``target_commands``)."""
     reference_check: ReferenceCheck | None = None
     """What the reference check excluded from the bound version (``None``: not run)."""
     exclusions: tuple[tuple[str, str, str], ...] = ()
@@ -347,7 +364,11 @@ async def prepare_check_package(
     # First, before anything that can fail: the run had the check package on.
     # A resume reads it back, so a missing boundary is undecided, never legacy.
     # The one run contract: admission and every later check read its timeout.
-    contract = RunContract(check_timeout_seconds=settings.check_timeout_seconds)
+    contract = RunContract(
+        check_timeout_seconds=settings.check_timeout_seconds,
+        base_regression=settings.base_regression,
+        worker_test_gate=settings.worker_test_gate,
+    )
     await ledger.record_check_package_enabled(execution_id, contract)
     store = private_store_dir(store_dir or default_store_dir(execution_id))
     digest = seed_digest(seed)
@@ -366,10 +387,12 @@ async def prepare_check_package(
     interpreter = resolve_check_interpreter(base)
     sealer = _Sealer(ledger, seed, base, store, contract, interpreter, execution_id)
     reference_check: ReferenceCheck | None = None
+    test_command: str | None = None
 
     for attempt in range(1, settings.attempts + 1):
         boundary_id = boundary_version_id(execution_id, attempt)
         outcome = await constructor.construct(seed, base, feedback=feedback)
+        test_command = getattr(outcome, "test_command", None) or test_command
         package, admission, package_path = outcome.package, None, None
         references = getattr(outcome, "references", None)
         reference_check = None
@@ -443,13 +466,22 @@ async def prepare_check_package(
 
     admitted = admission is not None and admission.verdict is PackageVerdict.ADMITTED
     snapshot: Path | None = None
+    snapshot_digest: str | None = None
     tiers = admission.check_tiers if admission is not None else None
-    if admitted and any(tier == CheckTier.U.value for tier in (tiers or {}).values()):
+    if (
+        contract.base_regression != "off"
+        or contract.worker_test_gate != "off"
+        or (admitted and any(tier == CheckTier.U.value for tier in (tiers or {}).values()))
+    ):
         # A late binding is validated against the base after the worker has
-        # stopped; keep the base outside every checkout until then. Taken
-        # before the actor start: the journal records a worker start only
-        # once everything that start depends on exists.
+        # stopped, and the artifact checks run the base's own tests then,
+        # admitted package or not; keep the base outside every checkout until
+        # then. Taken before the actor start: the journal records a worker
+        # start only once everything that start depends on exists.
         snapshot = snapshot_base(base, store)
+        if not admitted:
+            # No admission digest pins the base: pin the snapshot as taken.
+            snapshot_digest = tree_digest(snapshot)
     state = BoundaryRunState(
         execution_id=execution_id,
         boundary_id=bound,
@@ -465,6 +497,15 @@ async def prepare_check_package(
         contract=contract,
         criterion_keys=keys,
         base_snapshot=snapshot,
+        base_snapshot_digest=snapshot_digest,
+        verify_commands=tuple(
+            command
+            for command in (
+                getattr(spec, "verify_command", None) for spec in seed.acceptance_criteria
+            )
+            if command
+        ),
+        test_command=test_command,
         reference_check=reference_check,
         exclusions=tuple(sealer.exclusions),
         replacement_calls=replacement.calls,
@@ -699,6 +740,7 @@ async def verify_check_package(
     declared_entry_points: Mapping[str, Sequence[Any]] | None = None,
     base_run_cache: dict[str, Any] | None = None,
     phase: Literal["final", "resumed"] = "final",
+    footprint: OracleFootprint | None = None,
 ) -> BoundaryVerdict:
     """Bind, then run the unchanged package on the candidate; record everything.
 
@@ -709,6 +751,8 @@ async def verify_check_package(
     (``boundary.binding.recorded``), candidate verification (plus one R3
     re-run of transiently indeterminate checks). A resumed run records its own
     bindings (``phase="resumed"``) and verification the same way.
+    ``footprint`` collects which changed functions each oracle check entered
+    (``boundary/footprint.py``); it decides nothing here.
 
     Without an admitted package the verdict is ``unavailable`` with no
     per-criterion verdicts: every criterion is uncovered, so the legacy
@@ -746,6 +790,7 @@ async def verify_check_package(
         assignments,
         contract=state.contract,
         interpreter=state.interpreter,
+        footprint=footprint,
     )
     receipt: Path | None = None
     for run in (bound.first, bound.rerun):

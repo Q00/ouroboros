@@ -121,6 +121,10 @@ class _Payload(BaseModel):
         return self.model_dump(mode="json", exclude_unset=True)
 
 
+ArtifactCheckModeName = Literal["decide", "record", "off"]
+"""How an artifact check acts (``base_regression.ArtifactCheckMode``)."""
+
+
 class RunContract(_Payload):
     """The settings that decide anything after the worker starts, fixed for the run.
 
@@ -130,6 +134,19 @@ class RunContract(_Payload):
     """
 
     check_timeout_seconds: int = Field(gt=0)
+    base_regression: ArtifactCheckModeName = "off"
+    """How the base regression check acts (``boundary/base_regression.py``)."""
+    worker_test_gate: ArtifactCheckModeName = "off"
+    """How the worker-test gate acts. Both are ``off`` when absent, so a run
+    recorded before the settings existed resumes exactly as it started."""
+
+    @field_validator("base_regression", "worker_test_gate", mode="before")
+    @classmethod
+    def _switch_form(cls, value: Any) -> Any:
+        # The earlier on/off form of the setting.
+        if isinstance(value, bool):
+            return "decide" if value else "off"
+        return value
 
 
 class BaseRunRecord(_Payload):
@@ -181,6 +198,10 @@ class BindingsPayload(_Payload):
     status: str | None = None
 
 
+ArtifactCheckName = Literal["base_regression", "worker_tests"]
+"""A controller-run check of the whole artifact (``acceptance.ArtifactCheck``)."""
+
+
 class CriterionDecisionRecord(_Payload):
     """One criterion's final acceptance and the signals behind it.
 
@@ -208,6 +229,11 @@ class CriterionDecisionRecord(_Payload):
     when that verifier rejected the attempt, and it never accepts a criterion
     the existing verifier rejected. ``False`` for every status but ``pass``.
     """
+    artifact_check: ArtifactCheckName | None = None
+    """The controller-run artifact check that failed this criterion
+    (``boundary/base_regression.py``), or ``None``. Only a ``fail`` the check
+    package decided carries one, and only on a criterion the package's own
+    results left unverified or uncovered (``ledger._require_supported_statuses``)."""
 
 
 _DECISION_STATUSES = frozenset({"pass", "fail", "indeterminate", "unverified", "uncovered"})
@@ -280,6 +306,8 @@ class ReconciliationPayload(_Payload):
                 raise ValueError("only a pass can rest on a worker-declared binding")
             if item.declared_binding_pass and item.accepted and not item.existing_accepted:
                 raise ValueError("a declared-binding pass never overrules the existing verifier")
+            if item.artifact_check is not None and (status, governor) != ("fail", "check_package"):
+                raise ValueError("an artifact check only fails a criterion the package decides")
             if governor == "check_package":
                 expected = status in _PACKAGE_ACCEPTS
             elif governor == "execution":
