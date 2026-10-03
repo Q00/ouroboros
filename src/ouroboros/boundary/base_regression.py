@@ -321,9 +321,20 @@ def parse_junit(data: bytes) -> dict[str, str] | None:
 
 
 async def _pytest(
-    root: Path, files: Sequence[str], interpreter: CheckInterpreter, timeout: int
+    root: Path,
+    files: Sequence[str],
+    interpreter: CheckInterpreter,
+    timeout: int,
+    *,
+    past_collection_errors: bool = False,
 ) -> _Run:
-    """Run ``files`` with pytest in ``root`` (a throwaway copy) and read its report."""
+    """Run ``files`` with pytest in ``root`` (a throwaway copy) and read its report.
+
+    ``past_collection_errors`` runs the other files when one fails to collect
+    (the regression runs, where that error is a finding); pytest then exits 1
+    for the collection error alone, so a single worker test file never uses it
+    and a file that cannot be collected keeps pytest's own exit 2.
+    """
     report = root / f".ouroboros-report-{secrets.token_hex(8)}.xml"
     argv = (
         "python",
@@ -332,7 +343,7 @@ async def _pytest(
         "-p",
         "no:cacheprovider",
         "-q",
-        "--continue-on-collection-errors",
+        *(("--continue-on-collection-errors",) if past_collection_errors else ()),
         f"--junitxml={report.name}",
         "--",
         *files,
@@ -483,7 +494,7 @@ class ArtifactChecks:
         async with self._lock:
             try:
                 return await self._findings_for(candidate.resolve())
-            except (OSError, shutil.Error, RecursionError):
+            except Exception:  # noqa: BLE001 - an optional check never fails the decision
                 return _unavailable()
 
     async def _findings_for(self, candidate: Path) -> tuple[ArtifactFinding, ArtifactFinding]:
@@ -547,7 +558,9 @@ class ArtifactChecks:
             copy_checkout(candidate, copy_root)
             if not restore_base_bytes(copy_root, base, restored):
                 return ArtifactFinding(check, ArtifactCheckOutcome.UNAVAILABLE, selected=selected)
-            run = await _pytest(copy_root, selected, self._interpreter, self._timeout)
+            run = await _pytest(
+                copy_root, selected, self._interpreter, self._timeout, past_collection_errors=True
+            )
         if run.unavailable:
             return ArtifactFinding(check, ArtifactCheckOutcome.UNAVAILABLE, selected=selected)
         if run.timed_out:
@@ -563,7 +576,15 @@ class ArtifactChecks:
             with tempfile.TemporaryDirectory(prefix="ouroboros-regression-") as work:
                 copy_root = Path(work) / "base"
                 copy_checkout(base, copy_root)
-                runs.append(await _pytest(copy_root, selected, self._interpreter, self._timeout))
+                runs.append(
+                    await _pytest(
+                        copy_root,
+                        selected,
+                        self._interpreter,
+                        self._timeout,
+                        past_collection_errors=True,
+                    )
+                )
         if any(run.unavailable for run in runs):
             return _Base(outcome=ArtifactCheckOutcome.UNAVAILABLE)
         if any(run.timed_out for run in runs):
