@@ -79,7 +79,9 @@ before the legacy rule applies, so the legacy verifier cannot accept it; a
 verified ``pass``, a package ``fail`` and an ``indeterminate`` criterion keep
 the package's verdict. A check with no observation (a timeout, a base on
 which the runner wrote no report, no selected file, a project runner it does
-not drive, a run the sandbox could not confine) decides nothing.
+not drive, a run the sandbox could not confine) decides nothing. They run
+with no admitted package too: every criterion is then uncovered, so a failure
+fails them all, recorded on the version sealed without a package.
 
 Artifact verdict (precedence): ``fail`` if any criterion fails; else
 ``indeterminate`` if any is indeterminate; else ``pass`` if at least one

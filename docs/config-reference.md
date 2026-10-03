@@ -600,14 +600,15 @@ unavailable) is accepted as unverified; the run then prints an
 insufficient-verification warning, as it does when half or more of the
 criteria were not decided by the package.
 
-With an admitted package, the controller also runs two checks of the whole
-finished workspace (`base_regression`): the project's existing test files
+Whether or not a package was admitted, the controller also runs two checks
+of the whole finished workspace (`base_regression`): the project's existing test files
 that pair with or import a changed module, restored to their original bytes
 and run with pytest on the original tree twice and on the finished workspace
 once, and each test file the worker added. A test that passed on both
 original runs and fails on the finished workspace, or an added test file
-whose run fails, fails every criterion the package could not verify; while
-the worker runs, the failing test names are sent back as a repair. A
+whose run fails, fails every criterion the package could not verify (every
+criterion, when no package was admitted); while the worker runs under an
+admitted package, the failing test names are sent back as a repair. A
 criterion the package verified keeps its verdict, and a check that observed
 nothing (a timeout, no matching test file, a project whose own test runner is
 not pytest) decides nothing.
