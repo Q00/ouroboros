@@ -79,7 +79,11 @@ nothing) or ``off``. In ``decide`` mode an executed failure (a test that
 passed on both base runs fails on the candidate, or an added test file's run
 exits 1 with a failing test) fails every criterion the package left
 ``unverified`` or ``uncovered`` (``CriterionVerdict.artifact_check``) before
-the legacy rule applies, so the legacy verifier cannot accept it; a
+the legacy rule applies, so the legacy verifier cannot accept it. The
+decision records the check's evidence (``events.ArtifactCheckClaim``: its
+confirmed failures and the candidate tree), and the journal admits the fail
+only when the run's frozen contract had that check in ``decide`` mode (a
+regression also needs an admitted package); a
 regression does so only with an admitted package (``base_regression.decides``):
 without one nothing adjudicates a test that pins behaviour the criteria
 change, so the worker gets one repair turn naming the regressed tests and a
@@ -655,6 +659,9 @@ class AcceptanceReconciliation:
     tiers: dict[str, int] = field(default_factory=dict)
     legacy_rule: bool = False
     """Decided under ``legacy_decides_unverified`` (schema v3)."""
+    artifact_claims: tuple[dict[str, Any], ...] = ()
+    """The evidence of each artifact check a criterion's fail names
+    (``events.ArtifactCheckClaim``); recorded with the decision."""
 
     @property
     def overridden(self) -> tuple[CriterionDecision, ...]:
@@ -714,6 +721,8 @@ class AcceptanceReconciliation:
                     "verification_coverage": self.coverage.value,
                 }
             )
+        if self.artifact_claims:
+            data["artifact_checks"] = [dict(claim) for claim in self.artifact_claims]
         return data
 
     def to_payload(self) -> ReconciliationPayload:

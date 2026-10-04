@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from dataclasses import replace
 import inspect
 from pathlib import Path
 import sys
@@ -450,6 +451,16 @@ def test_a_rejection_fails_only_what_the_package_left_undecided() -> None:
     assert br.apply_findings(verdicts, keys, (passed,)) == verdicts
 
 
+CLAIM = {
+    "check": "base_regression",
+    "mode": "decide",
+    "outcome": "rejected",
+    "failed": ["m::test_a"],
+    "failed_count": 1,
+    "candidate_tree_digest": "c" * 64,
+}
+
+
 def test_a_rejection_flows_through_the_fail_route_and_the_journal_admits_it() -> None:
     keys = ["k0", "k1"]
     verdicts = br.apply_findings(
@@ -471,8 +482,12 @@ def test_a_rejection_flows_through_the_fail_route_and_the_journal_admits_it() ->
     assert not second.accepted and second.governed_by is Governor.CHECK_PACKAGE
     assert second.artifact_check is ArtifactCheck.BASE_REGRESSION
     assert reconciliation.run_accepted is False
-    payload = reconciliation.to_payload()
+    # The fail stands in the journal's record only with the check's evidence.
+    with pytest.raises(ValueError):
+        reconciliation.to_payload()
+    payload = replace(reconciliation, artifact_claims=(CLAIM,)).to_payload()
     assert payload.criteria[1].artifact_check == "base_regression"
+    assert payload.artifact_checks[0].failed == ("m::test_a",)
 
 
 def test_the_repair_names_the_failing_tests_and_never_the_selection() -> None:
@@ -1361,7 +1376,7 @@ def test_an_unattempted_criterion_never_carries_an_artifact_check() -> None:
     )
     blocked = reconciliation.decisions[1]
     assert blocked.governed_by is Governor.EXECUTION and blocked.artifact_check is None
-    reconciliation.to_payload()
+    replace(reconciliation, artifact_claims=(CLAIM,)).to_payload()
 
 
 async def test_a_blocked_criterion_beside_a_verified_pass_keeps_the_decision(

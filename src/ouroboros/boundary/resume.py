@@ -108,6 +108,7 @@ from ouroboros.boundary.events import (
     PACKAGE_FROZEN,
     ResumedPayload,
     RunContract,
+    artifact_claims_refusal,
     parse_boundary_version,
 )
 from ouroboros.boundary.ledger import (
@@ -171,6 +172,9 @@ class ResumedBoundary:
     reason: str | None = None
     """Why no check runs (``None`` when the live package decides)."""
     recorded_artifact_checks: tuple[tuple[str, ArtifactCheck], ...] = ()
+    recorded_claims: tuple[dict[str, Any], ...] = ()
+    """The validated evidence (``events.ArtifactCheckClaim``) behind those fails,
+    recorded again with the resumed decision that replays them."""
     """``(criterion key, check)`` of every fail an artifact check made in the bound
     version's journaled decision; replayed, never run again."""
 
@@ -227,7 +231,9 @@ async def load_resumed_boundary(
     if isinstance(projection, RecoveryNoPackage):
         parsed = parse_boundary_version(projection.boundary_id)
         assert parsed is not None
-        recorded = _recorded_artifact_checks(versions[parsed[1]])
+        recorded, claims = _recorded_artifact_checks(
+            versions[parsed[1]], projection.contract, packaged=False
+        )
         if not recorded:
             return None
         return ResumedBoundary(
@@ -238,6 +244,7 @@ async def load_resumed_boundary(
             contract=projection.contract,
             reason=NO_ADMITTED_PACKAGE,
             recorded_artifact_checks=recorded,
+            recorded_claims=claims,
         )
     if isinstance(projection, RecoveryUndecidable):
         log.warning("boundary.resume.boundary_record_missing", detail=projection.reason)
@@ -257,6 +264,9 @@ async def load_resumed_boundary(
     parsed = parse_boundary_version(projection.boundary_id)
     assert parsed is not None
     (frozen,) = [event for event in versions[parsed[1]] if event.type == PACKAGE_FROZEN]
+    recorded, claims = _recorded_artifact_checks(
+        versions[parsed[1]], projection.contract, packaged=True
+    )
     return ResumedBoundary(
         execution_id=execution_id,
         boundary_id=projection.boundary_id,
@@ -269,18 +279,32 @@ async def load_resumed_boundary(
         contract=projection.contract,
         live=live if problem is None else None,
         reason=problem,
-        recorded_artifact_checks=_recorded_artifact_checks(versions[parsed[1]]),
+        recorded_artifact_checks=recorded,
+        recorded_claims=claims,
     )
 
 
-def _recorded_artifact_checks(events: Any) -> tuple[tuple[str, ArtifactCheck], ...]:
-    """The artifact-check fails of a version's journaled decision (none without one)."""
+def _recorded_artifact_checks(
+    events: Any, contract: RunContract, *, packaged: bool
+) -> tuple[tuple[tuple[str, ArtifactCheck], ...], tuple[dict[str, Any], ...]]:
+    """The artifact-check fails of a version's journaled decision, and their evidence.
+
+    Only through a validated claim: the decision carries the check's
+    evidence, and the run's frozen contract had the check in ``decide`` mode
+    (a base regression also needs ``packaged``). Anything else replays nothing.
+    """
     decision = version_state(events).decision
-    return tuple(
+    if decision is None or artifact_claims_refusal(
+        decision, contract, packaged=packaged, candidate_tree_digest=None
+    ):
+        return (), ()
+    fails = tuple(
         (item.criterion_key, ArtifactCheck(item.artifact_check))
-        for item in (decision.criteria if decision is not None else ())
+        for item in decision.criteria
         if item.artifact_check is not None
     )
+    claims = tuple(claim.model_dump(mode="json") for claim in decision.artifact_checks)
+    return fails, claims
 
 
 def _undecided(key: str, reason: str) -> CriterionVerdict:
@@ -518,6 +542,13 @@ class ResumedCheckPackageAuthority:
             legacy,
             existing_run_accepted=bool(parallel_result.all_succeeded),
             legacy_decides_unverified=True,
+        )
+        replayed = {d.artifact_check for d in reconciliation.decisions if d.artifact_check}
+        reconciliation = replace(
+            reconciliation,
+            artifact_claims=tuple(
+                claim for claim in self.boundary.recorded_claims if claim["check"] in replayed
+            ),
         )
         record = {
             **reconciliation.to_dict(),

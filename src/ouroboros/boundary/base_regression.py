@@ -296,6 +296,8 @@ class ArtifactFinding:
     exemption: Exemption | None = None
     changed: ChangedCode = field(default_factory=ChangedCode)
     """What the change touched (``C``), which the exemption needs."""
+    candidate_digest: str | None = None
+    """The tree digest of the candidate the check observed (the journal record cites it)."""
 
     @property
     def rejects(self) -> bool:
@@ -920,10 +922,13 @@ class ArtifactChecks:
         else:
             worker = await self._worker_tests(candidate, added_paths(self._base_manifest, manifest))
         found = (
-            await self._regression(base, candidate, manifest, changed, transcript)
-            if self._run_regression
-            else ArtifactFinding(ArtifactCheck.BASE_REGRESSION, not_run),
-            worker,
+            replace(
+                await self._regression(base, candidate, manifest, changed, transcript)
+                if self._run_regression
+                else ArtifactFinding(ArtifactCheck.BASE_REGRESSION, not_run),
+                candidate_digest=digest,
+            ),
+            replace(worker, candidate_digest=digest),
         )
         if await asyncio.to_thread(tree_manifest, candidate) == manifest:
             # Kept only for the tree it observed: a workspace that changed

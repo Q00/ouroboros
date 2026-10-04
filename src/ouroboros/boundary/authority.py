@@ -114,7 +114,7 @@ from ouroboros.boundary.binding_flow import (
     bindings_payload,
     verify_with_bindings,
 )
-from ouroboros.boundary.events import ReconciliationPayload
+from ouroboros.boundary.events import ARTIFACT_CLAIM_TESTS, ReconciliationPayload
 from ouroboros.boundary.footprint import FunctionKey, OracleFootprint
 from ouroboros.boundary.ledger import BoundaryLedger
 from ouroboros.boundary.package import CheckRole, seed_criterion_keys, seed_digest
@@ -1029,6 +1029,7 @@ class CheckPackageAuthority:
             )
             if verdict.package_id is None:
                 reconciliation = _legacy_owned(reconciliation)
+            reconciliation = self._with_artifact_claims(reconciliation)
             if verdict.package_id is None and any(
                 decision.artifact_check for decision in reconciliation.decisions
             ):
@@ -1060,6 +1061,30 @@ class CheckPackageAuthority:
                 error_type=type(exc).__name__,
             )
             return await self._undecided(keys, parallel_result, type(exc).__name__)
+
+    def _with_artifact_claims(
+        self, reconciliation: AcceptanceReconciliation
+    ) -> AcceptanceReconciliation:
+        """The reconciliation with the evidence of every artifact check a fail names.
+
+        The journal admits an artifact check's fail only with this claim
+        (``events.artifact_claims_refusal``): the check in ``decide`` mode,
+        its confirmed failures, and the candidate tree it observed.
+        """
+        named = {decision.artifact_check for decision in reconciliation.decisions}
+        claims = tuple(
+            {
+                "check": finding.check.value,
+                "mode": ArtifactCheckMode.DECIDE.value,
+                "outcome": finding.outcome.value,
+                "failed": list(finding.failed[:ARTIFACT_CLAIM_TESTS]),
+                "failed_count": len(finding.failed),
+                "candidate_tree_digest": finding.candidate_digest,
+            }
+            for finding in self.artifact_findings
+            if finding.check in named
+        )
+        return replace(reconciliation, artifact_claims=claims) if claims else reconciliation
 
     async def _with_artifact_checks(
         self,

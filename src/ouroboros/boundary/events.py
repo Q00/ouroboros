@@ -264,6 +264,73 @@ def coverage_of(total: int, not_decided: int, unverified: int) -> str:
     return "partial" if not_decided else "full"
 
 
+ARTIFACT_CLAIM_TESTS = 100
+"""At most this many failing test names a claim records (``failed_count`` has them all)."""
+_ARTIFACT_MODE_FIELDS = {"base_regression": "base_regression", "worker_tests": "worker_test_gate"}
+
+
+class ArtifactCheckClaim(_Payload):
+    """The recorded evidence of an artifact check whose fail a decision records.
+
+    The check ran in ``decide`` mode on the candidate tree with
+    ``candidate_tree_digest`` and observed ``failed`` (confirmed regressed
+    tests or targets, or failing worker test files). A decision may name an
+    ``artifact_check`` on a criterion only with such a claim, and the journal
+    admits the claim only under the run's frozen contract
+    (``artifact_claims_refusal``).
+    """
+
+    check: ArtifactCheckName
+    mode: Literal["decide"]
+    outcome: Literal["rejected"]
+    failed: tuple[str, ...] = Field(min_length=1, max_length=ARTIFACT_CLAIM_TESTS)
+    failed_count: int = Field(ge=1)
+    candidate_tree_digest: str
+
+    @field_validator("candidate_tree_digest")
+    @classmethod
+    def _digest(cls, value: str) -> str:
+        if len(value) != 64 or not set(value) <= _HEX:
+            raise ValueError("candidate_tree_digest must be 64 lowercase hex characters")
+        return value
+
+    @model_validator(mode="after")
+    def _counted(self) -> ArtifactCheckClaim:
+        if self.failed_count < len(self.failed) or any(
+            not name or len(name) > 500 for name in self.failed
+        ):
+            raise ValueError("an artifact check claim names its failing tests and counts them")
+        return self
+
+
+def artifact_claims_refusal(
+    record: ReconciliationPayload,
+    contract: RunContract | None,
+    *,
+    packaged: bool,
+    candidate_tree_digest: str | None,
+) -> str | None:
+    """Why a decision's artifact-check fails may not stand, or ``None``.
+
+    Each claim's check must be in ``decide`` mode under the run's frozen
+    contract (no contract: every check off), a base regression needs an
+    admitted package (``packaged``), and with a recorded candidate
+    verification the claim must be about that same candidate tree.
+    """
+    for claim in record.artifact_checks:
+        mode = getattr(contract, _ARTIFACT_MODE_FIELDS[claim.check]) if contract else "off"
+        if mode != "decide":
+            return f"the run's {claim.check} check was not in decide mode"
+        if claim.check == "base_regression" and not packaged:
+            return "a base regression fails nothing without an admitted package"
+        if (
+            candidate_tree_digest is not None
+            and claim.candidate_tree_digest != candidate_tree_digest
+        ):
+            return "an artifact check claim is about another candidate tree"
+    return None
+
+
 class ReconciliationPayload(_Payload):
     """``boundary.acceptance.reconciled``: per-criterion decisions and the run's."""
 
@@ -282,6 +349,8 @@ class ReconciliationPayload(_Payload):
     """Set when the package could not decide (for example the authority raised):
     every covered criterion is then indeterminate. Only such a decision may be
     recorded without a candidate verification of a runnable check."""
+    artifact_checks: tuple[ArtifactCheckClaim, ...] = ()
+    """The evidence of every artifact check a criterion's fail names (``ArtifactCheckClaim``)."""
 
     @model_validator(mode="after")
     def _consistent(self) -> ReconciliationPayload:
@@ -298,6 +367,9 @@ class ReconciliationPayload(_Payload):
         is accepted exactly when every criterion is. An undecided decision
         has no pass and no fail.
         """
+        claimed = [claim.check for claim in self.artifact_checks]
+        if len(set(claimed)) != len(claimed):
+            raise ValueError("a decision records each artifact check's evidence once")
         for item in self.criteria:
             status, governor = item.package_status, item.governed_by
             if status not in _DECISION_STATUSES or governor not in _GOVERNORS:
@@ -308,6 +380,10 @@ class ReconciliationPayload(_Payload):
                 raise ValueError("a declared-binding pass never overrules the existing verifier")
             if item.artifact_check is not None and (status, governor) != ("fail", "check_package"):
                 raise ValueError("an artifact check only fails a criterion the package decides")
+            if item.artifact_check is not None and item.artifact_check not in claimed:
+                raise ValueError(
+                    "an artifact check fails a criterion only with its recorded evidence"
+                )
             if governor == "check_package":
                 expected = status in _PACKAGE_ACCEPTS
             elif governor == "execution":

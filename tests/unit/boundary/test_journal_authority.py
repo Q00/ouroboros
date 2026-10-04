@@ -359,39 +359,168 @@ async def test_a_decision_the_results_do_not_support_is_refused(
     assert verify_boundary_order(await ledger.events(B)) == ()
 
 
+RUN = "task-art"
+RUN_B = f"{RUN}/check_package/v1"
+
+
+def _claim(check: str, digest: str, **update: Any) -> dict[str, Any]:
+    return {
+        "check": check,
+        "mode": "decide",
+        "outcome": "rejected",
+        "failed": ["tests/test_calc.py"],
+        "failed_count": 1,
+        "candidate_tree_digest": digest,
+        **update,
+    }
+
+
+async def _artifact_run(
+    store: EventStore, package: CheckPackage, checkout: Path, contract: RunContract
+) -> tuple[BoundaryLedger, str]:
+    """A run version (the run's contract recorded) verified with one violated check."""
+    ledger = BoundaryLedger(store)
+    await ledger.record_check_package_enabled(RUN, contract)
+    await ledger.record_package_frozen(RUN_B, package, seed=seed_for(package))
+    await ledger.record_admission(RUN_B, admission_receipt(package, checkout))
+    await ledger.record_actor_started(RUN, [RUN_B])
+    await ledger.record_bindings(
+        RUN_B, package_id=package.package_id, payload=_script_bindings(package)
+    )
+    ran = tuple(
+        candidate_execution(check, met=index != 0) for index, check in enumerate(package.checks)
+    )
+    await ledger.record_candidate_verification(RUN_B, verification_receipt(package, checkout, ran))
+    digest = version_state(await ledger.events(RUN_B)).verifications[-1].artifact_tree_digest
+    return ledger, digest
+
+
+def _artifact_decision(package: CheckPackage, check: str, claims: list[Any]) -> Any:
+    keys = package.criterion_keys
+    named = {"accepted": False, "artifact_check": check}
+    return _decision(
+        [
+            _criterion(0, keys[0], "fail"),
+            _criterion(1, keys[1], "fail", **named),
+            _criterion(2, keys[2], "fail", **named),
+        ],
+        artifact_checks=claims,
+    )
+
+
+DECIDE = RunContract(check_timeout_seconds=120, base_regression="decide")
+
+
 async def test_an_artifact_check_fails_only_what_the_package_left_undecided(
     store, package, base_checkout
 ) -> None:
-    violated = candidate_execution(package.checks[0], met=False)
-    ledger = await _script_verified(store, package, base_checkout, violated)
+    ledger, digest = await _artifact_run(store, package, base_checkout, DECIDE)
     keys = package.criterion_keys
-    failed = {"accepted": False}
-    regression = {"accepted": False, "artifact_check": "base_regression"}
-    # Without the executed artifact check, a fail on an uncovered criterion is
-    # a status the recorded results do not show.
+    # Without an artifact check, a fail on an uncovered criterion is a status
+    # the recorded results do not show.
     forged = _decision(
         [
             _criterion(0, keys[0], "fail"),
             _criterion(1, keys[1], "indeterminate"),
-            _criterion(2, keys[2], "fail", **failed),
+            _criterion(2, keys[2], "fail", accepted=False),
         ]
     )
     with pytest.raises(BoundaryOrderError):
         await ledger.record_acceptance_reconciled(
-            B, package_id=package.package_id, reconciliation=forged
+            RUN_B, package_id=package.package_id, reconciliation=forged
         )
-    # The artifact check may fail the unverified and the uncovered criterion.
-    genuine = _decision(
-        [
-            _criterion(0, keys[0], "fail"),
-            _criterion(1, keys[1], "fail", **regression),
-            _criterion(2, keys[2], "fail", **regression),
-        ]
-    )
+    # Decide mode, an admitted package and the check's evidence: the artifact
+    # check may fail the unverified and the uncovered criterion.
+    genuine = _artifact_decision(package, "base_regression", [_claim("base_regression", digest)])
     await ledger.record_acceptance_reconciled(
-        B, package_id=package.package_id, reconciliation=genuine
+        RUN_B, package_id=package.package_id, reconciliation=genuine
     )
-    assert verify_boundary_order(await ledger.events(B)) == ()
+    assert verify_boundary_order(await ledger.events(RUN_B)) == ()
+
+
+@pytest.mark.parametrize(
+    ("contract", "claim_digest"),
+    [
+        (RunContract(check_timeout_seconds=120), None),
+        (RunContract(check_timeout_seconds=120, base_regression="record"), None),
+        (DECIDE, "d" * 64),
+    ],
+    ids=["mode_off", "mode_record", "another_candidate_tree"],
+)
+async def test_an_artifact_check_fail_outside_its_frozen_mode_or_tree_is_refused(
+    store, package, base_checkout, contract: RunContract, claim_digest: str | None
+) -> None:
+    ledger, digest = await _artifact_run(store, package, base_checkout, contract)
+    decision = _artifact_decision(
+        package, "base_regression", [_claim("base_regression", claim_digest or digest)]
+    )
+    with pytest.raises(BoundaryOrderError):
+        await ledger.record_acceptance_reconciled(
+            RUN_B, package_id=package.package_id, reconciliation=decision
+        )
+
+
+async def test_a_replay_honours_only_a_validated_claim(store, package, base_checkout) -> None:
+    from ouroboros.boundary.resume import _recorded_artifact_checks
+
+    ledger, digest = await _artifact_run(store, package, base_checkout, DECIDE)
+    genuine = _artifact_decision(package, "base_regression", [_claim("base_regression", digest)])
+    await ledger.record_acceptance_reconciled(
+        RUN_B, package_id=package.package_id, reconciliation=genuine
+    )
+    events = await ledger.events(RUN_B)
+    keys = package.criterion_keys
+
+    fails, claims = _recorded_artifact_checks(events, DECIDE, packaged=True)
+    assert [key for key, _check in fails] == [keys[1], keys[2]]
+    assert claims[0]["candidate_tree_digest"] == digest
+    # Read under another contract, or as if no package was admitted, the same
+    # journal replays nothing.
+    off = RunContract(check_timeout_seconds=120)
+    assert _recorded_artifact_checks(events, off, packaged=True) == ((), ())
+    assert _recorded_artifact_checks(events, DECIDE, packaged=False) == ((), ())
+
+
+def test_an_artifact_check_fail_without_its_evidence_is_refused(package) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        _artifact_decision(package, "base_regression", [])
+    with pytest.raises(ValidationError):
+        _artifact_decision(
+            package, "base_regression", [_claim("base_regression", "c" * 64, failed=[])]
+        )
+
+
+async def test_a_base_regression_without_a_package_is_refused(store, package) -> None:
+    ledger = BoundaryLedger(store)
+    run, version = "task-nopkg", "task-nopkg/check_package/v1"
+    both = RunContract(
+        check_timeout_seconds=120, base_regression="decide", worker_test_gate="decide"
+    )
+    await ledger.record_check_package_enabled(run, both)
+    await ledger.record_construction_failed(
+        version,
+        seed_digest=package.seed_digest,
+        input_digest="1" * 64,
+        reason="constructor_timeout",
+    )
+    await ledger.record_actor_started(run, [version])
+    keys = package.criterion_keys
+
+    def decision(check: str) -> Any:
+        named = {"accepted": False, "artifact_check": check, "governed_by": "check_package"}
+        rows = [_criterion(i, key, "fail", **named) for i, key in enumerate(keys)]
+        return _decision(rows, artifact_checks=[_claim(check, "c" * 64)])
+
+    with pytest.raises(BoundaryOrderError):
+        await ledger.record_acceptance_reconciled(
+            version, package_id=None, reconciliation=decision("base_regression")
+        )
+    # A worker-test fail in decide mode needs no package.
+    await ledger.record_acceptance_reconciled(
+        version, package_id=None, reconciliation=decision("worker_tests")
+    )
 
 
 def test_an_artifact_check_never_names_an_acceptance(package) -> None:

@@ -114,6 +114,7 @@ from ouroboros.boundary.events import (
     acceptance_resumed_event,
     actor_started_event,
     admission_completed_event,
+    artifact_claims_refusal,
     binding_recorded_event,
     boundary_version_id,
     candidate_verified_event,
@@ -1704,11 +1705,19 @@ class BoundaryLedger:
         a decision the package could not make (``undecided_reason``, every
         covered criterion indeterminate). Without a package (``package_id`` is ``None``) the boundary
         must be sealed as ``construction_failed`` and a worker must have
-        started on it.
+        started on it. An artifact check's fail stands only with its evidence,
+        admissible under the run's frozen contract (``artifact_claims_refusal``).
         """
         event = acceptance_reconciled_event(
             boundary_id, package_id=package_id, reconciliation=reconciliation
         )
+        state, run = await self._state(boundary_id), parse_boundary_version(boundary_id)
+        contract = await self.run_contract(run[0]) if run else None
+        verified = state.verifications[-1].artifact_tree_digest if state.verifications else None
+        if refusal := artifact_claims_refusal(
+            reconciliation, contract, packaged=state.frozen, candidate_tree_digest=verified
+        ):
+            raise BoundaryOrderError(refusal)
         return await self._append(boundary_id, event)
 
     async def record_reference_checked(
