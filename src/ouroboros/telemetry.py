@@ -470,6 +470,7 @@ _ARTIFACT_CHECK_OUTCOMES = frozenset(
         "imported_outside_copy",
         "not_run",
         "no_admitted_command",
+        "unconfirmed",
     }
 )
 # Each check's mode and what its finding did. SSOT pairing with

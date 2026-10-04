@@ -213,6 +213,8 @@ class ArtifactCheckOutcome(StrEnum):
     """A changed module was imported from outside the run's copy: the run did not test it."""
     NOT_RUN = "not_run"
     """The check's mode is ``off``."""
+    UNCONFIRMED = "unconfirmed"
+    """A failure whose rerun gave no result for it (neither a pass nor a second failure)."""
     NO_ADMITTED_COMMAND = "no_admitted_command"
     """Commands exist for the selected targets, but none passed admission on the base
     (``target_commands.judge_admission``): nothing observed the targets."""
@@ -1076,22 +1078,46 @@ class ArtifactChecks:
                 return failing, (), {}
             if run.record.imported_outside:
                 return ArtifactCheckOutcome.IMPORTED_OUTSIDE_COPY, (), {}
-            regressed = regressions(side.stable, run.statuses)
-            # Each failing test once more, alone (the copy still holds the
-            # base bytes): one that passes now is not a regression.
-            again = [run.record.nodeids[test] for test in regressed if test in run.record.nodeids]
-            if again and await asyncio.to_thread(restore_base_bytes, copy_root, base, restored):
+            failing = regressions(side.stable, run.statuses)
+            if not failing:
+                return None, (), {}
+            # A regression is a second observed failure: each failing test runs
+            # once more, alone where its node id is known, else with the whole
+            # selection (the copy still holds the base bytes). A rerun that
+            # times out, is refused, or gives no result for a test leaves that
+            # test unobserved, never a regression.
+            nodeids = {
+                test: run.record.nodeids[test] for test in failing if test in run.record.nodeids
+            }
+            rest = tuple(test for test in failing if test not in nodeids)
+            regressed: tuple[str, ...] = ()
+            reasons: list[ArtifactCheckOutcome] = []
+            for tests, files in (
+                (tuple(nodeids), tuple(nodeids.values())),
+                (rest, selected),
+            ):
+                if not tests:
+                    continue
+                await asyncio.to_thread(restore_base_bytes, copy_root, base, restored)
                 rerun = await _pytest(
                     copy_root,
-                    again,
+                    files,
                     self._interpreter,
                     self._timeout,
+                    past_collection_errors=True,
                     modules=modules,
                     config=config,
                 )
-                if _unobserved(rerun) is None and rerun.statuses is not None:
-                    passed = {test for test, status in rerun.statuses.items() if status == _PASS}
-                    regressed = tuple(test for test in regressed if test not in passed)
+                reason = _unobserved(rerun)
+                if reason is not None:
+                    reasons.append(reason)
+                    continue
+                again, no_result = _confirmed(tests, rerun.statuses, rerun.return_code)
+                regressed += again
+                if no_result:
+                    reasons.append(ArtifactCheckOutcome.UNCONFIRMED)
+            if not regressed and reasons:
+                return reasons[0], (), {}
         footprints = {
             test: run.record.footprints[test] for test in regressed if test in run.record.footprints
         }
@@ -1150,24 +1176,33 @@ class ArtifactChecks:
                     copy_root, admission.command, target, self._interpreter, self._timeout
                 )
                 if not run.observed:
-                    if attempt == 0:
-                        return (
-                            ArtifactCheckOutcome.TIMEOUT
-                            if run.timed_out
-                            else ArtifactCheckOutcome.UNAVAILABLE
-                        ), ()
-                    break
-                if admission.tier is Tier.JUNIT:
-                    failing = tuple(
-                        test for test in admission.stable if (run.statuses or {}).get(test) != _PASS
-                    )
+                    # The first run, or the rerun that must confirm it, saw
+                    # nothing: the target is no observation, not a regression.
+                    return (
+                        ArtifactCheckOutcome.TIMEOUT
+                        if run.timed_out
+                        else ArtifactCheckOutcome.UNAVAILABLE
+                    ), ()
+                if attempt == 0:
+                    if admission.tier is Tier.JUNIT:
+                        regressed = tuple(
+                            test
+                            for test in admission.stable
+                            if (run.statuses or {}).get(test) != _PASS
+                        )
+                    else:
+                        regressed = (target,) if run.exit_code != 0 else ()
+                    if not regressed:
+                        break
+                    await asyncio.to_thread(restore_base_bytes, copy_root, base, restored)
+                elif admission.tier is Tier.JUNIT:
+                    # A second observed failure of the same test, or nothing.
+                    again, no_result = _confirmed(regressed, run.statuses, run.exit_code)
+                    if not again and no_result:
+                        return ArtifactCheckOutcome.UNCONFIRMED, ()
+                    regressed = again
                 else:
-                    failing = (target,) if run.exit_code != 0 else ()
-                # A rerun keeps only what fails again.
-                regressed = failing if attempt == 0 else tuple(t for t in regressed if t in failing)
-                if not regressed:
-                    break
-                await asyncio.to_thread(restore_base_bytes, copy_root, base, restored)
+                    regressed = regressed if run.exit_code != 0 else ()
         return None, regressed
 
     async def _base_side(
@@ -1299,6 +1334,22 @@ def _write_canary(copy_root: Path, target: str) -> bool:
         os.unlink(path)
     path.write_bytes(CANARY)
     return True
+
+
+def _confirmed(
+    tests: Sequence[str], statuses: Mapping[str, str] | None, exit_code: int | None
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """``(failing again, no result)`` among ``tests`` after an observed rerun.
+
+    A test fails again when its report has it failing or erroring, or it
+    vanished behind a collection error of its module, or the runner died
+    before it wrote a report (a nonzero exit with no report fails every test).
+    A report that does not name a test, or no report with exit 0, is no
+    result for it: it neither confirms the failure nor passes.
+    """
+    again = () if statuses is None and exit_code == 0 else regressions(tests, statuses)
+    passed = {test for test, status in (statuses or {}).items() if status in (_PASS, _SKIP)}
+    return again, tuple(test for test in tests if test not in again and test not in passed)
 
 
 def _unobserved(run: _Run) -> ArtifactCheckOutcome | None:

@@ -273,7 +273,7 @@ async def test_a_worker_edit_to_a_selected_test_is_undone_before_the_run(
     (candidate / TEST_FILE).write_text("def test_zero():\n    pass\n")
     (candidate / "calc/tests/conftest.py").write_text("collect_ignore = ['test_ops.py']\n")
     failing = {**PASSING, "calc.tests.test_ops::test_zero": "fail"}
-    runner = _Runner([_run(PASSING), _run(PASSING)], [_run(failing, 1)])
+    runner = _Runner([_run(PASSING), _run(PASSING)], [_run(failing, 1), _run(failing, 1)])
     monkeypatch.setattr(br, "_pytest", runner)
 
     regression, _worker = await _checks(base).findings(candidate)
@@ -281,8 +281,9 @@ async def test_a_worker_edit_to_a_selected_test_is_undone_before_the_run(
     assert regression.outcome is Outcome.REJECTED
     assert regression.failed == ("calc.tests.test_ops::test_zero",)
     assert regression.selected == (TEST_FILE,)
-    # Base twice, candidate once; the candidate ran the base bytes of the test file.
-    assert [call[0] for call in runner.calls] == ["base", "base", "candidate"]
+    # Base twice, the candidate, then the rerun that confirms its failure, each
+    # with the base bytes of the test file.
+    assert [call[0] for call in runner.calls] == ["base", "base", "candidate", "candidate"]
     assert {call[2] for call in runner.calls} == {BASE_TREE[TEST_FILE]}
     # The worker's workspace itself is never touched.
     assert (candidate / TEST_FILE).read_text() == "def test_zero():\n    pass\n"
@@ -294,7 +295,7 @@ async def test_a_test_that_passed_on_one_base_run_only_is_never_a_regression(
     base, candidate = trees
     flaky = {**PASSING, "calc.tests.test_ops::test_one": "fail"}
     failing = dict.fromkeys(PASSING, "fail")
-    runner = _Runner([_run(PASSING), _run(flaky, 1)], [_run(failing, 1)])
+    runner = _Runner([_run(PASSING), _run(flaky, 1)], [_run(failing, 1), _run(failing, 1)])
     monkeypatch.setattr(br, "_pytest", runner)
 
     regression, _worker = await _checks(base).findings(candidate)
@@ -350,7 +351,7 @@ async def test_a_dead_runner_on_the_candidate_fails_every_stable_test(
     trees: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     base, candidate = trees
-    runner = _Runner([_run(PASSING), _run(PASSING)], [_run(None, 4)])
+    runner = _Runner([_run(PASSING), _run(PASSING)], [_run(None, 4), _run(None, 4)])
     monkeypatch.setattr(br, "_pytest", runner)
 
     regression, _worker = await _checks(base).findings(candidate)
@@ -1614,3 +1615,44 @@ async def test_the_two_switches_are_independent(
     assert regression.outcome is Outcome.NOT_RUN and worker.rejects
     (decision,) = authority.outcome.reconciliation.decisions
     assert decision.artifact_check is ArtifactCheck.WORKER_TESTS and not decision.accepted
+
+
+# --------------------------------------------------------------------------
+# A regression is a second observed failure
+
+
+FAIL_ZERO = {**PASSING, "calc.tests.test_ops::test_zero": "fail"}
+ZERO_ID = {"calc.tests.test_ops::test_zero": f"{TEST_FILE}::test_zero"}
+
+
+@pytest.mark.parametrize(
+    ("rerun", "expected", "failed"),
+    [
+        (_run(None, None, timed_out=True), Outcome.TIMEOUT, ()),
+        (_run(None, None, unavailable=True), Outcome.UNAVAILABLE, ()),
+        (_run({"calc.tests.test_ops::test_one": "pass"}, 0), Outcome.UNCONFIRMED, ()),
+        (_run({"calc.tests.test_ops::test_zero": "pass"}, 0), Outcome.PASSED, ()),
+        (
+            _run({"calc.tests.test_ops::test_zero": "fail"}, 1),
+            Outcome.REJECTED,
+            ("calc.tests.test_ops::test_zero",),
+        ),
+    ],
+    ids=["then_timeout", "then_unavailable", "then_missing", "then_pass", "then_fail"],
+)
+async def test_the_pytest_run_counts_only_a_second_observed_failure(
+    trees: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    rerun: Any,
+    expected: Outcome,
+    failed: tuple[str, ...],
+) -> None:
+    from ouroboros.boundary.footprint import RunRecord
+
+    base, candidate = trees
+    first = _run(FAIL_ZERO, 1, record=RunRecord(nodeids=ZERO_ID))
+    monkeypatch.setattr(br, "_pytest", _Runner([_run(PASSING), _run(PASSING)], [first, rerun]))
+
+    regression, _worker = await _checks(base).findings(candidate)
+
+    assert (regression.outcome, regression.failed) == (expected, failed)

@@ -410,3 +410,84 @@ def test_the_workers_test_invocations_are_read_from_its_transcript() -> None:
         "{target}",
         "-q",
     )
+
+
+# --------------------------------------------------------------------------
+# A regression is a second observed failure, on both tiers
+
+
+def _scripted(monkeypatch: pytest.MonkeyPatch, runs: list[tc.CommandRun]) -> None:
+    script = list(runs)
+
+    async def run(*_args: Any, **_kwargs: Any) -> tc.CommandRun:
+        return script.pop(0)
+
+    monkeypatch.setattr(br, "_run_command", run)
+
+
+SECOND = [
+    (tc.CommandRun(None, timed_out=True), Outcome.TIMEOUT),
+    (tc.CommandRun(None, unavailable=True), Outcome.UNAVAILABLE),
+    (tc.CommandRun(0), Outcome.PASSED),
+]
+
+
+@pytest.mark.parametrize(
+    ("rerun", "expected", "failed"),
+    [
+        *((run, outcome, ()) for run, outcome in SECOND),
+        (tc.CommandRun(1), Outcome.REJECTED, ("tests/test_calc.py",)),
+    ],
+    ids=["then_timeout", "then_unavailable", "then_pass", "then_fail"],
+)
+async def test_the_exit_floor_counts_only_a_second_observed_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rerun: tc.CommandRun,
+    expected: Outcome,
+    failed: tuple[str, ...],
+) -> None:
+    base = _tree(tmp_path / "base", {**UNITTEST_BASE, "bin/test": ""})
+    candidate = _fixed(_tree(tmp_path / "work", {**UNITTEST_BASE, "bin/test": ""}))
+    # Admission (two base passes, a failing canary), the candidate's failure, the rerun.
+    _scripted(
+        monkeypatch, [tc.CommandRun(0), tc.CommandRun(0), tc.CommandRun(1), tc.CommandRun(1), rerun]
+    )
+
+    regression, _worker = await _checks(
+        base, constructor_command="python -m unittest {module}"
+    ).findings(candidate)
+
+    assert (regression.outcome, regression.failed) == (expected, failed)
+
+
+@pytest.mark.parametrize(
+    ("rerun", "expected", "failed"),
+    [
+        *((run, outcome, ()) for run, outcome in SECOND[:2]),
+        (tc.CommandRun(0, {"t::test_pins": "pass"}), Outcome.PASSED, ()),
+        (tc.CommandRun(1, {"t::other": "pass"}), Outcome.UNCONFIRMED, ()),
+        (tc.CommandRun(1, {"t::test_pins": "fail"}), Outcome.REJECTED, ("t::test_pins",)),
+    ],
+    ids=["then_timeout", "then_unavailable", "then_pass", "then_missing", "then_fail"],
+)
+async def test_the_junit_tier_counts_only_a_second_observed_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rerun: tc.CommandRun,
+    expected: Outcome,
+    failed: tuple[str, ...],
+) -> None:
+    base = _tree(tmp_path / "base", JUNIT_BASE)
+    candidate = _fixed(_tree(tmp_path / "work", JUNIT_BASE))
+    passing = tc.CommandRun(1, {"t::test_pins": "pass", "t::test_broken_on_base": "fail"})
+    _scripted(
+        monkeypatch,
+        [passing, passing, tc.CommandRun(1), tc.CommandRun(1, {"t::test_pins": "fail"}), rerun],
+    )
+
+    regression, _worker = await _checks(
+        base, constructor_command="python junit_run.py {target} {report}"
+    ).findings(candidate)
+
+    assert (regression.outcome, regression.failed) == (expected, failed)
