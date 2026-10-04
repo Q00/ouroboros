@@ -333,6 +333,19 @@ def release(session_id: str) -> None:
     path = lock_path(session_id)
     with _LEASE_OPERATION_LOCK:
         fd = _HELD_LEASE_FDS.pop(session_id, None)
+        if os.name == "nt" and fd is not None:
+            # Windows cannot unlink this file while our descriptor is open.
+            # Consume it before closing so an ambiguous close failure cannot
+            # cause finally to close a descriptor that has since been reused.
+            closing_fd, fd = fd, None
+            try:
+                os.close(closing_fd)
+            except OSError:
+                log.warning(
+                    "session_lock.release_failed",
+                    extra={"session_id": session_id, "operation": "close"},
+                    exc_info=True,
+                )
         try:
             path.unlink(missing_ok=True)
             log.info(
@@ -340,22 +353,34 @@ def release(session_id: str) -> None:
                 extra={"session_id": session_id},
             )
         except OSError:
-            pass
+            log.warning(
+                "session_lock.release_failed",
+                extra={"session_id": session_id, "operation": "unlink"},
+                exc_info=True,
+            )
         finally:
             if fd is not None:
                 if fcntl is not None:
                     try:
                         fcntl.flock(fd, fcntl.LOCK_UN)
                     except OSError:
-                        pass
+                        log.warning(
+                            "session_lock.release_failed",
+                            extra={"session_id": session_id, "operation": "unlock"},
+                            exc_info=True,
+                        )
                 try:
                     os.close(fd)
                 except OSError:
-                    pass
+                    log.warning(
+                        "session_lock.release_failed",
+                        extra={"session_id": session_id, "operation": "close"},
+                        exc_info=True,
+                    )
 
 
 def release_if_owned_by_current_process(session_id: str) -> bool:
-    """Release a session lock only when the current process owns it."""
+    """Attempt release only for our lease; True denotes ownership, not I/O success."""
     # ``acquire`` cannot replace an extant lease, and this lock serializes two
     # local cleanup paths. Once ownership has been checked, no other normal
     # owner can create a replacement until this unlink has completed.
