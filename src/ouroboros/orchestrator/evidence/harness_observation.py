@@ -92,7 +92,10 @@ class CommandObservation:
     which is never success. ``network_isolated`` records whether network
     access was denied, and ``private_dev_shm`` whether the command had its own
     writable ``/dev/shm`` (without one, Linux POSIX shared memory and
-    semaphores, and so ``multiprocessing``, fail). ``transcript_returncode`` is the exit status the
+    semaphores, and so ``multiprocessing``, fail), and ``metadata_writes_in_roots``
+    whether it could change mode, timestamps and extended attributes inside
+    the copy (without that, ``shutil.copystat`` or a test runner's cache write
+    fails). ``transcript_returncode`` is the exit status the
     transcript recorded for the original run, when it recorded one; a replay
     whose exit differs from it is never success. ``env_delta`` holds the
     environment assignments the command itself made (``NAME=value`` before
@@ -110,6 +113,7 @@ class CommandObservation:
     mutated: bool = False
     network_isolated: bool = False
     private_dev_shm: bool = False
+    metadata_writes_in_roots: bool = False
     transcript_returncode: int | None = None
     env_delta: tuple[tuple[str, str], ...] = ()
     scrubbed_environment: tuple[str, ...] = ()

@@ -2,7 +2,7 @@
 
 Run as a standalone script, never imported into the controller:
 
-    python -I -S -B _confine_exec.py [--private-shm] [--loopback-up] [--require-loopback-only]
+    python -I -S -B _confine_exec.py [--private-mounts] [--loopback-up] [--require-loopback-only]
         [--landlock] --root DIR DEV INO ... -- ARGV...
 
 It is the last step of every ``ouroboros.runtime.exec_sandbox`` backend. It is
@@ -17,14 +17,23 @@ before confinement. The command's environment arrives as JSON in
   validated (same device and inode), or nothing runs; and once the
   restriction below is in place, no regular file beneath a root may have
   another hard link (it may be outside), or nothing runs;
-- on Linux with ``--private-shm`` (the helper runs in a new user and mount
-  namespace, ``unshare --user --map-root-user --mount``), a fresh tmpfs is
-  mounted over ``/dev/shm`` before anything else, with the size of the
-  ``/dev/shm`` it covers; it is private to this namespace (``unshare`` makes
-  the namespace's mounts private, so nothing propagates to the host), the
-  command's POSIX shared memory and semaphores live there, and it disappears
-  with the namespace. It becomes one more writable root; the host's
-  ``/dev/shm`` stays outside the roots and is not even visible at that path;
+- on Linux with ``--private-mounts`` (the helper runs in a new user and mount
+  namespace, ``unshare --user --map-root-user --mount``; ``unshare`` makes the
+  namespace's mounts private, so nothing propagates to the host), before
+  anything else: every mount in the namespace is made read-only in one
+  atomic step; a fresh tmpfs is mounted over ``/dev/shm``, with the size of
+  the ``/dev/shm`` it covers (the command's POSIX shared memory and
+  semaphores live there, and it disappears with the namespace; it becomes
+  one more writable root, and the host's ``/dev/shm`` stays outside the roots
+  and is not even visible at that path); and each writable root's verified
+  descriptor is cloned into a writable mount stacked on the root itself. A
+  read-only mount refuses every change to an inode beneath it (``EROFS``),
+  metadata included, so outside the roots mode, timestamps and extended
+  attributes cannot change while inside they can; the seccomp filter below
+  then leaves those syscall families to the mounts. Then ``CAP_SYS_ADMIN``
+  leaves the bounding set, so the command and everything it runs hold no
+  authority over this namespace's mounts and cannot undo them (a user
+  namespace it creates copies them with read-only locked);
 - on Linux (``--landlock``), a Landlock ruleset that handles every filesystem
   right that creates, changes, truncates or removes something and grants them
   only beneath those verified root descriptors (plus writing to ``/dev/null`` and a
@@ -33,7 +42,8 @@ before confinement. The command's environment arrives as JSON in
   The restriction is inherited by everything the command execs or forks, and
   Landlock also denies ptrace-mode access (``/proc/<pid>/environ``, ``mem``,
   ``maps``) to processes outside the domain; then the metadata seccomp
-  filter below;
+  filter below (without ``--private-mounts`` it denies the mode, timestamp
+  and extended attribute families everywhere, inside the roots too);
 - on macOS, nothing more: ``sandbox-exec`` already confined this process.
 
 It depends on nothing but the standard library, so it starts with ``-S`` (no
@@ -63,6 +73,19 @@ _LANDLOCK_RULE_PATH_BENEATH = 1
 _PR_SET_NO_NEW_PRIVS = 38
 _MS_NOSUID = 0x2
 _MS_NODEV = 0x4
+# The mount API (Linux 5.12; Landlock ABI 3 needs 6.2), from include/uapi/linux/mount.h.
+_SYS_OPEN_TREE = 428
+_SYS_MOVE_MOUNT = 429
+_SYS_MOUNT_SETATTR = 442
+_AT_FDCWD = -100
+_AT_EMPTY_PATH = 0x1000
+_AT_RECURSIVE = 0x8000
+_OPEN_TREE_CLONE = 0x1
+_MOVE_MOUNT_F_EMPTY_PATH = 0x4
+_MOVE_MOUNT_T_EMPTY_PATH = 0x40
+_MOUNT_ATTR_RDONLY = 0x1
+_PR_CAPBSET_DROP = 24
+_CAP_SYS_ADMIN = 21
 SHM_DIRECTORY = "/dev/shm"
 # ``os.O_PATH`` exists only on Linux builds of Python.
 _O_PATH: int = getattr(os, "O_PATH", 0o10000000)
@@ -304,6 +327,111 @@ def mount_private_shm() -> int:
     return fd
 
 
+def _mount_setattr(
+    syscall: Callable[..., Any], fd: int, path: bytes, flags: int, *, read_only: bool, what: str
+) -> None:
+    # struct mount_attr (MOUNT_ATTR_SIZE_VER0): u64 attr_set, attr_clr, propagation, userns_fd.
+    change = (_MOUNT_ATTR_RDONLY, 0) if read_only else (0, _MOUNT_ATTR_RDONLY)
+    attr = ctypes.create_string_buffer(struct.pack("=QQQQ", *change, 0, 0), 32)
+    _check(
+        syscall(
+            _SYS_MOUNT_SETATTR,
+            ctypes.c_int(fd),
+            ctypes.c_char_p(path),
+            ctypes.c_uint(flags),
+            attr,
+            ctypes.c_size_t(32),
+        ),
+        f"mount_setattr({what})",
+    )
+
+
+def make_mounts_read_only() -> None:
+    """Make every mount in this namespace read-only, in one atomic step.
+
+    Needs ``CAP_SYS_ADMIN`` in a mount namespace this process owns. Setting
+    the flag never needs to clear a lock the namespace copy placed, so it
+    works on every mount; it fails as a whole or applies as a whole.
+    """
+    _mount_setattr(_syscall(), _AT_FDCWD, b"/", _AT_RECURSIVE, read_only=True, what="/")
+
+
+def stack_writable_roots(roots: list[tuple[str, int, int]], root_fds: list[int]) -> None:
+    """Stack a writable clone of each verified root on the root itself.
+
+    Run after ``make_mounts_read_only``. Each clone is taken from the verified
+    descriptor (``open_tree``), made writable (only the clone's own mount; a
+    mount beneath the root stays read-only) and attached on that same
+    descriptor (``move_mount``), so no path is resolved again. A root inside
+    another root is covered by the outer clone and is not cloned itself (its
+    descriptor would name the hidden tree). The working directory still
+    points into the hidden read-only tree, so it is entered again by path.
+    """
+    syscall = _syscall()
+    for (path, _device, _inode), fd in zip(roots, root_fds, strict=True):
+        if any(other != path and _beneath(path, other) for other, _, _ in roots):
+            continue
+        clone = _check(
+            syscall(
+                _SYS_OPEN_TREE,
+                ctypes.c_int(fd),
+                ctypes.c_char_p(b""),
+                ctypes.c_uint(_OPEN_TREE_CLONE | _AT_RECURSIVE | _AT_EMPTY_PATH | os.O_CLOEXEC),
+            ),
+            f"open_tree({path})",
+        )
+        try:
+            _mount_setattr(syscall, clone, b"", _AT_EMPTY_PATH, read_only=False, what=path)
+            _check(
+                syscall(
+                    _SYS_MOVE_MOUNT,
+                    ctypes.c_int(clone),
+                    ctypes.c_char_p(b""),
+                    ctypes.c_int(fd),
+                    ctypes.c_char_p(b""),
+                    ctypes.c_uint(_MOVE_MOUNT_F_EMPTY_PATH | _MOVE_MOUNT_T_EMPTY_PATH),
+                ),
+                f"move_mount({path})",
+            )
+        finally:
+            os.close(clone)
+    os.chdir(os.getcwd())
+
+
+def drop_mount_authority() -> None:
+    """Remove ``CAP_SYS_ADMIN`` from the bounding set; refuse if it could return.
+
+    The command is exec'd as the namespace's root, whose permitted set after
+    exec is the bounding set plus its inheritable set. Dropping the
+    capability from the first and refusing when it is in the second leaves
+    the command no way to change this namespace's mounts (every mount
+    operation needs ``CAP_SYS_ADMIN`` over it), and nothing it execs can
+    regain it.
+    """
+    libc = ctypes.CDLL(None, use_errno=True)
+    _check(
+        libc.prctl(
+            ctypes.c_int(_PR_CAPBSET_DROP),
+            ctypes.c_ulong(_CAP_SYS_ADMIN),
+            ctypes.c_ulong(0),
+            ctypes.c_ulong(0),
+            ctypes.c_ulong(0),
+        ),
+        "prctl(PR_CAPBSET_DROP)",
+    )
+    with open("/proc/self/status", encoding="ascii") as handle:
+        sets = dict(line.split(":", 1) for line in handle if line.startswith("Cap"))
+    if (
+        int(sets["CapBnd"], 16) >> _CAP_SYS_ADMIN & 1
+        or int(sets["CapInh"], 16) >> _CAP_SYS_ADMIN & 1
+    ):
+        raise SandboxError("CAP_SYS_ADMIN could survive exec")
+
+
+def _beneath(path: str, parent: str) -> bool:
+    return parent == "/" or path.startswith(parent.rstrip("/") + "/")
+
+
 def restrict_writes(root_fds: list[int]) -> int:
     """Allow writes only beneath the verified root descriptors; return the ABI."""
     abi = landlock_abi()
@@ -353,8 +481,10 @@ def restrict_writes(root_fds: list[int]) -> int:
 # Landlock mediates creating, writing, truncating, removing, renaming and
 # linking, but not changing an existing inode's metadata: mode, ownership,
 # timestamps, extended attributes and inode flags. A seccomp filter denies those
-# syscalls with EPERM. It cannot see paths, so the denial is global, inside the
-# writable roots too. Numbers come from the kernel's syscall tables
+# syscalls with EPERM. It cannot see paths, so its denial is global, inside the
+# writable roots too. With ``--private-mounts`` the read-only mounts confine
+# the mode, timestamp and extended attribute families to the roots instead
+# (``MOUNT_CONFINED_METADATA``), and the filter leaves them out. Numbers come from the kernel's syscall tables
 # (arch/x86/entry/syscalls/syscall_64.tbl and scripts/syscall.tbl, v6.15);
 # syscalls numbered 424 and up share one number on every architecture. The
 # backend probe (``_sandbox_probe.py``) checks each class against a real file,
@@ -400,6 +530,28 @@ _UNIFIED_METADATA_SYSCALLS = {
     # io_uring has its own setxattr operations, which seccomp never sees.
     "io_uring_setup": 425,
 }
+# The families a read-only mount refuses outside the roots; ownership,
+# io_uring and ioctl stay with the filter on every path.
+MOUNT_CONFINED_METADATA = frozenset(
+    {
+        "chmod",
+        "fchmod",
+        "fchmodat",
+        "fchmodat2",
+        "utime",
+        "utimes",
+        "futimesat",
+        "utimensat",
+        "setxattr",
+        "lsetxattr",
+        "fsetxattr",
+        "removexattr",
+        "lremovexattr",
+        "fremovexattr",
+        "setxattrat",
+        "removexattrat",
+    }
+)
 _IOCTL_SYSCALL = {"x86_64": 16, "aarch64": 29}
 # ioctl is an allowlist: Landlock does not mediate ioctls on regular files or
 # directories, and some change an inode opened only for reading (chattr
@@ -444,10 +596,14 @@ class _SockFprog(ctypes.Structure):
     _fields_ = [("len", ctypes.c_ushort), ("filter", ctypes.POINTER(_SockFilter))]
 
 
-def metadata_filter(machine: str) -> list[tuple[int, int, int, int]]:
+def metadata_filter(
+    machine: str, *, mounts_confine: bool = False
+) -> list[tuple[int, int, int, int]]:
     """The BPF program denying metadata changes on ``machine``, as (code, jt, jf, k).
 
-    Denied with EPERM: the metadata syscall families above, and every ioctl
+    Denied with EPERM: the metadata syscall families above (without the
+    ``MOUNT_CONFINED_METADATA`` ones when ``mounts_confine``, because
+    read-only mounts confine those to the writable roots), and every ioctl
     request not in ``ALLOWED_IOCTLS``.
 
     Any other architecture in ``seccomp_data.arch`` (a 32-bit compat call) and,
@@ -455,7 +611,9 @@ def metadata_filter(machine: str) -> list[tuple[int, int, int, int]]:
     """
     if machine not in _METADATA_SYSCALLS:
         raise SandboxError(f"no metadata syscall table for {machine}")
-    denied = sorted({*_METADATA_SYSCALLS[machine].values(), *_UNIFIED_METADATA_SYSCALLS.values()})
+    syscalls = {**_METADATA_SYSCALLS[machine], **_UNIFIED_METADATA_SYSCALLS}
+    excluded = MOUNT_CONFINED_METADATA if mounts_confine else frozenset()
+    denied = sorted({number for name, number in syscalls.items() if name not in excluded})
     # Laid out so every check jumps forward to one of the two returns at the
     # end: [.., ioctl allowlist, DENY, ALLOW]. -1 targets DENY and -2 ALLOW;
     # an ioctl request that matches no allowlist entry falls through to DENY.
@@ -486,9 +644,9 @@ def metadata_filter(machine: str) -> list[tuple[int, int, int, int]]:
     return program
 
 
-def deny_metadata_changes() -> None:
+def deny_metadata_changes(*, mounts_confine: bool = False) -> None:
     """Install the metadata seccomp filter on this process (needs no_new_privs)."""
-    program = metadata_filter(os.uname().machine)
+    program = metadata_filter(os.uname().machine, mounts_confine=mounts_confine)
     filters = (_SockFilter * len(program))(*(_SockFilter(*item) for item in program))
     fprog = _SockFprog(len(program), filters)
     libc = ctypes.CDLL(None, use_errno=True)
@@ -558,8 +716,8 @@ def require_loopback_only() -> None:
 def _parse(
     arguments: list[str],
 ) -> tuple[bool, bool, bool, bool, list[tuple[str, int, int]], list[str]]:
-    private_shm = bool(arguments) and arguments[0] == "--private-shm"
-    if private_shm:
+    private_mounts = bool(arguments) and arguments[0] == "--private-mounts"
+    if private_mounts:
         arguments = arguments[1:]
     loopback = bool(arguments) and arguments[0] == "--loopback-up"
     if loopback:
@@ -581,12 +739,12 @@ def _parse(
         index += 4
     if index >= len(arguments) or arguments[index] != "--" or index + 1 >= len(arguments):
         raise SandboxError(
-            "usage: [--private-shm] [--loopback-up] [--require-loopback-only] [--landlock] "
+            "usage: [--private-mounts] [--loopback-up] [--require-loopback-only] [--landlock] "
             "--root DIR DEV INO ... -- ARGV..."
         )
     if not roots:
         raise SandboxError("at least one --root is required")
-    return private_shm, loopback, offline, landlock, roots, arguments[index + 1 :]
+    return private_mounts, loopback, offline, landlock, roots, arguments[index + 1 :]
 
 
 def _command_environment() -> dict[str, str]:
@@ -606,17 +764,20 @@ def _command_environment() -> dict[str, str]:
 
 def main(arguments: list[str]) -> int:
     try:
-        private_shm, loopback, offline, landlock, roots, command = _parse(arguments)
+        private_mounts, loopback, offline, landlock, roots, command = _parse(arguments)
         env = _command_environment()
         root_fds = open_verified_roots(roots)
         try:
-            if private_shm:
+            if private_mounts:
+                make_mounts_read_only()
+                stack_writable_roots(roots, root_fds)
                 root_fds.append(mount_private_shm())
+                drop_mount_authority()
             if loopback:
                 bring_loopback_up()
             if landlock:
                 restrict_writes(root_fds)
-                deny_metadata_changes()
+                deny_metadata_changes(mounts_confine=private_mounts)
             refuse_root_aliases(root_fds)
         finally:
             for fd in root_fds:
