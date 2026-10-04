@@ -34,9 +34,8 @@ the bytes of their files.
   oracle checks that passed on the candidate entered
   (``regressions_to_keep``): the oracle adjudicates that behaviour, and the
   old test pins what the criterion changed.
-- **Worker tests** (``ArtifactCheck.WORKER_TESTS``). Each test file the
-  candidate adds (at most ``WORKER_TEST_FILES``, in path order) is run alone
-  on a copy of the candidate, under the worker's own configuration. A run that exits 1
+- **Worker tests** (``ArtifactCheck.WORKER_TESTS``). Every test file the
+  candidate adds is run alone, in path order, on its own copy of the candidate, under the worker's own configuration. A run that exits 1
   with a report naming a failing test fails; exit 0 passes and proves
   nothing; any other exit (2 usage or interrupted, 5 nothing collected) is
   not a test result.
@@ -183,8 +182,6 @@ _REPAIR_NAMES = 10
 
 MASS_BREAKAGE = 20
 """More regressed tests than this are never exempt: the change broke too much to adjudicate."""
-WORKER_TEST_FILES = 5
-"""At most this many added test files run in the worker-test gate (first in path order)."""
 _BASE_ATTEMPTS = 2
 _ROOT_CONFIGS = ("pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg")
 
@@ -1258,7 +1255,7 @@ class ArtifactChecks:
 
     async def _worker_tests(self, candidate: Path, added: Sequence[str]) -> ArtifactFinding:
         check = ArtifactCheck.WORKER_TESTS
-        files = worker_test_files(added)[:WORKER_TEST_FILES]
+        files = worker_test_files(added)
         if not files:
             return ArtifactFinding(check, ArtifactCheckOutcome.NO_SELECTED_FILES)
         failed: list[str] = []
@@ -1522,7 +1519,6 @@ __all__ = [
     "BASE_REGRESSION_DEFAULT",
     "REGRESSION_REASON",
     "WORKER_TESTS_REASON",
-    "WORKER_TEST_FILES",
     "ArtifactCheckMode",
     "ArtifactCheckOutcome",
     "ArtifactEffect",

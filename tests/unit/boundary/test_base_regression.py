@@ -1521,20 +1521,22 @@ async def test_a_failure_that_passes_when_rerun_is_not_a_regression(
     assert runner.calls[-1][1] == tuple(sorted(nodeids.values()))
 
 
-async def test_the_gate_runs_at_most_five_added_test_files(
+async def test_the_gate_runs_every_added_test_file(
     trees: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     base, candidate = trees
     (candidate / "calc/ops.py").write_text(BASE_TREE["calc/ops.py"])
     for index in range(7):
         (candidate / f"calc/tests/test_new_{index}.py").write_text("def test_x():\n    pass\n")
-    runner = _Runner([], [_run({"t::x": "pass"}, 0)] * 7)
+    runner = _Runner([], [_run({"t::x": "pass"}, 0)] * 6 + [_run({"t::x": "fail"}, 1)])
     monkeypatch.setattr(br, "_pytest", runner)
 
     _regression, worker = await _checks(base).findings(candidate)
 
-    assert worker.selected == tuple(f"calc/tests/test_new_{i}.py" for i in range(5))
-    assert len(runner.calls) == br.WORKER_TEST_FILES
+    assert worker.selected == tuple(f"calc/tests/test_new_{i}.py" for i in range(7))
+    assert len(runner.calls) == 7
+    assert worker.outcome is br.ArtifactCheckOutcome.REJECTED
+    assert worker.failed == ("calc/tests/test_new_6.py",)
 
 
 async def test_a_timed_out_base_is_tried_once_more_then_kept(
