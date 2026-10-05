@@ -374,7 +374,17 @@ def _release_state(
         if unlock_error is not None:
             raise unlock_error
 
-    path = Mock(unlink=Mock(side_effect=unlink), read_text=Mock(side_effect=OSError("unreadable")))
+    path = Mock(unlink=Mock(side_effect=unlink))
+    path.name = "release-test"
+    release_path = Mock(unlink=Mock(side_effect=unlink))
+    path.with_name.return_value = release_path
+
+    def replace(target: object) -> object:
+        assert target is release_path
+        events.append("replace")
+        return target
+
+    path.replace.side_effect = replace
     os_api = SimpleNamespace(name=platform, close=Mock(side_effect=close))
     fcntl_api = SimpleNamespace(LOCK_UN=8, flock=Mock(side_effect=unlock))
     descriptors = {"release-test": descriptor}
@@ -383,13 +393,18 @@ def _release_state(
     monkeypatch.setattr(heartbeat, "lock_path", Mock(return_value=path))
     monkeypatch.setattr(heartbeat, "_HELD_LEASE_FDS", descriptors)
     return SimpleNamespace(
-        events=events, path=path, os=os_api, fcntl=fcntl_api, descriptors=descriptors
+        events=events,
+        path=path,
+        release_path=release_path,
+        os=os_api,
+        fcntl=fcntl_api,
+        descriptors=descriptors,
     )
 
 
 @pytest.mark.parametrize(
     ("platform", "expected"),
-    [("nt", ["close", "unlink"]), ("posix", ["unlink", "unlock", "close"])],
+    [("nt", ["close", "replace", "unlink"]), ("posix", ["unlink", "unlock", "close"])],
 )
 def test_release_preserves_platform_resource_order(
     monkeypatch: pytest.MonkeyPatch, platform: str, expected: list[str]
@@ -415,7 +430,8 @@ def test_release_attempts_close_only_once_when_close_fails(
         heartbeat.release("release-test")
 
     state.os.close.assert_called_once_with(73)
-    state.path.unlink.assert_called_once_with(missing_ok=True)
+    unlink = state.release_path.unlink if platform == "nt" else state.path.unlink
+    unlink.assert_called_once_with(missing_ok=True)
     assert state.descriptors == {}
     assert any(
         record.levelno >= logging.WARNING
@@ -449,37 +465,34 @@ def test_release_closes_descriptor_and_warns_when_unlink_fails(
     assert all(record.getMessage() != "session_lock.released" for record in caplog.records)
 
 
-def test_windows_release_retries_transient_sharing_violation_for_same_owner(
+def test_windows_release_retries_transient_rename_sharing_violation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = _release_state(monkeypatch, platform="nt")
-    state.path.read_text = Mock(return_value="123:456")
-    state.path.unlink = Mock(side_effect=[PermissionError("sharing violation"), None])
+    state.path.replace = Mock(
+        side_effect=[PermissionError("sharing violation"), state.release_path]
+    )
     sleep = Mock()
     monkeypatch.setattr(heartbeat.time, "sleep", sleep)
 
     heartbeat.release("release-test")
 
-    assert state.events == ["close"]
-    assert state.path.unlink.call_count == 2
-    assert state.path.read_text.call_count == 2
+    assert state.events == ["close", "unlink"]
+    assert state.path.replace.call_count == 2
+    state.release_path.unlink.assert_called_once_with(missing_ok=True)
     sleep.assert_called_once_with(0.01)
 
 
-def test_windows_release_does_not_retry_after_owner_payload_changes(
+def test_windows_release_never_unlinks_the_successor_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = _release_state(monkeypatch, platform="nt")
-    state.path.read_text = Mock(side_effect=["123:456", "789:012"])
-    state.path.unlink = Mock(side_effect=PermissionError("sharing violation"))
-    sleep = Mock()
-    monkeypatch.setattr(heartbeat.time, "sleep", sleep)
 
     heartbeat.release("release-test")
 
-    assert state.events == ["close"]
-    state.path.unlink.assert_called_once_with(missing_ok=True)
-    sleep.assert_not_called()
+    assert state.events == ["close", "replace", "unlink"]
+    state.path.unlink.assert_not_called()
+    state.release_path.unlink.assert_called_once_with(missing_ok=True)
 
 
 def test_posix_release_still_closes_descriptor_when_unlock_fails(
@@ -511,7 +524,11 @@ def test_repeated_release_never_closes_a_consumed_descriptor(
     heartbeat.release("release-test")
 
     state.os.close.assert_called_once_with(73)
-    assert state.path.unlink.call_count == 2
+    if platform == "nt":
+        state.release_path.unlink.assert_called_once_with(missing_ok=True)
+        state.path.unlink.assert_called_once_with(missing_ok=True)
+    else:
+        assert state.path.unlink.call_count == 2
     assert state.descriptors == {}
 
 
@@ -551,5 +568,5 @@ def test_owned_release_wrapper_returns_ownership_match_even_when_unlink_fails(
     assert heartbeat.release_if_owned_by_current_process("release-test") is True
 
     state.os.close.assert_called_once_with(73)
-    state.path.unlink.assert_called_once_with(missing_ok=True)
+    state.release_path.unlink.assert_called_once_with(missing_ok=True)
     assert state.descriptors == {}

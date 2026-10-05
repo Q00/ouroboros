@@ -334,12 +334,10 @@ def release(session_id: str) -> None:
     path = lock_path(session_id)
     with _LEASE_OPERATION_LOCK:
         fd = _HELD_LEASE_FDS.pop(session_id, None)
-        windows_owner_payload: str | None = None
+        windows_owned_release = os.name == "nt" and fd is not None
+        windows_release_path: Path | None = None
+        windows_move_succeeded = False
         if os.name == "nt" and fd is not None:
-            try:
-                windows_owner_payload = path.read_text().strip()
-            except OSError:
-                pass
             # Windows cannot unlink this file while our descriptor is open.
             # Consume it before closing so an ambiguous close failure cannot
             # cause finally to close a descriptor that has since been reused.
@@ -352,24 +350,35 @@ def release(session_id: str) -> None:
                     extra={"session_id": session_id, "operation": "close"},
                     exc_info=True,
                 )
+            candidate = path.with_name(f".{path.name}.release-{uuid4().hex}")
+            move_error: OSError | None = None
+            for attempt in range(3):
+                try:
+                    path.replace(candidate)
+                    windows_release_path = candidate
+                    windows_move_succeeded = True
+                    break
+                except FileNotFoundError:
+                    windows_move_succeeded = True
+                    break
+                except OSError as exc:
+                    move_error = exc
+                    if attempt < 2:
+                        time.sleep(0.01)
+            if not windows_move_succeeded:
+                log.warning(
+                    "session_lock.release_failed",
+                    extra={"session_id": session_id, "operation": "rename"},
+                    exc_info=move_error,
+                )
         unlink_error: OSError | None = None
-        unlink_attempts = 3 if windows_owner_payload is not None else 1
-        for attempt in range(unlink_attempts):
+        unlink_path = windows_release_path if windows_owned_release else path
+        if unlink_path is not None:
             try:
-                path.unlink(missing_ok=True)
-                unlink_error = None
-                break
+                unlink_path.unlink(missing_ok=True)
             except OSError as exc:
                 unlink_error = exc
-                if attempt + 1 >= unlink_attempts:
-                    break
-                try:
-                    if path.read_text().strip() != windows_owner_payload:
-                        break
-                except OSError:
-                    break
-                time.sleep(0.01)
-        if unlink_error is None:
+        if unlink_error is None and (not windows_owned_release or windows_move_succeeded):
             log.info(
                 "session_lock.released",
                 extra={"session_id": session_id},
