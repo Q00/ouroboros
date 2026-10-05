@@ -257,6 +257,54 @@ async def test_a_plain_script_that_exits_by_result_finds_a_regression(tmp_path: 
     assert passing.outcome is Outcome.NO_SELECTED_FILES
 
 
+async def test_a_runner_script_the_worker_edits_runs_with_its_base_bytes(tmp_path: Path) -> None:
+    files = {**SCRIPT_BASE, "run_one.sh": 'PYTHONPATH="$PWD" exec python "$1"\n'}
+    base = _tree(tmp_path / "base", files)
+    candidate = _tree(tmp_path / "work", files)
+    # A change the pinned test does not notice, and a runner that fails everything.
+    (candidate / "calc/ops.py").write_text(
+        "def add(a, b):\n    return a - b\n\n\ndef mul(a, b):\n    return a * b\n"
+    )
+    (candidate / "run_one.sh").write_text("exit 1\n")
+
+    regression, _worker = await _checks(
+        base, seed_commands=("sh run_one.sh tests/test_calc.py",)
+    ).findings(candidate)
+
+    assert regression.outcome is Outcome.PASSED and not regression.failed
+
+
+def test_package_json_gets_its_base_scripts_and_keeps_the_rest(tmp_path: Path) -> None:
+    import json
+
+    base = _tree(
+        tmp_path / "base",
+        {"package.json": json.dumps({"scripts": {"test": "jest"}, "dependencies": {}})},
+    )
+    copy = _tree(
+        tmp_path / "copy",
+        {
+            "package.json": json.dumps(
+                {
+                    "type": "module",
+                    "scripts": {"test": "exit 1", "pretest": "exit 1"},
+                    "dependencies": {"left-pad": "1.3.0"},
+                }
+            )
+        },
+    )
+    manifest = {"package.json": "digest"}
+    command = tc.TargetCommand(("npm", "test", "--", "{target}"), tc.CommandSource.DEFAULT)
+
+    assert br.restore_runner_config(copy, base, manifest, command)
+
+    assert json.loads((copy / "package.json").read_text()) == {
+        "type": "module",
+        "dependencies": {"left-pad": "1.3.0"},
+        "scripts": {"test": "jest"},
+    }
+
+
 JUNIT_RUNNER = """import importlib.util, sys, xml.sax.saxutils as x
 sys.path.insert(0, ".")
 spec = importlib.util.spec_from_file_location("target", sys.argv[1])

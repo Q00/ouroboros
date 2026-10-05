@@ -62,7 +62,10 @@ test command taken, as data, from the Seed's ``verify_command``, the
 constructor's declared ``test_command``, the worker's own test invocations or
 a built-in default, and used only once admitted on the base: it exits 0 on
 two base copies and fails when the target is replaced with unparseable bytes
-(``target_commands.judge_admission``). Its exit status decides per target
+(``target_commands.judge_admission``). The candidate copy it runs on has the
+runner configuration it was admitted with: the base bytes of every file its
+template names and the base ``scripts`` of ``package.json``
+(``restore_runner_config``). Its exit status decides per target
 (the floor: 0 on both base runs, nonzero on the candidate and again on a
 rerun), or its JUnit report per test when it writes one (``{report}``). A
 Python target without an admitted declared command takes the product's own
@@ -90,6 +93,7 @@ from configparser import ConfigParser
 from configparser import Error as ConfigError
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
+import json
 import os
 from pathlib import Path, PurePosixPath
 import posixpath
@@ -184,6 +188,7 @@ MASS_BREAKAGE = 20
 """More regressed tests than this are never exempt: the change broke too much to adjudicate."""
 _BASE_ATTEMPTS = 2
 _ROOT_CONFIGS = ("pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg")
+_PACKAGE_JSON = "package.json"
 
 
 class ArtifactCheckOutcome(StrEnum):
@@ -553,9 +558,10 @@ async def _pytest(
     (the regression runs, where that error is a finding); pytest then exits 1
     for the collection error alone, so a single worker test file never uses it
     and a file that cannot be collected keeps pytest's own exit 2. ``config``
-    is the only configuration file pytest reads (``-c``, with ``--rootdir`` the
-    copy and ``addopts`` cleared); without it the copy's own configuration
-    applies (the worker-test gate). The bootstrap's plan names ``watched``
+    is the only configuration file pytest reads (``-c``, with ``addopts``
+    cleared); without it the copy's own configuration applies (the
+    worker-test gate). ``--rootdir`` is always the copy, so test ids never
+    depend on a configuration file above it. The bootstrap's plan names ``watched``
     (the changed functions, whose per-test footprint it records) and
     ``modules`` (whose import location it records). Report, plan and record
     live in the run's scratch directory, outside the copy; like the report,
@@ -566,9 +572,8 @@ async def _pytest(
     # root (a temp directory behind a link) would name them from elsewhere.
     root = root.resolve()
     controlled = (
-        ("-o", "addopts=", f"--rootdir={root}", "-c", str(config.resolve()))
-        if config is not None
-        else ()
+        f"--rootdir={root}",
+        *(("-o", "addopts=", "-c", str(config.resolve())) if config is not None else ()),
     )
     with check_scratch(root.parent) as scratch:
         token = secrets.token_hex(8)
@@ -1170,7 +1175,9 @@ class ArtifactChecks:
             prepared = await asyncio.to_thread(
                 _prepare_candidate_copy, copy_root, base, self._base_manifest, manifest, restored
             )
-            if not prepared:
+            if not prepared or not await asyncio.to_thread(
+                restore_runner_config, copy_root, base, self._base_manifest, admission.command
+            ):
                 return ArtifactCheckOutcome.UNAVAILABLE, ()
             regressed: tuple[str, ...] = ()
             for attempt in range(2):
@@ -1197,6 +1204,13 @@ class ArtifactChecks:
                     if not regressed:
                         break
                     await asyncio.to_thread(restore_base_bytes, copy_root, base, restored)
+                    await asyncio.to_thread(
+                        restore_runner_config,
+                        copy_root,
+                        base,
+                        self._base_manifest,
+                        admission.command,
+                    )
                 elif admission.tier is Tier.JUNIT:
                     # A second observed failure of the same test, or nothing.
                     again, no_result = _confirmed(regressed, run.statuses, run.exit_code)
@@ -1379,6 +1393,46 @@ def _prepare_candidate_copy(
     return neutralize_config(copy_root, base, base_manifest, manifest) and restore_base_bytes(
         copy_root, base, restored
     )
+
+
+def restore_runner_config(
+    copy_root: Path, base: Path, base_manifest: Mapping[str, str], command: TargetCommand
+) -> bool:
+    """Give an admitted command the runner configuration it was admitted with.
+
+    Every base file the command's template names (``tests/runtests.py``,
+    ``bin/test``, a runner script) gets its base bytes back, and the
+    candidate's ``package.json`` its base ``scripts`` (what ``npm test`` and
+    its ``pretest``/``posttest`` hooks run); the rest of that file, its
+    dependencies and module settings, stays the worker's. ``False`` when a
+    path cannot be written without going through a link.
+    """
+    named = tuple(token for token in command.template if _regular(base_manifest.get(token)))
+    if not restore_base_bytes(copy_root, base, named):
+        return False
+    if not _regular(base_manifest.get(_PACKAGE_JSON)):
+        return True
+    try:
+        base_package = json.loads((base / _PACKAGE_JSON).read_bytes())
+    except ValueError:
+        return True
+    if not isinstance(base_package, dict):
+        return True
+    target = copy_root / _PACKAGE_JSON
+    try:
+        package = json.loads(target.read_bytes()) if not target.is_symlink() else None
+    except (OSError, ValueError):
+        package = None
+    if not isinstance(package, dict):
+        return restore_base_bytes(copy_root, base, (_PACKAGE_JSON,))
+    if package.get("scripts") == base_package.get("scripts"):
+        return True
+    package.pop("scripts", None)
+    if "scripts" in base_package:
+        package["scripts"] = base_package["scripts"]
+    os.unlink(target)
+    target.write_text(json.dumps(package, indent=2) + "\n", encoding="utf-8")
+    return True
 
 
 def _unavailable() -> tuple[ArtifactFinding, ArtifactFinding]:
