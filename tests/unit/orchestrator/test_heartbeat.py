@@ -483,6 +483,30 @@ def test_windows_release_retries_transient_rename_sharing_violation(
     sleep.assert_called_once_with(0.01)
 
 
+def test_windows_release_reports_only_rename_when_all_move_attempts_fail(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    state = _release_state(monkeypatch, platform="nt")
+    state.path.replace = Mock(side_effect=PermissionError("rename denied"))
+    sleep = Mock()
+    monkeypatch.setattr(heartbeat.time, "sleep", sleep)
+
+    with caplog.at_level(logging.WARNING):
+        heartbeat.release("release-test")
+
+    assert state.path.replace.call_count == 3
+    assert sleep.call_count == 2
+    state.path.unlink.assert_not_called()
+    state.release_path.unlink.assert_not_called()
+    operations = [
+        getattr(record, "operation", None)
+        for record in caplog.records
+        if record.getMessage() == "session_lock.release_failed"
+    ]
+    assert operations == ["rename"]
+
+
 def test_windows_release_never_unlinks_the_successor_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

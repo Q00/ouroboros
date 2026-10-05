@@ -378,17 +378,18 @@ def release(session_id: str) -> None:
                 unlink_path.unlink(missing_ok=True)
             except OSError as exc:
                 unlink_error = exc
-        if unlink_error is None and (not windows_owned_release or windows_move_succeeded):
-            log.info(
-                "session_lock.released",
-                extra={"session_id": session_id},
-            )
-        else:
-            log.warning(
-                "session_lock.release_failed",
-                extra={"session_id": session_id, "operation": "unlink"},
-                exc_info=unlink_error,
-            )
+        if not windows_owned_release or windows_move_succeeded:
+            if unlink_error is None:
+                log.info(
+                    "session_lock.released",
+                    extra={"session_id": session_id},
+                )
+            else:
+                log.warning(
+                    "session_lock.release_failed",
+                    extra={"session_id": session_id, "operation": "unlink"},
+                    exc_info=unlink_error,
+                )
         if fd is not None:
             if fcntl is not None:
                 try:
