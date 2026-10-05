@@ -543,6 +543,11 @@ def _execution_axes(events: list[BaseEvent], *, execution_id: str) -> _Execution
             if dispatch_kind == "session_signal_followup":
                 invalid_dispatch = True
                 continue
+            if dispatch_kind == "evidence_turn":
+                # The controller's tool-less evidence turn on a finished
+                # attempt: verification, not attempt work; no token row is
+                # expected for it.
+                continue
             if dispatch_kind != "primary" or key is None:
                 invalid_dispatch = True
                 continue

@@ -1272,6 +1272,27 @@ def test_runtime_evidence_requires_exact_attempt_coverage(case: str) -> None:
     assert observation.evidence_issues
 
 
+def test_an_evidence_turn_dispatch_keeps_attempt_coverage_exact() -> None:
+    """The controller's evidence turn is verification, not attempt work."""
+    events = _complete_execution_events()
+    complete = _built_observation(events)
+    events.append(
+        events[0].model_copy(
+            update={
+                "data": {
+                    **events[0].data,
+                    "dispatch_kind": "evidence_turn",
+                    "ac_dispatch_id": "e" * 32,
+                    "follow_up_input_digest": "sha256:" + "1" * 64,
+                }
+            }
+        )
+    )
+    observation = _built_observation(events)
+    assert observation.token_evidence_complete == complete.token_evidence_complete
+    assert observation.evidence_issues == complete.evidence_issues
+
+
 @pytest.mark.parametrize(
     "ac_results",
     [

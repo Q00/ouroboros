@@ -240,6 +240,34 @@ class ClarificationConfig(BaseModel, frozen=True):
     default_model: str = "auto"
 
 
+class EvidenceCallOrderingWeights(BaseModel, frozen=True):
+    """Weights of the structural features that order the evidence turn's call list.
+
+    The evidence turn shows the worker the controller's own numbered record of
+    its shell calls, most likely evidence first. Each weight multiplies one
+    structural feature of a recorded call (0 or 1); ties keep transcript order.
+    The order changes only what the worker sees first, never what a cited
+    number proves. See ``orchestrator/evidence/call_ordering.py``.
+
+    Attributes:
+        verification: The call runs a test runner, an allowlisted runner, or a
+            Python program.
+        exercises_patch: The call names a file the final workspace changed.
+        latest_of_command: No later call recorded the same command.
+        passed: The call's recorded result is a pass.
+        after_last_edit: The call ran after the last edit of the changed files
+            it names.
+        replayable: The recorded command can be replayed by the controller.
+    """
+
+    verification: float = Field(default=4.0, ge=0.0)
+    exercises_patch: float = Field(default=2.0, ge=0.0)
+    latest_of_command: float = Field(default=2.0, ge=0.0)
+    passed: float = Field(default=1.0, ge=0.0)
+    after_last_edit: float = Field(default=1.0, ge=0.0)
+    replayable: float = Field(default=0.5, ge=0.0)
+
+
 class ExecutionConfig(BaseModel, frozen=True):
     """Phase 2 (Execution) configuration.
 
@@ -280,6 +308,12 @@ class ExecutionConfig(BaseModel, frozen=True):
             (stack, verify commands, layout) to run worker system prompts.
         project_guidance: Allowlist of project guidance ids to resolve from
             fixed project-local paths under ``.ouroboros/guidance/<id>/GUIDANCE.md``.
+        evidence_relevance_veto: Whether a model judges, after the evidence
+            turn, whether each cited passing call checks the criterion. The
+            judgement can only withhold a citation's evidence, never grant
+            it. On by default.
+        evidence_call_ordering: Weights that order the evidence turn's list
+            of recorded calls (``EvidenceCallOrderingWeights``).
         default_policy: Persistent default execution policy for FRESH runs
             (#1733). ``ask`` (the default) preserves the host's interactive
             prompt exactly; ``efficient`` resolves to adaptive/observe and
@@ -306,6 +340,10 @@ class ExecutionConfig(BaseModel, frozen=True):
     context_pack: bool = True
     project_guidance: tuple[str, ...] = ()
     default_policy: Literal["ask", "efficient", "quality_first"] = "ask"
+    evidence_relevance_veto: bool = True
+    evidence_call_ordering: EvidenceCallOrderingWeights = Field(
+        default_factory=EvidenceCallOrderingWeights
+    )
 
     @field_validator("decomposition_mode", mode="before")
     @classmethod

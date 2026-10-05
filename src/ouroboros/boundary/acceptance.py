@@ -130,6 +130,24 @@ class Governor(StrEnum):
     EXISTING_VERIFIER = "existing_verifier"
 
 
+class AcceptedBy(StrEnum):
+    """What an accepted criterion's acceptance rests on (reconciliation and telemetry).
+
+    ``check_package``: a package pass. Otherwise the existing verifier's
+    evidence: ``transcript_evidence`` (the worker cited the controller's own
+    recorded calls by number in the evidence turn), ``command_strings`` (the
+    worker's command strings matched against the transcript, a record without
+    an evidence turn), ``verify_command`` (the criterion's own verify command
+    passed), or ``no_evidence``.
+    """
+
+    CHECK_PACKAGE = "check_package"
+    TRANSCRIPT_EVIDENCE = "transcript_evidence"
+    COMMAND_STRINGS = "command_strings"
+    VERIFY_COMMAND = "verify_command"
+    NO_EVIDENCE = "no_evidence"
+
+
 class VerificationCoverage(StrEnum):
     """How much of a run the package decided (``verification_coverage``)."""
 
@@ -453,6 +471,9 @@ class LegacyNoEvidenceReason(StrEnum):
     SCRIPT_ABSENT_FROM_ARTIFACT = "script_absent_from_artifact"
     """Every unproven claim is a recorded run whose script left the workspace,
     so it was not replayed (``SCRIPT_ABSENT_FROM_ARTIFACT``)."""
+    CITED_EVIDENCE_WITHHELD = "cited_evidence_withheld"
+    """The worker cited recorded calls by number, none was fabricated, and none
+    the controller needed could be proven (``CITED_EVIDENCE_WITHHELD``)."""
     VERIFIER_VERDICT_NOT_PASSED = "verifier_verdict_not_passed"
     """A verdict that did not pass, with no rejection the executor made."""
 
@@ -471,6 +492,9 @@ class ExistingOutcome:
     unavailable, environment unverifiable); never set on a rejection."""
     no_evidence_reason: LegacyNoEvidenceReason | None = None
     """Why ``no_evidence`` is set; ``None`` when it is not. Decides nothing."""
+    evidence_path: AcceptedBy | None = None
+    """Which evidence the existing verifier accepted on (never ``check_package``
+    or ``no_evidence``); ``None`` without evidence. Decides nothing."""
 
     @property
     def passed(self) -> bool:
@@ -540,6 +564,8 @@ class CriterionDecision:
     failed_outside_package: bool = field(default=False, kw_only=True)
     """Not accepted because the worker's attempt failed a gate the package does
     not decide (``ExistingOutcome.failed_outside_package``); display only."""
+    accepted_by: AcceptedBy | None = field(default=None, kw_only=True)
+    """What the acceptance rests on (``AcceptedBy``); ``None`` when not accepted."""
 
     @property
     def legacy_decided(self) -> bool:
@@ -566,6 +592,7 @@ class CriterionDecision:
             "accepted": self.accepted,
             "governed_by": self.governed_by.value,
             "declared_binding_pass": self.declared_binding_pass,
+            "accepted_by": self.accepted_by.value if self.accepted_by is not None else None,
         }
 
 
@@ -710,6 +737,14 @@ def reconcile_acceptance(
             verdict = replace(verdict, reason=A_PRIME_CORROBORATES_ONLY)
         else:
             accepted, governor = True, Governor.CHECK_PACKAGE
+        accepted_by = None
+        if accepted:
+            if governor is Governor.CHECK_PACKAGE and not status.is_unverified:
+                accepted_by = AcceptedBy.CHECK_PACKAGE
+            elif prior is not None and not prior.no_evidence and prior.evidence_path is not None:
+                accepted_by = prior.evidence_path
+            else:
+                accepted_by = AcceptedBy.NO_EVIDENCE
         decisions.append(
             CriterionDecision(
                 root_ac_index=index,
@@ -726,6 +761,7 @@ def reconcile_acceptance(
                 binding=verdict.binding,
                 declared_binding_pass=verdict.declared_binding_pass,
                 failed_outside_package=prior is not None and prior.failed_outside_package,
+                accepted_by=accepted_by,
             )
         )
     run_accepted = bool(decisions) and all(decision.accepted for decision in decisions)

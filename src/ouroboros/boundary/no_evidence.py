@@ -98,7 +98,9 @@ def report_no_evidence(
     check_package_status: str,
     runtime_backend: str | None,
 ) -> None:
-    """Send one ``acceptance_no_evidence`` event when any criterion was accepted without evidence.
+    """Send one ``acceptance_no_evidence`` event when any criterion was accepted without
+    evidence, and one ``acceptance_basis`` event counting what each accepted
+    criterion rests on (``AcceptedBy``).
 
     Fire-and-forget: never raises, never changes a decision.
     """
@@ -113,6 +115,17 @@ def report_no_evidence(
             surface=surface,
             check_package=check_package,
             check_package_status=check_package_status,
+            runtime_backend=runtime_backend,
+        )
+        usage_telemetry.capture_acceptance_basis(
+            (
+                decision.accepted_by.value if decision.accepted_by is not None else None
+                for decision in reconciliation.decisions
+                if decision.accepted
+            ),
+            criterion_count=len(reconciliation.decisions),
+            surface=surface,
+            check_package=check_package,
             runtime_backend=runtime_backend,
         )
     except Exception:  # noqa: BLE001 - telemetry must never affect the run

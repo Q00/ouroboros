@@ -1064,7 +1064,23 @@ async def test_capsule_resume_rejects_handle_from_older_dispatch_after_follow_up
 
 
 @pytest.mark.asyncio
-async def test_capsule_resume_rejects_unsealed_session_signal_follow_up_phase(tmp_path) -> None:
+@pytest.mark.parametrize(
+    ("follow_up_kind", "match"),
+    [
+        (
+            {
+                "dispatch_kind": "session_signal_followup",
+                "signal_id": "signal-1",
+                "signal_mode": "inform",
+            },
+            "follow-up.*cannot be resumed",
+        ),
+        ({"dispatch_kind": "evidence_turn"}, "evidence turn.*cannot be resumed"),
+    ],
+)
+async def test_capsule_resume_rejects_unsealed_session_signal_follow_up_phase(
+    tmp_path, follow_up_kind: dict[str, str], match: str
+) -> None:
     """Recovery must not re-enter the primary AC after an interrupted follow-up."""
     capsule = _capsule(tmp_path)
     identity = build_ac_runtime_identity(0, execution_context_id="execution-1", retry_attempt=0)
@@ -1121,9 +1137,7 @@ async def test_capsule_resume_rejects_unsealed_session_signal_follow_up_phase(tm
                 "ac_dispatch_id": follow_up_id,
                 "previous_ac_dispatch_id": primary_id,
                 "capsule_fingerprint": capsule.fingerprint,
-                "dispatch_kind": "session_signal_followup",
-                "signal_id": "signal-1",
-                "signal_mode": "inform",
+                **follow_up_kind,
                 "follow_up_input_digest": "sha256:" + "1" * 64,
                 "runtime": follow_up_handle.to_persisted_dict(),
             },
@@ -1139,7 +1153,7 @@ async def test_capsule_resume_rejects_unsealed_session_signal_follow_up_phase(tm
     ]
     manager = _manager_for_events(events)
 
-    with pytest.raises(AmbiguousACExecutionError, match="follow-up.*cannot be resumed"):
+    with pytest.raises(AmbiguousACExecutionError, match=match):
         await manager._load_persisted_ac_runtime_handle(
             0,
             execution_context_id="execution-1",
@@ -1342,3 +1356,47 @@ async def test_session_signal_follow_up_dispatch_links_predecessor(tmp_path) -> 
 
     assert persisted[-1].data["previous_ac_dispatch_id"] == "1" * 32
     assert persisted[-1].data["dispatch_kind"] == "session_signal_followup"
+
+
+@pytest.mark.asyncio
+async def test_evidence_turn_dispatch_carries_its_input_digest_and_no_signal(tmp_path) -> None:
+    capsule = _capsule(tmp_path)
+    identity = build_ac_runtime_identity(0, execution_context_id="execution-1", retry_attempt=0)
+    persisted: list[BaseEvent] = []
+
+    class _Store:
+        async def append(self, event: BaseEvent) -> None:
+            persisted.append(event)
+
+    async def _append(event: BaseEvent) -> bool:
+        persisted.append(event)
+        return True
+
+    emitter = ExecutionEventEmitter(_Store(), safe_emit_event=_append)
+    handle = RuntimeHandle(
+        backend="codex_cli",
+        cwd=str(tmp_path.resolve()),
+        metadata={"ac_capsule_fingerprint": capsule.fingerprint, "ac_dispatch_id": "2" * 32},
+    )
+    common = {
+        "runtime_identity": identity,
+        "dispatch_id": "2" * 32,
+        "previous_dispatch_id": "1" * 32,
+        "execution_id": "execution-1",
+        "session_id": "session-1",
+        "capsule_fingerprint": capsule.fingerprint,
+        "request_authority_digest": "sha256:" + "f" * 64,
+        "session_origin": "restored_same_attempt",
+        "runtime_handle": handle,
+        "dispatch_kind": "evidence_turn",
+    }
+    with pytest.raises(ValueError, match="evidence turn dispatch metadata is invalid"):
+        await emitter.emit_ac_attempt_dispatched(**common)
+    with pytest.raises(ValueError, match="evidence turn dispatch metadata is invalid"):
+        await emitter.emit_ac_attempt_dispatched(
+            **common,
+            signal_id="signal-1",
+            follow_up_input_digest="sha256:" + "1" * 64,
+        )
+    await emitter.emit_ac_attempt_dispatched(**common, follow_up_input_digest="sha256:" + "1" * 64)
+    assert persisted[-1].data["dispatch_kind"] == "evidence_turn"

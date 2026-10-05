@@ -1722,3 +1722,46 @@ class TestAcceptanceNoEvidence:
         self._capture(None)
         telemetry.flush(timeout=2.0)
         assert sent == []
+
+
+class TestAcceptanceBasis:
+    """Counts of accepted criteria by what the acceptance rests on."""
+
+    @staticmethod
+    def _capture(bases: Any, **overrides: Any) -> None:
+        kwargs: dict[str, Any] = {
+            "criterion_count": 3,
+            "surface": "cli_run",
+            "check_package": "on",
+            "runtime_backend": "codex",
+        }
+        kwargs.update(overrides)
+        telemetry.capture_acceptance_basis(bases, **kwargs)
+
+    def test_counts_each_basis_and_folds_the_rest(self, sent: list[dict[str, Any]]) -> None:
+        hostile = "/private/seed.yaml"
+        self._capture(
+            ["check_package", "transcript_evidence", "transcript_evidence", hostile, None],
+            surface=hostile,
+        )
+        telemetry.flush(timeout=2.0)
+
+        assert len(sent) == 1
+        assert sent[0]["event"] == "acceptance_basis"
+        props = sent[0]["properties"]
+        assert props["accepted_by_check_package"] == 1
+        assert props["accepted_by_transcript_evidence"] == 2
+        assert props["accepted_by_unknown"] == 2
+        assert props["accepted_count"] == 5
+        assert props["surface"] == "unknown"
+        assert hostile not in json.dumps(sent[0])
+
+    def test_sends_nothing_without_an_acceptance(self, sent: list[dict[str, Any]]) -> None:
+        self._capture([])
+        telemetry.flush(timeout=2.0)
+        assert sent == []
+
+    def test_the_vocabulary_matches_the_reconciliation(self) -> None:
+        from ouroboros.boundary.acceptance import AcceptedBy
+
+        assert {basis.value for basis in AcceptedBy} == telemetry._ACCEPTANCE_BASES

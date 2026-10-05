@@ -413,6 +413,7 @@ _NO_EVIDENCE_REPLAY_REASONS = frozenset(
         "environment_unverifiable",
         "transcript_unavailable",
         "script_absent_from_artifact",
+        "cited_evidence_withheld",
         "no_verifier_verdict",
         "verifier_verdict_not_passed",
         "no_legacy_record",
@@ -449,6 +450,28 @@ _ACCEPTANCE_NO_EVIDENCE_KEYS = frozenset(
         _no_evidence_pair_key(package_reason, replay_reason)
         for package_reason in _NO_EVIDENCE_PACKAGE_REASONS | {_UNKNOWN_NO_EVIDENCE_VALUE}
         for replay_reason in _NO_EVIDENCE_REPLAY_REASONS | {_UNKNOWN_NO_EVIDENCE_VALUE}
+    }
+)
+# ``acceptance_basis``: per decided run, how many accepted criteria rest on
+# each basis. SSOT pairing with boundary/acceptance.py ``AcceptedBy``.
+_ACCEPTANCE_BASES = frozenset(
+    {"check_package", "transcript_evidence", "command_strings", "verify_command", "no_evidence"}
+)
+_ACCEPTANCE_BASIS_PREFIX = "accepted_by_"
+_ACCEPTANCE_BASIS_KEYS = frozenset(
+    {
+        "criterion_count",
+        "accepted_count",
+        "surface",
+        "check_package",
+        "runtime_backend",
+        "app_version",
+        "os",
+        "ci",
+    }
+    | {
+        f"{_ACCEPTANCE_BASIS_PREFIX}{basis}"
+        for basis in _ACCEPTANCE_BASES | {_UNKNOWN_NO_EVIDENCE_VALUE}
     }
 )
 # Bound on any single string property. Dropped, not truncated -- a truncated
@@ -1000,6 +1023,8 @@ def _resolve_allowed_keys(event: str, properties: dict[str, Any] | None) -> froz
         return _RUNTIME_DRIFT_KEYS
     if event == "acceptance_no_evidence":
         return _ACCEPTANCE_NO_EVIDENCE_KEYS
+    if event == "acceptance_basis":
+        return _ACCEPTANCE_BASIS_KEYS
     return None
 
 
@@ -1205,6 +1230,45 @@ def capture_acceptance_no_evidence(
                 "surface": _fold(surface, _NO_EVIDENCE_SURFACES),
                 "check_package": _fold(check_package, _NO_EVIDENCE_CHECK_PACKAGE),
                 "check_package_status": _fold(check_package_status, _NO_EVIDENCE_PACKAGE_STATUSES),
+                "runtime_backend": _canonical_runtime_backend(runtime_backend),
+            },
+        )
+    except Exception:
+        pass
+
+
+def capture_acceptance_basis(
+    bases: Iterable[str | None],
+    *,
+    criterion_count: int,
+    surface: str | None,
+    check_package: str | None,
+    runtime_backend: str | None,
+) -> None:
+    """Capture what each accepted criterion of one decided run rests on.
+
+    ``bases`` holds one ``AcceptedBy`` value per accepted criterion
+    (``check_package``, ``transcript_evidence``, ``command_strings``,
+    ``verify_command``, ``no_evidence``); anything else folds to ``unknown``.
+    Sent as ``accepted_by_<basis>`` integer counts. Nothing is sent when no
+    criterion was accepted. Never raises.
+    """
+    try:
+        counts: dict[str, int] = {}
+        for basis in bases:
+            key = f"{_ACCEPTANCE_BASIS_PREFIX}{_fold(basis, _ACCEPTANCE_BASES)}"
+            counts[key] = counts.get(key, 0) + 1
+        total = sum(counts.values())
+        if total == 0:
+            return
+        capture(
+            "acceptance_basis",
+            {
+                **counts,
+                "criterion_count": criterion_count,
+                "accepted_count": total,
+                "surface": _fold(surface, _NO_EVIDENCE_SURFACES),
+                "check_package": _fold(check_package, _NO_EVIDENCE_CHECK_PACKAGE),
                 "runtime_backend": _canonical_runtime_backend(runtime_backend),
             },
         )
