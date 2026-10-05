@@ -290,8 +290,10 @@ def _spawn_worker(request_path: Path, *, cwd: str) -> subprocess.Popen[bytes]:
     if os.name == "posix":
         kwargs["start_new_session"] = True
     else:  # pragma: no cover - exercised on Windows CI/hosts only
+        # A detached venv launcher lets its Python child allocate a console.
+        # Use a windowless console without changing the configured interpreter.
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
-            subprocess, "DETACHED_PROCESS", 0
+            subprocess, "CREATE_NO_WINDOW", 0
         )
     process = subprocess.Popen(  # noqa: S603 - fixed interpreter/module argv
         [sys.executable, "-m", "ouroboros.mcp.detached_worker", str(request_path)],
