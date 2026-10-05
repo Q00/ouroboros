@@ -452,7 +452,7 @@ execution:
 | `auto_evolve_max_generations` | `int` | `3` | Maximum generations for automatically chained Ralph work. Values are clamped to Ralph's supported `1..10` range. |
 | `run_verify_commands` | `bool` | `true` | Check an AC's success contract (expected artifacts and `verify_command`) before accepting it. While on, the evidence verifier may also replay allowlisted commands the worker ran, in a copy of the workspace under the execution sandbox (writes only inside the copy, no network; nothing is replayed where the sandbox is unavailable), to corroborate `tests_passed` and `commands_run` claims the transcript alone cannot prove (see [Verifier Evidence Policy](contributing/verifier-evidence-policy.md#replay-first-corroboration)). Off: nothing is executed by the harness. |
 | `verify_command_timeout_seconds` | `int >= 1` | `600` | Timeout for each `verify_command` run and each replayed command. |
-| `exec_sandbox` | `bool` | `true` | Confine the commands the controller runs on its own authority (verifier replay) with the execution sandbox: writes (content, names and metadata) only beneath the workspace copy and a per-run temp directory, no non-loopback network, an allowlisted environment (`sandbox-exec` on macOS; Landlock plus a seccomp metadata filter on Linux, where metadata inside the copy is read-only too; a per-run AppContainer on Windows, where loopback reaches only the command's own processes, the `NUL` device is unavailable, batch files (`.cmd`, `.bat`) cannot run and are left indeterminate, and reads are limited to what is granted). On Windows the controller's interpreter and the live dependency trees a workspace copy links to are granted read and execute to one Ouroboros capability SID; that grant is persistent, is recorded in `~/.ouroboros/exec-sandbox/read-grants.jsonl`, and is removed with `python -c "from ouroboros.runtime.exec_sandbox import remove_persistent_read_grants as r; print(r())"` (run it while no Ouroboros command is running). Where no backend works, nothing is run and the outcome is indeterminate (`sandbox_unavailable`). **Unsafe when `false`:** those commands run unconfined, able to write anywhere the user can and to use the network. `OUROBOROS_EXEC_SANDBOX` overrides it; a project `.env` cannot. The effective value is sealed when a run starts, and resuming it with a different value is refused. |
+| `exec_sandbox` | `bool` | `true` | Confine the commands the controller runs on its own authority (verifier replay) with the execution sandbox: writes (content, names and metadata) only beneath the workspace copy and a per-run temp directory, no non-loopback network, an allowlisted environment (`sandbox-exec` on macOS; Landlock plus read-only mounts and a seccomp metadata filter on Linux, where mode, timestamps and extended attributes inside the copy are read-only too only when no unprivileged mount namespace is available; a per-run AppContainer on Windows, where loopback reaches only the command's own processes, the `NUL` device is unavailable, batch files (`.cmd`, `.bat`) cannot run and are left indeterminate, and reads are limited to what is granted). On Windows the controller's interpreter and the live dependency trees a workspace copy links to are granted read and execute to one Ouroboros capability SID; that grant is persistent, is recorded in `~/.ouroboros/exec-sandbox/read-grants.jsonl`, and is removed with `python -c "from ouroboros.runtime.exec_sandbox import remove_persistent_read_grants as r; print(r())"` (run it while no Ouroboros command is running). Where no backend works, nothing is run and the outcome is indeterminate (`sandbox_unavailable`). **Unsafe when `false`:** those commands run unconfined, able to write anywhere the user can and to use the network. `OUROBOROS_EXEC_SANDBOX` overrides it; a project `.env` cannot. The effective value is sealed when a run starts, and resuming it with a different value is refused. |
 | `default_model` | `string \| null` | `null` | Optional Execute-stage model pin, applied with [`models.pin: true`](#models) (and always on `litellm`/`copilot`). `null`, an empty value, `"auto"`, `"default"`, or `"current"` means automatic selection: Claude runs the standard tier alias (`sonnet`) and other runtimes keep their own current/default model. `OUROBOROS_EXECUTION_MODEL` has highest precedence, and a present empty env var explicitly clears the saved pin for that process. |
 | `project_guidance` | `list[string]` | `[]` | Guidance IDs loaded from `<project-root>/.ouroboros/guidance/<id>/GUIDANCE.md` and appended to execution system prompts. This option is config-only and has no environment-variable override. |
 | `default_policy` | `"ask"` \| `"efficient"` \| `"quality_first"` | `"ask"` | Persistent default execution policy for fresh runs. `ask` preserves the host's interactive efficiency prompt exactly. `efficient` resolves omitted arguments to `adaptive`/`observe` and `quality_first` to `quality_first`/`off` without asking. Explicit invocation arguments always win, resumed sessions keep their persisted immutable contract, and `strict` frugality assurance never derives from this setting. |
@@ -491,7 +491,7 @@ check is admitted only if it behaves as declared on the current tree. After the 
 the criteria it covers, before the session's terminal status is recorded; the
 existing verifier's verdict is kept as advisory for those criteria and decides
 the others. Edits the worker makes to test configuration inside the workspace
-(for example `pytest.ini`, `conftest.py`, or Django's `tests/test_sqlite.py`)
+(for example `pytest.ini`, `conftest.py`, or a test settings module)
 can make the existing verifier accept; the check package's oracle checks are
 unaffected, because they call the implementation through the product harness
 and do not read workspace test configuration (a model-written script check
@@ -528,13 +528,36 @@ project, including a classmethod. A case input that is an object rather than
 a JSON value is written as `{"$symbol": "package.module.Name"}` (at any depth
 in the arguments or a method's `init`); the harness imports it and passes the
 object. An oracle may declare `setup`, calls of callables defined in the
-project with JSON arguments (for Django, `django.conf.settings.configure`
-then `django.setup`), which the harness makes before it resolves the target.
-A setup call that fails, or an input that names nothing, leaves the base run
-indeterminate, never a reproduction failure. A returned set compares as the
-list of its items sorted by their JSON text. The reference check makes no
-setup call and gives the reference each object input as its dotted path.
-Command oracles take neither.
+project with JSON arguments (for example a library's `configure` function,
+then its plugin loader), which the harness makes before it resolves the
+target. A setup call that fails, or an input that names nothing, leaves the
+base run indeterminate, never a reproduction failure. A returned set
+compares as the list of its items sorted by their JSON text. The reference
+check makes no setup call and gives the reference each object input as its
+dotted path. Command oracles take neither.
+
+Built calls. A case's `args` are the JSON data of the oracle's declared
+`params`, and the reference takes exactly those. An oracle may declare how
+the target's call is built from them: `inputs` (the call's parameters, each
+a template: JSON, `{"$symbol": ...}`, `{"$param": "name"}`, or a call chain
+`{"$call": "pkg.Factory", "args": [...], "kwargs": {...}, "then": [read,
+...]}` that builds an object such as a fitted model), `receiver` (a method
+oracle's instance, built the same way and required to be an instance of the
+bound class), and `project` (reads applied to each returned value before it
+is compared: `{"attr"}`, `{"method", "args", "kwargs", "keep"}`, `{"item"}`,
+`{"each": [...]}`). A case may expect `no_raise`; it can fail a candidate,
+but its pass never verifies a criterion, since a target that returns
+anything passes it. A command case may carry `files`, which the controller
+writes into a fresh directory in the check's scratch directory (never the
+checkout copy) that becomes the command's working directory. An input, a
+receiver or a projection read that fails leaves the base run indeterminate
+and fails the case on a candidate. The reference check never builds
+`inputs` or a `receiver`, applies no projection (the reference returns the
+projected value); a command case's files are case data and are written for
+the reference too. A method oracle with a built receiver
+needs a function reference, otherwise the criterion is
+`reference_unavailable`. Each new field is frozen in `oracle.json` only when
+declared, so an oracle without one freezes the same data as before.
 
 What an oracle observation proves. The candidate's code runs inside each
 target process, so it can write the process's report itself (the frame
@@ -553,9 +576,13 @@ runs the base checkout's code, so neither admission nor a failure depends on
 it.
 
 Admission is per check: a reproduction check that already passes on the
-current tree, or a preservation check that already fails on it, is excluded on
-its own (`repro_passes_on_base`, `preservation_fails_on_base`) and the rest of
-the package is admitted. A criterion keeps the package's authority only while
+current tree, a preservation check that already fails on it, or a check whose
+own run there decided nothing (it failed before its own assertion, timed out,
+could not start, or flooded its output) is excluded on its own
+(`repro_passes_on_base`, `preservation_fails_on_base`, `indeterminate_on_base`)
+and the rest of the package is admitted. A failure every check shares (the
+pinned interpreter or the sandbox unavailable, a changed file, a failed
+precondition) still leaves the whole package unadmitted. A criterion keeps the package's authority only while
 an admitted check covers it (for a bug-fix criterion, an admitted reproduction
 check). For the criteria left without an admitted check, one more constructor
 call, before the worker starts, asks for replacement checks and says why the

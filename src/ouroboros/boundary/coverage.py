@@ -28,6 +28,7 @@ from ouroboros.boundary.package import (
 )
 from ouroboros.boundary.per_check import (
     HELD_OUT_NOT_DISCRIMINATING,
+    INDETERMINATE_ON_BASE,
     NO_ADMITTED_REPRODUCTION_CHECK,
     PRESERVATION_FAILS_ON_BASE,
     REPRO_PASSES_ON_BASE,
@@ -54,9 +55,15 @@ _WHY: dict[str, str] = {
         "so the check cannot tell a fix from no fix; write at least one held-out case "
         "that the base code fails"
     ),
+    INDETERMINATE_ON_BASE: (
+        "its check decided nothing on the base code (it failed before reaching its own "
+        "assertion, timed out, could not start, or flooded its output); write a check "
+        "that runs to its own assertion on the base code"
+    ),
     NO_ADMITTED_REPRODUCTION_CHECK: (
-        "its reproduction check passes on the base code, so it does not reproduce the bug; "
-        "only a preservation check remains, which cannot show the fix"
+        "its reproduction check was excluded on the base code (it passed there, showed "
+        "nothing there, or could not tell a fix from no fix); only a preservation check "
+        "remains, which cannot show the fix"
     ),
     "construction_timeout": "the earlier construction ran out of time before its check",
     "reference_unavailable": "the reference implementation written for its oracle did not run",

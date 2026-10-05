@@ -131,7 +131,7 @@ async def validate_declared_binding(
     validation = parse_declared_binding(
         raw,
         criterion_key=oracle.criterion_key,
-        params=oracle.params,
+        params=oracle.call_params,
         call_kind=oracle.call_kind,
     )
     if not validation.valid or validation.binding is None:

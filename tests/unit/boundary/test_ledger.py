@@ -785,7 +785,51 @@ IMPOSSIBLE_ADMISSIONS = {
         "oracle_2", status="violated", reason="reproduction_passed_on_base"
     ),
     "admitted_check_undecided": _result("oracle_2", status="indeterminate"),
+    "violated_check_excluded_as_undecided": lambda a: a["excluded_checks"].update(
+        oracle_1="indeterminate_on_base"
+    ),
+    "shared_environment_failure_excluded": lambda a: (
+        _result(
+            "oracle_1",
+            status="indeterminate",
+            reason="sandbox_unavailable",
+            return_code=None,
+            signature_seen=False,
+            oracle_result=None,
+            tier="U",
+        )(a),
+        a.update(
+            reasons=["sandbox_unavailable:oracle_1"],
+            excluded_checks={"oracle_1": "indeterminate_on_base"},
+        ),
+    ),
 }
+
+
+# What an oracle check's base run records when it decided nothing, by reason
+# (``admission._classify``; an oracle's output is never oversized).
+_UNDECIDED_RUN: dict[str, dict[str, Any]] = {
+    "failure_signature_absent": {
+        "return_code": 2,
+        "tier": "U",
+        "oracle_result": {
+            "binding_source": "default",
+            "resolve": "import_error",
+            "cases": [{"case_id": f"c{n}", "held_out": n == 3, "passed": False} for n in (1, 2, 3)],
+        },
+    },
+    "timeout": {"return_code": None, "timed_out": True, "oracle_result": None, "tier": "U"},
+    "launch_failed": {"return_code": None, "oracle_result": None, "tier": "U"},
+}
+
+
+def _undecided(admission: dict[str, Any], check_id: str, reason: str) -> dict[str, Any]:
+    """``admission`` with ``check_id`` excluded as undecided on the base for ``reason``."""
+    run = {"status": "indeterminate", "reason": reason, "signature_seen": False}
+    _result(check_id, **run, **_UNDECIDED_RUN.get(reason, {}))(admission)
+    admission["reasons"] = [f"{reason}:{check_id}"]
+    admission["excluded_checks"] = {check_id: "indeterminate_on_base"}
+    return admission
 
 
 def _event_at(event_type: str, aggregate: str, data: dict[str, Any], second: int) -> BaseEvent:
@@ -828,6 +872,23 @@ def test_an_admission_record_admission_writes_is_accepted() -> None:
     admission = _admission_data(frozen, ("oracle_1",))
     assert admitted_exclusions(frozen_manifest(frozen), admission) == frozenset({"oracle_1"})
     assert verify_boundary_order(_journal(frozen, admission), run_events=_enabled()) == ()
+
+
+@pytest.mark.parametrize("reason", list(_UNDECIDED_RUN))
+def test_an_admission_excluding_an_undecided_check_is_accepted(reason: str) -> None:
+    frozen = _two_repros()
+    admission = _undecided(_admission_data(frozen, ("oracle_1",)), "oracle_1", reason)
+    assert admitted_exclusions(frozen_manifest(frozen), admission) == frozenset({"oracle_1"})
+    assert verify_boundary_order(_journal(frozen, admission), run_events=_enabled()) == ()
+
+
+def test_an_undecided_receipt_the_rule_would_admit_is_refused() -> None:
+    """Replay derives the verdict: a per-check undecided result is excluded, never the whole."""
+    frozen = _two_repros()
+    admission = _undecided(_admission_data(frozen, ("oracle_1",)), "oracle_1", "timeout")
+    admission.update(verdict="indeterminate", excluded_checks=None)
+    admission["check_tiers"]["oracle_1"] = "U"
+    assert verify_boundary_order(_journal(frozen, admission), run_events=_enabled()) != ()
 
 
 @pytest.mark.parametrize(

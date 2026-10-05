@@ -5,7 +5,7 @@ behave on the pinned base checkout the way its roles declare? A reproduction
 check must reach its intended failing assertion (non-zero exit and its declared
 ``failure_signature`` in the output); a preservation check must pass. A
 non-zero reproduction exit without the signature (setup, import, collection or
-an unintended failure) is indeterminate, never admitted.
+an unintended failure) is indeterminate: that check is never admitted.
 
 Every check runs on its own fresh copy of the checkout with a per-command
 timeout, confined by the shared execution sandbox through the check execution
@@ -20,9 +20,11 @@ scratch outputs and undeclared outputs. The source checkout itself is digested
 before and after the whole run.
 
 Every check of the package is run, and admission is per check
-(``boundary/per_check.py``): a check that contradicts its own role on the base
-is excluded and the rest of the package is admitted; anything else that fails
-(a setup error, a mutation, a precondition) leaves the package unadmitted.
+(``boundary/per_check.py``): a check that contradicts its own role on the base,
+or whose own base run decided nothing (no failure signature, a timeout, a
+launch failure, flooded output), is excluded and the rest of the package is
+admitted; anything else that fails (the shared interpreter or sandbox, a
+mutation, a precondition) leaves the package unadmitted.
 Nothing here calls back into generation: the result is data for the caller
 to record.
 
@@ -717,9 +719,10 @@ async def admit_check_package(
     ``admitted``. The per-check rule (``boundary/per_check.py``) is then
     applied to that verdict: a reproduction check that passes on the base
     (for an oracle, also one whose every held-out case passes there,
-    ``held_out_not_discriminating``), or a preservation check that fails on
-    it, is excluded (tier ``C``, ``excluded_checks``) and the rest of the
-    package is admitted.
+    ``held_out_not_discriminating``), a preservation check that fails on
+    it, or a check whose own base run decided nothing
+    (``indeterminate_on_base``), is excluded (tier ``C``,
+    ``excluded_checks``) and the rest of the package is admitted.
     """
     run = await _run_package(
         package,
