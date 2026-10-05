@@ -374,7 +374,7 @@ def _release_state(
         if unlock_error is not None:
             raise unlock_error
 
-    path = Mock(unlink=Mock(side_effect=unlink))
+    path = Mock(unlink=Mock(side_effect=unlink), read_text=Mock(side_effect=OSError("unreadable")))
     os_api = SimpleNamespace(name=platform, close=Mock(side_effect=close))
     fcntl_api = SimpleNamespace(LOCK_UN=8, flock=Mock(side_effect=unlock))
     descriptors = {"release-test": descriptor}
@@ -447,6 +447,39 @@ def test_release_closes_descriptor_and_warns_when_unlink_fails(
         for record in caplog.records
     )
     assert all(record.getMessage() != "session_lock.released" for record in caplog.records)
+
+
+def test_windows_release_retries_transient_sharing_violation_for_same_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _release_state(monkeypatch, platform="nt")
+    state.path.read_text = Mock(return_value="123:456")
+    state.path.unlink = Mock(side_effect=[PermissionError("sharing violation"), None])
+    sleep = Mock()
+    monkeypatch.setattr(heartbeat.time, "sleep", sleep)
+
+    heartbeat.release("release-test")
+
+    assert state.events == ["close"]
+    assert state.path.unlink.call_count == 2
+    assert state.path.read_text.call_count == 2
+    sleep.assert_called_once_with(0.01)
+
+
+def test_windows_release_does_not_retry_after_owner_payload_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _release_state(monkeypatch, platform="nt")
+    state.path.read_text = Mock(side_effect=["123:456", "789:012"])
+    state.path.unlink = Mock(side_effect=PermissionError("sharing violation"))
+    sleep = Mock()
+    monkeypatch.setattr(heartbeat.time, "sleep", sleep)
+
+    heartbeat.release("release-test")
+
+    assert state.events == ["close"]
+    state.path.unlink.assert_called_once_with(missing_ok=True)
+    sleep.assert_not_called()
 
 
 def test_posix_release_still_closes_descriptor_when_unlock_fails(

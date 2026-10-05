@@ -25,6 +25,7 @@ import os
 from pathlib import Path
 import re
 from threading import RLock
+import time
 from uuid import uuid4
 
 try:  # pragma: no cover - exercised on Unix CI; fallback supports Windows imports
@@ -333,7 +334,12 @@ def release(session_id: str) -> None:
     path = lock_path(session_id)
     with _LEASE_OPERATION_LOCK:
         fd = _HELD_LEASE_FDS.pop(session_id, None)
+        windows_owner_payload: str | None = None
         if os.name == "nt" and fd is not None:
+            try:
+                windows_owner_payload = path.read_text().strip()
+            except OSError:
+                pass
             # Windows cannot unlink this file while our descriptor is open.
             # Consume it before closing so an ambiguous close failure cannot
             # cause finally to close a descriptor that has since been reused.
@@ -346,37 +352,52 @@ def release(session_id: str) -> None:
                     extra={"session_id": session_id, "operation": "close"},
                     exc_info=True,
                 )
-        try:
-            path.unlink(missing_ok=True)
+        unlink_error: OSError | None = None
+        unlink_attempts = 3 if windows_owner_payload is not None else 1
+        for attempt in range(unlink_attempts):
+            try:
+                path.unlink(missing_ok=True)
+                unlink_error = None
+                break
+            except OSError as exc:
+                unlink_error = exc
+                if attempt + 1 >= unlink_attempts:
+                    break
+                try:
+                    if path.read_text().strip() != windows_owner_payload:
+                        break
+                except OSError:
+                    break
+                time.sleep(0.01)
+        if unlink_error is None:
             log.info(
                 "session_lock.released",
                 extra={"session_id": session_id},
             )
-        except OSError:
+        else:
             log.warning(
                 "session_lock.release_failed",
                 extra={"session_id": session_id, "operation": "unlink"},
-                exc_info=True,
+                exc_info=unlink_error,
             )
-        finally:
-            if fd is not None:
-                if fcntl is not None:
-                    try:
-                        fcntl.flock(fd, fcntl.LOCK_UN)
-                    except OSError:
-                        log.warning(
-                            "session_lock.release_failed",
-                            extra={"session_id": session_id, "operation": "unlock"},
-                            exc_info=True,
-                        )
+        if fd is not None:
+            if fcntl is not None:
                 try:
-                    os.close(fd)
+                    fcntl.flock(fd, fcntl.LOCK_UN)
                 except OSError:
                     log.warning(
                         "session_lock.release_failed",
-                        extra={"session_id": session_id, "operation": "close"},
+                        extra={"session_id": session_id, "operation": "unlock"},
                         exc_info=True,
                     )
+            try:
+                os.close(fd)
+            except OSError:
+                log.warning(
+                    "session_lock.release_failed",
+                    extra={"session_id": session_id, "operation": "close"},
+                    exc_info=True,
+                )
 
 
 def release_if_owned_by_current_process(session_id: str) -> bool:
