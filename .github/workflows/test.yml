@@ -176,6 +176,117 @@ jobs:
         # removes the persistent read grants it made.
         run: uv run --python 3.12 --no-sync pytest tests/unit/runtime/test_exec_sandbox.py tests/unit/runtime/test_exec_sandbox_windows.py -n 0 -rs --durations=15 -q
 
+      - name: Run targeted Windows detached worker regressions
+        id: detached-worker-tests
+        shell: pwsh
+        env:
+          HOME: ${{ runner.temp }}/ooo-detached-worker/home
+          USERPROFILE: ${{ runner.temp }}/ooo-detached-worker/home
+          APPDATA: ${{ runner.temp }}/ooo-detached-worker/home/AppData/Roaming
+          LOCALAPPDATA: ${{ runner.temp }}/ooo-detached-worker/home/AppData/Local
+          TEMP: ${{ runner.temp }}/ooo-detached-worker/tmp
+          TMP: ${{ runner.temp }}/ooo-detached-worker/tmp
+          OOO_WORKER_EVIDENCE: ${{ runner.temp }}/ooo-detached-worker
+          OUROBOROS_DASHBOARD: "0"
+          OUROBOROS_TELEMETRY: "0"
+          PYTHONFAULTHANDLER: "1"
+          PYTHONDONTWRITEBYTECODE: "1"
+          PYTHONNOUSERSITE: "1"
+        run: |
+          foreach ($directory in @($env:HOME, $env:APPDATA, $env:LOCALAPPDATA, $env:TEMP)) {
+            New-Item -ItemType Directory -Force -Path $directory | Out-Null
+          }
+          # Install the MCP profile only after the existing Windows checks.
+          uv sync --frozen --python 3.12 --dev --group mcp-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run --python 3.12 --no-sync python -c "import sys; assert sys.platform == 'win32'; assert sys.prefix != sys.base_prefix, 'Windows venv required for redirector regression tests'"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # A targeted subset: helper safety, launch options, lifecycle and windows.
+          $selectedTests = @(
+            'tests/integration/mcp/test_detached_probe_process.py',
+            'tests/unit/mcp/test_detached_jobs.py',
+            'tests/integration/mcp/test_detached_job_worker.py::test_detached_job_survives_accepting_process_exit',
+            'tests/integration/mcp/test_detached_job_worker.py::test_external_controller_cancels_detached_owner',
+            'tests/integration/mcp/test_detached_job_worker.py::test_nested_handoff_gets_independent_durable_owner',
+            'tests/integration/mcp/test_detached_worker_window.py'
+          )
+          $testTemp = Join-Path $env:OOO_WORKER_EVIDENCE 'pytest'
+          $junit = Join-Path $env:OOO_WORKER_EVIDENCE 'results.xml'
+          uv run --python 3.12 --no-sync pytest @selectedTests -n 0 -rs --durations=15 -q --basetemp $testTemp --junitxml $junit
+          exit $LASTEXITCODE
+
+      - name: Report detached worker verification scope
+        if: always()
+        shell: python
+        env:
+          OOO_WORKER_EVIDENCE: ${{ runner.temp }}/ooo-detached-worker
+          OOO_WORKER_TEST_OUTCOME: ${{ steps.detached-worker-tests.outcome }}
+        run: |
+          import os
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          evidence = Path(os.environ["OOO_WORKER_EVIDENCE"])
+          report = evidence / "results.xml"
+          lines = ["### Windows detached worker targeted regressions", "",
+                   "This subset does not cover the entire worker test module.", "",
+                   f"Test step outcome: {os.environ['OOO_WORKER_TEST_OUTCOME']}", ""]
+          invalid = False
+          if not report.exists():
+              lines.append("NOT VERIFIED: no JUnit report was produced.")
+              invalid = True
+          else:
+              cases = list(ET.parse(report).iter("testcase"))
+              failed = sum(case.find("failure") is not None or case.find("error") is not None for case in cases)
+              skipped = sum(case.find("skipped") is not None for case in cases)
+              passed = len(cases) - failed - skipped
+              lines += [f"Observed: {passed} passed, {failed} failed/error, {skipped} skipped.", "",
+                        "| Observation | Result | Detail |", "|---|---|---|"]
+              invalid = not cases or passed == 0 or failed > 0
+              checks = (
+                  ("Console association", "test_venv_worker_completes_without_allocating_a_console_window"),
+                  ("Visible window", "test_venv_worker_completes_without_a_visible_console_window"),
+              )
+              for label, name in checks:
+                  matches = [case for case in cases if case.get("name") == name]
+                  status, detail = "NOT VERIFIED", "Expected test result is missing or ambiguous."
+                  if len(matches) != 1:
+                      invalid = True
+                  else:
+                      case = matches[0]
+                      skip = case.find("skipped")
+                      if case.find("failure") is not None or case.find("error") is not None:
+                          status, detail = "FAIL", "See JUnit and process observation artifacts."
+                      elif skip is not None:
+                          status = "UNSUPPORTED / NOT VERIFIED"
+                          detail = skip.get("message") or skip.text or "Observation unavailable."
+                          print(f"::warning::{label}: {status}: {detail}")
+                      else:
+                          status, detail = "PASS", "Legacy positive control and candidate assertions passed."
+                  detail = " ".join(detail.split()).replace("|", "\\|")
+                  lines.append(f"| {label} | {status} | {detail} |")
+          text = "\n".join(lines) + "\n"
+          evidence.mkdir(parents=True, exist_ok=True)
+          (evidence / "summary.md").write_text(text, encoding="utf-8")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as output:
+              output.write(text)
+          print(text)
+          if invalid:
+              raise SystemExit(1)
+
+      - name: Upload detached worker regression evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-detached-worker-evidence
+          path: |
+            ${{ runner.temp }}/ooo-detached-worker/results.xml
+            ${{ runner.temp }}/ooo-detached-worker/summary.md
+            ${{ runner.temp }}/ooo-detached-worker/pytest/**/console.json
+            ${{ runner.temp }}/ooo-detached-worker/pytest/**/visible-windows.json
+          if-no-files-found: warn
+          retention-days: 7
+
   performance-budget:
     name: Performance budget (advisory)
     if: github.event_name == 'push'
