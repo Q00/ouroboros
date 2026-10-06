@@ -147,6 +147,35 @@ class TestSharedReducerLocation:
 
         assert board["meta"]["interview"] is None
 
+    def test_reopened_interview_retires_completion_total(self) -> None:
+        completed = {
+            "aggregate_id": "interview-c1",
+            "event_type": "interview.completed",
+            "payload": {"total_rounds": 3},
+        }
+        for event_type in (
+            "interview.started",
+            "interview.response.recorded",
+            "interview.question_generation.parent_handoff",
+            "interview.response.emitted",
+            "interview.lateral_review.recommended",
+            "interview.failed",
+        ):
+            transition = {
+                "aggregate_id": "interview-c1",
+                "event_type": event_type,
+                "payload": {"round_number": 4, "error": "new failure"},
+            }
+            projection = reduce_board([completed, transition])["meta"]["interview"]
+            assert projection["status"] != "completed"
+            assert projection["total_rounds"] is None
+
+        recompleted = {**completed, "payload": {"total_rounds": 5}}
+        projection = reduce_board([completed, transition, recompleted])["meta"]["interview"]
+        assert projection["status"] == "completed"
+        assert projection["total_rounds"] == 5
+        assert "error" not in projection
+
     def test_web_shim_reexports_same_object(self) -> None:
         """The web surface's import path is the very same reducer function."""
         from ouroboros.dashboard_web.kanban import reduce_board as web_reduce_board

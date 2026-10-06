@@ -357,6 +357,10 @@ def project_interview(events: list[dict[str, Any]]) -> dict[str, Any] | None:
         # carrying these fields forward would show contradictory dashboard data.
         projection.pop("error", None)
         projection.pop("phase", None)
+        # A completion total belongs to the completed state only. Interviews
+        # can reopen after completion, so every recognized transition must
+        # retire it before a new completed event supplies a fresh total.
+        projection["total_rounds"] = None
         if event_type == "interview.started":
             projection["status"] = "started"
         elif event_type in {
