@@ -402,6 +402,12 @@ def _release_state(
     )
 
 
+def _windows_error(winerror: int, message: str) -> PermissionError:
+    error = PermissionError(message)
+    error.winerror = winerror  # type: ignore[attr-defined]
+    return error
+
+
 @pytest.mark.parametrize(
     ("platform", "expected"),
     [("nt", ["close", "replace", "unlink"]), ("posix", ["unlink", "unlock", "close"])],
@@ -470,7 +476,7 @@ def test_windows_release_retries_transient_rename_sharing_violation(
 ) -> None:
     state = _release_state(monkeypatch, platform="nt")
     state.path.replace = Mock(
-        side_effect=[PermissionError("sharing violation"), state.release_path]
+        side_effect=[_windows_error(32, "sharing violation"), state.release_path]
     )
     sleep = Mock()
     monkeypatch.setattr(heartbeat.time, "sleep", sleep)
@@ -488,7 +494,7 @@ def test_windows_release_reports_only_rename_when_all_move_attempts_fail(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     state = _release_state(monkeypatch, platform="nt")
-    state.path.replace = Mock(side_effect=PermissionError("rename denied"))
+    state.path.replace = Mock(side_effect=_windows_error(32, "sharing violation"))
     sleep = Mock()
     monkeypatch.setattr(heartbeat.time, "sleep", sleep)
 
@@ -505,6 +511,22 @@ def test_windows_release_reports_only_rename_when_all_move_attempts_fail(
         if record.getMessage() == "session_lock.release_failed"
     ]
     assert operations == ["rename"]
+
+
+def test_windows_release_does_not_retry_permanent_rename_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _release_state(monkeypatch, platform="nt")
+    state.path.replace = Mock(side_effect=OSError(22, "invalid argument"))
+    sleep = Mock()
+    monkeypatch.setattr(heartbeat.time, "sleep", sleep)
+
+    heartbeat.release("release-test")
+
+    state.path.replace.assert_called_once_with(state.release_path)
+    sleep.assert_not_called()
+    state.path.unlink.assert_not_called()
+    state.release_path.unlink.assert_not_called()
 
 
 def test_windows_release_never_unlinks_the_successor_path(

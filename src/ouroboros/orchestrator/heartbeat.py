@@ -363,8 +363,9 @@ def release(session_id: str) -> None:
                     break
                 except OSError as exc:
                     move_error = exc
-                    if attempt < 2:
-                        time.sleep(0.01)
+                    if attempt >= 2 or getattr(exc, "winerror", None) not in {32, 33}:
+                        break
+                    time.sleep(0.01)
             if not windows_move_succeeded:
                 log.warning(
                     "session_lock.release_failed",
