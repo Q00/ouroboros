@@ -10,7 +10,7 @@ from rich.markup import escape
 import typer
 
 from ouroboros.mcp.machine_runtime import RuntimeSnapshot, collect_runtime_snapshot
-from ouroboros.mcp.registry_paths import owned_mcp_pid_registry_dir
+from ouroboros.mcp.registry_paths import diagnostic_mcp_pid_registry_dir
 
 app = typer.Typer(add_completion=False)
 
@@ -81,7 +81,11 @@ def doctor_runtime(
     as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON to stdout."),
 ) -> None:
     """Show bounded, read-only runtime facts for local MCP diagnostics."""
-    snapshot = collect_runtime_snapshot(registry_dir=owned_mcp_pid_registry_dir())
+    try:
+        registry_dir = diagnostic_mcp_pid_registry_dir()
+    except (KeyError, OSError):
+        registry_dir = None
+    snapshot = collect_runtime_snapshot(registry_dir=registry_dir)
     render_runtime_snapshot(snapshot, as_json=as_json)
 
 

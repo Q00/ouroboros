@@ -649,7 +649,7 @@ class TestDoctorCommand:
             patch("ouroboros.cli.commands.mcp_doctor._ALL_CHECKS", [lambda: check]),
             patch("ouroboros.mcp.machine_snapshot.collect_machine_snapshot", return_value=snapshot),
         ):
-            result = runner.invoke(app, ["--machine-snapshot", "--json"])
+            result = runner.invoke(app, ["doctor", "--machine-snapshot", "--json"])
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert data["checks"][0]["name"] == "x"
@@ -664,7 +664,7 @@ class TestDoctorCommand:
             patch("ouroboros.cli.commands.mcp_doctor._ALL_CHECKS", [lambda: check]),
             patch("ouroboros.mcp.machine_snapshot.collect_machine_snapshot", return_value=snapshot),
         ):
-            result = runner.invoke(app, ["--machine-snapshot"])
+            result = runner.invoke(app, ["doctor", "--machine-snapshot"])
         assert result.exit_code == 0
         assert "Static machine snapshot" in result.output
         assert "python" in result.output
@@ -829,13 +829,16 @@ def test_machine_snapshot_actual_collector_through_cli(tmp_path: Path):
             side_effect=PermissionError("PRIVATE_EXCEPTION_SENTINEL"),
         ),
     ):
-        for args in (["--machine-snapshot", "--json"], ["--machine-snapshot"]):
+        for args in (
+            ["doctor", "--machine-snapshot", "--json"],
+            ["doctor", "--machine-snapshot"],
+        ):
             result = runner.invoke(app, args)
             assert result.exit_code == 0, result.output
             assert "PRIVATE_CONFIG_SENTINEL" not in result.output
             assert "PRIVATE_EXCEPTION_SENTINEL" not in result.output
             assert "permission_denied" in result.output
-        result = runner.invoke(app, ["--machine-snapshot", "--json"])
+        result = runner.invoke(app, ["doctor", "--machine-snapshot", "--json"])
     snapshot = json.loads(result.output)["machine_snapshot"]
     assert snapshot["config_path"]["value"]["kind"] == "regular_file"
     assert snapshot["python"]["status"] == "ok"
@@ -847,10 +850,11 @@ def test_default_doctor_does_not_collect_machine_snapshot():
         patch("ouroboros.cli.commands.mcp_doctor._ALL_CHECKS", []),
         patch("ouroboros.mcp.machine_snapshot.collect_machine_snapshot") as collect,
     ):
-        result = runner.invoke(_make_app(), ["--json"])
+        result = runner.invoke(_make_app(), ["doctor", "--json"])
     assert result.exit_code == 0
     assert json.loads(result.output) == []
     collect.assert_not_called()
+
 
 def test_doctor_runtime_json_uses_owner_path_without_exposing_home(tmp_path: Path, monkeypatch):
     from ouroboros.cli.commands.mcp import app

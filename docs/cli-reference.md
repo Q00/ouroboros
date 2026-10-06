@@ -1223,6 +1223,7 @@ The snapshot covers OS, architecture, Python, current executable, installed `our
 
 ```bash
 ouroboros mcp doctor [--json] [--machine-snapshot]
+```
 
 ### `mcp doctor-runtime`
 
@@ -1240,6 +1241,8 @@ The command reads no registry contents, process arguments, credentials, or
 environment values other than `PATH`; it does not execute commands, connect to
 the network, or mutate the machine. PATH and registry scans have fixed bounds.
 Loopback probes only bind an ephemeral socket and close it immediately.
+On POSIX, the registry home is resolved from the local `/etc/passwd` file; if
+the current user has no local entry, registry status is `owner_unavailable`.
 
 ```bash
 ouroboros mcp doctor-runtime [--json]
