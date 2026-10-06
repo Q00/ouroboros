@@ -310,7 +310,13 @@ async def test_with_no_admitted_package_the_legacy_verifier_decides_every_criter
     store = EventStore("sqlite+aiosqlite:///:memory:")
     await store.initialize()
     try:
-        settings = CheckPackageSettings(enabled=True, max_construction_attempts=3)
+        # The artifact checks off: their repair turn would install the gate.
+        settings = CheckPackageSettings(
+            enabled=True,
+            max_construction_attempts=3,
+            base_regression="off",
+            worker_test_gate="off",
+        )
         state = await prepare_check_package(
             seed,
             event_store=store,

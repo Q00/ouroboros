@@ -1,0 +1,1675 @@
+"""Controller-run checks of the whole artifact (boundary/base_regression.py)."""
+
+from __future__ import annotations
+
+import ast
+from dataclasses import replace
+import inspect
+from pathlib import Path
+import sys
+from typing import Any
+
+import pytest
+
+from ouroboros.boundary import base_regression as br
+from ouroboros.boundary.acceptance import (
+    ArtifactCheck,
+    CriterionVerdict,
+    ExistingOutcome,
+    Governor,
+    PackageCriterionStatus,
+    reconcile_acceptance,
+)
+from ouroboros.boundary.base_regression import ArtifactCheckOutcome as Outcome
+from ouroboros.boundary.binding import CheckTier
+from ouroboros.boundary.check_env import pin_interpreter
+from ouroboros.boundary.tree import tree_digest
+
+BASE_FILES = [
+    "pkg/__init__.py",
+    "pkg/export.py",
+    "pkg/tests/__init__.py",
+    "pkg/tests/test_export.py",
+    "pkg/tests/test_tree.py",
+    "pkg/tests/test_relative.py",
+    "pkg/tests/test_patches.py",
+    "pkg/tests/test_mentions.py",
+    "pkg/utils/tests/test_validation.py",
+    "src/_pytest/logging.py",
+    "testing/logging/test_reporting.py",
+    "testing/test_skipping.py",
+    "conftest.py",
+]
+TEXT = {
+    "pkg/tests/test_export.py": "from pkg.export import export_text\n",
+    "pkg/tests/test_tree.py": "from pkg import Tree\n",
+    "pkg/tests/test_relative.py": "from .. import export\n",
+    "pkg/tests/test_patches.py": "from unittest import mock\n@mock.patch('pkg.export.render')\n"
+    "def test_a(render):\n    pass\n",
+    # A comment or a longer name is not an import: selection is structural.
+    "pkg/tests/test_mentions.py": "# pkg.export is changed often\nimport pkg.exporter\n",
+    "pkg/utils/tests/test_validation.py": "import pkg.export as exported\n",
+    "testing/logging/test_reporting.py": "import logging\n",
+    "testing/test_skipping.py": "from _pytest.skipping import evaluate_skip_marks\n",
+}
+
+
+# --------------------------------------------------------------------------
+# Selection
+
+
+def test_selection_pairs_by_stem_and_by_a_test_directory_named_after_the_module() -> None:
+    tests = br.base_test_files(BASE_FILES)
+    assert br.paired_tests(tests, "pkg/export.py") == ("pkg/tests/test_export.py",)
+    # A test directory named after the changed module counts as paired.
+    assert br.paired_tests(tests, "src/_pytest/logging.py") == (
+        "testing/logging/test_reporting.py",
+    )
+
+
+def test_selection_follows_imports_not_text() -> None:
+    assert br.select_tests(BASE_FILES, ["pkg/export.py"], TEXT) == (
+        "pkg/tests/test_export.py",
+        "pkg/tests/test_patches.py",
+        "pkg/tests/test_relative.py",
+        "pkg/utils/tests/test_validation.py",
+    )
+
+
+def test_a_package_init_selects_only_the_tests_that_import_the_package_itself() -> None:
+    assert br.select_tests(BASE_FILES, ["pkg/__init__.py"], TEXT) == (
+        "pkg/tests/test_relative.py",
+        "pkg/tests/test_tree.py",
+    )
+
+
+def test_added_files_and_edited_tests_select_nothing() -> None:
+    changed = ["test_repro.py", "pkg/tests/test_export.py", "README.md"]
+    assert br.select_tests(BASE_FILES, changed, TEXT) == ()
+    added = ["test_repro.py", "scripts/helper.py", "tests/test_new.py", "tests/conftest.py"]
+    assert br.worker_test_files(added) == ("test_repro.py", "tests/test_new.py")
+
+
+F = ("calc/ops.py", "add", 1)
+G = ("calc/ops.py", "sub", 4)
+C = br.ChangedCode(frozenset({F, G}))
+
+
+def _keep(regressed: Any, footprints: Any, entered: Any, changed: Any = C) -> Any:
+    return br.regressions_to_keep(regressed, footprints, entered, changed)
+
+
+def test_a_test_whose_footprint_lies_inside_the_passing_oracles_is_exempt() -> None:
+    assert _keep(("t::a",), {"t::a": frozenset({F})}, frozenset({F, G})) == (
+        (),
+        br.Exemption.APPLIED,
+    )
+
+
+def test_a_test_entering_a_changed_function_no_passing_oracle_entered_is_kept() -> None:
+    assert _keep(("t::a",), {"t::a": frozenset({F, G})}, frozenset({F})) == (
+        ("t::a",),
+        br.Exemption.NONE_INSIDE,
+    )
+
+
+def test_a_test_without_a_footprint_is_kept() -> None:
+    kept, _how = _keep(("t::a", "t::b"), {"t::b": frozenset({F})}, frozenset({F}))
+    assert kept == ("t::a",)
+
+
+def test_a_test_failing_before_any_changed_function_is_kept() -> None:
+    # Strict: an empty footprint is what a forged or a crashed run would show.
+    assert _keep(("t::a",), {"t::a": frozenset()}, frozenset({F}))[0] == ("t::a",)
+
+
+def test_mass_breakage_is_never_exempt() -> None:
+    many = tuple(f"t::{index}" for index in range(br.MASS_BREAKAGE + 1))
+    footprints = dict.fromkeys(many, frozenset({F}))
+    assert _keep(many, footprints, frozenset({F})) == (many, br.Exemption.MASS_BREAKAGE)
+    at_the_cap = many[: br.MASS_BREAKAGE]
+    assert _keep(at_the_cap, footprints, frozenset({F}))[0] == ()
+
+
+@pytest.mark.parametrize(
+    ("entered", "changed", "reason"),
+    [
+        (None, C, br.Exemption.NO_PASSING_ORACLE),
+        (frozenset(), C, br.Exemption.NO_ORACLE_FOOTPRINT),
+        (frozenset({F}), br.ChangedCode(), br.Exemption.NO_CHANGED_FUNCTION),
+        (
+            frozenset({F}),
+            br.ChangedCode(frozenset({F}), outside_functions=True),
+            br.Exemption.CHANGE_OUTSIDE_FUNCTIONS,
+        ),
+    ],
+    ids=["no_passing_oracle", "empty_oracle_footprint", "no_changed_function", "outside"],
+)
+def test_nothing_is_exempt_without_a_function_footprint_to_compare(
+    entered: Any, changed: Any, reason: Any
+) -> None:
+    assert _keep(("t::a",), {"t::a": frozenset({F})}, entered, changed) == (("t::a",), reason)
+
+
+def test_an_all_exempt_finding_is_void_and_a_partial_one_keeps_the_rest() -> None:
+    finding = br.ArtifactFinding(
+        ArtifactCheck.BASE_REGRESSION,
+        Outcome.REJECTED,
+        ("t::a", "t::b"),
+        footprints={"t::a": frozenset({F}), "t::b": frozenset({G})},
+        changed=C,
+    )
+    void = br.exempt(finding, frozenset({F, G}))
+    assert void.outcome is Outcome.EXEMPTED and not void.rejects
+    assert void.exempted == ("t::a", "t::b") and void.failed == ()
+    partial = br.exempt(finding, frozenset({F}))
+    assert partial.rejects and partial.failed == ("t::b",) and partial.exempted == ("t::a",)
+    verdicts = {"k": _verdict("k", PackageCriterionStatus.UNVERIFIED)}
+    assert br.apply_findings(verdicts, ["k"], (void,)) == verdicts
+
+
+# --------------------------------------------------------------------------
+# Reports and regressions
+
+JUNIT = b"""<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite name="pytest">
+<testcase classname="pkg.tests.test_export" name="test_a"/>
+<testcase classname="pkg.tests.test_export" name="test_b"><failure message="x"/></testcase>
+<testcase classname="pkg.tests.test_export.TestK" name="test_c"><skipped message="s"/></testcase>
+<testcase classname="pkg.tests.test_export" name="test_d"><error message="e"/></testcase>
+<testcase classname="" name="pkg.tests.test_tree"><error message="collection failure"/></testcase>
+</testsuite></testsuites>"""
+
+
+def test_the_report_gives_per_test_status() -> None:
+    assert br.parse_junit(JUNIT) == {
+        "pkg.tests.test_export::test_a": "pass",
+        "pkg.tests.test_export::test_b": "fail",
+        "pkg.tests.test_export.TestK::test_c": "skip",
+        "pkg.tests.test_export::test_d": "error",
+        "pkg.tests.test_tree": "error",
+    }
+    assert br.parse_junit(b"not xml") is None
+    assert br.parse_junit(b"<html/>") is None
+
+
+def test_a_regression_is_a_stable_base_pass_that_fails_or_vanishes() -> None:
+    stable = ("m.test_a::a", "m.test_a::b", "m.test_b.K::c", "m.test_c::d")
+    candidate = {
+        "m.test_a::a": "pass",
+        "m.test_a::b": "fail",
+        "m.test_b": "error",  # collection error: its tests vanished
+    }
+    assert br.regressions(stable, candidate) == ("m.test_a::b", "m.test_b.K::c")
+    # A runner that died before writing its report fails every stable test.
+    assert br.regressions(stable, None) == stable
+
+
+# --------------------------------------------------------------------------
+# The checks on real trees, with the runner replaced
+
+
+def _tree(root: Path, files: dict[str, str]) -> Path:
+    for relative, text in files.items():
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        (root / relative).write_text(text)
+    return root
+
+
+BASE_TREE = {
+    "calc/__init__.py": "",
+    "calc/ops.py": "def add(a, b):\n    return a - b\n",
+    "calc/tests/__init__.py": "",
+    "calc/tests/conftest.py": "",
+    "calc/tests/test_ops.py": "from calc.ops import add\ndef test_zero():\n    assert add(0, 0) == 0\n",
+    "README.md": "calc\n",
+}
+TEST_FILE = "calc/tests/test_ops.py"
+
+
+class _Runner:
+    """Stands in for ``_pytest``: records each run and returns the next scripted result."""
+
+    def __init__(self, base: list[Any], candidate: list[Any]) -> None:
+        self.base, self.candidate = list(base), list(candidate)
+        self.calls: list[tuple[str, tuple[str, ...], str | None]] = []
+
+    async def __call__(
+        self, root: Path, files: Any, interpreter: Any, timeout: int, **_options: Any
+    ) -> Any:
+        kind = root.name
+        seen = (root / TEST_FILE).read_text() if (root / TEST_FILE).exists() else None
+        self.calls.append((kind, tuple(files), seen))
+        script = self.base if kind == "base" else self.candidate
+        return script.pop(0)
+
+
+def _run(statuses: dict[str, str] | None, code: int | None = 0, **flags: Any) -> Any:
+    return br._Run(statuses, code, **flags)
+
+
+def _checks(base: Path) -> br.ArtifactChecks:
+    return br.ArtifactChecks(
+        base=base,
+        base_digest=tree_digest(base),
+        interpreter=pin_interpreter(sys.executable, "test"),
+        timeout_seconds=30,
+    )
+
+
+@pytest.fixture
+def trees(tmp_path: Path) -> tuple[Path, Path]:
+    base = _tree(tmp_path / "base", BASE_TREE)
+    candidate = _tree(tmp_path / "work", BASE_TREE)
+    (candidate / "calc/ops.py").write_text("def add(a, b):\n    return a + b + 1\n")
+    return base, candidate
+
+
+PASSING = {"calc.tests.test_ops::test_zero": "pass", "calc.tests.test_ops::test_one": "pass"}
+
+
+async def test_a_worker_edit_to_a_selected_test_is_undone_before_the_run(
+    trees: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, candidate = trees
+    (candidate / TEST_FILE).write_text("def test_zero():\n    pass\n")
+    (candidate / "calc/tests/conftest.py").write_text("collect_ignore = ['test_ops.py']\n")
+    failing = {**PASSING, "calc.tests.test_ops::test_zero": "fail"}
+    runner = _Runner([_run(PASSING), _run(PASSING)], [_run(failing, 1), _run(failing, 1)])
+    monkeypatch.setattr(br, "_pytest", runner)
+
+    regression, _worker = await _checks(base).findings(candidate)
+
+    assert regression.outcome is Outcome.REJECTED
+    assert regression.failed == ("calc.tests.test_ops::test_zero",)
+    assert regression.selected == (TEST_FILE,)
+    # Base twice, the candidate, then the rerun that confirms its failure, each
+    # with the base bytes of the test file.
+    assert [call[0] for call in runner.calls] == ["base", "base", "candidate", "candidate"]
+    assert {call[2] for call in runner.calls} == {BASE_TREE[TEST_FILE]}
+    # The worker's workspace itself is never touched.
+    assert (candidate / TEST_FILE).read_text() == "def test_zero():\n    pass\n"
+
+
+async def test_a_test_that_passed_on_one_base_run_only_is_never_a_regression(
+    trees: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, candidate = trees
+    flaky = {**PASSING, "calc.tests.test_ops::test_one": "fail"}
+    failing = dict.fromkeys(PASSING, "fail")
+    runner = _Runner([_run(PASSING), _run(flaky, 1)], [_run(failing, 1), _run(failing, 1)])
+    monkeypatch.setattr(br, "_pytest", runner)
+
+    regression, _worker = await _checks(base).findings(candidate)
+
+    assert regression.failed == ("calc.tests.test_ops::test_zero",)
+
+
+async def test_the_base_runs_once_per_selection_across_attempts(
+    trees: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, candidate = trees
+    runner = _Runner([_run(PASSING), _run(PASSING)], [_run(PASSING), _run(PASSING)])
+    monkeypatch.setattr(br, "_pytest", runner)
+    checks = _checks(base)
+
+    first, _ = await checks.findings(candidate)
+    again, _ = await checks.findings(candidate)  # the same tree: cached
+    (candidate / "calc/ops.py").write_text("def add(a, b):\n    return a + b\n")
+    repaired, _ = await checks.findings(candidate)  # a new tree: the candidate only
+
+    assert first.outcome is again.outcome is repaired.outcome is Outcome.PASSED
+    assert [call[0] for call in runner.calls] == ["base", "base", "candidate", "candidate"]
+
+
+@pytest.mark.parametrize(
+    ("base_runs", "candidate_runs", "expected"),
+    [
+        ([_run(PASSING), _run(PASSING)], [_run(None, None, timed_out=True)], Outcome.TIMEOUT),
+        ([_run(None, None, timed_out=True), _run(PASSING)], [], Outcome.TIMEOUT),
+        ([_run(None, 2), _run(None, 2)], [], Outcome.BASE_RUNNER_CRASH),
+        ([_run(None, None, unavailable=True), _run(PASSING)], [], Outcome.UNAVAILABLE),
+    ],
+    ids=["candidate_timeout", "base_timeout", "base_runner_crash", "sandbox_unavailable"],
+)
+async def test_a_run_without_an_observation_decides_nothing(
+    trees: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    base_runs: list[Any],
+    candidate_runs: list[Any],
+    expected: Outcome,
+) -> None:
+    base, candidate = trees
+    monkeypatch.setattr(br, "_pytest", _Runner(base_runs, candidate_runs))
+
+    regression, _worker = await _checks(base).findings(candidate)
+
+    assert regression.outcome is expected and not regression.rejects
+    verdicts = {"k0": _verdict("k0", PackageCriterionStatus.UNVERIFIED)}
+    assert br.apply_findings(verdicts, ["k0", "k1"], (regression,)) == verdicts
+
+
+async def test_a_dead_runner_on_the_candidate_fails_every_stable_test(
+    trees: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, candidate = trees
+    runner = _Runner([_run(PASSING), _run(PASSING)], [_run(None, 4), _run(None, 4)])
+    monkeypatch.setattr(br, "_pytest", runner)
+
+    regression, _worker = await _checks(base).findings(candidate)
+
+    assert regression.outcome is Outcome.REJECTED and regression.failed == tuple(sorted(PASSING))
+
+
+async def test_no_selected_file_and_an_unsupported_runner_are_reasons(
+    tmp_path: Path, trees: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, candidate = trees
+    monkeypatch.setattr(br, "_pytest", _Runner([], []))
+    (candidate / "calc/ops.py").write_text(BASE_TREE["calc/ops.py"])
+    (candidate / "README.md").write_text("changed\n")
+    regression, worker = await _checks(base).findings(candidate)
+    assert (regression.outcome, worker.outcome) == (Outcome.NO_SELECTED_FILES,) * 2
+
+    # A project runner pytest cannot drive, and no command that can name the
+    # target (Django's labels name files under ``tests/`` only).
+    runner_base = _tree(tmp_path / "django", {**BASE_TREE, "tests/runtests.py": ""})
+    (candidate / "calc/ops.py").write_text("def add(a, b):\n    return a + b\n")
+    regression, worker = await _checks(runner_base).findings(candidate)
+    assert (regression.outcome, worker.outcome) == (Outcome.UNSUPPORTED_RUNNER,) * 2
+
+
+async def test_a_base_snapshot_that_changed_is_not_used(
+    trees: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, candidate = trees
+    monkeypatch.setattr(br, "_pytest", _Runner([], []))
+    checks = _checks(base)
+    (base / "calc/ops.py").write_text("tampered\n")
+    regression, worker = await checks.findings(candidate)
+    assert (regression.outcome, worker.outcome) == (Outcome.UNAVAILABLE,) * 2
+
+
+# --------------------------------------------------------------------------
+# The worker-test gate: exit status 1 with a failing test fails; 2, 5 and the rest are no result
+
+
+@pytest.mark.parametrize(
+    ("run", "expected"),
+    [
+        (_run({"t::a": "fail"}, 1), Outcome.REJECTED),
+        (_run({"t::a": "pass"}, 0), Outcome.PASSED),
+        (_run({}, 5), Outcome.NOT_A_TEST_RESULT),
+        (_run({"t": "error"}, 2), Outcome.NOT_A_TEST_RESULT),
+        # Exit 1 without a report (no runner in the environment) is no test result.
+        (_run(None, 1), Outcome.NOT_A_TEST_RESULT),
+        (_run(None, None, timed_out=True), Outcome.TIMEOUT),
+    ],
+    ids=["exit_1", "exit_0", "exit_5", "exit_2", "exit_1_no_report", "timeout"],
+)
+async def test_the_worker_test_gate_reads_the_exit_status(
+    trees: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, run: Any, expected: Outcome
+) -> None:
+    base, candidate = trees
+    (candidate / "calc/ops.py").write_text(BASE_TREE["calc/ops.py"])
+    (candidate / "calc/tests/test_new.py").write_text("def test_new():\n    assert False\n")
+    monkeypatch.setattr(br, "_pytest", _Runner([], [run]))
+
+    _regression, worker = await _checks(base).findings(candidate)
+
+    assert worker.outcome is expected
+    assert worker.selected == ("calc/tests/test_new.py",)
+    assert worker.failed == (("calc/tests/test_new.py",) if expected is Outcome.REJECTED else ())
+
+
+# --------------------------------------------------------------------------
+# What a finding decides
+
+
+def _verdict(key: str, status: PackageCriterionStatus) -> CriterionVerdict:
+    tier = CheckTier.U if status.is_unverified else CheckTier.A
+    return CriterionVerdict(key, status, tier, status.value, declared_binding_pass=False)
+
+
+REJECTED = br.ArtifactFinding(
+    ArtifactCheck.BASE_REGRESSION, Outcome.REJECTED, ("m::test_a",), ("m.py",)
+)
+
+
+def test_a_rejection_fails_only_what_the_package_left_undecided() -> None:
+    keys = ["pass", "unverified", "uncovered", "fail", "indeterminate", "absent"]
+    verdicts = {key: _verdict(key, PackageCriterionStatus(key)) for key in keys[:5]}
+
+    out = br.apply_findings(verdicts, keys, (REJECTED,))
+
+    for key in ("pass", "fail", "indeterminate"):
+        assert out[key] == verdicts[key]  # a verified pass keeps the package's authority
+    for key in ("unverified", "uncovered", "absent"):
+        assert out[key].status is PackageCriterionStatus.FAIL
+        assert out[key].artifact_check is ArtifactCheck.BASE_REGRESSION
+        assert out[key].reason == br.REGRESSION_REASON
+    passed = br.ArtifactFinding(ArtifactCheck.BASE_REGRESSION, Outcome.PASSED)
+    assert br.apply_findings(verdicts, keys, (passed,)) == verdicts
+
+
+CLAIM = {
+    "check": "base_regression",
+    "mode": "decide",
+    "outcome": "rejected",
+    "failed": ["m::test_a"],
+    "failed_count": 1,
+    "candidate_tree_digest": "c" * 64,
+}
+
+
+def test_a_rejection_flows_through_the_fail_route_and_the_journal_admits_it() -> None:
+    keys = ["k0", "k1"]
+    verdicts = br.apply_findings(
+        {
+            "k0": _verdict("k0", PackageCriterionStatus.PASS),
+            "k1": _verdict("k1", PackageCriterionStatus.UNVERIFIED),
+        },
+        keys,
+        (REJECTED,),
+    )
+    legacy = {
+        index: ExistingOutcome(index, "succeeded", "accepted", "completed") for index in (0, 1)
+    }
+    reconciliation = reconcile_acceptance(
+        keys, verdicts, legacy, existing_run_accepted=True, legacy_decides_unverified=True
+    )
+    first, second = reconciliation.decisions
+    assert first.accepted and first.artifact_check is None
+    assert not second.accepted and second.governed_by is Governor.CHECK_PACKAGE
+    assert second.artifact_check is ArtifactCheck.BASE_REGRESSION
+    assert reconciliation.run_accepted is False
+    # The fail stands in the journal's record only with the check's evidence.
+    with pytest.raises(ValueError):
+        reconciliation.to_payload()
+    payload = replace(reconciliation, artifact_claims=(CLAIM,)).to_payload()
+    assert payload.criteria[1].artifact_check == "base_regression"
+    assert payload.artifact_checks[0].failed == ("m::test_a",)
+
+
+def test_the_repair_names_the_failing_tests_and_never_the_selection() -> None:
+    worker = br.ArtifactFinding(
+        ArtifactCheck.WORKER_TESTS, Outcome.REJECTED, ("tests/test_new.py",), ("tests/test_new.py",)
+    )
+    message = br.repair_message((REJECTED, worker))
+    assert message is not None
+    assert "m::test_a" in message and "tests/test_new.py" in message
+    assert "m.py" not in message.replace("tests/test_new.py", "")
+    assert (
+        br.repair_message((br.ArtifactFinding(ArtifactCheck.BASE_REGRESSION, Outcome.PASSED),))
+        is None
+    )
+
+
+def test_never_reads_the_grader_or_the_criteria() -> None:
+    """The decision has no input but trees: no grader material, no criterion or claim text."""
+    tree = ast.parse(inspect.getsource(br))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if ast.get_docstring(node) is not None:
+                node.body = node.body[1:] or [ast.Pass()]
+    code = ast.unparse(tree)
+    for forbidden in (
+        "FAIL_TO_PASS",
+        "PASS_TO_PASS",
+        "test_patch",
+        "gold",
+        "acceptance_criteria",
+        "ac_content",
+        "criterion_text",
+        "typed_evidence",
+        "claim",
+        "Seed",
+    ):
+        assert forbidden not in code, forbidden
+    imported = {
+        node.module
+        for node in ast.walk(ast.parse(inspect.getsource(br)))
+        if isinstance(node, ast.ImportFrom)
+    }
+    assert not {"ouroboros.core.seed", "ouroboros.boundary.package"} & imported
+    # The functions that decide take trees, paths and findings: never a criterion's text.
+    for function in (br.select_tests, br.apply_findings, br.repair_message):
+        assert not {"seed", "criteria", "text", "content"} & set(
+            inspect.signature(function).parameters
+        )
+
+
+# --------------------------------------------------------------------------
+# End to end with the real runner (the sandbox is switched off for unit tests)
+
+
+async def test_the_real_runner_finds_a_regression_and_keeps_a_fixed_test(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("pytest")
+    files = {
+        **BASE_TREE,
+        TEST_FILE: "from calc.ops import add\n"
+        "def test_pins_subtraction():\n    assert add(5, 3) == 2\n"
+        "def test_zero():\n    assert add(0, 0) == 0\n",
+    }
+    base = _tree(tmp_path / "base", files)
+    candidate = _tree(tmp_path / "work", files)
+    (candidate / "calc/ops.py").write_text("def add(a, b):\n    return a + b\n")
+    (candidate / "calc/tests/test_added.py").write_text(
+        "from calc.ops import add\ndef test_new():\n    assert add(1, 1) == 3\n"
+    )
+
+    regression, worker = await _checks(base).findings(candidate)
+
+    assert regression.outcome is Outcome.REJECTED
+    assert regression.failed == ("calc.tests.test_ops::test_pins_subtraction",)
+    assert worker.outcome is Outcome.REJECTED
+    assert worker.failed == ("calc/tests/test_added.py",)
+
+
+# --------------------------------------------------------------------------
+# Inside the runner: bounded repair while the worker runs, the fail route at the end
+
+
+@pytest.fixture
+async def store():
+    from ouroboros.persistence.event_store import EventStore
+
+    event_store = EventStore("sqlite+aiosqlite:///:memory:")
+    await event_store.initialize()
+    yield event_store
+    await event_store.close()
+
+
+async def _calc_authority(
+    store: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    criteria: tuple[str, ...] = ("add(2, 3) returns 5",),
+    constructor: Any = None,
+    execution_id: str = "exec_regression",
+    base_regression: str = "decide",
+    worker_test_gate: str = "record",
+    added_test: str | None = None,
+) -> Any:
+    from ouroboros.boundary import run_wiring
+    from ouroboros.boundary.authority import CheckPackageAuthority
+    from ouroboros.boundary.run_wiring import CheckPackageSettings, prepare_check_package
+
+    from .calc_fixtures import BUGFIX_SCRIPT, _package, _seed
+    from .fake_constructors import FakeConstructor, _ok
+
+    repo = _tree(
+        tmp_path / "repo",
+        {
+            "calc.py": "def add(a, b):\n    return a - b\n",
+            "tests/test_calc.py": "from calc import add\n"
+            "def test_pins_subtraction():\n    assert add(5, 3) == 2\n",
+        },
+    )
+    monkeypatch.setattr(
+        run_wiring, "resolve_check_interpreter", lambda _base: pin_interpreter(sys.executable, "t")
+    )
+    seed = _seed(*criteria)
+    settings = CheckPackageSettings(
+        enabled=True, base_regression=base_regression, worker_test_gate=worker_test_gate
+    )
+    if constructor is None:
+        uncovered = tuple(range(2, len(criteria) + 1))
+        constructor = FakeConstructor(
+            _ok(_package(seed, "repro_add", BUGFIX_SCRIPT, uncovered=uncovered))
+        )
+    state = await prepare_check_package(
+        seed,
+        event_store=store,
+        constructor=constructor,
+        execution_id=execution_id,
+        base_checkout=repo,
+        worker_workspace=repo,
+        runtime_label="codex",
+        settings=settings,
+        store_dir=tmp_path / "store",
+    )
+    assert state.base_snapshot is not None and state.contract.base_regression
+    authority = CheckPackageAuthority(state, settings, event_store=store, candidate_checkout=repo)
+    (repo / "calc.py").write_text("def add(a, b):\n    return a + b\n")
+    if added_test is not None:
+        (repo / "tests/test_added.py").write_text(added_test)
+    return seed, authority
+
+
+def _succeeded(count: int = 1) -> Any:
+    from ouroboros.orchestrator.parallel_executor_models import (
+        ACExecutionOutcome,
+        ACExecutionResult,
+        ParallelExecutionResult,
+    )
+
+    results = tuple(
+        ACExecutionResult(
+            ac_index=index,
+            ac_content=f"criterion {index}",
+            success=True,
+            outcome=ACExecutionOutcome.SUCCEEDED,
+        )
+        for index in range(count)
+    )
+    return results[0], ParallelExecutionResult(
+        results=results, success_count=count, failure_count=0, externally_satisfied_count=0
+    )
+
+
+async def test_the_gate_sends_a_regression_back_with_the_failing_test_names(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ouroboros.orchestrator.parallel_executor_models import package_repair
+
+    seed, authority = await _calc_authority(store, tmp_path, monkeypatch)
+    result, _parallel = _succeeded()
+
+    decided = await authority.gate(
+        seed=seed, ac_index=0, result=result, execution_id="exec_regression"
+    )
+
+    assert decided.success is False
+    repair = package_repair(decided)
+    assert repair is not None and "tests.test_calc::test_pins_subtraction" in repair
+    assert authority.gate.artifact_repairs == 1
+
+
+async def test_the_final_decision_fails_an_unverified_criterion_and_the_journal_records_it(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ouroboros.boundary.authority import ARTIFACT_CHECK_ERROR
+    from ouroboros.boundary.events import ACCEPTANCE_RECONCILED, BOUNDARY_AGGREGATE_TYPE
+
+    seed, authority = await _calc_authority(store, tmp_path, monkeypatch)
+    _result, parallel = _succeeded()
+
+    decided = await authority(seed=seed, execution_id="exec_regression", parallel_result=parallel)
+
+    assert authority.outcome is not None and authority.outcome.error is None
+    (decision,) = authority.outcome.reconciliation.decisions
+    assert decision.package_status is PackageCriterionStatus.FAIL
+    assert decision.artifact_check is ArtifactCheck.BASE_REGRESSION
+    assert decided.results[0].error == f"{ARTIFACT_CHECK_ERROR} (base_regression)"
+    example = authority.outcome.verdict.counterexamples[-1]
+    assert (example.check_id, example.role) == ("base_regression", "preservation")
+    assert example.output_tail == "tests.test_calc::test_pins_subtraction"
+    events = await store.replay(BOUNDARY_AGGREGATE_TYPE, "exec_regression/check_package/v1")
+    assert events[-1].type == ACCEPTANCE_RECONCILED
+    assert events[-1].data["criteria"][0]["artifact_check"] == "base_regression"
+
+
+async def test_a_decided_run_reports_what_the_artifact_checks_observed_once(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ouroboros import telemetry
+    from ouroboros.boundary.run_control import CheckPackageRun
+
+    captured: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        telemetry, "capture", lambda event, properties=None: captured.append((event, properties))
+    )
+    seed, authority = await _calc_authority(store, tmp_path, monkeypatch)
+    _result, parallel = _succeeded()
+    await authority(seed=seed, execution_id="exec_regression", parallel_result=parallel)
+    run = CheckPackageRun(authority.settings, state=authority.state, authority=authority)
+    run.attempted, run.runtime_backend = True, "codex"
+
+    run.finish("failed", surface="cli_run")
+    run.finish("failed", surface="cli_run")
+
+    rows = [props for event, props in captured if event == "acceptance_artifact_checks"]
+    assert rows == [
+        {
+            "base_regression": "rejected",
+            "worker_tests": "no_selected_files",
+            "failed_criteria": 1,
+            "criterion_count": 1,
+            "repairs": 0,
+            "exemption": "no_passing_oracle",
+            "exempted_tests": 0,
+            "base_regression_mode": "decide",
+            "worker_test_gate_mode": "record",
+            "base_regression_effect": "decided",
+            "worker_tests_effect": "none",
+            "would_fail_criteria": 0,
+            "surface": "cli_run",
+            "runtime_backend": "codex",
+        }
+    ]
+
+
+async def test_an_added_test_file_that_cannot_be_collected_is_no_test_result(
+    tmp_path: Path,
+) -> None:
+    base = _tree(tmp_path / "base", BASE_TREE)
+    candidate = _tree(tmp_path / "work", BASE_TREE)
+    (candidate / "calc/tests/test_added.py").write_text(
+        "import no_such_module\ndef test_new():\n    pass\n"
+    )
+
+    _regression, worker = await _checks(base).findings(candidate)
+
+    assert worker.outcome is Outcome.NOT_A_TEST_RESULT and worker.failed == ()
+
+
+async def test_a_check_that_breaks_leaves_the_package_decision_intact(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def broken(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("runner exploded")
+
+    seed, authority = await _calc_authority(store, tmp_path, monkeypatch)
+    monkeypatch.setattr(br, "_pytest", broken)
+    _result, parallel = _succeeded()
+
+    decided = await authority(seed=seed, execution_id="exec_regression", parallel_result=parallel)
+
+    assert authority.outcome is not None and authority.outcome.error is None
+    assert {finding.outcome for finding in authority.artifact_findings} == {Outcome.UNAVAILABLE}
+    (decision,) = authority.outcome.reconciliation.decisions
+    assert decision.artifact_check is None and decision.reason == "script_check_advisory"
+    assert decided.all_succeeded
+
+
+# --------------------------------------------------------------------------
+# With no admitted package, and on resume
+
+
+def _no_package() -> Any:
+    from ouroboros.boundary.constructor import ConstructionOutcome
+
+    from .fake_constructors import FakeConstructor
+
+    outage = ConstructionOutcome(None, "constructor_timeout", "1" * 64, "fake")
+    return FakeConstructor(outage, outage)
+
+
+FAILING_ADDED = "from calc import add\ndef test_added():\n    assert add(1, 1) == 3\n"
+
+
+async def test_without_a_package_a_regression_never_fails_anything(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from ouroboros.boundary.events import ACCEPTANCE_RECONCILED, BOUNDARY_AGGREGATE_TYPE
+    from ouroboros.boundary.run_control import CheckPackageRun
+    from ouroboros.orchestrator.parallel_executor_models import package_repair
+
+    criteria = ("add(2, 3) returns 5", "the docs describe add")
+    seed, authority = await _calc_authority(
+        store, tmp_path, monkeypatch, criteria=criteria, constructor=_no_package()
+    )
+    executor = SimpleNamespace()
+    authority.install(executor)
+    assert authority.installed  # the repair turn needs the gate
+    first, parallel = _succeeded(2)
+
+    # One repair turn, naming the regressed tests, and only one.
+    sent = await authority.gate(seed=seed, ac_index=0, result=first, execution_id="exec_regression")
+    repair = package_repair(sent)
+    assert repair is not None and "tests.test_calc::test_pins_subtraction" in repair
+    again = await authority.gate(
+        seed=seed, ac_index=1, result=parallel.results[1], execution_id="exec_regression"
+    )
+    assert again is parallel.results[1]
+
+    decided = await authority(seed=seed, execution_id="exec_regression", parallel_result=parallel)
+
+    assert authority.artifact_findings[0].rejects
+    assert (
+        authority.artifact_effects[ArtifactCheck.BASE_REGRESSION] is br.ArtifactEffect.UNADJUDICATED
+    )
+    assert authority.artifact_would_fail == 2
+    for decision in authority.outcome.reconciliation.decisions:
+        assert decision.package_status is PackageCriterionStatus.UNCOVERED
+        assert decision.artifact_check is None and decision.accepted
+    assert decided.all_succeeded
+    events = await store.replay(BOUNDARY_AGGREGATE_TYPE, authority.state.boundary_id)
+    assert ACCEPTANCE_RECONCILED not in {event.type for event in events}
+    run = CheckPackageRun(authority.settings, state=authority.state, authority=authority)
+    assert any("no admitted package adjudicates" in line for line in run.render_outcome())
+
+
+async def test_with_no_admitted_package_no_observation_leaves_the_legacy_run(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ouroboros.boundary.events import ACCEPTANCE_RECONCILED, BOUNDARY_AGGREGATE_TYPE
+
+    async def no_pytest(*_args: Any, **_kwargs: Any) -> Any:
+        return br._Run(None, 1)  # ``No module named pytest``: the runner wrote no report
+
+    seed, authority = await _calc_authority(store, tmp_path, monkeypatch, constructor=_no_package())
+    monkeypatch.setattr(br, "_pytest", no_pytest)
+    _result, parallel = _succeeded()
+
+    decided = await authority(seed=seed, execution_id="exec_regression", parallel_result=parallel)
+
+    assert decided.all_succeeded
+    assert authority.artifact_findings[0].outcome is Outcome.BASE_RUNNER_CRASH
+    (decision,) = authority.outcome.reconciliation.decisions
+    assert decision.governed_by is Governor.EXISTING_VERIFIER and decision.artifact_check is None
+    events = await store.replay(BOUNDARY_AGGREGATE_TYPE, authority.state.boundary_id)
+    assert ACCEPTANCE_RECONCILED not in {event.type for event in events}
+
+
+async def test_run_control_installs_the_checks_without_an_admitted_package(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from ouroboros.boundary import run_wiring
+    from ouroboros.boundary.run_control import CheckPackageRun
+    from ouroboros.boundary.run_wiring import CheckPackageSettings
+
+    from .calc_fixtures import _seed
+
+    repo = _tree(tmp_path / "repo", {"calc.py": "def add(a, b):\n    return a - b\n"})
+    monkeypatch.setattr(
+        run_wiring, "default_store_dir", lambda execution_id: tmp_path / "store" / execution_id
+    )
+    modes = (("decide", "off", True), ("off", "record", True), ("off", "off", False))
+    for regression, worker, installed in modes:
+        runner = SimpleNamespace(acceptance_authority=None)
+        settings = CheckPackageSettings(
+            enabled=True, base_regression=regression, worker_test_gate=worker
+        )
+        run = CheckPackageRun(settings)
+        await run.prepare(
+            runner,
+            _seed("add(2, 3) returns 5"),
+            event_store=store,
+            execution_id=f"exec_switch_{regression}_{worker}",
+            worker_dir=repo,
+            runtime_backend="codex",
+            model=None,
+            resume=False,
+            constructor_factory=lambda **_kwargs: _no_package(),
+        )
+        assert (runner.acceptance_authority is not None) is installed
+        assert run.status == "construction_failed"
+
+
+async def _resume(store: Any, execution_id: str, seed: Any, repo: Path, parallel: Any) -> Any:
+    from ouroboros.boundary.resume import ResumedCheckPackageAuthority, load_resumed_boundary
+
+    boundary = await load_resumed_boundary(store, execution_id)
+    if boundary is None:
+        return None, None
+    resumed = ResumedCheckPackageAuthority(boundary, event_store=store, candidate_checkout=repo)
+    return resumed, await resumed(seed=seed, execution_id=execution_id, parallel_result=parallel)
+
+
+async def _never_run(*_args: Any, **_kwargs: Any) -> Any:
+    raise AssertionError("a resumed run never runs the artifact checks again")
+
+
+async def test_a_resume_replays_the_recorded_fails_from_the_journal(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    criteria = ("add(2, 3) returns 5", "the docs describe add")
+    seed, authority = await _calc_authority(store, tmp_path, monkeypatch, criteria=criteria)
+    _result, parallel = _succeeded(2)
+    await authority(seed=seed, execution_id="exec_regression", parallel_result=parallel)
+    monkeypatch.setattr(br, "_pytest", _never_run)
+
+    resumed, decided = await _resume(store, "exec_regression", seed, authority.candidate, parallel)
+
+    # Covered: undecided without the held-out cases; uncovered: the recorded fail replays.
+    covered, uncovered = resumed.outcome.reconciliation.decisions
+    assert covered.package_status is PackageCriterionStatus.INDETERMINATE
+    assert covered.artifact_check is None
+    assert uncovered.package_status is PackageCriterionStatus.FAIL
+    assert uncovered.artifact_check is ArtifactCheck.BASE_REGRESSION
+    assert not decided.all_succeeded
+
+
+async def test_a_resume_with_no_admitted_package_replays_the_recorded_fails(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ouroboros.boundary.events import BOUNDARY_AGGREGATE_TYPE
+    from ouroboros.boundary.resume import NO_ADMITTED_PACKAGE
+
+    seed, authority = await _calc_authority(
+        store,
+        tmp_path,
+        monkeypatch,
+        constructor=_no_package(),
+        worker_test_gate="decide",
+        added_test=FAILING_ADDED,
+    )
+    _result, parallel = _succeeded()
+    await authority(seed=seed, execution_id="exec_regression", parallel_result=parallel)
+    recorded = len(await store.replay(BOUNDARY_AGGREGATE_TYPE, authority.state.boundary_id))
+    monkeypatch.setattr(br, "_pytest", _never_run)
+
+    resumed, decided = await _resume(store, "exec_regression", seed, authority.candidate, parallel)
+
+    assert resumed.boundary.reason == NO_ADMITTED_PACKAGE
+    (decision,) = resumed.outcome.reconciliation.decisions
+    assert decision.artifact_check is ArtifactCheck.WORKER_TESTS and not decided.all_succeeded
+    # The live decision already journaled the fail: the resume writes nothing more.
+    events = await store.replay(BOUNDARY_AGGREGATE_TYPE, authority.state.boundary_id)
+    assert len(events) == recorded
+
+
+async def test_a_journal_without_recorded_fails_resumes_as_before(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ouroboros.boundary.resume import load_resumed_boundary
+
+    monkeypatch.setattr(br, "_pytest", _never_run)
+    # No package and nothing recorded (an old journal, or checks that observed
+    # nothing): no resumed authority, the legacy verifier decides as before.
+    await _calc_authority(store, tmp_path / "a", monkeypatch, constructor=_no_package())
+    assert await load_resumed_boundary(store, "exec_regression") is None
+
+    # A package, and the controller died before its decision was journaled:
+    # nothing to replay, so the uncovered criterion is the legacy verifier's.
+    criteria = ("add(2, 3) returns 5", "the docs describe add")
+    seed, authority = await _calc_authority(
+        store, tmp_path / "b", monkeypatch, criteria=criteria, execution_id="exec_old"
+    )
+    _result, parallel = _succeeded(2)
+
+    resumed, _decided = await _resume(store, "exec_old", seed, authority.candidate, parallel)
+
+    assert resumed.boundary.recorded_artifact_checks == ()
+    covered, uncovered = resumed.outcome.reconciliation.decisions
+    assert covered.artifact_check is None and covered.reason == "script_check_advisory"
+    assert uncovered.artifact_check is None and uncovered.accepted
+
+
+# --------------------------------------------------------------------------
+# The footprint: changed functions, the recorders, and the exemption end to end
+
+
+def test_changed_functions_are_keyed_like_their_code_objects(tmp_path: Path) -> None:
+    from ouroboros.boundary.footprint import changed_code
+
+    before = (
+        "def deco(f):\n    return f\n\nclass K:\n    @deco\n    def m(self):\n        return 1\n"
+    )
+    after = before.replace("return 1", "return 2") + "\ndef added():\n    return 3\n"
+    base = _tree(tmp_path / "base", {"pkg/mod.py": before})
+    candidate = _tree(
+        tmp_path / "work", {"pkg/mod.py": after, "pkg/new.py": "def n():\n    pass\n"}
+    )
+    assert changed_code(base, candidate, ["pkg/mod.py"], ["pkg/new.py"]) == br.ChangedCode(
+        frozenset(
+            {
+                ("pkg/mod.py", "K.m", 5),  # the decorator's line, as ``co_firstlineno`` has it
+                ("pkg/mod.py", "added", 9),
+                ("pkg/new.py", "n", 1),
+            }
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        ("LIMIT = 1\n\ndef f():\n    return LIMIT\n", "LIMIT = 2\n\ndef f():\n    return LIMIT\n"),
+        (
+            "class K:\n    size = 1\n\n    def f(self):\n        return 1\n",
+            "class K:\n    size = 2\n\n    def f(self):\n        return 2\n",
+        ),
+        ("def f():\n    return 1\n\n\ndef g():\n    return 2\n", "def f():\n    return 3\n"),
+        ("import os\n\ndef f():\n    return 1\n", "\ndef f():\n    return 2\n"),
+    ],
+    ids=["module_level", "class_level", "deleted_function", "removed_import"],
+)
+def test_a_change_outside_every_function_is_flagged(
+    tmp_path: Path, before: str, after: str
+) -> None:
+    from ouroboros.boundary.footprint import changed_code
+
+    base = _tree(tmp_path / "base", {"m.py": before})
+    candidate = _tree(tmp_path / "work", {"m.py": after})
+    assert changed_code(base, candidate, ["m.py"]).outside_functions
+
+
+def test_comments_and_blank_lines_are_not_a_change_outside_functions(tmp_path: Path) -> None:
+    from ouroboros.boundary.footprint import changed_code
+
+    base = _tree(tmp_path / "base", {"m.py": "def f():\n    return 1\n"})
+    candidate = _tree(tmp_path / "work", {"m.py": "# note\n\ndef f():\n    return 2\n"})
+    assert changed_code(base, candidate, ["m.py"]) == br.ChangedCode(frozenset({("m.py", "f", 3)}))
+
+
+def test_a_linked_or_oversized_source_is_a_change_outside_functions(tmp_path: Path) -> None:
+    import os
+
+    from ouroboros.boundary import footprint
+
+    base = _tree(tmp_path / "base", {"m.py": "def f():\n    return 1\n"})
+    candidate = _tree(tmp_path / "work", {"outside.py": "def f():\n    return 2\n"})
+    os.symlink(candidate / "outside.py", candidate / "m.py")
+    assert footprint.changed_code(base, candidate, ["m.py"]).outside_functions
+    big = _tree(tmp_path / "big", {"m.py": "x = 1\n" * (footprint.SOURCE_LIMIT // 6 + 1)})
+    assert footprint.read_source(big / "m.py") is None
+
+
+def _write_oracle_plan(scratch: Path, root: Path, record: Path, watched: Any) -> None:
+    from ouroboros.boundary.footprint import ORACLE_PLAN, write_plan
+
+    plan = {"root": str(root), "record": str(record), "watched": [list(k) for k in watched]}
+    assert write_plan(scratch / ORACLE_PLAN, plan)
+
+
+def _oracle_process(root: Path, scratch: Path, harness: str) -> Any:
+    import os
+    import subprocess
+
+    from ouroboros.boundary.footprint import oracle_program
+
+    return subprocess.Popen(
+        [sys.executable, "-I", "-B", "-c", oracle_program(harness)],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        text=True,
+        env={**os.environ, "TMPDIR": str(scratch)},
+    )
+
+
+ORACLE_HARNESS = (
+    "import os, sys\nsys.path.insert(0, os.getcwd())\nfrom calc.ops import add\nadd(1, 2)\n"
+    "print('ready', flush=True)\nimport time\ntime.sleep(60)\n"
+)
+
+
+def test_the_oracle_recorder_has_written_and_closed_its_record_before_a_kill(
+    tmp_path: Path,
+) -> None:
+    import os
+    import signal
+
+    from ouroboros.boundary.footprint import read_entered
+
+    root = _tree(
+        tmp_path / "copy",
+        {"calc/__init__.py": "", "calc/ops.py": "def add(a, b):\n    return a + b\n"},
+    )
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    record = scratch / "record.jsonl"
+    watched = frozenset({("calc/ops.py", "add", 1)})
+    _write_oracle_plan(scratch, root, record, watched)
+    process = _oracle_process(root, scratch, ORACLE_HARNESS)
+    try:
+        assert process.stdout is not None and process.stdout.readline().strip() == "ready"
+        os.kill(process.pid, signal.SIGKILL)
+    finally:
+        process.wait(timeout=10)
+    assert read_entered(record, watched) == watched
+
+
+@pytest.mark.parametrize("plan", ["absent", "unwritable_record"])
+def test_a_recorder_that_cannot_record_never_changes_the_oracle_run(
+    tmp_path: Path, plan: str
+) -> None:
+    root = _tree(
+        tmp_path / "copy",
+        {"calc/__init__.py": "", "calc/ops.py": "def add(a, b):\n    return a + b\n"},
+    )
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    if plan == "unwritable_record":
+        record = tmp_path / "missing-dir" / "record.jsonl"
+        _write_oracle_plan(scratch, root, record, {("calc/ops.py", "add", 1)})
+    harness = ORACLE_HARNESS.replace("import time\ntime.sleep(60)\n", "")
+    process = _oracle_process(root, scratch, harness)
+    out, _err = process.communicate(timeout=30)
+    assert process.returncode == 0 and out.strip() == "ready"
+
+
+def test_a_passing_oracle_whose_recorder_failed_exempts_nothing() -> None:
+    from types import SimpleNamespace
+
+    from ouroboros.boundary.footprint import OracleFootprint
+
+    passing = SimpleNamespace(cases=[SimpleNamespace(passed=True)])
+    probe = OracleFootprint(frozenset({F}), entered={"o1": {F}})
+    assert probe.passed({"o1": passing}) == frozenset({F})
+    probe.unrecorded.add("o1")
+    assert probe.passed({"o1": passing}) is None
+
+
+def test_a_test_id_recorded_twice_has_no_footprint(tmp_path: Path) -> None:
+    import json
+
+    from ouroboros.boundary.footprint import read_run_record
+
+    record = tmp_path / "record.jsonl"
+    lines = [
+        {"test": "m::a", "nodeid": "m.py::a", "entered": [list(F)]},
+        {"test": "m::a", "nodeid": "m.py::a", "entered": [list(F)]},
+        {"test": "m::b", "nodeid": "m.py::b", "entered": [list(G)]},
+        {"provenance": {"calc.ops": True}},
+    ]
+    record.write_text("".join(json.dumps(line) + "\n" for line in lines))
+    read = read_run_record(record, frozenset({F, G}))
+    assert read.footprints == {"m::b": frozenset({G})} and read.nodeids == {"m::b": "m.py::b"}
+    assert not read.imported_outside
+
+
+async def _real_run(root: Path, files: Any, **options: Any) -> Any:
+    return await br._pytest(root, files, pin_interpreter(sys.executable, "t"), 60, **options)
+
+
+async def test_the_pytest_recorder_gives_each_test_its_own_footprint(tmp_path: Path) -> None:
+    from ouroboros.boundary.footprint import changed_code
+
+    files = {
+        "calc/__init__.py": "",
+        "calc/ops.py": "def add(a, b):\n    return a - b\n\n\ndef sub(a, b):\n    return a - b\n",
+        "calc/tests/__init__.py": "",
+        TEST_FILE: "from calc.ops import add, sub\n"
+        "def test_add():\n    assert add(5, 3) == 2\n"
+        "def test_sub():\n    assert sub(5, 3) == 2\n"
+        "def test_none():\n    assert False\n",
+    }
+    base = _tree(tmp_path / "base", files)
+    candidate = _tree(tmp_path / "work", files)
+    (candidate / "calc/ops.py").write_text(
+        "def add(a, b):\n    return a + b\n\n\ndef sub(a, b):\n    return b - a\n"
+    )
+    watched = changed_code(base, candidate, ["calc/ops.py"]).functions
+    run = await _real_run(candidate, (TEST_FILE,), watched=watched, modules=("calc.ops",))
+    assert run.record.footprints == {
+        "calc.tests.test_ops::test_add": frozenset({("calc/ops.py", "add", 1)}),
+        "calc.tests.test_ops::test_sub": frozenset({("calc/ops.py", "sub", 5)}),
+        "calc.tests.test_ops::test_none": frozenset(),
+    }
+    assert run.record.nodeids["calc.tests.test_ops::test_add"] == f"{TEST_FILE}::test_add"
+    assert not run.record.imported_outside
+    # The report and the record live in the run's scratch directory, not the copy.
+    assert not [path for path in candidate.iterdir() if path.name.startswith(".ouroboros")]
+
+
+async def test_the_bootstrap_puts_the_checkout_on_the_path_as_python_m_does(
+    tmp_path: Path,
+) -> None:
+    # ``tests`` is no package, so only the working directory on the path
+    # reaches ``calc``: with ``python -c``'s ``''`` it would follow the chdir.
+    files = {
+        "calc/__init__.py": "",
+        "calc/extra.py": "VALUE = 1\n",
+        "tests/test_lazy.py": "import os\n"
+        "def test_lazy(tmp_path):\n    os.chdir(tmp_path)\n    import calc.extra\n"
+        "    assert calc.extra.VALUE == 1\n",
+    }
+    root = _tree(tmp_path / "copy", files)
+    run = await _real_run(root, ("tests/test_lazy.py",))
+    assert run.statuses == {"tests.test_lazy::test_lazy": "pass"}
+
+
+MATH_BASE = "def clamp(value, low, high):\n    if value > high:\n        return value\n    return max(low, value)\n"
+MATH_FIXED = "def clamp(value, low, high):\n    return max(low, min(high, value))\n"
+CLAMP_ORACLE = {
+    "criterion": 1,
+    "check_id": "oracle_1",
+    "role": "reproduction",
+    "call_kind": "function",
+    "params": ["value", "low", "high"],
+    "default_binding": {"symbol": "mathutils.clamp"},
+    "target_named_in_criterion": False,
+    "cases": [
+        {
+            "case_id": "stated",
+            "held_out": False,
+            "args": {"value": 15, "low": 0, "high": 10},
+            "expect": {"kind": "returns", "value": 10},
+        },
+        {
+            "case_id": "held",
+            "held_out": True,
+            "args": {"value": 20, "low": -5, "high": 7},
+            "expect": {"kind": "returns", "value": 7},
+        },
+    ],
+}
+
+
+async def _oracle_authority(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, fixed: str, test: str
+) -> Any:
+    from ouroboros.boundary import run_wiring
+    from ouroboros.boundary.authority import CheckPackageAuthority
+    from ouroboros.boundary.constructor import ConstructionOutcome
+    from ouroboros.boundary.oracle_build import package_from_reply
+    from ouroboros.boundary.run_wiring import CheckPackageSettings, prepare_check_package
+
+    from .calc_fixtures import _seed
+    from .fake_constructors import FakeConstructor
+
+    repo = _tree(
+        tmp_path / "repo",
+        {
+            "mathutils.py": MATH_BASE + "\n\ndef widen(value):\n    return value\n",
+            "tests/test_mathutils.py": test,
+        },
+    )
+    monkeypatch.setattr(
+        run_wiring, "resolve_check_interpreter", lambda _base: pin_interpreter(sys.executable, "t")
+    )
+    seed = _seed("clamp(15, 0, 10) returns 10", "the helpers are documented")
+    reply = {"oracles": [CLAMP_ORACLE], "uncovered": [{"criterion": 2, "reason": "docs"}]}
+    package = package_from_reply(reply, seed, input_digest="1" * 64, generator="fake")
+    settings = CheckPackageSettings(enabled=True, base_regression="decide")
+    state = await prepare_check_package(
+        seed,
+        event_store=store,
+        constructor=FakeConstructor(ConstructionOutcome(package, None, "1" * 64, "fake")),
+        execution_id="exec_footprint",
+        base_checkout=repo,
+        worker_workspace=repo,
+        runtime_label="codex",
+        settings=settings,
+        store_dir=tmp_path / "store",
+    )
+    assert state.admitted
+    authority = CheckPackageAuthority(state, settings, event_store=store, candidate_checkout=repo)
+    (repo / "mathutils.py").write_text(fixed)
+    return seed, authority
+
+
+PINS_CLAMP = (
+    "from mathutils import clamp\ndef test_pins_clamp():\n    assert clamp(15, 0, 10) == 15\n"
+)
+
+
+async def test_a_regression_only_the_passing_oracle_adjudicates_is_exempt(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed, authority = await _oracle_authority(
+        store,
+        tmp_path,
+        monkeypatch,
+        fixed=MATH_FIXED + "\n\ndef widen(value):\n    return value\n",
+        test=PINS_CLAMP,
+    )
+    _result, parallel = _succeeded(2)
+
+    decided = await authority(seed=seed, execution_id="exec_footprint", parallel_result=parallel)
+
+    regression = authority.artifact_findings[0]
+    assert regression.outcome is Outcome.EXEMPTED
+    assert regression.exempted == ("tests.test_mathutils::test_pins_clamp",)
+    assert regression.exemption is br.Exemption.APPLIED
+    verified, docs = authority.outcome.reconciliation.decisions
+    assert verified.package_status is PackageCriterionStatus.PASS
+    assert docs.artifact_check is None and docs.accepted
+    assert decided.all_succeeded
+
+
+async def test_a_regression_through_a_change_no_passing_oracle_entered_is_kept(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    test = PINS_CLAMP.replace("assert clamp(15, 0, 10) == 15", "assert widen(clamp(5, 0, 10)) == 5")
+    seed, authority = await _oracle_authority(
+        store,
+        tmp_path,
+        monkeypatch,
+        fixed=MATH_FIXED + "\n\ndef widen(value):\n    return value + 1\n",
+        test=test.replace("import clamp", "import clamp, widen"),
+    )
+    _result, parallel = _succeeded(2)
+
+    await authority(seed=seed, execution_id="exec_footprint", parallel_result=parallel)
+
+    regression = authority.artifact_findings[0]
+    assert regression.rejects and regression.exemption is br.Exemption.NONE_INSIDE
+    assert regression.footprints["tests.test_mathutils::test_pins_clamp"] == {
+        ("mathutils.py", "clamp", 1),
+        ("mathutils.py", "widen", 5),
+    }
+    _verified, docs = authority.outcome.reconciliation.decisions
+    assert docs.artifact_check is ArtifactCheck.BASE_REGRESSION and not docs.accepted
+
+
+# --------------------------------------------------------------------------
+# Review fixes: unattempted criteria, configuration, provenance, reruns, caps
+
+
+def _with_blocked(count: int, blocked: int) -> Any:
+    from ouroboros.orchestrator.parallel_executor_models import (
+        ACExecutionOutcome,
+        ACExecutionResult,
+        ParallelExecutionResult,
+    )
+
+    results = tuple(
+        ACExecutionResult(
+            ac_index=index,
+            ac_content=f"criterion {index}",
+            success=index != blocked,
+            outcome=ACExecutionOutcome.BLOCKED
+            if index == blocked
+            else ACExecutionOutcome.SUCCEEDED,
+        )
+        for index in range(count)
+    )
+    return ParallelExecutionResult(
+        results=results, success_count=count - 1, failure_count=0, blocked_count=1
+    )
+
+
+def test_an_unattempted_criterion_never_carries_an_artifact_check() -> None:
+    keys = ["k0", "k1"]
+    attempted = {"k0"}
+    verdicts = br.apply_findings({}, keys, (REJECTED,), attempted)
+    assert set(verdicts) == {"k0"}
+    # Even a verdict that carries one is not recorded on a decision the
+    # execution governs.
+    forced = br.apply_findings({}, keys, (REJECTED,))
+    legacy = {
+        0: ExistingOutcome(0, "succeeded", "accepted", "completed"),
+        1: ExistingOutcome(1, "blocked", "blocked", "not_attempted"),
+    }
+    reconciliation = reconcile_acceptance(
+        keys, forced, legacy, existing_run_accepted=False, legacy_decides_unverified=True
+    )
+    blocked = reconciliation.decisions[1]
+    assert blocked.governed_by is Governor.EXECUTION and blocked.artifact_check is None
+    replace(reconciliation, artifact_claims=(CLAIM,)).to_payload()
+
+
+async def test_a_blocked_criterion_beside_a_verified_pass_keeps_the_decision(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    test = PINS_CLAMP.replace("assert clamp(15, 0, 10) == 15", "assert widen(clamp(5, 0, 10)) == 5")
+    seed, authority = await _oracle_authority(
+        store,
+        tmp_path,
+        monkeypatch,
+        fixed=MATH_FIXED + "\n\ndef widen(value):\n    return value + 1\n",
+        test=test.replace("import clamp", "import clamp, widen"),
+    )
+
+    await authority(seed=seed, execution_id="exec_footprint", parallel_result=_with_blocked(2, 1))
+
+    assert authority.outcome is not None and authority.outcome.error is None
+    assert authority.artifact_findings[0].rejects
+    verified, blocked = authority.outcome.reconciliation.decisions
+    assert verified.package_status is PackageCriterionStatus.PASS and verified.accepted
+    assert blocked.governed_by is Governor.EXECUTION and blocked.artifact_check is None
+
+
+async def test_a_blocked_criterion_without_a_package_or_on_resume_keeps_the_decision(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Without a package only a worker-test fail decides: the gate in decide mode.
+    criteria = ("add(2, 3) returns 5", "the docs describe add")
+    seed, authority = await _calc_authority(
+        store,
+        tmp_path,
+        monkeypatch,
+        criteria=criteria,
+        constructor=_no_package(),
+        worker_test_gate="decide",
+        added_test=FAILING_ADDED,
+    )
+    _result, parallel = _succeeded(2)
+    await authority(seed=seed, execution_id="exec_regression", parallel_result=parallel)
+    monkeypatch.setattr(br, "_pytest", _never_run)
+
+    resumed, decided = await _resume(
+        store, "exec_regression", seed, authority.candidate, _with_blocked(2, 1)
+    )
+
+    assert resumed.outcome.error is None
+    failed, blocked = resumed.outcome.reconciliation.decisions
+    assert failed.artifact_check is ArtifactCheck.WORKER_TESTS
+    assert blocked.governed_by is Governor.EXECUTION and blocked.artifact_check is None
+
+    other = tmp_path / "live"
+    other.mkdir()
+    seed, live = await _calc_authority(
+        store,
+        other,
+        monkeypatch,
+        criteria=criteria,
+        constructor=_no_package(),
+        execution_id="exec_live_blocked",
+        worker_test_gate="decide",
+        added_test=FAILING_ADDED,
+    )
+    monkeypatch.undo()
+    monkeypatch.setattr(
+        "ouroboros.boundary.run_wiring.resolve_check_interpreter",
+        lambda _base: pin_interpreter(sys.executable, "t"),
+    )
+    await live(seed=seed, execution_id="exec_live_blocked", parallel_result=_with_blocked(2, 1))
+    assert live.outcome.error is None
+    failed, blocked = live.outcome.reconciliation.decisions
+    assert failed.artifact_check is ArtifactCheck.WORKER_TESTS
+    assert blocked.artifact_check is None
+
+
+def test_a_replay_ignores_criteria_outside_the_seed() -> None:
+    recorded = {"k0": ArtifactCheck.BASE_REGRESSION, "gone": ArtifactCheck.BASE_REGRESSION}
+    assert set(br.replay_recorded({}, recorded, ["k0"])) == {"k0"}
+
+
+async def test_the_worker_controls_no_configuration_of_the_regression_run(
+    tmp_path: Path,
+) -> None:
+    files = {
+        **BASE_TREE,
+        TEST_FILE: "from calc.ops import add\ndef test_pins():\n    assert add(5, 3) == 2\n",
+    }
+    base = _tree(tmp_path / "base", files)
+    candidate = _tree(tmp_path / "work", files)
+    (candidate / "calc/ops.py").write_text("def add(a, b):\n    return a + b\n")
+    # The worker tries to hide the failing test three ways.
+    (candidate / "conftest.py").write_text("collect_ignore_glob = ['*']\n")
+    (candidate / "calc/tests/conftest.py").write_text("collect_ignore = ['test_ops.py']\n")
+    (candidate / "pytest.ini").write_text("[pytest]\naddopts = -k nothing_matches\n")
+
+    regression, _worker = await _checks(base).findings(candidate)
+
+    assert regression.outcome is Outcome.REJECTED
+    assert regression.failed == ("calc.tests.test_ops::test_pins",)
+
+
+async def test_a_changed_module_imported_from_outside_the_copy_is_no_observation(
+    tmp_path: Path,
+) -> None:
+    outside = _tree(
+        tmp_path / "installed",
+        {"calc/__init__.py": "", "calc/ops.py": "def add(a, b):\n    return a - b\n"},
+    )
+    # As an editable install of the live workspace would: the base's own
+    # configuration puts another copy of the package first on the path.
+    files = {
+        **BASE_TREE,
+        "conftest.py": f"import sys\nsys.path.insert(0, {str(outside)!r})\nimport calc.ops\n",
+        "tests/test_ops.py": "from calc.ops import add\ndef test_pins():\n    assert add(5, 3) == 2\n",
+    }
+    base = _tree(tmp_path / "base", files)
+    candidate = _tree(tmp_path / "work", files)
+    (candidate / "calc/ops.py").write_text("def add(a, b):\n    return a + b\n")
+
+    regression, _worker = await _checks(base).findings(candidate)
+
+    assert regression.outcome is Outcome.IMPORTED_OUTSIDE_COPY and not regression.rejects
+
+
+async def test_a_failure_that_passes_when_rerun_is_not_a_regression(
+    trees: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ouroboros.boundary.footprint import RunRecord
+
+    base, candidate = trees
+    failing = dict.fromkeys(PASSING, "fail")
+    nodeids = {key: f"{TEST_FILE}::{key.split('::')[1]}" for key in PASSING}
+    rerun = {"calc.tests.test_ops::test_zero": "pass", "calc.tests.test_ops::test_one": "fail"}
+    runner = _Runner(
+        [_run(PASSING), _run(PASSING)],
+        [_run(failing, 1, record=RunRecord(nodeids=nodeids)), _run(rerun, 1)],
+    )
+    monkeypatch.setattr(br, "_pytest", runner)
+
+    regression, _worker = await _checks(base).findings(candidate)
+
+    assert regression.failed == ("calc.tests.test_ops::test_one",)
+    assert runner.calls[-1][1] == tuple(sorted(nodeids.values()))
+
+
+async def test_the_gate_runs_every_added_test_file(
+    trees: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, candidate = trees
+    (candidate / "calc/ops.py").write_text(BASE_TREE["calc/ops.py"])
+    for index in range(7):
+        (candidate / f"calc/tests/test_new_{index}.py").write_text("def test_x():\n    pass\n")
+    runner = _Runner([], [_run({"t::x": "pass"}, 0)] * 6 + [_run({"t::x": "fail"}, 1)])
+    monkeypatch.setattr(br, "_pytest", runner)
+
+    _regression, worker = await _checks(base).findings(candidate)
+
+    assert worker.selected == tuple(f"calc/tests/test_new_{i}.py" for i in range(7))
+    assert len(runner.calls) == 7
+    assert worker.outcome is br.ArtifactCheckOutcome.REJECTED
+    assert worker.failed == ("calc/tests/test_new_6.py",)
+
+
+async def test_a_timed_out_base_is_tried_once_more_then_kept(
+    trees: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, candidate = trees
+    timeout = _run(None, None, timed_out=True)
+    runner = _Runner(
+        [timeout, timeout, _run(PASSING), _run(PASSING)], [_run(PASSING), _run(PASSING)]
+    )
+    monkeypatch.setattr(br, "_pytest", runner)
+    checks = _checks(base)
+
+    first, _ = await checks.findings(candidate)
+    (candidate / "README.md").write_text("another tree\n")
+    second, _ = await checks.findings(candidate)
+    (candidate / "README.md").write_text("a third tree\n")
+    third, _ = await checks.findings(candidate)
+
+    assert first.outcome is Outcome.TIMEOUT
+    assert second.outcome is third.outcome is Outcome.PASSED
+    assert [call[0] for call in runner.calls].count("base") == 4
+
+
+async def test_a_resume_without_a_package_never_replays_a_regression_as_a_fail(
+    store: Any, tmp_path: Path
+) -> None:
+    from ouroboros.boundary.package import seed_criterion_keys
+    from ouroboros.boundary.resume import NO_ADMITTED_PACKAGE, ResumedBoundary, decide_resumed
+
+    from .calc_fixtures import _seed
+
+    seed = _seed("add(2, 3) returns 5")
+    (key,) = seed_criterion_keys(seed)
+    boundary = ResumedBoundary(
+        execution_id="exec_x",
+        boundary_id="exec_x/check_package/v1",
+        package_id="",
+        covered=(),
+        reason=NO_ADMITTED_PACKAGE,
+        recorded_artifact_checks=((key, ArtifactCheck.BASE_REGRESSION),),
+    )
+    verdict = await decide_resumed(boundary, seed=seed, candidate=tmp_path, event_store=store)
+    assert verdict.verdicts[key].status is PackageCriterionStatus.UNCOVERED
+
+
+async def test_record_mode_runs_records_and_never_decides(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    seed, authority = await _calc_authority(
+        store, tmp_path, monkeypatch, base_regression="record", added_test=FAILING_ADDED
+    )
+    authority.install(SimpleNamespace())
+    first, parallel = _succeeded()
+
+    # No repair turn in record mode, for either check.
+    assert (
+        await authority.gate(seed=seed, ac_index=0, result=first, execution_id="exec_regression")
+        is first
+    )
+
+    decided = await authority(seed=seed, execution_id="exec_regression", parallel_result=parallel)
+
+    regression, worker = authority.artifact_findings
+    assert regression.rejects and worker.rejects
+    assert authority.artifact_effects == {
+        ArtifactCheck.BASE_REGRESSION: br.ArtifactEffect.RECORDED,
+        ArtifactCheck.WORKER_TESTS: br.ArtifactEffect.RECORDED,
+    }
+    assert authority.artifact_would_fail == 1
+    (decision,) = authority.outcome.reconciliation.decisions
+    assert decision.artifact_check is None and decision.accepted and decided.all_succeeded
+
+
+async def test_the_two_switches_are_independent(
+    store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed, authority = await _calc_authority(
+        store,
+        tmp_path,
+        monkeypatch,
+        base_regression="off",
+        worker_test_gate="decide",
+        added_test=FAILING_ADDED,
+    )
+    _first, parallel = _succeeded()
+
+    await authority(seed=seed, execution_id="exec_regression", parallel_result=parallel)
+
+    regression, worker = authority.artifact_findings
+    assert regression.outcome is Outcome.NOT_RUN and worker.rejects
+    (decision,) = authority.outcome.reconciliation.decisions
+    assert decision.artifact_check is ArtifactCheck.WORKER_TESTS and not decision.accepted
+
+
+# --------------------------------------------------------------------------
+# A regression is a second observed failure
+
+
+FAIL_ZERO = {**PASSING, "calc.tests.test_ops::test_zero": "fail"}
+ZERO_ID = {"calc.tests.test_ops::test_zero": f"{TEST_FILE}::test_zero"}
+
+
+@pytest.mark.parametrize(
+    ("rerun", "expected", "failed"),
+    [
+        (_run(None, None, timed_out=True), Outcome.TIMEOUT, ()),
+        (_run(None, None, unavailable=True), Outcome.UNAVAILABLE, ()),
+        (_run({"calc.tests.test_ops::test_one": "pass"}, 0), Outcome.UNCONFIRMED, ()),
+        (_run({"calc.tests.test_ops::test_zero": "pass"}, 0), Outcome.PASSED, ()),
+        (
+            _run({"calc.tests.test_ops::test_zero": "fail"}, 1),
+            Outcome.REJECTED,
+            ("calc.tests.test_ops::test_zero",),
+        ),
+    ],
+    ids=["then_timeout", "then_unavailable", "then_missing", "then_pass", "then_fail"],
+)
+async def test_the_pytest_run_counts_only_a_second_observed_failure(
+    trees: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    rerun: Any,
+    expected: Outcome,
+    failed: tuple[str, ...],
+) -> None:
+    from ouroboros.boundary.footprint import RunRecord
+
+    base, candidate = trees
+    first = _run(FAIL_ZERO, 1, record=RunRecord(nodeids=ZERO_ID))
+    monkeypatch.setattr(br, "_pytest", _Runner([_run(PASSING), _run(PASSING)], [first, rerun]))
+
+    regression, _worker = await _checks(base).findings(candidate)
+
+    assert (regression.outcome, regression.failed) == (expected, failed)
