@@ -206,6 +206,7 @@ from ouroboros.orchestrator.session import (
     SessionRepository,
     SessionStatus,
     SessionTracker,
+    _optional_create_session_kwargs,
     runtime_resume_identity_from_payload,
 )
 from ouroboros.orchestrator.verify_shell import (
@@ -8711,27 +8712,13 @@ class OrchestratorRunner:
                 create_session_kwargs["gate_forced"] = seed.metadata.gate_forced
             if self._task_workspace is not None:
                 create_session_kwargs["project_task_workspace"] = self._task_workspace
-            try:
-                create_session_parameters = inspect.signature(
-                    self._session_repo.create_session
-                ).parameters
-                accepts_extra_session_metadata = any(
-                    parameter.kind is inspect.Parameter.VAR_KEYWORD
-                    for parameter in create_session_parameters.values()
+            create_session_kwargs.update(
+                _optional_create_session_kwargs(
+                    self._session_repo.create_session,
+                    interview_id=getattr(seed.metadata, "interview_id", None),
+                    acceptance_criteria_count=len(seed.acceptance_criteria),
                 )
-                interview_id = getattr(seed.metadata, "interview_id", None)
-                if interview_id is not None and (
-                    "interview_id" in create_session_parameters or accepts_extra_session_metadata
-                ):
-                    create_session_kwargs["interview_id"] = interview_id
-                if "acceptance_root_indices" in create_session_parameters:
-                    create_session_kwargs["acceptance_root_indices"] = range(
-                        len(seed.acceptance_criteria)
-                    )
-            except (TypeError, ValueError):
-                # Legacy/mock repositories may not expose an inspectable signature;
-                # the durable SessionRepository path always does.
-                pass
+            )
             # Establish the exact capability and PID liveness lease before any
             # durable RUNNING tracker can be reconstructed by an observer. The
             # resolved session id is allocated locally for that purpose rather

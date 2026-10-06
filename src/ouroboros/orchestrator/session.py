@@ -23,10 +23,11 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+import inspect
 import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -59,6 +60,28 @@ log = get_logger(__name__)
 SESSION_START_IDENTITY_PROGRESS_KEY = "_session_start_identity"
 SESSION_RUNTIME_IDENTITY_PROGRESS_KEY = "_session_runtime_identity"
 ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY = "acceptance_root_indices"
+
+
+def _optional_create_session_kwargs(
+    create_session: Callable[..., Any],
+    *,
+    interview_id: object,
+    acceptance_criteria_count: int,
+) -> dict[str, object]:
+    """Return supported optional metadata for legacy session repositories."""
+    try:
+        parameters = inspect.signature(create_session).parameters
+    except (TypeError, ValueError):
+        return {}
+    accepts_extra = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+    kwargs: dict[str, object] = {}
+    if interview_id is not None and ("interview_id" in parameters or accepts_extra):
+        kwargs["interview_id"] = interview_id
+    if "acceptance_root_indices" in parameters:
+        kwargs["acceptance_root_indices"] = range(acceptance_criteria_count)
+    return kwargs
 
 
 def _normalize_pause_owner(value: object) -> dict[str, object]:
