@@ -56,16 +56,23 @@ runs its source text with ``-I -B -c`` in the project interpreter, where the
 ``ouroboros`` package is not importable. ``boundary/oracle.py`` reads this
 file's text once (``ORACLE_HARNESS_SOURCE``) and every oracle package
 freezes it, so a package carries the exact harness it was admitted with.
-"""
 
-from __future__ import annotations
+The target and cli roles run in the task's interpreter, which may be as old
+as Python 3.6 (SWE-bench images of older repositories), so the whole module
+must import there: no ``from __future__ import annotations``, and every
+annotation that is evaluated (signatures) spells its types with ``typing``
+(``Optional[str]``, ``List[str]``), never ``str | None`` or ``list[str]``;
+no standard library call newer than 3.6 in those roles. Python 3.5 and
+earlier are not supported (variable annotations). The compare role runs only
+in the controller.
+"""
 
 import json
 import math
 import os
 import stat
 import sys
-from typing import Any
+from typing import Any, Dict, List, Optional, Tuple
 
 MAX_REPR = 300
 SYMBOL_REF = "$symbol"
@@ -115,7 +122,7 @@ def _plain(value: Any, depth: int = 0) -> Any:
     raise TypeError(type(value).__name__)
 
 
-def symbol_ref(value: Any) -> str | None:
+def symbol_ref(value: Any) -> Optional[str]:
     """The dotted path ``value`` names when it is a symbol reference, else ``None``."""
     if isinstance(value, dict) and len(value) == 1 and SYMBOL_REF in value:
         name = value[SYMBOL_REF]
@@ -123,7 +130,7 @@ def symbol_ref(value: Any) -> str | None:
     return None
 
 
-def call_ref(value: Any) -> str | None:
+def call_ref(value: Any) -> Optional[str]:
     """The factory path ``value`` names when it is a ``$call`` node, else ``None``."""
     if isinstance(value, dict) and CALL_REF in value:
         name = value[CALL_REF]
@@ -131,7 +138,7 @@ def call_ref(value: Any) -> str | None:
     return None
 
 
-def param_ref(value: Any) -> str | None:
+def param_ref(value: Any) -> Optional[str]:
     """The parameter ``value`` names when it is a ``$param`` reference, else ``None``."""
     if isinstance(value, dict) and len(value) == 1 and PARAM_REF in value:
         name = value[PARAM_REF]
@@ -139,7 +146,7 @@ def param_ref(value: Any) -> str | None:
     return None
 
 
-def bind_params(value: Any, params: dict[str, Any]) -> Any:
+def bind_params(value: Any, params: Dict[str, Any]) -> Any:
     """``value`` with every ``$param`` reference replaced by that parameter's case value.
 
     Done by the controller before a call is sent: a target receives case data
@@ -155,7 +162,7 @@ def bind_params(value: Any, params: dict[str, Any]) -> Any:
     return value
 
 
-def symbol_refs(value: Any, depth: int = 0) -> list[str]:
+def symbol_refs(value: Any, depth: int = 0) -> List[str]:
     """Every symbol reference inside a JSON input value, in order."""
     if depth > 50:
         raise ValueError("too deep")
@@ -185,7 +192,7 @@ def named_inputs(value: Any) -> Any:
     return value
 
 
-def _lookup(symbol: str) -> tuple[Any, Any, int, list[str]]:
+def _lookup(symbol: str) -> Tuple[Any, Any, int, List[str]]:
     """``(module, object, split, parts)`` for an importable dotted ``symbol``."""
     import importlib
 
@@ -228,7 +235,7 @@ def _inputs(value: Any) -> Any:
     return value
 
 
-def _apply_reads(value: Any, reads: list[dict[str, Any]]) -> Any:
+def _apply_reads(value: Any, reads: List[Dict[str, Any]]) -> Any:
     """``value`` after each read in order (``boundary/call_grammar.py``)."""
     for step in reads:
         if "attr" in step:
@@ -245,7 +252,7 @@ def _apply_reads(value: Any, reads: list[dict[str, Any]]) -> Any:
     return value
 
 
-def _setup(calls: list[dict[str, Any]]) -> None:
+def _setup(calls: List[Dict[str, Any]]) -> None:
     """Make the oracle's declared setup calls, each to a callable of the checkout."""
     for call in calls:
         target = _resolve(call["symbol"], "function")
@@ -268,7 +275,7 @@ def _resolve(symbol: str, kind: str) -> Any:
     return target
 
 
-def _defining_file(target: Any, owner: Any) -> str | None:
+def _defining_file(target: Any, owner: Any) -> Optional[str]:
     """The source file the resolved target's code comes from, as this process loaded it."""
     function = target
     while hasattr(function, "__wrapped__"):
@@ -281,7 +288,7 @@ def _defining_file(target: Any, owner: Any) -> str | None:
     return filename if isinstance(filename, str) else None
 
 
-def _checkout_file(filename: str | None) -> bool:
+def _checkout_file(filename: Optional[str]) -> bool:
     """Whether ``filename`` is a regular file of the checkout, reached without a link.
 
     The same proof as ``ouroboros.core.filesystem_capability``'s
@@ -307,7 +314,7 @@ def _checkout_file(filename: str | None) -> bool:
         os.close(descriptor)
 
 
-def _require_nofollow() -> tuple[int, int]:
+def _require_nofollow() -> Tuple[int, int]:
     """``O_NOFOLLOW`` and ``O_DIRECTORY``; ``_Unprovable`` where no-follow opens are unavailable."""
     nofollow = getattr(os, "O_NOFOLLOW", None)
     directory_flag = getattr(os, "O_DIRECTORY", None)
@@ -316,7 +323,7 @@ def _require_nofollow() -> tuple[int, int]:
     return nofollow, directory_flag
 
 
-def _open_checkout_file(parts: list[str]) -> int:
+def _open_checkout_file(parts: List[str]) -> int:
     """A descriptor of the working directory's file ``parts``, opened without following a link.
 
     Every directory of the path is opened by name from the one before it
@@ -354,7 +361,7 @@ def _require_inside_checkout(symbol: str, target: Any, owner: Any) -> None:
         raise _Missing(symbol + ": not defined in the checkout")
 
 
-def _run(target: Any, kind: str, call: dict[str, Any]) -> dict[str, Any]:
+def _run(target: Any, kind: str, call: Dict[str, Any]) -> Dict[str, Any]:
     try:
         if kind == "method":
             owner, name = target
@@ -403,7 +410,7 @@ def _target(nonce: str, kind: str, symbol: str, setup: str) -> None:
     frames = os.dup(1)
     os.dup2(2, 1)
 
-    def frame(payload: dict[str, Any]) -> None:
+    def frame(payload: Dict[str, Any]) -> None:
         data = ("\n" + nonce + " " + json.dumps(payload) + "\n").encode("utf-8")
         while data:
             data = data[os.write(frames, data) :]
@@ -484,7 +491,7 @@ def _target(nonce: str, kind: str, symbol: str, setup: str) -> None:
 #     observation.
 
 
-def _proven_files(proofs: list[str]) -> list[tuple[str, bytes]]:
+def _proven_files(proofs: List[str]) -> List[Tuple[str, bytes]]:
     """Each proven ``(path, device, inode, sha256)`` as ``(absolute path, bytes)``.
 
     ``OSError`` when a file is not the proven one.
@@ -540,8 +547,8 @@ def _enter(workdir: str) -> None:
         os.chdir(workdir)
 
 
-def _cli(nonce: str, kind: str, name: str, workdir: str, count: str, rest: list[str]) -> None:
-    def frame(payload: dict[str, Any]) -> None:
+def _cli(nonce: str, kind: str, name: str, workdir: str, count: str, rest: List[str]) -> None:
+    def frame(payload: Dict[str, Any]) -> None:
         data = ("\n" + nonce + " " + json.dumps(payload) + "\n").encode("utf-8")
         while data:
             data = data[os.write(2, data) :]
@@ -610,7 +617,7 @@ def _cli(nonce: str, kind: str, name: str, workdir: str, count: str, rest: list[
 # ---------------------------------------------------------- shared call shape
 
 
-def call_inputs(spec: dict[str, Any], args: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
+def call_inputs(spec: Dict[str, Any], args: Dict[str, Any]) -> Tuple[List[str], Dict[str, Any]]:
     """The target call's parameter names and values for one case's ``args``.
 
     Without ``inputs`` they are the declared params and the case's values;
@@ -624,8 +631,8 @@ def call_inputs(spec: dict[str, Any], args: dict[str, Any]) -> tuple[list[str], 
 
 
 def split_args(
-    params: list[str], arg_map: dict[str, Any], args: dict[str, Any]
-) -> tuple[list[Any], dict[str, Any]]:
+    params: List[str], arg_map: Dict[str, Any], args: Dict[str, Any]
+) -> Tuple[List[Any], Dict[str, Any]]:
     if not arg_map:
         return [], {name: args[name] for name in params}
     positional = {}
@@ -643,10 +650,10 @@ def cli_argv(
     interpreter: str,
     cwd: str,
     symbol: str,
-    params: list[str],
-    arg_map: dict[str, Any],
-    args: dict[str, Any],
-) -> list[str]:
+    params: List[str],
+    arg_map: Dict[str, Any],
+    args: Dict[str, Any],
+) -> List[str]:
     if symbol.startswith("-m "):
         prefix = [interpreter, "-B", "-m", symbol[3:]]
     elif symbol.endswith(".py"):
@@ -680,7 +687,7 @@ def _number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def equal(expected: Any, observed: Any, approx: float | None) -> bool:
+def equal(expected: Any, observed: Any, approx: Optional[float]) -> bool:
     if approx is not None and _number(expected):
         return _number(observed) and abs(float(observed) - float(expected)) <= approx
     if isinstance(expected, bool) or isinstance(observed, bool):
@@ -707,7 +714,7 @@ def equal(expected: Any, observed: Any, approx: float | None) -> bool:
     return expected == observed
 
 
-def _render_call(symbol: str, args: list[Any], kwargs: dict[str, Any]) -> str:
+def _render_call(symbol: str, args: List[Any], kwargs: Dict[str, Any]) -> str:
     parts = [_short(a) for a in args] + [k + "=" + _short(v) for k, v in kwargs.items()]
     return symbol.rsplit(".", 1)[-1] + "(" + ", ".join(parts) + ")"
 
@@ -716,7 +723,7 @@ ABNORMAL = ("crashed", "timeout", "malformed", "unresolved")
 MALFORMED = "malformed or oversized output"
 
 
-def _abnormal(entry: dict[str, Any], call_text: str, expected_text: str) -> str:
+def _abnormal(entry: Dict[str, Any], call_text: str, expected_text: str) -> str:
     outcome = entry.get("outcome")
     if outcome == "timeout":
         seen = "timeout"
@@ -730,8 +737,8 @@ def _abnormal(entry: dict[str, Any], call_text: str, expected_text: str) -> str:
 
 
 def _judge_python(
-    case: dict[str, Any], entry: dict[str, Any] | None, call_text: str
-) -> tuple[bool, str]:
+    case: Dict[str, Any], entry: Optional[Dict[str, Any]], call_text: str
+) -> Tuple[bool, str]:
     expect = case["expect"]
     if expect["kind"] == "raises":
         expected_text = "to raise " + expect["exception"]
@@ -770,7 +777,7 @@ def _judge_python(
     return False, call_text + ": expected " + expected_text + ", observed " + _short(entry["value"])
 
 
-def _judge_cli(case: dict[str, Any], entry: dict[str, Any]) -> tuple[bool, str]:
+def _judge_cli(case: Dict[str, Any], entry: Dict[str, Any]) -> Tuple[bool, str]:
     call_text = entry.get("call") or case["case_id"]
     expect = case["expect"]
     if entry["outcome"] in ABNORMAL:
@@ -787,7 +794,7 @@ def _judge_cli(case: dict[str, Any], entry: dict[str, Any]) -> tuple[bool, str]:
     return not problems, (call_text + ": " + "; ".join(problems)) if problems else ""
 
 
-def compare(request: dict[str, Any]) -> dict[str, Any]:
+def compare(request: Dict[str, Any]) -> Dict[str, Any]:
     check_id = request["check_id"]
     spec = next(item for item in request["oracle"]["oracles"] if item["check_id"] == check_id)
     binding = request.get("binding")
