@@ -83,6 +83,12 @@ def test_the_replay_reason_is_read_from_the_results_typed_fields() -> None:
     assert _reason(_legacy_result(atomic_verifier_verdict=script_absent)) is (
         LegacyNoEvidenceReason.SCRIPT_ABSENT_FROM_ARTIFACT
     )
+    no_call_evidence = SimpleNamespace(
+        passed=False, failure_class=FailureClass.NO_CALL_EVIDENCE.value
+    )
+    assert _reason(_legacy_result(atomic_verifier_verdict=no_call_evidence)) is (
+        LegacyNoEvidenceReason.NO_CALL_EVIDENCE
+    )
     assert _reason(_legacy_result(atomic_verifier_verdict=transcript)) is (
         LegacyNoEvidenceReason.TRANSCRIPT_UNAVAILABLE
     )
@@ -144,7 +150,9 @@ def _accepted(index: int, reason: LegacyNoEvidenceReason | None = None) -> Exist
 
 def _run(outcome: AuthorityOutcome) -> CheckPackageRun:
     run = CheckPackageRun(CheckPackageSettings(enabled=True))
-    run.resumed = SimpleNamespace(outcome=outcome)  # type: ignore[assignment]
+    run.resumed = SimpleNamespace(  # type: ignore[assignment]
+        outcome=outcome, boundary=SimpleNamespace(reason=None)
+    )
     run.runtime_backend = "codex"
     return run
 

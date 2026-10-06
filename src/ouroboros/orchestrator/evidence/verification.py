@@ -6,6 +6,13 @@ from pathlib import Path
 
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.evidence.ac_classification import _effective_evidence_schema_for_ac
+from ouroboros.orchestrator.evidence.call_citation import (
+    CitationDecision,
+    CitationPolicy,
+    ReplayOutcome,
+    decide_citations,
+    recorded_calls,
+)
 from ouroboros.orchestrator.evidence.claims import (
     _runtime_messages_have_masked_test_command_form,
     _runtime_messages_support_claim,
@@ -100,6 +107,16 @@ def _verify_atomic_evidence_against_runtime_messages(
                 "was not evaluated",
             ),
             failure_class=FailureClass.TRANSCRIPT_MISSING_INFRASTRUCTURE.value,
+        )
+
+    # Evidence by call number: when the record cites transcript calls, the
+    # controller reads those calls itself and the claim strings decide nothing.
+    cited_calls = _cited_call_numbers(typed_evidence)
+    if cited_calls is not None:
+        return _verify_cited_calls(
+            cited_calls,
+            support_messages,
+            task_cwd=task_cwd or adapter_working_directory,
         )
 
     unsupported: list[str] = []
@@ -313,6 +330,90 @@ def _verify_atomic_evidence_against_runtime_messages(
         )
 
     return VerifierVerdict(passed=True)
+
+
+def _cited_call_numbers(typed_evidence: EvidenceRecord) -> tuple[int, ...] | None:
+    """Return the call numbers of an ``evidence_calls`` field, or None when the record has none."""
+    value = typed_evidence.get("evidence_calls")
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(item for item in value if isinstance(item, int) and not isinstance(item, bool))
+
+
+class _UnchangedWorkspaceFiles:
+    """Membership test: a workspace file the leaf did not create or change."""
+
+    def __init__(self, task_cwd: str | None, changed: frozenset[str]) -> None:
+        self._root = Path(task_cwd).resolve() if task_cwd else None
+        self._changed = changed
+
+    def __contains__(self, name: object) -> bool:
+        if self._root is None or not isinstance(name, str) or name in self._changed:
+            return False
+        try:
+            candidate = (self._root / name).resolve()
+            candidate.relative_to(self._root)
+            return candidate.is_file()
+        except (OSError, RuntimeError, ValueError):
+            return False
+
+
+def _verify_cited_calls(
+    cited: tuple[int, ...],
+    support_messages: tuple[AgentMessage, ...],
+    *,
+    task_cwd: str | None,
+) -> VerifierVerdict:
+    """Decide a criterion from the transcript calls the worker cited by number.
+
+    The harness's own observations supply everything but the numbers: the
+    snapshot diff names the changed paths, and a harness replay of a call's
+    executions supplies its exit status on the artifact. The replay does not
+    yet report which lines it executed, so under the default policy
+    (``require_changed_line``) a citation is no evidence until it does. A
+    citation that does not qualify is ``NO_CALL_EVIDENCE`` (no evidence, an
+    unavailable verdict that keeps the attempt), never fabrication; this path
+    accepts only on a qualified call and never rejects.
+    """
+    transcript = tuple(
+        message for message in support_messages if not is_harness_observation_message(message)
+    )
+    calls = recorded_calls(transcript, task_cwd=task_cwd)
+    observations = [
+        observation
+        for observation in (observation_from_message(message) for message in support_messages)
+        if observation is not None
+    ]
+    changed: frozenset[str] = frozenset().union(*(o.changed_paths for o in observations))
+    replays: dict[int, ReplayOutcome] = {}
+    for call in calls:
+        wanted = " ".join(call.replay_command.split())
+        for observation in observations:
+            for run in observation.command_runs:
+                if " ".join(run.command.split()) != wanted:
+                    continue
+                failed = run.timed_out or run.mutated
+                replays[call.number] = ReplayOutcome(
+                    returncode=(1 if failed and run.returncode == 0 else run.returncode)
+                )
+    verdict = decide_citations(
+        cited,
+        calls,
+        policy=CitationPolicy(),
+        replays=replays,
+        changed_paths=changed,
+        base_tree_paths=_UnchangedWorkspaceFiles(task_cwd, changed),
+    )
+    if verdict.decision is CitationDecision.ACCEPT:
+        return VerifierVerdict(passed=True)
+    detail = "; ".join(verdict.reasons)
+    return VerifierVerdict(
+        passed=False,
+        reasons=(f"no_call_evidence: {detail}",),
+        failure_class=FailureClass.NO_CALL_EVIDENCE.value,
+    )
 
 
 def _claimed_file_exists_in_workspace(value: str, *, task_cwd: str | None) -> bool:

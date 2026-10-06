@@ -131,6 +131,13 @@ from ouroboros.boundary.check_env import (
     default_interpreter,
     spawn_check_process,
 )
+from ouroboros.boundary.footprint import (
+    ORACLE_PLAN,
+    OracleFootprint,
+    oracle_program,
+    read_entered,
+    write_plan,
+)
 from ouroboros.boundary.oracle import (
     ORACLE_DATA_PATH,
     ORACLE_HARNESS_PATH,
@@ -839,6 +846,7 @@ async def _observe(
     on_base: bool,
     reference_run: bool = False,
     scratch: Path | None = None,
+    program: str | None = None,
 ) -> tuple[str, str, dict[str, dict[str, Any]], bool]:
     """Run ``cases`` by ``deadline``; return ``(resolve, detail, observations, timed_out)``.
 
@@ -849,7 +857,8 @@ async def _observe(
     with the declared params: it never builds ``inputs`` or a ``receiver``
     and applies no projection. A CLI case's files (case data, like its
     arguments) are written in ``scratch`` for the target and the reference
-    alike.
+    alike. ``program`` replaces the harness text a Python target runs (the
+    footprint recorder wrapping it).
     """
     arg_map = dict(binding.arg_map)
     setup = [] if reference_run else [call.model_dump(mode="json") for call in oracle.setup]
@@ -904,7 +913,7 @@ async def _observe(
                 "-I",
                 "-B",
                 "-c",
-                harness,
+                program or harness,
                 "target",
                 nonce,
                 kind,
@@ -1017,6 +1026,7 @@ async def run_oracle_check(
     writable_root: Path | None = None,
     include_held_out: bool = True,
     reference_run: bool = False,
+    footprint: OracleFootprint | None = None,
 ) -> OracleRun:
     """Run one oracle check on the checkout copy at ``cwd`` (see the module docstring).
 
@@ -1031,6 +1041,13 @@ async def run_oracle_check(
     ``reference_run`` is the reference check's run (``reference_check.py``):
     the reference has no project, so no setup call is made and each symbol
     reference in a case's inputs reaches it as its dotted path.
+    ``footprint`` (``boundary/footprint.py``): a Python target also records
+    which of its watched functions the case entered, in this check's scratch
+    directory (the plan, watched keys included, reaches it as a file there,
+    never in argv); the controller reads it into ``footprint.entered`` for
+    this check. When the recorder cannot be set up the target runs without
+    it and the check is ``unrecorded``. It is an observation only and never
+    part of the verdict.
 
     Never raises: an unexpected controller error is an indeterminate check,
     never a verdict and never a reason to fall back to another verifier.
@@ -1060,6 +1077,25 @@ async def run_oracle_check(
         # Parsed before any target starts; held in memory only.
         oracle_data = _selected_data(json.loads(data_text), oracle.check_id, cases)
         with check_scratch(scratch_parent) as scratch:
+            record = scratch / f"footprint-{secrets.token_hex(8)}.jsonl"
+            program: str | None = None
+            if (
+                footprint is not None
+                and footprint.watched
+                and oracle.call_kind is not CallKind.CLI
+                and not reference_run
+            ):
+                plan = {
+                    "root": str(writable_root or cwd),
+                    "record": str(record),
+                    "watched": sorted([list(key) for key in footprint.watched]),
+                }
+                if write_plan(scratch / ORACLE_PLAN, plan):
+                    program = oracle_program(harness)
+                else:
+                    # Run the oracle exactly as without a recorder, and let
+                    # its footprint exempt nothing.
+                    footprint.unrecorded.add(oracle.check_id)
 
             def prepare(argv: Sequence[str]) -> CheckCommand | CheckUnavailable:
                 return check_command(
@@ -1083,7 +1119,12 @@ async def run_oracle_check(
                 on_base=on_base,
                 reference_run=reference_run,
                 scratch=scratch,
+                program=program,
             )
+            if program is not None and footprint is not None:
+                footprint.entered.setdefault(oracle.check_id, set()).update(
+                    read_entered(record, footprint.watched)
+                )
         result: dict[str, Any] | None = None
         if _decided(resolve, on_base=on_base):
             result = harness_module.compare(

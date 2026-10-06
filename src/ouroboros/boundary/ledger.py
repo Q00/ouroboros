@@ -114,6 +114,7 @@ from ouroboros.boundary.events import (
     acceptance_resumed_event,
     actor_started_event,
     admission_completed_event,
+    artifact_claims_refusal,
     binding_recorded_event,
     boundary_version_id,
     candidate_verified_event,
@@ -1222,6 +1223,8 @@ def _require_supported_statuses(
         if keys[item.root_ac_index] != item.criterion_key:
             raise BoundaryOrderError("a decision's root index names another criterion")
         supported, declared = _supported(state, item.criterion_key, lost)
+        if item.artifact_check is not None and supported in ("unverified", "uncovered"):
+            supported = "fail"  # an executed artifact check failed what the package left undecided
         if item.package_status not in _SUPPORTED_STATUSES[supported] or (
             item.package_status == "pass" and item.declared_binding_pass != declared
         ):
@@ -1359,7 +1362,7 @@ def _require_unverified_decision(state: VersionState, record: ReconciledRecord) 
 
     Allowed only when the final bindings left no check runnable, or when the
     decision says the package could not decide (``undecided_reason``) after
-    the worker started; either way no criterion is a pass or a fail.
+    the worker started; either way no criterion is a pass or a package fail.
     """
     if state.final_bindings and not state.runnable:
         allowed = _UNRUN_STATUSES
@@ -1367,7 +1370,7 @@ def _require_unverified_decision(state: VersionState, record: ReconciledRecord) 
         allowed = _UNDECIDED_STATUSES
     else:
         raise BoundaryOrderError("acceptance must cite a verification of the frozen package")
-    statuses = {item.package_status for item in record.criteria}
+    statuses = {item.package_status for item in record.criteria if item.artifact_check is None}
     if not statuses <= allowed:
         raise BoundaryOrderError(
             "a decision recorded without a candidate verification claims a verified status"
@@ -1702,11 +1705,19 @@ class BoundaryLedger:
         a decision the package could not make (``undecided_reason``, every
         covered criterion indeterminate). Without a package (``package_id`` is ``None``) the boundary
         must be sealed as ``construction_failed`` and a worker must have
-        started on it.
+        started on it. An artifact check's fail stands only with its evidence,
+        admissible under the run's frozen contract (``artifact_claims_refusal``).
         """
         event = acceptance_reconciled_event(
             boundary_id, package_id=package_id, reconciliation=reconciliation
         )
+        state, run = await self._state(boundary_id), parse_boundary_version(boundary_id)
+        contract = await self.run_contract(run[0]) if run else None
+        verified = state.verifications[-1].artifact_tree_digest if state.verifications else None
+        if refusal := artifact_claims_refusal(
+            reconciliation, contract, packaged=state.frozen, candidate_tree_digest=verified
+        ):
+            raise BoundaryOrderError(refusal)
         return await self._append(boundary_id, event)
 
     async def record_reference_checked(

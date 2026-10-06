@@ -15,7 +15,9 @@ construction, with the run contract). It is exactly one of:
 - off (no record of the run at all): the package was off; the legacy verifier
   decides, as it did then;
 - no package (a valid lifecycle whose bound version was sealed
-  ``construction_failed``): the legacy verifier decides, as it did then;
+  ``construction_failed``): the legacy verifier decides, as it did then,
+  except that the criteria the run's journaled decision failed through an
+  artifact check (``boundary/base_regression.py``) fail again;
 - undecidable (any lifecycle violation, duplicate, conflict, gap, or missing
   required record or field): every criterion is indeterminate
   (``boundary_record_missing``) and no check runs;
@@ -53,6 +55,11 @@ when the package, or the record the store holds for it, does not have the
 digest the frozen record journaled (``record_sha256``), or the stored record
 does not name the Seed's criteria in order.
 
+Artifact checks are never run again on resume: the fails a journaled
+decision of the bound version recorded (``artifact_check``) are replayed onto
+every criterion the resumed decision leaves unverified or uncovered
+(``base_regression.replay_recorded``); a journal without them changes nothing.
+
 The journal is as writable as the workspace; removing every record of the
 run, the enabled record included, still reads as "off" (a documented
 residual). What counts as an attempt is the live rule with the check package
@@ -64,6 +71,7 @@ the live run's final bindings are not written again.
 
 from __future__ import annotations
 
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, replace
 import json
 from pathlib import Path
@@ -72,9 +80,11 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from ouroboros.boundary.acceptance import (
+    ArtifactCheck,
     CriterionVerdict,
     PackageCriterionStatus,
     artifact_verdict,
+    attempted_keys,
     reconcile_acceptance,
     render_reconciliation,
 )
@@ -85,25 +95,30 @@ from ouroboros.boundary.authority import (
     RunIdentity,
     _declared_from,
     _fail_attempted,
+    _legacy_owned,
     apply_reconciliation,
     decide_without_package,
     existing_outcomes_from_results,
     mismatched_run,
 )
+from ouroboros.boundary.base_regression import replay_recorded
 from ouroboros.boundary.binding import CheckTier
 from ouroboros.boundary.check_env import INTERPRETER_CHANGED
 from ouroboros.boundary.events import (
     PACKAGE_FROZEN,
     ResumedPayload,
     RunContract,
+    artifact_claims_refusal,
     parse_boundary_version,
 )
 from ouroboros.boundary.ledger import (
     BoundaryLedger,
     BoundaryOrderError,
     RecoveryBound,
+    RecoveryNoPackage,
     RecoveryUndecidable,
     recovery_projection,
+    version_state,
 )
 from ouroboros.boundary.package import (
     CheckPackage,
@@ -129,6 +144,8 @@ log = structlog.get_logger(__name__)
 HELD_OUT_UNAVAILABLE = "held_out_unavailable"
 BOUNDARY_RECORD_MISSING = "boundary_record_missing"
 PACKAGE_RECORD_CHANGED = "package_record_changed"
+NO_ADMITTED_PACKAGE = "no_admitted_package"
+"""Reason of a resumed run bound to no package whose decision recorded artifact-check fails."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +171,12 @@ class ResumedBoundary:
     """The admitted run state still in this process, checked against the projection."""
     reason: str | None = None
     """Why no check runs (``None`` when the live package decides)."""
+    recorded_artifact_checks: tuple[tuple[str, ArtifactCheck], ...] = ()
+    recorded_claims: tuple[dict[str, Any], ...] = ()
+    """The validated evidence (``events.ArtifactCheckClaim``) behind those fails,
+    recorded again with the resumed decision that replays them."""
+    """``(criterion key, check)`` of every fail an artifact check made in the bound
+    version's journaled decision; replayed, never run again."""
 
     @property
     def package(self) -> CheckPackage | None:
@@ -205,6 +228,24 @@ async def load_resumed_boundary(
     ledger = BoundaryLedger(event_store)
     versions = await ledger.run_versions(execution_id)
     projection = recovery_projection(execution_id, await ledger.events(execution_id), versions)
+    if isinstance(projection, RecoveryNoPackage):
+        parsed = parse_boundary_version(projection.boundary_id)
+        assert parsed is not None
+        recorded, claims = _recorded_artifact_checks(
+            versions[parsed[1]], projection.contract, packaged=False
+        )
+        if not recorded:
+            return None
+        return ResumedBoundary(
+            execution_id=execution_id,
+            boundary_id=projection.boundary_id,
+            package_id="",
+            covered=(),
+            contract=projection.contract,
+            reason=NO_ADMITTED_PACKAGE,
+            recorded_artifact_checks=recorded,
+            recorded_claims=claims,
+        )
     if isinstance(projection, RecoveryUndecidable):
         log.warning("boundary.resume.boundary_record_missing", detail=projection.reason)
         return ResumedBoundary(
@@ -223,6 +264,9 @@ async def load_resumed_boundary(
     parsed = parse_boundary_version(projection.boundary_id)
     assert parsed is not None
     (frozen,) = [event for event in versions[parsed[1]] if event.type == PACKAGE_FROZEN]
+    recorded, claims = _recorded_artifact_checks(
+        versions[parsed[1]], projection.contract, packaged=True
+    )
     return ResumedBoundary(
         execution_id=execution_id,
         boundary_id=projection.boundary_id,
@@ -235,7 +279,32 @@ async def load_resumed_boundary(
         contract=projection.contract,
         live=live if problem is None else None,
         reason=problem,
+        recorded_artifact_checks=recorded,
+        recorded_claims=claims,
     )
+
+
+def _recorded_artifact_checks(
+    events: Any, contract: RunContract, *, packaged: bool
+) -> tuple[tuple[tuple[str, ArtifactCheck], ...], tuple[dict[str, Any], ...]]:
+    """The artifact-check fails of a version's journaled decision, and their evidence.
+
+    Only through a validated claim: the decision carries the check's
+    evidence, and the run's frozen contract had the check in ``decide`` mode
+    (a base regression also needs ``packaged``). Anything else replays nothing.
+    """
+    decision = version_state(events).decision
+    if decision is None or artifact_claims_refusal(
+        decision, contract, packaged=packaged, candidate_tree_digest=None
+    ):
+        return (), ()
+    fails = tuple(
+        (item.criterion_key, ArtifactCheck(item.artifact_check))
+        for item in decision.criteria
+        if item.artifact_check is not None
+    )
+    claims = tuple(claim.model_dump(mode="json") for claim in decision.artifact_checks)
+    return fails, claims
 
 
 def _undecided(key: str, reason: str) -> CriterionVerdict:
@@ -258,6 +327,7 @@ async def decide_resumed(
     candidate: Path,
     event_store: EventStore,
     declared: dict[str, list[Any]] | None = None,
+    attempted: Collection[str] | None = None,
 ) -> BoundaryVerdict:
     """The package's per-criterion verdicts on ``candidate`` (see the module docstring).
 
@@ -280,6 +350,8 @@ async def decide_resumed(
         return _verdict(
             boundary,
             {key: _undecided(key, reason) if key in covered else _uncovered(key) for key in keys},
+            keys,
+            attempted,
         )
     computed = (
         await verify_check_package(
@@ -300,10 +372,23 @@ async def decide_resumed(
             verdicts[key] = _undecided(key, BOUNDARY_RECORD_MISSING)
         else:
             verdicts[key] = item
-    return _verdict(boundary, verdicts)
+    return _verdict(boundary, verdicts, keys, attempted)
 
 
-def _verdict(boundary: ResumedBoundary, verdicts: dict[str, CriterionVerdict]) -> BoundaryVerdict:
+def _verdict(
+    boundary: ResumedBoundary,
+    verdicts: dict[str, CriterionVerdict],
+    keys: Sequence[str],
+    attempted: Collection[str] | None,
+) -> BoundaryVerdict:
+    # Replayed only onto this Seed's criteria the worker attempted; without a
+    # package a regression never fails anything, whatever a journal holds.
+    recorded = {
+        key: check
+        for key, check in boundary.recorded_artifact_checks
+        if boundary.reason != NO_ADMITTED_PACKAGE or check is not ArtifactCheck.BASE_REGRESSION
+    }
+    verdicts = replay_recorded(verdicts, recorded, keys, attempted)
     overall = artifact_verdict(item.status for item in verdicts.values())
     return BoundaryVerdict(
         verdict=overall.value,
@@ -432,7 +517,9 @@ class ResumedCheckPackageAuthority:
         # gate failed, is an attempt the package may accept. A runtime
         # failure, a failed verify command, or a resumed attempt the
         # (ungated) legacy verifier rejected is never accepted here.
-        legacy = existing_outcomes_from_results(parallel_result, gated=True)
+        # A run bound to no package had no gate: its attempts are the legacy run's.
+        gated = self.boundary.reason != NO_ADMITTED_PACKAGE
+        legacy = existing_outcomes_from_results(parallel_result, gated=gated)
         declared: dict[str, list[Any]] = {}
         for result in getattr(parallel_result, "results", ()) or ():
             index = getattr(result, "ac_index", -1)
@@ -445,6 +532,9 @@ class ResumedCheckPackageAuthority:
             candidate=self._candidate.resolve(),
             event_store=self._event_store,
             declared=declared,
+            attempted=attempted_keys(
+                keys, legacy, existing_run_accepted=bool(parallel_result.all_succeeded)
+            ),
         )
         reconciliation = reconcile_acceptance(
             keys,
@@ -453,13 +543,24 @@ class ResumedCheckPackageAuthority:
             existing_run_accepted=bool(parallel_result.all_succeeded),
             legacy_decides_unverified=True,
         )
+        replayed = {d.artifact_check for d in reconciliation.decisions if d.artifact_check}
+        reconciliation = replace(
+            reconciliation,
+            artifact_claims=tuple(
+                claim for claim in self.boundary.recorded_claims if claim["check"] in replayed
+            ),
+        )
         record = {
             **reconciliation.to_dict(),
             "source": self.boundary.source,
             "held_out_checks": sorted(self.boundary.held_out_checks),
         }
         ledger = BoundaryLedger(self._event_store)
-        if self.boundary.package_id:
+        if self.boundary.reason == NO_ADMITTED_PACKAGE:
+            # Bound to no package: the legacy verifier owns every criterion
+            # but the replayed fails, which the live decision already journaled.
+            reconciliation = _legacy_owned(reconciliation)
+        elif self.boundary.package_id:
             await ledger.record_acceptance_resumed(
                 self.boundary.boundary_id,
                 package_id=self.boundary.package_id,
@@ -515,7 +616,12 @@ class ResumedCheckPackageAuthority:
             if outcome.reconciliation is not None:
                 lines.extend(render_reconciliation(outcome.reconciliation))
             return lines
-        if self.boundary.source == "memory":
+        if self.boundary.reason == NO_ADMITTED_PACKAGE:
+            lines = [
+                "No admitted package on resume: the artifact-check fails the run recorded "
+                "are replayed, the legacy verifier decided the rest."
+            ]
+        elif self.boundary.source == "memory":
             lines = ["Check package recomputed on resume from memory (held-out cases available)."]
         else:
             lines = [
@@ -533,6 +639,7 @@ class ResumedCheckPackageAuthority:
 __all__ = [
     "BOUNDARY_RECORD_MISSING",
     "HELD_OUT_UNAVAILABLE",
+    "NO_ADMITTED_PACKAGE",
     "PACKAGE_RECORD_CHANGED",
     "ResumedBoundary",
     "ResumedCheckPackageAuthority",
