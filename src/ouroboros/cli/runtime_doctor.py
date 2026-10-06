@@ -83,7 +83,7 @@ def doctor_runtime(
     """Show bounded, read-only runtime facts for local MCP diagnostics."""
     try:
         registry_dir = diagnostic_mcp_pid_registry_dir()
-    except (KeyError, OSError):
+    except (KeyError, OSError, RuntimeError, ValueError):
         registry_dir = None
     snapshot = collect_runtime_snapshot(registry_dir=registry_dir)
     render_runtime_snapshot(snapshot, as_json=as_json)

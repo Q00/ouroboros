@@ -1237,12 +1237,16 @@ unavailable reasons, loopback results, and each registry record's metadata.
 The registry location is displayed using the stable label
 `~/.ouroboros/mcp-servers`; the resolved absolute home path is not included.
 
-The command reads no registry contents, process arguments, credentials, or
-environment values other than `PATH`; it does not execute commands, connect to
-the network, or mutate the machine. PATH and registry scans have fixed bounds.
-Loopback probes only bind an ephemeral socket and close it immediately.
-On POSIX, the registry home is resolved from the local `/etc/passwd` file; if
-the current user has no local entry, registry status is `owner_unavailable`.
+The command reads only `PATH` and the home-location information used by the
+server's normal `Path.home()` lookup (including a `HOME` override on POSIX).
+The resolved home and absolute registry path are used only for the bounded
+registry lookup; neither value is included in output or stored. It reads no
+configuration, registry contents, process arguments, or credentials, executes
+no commands, connects to no network, and does not mutate the machine. PATH
+and registry scans have fixed bounds. Loopback probes only bind an ephemeral
+socket and close it immediately. An invalid or unresolvable home location
+reports registry status `not_checked` with reason `owner_unavailable`, without
+including the location or exception details.
 
 ```bash
 ouroboros mcp doctor-runtime [--json]
