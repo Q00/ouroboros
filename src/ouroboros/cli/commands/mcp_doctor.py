@@ -340,14 +340,17 @@ async def _probe_local_stdio() -> list[CheckResult]:
     if cleanup_errors:
         if not results:
             results = _local_stdio_failure(cleanup_errors[0])
-        for result in results:
-            result.status = "fail"
-            result.remediation = "Resolve local stdio teardown before rerunning the probe."
-        cleanup_error = cleanup_errors[0]
-        cleanup_message = (
-            f"Local stdio teardown failed ({type(cleanup_error).__name__}): {cleanup_error}"
+        # Cleanup failure makes the overall Doctor fail, but cannot rewrite
+        # the observed startup/discovery/tool results into a different diagnosis.
+        cleanup_message = "; ".join(f"{type(error).__name__}: {error}" for error in cleanup_errors)
+        results.append(
+            CheckResult(
+                "local_stdio_cleanup",
+                "fail",
+                f"Local stdio teardown failed ({cleanup_message})",
+                "Resolve local stdio teardown before rerunning the probe.",
+            )
         )
-        results[0].message = f"{cleanup_message}; {results[0].message}"
     return results
 
 

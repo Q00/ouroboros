@@ -793,8 +793,9 @@ class TestLocalStdioProbe:
             results = await _probe_local_stdio()
 
         assert captured["cleaned_up"] is True
-        assert [result.status for result in results] == ["fail", "fail", "fail"]
-        assert "child reap failed" in results[0].message
+        assert [result.status for result in results] == ["pass", "pass", "pass", "fail"]
+        assert results[-1].name == "local_stdio_cleanup"
+        assert "child reap failed" in results[-1].message
         adapter.call_tool.assert_not_awaited()
 
 

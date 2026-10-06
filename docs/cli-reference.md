@@ -1375,7 +1375,9 @@ disabled, does not read configured MCP launch commands, and cannot modify the
 user's Ouroboros configuration, EventStore, or PID registry. The temporary
 child and its isolated state are cleaned up on both success and failure.
 Transport success is observed before protocol discovery, and a cleanup failure
-causes the probe to fail even when tool discovery succeeded.
+causes the probe to fail even when tool discovery succeeded. The three diagnostic
+stage results remain unchanged; teardown failures add a `local_stdio_cleanup`
+failure result and force the overall exit status to 1.
 
 This first diagnostic increment does not probe configured or third-party MCP
 servers, execute arbitrary launchers, open a network transport, inventory the
