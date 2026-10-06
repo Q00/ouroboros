@@ -114,7 +114,7 @@ async def test_temporary_directory_cleanup_failure_becomes_visible_probe_failure
 async def test_probe_preserves_external_cancellation_while_teardown_also_fails(monkeypatch):
     cancellation = anyio.get_cancelled_exc_class()("probe cancelled")
     adapter = MagicMock()
-    adapter.disconnect = AsyncMock(return_value=SimpleNamespace(is_err=False))
+    adapter.disconnect = AsyncMock(side_effect=SystemExit(74))
     monkeypatch.setattr("ouroboros.cli.commands.mcp_doctor.MCPClientAdapter", lambda **_: adapter)
 
     async def cancel_probe(*_args):
@@ -128,6 +128,27 @@ async def test_probe_preserves_external_cancellation_while_teardown_also_fails(m
         await _probe_local_stdio()
 
     assert caught.value is cancellation
+    assert any("SystemExit" in note and "74" in note for note in cancellation.__notes__)
+    adapter.disconnect.assert_awaited_once()
+
+
+async def test_probe_preserves_primary_error_when_teardown_also_fails(monkeypatch):
+    adapter = MagicMock()
+    adapter.disconnect = AsyncMock(side_effect=SystemExit(74))
+    monkeypatch.setattr("ouroboros.cli.commands.mcp_doctor.MCPClientAdapter", lambda **_: adapter)
+
+    async def fail_probe(*_args):
+        raise RuntimeError("discovery rejected")
+
+    monkeypatch.setattr(
+        "ouroboros.cli.commands.mcp_doctor._collect_local_stdio_results", fail_probe
+    )
+
+    results = await _probe_local_stdio()
+
+    assert [result.status for result in results] == ["fail", "fail", "fail"]
+    assert "discovery rejected" in results[0].message
+    assert "teardown failed (SystemExit): 74" in results[0].message
     adapter.disconnect.assert_awaited_once()
 
 

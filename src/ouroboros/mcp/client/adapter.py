@@ -41,6 +41,7 @@ from ouroboros.mcp.types import (
 log = structlog.get_logger(__name__)
 
 RETRIABLE_EXCEPTIONS = (TimeoutError, ConnectionError, OSError)
+CONTROL_FLOW_EXCEPTIONS = (asyncio.CancelledError, KeyboardInterrupt, GeneratorExit)
 
 
 def _record_cleanup_failure(primary: BaseException, cleanup: BaseException) -> None:
@@ -59,6 +60,17 @@ def _record_cleanup_failure(primary: BaseException, cleanup: BaseException) -> N
         # Logging is best-effort during exception unwinding. In particular, a
         # broken logging sink must not replace the error from the context body.
         pass
+
+
+def _cleanup_client_error(error: BaseException, server_name: str) -> MCPClientError:
+    """Wrap a cleanup BaseException without narrowing its diagnostic type."""
+    wrapped = MCPClientError(
+        str(error),
+        server_name=server_name,
+        details={"original_exception": type(error).__name__},
+    )
+    wrapped.__cause__ = error
+    return wrapped
 
 
 def _freeze_json(value: Any) -> Any:
@@ -231,26 +243,30 @@ class MCPClientAdapter:
             await resources.client.__aenter__()
             self._server_info = self._parse_server_info(resources.client, config.name)
             self._server_snapshot = self._parse_server_snapshot(resources.client)
-        except asyncio.CancelledError:
+        except CONTROL_FLOW_EXCEPTIONS as primary_error:
             # SDK entry unwinds its transport, but our published state and
             # explicitly owned HTTP client still need cleanup. A cleanup error
             # must not turn task cancellation into a retried connection error.
             if resources is not None:
                 try:
                     await self._reset_connection_state()
-                except Exception as exc:
-                    log.warning("mcp.cancelled_connect_cleanup_failed", error=str(exc))
+                except BaseException as cleanup_error:
+                    self._cleanup_error = _cleanup_client_error(cleanup_error, config.name)
+                    _record_cleanup_failure(primary_error, cleanup_error)
+                    if isinstance(cleanup_error, CONTROL_FLOW_EXCEPTIONS):
+                        raise
             raise
-        except Exception:
+        except Exception as primary_error:
             # The high-level Client unwinds its own transport.  Ouroboros still
             # closes its explicitly owned HTTP client, even if Client teardown fails.
             if resources is not None:
                 try:
                     await self._reset_connection_state()
-                except Exception as cleanup_exc:
-                    self._cleanup_error = MCPClientError.from_exception(
-                        cleanup_exc, server_name=config.name
-                    )
+                except BaseException as cleanup_exc:
+                    self._cleanup_error = _cleanup_client_error(cleanup_exc, config.name)
+                    _record_cleanup_failure(primary_error, cleanup_exc)
+                    if isinstance(cleanup_exc, CONTROL_FLOW_EXCEPTIONS):
+                        raise
             raise
 
     async def _reset_connection_state(self) -> None:
@@ -266,15 +282,22 @@ class MCPClientAdapter:
         if client is not None:
             try:
                 await client.__aexit__(None, None, None)
-            except Exception as exc:  # pragma: no cover - defensive cleanup
+            except BaseException as exc:  # pragma: no cover - defensive cleanup
                 errors.append(exc)
         if http_client is not None:
             try:
                 await http_client.aclose()
-            except Exception as exc:  # pragma: no cover - defensive cleanup
+            except BaseException as exc:  # pragma: no cover - defensive cleanup
                 errors.append(exc)
         if errors:
-            raise errors[0]
+            control_flow_error = next(
+                (error for error in errors if isinstance(error, CONTROL_FLOW_EXCEPTIONS)), None
+            )
+            if control_flow_error is not None:
+                for error in errors:
+                    if error is not control_flow_error:
+                        _record_cleanup_failure(control_flow_error, error)
+            raise control_flow_error or errors[0]
 
     @staticmethod
     def _parse_server_info(client: Any, configured_name: str) -> MCPServerInfo:

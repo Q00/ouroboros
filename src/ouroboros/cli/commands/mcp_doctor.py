@@ -344,9 +344,10 @@ async def _probe_local_stdio() -> list[CheckResult]:
             result.status = "fail"
             result.remediation = "Resolve local stdio teardown before rerunning the probe."
         cleanup_error = cleanup_errors[0]
-        results[
-            0
-        ].message = f"Local stdio teardown failed ({type(cleanup_error).__name__}): {cleanup_error}"
+        cleanup_message = (
+            f"Local stdio teardown failed ({type(cleanup_error).__name__}): {cleanup_error}"
+        )
+        results[0].message = f"{cleanup_message}; {results[0].message}"
     return results
 
 
