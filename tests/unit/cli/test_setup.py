@@ -277,7 +277,9 @@ class TestCodexSetup:
   -p, --profile <CONFIG_PROFILE_V2>
           Layer $CODEX_HOME/<name>.config.toml on top of the base user config
 """
-        completed = subprocess.CompletedProcess(["codex", "--help"], 0, stdout=help_text, stderr="")
+        completed = subprocess.CompletedProcess(
+            ["codex", "--help"], 0, stdout=help_text.encode("utf-8"), stderr=b""
+        )
 
         with patch("ouroboros.cli.commands.setup.subprocess.run", return_value=completed):
             assert _codex_uses_profile_v2("/usr/local/bin/codex") is True
@@ -291,7 +293,9 @@ class TestCodexSetup:
       --profile-v2 <CONFIG_PROFILE_V2>
           Layer $CODEX_HOME/<name>.config.toml on top of the base user config
 """
-        completed = subprocess.CompletedProcess(["codex", "--help"], 0, stdout=help_text, stderr="")
+        completed = subprocess.CompletedProcess(
+            ["codex", "--help"], 0, stdout=help_text.encode("utf-8"), stderr=b""
+        )
 
         with patch("ouroboros.cli.commands.setup.subprocess.run", return_value=completed):
             assert _codex_uses_profile_v2("/Applications/Codex.app/codex") is False
@@ -309,7 +313,7 @@ class TestCodexSetup:
     ) -> None:
         """Help failures are unknown and must not be reported as legacy evidence."""
 
-        def failing_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        def failing_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
             raise failure
 
         assert codex_uses_profile_v2("/configured/codex", run_command=failing_run) is None
