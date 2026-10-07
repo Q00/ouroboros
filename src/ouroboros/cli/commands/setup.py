@@ -90,6 +90,9 @@ from ouroboros.cli.windows_codex_mcp import apply_windows_codex_mcp_mode, is_nat
 from ouroboros.codex.cli_policy import resolve_codex_cli_path
 from ouroboros.codex.home import resolve_codex_home
 from ouroboros.codex.runtime_profile import codex_uses_profile_v2 as _shared_codex_uses_profile_v2
+from ouroboros.codex.runtime_profile import (
+    existing_codex_profile_names as _existing_codex_profile_names,
+)
 from ouroboros.config._model_defaults import (
     DEFAULT_CONSENSUS_OPUS_MODEL,
     DEFAULT_OPUS_MODEL,
@@ -1245,9 +1248,9 @@ def _upsert_codex_mcp_section(raw: str, section: str) -> tuple[str, bool]:
     return "\n".join(output_lines).rstrip() + "\n", existed_before
 
 
-def _codex_uses_profile_v2(codex_path: str | None = None) -> bool:
+def _codex_uses_profile_v2(codex_path: str | None = None) -> bool | None:
     """Return whether ``codex --profile`` expects ``<name>.config.toml`` files."""
-    return _shared_codex_uses_profile_v2(codex_path, run_command=subprocess.run) is True
+    return _shared_codex_uses_profile_v2(codex_path, run_command=subprocess.run)
 
 
 def _register_codex_mcp_server(
@@ -1453,23 +1456,6 @@ def _render_toml_mapping(settings: _CodexProfileSettings, prefix: str = "") -> l
         lines.extend(_render_toml_mapping(value, section_name))
 
     return lines
-
-
-def _existing_codex_profile_names(raw: str) -> set[str]:
-    """Return configured Codex profile names from a TOML document."""
-    import tomllib
-
-    if not raw.strip():
-        return set()
-
-    parsed = tomllib.loads(raw)
-    profiles = parsed.get("profiles")
-    if profiles is None:
-        return set()
-    if not isinstance(profiles, dict):
-        msg = "Codex config contains a non-table 'profiles' key."
-        raise ValueError(msg)
-    return {str(name) for name in profiles}
 
 
 def _upsert_codex_profile_sections(raw: str) -> tuple[str, list[str]]:
@@ -1883,11 +1869,18 @@ def _register_codex_default_profiles(*, codex_path: str | None = None) -> None:
     """Register default Codex profile anchors for Ouroboros task profiles."""
     import tomllib
 
+    profile_v2 = _codex_uses_profile_v2(codex_path)
+    if profile_v2 is None:
+        print_warning(
+            "Cannot determine Codex profile format; check 'codex --help' and rerun setup."
+        )
+        return
+
     codex_config = resolve_codex_home() / "config.toml"
     codex_config.parent.mkdir(parents=True, exist_ok=True)
     raw = codex_config.read_text(encoding="utf-8") if codex_config.exists() else ""
 
-    if _codex_uses_profile_v2(codex_path):
+    if profile_v2:
         existing_v2_profiles = {
             name
             for name in _CODEX_DEFAULT_PROFILE_SECTIONS
@@ -1961,6 +1954,13 @@ def _register_codex_worker_profile(
     """Register the managed Codex worker profile in ~/.codex/config.toml."""
     import tomllib
 
+    profile_v2 = _codex_uses_profile_v2(codex_path)
+    if profile_v2 is None:
+        print_warning(
+            "Cannot determine Codex profile format; check 'codex --help' and rerun setup."
+        )
+        return False
+
     codex_config = resolve_codex_home() / "config.toml"
     codex_config.parent.mkdir(parents=True, exist_ok=True)
     expected_config = (
@@ -1981,7 +1981,7 @@ def _register_codex_worker_profile(
     else:
         raw = ""
 
-    if _codex_uses_profile_v2(codex_path):
+    if profile_v2:
         profile_path = codex_config.parent / f"{_CODEX_WORKER_PROFILE_NAME}.config.toml"
         legacy_profiles = _existing_codex_profile_names(raw)
         try:
