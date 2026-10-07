@@ -27,7 +27,9 @@ When the user invokes this skill:
    ouroboros update --check
    ```
 
-   - If it reports **up to date**, report that result and stop.
+   - If it reports **up to date**, report the package result together with any
+     Codex plugin version mismatch or unknown-status warning, then stop. Do
+     not infer that every integration is current from the package version.
    - If it reports an **update available**, ask the user to choose **Update
      now** or **Skip**.
    - If the user chooses **Update now**, run:
@@ -67,9 +69,11 @@ When the user invokes this skill:
      legacy path.
 
 4. After a successful update, relay the runtime-specific restart guidance from
-   the native command. If project instruction content also needs regeneration,
-   suggest `ooo setup`; do not edit project instruction files as part of the
-   package update.
+   the native command and any Codex plugin version diagnostic. A version
+   mismatch is advisory; preserve existing marketplace refs rather than
+   automatically removing or advancing a pin. If project instruction content
+   also needs regeneration, suggest `ooo setup`; do not edit project
+   instruction files as part of the package update.
 
 ## Safety contract
 

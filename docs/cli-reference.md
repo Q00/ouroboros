@@ -957,6 +957,25 @@ backend. Claude can apply the new plugin with `/reload-plugins` or a restart;
 active Codex sessions must restart because Codex does not currently retain an
 in-use plugin generation during marketplace cache rotation.
 
+When Codex is selected (`--runtime codex`, `auto` resolving to Codex, or `all`),
+the updater also reports the installed `ouroboros@ouroboros` plugin version.
+This read-only check runs after runtime refresh and on `--check` or an already
+current package. It queries the same configured Codex executable with
+`plugin list --marketplace ouroboros --json`, rather than inferring an installed
+version from available releases or cached directories. After an upgrade, the
+comparison uses the newly verified package version.
+
+A different plugin version produces a warning with both versions. Inspect the
+marketplace ref before deciding whether to update that integration: a pinned
+release may intentionally differ, and refreshing the same pinned ref will not
+advance it. The diagnostic never changes refs or configuration, and does not
+certify the version loaded by an already-running Codex session or MCP server.
+An unavailable CLI, unsupported command, five-second timeout, or unreadable
+inventory is reported as **unknown**, separately from **not installed**.
+These advisory results do not change the update command's exit status.
+An editable package reporting `0.0.0` is shown without inferring version drift.
+Other selected runtimes, `--runtime none`, and `--dry-run` skip this query.
+
 > **Installation identity:** the updater does not guess from global tool lists,
 > PATH order, directory names, or the selected runtime. If the receipt is
 > missing or ambiguous, the owning manager is unavailable, or a direct `pip`

@@ -26,10 +26,12 @@ import tomllib
 from typing import Annotated, Literal
 import urllib.request
 
+from rich.markup import escape
 import typer
 
 from ouroboros import __version__
 from ouroboros.backends import get_backend_capability, resolve_runtime_backend_name
+from ouroboros.cli.codex_plugin import inspect_codex_plugin
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import (
     print_info,
@@ -722,6 +724,50 @@ def _installed_version(identity: InstallationIdentity) -> str | None:
     return match.group(0) if match else None
 
 
+def _report_codex_plugin_version(
+    package_version: str,
+    runtime: str,
+    *,
+    dry_run: bool = False,
+    topology: RuntimeRefreshTopology | None = None,
+) -> None:
+    """Report installed plugin drift without changing refs or update exit status."""
+    if dry_run or runtime not in {"auto", "codex", "codex_cli", "all"}:
+        return
+    if topology is None:
+        try:
+            topology = _configured_runtime_topology("codex" if runtime == "all" else runtime)
+        except ConfigError:
+            print_warning("Codex plugin version: unknown (runtime configuration is invalid).")
+            return
+    if runtime != "all" and _resolve_runtime(
+        runtime, configured_backend=topology.runtime_backend
+    ) not in {"codex", "codex_cli"}:
+        return
+
+    plugin = inspect_codex_plugin(topology.runtime_executable)
+    if plugin.status == "unknown":
+        print_warning(f"Codex plugin version: unknown ({escape(plugin.reason or 'query failed')}).")
+    elif plugin.status == "not_installed":
+        print_info("Codex plugin: not installed.")
+    elif package_version == "0.0.0":
+        print_info(
+            f"Codex plugin: v{escape(plugin.version or '')}. "
+            "Package version is unavailable; version comparison skipped."
+        )
+    else:
+        assert plugin.version is not None
+        if _compare_versions(plugin.version, package_version) == 0:
+            print_info(f"Codex plugin: v{escape(plugin.version)} (matches package).")
+        else:
+            print_warning(
+                f"Codex plugin v{escape(plugin.version)} differs from package "
+                f"v{escape(package_version)}. Review the Ouroboros marketplace ref in Codex; "
+                "refreshing a pinned ref can retain an older plugin. "
+                "This check leaves existing refs and configuration unchanged."
+            )
+
+
 # ── CLI Command ──────────────────────────────────────────────────
 
 
@@ -799,13 +845,15 @@ def update(
                 "Could not set OMP MCP tool timeout; run: "
                 "omp config set extensionHandlers.toolCallTimeoutMs 60000"
             )
-        console.print(f"\n[green]Ouroboros is up to date (v{current}).[/green]\n")
+        console.print(f"\n[green]Ouroboros package is up to date (v{current}).[/green]\n")
+        _report_codex_plugin_version(current, runtime, dry_run=dry_run)
         raise typer.Exit()
 
     console.print(f"\nUpdate available: [yellow]v{current}[/yellow] → [green]v{latest}[/green]")
     console.print(f"[dim]Changes: https://github.com/Q00/ouroboros/releases/tag/v{latest}[/dim]\n")
 
     if check:
+        _report_codex_plugin_version(current, runtime, dry_run=dry_run)
         raise typer.Exit()
 
     configured_topology = RuntimeRefreshTopology()
@@ -955,7 +1003,16 @@ def update(
             console.print(f"  [yellow]![/yellow] {step}")
         console.print()
     else:
-        console.print(f"[bold green]Updated to v{installed}.[/bold green]")
+        console.print(f"[bold green]Package updated to v{installed}.[/bold green]")
+    _report_codex_plugin_version(
+        installed,
+        resolved_runtime,
+        topology=(
+            configured_host_topologies["codex"]
+            if resolved_runtime == "all"
+            else configured_topology
+        ),
+    )
     if resolved_runtime == "all":
         refreshed_hosts = [
             host

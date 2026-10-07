@@ -975,7 +975,7 @@ class TestCheckFlow:
             ),
             patch("ouroboros.cli.commands.update.subprocess.run") as run,
         ):
-            result = runner.invoke(app, ["--check"])
+            result = runner.invoke(app, ["--check", "--runtime", "none"])
 
         assert result.exit_code == 0
         output = _plain(result.output)
@@ -1264,7 +1264,7 @@ class TestUpdateFlow:
             "setup",
             "refresh",
         ] in commands
-        assert "Updated to v99.0.0" in _plain(result.output)
+        assert "Package updated to v99.0.0" in _plain(result.output)
         assert "Restart active claude and codex sessions" in _plain(result.output)
 
     def test_all_runtime_update_reports_partial_artifact_refresh(self) -> None:
@@ -1308,7 +1308,7 @@ class TestUpdateFlow:
         output = _plain(result.output)
         assert "Ouroboros partially updated" in output
         assert "installed runtime artifact refresh" in output
-        assert "Updated to v99.0.0" not in output
+        assert "Package updated to v99.0.0" not in output
 
     def test_auto_runtime_without_claude_or_codex_skips_refresh(self) -> None:
         with (
@@ -1494,7 +1494,7 @@ class TestUpdateFlow:
         output = _plain(result.output)
         assert "claude CLI not found" in output
         assert "Skipping claude runtime config refresh" in output
-        assert "Updated to v99.0.0" in output
+        assert "Package updated to v99.0.0" in output
         # Only the package upgrade and the version probe ran — no plugin or
         # setup subprocesses were attempted without the claude CLI.
         assert run.call_count == 2
@@ -1564,7 +1564,7 @@ class TestUpdateFlow:
 
         assert result.exit_code == 0
         assert "Runtime refresh skipped" in result.output
-        assert "Updated to v99.0.0" in _plain(result.output)
+        assert "Package updated to v99.0.0" in _plain(result.output)
         assert run.call_count == 2
         topology.assert_not_called()
         configure_omp.assert_called_once_with(dry_run=False)
