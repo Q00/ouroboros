@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 import unicodedata
 
 from rich.console import Console
@@ -33,10 +35,40 @@ def _terminal_safe_path(value: str) -> str:
     return escape("".join(rendered))
 
 
-def render_runtime_snapshot(snapshot: RuntimeSnapshot, *, as_json: bool) -> None:
-    """Render bounded runtime facts as JSON or terminal-safe human output."""
+def _private_home_path(value: str, home: Path | None) -> str:
+    """Hide an already resolved home prefix without another location lookup."""
+    if home is None:
+        return value
+    # Normalize lexical dot segments without following symlinks or performing
+    # another filesystem/home lookup. A path can leave and re-enter the home.
+    normalized = Path(os.path.normpath(value))
+    try:
+        relative = normalized.relative_to(Path(os.path.normpath(home)))
+    except ValueError:
+        return str(normalized)
+    return "~" if relative == Path(".") else str(Path("~") / relative)
+
+
+def render_runtime_snapshot(
+    snapshot: RuntimeSnapshot, *, as_json: bool, registry_dir: Path | None = None
+) -> None:
+    """Render runtime facts with home-private, terminal-safe path provenance."""
+    home = (
+        registry_dir.parent.parent
+        if registry_dir is not None
+        and registry_dir.name == "mcp-servers"
+        and registry_dir.parent.name == ".ouroboros"
+        else None
+    )
     if as_json:
-        print(json.dumps(snapshot.to_dict(), indent=2))
+        payload = snapshot.to_dict()
+        for candidate in payload["path"]["candidates"]:
+            candidate["path"] = _private_home_path(candidate["path"], home)
+        payload["path"]["collisions"] = {
+            name: tuple(_private_home_path(value, home) for value in paths)
+            for name, paths in payload["path"]["collisions"].items()
+        }
+        print(json.dumps(payload, indent=2))
         return
 
     console = Console(soft_wrap=True)
@@ -50,11 +82,13 @@ def render_runtime_snapshot(snapshot: RuntimeSnapshot, *, as_json: bool) -> None
         console.print(f"  PATH unavailable reason: {escape(path.reason)}")
     for candidate in path.candidates:
         console.print(
-            f"  PATH candidate: {escape(candidate.name)} -> {_terminal_safe_path(candidate.path)} "
+            f"  PATH candidate: {escape(candidate.name)} -> {_terminal_safe_path(_private_home_path(candidate.path, home))} "
             f"(executable={candidate.executable})"
         )
     for name, paths in path.collisions.items():
-        collision_paths = ", ".join(_terminal_safe_path(value) for value in paths)
+        collision_paths = ", ".join(
+            _terminal_safe_path(_private_home_path(value, home)) for value in paths
+        )
         console.print(f"  PATH collision: {escape(name)} -> {collision_paths}")
     for probe in snapshot.loopback:
         port = "-" if probe.port is None else str(probe.port)
@@ -86,7 +120,7 @@ def doctor_runtime(
     except (KeyError, OSError, RuntimeError, ValueError):
         registry_dir = None
     snapshot = collect_runtime_snapshot(registry_dir=registry_dir)
-    render_runtime_snapshot(snapshot, as_json=as_json)
+    render_runtime_snapshot(snapshot, as_json=as_json, registry_dir=registry_dir)
 
 
 __all__ = ["app", "doctor_runtime", "render_runtime_snapshot"]

@@ -613,7 +613,7 @@ def register_doctor_command(app: typer.Typer) -> None:
         from ouroboros.mcp.machine_runtime import collect_runtime_snapshot
 
         snapshot = collect_runtime_snapshot(registry_dir=_PID_REGISTRY_DIR)
-        render_runtime_snapshot(snapshot, as_json=as_json)
+        render_runtime_snapshot(snapshot, as_json=as_json, registry_dir=_PID_REGISTRY_DIR)
 
 
 __all__ = [

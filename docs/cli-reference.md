@@ -1240,7 +1240,10 @@ The registry location is displayed using the stable label
 The command reads only `PATH` and the home-location information used by the
 server's normal `Path.home()` lookup (including a `HOME` override on POSIX).
 The resolved home and absolute registry path are used only for the bounded
-registry lookup; neither value is included in output or stored. It reads no
+registry lookup; neither value is included in output or stored. PATH candidate
+and collision paths under that home are displayed with a `~` prefix in both
+JSON and human output after lexical dot-segment normalization; paths outside
+that home retain their location provenance. It reads no
 configuration, registry contents, process arguments, or credentials, executes
 no commands, connects to no network, and does not mutate the machine. PATH
 and registry scans have fixed bounds. Loopback probes only bind an ephemeral

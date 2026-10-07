@@ -1112,3 +1112,110 @@ atexit.register(record_imports)
         "config_loader": False,
         "telemetry": False,
     }
+
+
+@pytest.mark.skipif(os.name == "nt", reason="HOME overrides the POSIX server location")
+@pytest.mark.parametrize("route", ["module", "ouroboros", "ooo"])
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize("parent_alias", [False, True])
+def test_public_runtime_masks_home_in_path_candidates_and_collisions(
+    tmp_path, route, as_json, parent_alias
+):
+    home = tmp_path.resolve() / "PRIVATE_HOME_PATH_SENTINEL"
+    registry = home / ".ouroboros" / "mcp-servers"
+    registry.mkdir(parents=True)
+    (registry / "123.pid").write_text("PRIVATE_PID_CONTENT_SENTINEL")
+    (home / ".ouroboros" / "config.yaml").write_text("PRIVATE_CONFIG_SENTINEL")
+    first, second = home / "bin", home / "tools"
+    outside = tmp_path.resolve() / "public-bin"
+    for directory in (first, second, outside):
+        directory.mkdir()
+        executable = directory / "ouroboros"
+        executable.write_text("unused")
+        executable.chmod(0o755)
+    files_before = {path: path.read_bytes() for path in home.rglob("*") if path.is_file()}
+    environment = os.environ.copy()
+    path_home = home / ".." / home.name if parent_alias else home
+    environment.update(
+        HOME=str(home),
+        PATH=os.pathsep.join(map(str, (path_home / "bin", path_home / "tools", outside))),
+        PYTHONDONTWRITEBYTECODE="1",
+    )
+    if route == "module":
+        command = [sys.executable, "-B", "-m", "ouroboros"]
+    else:
+        command = [str(Path(sysconfig.get_path("scripts")) / route)]
+    command.extend(["mcp", "doctor-runtime"])
+    if as_json:
+        command.append("--json")
+    result = subprocess.run(
+        command, env=environment, capture_output=True, text=True, timeout=30, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    for sentinel in (
+        "PRIVATE_HOME_PATH_SENTINEL",
+        "PRIVATE_PID_CONTENT_SENTINEL",
+        "PRIVATE_CONFIG_SENTINEL",
+    ):
+        assert sentinel not in result.stdout
+    assert str(home) not in result.stdout
+    expected_paths = ["~/bin/ouroboros", "~/tools/ouroboros", str(outside / "ouroboros")]
+    if as_json:
+        payload = json.loads(result.stdout)
+        assert [value["path"] for value in payload["path"]["candidates"]] == expected_paths
+        assert payload["path"]["collisions"]["ouroboros"] == expected_paths
+        assert [record["pid"] for record in payload["registry"]["records"]] == [123]
+    else:
+        assert "PATH collision: ouroboros ->" in result.stdout
+        assert all(value in result.stdout for value in expected_paths)
+    assert files_before == {path: path.read_bytes() for path in home.rglob("*") if path.is_file()}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX absolute and root-home path cases")
+def test_runtime_home_mask_preserves_other_locations_and_root_home():
+    from ouroboros.cli.runtime_doctor import _private_home_path
+
+    home = Path("/private/home")
+    assert _private_home_path("/private/home/bin/python", home) == "~/bin/python"
+    assert _private_home_path("/private/home-other/bin/python", home) == (
+        "/private/home-other/bin/python"
+    )
+    assert _private_home_path("relative/bin/python", home) == "relative/bin/python"
+    assert _private_home_path("/bin/python", Path("/")) == "~/bin/python"
+    assert _private_home_path("/private/home", home) == "~"
+    assert _private_home_path("/private/home/../home/bin/python", home) == "~/bin/python"
+    assert _private_home_path("/private/home/../public/bin/python", home) == (
+        "/private/public/bin/python"
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX absolute HOME paths")
+@pytest.mark.parametrize("as_json", [False, True])
+def test_registered_runtime_command_masks_the_same_home_prefix(tmp_path, monkeypatch, as_json):
+    from ouroboros.cli.commands.mcp import app
+
+    home = tmp_path.resolve() / "PRIVATE_REGISTERED_HOME_SENTINEL"
+    registry = home / ".ouroboros" / "mcp-servers"
+    registry.mkdir(parents=True)
+    (registry / "123.pid").write_text("unused")
+    candidates = [home / "bin", home / "tools"]
+    for directory in candidates:
+        directory.mkdir()
+        executable = directory / "ouroboros"
+        executable.write_text("unused")
+        executable.chmod(0o755)
+    monkeypatch.setenv("PATH", os.pathsep.join(map(str, candidates)))
+    with patch("ouroboros.cli.commands.mcp._PID_REGISTRY_DIR", registry):
+        result = runner.invoke(app, ["doctor-runtime"] + (["--json"] if as_json else []))
+    assert result.exit_code == 0
+    assert "PRIVATE_REGISTERED_HOME_SENTINEL" not in result.output
+    if as_json:
+        payload = json.loads(result.output)
+        assert payload["path"]["collisions"]["ouroboros"] == [
+            "~/bin/ouroboros",
+            "~/tools/ouroboros",
+        ]
+    else:
+        assert "~/bin/ouroboros" in result.output
+        assert "~/tools/ouroboros" in result.output
