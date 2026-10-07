@@ -153,6 +153,19 @@ jobs:
       - name: Install dependencies
         run: uv sync --python 3.12 --dev
 
+      - name: Run native Windows heartbeat lease tests
+        # Serial: the native regression hands a real lease between processes.
+        run: |
+          uv run --python 3.12 --no-sync pytest tests/unit/orchestrator/test_heartbeat.py -n 0 -rs --junitxml=heartbeat-windows.xml -q
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          [xml]$heartbeatReport = Get-Content heartbeat-windows.xml
+          $nativeCases = @($heartbeatReport.testsuites.testsuite.testcase | Where-Object {
+            $_.name -eq 'test_windows_release_allows_other_processes_to_reacquire_before_and_after_owner_exit'
+          })
+          if ($nativeCases.Count -ne 1 -or $null -ne $nativeCases[0].SelectSingleNode('skipped')) {
+            throw 'The native Windows heartbeat lease regression must run without skipping.'
+          }
+
       - name: Run native Windows plugin hook tests
         run: uv run --python 3.12 --no-sync pytest tests/unit/scripts/test_windows_plugin_hooks.py -n 0 -q
 

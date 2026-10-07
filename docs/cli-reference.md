@@ -1225,6 +1225,36 @@ The snapshot covers OS, architecture, Python, current executable, installed `our
 ouroboros mcp doctor [--json] [--machine-snapshot]
 ```
 
+### `mcp doctor-runtime`
+
+Show bounded, read-only runtime metadata for local MCP diagnostics. `--json`
+emits typed fields for fixed PATH executable provenance and collisions,
+ephemeral IPv4/IPv6 loopback bindability, and metadata for Ouroboros's own MCP
+PID registry.
+
+Human-readable output shows the bounded executable candidates and collisions,
+unavailable reasons, loopback results, and each registry record's metadata.
+The registry location is displayed using the stable label
+`~/.ouroboros/mcp-servers`; the resolved absolute home path is not included.
+
+The command reads only `PATH` and the home-location information used by the
+server's normal `Path.home()` lookup (including a `HOME` override on POSIX).
+The resolved home and absolute registry path are used only for the bounded
+registry lookup; neither value is included in output or stored. PATH candidate
+and collision paths under that home are displayed with a `~` prefix in both
+JSON and human output after lexical dot-segment normalization; paths outside
+that home retain their location provenance. It reads no
+configuration, registry contents, process arguments, or credentials, executes
+no commands, connects to no network, and does not mutate the machine. PATH
+and registry scans have fixed bounds. Loopback probes only bind an ephemeral
+socket and close it immediately. An invalid or unresolvable home location
+reports registry status `not_checked` with reason `owner_unavailable`, without
+including the location or exception details.
+
+```bash
+ouroboros mcp doctor-runtime [--json]
+```
+
 ### `mcp serve`
 
 Start the MCP server to expose Ouroboros tools to Claude Desktop or other MCP clients.
