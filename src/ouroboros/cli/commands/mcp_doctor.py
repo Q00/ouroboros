@@ -600,6 +600,21 @@ def register_doctor_command(app: typer.Typer) -> None:
         if has_failure:
             raise typer.Exit(code=1)
 
+    @app.command("doctor-runtime")
+    def doctor_runtime(
+        as_json: Annotated[
+            bool,
+            typer.Option("--json", help="Emit machine-readable JSON to stdout."),
+        ] = False,
+    ) -> None:
+        """Show bounded, read-only runtime facts for local MCP diagnostics."""
+        from ouroboros.cli.commands.mcp import _PID_REGISTRY_DIR
+        from ouroboros.cli.runtime_doctor import render_runtime_snapshot
+        from ouroboros.mcp.machine_runtime import collect_runtime_snapshot
+
+        snapshot = collect_runtime_snapshot(registry_dir=_PID_REGISTRY_DIR)
+        render_runtime_snapshot(snapshot, as_json=as_json, registry_dir=_PID_REGISTRY_DIR)
+
 
 __all__ = [
     "CheckResult",

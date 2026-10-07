@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import importlib.metadata
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
+import sysconfig
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -613,7 +616,7 @@ class TestDoctorCommand:
             "ouroboros.cli.commands.mcp_doctor._ALL_CHECKS",
             [lambda: all_pass],
         ):
-            result = runner.invoke(app, [])
+            result = runner.invoke(app, ["doctor"])
         assert result.exit_code == 0
 
     def test_exits_1_when_any_fail(self):
@@ -624,7 +627,7 @@ class TestDoctorCommand:
             "ouroboros.cli.commands.mcp_doctor._ALL_CHECKS",
             [lambda: failing, lambda: passing],
         ):
-            result = runner.invoke(app, [])
+            result = runner.invoke(app, ["doctor"])
         assert result.exit_code == 1
 
     def test_exits_0_when_only_warn(self):
@@ -634,7 +637,7 @@ class TestDoctorCommand:
             "ouroboros.cli.commands.mcp_doctor._ALL_CHECKS",
             [lambda: warning],
         ):
-            result = runner.invoke(app, [])
+            result = runner.invoke(app, ["doctor"])
         assert result.exit_code == 0
 
     def test_machine_snapshot_json_is_structured_and_opt_in(self):
@@ -646,7 +649,7 @@ class TestDoctorCommand:
             patch("ouroboros.cli.commands.mcp_doctor._ALL_CHECKS", [lambda: check]),
             patch("ouroboros.mcp.machine_snapshot.collect_machine_snapshot", return_value=snapshot),
         ):
-            result = runner.invoke(app, ["--machine-snapshot", "--json"])
+            result = runner.invoke(app, ["doctor", "--machine-snapshot", "--json"])
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert data["checks"][0]["name"] == "x"
@@ -661,7 +664,7 @@ class TestDoctorCommand:
             patch("ouroboros.cli.commands.mcp_doctor._ALL_CHECKS", [lambda: check]),
             patch("ouroboros.mcp.machine_snapshot.collect_machine_snapshot", return_value=snapshot),
         ):
-            result = runner.invoke(app, ["--machine-snapshot"])
+            result = runner.invoke(app, ["doctor", "--machine-snapshot"])
         assert result.exit_code == 0
         assert "Static machine snapshot" in result.output
         assert "python" in result.output
@@ -675,7 +678,7 @@ class TestDoctorCommand:
             "ouroboros.cli.commands.mcp_doctor._ALL_CHECKS",
             [lambda: check_a, lambda: check_b],
         ):
-            result = runner.invoke(app, ["--json"])
+            result = runner.invoke(app, ["doctor", "--json"])
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert isinstance(data, list)
@@ -691,7 +694,7 @@ class TestDoctorCommand:
             "ouroboros.cli.commands.mcp_doctor._ALL_CHECKS",
             [lambda: check_result],
         ):
-            result = runner.invoke(app, ["--json"])
+            result = runner.invoke(app, ["doctor", "--json"])
         data = json.loads(result.output)
         for item in data:
             assert "name" in item
@@ -706,7 +709,7 @@ class TestDoctorCommand:
             "ouroboros.cli.commands.mcp_doctor._ALL_CHECKS",
             [lambda: check_result],
         ):
-            result = runner.invoke(app, [])
+            result = runner.invoke(app, ["doctor"])
         assert "mcp" in result.output
 
     def test_human_output_shows_remediation(self):
@@ -721,7 +724,7 @@ class TestDoctorCommand:
             "ouroboros.cli.commands.mcp_doctor._ALL_CHECKS",
             [lambda: check_result],
         ):
-            result = runner.invoke(app, [])
+            result = runner.invoke(app, ["doctor"])
         assert "pip install mcp" in result.output
 
     def test_human_output_preserves_literal_package_profiles(self):
@@ -736,7 +739,7 @@ class TestDoctorCommand:
             "ouroboros.cli.commands.mcp_doctor._ALL_CHECKS",
             [lambda: check_result],
         ):
-            result = runner.invoke(app, [])
+            result = runner.invoke(app, ["doctor"])
 
         assert result.exit_code == 1
         for profile in (
@@ -755,7 +758,7 @@ class TestDoctorCommand:
             "ouroboros.cli.commands.mcp_doctor._ALL_CHECKS",
             [lambda: failing],
         ):
-            result = runner.invoke(app, ["--json"])
+            result = runner.invoke(app, ["doctor", "--json"])
         assert result.exit_code == 1
         data = json.loads(result.output)
         assert data[0]["status"] == "fail"
@@ -773,7 +776,7 @@ class TestDoctorCommand:
             "ouroboros.cli.commands.mcp_doctor._ALL_CHECKS",
             [lambda: pass_result, lambda: warn_result],
         ):
-            result = runner.invoke(app, [])
+            result = runner.invoke(app, ["doctor"])
         assert result.exit_code == 0
 
 
@@ -826,13 +829,16 @@ def test_machine_snapshot_actual_collector_through_cli(tmp_path: Path):
             side_effect=PermissionError("PRIVATE_EXCEPTION_SENTINEL"),
         ),
     ):
-        for args in (["--machine-snapshot", "--json"], ["--machine-snapshot"]):
+        for args in (
+            ["doctor", "--machine-snapshot", "--json"],
+            ["doctor", "--machine-snapshot"],
+        ):
             result = runner.invoke(app, args)
             assert result.exit_code == 0, result.output
             assert "PRIVATE_CONFIG_SENTINEL" not in result.output
             assert "PRIVATE_EXCEPTION_SENTINEL" not in result.output
             assert "permission_denied" in result.output
-        result = runner.invoke(app, ["--machine-snapshot", "--json"])
+        result = runner.invoke(app, ["doctor", "--machine-snapshot", "--json"])
     snapshot = json.loads(result.output)["machine_snapshot"]
     assert snapshot["config_path"]["value"]["kind"] == "regular_file"
     assert snapshot["python"]["status"] == "ok"
@@ -844,7 +850,386 @@ def test_default_doctor_does_not_collect_machine_snapshot():
         patch("ouroboros.cli.commands.mcp_doctor._ALL_CHECKS", []),
         patch("ouroboros.mcp.machine_snapshot.collect_machine_snapshot") as collect,
     ):
-        result = runner.invoke(_make_app(), ["--json"])
+        result = runner.invoke(_make_app(), ["doctor", "--json"])
     assert result.exit_code == 0
     assert json.loads(result.output) == []
     collect.assert_not_called()
+
+
+def test_doctor_runtime_json_uses_owner_path_without_exposing_home(tmp_path: Path, monkeypatch):
+    from ouroboros.cli.commands.mcp import app
+
+    registry = tmp_path / "registry"
+    registry.mkdir()
+    (registry / "123.pid").write_bytes(b"opaque")
+    private_home = tmp_path / "PRIVATE_HOME_SENTINEL"
+    monkeypatch.setenv("HOME", str(private_home))
+
+    with patch("ouroboros.cli.commands.mcp._PID_REGISTRY_DIR", registry):
+        result = runner.invoke(app, ["doctor-runtime", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert set(payload) == {"path", "loopback", "registry"}
+    assert payload["registry"]["directory"] == "~/.ouroboros/mcp-servers"
+    assert payload["registry"]["records"][0]["pid"] == 123
+    assert str(private_home) not in json.dumps(payload)
+    assert all(
+        item["status"] in {"available", "unavailable", "not_checked"}
+        for item in payload["loopback"]
+    )
+
+
+def test_doctor_runtime_human_output_includes_bounded_path_and_registry_details(
+    tmp_path: Path, monkeypatch
+):
+    from ouroboros.cli.commands.mcp import app
+
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    registry = tmp_path / "registry"
+    for directory in (first, second):
+        directory.mkdir()
+        executable = directory / "ouroboros"
+        executable.write_text("unused", encoding="utf-8")
+        executable.chmod(0o755)
+    registry.mkdir()
+    (registry / "456.pid").write_bytes(b"opaque")
+    monkeypatch.setenv("PATH", os.pathsep.join((str(first), str(second))))
+
+    with patch("ouroboros.cli.commands.mcp._PID_REGISTRY_DIR", registry):
+        result = runner.invoke(app, ["doctor-runtime"])
+
+    assert result.exit_code == 0
+    assert "Ouroboros MCP Runtime Facts" in result.output
+    output = " ".join(result.output.split())
+    assert "PATH candidate: ouroboros ->" in output
+    assert f"{first.name}/ouroboros" in output
+    assert f"{second.name}/ouroboros" in output
+    assert "PATH collision: ouroboros ->" in output
+    assert "registry: available at ~/.ouroboros/mcp-servers" in output
+    assert "registry record: pid=456, name=456.pid" in output
+    assert str(registry) not in output
+
+
+def test_doctor_runtime_human_output_includes_unavailable_reason(capsys):
+    from types import SimpleNamespace
+
+    app = _make_app()
+    callback = next(
+        command.callback
+        for command in app.registered_commands
+        if command.callback.__name__ == "doctor_runtime"
+    )
+    snapshot = SimpleNamespace(
+        path=SimpleNamespace(
+            status="not_checked",
+            reason="missing",
+            entries_seen=0,
+            entries_limit=128,
+            candidates=(),
+            collisions={},
+            truncated=False,
+        ),
+        loopback=(
+            SimpleNamespace(family="ipv4", status="unavailable", port=None, reason="denied"),
+        ),
+        registry=SimpleNamespace(
+            directory="~/.ouroboros/mcp-servers",
+            entries_seen=0,
+            entries_limit=128,
+            records=(),
+            status="not_checked",
+            truncated=False,
+            reason="owner_unavailable",
+        ),
+    )
+    with patch(
+        "ouroboros.mcp.machine_runtime.collect_runtime_snapshot",
+        return_value=snapshot,
+    ):
+        callback()
+
+    output = capsys.readouterr().out
+    assert "loopback ipv4: unavailable (port -, denied)" in output
+    assert "PATH unavailable reason: missing" in output
+    assert "registry unavailable reason: owner_unavailable" in output
+
+
+def test_doctor_runtime_human_output_escapes_terminal_controls(tmp_path: Path, monkeypatch):
+    from ouroboros.cli.commands.mcp import app
+
+    first = tmp_path / "line\nbreak\x1b[31m"
+    second = tmp_path / "second"
+    registry = tmp_path / "registry"
+    for directory in (first, second):
+        directory.mkdir()
+        executable = directory / "ouroboros"
+        executable.write_text("unused", encoding="utf-8")
+        executable.chmod(0o755)
+    registry.mkdir()
+    monkeypatch.setenv("PATH", os.pathsep.join((str(first), str(second))))
+
+    with patch("ouroboros.cli.commands.mcp._PID_REGISTRY_DIR", registry):
+        result = runner.invoke(app, ["doctor-runtime"])
+
+    assert result.exit_code == 0
+    rendered_path = str(first / "ouroboros").replace("\n", "\\x0a").replace("\x1b", "\\x1b")
+    assert "line\\x0abreak\\x1b[31m" in result.output
+    assert rendered_path in result.output
+    assert str(first / "ouroboros") not in result.output
+    assert "\x1b[31m" not in result.output
+
+
+def test_doctor_runtime_command_is_registered():
+    from ouroboros.cli.commands.mcp import app
+
+    callback_names = [cmd.callback.__name__ for cmd in app.registered_commands]
+
+    assert "doctor_runtime" in callback_names
+
+
+def test_public_doctor_runtime_skips_config_telemetry_and_logging_bootstrap(tmp_path: Path):
+    repo_root = Path(__file__).resolve().parents[3]
+    home = tmp_path / "fresh-home"
+    home.mkdir()
+    script = """
+import sys
+from ouroboros import telemetry
+
+def forbidden(*_args, **_kwargs):
+    raise AssertionError("doctor-runtime must skip telemetry startup")
+
+telemetry.show_first_run_notice = forbidden
+telemetry.capture_cli_command = forbidden
+from ouroboros import main
+main()
+assert "ouroboros.config.loader" not in sys.modules
+"""
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["PYTHONPATH"] = str(repo_root / "src")
+    env["PATH"] = ""
+    env.pop("OUROBOROS_TELEMETRY", None)
+    result = subprocess.run(
+        [sys.executable, "-c", script, "mcp", "doctor-runtime", "--json"],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert set(payload) == {"path", "loopback", "registry"}
+    assert payload["registry"]["directory"] == "~/.ouroboros/mcp-servers"
+    assert str(home) not in result.stdout
+    assert not (home / ".ouroboros").exists()
+
+
+@pytest.mark.parametrize("command_name", ["ouroboros", "ooo"])
+def test_public_console_scripts_skip_config_telemetry_and_logging_bootstrap(
+    tmp_path: Path, command_name: str
+):
+    repo_root = Path(__file__).resolve().parents[3]
+    home = tmp_path / f"fresh-home-{command_name}"
+    home.mkdir()
+    probe_dir = tmp_path / f"probe-{command_name}"
+    probe_dir.mkdir()
+    probe_result = probe_dir / "imports.json"
+    (probe_dir / "sitecustomize.py").write_text(
+        """import atexit
+import builtins
+import importlib.abc
+import json
+import os
+from pathlib import Path
+import sys
+
+class ConfigLoaderGuard(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "ouroboros.config.loader":
+            raise AssertionError("runtime doctor must not import config loader")
+
+sys.meta_path.insert(0, ConfigLoaderGuard())
+original_import = builtins.__import__
+
+def forbidden(*_args, **_kwargs):
+    raise AssertionError("runtime doctor must skip telemetry startup")
+
+def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+    module = original_import(name, globals, locals, fromlist, level)
+    telemetry = sys.modules.get("ouroboros.telemetry")
+    if telemetry is not None:
+        telemetry.show_first_run_notice = forbidden
+        telemetry.capture_cli_command = forbidden
+    return module
+
+builtins.__import__ = guarded_import
+
+def record_imports():
+    Path(os.environ["ENTRYPOINT_PROBE_RESULT"]).write_text(
+        json.dumps({
+            "config_loader": "ouroboros.config.loader" in sys.modules,
+            "telemetry": "ouroboros.telemetry" in sys.modules,
+        }),
+        encoding="utf-8",
+    )
+
+atexit.register(record_imports)
+""",
+        encoding="utf-8",
+    )
+    script_name = command_name + (".exe" if os.name == "nt" else "")
+    executable = Path(sysconfig.get_path("scripts")) / script_name
+    assert executable.is_file(), f"expected installed console script at {executable}"
+
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["PATH"] = ""
+    env["PYTHONPATH"] = os.pathsep.join((str(probe_dir), str(repo_root / "src")))
+    env["ENTRYPOINT_PROBE_RESULT"] = str(probe_result)
+    env.pop("OUROBOROS_TELEMETRY", None)
+    result = subprocess.run(
+        [str(executable), "mcp", "doctor-runtime", "--json"],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert set(payload) == {"path", "loopback", "registry"}
+    assert payload["registry"]["directory"] == "~/.ouroboros/mcp-servers"
+    assert str(home) not in result.stdout
+    assert not home.exists() or not any(home.iterdir())
+    assert json.loads(probe_result.read_text(encoding="utf-8")) == {
+        "config_loader": False,
+        "telemetry": False,
+    }
+
+
+@pytest.mark.skipif(os.name == "nt", reason="HOME overrides the POSIX server location")
+@pytest.mark.parametrize("route", ["module", "ouroboros", "ooo"])
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize("parent_alias", [False, True])
+@pytest.mark.parametrize("relative_home", [False, True])
+@pytest.mark.parametrize("absolute_path", [False, True])
+def test_public_runtime_masks_home_in_path_candidates_and_collisions(
+    tmp_path, route, as_json, parent_alias, relative_home, absolute_path
+):
+    home = tmp_path.resolve() / "PRIVATE_HOME_PATH_SENTINEL"
+    registry = home / ".ouroboros" / "mcp-servers"
+    registry.mkdir(parents=True)
+    (registry / "123.pid").write_text("PRIVATE_PID_CONTENT_SENTINEL")
+    (home / ".ouroboros" / "config.yaml").write_text("PRIVATE_CONFIG_SENTINEL")
+    first, second = home / "bin", home / "tools"
+    outside = tmp_path.resolve() / "public-bin"
+    for directory in (first, second, outside):
+        directory.mkdir()
+        executable = directory / "ouroboros"
+        executable.write_text("unused")
+        executable.chmod(0o755)
+    files_before = {path: path.read_bytes() for path in home.rglob("*") if path.is_file()}
+    environment = os.environ.copy()
+    location_home = Path(home.name) if relative_home else home
+    path_home = home if absolute_path else location_home
+    path_home = path_home / ".." / home.name if parent_alias else path_home
+    environment.update(
+        HOME=str(location_home),
+        PATH=os.pathsep.join(map(str, (path_home / "bin", path_home / "tools", outside))),
+        PYTHONDONTWRITEBYTECODE="1",
+    )
+    if route == "module":
+        command = [sys.executable, "-B", "-m", "ouroboros"]
+    else:
+        command = [str(Path(sysconfig.get_path("scripts")) / route)]
+    command.extend(["mcp", "doctor-runtime"])
+    if as_json:
+        command.append("--json")
+    result = subprocess.run(
+        command,
+        cwd=tmp_path.resolve(),
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    for sentinel in (
+        "PRIVATE_HOME_PATH_SENTINEL",
+        "PRIVATE_PID_CONTENT_SENTINEL",
+        "PRIVATE_CONFIG_SENTINEL",
+    ):
+        assert sentinel not in result.stdout
+    assert str(home) not in result.stdout
+    expected_paths = ["~/bin/ouroboros", "~/tools/ouroboros", str(outside / "ouroboros")]
+    if as_json:
+        payload = json.loads(result.stdout)
+        assert [value["path"] for value in payload["path"]["candidates"]] == expected_paths
+        assert payload["path"]["collisions"]["ouroboros"] == expected_paths
+        if relative_home:
+            assert payload["registry"]["reason"] == "owner_unavailable"
+            assert payload["registry"]["records"] == []
+        else:
+            assert [record["pid"] for record in payload["registry"]["records"]] == [123]
+    else:
+        assert "PATH collision: ouroboros ->" in result.stdout
+        assert all(value in result.stdout for value in expected_paths)
+    assert files_before == {path: path.read_bytes() for path in home.rglob("*") if path.is_file()}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX absolute and root-home path cases")
+def test_runtime_home_mask_preserves_other_locations_and_root_home():
+    from ouroboros.cli.runtime_doctor import _private_home_path
+
+    home = Path("/private/home")
+    assert _private_home_path("/private/home/bin/python", home) == "~/bin/python"
+    assert _private_home_path("/private/home-other/bin/python", home) == (
+        "/private/home-other/bin/python"
+    )
+    assert _private_home_path("relative/bin/python", home) == "relative/bin/python"
+    assert _private_home_path("/bin/python", Path("/")) == "~/bin/python"
+    assert _private_home_path("/private/home", home) == "~"
+    assert _private_home_path("/private/home/../home/bin/python", home) == "~/bin/python"
+    assert _private_home_path("/private/home/../public/bin/python", home) == (
+        "/private/public/bin/python"
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX absolute HOME paths")
+@pytest.mark.parametrize("as_json", [False, True])
+def test_registered_runtime_command_masks_the_same_home_prefix(tmp_path, monkeypatch, as_json):
+    from ouroboros.cli.commands.mcp import app
+
+    home = tmp_path.resolve() / "PRIVATE_REGISTERED_HOME_SENTINEL"
+    registry = home / ".ouroboros" / "mcp-servers"
+    registry.mkdir(parents=True)
+    (registry / "123.pid").write_text("unused")
+    candidates = [home / "bin", home / "tools"]
+    for directory in candidates:
+        directory.mkdir()
+        executable = directory / "ouroboros"
+        executable.write_text("unused")
+        executable.chmod(0o755)
+    monkeypatch.setenv("PATH", os.pathsep.join(map(str, candidates)))
+    with patch("ouroboros.cli.commands.mcp._PID_REGISTRY_DIR", registry):
+        result = runner.invoke(app, ["doctor-runtime"] + (["--json"] if as_json else []))
+    assert result.exit_code == 0
+    assert "PRIVATE_REGISTERED_HOME_SENTINEL" not in result.output
+    if as_json:
+        payload = json.loads(result.output)
+        assert payload["path"]["collisions"]["ouroboros"] == [
+            "~/bin/ouroboros",
+            "~/tools/ouroboros",
+        ]
+    else:
+        assert "~/bin/ouroboros" in result.output
+        assert "~/tools/ouroboros" in result.output
