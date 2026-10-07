@@ -69,6 +69,112 @@ class TestSharedReducerLocation:
         board = reduce_board(_raw_events(), execution_id="exec_1")
         assert set(board) == {"meta", "columns", "providers"}
         assert board["providers"] == ["claude", "codex_cli"]
+        assert board["meta"]["interview"] is None
+
+    def test_linked_interview_projection_is_read_only_lifecycle_state(self) -> None:
+        events = [
+            {
+                "aggregate_id": "interview-c1",
+                "event_type": "interview.started",
+                "payload": {"initial_context": "dashboard idea"},
+            },
+            {
+                "aggregate_id": "interview-c1",
+                "event_type": "interview.response.recorded",
+                "payload": {"round_number": 2, "response_preview": "bounded answer"},
+            },
+            {
+                "aggregate_id": "interview-c1",
+                "event_type": "interview.completed",
+                "payload": {"total_rounds": 3},
+            },
+        ]
+
+        board = reduce_board(events, execution_id="exec-c1")
+
+        assert board["meta"]["interview"] == {
+            "interview_id": "interview-c1",
+            "status": "completed",
+            "round": 2,
+            "total_rounds": 3,
+            "last_event": "interview.completed",
+        }
+        assert set(board) == {"meta", "columns", "providers"}
+
+    def test_recovered_interview_drops_obsolete_failure_diagnostics(self) -> None:
+        failed = {
+            "aggregate_id": "interview-c1",
+            "event_type": "interview.failed",
+            "payload": {"error": "generation timed out", "phase": "question_generation"},
+        }
+        resumed = {
+            "aggregate_id": "interview-c1",
+            "event_type": "interview.response.recorded",
+            "payload": {"round_number": 2, "response_preview": "continued"},
+        }
+        completed = {
+            "aggregate_id": "interview-c1",
+            "event_type": "interview.completed",
+            "payload": {"total_rounds": 3},
+        }
+
+        active = reduce_board([failed, resumed], execution_id="exec-c1")["meta"]["interview"]
+        done = reduce_board([failed, resumed, completed], execution_id="exec-c1")["meta"][
+            "interview"
+        ]
+
+        assert active["status"] == "active"
+        assert done["status"] == "completed"
+        for projection in (active, done):
+            assert "error" not in projection
+            assert "phase" not in projection
+
+    def test_interview_projection_ignores_unrecognized_or_identity_free_rows(self) -> None:
+        board = reduce_board(
+            [
+                {
+                    "aggregate_id": "interview-c1",
+                    "event_type": "interview.future.mutation.requested",
+                    "payload": {"action": "approve"},
+                },
+                {
+                    "event_type": "interview.started",
+                    "payload": {"initial_context": "missing aggregate identity"},
+                },
+            ],
+            execution_id="exec-c1",
+        )
+
+        assert board["meta"]["interview"] is None
+
+    def test_reopened_interview_retires_completion_total(self) -> None:
+        completed = {
+            "aggregate_id": "interview-c1",
+            "event_type": "interview.completed",
+            "payload": {"total_rounds": 3},
+        }
+        for event_type in (
+            "interview.started",
+            "interview.response.recorded",
+            "interview.question_generation.parent_handoff",
+            "interview.response.emitted",
+            "interview.lateral_review.recommended",
+            "interview.failed",
+        ):
+            transition = {
+                "aggregate_id": "interview-c1",
+                "event_type": event_type,
+                "payload": {"round_number": 4, "error": "new failure"},
+            }
+            projection = reduce_board([completed, transition])["meta"]["interview"]
+            assert projection["status"] != "completed"
+            assert projection["total_rounds"] is None
+
+        recompleted = {**completed, "payload": {"total_rounds": 5}}
+        projection = reduce_board([completed, transition, recompleted])["meta"]["interview"]
+        assert projection["status"] == "completed"
+        assert projection["total_rounds"] == 5
+        assert "error" not in projection
 
     def test_web_shim_reexports_same_object(self) -> None:
         """The web surface's import path is the very same reducer function."""
