@@ -12,7 +12,7 @@ from rich.markup import escape
 import typer
 
 from ouroboros.mcp.machine_runtime import RuntimeSnapshot, collect_runtime_snapshot
-from ouroboros.mcp.registry_paths import diagnostic_mcp_pid_registry_dir
+from ouroboros.mcp.registry_paths import diagnostic_mcp_location
 
 app = typer.Typer(add_completion=False)
 
@@ -43,22 +43,30 @@ def _private_home_path(value: str, home: Path | None) -> str:
     # another filesystem/home lookup. A path can leave and re-enter the home.
     normalized = Path(os.path.normpath(value))
     try:
-        relative = normalized.relative_to(Path(os.path.normpath(home)))
+        relative = Path(os.path.abspath(normalized)).relative_to(Path(os.path.abspath(home)))
     except ValueError:
         return str(normalized)
     return "~" if relative == Path(".") else str(Path("~") / relative)
 
 
 def render_runtime_snapshot(
-    snapshot: RuntimeSnapshot, *, as_json: bool, registry_dir: Path | None = None
+    snapshot: RuntimeSnapshot,
+    *,
+    as_json: bool,
+    registry_dir: Path | None = None,
+    home: Path | None = None,
 ) -> None:
     """Render runtime facts with home-private, terminal-safe path provenance."""
     home = (
-        registry_dir.parent.parent
-        if registry_dir is not None
-        and registry_dir.name == "mcp-servers"
-        and registry_dir.parent.name == ".ouroboros"
-        else None
+        home
+        if home is not None
+        else (
+            registry_dir.parent.parent
+            if registry_dir is not None
+            and registry_dir.name == "mcp-servers"
+            and registry_dir.parent.name == ".ouroboros"
+            else None
+        )
     )
     if as_json:
         payload = snapshot.to_dict()
@@ -116,11 +124,11 @@ def doctor_runtime(
 ) -> None:
     """Show bounded, read-only runtime facts for local MCP diagnostics."""
     try:
-        registry_dir = diagnostic_mcp_pid_registry_dir()
+        home, registry_dir = diagnostic_mcp_location()
     except (KeyError, OSError, RuntimeError, ValueError):
-        registry_dir = None
+        home, registry_dir = None, None
     snapshot = collect_runtime_snapshot(registry_dir=registry_dir)
-    render_runtime_snapshot(snapshot, as_json=as_json, registry_dir=registry_dir)
+    render_runtime_snapshot(snapshot, as_json=as_json, registry_dir=registry_dir, home=home)
 
 
 __all__ = ["app", "doctor_runtime", "render_runtime_snapshot"]

@@ -1118,8 +1118,10 @@ atexit.register(record_imports)
 @pytest.mark.parametrize("route", ["module", "ouroboros", "ooo"])
 @pytest.mark.parametrize("as_json", [False, True])
 @pytest.mark.parametrize("parent_alias", [False, True])
+@pytest.mark.parametrize("relative_home", [False, True])
+@pytest.mark.parametrize("absolute_path", [False, True])
 def test_public_runtime_masks_home_in_path_candidates_and_collisions(
-    tmp_path, route, as_json, parent_alias
+    tmp_path, route, as_json, parent_alias, relative_home, absolute_path
 ):
     home = tmp_path.resolve() / "PRIVATE_HOME_PATH_SENTINEL"
     registry = home / ".ouroboros" / "mcp-servers"
@@ -1135,9 +1137,11 @@ def test_public_runtime_masks_home_in_path_candidates_and_collisions(
         executable.chmod(0o755)
     files_before = {path: path.read_bytes() for path in home.rglob("*") if path.is_file()}
     environment = os.environ.copy()
-    path_home = home / ".." / home.name if parent_alias else home
+    location_home = Path(home.name) if relative_home else home
+    path_home = home if absolute_path else location_home
+    path_home = path_home / ".." / home.name if parent_alias else path_home
     environment.update(
-        HOME=str(home),
+        HOME=str(location_home),
         PATH=os.pathsep.join(map(str, (path_home / "bin", path_home / "tools", outside))),
         PYTHONDONTWRITEBYTECODE="1",
     )
@@ -1149,7 +1153,13 @@ def test_public_runtime_masks_home_in_path_candidates_and_collisions(
     if as_json:
         command.append("--json")
     result = subprocess.run(
-        command, env=environment, capture_output=True, text=True, timeout=30, check=False
+        command,
+        cwd=tmp_path.resolve(),
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
     )
     assert result.returncode == 0, result.stderr
     assert result.stderr == ""
@@ -1165,7 +1175,11 @@ def test_public_runtime_masks_home_in_path_candidates_and_collisions(
         payload = json.loads(result.stdout)
         assert [value["path"] for value in payload["path"]["candidates"]] == expected_paths
         assert payload["path"]["collisions"]["ouroboros"] == expected_paths
-        assert [record["pid"] for record in payload["registry"]["records"]] == [123]
+        if relative_home:
+            assert payload["registry"]["reason"] == "owner_unavailable"
+            assert payload["registry"]["records"] == []
+        else:
+            assert [record["pid"] for record in payload["registry"]["records"]] == [123]
     else:
         assert "PATH collision: ouroboros ->" in result.stdout
         assert all(value in result.stdout for value in expected_paths)
