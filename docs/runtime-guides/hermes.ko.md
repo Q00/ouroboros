@@ -83,6 +83,24 @@ orchestrator:
   hermes_cli_path: ~/.local/bin/hermes
 ```
 
+Ouroboros가 Hermes의 정식 프로필 디렉터리
+(`~/.hermes/profiles/<이름>`)에서 호스팅되면 워커 하위 프로세스가 그
+프로필을 이어받습니다. 따라서 Ouroboros가 격리된 worktree로 실행 위치를
+옮긴 뒤에도 호스트의 제공자 인증과 모델 설정을 사용할 수 있습니다.
+
+워커가 다른 Hermes 프로필을 사용해야 한다면 백엔드 프로필을 명시합니다.
+
+```yaml
+orchestrator:
+  runtime_backend: hermes
+  runtime_profile:
+    backend_profile: worker
+```
+
+명시적 설정은 호스트 프로필 자동 인식보다 우선합니다. 정식 Hermes 프로필
+디렉터리 밖에서는 `runtime_profile`을 설정하지 않을 경우 기존처럼 프로필
+플래그 없이 `hermes chat ...`을 실행합니다.
+
 ## 기술 세부사항
 
 ### 세션 관리
