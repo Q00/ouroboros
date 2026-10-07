@@ -166,6 +166,9 @@ jobs:
             throw 'The native Windows heartbeat lease regression must run without skipping.'
           }
 
+      - name: Run native Windows updater recovery tests
+        run: uv run --python 3.12 --no-sync pytest tests/unit/cli/test_update_recovery.py -n 0 -q
+
       - name: Run native Windows plugin hook tests
         run: uv run --python 3.12 --no-sync pytest tests/unit/scripts/test_windows_plugin_hooks.py -n 0 -q
 

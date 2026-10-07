@@ -957,6 +957,20 @@ backend. Claude can apply the new plugin with `/reload-plugins` or a restart;
 active Codex sessions must restart because Codex does not currently retain an
 in-use plugin generation during marketplace cache rotation.
 
+If the package upgrade is verified but a required integration refresh fails,
+the command reports a partial update and exits with code `1`. Each failed step
+prints its recovery command, including the selected executable and any explicit
+runtime CLI override. Codex setup retains `--preserve-existing-llm`; OpenCode
+setup retains the selected mode. After resolving the reported cause, run the
+commands in the same environment so settings such as `HOME` and `CODEX_HOME`
+still select the original installation. Windows instructions use PowerShell;
+other platforms use a POSIX shell. Apply any listed follow-up command only after
+the preceding command succeeds.
+
+Once the package is current, rerunning `ouroboros update` exits as up to date
+without retrying failed integration refreshes. Use the printed recovery commands
+instead. This guidance does not repair a failed package-manager upgrade.
+
 > **Installation identity:** the updater does not guess from global tool lists,
 > PATH order, directory names, or the selected runtime. If the receipt is
 > missing or ambiguous, the owning manager is unavailable, or a direct `pip`

@@ -18,6 +18,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import ssl
 import subprocess
@@ -442,6 +443,79 @@ def _upgrade_environment(identity: InstallationIdentity) -> dict[str, str]:
     return {"PIPX_HOME": str(identity.manager_home)}
 
 
+def _format_recovery_command(
+    command: list[str],
+    env_overrides: Mapping[str, str] | None = None,
+    *,
+    windows: bool | None = None,
+) -> str:
+    """Render a shell command without losing argument or environment boundaries."""
+    is_windows = os.name == "nt" if windows is None else windows
+    if not is_windows:
+        if env_overrides:
+            return shlex.join(
+                ["env", *(f"{key}={value}" for key, value in env_overrides.items()), *command]
+            )
+        return shlex.join(command)
+
+    def quote(value: str) -> str:
+        # PowerShell treats typographic single quotes as string delimiters too.
+        for delimiter in ("'", "\u2018", "\u2019", "\u201a", "\u201b"):
+            value = value.replace(delimiter, delimiter * 2)
+        return "'" + value + "'"
+
+    invocation = "& " + " ".join(quote(argument) for argument in command)
+    if not env_overrides:
+        return invocation
+
+    # A scriptblock scopes the temporary variables; finally also restores the
+    # process environment if the command fails. Environment changes themselves
+    # are not scoped by a PowerShell scriptblock.
+    lines = ["& {"]
+    for index, key in enumerate(env_overrides):
+        lines.append(
+            f"    $oooPreviousEnv{index} = "
+            f"[Environment]::GetEnvironmentVariable({quote(key)}, 'Process')"
+        )
+    lines.append("    try {")
+    for key, value in env_overrides.items():
+        lines.append(
+            f"        [Environment]::SetEnvironmentVariable({quote(key)}, {quote(value)}, 'Process')"
+        )
+    lines.extend([f"        {invocation}", "    } finally {"])
+    for index, key in enumerate(env_overrides):
+        lines.append(
+            f"        [Environment]::SetEnvironmentVariable("
+            f"{quote(key)}, $oooPreviousEnv{index}, 'Process')"
+        )
+    lines.extend(["    }", "}"])
+    return "\n".join(lines)
+
+
+def _print_step_recovery(
+    command: list[str],
+    env_overrides: Mapping[str, str] | None,
+    follow_up: list[list[str]] | None,
+) -> None:
+    """Show the failed invocation and any pending commands needed to finish it."""
+    shell = "PowerShell" if os.name == "nt" else "POSIX shell"
+    console.print(f"Recovery command ({shell}; use the same environment):", markup=False)
+    console.print(
+        _format_recovery_command(command, env_overrides),
+        markup=False,
+        highlight=False,
+        soft_wrap=True,
+    )
+    for pending in follow_up or []:
+        console.print("After the previous command succeeds, complete the step with:", markup=False)
+        console.print(
+            _format_recovery_command(pending, env_overrides),
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
+
+
 def _run_step(
     command: list[str],
     *,
@@ -449,6 +523,8 @@ def _run_step(
     dry_run: bool,
     timeout: float = 600.0,
     env_overrides: Mapping[str, str] | None = None,
+    recovery: bool = False,
+    recovery_follow_up: list[list[str]] | None = None,
 ) -> bool:
     """Run one update step, streaming its output. Returns True on success."""
     if dry_run:
@@ -464,12 +540,14 @@ def _run_step(
         result = subprocess.run(command, timeout=timeout, env=command_env)
     except (OSError, subprocess.SubprocessError):
         print_warning(f"{description} failed — could not run {command[0]!r}.")
-        return False
-    if result.returncode != 0:
+    else:
+        if result.returncode == 0:
+            print_success(description)
+            return True
         print_warning(f"{description} exited with code {result.returncode}.")
-        return False
-    print_success(description)
-    return True
+    if recovery:
+        _print_step_recovery(command, env_overrides, recovery_follow_up)
+    return False
 
 
 # ── Runtime integration refresh ──────────────────────────────────
@@ -486,10 +564,13 @@ def _refresh_claude_plugin(dry_run: bool, claude_executable: str | None) -> bool
         description="Refreshed ouroboros marketplace",
         dry_run=dry_run,
     )
+    update_command = [claude_executable, "plugin", "update", "ouroboros@ouroboros"]
     installed = _run_step(
         [claude_executable, "plugin", "install", "ouroboros@ouroboros"],
         description="Installed Claude Code plugin",
         dry_run=dry_run,
+        recovery=True,
+        recovery_follow_up=[update_command],
     )
     if not installed:
         return False
@@ -497,9 +578,10 @@ def _refresh_claude_plugin(dry_run: bool, claude_executable: str | None) -> bool
     # update is what advances an existing installation to the marketplace's
     # refreshed version.
     return _run_step(
-        [claude_executable, "plugin", "update", "ouroboros@ouroboros"],
+        update_command,
         description="Updated Claude Code plugin",
         dry_run=dry_run,
+        recovery=True,
     )
 
 
@@ -512,6 +594,7 @@ def _refresh_codex_plugin(dry_run: bool, codex_executable: str | None) -> bool |
         [codex_executable, "plugin", "marketplace", "upgrade", "ouroboros"],
         description="Refreshed Codex Ouroboros marketplace",
         dry_run=dry_run,
+        recovery=True,
     )
 
 
@@ -524,6 +607,7 @@ def _refresh_all_runtime_artifacts(
         [str(identity.console_path), "setup", "refresh"],
         description="Refreshed installed runtime artifacts",
         dry_run=dry_run,
+        recovery=True,
     )
 
 
@@ -552,6 +636,7 @@ def _refresh_runtime_config(
             if runtime_executable is not None and runtime_executable_env_key is not None
             else None
         ),
+        recovery=True,
     )
 
 
@@ -953,6 +1038,11 @@ def update(
         console.print("[yellow]Could not complete:[/yellow]")
         for step in failed:
             console.print(f"  [yellow]![/yellow] {step}")
+        console.print(
+            "Use the recovery commands above to finish these steps. Once the package is current, "
+            "rerunning `ouroboros update` does not retry runtime refreshes.",
+            markup=False,
+        )
         console.print()
     else:
         console.print(f"[bold green]Updated to v{installed}.[/bold green]")
