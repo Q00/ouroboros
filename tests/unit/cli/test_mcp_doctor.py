@@ -14,9 +14,9 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import sysconfig
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
-import sysconfig
 
 import pytest
 from typer.testing import CliRunner
