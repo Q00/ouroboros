@@ -172,7 +172,7 @@ class TestFactory:
         assert client_class.call_args.kwargs["mode"] == "auto"
         assert resources.client is sdk_client and resources.http_client is http_client
 
-    def test_stdio_factory_delegates_transport_lifecycle_to_high_level_client(self) -> None:
+    async def test_stdio_factory_delegates_transport_lifecycle_to_high_level_client(self) -> None:
         transport = MagicMock()
         sdk_client = MagicMock()
         with (
@@ -180,6 +180,107 @@ class TestFactory:
             patch("mcp.client.Client", return_value=sdk_client) as client_class,
         ):
             resources = build_sdk_client(_config())
-        assert client_class.call_args.args[0] is transport
+        observed = client_class.call_args.args[0]
+        assert resources.transport_lifecycle.entered is False
+        async with observed:
+            assert resources.transport_lifecycle.entered is True
+        transport.__aenter__.assert_awaited_once()
+        transport.__aexit__.assert_awaited_once()
         assert client_class.call_args.kwargs["mode"] == "auto"
         assert resources.http_client is None
+
+
+async def test_context_exit_propagates_real_adapter_disconnect_error():
+    adapter = MCPClientAdapter()
+    adapter._client = _entered_client(exit_error=RuntimeError("child reap failed"))
+    with pytest.raises(Exception, match="child reap failed"):
+        async with adapter:
+            pass
+
+
+async def test_failed_discovery_preserves_cleanup_error_for_probe():
+    adapter = MCPClientAdapter(max_retries=1)
+    client = _entered_client(
+        enter_error=RuntimeError("discovery rejected"), exit_error=RuntimeError("child reap failed")
+    )
+    with patch(
+        "ouroboros.mcp.client.adapter.build_sdk_client", return_value=SDKClientResources(client)
+    ):
+        result = await adapter.connect(_config())
+    assert result.is_err and "discovery rejected" in str(result.error)
+    cleanup = await adapter.disconnect()
+    assert cleanup.is_err and "child reap failed" in str(cleanup.error)
+
+
+async def test_failed_discovery_preserves_primary_when_cleanup_raises_baseexception():
+    adapter = MCPClientAdapter(max_retries=1)
+    client = _entered_client(enter_error=RuntimeError("discovery rejected"))
+    client.__aexit__.side_effect = SystemExit(73)
+    with patch(
+        "ouroboros.mcp.client.adapter.build_sdk_client", return_value=SDKClientResources(client)
+    ):
+        result = await adapter.connect(_config())
+
+    assert result.is_err and "discovery rejected" in str(result.error)
+    assert any("SystemExit): 73" in note for note in result.error.__cause__.__notes__)
+    cleanup = await adapter.disconnect()
+    assert cleanup.is_err and "73" in str(cleanup.error)
+
+
+@pytest.mark.parametrize("cancel_during", ["client_exit", "http_close"])
+async def test_failed_discovery_propagates_cancellation_during_cleanup(cancel_during):
+    adapter = MCPClientAdapter(max_retries=1)
+    client = _entered_client(enter_error=RuntimeError("discovery rejected"))
+    http_client = AsyncMock()
+    cancellation = asyncio.CancelledError(f"cancelled during {cancel_during}")
+    if cancel_during == "client_exit":
+        client.__aexit__.side_effect = cancellation
+    else:
+        client.__aexit__.side_effect = RuntimeError("client exit failed")
+        http_client.aclose.side_effect = cancellation
+
+    with patch(
+        "ouroboros.mcp.client.adapter.build_sdk_client",
+        return_value=SDKClientResources(client, http_client),
+    ):
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await adapter.connect(_config(TransportType.HTTP))
+
+    assert caught.value is cancellation
+    client.__aexit__.assert_awaited_once_with(None, None, None)
+    http_client.aclose.assert_awaited_once()
+    assert not adapter.is_connected
+    assert adapter._http_client is None
+    if cancel_during == "http_close":
+        assert any("client exit failed" in note for note in cancellation.__notes__)
+
+
+@pytest.mark.parametrize("body_error", [asyncio.CancelledError, KeyboardInterrupt, ValueError])
+async def test_context_exit_preserves_body_exception_when_cleanup_fails(body_error):
+    adapter = MCPClientAdapter()
+    adapter._client = _entered_client(exit_error=RuntimeError("child reap failed"))
+    original = body_error("body failed")
+    with pytest.raises(body_error) as caught:
+        async with adapter:
+            raise original
+    assert caught.value is original
+    assert any("child reap failed" in note for note in original.__notes__)
+
+
+@pytest.mark.parametrize("warning_fails", [False, True])
+async def test_context_exit_preserves_body_error_when_baseexception_cleanup_fails(warning_fails):
+    adapter = MCPClientAdapter()
+    client = _entered_client()
+    client.__aexit__.side_effect = SystemExit(73)
+    adapter._client = client
+    original = ValueError("body failed")
+    warning = patch(
+        "ouroboros.mcp.client.adapter.log.warning",
+        side_effect=SystemExit(74) if warning_fails else None,
+    )
+    with warning, pytest.raises(ValueError) as caught:
+        async with adapter:
+            raise original
+
+    assert caught.value is original
+    assert any("SystemExit): 73" in note for note in original.__notes__)
