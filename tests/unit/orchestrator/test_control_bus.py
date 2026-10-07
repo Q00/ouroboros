@@ -308,7 +308,7 @@ async def test_close_cancels_stragglers_after_timeout() -> None:
 
     async def blocked(event: BaseEvent) -> None:
         started.set()
-        await asyncio.sleep(60)
+        await asyncio.Event().wait()
 
     bus.subscribe(_is_directive, blocked)
     tasks = bus.publish(_directive_event())
@@ -330,7 +330,7 @@ async def test_close_does_not_hang_when_cancel_is_ignored() -> None:
     async def stubborn(event: BaseEvent) -> None:
         started.set()
         try:
-            await asyncio.sleep(60)
+            await asyncio.Event().wait()
         except asyncio.CancelledError:
             cancelled.set()
             await release.wait()
@@ -381,7 +381,7 @@ async def test_close_does_not_raise_when_cancelled_task_finishes_after_wait(
     async def exits_after_cancel(event: BaseEvent) -> None:
         started.set()
         try:
-            await asyncio.sleep(60)
+            await asyncio.Event().wait()
         except asyncio.CancelledError:
             await asyncio.sleep(0)
 
