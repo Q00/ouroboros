@@ -370,7 +370,8 @@ class OmpRuntime:
             if isinstance(content, list)
             else ""
         )
-        details = payload.get("details", {})
+        # An absent details object is incomplete evidence, not a valid empty one.
+        details = payload.get("details")
         meta: dict[str, Any] = {
             "tool_call_id": call_id,
             "omp_event_type": event_type,

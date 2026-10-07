@@ -166,6 +166,7 @@ async def test_interleaved_omp_calls_keep_inputs_outputs_and_test_success(tmp_pa
         "string-error",
         "nested-string-error",
         "missing-result",
+        "missing-details",
         "malformed-details",
         "background",
         "no-end",
@@ -194,6 +195,8 @@ async def test_incomplete_or_failed_omp_results_never_prove_test_success(
         payload["isError"] = "false"
     elif case == "missing-result":
         del completion["result"]
+    elif case == "missing-details":
+        del payload["details"]
     elif case == "malformed-details":
         payload["details"] = []
     elif case == "background":
