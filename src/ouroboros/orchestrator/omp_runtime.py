@@ -80,6 +80,16 @@ _OMP_TOOL_FLAG_NAMES: dict[str, str] = {
     "Ls": "glob",
 }
 
+_OMP_TOOL_MESSAGE_NAMES = {
+    "read": "Read",
+    "write": "Write",
+    "edit": "Edit",
+    "bash": "Bash",
+    "glob": "Glob",
+    "find": "Glob",
+    "grep": "Grep",
+}
+
 # OMP's documented built-in tools (verified via the ``--tools`` validation
 # error's valid-tool list). Kept as the unit-test lock for the mapping above.
 OMP_BUILTIN_TOOLS = frozenset({"read", "write", "edit", "bash", "grep", "glob", "find", "lsp"})
@@ -95,6 +105,8 @@ class OmpRuntime:
     - ``message_update``: streaming content deltas (``thinking_delta`` /
       ``text_delta`` inside ``assistantMessageEvent``; only ``text_delta``
       is user-visible)
+    - ``tool_execution_start`` / ``tool_execution_end``: correlated tool
+      calls and results, including command evidence
     - ``agent_end``: task complete, contains final messages array
     """
 
@@ -131,6 +143,7 @@ class OmpRuntime:
         self._permission_mode = permission_mode
         self._model = model
         self._cwd = resolve_worker_cwd(cwd)
+        self._session_cli_flags: tuple[str, ...] = ()
         self._skill_dispatcher = skill_dispatcher
         self._llm_backend = llm_backend or self._default_llm_backend
         self._skills_dir = Path(skills_dir).expanduser() if skills_dir is not None else None
@@ -232,7 +245,7 @@ class OmpRuntime:
         session. The generic ``default`` model sentinel is omitted so OMP
         uses its own configured model.
         """
-        command = [self._cli_path, "--mode", "json"]
+        command = [self._cli_path, "--mode", "json", *self._session_cli_flags]
 
         if self._model and self._model.strip() and self._model.strip() != "default":
             command.extend(["--model", self._model.strip()])
@@ -301,6 +314,111 @@ class OmpRuntime:
 
     def _malformed_event_message(self, line: str) -> str:
         return malformed_event_message(line, display_name=self._display_name)
+
+    def _convert_tool_event(
+        self,
+        event: dict[str, Any],
+        pending_tools: dict[str, tuple[str, dict[str, Any]]],
+        current_handle: RuntimeHandle | None,
+    ) -> AgentMessage | None:
+        """Project OMP's tool lifecycle without trusting assistant self-reports."""
+        event_type = event.get("type")
+        if event_type not in {"tool_execution_start", "tool_execution_end"}:
+            return None
+        call_id = event.get("toolCallId")
+        name = event.get("toolName")
+        if not isinstance(call_id, str) or not call_id.strip():
+            return None
+        if not isinstance(name, str) or not name.strip():
+            return None
+        tool_name = _OMP_TOOL_MESSAGE_NAMES.get(name, name)
+        data: dict[str, Any] = {
+            "tool_call_id": call_id,
+            "runtime_event_type": (
+                "tool.started" if event_type == "tool_execution_start" else "tool.result"
+            ),
+        }
+        if event_type == "tool_execution_start":
+            args = event.get("args")
+            if not isinstance(args, dict):
+                return None
+            pending_tools[call_id] = (name, args)
+            data["tool_input"] = args
+            return AgentMessage(
+                type="tool",
+                content="",
+                tool_name=tool_name,
+                data=data,
+                resume_handle=current_handle,
+            )
+
+        started = pending_tools.pop(call_id, None)
+        if started is not None and started[0] == name:
+            data["tool_input"] = started[1]
+        data["subtype"] = "tool_result"
+        result = event.get("result")
+        payload = result if isinstance(result, dict) else {}
+        content = payload.get("content")
+        text = (
+            "\n".join(
+                block["text"]
+                for block in content
+                if isinstance(block, dict)
+                and block.get("type") == "text"
+                and isinstance(block.get("text"), str)
+            )
+            if isinstance(content, list)
+            else ""
+        )
+        details = payload.get("details", {})
+        meta: dict[str, Any] = {
+            "tool_call_id": call_id,
+            "omp_event_type": event_type,
+            "omp_details": details,
+            "omp_is_error": event.get("isError"),
+        }
+        tool_result: dict[str, Any] = {
+            "content": content,
+            "text_content": text,
+            "meta": meta,
+        }
+        data["tool_result"] = tool_result
+
+        # Missing/malformed verdicts must not become success through defaults
+        # or success-looking output. OMP may also put isError on the result.
+        flags = [event.get("isError")]
+        if "isError" in payload:
+            flags.append(payload["isError"])
+        invalid = (
+            not isinstance(content, list)
+            or not isinstance(details, dict)
+            or any(type(flag) is not bool for flag in flags)
+        )
+        failed = any(flag is True for flag in flags)
+        if isinstance(details, dict) and "exitCode" in details and name == "bash":
+            exit_code = details["exitCode"]
+            data["exit_code"] = exit_code
+            meta["exit_status"] = exit_code
+            invalid = invalid or type(exit_code) is not int
+            failed = failed or (type(exit_code) is int and exit_code != 0)
+        if invalid:
+            data["is_error_invalid"] = True
+            tool_result["is_error_invalid"] = True
+        if failed:
+            data["is_error"] = tool_result["is_error"] = True
+        elif not invalid and not (isinstance(details, dict) and "async" in details):
+            data["is_error"] = tool_result["is_error"] = False
+            # OMP 18 omits exitCode on synchronous Bash success, but reports
+            # nonzero exits with isError. A background launch is NOT exit 0.
+            if name == "bash" and "exit_code" not in data:
+                data["exit_code"] = meta["exit_status"] = 0
+        return AgentMessage(
+            type="tool_result",
+            content=text,
+            tool_name=tool_name,
+            data=data,
+            resume_handle=current_handle,
+        )
 
     def _extract_session_id(self, event: dict[str, Any]) -> str | None:
         """Extract session ID from the OMP session header event."""
@@ -550,6 +668,7 @@ class OmpRuntime:
         last_content = ""
         pending_final_content: str | None = None
         pending_error_content: str | None = None
+        pending_tools: dict[str, tuple[str, dict[str, Any]]] = {}
 
         try:
             if process.stdout is not None:
@@ -580,6 +699,11 @@ class OmpRuntime:
                     sid = self._extract_session_id(event)
                     if sid:
                         current_handle = self._build_runtime_handle(sid, current_handle)
+
+                    tool_message = self._convert_tool_event(event, pending_tools, current_handle)
+                    if tool_message is not None:
+                        yield tool_message
+                        continue
 
                     # Streaming content
                     delta = self._extract_content_delta(event)
