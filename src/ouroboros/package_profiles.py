@@ -88,7 +88,7 @@ def has_unsupported_claude_sdk_mcp_mix() -> bool:
 def has_pinned_mcp_v2_profile() -> bool:
     """Return whether this interpreter has Ouroboros's exact MCP v2 client pin."""
     try:
-        return importlib_metadata.version("mcp") == "2.0.0"
+        return importlib_metadata.version("mcp") == "2.2.0"
     except importlib_metadata.PackageNotFoundError:
         return False
 

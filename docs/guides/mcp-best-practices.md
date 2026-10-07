@@ -32,7 +32,7 @@ server entry so it can be removed without changing the workflow contract.
 
 ### MCP and Claude process profiles
 
-`mcp==2.0.0` and the current `claude-agent-sdk` cannot safely share one Python
+`mcp==2.2.0` and the current `claude-agent-sdk` cannot safely share one Python
 interpreter: the Claude SDK embeds MCP 1.x internals and declares `mcp<2`.
 Ouroboros therefore treats them as separate runtime profiles and processes:
 
