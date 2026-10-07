@@ -1,8 +1,8 @@
 """The constructor's model call keeps no session on disk (held-out values at rest).
 
-The constructor's reply holds every held-out case. The Codex call must carry
-``--ephemeral`` and the Claude call ``--no-session-persistence``; any other
-runtime is refused before a model call.
+The constructor's reply holds every held-out case. Codex, Claude and OMP
+must use their no-persistence modes; unsupported runtimes are refused
+before a model call.
 """
 
 from __future__ import annotations
@@ -229,3 +229,63 @@ async def test_the_codex_constructor_call_logs_no_reply_text(
         messages = [message async for message in runtime.execute_task("construct")]
     assert messages[-1].content == SECRET_REPLY  # the reply reached the caller
     assert logs and "6173" not in _logged_text(logs)
+
+
+@pytest.mark.parametrize("per_criterion", [False, True])
+async def test_omp_constructor_builds_package_without_persisting_or_logging_reply(
+    tmp_path: Path, per_criterion: bool
+) -> None:
+    import json
+
+    from structlog.testing import capture_logs
+
+    from ouroboros.orchestrator.omp_runtime import OmpRuntime
+    from tests.unit.orchestrator.test_omp_runtime import _FakeProcess
+
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "calc.py").write_text("def add(a, b):\n    return a - b\n")
+    marker = "constructor-held-out-6173"
+    reply = _reply().replace("readability is not mechanical", marker)
+    commands: list[tuple[str, ...]] = []
+
+    async def fake_exec(*command: str, **_kwargs: Any) -> _FakeProcess:
+        commands.append(command)
+        return _FakeProcess(
+            stdout_lines=[
+                json.dumps(
+                    {
+                        "type": "agent_end",
+                        "messages": [{"role": "assistant", "content": reply}],
+                    }
+                )
+            ],
+            stderr_lines=[],
+        )
+
+    constructor = CheckConstructor(
+        runtime_backend="omp",
+        model=None,
+        runtime_factory=lambda **kwargs: OmpRuntime(cli_path="omp", **kwargs),
+        system_prompt="SYSTEM",
+        per_criterion=per_criterion,
+    )
+    with (
+        patch(
+            "ouroboros.orchestrator.omp_runtime.asyncio.create_subprocess_exec",
+            side_effect=fake_exec,
+        ),
+        capture_logs() as logs,
+    ):
+        outcome = await constructor.construct(_seed(), base)
+
+    assert outcome.failure_reason is None
+    assert outcome.package is not None
+    assert commands and all("--no-session" in command for command in commands)
+    assert marker not in _logged_text(logs)
+    # The constructor switch is instance-local; workers still support resume.
+    worker_command = OmpRuntime(cwd=base)._build_command(
+        prompt="work", resume_session_id="worker-1"
+    )
+    assert "--no-session" not in worker_command
+    assert worker_command[worker_command.index("--resume") + 1] == "worker-1"
