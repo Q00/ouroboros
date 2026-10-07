@@ -103,6 +103,7 @@ _bmad/
 .claude/commands/bmad/
 .omc/
 .smoke-home/
+.acp-artifacts/
 
 
 # Local archive for removed/held docs and assets
