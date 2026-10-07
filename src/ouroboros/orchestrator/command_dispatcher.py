@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
-from datetime import UTC, datetime
 from functools import lru_cache
 import hashlib
 import json
@@ -20,15 +18,16 @@ from ouroboros.orchestrator.adapter import (
     resolve_worker_cwd,
     worker_cwd_failure_message,
 )
+from ouroboros.orchestrator.interview_session import (
+    InterviewSessionTransition,
+    interview_transition_digest,
+)
 from ouroboros.router.types import Resolved
 
 log = get_logger(__name__)
 
 if TYPE_CHECKING:
     from ouroboros.mcp.server.adapter import MCPServerAdapter
-
-
-_INTERVIEW_SESSION_METADATA_KEY = "ouroboros_interview_session_id"
 
 
 @lru_cache(maxsize=1)
@@ -84,14 +83,12 @@ class CodexCommandDispatcher:
                 "dispatch",
             )
         }
-        payload["globals"] = {
-            "_INTERVIEW_SESSION_METADATA_KEY": _INTERVIEW_SESSION_METADATA_KEY,
-        }
         from ouroboros.mcp.server.adapter import MCPServerAdapter, create_ouroboros_server
         from ouroboros.orchestrator.runner import OrchestratorRunner
 
         payload.update(
             {
+                "external:InterviewSessionTransition": interview_transition_digest(),
                 "external:create_ouroboros_server": self._callable_implementation_digest(
                     create_ouroboros_server
                 ),
@@ -246,23 +243,8 @@ class CodexCommandDispatcher:
         intercept: Resolved,
         current_handle: RuntimeHandle | None,
     ) -> dict[str, Any]:
-        """Build the MCP argument payload for an intercepted skill."""
-        if intercept.mcp_tool != "ouroboros_interview" or current_handle is None:
-            return dict(intercept.mcp_args)
-
-        session_id = current_handle.metadata.get(_INTERVIEW_SESSION_METADATA_KEY)
-        if not isinstance(session_id, str) or not session_id.strip():
-            return dict(intercept.mcp_args)
-
-        # Resume turn: drop initial_context so InterviewHandler branches on
-        # session_id instead of starting a new interview. Other frontmatter
-        # args (cwd, etc.) are preserved.
-        arguments: dict[str, Any] = dict(intercept.mcp_args)
-        arguments.pop("initial_context", None)
-        arguments["session_id"] = session_id.strip()
-        if intercept.first_argument is not None:
-            arguments["answer"] = intercept.first_argument
-        return arguments
+        """Build arguments through the shared interview transition contract."""
+        return InterviewSessionTransition(intercept, current_handle).tool_arguments()
 
     def _build_resume_handle(
         self,
@@ -270,32 +252,12 @@ class CodexCommandDispatcher:
         intercept: Resolved,
         tool_result: Any,
     ) -> RuntimeHandle | None:
-        """Attach interview session metadata to the runtime handle."""
-        if intercept.mcp_tool != "ouroboros_interview":
-            return current_handle
-
-        session_id = tool_result.meta.get("session_id")
-        if not isinstance(session_id, str) or not session_id.strip():
-            if session_id is not None:
-                log.warning(
-                    "command_dispatcher.resume_handle.invalid_session_id",
-                    session_id_type=type(session_id).__name__,
-                    session_id_value=repr(session_id),
-                )
-            return current_handle
-
-        metadata = dict(current_handle.metadata) if current_handle is not None else {}
-        metadata[_INTERVIEW_SESSION_METADATA_KEY] = session_id.strip()
-        updated_at = datetime.now(UTC).isoformat()
-
-        if current_handle is not None:
-            return replace(current_handle, metadata=metadata, updated_at=updated_at)
-
-        return RuntimeHandle(
+        """Retain session-local interview state through the shared transition."""
+        return InterviewSessionTransition(intercept, current_handle).resume_handle(
+            tool_result.meta,
             backend=self._resume_handle_backend(),
             cwd=self._cwd,
-            updated_at=updated_at,
-            metadata=metadata,
+            log_namespace="command_dispatcher",
         )
 
     def _build_tool_call_message(

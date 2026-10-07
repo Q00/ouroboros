@@ -173,25 +173,65 @@ class TestCodexCommandDispatcher:
         assert json.loads(first)["implementation_sha256"]
         assert first == second
 
-    def test_stable_identity_tracks_dispatcher_global_semantics(
+    @pytest.mark.parametrize(
+        "metadata_key", ["INTERVIEW_SESSION_METADATA_KEY", "INTERVIEW_CALIBRATION_METADATA_KEY"]
+    )
+    def test_stable_identity_tracks_interview_global_semantics(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        metadata_key: str,
     ) -> None:
         """Behavior-affecting globals must be part of portable dispatcher identity."""
-        from ouroboros.orchestrator import command_dispatcher
+        from ouroboros.orchestrator import interview_session
 
         dispatcher = CodexCommandDispatcher(cwd="/tmp/project")
         original = dispatcher.stable_identity_contract()
 
         monkeypatch.setattr(
-            command_dispatcher,
-            "_INTERVIEW_SESSION_METADATA_KEY",
+            interview_session,
+            metadata_key,
             "changed_session_metadata_key",
         )
 
         changed = dispatcher.stable_identity_contract()
 
         assert original["implementation_sha256"] != changed["implementation_sha256"]
+
+    @pytest.mark.parametrize(
+        "changed_member",
+        [
+            "tool_arguments",
+            "INTERVIEW_SESSION_METADATA_KEY",
+            "INTERVIEW_CALIBRATION_METADATA_KEY",
+        ],
+    )
+    @pytest.mark.parametrize("shared_dispatcher", [False, True], ids=["direct", "shared"])
+    def test_transition_drift_changes_execution_identity(
+        self, monkeypatch, tmp_path, changed_member, shared_dispatcher
+    ) -> None:
+        from ouroboros.orchestrator import interview_session
+
+        dispatcher = CodexCommandDispatcher(cwd=tmp_path)
+
+        def identity():
+            return CodexCliRuntime(
+                cli_path="test-runtime",
+                cwd=tmp_path,
+                skill_dispatcher=dispatcher.dispatch if shared_dispatcher else None,
+            ).execution_identity_contract()
+
+        original = identity()
+        assert identity() == original
+        if changed_member == "tool_arguments":
+            monkeypatch.setattr(
+                interview_session.InterviewSessionTransition,
+                changed_member,
+                lambda _self: {"changed": True},
+            )
+        else:
+            monkeypatch.setattr(interview_session, changed_member, "changed_metadata_key")
+
+        assert identity() != original
 
     @staticmethod
     def _write_skill(
@@ -388,6 +428,106 @@ class TestCodexCommandDispatcher:
         assert messages[-1].resume_handle.native_session_id == "thread-123"
         assert (
             messages[-1].resume_handle.metadata["ouroboros_interview_session_id"] == "interview-123"
+        )
+
+    @pytest.mark.asyncio
+    async def test_interview_idk_answer_sequence_preserves_pending_turn_and_calibration(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """An idk control turn must not consume the pending interview answer slot."""
+        interview = self._make_intercept(
+            tmp_path,
+            "interview",
+            mcp_tool="ouroboros_interview",
+            mcp_args={"initial_context": "Design payment failure handling"},
+            prompt="ooo interview Design payment failure handling",
+            first_argument="Design payment failure handling",
+        )
+        idk = self._make_intercept(
+            tmp_path,
+            "idk",
+            mcp_tool="ouroboros_interview",
+            mcp_args={"calibration_input": "I do not know idempotency; I built REST APIs"},
+            prompt="ooo idk I do not know idempotency; I built REST APIs",
+            first_argument="I do not know idempotency; I built REST APIs",
+        )
+        answer = self._make_intercept(
+            tmp_path,
+            "interview",
+            mcp_tool="ouroboros_interview",
+            mcp_args={"initial_context": "Retry once"},
+            prompt="ooo interview Retry once",
+            first_argument="Retry once",
+        )
+        calibration = {
+            "level": "foundational",
+            "confidence": "high",
+            "evidence": "I do not know idempotency; I built REST APIs",
+            "unknown_terms": [],
+        }
+        fake_server = AsyncMock()
+        fake_server.call_tool = AsyncMock(
+            side_effect=(
+                Result.ok(
+                    MCPToolResult(
+                        content=(
+                            MCPContentItem(
+                                type=ContentType.TEXT, text="Should retries duplicate a charge?"
+                            ),
+                        ),
+                        meta={"session_id": "interview-123"},
+                    )
+                ),
+                Result.ok(
+                    MCPToolResult(
+                        content=(
+                            MCPContentItem(
+                                type=ContentType.TEXT, text="Same question, in plain language"
+                            ),
+                        ),
+                        meta={
+                            "session_id": "interview-123",
+                            "interview_calibration": calibration,
+                            "pending_question": "Should retries duplicate a charge?",
+                            "pending_question_preserved": True,
+                        },
+                    )
+                ),
+                Result.ok(
+                    MCPToolResult(
+                        content=(MCPContentItem(type=ContentType.TEXT, text="Next question"),),
+                        meta={"session_id": "interview-123"},
+                    )
+                ),
+            )
+        )
+        dispatcher = create_codex_command_dispatcher(cwd=tmp_path, runtime_backend="codex")
+
+        with patch(
+            "ouroboros.mcp.server.adapter.create_ouroboros_server",
+            return_value=fake_server,
+        ):
+            started = await dispatcher(interview, None)
+            assert started is not None
+            calibrated = await dispatcher(idk, started[-1].resume_handle)
+            assert calibrated is not None
+            completed_turn = await dispatcher(answer, calibrated[-1].resume_handle)
+
+        assert completed_turn is not None
+        calls = fake_server.call_tool.await_args_list
+        calibration_args = calls[1].args[1]
+        assert calibration_args["session_id"] == "interview-123"
+        assert "answer" not in calibration_args
+        assert calibration_args["calibration_input"].startswith("I do not know")
+        answer_args = calls[2].args[1]
+        assert answer_args == {
+            "session_id": "interview-123",
+            "answer": "Retry once",
+            "interview_calibration": calibration,
+        }
+        assert (
+            calibrated[-1].resume_handle.metadata["ouroboros_interview_calibration"] == calibration
         )
 
     @pytest.mark.asyncio

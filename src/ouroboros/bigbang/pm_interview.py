@@ -585,6 +585,7 @@ class PMInterviewEngine:
             state: InterviewState,
             initial_context: str | None = None,
             max_chars: int | None = None,
+            **_kwargs: Any,
         ) -> str:
             return compose_steered_prompt(
                 inner=self.inner,
