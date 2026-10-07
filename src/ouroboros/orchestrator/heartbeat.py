@@ -25,6 +25,7 @@ import os
 from pathlib import Path
 import re
 from threading import RLock
+import time
 from uuid import uuid4
 
 try:  # pragma: no cover - exercised on Unix CI; fallback supports Windows imports
@@ -333,29 +334,85 @@ def release(session_id: str) -> None:
     path = lock_path(session_id)
     with _LEASE_OPERATION_LOCK:
         fd = _HELD_LEASE_FDS.pop(session_id, None)
-        try:
-            path.unlink(missing_ok=True)
-            log.info(
-                "session_lock.released",
-                extra={"session_id": session_id},
-            )
-        except OSError:
-            pass
-        finally:
-            if fd is not None:
-                if fcntl is not None:
-                    try:
-                        fcntl.flock(fd, fcntl.LOCK_UN)
-                    except OSError:
-                        pass
+        windows_owned_release = os.name == "nt" and fd is not None
+        windows_release_path: Path | None = None
+        windows_move_succeeded = False
+        if os.name == "nt" and fd is not None:
+            # Windows cannot unlink this file while our descriptor is open.
+            # Consume it before closing so an ambiguous close failure cannot
+            # cause finally to close a descriptor that has since been reused.
+            closing_fd, fd = fd, None
+            try:
+                os.close(closing_fd)
+            except OSError:
+                log.warning(
+                    "session_lock.release_failed",
+                    extra={"session_id": session_id, "operation": "close"},
+                    exc_info=True,
+                )
+            candidate = path.with_name(f".{path.name}.release-{uuid4().hex}")
+            move_error: OSError | None = None
+            for attempt in range(3):
                 try:
-                    os.close(fd)
+                    path.replace(candidate)
+                    windows_release_path = candidate
+                    windows_move_succeeded = True
+                    break
+                except FileNotFoundError:
+                    windows_move_succeeded = True
+                    break
+                except OSError as exc:
+                    move_error = exc
+                    if attempt >= 2 or getattr(exc, "winerror", None) not in {32, 33}:
+                        break
+                    time.sleep(0.01)
+            if not windows_move_succeeded:
+                log.warning(
+                    "session_lock.release_failed",
+                    extra={"session_id": session_id, "operation": "rename"},
+                    exc_info=move_error,
+                )
+        unlink_error: OSError | None = None
+        unlink_path = windows_release_path if windows_owned_release else path
+        if unlink_path is not None:
+            try:
+                unlink_path.unlink(missing_ok=True)
+            except OSError as exc:
+                unlink_error = exc
+        if not windows_owned_release or windows_move_succeeded:
+            if unlink_error is None:
+                log.info(
+                    "session_lock.released",
+                    extra={"session_id": session_id},
+                )
+            else:
+                log.warning(
+                    "session_lock.release_failed",
+                    extra={"session_id": session_id, "operation": "unlink"},
+                    exc_info=unlink_error,
+                )
+        if fd is not None:
+            if fcntl is not None:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
                 except OSError:
-                    pass
+                    log.warning(
+                        "session_lock.release_failed",
+                        extra={"session_id": session_id, "operation": "unlock"},
+                        exc_info=True,
+                    )
+            try:
+                os.close(fd)
+            except OSError:
+                log.warning(
+                    "session_lock.release_failed",
+                    extra={"session_id": session_id, "operation": "close"},
+                    exc_info=True,
+                )
 
 
 def release_if_owned_by_current_process(session_id: str) -> bool:
-    """Release a session lock only when the current process owns it."""
+    """Attempt release only for our lease; True denotes ownership, not I/O success."""
     # ``acquire`` cannot replace an extant lease, and this lock serializes two
     # local cleanup paths. Once ownership has been checked, no other normal
     # owner can create a replacement until this unlink has completed.
