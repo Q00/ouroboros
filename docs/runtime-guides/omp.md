@@ -127,7 +127,10 @@ claims against these runtime messages rather than trusting the worker's final
 summary. A command absent from the transcript remains unsupported.
 
 OMP omits `details.exitCode` on successful synchronous Bash completions; an
-explicit, valid `isError: false` completion is normalized to exit status zero.
+explicit, valid `isError: false` completion with a `result.details` object is
+normalized to exit status zero. An explicitly present empty object is valid;
+an absent or non-object `result.details` is incomplete evidence and cannot
+establish success.
 Nonzero exits, error flags, and malformed verdicts do not become successful
 test evidence. A background-job launch is not proof of a completed command:
 its `details.async` result does not grant a successful exit, even when the
