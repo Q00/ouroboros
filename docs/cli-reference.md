@@ -948,15 +948,6 @@ ouroboros update --runtime none -y
 5. Re-runs `ouroboros setup --runtime <rt> --non-interactive` for a single selected
    runtime, or `ouroboros setup refresh` for `--runtime all`
 
-With `--runtime auto` (the default), an existing configured backend is preserved. Only an unconfigured installation probes for the `claude` CLI first and then `codex`; when neither is found the runtime refresh is skipped with a notice and the package upgrade still completes. Existing OpenCode integrations also preserve their mutually exclusive `plugin` or `subprocess` mode. Runtime executable selection preserves the supported environment override before the persisted `orchestrator.*_cli_path`, then PATH; the exact validated executable is reused for plugin and setup refresh so a stale PATH binary cannot replace it. Runtime setup and the post-update version check always use the console script inside the same proven package environment, including `.exe`/`PATHEXT` launcher resolution on native Windows.
-
-With `--runtime all`, the updater refreshes the Claude plugin, the Codex
-Ouroboros marketplace, and all previously installed runtime artifacts through
-`ouroboros setup refresh`. This path does not rewrite the configured execution
-backend. Claude can apply the new plugin with `/reload-plugins` or a restart;
-active Codex sessions must restart because Codex does not currently retain an
-in-use plugin generation during marketplace cache rotation.
-
 If the package upgrade is verified but a required integration refresh fails,
 the command reports a partial update and exits with code `1`. Each failed step
 prints its recovery command, including the selected executable and any explicit
@@ -965,11 +956,21 @@ setup retains the selected mode. After resolving the reported cause, run the
 commands in the same environment so settings such as `HOME` and `CODEX_HOME`
 still select the original installation. Windows instructions use PowerShell;
 other platforms use a POSIX shell. Apply any listed follow-up command only after
-the preceding command succeeds.
+the preceding command succeeds. In PowerShell, check `$LASTEXITCODE` for the
+native command's result; the environment-restoration block can change `$?`.
 
 Once the package is current, rerunning `ouroboros update` exits as up to date
 without retrying failed integration refreshes. Use the printed recovery commands
 instead. This guidance does not repair a failed package-manager upgrade.
+
+With `--runtime auto` (the default), an existing configured backend is preserved. Only an unconfigured installation probes for the `claude` CLI first and then `codex`; when neither is found the runtime refresh is skipped with a notice and the package upgrade still completes. Existing OpenCode integrations also preserve their mutually exclusive `plugin` or `subprocess` mode. Runtime executable selection preserves the supported environment override before the persisted `orchestrator.*_cli_path`, then PATH; the exact validated executable is reused for plugin and setup refresh so a stale PATH binary cannot replace it. Runtime setup and the post-update version check always use the console script inside the same proven package environment, including `.exe`/`PATHEXT` launcher resolution on native Windows.
+
+With `--runtime all`, the updater refreshes the Claude plugin, the Codex
+Ouroboros marketplace, and all previously installed runtime artifacts through
+`ouroboros setup refresh`. This path does not rewrite the configured execution
+backend. Claude can apply the new plugin with `/reload-plugins` or a restart;
+active Codex sessions must restart because Codex does not currently retain an
+in-use plugin generation during marketplace cache rotation.
 
 > **Installation identity:** the updater does not guess from global tool lists,
 > PATH order, directory names, or the selected runtime. If the receipt is

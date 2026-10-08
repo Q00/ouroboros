@@ -118,7 +118,9 @@ def test_failed_refresh_shows_original_command_and_latest_retry_does_not_replay(
     assert latest.exit_code == 0, latest.output
     assert "up to date" in _plain(latest.output)
     assert "Recovery command (" not in _plain(latest.output)
-    run.assert_not_called()
+    # Read-only plugin diagnostics are allowed; no refresh may be replayed.
+    diagnostic = [codex, "plugin", "list", "--marketplace", "ouroboros", "--json"]
+    assert all(call.args[0] == diagnostic for call in run.call_args_list)
 
 
 @pytest.mark.parametrize("mode", ["plugin", "subprocess"])
