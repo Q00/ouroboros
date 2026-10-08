@@ -503,6 +503,7 @@ def _print_step_recovery(
     console.print(
         _format_recovery_command(command, env_overrides),
         markup=False,
+        emoji=False,
         highlight=False,
         soft_wrap=True,
     )
@@ -511,6 +512,7 @@ def _print_step_recovery(
         console.print(
             _format_recovery_command(pending, env_overrides),
             markup=False,
+            emoji=False,
             highlight=False,
             soft_wrap=True,
         )

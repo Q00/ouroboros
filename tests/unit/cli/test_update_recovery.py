@@ -265,6 +265,47 @@ def test_failed_launch_or_timeout_prints_literal_unwrapped_recovery(
     assert update._format_recovery_command(command) in buffer.getvalue()
 
 
+@pytest.mark.parametrize(
+    ("command", "overrides", "follow_up"),
+    [
+        pytest.param(
+            ["/managed/:smile:/ouroboros", "setup", "refresh"],
+            None,
+            None,
+            id="executable-path",
+        ),
+        pytest.param(
+            ["/managed/ouroboros", "setup", "--runtime", "codex"],
+            {ENV_KEY: "/managed/:rocket:/codex"},
+            None,
+            id="environment-override",
+        ),
+        pytest.param(
+            ["/managed/:tada:/claude", "plugin", "install", "ouroboros@ouroboros"],
+            None,
+            [["/managed/:tada:/claude", "plugin", "update", "ouroboros@ouroboros"]],
+            id="pending-plugin-update",
+        ),
+    ],
+)
+def test_recovery_output_preserves_literal_emoji_shortcodes(
+    command: list[str],
+    overrides: dict[str, str] | None,
+    follow_up: list[list[str]] | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Preserve valid POSIX path text through Rich without executing any commands."""
+    buffer = StringIO()
+    monkeypatch.setattr(
+        update, "console", Console(file=buffer, width=20, color_system=None, emoji=True)
+    )
+
+    update._print_step_recovery(command, overrides, follow_up)
+
+    for invocation in [command, *(follow_up or [])]:
+        assert update._format_recovery_command(invocation, overrides) in buffer.getvalue()
+
+
 @pytest.mark.parametrize("prior_value", [None, "original 한글 $value [red]& apostrophe's"])
 @pytest.mark.parametrize("exit_code", [0, 7])
 def test_copyable_command_round_trips_real_shell_and_restores_environment(
