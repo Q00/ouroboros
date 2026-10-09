@@ -86,6 +86,29 @@ class TestQAHandlerSubagentDispatch:
         result = await handler.handle({"artifact": "code"})
         assert result.is_err
 
+    @pytest.mark.parametrize(
+        "history",
+        [["x"], [1], "str", [{"iteration": 1}, None], {}, 0, ""],
+    )
+    async def test_rejects_malformed_iteration_history(self, handler, history) -> None:
+        result = await handler.handle(
+            {"artifact": "code", "quality_bar": "good", "iteration_history": history}
+        )
+        assert result.is_err
+        assert result.error.tool_name == "ouroboros_qa"
+        assert "iteration_history" in str(result.error)
+
+    async def test_accepts_valid_iteration_history(self, handler) -> None:
+        result = await handler.handle(
+            {
+                "artifact": "code",
+                "quality_bar": "good",
+                "iteration_history": [{"iteration": 1, "score": 0.5, "verdict": "revise"}],
+            }
+        )
+        assert result.is_ok
+        assert "Iteration 1: score=0.5, verdict=revise" in result.value.meta["_subagent"]["prompt"]
+
     async def test_empty_artifact_reaches_qa_evaluation(self, handler) -> None:
         result = await handler.handle({"artifact": "", "quality_bar": "good"})
         assert result.is_ok
