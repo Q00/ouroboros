@@ -518,6 +518,15 @@ class QAHandler:
         pass_threshold = float(arguments.get("pass_threshold", DEFAULT_PASS_THRESHOLD))
         qa_session_id = arguments.get("qa_session_id") or f"qa-{uuid.uuid4().hex[:8]}"
         iteration_history = arguments.get("iteration_history") or []
+        if not isinstance(iteration_history, list) or not all(
+            isinstance(entry, dict) for entry in iteration_history
+        ):
+            return Result.err(
+                MCPToolError(
+                    "iteration_history must be a list of objects",
+                    tool_name="ouroboros_qa",
+                )
+            )
         seed_content = arguments.get("seed_content")
 
         iteration = len(iteration_history) + 1
