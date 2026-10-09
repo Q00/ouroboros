@@ -517,7 +517,9 @@ class QAHandler:
         reference = arguments.get("reference")
         pass_threshold = float(arguments.get("pass_threshold", DEFAULT_PASS_THRESHOLD))
         qa_session_id = arguments.get("qa_session_id") or f"qa-{uuid.uuid4().hex[:8]}"
-        iteration_history = arguments.get("iteration_history") or []
+        iteration_history = arguments.get("iteration_history")
+        if iteration_history is None:
+            iteration_history = []
         if not isinstance(iteration_history, list) or not all(
             isinstance(entry, dict) for entry in iteration_history
         ):

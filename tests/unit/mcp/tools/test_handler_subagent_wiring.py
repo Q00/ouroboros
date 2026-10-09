@@ -86,7 +86,10 @@ class TestQAHandlerSubagentDispatch:
         result = await handler.handle({"artifact": "code"})
         assert result.is_err
 
-    @pytest.mark.parametrize("history", [["x"], [1], "str", [{"iteration": 1}, None]])
+    @pytest.mark.parametrize(
+        "history",
+        [["x"], [1], "str", [{"iteration": 1}, None], {}, 0, ""],
+    )
     async def test_rejects_malformed_iteration_history(self, handler, history) -> None:
         result = await handler.handle(
             {"artifact": "code", "quality_bar": "good", "iteration_history": history}
