@@ -13,6 +13,7 @@ Verifies the multi-persona fan-out path honours the shared
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -26,6 +27,7 @@ from ouroboros.mcp.host_context import (
     use_mcp_host_context,
 )
 from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
+from ouroboros.mcp.tools.fanout import FanoutRegistry
 from ouroboros.mcp.tools.subagent import (
     continue_interview_after_lateral_persona_synthesis,
     lateral_persona_panel_metadata_from_capability_definitions,
@@ -1232,3 +1234,54 @@ async def test_decision_single_persona_inline_appends_convergence_contract() -> 
     assert payload.meta is not None
     assert payload.meta["mode"] == "decision"
     assert "synthesis_contract" in payload.meta
+
+
+def test_lateral_think_declares_the_session_id_it_reads() -> None:
+    """``session_id`` must be callable, not an undeclared read (Q00/ouroboros#2438).
+
+    ``handle`` reads ``arguments.get("session_id")`` to stamp the fan-out record.
+    While the parameter was absent from the served schema no client could supply
+    it, so the recorded id was always ``""`` and ``prepare_fanout_results``
+    accepted a submission from any session.
+    """
+    parameters = {
+        parameter.name: parameter for parameter in LateralThinkHandler().definition.parameters
+    }
+
+    assert "session_id" in parameters, sorted(parameters)
+    session_id = parameters["session_id"]
+    assert session_id.required is False, "the correlation id is optional"
+    assert str(session_id.type) == "string"
+
+
+@pytest.mark.asyncio
+async def test_lateral_think_records_the_session_id_it_was_given(tmp_path: Path) -> None:
+    """The declared ``session_id`` reaches the persisted fan-out record.
+
+    The inline/host-driven dispatch path stamps the record; the plugin path
+    returns its ``_subagents`` envelope earlier and never registers a fan-out,
+    so this exercises the host-driven backend the same way the other
+    subprocess-mode tests do.
+    """
+    registry = FanoutRegistry(tmp_path / "fanout")
+    handler = LateralThinkHandler(
+        agent_runtime_backend="subprocess",
+        fanout_registry=registry,
+    )
+
+    result = await handler.handle(
+        {
+            "problem_context": "stuck on X",
+            "current_approach": "tried Y",
+            "personas": ["hacker", "contrarian"],
+            "session_id": "sess-lateral-1",
+        }
+    )
+
+    assert result.is_ok, result
+    payload = result.unwrap()
+    assert payload.meta is not None
+    fanout_id = payload.meta["fanout_id"]
+    record = registry.load(fanout_id)
+    assert record is not None
+    assert record.session_id == "sess-lateral-1"
