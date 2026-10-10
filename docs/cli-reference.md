@@ -948,6 +948,18 @@ ouroboros update --runtime none -y
 5. Re-runs `ouroboros setup --runtime <rt> --non-interactive` for a single selected
    runtime, or `ouroboros setup refresh` for `--runtime all`
 
+For a uv installation, the updater first checks the active root package's
+recorded version constraint against the selected PyPI target. A conflicting
+pin, bound, or exclusion exits with code 1 before confirmation or package
+mutation, including with `--dry-run`. The diagnostic identifies the constraint,
+target and receipt, and explains how to deliberately revise the original install
+command while preserving its uv root, executable directory, Python, extras,
+additional requirements and index/options. It never removes the constraint or
+rewrites the receipt. Compatible ranges and wildcards retain the normal upgrade
+path; additional packages' constraints are left to uv. `--check` remains a
+version-only query and does not inspect the installation receipt. Package upgrade
+success is reported only after the installed version has been verified.
+
 With `--runtime auto` (the default), an existing configured backend is preserved. Only an unconfigured installation probes for the `claude` CLI first and then `codex`; when neither is found the runtime refresh is skipped with a notice and the package upgrade still completes. Existing OpenCode integrations also preserve their mutually exclusive `plugin` or `subprocess` mode. Runtime executable selection preserves the supported environment override before the persisted `orchestrator.*_cli_path`, then PATH; the exact validated executable is reused for plugin and setup refresh so a stale PATH binary cannot replace it. Runtime setup and the post-update version check always use the console script inside the same proven package environment, including `.exe`/`PATHEXT` launcher resolution on native Windows.
 
 With `--runtime all`, the updater refreshes the Claude plugin, the Codex
