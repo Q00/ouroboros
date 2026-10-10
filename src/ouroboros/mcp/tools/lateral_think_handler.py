@@ -169,6 +169,16 @@ class LateralThinkHandler(BridgeAwareMixin):
                     description="Previous failed approaches to avoid repeating",
                     required=False,
                 ),
+                MCPToolParameter(
+                    name="session_id",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Interview/lateral session id the fan-out belongs to. The id is "
+                        "recorded with the fan-out so a later "
+                        "ouroboros_submit_fanout_results from a different session is refused."
+                    ),
+                    required=False,
+                ),
                 *_lateral_mode_parameters(),
             ),
         )
