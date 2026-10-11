@@ -343,7 +343,9 @@ def _remove_opencode_bridge_plugin(dry_run: bool) -> bool:
                         print_info(f"[dry-run] Would remove bridge plugin from {config_path}")
                         return True
                     data["plugin"] = kept
-                    from ouroboros.cli.commands.setup import _warn_if_opencode_jsonc_comments_removed
+                    from ouroboros.cli.commands.setup import (
+                        _warn_if_opencode_jsonc_comments_removed,
+                    )
 
                     _warn_if_opencode_jsonc_comments_removed(config_path, raw)
                     with config_path.open("w") as f:
