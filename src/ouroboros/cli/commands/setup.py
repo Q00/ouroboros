@@ -4030,9 +4030,7 @@ def _warn_if_opencode_jsonc_comments_removed(config_path: Path, original_text: s
     """Warn before rewriting an OpenCode config that contains JSONC comments."""
     without_strings = re.sub(r'"(?:\\.|[^"\\])*"', '""', original_text, flags=re.DOTALL)
     if "//" in without_strings or "/*" in without_strings:
-        print_warning(
-            f"Note: JSONC comments in {config_path} were removed during config update."
-        )
+        print_warning(f"Note: JSONC comments in {config_path} were removed during config update.")
 
 
 def _find_opencode_config() -> Path:
