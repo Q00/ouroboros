@@ -23,6 +23,7 @@ from importlib import util as importlib_util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
@@ -4025,6 +4026,15 @@ def _strip_jsonc(text: str) -> str:
     return strip_jsonc(text)
 
 
+def _warn_if_opencode_jsonc_comments_removed(config_path: Path, original_text: str) -> None:
+    """Warn before rewriting an OpenCode config that contains JSONC comments."""
+    without_strings = re.sub(r'"(?:\\.|[^"\\])*"', '""', original_text, flags=re.DOTALL)
+    if "//" in without_strings or "/*" in without_strings:
+        print_warning(
+            f"Note: JSONC comments in {config_path} were removed during config update."
+        )
+
+
 def _find_opencode_config() -> Path:
     """Locate the existing OpenCode config file, or return a default path.
 
@@ -4055,9 +4065,11 @@ def _ensure_opencode_mcp_entry() -> bool:
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
     data: dict = {}
+    original_text = ""
     if config_path.exists():
         try:
-            data = json.loads(_strip_jsonc(config_path.read_text()))
+            original_text = config_path.read_text(encoding="utf-8")
+            data = json.loads(_strip_jsonc(original_text))
         except (json.JSONDecodeError, OSError):
             print_warning(
                 f"Could not parse {config_path} — skipping MCP registration to avoid "
@@ -4139,16 +4151,7 @@ def _ensure_opencode_mcp_entry() -> bool:
             existing["timeout"] = 300000
         print_info("MCP server already registered — verified config.")
 
-    # Warn if we're about to overwrite a .jsonc file that contained comments.
-    if config_path.suffix == ".jsonc":
-        try:
-            original_text = config_path.read_text(encoding="utf-8")
-        except OSError:
-            original_text = ""
-        if "//" in original_text or "/*" in original_text:
-            print_warning(
-                f"Note: JSONC comments in {config_path} were removed during config update."
-            )
+    _warn_if_opencode_jsonc_comments_removed(config_path, original_text)
 
     # Write back as plain JSON.  This intentionally discards JSONC
     # comments — the same approach Claude and Codex setup use for their
@@ -4368,9 +4371,11 @@ def _ensure_opencode_plugin_entry() -> bool:
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
     data: dict = {}
+    original_text = ""
     if config_path.exists():
         try:
-            data = json.loads(_strip_jsonc(config_path.read_text()))
+            original_text = config_path.read_text(encoding="utf-8")
+            data = json.loads(_strip_jsonc(original_text))
         except (json.JSONDecodeError, OSError):
             print_warning(f"Could not parse {config_path} — skipping plugin registration.")
             return False
@@ -4400,16 +4405,7 @@ def _ensure_opencode_plugin_entry() -> bool:
 
     data["plugin"] = cleaned
 
-    # Warn if we're about to overwrite a .jsonc file that contained comments.
-    if config_path.suffix == ".jsonc":
-        try:
-            original_text = config_path.read_text(encoding="utf-8")
-        except OSError:
-            original_text = ""
-        if "//" in original_text or "/*" in original_text:
-            print_warning(
-                f"Note: JSONC comments in {config_path} were removed during config update."
-            )
+    _warn_if_opencode_jsonc_comments_removed(config_path, original_text)
 
     try:
         _atomic_write_text(config_path, json.dumps(data, indent=2) + "\n")
@@ -4452,6 +4448,7 @@ def _cleanup_plugin_artifacts() -> None:
                 kept = [e for e in plugins if not _is_bridge_plugin_entry(e)]
                 if len(kept) != len(plugins):
                     data["plugin"] = kept
+                    _warn_if_opencode_jsonc_comments_removed(config_path, raw)
                     with config_path.open("w") as f:
                         json.dump(data, f, indent=2)
                         f.write("\n")

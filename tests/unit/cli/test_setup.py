@@ -9839,6 +9839,39 @@ class TestSetupJsoncDetection:
         assert data["theme"] == "dark"
         assert not (config_dir / "opencode.json").exists()
 
+    def test_setup_warns_when_json_config_comments_will_be_removed(self, tmp_path: Path) -> None:
+        """A JSON filename does not imply strict JSON when OpenCode accepts JSONC."""
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir()
+        config_path = config_dir / "opencode.json"
+        config_path.write_text(
+            '{\n  "url": "https://example.com",\n  // keep this note\n  "mcp": {}\n}\n',
+            encoding="utf-8",
+        )
+
+        with (
+            patch(self._OCD, return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_opencode_mcp_command",
+                return_value={"command": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch("ouroboros.cli.commands.setup.print_warning") as print_warning,
+        ):
+            _ensure_opencode_mcp_entry()
+
+        print_warning.assert_called_once_with(
+            f"Note: JSONC comments in {config_path} were removed during config update."
+        )
+
+    def test_comment_warning_ignores_markers_inside_json_strings(self, tmp_path: Path) -> None:
+        """URL and comment-like string contents are not JSONC comments."""
+        config_path = tmp_path / "opencode.json"
+        with patch("ouroboros.cli.commands.setup.print_warning") as print_warning:
+            setup_cmd._warn_if_opencode_jsonc_comments_removed(
+                config_path, '{"url": "https://example.com/*path*/"}'
+            )
+        print_warning.assert_not_called()
+
 
 class TestGooseSetup:
     """Tests for Goose-specific setup behavior."""
