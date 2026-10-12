@@ -109,7 +109,7 @@ ELECTRON_RUN_AS_NODE=1 <ZCode.app/Contents/MacOS/ZCode> <zcode.cjs> \
 
 ## 실제 호환성 근거
 
-공식 서명된 macOS ARM 패키지를 로컬 OpenAI 호환 모델 엔드포인트로 처음부터 끝까지 실행했습니다. 따라서 공급업체 프로세스, 스트리밍 모델 어댑터, JSON 요약, 저장된 세션, `--resume` 경로를 실제로 확인했습니다.
+공식 공증을 받은 macOS ARM 패키지를 로컬 OpenAI 호환 모델 엔드포인트로 처음부터 끝까지 실행했습니다. 따라서 공급업체 프로세스, 스트리밍 모델 어댑터, JSON 요약, 저장된 세션, `--resume` 경로를 실제로 확인했습니다.
 
 | ZCode 앱 | CLI | 결과 |
 |---|---|---|

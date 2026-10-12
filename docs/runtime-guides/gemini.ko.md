@@ -91,7 +91,7 @@ Ouroboros는 권한 모드를 Gemini의 비대화형 승인 모드에 대응시�
 
 Runner가 실행하는 Seed 작업은 `bypassPermissions`를 강제하므로 새 실행과 논리적 재개 실행에 `--approval-mode yolo --skip-trust`를 사용합니다. `acceptEdits`를 명시적으로 선택한 하위 수준 호출자는 `--skip-trust` 없이 `auto_edit`를 계속 사용합니다.
 
-Gemini에서는 대화형 Ouroboros의 기본 권한 모드를 `acceptEdits`로 정규화합니다. `--non-interactive` 실행은 TTY 승인 프롬프트를 처리할 수 없기 때문입니다.
+Gemini에서는 대화형 Ouroboros의 `default` 권한 모드를 `acceptEdits`로 정규화합니다. `--non-interactive` 실행은 TTY 승인 프롬프트를 처리할 수 없기 때문입니다.
 
 ## 이벤트 변환
 
