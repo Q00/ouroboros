@@ -1,12 +1,14 @@
-"""Controller-written code that runs under the task's own interpreter parses for Python 3.6.
+"""Controller-written code that runs under the task's own interpreter parses for Python 3.5.
 
 The oracle harness and the footprint programs are executed by the task
 image's ``python3`` (``python -I -B -c <source>``), which on SWE-bench images
-of older repositories is Python 3.6. CI has no 3.6, so these checks are
-static: the source must parse with the 3.6 grammar, and no annotation that
-Python evaluates (signatures, module and class level) may use a form that
-needs 3.7 or later. The runtime proof on a real 3.6 interpreter is in the
-pull request that added this file.
+of older repositories is Python 3.6, and for two of them 3.5. CI has neither,
+so these checks are static: the source must parse with the 3.5 and 3.6
+grammars, hold no f-string or async generator (the 3.5 grammar check of
+``ast`` does not reject those), name no builtin newer than 3.5, and no
+annotation that Python evaluates (signatures, module and class level) may use
+a form that needs 3.7 or later. The runtime proofs on real 3.5 and 3.6
+interpreters are in the pull requests that added these checks.
 """
 
 import ast
@@ -22,6 +24,17 @@ SOURCES = {
     "oracle_program": oracle_program(ORACLE_HARNESS_SOURCE),
 }
 BUILTIN_GENERICS = frozenset({"list", "dict", "tuple", "set", "frozenset", "type"})
+NEWER_BUILTINS = frozenset(
+    {
+        "ModuleNotFoundError",
+        "breakpoint",
+        "aiter",
+        "anext",
+        "EncodingWarning",
+        "ExceptionGroup",
+        "BaseExceptionGroup",
+    }
+)
 
 
 def _evaluated_annotations(tree: ast.Module) -> list[ast.expr]:
@@ -65,6 +78,49 @@ def _newer_forms(annotation: ast.expr) -> list[str]:
 @pytest.mark.parametrize("name", sorted(SOURCES))
 def test_source_parses_with_the_python_36_grammar(name: str) -> None:
     ast.parse(SOURCES[name], feature_version=(3, 6))
+
+
+@pytest.mark.parametrize("name", sorted(SOURCES))
+def test_source_parses_with_the_python_35_grammar(name: str) -> None:
+    ast.parse(SOURCES[name], feature_version=(3, 5))
+
+
+def _python_36_forms(tree: ast.Module) -> list[str]:
+    """F-strings and async generators: 3.6 syntax that ``feature_version=(3, 5)`` accepts."""
+    problems = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.JoinedStr):
+            problems.append("f-string at line " + str(node.lineno))
+        if isinstance(node, ast.AsyncFunctionDef) and any(
+            isinstance(inner, ast.Yield | ast.YieldFrom) for inner in ast.walk(node)
+        ):
+            problems.append("async generator at line " + str(node.lineno))
+        if isinstance(node, ast.Name) and node.id in NEWER_BUILTINS:
+            problems.append(node.id + " at line " + str(node.lineno))
+    return problems
+
+
+@pytest.mark.parametrize("name", sorted(SOURCES))
+def test_no_form_the_python_35_grammar_check_misses(name: str) -> None:
+    assert _python_36_forms(ast.parse(SOURCES[name])) == []
+
+
+def test_the_python_35_checks_see_each_form() -> None:
+    for source in ("held: list[int] = []\n", "x = 1_000\n"):
+        with pytest.raises(SyntaxError):
+            ast.parse(source, feature_version=(3, 5))
+    tree = ast.parse(
+        "name = f'{1}'\n"
+        "async def g():\n"
+        "    yield 1\n"
+        "try:\n"
+        "    pass\n"
+        "except ModuleNotFoundError:\n"
+        "    pass\n"
+    )
+    assert sorted(_python_36_forms(tree)) == sorted(
+        ["f-string at line 1", "async generator at line 2", "ModuleNotFoundError at line 6"]
+    )
 
 
 @pytest.mark.parametrize("name", sorted(SOURCES))
