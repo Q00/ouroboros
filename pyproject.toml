@@ -267,8 +267,9 @@ known-first-party = ["ouroboros"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ARG001", "ARG002", "E402"]
 # Executed by the task's own interpreter, down to Python 3.5: evaluated
-# annotations must use typing generics (boundary/harness.py docstring).
-"src/ouroboros/boundary/harness.py" = ["UP006", "UP035", "UP045"]
+# annotations must use typing generics, and no f-strings are allowed
+# (boundary/harness.py docstring).
+"src/ouroboros/boundary/harness.py" = ["UP006", "UP032", "UP035", "UP045"]
 
 [tool.ruff.format]
 quote-style = "double"

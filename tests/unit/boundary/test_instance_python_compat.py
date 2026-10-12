@@ -12,9 +12,12 @@ interpreters are in the pull requests that added these checks.
 """
 
 import ast
+from pathlib import Path
+import sys
 
 import pytest
 
+from ouroboros.boundary import harness
 from ouroboros.boundary.footprint import PYTEST_BOOTSTRAP, oracle_program
 from ouroboros.boundary.oracle import ORACLE_HARNESS_SOURCE
 
@@ -150,3 +153,48 @@ def test_the_annotation_check_sees_signatures_and_class_bodies() -> None:
     assert sorted(problems) == sorted(
         ["int | None", "list[int]", "dict[str, int]", "tuple[int, ...]", "set[int]", "type[C]"]
     )
+
+
+# What Python 3.5 raises (type ``ImportError`` throughout), observed on
+# python:3.5-slim, and whether 3.6 raises the same failure as
+# ``ModuleNotFoundError``.
+PYTHON_35_IMPORT_FAILURES = [
+    ("absent", "No module named 'absent'", True),
+    ("pkg.absent", "No module named 'pkg.absent'", True),
+    ("pkg.mod.x", "No module named 'pkg.mod.x'; 'pkg.mod' is not a package", True),
+    ("pkg.blocked", "import of pkg.blocked halted; None in sys.modules", True),
+    ("pkg.blocked", "import of 'pkg.blocked' halted; None in sys.modules", True),
+    (None, "cannot import name 'missing_dependency'", False),
+    (None, "boom", False),
+    ("pkg.m_raise_named", "boom", False),
+    # Python 3.7 and later name the package of a failed ``from pkg import x``.
+    ("pkg", "cannot import name 'missing_dependency' from 'pkg' (pkg/__init__.py)", False),
+]
+
+
+@pytest.mark.parametrize(("name", "message", "not_found"), PYTHON_35_IMPORT_FAILURES)
+def test_python_35_import_failures_are_classified_as_on_python_36(
+    monkeypatch: pytest.MonkeyPatch, name: str | None, message: str, not_found: bool
+) -> None:
+    monkeypatch.setattr(harness, "_MODULE_NOT_FOUND", None)
+    assert harness._module_not_found(ImportError(message, name=name)) is not_found
+
+
+def test_python_35_lookup_reports_an_import_failure_inside_the_target_module(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    package = tmp_path / "py35_lookup_pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "mod.py").write_text(
+        "from py35_lookup_pkg import missing_dependency\n\ndef f():\n    return 1\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setattr(harness, "_MODULE_NOT_FOUND", None)
+    try:
+        # An import error of the module itself: import_error, never missing.
+        with pytest.raises(ImportError, match="missing_dependency"):
+            harness._lookup("py35_lookup_pkg.mod.f")
+    finally:
+        for loaded in [key for key in sys.modules if key.startswith("py35_lookup_pkg")]:
+            del sys.modules[loaded]
