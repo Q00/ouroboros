@@ -38,6 +38,10 @@ import yaml
 
 from ouroboros import package_profiles
 from ouroboros.bigbang.brownfield import scan_and_register, set_default_repo
+from ouroboros.cli.codex_mcp_launcher import (
+    is_setup_owned_codex_uvx_args,
+    release_codex_mcp_launcher,
+)
 from ouroboros.cli.commands import ooo_bridges
 from ouroboros.cli.commands.claude_setup import (
     setup_claude as _setup_claude,
@@ -672,40 +676,23 @@ def _toml_string(value: str) -> str:
 
 
 def _codex_release_mcp_launcher() -> tuple[str, list[str]] | None:
-    """Resolve a launchable release MCP command for the current machine."""
-    uvx_path = shutil.which("uvx")
-    if uvx_path:
-        return uvx_path, list(_CODEX_UVX_MCP_ARGS)
-
-    ouroboros_path = shutil.which("ouroboros")
-    if ouroboros_path:
-        try:
-            result = subprocess.run(
-                [ouroboros_path, "mcp", "serve", "--help"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            result = None
-        if result is not None and result.returncode == 0:
-            return ouroboros_path, list(_CODEX_DIRECT_MCP_ARGS)
-
-    if (
-        Path(sys.executable).is_file()
-        and os.access(sys.executable, os.X_OK)
-        and importlib_util.find_spec("mcp") is not None
-    ):
-        return sys.executable, list(_CODEX_MODULE_MCP_ARGS)
-    return None
+    """Resolve a pinned release launcher with current-environment fallbacks."""
+    return release_codex_mcp_launcher(
+        which=shutil.which,
+        run=subprocess.run,
+        executable=sys.executable,
+        find_spec=importlib_util.find_spec,
+        uvx_args=_CODEX_UVX_MCP_ARGS,
+        direct_args=_CODEX_DIRECT_MCP_ARGS,
+        module_args=_CODEX_MODULE_MCP_ARGS,
+    )
 
 
 def _render_codex_mcp_section() -> str | None:
     """Render the managed Codex MCP block for the current install source.
 
-    Release installs use ``uvx --isolated --from ouroboros-ai[mcp]`` so Codex
-    can bootstrap the MCP extra without reusing a conflicting installed tool.
+    Release installs pin ``uvx --from ouroboros-ai[mcp]==<installed version>``
+    so the MCP server cannot drift from the setup release.
     Dev/git installs must instead point Codex at this
     Python environment; otherwise setup silently downgrades the MCP server back
     to the latest PyPI release and hides main-branch fixes under test.
@@ -773,7 +760,11 @@ def _is_setup_managed_codex_mcp_entry(
         return False
 
     if Path(command).name == "uvx":
-        return tuple(str(arg) for arg in args) in _CODEX_LEGACY_UVX_MCP_ARGS
+        return is_setup_owned_codex_uvx_args(
+            [str(arg) for arg in args],
+            _CODEX_LEGACY_UVX_MCP_ARGS,
+            has_managed_comment=has_managed_comment,
+        )
     if Path(command).name == "ouroboros":
         args_tuple = tuple(str(arg) for arg in args)
         if has_managed_comment:

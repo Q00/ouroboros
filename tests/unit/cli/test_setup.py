@@ -339,9 +339,43 @@ class TestCodexSetup:
         assert "tool_timeout_sec" not in contents
         assert 'command = "/usr/local/bin/uvx"' in contents
         assert (
-            'args = ["--isolated", "--python", ">=3.12", "--from", "ouroboros-ai[mcp]", '
+            'args = ["--isolated", "--python", ">=3.12", "--from", "ouroboros-ai[mcp]==0.38.2", '
             '"ouroboros", "mcp", "serve"]' in contents
         )
+
+    def test_register_codex_mcp_server_refreshes_generated_release_pin(
+        self, tmp_path: Path
+    ) -> None:
+        """A subsequent setup updates its own release pin and stays idempotent."""
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._is_source_tree_ouroboros_build", return_value=False
+            ),
+            patch("ouroboros.cli.commands.setup.shutil.which", return_value="/usr/local/bin/uvx"),
+            patch(
+                "ouroboros.cli.commands.setup.importlib_metadata.version", return_value="0.51.15"
+            ),
+        ):
+            assert setup_cmd._register_codex_mcp_server()
+        config = tmp_path / ".codex" / "config.toml"
+        assert "ouroboros-ai[mcp]==0.51.15" in config.read_text()
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._is_source_tree_ouroboros_build", return_value=False
+            ),
+            patch("ouroboros.cli.commands.setup.shutil.which", return_value="/usr/local/bin/uvx"),
+            patch(
+                "ouroboros.cli.commands.setup.importlib_metadata.version", return_value="0.51.16"
+            ),
+        ):
+            assert setup_cmd._register_codex_mcp_server()
+            updated = config.read_text()
+            assert "ouroboros-ai[mcp]==0.51.16" in updated
+            assert "ouroboros-ai[mcp]==0.51.15" not in updated
+            assert setup_cmd._register_codex_mcp_server()
+            assert config.read_text() == updated
 
     def test_register_codex_mcp_server_uses_direct_executable_for_dev_build(
         self, tmp_path: Path
@@ -598,6 +632,7 @@ class TestCodexSetup:
                 "ouroboros.cli.commands.setup.importlib_metadata.version",
                 return_value="0.51.4",
             ),
+            patch("ouroboros.cli.commands.setup.shutil.which", return_value="/usr/local/bin/uvx"),
             patch(
                 "ouroboros.cli.commands.setup._command_matches_path_program",
                 return_value=True,
@@ -607,7 +642,7 @@ class TestCodexSetup:
 
         contents = codex_config.read_text(encoding="utf-8")
         assert "/home/operator/.local/bin/ouroboros" not in contents
-        assert "ouroboros-ai[mcp]" in contents
+        assert "ouroboros-ai[mcp]==0.51.4" in contents
 
     def test_register_codex_mcp_server_preserves_path_direct_with_mismatched_env(
         self, tmp_path: Path
