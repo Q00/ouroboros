@@ -206,6 +206,7 @@ from ouroboros.orchestrator.session import (
     SessionRepository,
     SessionStatus,
     SessionTracker,
+    _optional_create_session_kwargs,
     runtime_resume_identity_from_payload,
 )
 from ouroboros.orchestrator.verify_shell import (
@@ -8711,18 +8712,13 @@ class OrchestratorRunner:
                 create_session_kwargs["gate_forced"] = seed.metadata.gate_forced
             if self._task_workspace is not None:
                 create_session_kwargs["project_task_workspace"] = self._task_workspace
-            try:
-                if (
-                    "acceptance_root_indices"
-                    in inspect.signature(self._session_repo.create_session).parameters
-                ):
-                    create_session_kwargs["acceptance_root_indices"] = range(
-                        len(seed.acceptance_criteria)
-                    )
-            except (TypeError, ValueError):
-                # Legacy/mock repositories may not expose an inspectable signature;
-                # the durable SessionRepository path always does.
-                pass
+            create_session_kwargs.update(
+                _optional_create_session_kwargs(
+                    self._session_repo.create_session,
+                    interview_id=getattr(seed.metadata, "interview_id", None),
+                    acceptance_criteria_count=len(seed.acceptance_criteria),
+                )
+            )
             # Establish the exact capability and PID liveness lease before any
             # durable RUNNING tracker can be reconstructed by an observer. The
             # resolved session id is allocated locally for that purpose rather
