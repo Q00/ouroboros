@@ -195,11 +195,15 @@ def parse_coverage_from_output(output: str) -> float | None:
     # a requirement such as "Required Coverage: 70%" is not read as a result.
     alt_pattern = r"^[ \t]*Coverage:\s*(\d+(?:\.\d+)?)%"
 
-    readings = set(re.findall(pattern, output, re.MULTILINE))
-    # A TOTAL row in a shape the pattern cannot read (decimals, branch columns)
-    # is still the report's figure; a "Coverage:" line elsewhere must not stand in.
-    if not readings and not re.search(r"^[ \t]*TOTAL\b", output, re.MULTILINE):
-        readings = set(re.findall(alt_pattern, output, re.MULTILINE))
+    # Every TOTAL row is a figure from the report. One in a shape the pattern
+    # cannot read (decimals, branch columns) makes the report ambiguous, so no
+    # other row or "Coverage:" line may stand in for it.
+    total_rows = re.findall(r"^[ \t]*TOTAL\b.*$", output, re.MULTILINE)
+    matches = [re.match(pattern, row) for row in total_rows]
+    if not all(matches):
+        return None
+    readings = [match.group(1) for match in matches if match]
+    readings += re.findall(alt_pattern, output, re.MULTILINE)
     values = {float(reading) for reading in readings}
     # More than one distinct figure, or a figure no tool can report, is not a
     # measurement: return None so the threshold stays undecided.

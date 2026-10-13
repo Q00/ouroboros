@@ -71,6 +71,9 @@ class TestParseCoverageFromOutput:
             "TOTAL   100   0   101%",
             "TOTAL   10   0   100%\nTOTAL   100   85   15%",
             "Coverage: 100%\nCoverage: 15%",
+            "TOTAL   10   0   100%\nTOTAL   100   85   15.00%",
+            "TOTAL   10   0   100%\nTOTAL   100   85   40   30   15%",
+            "TOTAL   100   20   80%\nCoverage: 15%",
         ],
         ids=[
             "requirement-beside-decimal-total",
@@ -80,14 +83,21 @@ class TestParseCoverageFromOutput:
             "over-100-total",
             "conflicting-totals",
             "conflicting-colon",
+            "readable-beside-decimal-total",
+            "readable-beside-branch-total",
+            "total-disagrees-with-colon",
         ],
     )
     def test_ambiguous_or_impossible_figures_are_unread(self, output: str) -> None:
         """A figure the output does not pin down is not a measurement."""
         assert parse_coverage_from_output(output) is None
 
-    def test_repeated_identical_total_is_one_reading(self) -> None:
-        output = "TOTAL   100   20   80%\nTOTAL   100   20   80%"
+    @pytest.mark.parametrize(
+        "output",
+        ["TOTAL   100   20   80%\nTOTAL   100   20   80%", "TOTAL   100   20   80%\nCoverage: 80%"],
+        ids=["repeated-total", "total-agrees-with-colon"],
+    )
+    def test_agreeing_figures_are_one_reading(self, output: str) -> None:
         assert parse_coverage_from_output(output) == 0.80
 
 
@@ -473,6 +483,7 @@ _UNPARSED_COVERAGE_OUTPUTS = {
     "requirement beside decimal TOTAL": "Required Coverage: 70%\nTOTAL   100   85   15.00%",
     "coverage over 100%": "Coverage: 999%",
     "conflicting TOTAL rows": "TOTAL   10   0   100%\nTOTAL   100   85   15%",
+    "readable beside decimal TOTAL": "TOTAL   10   0   100%\nTOTAL   100   85   15.00%",
 }
 
 
