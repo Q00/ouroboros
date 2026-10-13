@@ -1,6 +1,7 @@
 ---
 name: tutorial
 description: "Interactive tutorial teaching Ouroboros hands-on"
+disable-model-invocation: true
 ---
 
 # /ouroboros:tutorial
