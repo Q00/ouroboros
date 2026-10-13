@@ -58,15 +58,17 @@ file's text once (``ORACLE_HARNESS_SOURCE``) and every oracle package
 freezes it, so a package carries the exact harness it was admitted with.
 
 The target and cli roles run in the task's interpreter, which may be as old
-as Python 3.6 (SWE-bench images of older repositories), so the whole module
+as Python 3.5 (SWE-bench images of older repositories), so the whole module
 must import there: no ``from __future__ import annotations``, and every
 annotation that is evaluated (signatures) spells its types with ``typing``
 (``Optional[str]``, ``List[str]``), never ``str | None`` or ``list[str]``;
-no standard library call newer than 3.6 in those roles. Python 3.5 and
-earlier are not supported (variable annotations). The compare role runs only
-in the controller.
+no variable annotations (a type comment instead), no f-strings, and no
+standard library name newer than 3.5 in those roles (``ModuleNotFoundError``
+is looked up; on 3.5 ``_module_not_found`` recognises the same failures). The
+compare role runs only in the controller.
 """
 
+import builtins
 import json
 import math
 import os
@@ -84,6 +86,8 @@ PARAM_REF = "$param"
 """The key of a template value that stands for a case's declared parameter (controller side)."""
 INPUT_FAILED_EXIT = 3
 PROJECTION_FAILED_EXIT = 4
+# Python 3.5 has no ModuleNotFoundError (see ``_module_not_found``).
+_MODULE_NOT_FOUND = getattr(builtins, "ModuleNotFoundError", None)
 
 
 # ---------------------------------------------------------------- target role
@@ -192,6 +196,31 @@ def named_inputs(value: Any) -> Any:
     return value
 
 
+def _module_not_found(exc: ImportError) -> bool:
+    """Whether ``exc`` is the import system's "no such module" failure.
+
+    On Python 3.6 and later that is exactly ``ModuleNotFoundError``. Python
+    3.5 raises a plain ``ImportError`` from the same places (three in
+    ``importlib._bootstrap``; an ``import`` statement that meets ``None`` in
+    ``sys.modules`` quotes the name), with the same ``name`` and a message
+    built from it. An ``ImportError`` raised while a found module runs
+    (``from pkg import absent``, or the module's own ``raise``) does not carry
+    that pair unless the module spells it out itself, so it is not counted,
+    as on 3.6.
+    """
+    if _MODULE_NOT_FOUND is not None:
+        return isinstance(exc, _MODULE_NOT_FOUND)
+    name = exc.name
+    if type(exc) is not ImportError or not isinstance(name, str):
+        return False
+    return str(exc) in (
+        "No module named {!r}".format(name),
+        "No module named {!r}; {!r} is not a package".format(name, name.rpartition(".")[0]),
+        "import of {} halted; None in sys.modules".format(name),
+        "import of {!r} halted; None in sys.modules".format(name),
+    )
+
+
 def _lookup(symbol: str) -> Tuple[Any, Any, int, List[str]]:
     """``(module, object, split, parts)`` for an importable dotted ``symbol``."""
     import importlib
@@ -201,7 +230,9 @@ def _lookup(symbol: str) -> Tuple[Any, Any, int, List[str]]:
         module_name = ".".join(parts[:split])
         try:
             module = importlib.import_module(module_name)
-        except ModuleNotFoundError as exc:
+        except ImportError as exc:
+            if not _module_not_found(exc):
+                raise
             missing = exc.name or ""
             if missing == module_name or module_name.startswith(missing + "."):
                 continue
@@ -334,7 +365,7 @@ def _open_checkout_file(parts: List[str]) -> int:
     nofollow, directory_flag = _require_nofollow()
     if not parts or any(part in ("", ".", "..") for part in parts):
         raise OSError("not a path below the working directory")
-    held: list[int] = []
+    held = []  # type: List[int]
     try:
         held.append(os.open(".", os.O_RDONLY | directory_flag))
         for part in parts[:-1]:

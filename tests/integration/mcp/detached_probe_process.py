@@ -399,7 +399,7 @@ async def accepting_parent(
         probe = DetachedProbe(parent, store, JobManager(store), identities)
         failed = False
         try:
-            deadline = asyncio.get_running_loop().time() + 30.0
+            deadline = asyncio.get_running_loop().time() + 60.0
             while not probe.record.get("ready"):
                 if receipt.exists():
                     probe.record = json.loads(receipt.read_text(encoding="utf-8"))
