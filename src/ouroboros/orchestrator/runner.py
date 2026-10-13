@@ -55,16 +55,22 @@ from ouroboros.core.execution_preferences import (
     resolve_execution_preferences,
 )
 from ouroboros.core.project_identity import (
-    ManagedProjectOwnershipError,
-    ManagedProjectScopeError,
+    ManagedProjectOwnershipError as ManagedProjectOwnershipError,
+)
+from ouroboros.core.project_identity import (
+    ManagedProjectScopeError as ManagedProjectScopeError,
+)
+from ouroboros.core.project_identity import (
     ProjectIdentity,
     ProjectIdentityError,
-    ProjectIdentityUnavailableError,
     active_publication_evidence_sink,
     publication_evidence_sink,
     resolve_managed_project_identity,
     resolve_project_identity,
     resolve_project_identity_for_publication,
+)
+from ouroboros.core.project_identity import (
+    ProjectIdentityUnavailableError as ProjectIdentityUnavailableError,
 )
 from ouroboros.core.seed import AcceptanceCriterionSpec, ac_text, ac_texts
 from ouroboros.core.seed_contract import SeedContract
@@ -183,6 +189,7 @@ from ouroboros.orchestrator.policy import (
 )
 from ouroboros.orchestrator.profile_loader import ExecutionProfile, ProfileError, load_profile
 from ouroboros.orchestrator.profile_strategy import ProfileBackedStrategy
+from ouroboros.orchestrator.project_anchor import ProjectAnchor
 from ouroboros.orchestrator.recoverable_failure import (
     is_usage_limit_pause_message,
     project_failure_metadata,
@@ -982,6 +989,22 @@ class OrchestratorRunner:
         self._task_workspace_value: TaskWorkspace | None = None
         self._task_workspace_lock_held = False
         self._task_workspace = task_workspace
+        self._project_anchor = ProjectAnchor(
+            workspace=lambda: self._task_workspace,
+            effective_cwd=lambda: self._effective_cwd(),
+            canonical_path=lambda value: self._canonical_path(value),
+            task_identity=lambda workspace: self._task_workspace_project_identity(workspace),
+            translate_error=lambda exc: self._project_identity_error(exc),
+            project_identity=lambda: self._project_identity(),
+            resolved_identity=lambda identity: self._resolved_proof_workspace_identity(identity),
+            task_resume_identity=lambda workspace: self._task_resume_workspace_identity(workspace),
+            resolve_identity=lambda cwd: resolve_project_identity(cwd),
+            resolve_publication_identity=lambda cwd: resolve_project_identity_for_publication(cwd),
+            publication_sink=lambda: active_publication_evidence_sink(),
+            legacy_identity=lambda workspace, canonical: legacy_task_workspace_identity(
+                workspace, canonical
+            ),
+        )
         self._max_decomposition_depth = validate_max_decomposition_depth(max_decomposition_depth)
         self._max_parallel_workers = max(1, max_parallel_workers)
         self._fat_harness_mode = fat_harness_mode
@@ -3303,65 +3326,25 @@ class OrchestratorRunner:
     @staticmethod
     def _canonical_path(value: str) -> str:
         """Return a symlink-resolved absolute path without requiring existence."""
-        return str(Path(value).expanduser().resolve(strict=False))
+        return ProjectAnchor.canonical_path(value)
 
     @classmethod
     def _task_workspace_project_identity(cls, workspace: TaskWorkspace) -> ProjectIdentity:
         """Resolve a managed worktree against its durable source checkout."""
-        try:
-            return resolve_managed_project_identity(
-                workspace.effective_cwd,
-                source_root=workspace.repo_root,
-                source_workspace=workspace.original_cwd,
-                worktree_root=workspace.worktree_path,
-            )
-        except ManagedProjectScopeError as exc:
-            raise OrchestratorError(
-                message="Managed source and execution workspace scopes do not match",
-                details={
-                    "invalid": "runtime_cwd",
-                    "source_cwd": exc.source_workspace,
-                    "execution_cwd": exc.execution_workspace,
-                    "resume_blocked": "runtime_cwd_mismatch",
-                },
-            ) from exc
-        except ManagedProjectOwnershipError as exc:
-            raise OrchestratorError(
-                message="Managed worktree does not belong to its source project",
-                details={
-                    "invalid": "project_identity",
-                    "source_identity": exc.source_identity.to_workspace_data(),
-                    "execution_identity": exc.execution_identity.to_workspace_data(),
-                    "resume_blocked": "project_identity_mismatch",
-                },
-            ) from exc
+        return ProjectAnchor.task_workspace_project_identity(
+            workspace,
+            resolve_managed=resolve_managed_project_identity,
+            error_type=OrchestratorError,
+        )
 
     @staticmethod
     def _project_identity_error(exc: ProjectIdentityError) -> OrchestratorError:
         """Normalize resolver failures at the orchestration lifecycle boundary."""
-        details: dict[str, Any] = {"invalid": "project_identity", "cause": str(exc)}
-        if isinstance(exc, ProjectIdentityUnavailableError):
-            details.update(
-                resume_blocked="project_identity_unavailable",
-                retryable=True,
-            )
-        return OrchestratorError(message="Cannot resolve project identity", details=details)
+        return ProjectAnchor.project_identity_error(exc, error_type=OrchestratorError)
 
     def _project_identity(self) -> ProjectIdentity | None:
         """Return the single canonical identity shared by event and contract."""
-        try:
-            if self._task_workspace is not None:
-                self._effective_cwd()
-                return self._task_workspace_project_identity(self._task_workspace)
-            effective_cwd = self._effective_cwd()
-            if not isinstance(effective_cwd, str) or not effective_cwd.strip():
-                return None
-            if active_publication_evidence_sink() is None:
-                return resolve_project_identity(effective_cwd)
-            identity, _evidence = resolve_project_identity_for_publication(effective_cwd)
-            return identity
-        except ProjectIdentityError as exc:
-            raise self._project_identity_error(exc) from exc
+        return self._project_anchor.project_identity()
 
     def _proof_workspace_identity(self) -> dict[str, str] | None:
         """Return the stable project + source-workspace identity for this run.
@@ -3373,82 +3356,40 @@ class OrchestratorRunner:
         to their primary source root. Non-Git callers retain the conservative
         canonical effective-cwd identity.
         """
-        return self._resolved_proof_workspace_identity(self._project_identity())
+        return self._project_anchor.proof_workspace_identity()
 
     @staticmethod
     def _resolved_proof_workspace_identity(
         project_identity: ProjectIdentity | None,
     ) -> dict[str, str] | None:
         """Project one already-resolved identity without another resolver call."""
-        return project_identity.to_workspace_data() if project_identity is not None else None
+        return ProjectAnchor.resolved_proof_workspace_identity(project_identity)
 
     def _legacy_proof_workspace_identity(self) -> dict[str, str] | None:
         """Reproduce the pre-Project-Map V1 nested workspace representation."""
-        if self._task_workspace is not None:
-            return legacy_task_workspace_identity(self._task_workspace, self._canonical_path)
-        effective_cwd = self._effective_cwd()
-        if not isinstance(effective_cwd, str) or not effective_cwd.strip():
-            return None
-        return {
-            "project_root": self._canonical_path(effective_cwd),
-            "workspace_path": ".",
-        }
+        return self._project_anchor.legacy_proof_workspace_identity()
 
     @staticmethod
     def _project_start_identity(
         progress: Mapping[str, Any],
     ) -> tuple[bool, ProjectIdentity | None]:
         """Parse the all-or-none immutable Project Map session anchor."""
-        raw_start_identity = progress.get(SESSION_START_IDENTITY_PROGRESS_KEY)
-        if not isinstance(raw_start_identity, Mapping):
-            return False, None
-        project_keys = frozenset({"project_id", "project_root", "workspace_path"})
-        present_keys = {key for key in project_keys if key in raw_start_identity}
-        if not present_keys:
-            return False, None
-        if present_keys != project_keys:
-            raise OrchestratorError(
-                message="Cannot resume with a partial project identity anchor",
-                details={"invalid": "project_identity_anchor"},
-            )
-        try:
-            identity = ProjectIdentity(
-                project_id=raw_start_identity["project_id"],
-                project_root=raw_start_identity["project_root"],
-                workspace_path=raw_start_identity["workspace_path"],
-            )
-        except ProjectIdentityUnavailableError as exc:
-            raise OrchestratorRunner._project_identity_error(exc) from exc
-        except (KeyError, TypeError, ValueError) as exc:
-            raise OrchestratorError(
-                message="Cannot resume with an invalid project identity anchor",
-                details={"invalid": "project_identity_anchor"},
-            ) from exc
-        return True, identity
+        return ProjectAnchor.project_start_identity(
+            progress,
+            translate_error=OrchestratorRunner._project_identity_error,
+            error_type=OrchestratorError,
+        )
 
     @classmethod
     def _task_resume_workspace_identity(cls, workspace: TaskWorkspace) -> dict[str, str]:
         """Return the exact managed checkout identity required for safe resume."""
-        return {
-            "mode": "task_workspace",
-            "durable_id": workspace.durable_id,
-            "repo_root": cls._canonical_path(workspace.repo_root),
-            "worktree_path": cls._canonical_path(workspace.worktree_path),
-            "effective_cwd": cls._canonical_path(workspace.effective_cwd),
-            "branch": workspace.branch,
-        }
+        return ProjectAnchor.task_resume_workspace_identity(
+            workspace, canonical_path=cls._canonical_path
+        )
 
     def _resume_workspace_identity(self) -> dict[str, str] | None:
         """Return session-specific checkout identity, unlike stable proof cohorting."""
-        if self._task_workspace is not None:
-            return self._task_resume_workspace_identity(self._task_workspace)
-        effective_cwd = self._effective_cwd()
-        if not isinstance(effective_cwd, str) or not effective_cwd.strip():
-            return None
-        return {
-            "mode": "direct",
-            "effective_cwd": self._canonical_path(effective_cwd),
-        }
+        return self._project_anchor.resume_workspace_identity()
 
     @staticmethod
     def _routing_fingerprint(routing_contract: Mapping[str, Any]) -> str:
