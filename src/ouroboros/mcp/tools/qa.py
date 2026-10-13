@@ -329,6 +329,16 @@ def _parse_qa_response(
             data = json.loads(json_str)
         except json.JSONDecodeError as e:
             return Result.err(f"Invalid JSON in QA response: {e}")
+        if not isinstance(data, dict):
+            return Result.err("QA response JSON must be an object, got " + type(data).__name__)
+        if not _JSON_FENCE_RE.search(response_text) and _carries_json_object(
+            response_text.replace(json_str, "", 1)
+        ):
+            # The extractor counts only *valid* objects, so a malformed second
+            # verdict (``{"score": 0.1, "verdict": "fail",}``) beside a passing
+            # one leaves the passing one "unique". Any other object start
+            # outside the payload is a competing answer, not prose.
+            return Result.err("QA response contains JSON but no single unambiguous verdict object")
     elif _carries_json_object(response_text):
         # The model answered in JSON, but not with one authoritative object
         # (competing fences, or several objects). Reading ``Score: 0.95`` out of

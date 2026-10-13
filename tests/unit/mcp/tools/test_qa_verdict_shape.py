@@ -229,3 +229,43 @@ async def test_prose_without_json_still_uses_the_fallback() -> None:
     assert result.is_ok
     assert result.value.meta["score"] == 0.9
     assert result.value.meta["passed"] is True
+
+
+# The extractor counts only *valid* objects, so a malformed second verdict left
+# the passing one "unique" and it was read as the answer.
+_COMPETING_MALFORMED: dict[str, str] = {
+    "valid-pass-then-malformed-fail": (
+        '{"score": 0.95, "verdict": "pass"}\nCorrection: {"score": 0.1, "verdict": "fail",}'
+    ),
+    "malformed-fail-then-valid-pass": (
+        '{"score": 0.1, "verdict": "fail",}\n{"score": 0.95, "verdict": "pass"}'
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "body", list(_COMPETING_MALFORMED.values()), ids=list(_COMPETING_MALFORMED)
+)
+async def test_malformed_competing_object_blocks_the_valid_one(body: str) -> None:
+    result = await _handler(body).handle(dict(_ARGS))
+
+    assert result.is_err
+    assert "no single unambiguous verdict object" in str(result.error)
+
+
+async def test_fenced_array_is_a_parse_error() -> None:
+    body = '```json\n[{"score": 0.95, "verdict": "pass"}]\n```'
+
+    result = await _handler(body).handle(dict(_ARGS))
+
+    assert result.is_err
+    assert "must be an object" in str(result.error)
+
+
+async def test_single_object_beside_prose_still_parses() -> None:
+    body = 'All ACs met.\n{"score": 0.9, "verdict": "pass", "reasoning": "ok"}'
+
+    result = await _handler(body).handle(dict(_ARGS))
+
+    assert result.is_ok
+    assert result.value.meta["passed"] is True
