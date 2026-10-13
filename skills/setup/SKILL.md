@@ -1,6 +1,7 @@
 ---
 name: setup
 description: "Guided onboarding wizard for Ouroboros setup"
+disable-model-invocation: true
 ---
 
 # /ouroboros:setup

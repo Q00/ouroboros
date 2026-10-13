@@ -1,6 +1,7 @@
 ---
 name: welcome
 description: "First-touch experience for new Ouroboros users"
+disable-model-invocation: true
 ---
 
 # /ouroboros:welcome
