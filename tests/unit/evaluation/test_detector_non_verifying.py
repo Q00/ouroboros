@@ -226,6 +226,9 @@ ACCEPTED: list[tuple[str, str]] = [
     ("test", "pytest -k npm -v"),
     ("test", "uv run pytest -k npm -v"),
     ("test", "pytest -m slow -q"),
+    # Task runners run every positional: a reporting task beside a check is a check.
+    ("test", "gradle clean test"),
+    ("build", "gradle build -x test"),
 ]
 
 
@@ -329,6 +332,34 @@ def test_informational_subcommands_are_refused_on_the_override_path(
     tmp_path: Path, command: str
 ) -> None:
     """Overrides skip the detector, so the shared gate must know these too."""
+    config = build_mechanical_config(tmp_path, overrides={"test": command})
+    assert config.test_command is None
+
+
+@pytest.mark.parametrize(("key", "command"), REFUSED_SUBCOMMANDS)
+def test_reporting_subcommands_are_refused_on_the_override_path(
+    tmp_path: Path, key: str, command: str
+) -> None:
+    """Every subcommand pruned from the detector allowlists is refused by the shared gate."""
+    config = build_mechanical_config(tmp_path, overrides={key: command})
+    assert getattr(config, f"{key}_command") is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "uv tree --offline",
+        "mvn -q clean dependency:tree",
+        "gradle clean tasks",
+        "python -m pickletools x.pickle",
+        "python -m zipfile -l a.zip",
+        "python -m dis x.py",
+        "python -m ast x.py",
+    ],
+)
+def test_reporting_only_lines_are_refused_on_the_override_path(
+    tmp_path: Path, command: str
+) -> None:
     config = build_mechanical_config(tmp_path, overrides={"test": command})
     assert config.test_command is None
 

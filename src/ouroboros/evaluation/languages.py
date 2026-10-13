@@ -183,6 +183,7 @@ class _ModeSpec:
     needs_positional: bool
     skip_properties: bool
     takes_value: frozenset[str]
+    task_list: bool
 
     def normalize(self, name: str) -> str:
         if self.case_insensitive:
@@ -243,6 +244,7 @@ def _spec(
     needs_positional: bool = False,
     skip_properties: bool = False,
     values: str = "",
+    task_list: bool = False,
 ) -> _ModeSpec:
     """Build a :class:`_ModeSpec` from space-separated option names.
 
@@ -253,6 +255,9 @@ def _spec(
     (``cargo test --no-run``): evidence for a ``build`` command, refused for
     every other key. ``values`` are options whose next token is their value
     (``pytest -k npm``), so that token is neither a positional nor a program.
+    ``task_list`` marks tools that run every positional as a task or goal
+    (``gradle clean test``): ``subcommands`` then refuse only a line whose
+    positionals are all reporting tasks.
     """
     probe = _ModeSpec(
         forbidden=frozenset(),
@@ -272,6 +277,7 @@ def _spec(
         needs_positional=needs_positional,
         skip_properties=skip_properties,
         takes_value=frozenset(),
+        task_list=task_list,
     )
     names = flags.split()
     return replace(
@@ -298,8 +304,8 @@ _PYTHON_SPEC = _spec(
     needs_positional=True,
     # ``python -m <module>`` whose exit status cannot reflect the project.
     subcommands=(
-        "timeit, pydoc, json.tool, tabnanny, this, antigravity, sysconfig, site, platform,"
-        " calendar, webbrowser, base64, uuid"
+        "timeit, pydoc, json.tool, tabnanny, pickletools, zipfile, zipapp, dis, ast, this,"
+        " antigravity, sysconfig, site, platform, calendar, webbrowser, base64, uuid"
     ),
 )
 _MAKE_SPEC = _spec(
@@ -309,8 +315,37 @@ _MAKE_SPEC = _spec(
     abbreviates=True,
     assignments=True,
 )
-_GRADLE_SPEC = _spec("-m --dry-run -v -h -? --status --stop", clusters=False)
-_MAVEN_SPEC = _spec("-v -h -fn --fail-never", clusters=False, skip_properties=True)
+_GRADLE_SPEC = _spec(
+    "-m --dry-run -v -h -? --status --stop",
+    clusters=False,
+    # Tasks that report on the build or delete outputs, and run no check.
+    subcommands=(
+        "tasks, help, projects, properties, dependencies, dependencyInsight,"
+        " buildEnvironment, outgoingVariants, resolvableConfigurations, javaToolchains,"
+        " components, model, clean"
+    ),
+    values=(
+        "-x --exclude-task -p --project-dir -b --build-file -c --settings-file"
+        " -I --init-script -g --gradle-user-home -P -D --console --warning-mode"
+    ),
+    task_list=True,
+)
+_MAVEN_SPEC = _spec(
+    "-v -h -fn --fail-never",
+    clusters=False,
+    skip_properties=True,
+    # Goals that describe the project or delete outputs, and run no check.
+    subcommands=(
+        "help:help, help:describe, help:effective-pom, help:effective-settings, help:system,"
+        " help:active-profiles, help:all-profiles, help:evaluate, dependency:tree,"
+        " dependency:list, dependency:resolve, dependency:sources, clean"
+    ),
+    values=(
+        "-pl --projects -f --file -P --activate-profiles -s --settings -gs"
+        " --global-settings -rf --resume-from -T --threads -t --toolchains -l --log-file"
+    ),
+    task_list=True,
+)
 _NODE_PM_SPEC = _spec(
     "-v -h -? --dry-run",
     overrides="--script-shell --config.script-shell",
@@ -328,7 +363,12 @@ _MODE_SPECS: dict[str, _ModeSpec] = {
     # Python
     "python": _PYTHON_SPEC,
     "python3": _PYTHON_SPEC,
-    "uv": _spec("-V -h --dry-run", wraps=True, forwards=True),
+    "uv": _spec(
+        "-V -h --dry-run",
+        wraps=True,
+        forwards=True,
+        subcommands="tree, version, help, cache dir, python list, tool list, self version",
+    ),
     "poetry": _spec("-V -h --dry-run", wraps=True, forwards=True),
     "pdm": _spec("-V -h -l --list --dry-run", wraps=True, forwards=True),
     "hatch": _spec("-h --dry-run", wraps=True, forwards=True),
@@ -523,10 +563,11 @@ _MODE_SPECS: dict[str, _ModeSpec] = {
     ),
     "dotnet": _spec(
         "-h -? --info --list-sdks --list-runtimes",
+        subcommands="list, help, sdk, workload list",
         scoped={"test": "-t --list-tests"},
         clusters=False,
     ),
-    "mix": _spec("-v -h"),
+    "mix": _spec("-v -h", subcommands="help, deps.tree, hex.info"),
     "elixir": _spec("-v -h", overrides="-e --eval", forwards=True, needs_positional=True),
     "swift": _spec(
         "-h -l --list-tests --show-bin-path -version",
@@ -742,9 +783,15 @@ def non_verifying_reason(
 def _positional_reason(scope: _Scope, parts: Sequence[str]) -> str | None:
     """Informational subcommands, and options valid only under one subcommand."""
     leading = scope.positionals[:2]
-    for name in (*leading, " ".join(leading)):
-        if name in scope.spec.subcommands:
-            return f"{scope.tool}: {name}"
+    if scope.spec.task_list:
+        # ``gradle clean test`` runs the tests; ``gradle clean tasks`` runs none.
+        tasks = scope.positionals
+        if tasks and all(task in scope.spec.subcommands for task in tasks):
+            return f"{scope.tool}: {' '.join(tasks)}"
+    else:
+        for name in (*leading, " ".join(leading)):
+            if name in scope.spec.subcommands:
+                return f"{scope.tool}: {name}"
     for sub, flags in scope.spec.scoped:
         if sub not in leading:
             continue

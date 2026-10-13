@@ -2037,6 +2037,7 @@ _GRADLE_BUILTIN_TASKS: frozenset[str] = frozenset(
         "assemble",
         "build",
         "check",
+        "clean",
         "jar",
         "javadoc",
         "test",
