@@ -184,6 +184,7 @@ class _ModeSpec:
     skip_properties: bool
     takes_value: frozenset[str]
     task_list: bool
+    zero_runs: frozenset[str]
 
     def normalize(self, name: str) -> str:
         if self.case_insensitive:
@@ -245,6 +246,7 @@ def _spec(
     skip_properties: bool = False,
     values: str = "",
     task_list: bool = False,
+    zero_runs: str = "",
 ) -> _ModeSpec:
     """Build a :class:`_ModeSpec` from space-separated option names.
 
@@ -257,7 +259,9 @@ def _spec(
     (``pytest -k npm``), so that token is neither a positional nor a program.
     ``task_list`` marks tools that run every positional as a task or goal
     (``gradle clean test``): ``subcommands`` then refuse only a line whose
-    positionals are all reporting tasks.
+    positionals are all reporting tasks. ``zero_runs`` are repeat counts,
+    refused under a ``scoped`` subcommand when set to zero (``go test
+    -count=0`` runs nothing and exits 0).
     """
     probe = _ModeSpec(
         forbidden=frozenset(),
@@ -278,6 +282,7 @@ def _spec(
         skip_properties=skip_properties,
         takes_value=frozenset(),
         task_list=task_list,
+        zero_runs=frozenset(),
     )
     names = flags.split()
     return replace(
@@ -292,6 +297,7 @@ def _spec(
             for sub, names_ in (scoped or {}).items()
         ),
         takes_value=frozenset(map(probe.normalize, values.split())),
+        zero_runs=frozenset(map(probe.normalize, zero_runs.split())),
     )
 
 
@@ -440,8 +446,11 @@ _MODE_SPECS: dict[str, _ModeSpec] = {
         "-n -h -help",
         overrides="-exec -toolexec",
         build_ok="-c",
-        scoped={"test": "-list"},
+        # The test binary also takes its flags as ``-test.<name>``, directly
+        # or after ``-args``.
+        scoped={"test": "-list -test.list"},
         single_dash_long=True,
+        zero_runs="-count -test.count",
         subcommands="version, env, help, doc, list, bug, telemetry",
     ),
     "golangci-lint": _spec(
@@ -795,11 +804,27 @@ def _positional_reason(scope: _Scope, parts: Sequence[str]) -> str | None:
     for sub, flags in scope.spec.scoped:
         if sub not in leading:
             continue
+        previous = ""
         for token in parts:
             for candidate in _flag_candidates(token):
                 if scope.spec.normalize(candidate) in flags:
                     return f"{scope.tool} {sub}: {candidate}"
+            if _zero_run(scope.spec, previous, token):
+                return f"{scope.tool} {sub}: zero repeat count {token}"
+            previous = token
     return None
+
+
+def _zero_run(spec: _ModeSpec, previous: str, token: str) -> bool:
+    """``-count=0`` / ``-count 0``: a repeat count of zero runs no test."""
+    if not spec.zero_runs:
+        return False
+    name, sep, value = token.partition("=")
+    if not (sep and token.startswith("-")):
+        name, value = previous, token
+    if not name.startswith("-") or spec.normalize(name) not in spec.zero_runs:
+        return False
+    return value.strip().isdigit() and int(value) == 0
 
 
 def _maven_property_skips(token: str, previous: str, build: bool) -> bool:

@@ -167,6 +167,19 @@ REFUSED: list[tuple[str, str]] = [
     ("test", "zig build test -l"),
 ]
 
+# Go test-binary modes: measured on go1.26 against a failing test, each exits 0.
+GO_TEST_BINARY_MODES: list[tuple[str, str]] = [
+    # The binary's own spelling, direct or forwarded after ``-args``.
+    ("test", "go test -args -test.list=."),
+    ("test", "go test -test.list=. ./..."),
+    ("test", "go test --test.list . ./..."),
+    # A repeat count of zero runs nothing.
+    ("test", "go test -count=0 ./..."),
+    ("test", "go test -count 0 ./..."),
+    ("test", "go test -test.count=00 ./..."),
+    ("test", "go test ./... -args -test.count=0"),
+]
+
 # Informational subcommands that the per-tool subcommand allowlists carried.
 REFUSED_SUBCOMMANDS: list[tuple[str, str]] = [
     ("static", "uv tree"),
@@ -213,6 +226,9 @@ ACCEPTED: list[tuple[str, str]] = [
     ("build", "cargo test --no-run"),
     ("build", "go test -c ./..."),
     ("test", "go test ./..."),
+    ("test", "go test -count=1 ./..."),
+    ("test", "go test -count 2 ./..."),
+    ("test", "go test -run TestA -args -test.v"),
     ("static", "go vet ./..."),
     ("test", "mvn -B -V verify"),
     ("build", "mvn -B verify -DskipTests"),
@@ -232,7 +248,7 @@ ACCEPTED: list[tuple[str, str]] = [
 ]
 
 
-@pytest.mark.parametrize(("key", "command"), REFUSED + REFUSED_SUBCOMMANDS)
+@pytest.mark.parametrize(("key", "command"), REFUSED + REFUSED_SUBCOMMANDS + GO_TEST_BINARY_MODES)
 def test_detector_refuses_a_command_that_cannot_fail(
     tmp_path: Path, key: str, command: str
 ) -> None:
@@ -334,6 +350,14 @@ def test_informational_subcommands_are_refused_on_the_override_path(
     """Overrides skip the detector, so the shared gate must know these too."""
     config = build_mechanical_config(tmp_path, overrides={"test": command})
     assert config.test_command is None
+
+
+@pytest.mark.parametrize(("key", "command"), GO_TEST_BINARY_MODES)
+def test_go_test_binary_modes_are_refused_on_the_override_path(
+    tmp_path: Path, key: str, command: str
+) -> None:
+    config = build_mechanical_config(_project(tmp_path), overrides={key: command})
+    assert getattr(config, f"{key}_command") is None
 
 
 @pytest.mark.parametrize(("key", "command"), REFUSED_SUBCOMMANDS)
