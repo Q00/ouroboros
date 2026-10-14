@@ -91,8 +91,9 @@ class LateralThinkHandler(BridgeAwareMixin):
                 "Use when: the user says they are stuck or going in circles "
                 '("I\'ve tried three fixes", "nothing works"), the same fix has '
                 "failed twice, progress has stalled, OR the user faces a "
-                'consequential choice with no clear winner ("Postgres or SQLite?", '
-                "architecture, library, trade-off); call it proactively on these "
+                "consequential choice with no clear winner (architecture, "
+                "library, trade-off; hard to undo, or the team is split); call "
+                "it proactively on these "
                 "signals, before proposing yet another fix; do not wait for the "
                 "user to ask for 'lateral' or 'unstuck'. "
                 "Result: fresh perspectives from "

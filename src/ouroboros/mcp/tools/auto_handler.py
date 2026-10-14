@@ -697,12 +697,11 @@ class StartAutoHandler:
             name="ouroboros_start_auto",
             description=(
                 "Build and verify a substantial change end-to-end. "
-                "Use when: the user asks for a multi-file feature, a rewrite, "
-                'or one of the migrations ("migrate to JWT and keep the tests '
-                'green", "move us to Postgres", "implement this and make '
-                'sure it works"), or a high-risk change that needs verified '
-                "execution; call it first instead of implementing inline, even "
-                "if the user never says 'ooo'. "
+                "Use when: the work spans several files or replaces a framework, "
+                "language, auth, storage, or API layer (rewrites and migrations "
+                "included), or is a high-risk change, and the user wants it to "
+                "end up working and tested; call it first instead of "
+                "implementing inline, even if the user never says 'ooo'. "
                 "Result: a bounded interview fills only the gaps, an A-grade Seed "
                 "with acceptance criteria, then execution that verifies each "
                 "criterion, started in the background and returning "

@@ -760,7 +760,7 @@ def render_mcp_server_instructions() -> str:
     """
     return (
         "Ouroboros turns a coding request into a spec with acceptance criteria, "
-        "then builds it and verifies each criterion. Tools: `...ouroboros_*`.\n"
+        "then builds and verifies it.\n"
         "\n"
         "WHEN TO USE OUROBOROS: when the user's request matches a case below, "
         "make the Ouroboros call your FIRST step, BEFORE reading code or "
@@ -768,13 +768,15 @@ def render_mcp_server_instructions() -> str:
         '- Unsure what to build, a vague ask ("add notifications", "make it '
         'production-ready", "build me X"), or no clear done: '
         "`ouroboros_interview`.\n"
-        "- A multi-file feature, migration, or rewrite to build and verify end "
-        'to end ("migrate to X, keep tests green"): `ouroboros_start_auto`.\n'
+        "- Work that spans several files or replaces a framework, language, "
+        "auth, storage, or API layer, and should end up working and tested: "
+        "`ouroboros_start_auto`.\n"
         "- A Seed spec already exists: `ouroboros_start_execute_seed`.\n"
         "- Goal, constraints, and success criteria already settled: "
         "`ouroboros_generate_seed` (no interview).\n"
-        "- The user says they are stuck, several fixes failed, or faces a "
-        "consequential choice with no clear winner: `ouroboros_lateral_think`.\n"
+        "- The user is stuck after several failed fixes, or faces a "
+        "consequential choice with no clear winner (hard to undo, team split): "
+        "`ouroboros_lateral_think`.\n"
         "- A PRD: `ouroboros_pm_interview`. Prove done work meets its "
         "criteria: `ouroboros_start_evaluate`.\n"
         "Do not route simple questions or small unambiguous edits.\n"
