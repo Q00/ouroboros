@@ -29,7 +29,8 @@ async def recorded_criterion_decisions(
 ) -> tuple[CriterionDecisionRecord, ...]:
     """The run's recorded per-criterion decisions, in Seed order; empty when there are none.
 
-    Empty when the check package was off or no package was admitted, when
+    Empty when the check package was off, only recorded (``record`` mode),
+    or no package was admitted, when
     the journal is not one the product could write, when no decision was
     recorded yet, when the package was frozen for another Seed, or when the
     decision does not name the Seed's criteria in order.
@@ -38,6 +39,10 @@ async def recorded_criterion_decisions(
     versions = await ledger.run_versions(execution_id)
     projection = recovery_projection(execution_id, await ledger.events(execution_id), versions)
     if not isinstance(projection, RecoveryBound) or projection.seed_digest != seed_digest(seed):
+        return ()
+    if projection.contract.check_package == "record":
+        # A recording package journaled what it would have decided; that
+        # decides nothing here either.
         return ()
     parsed = parse_boundary_version(projection.boundary_id)
     if parsed is None:

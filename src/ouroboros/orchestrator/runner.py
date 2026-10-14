@@ -161,6 +161,7 @@ from ouroboros.orchestrator.execution_runtime_scope import (
 from ouroboros.orchestrator.execution_semantics import (
     CURRENT_EXECUTION_SEMANTICS_VERSION,
     migrated_pre_exec_sandbox_execution_semantics,
+    migrated_pre_transcript_verifier_execution_semantics,
     migrated_pre_verify_shell_execution_semantics,
     pre_adaptive_execution_semantics_rejection,
     valid_execution_semantics_contract,
@@ -1109,6 +1110,8 @@ class OrchestratorRunner:
         self._route_economics = _economics_config
         _execution_config = _config.execution
         self._run_verify_commands = _execution_config.run_verify_commands
+        # Sealed in the execution-semantics contract; a resume uses the run's own mode.
+        self._transcript_verifier = _execution_config.transcript_verifier
         # Sealed in the execution-semantics contract; replay confines with it.
         self._exec_sandbox_enabled = exec_sandbox_enabled()
         self._verify_command_timeout_seconds = _execution_config.verify_command_timeout_seconds
@@ -3905,6 +3908,7 @@ class OrchestratorRunner:
                 max_limit=self._max_parallel_workers,
             ),
             "fat_harness_mode": self._fat_harness_mode,
+            "transcript_verifier": self._transcript_verifier,
             "shadow_replay_enabled": self._shadow_replay_enabled,
             "checkpoint_store_enabled": self._checkpoint_store is not None,
             "session_signal_hub_enabled": self._session_signal_hub is not None,
@@ -6138,6 +6142,25 @@ class OrchestratorRunner:
             )
             raw_execution_semantics = migrated_sandbox_semantics
 
+        migrated_verifier_semantics = migrated_pre_transcript_verifier_execution_semantics(
+            raw_execution_semantics
+        )
+        if migrated_verifier_semantics is not None:
+            if raw_proof.get("execution_semantics_fingerprint") != (
+                self._execution_semantics_fingerprint(raw_execution_semantics)
+            ):
+                raise OrchestratorError(
+                    message="Cannot resume with an invalid pre-transcript-verifier contract",
+                    details={"invalid": "execution_semantics_fingerprint"},
+                )
+            raw_contract = deepcopy(dict(raw_contract))
+            raw_proof = raw_contract["frugality_proof"]
+            raw_contract["execution_semantics"] = migrated_verifier_semantics
+            raw_proof["execution_semantics_fingerprint"] = self._execution_semantics_fingerprint(
+                migrated_verifier_semantics
+            )
+            raw_execution_semantics = migrated_verifier_semantics
+
         migrate_preflight_contract = self._valid_legacy_preflight_execution_semantics_contract(
             raw_execution_semantics
         )
@@ -6686,6 +6709,16 @@ class OrchestratorRunner:
             )
         self._execution_preferences = persisted_preferences
         self._shadow_replay_enabled = self._resolved_shadow_replay_enabled()
+        persisted_verifier = (
+            raw_execution_semantics.get("transcript_verifier")
+            if isinstance(raw_execution_semantics, Mapping)
+            else None
+        )
+        if persisted_verifier in ("decide", "record"):
+            # The run's own sealed mode, never the live config: a run that
+            # started deciding (every run sealed before the setting existed)
+            # resumes deciding, one that started recording keeps recording.
+            self._transcript_verifier = persisted_verifier
         current_execution_semantics = self._execution_semantics_contract()
         if (
             not migrate_legacy_contract
@@ -10330,6 +10363,7 @@ class OrchestratorRunner:
             checkpoint_store=self._checkpoint_store,
             execution_profile=execution_profile,
             fat_harness_mode=execution_semantics["fat_harness_mode"],
+            transcript_verifier=execution_semantics["transcript_verifier"],
             reasoning_effort=self._reasoning_effort,
             # Legacy model selection predates Routing D and remains active when
             # durable route ownership is unavailable (for example, configured

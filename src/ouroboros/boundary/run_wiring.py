@@ -135,6 +135,8 @@ class CheckPackageSettings:
     """How the base regression check acts (``boundary/base_regression.py``); on the run contract."""
     worker_test_gate: ArtifactCheckModeName = WORKER_TEST_GATE_DEFAULT
     """How the worker-test gate acts; recorded on the run contract."""
+    mode: Literal["decide", "record"] = "decide"
+    """Whether the package decides or only records (``boundary/switch.py``); on the run contract."""
 
     @property
     def attempts(self) -> int:
@@ -368,6 +370,7 @@ async def prepare_check_package(
         check_timeout_seconds=settings.check_timeout_seconds,
         base_regression=settings.base_regression,
         worker_test_gate=settings.worker_test_gate,
+        check_package=settings.mode,
     )
     await ledger.record_check_package_enabled(execution_id, contract)
     store = private_store_dir(store_dir or default_store_dir(execution_id))
