@@ -84,6 +84,8 @@ CALL_REF = "$call"
 CALL_KEYS = frozenset({CALL_REF, "args", "kwargs", "then"})
 PARAM_REF = "$param"
 """The key of a template value that stands for a case's declared parameter (controller side)."""
+UNRENDERABLE = "<unrenderable "
+"""The start of the text recorded for an object neither ``str`` nor ``repr`` can render."""
 INPUT_FAILED_EXIT = 3
 PROJECTION_FAILED_EXIT = 4
 # Python 3.5 has no ModuleNotFoundError (see ``_module_not_found``).
@@ -124,6 +126,59 @@ def _plain(value: Any, depth: int = 0) -> Any:
             raise TypeError("non-string key")
         return {key: _plain(item, depth + 1) for key, item in value.items()}
     raise TypeError(type(value).__name__)
+
+
+def _type_name(value: Any) -> str:
+    """The name of ``value``'s type, as exact ``str``; never raises."""
+    try:
+        return str.__str__(type(value).__name__)
+    except BaseException:
+        return "?"
+
+
+def _arg_text(value: Any) -> str:
+    """One ``args`` item for ``_text``'s fallback: builtin scalars by ``repr``, else the type name.
+
+    Only types whose ``repr`` is the builtin one are rendered, so the
+    fallback runs no project code and prints no memory address.
+    """
+    if type(value) in (str, int, float, bool, type(None)):
+        try:
+            return repr(value)[:MAX_REPR]
+        except BaseException:  # an int too long to print (Python 3.11+)
+            pass
+    return "<" + _type_name(value) + ">"
+
+
+def _text(value: Any, first: Any = str) -> str:
+    """``first(value)`` (``str`` or ``repr``) as exact ``str``; never raises.
+
+    Rendering runs the object's own ``__str__`` or ``__repr__``, which is
+    project code and may raise: a Django ``ValidationError`` evaluates its
+    lazily translated message, which needs settings this process never
+    configures. Whatever the rendering does, the observation must still be
+    written, so ``BaseException`` is caught (as ``_run`` catches the call's
+    own failure). The fallbacks, in order: the other rendering, then a fixed
+    marker (``UNRENDERABLE``) naming the type, the type of what ``first``
+    raised, and the object's ``args`` item by item (``_arg_text``). The text
+    is diagnostic only: no oracle rule compares it (see ``_judge_python``).
+    """
+    failure = None  # type: Any
+    for render in (first, repr if first is str else str):
+        try:
+            return str.__str__(render(value))
+        except BaseException as exc:
+            if failure is None:
+                failure = exc
+    try:
+        args = value.args
+        items = [_arg_text(item) for item in args] if type(args) is tuple else []
+    except BaseException:
+        items = []
+    marker = UNRENDERABLE + _type_name(value) + ": " + _type_name(failure) + " while rendering"
+    if items:
+        marker += "; args " + ", ".join(items)
+    return marker + ">"
 
 
 def symbol_ref(value: Any) -> Optional[str]:
@@ -213,7 +268,7 @@ def _module_not_found(exc: ImportError) -> bool:
     name = exc.name
     if type(exc) is not ImportError or not isinstance(name, str):
         return False
-    return str(exc) in (
+    return _text(exc) in (
         "No module named {!r}".format(name),
         "No module named {!r}; {!r} is not a package".format(name, name.rpartition(".")[0]),
         "import of {} halted; None in sys.modules".format(name),
@@ -408,7 +463,7 @@ def _run(target: Any, kind: str, call: Dict[str, Any]) -> Dict[str, Any]:
             "case_id": call["case_id"],
             "outcome": "raised",
             "exception": [klass.__name__ for klass in type(exc).__mro__],
-            "repr": (type(exc).__name__ + ": " + str(exc))[:MAX_REPR],
+            "repr": (_type_name(exc) + ": " + _text(exc))[:MAX_REPR],
         }
     if call.get("project"):
         try:
@@ -416,7 +471,11 @@ def _run(target: Any, kind: str, call: Dict[str, Any]) -> Dict[str, Any]:
         except BaseException:
             # A read the returned value does not support: no observation.
             os._exit(PROJECTION_FAILED_EXIT)
-    entry = {"case_id": call["case_id"], "outcome": "returned", "repr": repr(value)[:MAX_REPR]}
+    entry = {
+        "case_id": call["case_id"],
+        "outcome": "returned",
+        "repr": _text(value, repr)[:MAX_REPR],
+    }
     try:
         entry["value"] = _plain(value)
         entry["encodable"] = True
@@ -462,7 +521,7 @@ def _target(nonce: str, kind: str, symbol: str, setup: str) -> None:
             {
                 "phase": "resolved",
                 "resolve": "import_error",
-                "detail": ("setup: " + type(exc).__name__ + ": " + str(exc))[:500],
+                "detail": ("setup: " + _type_name(exc) + ": " + _text(exc))[:500],
             }
         )
         os._exit(0)
@@ -480,7 +539,7 @@ def _target(nonce: str, kind: str, symbol: str, setup: str) -> None:
             {
                 "phase": "resolved",
                 "resolve": "import_error",
-                "detail": (type(exc).__name__ + ": " + str(exc))[:500],
+                "detail": (_type_name(exc) + ": " + _text(exc))[:500],
             }
         )
         os._exit(0)
