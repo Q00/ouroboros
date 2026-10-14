@@ -2423,7 +2423,9 @@ class StartExecuteSeedHandler:
             name="ouroboros_start_execute_seed",
             description=(
                 "Execute an existing Seed specification. "
-                "Use when: a validated Seed (file path or YAML) already exists. "
+                "Use when: a validated Seed (file path such as *.seed.yaml, or "
+                'YAML) already exists and the user wants it run ("run the '
+                'seed", "execute this spec"). '
                 "Result: a background execution returning a job ID immediately; "
                 "use ouroboros_ac_tree_hud for live progress snapshots and "
                 "ouroboros_job_result for terminal output. "

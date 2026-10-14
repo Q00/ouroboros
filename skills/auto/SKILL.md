@@ -1,6 +1,6 @@
 ---
 name: auto
-description: "Automatically converge from goal to A-grade Seed and execute it"
+description: "Use when the user wants a substantial feature, migration, or rewrite taken all the way to verified, working code: 'build X end to end', 'migrate A to B and keep the tests green', 'implement this and make sure it works'. Asks only what is missing, writes a spec with acceptance criteria, then runs and verifies it in the background. Not for questions, small edits, or an existing Seed (use run)."
 mcp_tool: ouroboros_start_auto
 mcp_args:
   goal: "$goal"

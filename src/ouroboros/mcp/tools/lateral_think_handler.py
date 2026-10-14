@@ -87,12 +87,14 @@ class LateralThinkHandler(BridgeAwareMixin):
         return MCPToolDefinition(
             name="ouroboros_lateral_think",
             description=(
-                "Generate alternative thinking approaches using lateral thinking personas. "
-                "Use when: stuck on a problem, going in circles, the same fix has "
+                "Get unstuck, or decide a hard trade-off, with lateral thinking personas. "
+                "Use when: the user says they are stuck or going in circles "
+                '("I\'ve tried three fixes", "nothing works"), the same fix has '
                 "failed twice, progress has stalled, OR the user faces a "
-                "consequential choice with no clear winner (architecture, library, "
-                "trade-off) — call proactively on these "
-                "signals; do not wait for the user to ask for 'lateral' or 'unstuck'. "
+                'consequential choice with no clear winner ("Postgres or SQLite?", '
+                "architecture, library, trade-off); call it proactively on these "
+                "signals, before proposing yet another fix; do not wait for the "
+                "user to ask for 'lateral' or 'unstuck'. "
                 "Result: fresh perspectives from "
                 "different thinking modes: hacker (unconventional workarounds), "
                 "researcher (seeks information), simplifier (reduces complexity), "

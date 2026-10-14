@@ -1,6 +1,6 @@
 ---
 name: evaluate
-description: "Evaluate execution with three-stage verification pipeline"
+description: "Use when the user wants proof that finished work meets its acceptance criteria, not just that tests pass: 'verify it is actually done', 'check it against the spec', 'evaluate the run'. Runs mechanical checks, a semantic review per criterion, and multi-model consensus when uncertain. Not for writing new code."
 aliases: [eval]
 ---
 

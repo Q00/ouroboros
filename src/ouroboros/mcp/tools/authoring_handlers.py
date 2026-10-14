@@ -1963,11 +1963,15 @@ class InterviewHandler:
         return MCPToolDefinition(
             name="ouroboros_interview",
             description=(
-                "Socratic interview that clarifies requirements before any "
-                "implementation. "
-                "Use when: a request is ambiguous, has unclear scope, or lacks "
-                "acceptance criteria — even if the user never says 'ooo'. "
-                "Result: a closed requirements state ready for Seed generation. "
+                "Clarify a vague request before any implementation. "
+                "Use when: the user wants something built but is unsure what "
+                '("help me figure out what to build", "add notifications", '
+                '"make it production-ready", "build me X"), the request is '
+                "ambiguous, or it lacks acceptance criteria; call it first, even "
+                "if the user never says 'ooo'. "
+                "Result: a short Socratic interview, one question at a time, that "
+                "closes goals, constraints, and acceptance criteria, ready for "
+                "Seed generation. "
                 "Do not use when: a validated Seed already exists "
                 "(use ouroboros_start_execute_seed) or the request is a simple "
                 "question or small unambiguous edit. "

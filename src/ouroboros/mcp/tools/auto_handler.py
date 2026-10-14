@@ -156,7 +156,9 @@ class AutoHandler:
         return MCPToolDefinition(
             name="ouroboros_auto",
             description=(
-                "Run full-quality ooo auto: automatically interview, generate an A-grade Seed, "
+                "Blocking form of ouroboros_start_auto (prefer that one; this call "
+                "can outlast the client timeout). Runs ooo auto in the foreground: "
+                "automatically interview, generate an A-grade Seed, "
                 "and start execution only after the A-grade gate passes. All loops are bounded."
             ),
             parameters=(
@@ -694,14 +696,17 @@ class StartAutoHandler:
         return MCPToolDefinition(
             name="ouroboros_start_auto",
             description=(
-                "Default entry point for substantial end-to-end work: "
-                "multi-step features, migrations, and high-risk changes that "
-                "need verified execution. "
-                "Use when: the user wants a task taken from clarification "
-                "through verified execution — even if they never say 'ooo'. "
-                "Result: bounded interview → A-grade Seed → execution handoff, "
-                "started in the background and returning auto_session_id + "
-                "job_id immediately. "
+                "Build and verify a substantial change end-to-end. "
+                "Use when: the user asks for a multi-file feature, a rewrite, "
+                'or one of the migrations ("migrate to JWT and keep the tests '
+                'green", "move us to Postgres", "implement this and make '
+                'sure it works"), or a high-risk change that needs verified '
+                "execution; call it first instead of implementing inline, even "
+                "if the user never says 'ooo'. "
+                "Result: a bounded interview fills only the gaps, an A-grade Seed "
+                "with acceptance criteria, then execution that verifies each "
+                "criterion, started in the background and returning "
+                "auto_session_id + job_id immediately. "
                 "Do not use when: the request is a simple question or small "
                 "unambiguous edit, or a validated Seed already exists "
                 "(use ouroboros_start_execute_seed). "
