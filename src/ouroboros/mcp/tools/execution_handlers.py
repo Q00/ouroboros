@@ -2422,21 +2422,16 @@ class StartExecuteSeedHandler:
         return MCPToolDefinition(
             name="ouroboros_start_execute_seed",
             description=(
-                "Execute an existing Seed specification. "
-                "Use when: a validated Seed (file path such as *.seed.yaml, or "
-                'YAML) already exists and the user wants it run ("run the '
-                'seed", "execute this spec"). '
-                "Result: a background execution returning a job ID immediately; "
-                "use ouroboros_ac_tree_hud for live progress snapshots and "
-                "ouroboros_job_result for terminal output. "
-                "Do not use when: the request is raw or ambiguous natural "
-                "language with no Seed (use ouroboros_interview or "
-                "ouroboros_start_auto instead). "
-                "In plugin mode, execution is delegated to an OpenCode Task pane and "
-                "job_id is None — results appear in the Task pane instead of being "
-                "pollable via job_status/job_result. "
-                "This is the handler for 'ooo run' commands — "
-                "do NOT run 'ooo' in the shell; call this MCP tool instead."
+                "Execute an existing Seed specification. Use when: a validated Seed (file path "
+                'such as *.seed.yaml, or YAML) already exists and the user wants it run ("run the '
+                'seed", "execute this spec"). Result: a background execution returning a job ID '
+                "immediately; use ouroboros_ac_tree_hud for live progress snapshots and "
+                "ouroboros_job_result for terminal output. Do not use when: the request is raw or "
+                "ambiguous natural language with no Seed (use ouroboros_interview or "
+                "ouroboros_start_auto instead). In plugin mode, execution is delegated to an "
+                "OpenCode Task pane and job_id is None — results appear in the Task pane instead "
+                "of being pollable via job_status/job_result. This is the handler for 'ooo run' "
+                "commands — do NOT run 'ooo' in the shell; call this MCP tool instead."
             ),
             parameters=(
                 *ExecuteSeedHandler().definition.parameters,

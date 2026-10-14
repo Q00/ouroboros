@@ -1963,23 +1963,18 @@ class InterviewHandler:
         return MCPToolDefinition(
             name="ouroboros_interview",
             description=(
-                "Clarify a vague request before any implementation. "
-                "Use when: the user wants something built but is unsure what "
-                '("help me figure out what to build", "add notifications", '
-                '"make it production-ready", "build me X"), the request is '
-                "ambiguous, or it lacks acceptance criteria; call it first, even "
-                "if the user never says 'ooo'. "
-                "Result: a short Socratic interview, one question at a time, that "
-                "closes goals, constraints, and acceptance criteria, ready for "
-                "Seed generation. "
-                "Do not use when: a validated Seed already exists "
-                "(use ouroboros_start_execute_seed) or the request is a simple "
-                "question or small unambiguous edit. "
-                "Start a new interview with initial_context, resume with session_id, "
-                "or record an answer to the current question. "
-                "In plugin mode, returns a delegation receipt "
-                "(status=delegated_to_subagent) and the interview executes in an "
-                "OpenCode Task pane — the real session_id is returned there."
+                "Clarify a vague request before any implementation. Use when: the user wants "
+                'something built but is unsure what ("help me figure out what to build", "add '
+                'notifications", "make it production-ready", "build me X"), the request is '
+                "ambiguous, or it lacks acceptance criteria; call it first, even if the user never "
+                "says 'ooo'. Result: a short Socratic interview, one question at a time, that "
+                "closes goals, constraints, and acceptance criteria, ready for Seed generation. Do "
+                "not use when: a validated Seed already exists (use ouroboros_start_execute_seed) "
+                "or the request is a simple question or small unambiguous edit. Start a new "
+                "interview with initial_context, resume with session_id, or record an answer to "
+                "the current question. In plugin mode, returns a delegation receipt "
+                "(status=delegated_to_subagent) and the interview executes in an OpenCode Task "
+                "pane — the real session_id is returned there."
             ),
             parameters=(
                 MCPToolParameter(
