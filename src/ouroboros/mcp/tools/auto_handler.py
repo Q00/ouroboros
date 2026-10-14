@@ -73,7 +73,7 @@ from ouroboros.auto.worktree import (
     ensure_auto_worktree,
     release_auto_worktree,
 )
-from ouroboros.config import default_execution_efficiency_mode, get_opencode_mode
+from ouroboros.config import default_execution_efficiency_mode, get_opencode_mode, policy_notice
 from ouroboros.core.execution_preferences import resolve_execution_preferences
 from ouroboros.core.file_lock import file_lock
 from ouroboros.core.types import Result
@@ -260,8 +260,8 @@ class AutoHandler:
                         "Execution efficiency policy: adaptive may use lower-cost child "
                         "tiers with recovery escalation; quality_first keeps child ACs "
                         "at the parent starting tier. When omitted on a fresh start, a "
-                        "configured execution.default_policy supplies it; otherwise "
-                        "defaults to adaptive."
+                        "configured execution.default_policy supplies it (default "
+                        "quality_first; adaptive only when the policy is ask)."
                     ),
                     required=False,
                     enum=("adaptive", "quality_first"),
@@ -983,7 +983,7 @@ class StartAutoHandler:
             f"auto_session_id: {auto_session_id}\n"
             f"Runtime Backend: {start_briefing['runtime_backend']}\n"
             f"LLM Backend: {start_briefing['llm_backend']}\n"
-            f"Efficiency Mode: {start_briefing['efficiency_mode']}\n"
+            f"Efficiency Mode: {start_briefing['efficiency_mode']}{policy_notice(arguments)}\n"
             f"Frugality Assurance: {start_briefing['frugality_assurance']}\n"
             f"{dashboard_line}\n"
             "The exact active model and first parallel level will be reported "
