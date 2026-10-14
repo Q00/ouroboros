@@ -35,6 +35,7 @@ from ouroboros.orchestrator.parallel_executor_models import (
     ACExecutionResult,
     ParallelExecutionResult,
 )
+from ouroboros.orchestrator.verifier import VerifierVerdict
 
 from .calc_fixtures import _seed
 
@@ -119,6 +120,45 @@ def test_no_reason_when_the_legacy_verifier_had_evidence_or_rejected() -> None:
         )
     )[0]
     assert rejected.no_evidence is False and rejected.no_evidence_reason is None
+
+
+def test_a_failed_cited_call_is_a_legacy_rejection_never_no_evidence() -> None:
+    verdict = VerifierVerdict(
+        passed=False,
+        reasons=("cited_call_failed: call 1: replay_failed",),
+        failure_class=FailureClass.CITED_CALL_FAILED.value,
+    )
+    # With the gate the executor keeps the rejection advisory on a successful result.
+    gated = existing_outcomes_from_results(
+        SimpleNamespace(
+            results=(
+                _legacy_result(
+                    atomic_verifier_verdict=verdict,
+                    legacy_rejection="Fat-harness verifier failed (cited_call_failed).",
+                ),
+            )
+        ),
+        gated=True,
+    )[0]
+    assert gated.outcome == "failed" and gated.no_evidence is False
+    assert gated.failure_class == FailureClass.CITED_CALL_FAILED.value
+    reconciliation = reconcile_acceptance(
+        ("c0",), {}, {0: gated}, existing_run_accepted=True, legacy_decides_unverified=True
+    )
+    assert reconciliation.run_accepted is False
+    # Without the gate the executor fails the result itself.
+    ungated = existing_outcomes_from_results(
+        SimpleNamespace(
+            results=(
+                _legacy_result(
+                    outcome=SimpleNamespace(value="failed"),
+                    success=False,
+                    atomic_verifier_verdict=verdict,
+                ),
+            )
+        )
+    )[0]
+    assert ungated.outcome == "failed" and ungated.no_evidence is False
 
 
 def _outcome(

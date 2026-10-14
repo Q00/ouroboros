@@ -254,6 +254,9 @@ class TestPolicyTable:
     def test_blocked_escalates_to_human(self) -> None:
         assert policy_for(FailureClass.BLOCKED).action == RecoveryAction.ESCALATE_HUMAN
 
+    def test_cited_call_failed_retries(self) -> None:
+        assert policy_for(FailureClass.CITED_CALL_FAILED).action == RecoveryAction.RETRY
+
 
 class TestPolicyForAttempt:
     def test_accepted_attempt_has_no_recovery_policy(self) -> None:

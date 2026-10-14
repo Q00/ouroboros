@@ -3,7 +3,8 @@
 A worker's own passing check says nothing about correctness. A citation is evidence only when the
 controller can show more than "a call passed": the call is a base-tree test, it names the changed
 code, it passes again when replayed on the frozen artifact, and that replay runs a changed line.
-Anything less is no evidence, never fabrication.
+Anything less is no evidence, never fabrication. A cited call whose replay fails is an executed
+failure, never no evidence.
 """
 
 from __future__ import annotations
@@ -163,7 +164,7 @@ def test_failing_or_irrelevant_citations_never_accept() -> None:
     assert decide([9], {}).reasons == ("call 9: not in transcript",)
     accepted = decide([1, 3], {3: PASSING_REPLAY})
     assert accepted.decision is CitationDecision.ACCEPT and accepted.evidence == (3,)
-    # One cited call that fails on the artifact withholds the criterion even when another qualifies.
+    # One cited call that fails on the artifact is an executed failure even when another qualifies.
     failing = [*calls, _call("python -m pytest tests/test_serializer.py -k x", number=4)]
     verdict = decide_citations(
         [3, 4],
@@ -173,7 +174,14 @@ def test_failing_or_irrelevant_citations_never_accept() -> None:
         changed_paths=CHANGED,
         base_tree_paths=BASE_TREE,
     )
-    assert verdict.decision is CitationDecision.NO_EVIDENCE
+    assert verdict.decision is CitationDecision.EXECUTED_FAILURE
+    assert verdict.evidence == () and verdict.reasons == ("call 4: replay_failed",)
+    # A failed replay alone is an executed failure too, never no evidence.
+    alone = decide([3], {3: ReplayOutcome(returncode=1)})
+    assert alone.decision is CitationDecision.EXECUTED_FAILURE
+    assert alone.reasons == ("call 3: replay_failed",)
+    # A transcript-failed call is not replayed evidence of anything: still no evidence.
+    assert decide([2], {2: ReplayOutcome(returncode=1)}).decision is CitationDecision.NO_EVIDENCE
 
 
 def _verify(workspace: Path, transcript: tuple[AgentMessage, ...], record: dict):
@@ -218,3 +226,71 @@ def test_verifier_hook_withholds_without_qualified_call(tmp_path: Path) -> None:
         {"files_touched": [], "commands_run": [command], "tests_passed": [command]},
     )
     assert legacy.failure_class != FailureClass.NO_CALL_EVIDENCE.value
+
+
+def test_verifier_hook_fails_a_cited_call_whose_replay_failed(tmp_path: Path) -> None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_serializer.py").write_text("def test_ok():\n    assert False\n")
+    command = "python -m pytest tests/test_serializer.py -q"
+    observation = WorkspaceObservation(
+        changed_paths=frozenset({"pkg/serializer.py"}),
+        command_runs=(
+            CommandObservation(
+                command=command, returncode=1, output_tail="1 failed", transcript_returncode=0
+            ),
+        ),
+    )
+    transcript = (*_bash(command, "c1", 0), build_observation_message(observation))
+    verdict = _verify(tmp_path, transcript, {"evidence_calls": [1]})
+    # The transcript recorded exit 0, but the controller's replay on the artifact failed: an
+    # executed failure the worker retries, never an unavailable verdict that keeps the attempt.
+    assert not verdict.passed
+    assert verdict.failure_class == FailureClass.CITED_CALL_FAILED.value
+    assert verdict.status is VerifierStatus.FAIL
+    assert verdict.retry_admission is RetryAdmission.RETRY
+    assert verdict.reasons == ("cited_call_failed: call 1: replay_failed",)
+    # Citing another call next to the failed one does not rescue it.
+    second = (*_bash(command, "c1", 0), *_bash("ls -la", "c2", 0))
+    both = _verify(
+        tmp_path, (*second, build_observation_message(observation)), {"evidence_calls": [1, 2]}
+    )
+    assert both.failure_class == FailureClass.CITED_CALL_FAILED.value
+
+
+def test_verifier_hook_keeps_an_unusable_replay_as_no_evidence(tmp_path: Path) -> None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_serializer.py").write_text("def test_ok():\n    assert True\n")
+    command = "python -m pytest tests/test_serializer.py -q"
+    for run in (
+        CommandObservation(
+            command=command, returncode=0, output_tail="", transcript_returncode=0, mutated=True
+        ),
+        CommandObservation(
+            command=command,
+            returncode=None,
+            output_tail="",
+            transcript_returncode=0,
+            timed_out=True,
+        ),
+    ):
+        observation = WorkspaceObservation(
+            changed_paths=frozenset({"pkg/serializer.py"}), command_runs=(run,)
+        )
+        transcript = (*_bash(command, "c1", 0), build_observation_message(observation))
+        verdict = _verify(tmp_path, transcript, {"evidence_calls": [1]})
+        # A replay that changed the workspace or timed out observed nothing either way.
+        assert verdict.failure_class == FailureClass.NO_CALL_EVIDENCE.value
+        assert verdict.status is VerifierStatus.UNAVAILABLE
+
+
+def test_verified_cited_call_passes_when_its_replay_qualifies() -> None:
+    calls = [_call("python -m pytest tests/test_serializer.py -q", number=1)]
+    verdict = decide_citations(
+        [1],
+        calls,
+        policy=CitationPolicy(),
+        replays={1: PASSING_REPLAY},
+        changed_paths=CHANGED,
+        base_tree_paths=BASE_TREE,
+    )
+    assert verdict.decision is CitationDecision.ACCEPT and verdict.evidence == (1,)
