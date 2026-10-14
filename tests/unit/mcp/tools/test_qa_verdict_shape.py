@@ -240,6 +240,8 @@ _COMPETING_MALFORMED: dict[str, str] = {
     "malformed-fail-then-valid-pass": (
         '{"score": 0.1, "verdict": "fail",}\n{"score": 0.95, "verdict": "pass"}'
     ),
+    "valid-pass-then-malformed-array": ('{"score":0.95,"verdict":"pass"}\nCorrection: ["fail",]'),
+    "malformed-array-then-valid-pass": ('[0.1, "fail",]\n{"score": 0.95, "verdict": "pass"}'),
 }
 
 
@@ -260,6 +262,15 @@ async def test_fenced_array_is_a_parse_error() -> None:
 
     assert result.is_err
     assert "must be an object" in str(result.error)
+
+
+async def test_prose_brackets_beside_single_object_still_parse() -> None:
+    body = 'All ACs met [see AC 2].\n{"score": 0.9, "verdict": "pass", "reasoning": "ok"}'
+
+    result = await _handler(body).handle(dict(_ARGS))
+
+    assert result.is_ok
+    assert result.value.meta["passed"] is True
 
 
 async def test_single_object_beside_prose_still_parses() -> None:

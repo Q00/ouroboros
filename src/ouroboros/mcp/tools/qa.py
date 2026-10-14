@@ -303,15 +303,18 @@ def _parse_non_json_qa_response(response_text: str) -> dict[str, Any] | None:
 
 
 _JSON_FENCE_RE = re.compile(r"(?im)^[ \t>]*(?:`{3,}|~{3,})[ \t]*json\b")
+# An object opening on a key, or an array opening on a JSON value. Prose
+# brackets such as ``[see AC 2]`` start with neither.
+_JSON_OPENER_RE = re.compile(r'\{\s*"|\[\s*(?:["{\[]|-?\d|true\b|false\b|null\b)')
 
 
 def _carries_json_object(text: str) -> bool:
-    """True when the text holds a JSON fence or a JSON object opener.
+    """True when the text holds a JSON fence or a JSON object or array opener.
 
     The plain-text fallback exists for providers that ignore the JSON
     instruction entirely; text that attempted JSON is not that case.
     """
-    return bool(_JSON_FENCE_RE.search(text)) or re.search(r"\{\s*\"", text) is not None
+    return bool(_JSON_FENCE_RE.search(text)) or _JSON_OPENER_RE.search(text) is not None
 
 
 def _parse_qa_response(
