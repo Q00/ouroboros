@@ -82,6 +82,7 @@ _FAILURE_CLASS_VALUES = frozenset(
         "transcript_missing_infrastructure",
         "script_absent_from_artifact",
         "no_call_evidence",
+        "cited_call_failed",
     }
 )
 SWITCH_TEXT = (

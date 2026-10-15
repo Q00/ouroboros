@@ -17,11 +17,12 @@ constructor call the runtime is switched to its no-persistence mode:
   of the ``[mcp]`` profile's ``--runtime claude-cli``): the same flag, which
   its transport passes whenever it does not persist sessions (checked against
   Claude Code 2.1.284 in ``-p --output-format json`` mode: no transcript is
-  written). The constructor turns its opt-in session persistence off.
+  written). The constructor turns its opt-in session persistence off;
+- OMP (backend ``omp``): ``--no-session`` disables session persistence.
 
 The same switch keeps the reply out of the logs: the Claude adapter logs
 message and result text by length and SHA-256 only (``_log_message_text``).
-The Codex CLI runtime logs no reply text.
+The Codex CLI and OMP runtimes log no reply text.
 
 A runtime without such a mode is refused before any model call
 (``constructor_session_not_ephemeral:<backend>``): the attempt is a typed
@@ -37,6 +38,7 @@ from typing import Any
 
 CODEX_EPHEMERAL = ("--ephemeral",)
 CLAUDE_NO_SESSION_PERSISTENCE = (("no-session-persistence", None),)
+OMP_NO_SESSION = ("--no-session",)
 NOT_EPHEMERAL_PREFIX = "constructor_session_not_ephemeral"
 
 
@@ -48,6 +50,9 @@ def disable_session_persistence(runtime: Any) -> str | None:
     backend = getattr(type(runtime), "_runtime_backend", None)
     if backend == "codex" and hasattr(runtime, "_exec_session_flags"):
         runtime._exec_session_flags = CODEX_EPHEMERAL
+        return None
+    if backend == "omp" and hasattr(runtime, "_session_cli_flags"):
+        runtime._session_cli_flags = OMP_NO_SESSION
         return None
     if backend == "claude" and hasattr(runtime, "_session_cli_args"):
         runtime._session_cli_args = CLAUDE_NO_SESSION_PERSISTENCE
@@ -73,5 +78,6 @@ __all__ = [
     "CLAUDE_NO_SESSION_PERSISTENCE",
     "CODEX_EPHEMERAL",
     "NOT_EPHEMERAL_PREFIX",
+    "OMP_NO_SESSION",
     "disable_session_persistence",
 ]
