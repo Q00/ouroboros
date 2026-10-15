@@ -729,6 +729,9 @@ class CheckPackageRun:
                 check_package="on" if self.enabled or self.resumed is not None else "off",
                 check_package_status=self.status,
                 runtime_backend=self.runtime_backend,
+                check_package_mode=(
+                    self.settings.mode if self.enabled or self.resumed is not None else "off"
+                ),
             )
             self._report_artifact_checks(outcome, surface)
 

@@ -238,6 +238,7 @@ def test_a_reconciliation_with_no_evidence_criteria_emits_exactly_one_event(
     assert props["verification_coverage"] == "low"
     assert props["surface"] == "cli_run"
     assert props["check_package"] == "on"
+    assert props["check_package_mode"] == "decide"
     assert props["check_package_status"] == "admitted"
     assert props["runtime_backend"] == "codex"
     assert set(props) <= telemetry._ACCEPTANCE_NO_EVIDENCE_KEYS
@@ -335,3 +336,24 @@ async def test_an_unadmitted_run_names_no_admitted_package(
     assert props["pair_no_admitted_package__no_verifier_verdict"] == 1
     assert props["surface"] == "evolve"
     assert props["check_package_status"] == "construction_failed"
+
+
+def test_a_record_mode_run_names_its_mode_and_an_off_run_names_off(
+    captured: list[tuple[str, dict[str, Any]]],
+) -> None:
+    outcome = _outcome(
+        {"a": PackageCriterionStatus.UNCOVERED},
+        {0: _accepted(0, LegacyNoEvidenceReason.NO_VERIFIER_VERDICT)},
+        package_id="pkg_1",
+    )
+    run = _run(outcome)
+    run.settings = CheckPackageSettings(enabled=True, mode="record")
+    run.finish("completed", surface="cli_run")
+    assert captured[-1][1]["check_package_mode"] == "record"
+    assert captured[-1][1]["check_package"] == "on"
+
+    off = CheckPackageRun(CheckPackageSettings(enabled=False))
+    off._outcome = lambda: outcome  # type: ignore[method-assign]
+    off.finish("completed", surface="cli_run")
+    assert captured[-1][1]["check_package"] == "off"
+    assert captured[-1][1]["check_package_mode"] == "off"
