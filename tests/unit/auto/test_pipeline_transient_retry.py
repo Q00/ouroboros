@@ -25,8 +25,8 @@ from ouroboros.auto.interview_driver import (
 )
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 import ouroboros.auto.pipeline as pipeline_module
-import ouroboros.auto.state as state_module
 from ouroboros.auto.pipeline import AutoPipeline
+import ouroboros.auto.state as state_module
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 from ouroboros.core.seed import (
     EvaluationPrinciple,
