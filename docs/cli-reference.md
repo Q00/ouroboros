@@ -309,8 +309,10 @@ ouroboros setup --non-interactive
 - For Codex CLI: sets `orchestrator.codex_cli_path` and `llm.backend: codex` in `~/.ouroboros/config.yaml`
 - For Codex CLI: installs managed Ouroboros rules into `~/.codex/rules/`
 - For Codex CLI: installs managed Ouroboros skills into `~/.codex/skills/`
+- For Codex release installs using `uvx`: pins the MCP package to the installed setup version (`ouroboros-ai[mcp]==<version>`). Source/dev installs keep serving their current Python environment.
 - For Codex CLI: registers or refreshes setup-managed stdio blocks on supported hosts and preserves user-managed URL/custom blocks by default. A legacy PATH-selected `ouroboros mcp serve` entry with the canonical Codex environment is migrated to the isolated managed launcher; custom executable paths and extra process controls remain untouched. Native Windows `auto` creates no MCP child, `stdio` is refused, and explicit `http` writes the loopback URL only after resolving a launchable MCP command; the operator owns that visible server process.
 - For Codex CLI: adds missing Ouroboros task profiles whose per-role reasoning effort is passed to each `codex exec` invocation; it retires only untouched legacy generated profile anchors and preserves user-created Codex profiles
+- For Codex CLI: reads `codex --help` as UTF-8 to determine the worker-profile format. If the probe fails or the format is unknown, setup reports failure and rolls back its managed changes instead of assuming a legacy profile. Check that the configured Codex executable's `--help` succeeds, then rerun setup.
 - For OpenCode: registers the Ouroboros MCP server in OpenCode's configuration
 - For OpenCode (plugin mode): installs the bridge plugin into `<opencode_config_dir>/plugins/ouroboros-bridge/`
 - For OpenCode: installs the runtime skill capability guide into global `AGENTS.md` in the active OpenCode config directory
@@ -1244,6 +1246,36 @@ The snapshot covers OS, architecture, Python, current executable, installed `our
 ouroboros mcp doctor [--json] [--machine-snapshot]
 ```
 
+### `mcp doctor-runtime`
+
+Show bounded, read-only runtime metadata for local MCP diagnostics. `--json`
+emits typed fields for fixed PATH executable provenance and collisions,
+ephemeral IPv4/IPv6 loopback bindability, and metadata for Ouroboros's own MCP
+PID registry.
+
+Human-readable output shows the bounded executable candidates and collisions,
+unavailable reasons, loopback results, and each registry record's metadata.
+The registry location is displayed using the stable label
+`~/.ouroboros/mcp-servers`; the resolved absolute home path is not included.
+
+The command reads only `PATH` and the home-location information used by the
+server's normal `Path.home()` lookup (including a `HOME` override on POSIX).
+The resolved home and absolute registry path are used only for the bounded
+registry lookup; neither value is included in output or stored. PATH candidate
+and collision paths under that home are displayed with a `~` prefix in both
+JSON and human output after lexical dot-segment normalization; paths outside
+that home retain their location provenance. It reads no
+configuration, registry contents, process arguments, or credentials, executes
+no commands, connects to no network, and does not mutate the machine. PATH
+and registry scans have fixed bounds. Loopback probes only bind an ephemeral
+socket and close it immediately. An invalid or unresolvable home location
+reports registry status `not_checked` with reason `owner_unavailable`, without
+including the location or exception details.
+
+```bash
+ouroboros mcp doctor-runtime [--json]
+```
+
 ### `mcp serve`
 
 Start the MCP server to expose Ouroboros tools to Claude Desktop or other MCP clients.
@@ -1365,6 +1397,44 @@ orchestrator:
 ```
 
 Override per-session with the `OUROBOROS_AGENT_RUNTIME` environment variable if needed.
+
+### `mcp doctor`
+
+Run fast, read-only environment diagnostics. The default command does not
+start a server:
+
+```bash
+ouroboros mcp doctor
+ouroboros mcp doctor --json
+```
+
+Use the opt-in local stdio probe when the environment checks pass but an MCP
+host still cannot discover Ouroboros:
+
+```bash
+ouroboros mcp doctor --probe-local-stdio
+```
+
+The probe launches this installation's own server with the current Python
+interpreter in isolated mode, with a temporary home and working directory.
+It loads the production server composition directly, bypassing shell profiles,
+project dotenv files, update checks, and normal CLI startup. Network and child
+command execution are disabled inside the probe. It reports stable stages for local
+startup/stdio transport, protocol discovery, and expected tool recognition.
+It lists tools but never calls one. The child uses stdio only, has telemetry
+disabled, does not read configured MCP launch commands, and cannot modify the
+user's Ouroboros configuration, EventStore, or PID registry. The temporary
+child and its isolated state are cleaned up on both success and failure.
+Transport success is observed before protocol discovery, and a cleanup failure
+causes the probe to fail even when tool discovery succeeded. The three diagnostic
+stage results remain unchanged; teardown failures add a `local_stdio_cleanup`
+failure result and force the overall exit status to 1.
+
+This first diagnostic increment does not probe configured or third-party MCP
+servers, execute arbitrary launchers, open a network transport, inventory the
+whole machine, invoke an LLM, or repair the installation. A failed probe is a
+normal Doctor failure: all emitted stages remain visible and the command exits
+with status 1.
 
 ### `mcp info`
 

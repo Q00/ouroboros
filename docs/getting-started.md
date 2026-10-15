@@ -123,6 +123,11 @@ ouroboros setup --runtime codex
 ouroboros init start "Build a task management CLI"
 ```
 
+For release installs, the setup-managed Codex `uvx` MCP command pins
+`ouroboros-ai[mcp]` to the installed setup version. After upgrading Ouroboros,
+rerun setup to refresh that managed pin. Source/dev installs continue to use
+the current Python environment.
+
 > **Note:** The standalone CLI interview is invoked via `ouroboros init start "your context"` (not `ooo interview`, which is Claude Code-specific). The interview flow is identical across both tools. Power users can also author seed YAML files directly — see the [Seed Authoring Guide](guides/seed-authoring.md).
 
 > **Tip:** `ouroboros run` requires a path to a seed YAML file as a positional argument (e.g., `ouroboros run ~/.ouroboros/seeds/seed_<id>.yaml`).
