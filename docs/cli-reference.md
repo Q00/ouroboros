@@ -959,7 +959,11 @@ commands in the same environment so settings such as `HOME` and `CODEX_HOME`
 still select the original installation. Windows instructions use PowerShell;
 other platforms use a POSIX shell. Apply any listed follow-up command only after
 the preceding command succeeds. In PowerShell, check `$LASTEXITCODE` for the
-native command's result; the environment-restoration block can change `$?`.
+native command's result only after the executable actually starts; the
+environment-restoration block can change `$?`. PowerShell errors while starting
+the executable or preparing the recovery helper are failures even if an earlier
+`$LASTEXITCODE` is still `0`. Resolve those errors before running any follow-up
+command.
 
 Once the package is current, rerunning `ouroboros update` exits as up to date
 without retrying failed integration refreshes. Use the printed recovery commands

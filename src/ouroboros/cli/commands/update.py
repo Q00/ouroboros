@@ -444,16 +444,19 @@ def _upgrade_environment(identity: InstallationIdentity) -> dict[str, str]:
 
 
 _RECOVERY_CONTROL = re.compile(r"([\x00-\x09\x0b-\x1f\x7f-\x9f])")
+_RECOVERY_POSIX_ESCAPE = re.compile(r"([\x00-\x09\x0b-\x1f\x7f-\x9f\udc80-\udcff])")
 
 
 def _quote_recovery_posix(value: str) -> str:
-    """Keep terminal controls printable using portable /bin/sh expressions."""
+    """Keep controls and surrogateescaped path bytes printable for /bin/sh."""
     parts = []
-    for part in _RECOVERY_CONTROL.split(value):
-        if _RECOVERY_CONTROL.fullmatch(part):
+    for part in _RECOVERY_POSIX_ESCAPE.split(value):
+        if _RECOVERY_POSIX_ESCAPE.fullmatch(part):
             # Only generated octal escapes enter printf's format. LF remains
             # literal in shlex.quote, avoiding command substitution's removal
-            # of trailing newlines. Adjacent quoted fragments form one argument.
+            # of trailing newlines. fsencode restores undecodable POSIX path
+            # bytes without trying to print surrogate code points to a terminal.
+            # Adjacent quoted fragments form one argument.
             octal = "".join(f"\\{byte:03o}" for byte in os.fsencode(part))
             parts.append(f"\"$(printf '{octal}')\"")
         else:

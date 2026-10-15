@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import base64
-from io import StringIO
+from io import BytesIO, StringIO, TextIOWrapper
 import json
 import os
 from pathlib import Path
@@ -489,3 +489,87 @@ def test_windows_helper_failure_leaves_environment_and_command_untouched(
     assert result.returncode == 0, result.stderr
     assert not marker.exists()
     assert json.loads(result.stdout) == ""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX filesystem byte names")
+@pytest.mark.parametrize("suffix", [b"\x80", b"\xff'quote"])
+@pytest.mark.parametrize("follow_up", [False, True])
+def test_printed_posix_byte_path_and_environment_survive_utf8_output(
+    suffix: bytes,
+    follow_up: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / os.fsdecode(b"recorder-" + suffix)
+    executable.write_text(
+        '#!/bin/sh\nprintf \'%s\\0\' "$0" "$@" "$OUROBOROS_CODEX_CLI_PATH"\nexit 7\n',
+        encoding="ascii",
+    )
+    executable.chmod(0o700)
+    monkeypatch.setenv(ENV_KEY, str(executable))
+    selected, env_key = update._runtime_executable_identity("codex", None)
+    assert selected == str(executable)
+    assert env_key == ENV_KEY
+    command = [selected, "plugin", "marketplace", "upgrade", "ouroboros"]
+    expected = b"\0".join(os.fsencode(value) for value in [*command, selected]) + b"\0"
+    original = subprocess.run(command, capture_output=True, timeout=5)
+    assert original.returncode == 7
+    assert original.stdout == expected
+
+    # A StringIO capture alone would hide an unprintable surrogate. Exercise
+    # an actual UTF-8 text stream before replaying its final displayed command.
+    buffer = BytesIO()
+    stream = TextIOWrapper(buffer, encoding="utf-8", errors="strict")
+    monkeypatch.setattr(update, "console", Console(file=stream, width=200, color_system=None))
+    update._print_step_recovery(command, {ENV_KEY: selected}, [command] if follow_up else None)
+    stream.flush()
+    output = buffer.getvalue().decode("utf-8").split("use the same environment):\n", 1)[1]
+    monkeypatch.setenv(ENV_KEY, "prior value")
+    for printed in output.split("After the previous command succeeds, complete the step with:\n"):
+        replay = _run_recovery_shell(printed.removesuffix("\n"), dict(os.environ))
+        assert replay.returncode == 7, replay.stderr
+        assert replay.stdout == expected
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows PowerShell launch failures")
+@pytest.mark.parametrize("prior_value,error_action", [(None, "Continue"), ("", "Stop")])
+def test_windows_launch_failure_is_explicit_and_restores_environment(
+    prior_value: str | None,
+    error_action: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A launch error is failure even when the previous native exit code is zero."""
+    printed = _printed_recovery_commands(
+        monkeypatch,
+        [str(tmp_path / "missing.exe"), "setup", "--runtime", "codex"],
+        {ENV_KEY: "fixture runtime override"},
+    )[0]
+    observer = update._format_recovery_command(
+        [
+            sys.executable,
+            "-c",
+            f"import json, os; print(json.dumps(["
+            f"{ENV_KEY!r} in os.environ, os.environ.get({ENV_KEY!r})]))",
+        ]
+    )
+    script = (
+        f"$ErrorActionPreference = '{error_action}'\n"
+        "$global:LASTEXITCODE = 0\n"
+        "$launchFailure = $null\n"
+        "try {\n" + printed + "\n} catch { $launchFailure = $_.FullyQualifiedErrorId }\n"
+        "@{ failure=$launchFailure; nativeExit=$LASTEXITCODE } | ConvertTo-Json -Compress\n"
+        + observer
+    )
+    env = dict(os.environ)
+    if prior_value is None:
+        env.pop(ENV_KEY, None)
+    else:
+        env[ENV_KEY] = prior_value
+    result = _run_recovery_shell(script, env)
+
+    assert result.returncode == 0, result.stderr
+    failure, restored = [json.loads(line) for line in result.stdout.splitlines()]
+    assert "CommandNotFoundException" in failure["failure"]
+    assert failure["nativeExit"] == 0  # stale status cannot establish recovery success
+    assert restored == [prior_value is not None, prior_value]
