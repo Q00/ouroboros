@@ -31,7 +31,7 @@ import typer
 
 from ouroboros import __version__
 from ouroboros.backends import get_backend_capability, resolve_runtime_backend_name
-from ouroboros.cli.codex_plugin import inspect_codex_plugin
+from ouroboros.cli.codex_plugin import inspect_codex_plugin, plugin_versions_match
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import (
     print_info,
@@ -757,7 +757,13 @@ def _report_codex_plugin_version(
         )
     else:
         assert plugin.version is not None
-        if _compare_versions(plugin.version, package_version) == 0:
+        matches = plugin_versions_match(plugin.version, package_version)
+        if matches is None:
+            print_warning(
+                f"Codex plugin: v{escape(plugin.version)}. Version comparison with package "
+                f"v{escape(package_version)} is unknown (unsupported version format)."
+            )
+        elif matches:
             print_info(f"Codex plugin: v{escape(plugin.version)} (matches package).")
         else:
             print_warning(

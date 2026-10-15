@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
@@ -17,7 +18,7 @@ _ENTRY = {"pluginId": "ouroboros@ouroboros", "installed": True, "version": "0.55
 
 
 def _inspect_inventory(inventory: object) -> CodexPluginVersion:
-    completed = subprocess.CompletedProcess(_COMMAND, 0, json.dumps(inventory), "")
+    completed = subprocess.CompletedProcess(_COMMAND, 0, json.dumps(inventory).encode(), b"")
     with patch("ouroboros.cli.codex_plugin.subprocess.run", return_value=completed):
         return inspect_codex_plugin(_COMMAND[0])
 
@@ -113,7 +114,7 @@ def test_invalid_versions_are_unknown(version: object) -> None:
 
 @pytest.mark.parametrize("output", ["", "private/path: failed", '{"installed": []} trailing'])
 def test_invalid_json_is_unknown_without_echoing_output(output: str) -> None:
-    completed = subprocess.CompletedProcess(_COMMAND, 0, output, "private stderr")
+    completed = subprocess.CompletedProcess(_COMMAND, 0, output.encode(), b"private stderr")
     with patch("ouroboros.cli.codex_plugin.subprocess.run", return_value=completed):
         result = inspect_codex_plugin(_COMMAND[0])
     assert result.status == "unknown"
@@ -149,7 +150,7 @@ def test_query_failures_are_unknown_with_bounded_reasons(error: Exception) -> No
 
 def test_nonzero_exit_cannot_be_mistaken_for_valid_inventory() -> None:
     completed = subprocess.CompletedProcess(
-        _COMMAND, 1, json.dumps({"installed": [_ENTRY]}), "private error"
+        _COMMAND, 1, json.dumps({"installed": [_ENTRY]}).encode(), b"private error"
     )
     with patch("ouroboros.cli.codex_plugin.subprocess.run", return_value=completed):
         result = inspect_codex_plugin(_COMMAND[0])
@@ -164,16 +165,13 @@ def test_query_is_bounded_noninteractive_and_creates_no_windows(
 ) -> None:
     monkeypatch.setattr("ouroboros.cli.codex_plugin.sys.platform", platform)
     monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
-    completed = subprocess.CompletedProcess(_COMMAND, 0, '{"installed": []}', "")
+    completed = subprocess.CompletedProcess(_COMMAND, 0, b'{"installed": []}', b"")
     with patch("ouroboros.cli.codex_plugin.subprocess.run", return_value=completed) as run:
         inspect_codex_plugin(_COMMAND[0])
     run.assert_called_once_with(
         _COMMAND,
         stdin=subprocess.DEVNULL,
         capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="strict",
         timeout=5,
         check=False,
         creationflags=0x08000000 if platform == "win32" else 0,
@@ -205,3 +203,54 @@ def test_utf8_inventory_inherits_codex_home_and_preserves_config(
 
     assert inspect_codex_plugin(sys.executable) == CodexPluginVersion("installed", version="0.52.0")
     assert config.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "returncode", "status"),
+    [
+        (b"private-output-\xff", b"", 0, "unknown"),
+        (json.dumps({"installed": [_ENTRY]}).encode(), b"private-stderr-\xff", 0, "installed"),
+        (json.dumps({"installed": [_ENTRY]}).encode(), b"private-stderr-\xff", 1, "unknown"),
+    ],
+)
+def test_real_pipe_decode_errors_never_escape_as_thread_tracebacks(
+    tmp_path: Path,
+    stdout: bytes,
+    stderr: bytes,
+    returncode: int,
+    status: str,
+) -> None:
+    """Inspect the actual child pipes outside pytest's thread-exception hooks."""
+    (tmp_path / "plugin").write_text(
+        "import sys\n"
+        f"sys.stdout.buffer.write({stdout!r})\n"
+        f"sys.stderr.buffer.write({stderr!r})\n"
+        f"sys.exit({returncode})\n",
+        encoding="utf-8",
+    )
+    spec = importlib.util.find_spec("ouroboros.cli.codex_plugin")
+    assert spec is not None and spec.origin is not None
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "import importlib.util, json, sys\n"
+        f"spec = importlib.util.spec_from_file_location('inventory_probe', {spec.origin!r})\n"
+        "module = importlib.util.module_from_spec(spec)\n"
+        "sys.modules[spec.name] = module\n"
+        "spec.loader.exec_module(module)\n"
+        "result = module.inspect_codex_plugin(sys.executable)\n"
+        "print(json.dumps({'status': result.status, 'reason': result.reason}))\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-I", str(probe)],
+        cwd=tmp_path,
+        capture_output=True,
+        timeout=15,
+        check=False,
+        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == b""
+    assert json.loads(result.stdout)["status"] == status
+    assert b"private" not in result.stdout

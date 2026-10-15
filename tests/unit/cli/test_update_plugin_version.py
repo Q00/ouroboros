@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -110,12 +111,16 @@ def flow(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[SimpleName
     monkeypatch.setattr(update, "_installed_version", lambda _identity: state.refreshed)
     monkeypatch.setattr(update, "configure_omp_tool_call_timeout", lambda **_kwargs: True)
 
-    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
         state.calls.append((command, kwargs))
         if command == state.query:
             if state.query_error is not None:
                 raise state.query_error
-            return subprocess.CompletedProcess(command, state.query_returncode, state.stdout, "")
+            return subprocess.CompletedProcess(
+                command, state.query_returncode, state.stdout.encode(), b""
+            )
         if "setup" in command:
             return subprocess.CompletedProcess(command, state.setup_returncode, "", "")
         return subprocess.CompletedProcess(command, 0, "", "")
@@ -160,6 +165,62 @@ def test_current_package_reports_matching_and_newer_plugins(
     output = _plain(result.output)
     assert "Codex plugin" in output and version in output
     assert ("differs" in output) == (version != "0.55.6")
+    assert [command for command, _ in flow.calls] == [flow.query]
+
+
+@pytest.mark.parametrize("packaging_available", [True, False])
+@pytest.mark.parametrize(
+    ("plugin", "package", "matches"),
+    [
+        ("0.55.6.post1", "0.55.6", False),
+        ("0.55.6+local.1", "0.55.6", False),
+        ("0.55.6rc1.dev1", "0.55.6rc1", False),
+        ("0.55.6.0", "0.55.6", True),
+        ("v0.55.6", "0.55.6.0", True),
+        ("0.55.6+LOCAL-01", "0.55.6+local.1", True),
+        ("0.55.6+local_1", "0.55.6+local.2", False),
+        ("0.55.6rc01.post01.dev01", "0.55.6rc1.post1.dev1", True),
+    ],
+)
+def test_plugin_version_identity_is_independent_of_packaging(
+    flow: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    packaging_available: bool,
+    plugin: str,
+    package: str,
+    matches: bool,
+) -> None:
+    # Pytest supplies packaging in the dev environment; a base install need not.
+    # Exercise the real CLI comparison with both import environments.
+    if not packaging_available:
+        monkeypatch.setitem(sys.modules, "packaging", None)
+        monkeypatch.setitem(sys.modules, "packaging.version", None)
+    else:
+        import packaging.version  # noqa: F401
+
+    flow.current = flow.latest = package
+    flow.stdout = _listing(plugin)
+
+    result = flow.invoke("--runtime", "codex", "--check")
+
+    assert result.exit_code == 0, result.output
+    output = _plain(result.output)
+    assert ("matches package" in output) is matches
+    assert ("differs" in output) is not matches
+    assert [command for command, _ in flow.calls] == [flow.query]
+
+
+def test_unsupported_package_version_does_not_infer_plugin_drift(flow: SimpleNamespace) -> None:
+    flow.current = flow.latest = "1!0.55.6"
+    flow.stdout = _listing("0.55.6")
+
+    result = flow.invoke("--runtime", "codex", "--check")
+
+    assert result.exit_code == 0, result.output
+    output = _plain(result.output)
+    assert "Codex plugin: v0.55.6" in output
+    assert "unknown (unsupported version format)" in output
+    assert "matches package" not in output and "differs" not in output
     assert [command for command, _ in flow.calls] == [flow.query]
 
 

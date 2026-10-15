@@ -296,6 +296,15 @@ jobs:
           New-Item -ItemType Directory -Force -Path $env:HOME | Out-Null
           .venv/Scripts/python.exe -m pytest tests/unit/codex/test_runtime_profile_probe.py tests/unit/cli/test_setup_profile_detection.py -n 0 -q -W error::pytest.PytestUnhandledThreadExceptionWarning
 
+      - name: Run Windows Codex plugin inventory regressions
+        env:
+          HOME: ${{ runner.temp }}/ooo-plugin-inventory/home
+          USERPROFILE: ${{ runner.temp }}/ooo-plugin-inventory/home
+          CODEX_HOME: ${{ runner.temp }}/ooo-plugin-inventory/home/.codex
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:HOME | Out-Null
+          .venv/Scripts/python.exe -m pytest tests/unit/cli/test_codex_plugin.py tests/unit/cli/test_update_plugin_version.py -n 0 -q -W error::pytest.PytestUnhandledThreadExceptionWarning
+
   performance-budget:
     name: Performance budget (advisory)
     if: github.event_name == 'push'

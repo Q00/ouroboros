@@ -12,10 +12,10 @@ from typing import Literal
 _PLUGIN_ID = "ouroboros@ouroboros"
 _QUERY_TIMEOUT_SECONDS = 5
 _RELEASE_VERSION = re.compile(
-    r"v?[0-9]+(?:\.[0-9]+)*"
-    r"(?:(?:a|b|rc)[0-9]+)?"
-    r"(?:\.post[0-9]+)?(?:\.dev[0-9]+)?"
-    r"(?:\+[a-zA-Z0-9]+(?:[._-][a-zA-Z0-9]+)*)?"
+    r"v?(?P<release>[0-9]+(?:\.[0-9]+)*)"
+    r"(?:(?P<pre_kind>a|b|rc)(?P<pre_number>[0-9]+))?"
+    r"(?:\.post(?P<post>[0-9]+))?(?:\.dev(?P<dev>[0-9]+))?"
+    r"(?:\+(?P<local>[a-zA-Z0-9]+(?:[._-][a-zA-Z0-9]+)*))?"
 )
 
 
@@ -26,6 +26,40 @@ class CodexPluginVersion:
     status: Literal["installed", "not_installed", "unknown"]
     version: str | None = None
     reason: str | None = None
+
+
+def _version_identity(version: str) -> tuple[object, ...] | None:
+    """Normalize equality only for the release forms accepted by this inventory."""
+    if len(version) > 128 or (match := _RELEASE_VERSION.fullmatch(version)) is None:
+        return None
+    release = [int(part) for part in match["release"].split(".")]
+    while len(release) > 1 and release[-1] == 0:
+        release.pop()
+    local = (
+        tuple(
+            int(part) if part.isdecimal() else part.lower()
+            for part in re.split(r"[._-]", match["local"])
+        )
+        if match["local"] is not None
+        else None
+    )
+    return (
+        tuple(release),
+        (match["pre_kind"], int(match["pre_number"])) if match["pre_kind"] else None,
+        int(match["post"]) if match["post"] is not None else None,
+        int(match["dev"]) if match["dev"] is not None else None,
+        local,
+    )
+
+
+def plugin_versions_match(plugin_version: str, package_version: str) -> bool | None:
+    """Compare installed identities independently of optional packaging imports.
+
+    This is not an ordering key for the updater. Unsupported forms are unknown,
+    rather than a match inferred from a lossy release-prefix comparison.
+    """
+    plugin, package = _version_identity(plugin_version), _version_identity(package_version)
+    return None if plugin is None or package is None else plugin == package
 
 
 def _parse_inventory(output: str) -> CodexPluginVersion:
@@ -81,9 +115,6 @@ def inspect_codex_plugin(codex_executable: str | None) -> CodexPluginVersion:
             [codex_executable, "plugin", "list", "--marketplace", "ouroboros", "--json"],
             stdin=subprocess.DEVNULL,
             capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="strict",
             timeout=_QUERY_TIMEOUT_SECONDS,
             check=False,
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
@@ -94,7 +125,14 @@ def inspect_codex_plugin(codex_executable: str | None) -> CodexPluginVersion:
         return CodexPluginVersion("unknown", reason="Codex plugin query could not be completed")
     if result.returncode != 0:
         return CodexPluginVersion("unknown", reason="Codex plugin query exited unsuccessfully")
-    return _parse_inventory(result.stdout)
+    # Windows text-mode pipe readers decode in background threads, where decode
+    # errors evade the caller's handler. Decode only the inventory here; unused
+    # stderr stays bytes and cannot emit a reader-thread traceback.
+    try:
+        output = result.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return CodexPluginVersion("unknown", reason="Codex returned invalid plugin JSON")
+    return _parse_inventory(output)
 
 
-__all__ = ["CodexPluginVersion", "inspect_codex_plugin"]
+__all__ = ["CodexPluginVersion", "inspect_codex_plugin", "plugin_versions_match"]
