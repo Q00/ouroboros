@@ -309,6 +309,41 @@ def test_query_failure_is_advisory_unknown(flow: SimpleNamespace, failure: str) 
     assert "not installed" not in output
 
 
+@pytest.mark.parametrize(
+    ("args", "current", "setup_returncode"),
+    [
+        pytest.param(["--runtime", "codex"], "0.55.6", 0, id="current"),
+        pytest.param(["--runtime", "codex", "--check"], "0.55.6", 0, id="check-current"),
+        pytest.param(["--runtime", "codex", "--check"], "0.54.4", 0, id="check-upgrade"),
+        pytest.param(["--runtime", "codex", "--yes"], "0.54.4", 0, id="upgraded"),
+        pytest.param(["--runtime", "codex", "--yes"], "0.54.4", 7, id="partial-upgrade"),
+        pytest.param(["--runtime", "all"], "0.55.6", 0, id="all-current"),
+        pytest.param(["--runtime", "all", "--yes"], "0.54.4", 0, id="all-upgraded"),
+    ],
+)
+def test_deep_plugin_json_remains_advisory_in_update_flows(
+    flow: SimpleNamespace, args: list[str], current: str, setup_returncode: int
+) -> None:
+    flow.current = current
+    flow.setup_returncode = setup_returncode
+    flow.stdout = '{"installed": [], "private": ' + "[" * 10_000 + "0" + "]" * 10_000 + "}"
+
+    result = flow.invoke(*args)
+
+    assert result.exit_code == (1 if setup_returncode else 0), result.output
+    if setup_returncode:
+        assert isinstance(result.exception, SystemExit)
+        assert "partially updated" in _plain(result.output)
+    else:
+        assert result.exception is None
+    output = _plain(result.output)
+    assert "Codex plugin version: unknown (Codex returned invalid plugin JSON)" in output
+    assert "not installed" not in output and "private" not in output
+    assert [command for command, _ in flow.calls][-1] == flow.query
+    if current == flow.latest or "--check" in args:
+        assert [command for command, _ in flow.calls] == [flow.query]
+
+
 @pytest.mark.parametrize("runtime", ["none", "claude", "opencode"])
 def test_other_selected_runtime_does_not_inspect_codex(flow: SimpleNamespace, runtime: str) -> None:
     flow.current = "0.54.4"

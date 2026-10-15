@@ -112,7 +112,18 @@ def test_invalid_versions_are_unknown(version: object) -> None:
     assert result.reason == "Codex did not report a release plugin version"
 
 
-@pytest.mark.parametrize("output", ["", "private/path: failed", '{"installed": []} trailing'])
+@pytest.mark.parametrize(
+    "output",
+    [
+        "",
+        "private/path: failed",
+        '{"installed": []} trailing',
+        pytest.param(
+            '{"installed": [], "private": ' + "[" * 10_000 + "0" + "]" * 10_000 + "}",
+            id="deep-json",
+        ),
+    ],
+)
 def test_invalid_json_is_unknown_without_echoing_output(output: str) -> None:
     completed = subprocess.CompletedProcess(_COMMAND, 0, output.encode(), b"private stderr")
     with patch("ouroboros.cli.codex_plugin.subprocess.run", return_value=completed):
@@ -211,9 +222,16 @@ def test_utf8_inventory_inherits_codex_home_and_preserves_config(
         (b"private-output-\xff", b"", 0, "unknown"),
         (json.dumps({"installed": [_ENTRY]}).encode(), b"private-stderr-\xff", 0, "installed"),
         (json.dumps({"installed": [_ENTRY]}).encode(), b"private-stderr-\xff", 1, "unknown"),
+        pytest.param(
+            b'{"installed": [], "private": ' + b"[" * 10_000 + b"0" + b"]" * 10_000 + b"}",
+            b"private-stderr",
+            0,
+            "unknown",
+            id="deep-json",
+        ),
     ],
 )
-def test_real_pipe_decode_errors_never_escape_as_thread_tracebacks(
+def test_real_pipe_failures_never_escape_as_tracebacks(
     tmp_path: Path,
     stdout: bytes,
     stderr: bytes,

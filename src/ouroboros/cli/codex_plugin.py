@@ -65,7 +65,7 @@ def plugin_versions_match(plugin_version: str, package_version: str) -> bool | N
 def _parse_inventory(output: str) -> CodexPluginVersion:
     try:
         inventory = json.loads(output)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         return CodexPluginVersion("unknown", reason="Codex returned invalid plugin JSON")
     if not isinstance(inventory, dict) or not isinstance(inventory.get("installed"), list):
         return CodexPluginVersion(
