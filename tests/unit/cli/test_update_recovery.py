@@ -22,6 +22,7 @@ from ouroboros.cli.commands import update
 runner = CliRunner()
 ENV_KEY = "OUROBOROS_CODEX_CLI_PATH"
 SPECIAL_TEXT = "owner's ‘smart’ ‚low‛ 한글 $cash [red]& spaced value"
+CONTROL_TEXT = "tab\tcarriage\rbell\aback\bvertical\vform\fescape\x1bdelete\x7fc1\x85\nend\n\n"
 
 
 def _plain(output: str) -> str:
@@ -91,21 +92,27 @@ def test_failed_refresh_shows_original_command_and_latest_retry_does_not_replay(
         "codex-marketplace": [codex, "plugin", "marketplace", "upgrade", "ouroboros"],
     }[stage]
     overrides = {ENV_KEY: codex} if stage == "codex-config" else None
-    run = MagicMock(
-        side_effect=lambda command, **_kwargs: subprocess.CompletedProcess(
-            command, 1 if command == expected else 0
-        )
-    )
+    diagnostic = [codex, "plugin", "list", "--marketplace", "ouroboros", "--json"]
+
+    def simulate(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        if command == diagnostic:
+            return subprocess.CompletedProcess(command, 0, b'{"installed": []}', b"")
+        return subprocess.CompletedProcess(command, 1 if command == expected else 0)
+
+    run = MagicMock(side_effect=simulate)
     monkeypatch.setattr(update.subprocess, "run", run)
     runtime = "codex" if stage == "codex-config" else "all"
 
     failed = runner.invoke(update.app, ["--yes", "--runtime", runtime])
 
     assert failed.exit_code == 1, failed.output
+    assert isinstance(failed.exception, SystemExit), repr(failed.exception)
     assert "partially updated" in _plain(failed.output)
     assert _plain(failed.output).count("Recovery command (") == 1
     # Exact matching detects Rich markup interpretation or wrapping of a copyable command.
     assert update._format_recovery_command(expected, overrides) in failed.output
+    if any(call.args[0] == diagnostic for call in run.call_args_list):
+        assert "Codex plugin: not installed." in _plain(failed.output)
     failed_call = next(call for call in run.call_args_list if call.args[0] == expected)
     if overrides:
         assert failed_call.kwargs["env"][ENV_KEY] == codex
@@ -119,8 +126,9 @@ def test_failed_refresh_shows_original_command_and_latest_retry_does_not_replay(
     assert "up to date" in _plain(latest.output)
     assert "Recovery command (" not in _plain(latest.output)
     # Read-only plugin diagnostics are allowed; no refresh may be replayed.
-    diagnostic = [codex, "plugin", "list", "--marketplace", "ouroboros", "--json"]
     assert all(call.args[0] == diagnostic for call in run.call_args_list)
+    if run.call_args_list:
+        assert "Codex plugin: not installed." in _plain(latest.output)
 
 
 @pytest.mark.parametrize("mode", ["plugin", "subprocess"])
@@ -306,58 +314,178 @@ def test_recovery_output_preserves_literal_emoji_shortcodes(
         assert update._format_recovery_command(invocation, overrides) in buffer.getvalue()
 
 
-@pytest.mark.parametrize("prior_value", [None, "original 한글 $value [red]& apostrophe's"])
-@pytest.mark.parametrize("exit_code", [0, 7])
-def test_copyable_command_round_trips_real_shell_and_restores_environment(
-    prior_value: str | None,
-    exit_code: int,
-    tmp_path: Path,
-) -> None:
-    """Execute harmless recorders in native PowerShell on Windows and /bin/sh elsewhere."""
+def _printed_recovery_commands(
+    monkeypatch: pytest.MonkeyPatch,
+    command: list[str],
+    overrides: dict[str, str] | None = None,
+    follow_up: list[list[str]] | None = None,
+) -> list[str]:
+    """Exercise the final Rich output, retaining literal command line breaks."""
+    output = StringIO()
+    monkeypatch.setattr(update, "console", Console(file=output, width=200, color_system=None))
+    update._print_step_recovery(command, overrides, follow_up)
+    commands = output.getvalue().split("use the same environment):\n", 1)[1]
+    return [
+        text.removesuffix("\n")
+        for text in commands.split("After the previous command succeeds, complete the step with:\n")
+    ]
+
+
+def _run_recovery_shell(script: str, env: dict[str, str]) -> subprocess.CompletedProcess[bytes]:
     windows = sys.platform == "win32"
     shell = shutil.which("powershell") if windows else shutil.which("sh")
     if shell is None:
         pytest.skip("Native shell is unavailable")
-    recorder = tmp_path / f"{SPECIAL_TEXT}.py"
-    recorder.write_text(
-        "import json, os, pathlib, sys\n"
-        "pathlib.Path(sys.argv[1]).write_text(json.dumps({"
-        "'args': sys.argv[3:], 'value': os.environ.get('OUROBOROS_CODEX_CLI_PATH')"
-        "}, ensure_ascii=False), encoding='utf-8')\n"
-        "sys.exit(int(sys.argv[2]))\n",
-        encoding="utf-8",
-    )
-    during = tmp_path / "during.json"
-    after = tmp_path / "after.json"
-    args = [SPECIAL_TEXT, "$(echo should-not-run)", "a;b|c", "`literal`", "--flag"]
-    command = [sys.executable, str(recorder), str(during), str(exit_code), *args]
-    recovery = update._format_recovery_command(command, {ENV_KEY: SPECIAL_TEXT}, windows=windows)
-    observe_after = update._format_recovery_command(
-        [sys.executable, str(recorder), str(after), "0"], windows=windows
-    )
-    shell_script = recovery + "\n" + observe_after
-    env = dict(os.environ)
-    if prior_value is None:
-        env.pop(ENV_KEY, None)
-    else:
-        env[ENV_KEY] = prior_value
     if windows:
-        encoded = base64.b64encode(shell_script.encode("utf-16-le")).decode("ascii")
-        shell_command = [shell, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded]
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        command = [shell, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded]
     else:
-        shell_command = [shell, "-c", shell_script]
-
-    result = subprocess.run(
-        shell_command,
+        command = [shell, "-c", script]
+    return subprocess.run(
+        command,
         env=env,
         capture_output=True,
         timeout=30,
         creationflags=subprocess.CREATE_NO_WINDOW if windows else 0,
     )
 
+
+@pytest.mark.parametrize("prior_value", [None, "", "original 한글 $value [red]& apostrophe's"])
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_copyable_command_round_trips_real_shell_and_restores_environment(
+    prior_value: str | None,
+    exit_code: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replay printed commands twice, including an originally present empty value."""
+    windows = sys.platform == "win32"
+    recorder = tmp_path / f"{SPECIAL_TEXT}.py"
+    recorder.write_text(
+        "import json, os, pathlib, sys\n"
+        "pathlib.Path(sys.argv[1]).write_text(json.dumps({"
+        "'args': sys.argv[3:], 'value': os.environ.get('OUROBOROS_CODEX_CLI_PATH'),"
+        "'present': 'OUROBOROS_CODEX_CLI_PATH' in os.environ"
+        "}, ensure_ascii=False), encoding='utf-8')\n"
+        "sys.exit(int(sys.argv[2]))\n",
+        encoding="utf-8",
+    )
+    before = tmp_path / "before.json"
+    during = tmp_path / "during.json"
+    after = tmp_path / "after.json"
+    args = [SPECIAL_TEXT, "$(echo should-not-run)", "a;b|c", "`literal`", "--flag"]
+    command = [sys.executable, str(recorder), str(during), str(exit_code), *args]
+    recovery = _printed_recovery_commands(monkeypatch, command, {ENV_KEY: SPECIAL_TEXT})[0]
+    observe_before = update._format_recovery_command(
+        [sys.executable, str(recorder), str(before), "0"], windows=windows
+    )
+    observe_after = update._format_recovery_command(
+        [sys.executable, str(recorder), str(after), "0"], windows=windows
+    )
+    # The second execution must reuse the native helper without a type conflict.
+    capture_exit = "$recoveryExit = $LASTEXITCODE" if windows else "recoveryExit=$?"
+    verify_exit = (
+        f"if ($recoveryExit -ne {exit_code}) {{ exit 91 }}"
+        if windows
+        else f'[ "$recoveryExit" -eq {exit_code} ] || exit 91'
+    )
+    caller_scope = "$oooPreviousEnv0 = 'caller value'" if windows else ":"
+    verify_scope = "if ($oooPreviousEnv0 -ne 'caller value') { exit 92 }" if windows else ":"
+    shell_script = "\n".join(
+        [
+            caller_scope,
+            observe_before,
+            recovery,
+            capture_exit,
+            verify_exit,
+            recovery,
+            capture_exit,
+            verify_exit,
+            verify_scope,
+            observe_after,
+        ]
+    )
+    env = dict(os.environ)
+    if prior_value is None:
+        env.pop(ENV_KEY, None)
+    else:
+        env[ENV_KEY] = prior_value
+    result = _run_recovery_shell(shell_script, env)
+
     assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    original = {"args": [], "value": prior_value, "present": prior_value is not None}
+    assert json.loads(before.read_text(encoding="utf-8")) == original
     assert json.loads(during.read_text(encoding="utf-8")) == {
         "args": args,
         "value": SPECIAL_TEXT,
+        "present": True,
     }
-    assert json.loads(after.read_text(encoding="utf-8")) == {"args": [], "value": prior_value}
+    assert json.loads(after.read_text(encoding="utf-8")) == original
+
+
+@pytest.mark.parametrize("follow_up", [False, True])
+def test_printed_control_arguments_and_environment_round_trip(
+    follow_up: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Control bytes must survive rendering without reaching the terminal literally."""
+    recorder = tmp_path / "record.py"
+    recorder.write_text(
+        f"import json, os, sys\nprint(json.dumps([sys.argv[1:], os.environ.get({ENV_KEY!r})]))\n",
+        encoding="utf-8",
+    )
+    args = [CONTROL_TEXT, SPECIAL_TEXT, "percent%s\\011$(echo nope)"]
+    command = [sys.executable, str(recorder), *args]
+    commands = _printed_recovery_commands(
+        monkeypatch,
+        command,
+        {ENV_KEY: CONTROL_TEXT},
+        [command] if follow_up else None,
+    )
+    for printed in commands:
+        assert re.search(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]", printed) is None
+        result = _run_recovery_shell(printed, dict(os.environ))
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == [args, CONTROL_TEXT]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Control characters are POSIX filenames")
+@pytest.mark.parametrize("piece", ["tab\tpath", "carriage\rpath", "new\npath\n", "escape\x1bpath"])
+def test_printed_posix_control_executable_path_runs(
+    piece: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = tmp_path / piece
+    directory.mkdir()
+    executable = directory / "recorder"
+    executable.write_text("#!/bin/sh\nprintf '%s\\n' executed\n", encoding="utf-8")
+    executable.chmod(0o700)
+    printed = _printed_recovery_commands(monkeypatch, [str(executable)])[0]
+    assert re.search(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]", printed) is None
+    result = _run_recovery_shell(printed, dict(os.environ))
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == b"executed\n"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows native helper initialization")
+def test_windows_helper_failure_leaves_environment_and_command_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = tmp_path / "must-not-run"
+    command = [sys.executable, "-c", f"from pathlib import Path; Path({str(marker)!r}).touch()"]
+    printed = _printed_recovery_commands(monkeypatch, command, {ENV_KEY: "override"})[0]
+    observer = update._format_recovery_command(
+        [
+            sys.executable,
+            "-c",
+            f"import json, os; print(json.dumps(dict(os.environ).get({ENV_KEY!r})))",
+        ]
+    )
+    script = (
+        "function Add-Type { throw 'fixture: native helper unavailable' }\n"
+        "try {\n" + printed + "\n} catch {}\n" + observer
+    )
+    result = _run_recovery_shell(script, {**os.environ, ENV_KEY: ""})
+    assert result.returncode == 0, result.stderr
+    assert not marker.exists()
+    assert json.loads(result.stdout) == ""
