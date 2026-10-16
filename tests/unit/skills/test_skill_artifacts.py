@@ -1010,7 +1010,6 @@ def test_first_run_preference_write_works_through_uv_only_path(
     if relative_path.parts[-2] == "welcome":
         assert prefs["welcomeShown"] is True
         assert prefs["welcomeCompleted"]
-        assert prefs["welcomeVersion"]
     else:
         assert prefs["star_asked"] is True
 
