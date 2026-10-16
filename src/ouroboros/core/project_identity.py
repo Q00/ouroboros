@@ -329,6 +329,16 @@ def _require_supported_git() -> None:
         )
 
 
+def require_managed_identity_git() -> None:
+    """Raise unless installed Git can prove managed worktree ownership.
+
+    :func:`resolve_managed_project_identity` raises the same error at session
+    start; callers that provision a managed worktree call this first so an old
+    Git is refused before the worktree exists.
+    """
+    _require_supported_git()
+
+
 def _git_path(output: bytes) -> Path:
     """Decode one Git-owned path, removing only its final record terminator."""
     if not output.endswith(b"\n"):
@@ -1111,6 +1121,7 @@ __all__ = [
     "ProjectIdentityGitVersionError",
     "ProjectIdentityUnavailableError",
     "project_id_for_root",
+    "require_managed_identity_git",
     "resolve_managed_project_identity",
     "resolve_project_identity",
 ]
