@@ -3060,3 +3060,74 @@ class TestAutoRunSuccessorWiring:
 
         assert rebuilt is not original
         assert rebuilt._execute_handler.host_dispatch_bridge is bridge
+
+
+class _CapturingAutoPipeline:
+    """Record the run starter the MCP handler hands to the pipeline, then stop."""
+
+    captured: dict[str, object] = {}
+
+    def __init__(self, *_args, **kwargs) -> None:
+        type(self).captured["run_starter"] = kwargs["run_starter"]
+
+    async def run(self, state):
+        return AutoPipelineResult(
+            status="blocked",
+            auto_session_id=state.auto_session_id,
+            phase=str(state.phase.value),
+        )
+
+
+@pytest.mark.parametrize("worktree_policy", ["current", "none"])
+@pytest.mark.asyncio
+async def test_mcp_auto_run_handoff_uses_caller_checkout_for_current_policy(
+    event_store, tmp_path, monkeypatch, worktree_policy: str
+) -> None:
+    """``worktree_policy=current/none`` runs the Seed in the caller's checkout.
+
+    The execution job must not create a managed task worktree of its own: the
+    auto session's policy is the only isolation authority.
+    """
+    import subprocess
+
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _CapturingAutoPipeline.captured = {}
+
+    with patch("ouroboros.mcp.tools.auto_handler.AutoPipeline", _CapturingAutoPipeline):
+        await AutoHandler(store=AutoStore(tmp_path / "store"), event_store=event_store)._run(
+            {"goal": "build a CLI", "cwd": str(tmp_path), "worktree_policy": worktree_policy}
+        )
+
+    run_starter = _CapturingAutoPipeline.captured["run_starter"]
+    assert run_starter.use_worktree is False
+    assert run_starter.cwd == str(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_mcp_auto_run_handoff_reuses_the_auto_worktree(
+    event_store, tmp_path, monkeypatch
+) -> None:
+    """The default coding path makes one worktree (auto's), never a second one."""
+    workspace = _managed_workspace(tmp_path)
+    _CapturingAutoPipeline.captured = {}
+
+    def fake_ensure(state):
+        state.cwd = workspace.effective_cwd
+        return workspace
+
+    monkeypatch.setattr("ouroboros.mcp.tools.auto_handler.ensure_auto_worktree", fake_ensure)
+    monkeypatch.setattr(
+        "ouroboros.mcp.tools.auto_handler.release_auto_worktree",
+        lambda _candidate, *, cleanup: None,  # noqa: ARG005
+    )
+
+    with patch("ouroboros.mcp.tools.auto_handler.AutoPipeline", _CapturingAutoPipeline):
+        await AutoHandler(store=AutoStore(tmp_path / "store"), event_store=event_store)._run(
+            {"goal": "build a CLI", "cwd": str(tmp_path)}
+        )
+
+    run_starter = _CapturingAutoPipeline.captured["run_starter"]
+    assert run_starter.use_worktree is False
+    assert run_starter.cwd == workspace.effective_cwd
