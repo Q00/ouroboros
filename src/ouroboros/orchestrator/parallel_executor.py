@@ -454,8 +454,8 @@ from ouroboros.orchestrator.verify_shell import (
     verify_shell_unavailable_reason,
 )
 from ouroboros.orchestrator.workspace_evidence_paths import (
-    is_git_ignored_path,
-    is_untracked_top_level_evidence_path,
+    collect_bounded_workspace_paths,
+    is_declared_contract_path,
     load_ignored_workspace_paths,
     load_tracked_workspace_paths,
 )
@@ -5088,69 +5088,24 @@ class ParallelACExecutor:
                     if declared.is_relative_to(root):
                         declared_paths.add(declared.relative_to(root))
 
-            def is_declared_contract_path(relative: Path) -> bool:
-                return any(
-                    relative == declared
-                    or relative in declared.parents
-                    or declared in relative.parents
-                    for declared in declared_paths
-                )
-
             tracked_paths = load_tracked_workspace_paths(root)
             ignored_paths = load_ignored_workspace_paths(root)
 
             digest = hashlib.sha256()
-            paths: list[Path] = []
-            visited_entries = 0
-
-            def is_ignored(relative: Path, *, is_directory: bool) -> bool:
-                declared_contract_path = is_declared_contract_path(relative)
-                return (
-                    is_untracked_top_level_evidence_path(
-                        relative,
-                        tracked_paths=tracked_paths,
-                        is_directory=is_directory,
-                    )
-                    or is_git_ignored_path(relative, ignored_paths=ignored_paths)
-                    or any(
-                        part in _WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES
-                        for part in relative.parts
-                    )
-                ) and not declared_contract_path
-
-            pending_directories = [(root, 0)]
-            while pending_directories:
-                current_path, depth = pending_directories.pop()
-                with os.scandir(current_path) as iterator:
-                    entries = []
-                    for entry in iterator:
-                        visited_entries += 1
-                        if visited_entries >= _WORKSPACE_FINGERPRINT_MAX_ENTRIES:
-                            return None
-                        entries.append(entry)
-
-                child_directories: list[Path] = []
-                for entry in sorted(entries, key=lambda item: item.name):
-                    path = Path(entry.path)
-                    is_symlink = entry.is_symlink()
-                    is_directory = entry.is_dir(follow_symlinks=False)
-                    relative = path.relative_to(root)
-                    if is_ignored(relative, is_directory=is_directory):
-                        continue
-                    paths.append(path)
-                    if is_directory and not is_symlink:
-                        if depth >= _WORKSPACE_FINGERPRINT_MAX_DEPTH:
-                            return None
-                        child_directories.append(path)
-
-                pending_directories.extend(
-                    (path, depth + 1) for path in reversed(child_directories)
-                )
-
-            paths.sort(key=lambda path: path.as_posix())
+            paths = collect_bounded_workspace_paths(
+                root,
+                declared_paths=declared_paths,
+                tracked_paths=tracked_paths,
+                ignored_paths=ignored_paths,
+                ignored_directory_names=_WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES,
+                max_entries=_WORKSPACE_FINGERPRINT_MAX_ENTRIES,
+                max_depth=_WORKSPACE_FINGERPRINT_MAX_DEPTH,
+            )
+            if paths is None:
+                return None
             for path in paths:
                 relative = path.relative_to(root)
-                declared_contract_path = is_declared_contract_path(relative)
+                declared_contract_path = is_declared_contract_path(relative, declared_paths)
                 try:
                     stat = path.lstat()
                     if path.is_symlink():
