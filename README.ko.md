@@ -440,6 +440,7 @@ Gen 3: {Task, Priority, Status, DueDate}     → similarity 1.00 → CONVERGED �
 |:--------|:-------------|
 | `ooo setup` | MCP 서버 등록 (1회) |
 | `ooo interview` | 소크라테스식 질문 → 숨겨진 가정 드러내기 |
+| `ooo idk` | 주제별 이해 수준에 맞춰 인터뷰 설명 난이도 조절 |
 | `ooo auto` | 목표 하나에서 A-grade Seed까지 자동 수렴 후 실행 시작 |
 | `ooo seed` | 확정된 스펙으로 정리 |
 | `ooo run` | Double Diamond로 실행 |
