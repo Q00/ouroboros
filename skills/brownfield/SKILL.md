@@ -5,9 +5,7 @@ description: "Scan and manage brownfield repository/worktree defaults for interv
 
 # /ouroboros:brownfield
 
-Scan a root directory for existing git repositories and linked worktrees, then manage default repos used as context in interviews.
-
-## Usage
+Scan a root directory for existing git repositories and linked worktrees, then manage the default repos used as interview context.
 
 ```
 ooo brownfield                # Scan repos and set defaults
@@ -17,48 +15,26 @@ ooo brownfield set 6,18,19   # Set defaults by repo numbers
 ooo brownfield detect [path]  # Author mechanical.toml via one AI call
 ```
 
-**Trigger keywords:** "brownfield", "scan repos", "default repos", "brownfield scan", "mechanical detect"
+## Loading MCP tools (deferred-schema guard)
 
----
+Ouroboros tools may be deferred, and a schema loaded on one turn can unload by the next. Immediately before each `ouroboros_*` call, load it with the active runtime's tool-discovery capability: `"+ouroboros brownfield"` for `ouroboros_brownfield`. A call whose schema is not loaded fails with "Invalid tool parameters". If the tool is already callable, discovery is a no-op and an empty result is expected. If it is genuinely absent, stop and say the Ouroboros MCP server is not available. Scan, defaults, and set use only this MCP tool, never the CLI or Python scripts.
 
-## How It Works
+## Default flow (`ooo brownfield`)
 
-### Default flow (`ooo brownfield` with no args)
+### Step 1: Scan
 
-**Step 1: Scan**
-
-Show scanning indicator:
 ```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Scanning for Existing Projects...
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Looking for git repositories and worktrees up to two directories below the scan root.
-Local repos and repos with any remote name are eligible.
-This may take a moment...
+Tool: ouroboros_brownfield
+Arguments: { "action": "scan" }
 ```
 
-**Implementation — use MCP tools only, do NOT use CLI or Python scripts:**
+Scan boundaries:
+- The walk starts at `scan_root` (default: the user's home directory) and goes at most two directory levels deep (`~/repo` and `~/group/repo` are found; deeper nesting is not).
+- Dot-prefixed and noisy directories such as `node_modules` are not walked.
+- Normal repos (`.git` directory) and linked worktrees (`.git` file) are registered self-only when the walk reaches them. Git worktree families are not expanded, so worktrees outside the depth-bounded walk (e.g. under `.ouroboros/worktrees`) are not pulled in.
+- Repos without remotes or with remotes not named `origin` are eligible. Existing defaults are preserved.
 
-**CRITICAL — deferred-schema guard (prevents "Invalid tool parameters"):**
-This skill can call `ouroboros_brownfield` across multiple turns (`scan`,
-`set_defaults`, `defaults`, and `set`). A deferred schema loaded for one turn is
-NOT guaranteed to remain loaded for the next. Immediately before EVERY
-`ouroboros_brownfield` call, re-run `tool discovery query: "+ouroboros brownfield"`
-(idempotent — a no-op when already loaded). If the load returns no matching tool (and the tool is not already callable — an empty load for an already-exposed tool is an expected no-op, not absence),
-stop with the MCP-not-available message instead of retrying the failing call.
-
-1. Load the brownfield MCP tool: `tool discovery query: "+ouroboros brownfield"`
-2. Call scan+register:
-   ```
-   Tool: ouroboros_brownfield
-   Arguments: { "action": "scan" }
-   ```
-   This walks `scan_root` (up to two directory levels deep) for valid seed repos/worktrees and registers them in DB. Each repo or worktree found directly by the walk is registered self-only — Git worktree families are not expanded, so worktrees outside the depth-bounded walk (e.g. under `.ouroboros/worktrees`) are not pulled in. Existing defaults are preserved.
-
-The scan response `text` already contains a pre-formatted numbered list with ` *` markers on defaults. **Do NOT make any additional MCP calls to list or query repos.**
-
-**Display the repos in a plain-text 2-column grid** (NOT a markdown table). Use a code block so columns align. Example:
+The scan response `text` already holds the numbered list with ` *` markers on defaults; make no further MCP calls to list or query repos. Show it as a plain-text two-column grid in a code block (not a markdown table), keeping the `*` markers exactly:
 
 ```
 Scan complete. 8 repositories registered.
@@ -69,173 +45,45 @@ Scan complete. 8 repositories registered.
  4. repo-delta                   8. repo-hotel
 ```
 
-Include `*` markers for defaults exactly as they appear in the scan response.
+If nothing is found, say "No git repositories or worktrees found." and stop.
 
-**If no repos found**, show:
-```
-No git repositories or worktrees found.
-```
-Then stop.
+### Step 2: Default selection
 
-### Scan boundaries
+**Do NOT use the active runtime's `ask_user` dialog for this selection**: text between tool calls may not render, and dialog previews truncate long lists. Instead, **end the turn with the repo grid as the final message** and collect the selection as a plain chat reply. Directly below the grid, append:
 
-- The filesystem walk starts at `scan_root`; when omitted, `scan_root` defaults to the current user's home directory.
-- Repositories are discovered by walking directories inside `scan_root`, at most two levels deep (so `~/repo` and `~/group/repo` are found; deeper nesting is not).
-- Dot-prefixed directories and known noisy directories such as `node_modules` are not walked as seed locations.
-- Both normal repos (`.git` directory) and linked worktrees (`.git` file) are registered when the walk reaches them. Git worktree families are NOT expanded — a worktree is only registered if the walk finds it directly, not because its main repo's Git metadata reports it.
-- Local repos, repos without remotes, and repos whose remotes are not named `origin` are all eligible.
+- With defaults: `Current defaults: <names> (numbers <numbers>)`, then "Reply with repo numbers to change defaults (e.g. "6, 18, 19"), "keep" to keep the current defaults, or "none" to clear them."
+- Without defaults: `No defaults set.`, then "Reply with repo numbers to set defaults (e.g. "6, 18, 19"), or "none" to run interviews in greenfield mode."
 
-**Step 2: Default Selection**
+Make no tool calls after the grid; the breadcrumb footer is still the last line.
 
-**Do NOT use `AskUserQuestion` for this selection.** Two rendering constraints
-make it unusable here:
-
-- Assistant text emitted between tool calls (scan result → grid → question
-  dialog) is not guaranteed to render, so the user may face the dialog
-  without ever seeing the repo list.
-- Embedding the list in option `preview` fields does not work either — the
-  preview box has a fixed height and silently truncates long lists
-  ("N lines hidden"), and repo lists routinely exceed it.
-
-Instead, **end the turn with the repo grid as the final message** so its
-display is guaranteed, and collect the selection as a plain chat reply.
-
-Immediately below the grid (same message, same code block or right after it),
-append the selection prompt:
-
-**If defaults exist:**
-```
-Current defaults: <current default names> (numbers <current default numbers>)
-
-Reply with repo numbers to change defaults (e.g. "6, 18, 19"),
-"keep" to keep the current defaults, or "none" to clear them.
-```
-
-**If no defaults exist:**
-```
-No defaults set.
-
-Reply with repo numbers to set defaults (e.g. "6, 18, 19"),
-or "none" to run interviews in greenfield mode.
-```
-
-Then **end the turn** — no tool calls after the grid. The RFC #1392
-breadcrumb footer is still the last line of the message.
-
-On the next turn, parse the user's reply:
-
-- Numbers (any separator) → those indices
-- "keep" (defaults exist) → stop; no MCP call needed, confirm defaults unchanged
-- "none" → empty indices (clear all)
-- Anything else → ask again in plain text; do not guess
-
-Then re-run `tool discovery query: "+ouroboros brownfield"` and use ONE MCP call to update all defaults at once:
+Next turn, parse the reply: numbers (any separator) → those indices; "keep" → confirm defaults unchanged, no MCP call; "none" → empty indices; anything else → ask again in plain text, never guess. Then update all defaults in one call (it replaces every existing default):
 
 ```
 Tool: ouroboros_brownfield
 Arguments: { "action": "set_defaults", "indices": "<comma-separated IDs>" }
 ```
 
-Example: if the user picks IDs 6, 18, 19 → `{ "action": "set_defaults", "indices": "6,18,19" }`
+For example `{ "action": "set_defaults", "indices": "6,18,19" }`, or `"indices": ""` for "none".
 
-This clears all existing defaults and sets the selected repos as default in one call.
+### Step 3: Confirm
 
-If "none" → `{ "action": "set_defaults", "indices": "" }` to clear all defaults.
+Name the new defaults and that they will be used as interview context; for "none", say interviews run in greenfield mode and `ooo brownfield` can set defaults later.
 
-**Step 3: Confirmation**
+## Subcommands
 
-```
-Brownfield defaults updated!
-Defaults: grape, podo-app, podo-backend
+- **`scan`**: Step 1 only; show the grid and stop.
+- **`defaults`**: run the Step 1 scan call and show only the `*` repos, or "No default repos set. Run 'ooo brownfield' to configure."
+- **`set <indices>`**: parse the comma-separated indices and call `{ "action": "set_defaults", "indices": "<indices>" }` without scanning; confirm the updated defaults.
+- **`detect [path]`**: one AI call against the target directory (default: cwd) writes `.ouroboros/mechanical.toml` with validated lint/build/test/static/coverage commands, which Stage 1 of evaluation reads verbatim. Evaluation auto-runs it when no toml exists, so run it explicitly only to pre-author, refresh after a build-tool change (`--force`), or review commands before Stage 1 trusts them. This subcommand uses the CLI through the active runtime's `run_shell` capability:
 
-These repos will be used as context in interviews.
-```
+  ```
+  uvx --python '>=3.12' --from ouroboros-ai ouroboros detect [path]
+  # or, if already installed:
+  ouroboros detect [path] [--force]
+  ```
 
-Or if "none" selected:
-```
-No default repos set. Interviews will run in greenfield mode.
-You can set defaults anytime with: ooo brownfield
-```
-
-Or if "keep" selected:
-```
-Defaults unchanged: <current default names>
-```
-
----
-
-### Subcommand: `scan`
-
-Scan only, no default selection prompt. Show the numbered list and stop.
-
----
-
-### Subcommand: `defaults`
-
-Re-run `tool discovery query: "+ouroboros brownfield"`, then call:
-```
-Tool: ouroboros_brownfield
-Arguments: { "action": "scan" }
-```
-
-Display only the repos marked with `*` (defaults). If none, show:
-```
-No default repos set. Run 'ooo brownfield' to configure.
-```
-
----
-
-### Subcommand: `set <indices>`
-
-Directly set defaults without scanning. Parse the comma-separated indices from the user's input, re-run `tool discovery query: "+ouroboros brownfield"`, and call:
-
-```
-Tool: ouroboros_brownfield
-Arguments: { "action": "set_defaults", "indices": "<indices>" }
-```
-
-Show confirmation with updated defaults.
-
----
-
-### Subcommand: `detect [path]`
-
-Runs one AI call against the target directory (defaults to the user's cwd)
-and writes `.ouroboros/mechanical.toml` with validated lint / build / test /
-static / coverage commands. Stage 1 of evaluation reads this file verbatim,
-so the toml is the authoritative Stage 1 contract — no hardcoded language
-presets exist anymore.
-
-Ouroboros auto-runs this detect the first time `ouroboros_evaluate` is
-invoked without a toml present, so most users never need to call it
-directly. Run it explicitly when:
-
-- you want to pre-author the toml before the first evaluate,
-- you moved to a new build tool and want to refresh (`--force`),
-- you want to review/edit the commands before Stage 1 trusts them.
-
-**Implementation:** invoke the CLI via Bash.
-
-```
-uvx --python '>=3.12' --from ouroboros-ai ouroboros detect [path]
-# or, if already installed:
-ouroboros detect [path] [--force]
-```
-
-Then print the resulting `.ouroboros/mechanical.toml` contents so the user
-can confirm the proposed commands or hand-edit them.
-
-If detect reports "could not propose any verifiable commands", surface the
-reason (no manifests found, LLM unavailable, every proposal dropped) and
-suggest the user write a minimal toml by hand — any single entry like
-`test = "pytest -q"` is enough to opt back in to Stage 1 for that check.
+  Print the resulting toml so the user can confirm or edit it. If detect reports "could not propose any verifiable commands", surface the reason (no manifests, LLM unavailable, every proposal dropped) and suggest a minimal hand-written toml; one entry such as `test = "pytest -q"` opts that check back in to Stage 1.
 
 ## RFC #1392 State Breadcrumb Footer
 
-Your final response MUST end with exactly one breadcrumb footer line:
-
-```
-◆ <current state> → next: <recommended action>
-```
-
-Derive `<current state>` from live session state via `ouroboros_session_status` when that MCP projection is available; otherwise derive it from this skill's actual outcome. Never use a linear `Step N of M` footer because Ouroboros is an evolutionary loop. When the next action is genuinely a choice, list 2-3 honest options in the `next:` clause. The breadcrumb line must be the last line of the response.
+End the final response with exactly one line `◆ <current state> → next: <recommended action>`. Derive the state from live session state via `ouroboros_session_status` when available, otherwise from this skill's actual outcome. Never use a linear `Step N of M` footer; when the next step is a real choice, list 2-3 options.

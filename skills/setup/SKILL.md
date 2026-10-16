@@ -302,7 +302,7 @@ Ouroboros tools may be deferred, and a schema loaded on one turn can unload by t
 
    If no repos were found, skip to Step 6.
 
-3. **Do NOT use `AskUserQuestion` for this selection.** Text emitted between
+3. **Do NOT use the active runtime's `ask_user` dialog for this selection.** Text emitted between
    tool calls is not guaranteed to render, so a dialog can appear without the
    list, and option previews truncate long lists. Instead, end the turn with the repo grid as the final message, followed by the prompt:
 

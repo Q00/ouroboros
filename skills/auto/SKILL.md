@@ -22,30 +22,23 @@ Run the full-quality auto pipeline from a single task description.
 
 This skill must be executed by invoking MCP tool `ouroboros_start_auto`. Do not
 manually inspect repositories, run shell commands, query GitHub, edit files, or
-otherwise emulate the auto pipeline as a substitute. Full auto runs routinely
-exceed interactive MCP tool-call timeouts, so the background starter is the
-supported default: it returns `job_id` and `auto_session_id` quickly. Retain
-both. When `response.meta.job_observer` is present, delegate its read-only
-wait/result contract to exactly one independent child session. The main session
-keeps only start and explicit on-demand status responsibility.
+otherwise emulate the auto pipeline. The background starter returns `job_id`
+and `auto_session_id` quickly; retain both. If `ouroboros_start_auto` or a
+required job wait/result tool is unavailable, stop and report that the required
+MCP tool is unavailable. A manual fallback is not an `ooo auto` run.
 
-If `ouroboros_start_auto` is unavailable, or if any required job polling/result
-MCP tool is unavailable, stop and report that the required MCP tool is
-unavailable. A manual fallback is not an `ooo auto` run.
+If a started auto job returns `detached`, `blocked`, `failed`, or another
+auto-session status, report that status and the tool's blocker. `detached` is
+non-terminal tracked background work: surface the job/Ralph handles and keep
+observing them through the same owner. Do not label a `blocked` or `failed`
+outcome as MCP dispatch failure; dispatch failure means the MCP tool could not
+be invoked.
 
-If a started auto job later returns `detached`, `blocked`, `failed`, or another
-auto-session status, report that auto-session status and the tool's blocker.
-`detached` is non-terminal tracked background work; surface the job/Ralph
-handles and keep observing them through the same owner. Do not label a
-`blocked` or `failed` outcome as MCP dispatch failure; dispatch failure means
-the MCP tool could not be invoked.
+Do not stop after returning the `job_id`: keep the conversational UX, delegate
+monitoring (below), and never tell the user to call job tools themselves. The
+user should not have to poll the job manually.
 
-If the active runtime routes `ooo auto` through a background starter such as
-`ouroboros_start_auto`, do not stop after returning the `job_id`. Keep ownership
-of the conversational UX: retain the returned `job_id`, `auto_session_id`, and
-cursor, then delegate monitoring when the host supports child sessions. Only
-the fallback path monitors with `ouroboros_job_wait` / `ouroboros_job_status`
-in the main session. The user should not have to poll the job manually.
+Immediately before each `ouroboros_*` call, load its schema with the active runtime's tool-discovery capability (for example `"+ouroboros auto"` for `ouroboros_start_auto` and `"+ouroboros session signal"` for the Synapse tools); a schema loaded on an earlier turn may be gone. An empty result for an already-callable tool is expected.
 
 ## Usage
 
@@ -56,15 +49,14 @@ ooo auto "Build a local-first habit tracker CLI" --skip-run
 /ouroboros:auto "Build a local-first habit tracker CLI"
 ```
 
-`ooo auto` does not accept a parent Seed ID/path or infer lineage from goal
-prose. Mentioning an existing Seed in the goal is ordinary context, not an
-authorized derivative operation. Use `ooo evolve` for typed parent evolution,
-or `ooo run` to execute an existing immutable Seed. Do not claim preserved
-lineage or AC edit scope from an `ooo auto` goal alone.
+`ooo auto` takes no parent Seed and infers no lineage from goal prose (a Seed
+named in the goal is ordinary context); never claim preserved lineage or AC
+edit scope. Use `ooo evolve` for parent evolution or `ooo run` for an existing
+Seed.
 
 ## CLI flag → MCP arg translation
 
-When the user types `ooo auto` with CLI-style flags inside chat, translate to MCP arguments before invoking `ouroboros_start_auto`:
+Translate CLI-style flags typed in chat before invoking `ouroboros_start_auto`:
 
 | CLI flag | MCP arg | Type |
 |----------|---------|------|
@@ -76,173 +68,144 @@ When the user types `ooo auto` with CLI-style flags inside chat, translate to MC
 | `--frugality-assurance off\|observe\|strict` | `frugality_assurance=<value>` | string |
 | `--resume <id>` | `resume=<id>` | string |
 
-`--max-generations` is **not** a flag for `ooo auto`; it belongs to `ooo ralph`. The chained Ralph started by the run job is bounded by `execution.auto_evolve_max_generations`.
+- `--max-generations` belongs to `ooo ralph`, not `ooo auto`.
+- `--complete-product` is deprecated and ignored (the run job owns the chain).
+- `--pipeline-timeout-seconds` is accepted only on a fresh start; with `--resume` it is rejected because the original deadline is preserved.
+- The CLI-only `--show-ledger` flag prints assumptions/non-goals; MCP responses already include that ledger summary when available.
 
-`--complete-product` is deprecated and ignored: the run job owns `run → evaluate → ralph`, so a single Auto invocation no longer drives Ralph itself. Follow the run job's chain with `ooo status` or the job tools.
-
-`--pipeline-timeout-seconds` is accepted only when starting a session. Passing it with `--resume` is rejected because the original deadline is preserved across process restarts.
-
-Before a fresh Auto start, do not ask about an efficiency policy unless the user
+Before a fresh start, do not ask about an efficiency policy unless the user
 raised it or `execution.default_policy` in `~/.ouroboros/config.yaml` is
 explicitly `ask`. Otherwise omit both arguments: the server applies the
-configured default, which is quality-first when nothing is configured. After
-the start, tell the user once which policy is running, using the `Efficiency
-Mode` line of the handoff; when it names the default, include the change
-command it shows. If the user did choose, or the config says `ask`, map their
-choice in outcome language: **Efficient execution** maps to
-`adaptive/observe`; **Quality-first execution** maps to `quality_first/off`.
-`strict` assurance is a separate explicit opt-in because it may spend extra
-work on proof. Never infer strict from the efficiency choice. On resume, do not
-ask or send either argument; Auto restores the persisted contract.
+configured default (quality-first when nothing is configured), and its start
+receipt names the running policy and the change command; relay that line once.
+If the user did choose, or the config says `ask`, map the choice in outcome
+language: **Efficient execution** is `adaptive/observe`; **Quality-first
+execution** is `quality_first/off`. `strict` assurance is a separate explicit
+opt-in because it may spend extra work on proof; never infer it. On resume,
+send neither argument; Auto restores the persisted contract.
 
 ## Behavior
 
-1. Starts an auto session.
-2. Runs bounded Socratic interview rounds with source-tagged auto answers.
-3. Generates a Seed.
-4. Reviews and repairs until A-grade or blocked.
-5. Starts execution only after A-grade.
-6. Auto reaches `COMPLETE` as soon as the run has a durable handle. The run keeps going as a background job, and that job carries its own `run → evaluate → ralph` chain governed by `execution.auto_evaluate` / `execution.auto_evolve` (both default `true`, Ralph bounded by `execution.auto_evolve_max_generations`). Auto does not evaluate the run itself; the chained evaluate job does.
+1. Starts an auto session and runs bounded Socratic interview rounds with source-tagged auto answers.
+2. Generates a Seed, then reviews and repairs it until it is A-grade (passes the Seed review) or blocked.
+3. Starts execution only after A-grade (unless `skip_run`). Auto reaches `COMPLETE` once the run has a durable handle; the run job then carries its own `run → evaluate → ralph` chain under `execution.auto_evaluate` / `execution.auto_evolve` (both default `true`). Auto does not evaluate the run itself.
+4. Every loop is bounded and timeouts return a resumable `auto_session_id`: resume with `ooo auto --resume <auto_session_id>`. The chained Ralph is bounded by `execution.auto_evolve_max_generations` (default 3), each generation capped by Ralph's per-iteration timeout, but there is no total wall-clock cap on the chain, and the auto deadline (`--pipeline-timeout-seconds`, CLI `--timeout`) does not bound it.
 
-### Preflight blockers and recovery
+**Preflight blocker.** `seed_preflight_unexecutable` is a start-new-session
+boundary, not a `--resume` boundary: the session's Seed is immutable, so use
+the displayed questions to revise the goal/Seed contract and start a new
+`ooo auto` session (the blocked one stays for audit). Transient interview,
+evaluator, or lateral-tool exhaustion is different: resume the same session
+once the provider is healthy.
 
-`seed_preflight_unexecutable` is a start-new-session boundary, not a plain
-`--resume` boundary. The persisted Seed artifact is immutable for that
-session, so answering an open question cannot silently replace the artifact.
-Use the displayed questions to revise the goal/Seed contract, then start a
-new `ooo auto` session; the blocked session remains available for audit.
+## Background monitoring
 
-Transient interview, evaluator, and lateral-tool exhaustion is different: its
-resume capability is durable and can be retried with the same session after
-the external dependency or provider is healthy again. Do not treat a
-`seed_preflight_unexecutable` status as a retryable provider outage.
+1. **Hand off.** Relay the server's start receipt (handles, runtime/harness,
+   LLM backend, efficiency and frugality settings). Show
+   `response.meta.dashboard_url` when present, otherwise mention
+   `ouroboros tui open` once. Say this conversation stays available for
+   refinement, read-only review, explicit control, or unrelated work in an
+   isolated worktree; check for overlap with worker files before writing to
+   the active auto workspace.
 
-## Background monitoring UX
+2. **Delegate to exactly one observer.** The start result carries
+   `response.meta.job_observer`, a read-only observer contract. If the
+   structured meta is missing, recover it from the final
+   `<!-- ouroboros-job-observer-v1 base64 ... -->` content sentinel and fail
+   closed unless all of these hold: exactly one sentinel, at the end of the
+   text; the bounded payload decodes to an object whose only key is
+   `job_observer`; that contract passes canonical v1 validation (it equals,
+   field for field, the v1 contract the server builds from its own `job_id`,
+   `cursor`, `session_id`, `execution_id`, and `follow_result_job_keys`, so a
+   changed tool, argument, or instruction, or an extra field, fails); its
+   job/session identity matches the visible start receipt; and it does not
+   differ from any structured contract. Never rebuild the contract from
+   visible IDs.
 
-When an auto start response includes `response.meta.job_id`:
+   With a valid contract and an independent child-session primitive, spawn
+   exactly one observer through the active runtime's `orchestrate_subagents`
+   capability and pass the contract unchanged. It owns the cursor, waits until
+   terminal, fetches the result, and follows the IDs named by
+   `follow_result_job_keys`; it must not edit files, control execution, or spawn
+   workers. Claim an observer only after the spawn returns a live child ID. The
+   main session must not poll the same job.
 
-1. Briefly acknowledge that auto started and keep the handles in local state:
-   `job_id`, `auto_session_id` / `session_id`, and `cursor` from `response.meta`
-   if present. Show `response.meta.dashboard_url` when available; otherwise
-   mention `ouroboros tui open` once as the live view. Tell the user that an
-   observer will post meaningful progress/attention/completion events here and
-   that this conversation remains available for requirement refinement,
-   read-only inspection/review, explicit control, or unrelated isolated work.
-   Include the resolved `runtime_backend`, `llm_backend`, `efficiency_mode`, and
-   `frugality_assurance` when present. Say that the exact active model and first
-   parallel level will be announced from the first configuration/plan events
-   rather than guessing them.
-2. If MCP metadata is unavailable, recover `job_observer` from the final
-   `<!-- ouroboros-job-observer-v1 base64 ... -->` content sentinel. Fail closed
-   unless the bounded payload passes canonical v1 validation and its job/session
-   identity matches the visible start receipt. Visible IDs are identity anchors,
-   not a source for reconstructing tools or arguments. Reject validation failure
-   or any mismatch between structured and inline surfaces.
-3. If the structured or recovered `job_observer` is present and the host
-   supports independent child sessions, spawn exactly one read-only observer
-   and pass the contract unchanged. Codex uses `spawn_agent`, OMP uses one
-   native Task child, and Claude Code uses one Task/Agent child. The observer
-   owns the cursor, waits until terminal, fetches the result, and follows
-   downstream IDs named by `follow_result_job_keys`. It must not edit files,
-   control execution, or spawn implementation workers. The main session must not poll the same job.
-   On Codex, call `spawn_agent` exactly once with `task_name="run_observer"`;
-   a `wait` call is not a spawn, and the handoff may claim an observer only after
-   the spawn result returns a live child ID/path. Once acknowledged, keep the
-   parent turn open with `wait_agent` calls of at most 60 seconds while the child
-   remains active. A child `send_message` only queues a mailbox event; it cannot
-   revive an ended parent turn. Relay meaningful updates and wait again until
-   the observer sends its terminal summary.
-   On OMP, submit exactly one native Task child named `RunObserver`, require its
-   live agent/job ID, and use the host wait/inbox relay until terminal.
-   User input may interrupt the wait; handle it and resume waiting while
-   observation remains active unless the user asks to stop live observation or
-   replaces the active request. Then end only
-   the relay loop, keep the durable job running, and offer next-turn or explicit-
-   status catch-up. If the observer child fails, is cancelled, or exits before a
-   terminal summary, use that same fallback instead of waiting indefinitely.
-   This parent relay loop must not call job wait/result or take cursor ownership.
-   If spawn fails, do not promise live proactive relays. The detached worker
-   continues after the stdio turn; say that durable progress will be caught up
-   on the next parent turn or an explicit status request. Keep the current turn
-   open in the fallback polling loop only when the user asked for live watching.
-4. If child-to-parent progress messages are supported, the observer relays only
-   meaningful `phase_changed`, `progress_advanced`, `attention_required`, and
-   `terminal` events in at most 1-2 lines. During interview, it may use
-   `ouroboros_session_status(session_id=<auto_session_id>)` to surface a new
-   pending question or newly answered rounds. Otherwise, keep the main session
-   available and use on-demand status only when the user asks. Surface
-   `attention_required` immediately when a blocker needs human judgment.
-   Suppress unchanged heartbeats and raw tool output.
-   Interpret execution relays explicitly: `run_configuration` reports current
-   runtime/harness/model policy; `execution_plan` reports total ACs, total
-   dependency/parallel levels, and first scheduled ACs; `discovery_summary`
-   reports bounded targets and purpose; level/routing/harness/verified subtypes
-   report only material changes. Never relay raw commands or reasoning.
-   Before the main session writes to the active auto workspace, check for overlap
-   with worker files or move the unrelated work to an isolated worktree.
-5. When no independent child session exists and the user explicitly asks to
-   keep watching in this turn, enter the fallback low-noise loop. Otherwise end
-   the turn safely and resume from the durable cursor on the next interaction:
-   - `ouroboros_job_wait(job_id=<job_id>, cursor=<cursor>, timeout_seconds=120, view="summary", stream="linked", wait_for="attention_or_ac_change")`
-   - update `cursor = response.meta.cursor` after every wait/status response
-   - treat `response.meta` as the source of truth; use response text only as a
-     human-readable hint
-6. Relay only meaningful changes: status changes, phase changes, new
-   execution/session/lineage handles, progress counters, blocker/error text, or
-   a terminal state. If `response.meta.changed is false`, continue silently
-   unless the user asked for heartbeat updates.
-   Synapse delivery events are meaningful: distinguish `queued`/`delivering` from
-   `applied`/`completed`, and surface `rejected`/`delivery_uncertain`
-   immediately. Render the relay in the user's current conversation language;
-   preserve raw event codes only when exact diagnostics help.
-   When the user adds implementation intent during an executing auto run, the
-   main session first reloads Synapse schemas with
-   `tool discovery query: "+ouroboros session signal"`, then calls
-   `ouroboros_session_signal_targets` with the observed
-   `execution_id`, selects the semantically matching AC from `ac_content` and
-   current activity, then sends `ouroboros_session_signal` with that target's
-   exact IDs. Never ask the user for internal IDs. Ask a short clarification only
-   when multiple live ACs remain genuinely tied, and never route shared goal/AC/
-   constraint changes to one worker.
-   Send additive implementation refinements with exact target guards,
-   `contract_effect="additive"`, `source="user"`, `mode="redirect"`, and explicit
-   `fallback_mode="after_turn"`. Use `mode="inform"` for a read-only AC question
-   or assurance request, omit `fallback_mode` entirely in that mode, and relay
-   the bounded reply from the completed event.
-7. **During the interview phase, surface the live Q&A — not just the round
-   counter.** Whenever the relayed phase is `interview` (e.g. progress reads
+   - A `wait` call or a parent job-status poll is not a spawn. The contract's
+     `host_lifecycle` and the runtime's `orchestrate_subagents` guidance name
+     the concrete spawn and wait mechanics. Once acknowledged, if the runtime
+     cannot wake a parent turn that already ended when the child posts (a child
+     message only queues for the parent), keep the parent turn open with the
+     host's child-wait primitive in waits of at most 60 seconds. Relay
+     meaningful updates and wait again until the terminal summary. User input
+     may interrupt the wait; handle it and resume unless the user asks to stop
+     live observation or replaces the request. Then end only the relay loop,
+     keep the durable job running, and offer next-turn or explicit-status
+     catch-up. If the observer child fails, is cancelled, or exits early, use
+     that same catch-up instead of waiting indefinitely. The relay loop must not
+     poll job tools or take cursor ownership.
+
+   If spawn fails, do not promise live relays. The detached worker continues
+   after the stdio turn; say durable progress will be caught up next turn or on
+   an explicit status request.
+
+   If `response.meta.status == "delegated_to_plugin"` and `job_id` is None,
+   plugin mode delegated the work to a child session: follow that session's
+   lifecycle and do not call job tools without a real job id.
+
+3. **Relay events** in at most 1-2 lines, suppressing heartbeats, raw tool
+   output, commands, and reasoning. `run_configuration` reports
+   runtime/harness/model policy; `execution_plan` reports total ACs,
+   dependency/parallel levels, and the first scheduled ACs;
+   `discovery_summary` reports bounded targets and purpose; other execution
+   subtypes (`ac_routing`, `ac_attempt_judged`, `ac_accepted`/`ac_rejected`,
+   level and harness changes) only when material. For Synapse events,
+   distinguish `queued`/`delivering` from `applied`/`completed`, and surface
+   `rejected`/`delivery_uncertain` and `attention_required` at once. English
+   is the canonical instruction language; render facts naturally in the
+   user's current conversation language.
+
+4. **Interview Q&A.** While the phase is `interview` (for example
    `interview round N/50`), call
-   `ouroboros_session_status(session_id=<auto_session_id>)` and relay to the
-   user: (a) the current `meta.pending_question` (the question the interview is
-   asking right now), and (b) the `meta.auto_answer_log` entries — each is
-   `{round, source, question, answer}`, i.e. what the auto-answerer answered and
-   why (`source`: `conservative_default` = safe-default policy,
-   `inference` = model reasoning, `assumption` = auto-answerer fallback). Show
-   this so the user sees what the interview is converging on, not a bare
-   counter. Note: this Q&A lives in the auto-session state, so
-   `session_status` surfaces it even though `ouroboros_query_events` returns
-   nothing for the auto session, and it shows only the last 3 answers (each
-   truncated). Keep it low-noise: relay the pending question and any newly
-   answered rounds, not the same 3 entries every poll.
-8. If the job status is non-terminal (`queued`, `running`, or another active
-   status), keep waiting. Do not tell the user to call job tools themselves.
-9. When the job reaches a terminal status, the polling owner calls
-   `ouroboros_job_result(job_id)`
-   and summarize the final auto-session outcome. If the final auto result is
-   `detached`, keep tracking the surfaced downstream job/Ralph handles when
-   available instead of presenting `detached` as completion.
-10. If `response.meta.status == "delegated_to_plugin"` and
-   `response.meta.job_id is None`, report that OpenCode plugin mode delegated
-   the work to the child Task/session. Do not call job wait/result without a
-   real job id; follow the host Task widget/session lifecycle.
+   `ouroboros_session_status(session_id=<auto_session_id>)` and relay the
+   current `meta.pending_question` plus newly answered `meta.auto_answer_log`
+   entries (`{round, source, question, answer}`; `source` is
+   `conservative_default`, `inference`, or `assumption`), not a bare counter.
+   This Q&A lives in the auto-session state, so `ouroboros_query_events`
+   returns nothing for it; status shows only the last 3 answers, truncated.
 
-Use short progress relays; the goal is “I am still watching this for you,” not a
-wall of logs.
+5. **Fallback.** Only when no child session exists and the user asked to keep
+   watching this turn, loop on
+   `ouroboros_job_wait(job_id=<job_id>, cursor=<cursor>, timeout_seconds=180, view="summary", stream="linked", wait_for="attention_or_ac_change")`,
+   replacing the cursor from `response.meta.cursor` each time, treating
+   `response.meta` as the source of truth, and staying silent when
+   `response.meta.changed` is false. Otherwise end the turn and resume from the
+   durable cursor next interaction. Keep waiting while the status is
+   non-terminal.
+
+6. **Result.** At terminal status the polling owner calls
+   `ouroboros_job_result(job_id)` and summarizes the auto-session outcome. A
+   `detached` result is not completion: keep tracking its downstream job/Ralph
+   handles. Report `stop_reason_code` (or the free-form `last_error` blocker)
+   verbatim. For `seed_ready`, summarize `interview_closure_mode` (`None` =
+   backend and ledger agreed; `ledger_only` or `safe_default` = closed at the
+   round cap, with `defaulted_sections`) and the `assumption_sources` entries
+   (each with `text`, `source`, `confidence`; broader than `assumptions`).
+
+## Synapse intent refinement
+
+Synapse is the `ouroboros_session_signal` channel that delivers bounded user
+intent to one running AC. When the user adds implementation intent during an
+executing auto run, call `ouroboros_session_signal_targets` with the observed
+`execution_id`, select the AC whose `ac_content` and current activity match,
+and send `ouroboros_session_signal` with that target's exact IDs. Never ask the
+user for internal IDs; ask a short clarification only when live ACs remain
+genuinely tied. Send additive refinements with `contract_effect="additive"`,
+`source="user"`, `mode="redirect"`, and `fallback_mode="after_turn"`. For a
+read-only AC question or assurance request use `mode="inform"`, omit
+`fallback_mode`, and relay the bounded reply from the completed event. Never
+route shared goal/AC/constraint changes to one worker.
 
 ## Active Conductor decision policy
-
-English is the canonical instruction language; render facts naturally in the
-user's current conversation language.
 
 For `attention_required`, treat `recommended_host_actions` as authoritative:
 
@@ -254,56 +217,9 @@ For `attention_required`, treat `recommended_host_actions` as authoritative:
    deterministic, non-relaxing successor for that attention event and must pass
    the audited directive/decision/predecessor receipts exactly.
 5. LOG exactly one terminal `completed`, `failed`, or `declined` result. Do not
-   silently retry. Any specification-changing proposal is escalated to the user;
+   silently retry. Escalate any specification-changing proposal to the user;
    Auto never relaxes the approved goal, ACs, constraints, or non-goals itself.
-
-### Canonical stop_reason_code taxonomy
-
-| Layer | Code | Surface | Meaning |
-|---|---|---|---|
-| Interview | `interview_max_rounds_exhausted` | `last_error_code`, `result.stop_reason_code` | Auto interview ran `max_interview_rounds` without ledger+backend mutual closure, no section was safely defaultable, and no partial defaults applied — i.e. genuine deadlock with nothing the policy could close. |
-| Interview | `interview_unsafe_gaps_remain` | `last_error_code`, `result.stop_reason_code` | Auto interview ran `max_interview_rounds` with at least one section safely defaultable and at least one section remaining unsafe (e.g. CONFLICTING ledger entry, production/credential context). Partial defaults are rolled back so the persisted transcript and ledger stay aligned; resume can address the unsafe gap and re-run. |
-| Interview | `interview_phase_deadline` | `last_error_code`, `result.stop_reason_code` | Interview phase exceeded its per-phase timeout. |
-| Ralph | `iteration_timeout` | blocker text + (future) `result.stop_reason_code` | A single Ralph iteration exceeded its per-iteration timeout. |
-| Ralph | `wall_clock_exhausted` | blocker text + (future) `result.stop_reason_code` | The Ralph wall-clock budget was exhausted before convergence. |
-| Ralph | `oscillation_detected` | blocker text + (future) `result.stop_reason_code` | Ralph oscillated between two grade states without making progress. |
-| Ralph | `grade_regressing` | blocker text + (future) `result.stop_reason_code` | A subsequent Ralph generation produced a strictly worse grade than its predecessor. |
-| Ralph | `max_generations reached` | blocker text + (future) `result.stop_reason_code` | Ralph hit its configured generation cap before reaching A grade. |
-
-Blockers without a canonical code keep using the free-form ``last_error`` text. Ralph-layer codes are surfaced via blocker text today; their result-envelope promotion is tracked as a follow-up.
-
-### Interview closure mode taxonomy
-
-When `result.status == "seed_ready"`, `result.interview_closure_mode` distinguishes how the interview was closed:
-
-| Value | Meaning |
-|---|---|
-| `None` | Mutual agreement — both the backend and the ledger declared the seed ready in the same round. The default healthy path. |
-| `"ledger_only"` | PR-B1 / #1148: `max_rounds` hit; the ledger was structurally complete but the backend refused to declare closure. The interview closes on ledger-only consensus. Defaulted sections (if any) are tagged in `result.defaulted_sections`. |
-| `"safe_default"` | PR-B2: `max_rounds` hit; the safe-default policy successfully filled every remaining required gap with auditable assumptions. Synthesis was pushed back into the persisted transcript so the seed generator sees the same assumptions the ledger records. Defaulted sections are tagged in `result.defaulted_sections`. |
-
-Genuine-deadlock and partial-unsafe outcomes do **not** set `interview_closure_mode`; they reach a `blocked` terminal with the matching `stop_reason_code` above instead.
-
-### Assumption-source provenance (PR-C2 / #1157)
-
-`result.assumptions: tuple[str, ...]` (the existing list of assumption texts) is now accompanied by `result.assumption_sources: tuple[AssumptionRecord, ...]`, where each `AssumptionRecord` is a frozen dataclass with:
-
-| Field | Type | Meaning |
-|---|---|---|
-| `text` | `str` | The assumption text (same surface as the corresponding `assumptions` entry where present). |
-| `source` | `str` | One of `"assumption"` (auto-answerer fallback), `"inference"` (model reasoning), `"conservative_default"` (safe-default policy). These are the three assumption-class `LedgerSource` values that produce `assumption_only_sections`. |
-| `confidence` | `float` | Per-entry confidence as recorded by the ledger. |
-
-`assumption_sources` is a *broader* surface than `assumptions` — it includes inference- and conservative-default-class entries that `assumptions` (filtered to `LedgerSource.ASSUMPTION` only) does not surface. Callers wanting to know *which assumptions the system made on the user's behalf* should read `assumption_sources`; callers preserving the older string-only contract continue to read `assumptions`.
-
-The pipeline must not hang indefinitely: all loops are bounded and timeout failures return a resumable `auto_session_id`. Resume with `ooo auto --resume <auto_session_id>`. Use `--skip-run` to stop after the A-grade Seed. `--complete-product` is deprecated and ignored: the run job owns `run → evaluate → ralph`. The chained Ralph is bounded by `execution.auto_evolve_max_generations` (default 3) generations, each capped by Ralph's per-iteration timeout — it is finite, but there is no single total wall-clock cap, because the chain dispatch passes no `max_total_seconds`. The auto session's `--timeout` no longer bounds it. The CLI-only `--show-ledger` flag prints assumptions/non-goals; MCP skill responses already include the same ledger summary when available.
 
 ## RFC #1392 State Breadcrumb Footer
 
-Your final response MUST end with exactly one breadcrumb footer line:
-
-```
-◆ <current state> → next: <recommended action>
-```
-
-Derive `<current state>` from live session state via `ouroboros_session_status` when that MCP projection is available; otherwise derive it from this skill's actual outcome. Never use a linear `Step N of M` footer because Ouroboros is an evolutionary loop. When the next action is genuinely a choice, list 2-3 honest options in the `next:` clause. The breadcrumb line must be the last line of the response.
+End the final response with exactly one line `◆ <current state> → next: <recommended action>`. Derive the state from live session state via `ouroboros_session_status` when available, otherwise from this skill's actual outcome. Never use a linear `Step N of M` footer; when the next step is a real choice, list 2-3 options.
