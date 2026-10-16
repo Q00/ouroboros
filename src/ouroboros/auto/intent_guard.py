@@ -249,6 +249,8 @@ _HUMAN_ANSWER_SOURCES = {
     "user",
     "user_answer",
     "user_response",
+    # ``ooo auto`` relayed the requester's own answer (requester command).
+    "requester",
 }
 
 _EVIDENCE_ANSWER_SOURCES = {

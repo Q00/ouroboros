@@ -509,3 +509,43 @@ def test_cli_rejects_invalid_requester_timeout(monkeypatch) -> None:
 
     assert result.exit_code == 1
     run_auto.assert_not_awaited()
+
+
+def test_interview_handler_guard_treats_requester_prefix_as_human() -> None:
+    """The handler-side guard must not reject what the driver-side guard allowed.
+
+    ``ooo auto`` sends the requester's answer to the interview handler as
+    ``[from-auto][requester] ...``; a generated ``[from-auto]`` answer that
+    narrows the output contract is rejected there, a requester answer is not.
+    """
+    from ouroboros.auto.intent_guard import IntentGuardStatus, guard_interview_turn
+    from ouroboros.auto.requester import REQUESTER_ANSWER_PREFIX
+    from ouroboros.mcp.tools.authoring_handlers import _classify_interview_answer_source
+
+    goal = "Create MP4 videos and transcripts from the input recordings."
+    question = (
+        "Which one is the actual MVP behavior to lock: `--mode auto` creates MP4s "
+        "and transcripts, or `--mode review` creates only the review package and "
+        "rejects automated export?"
+    )
+    requester_answer = AutoAnswer(
+        text="Use REVIEW REVIEW as the MVP behavior.",
+        source=AutoAnswerSource.REQUESTER,
+        confidence=0.83,
+    ).prefixed_text
+    generated_answer = "[from-auto][conservative_default] Use REVIEW REVIEW as the MVP behavior."
+
+    assert requester_answer.startswith(REQUESTER_ANSWER_PREFIX)
+    assert _classify_interview_answer_source(requester_answer) == "requester"
+    assert _classify_interview_answer_source(generated_answer) == "generated"
+
+    def status(answer: str) -> IntentGuardStatus:
+        return guard_interview_turn(
+            goal=goal,
+            question=question,
+            answer_text=answer,
+            answer_source=_classify_interview_answer_source(answer),
+        ).status
+
+    assert status(generated_answer) is IntentGuardStatus.FAIL
+    assert status(requester_answer) is IntentGuardStatus.WARN

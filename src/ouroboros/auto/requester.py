@@ -31,6 +31,10 @@ from typing import Literal, Protocol
 REQUESTER_COMMAND_ENV = "OUROBOROS_AUTO_REQUESTER_COMMAND"
 REQUESTER_TIMEOUT_ENV = "OUROBOROS_AUTO_REQUESTER_TIMEOUT_SECONDS"
 DEFAULT_REQUESTER_TIMEOUT_SECONDS = 300.0
+# Transcript prefix of a requester answer (``AutoAnswer.prefixed_text`` for
+# source ``requester``). The interview handler reads it to treat the answer as
+# the requester's own decision rather than a generated one.
+REQUESTER_ANSWER_PREFIX = "[from-auto][requester]"
 
 RequesterOutcome = Literal[
     "answered",

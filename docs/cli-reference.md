@@ -129,7 +129,8 @@ Where the answers are recorded:
   `draft_answer`, `outcome` (`answered`, `timeout`, `nonzero_exit`,
   `empty_answer`, `invalid_output` or `launch_failed`), `used`, `answer`,
   `detail` and `elapsed_seconds`. The key is absent when no question went to the
-  requester.
+  requester. Text fields in both logs are cut to 200 characters; the full
+  answer is in the interview transcript.
 - Each question also emits an `auto.interview.requester_asked` event (fields
   `round`, `draft_source`, `outcome`, `used`, `detail`, `elapsed_seconds`,
   `question`) to the event store.
