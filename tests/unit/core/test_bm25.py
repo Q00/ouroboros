@@ -19,7 +19,13 @@ class TestTokenize:
         assert tokenize("the a of x payments in go") == ["payments", "go"]
 
     def test_keeps_non_latin_words(self) -> None:
-        assert tokenize("결제 서비스") == ["결제", "서비스"]
+        assert tokenize("결제 모듈") == ["결제", "모듈"]
+
+    def test_hangul_words_add_syllable_bigrams(self) -> None:
+        assert tokenize("결제를 서비스") == ["결제를", "결제", "제를", "서비스", "서비", "비스"]
+
+    def test_ascii_tokens_get_no_bigrams(self) -> None:
+        assert tokenize("Payment gateway v2") == ["payment", "gateway", "v2"]
 
 
 class TestRank:
@@ -64,6 +70,21 @@ class TestRank:
 
     def test_empty_corpus_returns_nothing(self) -> None:
         assert rank("anything", []) == []
+
+    def test_korean_particle_query_matches_bare_noun(self) -> None:
+        docs = [
+            "로그 수집 파이프라인",
+            "결제 서비스 README",
+            "회원 관리 화면",
+        ]
+        ranked = rank("결제를 처리하는 레포", docs)
+        assert ranked[0].index == 1
+        assert rank("결제를", ["결제 모듈"])[0].index == 0
+
+    def test_english_ranking_unchanged_by_hangul_support(self) -> None:
+        docs = ["payments service stripe billing", "billing reports", "결제 서비스"]
+        ranked = rank("stripe billing", docs)
+        assert [r.index for r in ranked] == [0, 1]
 
     def test_repeated_query_terms_count_once(self) -> None:
         docs = ["alpha beta", "alpha"]

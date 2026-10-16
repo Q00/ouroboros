@@ -214,3 +214,21 @@ class TestScanStoresDocuments:
         entries = await store.get_index_entries()
         assert "terraform" in entries[str(repo.resolve())][0]
         assert "/not/on/this/machine" not in entries
+
+
+class TestKoreanQuery:
+    async def test_particle_query_ranks_readme_noun_first(self, tmp_path: Path, store) -> None:
+        root = tmp_path / "root"
+        for name, readme in (
+            ("alpha", "로그 수집 파이프라인"),
+            ("bravo", "결제 서비스"),
+            ("charlie", "회원 관리 화면"),
+        ):
+            _init_repo(root / name)
+            (root / name / "README.md").write_text(readme)
+        await scan_and_register(store, root=root)
+
+        repos = list(await store.list())
+        docs = {path: doc for path, (doc, _fp) in (await store.get_index_entries()).items()}
+        ranked = rank_repos("결제를 처리하는 레포", repos, docs)
+        assert ranked[0][0].name == "bravo"

@@ -18,6 +18,7 @@ DEFAULT_K1 = 1.5
 DEFAULT_B = 0.75
 
 _WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
+_HANGUL_RE = re.compile(r"[\uac00-\ud7a3]+")
 _CAMEL_RE = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+|[^\W\d_a-zA-Z]+")
 
 _STOPWORDS: frozenset[str] = frozenset(
@@ -54,6 +55,10 @@ def tokenize(text: str) -> list[str]:
     boundaries (``BrownfieldHandler`` yields ``brownfield``, ``handler`` and
     ``brownfieldhandler``). Single-character ASCII terms and a short English
     stopword list are dropped. Non-Latin scripts are kept as whole words.
+
+    Hangul words longer than two syllables also yield their syllable bigrams,
+    so a query word carrying a particle (``결제를``) still matches the bare
+    noun (``결제``) without a morphological analyzer.
     """
     terms: list[str] = []
     for word in _WORD_RE.findall(text):
@@ -64,7 +69,12 @@ def tokenize(text: str) -> list[str]:
             terms.append(lowered)
         else:
             terms.append(lowered)
-    return [t for t in terms if t not in _STOPWORDS and not (len(t) == 1 and t.isascii())]
+    with_bigrams: list[str] = []
+    for term in terms:
+        with_bigrams.append(term)
+        if len(term) > 2 and _HANGUL_RE.fullmatch(term):
+            with_bigrams.extend(term[i : i + 2] for i in range(len(term) - 1))
+    return [t for t in with_bigrams if t not in _STOPWORDS and not (len(t) == 1 and t.isascii())]
 
 
 @dataclass(frozen=True, slots=True)
