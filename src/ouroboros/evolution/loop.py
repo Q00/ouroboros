@@ -1971,7 +1971,14 @@ class EvolutionaryLoop:
         )
 
         await record_generation_drift(
-            self.event_store, lineage.lineage_id, generation_number, current_seed, execution_output
+            self.event_store,
+            lineage.lineage_id,
+            generation_number,
+            current_seed,
+            execution_output,
+            goal_alignment=(
+                evaluation_summary.goal_alignment if evaluation_summary is not None else None
+            ),
         )
 
         # Check for graceful shutdown after evaluating

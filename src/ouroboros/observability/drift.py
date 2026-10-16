@@ -36,6 +36,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 from ouroboros.core.seed import Seed
 from ouroboros.events.base import BaseEvent
@@ -256,6 +257,7 @@ class DriftMeasurement:
         constraint_violations: list[str],
         current_concepts: list[str],
         seed: Seed,
+        goal_alignment: float | None = None,
     ) -> DriftMetrics:
         """Measure all drift components.
 
@@ -264,11 +266,20 @@ class DriftMeasurement:
             constraint_violations: List of constraint violations
             current_concepts: Current ontology concepts
             seed: Original seed specification
+            goal_alignment: Existing semantic alignment with the goal, if available.
+                Valid values replace lexical goal drift with ``1 - goal_alignment``.
 
         Returns:
             DriftMetrics with all components
         """
-        goal_drift = calculate_goal_drift(current_output, seed)
+        if (
+            goal_alignment is not None
+            and math.isfinite(goal_alignment)
+            and 0.0 <= goal_alignment <= 1.0
+        ):
+            goal_drift = 1.0 - goal_alignment
+        else:
+            goal_drift = calculate_goal_drift(current_output, seed)
         constraint_drift = calculate_constraint_drift(constraint_violations, seed)
         ontology_drift = calculate_ontology_drift(current_concepts, seed)
 

@@ -17,6 +17,7 @@ async def record_generation_drift(
     generation_number: int,
     seed: Seed,
     execution_output: str | None,
+    goal_alignment: float | None = None,
 ) -> None:
     """Persist drift telemetry without making observation a generation gate."""
     if not execution_output:
@@ -27,6 +28,7 @@ async def record_generation_drift(
             constraint_violations=[],
             current_concepts=[],
             seed=seed,
+            goal_alignment=goal_alignment,
         )
         await event_store.append(
             DriftMeasuredEvent(

@@ -163,6 +163,7 @@ def evaluation_summary_from_pipeline_result(
         highest_stage_passed=max(1, result.highest_stage_completed),
         score=stage2.score if stage2 else None,
         drift_score=stage2.drift_score if stage2 else None,
+        goal_alignment=stage2.goal_alignment if stage2 else None,
         reward_hacking_risk=stage2.reward_hacking_risk if stage2 else None,
         failure_reason=result.failure_reason,
         feedback_metadata=tuple(feedback),
