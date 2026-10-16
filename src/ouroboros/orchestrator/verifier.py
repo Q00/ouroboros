@@ -98,6 +98,7 @@ _VALID_FAILURE_CLASSES: frozenset[str] = frozenset(
         "TRANSCRIPT_MISSING_INFRASTRUCTURE",
         "SCRIPT_ABSENT_FROM_ARTIFACT",
         "NO_CALL_EVIDENCE",
+        "CITED_CALL_FAILED",
     }
 )
 
@@ -307,7 +308,7 @@ def _default_retry_admission_for_failure_class(
         return RetryAdmission.REDISPATCH
     if failure_class == "BLOCKED":
         return RetryAdmission.BLOCK
-    if failure_class in {"EVIDENCE_MISSING", "EVIDENCE_FORM_MISMATCH"}:
+    if failure_class in {"EVIDENCE_MISSING", "EVIDENCE_FORM_MISMATCH", "CITED_CALL_FAILED"}:
         return RetryAdmission.RETRY
     return RetryAdmission.REDISPATCH
 

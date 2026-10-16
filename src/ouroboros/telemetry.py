@@ -422,6 +422,7 @@ _NO_EVIDENCE_REPLAY_REASONS = frozenset(
 _NO_EVIDENCE_SURFACES = frozenset({"cli_run", "mcp_execute", "evolve"})
 _NO_EVIDENCE_COVERAGES = frozenset({"full", "partial", "low"})
 _NO_EVIDENCE_CHECK_PACKAGE = frozenset({"on", "off"})
+_NO_EVIDENCE_CHECK_PACKAGE_MODES = frozenset({"record", "decide", "off"})
 _NO_EVIDENCE_PACKAGE_STATUSES = frozenset(
     {"admitted", "construction_failed", "rejected", "not_run"}
 )
@@ -440,6 +441,7 @@ _ACCEPTANCE_NO_EVIDENCE_KEYS = frozenset(
         "verification_coverage",
         "surface",
         "check_package",
+        "check_package_mode",
         "check_package_status",
         "runtime_backend",
         "app_version",
@@ -1236,6 +1238,7 @@ def capture_acceptance_no_evidence(
     check_package: str | None,
     check_package_status: str | None,
     runtime_backend: str | None,
+    check_package_mode: str | None = None,
 ) -> None:
     """Capture one run's criteria accepted without evidence from any verifier.
 
@@ -1266,6 +1269,7 @@ def capture_acceptance_no_evidence(
                 "verification_coverage": _fold(verification_coverage, _NO_EVIDENCE_COVERAGES),
                 "surface": _fold(surface, _NO_EVIDENCE_SURFACES),
                 "check_package": _fold(check_package, _NO_EVIDENCE_CHECK_PACKAGE),
+                "check_package_mode": _fold(check_package_mode, _NO_EVIDENCE_CHECK_PACKAGE_MODES),
                 "check_package_status": _fold(check_package_status, _NO_EVIDENCE_PACKAGE_STATUSES),
                 "runtime_backend": _canonical_runtime_backend(runtime_backend),
             },

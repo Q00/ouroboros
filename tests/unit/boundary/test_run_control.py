@@ -246,6 +246,33 @@ async def test_a_fresh_run_with_the_package_on_needs_an_execution_id(
         )
 
 
+@pytest.mark.parametrize("live", ["decide", "record", "off"])
+async def test_a_recording_run_resumes_recording_whatever_the_live_switch(
+    store: EventStore, repo: Path, monkeypatch: pytest.MonkeyPatch, live: str
+) -> None:
+    """A run that only recorded decides nothing on resume either; the legacy verifier decides."""
+    monkeypatch.setenv("OUROBOROS_CHECK_PACKAGE", live)
+    await BoundaryLedger(store).record_check_package_enabled(
+        "exec_record", RunContract(check_timeout_seconds=30, check_package="record")
+    )
+    run = await CheckPackageRun.load(store, execution_id="exec_record", resume=True)
+    assert run.resuming and run.enabled and run.records_only
+    assert run.pending_meta()["check_package_mode"] == "record"
+    runner = SimpleNamespace(acceptance_authority=None)
+    lines = await run.prepare(
+        runner,
+        _seed(),
+        event_store=store,
+        execution_id="exec_record",
+        worker_dir=repo,
+        runtime_backend="codex",
+        model=None,
+        resume=True,
+    )
+    assert runner.acceptance_authority is None and run.resumed is None
+    assert lines and "record mode" in lines[0]
+
+
 async def test_a_resume_without_an_execution_id_is_an_error(store: EventStore, repo: Path) -> None:
     run = CheckPackageRun(CheckPackageSettings(enabled=False))
     runner = SimpleNamespace(acceptance_authority=None)
@@ -266,7 +293,14 @@ async def test_a_resume_without_an_execution_id_is_an_error(store: EventStore, r
 @pytest.mark.parametrize(
     ("recorded", "receipt"),
     [
-        (True, {"check_package": "on", "check_package_status": "pending"}),
+        (
+            True,
+            {
+                "check_package": "on",
+                "check_package_status": "pending",
+                "check_package_mode": "decide",
+            },
+        ),
         (False, {"check_package": "off", "check_package_status": "not_run"}),
     ],
 )
@@ -386,6 +420,7 @@ async def test_outcome_meta_when_the_check_package_never_ran() -> None:
         "legacy_verdict": "reject",
         "reconciliation": "none",
         "legacy_failure_class": "other",
+        "check_package_mode": "off",
     }
     errored = await _meta(_run(False), "failed", verdict_available=False)
     assert errored["legacy_verdict"] == "none"

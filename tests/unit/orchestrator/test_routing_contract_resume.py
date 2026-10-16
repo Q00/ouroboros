@@ -1080,6 +1080,62 @@ def test_v7_sandbox_migration_rejects_unsealed_semantics(
         _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
 
+@pytest.mark.parametrize("mode", ["decide", "record"])
+def test_execution_semantics_seal_the_transcript_verifier_mode(mode: str) -> None:
+    runner = _runner()
+    runner._transcript_verifier = mode
+    assert runner._execution_semantics_contract()["transcript_verifier"] == mode
+
+
+@pytest.mark.parametrize(("sealed", "live"), [("record", "decide"), ("decide", "record")])
+def test_resume_keeps_the_run_own_transcript_verifier_mode(sealed: str, live: str) -> None:
+    """A resume takes the sealed mode, never the live config: acceptance does not change mid-run."""
+    original = _runner()
+    original._transcript_verifier = sealed
+    persisted = original._build_execution_contract(project_identity=original._project_identity())
+
+    resumed = _runner()
+    resumed._transcript_verifier = live
+    resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+    assert resumed._transcript_verifier == sealed
+    assert resumed._execution_contract["execution_semantics"]["transcript_verifier"] == sealed
+
+
+@pytest.mark.parametrize("live", ["decide", "record"])
+def test_v8_execution_semantics_migrate_to_the_deciding_verifier(live: str) -> None:
+    """A run sealed before the setting existed decided; it resumes deciding."""
+    original = _runner()
+    persisted = copy.deepcopy(
+        original._build_execution_contract(project_identity=original._project_identity())
+    )
+    semantics = persisted["execution_semantics"]
+    semantics["version"] = 8
+    del semantics["transcript_verifier"]
+    persisted["frugality_proof"]["execution_semantics_fingerprint"] = (
+        OrchestratorRunner._execution_semantics_fingerprint(semantics)
+    )
+
+    resumed = _runner()
+    resumed._transcript_verifier = live
+    resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+    migrated = resumed._execution_contract["execution_semantics"]
+    assert migrated["version"] == CURRENT_EXECUTION_SEMANTICS_VERSION
+    assert migrated["transcript_verifier"] == "decide"
+    assert resumed._transcript_verifier == "decide"
+
+
+def test_v8_transcript_verifier_migration_rejects_unsealed_semantics() -> None:
+    original = _runner()
+    persisted = copy.deepcopy(
+        original._build_execution_contract(project_identity=original._project_identity())
+    )
+    persisted["execution_semantics"]["version"] = 8
+    del persisted["execution_semantics"]["transcript_verifier"]
+
+    with pytest.raises(OrchestratorError, match="invalid pre-transcript-verifier contract"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
 def test_resume_rejects_changed_verify_shell_authority() -> None:
     original = _runner()
     original._verify_shell_identity = {

@@ -314,7 +314,9 @@ def _terminal_result(events: Sequence[dict[str, Any]]) -> dict[str, Any]:
             if init_seen or activity_seen:
                 raise ClaudeCliOutputError("system/init event is duplicated or out of order")
             init_seen = True
-        else:
+        elif not (
+            event_type == "system" and event.get("subtype") in ("hook_started", "hook_response")
+        ):
             activity_seen = True
 
     if not result_indexes:

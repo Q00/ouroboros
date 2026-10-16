@@ -166,7 +166,7 @@ class ArtifactCheckMode(StrEnum):
     """Do not run it."""
 
 
-BASE_REGRESSION_DEFAULT: Literal["decide", "record", "off"] = "decide"
+BASE_REGRESSION_DEFAULT: Literal["decide", "record", "off"] = "record"
 """The base regression check's mode when nothing configures it. The one place it lives."""
 WORKER_TEST_GATE_DEFAULT: Literal["decide", "record", "off"] = "record"
 """The worker-test gate's mode when nothing configures it. The one place it lives."""

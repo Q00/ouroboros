@@ -455,6 +455,7 @@ execution:
 | `exec_sandbox` | `bool` | `true` | Confine the commands the controller runs on its own authority (verifier replay) with the execution sandbox: writes (content, names and metadata) only beneath the workspace copy and a per-run temp directory, no non-loopback network, an allowlisted environment (`sandbox-exec` on macOS; Landlock plus read-only mounts and a seccomp metadata filter on Linux, where mode, timestamps and extended attributes inside the copy are read-only too only when no unprivileged mount namespace is available; a per-run AppContainer on Windows, where loopback reaches only the command's own processes, the `NUL` device is unavailable, batch files (`.cmd`, `.bat`) cannot run and are left indeterminate, and reads are limited to what is granted). On Windows the controller's interpreter and the live dependency trees a workspace copy links to are granted read and execute to one Ouroboros capability SID; that grant is persistent, is recorded in `~/.ouroboros/exec-sandbox/read-grants.jsonl`, and is removed with `python -c "from ouroboros.runtime.exec_sandbox import remove_persistent_read_grants as r; print(r())"` (run it while no Ouroboros command is running). Where no backend works, nothing is run and the outcome is indeterminate (`sandbox_unavailable`). **Unsafe when `false`:** those commands run unconfined, able to write anywhere the user can and to use the network. `OUROBOROS_EXEC_SANDBOX` overrides it; a project `.env` cannot. The effective value is sealed when a run starts, and resuming it with a different value is refused. |
 | `default_model` | `string \| null` | `null` | Optional Execute-stage model pin, applied with [`models.pin: true`](#models) (and always on `litellm`/`copilot`). `null`, an empty value, `"auto"`, `"default"`, or `"current"` means automatic selection: Claude runs the standard tier alias (`sonnet`) and other runtimes keep their own current/default model. `OUROBOROS_EXECUTION_MODEL` has highest precedence, and a present empty env var explicitly clears the saved pin for that process. |
 | `project_guidance` | `list[string]` | `[]` | Guidance IDs loaded from `<project-root>/.ouroboros/guidance/<id>/GUIDANCE.md` and appended to execution system prompts. This option is config-only and has no environment-variable override. |
+| `transcript_verifier` | `"decide"` \| `"record"` | `"record"` | How the per-criterion evidence verifier of the default (fat-harness) run path acts: the typed evidence check plus the transcript verifier. `record` runs it and writes what it would have decided to the criterion's `execution.ac.typed_evidence.observed` event (`transcript_verifier: record`, `would_have_rejected`), but a rejection fails no criterion and triggers no retry. `decide` lets a rejection fail the attempt and drive retries. A failing `verify_command` (see `run_verify_commands`) decides in both modes. The value is sealed when a run starts; a resumed run keeps it, and a run started before this setting existed resumes with `decide`. |
 | `default_policy` | `"ask"` \| `"efficient"` \| `"quality_first"` | `"ask"` | Persistent default execution policy for fresh runs. `ask` preserves the host's interactive efficiency prompt exactly. `efficient` resolves omitted arguments to `adaptive`/`observe` and `quality_first` to `quality_first`/`off` without asking. Explicit invocation arguments always win, resumed sessions keep their persisted immutable contract, and `strict` frugality assurance never derives from this setting. |
 
 ### Project Execution Guidance
@@ -485,7 +486,23 @@ rejects runs with enabled project guidance.
 
 The check package boundary of `ooo run` (CLI and `ouroboros_execute_seed`),
 on by default for every run it applies to (a fresh run; a resumed session
-keeps the boundary it started with): before the worker starts, a read-only
+keeps the boundary it started with), in record mode.
+
+Record mode (the default, `check_package: record`). The package is built,
+admitted, and run on the finished workspace exactly as described below, and
+what it would have decided is recorded: in the run's journal
+(`boundary.acceptance.reconciled`, under a run contract that says
+`check_package: record`), in the printed outcome (under a line saying it
+decided nothing), and in the MCP summary (`check_package_mode: record`). It
+decides nothing: no criterion or run outcome changes, the worker gets no
+repair turn and no entry-point request, the existing verifier keeps deciding
+as with the check package off, formal evaluation and evolve do not read the
+journaled decision as a decision, and a resumed run does not run it again.
+The artifact checks below decide nothing under a recording package either,
+whatever their own mode. The rest of this section describes `decide` mode
+(`check_package: decide`, or the older spelling `on`).
+
+Before the worker starts, a read-only
 model call writes executable checks for the acceptance criteria, and each
 check is admitted only if it behaves as declared on the current tree. After the worker stops, the package decides
 the criteria it covers, before the session's terminal status is recorded; the
@@ -499,7 +516,7 @@ that runs the project's test runner would read it).
 
 MCP results: `ouroboros_start_execute_seed` reports the closed-value summary
 (`check_package`, `check_package_status`, `package_verdict`, `legacy_verdict`,
-`reconciliation`, `verification_coverage`) in its job result, with or without
+`reconciliation`, `verification_coverage`, `check_package_mode`) in its job result, with or without
 `auto_evaluate`. The receipts of `ouroboros_start_execute_seed` and of a
 background `ouroboros_execute_seed` call carry `check_package` and
 `check_package_status: pending` (`off` and `not_run` when the check package is
@@ -594,7 +611,10 @@ uncovered is descriptive only.
 
 Every criterion the package cannot verify (no admitted check, or no binding)
 is decided by the existing verifier: its rejection fails the
-run (exit 1) and is shown as legacy-decided. Only a criterion neither verifier
+run (exit 1) and is shown as legacy-decided. That rejection exists only with
+`execution.transcript_verifier: decide`; in its default `record` mode the
+existing verifier records what it would have rejected and the criterion is
+accepted. Only a criterion neither verifier
 had evidence for (for example the existing verifier's transcript was
 unavailable) is accepted as unverified; the run then prints an
 insufficient-verification warning, as it does when half or more of the
@@ -644,21 +664,21 @@ not pytest) decides nothing.
 
 ```yaml
 boundary:
-  check_package: off              # on | off; unset = on
+  check_package: decide           # decide (or on) | record | off; unset = record
   constructor_timeout_seconds: 600
   check_timeout_seconds: 120
   max_construction_attempts: 2
-  base_regression: decide         # decide | record | off; unset = decide
+  base_regression: decide         # decide | record | off; unset = record
   worker_test_gate: record        # decide | record | off; unset = record
 ```
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `check_package` | `"on"` \| `"off"` \| unset | unset (on) | `off` turns the check package off for every run; unset or `on` keeps it on. `--check-package/--no-check-package` and `OUROBOROS_CHECK_PACKAGE` take precedence, in that order. A bare YAML `on`/`off` is accepted. If `config.yaml` cannot be read, the check package is off for runs that set neither the flag nor the variable, since the unreadable file may hold an `off`; with no `config.yaml` at all the default (on) applies. The setting does not depend on telemetry. |
+| `check_package` | `"decide"` \| `"on"` \| `"record"` \| `"off"` \| unset | unset (`record`) | `record` runs the check package and records what it would have decided without deciding anything (see above); `decide` lets it decide the criteria it covers; `on` is the older spelling of `decide` and keeps deciding; `off` turns it off for every run. `--check-package` (`decide`) / `--no-check-package` (`off`) and `OUROBOROS_CHECK_PACKAGE` take precedence, in that order. A bare YAML `on`/`off` is accepted. If `config.yaml` cannot be read, the check package is off for runs that set neither the flag nor the variable, since the unreadable file may hold an `off`; with no `config.yaml` at all the default (`record`) applies. The setting does not depend on telemetry. |
 | `constructor_timeout_seconds` | `int` (30..3600) | `600` | Wall-clock budget of one constructor call. |
 | `check_timeout_seconds` | `int` (5..1800) | `120` | Per-check timeout during admission and verification. |
 | `max_construction_attempts` | `int` (1..5) | `2` | Package versions tried before the worker starts; a version that is not admitted is superseded by the next. The one replacement call for criteria left without an admitted check adds a version outside this budget. |
-| `base_regression` | `"decide"` \| `"record"` \| `"off"` \| unset | unset (`decide`) | How the existing tests' check acts (see above). Each test run uses `check_timeout_seconds`. Recorded on the run when it starts; a resumed run does not run it. A bare YAML `on`/`off` reads as `decide`/`off`. |
+| `base_regression` | `"decide"` \| `"record"` \| `"off"` \| unset | unset (`record`) | How the existing tests' check acts (see above). `decide` takes effect only while the check package decides; under a recording check package it records. Each test run uses `check_timeout_seconds`. Recorded on the run when it starts; a resumed run does not run it. A bare YAML `on`/`off` reads as `decide`/`off`. |
 | `worker_test_gate` | `"decide"` \| `"record"` \| `"off"` \| unset | unset (`record`) | How the check of the test files the worker added acts, independently of `base_regression`. |
 
 Checks are model-written Python scripts. They run on throwaway copies of the
@@ -944,7 +964,7 @@ All environment variables have higher priority than the corresponding `config.ya
 | `OUROBOROS_OUROCODE_CLI_PATH` | `orchestrator.ourocode_cli_path` | Path to the ourocode CLI binary used by the LLM-only `ourocode` backend. |
 | `OUROBOROS_DSH_CLI_PATH` | `orchestrator.dsh_cli_path` | Path to the `dsh-acp-demo` binary used by the LLM-only `dsh` backend. |
 | `OUROBOROS_DSH_CONFIG_PATH` | `orchestrator.dsh_config_path` | Absolute path to the trusted Cordis composition the `dsh` backend loads. Required by that backend. |
-| `OUROBOROS_CHECK_PACKAGE` | `boundary.check_package` | `on` or `off` for the `ooo run` check package boundary (on by default); overrides config, and is overridden by `--check-package/--no-check-package`. Only the exact value `on` turns it on: any other set value (`off`, an alias such as `1`, `true`, `yes` or `ON`, empty or whitespace) means `off`. Not accepted from a project `.env`. |
+| `OUROBOROS_CHECK_PACKAGE` | `boundary.check_package` | `decide`, `on` (the same as `decide`), `record` or `off` for the `ooo run` check package boundary (`record` by default); overrides config, and is overridden by `--check-package/--no-check-package`. Only those exact values are read: any other set value (an alias such as `1`, `true`, `yes` or `ON`, empty or whitespace) means `off`. Not accepted from a project `.env`. |
 | `OUROBOROS_SKIP_VERSION_CHECK` | *(none)* | Controls the Claude Agent SDK per-call version compatibility check. Defaults to `"1"` (skip the check, saving ~0.3-0.8 s per LLM call). Set to `"0"` to re-enable the check for debugging version-mismatch issues. Maps to `CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK` internally. |
 
 ### LLM Flow

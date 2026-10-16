@@ -182,6 +182,12 @@ from ouroboros.orchestrator.evidence.ac_classification import (  # noqa: F401
     _profile_with_evidence_schema,
     _scoped_evidence_record_for_ac,
 )
+from ouroboros.orchestrator.evidence.acceptance_gate import (
+    fat_harness_acceptance_error,
+    split_leaf_rejection,
+    transcript_verifier_mode,
+    verifier_mode_fields,
+)
 from ouroboros.orchestrator.evidence.claims import (  # noqa: F401
     _bash_command_mutates_file_reference,
     _file_claim_matches_runtime_path,
@@ -2669,6 +2675,7 @@ class ParallelACExecutor:
         model_router: ModelRouter | None = None,
         route_economics: Any | None = None,
         run_verify_commands: bool = True,
+        transcript_verifier: Literal["decide", "record"] = "decide",
         exec_sandbox_enabled: bool | None = None,
         verify_command_timeout_seconds: int = 600,
         verify_shell_identity: Mapping[str, object] | None | _AutoVerifyShell = _AUTO_VERIFY_SHELL,
@@ -2706,6 +2713,7 @@ class ParallelACExecutor:
                 profile axis/min_unit instead of the legacy generic prompt.
             fat_harness_mode: Enforce profile typed evidence plus a verifier
                 PASS at atomic AC acceptance.
+            transcript_verifier: ``decide`` or ``record`` (``evidence/acceptance_gate.py``).
             atomic_verifier: Optional verifier callable for the separate
                 atomic evidence PASS gate. Defaults to the harness-owned
                 structural verifier.
@@ -2781,6 +2789,7 @@ class ParallelACExecutor:
         self._task_cwd = resolve_worker_cwd(task_cwd) if task_cwd else None
         self._execution_profile = execution_profile
         self._fat_harness_mode = fat_harness_mode
+        self._transcript_verifier = transcript_verifier_mode(transcript_verifier)
         self._run_verify_commands = run_verify_commands
         # The runner's sealed execution-sandbox policy for replay; None reads
         # the live switch (``runtime.exec_sandbox.sandbox_enabled``).
@@ -3069,6 +3078,7 @@ class ParallelACExecutor:
                 else None
             ),
             "fat_harness_mode": get_attribute(self, "_fat_harness_mode"),
+            "transcript_verifier": get_attribute(self, "_transcript_verifier"),
             "run_verify_commands": get_attribute(self, "_run_verify_commands"),
             "verify_command_timeout_seconds": get_attribute(
                 self,
@@ -5480,6 +5490,7 @@ class ParallelACExecutor:
                         reasons=(reason,),
                         failure_class=FailureClass.EVIDENCE_MISSING.value,
                     ),
+                    recorded_rejection=None,  # this verdict decides
                 )
             )
         return settle_package_results(originals, finalized)
@@ -7134,6 +7145,7 @@ class ParallelACExecutor:
             task_cwd=self._task_cwd,
             execution_profile=self._execution_profile,
             fat_harness_mode=self._fat_harness_mode,
+            transcript_verifier=self._transcript_verifier,
             atomic_verifier=self._authority_verifier,
             reasoning_effort=self._reasoning_effort,
             # Preserve the parent's sealed verification contract across the
@@ -9206,9 +9218,15 @@ Respond with either ATOMIC or the structured JSON object only.
                     execution_id=execution_id,
                     ac_index=ac_index,
                 )
-            legacy_rejection = None
-            if fat_harness_error is not None and getattr(self, "check_package_gate", None):
-                legacy_rejection, fat_harness_error = fat_harness_error, None
+            fat_harness_error, recorded_rejection, legacy_rejection = split_leaf_rejection(
+                fat_harness_error,
+                mode=self._transcript_verifier,
+                verify_gate_outcome=verify_gate_outcome,
+                gated=bool(getattr(self, "check_package_gate", None)),
+                session_id=session_id,
+                execution_id=execution_id,
+                ac_index=ac_index,
+            )
             result_final_message = final_message
             if fat_harness_error is not None:
                 success = False
@@ -9260,6 +9278,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 typed_error=typed_error,
                 verifier_verdict=verifier_verdict,
                 enforcement_error=fat_harness_error,
+                would_have_rejected=recorded_rejection,
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
@@ -9360,6 +9379,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 error=fat_harness_error,
                 route_candidate=observed_route_candidate,
                 legacy_rejection=legacy_rejection,
+                recorded_rejection=recorded_rejection,
             )
 
         except _BatchInterruptedForRecoverablePause:
@@ -10006,6 +10026,7 @@ Respond with either ATOMIC or the structured JSON object only.
             outcome=ACExecutionOutcome.FAILED,
             atomic_verifier_verdict=verdict,
             verify_gate_outcome=outcome,
+            recorded_rejection=None,  # this verdict decides
         )
 
     async def _emit_ac_attempt_judged(
@@ -12731,50 +12752,13 @@ Respond with either ATOMIC or the structured JSON object only.
             stall_retries_exhausted=False,
         )
 
-    def _fat_harness_acceptance_error(
-        self,
-        *,
-        runtime_success: bool,
-        typed_evidence: EvidenceRecord | None,
-        typed_validation: ValidationResult | None,
-        typed_error: str | None,
-        verifier_verdict: VerifierVerdict | None,
-        verify_gate_outcome: _VerifyGateOutcome | None = None,
-        verify_gate_replaces_all_evidence: bool = False,
-    ) -> str | None:
-        """Return the fat-harness rejection reason for an atomic leaf."""
-        if not self._fat_harness_mode or not runtime_success:
-            return None
-        if verify_gate_outcome is not None:
-            if verify_gate_outcome.environment_unverifiable:
-                return None
-            if not verify_gate_outcome.passed:
-                return f"Verify gate failed: {verify_gate_outcome.reason}"
-            if verify_gate_replaces_all_evidence:
-                return None
-        if self._execution_profile is None:
-            return "Fat-harness mode requires a loaded execution profile."
-        if typed_evidence is None:
-            return typed_error or "Fat-harness mode requires typed evidence."
-        if typed_validation is None:
-            return "Fat-harness mode could not validate typed evidence."
-        if typed_validation.ok:
-            if verifier_verdict is None:
-                return "Fat-harness mode requires verifier PASS before atomic acceptance."
-            if verifier_verdict.passed:
-                return None
-            detail = "; ".join(verifier_verdict.reasons) or "verifier rejected atomic evidence"
-            return f"Fat-harness verifier failed ({detail})."
-
-        reasons: list[str] = []
-        if typed_validation.missing_fields:
-            reasons.append("missing fields: " + ", ".join(typed_validation.missing_fields))
-        if typed_validation.rejected_by:
-            reasons.append("rejected by: " + ", ".join(typed_validation.rejected_by))
-        if typed_validation.blocker is not None:
-            reasons.append("blocker: " + typed_validation.blocker.summary())
-        detail = "; ".join(reasons) if reasons else "profile evidence validation failed"
-        return f"Fat-harness typed evidence validation failed ({detail})."
+    def _fat_harness_acceptance_error(self, **kwargs: Any) -> str | None:
+        """Return the fat-harness rejection reason for an atomic leaf (``acceptance_gate``)."""
+        return fat_harness_acceptance_error(
+            fat_harness_mode=self._fat_harness_mode,
+            execution_profile=self._execution_profile,
+            **kwargs,
+        )
 
     def _run_atomic_verifier_pass(
         self,
@@ -12892,6 +12876,7 @@ Respond with either ATOMIC or the structured JSON object only.
         typed_error: str | None,
         verifier_verdict: VerifierVerdict | None = None,
         enforcement_error: str | None = None,
+        would_have_rejected: str | None = None,
         has_success_contract: bool = False,
         has_expected_artifacts: bool = False,
         verify_gate_active: bool = False,
@@ -12917,10 +12902,14 @@ Respond with either ATOMIC or the structured JSON object only.
                 ).required
             ),
             "observe_only": not self._fat_harness_mode,
-            "enforced": self._fat_harness_mode
-            and not (
-                verifier_verdict is not None
-                and verifier_verdict.status is VerifierStatus.UNAVAILABLE
+            **verifier_mode_fields(
+                self._transcript_verifier,
+                enforced=self._fat_harness_mode
+                and not (
+                    verifier_verdict is not None
+                    and verifier_verdict.status is VerifierStatus.UNAVAILABLE
+                ),
+                would_have_rejected=would_have_rejected,
             ),
             "fat_harness_mode": self._fat_harness_mode,
             "enforcement_error": enforcement_error,

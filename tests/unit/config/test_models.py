@@ -373,6 +373,13 @@ class TestExecutionConfig:
         with pytest.raises(ValidationError):
             ExecutionConfig(default_policy="adaptive")  # type: ignore[arg-type]
 
+    def test_transcript_verifier_records_by_default_and_decides_when_set(self) -> None:
+        """The evidence verifier only records unless explicitly set to decide."""
+        assert ExecutionConfig().transcript_verifier == "record"
+        assert ExecutionConfig(transcript_verifier="decide").transcript_verifier == "decide"
+        with pytest.raises(ValidationError):
+            ExecutionConfig(transcript_verifier="warn")  # type: ignore[arg-type]
+
     def test_execution_config_migrates_legacy_preflight_to_bounce_only(self) -> None:
         """Stored preflight settings cannot re-enable pre-execution splitting."""
         config = ExecutionConfig(decomposition_mode="preflight")  # type: ignore[arg-type]

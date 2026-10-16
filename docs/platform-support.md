@@ -76,6 +76,8 @@ If you encounter Windows-specific issues, please [open an issue](https://github.
 
 The minimum required version is **Python >= 3.12** as specified in `pyproject.toml`. Source checkouts default to **stable Python 3.14** through `.python-version`; that default does not narrow the supported runtime range to 3.14-only.
 
+Ouroboros itself runs on Python 3.12 or newer. The projects it checks may use Python 3.5 or newer, since the check harness runs inside the project's own interpreter.
+
 ## Python Profile Matrix
 
 | Profile | Supported Python | Python 3.14 behavior |

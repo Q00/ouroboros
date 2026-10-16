@@ -221,13 +221,18 @@ async def load_resumed_boundary(
     """The boundary a resumed run's worker was bound to, or ``None`` when legacy decides.
 
     ``None`` means the recovery projection is off or no package (see the
-    module docstring). Raises ``BoundaryOrderError`` without an execution id.
+    module docstring), or the run's package only recorded (``record`` mode):
+    then the legacy verifier decides, as it did in the live run. Raises
+    ``BoundaryOrderError`` without an execution id.
     """
     if not execution_id:
         raise BoundaryOrderError("a resumed run needs its execution id to find its boundary")
     ledger = BoundaryLedger(event_store)
     versions = await ledger.run_versions(execution_id)
     projection = recovery_projection(execution_id, await ledger.events(execution_id), versions)
+    contract = getattr(projection, "contract", None)
+    if isinstance(contract, RunContract) and contract.check_package == "record":
+        return None
     if isinstance(projection, RecoveryNoPackage):
         parsed = parse_boundary_version(projection.boundary_id)
         assert parsed is not None

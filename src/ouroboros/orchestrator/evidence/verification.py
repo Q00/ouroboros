@@ -374,8 +374,11 @@ def _verify_cited_calls(
     yet report which lines it executed, so under the default policy
     (``require_changed_line``) a citation is no evidence until it does. A
     citation that does not qualify is ``NO_CALL_EVIDENCE`` (no evidence, an
-    unavailable verdict that keeps the attempt), never fabrication; this path
-    accepts only on a qualified call and never rejects.
+    unavailable verdict that keeps the attempt), never fabrication. A cited
+    call whose controller replay failed is ``CITED_CALL_FAILED``, a failing
+    verdict the worker retries: the controller ran the check and saw it fail.
+    This path accepts only on a qualified call and rejects only on a failed
+    replay.
     """
     transcript = tuple(
         message for message in support_messages if not is_harness_observation_message(message)
@@ -394,9 +397,11 @@ def _verify_cited_calls(
             for run in observation.command_runs:
                 if " ".join(run.command.split()) != wanted:
                     continue
-                failed = run.timed_out or run.mutated
+                # A replay that timed out or changed the workspace did not
+                # observe the check either way: it is unusable, not a failure.
+                unusable = run.timed_out or run.mutated
                 replays[call.number] = ReplayOutcome(
-                    returncode=(1 if failed and run.returncode == 0 else run.returncode)
+                    returncode=(None if unusable else run.returncode)
                 )
     verdict = decide_citations(
         cited,
@@ -409,6 +414,12 @@ def _verify_cited_calls(
     if verdict.decision is CitationDecision.ACCEPT:
         return VerifierVerdict(passed=True)
     detail = "; ".join(verdict.reasons)
+    if verdict.decision is CitationDecision.EXECUTED_FAILURE:
+        return VerifierVerdict(
+            passed=False,
+            reasons=(f"cited_call_failed: {detail}",),
+            failure_class=FailureClass.CITED_CALL_FAILED.value,
+        )
     return VerifierVerdict(
         passed=False,
         reasons=(f"no_call_evidence: {detail}",),

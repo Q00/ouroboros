@@ -309,8 +309,10 @@ ouroboros setup --non-interactive
 - For Codex CLI: sets `orchestrator.codex_cli_path` and `llm.backend: codex` in `~/.ouroboros/config.yaml`
 - For Codex CLI: installs managed Ouroboros rules into `~/.codex/rules/`
 - For Codex CLI: installs managed Ouroboros skills into `~/.codex/skills/`
+- For Codex release installs using `uvx`: pins the MCP package to the installed setup version (`ouroboros-ai[mcp]==<version>`). Source/dev installs keep serving their current Python environment.
 - For Codex CLI: registers or refreshes setup-managed stdio blocks on supported hosts and preserves user-managed URL/custom blocks by default. A legacy PATH-selected `ouroboros mcp serve` entry with the canonical Codex environment is migrated to the isolated managed launcher; custom executable paths and extra process controls remain untouched. Native Windows `auto` creates no MCP child, `stdio` is refused, and explicit `http` writes the loopback URL only after resolving a launchable MCP command; the operator owns that visible server process.
 - For Codex CLI: adds missing Ouroboros task profiles whose per-role reasoning effort is passed to each `codex exec` invocation; it retires only untouched legacy generated profile anchors and preserves user-created Codex profiles
+- For Codex CLI: reads `codex --help` as UTF-8 to determine the worker-profile format. If the probe fails or the format is unknown, setup reports failure and rolls back its managed changes instead of assuming a legacy profile. Check that the configured Codex executable's `--help` succeeds, then rerun setup.
 - For OpenCode: registers the Ouroboros MCP server in OpenCode's configuration
 - For OpenCode (plugin mode): installs the bridge plugin into `<opencode_config_dir>/plugins/ouroboros-bridge/`
 - For OpenCode: installs the runtime skill capability guide into global `AGENTS.md` in the active OpenCode config directory
@@ -473,7 +475,7 @@ ouroboros run [workflow] [OPTIONS] SEED_FILE
 | `--no-qa` | Skip post-execution QA evaluation |
 | `--auto-evaluate/--no-auto-evaluate` | After the run finishes (completed or failed), enqueue formal evaluation of the directory the run executed in (inside its task worktree) and wait for its result, as `ooo run` does. A paused or cancelled run is not evaluated. Default: `execution.auto_evaluate` in config (on) |
 | `--auto-evolve/--no-auto-evolve` | When formal evaluation is not approved, continue into the bounded Ralph job the evaluation chains and wait for its result. Default: `execution.auto_evolve` in config (on) |
-| `--check-package/--no-check-package` | Build executable checks from the acceptance criteria before the worker starts, admit them on the current tree, and let them decide the criteria they cover (the existing verifier stays advisory for those and decides the rest). On by default; `--no-check-package` opts out for this run. Default: `OUROBOROS_CHECK_PACKAGE` (only the exact value `on` turns it on; any other set value, such as `1`, `true` or `ON`, means off), then `boundary.check_package` in config, then on. The checks are model-written Python scripts: they run on throwaway copies of the project with the project's interpreter, a per-check timeout, and an allowlisted environment, confined by the execution sandbox (they can write only inside their copy and a scratch directory, and have no network); they can read files you can read. Where the sandbox is unavailable, a check is undecided and does not run. The same switch applies to `ooo run` from a plugin host, meaning the in-process `ouroboros_execute_seed` / `ouroboros_start_execute_seed` path; an execution dispatched to the OpenCode plugin's child session is not governed and reports `check_package: not_applied`. Only Claude Code and Codex CLI can construct checks; with another runtime the existing verifier decides the run. |
+| `--check-package/--no-check-package` | Build executable checks from the acceptance criteria before the worker starts, admit them on the current tree, and run them on the finished workspace. By default they only record what they would have decided (record mode): no criterion or run outcome changes and the worker gets no repair turn. `--check-package` lets them decide the criteria they cover for this run (the existing verifier stays advisory for those and decides the rest); `--no-check-package` turns them off for this run. Default: `OUROBOROS_CHECK_PACKAGE` (exactly `decide`, `on` (the same as `decide`), `record` or `off`; any other set value, such as `1`, `true` or `ON`, means off), then `boundary.check_package` in config, then `record`. The checks are model-written Python scripts: they run on throwaway copies of the project with the project's interpreter, a per-check timeout, and an allowlisted environment, confined by the execution sandbox (they can write only inside their copy and a scratch directory, and have no network); they can read files you can read. Where the sandbox is unavailable, a check is undecided and does not run. The same switch applies to `ooo run` from a plugin host, meaning the in-process `ouroboros_execute_seed` / `ouroboros_start_execute_seed` path; an execution dispatched to the OpenCode plugin's child session is not governed and reports `check_package: not_applied`. Only Claude Code and Codex CLI can construct checks; with another runtime the existing verifier decides the run. |
 | `-m, --model TEXT` | Model for every role in this run, the check package and the evaluation it continues into included: `auto` (latest of each role's tier), `frugal`, `standard`, `frontier`, or a model id. Tier names work on every backend; Claude aliases such as `opus` only on Claude backends. Default: `models.default` in config (`auto`) |
 | `--pin-models/--no-pin-models` | Run the per-role model ids saved in config for this run (research and reproducibility). Default: `models.pin` in config (off) |
 | `-d, --debug` | Show logs and agent thinking (verbose output) |
@@ -508,7 +510,11 @@ ouroboros run seed.yaml --no-auto-evolve
 # Run every role on the frontier tier
 ouroboros run seed.yaml --model frontier
 
-# Opt out of the check package for this run (or: OUROBOROS_CHECK_PACKAGE=off,
+# Let the check package decide for this run instead of only recording
+# (or: OUROBOROS_CHECK_PACKAGE=decide, or boundary.check_package: decide)
+ouroboros run seed.yaml --check-package
+
+# Turn the check package off for this run (or: OUROBOROS_CHECK_PACKAGE=off,
 # or boundary.check_package: off in ~/.ouroboros/config.yaml)
 ouroboros run seed.yaml --no-check-package
 
