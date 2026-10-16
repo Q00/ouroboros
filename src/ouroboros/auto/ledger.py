@@ -82,6 +82,14 @@ instead of inventing a merge.
 """
 
 
+# Key suffix of a ledger entry written from the requester's own answer (opt-in
+# ``ooo auto`` requester, ``auto/requester.py``). The rest of the key is the
+# facet the interview question targeted, so a later requester answer for the
+# same facet is a correction and supersedes the earlier one in ``add_entry``,
+# as it also supersedes auto's own draft under the bare facet key.
+REQUESTER_KEY_SUFFIX = ".requester"
+
+
 REQUIRED_SECTIONS = (
     "goal",
     "actors",
@@ -414,7 +422,11 @@ class SeedDraftLedger:
         instead of keeping the section permanently conflicting.
         """
         section = self.sections.setdefault(section_name, LedgerSection(section_name))
-        same_key_entries = [existing for existing in section.entries if existing.key == entry.key]
+        facet_keys = {entry.key}
+        if entry.key.endswith(REQUESTER_KEY_SUFFIX) and entry.status == LedgerStatus.CONFIRMED:
+            # The requester's answer also retires auto's own draft for the facet.
+            facet_keys.add(entry.key.removesuffix(REQUESTER_KEY_SUFFIX))
+        same_key_entries = [existing for existing in section.entries if existing.key in facet_keys]
         entry_value = _normalize_conflict_value(entry.value)
         matching_prior = [
             existing
@@ -423,7 +435,10 @@ class SeedDraftLedger:
         ]
         if (
             same_key_entries
-            and entry.source in {LedgerSource.USER_GOAL, LedgerSource.NON_GOAL}
+            and (
+                entry.source in {LedgerSource.USER_GOAL, LedgerSource.NON_GOAL}
+                or entry.key.endswith(REQUESTER_KEY_SUFFIX)
+            )
             and entry.status == LedgerStatus.CONFIRMED
         ):
             for existing in same_key_entries:

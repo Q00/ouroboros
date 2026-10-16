@@ -90,8 +90,55 @@ ouroboros auto "Build a local-first habit tracker CLI"
 | `--skip-run` | Stop after creating an A-grade Seed |
 | `--show-ledger` | Print assumptions and non-goals captured during auto convergence |
 | `--status` | Print the persisted state for `--resume <id>` without running |
+| `--requester-command CMD` | Ask the requester instead of assuming (off by default; see below). Overrides `OUROBOROS_AUTO_REQUESTER_COMMAND` |
+| `--requester-timeout SECONDS` | Seconds to wait for one requester answer before keeping auto's draft (default 300). Overrides `OUROBOROS_AUTO_REQUESTER_TIMEOUT_SECONDS` |
 
 Auto mode starts execution only after the generated Seed reaches A-grade. If a phase times out or hits a hard blocker, the command prints the auto session id and a resume command instead of hanging indefinitely.
+
+### Asking the requester instead of assuming
+
+Auto answers interview questions itself. When a draft answer has source
+`conservative_default` or `assumption`, auto is guessing. With
+`--requester-command CMD` (or `OUROBOROS_AUTO_REQUESTER_COMMAND`), auto asks the
+requester at exactly those questions and still answers every other question
+itself.
+
+For each such question, auto runs `CMD` once. The command is split like a
+shell command (`shlex.split`) but runs without a shell. Its stdin is one JSON
+object:
+
+```json
+{"question": "...", "goal": "...", "draft_answer": "...", "draft_source": "conservative_default", "round": 3}
+```
+
+Its stdout is either `{"answer": "..."}` or plain text. A nonempty answer
+replaces the draft. A timeout, a nonzero exit, an empty answer, or a JSON object
+without a string `answer` keeps the draft. The option wins over the variable,
+and `--requester-command ""` turns the requester off. The command is read again
+on every invocation and is not stored in the session, so pass it again with
+`--resume`.
+
+Where the answers are recorded:
+
+- The interview transcript gets `[from-auto][requester] <answer>` in place of the
+  draft (`rounds[].user_response` in
+  `~/.ouroboros/data/interview_<interview_session_id>.json`).
+- In the auto session file (`~/.ouroboros/data/<auto_session_id>.json`),
+  `auto_answer_log[].source` is `requester`. `requester_log` has one entry per
+  question sent to the requester: `round`, `question`, `draft_source`,
+  `draft_answer`, `outcome` (`answered`, `timeout`, `nonzero_exit`,
+  `empty_answer`, `invalid_output` or `launch_failed`), `used`, `answer`,
+  `detail` and `elapsed_seconds`. The key is absent when no question went to the
+  requester. Text fields in both logs are cut to 200 characters; the full
+  answer is in the interview transcript.
+- Each question also emits an `auto.interview.requester_asked` event (fields
+  `round`, `draft_source`, `outcome`, `used`, `detail`, `elapsed_seconds`,
+  `question`) to the event store.
+
+Time spent waiting for the requester counts against the interview phase
+timeout (`OUROBOROS_PHASE_TIMEOUT_INTERVIEW_SECONDS`, default 600 seconds).
+The requester is available from the CLI only; the MCP auto tools do not use it
+yet.
 
 ### Detached `auto` wait and retrieve
 

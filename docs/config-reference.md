@@ -965,6 +965,8 @@ All environment variables have higher priority than the corresponding `config.ya
 | `OUROBOROS_DSH_CLI_PATH` | `orchestrator.dsh_cli_path` | Path to the `dsh-acp-demo` binary used by the LLM-only `dsh` backend. |
 | `OUROBOROS_DSH_CONFIG_PATH` | `orchestrator.dsh_config_path` | Absolute path to the trusted Cordis composition the `dsh` backend loads. Required by that backend. |
 | `OUROBOROS_CHECK_PACKAGE` | `boundary.check_package` | `decide`, `on` (the same as `decide`), `record` or `off` for the `ooo run` check package boundary (`record` by default); overrides config, and is overridden by `--check-package/--no-check-package`. Only those exact values are read: any other set value (an alias such as `1`, `true`, `yes` or `ON`, empty or whitespace) means `off`. Not accepted from a project `.env`. |
+| `OUROBOROS_AUTO_REQUESTER_COMMAND` | *(none)* | Requester command for `ouroboros auto`: asked instead of assuming (see [`auto` requester](cli-reference.md#asking-the-requester-instead-of-assuming)). Overridden by `--requester-command`. Not accepted from a project `.env`. |
+| `OUROBOROS_AUTO_REQUESTER_TIMEOUT_SECONDS` | *(none)* | Seconds to wait for one requester answer (default `300`). Overridden by `--requester-timeout`. Not accepted from a project `.env`. |
 | `OUROBOROS_SKIP_VERSION_CHECK` | *(none)* | Controls the Claude Agent SDK per-call version compatibility check. Defaults to `"1"` (skip the check, saving ~0.3-0.8 s per LLM call). Set to `"0"` to re-enable the check for debugging version-mismatch issues. Maps to `CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK` internally. |
 
 ### LLM Flow

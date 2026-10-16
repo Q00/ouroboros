@@ -224,11 +224,11 @@ def test_packaged_skill_bodies_expose_tool_specific_context_keys() -> None:
             "current_output",
             "seed_content",
         ),
-        # Corpus guard: brownfield/setup declare ``indices`` only via inline
-        # ``Arguments: { ... }`` maps. If inline-mapping parsing regresses or the
-        # skill format drifts, this fails instead of silently dropping a mutating
+        # Corpus guard: brownfield/setup declare ``indices`` and ``text`` only via
+        # inline ``Arguments: { ... }`` maps. If inline-mapping parsing regresses
+        # or the skill format drifts, this fails instead of silently dropping a
         # tool input from the capability contract.
-        "ouroboros_brownfield": ("indices",),
+        "ouroboros_brownfield": ("indices", "text"),
     }
 
     assert {tool: context_keys_by_tool[tool] for tool in expected_subset} == expected_subset

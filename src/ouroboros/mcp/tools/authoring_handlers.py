@@ -18,6 +18,7 @@ import structlog
 import yaml
 
 from ouroboros.auto.intent_guard import IntentGuardReport, IntentGuardStatus, guard_interview_turn
+from ouroboros.auto.requester import REQUESTER_ANSWER_PREFIX
 from ouroboros.backends import (
     backend_supports_tool_envelope,
 )
@@ -60,7 +61,6 @@ from ouroboros.interview_adapters import (
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.host_context import resolve_request_subagent_dispatch
 from ouroboros.mcp.tools.advisory_dispatch import (
-    append_lateral_review_notice,
     append_question_advisory_dispatch,
     echo_carries_dispatch,
     strip_bridge_notice,
@@ -71,6 +71,7 @@ from ouroboros.mcp.tools.interview_advisory import (
 )
 from ouroboros.mcp.tools.question_advisory import (
     build_question_advisory_request,
+    required_advisory_personas,
 )
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
@@ -457,7 +458,8 @@ def _build_interview_lateral_review_tool_args(
     score: AmbiguityScore | None,
     lateral_review_meta: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build deterministic ``ouroboros_lateral_think`` args for interview review."""
+    """Build lateral-review args, skipping personas the advisory lanes already run."""
+    covered = required_advisory_personas("ouroboros_interview")
     latest = _latest_answered_round(state)
     milestone = lateral_review_meta["lateral_review_milestone"]
     from_milestone = lateral_review_meta["lateral_review_from_milestone"]
@@ -483,10 +485,10 @@ def _build_interview_lateral_review_tool_args(
         "problem_context": "\n".join(problem_lines),
         "current_approach": (
             "The main session is continuing a Socratic interview and is about to "
-            "route the next question. Review hidden assumptions, missing context, "
-            "and simplifications before asking the user or auto-answering from code."
+            "route the next question. Surface what the per-question advisory lanes "
+            "cannot: facts, evidence, or context the interview has not gathered yet."
         ),
-        "personas": list(_INTERVIEW_LATERAL_PERSONAS),
+        "personas": [p for p in _INTERVIEW_LATERAL_PERSONAS if p not in covered] or ["researcher"],
         "failed_attempts": [],
     }
 
@@ -581,7 +583,7 @@ def _with_lateral_review_dispatch(
         {
             "lateral_review_required": True,
             "lateral_review_tool": "ouroboros_lateral_think",
-            "lateral_review_personas": list(_INTERVIEW_LATERAL_PERSONAS),
+            "lateral_review_personas": list(tool_args["personas"]),
             "lateral_review_tool_args": tool_args,
             "lateral_review_orchestration": (
                 _build_interview_lateral_review_orchestration(
@@ -768,6 +770,8 @@ def _classify_interview_answer_source(answer: str) -> str:
     lowered = str(answer).lstrip().casefold()
     if lowered.startswith("[from-code]") or lowered.startswith("[from-repo]"):
         return "repo_fact"
+    if lowered.startswith(REQUESTER_ANSWER_PREFIX):  # auto relays the requester's own answer
+        return "requester"
     if lowered.startswith("[from-auto]") or lowered.startswith("[from-safe-default]"):
         return "generated"
     if lowered.startswith("[from-assumption]") or lowered.startswith("[from-inference]"):
@@ -3683,10 +3687,6 @@ class InterviewHandler:
             answer_meta.update(lateral_review_dispatch_meta)
 
         answer_response_text = f"Session {session_id}\n\n{display_question}"
-        answer_response_text = append_lateral_review_notice(
-            answer_response_text,
-            lateral_review_dispatch_meta,
-        )
         answer_response_text = append_question_advisory_dispatch(answer_response_text, answer_meta)
         # Q00/ouroboros#831 (diagnostics): response-shape event for
         # the answer branch.  Pure observability.

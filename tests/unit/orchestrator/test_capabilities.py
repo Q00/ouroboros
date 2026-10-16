@@ -159,7 +159,7 @@ def test_private_tool_spec_attributes_remain_importable_from_capabilities_root()
 _EXPECTED_OUROBOROS_REQUIRED_CONTEXT_KEYS = {
     "ouroboros_ac_tree_hud": ("session_id", "cursor"),
     "ouroboros_auto": (),
-    "ouroboros_brownfield": ("indices",),
+    "ouroboros_brownfield": ("indices", "text"),
     "ouroboros_cancel_execution": ("execution_id",),
     "ouroboros_cancel_job": ("job_id",),
     "ouroboros_checklist_verify": ("session_id", "seed_content", "artifact"),
