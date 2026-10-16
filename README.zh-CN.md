@@ -57,7 +57,7 @@ irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | i
 
 <p align="center"><sub>一行命令完成安装。然后在你的编码 agent 里运行一次 <code>ooo setup</code>，详见<a href="#快速开始">快速开始</a>。</sub></p>
 
-<p align="center"><sub><b>六次各自独立的运行，六个宿主。任务不同是故意的——共享的是引擎，不是提示词</b></sub></p>
+<p align="center"><sub><b>七次各自独立的运行，七个宿主。任务不同是故意的——共享的是引擎，不是提示词</b></sub></p>
 
 <table align="center">
 <tr>
@@ -69,8 +69,11 @@ irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | i
 <td align="center" width="50%"><img src="./docs/images/host-hermes.gif" width="440" alt="Screen recording of a Discord bot running the Ouroboros interview and reporting a final ambiguity of 0.15"><br><sub><b>Hermes (Discord)</b> — 卡丁车游戏任务跑在聊天机器人里，收在 <code>Final ambiguity: 0.15</code></sub></td>
 </tr>
 <tr>
-<td align="center" width="50%"><img src="./docs/images/host-kiro.gif" width="440" alt="Kiro CLI 运行 Ouroboros 访谈的十倍速屏幕录像"><br><sub><b>Kiro</b> — 在 Kiro CLI 中运行 Ouroboros 访谈流程，把模糊需求收敛为结构清晰、可验证的 Seed</sub></td>
 <td align="center" width="50%"><img src="./docs/images/host-dsh.gif" width="440" alt="Screen recording of DeepSeek Harness calling the Ouroboros interview tool and submitting advisory fan-out results"><br><sub><b>DeepSeek Harness</b> — 一个 OSS 趋势外联脚本，跑在 dsh 聊天里：<code>mcp__ouroboros__ouroboros_interview</code> 逐轮提问，轮次之间提交 fan-out 结果</sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-kiro.gif" width="440" alt="Kiro CLI 运行 Ouroboros 访谈的十倍速屏幕录像"><br><sub><b>Kiro</b> — 在 Kiro CLI 中运行 Ouroboros 访谈流程，把模糊需求收敛为结构清晰、可验证的 Seed</sub></td>
+</tr>
+<tr>
+<td align="center" colspan="2"><img src="./docs/images/host-antigravity.gif" width="440" alt="Antigravity 运行 Ouroboros 访谈并提交所选答案的屏幕录像"><br><sub><b>Antigravity</b> — YouTube 发布自动化访谈：询问自动化范围、运行顾问轨，并提交选中的答案</sub></td>
 </tr>
 </table>
 
