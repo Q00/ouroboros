@@ -622,7 +622,7 @@ async def _run_auto(
         run_starter=HandlerRunStarter(
             start_execute,
             cwd=state.cwd,
-            use_worktree=auto_workspace is None,
+            use_worktree=False,  # auto's worktree policy alone decides isolation
         ),
         store=store,
         repairer=SeedRepairer(max_repair_rounds=max_repair_rounds),

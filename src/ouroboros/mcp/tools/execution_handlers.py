@@ -27,6 +27,7 @@ from ouroboros.config.loader import (
     get_max_parallel_workers,
     resolve_execution_model,
 )
+from ouroboros.config.policy_notice import policy_notice
 from ouroboros.core.conductor import (
     ConductorDirective,
     validate_conductor_successor_authorization,
@@ -1092,8 +1093,8 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                         "Execution efficiency policy. adaptive may start decomposed ACs "
                         "on lower-cost tiers and escalate on recovery; quality_first keeps "
                         "children at the parent starting tier. When omitted on a fresh "
-                        "start, a configured execution.default_policy supplies it; "
-                        "otherwise defaults to adaptive."
+                        "start, execution.default_policy supplies it (default "
+                        "quality_first; adaptive only when the policy is ask)."
                     ),
                     required=False,
                     enum=("adaptive", "quality_first"),
@@ -2037,7 +2038,8 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     f"Status: {status_label}\n"
                     f"Runtime Backend: {effective_runtime_backend}\n"
                     f"LLM Backend: {resolved_llm_backend}\n"
-                    f"Efficiency Mode: {execution_preferences.efficiency_mode.value}\n"
+                    f"Efficiency Mode: {execution_preferences.efficiency_mode.value}"
+                    f"{policy_notice(arguments)}\n"
                     "Frugality Assurance: "
                     f"{execution_preferences.frugality_assurance.value}\n"
                 )
@@ -2830,7 +2832,7 @@ class StartExecuteSeedHandler:
             f"Execution ID: {snapshot.links.execution_id or 'pending'}\n\n"
             f"Runtime Backend: {runtime_backend}\n"
             f"LLM Backend: {llm_backend}\n"
-            f"Efficiency Mode: {execution_preferences.efficiency_mode.value}\n"
+            f"Efficiency Mode: {execution_preferences.efficiency_mode.value}{policy_notice(arguments)}\n"
             "Frugality Assurance: "
             f"{execution_preferences.frugality_assurance.value}\n"
             f"{dashboard_line}\n"

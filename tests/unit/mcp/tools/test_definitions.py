@@ -2247,7 +2247,7 @@ class TestEntryToolRoutingContracts:
         assert result.value.meta["execution_id"] == "exec_resume_preferences"
         assert result.value.meta["efficiency_mode"] == "quality_first"
         assert result.value.meta["frugality_assurance"] == "off"
-        assert "Efficiency Mode: quality_first" in result.value.text_content
+        assert "Efficiency Mode: quality_first\n" in result.value.text_content
         assert "Frugality Assurance: off" in result.value.text_content
 
     async def test_start_execute_seed_plugin_marks_delegation_unverified(

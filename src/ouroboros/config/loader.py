@@ -1039,8 +1039,9 @@ def get_auto_evolve_enabled() -> bool:
 def default_execution_efficiency_mode() -> str | None:
     """Map ``execution.default_policy`` to a fresh-start efficiency mode.
 
-    ``None`` — for ``ask`` or an unreadable config — preserves the
-    interactive-prompt contract exactly (#1733). ``efficient`` and
+    ``None`` for an explicit ``ask`` keeps the interactive prompt (#1733); a missing or
+    unreadable config takes the shipped default, ``quality_first``, so a fresh start never
+    stalls on a policy question before anything is configured. ``efficient`` and
     ``quality_first`` return the efficiency mode whose documented coupling
     supplies the paired frugality default (adaptive/observe and
     quality_first/off); strict assurance never derives from here. Explicit
@@ -1049,8 +1050,8 @@ def default_execution_efficiency_mode() -> str | None:
     """
     try:
         policy = load_config().execution.default_policy
-    except ConfigError:
-        return None
+    except (ConfigError, OSError):
+        return "quality_first"
     if policy == "efficient":
         return "adaptive"
     if policy == "quality_first":

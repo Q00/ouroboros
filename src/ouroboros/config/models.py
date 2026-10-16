@@ -290,12 +290,13 @@ class ExecutionConfig(BaseModel, frozen=True):
             Seed (``run_verify_commands``) decides in both modes. Sealed in a
             run's execution semantics, so a resume uses the run's own mode.
         default_policy: Persistent default execution policy for FRESH runs
-            (#1733). ``ask`` (the default) preserves the host's interactive
-            prompt exactly; ``efficient`` resolves to adaptive/observe and
-            ``quality_first`` to quality_first/off without asking. Explicit
-            invocation arguments always win, resumed sessions keep their
-            persisted immutable contract, and strict frugality assurance
-            never derives from this setting.
+            (#1733). ``quality_first`` (the default) resolves to
+            quality_first/off without asking, so a request routed to
+            Ouroboros starts at once; ``efficient`` resolves to
+            adaptive/observe; ``ask`` opts back into the host's interactive
+            prompt. Explicit invocation arguments always win, resumed
+            sessions keep their persisted immutable contract, and strict
+            frugality assurance never derives from this setting.
     """
 
     max_iterations_per_ac: int = Field(default=10, ge=1)
@@ -314,7 +315,7 @@ class ExecutionConfig(BaseModel, frozen=True):
     decomposition_mode: Literal["bounce_only", "off"] = "bounce_only"
     context_pack: bool = True
     project_guidance: tuple[str, ...] = ()
-    default_policy: Literal["ask", "efficient", "quality_first"] = "ask"
+    default_policy: Literal["ask", "efficient", "quality_first"] = "quality_first"
     transcript_verifier: Literal["decide", "record"] = "record"
 
     @field_validator("decomposition_mode", mode="before")
