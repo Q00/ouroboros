@@ -6,115 +6,26 @@ aliases: [kill, abort]
 
 # /ouroboros:cancel
 
-Cancel stuck or orphaned executions by session ID, cancel all running sessions, or interactively pick from active executions.
-
-## Usage
+Cancel stuck or orphaned executions through the CLI, which writes cancellation events straight to the event store.
 
 ```
-/ouroboros:cancel                          # Interactive: list active, pick one
-/ouroboros:cancel <execution_id>           # Cancel specific execution
-/ouroboros:cancel --all                    # Cancel all running executions
+/ouroboros:cancel                 # list active executions, ask which to cancel
+/ouroboros:cancel <session_id>    # cancel one execution
+/ouroboros:cancel --all           # cancel every running or paused execution
 ```
-
-**Trigger keywords:** "cancel execution", "kill session", "stop running", "abort execution"
-
-## How It Works
-
-This skill interacts **directly with the event store** (not via MCP tool) to emit cancellation events. It uses the CLI command under the hood.
-
-Three modes:
-
-1. **Bare (no args)**: Lists all active (running/paused) executions, asks you which one to cancel, then cancels it
-2. **Explicit (`execution_id`)**: Cancels the specified execution immediately
-3. **`--all` flag**: Cancels every running or paused execution at once
 
 ## Instructions
 
-When the user invokes this skill:
+Run the command for the user's request with the active runtime's `run_shell` capability:
 
-1. Determine which mode to use:
-   - If the user provided an execution/session ID: **Explicit mode**
-   - If the user says "cancel all" or "cancel everything": **--all mode**
-   - If no ID given and not "all": **Bare mode** (interactive listing)
+- **No ID, not "all"**: run `ouroboros cancel execution --list`. It prints the active executions and exits without prompting (the command's own interactive prompt aborts when no terminal is attached). Show the list, ask which session to cancel with the active runtime's `ask_user` capability, then cancel that `session_id` as below. If the user declines, cancel nothing.
+- **ID given**: `ouroboros cancel execution <session_id>`
+- **"cancel all" / "cancel everything"**: `ouroboros cancel execution --all`
 
-2. Run the appropriate CLI command using Bash:
+Add `--reason "<text>"` to record why. Only `running` or `paused` sessions can be cancelled; completed, failed, or already cancelled ones are skipped with a warning.
 
-   **Bare mode** (list, then ask):
-   ```bash
-   ouroboros cancel execution --list
-   ```
-   This prints the active executions and exits without prompting (the
-   command's own interactive prompt aborts when no terminal is attached).
-   Show the list, ask the user which session to cancel with the active
-   runtime's `ask_user` capability, then run explicit mode with that
-   `session_id`. If the user declines, cancel nothing.
-
-   **Explicit mode** (specific execution):
-   ```bash
-   ouroboros cancel execution <execution_id>
-   ```
-
-   **Cancel all mode**:
-   ```bash
-   ouroboros cancel execution --all
-   ```
-
-   **With custom reason**:
-   ```bash
-   ouroboros cancel execution <execution_id> --reason "Stuck for 2 hours"
-   ```
-
-3. Present results to the user:
-   - Show which executions were cancelled
-   - If bare mode, show the list and the user's choice
-   - If no active executions, inform the user
-
-4. End with a next-step suggestion:
-   - After cancellation: `◆ Cancelled — use ooo status to verify, or ooo run to start fresh`
-   - No active sessions: `◆ No active executions — use ooo run to start a new one`
-
-## State Transitions
-
-Only sessions in `running` or `paused` status can be cancelled. Sessions that are already `completed`, `failed`, or `cancelled` are skipped with a warning.
-
-## Fallback (No Database)
-
-If the configured runtime EventStore does not exist:
-
-```
-No Ouroboros database found at the configured runtime path.
-Run an execution first with: /ouroboros:ouroboros-run
-```
-
-## Example
-
-```
-User: cancel that stuck execution
-
-> ouroboros cancel execution --list
-
-Active Executions
-┌───┬──────────────────┬──────────────┬─────────┬─────────┬──────────────┐
-│ # │ Session ID       │ Execution ID │ Seed ID │ Status  │ Started      │
-├───┼──────────────────┼──────────────┼─────────┼─────────┼──────────────┤
-│ 1 │ sess-abc-123     │ exec-001     │ seed-42 │ running │ 2024-01-15   │
-│ 2 │ sess-def-456     │ exec-002     │ seed-99 │ paused  │ 2024-01-14   │
-└───┴──────────────────┴──────────────┴─────────┴─────────┴──────────────┘
-
-Which execution should I cancel? → sess-abc-123
-
-> ouroboros cancel execution sess-abc-123
-✓ Cancelled execution: sess-abc-123
-
-◆ Cancelled — use `ooo status` to verify, or `ooo run` to start fresh
-```
+Report what the command printed (`Cancelled execution: <id>`, `Cancellation requested for execution: <id>`, or `No active executions found.`) and relay any warning verbatim. Then suggest `ooo status` to verify or `ooo run` to start fresh.
 
 ## RFC #1392 State Breadcrumb Footer
 
-Your final response MUST end with exactly one breadcrumb footer line:
-
-```
-◆ <current state> → next: <recommended action>
-```
-
-Derive `<current state>` from live session state via `ouroboros_session_status` when that MCP projection is available; otherwise derive it from this skill's actual outcome. Never use a linear `Step N of M` footer because Ouroboros is an evolutionary loop. When the next action is genuinely a choice, list 2-3 honest options in the `next:` clause. The breadcrumb line must be the last line of the response.
+End the final response with exactly one line `◆ <current state> → next: <recommended action>`. Derive the state from live session state via `ouroboros_session_status` when available, otherwise from this skill's actual outcome. Never use a linear `Step N of M` footer; when the next step is a real choice, list 2-3 options.

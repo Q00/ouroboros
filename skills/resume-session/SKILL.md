@@ -5,134 +5,44 @@ description: "List in-flight Ouroboros sessions and show the commands needed to 
 
 # /ouroboros:resume-session
 
-Recover in-flight Ouroboros sessions after an unexpected MCP server disconnect.
-
-Claude Code reserves `/resume` for its built-in session picker. This skill
-intentionally uses `resume-session` so it does not shadow that native command.
-
-## Usage
+Recover in-flight Ouroboros sessions after an unexpected MCP server disconnect. The name avoids shadowing Claude Code's built-in `/resume`.
 
 ```
-ooo resume-session
-ooo resume-session --all
+ooo resume-session [--all]
 /ouroboros:resume-session
 ```
 
-**Trigger keywords:** "in-flight Ouroboros sessions", "re-attach", "mcp disconnected", "lost Ouroboros execution"
-
-## How It Works
-
-`ooo resume-session` reads the EventStore directly (no MCP server required) and lists
-every session that is still in a `running` or `paused` state. The command is
-strictly read-only — it never creates the data directory, never writes
-schema, and never appends events. Its job is to surface the identifiers you
-need to re-attach.
-
-- `ooo resume-session` shows the 20 most recent active sessions.
-- `ooo resume-session --all` shows every active session.
-
 ## Instructions
 
-When the user invokes this skill:
-
-1. Run the CLI command:
+1. Run with the active runtime's `run_shell` capability:
 
    ```
    ouroboros resume --list
    ```
 
-   This reads the configured runtime EventStore directly; the MCP server does
-   **not** need to be running. `--list` prints the table and exits without the
-   interactive prompt, which aborts when no terminal is attached. Add `--all`
-   to show every active session.
+   It reads the configured EventStore directly and read-only (no MCP server needed, nothing created or written) and lists `running` or `paused` sessions: the 20 most recent, or all with `--all`. `--list` prints the table and exits without the interactive prompt, which aborts when no terminal is attached. Exit code 2 means the EventStore exists but could not be read.
 
-2. If sessions are listed, show the table and ask the user which session to
-   work with (active runtime's `ask_user` capability). Each row carries the
-   `session_id`, `exec_id`, and seed id used by the re-attach paths below.
+2. If sessions are listed, show the table and ask which session to work with (active runtime's `ask_user` capability). Each row carries the `session_id`, `exec_id`, and Seed id used below.
 
-3. Pick the right re-attach path:
+3. Give the matching re-attach path:
 
-   - **Inspect persisted events** (read-only):
-
+   - Inspect persisted events (read-only, no MCP server):
      ```
      ouroboros status execution <exec_id> --events
      ```
-
-     Reads the configured EventStore without starting an MCP server.
-
-   - **Inspect interactively** (read-only monitor):
-
+   - Inspect interactively (read-only monitor; pick the session in the TUI):
      ```
      ouroboros tui monitor
      ```
-
-     Launches the TUI and lets you pick the session to inspect.
-
-   - **Resume execution** (requires the original seed file):
-
+   - Resume execution (needs the original Seed file; `--resume` takes the `session_id`):
      ```
      ouroboros run workflow --orchestrator --resume <session_id> <seed.yaml>
      ```
 
-## Exit codes
+   Afterwards: `ooo evaluate` once the execution completes, or `ooo cancel <session_id>` if it is stuck.
 
-| Code | Meaning |
-|------|---------|
-| `0`  | Success — sessions listed, or no sessions found |
-| `1`  | Invalid selection at the interactive prompt (not used with `--list`) |
-| `2`  | EventStore exists but could not be opened or read |
-
-## Fallback (No sessions found)
-
-If the command reports "No in-flight sessions found", the execution either
-completed, failed, was cancelled, or the EventStore has never been created.
-To browse historical sessions interactively, use the TUI monitor:
-
-```
-ouroboros tui monitor
-```
-
-## Example
-
-```
-User: ooo resume-session
-
-> ouroboros resume --list
-
-┌─────────────────────── In-Flight Sessions ───────────────────────┐
-│  #  Session ID          Execution ID        Status    Started    │
-│  1  sess-abc123         exec-xyz789         running   2026-04-15 │
-└───────────────────────────────────────────────────────────────────┘
-
-Which session should I re-attach? → sess-abc123
-
-╭─ Re-attach ────────────────────────────────────────────────────────────────╮
-│ Session ID:   sess-abc123                                                  │
-│ Execution ID: exec-xyz789                                                  │
-│                                                                            │
-│ Inspect (read-only interactive monitor):                                   │
-│     ouroboros tui monitor                                                  │
-│                                                                            │
-│ Resume execution (requires the original seed file):                        │
-│     ouroboros run workflow --orchestrator --resume sess-abc123 seed-001    │
-╰────────────────────────────────────────────────────────────────────────────╯
-```
-
-## Next Steps
-
-After you have the identifiers:
-
-- `ouroboros tui monitor` — launch the TUI and pick the session to inspect
-- `ouroboros run workflow --orchestrator --resume <session_id> <seed.yaml>` — resume execution
-- `ooo evaluate` — evaluate results once the execution completes
-- `ooo cancel <session_id>` — cancel if the session is stuck
+If it reports "No in-flight sessions found", the execution completed, failed, or was cancelled, or the EventStore was never created; `ouroboros tui monitor` browses past sessions.
 
 ## RFC #1392 State Breadcrumb Footer
 
-Your final response MUST end with exactly one breadcrumb footer line:
-
-```
-◆ <current state> → next: <recommended action>
-```
-
-Derive `<current state>` from live session state via `ouroboros_session_status` when that MCP projection is available; otherwise derive it from this skill's actual outcome. Never use a linear `Step N of M` footer because Ouroboros is an evolutionary loop. When the next action is genuinely a choice, list 2-3 honest options in the `next:` clause. The breadcrumb line must be the last line of the response.
+End the final response with exactly one line `◆ <current state> → next: <recommended action>`. Derive the state from live session state via `ouroboros_session_status` when available, otherwise from this skill's actual outcome. Never use a linear `Step N of M` footer; when the next step is a real choice, list 2-3 options.
