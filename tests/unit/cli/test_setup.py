@@ -3509,7 +3509,8 @@ class TestCodexSetup:
             *,
             _seen: frozenset[Path] = frozenset(),
         ) -> setup_cmd._PathSnapshot:
-            if path.name == "auto" and path.is_dir() and not path.is_relative_to(tmp_path):
+            # The new generation is snapshotted from the staged tree.
+            if path.name.startswith(".ouroboros-auto.") and path.name.endswith(".tmp"):
                 raise OSError("synthetic packaged skill snapshot failure")
             return original_snapshot(path, _seen=_seen)
 
