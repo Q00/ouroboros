@@ -58,7 +58,7 @@ If the scan finds nothing, say "No git repositories or worktrees found." and sto
 
 ### Step 2: Default selection
 
-**Do NOT use `AskUserQuestion` for this selection** (or any `ask_user` dialog): text between tool calls may not render, and dialog previews truncate long lists. Instead, **end the turn with the repo grid as the final message** and collect the selection as a plain chat reply. Directly below the grid, append:
+**Do NOT use the active runtime's `ask_user` dialog for this selection**: text between tool calls may not render, and dialog previews truncate long lists. Instead, **end the turn with the repo grid as the final message** and collect the selection as a plain chat reply. Directly below the grid, append:
 
 - With defaults: `Current defaults: <names> (numbers <numbers>)`, then "Reply with repo numbers to change defaults (e.g. "6, 18, 19"), "keep" to keep the current defaults, or "none" to clear them."
 - Without defaults: `No defaults set.`, then "Reply with repo numbers to set defaults (e.g. "6, 18, 19"), or "none" to run interviews in greenfield mode."
