@@ -17,6 +17,7 @@ Usage (async, called once per working_dir before Stage 1):
 
 from __future__ import annotations
 
+import ast
 from collections.abc import Callable
 from dataclasses import dataclass
 import json
@@ -130,21 +131,24 @@ def has_mechanical_toml(working_dir: Path) -> bool:
 
 async def ensure_mechanical_toml(
     working_dir: Path,
-    adapter: LLMAdapter,
+    adapter: LLMAdapter | None,
     *,
     model: str | None = None,
     backend: str | None = None,
     force: bool = False,
 ) -> bool:
-    """Write ``.ouroboros/mechanical.toml`` via one AI detect call.
+    """Write ``.ouroboros/mechanical.toml`` from a validated detector result.
 
     Idempotent: when the toml already exists and ``force`` is False, returns
-    True immediately. Otherwise makes one LLM call, validates the proposals,
-    and persists the file. Never raises — returns False on any failure.
+    True immediately. Manifest-backed projects use one LLM call. Projects
+    without manifests may use the narrow standard-library unittest fallback
+    when a real ``TestCase`` suite is discoverable. Every command is validated
+    before persistence. Never raises — returns False on any failure.
 
     Args:
         working_dir: Project root to detect against.
-        adapter: LLM adapter used for the single detect call.
+        adapter: LLM adapter used for manifest-backed detection. It may be
+            ``None`` when only deterministic manifest-free discovery is needed.
         model: Explicit model identifier. When ``None``, resolved via
             ``get_mechanical_detector_model(backend)`` so Codex / OpenCode
             backends receive the ``"default"`` sentinel instead of a Claude
@@ -155,19 +159,35 @@ async def ensure_mechanical_toml(
     Returns:
         True on success (toml exists after the call), False otherwise.
     """
-    model_is_explicit = model is not None
-    if model is None:
-        from ouroboros.config.loader import get_mechanical_detector_model
-
-        model = get_mechanical_detector_model(backend=backend)
     target = toml_path(working_dir)
     if target.is_file() and not force:
         return True
 
     manifests = _collect_manifests(working_dir)
     if not manifests:
-        log.info("detector.skipped", reason="no_manifests", working_dir=str(working_dir))
+        proposal = _manifest_free_unittest_proposal(working_dir)
+        if proposal is None:
+            log.info(
+                "detector.skipped", reason="no_manifests_or_unittest", working_dir=str(working_dir)
+            )
+            return False
+        validated = _validate_proposal(working_dir, proposal)
+        if validated.test is None:
+            log.info(
+                "detector.skipped", reason="unittest_command_invalid", working_dir=str(working_dir)
+            )
+            return False
+        return _persist_toml(target, validated)
+
+    if adapter is None:
+        log.info("detector.skipped", reason="no_adapter", working_dir=str(working_dir))
         return False
+
+    model_is_explicit = model is not None
+    if model is None:
+        from ouroboros.config.loader import get_mechanical_detector_model
+
+        model = get_mechanical_detector_model(backend=backend)
 
     proposal = await _ask_llm(
         adapter,
@@ -188,15 +208,71 @@ async def ensure_mechanical_toml(
         )
         return False
 
-    # Atomic replace: write the new toml to a sibling file first and
-    # ``os.replace`` it over the existing one. This keeps the prior
-    # known-good file intact if rendering or writing fails on any
-    # transient error — ``ouroboros detect --force`` never destroys the
-    # last working config before a replacement is ready.
+    return _persist_toml(target, validated)
+
+
+def _manifest_free_unittest_proposal(working_dir: Path) -> dict[str, str] | None:
+    """Return the safe Stage 1 command for a discoverable stdlib test suite.
+
+    This deliberately supports the conventional top-level ``tests/test*.py``
+    layout only. A filename alone is not enough: unittest exits successfully
+    when discovery finds zero tests, so the source is parsed to confirm at
+    least one test method on a ``unittest.TestCase`` class.
+    """
+    tests_dir = working_dir / "tests"
+    if tests_dir.is_symlink() or not tests_dir.is_dir():
+        return None
+    for path in sorted(tests_dir.glob("test*.py")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, SyntaxError):
+            continue
+        imported_testcase_names: set[str] = set()
+        unittest_aliases = {"unittest"}
+        local_testcase_classes: set[str] = set()
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "unittest":
+                        unittest_aliases.add(alias.asname or "unittest")
+            elif isinstance(node, ast.ImportFrom) and node.module == "unittest":
+                for alias in node.names:
+                    if alias.name in {"TestCase", "IsolatedAsyncioTestCase"}:
+                        imported_testcase_names.add(alias.asname or alias.name)
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+            known_testcase = any(
+                (isinstance(base, ast.Name) and base.id in imported_testcase_names)
+                or (
+                    isinstance(base, ast.Attribute)
+                    and base.attr in {"TestCase", "IsolatedAsyncioTestCase"}
+                    and isinstance(base.value, ast.Name)
+                    and base.value.id in unittest_aliases
+                )
+                or (isinstance(base, ast.Name) and base.id in local_testcase_classes)
+                for base in node.bases
+            )
+            if known_testcase:
+                if any(
+                    isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and member.name.startswith("test")
+                    for member in node.body
+                ):
+                    return {"test": "python3 -m unittest discover -s tests"}
+                local_testcase_classes.add(node.name)
+    return None
+
+
+def _persist_toml(target: Path, commands: DetectedCommands) -> bool:
+    """Atomically persist validated detector output without losing old config."""
+    # Write a sibling file first; replace only after the complete TOML is ready.
     temp = target.with_name(target.name + ".tmp")
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        temp.write_text(_render_toml(validated), encoding="utf-8")
+        temp.write_text(_render_toml(commands), encoding="utf-8")
         os.replace(temp, target)
     except OSError as exc:
         log.warning("detector.write_failed", path=str(target), error=str(exc))
@@ -210,7 +286,7 @@ async def ensure_mechanical_toml(
     log.info(
         "detector.toml_written",
         path=str(target),
-        commands={k: getattr(validated, k) for k in _COMMAND_KEYS},
+        commands={k: getattr(commands, k) for k in _COMMAND_KEYS},
     )
     return True
 
