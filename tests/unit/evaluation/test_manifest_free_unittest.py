@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from ouroboros.evaluation.detector import ensure_mechanical_toml, has_mechanical
 from ouroboros.evaluation.languages import build_mechanical_config
 from ouroboros.evaluation.mechanical import MechanicalVerifier
 from ouroboros.evaluation.models import CheckType, MechanicalDisposition
+from ouroboros.evaluation.verification_artifacts import build_verification_artifacts
 
 
 def _run(coro):
@@ -154,3 +156,32 @@ def test_existing_manifest_keeps_llm_detection_path_and_is_unchanged(tmp_path: P
     assert adapter.calls == 1
     assert manifest.read_text(encoding="utf-8") == original
     assert has_mechanical_toml(tmp_path) is False
+
+
+@pytest.mark.asyncio
+async def test_verification_artifacts_run_manifest_free_unittest_without_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The post-run Stage 1 consumer executes fallback tests when no provider exists."""
+    _write_unittest(tmp_path / "tests" / "test_sample.py")
+    monkeypatch.setattr(
+        "ouroboros.evaluation.verification_artifacts._ARTIFACT_BASE_DIR",
+        tmp_path / "artifacts",
+    )
+
+    def no_provider(**_kwargs):
+        raise RuntimeError("no configured provider")
+
+    monkeypatch.setattr("ouroboros.providers.factory.create_llm_adapter", no_provider)
+
+    artifacts = await build_verification_artifacts("manifest-free", "done", tmp_path)
+
+    manifest = json.loads(Path(artifacts.manifest_path).read_text(encoding="utf-8"))
+    assert len(manifest["runs"]) == 1
+    run = manifest["runs"][0]
+    assert run["check_type"] == "test"
+    assert run["command"] == ["python3", "-m", "unittest", "discover", "-s", "tests"]
+    assert run["passed"] is True
+    assert "Ran 1 test" in run["final_outcome"]
+    assert "OK" in run["final_outcome"]
