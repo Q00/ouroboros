@@ -1547,7 +1547,11 @@ class AutoStore:
     def path_for(self, auto_session_id: str) -> Path:
         """Return the JSON path for ``auto_session_id``."""
         safe = auto_session_id.strip()
-        if not safe.startswith("auto_") or "/" in safe or ".." in safe:
+        if (
+            not (safe.startswith("auto_") or safe.startswith("interview_"))
+            or "/" in safe
+            or ".." in safe
+        ):
             msg = f"Invalid auto session id: {auto_session_id}"
             raise ValueError(msg)
         return self.root / f"{safe}.json"
