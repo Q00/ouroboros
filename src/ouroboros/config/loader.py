@@ -1782,7 +1782,7 @@ def get_llm_backend_for_stage(
     overrides remain honored for un-mapped stages.
     """
     if explicit_backend:
-        return explicit_backend
+        return _guard_llm_completion_backend(explicit_backend)
 
     parsed_stage = stage if isinstance(stage, Stage) else parse_stage(stage)
     try:
@@ -1856,7 +1856,7 @@ def get_llm_backend_for_role(
     ``llm.backend`` default).
     """
     if explicit_backend:
-        return explicit_backend
+        return _guard_llm_completion_backend(explicit_backend)
 
     try:
         config = load_config()
