@@ -255,21 +255,29 @@ ouroboros_cli() {
   fi
 }
 ouroboros_cli config show orchestrator
+ouroboros_cli config show llm
 ```
 
-- If it shows `runtime_backend` as `claude` or `claude_mcp`, the runtime is
-  already configured: skip to Step 2.
-- If it shows another `runtime_backend` (for example `codex`), ask the user
+The welcome gate is ready only when `orchestrator.runtime_backend` is `claude`
+or `claude_mcp` AND `llm.backend` is `claude`. A missing file or section
+counts as not set.
+
+- Both conditions hold: already configured. Skip to Step 2.
+- `runtime_backend` is `claude_mcp` but `llm.backend` is not `claude`: run
+  `ouroboros_cli setup --runtime claude-cli --non-interactive` (keeps the CLI
+  transport).
+- `runtime_backend` is another runtime (for example `codex`): ask the user
   whether to switch the default runtime to Claude. If they decline, keep the
   existing configuration and skip to Step 2.
-- Otherwise (no config file or no `orchestrator` section), or after the user
-  agrees to switch, run:
+- Otherwise (`runtime_backend` is `claude` with another `llm.backend`, no
+  config, no `orchestrator` section), or after the user agrees to switch, run:
 
 ```bash
 ouroboros_cli setup --runtime claude --non-interactive
 ```
 
-This sets `orchestrator.runtime_backend: claude` and `llm.backend: claude`.
+Both setup commands set `llm.backend: claude`; `--runtime claude` sets
+`orchestrator.runtime_backend: claude` and `--runtime claude-cli` sets `claude_mcp`.
 If it fails, show the error and continue the wizard; Step 4 reports the
 runtime as not configured.
 
@@ -415,7 +423,8 @@ Check agents are available:
 ls src/ouroboros/agents/*.md | wc -l  # Should show 20+ bundled agents
 ```
 
-Confirm with `ouroboros_cli config show orchestrator` (Step 1.5) that the saved
+Confirm with `ouroboros_cli config show orchestrator` and `ouroboros_cli config show llm`
+(Step 1.5) that the saved
 Ouroboros config selects the default Claude Agent SDK runtime on MCP 1.x
 while `~/.claude/mcp.json` was not mutated by this setup. The
 dependency-free Claude CLI worker remains a distinct, explicit `[claude-cli]`
