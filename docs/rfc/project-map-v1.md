@@ -73,7 +73,10 @@ Identity is attribution metadata, so this never aborts
 execution, and it can only split attribution, never join unrelated work. The
 managed resolver still requires the grammar, because generated-worktree
 ownership needs Git's worktree population, and raises a typed, non-retryable
-configuration error. An unrepresentable version raises that error on every
+configuration error. Provisioning a run's managed task worktree checks the
+same version first (`require_managed_identity_git`) and refuses before the
+worktree, branch or lock exists, so the error never arrives at session start.
+An unrepresentable version raises that error on every
 resolver; spawn failures and timeouts remain retryable unavailability.
 
 The process environment removes caller-supplied `GIT_*` overrides and gives Git
