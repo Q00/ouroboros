@@ -31,7 +31,13 @@ from typing import TYPE_CHECKING, Literal, Protocol
 import structlog
 
 from ouroboros.auto.answerer import AutoAnswer, AutoAnswerSource
-from ouroboros.auto.ledger import DecisionProvenance, LedgerEntry, LedgerSource, LedgerStatus
+from ouroboros.auto.ledger import (
+    REQUESTER_KEY_SUFFIX,
+    DecisionProvenance,
+    LedgerEntry,
+    LedgerSource,
+    LedgerStatus,
+)
 
 if TYPE_CHECKING:
     from ouroboros.auto.interview_driver import AutoInterviewDriver, InterviewTurn
@@ -356,15 +362,17 @@ def requester_answer(draft: AutoAnswer, text: str, round_number: int) -> AutoAns
     """Replace ``draft`` with the requester's answer, keeping its sections.
 
     Each ledger section the draft would have filled gets the requester's text
-    as a confirmed user decision. The key is unique per round so a later
-    requester answer for the same facet never ties with an earlier one
-    (a same-key, same-source tie would mark the section CONFLICTING).
+    as a confirmed user decision, keyed ``<draft key>`` + ``REQUESTER_KEY_SUFFIX``.
+    The draft key names the facet the question targeted, so a later requester
+    answer for the same facet supersedes the earlier one in
+    ``SeedDraftLedger.add_entry`` (the earlier entry becomes WEAK) instead of
+    tying with it as CONFLICTING. The transcript keeps every answer in order.
     """
     updates = [
         (
             section,
             LedgerEntry(
-                key=f"{entry.key}.requester.round_{round_number}",
+                key=f"{entry.key}{REQUESTER_KEY_SUFFIX}",
                 value=text,
                 source=LedgerSource.USER_PREFERENCE,
                 confidence=0.83,

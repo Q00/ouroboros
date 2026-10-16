@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from typer.testing import CliRunner
 
-from ouroboros.auto.answerer import AutoAnswer, AutoAnswerSource, AutoBlocker
+from ouroboros.auto.answerer import AutoAnswer, AutoAnswerer, AutoAnswerSource, AutoBlocker
 from ouroboros.auto.intent_guard import guard_auto_answer
 from ouroboros.auto.interview_driver import (
     AutoInterviewDriver,
@@ -26,12 +26,15 @@ from ouroboros.auto.interview_driver import (
     InterviewTurn,
 )
 from ouroboros.auto.ledger import (
+    REQUESTER_KEY_SUFFIX,
+    REQUIRED_SECTIONS,
     DecisionProvenance,
     LedgerEntry,
     LedgerSource,
     LedgerStatus,
     SeedDraftLedger,
 )
+from ouroboros.auto.ledger_seed import synthesize_seed_from_ledger
 from ouroboros.auto.pipeline import AutoPipelineResult
 from ouroboros.auto.requester import (
     DEFAULT_REQUESTER_TIMEOUT_SECONDS,
@@ -42,6 +45,7 @@ from ouroboros.auto.requester import (
     RequesterReply,
     ask_requester,
     build_requester,
+    requester_answer,
     resolve_requester_command,
     resolve_requester_timeout,
 )
@@ -283,7 +287,7 @@ async def test_requester_answer_replaces_draft_with_requester_provenance(
         entry
         for section in ledger.sections.values()
         for entry in section.entries
-        if entry.key.endswith(".requester.round_1")
+        if entry.key.endswith(REQUESTER_KEY_SUFFIX)
     ]
     assert requester_entries
     for entry in requester_entries:
@@ -571,3 +575,60 @@ def test_interview_handler_guard_treats_requester_prefix_as_human() -> None:
 
     assert status(generated_answer) is IntentGuardStatus.FAIL
     assert status(requester_answer) is IntentGuardStatus.WARN
+
+
+def test_later_requester_correction_supersedes_earlier_answer_for_same_facet() -> None:
+    """Round 1 "Write CSV", round 2 a correction on the same draft facet.
+
+    Only the latest requester answer stays active, the section stays confirmed
+    (no CONFLICTING tie), and ledger Seed synthesis reads one value.
+    """
+    goal = "Export the report"
+    ledger = SeedDraftLedger.from_goal(goal)
+    for section in REQUIRED_SECTIONS:
+        if section in {"goal", "constraints"}:
+            continue
+        ledger.add_entry(
+            section,
+            LedgerEntry(
+                key=f"{section}.fixture",
+                value=f"{section} fixture",
+                source=LedgerSource.USER_PREFERENCE,
+                confidence=0.9,
+                status=LedgerStatus.CONFIRMED,
+            ),
+        )
+    draft_entry = LedgerEntry(
+        key="constraints.behavior.output_format",
+        value="Use the existing output format.",
+        source=LedgerSource.CONSERVATIVE_DEFAULT,
+        confidence=0.8,
+        status=LedgerStatus.DEFAULTED,
+    )
+    draft = AutoAnswer(
+        text=draft_entry.value,
+        source=AutoAnswerSource.CONSERVATIVE_DEFAULT,
+        confidence=0.8,
+        ledger_updates=[("constraints", draft_entry)],
+    )
+    answerer = AutoAnswerer()
+    first = "Write CSV"
+    correction = "Correction: write JSON instead of CSV"
+    answerer.apply(requester_answer(draft, first, 1), ledger, question="Output format?")
+    answerer.apply(requester_answer(draft, correction, 2), ledger, question="Output format?")
+
+    entries = [
+        entry
+        for entry in ledger.sections["constraints"].entries
+        if entry.key == f"constraints.behavior.output_format{REQUESTER_KEY_SUFFIX}"
+    ]
+    assert [(entry.value, entry.status) for entry in entries] == [
+        (first, LedgerStatus.WEAK),
+        (correction, LedgerStatus.CONFIRMED),
+    ]
+    assert ledger.sections["constraints"].status() == LedgerStatus.CONFIRMED
+    assert ledger.is_seed_ready()
+
+    seed = synthesize_seed_from_ledger(ledger)
+    assert any("JSON instead of CSV" in item for item in seed.constraints)
+    assert all(item != "Write CSV" for item in seed.constraints)

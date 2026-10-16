@@ -82,6 +82,13 @@ instead of inventing a merge.
 """
 
 
+# Key suffix of a ledger entry written from the requester's own answer (opt-in
+# ``ooo auto`` requester, ``auto/requester.py``). The rest of the key is the
+# facet the interview question targeted, so a later requester answer for the
+# same facet is a correction and supersedes the earlier one in ``add_entry``.
+REQUESTER_KEY_SUFFIX = ".requester"
+
+
 REQUIRED_SECTIONS = (
     "goal",
     "actors",
@@ -423,7 +430,10 @@ class SeedDraftLedger:
         ]
         if (
             same_key_entries
-            and entry.source in {LedgerSource.USER_GOAL, LedgerSource.NON_GOAL}
+            and (
+                entry.source in {LedgerSource.USER_GOAL, LedgerSource.NON_GOAL}
+                or entry.key.endswith(REQUESTER_KEY_SUFFIX)
+            )
             and entry.status == LedgerStatus.CONFIRMED
         ):
             for existing in same_key_entries:
