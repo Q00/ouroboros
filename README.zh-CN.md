@@ -61,19 +61,19 @@ irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | i
 
 <table align="center">
 <tr>
-<td align="center" width="50%"><img src="./docs/images/ooo-interview.gif" width="440" alt="Terminal recording of the ouroboros CLI interview reporting an ambiguity score"><br><sub><b>终端 CLI</b> — 待办管理 CLI 任务，<code>ouroboros init start</code> 追问顺序与范围，然后报出模糊度分数</sub></td>
-<td align="center" width="50%"><img src="./docs/images/host-codex.gif" width="440" alt="Screen recording of the ChatGPT app calling Ouroboros as an integration"><br><sub><b>ChatGPT (Codex)</b> — 视频发布流水线任务，作为 integration 被调用：提问、顾问轨、模糊度台账都在同一屏</sub></td>
+<td align="center" width="50%"><img src="./docs/images/ooo-interview.gif" alt="Terminal recording of the ouroboros CLI interview reporting an ambiguity score"><br><sub><b>终端 CLI</b> — 待办管理 CLI 任务，<code>ouroboros init start</code> 追问顺序与范围，然后报出模糊度分数</sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-codex.gif" alt="Screen recording of the ChatGPT app calling Ouroboros as an integration"><br><sub><b>ChatGPT (Codex)</b> — 视频发布流水线任务，作为 integration 被调用：提问、顾问轨、模糊度台账都在同一屏</sub></td>
 </tr>
 <tr>
-<td align="center" width="50%"><img src="./docs/images/host-claude.gif" width="440" alt="Screen recording of Claude Code running six Ouroboros interview advisory lanes in parallel"><br><sub><b>Claude Code</b> — YouTube 自动化任务，六条顾问轨并行跑完，访谈才提交结果</sub></td>
-<td align="center" width="50%"><img src="./docs/images/host-hermes.gif" width="440" alt="Screen recording of a Discord bot running the Ouroboros interview and reporting a final ambiguity of 0.15"><br><sub><b>Hermes (Discord)</b> — 卡丁车游戏任务跑在聊天机器人里，收在 <code>Final ambiguity: 0.15</code></sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-claude.gif" alt="Screen recording of Claude Code running six Ouroboros interview advisory lanes in parallel"><br><sub><b>Claude Code</b> — YouTube 自动化任务，六条顾问轨并行跑完，访谈才提交结果</sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-hermes.gif" alt="Screen recording of a Discord bot running the Ouroboros interview and reporting a final ambiguity of 0.15"><br><sub><b>Hermes (Discord)</b> — 卡丁车游戏任务跑在聊天机器人里，收在 <code>Final ambiguity: 0.15</code></sub></td>
 </tr>
 <tr>
-<td align="center" width="50%"><img src="./docs/images/host-dsh.gif" width="440" alt="Screen recording of DeepSeek Harness calling the Ouroboros interview tool and submitting advisory fan-out results"><br><sub><b>DeepSeek Harness</b> — 一个 OSS 趋势外联脚本，跑在 dsh 聊天里：<code>mcp__ouroboros__ouroboros_interview</code> 逐轮提问，轮次之间提交 fan-out 结果</sub></td>
-<td align="center" width="50%"><img src="./docs/images/host-kiro.gif" width="440" alt="Kiro CLI 运行 Ouroboros 访谈的十倍速屏幕录像"><br><sub><b>Kiro</b> — 在 Kiro CLI 中运行 Ouroboros 访谈流程，把模糊需求收敛为结构清晰、可验证的 Seed</sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-dsh.gif" alt="Screen recording of DeepSeek Harness calling the Ouroboros interview tool and submitting advisory fan-out results"><br><sub><b>DeepSeek Harness</b> — 一个 OSS 趋势外联脚本，跑在 dsh 聊天里：<code>mcp__ouroboros__ouroboros_interview</code> 逐轮提问，轮次之间提交 fan-out 结果</sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-kiro.gif" alt="Kiro CLI 运行 Ouroboros 访谈的十倍速屏幕录像"><br><sub><b>Kiro</b> — 在 Kiro CLI 中运行 Ouroboros 访谈流程，把模糊需求收敛为结构清晰、可验证的 Seed</sub></td>
 </tr>
 <tr>
-<td align="center" colspan="2"><img src="./docs/images/host-antigravity.gif" width="440" alt="Antigravity 运行 Ouroboros 访谈并提交所选答案的屏幕录像"><br><sub><b>Antigravity</b> — YouTube 发布自动化访谈：询问自动化范围、运行顾问轨，并提交选中的答案</sub></td>
+<td align="center" colspan="2"><img src="./docs/images/host-antigravity.gif" alt="Antigravity 运行 Ouroboros 访谈并提交所选答案的屏幕录像"><br><sub><b>Antigravity</b> — YouTube 发布自动化访谈：询问自动化范围、运行顾问轨，并提交选中的答案</sub></td>
 </tr>
 </table>
 
