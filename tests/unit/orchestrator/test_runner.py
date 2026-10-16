@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import yaml
 
+from ouroboros.core import project_identity as project_identity_module
 from ouroboros.core.errors import ConfigError, PersistenceError
 from ouroboros.core.project_identity import resolve_project_identity
 from ouroboros.core.seed import (
@@ -3435,10 +3436,14 @@ class TestOrchestratorRunner:
             task_cwd=str(workspace),
         )
 
+        real_run_git_command = project_identity_module._run_git_command
+
         def old_git(*arguments: str) -> bytes:
             if arguments == ("--version",):
                 return b"git version 2.34.1\n"
-            raise AssertionError(f"old Git must not run topology queries: {arguments}")
+            if "worktree" in arguments or "--path-format=absolute" in arguments:
+                raise AssertionError(f"old Git must not run topology queries: {arguments}")
+            return real_run_git_command(*arguments)
 
         with patch("ouroboros.core.project_identity._run_git_command", side_effect=old_git):
             result = await runner.prepare_session(

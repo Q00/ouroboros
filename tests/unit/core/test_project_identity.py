@@ -688,13 +688,15 @@ def test_supported_git_version_grammar_is_explicit(output: bytes) -> None:
 
 
 def _git_reporting_version(version: bytes) -> AbstractContextManager[Any]:
-    """Fake ``git --version`` while failing any topology query outright."""
+    """Fake ``git --version``; on old Git, fail any worktree or path-format query."""
     real_run_git_command = project_identity._run_git_command
 
     def fake(*arguments: str) -> bytes:
         if arguments == ("--version",):
             return version
-        if version == b"git version 2.34.1\n":
+        if version == b"git version 2.34.1\n" and (
+            "worktree" in arguments or "--path-format=absolute" in arguments
+        ):
             raise AssertionError(f"old Git must not run topology queries: {arguments}")
         return real_run_git_command(*arguments)
 
@@ -778,6 +780,54 @@ def test_old_git_publication_always_escalates_to_full_resolution(tmp_path: Path)
     assert evidence.escalate is True
     assert project_identity.publication_evidence_is_stable(evidence, repo) is False
     assert revalidated == identity
+
+
+@pytest.mark.parametrize(
+    "marker",
+    ["gitdir: /missing-ouroboros-admin-dir\n", "not a gitfile\n"],
+    ids=["dangling-gitfile", "garbage-gitfile"],
+)
+def test_old_git_malformed_marker_cannot_publish_identity(tmp_path: Path, marker: str) -> None:
+    root = tmp_path / "broken"
+    workspace = root / "nested"
+    workspace.mkdir(parents=True)
+    (root / ".git").write_text(marker)
+
+    with (
+        _git_reporting_version(b"git version 2.34.1\n"),
+        pytest.raises(ProjectIdentityUnavailableError),
+    ):
+        resolve_project_identity(workspace)
+    with (
+        _git_reporting_version(b"git version 2.34.1\n"),
+        pytest.raises(ProjectIdentityUnavailableError),
+    ):
+        project_identity.resolve_project_identity_for_publication(workspace)
+
+
+def test_old_git_malformed_bare_shape_cannot_publish_identity(tmp_path: Path) -> None:
+    bare = tmp_path / "bare"
+    for name in ("objects", "refs"):
+        (bare / name).mkdir(parents=True)
+    (bare / "HEAD").write_text("garbage\n")
+    workspace = bare / "objects"
+
+    with (
+        _git_reporting_version(b"git version 2.34.1\n"),
+        pytest.raises(ProjectIdentityUnavailableError),
+    ):
+        resolve_project_identity(workspace)
+
+
+def test_old_git_valid_bare_repository_degrades_to_effective_cwd(tmp_path: Path) -> None:
+    bare = tmp_path / "bare.git"
+    _git("init", "-q", "--bare", str(bare))
+
+    with _git_reporting_version(b"git version 2.34.1\n"):
+        identity = resolve_project_identity(bare)
+
+    assert identity.project_root == str(bare.resolve())
+    assert identity.degraded_reason == project_identity.DEGRADED_REASON_GIT_VERSION
 
 
 def test_old_git_managed_ownership_still_requires_topology_grammar(tmp_path: Path) -> None:

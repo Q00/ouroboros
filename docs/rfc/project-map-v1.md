@@ -66,7 +66,10 @@ identity (`workspace_path="."`) that a non-Git directory already receives and
 marks it with `degraded_reason="git_version_unsupported"` when a repository
 boundary is present; the reason is persisted as
 `project_identity_degraded_reason` on the session-start event and takes no part
-in identity equality. Identity is attribution metadata, so this never aborts
+in identity equality. A discovered marker or bare shape must still be accepted
+by Git first (`rev-parse --absolute-git-dir`, or the bare-state and `HEAD`
+checks), so a malformed boundary stays unavailable and publishes nothing.
+Identity is attribution metadata, so this never aborts
 execution, and it can only split attribution, never join unrelated work. The
 managed resolver still requires the grammar, because generated-worktree
 ownership needs Git's worktree population, and raises a typed, non-retryable

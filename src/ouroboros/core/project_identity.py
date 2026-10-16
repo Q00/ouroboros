@@ -924,11 +924,38 @@ def _resolve_effective_cwd_identity(
     the installed Git cannot prove topology, so it never joins a parent
     checkout or a linked worktree; it can only split attribution, never merge
     unrelated work.  A present repository boundary is recorded as the reason.
+
+    A discovered boundary must still be accepted by Git before an identity is
+    published, exactly as on the full path: a malformed marker or bare shape
+    stays a discovery boundary and its nonzero query is unavailability.  The
+    validation uses scalar queries that predate the topology grammar.
     """
     checkout_root, bare_candidate = _nearest_repository_boundary(effective)
-    degraded_reason = (
-        None if checkout_root is None and bare_candidate is None else DEGRADED_REASON_GIT_VERSION
-    )
+    degraded_reason: str | None = None
+    if checkout_root is not None:
+        # ``--absolute-git-dir`` (Git 2.13) makes Git parse the marker, follow
+        # a gitfile, and validate the administrative directory it names.
+        _git_path(
+            _run_git(
+                effective,
+                *_git_dir_argument(checkout_root),
+                "rev-parse",
+                "--absolute-git-dir",
+            )
+        )
+        degraded_reason = DEGRADED_REASON_GIT_VERSION
+    elif bare_candidate is not None:
+        # Bind the query to the exact candidate, as the full path does, so Git
+        # cannot skip it in favor of an enclosing checkout.
+        bare_state = _run_git(
+            bare_candidate,
+            f"--git-dir={bare_candidate}",
+            "rev-parse",
+            "--is-bare-repository",
+        )
+        if bare_state != b"true\n" or not _git_head_is_valid(bare_candidate):
+            raise ProjectIdentityUnavailableError("Git rejected bare repository topology")
+        degraded_reason = DEGRADED_REASON_GIT_VERSION
     return _ResolvedProjectIdentity(
         identity=ProjectIdentity.from_root(
             effective,
