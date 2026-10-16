@@ -519,6 +519,11 @@ class AutoPipelineState:
     last_grade: str | None = None
     findings: list[dict[str, Any]] = field(default_factory=list)
     auto_answer_log: list[dict[str, Any]] = field(default_factory=list)
+    # One entry per interview question routed to the requester command
+    # (``ouroboros.auto.requester``), answered or not. Empty and omitted from
+    # the persisted JSON when the requester is off, so state files of sessions
+    # without a requester keep their shape.
+    requester_log: list[dict[str, Any]] = field(default_factory=list)
     repair_round: int = 0
     current_round: int = 0
     pending_question: str | None = None
@@ -1048,6 +1053,8 @@ class AutoPipelineState:
         # stable for callers that read state files directly.
         if self.deadline_at is not None:
             data["deadline_at"] = None
+        if not self.requester_log:
+            del data["requester_log"]
         return data
 
     @classmethod
@@ -1078,6 +1085,7 @@ class AutoPipelineState:
         payload.setdefault("complete_product", False)
         payload.setdefault("provenance", None)
         payload.setdefault("auto_answer_log", [])
+        payload.setdefault("requester_log", [])
         payload.setdefault("seed_origin", SeedOrigin.NONE.value)
         payload.setdefault("last_authoring_backend", None)
         payload.setdefault("pipeline_timeout_seconds", DEFAULT_PIPELINE_TIMEOUT_SECONDS)
@@ -1506,7 +1514,7 @@ class AutoPipelineState:
             if type(getattr(self, field_name)) is not bool:
                 msg = f"{field_name} must be a boolean"
                 raise ValueError(msg)
-        for field_name in ("findings", "auto_answer_log"):
+        for field_name in ("findings", "auto_answer_log", "requester_log"):
             value = getattr(self, field_name)
             if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
                 msg = f"{field_name} must be a list of objects"

@@ -25,6 +25,10 @@ class AutoAnswerSource(StrEnum):
     ASSUMPTION = "assumption"
     NON_GOAL = "non_goal"
     BLOCKER = "blocker"
+    # The requester answered the question directly (opt-in requester command;
+    # see ``ouroboros.auto.requester``). Replaces a CONSERVATIVE_DEFAULT or
+    # ASSUMPTION draft only.
+    REQUESTER = "requester"
 
 
 class QuestionIntent(StrEnum):
