@@ -42,6 +42,8 @@ from contextlib import aclosing
 from dataclasses import replace
 from typing import Any, cast
 
+from pathlib import Path
+
 import structlog
 
 from ouroboros.orchestrator.adapter import (
@@ -81,6 +83,15 @@ class _ConversationMismatch(ValueError):
         super().__init__("Antigravity returned a different conversation than requested.")
         self.requested = requested
         self.observed = observed
+
+class _WorkspaceMismatchError(RuntimeError):
+    """A native init contradicts the requested workspace."""
+
+    def __init__(self, requested: str, effective: str, handle: RuntimeHandle | None) -> None:
+        super().__init__(
+            f"Antigravity workspace mismatch: requested {requested}, reported {effective}"
+        )
+        self.handle = handle
 
 
 class AntigravityCLIRuntime(GeminiCLIRuntime):
@@ -174,9 +185,11 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
             model=model,
             _resume_depth=_resume_depth,
         )
+        verified = False
         try:
             async with aclosing(cast(AsyncGenerator[AgentMessage, None], stream)):
                 async for message in stream:
+                    verified = verified or message.data.get("subtype") == "workspace.binding"
                     yield message
         except _ResumeUnavailable as error:
             yield AgentMessage(
@@ -197,6 +210,23 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
                     "observed_session_id": error.observed,
                 },
                 resume_handle=requested_handle,
+            )
+        except _WorkspaceMismatchError as error:
+            yield AgentMessage(
+                type="result",
+                content=str(error),
+                data={"subtype": "error", "terminal": True, "error_type": "WorkspaceMismatchError"},
+                resume_handle=error.handle,
+            )
+            return
+        if not verified:
+            yield AgentMessage(
+                type="system",
+                content="Antigravity did not report an absolute working directory; the effective workspace is unverified. Filesystem access is not confined.",
+                data={
+                    "subtype": "workspace.unverified",
+                    "requested_cwd": str(Path(self._cwd or ".").resolve()),
+                },
             )
 
     def _resolve_resume_session_id(self, current_handle: RuntimeHandle | None) -> str | None:
@@ -224,6 +254,41 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
             previous_handle=previous_handle,
             current_handle=current_handle,
             session_rebound=session_rebound,
+        )
+
+    def _compose_prompt(
+        self, prompt: str, system_prompt: str | None, tools: list[str] | None
+    ) -> str:
+        requested = str(Path(self._cwd or ".").resolve())
+        workspace = (
+            f"Requested working directory: {requested}\n"
+            "Perform this task in that directory. This request does not confine filesystem access."
+        )
+        return super()._compose_prompt(f"{workspace}\n\n{prompt}", system_prompt, tools)
+
+    async def _handle_runtime_event(
+        self, event: dict[str, Any], current_handle: RuntimeHandle | None, process: Any
+    ) -> tuple[AgentMessage, ...]:
+        if event.get("type") != "init":
+            return await super()._handle_runtime_event(event, current_handle, process)
+        effective = event.get("metadata", {}).get("cwd")
+        if not isinstance(effective, str) or not effective or not Path(effective).is_absolute():
+            return ()
+        requested = str(Path(self._cwd or ".").resolve())
+        effective = str(Path(effective).resolve())
+        if effective != requested:
+            raise _WorkspaceMismatchError(requested, effective, current_handle)
+        return (
+            AgentMessage(
+                type="system",
+                content=f"Antigravity reported working directory: {effective}. Filesystem access is not confined.",
+                data={
+                    "subtype": "workspace.binding",
+                    "requested_cwd": requested,
+                    "effective_cwd": effective,
+                },
+                resume_handle=current_handle,
+            ),
         )
 
     # -- Permission mode overrides -----------------------------------------

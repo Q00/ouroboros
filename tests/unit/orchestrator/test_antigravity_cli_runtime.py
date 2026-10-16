@@ -319,7 +319,7 @@ async def test_structured_execution_records_tools_and_preserves_final_answer(
     generated.write_text("answer = 42\n")
     runtime = AntigravityCLIRuntime(cli_path="/usr/bin/agy", cwd=str(tmp_path))
     events = [
-        {"event": "init", "conversation_id": "native-session", "init": {"cwd": "/tmp"}},
+        {"event": "init", "conversation_id": "native-session", "init": {"cwd": str(tmp_path)}},
         {
             "event": "step_update",
             "step_update": {
@@ -996,3 +996,67 @@ async def test_flat_unknown_stream_never_binds_or_replaces_identity(has_current_
     )
     if handle:
         assert handle.to_dict() == before
+
+
+def test_requested_workspace_is_explicit_in_prompt(tmp_path) -> None:
+    runtime = AntigravityCLIRuntime(cli_path="/usr/bin/agy", cwd=str(tmp_path))
+    prompt = runtime._compose_prompt("do work", None, None)
+    assert f"Requested working directory: {tmp_path.resolve()}" in prompt
+    assert "does not confine" in prompt
+    assert "--add-dir" not in runtime._build_command("unused", prompt=prompt)
+
+
+@pytest.mark.asyncio
+async def test_mismatched_native_workspace_aborts_before_tool_messages(tmp_path) -> None:
+    import json
+    from unittest.mock import AsyncMock
+
+    runtime = AntigravityCLIRuntime(cli_path="/usr/bin/agy", cwd=str(tmp_path))
+    process = _FakeProcess(
+        [
+            json.dumps(event)
+            for event in [
+                {
+                    "event": "init",
+                    "conversation_id": "mismatch-session",
+                    "init": {"cwd": str(tmp_path / "other")},
+                },
+                {
+                    "event": "step_update",
+                    "step_update": {
+                        "step_type": "tool",
+                        "state": "ACTIVE",
+                        "tool_name": "run_command",
+                        "tool_info": {"parameters": {"CommandLine": "should not be surfaced"}},
+                    },
+                },
+            ]
+        ]
+    )
+    with (
+        patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            return_value=process,
+        ),
+        patch.object(runtime, "_terminate_process", new_callable=AsyncMock) as terminate,
+    ):
+        messages = [m async for m in runtime.execute_task("work")]
+    errors = [m for m in messages if m.is_final and m.is_error]
+    assert len(errors) == 1
+    assert "workspace mismatch" in errors[0].content
+    assert errors[0].resume_handle.native_session_id == "mismatch-session"
+    assert not any(m.tool_name for m in messages)
+    terminate.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("events", [["plain result"], ['{"event":"init","init":{}}']])
+async def test_missing_workspace_attestation_is_reported(tmp_path, events) -> None:
+    runtime = AntigravityCLIRuntime(cli_path="/usr/bin/agy", cwd=str(tmp_path))
+    with patch(
+        "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+        return_value=_FakeProcess(events),
+    ):
+        result = await runtime.execute_task_to_result("work")
+    assert result.is_ok
+    assert any(m.data.get("subtype") == "workspace.unverified" for m in result.value.messages)

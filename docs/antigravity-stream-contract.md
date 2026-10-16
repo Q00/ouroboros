@@ -53,3 +53,16 @@ A mismatched ID, including one in the initial event, produces a terminal
 underlying invocation is closed and is not retried as a fresh session. Streams
 keep their checks in the existing invocation-local handles, so concurrent and
 same-task interleaved consumers do not share mutable expected-ID state.
+
+
+## Workspace binding
+
+The prompt explicitly identifies the resolved requested working directory and
+the subprocess starts there. A native init reporting another absolute cwd
+fails the task and stops further event processing. A matching init produces a
+workspace-binding observation; missing cwd or plain output produces an explicit
+unverified-workspace message. These checks observe and reject a mismatch after
+startup; they are not a filesystem sandbox and cannot undo work the child has
+already performed. `--add-dir` is not used as evidence of replacement or
+confinement. A live IDE-daemon workspace check is recorded separately from unit
+fixtures and standalone headless probes.
