@@ -36,3 +36,13 @@ ArtifactCollector; a regression disables directory scanning to verify that
 native path hints drive collection. Plain-text fallback logs that tool usage is
 unknown: zero observed calls does not establish that no tools were used.
 The adapter cannot reconstruct events omitted by the CLI itself.
+
+
+## Targeted resume
+
+The runtime forwards an explicit native conversation ID or a resumable runtime
+handle through `--conversation ID`. It does not use `--continue`, which selects
+the most recent conversation rather than the requested one. A task-owned live
+headless probe continued the same native ID and recalled the prior test marker;
+its result reported two turns. Unsupported CLI versions return their resume
+error; the adapter never retries that request as a new conversation.

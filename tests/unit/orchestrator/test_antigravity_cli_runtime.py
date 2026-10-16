@@ -181,10 +181,10 @@ def test_runtime_identity_is_antigravity() -> None:
     assert runtime.runtime_backend == "antigravity_cli"  # the handle name
 
 
-def test_capabilities_mark_structured_output_and_no_resume() -> None:
+def test_capabilities_mark_structured_output_and_targeted_resume() -> None:
     runtime = _make_runtime()
     assert runtime.capabilities.skill_dispatch is True
-    assert runtime.capabilities.targeted_resume is False
+    assert runtime.capabilities.targeted_resume is True
     assert runtime.capabilities.structured_output is True
     assert runtime.capabilities.system_prompt_support is ParamSupport.TRANSLATED
     assert runtime.capabilities.tool_restriction_support is ParamSupport.TRANSLATED
@@ -414,6 +414,72 @@ def test_plain_text_fallback_reports_unknown_tool_usage() -> None:
     assert event["content"] == "Wrapped CLI response"
     warning.assert_called_once()
     assert "unknown" in warning.call_args.kwargs["limitation"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("from_handle", [False, True])
+async def test_native_resume_forwards_requested_conversation(from_handle: bool) -> None:
+    import json
+
+    runtime = _make_runtime()
+    handle = runtime._build_runtime_handle("requested-native-session") if from_handle else None
+    calls = []
+
+    async def fake_exec(*command: str, **kwargs: object) -> _FakeProcess:
+        calls.append(command)
+        assert command[command.index("--conversation") + 1] == "requested-native-session"
+        return _FakeProcess(
+            [
+                json.dumps(
+                    {
+                        "event": "result",
+                        "result": {
+                            "conversation_id": "requested-native-session",
+                            "status": "SUCCESS",
+                            "response": "continued",
+                        },
+                    }
+                )
+            ]
+        )
+
+    with patch(
+        "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+        side_effect=fake_exec,
+    ):
+        result = await runtime.execute_task_to_result(
+            "continue",
+            resume_handle=handle,
+            resume_session_id=None if from_handle else "requested-native-session",
+        )
+    assert result.is_ok
+    assert result.value.session_id == "requested-native-session"
+    assert result.value.final_message == "continued"
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_unsupported_resume_cli_fails_without_fresh_session_retry() -> None:
+    runtime = _make_runtime()
+    calls = []
+
+    async def fake_exec(*command: str, **kwargs: object) -> _FakeProcess:
+        calls.append(command)
+        assert "--conversation" in command
+        process = _FakeProcess([], returncode=2)
+        process.stderr = _FakeStream(["unknown flag: --conversation"])
+        return process
+
+    with patch(
+        "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+        side_effect=fake_exec,
+    ):
+        result = await runtime.execute_task_to_result(
+            "continue", resume_session_id="native-session"
+        )
+    assert result.is_err
+    assert "conversation" in str(result.error)
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize(
