@@ -273,7 +273,7 @@ installation fails, see
 
 | Path | Requirements |
 |------|-------------|
-| All runner sessions | Git >= 2.36.0 on PATH. Project identity requires the unambiguous `worktree list --porcelain -z` topology grammar even for a non-Git local workspace; an older or unrepresentable Git version is a non-retryable configuration error. |
+| All runner sessions | Git on PATH. Git >= 2.36.0 gives Project Map its full topology identity (the unambiguous `worktree list --porcelain -z` grammar). With older Git, direct runs (`--worktree-policy current` or no managed worktree) still execute and use the conservative current-directory identity; managed task worktrees still require Git >= 2.36.0. An unrepresentable Git version is a non-retryable configuration error. |
 | Claude Code (`ooo`) | Claude Code with plugin support |
 | Standalone CLI (`ouroboros`) | Python >= 3.12, API key (Anthropic or OpenAI) |
 | Codex CLI backend | Python >= 3.12, `npm install -g @openai/codex`, and a signed-in Codex CLI account with access to a Codex-supported model |

@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import os
 from pathlib import Path, PurePosixPath
@@ -23,6 +23,10 @@ from uuid import NAMESPACE_URL, uuid5
 import weakref
 
 PROJECT_ID_PREFIX = "project_"
+# The installed Git predates ``worktree list --porcelain -z``; the identity is
+# the conservative canonical effective-cwd identity instead of a Git topology.
+DEGRADED_REASON_GIT_VERSION = "git_version_unsupported"
+_DEGRADED_REASONS = frozenset({DEGRADED_REASON_GIT_VERSION})
 _MAX_PATH_LENGTH = 4096
 _MAX_GIT_OUTPUT_LENGTH = 1_048_576
 _GIT_TIMEOUT_SECONDS = 5.0
@@ -43,7 +47,12 @@ class ProjectIdentityUnavailableError(ProjectIdentityError):
 
 
 class ProjectIdentityGitVersionError(ProjectIdentityError):
-    """Raised when installed Git cannot implement the identity grammar."""
+    """Raised when installed Git cannot implement the identity grammar.
+
+    Direct resolution never raises this for a parseable old version; it
+    degrades to the conservative effective-cwd identity.  Managed worktree
+    ownership and an unrepresentable version still raise it.
+    """
 
 
 class ManagedProjectScopeError(ProjectIdentityError):
@@ -133,6 +142,10 @@ class ProjectIdentity:
     project_id: str
     project_root: str
     workspace_path: str
+    # Why the identity is not Git-resolved although a repository boundary
+    # exists.  It describes how the join key was derived, not which project
+    # it names, so it never takes part in identity equality or hashing.
+    degraded_reason: str | None = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         canonical_root = str(_canonical_directory(self.project_root))
@@ -141,6 +154,8 @@ class ProjectIdentity:
         if self.project_id != project_id_for_root(canonical_root):
             raise ProjectIdentityError("project_id does not match project_root")
         _normalize_workspace_path(self.workspace_path)
+        if self.degraded_reason is not None and self.degraded_reason not in _DEGRADED_REASONS:
+            raise ProjectIdentityError("degraded_reason is not a known reason")
 
     @classmethod
     def from_root(
@@ -149,6 +164,7 @@ class ProjectIdentity:
         *,
         workspace_path: str = ".",
         require_exists: bool = False,
+        degraded_reason: str | None = None,
     ) -> ProjectIdentity:
         """Construct a validated identity from an explicit source root."""
         canonical_root = str(_canonical_directory(project_root, require_exists=require_exists))
@@ -156,15 +172,19 @@ class ProjectIdentity:
             project_id=project_id_for_root(canonical_root),
             project_root=canonical_root,
             workspace_path=_normalize_workspace_path(workspace_path),
+            degraded_reason=degraded_reason,
         )
 
     def to_event_data(self) -> dict[str, str]:
         """Return the additive ``orchestrator.session.started`` anchor fields."""
-        return {
+        data = {
             "project_id": self.project_id,
             "project_root": self.project_root,
             "workspace_path": self.workspace_path,
         }
+        if self.degraded_reason is not None:
+            data["project_identity_degraded_reason"] = self.degraded_reason
+        return data
 
     def to_workspace_data(self) -> dict[str, str]:
         """Return the existing nested execution-contract workspace identity."""
@@ -275,8 +295,8 @@ def _run_git(start: Path, *arguments: str) -> bytes:
     return _run_git_command("-C", str(start), *arguments)
 
 
-def _require_supported_git() -> None:
-    """Reject Git versions that lack the unambiguous topology query grammar."""
+def _installed_git_version() -> tuple[int, int, int]:
+    """Return the bounded installed Git version, rejecting unrepresentable output."""
     output = _run_git_command("--version")
     match = _GIT_VERSION_PATTERN.fullmatch(output)
     if match is None:
@@ -284,7 +304,23 @@ def _require_supported_git() -> None:
             f"Git {_MINIMUM_GIT_VERSION_TEXT} or newer is required for project identity"
         )
     major, minor, patch = match.groups()
-    version = (int(major), int(minor), int(patch or b"0"))
+    return (int(major), int(minor), int(patch or b"0"))
+
+
+def _installed_git_supports_topology() -> bool:
+    """Return whether installed Git has the unambiguous topology query grammar.
+
+    ``worktree list --porcelain -z`` first shipped in Git 2.36.0.  Older
+    porcelain output separates records with LF and does not quote paths, so a
+    legal newline-bearing worktree path cannot be told apart from a record
+    boundary.  No older query exposes the worktree population unambiguously.
+    """
+    return _installed_git_version() >= _MINIMUM_GIT_VERSION
+
+
+def _require_supported_git() -> None:
+    """Reject Git versions that lack the unambiguous topology query grammar."""
+    version = _installed_git_version()
     if version < _MINIMUM_GIT_VERSION:
         found = ".".join(str(part) for part in version)
         raise ProjectIdentityGitVersionError(
@@ -744,6 +780,7 @@ def resolve_project_identity_for_publication(
     escalate = True
     if (
         not pre_escalate
+        and resolved.identity.degraded_reason is None
         and resolved.checkout_root == pre_marker_root
         and project_root == resolved.checkout_root
     ):
@@ -877,11 +914,46 @@ def _revalidate_live_directories(*expected_population: _LiveDirectoryEvidence) -
             raise ProjectIdentityError("project identity path changed during resolution")
 
 
+def _resolve_effective_cwd_identity(
+    effective: Path,
+    effective_evidence: _LiveDirectoryEvidence,
+) -> _ResolvedProjectIdentity:
+    """Return the conservative canonical effective-cwd identity without Git.
+
+    This is the identity a non-Git directory already receives.  It is used when
+    the installed Git cannot prove topology, so it never joins a parent
+    checkout or a linked worktree; it can only split attribution, never merge
+    unrelated work.  A present repository boundary is recorded as the reason.
+    """
+    checkout_root, bare_candidate = _nearest_repository_boundary(effective)
+    degraded_reason = (
+        None if checkout_root is None and bare_candidate is None else DEGRADED_REASON_GIT_VERSION
+    )
+    return _ResolvedProjectIdentity(
+        identity=ProjectIdentity.from_root(
+            effective,
+            workspace_path=".",
+            require_exists=True,
+            degraded_reason=degraded_reason,
+        ),
+        checkout_root=effective,
+        directory_evidence=(effective_evidence,),
+    )
+
+
 def _resolve_with_evidence(effective: Path) -> _ResolvedProjectIdentity:
-    """Run the direct resolution pipeline and keep its evidence."""
+    """Run the direct resolution pipeline and keep its evidence.
+
+    Identity is attribution metadata only, so a parseable Git version that
+    predates the topology grammar degrades to the effective-cwd identity
+    instead of aborting the caller.  Managed ownership checks do not use this
+    path and still require the full grammar.
+    """
     effective_evidence = _capture_live_directory(effective)
-    _require_supported_git()
-    resolved = _resolve_canonical_project_identity(effective)
+    if _installed_git_supports_topology():
+        resolved = _resolve_canonical_project_identity(effective)
+    else:
+        resolved = _resolve_effective_cwd_identity(effective, effective_evidence)
     _revalidate_live_directories(effective_evidence, *resolved.directory_evidence)
     return resolved
 
@@ -892,7 +964,9 @@ def resolve_project_identity(effective_cwd: str | Path) -> ProjectIdentity:
     Direct callers are anchored to the nearest Git checkout and, for linked
     worktrees, the provable common source checkout.  Non-Git directories remain
     valid local-first projects and use their canonical cwd as both project and
-    workspace root.
+    workspace root.  When the installed Git predates the topology grammar, a
+    checkout receives that same canonical cwd identity with
+    ``degraded_reason`` set instead of failing the caller.
 
     Managed task worktrees must use :func:`resolve_managed_project_identity`;
     this direct resolver cannot attribute a caller-supplied source checkout.
@@ -1001,6 +1075,7 @@ def resolve_managed_project_identity(
 
 
 __all__ = [
+    "DEGRADED_REASON_GIT_VERSION",
     "PROJECT_ID_PREFIX",
     "ManagedProjectOwnershipError",
     "ManagedProjectScopeError",

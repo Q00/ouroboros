@@ -57,9 +57,21 @@ binary with argv rather than a shell and asks it for:
   --show-toplevel`.
 
 This grammar requires Git 2.36.0 or newer. Every public resolver validates the
-bounded `git --version` result before any topology query. An older or
-unrepresentable version raises a typed, non-retryable configuration error;
-spawn failures and timeouts remain retryable unavailability.
+bounded `git --version` result before any topology query. Older Git has no
+unambiguous worktree population query: LF porcelain output does not quote
+paths, so a legal newline-bearing worktree path cannot be told apart from a
+record boundary. An older but parseable version therefore never runs a topology
+query. The direct resolver returns the conservative canonical effective-cwd
+identity (`workspace_path="."`) that a non-Git directory already receives and
+marks it with `degraded_reason="git_version_unsupported"` when a repository
+boundary is present; the reason is persisted as
+`project_identity_degraded_reason` on the session-start event and takes no part
+in identity equality. Identity is attribution metadata, so this never aborts
+execution, and it can only split attribution, never join unrelated work. The
+managed resolver still requires the grammar, because generated-worktree
+ownership needs Git's worktree population, and raises a typed, non-retryable
+configuration error. An unrepresentable version raises that error on every
+resolver; spawn failures and timeouts remain retryable unavailability.
 
 The process environment removes caller-supplied `GIT_*` overrides and gives Git
 a fixed neutral `HOME`, so home-relative local includes cannot change identity
