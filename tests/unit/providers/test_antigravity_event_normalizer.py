@@ -102,6 +102,27 @@ def test_tool_call_fixture_spelling():
     assert parsed["metadata"]["input"]["command"] == "pytest"
 
 
+def test_successful_tool_completion_preserves_native_output():
+    parsed = event(
+        "step_update",
+        {
+            "step_type": "tool",
+            "state": "DONE",
+            "tool_name": "view_file",
+            "tool_info": {
+                "parameters": {"AbsolutePath": "/work/probe.txt"},
+                "output": "2 lines, 21 bytes",
+            },
+        },
+    )
+
+    assert parsed["type"] == "tool_result"
+    assert parsed["content"] == "2 lines, 21 bytes"
+    assert parsed["is_error"] is False
+    assert parsed["metadata"]["name"] == "Read"
+    assert parsed["metadata"]["input"]["file_path"] == "/work/probe.txt"
+
+
 def test_failed_terminal_does_not_become_success():
     runtime = AntigravityCLIRuntime(cli_path="/usr/bin/agy")
     message = runtime._convert_event(event("result", {"status": "ERROR", "error": "quota"}), None)[

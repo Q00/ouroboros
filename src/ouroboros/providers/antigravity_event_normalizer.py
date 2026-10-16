@@ -99,7 +99,11 @@ class AntigravityEventNormalizer(GeminiEventNormalizer):
                     is_error = state == "ERROR" or bool(info.get("error"))
                     # Native result objects vary by tool; retain them without
                     # guessing whether absence of output implies tool success.
-                    output = info.get("error") if is_error else info.get("result", "")
+                    output = (
+                        info.get("error")
+                        if is_error
+                        else info.get("output", info.get("result", ""))
+                    )
                     content = output if isinstance(output, str) else json.dumps(output)
                 elif state in {None, "ACTIVE"}:
                     event_type = "tool_use" if name else "unknown"

@@ -9,9 +9,12 @@ from the synthetic regression fixtures. No private session database was read.
 The normalizer understands assistant `text_delta` fragments, native
 `step_type=tool` events (`tool_info.parameters`), the `tool_call` fixture
 spelling (`tool_input`), and terminal `result.response`. It preserves session
-identifiers and errors. A live file-read attempt emitted `view_file` with
+identifiers and errors. One live file-read probe emitted `view_file` with
 `AbsolutePath`, followed by a tool error because the test file had not yet been
-created. That capture verifies error-event shape, not successful file reading.
+created. A separate probe read an existing test file successfully; its DONE
+event used `tool_info.output` (for example, `2 lines, 21 bytes`). The successful
+capture also ended with a terminal `result.response`. These are observations
+from the local CLI probes, distinct from the synthetic fixtures.
 
 Known native file, search, and command tools receive canonical names and
 path/command hints. Original arguments remain available; malformed inputs do
