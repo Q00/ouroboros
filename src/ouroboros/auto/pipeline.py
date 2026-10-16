@@ -69,7 +69,8 @@ from ouroboros.auto.retired_phases import (
     mark_retired_complete_product_run,
     mark_retired_phase,
 )
-from ouroboros.auto.seed_preflight_gate import enforce_seed_preflight
+from ouroboros.auto.seed_preflight_gate import enforce_seed_preflight, preflight_workspace_root
+from ouroboros.auto.seed_preflight_repair import repair_seed_preflight
 from ouroboros.auto.seed_qa_advisory import (
     clear_seed_qa_verdict,
     publish_advisory,
@@ -1175,6 +1176,10 @@ class AutoPipeline:
                 self._save(state)
                 return self._result(state, ledger, review=review, blocker=blocker)
 
+            repaired = await self._repair_seed_preflight(state, ledger, seed, review)
+            if isinstance(repaired, AutoPipelineResult):
+                return repaired
+            seed, review = repaired
             if preflight_blocker := await enforce_seed_preflight(
                 seed, state, self._emit_runtime_event
             ):
@@ -1979,6 +1984,86 @@ class AutoPipeline:
                 auto_session_id=aggregate_id,
                 error=str(exc),
             )
+
+    async def _repair_seed_preflight(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        seed: Seed,
+        review: SeedReview,
+    ) -> AutoPipelineResult | tuple[Seed, SeedReview]:
+        """Repair preflight findings the workspace answers before blocking on them.
+
+        Auto mode has no human to answer a preflight question, so a finding the
+        repository itself decides (a verifier script that exists at another
+        path in the checkout) is rewritten from the workspace listing and
+        re-checked; see :mod:`ouroboros.auto.seed_preflight_repair`. The
+        rounds share the review repair budget (``max_repair_rounds``). A
+        repaired Seed is re-reviewed and must still clear the grade gate;
+        whatever preflight still finds afterwards blocks as before.
+        """
+        budget = max(0, int(state.max_repair_rounds or 0) - int(state.repair_round or 0))
+        outcome = await asyncio.to_thread(
+            repair_seed_preflight, seed, preflight_workspace_root(state), max_rounds=budget
+        )
+        if not outcome.changed:
+            return seed, review
+        repaired_seed = normalize_execution_acceptance(outcome.seed)
+        repaired_review = SeedReviewer(self.grade_gate).review(
+            repaired_seed,
+            ledger=ledger,
+            closure_mode=state.interview_closure_mode,
+            degraded=bool(getattr(repaired_seed.metadata, "degraded", False)),
+        )
+        state.seed_artifact = repaired_seed.to_dict()
+        state.seed_id = repaired_seed.metadata.seed_id
+        state.repair_round += len(outcome.repairs)
+        state.last_grade = repaired_review.grade_result.grade.value
+        state.findings = [asdict(finding) for finding in repaired_review.findings]
+        self._maybe_emit_repair(state)
+        self._maybe_emit_grade(state)
+        if self.seed_saver is not None:
+            try:
+                state.seed_path = self.seed_saver(repaired_seed)
+            except Exception as exc:
+                state.mark_failed(f"seed save failed: {exc}", tool_name="seed_saver")
+                self._save(state)
+                return self._result(state, ledger, review=repaired_review, blocker=state.last_error)
+        await self._emit_runtime_event(
+            "auto.seed_preflight.repaired",
+            state.auto_session_id,
+            {
+                "schema_version": 1,
+                "auto_session_id": state.auto_session_id,
+                "seed_id": repaired_seed.metadata.seed_id,
+                "parent_seed_id": seed.metadata.seed_id,
+                "rounds": outcome.rounds,
+                "repairs": [
+                    {
+                        "code": repair.code,
+                        "subject": repair.subject,
+                        "evidence_path": repair.evidence_path,
+                        "commands_before": list(repair.commands_before[:8]),
+                        "commands_after": list(repair.commands_after[:8]),
+                    }
+                    for repair in outcome.repairs[:8]
+                ],
+            },
+        )
+        state.mark_progress(
+            f"Seed preflight repaired {len(outcome.repairs)} verify command path(s) "
+            "from the workspace listing",
+            tool_name="seed_preflight",
+        )
+        self._save(state)
+        if terminal := seed_review_gate_blocker(
+            state, repaired_review, skip_run=self.skip_run or state.skip_run
+        ):
+            blocker, code = terminal
+            state.mark_blocked(blocker, tool_name="grade_gate", error_code=code)
+            self._save(state)
+            return self._result(state, ledger, review=repaired_review, blocker=blocker)
+        return repaired_seed, repaired_review
 
     async def _run_seed_qa_gate(
         self,

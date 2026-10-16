@@ -11,18 +11,22 @@ from ouroboros.auto.state import AutoPipelineState
 from ouroboros.core.seed import Seed
 
 
+def preflight_workspace_root(state: AutoPipelineState) -> Path | None:
+    """Return the run workspace preflight anchors relative paths to."""
+    if state.cwd:
+        candidate = Path(state.cwd).expanduser()
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
 async def enforce_seed_preflight(
     seed: Seed,
     state: AutoPipelineState,
     emit: Callable[[str, str, dict[str, Any]], Awaitable[None]],
 ) -> str | None:
     """Return and persist a blocker description for unverifiable Seed claims."""
-    workspace_root: Path | None = None
-    if state.cwd:
-        candidate = Path(state.cwd).expanduser()
-        if candidate.is_dir():
-            workspace_root = candidate
-    report = run_seed_preflight(seed, workspace_root=workspace_root)
+    report = run_seed_preflight(seed, workspace_root=preflight_workspace_root(state))
     if report.passed:
         return None
     questions = list(report.open_questions)[:8]
@@ -37,10 +41,16 @@ async def enforce_seed_preflight(
             "open_questions": questions,
         },
     )
+    # The event carries every open question; the blocker names only the
+    # questions of the blocking findings it counts, so an advisory question
+    # is never presented as the reason the session stopped.
+    blocking_questions = list(
+        dict.fromkeys(finding.question for finding in report.blocking_findings)
+    )[:8]
     blocker = (
         f"Seed preflight found {len(report.blocking_findings)} unexecutable contract claim(s); "
         "answer these open questions, revise the Seed, and start a new session: "
-        + " | ".join(questions)
+        + " | ".join(blocking_questions)
     )
     state.mark_blocked(
         blocker, tool_name="seed_preflight", error_code="seed_preflight_unexecutable"
