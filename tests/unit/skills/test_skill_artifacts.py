@@ -1472,15 +1472,30 @@ def test_skill_agent_prompt_fallbacks_resolve_outside_a_source_checkout() -> Non
     """Agent prompts ship in the ``ouroboros.agents`` package; skills ship without them.
 
     No plugin manifest declares an agents directory, so a skill cannot name an
-    ``ouroboros:<agent>`` subagent type or only a checkout-relative path.
+    ``ouroboros:<agent>`` subagent type or only a checkout-relative path. Each
+    skill states the resolution order once: override dir, the packaged copy
+    printed by a runnable command, then the source checkout.
     """
     repo_root = Path(__file__).resolve().parents[3]
-    for skill in ("qa", "evaluate", "interview", "seed"):
+    command = (
+        "uvx --isolated --python '>=3.12' --from ouroboros-ai python -c "
+        '"import importlib.resources as r, sys; '
+        "print(r.files('ouroboros.agents').joinpath(sys.argv[1]).read_text(encoding='utf-8'))\" "
+    )
+    agents = {
+        "qa": "qa-judge",
+        "evaluate": "evaluator",
+        "interview": "socratic-interviewer",
+        "seed": "seed-architect",
+    }
+    for skill, agent in agents.items():
         text = (repo_root / "skills" / skill / "SKILL.md").read_text(encoding="utf-8")
-        for match in re.finditer(r"src/ouroboros/agents/", text):
-            line = text[text.rfind("\n", 0, match.start()) + 1 : text.find("\n", match.end())]
-            assert "OUROBOROS_AGENTS_DIR" in line, (skill, line)
-            assert "`ouroboros.agents` package" in line, (skill, line)
+        assert text.count("OUROBOROS_AGENTS_DIR") == 1, skill
+        assert text.count(command) == 1, skill
+        assert f"{command}{agent}.md\n" in text, skill
+        assert text.count("src/ouroboros/agents/") == 1, skill
+        assert f"src/ouroboros/agents/{agent}.md" in text, skill
+        assert (repo_root / "src" / "ouroboros" / "agents" / f"{agent}.md").is_file()
 
     evaluate = (repo_root / "skills" / "evaluate" / "SKILL.md").read_text(encoding="utf-8")
     assert "ouroboros:evaluator" not in evaluate

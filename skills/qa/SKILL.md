@@ -60,7 +60,15 @@ The first call returns `qa_session_id` and `iteration_entry` in meta. On later c
 
 ### Fallback (no Ouroboros MCP server)
 
-Adopt the `qa-judge` role yourself with the same prompt the MCP tool uses: `$OUROBOROS_AGENTS_DIR/qa-judge.md` when that override is set, else `qa-judge.md` in the installed `ouroboros.agents` package, else `src/ouroboros/agents/qa-judge.md` in a source checkout. If none is reachable, judge on the dimensions and thresholds above and label the verdict as an unaligned fallback. Run the step 3.5 probes first for behavior-bearing artifacts, render the verdict in the same shape the MCP tool returns (score, verdict, threshold, dimensions, differences, suggestions, reasoning, loop action), and keep the iterative contract with a `qa-<uuid4_short>` session id and an iteration count held in the conversation.
+Adopt the `qa-judge` role yourself with the same prompt the MCP tool uses: `$OUROBOROS_AGENTS_DIR/qa-judge.md` when that override is set; else the installed package's copy, printed with `run_shell`:
+
+```bash
+uvx --isolated --python '>=3.12' --from ouroboros-ai python -c "import importlib.resources as r, sys; print(r.files('ouroboros.agents').joinpath(sys.argv[1]).read_text(encoding='utf-8'))" qa-judge.md
+```
+
+else `src/ouroboros/agents/qa-judge.md` in a source checkout.
+
+If none is reachable, judge on the dimensions and thresholds above and label the verdict as an unaligned fallback. Run the step 3.5 probes first for behavior-bearing artifacts, render the verdict in the same shape the MCP tool returns (score, verdict, threshold, dimensions, differences, suggestions, reasoning, loop action), and keep the iterative contract with a `qa-<uuid4_short>` session id and an iteration count held in the conversation.
 
 ## RFC #1392 State Breadcrumb Footer
 

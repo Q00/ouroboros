@@ -95,7 +95,13 @@ Load `ouroboros_generate_seed` before choosing a path: if it is callable, use **
 
 ### Path B: No MCP Server
 
-1. Read the `seed-architect` prompt and adopt that role: `$OUROBOROS_AGENTS_DIR/seed-architect.md` when that override is set, else `seed-architect.md` in the installed `ouroboros.agents` package, else `src/ouroboros/agents/seed-architect.md` in a source checkout. Resolve every agent prompt this skill names the same way.
+1. Read the `seed-architect` prompt and adopt that role: `$OUROBOROS_AGENTS_DIR/seed-architect.md` when that override is set; else the installed package's copy, printed with `run_shell`:
+
+   ```bash
+   uvx --isolated --python '>=3.12' --from ouroboros-ai python -c "import importlib.resources as r, sys; print(r.files('ouroboros.agents').joinpath(sys.argv[1]).read_text(encoding='utf-8'))" seed-architect.md
+   ```
+
+   else `src/ouroboros/agents/seed-architect.md` in a source checkout. Resolve every agent prompt this skill names the same way, substituting its file name.
 2. Recover the requirements before drafting; never invent missing context:
    - With a `session_id`, use current-thread Q&A and corrections only when they belong to that session; if incomplete, use `inspect_code` / `run_shell` to find persisted or exported artifacts for that ID (for example under `~/.ouroboros/data/`). Keep a persisted transcript as evidence, but let explicit same-thread corrections supersede it.
    - Without a `session_id`, use current-thread Q&A only when it forms one coherent interview.

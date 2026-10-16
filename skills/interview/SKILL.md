@@ -175,7 +175,13 @@ MCP generates the questions, keeps state, and scores ambiguity; it cannot read c
 
 ## Path B: Fallback (No MCP Server)
 
-1. Read the `socratic-interviewer` prompt and adopt that role: `$OUROBOROS_AGENTS_DIR/socratic-interviewer.md` when that override is set, else `socratic-interviewer.md` in the installed `ouroboros.agents` package, else `src/ouroboros/agents/socratic-interviewer.md` in a source checkout.
+1. Read the `socratic-interviewer` prompt and adopt that role: `$OUROBOROS_AGENTS_DIR/socratic-interviewer.md` when that override is set; else the installed package's copy, printed with `run_shell`:
+
+   ```bash
+   uvx --isolated --python '>=3.12' --from ouroboros-ai python -c "import importlib.resources as r, sys; print(r.files('ouroboros.agents').joinpath(sys.argv[1]).read_text(encoding='utf-8'))" socratic-interviewer.md
+   ```
+
+   else `src/ouroboros/agents/socratic-interviewer.md` in a source checkout.
 2. Pre-scan config files (`pyproject.toml`, `package.json`, `go.mod`, ...) with `inspect_code`, and ask confirmation-style questions ("I see X. Should I assume Y?") instead of open discovery.
 3. Ask each question through `ask_user` with suggested answers; use `inspect_code` and `web_research` as needed.
 4. Keep the ambiguity ledger: track independent threads, revisit unresolved ones every few rounds, and do not let one subtopic crowd out the original request.
