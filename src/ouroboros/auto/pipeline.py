@@ -69,7 +69,7 @@ from ouroboros.auto.retired_phases import (
     mark_retired_complete_product_run,
     mark_retired_phase,
 )
-from ouroboros.auto.seed_preflight_gate import enforce_seed_preflight
+from ouroboros.auto.seed_preflight_gate import enforce_seed_preflight, repair_seed_preflight_in_auto
 from ouroboros.auto.seed_qa_advisory import (
     clear_seed_qa_verdict,
     publish_advisory,
@@ -1175,6 +1175,23 @@ class AutoPipeline:
                 self._save(state)
                 return self._result(state, ledger, review=review, blocker=blocker)
 
+            repaired = await repair_seed_preflight_in_auto(
+                seed,
+                review,
+                state,
+                ledger,
+                grade_gate=self.grade_gate,
+                seed_saver=self.seed_saver,
+                emit=self._emit_runtime_event,
+                skip_run=self.skip_run or state.skip_run,
+            )
+            seed, review = repaired.seed, repaired.review
+            if repaired.changed:
+                self._maybe_emit_repair(state)
+                self._maybe_emit_grade(state)
+                self._save(state)
+            if repaired.blocker is not None:
+                return self._result(state, ledger, review=review, blocker=repaired.blocker)
             if preflight_blocker := await enforce_seed_preflight(
                 seed, state, self._emit_runtime_event
             ):
