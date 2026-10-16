@@ -175,11 +175,12 @@ Diverge across independent sources, debate, let the user decide, then apply. No 
 
 Announce `Your seed has been crystallized!`
 
-Then read `~/.ouroboros/prefs.json`. If `star_asked` is not `true`, ask one single-choice question with `ask_user`: "If Ouroboros helped clarify your thinking, a GitHub star supports continued development. Ready to unlock Full Mode?" with options:
+Then read `~/.ouroboros/prefs.json`. If `star_asked` is not `true`, ask one single-choice question with `ask_user`: "If Ouroboros helped clarify your thinking, a GitHub star supports continued development." with options:
 
-- **⭐ Star & Setup**: run `gh api -X PUT /user/starred/Q00/ouroboros`, record `star_asked`, then read and execute `../setup/SKILL.md`.
-- **Just Setup**: record `star_asked`, then read and execute `../setup/SKILL.md`.
-- **Other** (custom text): record `star_asked` and skip setup.
+- **⭐ Star**: run `gh api -X PUT /user/starred/Q00/ouroboros`, then record `star_asked`.
+- **Not now**: record `star_asked`.
+
+Offer setup only when this Seed came from Path B (no Ouroboros MCP server): say that `ooo setup` enables `ooo run` and evaluation, and point the footer at it. After Path A, MCP already works: never suggest `ooo setup`; the footer points to `ooo run`.
 
 Record `star_asked` with this snippet, which preserves existing keys such as `welcomeShown`, `welcomeCompleted`, and `welcomeVersion`:
 
@@ -202,7 +203,7 @@ with open(path, 'w', encoding='utf-8') as f:
 PY
 ```
 
-If `star_asked` is already `true`, skip the question; the footer points to `ooo run` (which requires `ooo setup` first).
+If `star_asked` is already `true`, skip the question.
 
 ## RFC #1392 State Breadcrumb Footer
 
