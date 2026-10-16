@@ -23,5 +23,16 @@ Tool output is kept separate from assistant answer accumulation. Deltas are
 concatenated exactly, and a terminal full response replaces accumulated text.
 Plain-text fallback still joins lines for compatibility with wrapped output.
 
-This change supplies parsing and conversion. Enabling structured invocation
-and validating workspace/resume behavior are separate runtime changes.
+Workspace and resume validation are separate runtime changes.
+
+## Runtime invocation
+
+The runtime now requests `--output-format stream-json` and advertises structured
+output. Native tool-use and tool-result messages retain canonical inputs in the
+runtime transcript. Plain-text wrapped output remains a compatibility fallback.
+The existing runtime-message projection counts observed calls. Canonical Write
+and Edit paths reach the existing verification-report renderer and then
+ArtifactCollector; a regression disables directory scanning to verify that
+native path hints drive collection. Plain-text fallback logs that tool usage is
+unknown: zero observed calls does not establish that no tools were used.
+The adapter cannot reconstruct events omitted by the CLI itself.

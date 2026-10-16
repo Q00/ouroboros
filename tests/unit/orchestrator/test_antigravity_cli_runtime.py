@@ -4,8 +4,7 @@ Antigravity is Google's successor to the Gemini CLI (the ``agy`` binary). The
 runtime extends :class:`GeminiCLIRuntime` but speaks ``agy``'s headless
 contract, which differs in three ways covered here:
 
-1. ``agy -p`` (no ``--output-format``) — plain-text stdout, so
-   ``capabilities.structured_output`` is ``False``.
+1. ``agy -p --output-format stream-json`` preserves structured tool evidence.
 2. ``--dangerously-skip-permissions`` is the only auto-approve mode; both
    ``acceptEdits`` and ``bypassPermissions`` map to it, and interactive
    ``default`` is coerced to a safe non-blocking mode with an audit log.
@@ -99,11 +98,11 @@ def test_build_command_always_skips_permissions() -> None:
     assert "--dangerously-skip-permissions" in cmd
 
 
-def test_build_command_has_no_output_format_flag() -> None:
-    """agy emits plain text — there is no --output-format flag to pass."""
+def test_build_command_requests_structured_output() -> None:
+    """Native stream-json is requested so tool activity is observable."""
     runtime = _make_runtime()
     cmd = runtime._build_command("/tmp/unused", prompt="x")
-    assert "--output-format" not in cmd
+    assert cmd[cmd.index("--output-format") + 1] == "stream-json"
 
 
 def test_build_command_omits_sentinel_model() -> None:
@@ -182,12 +181,11 @@ def test_runtime_identity_is_antigravity() -> None:
     assert runtime.runtime_backend == "antigravity_cli"  # the handle name
 
 
-def test_capabilities_mark_plain_text_and_no_resume() -> None:
+def test_capabilities_mark_structured_output_and_no_resume() -> None:
     runtime = _make_runtime()
     assert runtime.capabilities.skill_dispatch is True
     assert runtime.capabilities.targeted_resume is False
-    # Plain-text stdout (no stream-json) → structured output unavailable.
-    assert runtime.capabilities.structured_output is False
+    assert runtime.capabilities.structured_output is True
     assert runtime.capabilities.system_prompt_support is ParamSupport.TRANSLATED
     assert runtime.capabilities.tool_restriction_support is ParamSupport.TRANSLATED
 
@@ -299,6 +297,104 @@ async def test_execute_task_to_result_preserves_multiline_response() -> None:
 
     assert result.is_ok
     assert result.value.final_message == "First line\nSecond line\nThird line"
+
+
+@pytest.mark.asyncio
+async def test_structured_execution_records_tools_and_preserves_final_answer(tmp_path) -> None:
+    import json
+
+    from ouroboros.evaluation.artifact_collector import ArtifactCollector
+    from ouroboros.orchestrator.parallel_executor import render_parallel_verification_report
+    from ouroboros.orchestrator.parallel_executor_models import (
+        ACExecutionResult,
+        ParallelExecutionResult,
+    )
+    from ouroboros.orchestrator.runtime_message_projection import project_runtime_message
+
+    generated = tmp_path / "a.py"
+    generated.write_text("answer = 42\n")
+    runtime = AntigravityCLIRuntime(cli_path="/usr/bin/agy", cwd=str(tmp_path))
+    events = [
+        {"event": "init", "conversation_id": "native-session", "init": {"cwd": "/tmp"}},
+        {
+            "event": "step_update",
+            "step_update": {
+                "step_type": "tool",
+                "state": "ACTIVE",
+                "tool_name": "write_to_file",
+                "tool_info": {"parameters": {"TargetFile": str(generated)}},
+            },
+        },
+        {
+            "event": "step_update",
+            "step_update": {
+                "step_type": "tool",
+                "state": "DONE",
+                "tool_name": "write_to_file",
+                "tool_info": {"output": "written"},
+            },
+        },
+        {
+            "event": "step_update",
+            "step_update": {"step_type": "agent_response", "text_delta": "Done"},
+        },
+        {
+            "event": "result",
+            "result": {
+                "conversation_id": "native-session",
+                "status": "SUCCESS",
+                "response": "Done\n",
+            },
+        },
+    ]
+
+    async def fake_exec(*command: str, **kwargs: object) -> _FakeProcess:
+        assert command[command.index("--output-format") + 1] == "stream-json"
+        return _FakeProcess([json.dumps(e) for e in events])
+
+    with patch(
+        "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+        side_effect=fake_exec,
+    ):
+        result = await runtime.execute_task_to_result("write a.py")
+    assert result.is_ok
+    transcript = result.value.messages
+    calls = [m for m in transcript if m.type == "assistant" and m.tool_name]
+    assert len(calls) == 1
+    assert calls[0].tool_name == "Write"
+    assert calls[0].data["tool_input"]["file_path"] == str(generated)
+    assert any(m.type == "tool_result" and m.content == "written" for m in transcript)
+    assert result.value.final_message == "Done\n"
+    assert result.value.session_id == "native-session"
+
+    # This is the projection the dispatcher counts, not just a parser assertion.
+    projected = [project_runtime_message(m) for m in transcript]
+    assert sum(m.is_tool_call for m in projected) == 1
+    assert sum(m.is_tool_result for m in projected) == 1
+    ac = ACExecutionResult(
+        ac_index=0,
+        ac_content="Write a.py",
+        success=True,
+        messages=tuple(transcript),
+        final_message=result.value.final_message,
+    )
+    report = render_parallel_verification_report(
+        ParallelExecutionResult(results=(ac,), success_count=1, failure_count=0), 1
+    )
+    assert f"Write: {generated}" in report
+    # Disable fallback scanning so it cannot conceal a missing event path hint.
+    with patch.object(ArtifactCollector, "_scan_directory", side_effect=AssertionError("no scan")):
+        bundle = ArtifactCollector().collect(report, str(tmp_path))
+    assert [(f.file_path, f.content) for f in bundle.files] == [(str(generated), "answer = 42\n")]
+
+
+def test_plain_text_fallback_reports_unknown_tool_usage() -> None:
+    runtime = _make_runtime()
+    with patch("ouroboros.orchestrator.antigravity_cli_runtime.log.warning") as warning:
+        event = runtime._parse_json_event("Wrapped CLI response")
+    assert event["content"] == "Wrapped CLI response"
+    warning.assert_called_once()
+    assert "unknown" in warning.call_args.kwargs["limitation"]
 
 
 @pytest.mark.parametrize(

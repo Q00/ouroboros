@@ -8,12 +8,10 @@ runtime's text-stream handling.
 
 The ``agy`` headless contract differs from the Gemini CLI:
 
-- ``agy -p <prompt>`` runs a single prompt non-interactively and prints the
-  response to stdout. There is **no** ``--output-format`` flag, so ``agy``
-  emits plain text rather than ``stream-json`` events. The inherited
-  :class:`~ouroboros.providers.gemini_event_normalizer.GeminiEventNormalizer`
-  treats each plain line as a ``text`` event, so the assistant response is
-  surfaced as normal assistant messages.
+- ``agy -p <prompt> --output-format stream-json`` emits nested native
+  events, including tool calls and terminal response text. The Antigravity
+  normalizer preserves tool names, inputs, errors, and conversation identifiers.
+  Plain-text fallback remains available for wrapped output.
 - Permissions are all-or-nothing: ``--dangerously-skip-permissions``
   auto-approves every tool request. ``agy`` has no granular ``auto_edit``
   equivalent, so the non-blocking Ouroboros modes (``acceptEdits`` /
@@ -80,8 +78,7 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
     process model:
 
     - ``agy -p`` headless invocation with ``--dangerously-skip-permissions``
-    - Plain-text stdout (no ``stream-json``) normalized via the inherited
-      :class:`GeminiEventNormalizer`
+    - Structured stdout normalized by :class:`AntigravityEventNormalizer`
     - No session resumption (stateless execution model)
     """
 
@@ -115,7 +112,13 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
     def _parse_json_event(self, line: str) -> dict[str, Any] | None:
         if not line.strip():
             return None
-        return AntigravityEventNormalizer().normalize_line(line)
+        event = AntigravityEventNormalizer().normalize_line(line)
+        if event.get("type") == "text":
+            log.warning(
+                "antigravity_cli_runtime.unstructured_output",
+                limitation="Tool usage is unknown for plain-text output; zero observed calls is not evidence of no tool use.",
+            )
+        return event
 
     def _convert_event(
         self, event: dict[str, Any], current_handle: RuntimeHandle | None, *, item_scope: Any = None
@@ -205,6 +208,8 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
             "-p",
             prompt or "",
             "--dangerously-skip-permissions",
+            "--output-format",
+            "stream-json",
         ]
         normalized_model = self._normalize_model(self._model)
         if normalized_model and normalized_model != _SENTINEL_MODEL:
@@ -227,15 +232,7 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
     # -- Final-message accumulation ----------------------------------------
 
     def _update_last_content(self, last_content: str, message: AgentMessage) -> str:
-        """Accumulate plain-text lines into the final message.
-
-        ``agy -p`` prints the full response as plain-text lines (no token
-        deltas, no terminal JSON payload), so each stdout line is surfaced as a
-        separate assistant message. The base "keep the latest message" fallback
-        would therefore truncate a multi-line answer to its last line. Join the
-        non-empty assistant lines with newlines so the orchestrator's
-        ``final_message`` reconstructs the complete response.
-        """
+        """Reconstruct assistant deltas or legacy text, excluding tool output."""
         if message.tool_name or message.type != "assistant" or message.data.get("thinking"):
             return last_content
         if message.data.get("terminal"):
@@ -250,16 +247,15 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
     def capabilities(self) -> RuntimeCapabilities:
         """Declare the Antigravity CLI runtime feature contract.
 
-        ``agy -p`` prints plain text (no ``stream-json``), so structured event
-        output is unavailable and the native CLI exposes no targeted session
-        resume; recovery happens at the Ouroboros checkpoint/lineage layer.
+        ``agy -p --output-format stream-json`` exposes structured tool events.
+        Targeted resume is not yet wired here; recovery happens at the Ouroboros checkpoint/lineage layer.
         Tool restrictions and the system prompt are composed into the user
         message by the inherited prompt builder rather than enforced natively.
         """
         return RuntimeCapabilities(
             skill_dispatch=True,
             targeted_resume=False,
-            structured_output=False,
+            structured_output=True,
             system_prompt_support=ParamSupport.TRANSLATED,
             tool_restriction_support=ParamSupport.TRANSLATED,
             empty_tool_restriction_support=ParamSupport.IGNORED,
