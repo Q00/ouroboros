@@ -52,7 +52,7 @@ irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | i
 
 <p align="center"><sub>설치는 위 한 줄입니다. 이후 코딩 에이전트 안에서 <code>ooo setup</code>을 한 번 실행하세요. 자세한 내용은 <a href="#빠른-시작">빠른 시작</a>에 있습니다.</sub></p>
 
-<p align="center"><sub><b>서로 다른 다섯 번의 실행, 다섯 개의 호스트. 과제가 다른 건 의도한 것입니다 — 공유되는 건 엔진이지 프롬프트가 아닙니다</b></sub></p>
+<p align="center"><sub><b>서로 다른 일곱 번의 실행, 일곱 개의 호스트. 과제가 다른 건 의도한 것입니다 — 공유되는 건 엔진이지 프롬프트가 아닙니다</b></sub></p>
 
 <table align="center">
 <tr>
@@ -64,7 +64,11 @@ irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | i
 <td align="center" width="50%"><img src="./docs/images/host-hermes.gif" width="440" alt="Screen recording of a Discord bot running the Ouroboros interview and reporting a final ambiguity of 0.15"><br><sub><b>Hermes (Discord)</b> — 카트 레이싱 게임 과제를 챗봇으로. <code>Final ambiguity: 0.15</code>에서 끝납니다</sub></td>
 </tr>
 <tr>
-<td align="center" colspan="2"><img src="./docs/images/host-kiro.gif" width="440" alt="Kiro CLI에서 Ouroboros 인터뷰를 실행하는 10배속 화면 녹화"><br><sub><b>Kiro</b> — Kiro CLI에서 Ouroboros 인터뷰 흐름을 실행해 모호한 요청을 구조화하고 검증 가능한 Seed로 구체화합니다</sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-dsh.gif" width="440" alt="DeepSeek Harness가 Ouroboros 인터뷰 도구를 호출하고 어드바이저리 fan-out 결과를 제출하는 화면 녹화"><br><sub><b>DeepSeek Harness</b> — OSS 트렌드 아웃리치 스크립트 과제. dsh 대화에서 <code>mcp__ouroboros__ouroboros_interview</code>를 차례로 호출하고 라운드 사이에 fan-out 결과를 제출합니다</sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-kiro.gif" width="440" alt="Kiro CLI에서 Ouroboros 인터뷰를 실행하는 10배속 화면 녹화"><br><sub><b>Kiro</b> — Kiro CLI에서 Ouroboros 인터뷰 흐름을 실행해 모호한 요청을 구조화하고 검증 가능한 Seed로 구체화합니다</sub></td>
+</tr>
+<tr>
+<td align="center" colspan="2"><img src="./docs/images/host-antigravity.gif" width="440" alt="Antigravity에서 Ouroboros 인터뷰를 실행하고 선택한 답변을 제출하는 화면 녹화"><br><sub><b>Antigravity</b> — YouTube 게시 자동화 인터뷰. 자동화할 범위를 묻고, 어드바이저리 레인을 실행하며 선택한 답변을 제출합니다</sub></td>
 </tr>
 </table>
 
