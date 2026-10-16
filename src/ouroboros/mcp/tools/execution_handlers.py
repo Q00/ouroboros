@@ -2429,9 +2429,9 @@ class StartExecuteSeedHandler:
                 "ouroboros_job_result for terminal output. Do not use when: the request is raw or "
                 "ambiguous natural language with no Seed (use ouroboros_interview or "
                 "ouroboros_start_auto instead). In plugin mode, execution is delegated to an "
-                "OpenCode Task pane and job_id is None — results appear in the Task pane instead "
+                "OpenCode Task pane and job_id is None; results appear in the Task pane instead "
                 "of being pollable via job_status/job_result. This is the handler for 'ooo run' "
-                "commands — do NOT run 'ooo' in the shell; call this MCP tool instead."
+                "commands; do NOT run 'ooo' in the shell; call this MCP tool instead."
             ),
             parameters=(
                 *ExecuteSeedHandler().definition.parameters,

@@ -1974,7 +1974,7 @@ class InterviewHandler:
                 "interview with initial_context, resume with session_id, or record an answer to "
                 "the current question. In plugin mode, returns a delegation receipt "
                 "(status=delegated_to_subagent) and the interview executes in an OpenCode Task "
-                "pane — the real session_id is returned there."
+                "pane; the real session_id is returned there."
             ),
             parameters=(
                 MCPToolParameter(
