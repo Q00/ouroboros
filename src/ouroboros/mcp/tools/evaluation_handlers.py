@@ -1651,6 +1651,9 @@ class StartEvaluateHandler:
         return MCPToolDefinition(
             name="ouroboros_start_evaluate",
             description=(
+                "Verify that finished work meets its acceptance criteria, not just "
+                'that tests pass ("is it actually done?", "check it against '
+                'the spec"). '
                 "Start an evaluation in the background and return a job ID immediately. "
                 "Use this instead of ouroboros_evaluate when the three-stage pipeline "
                 "(mechanical + semantic + optional consensus) is expected to exceed the "

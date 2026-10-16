@@ -1,6 +1,6 @@
 ---
 name: auto
-description: "Automatically converge from goal to A-grade Seed and execute it"
+description: "Use when the work spans several files or replaces a framework, language, auth, storage, or API layer (rewrites and migrations included), and the user wants it to end up working and tested. Asks only what is missing, writes a spec with acceptance criteria, then runs and verifies it in the background. Not for questions, small edits, or an existing Seed (use run)."
 mcp_tool: ouroboros_start_auto
 mcp_args:
   goal: "$goal"
@@ -82,12 +82,14 @@ When the user types `ooo auto` with CLI-style flags inside chat, translate to MC
 
 `--pipeline-timeout-seconds` is accepted only when starting a session. Passing it with `--resume` is rejected because the original deadline is preserved across process restarts.
 
-Before a fresh Auto start, if the user did not already choose an efficiency
-policy, first check the persistent default: when `execution.default_policy` in
-`~/.ouroboros/config.yaml` is `efficient` or `quality_first`, do not ask — omit
-both arguments and the server applies the configured default (the handoff still
-reports the resolved policy). Otherwise ask in outcome language:
-**Efficient execution** maps to
+Before a fresh Auto start, do not ask about an efficiency policy unless the user
+raised it or `execution.default_policy` in `~/.ouroboros/config.yaml` is
+explicitly `ask`. Otherwise omit both arguments: the server applies the
+configured default, which is quality-first when nothing is configured. After
+the start, tell the user once which policy is running, using the `Efficiency
+Mode` line of the handoff; when it names the default, include the change
+command it shows. If the user did choose, or the config says `ask`, map their
+choice in outcome language: **Efficient execution** maps to
 `adaptive/observe`; **Quality-first execution** maps to `quality_first/off`.
 `strict` assurance is a separate explicit opt-in because it may spend extra
 work on proof. Never infer strict from the efficiency choice. On resume, do not

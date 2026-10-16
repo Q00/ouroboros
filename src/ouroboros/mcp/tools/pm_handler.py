@@ -424,6 +424,8 @@ class PMInterviewHandler:
             name="ouroboros_pm_interview",
             description=(
                 "PM interview for product requirements gathering. "
+                "Use when: the user wants a PRD or product requirements rather "
+                'than code ("write a PRD", "spec this feature for the team"). '
                 "Start with initial_context, continue with session_id + answer, "
                 "or generate PM seed with action='generate'. "
                 "In plugin mode, returns a delegation receipt "

@@ -1,6 +1,6 @@
 ---
 name: pm
-description: "Generate a PM through guided PM-focused interview with automatic question classification. Use when the user says 'ooo pm', 'prd', 'product requirements', or wants to create a PRD/PM document."
+description: "Use when the user wants product requirements rather than code: 'write a PRD', 'product requirements', 'spec this feature for the team', 'ooo pm'. Runs a PM-focused interview with automatic question classification and produces a PRD/PM document. Not for implementation requests."
 ---
 
 # /ouroboros:pm
@@ -9,43 +9,7 @@ PM-focused Socratic interview that produces a Product Requirements Document.
 
 ## Instructions
 
-### Step 0: Version Check (runs before the PM interview)
-
-Before starting the PM interview, check if a newer version is available:
-
-```bash
-# Fetch latest release tag from GitHub (timeout 3s to avoid blocking)
-curl -s --max-time 3 https://api.github.com/repos/Q00/ouroboros/releases/latest | grep -o '"tag_name": "[^"]*"' | head -1
-```
-
-Compare the result with the current version in the active runtime's local plugin metadata (for Claude installs this is `.claude-plugin/plugin.json`).
-- If a newer version exists, ask the user through the active runtime's `ask_user` capability:
-  ```json
-  {
-    "questions": [{
-      "question": "Ouroboros <latest> is available (current: <local>). Update before starting?",
-      "header": "Update",
-      "options": [
-        {"label": "Update now", "description": "Update plugin to latest version (restart required to apply)"},
-        {"label": "Skip, start PM interview", "description": "Continue with current version"}
-      ],
-      "multiSelect": false
-    }]
-  }
-  ```
-  - If "Update now":
-    - On Claude-plugin installs only:
-      1. Run `claude plugin marketplace update ouroboros` via the active runtime's `run_shell` capability (refresh marketplace index). If this fails, tell the user "⚠️ Marketplace refresh failed, continuing…" and proceed.
-      2. Run `claude plugin update ouroboros@ouroboros` via the active runtime's `run_shell` capability (update plugin/skills). If this fails, inform the user and stop — do NOT proceed to the package-manager step.
-    - On non-Claude runtimes, skip Claude plugin commands and proceed directly to the package-manager step for `ouroboros-ai`; do not require Claude-only commands or tools.
-    3. Detect the user's Python package manager and upgrade the MCP server:
-       - Check which tool installed `ouroboros-ai` by running these in order:
-         - `uv tool list 2>/dev/null | grep "^ouroboros-ai "` → if found, use `uv tool upgrade ouroboros-ai`
-         - `pipx list 2>/dev/null | grep "^  ouroboros-ai "` → if found, use `pipx upgrade ouroboros-ai`
-         - Otherwise, print: "Also upgrade the MCP server: `pip install --upgrade ouroboros-ai`" (do NOT run pip automatically)
-    4. Tell the user: "Updated! Restart your session to apply, then run `ooo pm` again."
-  - If "Skip": proceed immediately.
-- If versions match, the check fails (network error, timeout, rate limit 403/429), or parsing fails/returns empty: **silently skip** and proceed.
+Updates are checked in the background, at most once a day. If your context carries an Ouroboros update notice, mention `ooo update` once after the first question; do not run a version check here.
 
 ### Step 1: Load MCP Tool
 

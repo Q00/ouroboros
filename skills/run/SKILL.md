@@ -1,6 +1,6 @@
 ---
 name: ouroboros-run
-description: "Execute a Seed specification through the workflow engine"
+description: "Use when an Ouroboros Seed (a spec file with a goal and acceptance criteria, such as *.seed.yaml) already exists and the user wants it executed: 'run the seed', 'execute this spec', 'ooo run'. Executes it and verifies every acceptance criterion. Not for raw requests without a Seed (use interview or auto)."
 aliases: [execute]
 mcp_tool: ouroboros_execute_seed
 mcp_args:
@@ -75,12 +75,14 @@ fallback instead of retrying the failing call.
    - If inline YAML: Use directly
    - If neither: Check conversation history for a recently generated seed
 
-   Before a fresh start, when the user has not already chosen an efficiency
-   policy, first check the persistent default: when `execution.default_policy`
-   in `~/.ouroboros/config.yaml` is `efficient` or `quality_first`, do not ask —
-   omit both arguments and the server applies the configured default (the start
-   handoff still reports the resolved policy). When it is `ask` or unset, ask
-   in outcome language:
+   Before a fresh start, do not ask about an efficiency policy unless the user
+   raised it or `execution.default_policy` in `~/.ouroboros/config.yaml` is
+   explicitly `ask`. Otherwise omit both arguments: the server applies the
+   configured default, which is quality-first when nothing is configured.
+   After the start, tell the user once which policy is running, using the
+   `Efficiency Mode` line of the handoff; when it names the default, include
+   the change command it shows. If the user did choose, or the config says
+   `ask`, map the choice in outcome language:
 
    - **Efficient execution** — start parallel/decomposed work economically and
      strengthen the route only when recovery requires it. Send
@@ -98,8 +100,8 @@ fallback instead of retrying the failing call.
    Tool: ouroboros_start_execute_seed
    Arguments:
      seed_content: <the seed YAML>
-     efficiency_mode: <adaptive or quality_first>
-     frugality_assurance: <observe, off, or explicit strict>
+     efficiency_mode: <only when chosen: adaptive or quality_first>
+     frugality_assurance: <only when chosen: observe, off, or explicit strict>
      max_iterations: 10    (or as specified by user)
    ```
    Omit `model_tier` by default so the runtime selects automatically. Include
