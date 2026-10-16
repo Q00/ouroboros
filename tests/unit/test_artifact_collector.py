@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import tempfile
 
+import pytest
+
 import ouroboros.evaluation.artifact_collector as artifact_collector_module
 from ouroboros.evaluation.artifact_collector import ArtifactCollector
 
@@ -136,10 +138,40 @@ class TestArtifactCollector:
         bundle = ArtifactCollector().collect("No file operations here.", project_dir=tmpdir)
 
         assert bundle.scan_complete is False
-        assert bundle.scan_error == "entry limit (2) exceeded"
+        assert bundle.scan_error == "entry budget (2) reached"
+
+    def test_fallback_scan_does_not_enumerate_past_entry_budget(self, monkeypatch) -> None:
+        tmpdir = self._create_project({f"{index}.py": "code" for index in range(7)})
+        monkeypatch.setattr(artifact_collector_module, "MAX_SCAN_ENTRIES", 2)
+        real_scandir = os.scandir
+        enumerated = 0
+
+        class CountingScandir:
+            def __init__(self, path):
+                self._iterator = real_scandir(path)
+
+            def __enter__(self):
+                self._iterator.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self._iterator.__exit__(*args)
+
+            def __iter__(self):
+                nonlocal enumerated
+                for entry in self._iterator:
+                    enumerated += 1
+                    yield entry
+
+        monkeypatch.setattr(artifact_collector_module.os, "scandir", CountingScandir)
+
+        bundle = ArtifactCollector().collect("No file operations here.", project_dir=tmpdir)
+
+        assert bundle.scan_complete is False
+        assert enumerated == 2
 
     def test_fallback_scan_depth_limit_is_marked_incomplete(self, monkeypatch) -> None:
-        tmpdir = self._create_project({"nested/source.py": "code"})
+        tmpdir = self._create_project({"nested/deeper/source.py": "code"})
         monkeypatch.setattr(artifact_collector_module, "MAX_SCAN_DEPTH", 1)
 
         bundle = ArtifactCollector().collect("No file operations here.", project_dir=tmpdir)
@@ -164,3 +196,22 @@ class TestArtifactCollector:
 
         assert bundle.scan_complete is True
         assert {Path(item.file_path).name for item in bundle.files} == {"src.py"}
+
+    def test_fallback_scan_skips_special_files_without_reading(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("FIFO files are unavailable on this platform")
+        fifo = tmp_path / "blocked.pipe"
+        os.mkfifo(fifo)
+        collector = ArtifactCollector()
+        monkeypatch.setattr(
+            collector,
+            "_read_file",
+            lambda _path: pytest.fail("fallback scanner must skip special files"),
+        )
+
+        bundle = collector.collect("No file operations here.", project_dir=str(tmp_path))
+
+        assert bundle.scan_complete is True
+        assert bundle.files == ()
