@@ -184,28 +184,37 @@ class TestGoalDriftCalculation:
         self, sample_seed: Seed, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from ouroboros.core.types import Result
-        from ouroboros.evaluation.models import SemanticResult
-        from ouroboros.evaluation.semantic import SemanticEvaluator
+        import ouroboros.evolution.provider_usage as provider_usage
         from ouroboros.observability.drift import calculate_goal_drift_async
 
         seen: list[tuple[str, str, int]] = []
 
-        async def evaluate(_self: object, context: object) -> object:
-            artifact = context.artifact  # type: ignore[attr-defined]
-            goal = context.goal  # type: ignore[attr-defined]
+        async def complete(adapter: object, messages: object, config: object) -> object:
+            content = messages[1].content  # type: ignore[index,attr-defined]
+            import json
+
+            parsed = json.loads(content)
+            goal = parsed["goal"]
+            artifact = parsed["execution_summary"]
             seen.append((goal, artifact, threading.get_ident()))
             alignment = 0.92 if "Count valid" in artifact else 0.08
-            semantic = SemanticResult(
-                score=alignment,
-                ac_compliance=alignment > 0.5,
-                goal_alignment=alignment,
-                drift_score=1.0 - alignment,
-                uncertainty=0.05,
-                reasoning="test semantic alignment",
+            assert messages[0].role.value == "system"  # type: ignore[index,attr-defined]
+            assert "Do not judge implementation quality" in messages[0].content  # type: ignore[index,attr-defined]
+            assert config.role == "semantic_evaluation"  # type: ignore[attr-defined]
+            assert config.response_format["type"] == "json_schema"  # type: ignore[attr-defined]
+            assert config.response_format["json_schema"]["required"] == [  # type: ignore[attr-defined,index]
+                "goal_alignment",
+                "reasoning",
+            ]
+            return Result.ok(
+                type(
+                    "Response",
+                    (),
+                    {"content": f'{{"goal_alignment": {alignment}, "reasoning": "test"}}'},
+                )()
             )
-            return Result.ok((semantic, []))
 
-        monkeypatch.setattr(SemanticEvaluator, "evaluate", evaluate)
+        monkeypatch.setattr(provider_usage, "tracked_complete", complete)
         adapter_threads: list[int] = []
 
         def adapter_factory() -> object:
@@ -250,22 +259,22 @@ class TestGoalDriftCalculation:
         self, sample_seed: Seed, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from ouroboros.core.types import Result
-        from ouroboros.evaluation.models import SemanticResult
-        from ouroboros.evaluation.semantic import SemanticEvaluator
+        import ouroboros.evolution.provider_usage as provider_usage
         from ouroboros.observability.drift import calculate_goal_drift
 
         caller_thread = threading.get_ident()
         factory_threads: list[int] = []
 
-        async def evaluate(_self: object, _context: object) -> object:
+        async def complete(_adapter: object, _messages: object, _config: object) -> object:
             return Result.ok(
-                (
-                    SemanticResult(0.9, True, 0.9, 0.1, 0.05, "worker result"),
-                    [],
-                )
+                type(
+                    "Response",
+                    (),
+                    {"content": '{"goal_alignment": 0.9, "reasoning": "worker result"}'},
+                )()
             )
 
-        monkeypatch.setattr(SemanticEvaluator, "evaluate", evaluate)
+        monkeypatch.setattr(provider_usage, "tracked_complete", complete)
         result = calculate_goal_drift(
             "A complete output",
             sample_seed,
@@ -281,17 +290,17 @@ class TestGoalDriftCalculation:
     ) -> None:
         import asyncio
 
-        from ouroboros.evaluation.semantic import SemanticEvaluator
+        import ouroboros.evolution.provider_usage as provider_usage
         from ouroboros.observability.drift import (
             _calculate_lexical_goal_drift,
             calculate_goal_drift_async,
         )
 
-        async def slow_evaluate(_self: object, _context: object) -> object:
+        async def slow_complete(_adapter: object, _messages: object, _config: object) -> object:
             await asyncio.sleep(0.05)
             raise AssertionError("timeout should cancel evaluation")
 
-        monkeypatch.setattr(SemanticEvaluator, "evaluate", slow_evaluate)
+        monkeypatch.setattr(provider_usage, "tracked_complete", slow_complete)
         output = "The delivery is complete"
         result = await calculate_goal_drift_async(
             output,
@@ -315,21 +324,29 @@ class TestGoalDriftCalculation:
         def unavailable() -> object:
             raise RuntimeError("test provider unavailable")
 
+        async def fail_complete(_adapter: object, _messages: object, _config: object) -> object:
+            from ouroboros.core.types import Result
+
+            return Result.err(RuntimeError("test completion failed"))
+
         warnings: list[str] = []
         monkeypatch.setattr(
             drift_module.log,
             "warning",
             lambda event, **fields: warnings.append(f"{event} {fields}"),
         )
+        import ouroboros.evolution.provider_usage as provider_usage
+
+        monkeypatch.setattr(provider_usage, "tracked_complete", fail_complete)
         output = "A totally unrelated delivery"
         drift = await calculate_goal_drift_async(
             output,
             sample_seed,
-            adapter_factory=unavailable,  # type: ignore[arg-type]
+            adapter_factory=lambda: object(),  # type: ignore[arg-type]
         )
 
         assert drift == _calculate_lexical_goal_drift(output, sample_seed)
-        assert any("test provider unavailable" in warning for warning in warnings)
+        assert any("test completion failed" in warning for warning in warnings)
 
 
 # =============================================================================
