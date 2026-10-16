@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
 
+from ouroboros.evaluation import detector
 from ouroboros.evaluation.detector import ensure_mechanical_toml, has_mechanical_toml
 from ouroboros.evaluation.languages import build_mechanical_config
 from ouroboros.evaluation.mechanical import MechanicalVerifier
@@ -56,6 +58,54 @@ def test_manifest_free_unittest_runs_as_stage1_evidence(
     check = mechanical.checks[0]
     assert check.executed is True
     assert check.passed is (not fail)
+
+
+def test_manifest_free_unittest_recurses_into_importable_subpackage(
+    tmp_path: Path,
+) -> None:
+    """unittest discovery also finds tests below a package under tests/."""
+    package = tmp_path / "tests" / "unit"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    _write_unittest(package / "test_nested.py")
+
+    assert _run(ensure_mechanical_toml(tmp_path, None)) is True
+    config = build_mechanical_config(tmp_path)
+    result = _run(MechanicalVerifier(config).verify("nested", checks=[CheckType.TEST]))
+
+    assert result.is_ok
+    mechanical, _ = result.value
+    assert mechanical.disposition is MechanicalDisposition.EXECUTED_PASS
+    assert mechanical.checks[0].passed is True
+
+
+def test_manifest_free_unittest_does_not_follow_symlink_cycle(tmp_path: Path) -> None:
+    """Package symlinks cannot make the bounded discovery loop revisit paths."""
+    package = tmp_path / "tests" / "unit"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    _write_unittest(package / "test_nested.py")
+    try:
+        os.symlink(tmp_path / "tests", package / "cycle", target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"directory symlinks are unavailable: {exc}")
+
+    assert _run(ensure_mechanical_toml(tmp_path, None)) is True
+
+
+def test_manifest_free_unittest_budget_exhaustion_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A test file beyond the scan budget cannot become an unverified guess."""
+    _write_unittest(tmp_path / "tests" / "test_sample.py")
+    (tmp_path / "tests" / "test_helper.py").write_text(
+        "def helper():\n    return True\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(detector, "_MAX_UNITTEST_DISCOVERY_ENTRIES", 1)
+
+    assert _run(ensure_mechanical_toml(tmp_path, None)) is False
+    assert has_mechanical_toml(tmp_path) is False
 
 
 def test_project_without_discoverable_tests_stays_unverified(tmp_path: Path) -> None:
