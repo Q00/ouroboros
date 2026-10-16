@@ -192,3 +192,77 @@ def test_dispatch_prompt_monitors_auto_job_until_result(capsys) -> None:
     assert "Monitoring auto job: job_auto_123" in output
     assert "job completed" in output
     assert "final auto result" in output
+
+
+def test_dispatch_prompt_monitors_run_job_until_result(capsys) -> None:
+    resolved = Resolved(
+        skill_name="run",
+        command_prefix="ooo run",
+        prompt="ooo run seed.yaml",
+        skill_path=Path("skills/run/SKILL.md"),
+        mcp_tool="ouroboros_start_execute_seed",
+        mcp_args={"seed_path": "seed.yaml", "cwd": "/tmp/project"},
+        first_argument="seed.yaml",
+    )
+
+    async def fake_dispatch(intercept, current_handle):
+        return (
+            AgentMessage(type="assistant", content="Calling tool: ouroboros_start_execute_seed"),
+            AgentMessage(
+                type="result",
+                content="started run",
+                data={"subtype": "success", "job_id": "job_run_123", "cursor": 3},
+            ),
+        )
+
+    class FakeWaitHandler:
+        async def handle(self, arguments):
+            assert arguments["job_id"] == "job_run_123"
+            assert arguments["cursor"] == 3
+            return Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="run job failed"),),
+                    is_error=True,
+                    meta={
+                        "job_id": "job_run_123",
+                        "cursor": 4,
+                        "changed": True,
+                        "is_terminal": True,
+                        "status": "failed",
+                    },
+                )
+            )
+
+    class FakeResultHandler:
+        async def handle(self, arguments):
+            assert arguments == {"job_id": "job_run_123"}
+            return Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="final run result"),),
+                    meta={"job_id": "job_run_123", "is_terminal": True},
+                )
+            )
+
+    with (
+        patch("ouroboros.cli.commands.dispatch.resolve_skill_dispatch", return_value=resolved),
+        patch(
+            "ouroboros.cli.commands.dispatch.create_codex_command_dispatcher",
+            return_value=fake_dispatch,
+        ),
+        patch("ouroboros.cli.commands.dispatch.JobWaitHandler", return_value=FakeWaitHandler()),
+        patch("ouroboros.cli.commands.dispatch.JobResultHandler", return_value=FakeResultHandler()),
+    ):
+        exit_code = asyncio.run(
+            dispatch_cmd._dispatch_prompt(
+                "ooo run seed.yaml",
+                runtime="pi",
+                llm_backend=None,
+                cwd=Path("/tmp/project"),
+            )
+        )
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert "started run" in output
+    assert "Monitoring run job: job_run_123" in output
+    assert "final run result" in output

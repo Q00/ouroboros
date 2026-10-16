@@ -2,7 +2,7 @@
 name: ouroboros-run
 description: "Use when an Ouroboros Seed (a spec file with a goal and acceptance criteria, such as *.seed.yaml) already exists and the user wants it executed: 'run the seed', 'execute this spec', 'ooo run'. Executes it and verifies every acceptance criterion. Not for raw requests without a Seed (use interview or auto)."
 aliases: [execute]
-mcp_tool: ouroboros_execute_seed
+mcp_tool: ouroboros_start_execute_seed
 mcp_args:
   seed_path: "$1"
   cwd: "$CWD"
