@@ -1285,7 +1285,8 @@ def test_brownfield_default_selection_ends_turn_in_every_skill_bundle() -> None:
         for skill in ("brownfield", "setup"):
             text = (root / skill / "SKILL.md").read_text(encoding="utf-8")
             compact = " ".join(text.split())
-            assert "Do NOT use `AskUserQuestion` for this selection" in text
+            assert "Do NOT use the active runtime's `ask_user` dialog for this selection" in text
+            assert "AskUserQuestion" not in text
             assert "end the turn with the repo grid as the final message" in compact
             assert '"keep" to keep the current defaults' in compact
             assert "IMMEDIATELY after showing the list" not in text
@@ -1344,7 +1345,10 @@ def test_background_skills_delegate_one_exclusive_job_observer() -> None:
             assert "isolated worktree" in compact
             assert "tui open" in normalized
             assert "conversation" in normalized and "available" in normalized
-            assert "wait_agent" in text
+            assert "orchestrate_subagents" in text
+            assert "host_lifecycle" in text
+            assert "live child id" in compact
+            assert "at most 60 seconds" in compact
             assert "cannot revive" in compact or "cannot wake" in compact
             assert "must not poll" in normalized
             assert "stop live observation" in compact
@@ -1354,8 +1358,11 @@ def test_background_skills_delegate_one_exclusive_job_observer() -> None:
     for skill in ("run", "auto", "ralph"):
         text = (repo_root / "skills" / skill / "SKILL.md").read_text(encoding="utf-8")
         normalized = text.lower()
-        assert "spawn_agent" in text
-        assert "run_observer" in text
+        # Vendor spawn mechanics live in the runtime-specific surfaces (the
+        # Codex rules below and the observer contract's ``host_lifecycle``),
+        # not in the shared skill text.
+        for vendor_phrase in ("spawn_agent", "wait_agent", "run_observer", "RunObserver"):
+            assert vendor_phrase not in text
         assert "wait" in normalized and "not a spawn" in normalized
         assert "stdio" in normalized
         assert "detached worker" in normalized
@@ -1364,10 +1371,38 @@ def test_background_skills_delegate_one_exclusive_job_observer() -> None:
     codex_instructions = (repo_root / "src" / "ouroboros" / "codex" / "ouroboros.md").read_text(
         encoding="utf-8"
     )
+    codex_compact = " ".join(codex_instructions.split())
+    assert "`spawn_agent` primitive exactly once" in codex_compact
+    assert 'task_name="run_observer"' in codex_instructions
+    assert "A `wait` call does not create an observer" in codex_compact
     assert "wait_agent" in codex_instructions
+    assert "at most 60 seconds" in codex_compact
     assert "cannot revive a parent turn" in codex_instructions
+    assert "`ooo run`, `ooo auto`, `ooo ralph`" in codex_compact
     assert "stop live observation" in codex_instructions
     assert "without cancelling the durable job" in codex_instructions
+
+
+_VENDOR_TOOL_PHRASES = re.compile(
+    r"spawn_agent|wait_agent|send_message|run_observer|RunObserver|AskUserQuestion|Task/Agent"
+)
+
+
+def test_shared_skills_use_capability_words_not_vendor_tool_names() -> None:
+    """Shared skills speak runtime capability words only.
+
+    Runtime-specific spawn, wait, and question tools belong in the runtime
+    surfaces (``src/ouroboros/codex/ouroboros.md``, the capability guides in
+    ``backends/capabilities.py``), never in ``skills/*/SKILL.md``.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    offenders = [
+        f"{skill_path.relative_to(repo_root)}:{line_no}: {match.group(0)}"
+        for skill_path in sorted((repo_root / "skills").glob("*/SKILL.md"))
+        for line_no, line in enumerate(skill_path.read_text(encoding="utf-8").splitlines(), 1)
+        for match in _VENDOR_TOOL_PHRASES.finditer(line)
+    ]
+    assert not offenders, "vendor tool names in shared skills:\n" + "\n".join(offenders)
 
 
 def test_run_and_auto_route_human_intent_without_exposing_internal_ids() -> None:

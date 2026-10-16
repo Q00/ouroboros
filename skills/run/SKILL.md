@@ -95,21 +95,20 @@ Ouroboros tools may be deferred, and a schema loaded on one turn can unload by t
    observer owns it. If plugin mode already delegated the whole execution (no
    `job_id`), follow that child's lifecycle instead.
 
-   - On Codex, call `spawn_agent` exactly once with `task_name="run_observer"`
-     and the contract unchanged in the child message; a `wait` call is not a
-     spawn. After the live child ID returns, keep the parent turn open with
-     `wait_agent` calls of at most 60 seconds: a child `send_message` only
-     queues a mailbox event and cannot wake a parent turn that already ended.
-     Relay meaningful updates and wait again until the terminal summary. User
-     input may interrupt the wait; handle it and resume unless the user asks to
-     stop live observation or replaces the request. Then end only the relay
-     loop, keep the durable job running, and offer next-turn or explicit-status
-     catch-up. If the observer child fails, is cancelled, or exits early, use
-     that same catch-up instead of waiting indefinitely. The relay loop must not
-     poll Ouroboros job tools or touch the observer's cursor.
-   - On OMP, submit exactly one native Task child named `RunObserver` with the
-     contract unchanged, require its live agent/job ID, and relay through the
-     host wait/inbox until terminal. A parent job-status poll is not a spawn.
+   - A `wait` call or a parent job-status poll is not a spawn. The contract's
+     `host_lifecycle` and the runtime's `orchestrate_subagents` guidance name
+     the concrete spawn and wait mechanics; pass the contract unchanged in the
+     child message. After the live child ID returns, if the runtime cannot
+     wake a parent turn that already ended when the child posts (a child
+     message only queues for the parent), keep the parent turn open with the
+     host's child-wait primitive in waits of at most 60 seconds. Relay
+     meaningful updates and wait again until the terminal summary. User input may interrupt the wait; handle it and
+     resume unless the user asks to stop live observation or replaces the
+     request. Then end only the relay loop, keep the durable job running, and
+     offer next-turn or explicit-status catch-up. If the observer child fails,
+     is cancelled, or exits early, use that same catch-up instead of waiting
+     indefinitely. The relay loop must not poll Ouroboros job tools or touch the
+     observer's cursor.
 
    If no child can be created, do not claim an observer or promise live
    messages. The detached worker survives the stdio MCP turn: say progress is
