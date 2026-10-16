@@ -423,10 +423,9 @@ Check agents are available:
 ls src/ouroboros/agents/*.md | wc -l  # Should show 20+ bundled agents
 ```
 
-Confirm with `ouroboros_cli config show orchestrator` and `ouroboros_cli config show llm`
-(Step 1.5) that the saved
-Ouroboros config selects the default Claude Agent SDK runtime on MCP 1.x
-while `~/.claude/mcp.json` was not mutated by this setup. The
+Confirm (with the Step 1.5 `config show` commands) that the saved Ouroboros
+config selects the default Claude Agent SDK runtime
+on MCP 1.x while `~/.claude/mcp.json` was not mutated by this setup. The
 dependency-free Claude CLI worker remains a distinct, explicit `[claude-cli]`
 selection for the isolated MCP 2 process.
 
