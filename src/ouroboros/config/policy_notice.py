@@ -8,8 +8,9 @@ from typing import Any
 from ouroboros.config.loader import default_execution_efficiency_mode
 
 _NOTICE = (
-    " (default; to switch future runs to efficient execution: `ooo config` or "
-    "`ouroboros config set execution.default_policy efficient`)"
+    " (default; to switch future runs to efficient execution: "
+    "`ouroboros config set execution.default_policy efficient`, after "
+    "`ouroboros config init` if no config exists yet)"
 )
 
 

@@ -1050,7 +1050,7 @@ def default_execution_efficiency_mode() -> str | None:
     """
     try:
         policy = load_config().execution.default_policy
-    except ConfigError:
+    except (ConfigError, OSError):
         return "quality_first"
     if policy == "efficient":
         return "adaptive"

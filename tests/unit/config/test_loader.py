@@ -2929,10 +2929,11 @@ class TestDefaultExecutionEfficiencyMode:
         ):
             assert default_execution_efficiency_mode() == expected
 
-    def test_missing_or_unreadable_config_takes_the_quality_first_default(self) -> None:
-        # A user with no config must not stall on a policy question.
-        with patch(
-            "ouroboros.config.loader.load_config",
-            side_effect=ConfigError("unreadable"),
-        ):
+    @pytest.mark.parametrize("error", [ConfigError("unreadable"), IsADirectoryError("config.yaml")])
+    def test_missing_or_unreadable_config_takes_the_quality_first_default(
+        self, error: Exception
+    ) -> None:
+        # A user with no config, or one the filesystem cannot read, must not
+        # stall on a policy question.
+        with patch("ouroboros.config.loader.load_config", side_effect=error):
             assert default_execution_efficiency_mode() == "quality_first"

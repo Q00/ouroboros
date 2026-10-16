@@ -14,7 +14,7 @@ def test_defaulted_quality_first_start_names_the_change_command() -> None:
         notice = policy_notice({"goal": "migrate to JWT"})
     assert "default" in notice
     assert "ouroboros config set execution.default_policy efficient" in notice
-    assert "ooo config" in notice
+    assert "ouroboros config init" in notice
 
 
 @pytest.mark.parametrize(
