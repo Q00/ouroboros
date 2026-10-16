@@ -161,7 +161,11 @@ MCP generates the questions, keeps state, and scores ambiguity; it cannot read c
    - `contrarian`: hidden assumptions, overloaded terms, decisions the interview skipped.
    - `gap_hunter`: missing requirements, unlisted constraints, unhandled edge cases, unverifiable acceptance criteria.
 
-   Closure is blocked when the `closer` verdict is not `seed_ready` or any `contrarian` / `gap_hunter` finding is HIGH severity. Then override the signal ("MCP says seed-ready, but I am not accepting it yet because <gap>."), explain the gap briefly, and ask the single highest-impact blocking question through PATH 2 or PATH 3.
+   Each lane returns only JSON:
+   - `closer`: `{"lane_id": "closer", "verdict": "seed_ready" | "not_ready", "reason": "...", "blocking_question": "..." | null}`
+   - `contrarian` / `gap_hunter`: `{"lane_id": "<lane>", "severity": "high" | "medium" | "low", "finding": "...", "question": "..." | null}`; `high` only when the gap would materially change the implementation.
+
+   Closure is blocked when the `closer` verdict is not `seed_ready` or any `contrarian` / `gap_hunter` severity is `high`. Then override the signal ("MCP says seed-ready, but I am not accepting it yet because <gap>."), explain the gap briefly, and ask the single highest-impact blocking question through PATH 2 or PATH 3.
 
 9. **Restate gate** (after the Seed-ready Acceptance Guard passes). Restate the agreed goal as one sentence and ask through `ask_user`: "goal: <one-sentence restatement>. If someone else read only this line, would they arrive at the outcome you have in mind?" Options: `Yes, generate seed`, `Adjust wording`, `Missing scope`.
    - `Yes, generate seed`: suggest `ooo seed`.
