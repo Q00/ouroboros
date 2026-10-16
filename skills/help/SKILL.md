@@ -16,145 +16,88 @@ ooo help
 
 ## What Is Ouroboros?
 
-Ouroboros is a **requirement crystallization engine** for AI workflows. It transforms vague ideas into validated specifications through:
+A specification-first workflow engine: it turns vague ideas into a validated
+Seed (goal, constraints, acceptance criteria) before any code is written.
 
-1. **Socratic Interview** - Exposes hidden assumptions
-2. **Seed Generation** - Creates immutable specifications
-3. **PAL Routing** - Auto-escalates/descends model complexity
-4. **Lateral Thinking** - 5 personas to break stagnation
-5. **3-Stage Evaluation** - Mechanical > Semantic > Consensus
+```
+Interview → Seed → Execute → Evaluate
+    ↑                           ↓
+    └─── Evolutionary Loop ─────┘
+```
 
-## All Commands
+## Commands
 
-### Core Commands
+Each `ooo <name>` is also the skill `/ouroboros:<name>`, except `run`, `status`,
+`config`, and `help`, which are `/ouroboros:ouroboros-<name>`.
 
-| Command | Purpose | Mode |
-|---------|---------|------|
-| `ooo` | Welcome + quick start | Plugin |
-| `ooo interview` | Socratic requirement clarification | Plugin |
-| `ooo seed` | Generate validated seed spec | Plugin |
-| `ooo run` | Execute seed workflow | MCP |
-| `ooo evaluate` | 3-stage verification | MCP |
-| `ooo unstuck` | 5 lateral thinking personas | Plugin |
-| `ooo status` | Session status + drift check | MCP |
-| `ooo resume-session` | List in-flight sessions and re-attach commands | CLI |
-| `ooo setup` | Installation wizard | Plugin |
-| `ooo config` | Settings GUI — per-stage agents & models (browser here, TUI in a terminal) | CLI |
-| `ooo welcome` | First-touch welcome guide | Plugin |
-| `ooo tutorial` | Interactive hands-on learning | Plugin |
-| `ooo help` | This reference guide | Plugin |
-| `ooo pm` | PM-focused interview + PRD generation | MCP |
-| `ooo qa` | General-purpose QA verdict for any artifact | Plugin |
-| `ooo cancel` | Cancel stuck or orphaned executions | CLI |
-| `ooo update` | Check for updates + upgrade to latest | Plugin |
+| Command | Purpose | Needs |
+|---------|---------|-------|
+| `ooo` / `ooo welcome` | First-touch onboarding | none |
+| `ooo setup` | Claude Code setup wizard | none |
+| `ooo tutorial` | Interactive hands-on learning | none |
+| `ooo help` | This reference | none |
+| `ooo interview` | Socratic interview that exposes hidden assumptions | MCP, in-session fallback |
+| `ooo seed` | Freeze interview results into a Seed | MCP, in-session fallback |
+| `ooo auto` | Goal to A-grade Seed, then execute and verify in the background | MCP |
+| `ooo run` | Execute a Seed and verify every acceptance criterion | MCP |
+| `ooo evaluate` | Mechanical checks, semantic review per criterion, consensus when uncertain | MCP, in-session fallback |
+| `ooo evolve` | Start or monitor an evolutionary loop across Seed generations | MCP |
+| `ooo ralph` | Server-owned loop until verified (`ouroboros_ralph` runs it as a background job) | MCP |
+| `ooo unstuck` | Five lateral thinking personas, single or debate | MCP |
+| `ooo status` | Session status and goal drift | MCP |
+| `ooo qa` | General-purpose QA verdict for any artifact | MCP, in-session fallback |
+| `ooo pm` | PM-focused interview and PRD | MCP |
 | `ooo brownfield` | Scan and manage brownfield repo defaults | MCP |
-| `ooo publish` | Publish Seed as GitHub Issues for teams | Plugin |
-| `ooo maintain` | Triage and resolve maintainer issues and PRs | Plugin |
+| `ooo config` | Settings GUI for per-stage agents and models | CLI |
+| `ooo cancel` | Cancel stuck or orphaned executions | CLI |
+| `ooo resume-session` | List in-flight sessions and re-attach commands | CLI |
+| `ooo update` | Check for updates and upgrade | CLI |
+| `ooo publish` | Publish a Seed as GitHub Issues | `gh` |
+| `ooo maintain` | Triage and resolve maintainer issues and PRs | `gh` |
 
-### Evolutionary Loop
-
-| Command | Purpose | Mode |
-|---------|---------|------|
-| `ooo evolve` | Start/monitor evolutionary development loop | MCP |
-| `ooo ralph` | Server-owned loop until verified (`ouroboros_ralph` runs it as a background job) | Plugin + MCP |
-
-**Plugin** = Works immediately after `ooo setup`.
-**MCP** = Requires `ooo setup` (Python >= 3.12 auto-detected). Run setup once to unlock all features.
+**MCP** = the Ouroboros MCP server, which the Claude marketplace plugin or a
+supported host setup (`ouroboros setup --runtime <runtime>`) provides.
+**In-session fallback** = runs advisory-only through a bundled agent when the
+MCP server is unavailable. **CLI** = drives the `ouroboros` command.
 
 ## Natural Language Triggers
 
-| Phrase | Triggers |
-|--------|----------|
+In Claude Code these phrases route to a command without the `ooo` prefix:
+
+| Phrase | Command |
+|--------|---------|
 | "interview me", "clarify requirements", "socratic interview" | `ooo interview` |
 | "crystallize", "generate seed", "create seed", "freeze requirements" | `ooo seed` |
 | "ouroboros run", "execute seed", "run seed", "run workflow" | `ooo run` |
 | "evaluate this", "3-stage check", "verify execution" | `ooo evaluate` |
+| "evolve", "evolutionary loop", "iterate until converged" | `ooo evolve` |
+| "ralph", "don't stop", "must complete", "until it works", "keep going" | `ooo ralph` |
 | "think sideways", "i'm stuck", "break through", "lateral thinking" | `ooo unstuck` |
 | "am I drifting?", "drift check", "session status" | `ooo status` |
-
-### Utility Triggers
-
-| Phrase | Triggers |
-|--------|----------|
 | "write prd", "pm interview", "product requirements", "create prd" | `ooo pm` |
 | "qa check", "quality check" | `ooo qa` |
 | "cancel execution", "stop job", "kill stuck", "abort execution" | `ooo cancel` |
-| "in-flight sessions", "mcp disconnected", "lost Ouroboros execution" | `ooo resume-session` |
 | "update ouroboros", "upgrade ouroboros" | `ooo update` |
-| "open settings", "change model", "change agent", "configure backend" | `ooo config` |
 | "brownfield defaults", "brownfield scan" | `ooo brownfield` |
-| "publish to github", "create issues from seed", "seed to issues" | `ooo publish` |
-| "ooo maintain" | `ooo maintain` |
 
-### Loop Triggers
-
-| Phrase | Triggers |
-|--------|----------|
-| "ralph", "don't stop", "must complete", "until it works", "keep going" | `ooo ralph` |
-| "evolve", "evolutionary loop", "iterate until converged" | `ooo evolve` |
-
-## Available Skills
-
-### Core Skills
-
-| Skill | Purpose | Mode |
-|-------|---------|------|
-| `/ouroboros:welcome` | First-touch welcome experience | Plugin |
-| `/ouroboros:interview` | Socratic requirement clarification | Plugin |
-| `/ouroboros:seed` | Generate validated seed spec | Plugin |
-| `/ouroboros:ouroboros-run` | Execute seed workflow | MCP |
-| `/ouroboros:evaluate` | 3-stage verification | MCP |
-| `/ouroboros:unstuck` | 5 lateral thinking personas | Plugin |
-| `/ouroboros:ouroboros-status` | Session status + drift check | MCP |
-| `/ouroboros:resume-session` | List in-flight sessions and re-attach commands | CLI |
-| `/ouroboros:setup` | Installation wizard | Plugin |
-| `/ouroboros:tutorial` | Interactive hands-on learning | Plugin |
-| `/ouroboros:ouroboros-config` | Settings GUI | Plugin |
-| `/ouroboros:ouroboros-help` | This guide | Plugin |
-| `/ouroboros:pm` | PM-focused interview + PRD generation | MCP |
-| `/ouroboros:qa` | General-purpose QA verdict for any artifact | Plugin |
-| `/ouroboros:cancel` | Cancel stuck or orphaned executions | CLI |
-| `/ouroboros:update` | Check for updates + upgrade to latest | Plugin |
-| `/ouroboros:brownfield` | Scan and manage brownfield repo defaults | MCP |
-| `/ouroboros:publish` | Publish Seed as GitHub Issues for teams | Plugin |
-| `/ouroboros:maintain` | Triage and resolve maintainer issues and PRs | Plugin |
-
-### Loop Skills
-
-| Skill | Purpose | Best For |
-|-------|---------|----------|
-| `/ouroboros:ralph` | Server-owned loop; `ouroboros_ralph` runs it as a background job | "Don't stop", must complete |
-| `/ouroboros:evolve` | Evolutionary ontology refinement | Spec iteration until convergence |
-
-## Available Agents
+## Agents
 
 | Agent | Purpose |
 |-------|---------|
 | `ouroboros:socratic-interviewer` | Exposes hidden assumptions through questioning |
 | `ouroboros:ontologist` | Finds root problems vs symptoms |
-| `ouroboros:seed-architect` | Crystallizes requirements into seed specs |
-| `ouroboros:evaluator` | Three-stage verification |
+| `ouroboros:seed-architect` | Crystallizes requirements into a Seed |
+| `ouroboros:evaluator` | Verifies results against acceptance criteria |
+| `ouroboros:qa-judge` | Renders QA verdicts for `ooo qa` |
 | `ouroboros:contrarian` | "Are we solving the wrong problem?" |
 | `ouroboros:hacker` | "Make it work first, elegance later" |
 | `ouroboros:simplifier` | "Cut scope to absolute minimum" |
 | `ouroboros:researcher` | "Stop coding, start investigating" |
 | `ouroboros:architect` | "Question the foundation, redesign if needed" |
 
-## Setup
-
-After installing Ouroboros, run `ooo setup` once to register the MCP server.
-This connects your runtime backend to the Ouroboros Python core and unlocks all features.
-
-```
-ooo setup    # One-time setup (~1 minute)
-```
+The last five are the `ooo unstuck` personas. Other files in
+`src/ouroboros/agents/` are internal pipeline roles.
 
 ## RFC #1392 State Breadcrumb Footer
 
-Your final response MUST end with exactly one breadcrumb footer line:
-
-```
-◆ <current state> → next: <recommended action>
-```
-
-Derive `<current state>` from live session state via `ouroboros_session_status` when that MCP projection is available; otherwise derive it from this skill's actual outcome. Never use a linear `Step N of M` footer because Ouroboros is an evolutionary loop. When the next action is genuinely a choice, list 2-3 honest options in the `next:` clause. The breadcrumb line must be the last line of the response.
+End the final response with exactly one line `◆ <current state> → next: <recommended action>`. Derive the state from live session state via `ouroboros_session_status` when available, otherwise from this skill's actual outcome. Never use a linear `Step N of M` footer; when the next step is a real choice, list 2-3 options.
