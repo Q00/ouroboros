@@ -632,3 +632,72 @@ def test_later_requester_correction_supersedes_earlier_answer_for_same_facet() -
     seed = synthesize_seed_from_ledger(ledger)
     assert any("JSON instead of CSV" in item for item in seed.constraints)
     assert all(item != "Write CSV" for item in seed.constraints)
+
+
+class _FailThenAnswerRequester:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def ask(self, question: RequesterQuestion) -> RequesterReply:  # noqa: ARG002
+        self.calls += 1
+        if self.calls == 1:
+            return RequesterReply("timeout", detail="no reply within 1s")
+        return RequesterReply("answered", answer=REQUESTER_TEXT)
+
+
+@pytest.mark.asyncio
+async def test_requester_answer_retires_earlier_fallback_draft_for_same_facet(
+    tmp_path: Path,
+) -> None:
+    """Round 1: requester fails, auto commits its draft. Round 2: the same
+    question is asked again and the requester answers. Only the requester's
+    value stays active for the facet, and Seed synthesis reads one value.
+    """
+    from ouroboros.auto.ledger_seed import _active_values
+
+    sent: list[str] = []
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(FIRST_QUESTION, "s")
+
+    async def answer(session_id: str, text: str, *, last_question=None) -> InterviewTurn:  # noqa: ARG001
+        sent.append(text)
+        return InterviewTurn(FIRST_QUESTION, session_id)
+
+    requester = _FailThenAnswerRequester()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path / "store"),
+        max_rounds=2,
+        requester=requester,
+    )
+    state = AutoPipelineState(goal=GOAL, cwd=str(tmp_path))
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    await driver.run(state, SeedDraftLedger.from_goal(GOAL))
+
+    assert requester.calls == 2
+    assert sent[0].startswith("[from-auto][conservative_default] ")
+    assert sent[1] == f"[from-auto][requester] {REQUESTER_TEXT}"
+    assert [e["outcome"] for e in state.requester_log] == ["timeout", "answered"]
+
+    ledger = SeedDraftLedger.from_dict(state.ledger)
+    touched = 0
+    for name, section in ledger.sections.items():
+        requester_keys = {
+            e.key.removesuffix(REQUESTER_KEY_SUFFIX)
+            for e in section.entries
+            if e.key.endswith(REQUESTER_KEY_SUFFIX)
+        }
+        for base in requester_keys:
+            touched += 1
+            facet = [e for e in section.entries if e.key in {base, base + REQUESTER_KEY_SUFFIX}]
+            active = [e for e in facet if e.status != LedgerStatus.WEAK]
+            # The round 1 draft under the bare key is retired; the answer is active.
+            assert any(e.key == base and e.status == LedgerStatus.WEAK for e in facet)
+            assert [(e.key, e.value) for e in active] == [
+                (base + REQUESTER_KEY_SUFFIX, REQUESTER_TEXT)
+            ]
+        if requester_keys:
+            assert ledger.sections[name].status() == LedgerStatus.CONFIRMED
+            assert _active_values(ledger, name) == (REQUESTER_TEXT,)
+    assert touched
