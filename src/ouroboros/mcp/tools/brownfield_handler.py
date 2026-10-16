@@ -8,6 +8,8 @@ repository registrations in the SQLite database. Supports four actions:
   discovered local repositories in the DB.
 - **register** — Manually register a single repository by path.
 - **query** — List all registered repos or get the current default.
+  Reads the DB only (no filesystem access); with ``text`` it ranks repos
+  by BM25 over the search documents stored at scan/register time.
 - **set_default** — Set a registered repo as the default brownfield context.
 
 Follows the action-dispatch pattern from ``pm_handler.py``.
@@ -16,6 +18,7 @@ Follows the action-dispatch pattern from ``pm_handler.py``.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -26,6 +29,8 @@ from ouroboros.bigbang.brownfield import (
     register_repo,
     scan_and_register,
 )
+from ouroboros.bigbang.brownfield_index import rank_repos
+from ouroboros.core.errors import PersistenceError
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.types import (
@@ -41,6 +46,9 @@ from ouroboros.persistence.brownfield import BrownfieldRepo, BrownfieldStore
 log = structlog.get_logger()
 
 _TOOL_NAME = "ouroboros_brownfield"
+
+# Page size for ranked ``text`` queries when the caller gives no ``limit``.
+_RANKED_DEFAULT_LIMIT = 10
 
 
 def _detect_action(arguments: dict[str, Any]) -> str:
@@ -66,6 +74,21 @@ def _detect_action(arguments: dict[str, Any]) -> str:
         return "register"
 
     return "query"
+
+
+def _repo_line(repo: BrownfieldRepo, *, fallback_id: int | None = None) -> str:
+    """Numbered registry line, ``{id}. {name}`` with `` *`` on defaults."""
+    rid = repo.id if repo.id is not None else (fallback_id if fallback_id is not None else "?")
+    marker = " *" if repo.is_default else ""
+    return f"{rid:>2}. {repo.name}{marker}"
+
+
+def _defaults_line(defaults: Sequence[BrownfieldRepo]) -> str:
+    if not defaults:
+        return "No defaults set."
+    default_ids = ", ".join(str(d.id or "?") for d in defaults)
+    names = ", ".join(d.name for d in defaults)
+    return f"Defaults (* marked): {default_ids} ({names})"
 
 
 @dataclass
@@ -106,7 +129,8 @@ class BrownfieldHandler:
                     description=(
                         "Action to perform: 'scan' to discover repos from ~/,"
                         " 'register' to add a single repo,"
-                        " 'query' to list all repos or get default,"
+                        " 'query' to list all registered repos from the DB without"
+                        " rescanning, get the default, or rank repos by 'text',"
                         " 'set_default' to toggle a repo's default flag"
                         " (supports multiple defaults; does NOT clear others)."
                         " Auto-detected from parameters when omitted."
@@ -176,6 +200,18 @@ class BrownfieldHandler:
                         "Comma-separated repo numbers from the scan list "
                         "(e.g. '6,18,19'). Used with 'set_defaults' action to "
                         "replace all defaults at once."
+                    ),
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="text",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Free-text topic for the 'query' action. When set, repos are "
+                        "ranked by BM25 relevance over name, description, path, "
+                        "manifest, README head, and top-level entries stored at "
+                        "scan time; only matching repos are returned, best first. "
+                        "offset/limit then page the ranked list (limit defaults to 10)."
                     ),
                     required=False,
                 ),
@@ -354,16 +390,9 @@ class BrownfieldHandler:
         # Build compact list — {id}. {name} using SQLite rowid
         lines = [f"Scan complete. {len(repos)} repositories registered.", ""]
         for i, r in enumerate(repos, 1):
-            rid = r.id if r.id is not None else i
-            marker = " *" if r.is_default else ""
-            lines.append(f"{rid:>2}. {r.name}{marker}")
+            lines.append(_repo_line(r, fallback_id=i))
         lines.append("")
-        if defaults:
-            default_ids = ", ".join(str(d.id or "?") for d in defaults)
-            names = ", ".join(d.name for d in defaults)
-            lines.append(f"Defaults (* marked): {default_ids} ({names})")
-        else:
-            lines.append("No defaults set.")
+        lines.append(_defaults_line(defaults))
         summary = "\n".join(lines)
 
         log.info(
@@ -508,6 +537,11 @@ class BrownfieldHandler:
         limit_raw = arguments.get("limit")
         limit: int | None = int(limit_raw) if limit_raw is not None else None
 
+        query_text = str(arguments.get("text") or "").strip()
+        if query_text:
+            ranked_limit = limit if limit is not None else _RANKED_DEFAULT_LIMIT
+            return await self._handle_ranked_query(store, query_text, offset, ranked_limit)
+
         # Total count for pagination metadata
         total = await store.count()
 
@@ -538,11 +572,10 @@ class BrownfieldHandler:
                 )
             )
 
-        lines = [f"Brownfield repositories ({total} total, showing {len(repos)}):"]
-        for r in repos:
-            marker = " [default]" if r.is_default else ""
-            desc_part = f" — {r.desc}" if r.desc else ""
-            lines.append(f"  • {r.name}{marker}: {r.path}{desc_part}")
+        lines = [f"Brownfield repositories ({total} total, showing {len(repos)}):", ""]
+        lines.extend(_repo_line(r) for r in repos)
+        lines.append("")
+        lines.append(_defaults_line(defaults))
 
         repos_data = [r.to_dict() for r in repos]
         defaults_data = [d.to_dict() for d in defaults]
@@ -568,6 +601,64 @@ class BrownfieldHandler:
                     if paginated_first_default
                     else None,
                     "defaults": defaults_data,
+                },
+            )
+        )
+
+    async def _handle_ranked_query(
+        self,
+        store: BrownfieldStore,
+        query_text: str,
+        offset: int,
+        limit: int,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Rank every registered repo for ``query_text`` from stored documents only."""
+        repos = list(await store.list())
+        try:
+            documents = {
+                path: doc for path, (doc, _fp) in (await store.get_index_entries()).items()
+            }
+        except PersistenceError as exc:
+            # Ranking still works on name, description, and path.
+            log.warning("brownfield_handler.index_read_failed", error=str(exc))
+            documents = {}
+
+        ranked = rank_repos(query_text, repos, documents)
+        page = ranked[offset : offset + limit]
+        unindexed = sum(1 for r in repos if r.path not in documents)
+
+        if not repos:
+            text = "No brownfield repositories registered. Run 'scan' to discover repos."
+        elif not ranked:
+            text = f"No registered repository matches {query_text!r} ({len(repos)} searched)."
+        else:
+            lines = [
+                f"Repositories matching {query_text!r} "
+                f"({len(ranked)} of {len(repos)} match, showing {len(page)}):",
+                "",
+            ]
+            lines.extend(f"{_repo_line(r)}  (score {score:.2f})" for r, score in page)
+            text = "\n".join(lines)
+        if repos and unindexed:
+            text += (
+                f"\n\n{unindexed} repo(s) have no stored search document and rank on "
+                "name, description, and path only. 'scan' indexes them."
+            )
+
+        return Result.ok(
+            MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text=text),),
+                is_error=False,
+                meta={
+                    "action": "query",
+                    "text": query_text,
+                    "total": len(repos),
+                    "matched": len(ranked),
+                    "count": len(page),
+                    "offset": offset,
+                    "limit": limit,
+                    "unindexed": unindexed,
+                    "repos": [{**r.to_dict(), "score": round(score, 4)} for r, score in page],
                 },
             )
         )
