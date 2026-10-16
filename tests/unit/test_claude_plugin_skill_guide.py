@@ -48,3 +48,19 @@ def test_claude_plugin_unstuck_skill_includes_host_capability_contract() -> None
     assert "result_correlation_key" in skill_text
     assert 'legacy_dispatch_mode="inline_fallback"' in skill_text
     assert 'Debate response (`dispatch_mode = "inline_fallback"`)' not in skill_text
+
+
+def test_interview_skill_pins_seed_ready_guard_lane_output_shapes() -> None:
+    skill_text = (Path("skills") / "interview" / "SKILL.md").read_text(encoding="utf-8")
+    step8 = skill_text.split("8. **Seed-ready Acceptance Guard.**", 1)[1].split(
+        "9. **Restate gate**", 1
+    )[0]
+
+    assert (
+        '{"lane_id": "closer", "verdict": "seed_ready" | "not_ready", "reason": "...", '
+        '"blocking_question": "..." | null}'
+    ) in step8
+    assert (
+        '{"lane_id": "<lane>", "severity": "high" | "medium" | "low", "finding": "...", '
+        '"question": "..." | null}'
+    ) in step8
