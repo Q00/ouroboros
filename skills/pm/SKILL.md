@@ -265,15 +265,7 @@ unknown, stakeholder-dependent, too broad, or safer to decide later, route it
 through the existing assumptions / decide-later / deferred mechanisms instead
 of presenting it as a confirmed requirement.
 
-Then check: does `meta.ask_user_question` exist?
-
-- **YES** → Pass it directly to `AskUserQuestion`:
-  ```
-  AskUserQuestion(questions=[meta.ask_user_question])
-  ```
-  Do NOT modify it. Do NOT add options. Do NOT rephrase the question.
-
-- **NO** → This is an interview question. Use `AskUserQuestion` with `meta.question`.
+Then ask with `AskUserQuestion`, using `meta.question` as the question text.
   - **Batched turn**: put every question of the turn into ONE `AskUserQuestion`
     call — one entry per question (the tool takes up to 4). Each keeps its own
     options, built by the same rules below from its own entry in
@@ -366,9 +358,8 @@ Arguments:
   answer: <the refined answer, or "[decide_later]" / "[deferred]">
 ```
 
-Ignored while the server holds the question unanswered; required otherwise —
-plugin mode never persists the child's questions, and an answer with no pending
-question is refused without it.
+Always required with `answer`: the server pairs every answer with the question
+it belongs to and refuses an `answer` without `last_question`.
 
 There is no parameter carrying findings, second or otherwise: findings never
 travel as answers (A3). Every call on this parameter is the user's own words.

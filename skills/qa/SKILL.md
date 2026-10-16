@@ -121,10 +121,10 @@ This skill works in two modes. Determine which one **before** attempting any too
    - List dimension scores
    - Highlight specific differences found
    - Show actionable suggestions
-   - End with next step guidance based on verdict:
-     - **PASS (done)**: `Next: Your artifact meets the quality bar. Proceed with confidence.`
-     - **REVISE (continue)**: `Next: Address the suggestions above, then run ooo qa again to re-check.`
-     - **FAIL (escalate)**: `Next: Fundamental issues detected. Consider ooo interview to re-examine requirements, or ooo unstuck to challenge assumptions.`
+   - End with the breadcrumb footer below, derived from the verdict:
+     - **PASS (done)**: `◆ QA passed → next: proceed; the artifact meets the quality bar`
+     - **REVISE (continue)**: `◆ QA needs revision → next: address the suggestions above, then run ooo qa again`
+     - **FAIL (escalate)**: `◆ QA failed → next: ooo interview to re-examine requirements, or ooo unstuck to challenge assumptions`
 
 ### Iterative QA Loop
 
@@ -208,7 +208,7 @@ patterns expected for production code.
 
 Loop Action: continue
 
-Next: Address the suggestions above, then run `ooo qa` again to re-check.
+◆ QA needs revision → next: address the suggestions above, then run `ooo qa` again
 ```
 
 ## RFC #1392 State Breadcrumb Footer
