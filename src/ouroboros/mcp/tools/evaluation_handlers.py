@@ -404,7 +404,7 @@ class MeasureDriftHandler:
         try:
             # Calculate drift using real DriftMeasurement
             measurement = DriftMeasurement()
-            metrics = measurement.measure(
+            metrics = await measurement.measure_async(
                 current_output=current_output,
                 constraint_violations=[str(v) for v in constraint_violations_raw],
                 current_concepts=[str(c) for c in current_concepts_raw],

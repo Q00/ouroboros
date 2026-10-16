@@ -24,7 +24,7 @@ async def record_generation_drift(
     if not execution_output:
         return
     try:
-        metrics = DriftMeasurement().measure(
+        metrics = await DriftMeasurement().measure_async(
             current_output=execution_output,
             constraint_violations=[],
             current_concepts=[],

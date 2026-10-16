@@ -11,6 +11,7 @@ import pytest
 from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
 from ouroboros.config.models import RuntimeControlsConfig
 from ouroboros.core.errors import ConfigError
+from ouroboros.core.seed import Seed
 from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.tools.authoring_handlers import _is_interview_completion_signal
@@ -2669,6 +2670,17 @@ class TestLateralThinkHandler:
 
 class TestMeasureDriftHandler:
     """Test MeasureDriftHandler class."""
+
+    @pytest.fixture(autouse=True)
+    def use_lexical_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from ouroboros.observability.drift import _calculate_lexical_goal_drift
+
+        async def lexical_fallback(current_output: str, seed: Seed, **_kwargs: object) -> float:
+            return _calculate_lexical_goal_drift(current_output, seed)
+
+        monkeypatch.setattr(
+            "ouroboros.observability.drift.calculate_goal_drift_async", lexical_fallback
+        )
 
     def test_definition_name(self) -> None:
         """MeasureDriftHandler has correct name."""

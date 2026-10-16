@@ -14,6 +14,8 @@ Covers:
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from ouroboros.core.seed import (
@@ -81,6 +83,19 @@ def sample_seed() -> Seed:
         ),
         metadata=SeedMetadata(ambiguity_score=0.15),
     )
+
+
+@pytest.fixture(autouse=True)
+def disable_unconfigured_provider_for_legacy_drift_tests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep pre-existing lexical tests independent from local provider setup."""
+    import ouroboros.observability.drift as drift_module
+
+    def unavailable() -> object:
+        raise RuntimeError("provider is intentionally unavailable in unit tests")
+
+    monkeypatch.setattr(drift_module, "_default_semantic_adapter_factory", unavailable)
 
 
 @pytest.fixture
@@ -163,6 +178,158 @@ class TestGoalDriftCalculation:
         )
 
         assert 0.0 <= result <= 1.0
+
+    @pytest.mark.asyncio
+    async def test_async_fallback_uses_semantic_goal_alignment(
+        self, sample_seed: Seed, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ouroboros.core.types import Result
+        from ouroboros.evaluation.models import SemanticResult
+        from ouroboros.evaluation.semantic import SemanticEvaluator
+        from ouroboros.observability.drift import calculate_goal_drift_async
+
+        seen: list[tuple[str, str, int]] = []
+
+        async def evaluate(_self: object, context: object) -> object:
+            artifact = context.artifact  # type: ignore[attr-defined]
+            goal = context.goal  # type: ignore[attr-defined]
+            seen.append((goal, artifact, threading.get_ident()))
+            alignment = 0.92 if "Count valid" in artifact else 0.08
+            semantic = SemanticResult(
+                score=alignment,
+                ac_compliance=alignment > 0.5,
+                goal_alignment=alignment,
+                drift_score=1.0 - alignment,
+                uncertainty=0.05,
+                reasoning="test semantic alignment",
+            )
+            return Result.ok((semantic, []))
+
+        monkeypatch.setattr(SemanticEvaluator, "evaluate", evaluate)
+        adapter_threads: list[int] = []
+
+        def adapter_factory() -> object:
+            adapter_threads.append(threading.get_ident())
+            return object()
+
+        seed = sample_seed.model_copy(
+            update={"goal": "CSV에서 유효 행과 무효 행을 세고 평균 금액을 JSON으로 출력한다"}
+        )
+        equivalent = await calculate_goal_drift_async(
+            "Count valid and invalid CSV rows, calculate the average amount, and output JSON",
+            seed,
+            adapter_factory=adapter_factory,  # type: ignore[arg-type]
+        )
+        unrelated = await calculate_goal_drift_async(
+            "Deploy the weather dashboard for mountain forecasts",
+            seed,
+            adapter_factory=adapter_factory,  # type: ignore[arg-type]
+        )
+        identifier_only = await calculate_goal_drift_async(
+            "CSV JSON task_id seed_id output API",
+            seed,
+            adapter_factory=adapter_factory,  # type: ignore[arg-type]
+        )
+
+        assert equivalent < 0.1
+        assert unrelated > 0.9
+        assert identifier_only > 0.9
+        assert seen[0][:2] == (
+            seed.goal,
+            "Count valid and invalid CSV rows, calculate the average amount, and output JSON",
+        )
+        assert all(
+            factory_thread == evaluator_thread
+            for factory_thread, evaluator_thread in zip(
+                adapter_threads, (item[2] for item in seen), strict=True
+            )
+        )
+
+    @pytest.mark.asyncio
+    async def test_sync_bridge_inside_event_loop_creates_adapter_in_worker(
+        self, sample_seed: Seed, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ouroboros.core.types import Result
+        from ouroboros.evaluation.models import SemanticResult
+        from ouroboros.evaluation.semantic import SemanticEvaluator
+        from ouroboros.observability.drift import calculate_goal_drift
+
+        caller_thread = threading.get_ident()
+        factory_threads: list[int] = []
+
+        async def evaluate(_self: object, _context: object) -> object:
+            return Result.ok(
+                (
+                    SemanticResult(0.9, True, 0.9, 0.1, 0.05, "worker result"),
+                    [],
+                )
+            )
+
+        monkeypatch.setattr(SemanticEvaluator, "evaluate", evaluate)
+        result = calculate_goal_drift(
+            "A complete output",
+            sample_seed,
+            adapter_factory=lambda: factory_threads.append(threading.get_ident()) or object(),  # type: ignore[arg-type]
+        )
+
+        assert result == pytest.approx(0.1)
+        assert factory_threads and factory_threads[0] != caller_thread
+
+    @pytest.mark.asyncio
+    async def test_semantic_timeout_falls_back_to_lexical(
+        self, sample_seed: Seed, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import asyncio
+
+        from ouroboros.evaluation.semantic import SemanticEvaluator
+        from ouroboros.observability.drift import (
+            _calculate_lexical_goal_drift,
+            calculate_goal_drift_async,
+        )
+
+        async def slow_evaluate(_self: object, _context: object) -> object:
+            await asyncio.sleep(0.05)
+            raise AssertionError("timeout should cancel evaluation")
+
+        monkeypatch.setattr(SemanticEvaluator, "evaluate", slow_evaluate)
+        output = "The delivery is complete"
+        result = await calculate_goal_drift_async(
+            output,
+            sample_seed,
+            adapter_factory=lambda: object(),  # type: ignore[arg-type]
+            timeout=0.001,
+        )
+
+        assert result == _calculate_lexical_goal_drift(output, sample_seed)
+
+    @pytest.mark.asyncio
+    async def test_provider_failure_keeps_lexical_drift_and_logs_cause(
+        self, sample_seed: Seed, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import ouroboros.observability.drift as drift_module
+        from ouroboros.observability.drift import (
+            _calculate_lexical_goal_drift,
+            calculate_goal_drift_async,
+        )
+
+        def unavailable() -> object:
+            raise RuntimeError("test provider unavailable")
+
+        warnings: list[str] = []
+        monkeypatch.setattr(
+            drift_module.log,
+            "warning",
+            lambda event, **fields: warnings.append(f"{event} {fields}"),
+        )
+        output = "A totally unrelated delivery"
+        drift = await calculate_goal_drift_async(
+            output,
+            sample_seed,
+            adapter_factory=unavailable,  # type: ignore[arg-type]
+        )
+
+        assert drift == _calculate_lexical_goal_drift(output, sample_seed)
+        assert any("test provider unavailable" in warning for warning in warnings)
 
 
 # =============================================================================
