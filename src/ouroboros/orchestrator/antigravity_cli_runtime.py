@@ -15,9 +15,9 @@ The ``agy`` headless contract differs from the Gemini CLI:
 - Permissions are all-or-nothing: ``--dangerously-skip-permissions``
   auto-approves every tool request. The existing runtime mapping is full bypass,
   so the non-blocking Ouroboros modes (``acceptEdits`` /
-  ``bypassPermissions``) both map to that single skip flag — a headless
-  subprocess must never surface an interactive approval prompt or it would
-  wedge indefinitely.
+  ``bypassPermissions``) both map to that single skip flag. Native headless
+  policy can soft-deny tools instead of prompting; preserving bypass here is
+  compatibility with the established mapping, not an edit-only guarantee.
 - ``--model`` selects the session model. ``agy`` owns its own model catalog
   (``agy models``), so Antigravity is a sentinel-model backend: the orchestrator
   defers to the CLI's configured default and only forwards ``--model`` when an
@@ -63,8 +63,8 @@ log = structlog.get_logger(__name__)
 # ``agy`` exposes ``--dangerously-skip-permissions`` (auto-approve every tool
 # request). Preserve the legacy full-bypass mapping for the non-blocking
 # Ouroboros permission vocabulary onto that single flag; ``"default"``
-# (interactive) is normalized to ``acceptEdits`` because the headless runtime
-# (``agy -p``) cannot honour an approval prompt without deadlocking.
+# is normalized to ``acceptEdits`` for compatibility. Native headless policy
+# can soft-deny approval-required calls; the legacy mapping instead bypasses all.
 _AGY_PERMISSION_MODES = frozenset({"acceptEdits", "bypassPermissions"})
 _AGY_DEFAULT_PERMISSION_MODE = "acceptEdits"
 _AGY_REASONING_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
@@ -316,8 +316,8 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
         recognized non-blocking modes (``acceptEdits`` and
         ``bypassPermissions``) map to ``--dangerously-skip-permissions`` in
         :meth:`_build_command`, preserving the existing full-bypass contract.
-        The native accept-edits mode is not equivalent, and headless execution must not block on an approval
-        prompt. Anything else raises ``ValueError`` rather than silently
+        Native accept-edits is not equivalent: headless policy can soft-deny
+        calls requiring approval. Anything else raises ``ValueError`` rather than silently
         falling back, so a typo on a permission boundary cannot escalate the
         runtime.
         """
@@ -332,8 +332,8 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
                 requested="default",
                 resolved=_AGY_DEFAULT_PERMISSION_MODE,
                 reason=(
-                    "Antigravity runtime is headless (agy -p); the interactive "
-                    "'default' approval mode would block, so it is normalized to "
+                    "Antigravity runtime preserves its established permission mapping: "
+                    "'default' is normalized to "
                     "the legacy full-bypass mode; this is not edit-only permission."
                 ),
             )
@@ -361,8 +361,8 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
         Headless contract:
         - ``-p`` (alias ``--print`` / ``--prompt``) carries the request and
           prints the response to stdout.
-        - ``--dangerously-skip-permissions`` auto-approves tool requests so the
-          subprocess never blocks. Both ``acceptEdits`` and
+        - ``--dangerously-skip-permissions`` auto-approves all tool requests.
+          Both ``acceptEdits`` and
           ``bypassPermissions`` preserve the existing full-bypass mapping.
         - ``--model`` is forwarded only for an explicit, non-sentinel id;
           ``agy`` otherwise uses its own configured default.

@@ -84,3 +84,18 @@ not establish equivalent headless approval semantics, so this change does not
 replace the established bypass mapping with a different mode. Native `auto`
 was unavailable for the test account and warned that it fell back to default;
 that probe is not evidence of enforced auto mode.
+
+
+The [official headless documentation](https://www.antigravity.google/docs/cli/headless/)
+states that approval-required calls may be soft-denied without an interactive
+prompt, while the skip flag approves all tools. The runtime preserves the skip
+mapping for compatibility, rather than claiming bypass is necessary to prevent
+all headless hangs. Official documentation was checked on 2026-10-17.
+
+
+A second task-owned probe requested only a harmless shell `printf` in an empty
+probe directory. With the legacy skip flag, `run_command` completed and emitted
+the expected marker. With native `accept-edits`, the same tool returned a
+permission error and stderr explained the headless auto-denial. Both processes
+exited successfully, demonstrating why exit code alone does not establish tool
+permission or execution. No permission configuration was changed.
