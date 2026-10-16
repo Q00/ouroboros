@@ -1799,6 +1799,8 @@ _WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES = frozenset(
     }
 )
 _WORKSPACE_FINGERPRINT_IGNORED_REGULAR_FILE_SUFFIXES = frozenset({".pyc", ".pyo"})
+_WORKSPACE_FINGERPRINT_MAX_ENTRIES = 50_000
+_WORKSPACE_FINGERPRINT_MAX_DEPTH = 64
 _ROUTE_SUCCESS_CONTEXT_CHARS = 200
 _ROUTE_SUCCESS_PUBLIC_API_CHARS = 500
 _DURABLE_CONFLICT_PATH_CHARS = 32_768
@@ -5098,23 +5100,57 @@ class ParallelACExecutor:
             ignored_paths = load_ignored_workspace_paths(root)
 
             digest = hashlib.sha256()
-            paths = sorted(root.rglob("*"), key=lambda path: path.as_posix())
-            for path in paths:
-                relative = path.relative_to(root)
+            paths: list[Path] = []
+            visited_entries = 0
+
+            def is_ignored(relative: Path, *, is_directory: bool) -> bool:
                 declared_contract_path = is_declared_contract_path(relative)
-                if (
+                return (
                     is_untracked_top_level_evidence_path(
                         relative,
                         tracked_paths=tracked_paths,
-                        is_directory=path.is_dir() and not path.is_symlink(),
+                        is_directory=is_directory,
                     )
                     or is_git_ignored_path(relative, ignored_paths=ignored_paths)
                     or any(
                         part in _WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES
                         for part in relative.parts
                     )
-                ) and not declared_contract_path:
-                    continue
+                ) and not declared_contract_path
+
+            pending_directories = [(root, 0)]
+            while pending_directories:
+                current_path, depth = pending_directories.pop()
+                with os.scandir(current_path) as iterator:
+                    entries = []
+                    for entry in iterator:
+                        visited_entries += 1
+                        if visited_entries >= _WORKSPACE_FINGERPRINT_MAX_ENTRIES:
+                            return None
+                        entries.append(entry)
+
+                child_directories: list[Path] = []
+                for entry in sorted(entries, key=lambda item: item.name):
+                    path = Path(entry.path)
+                    is_symlink = entry.is_symlink()
+                    is_directory = entry.is_dir(follow_symlinks=False)
+                    relative = path.relative_to(root)
+                    if is_ignored(relative, is_directory=is_directory):
+                        continue
+                    paths.append(path)
+                    if is_directory and not is_symlink:
+                        if depth >= _WORKSPACE_FINGERPRINT_MAX_DEPTH:
+                            return None
+                        child_directories.append(path)
+
+                pending_directories.extend(
+                    (path, depth + 1) for path in reversed(child_directories)
+                )
+
+            paths.sort(key=lambda path: path.as_posix())
+            for path in paths:
+                relative = path.relative_to(root)
+                declared_contract_path = is_declared_contract_path(relative)
                 try:
                     stat = path.lstat()
                     if path.is_symlink():
