@@ -285,6 +285,59 @@ def test_a_scan_over_its_budget_refuses_the_start(
     assert find_workspace_leaks(workspace, [package]) != ()
 
 
+def test_scan_does_not_enumerate_past_its_budget(
+    tmp_path: Path,
+    package,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ouroboros.boundary.package as package_module
+
+    workspace = _workspace(tmp_path)
+    for index in range(7):
+        (workspace / f"f{index}.txt").write_text("x\n")
+    monkeypatch.setattr(package_module, "_MAX_SCAN_ENTRIES", 3)
+    real_scandir = os.scandir
+    enumerated = 0
+
+    class CountingScandir:
+        def __init__(self, path):
+            self._iterator = real_scandir(path)
+
+        def __enter__(self):
+            self._iterator.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self._iterator.__exit__(*args)
+
+        def __iter__(self):
+            nonlocal enumerated
+            for entry in self._iterator:
+                enumerated += 1
+                yield entry
+
+    monkeypatch.setattr(package_module.os, "scandir", CountingScandir)
+
+    assert find_workspace_leaks(workspace, [package]) != ()
+    assert enumerated == 3
+
+
+def test_scan_refuses_when_directory_depth_exceeds_limit(
+    tmp_path: Path,
+    package,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ouroboros.boundary.package as package_module
+
+    workspace = _workspace(tmp_path)
+    nested = workspace / "one" / "two"
+    nested.mkdir(parents=True)
+    (nested / "innocent.txt").write_text("not a package file")
+    monkeypatch.setattr(package_module, "_MAX_SCAN_DEPTH", 1)
+
+    assert find_workspace_leaks(workspace, [package]) != ()
+
+
 def test_a_copy_of_the_product_harness_is_not_a_leak(tmp_path: Path, seed) -> None:
     from ouroboros.boundary.oracle import ORACLE_HARNESS_SOURCE
     from ouroboros.boundary.oracle_build import package_from_reply
