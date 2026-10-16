@@ -815,6 +815,8 @@ class _Scan:
             self.leaks.append(relative)
 
     def directory(self, directory: str, prefix: str, root: str, depth: int = 0) -> None:
+        if self.budget <= 0:
+            return
         try:
             status = os.stat(directory)
         except OSError:
@@ -843,6 +845,8 @@ class _Scan:
             self.leaks.append(prefix.rstrip("/") or ".")
             return
         for entry in entries:
+            if self.budget <= 0:
+                return
             relative = prefix + entry.name
             if relative in self.paths:
                 self.leaks.append(relative)

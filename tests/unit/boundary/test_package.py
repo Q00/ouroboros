@@ -322,6 +322,46 @@ def test_scan_does_not_enumerate_past_its_budget(
     assert enumerated == 3
 
 
+def test_scan_global_budget_stops_before_opening_remaining_sibling_directories(
+    tmp_path: Path,
+    package,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ouroboros.boundary.package as package_module
+
+    workspace = _workspace(tmp_path)
+    for dirname in ("first", "second"):
+        directory = workspace / dirname
+        directory.mkdir()
+        for index in range(5):
+            (directory / f"{index}.txt").write_text("x\n")
+    monkeypatch.setattr(package_module, "_MAX_SCAN_ENTRIES", 4)
+    real_scandir = os.scandir
+    enumerated = 0
+
+    class CountingScandir:
+        def __init__(self, path):
+            self._iterator = real_scandir(path)
+
+        def __enter__(self):
+            self._iterator.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self._iterator.__exit__(*args)
+
+        def __iter__(self):
+            nonlocal enumerated
+            for entry in self._iterator:
+                enumerated += 1
+                yield entry
+
+    monkeypatch.setattr(package_module.os, "scandir", CountingScandir)
+
+    assert find_workspace_leaks(workspace, [package]) != ()
+    assert enumerated == 4
+
+
 def test_scan_refuses_when_directory_depth_exceeds_limit(
     tmp_path: Path,
     package,
