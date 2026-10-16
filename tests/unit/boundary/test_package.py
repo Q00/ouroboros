@@ -393,9 +393,7 @@ def test_scan_bounds_large_external_symlink_target(
 
         def __iter__(self):
             for entry in self._iterator:
-                enumerated_by_directory[self.path] = (
-                    enumerated_by_directory.get(self.path, 0) + 1
-                )
+                enumerated_by_directory[self.path] = enumerated_by_directory.get(self.path, 0) + 1
                 yield entry
 
     monkeypatch.setattr(package_module.os, "scandir", CountingScandir)
