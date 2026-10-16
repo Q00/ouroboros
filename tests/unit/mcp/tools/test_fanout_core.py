@@ -647,9 +647,7 @@ async def test_contracted_json_string_rejects_malformed_or_non_object_content(
 ) -> None:
     registry = FanoutRegistry(tmp_path)
     session_id = "sess-invalid-contracted-json"
-    fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(
-        registry, session_id
-    )
+    fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(registry, session_id)
     outputs = _advisory_lane_outputs(meta, lane_keys)
     outputs["data_context"] = content
 
