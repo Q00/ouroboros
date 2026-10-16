@@ -47,6 +47,8 @@ Ouroboros tools may be deferred, and a schema loaded on one turn can unload by t
      seed_content: <seed YAML if available>
    ```
 
+   **Plugin delegation**: a response with `status: "delegated_to_subagent"` and `dispatch_mode: "plugin"` carries no verdict. Its content is the bridge's dispatch notice and its `_subagent` prompt is the child's input, never a result. Keep `qa_session_id`, await the plugin-spawned child, and parse its JSON verdict (`score`, `verdict`, `dimensions`, `differences`, `suggestions`, `reasoning`). No `iteration_entry` comes back, so derive the loop action as the tool does (score >= `pass_threshold`: done; >= 0.40: continue; else escalate) and build the entry yourself (`iteration`, `score`, `verdict`, `loop_action`). If the child returns no parseable verdict, say so instead of presenting the envelope.
+
 5. **Present** the score and verdict prominently, then dimension scores, specific differences, and actionable suggestions. **Empirical evidence outranks the judge**: if the judge scores PASS but a probe observed the behavior failing, present REVISE/FAIL on that evidence and say so. If nothing could act, flag that behavior was not observed. Pick the next action from the verdict:
    - **PASS (done)**: proceed; the artifact meets the quality bar
    - **REVISE (continue)**: address the suggestions, then run `ooo qa` again

@@ -56,7 +56,7 @@ Ouroboros tools may be deferred, and a schema loaded on one turn can unload by t
 
 ### Fallback (no Ouroboros MCP server)
 
-Delegate to the `ouroboros:evaluator` agent for a qualitative, advisory evaluation against the Seed (no numerical scoring and no approval authority without the Python core).
+Adopt the `evaluator` role yourself with the prompt the MCP server uses: `$OUROBOROS_AGENTS_DIR/evaluator.md` when that override is set, else `evaluator.md` in the installed `ouroboros.agents` package, else `src/ouroboros/agents/evaluator.md` in a source checkout. Give a qualitative, advisory evaluation against the Seed (no numerical scoring and no approval authority without the Python core).
 
 ## RFC #1392 State Breadcrumb Footer
 

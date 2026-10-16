@@ -1455,3 +1455,32 @@ def test_active_conductor_guidance_is_english_canonical_without_locale_catalogs(
         assert "centralized" not in normalized
         assert "locale catalog" not in normalized
         assert "translation catalog" not in normalized
+
+
+def test_qa_skill_reads_the_verdict_from_the_plugin_child_not_the_envelope() -> None:
+    from ouroboros.mcp.tools.subagent import DELEGATED_TO_SUBAGENT
+
+    repo_root = Path(__file__).resolve().parents[3]
+    text = (repo_root / "skills" / "qa" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert f'status: "{DELEGATED_TO_SUBAGENT}"' in text
+    assert 'dispatch_mode: "plugin"' in text
+    assert "iteration_entry" in text
+
+
+def test_skill_agent_prompt_fallbacks_resolve_outside_a_source_checkout() -> None:
+    """Agent prompts ship in the ``ouroboros.agents`` package; skills ship without them.
+
+    No plugin manifest declares an agents directory, so a skill cannot name an
+    ``ouroboros:<agent>`` subagent type or only a checkout-relative path.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    for skill in ("qa", "evaluate", "interview", "seed"):
+        text = (repo_root / "skills" / skill / "SKILL.md").read_text(encoding="utf-8")
+        for match in re.finditer(r"src/ouroboros/agents/", text):
+            line = text[text.rfind("\n", 0, match.start()) + 1 : text.find("\n", match.end())]
+            assert "OUROBOROS_AGENTS_DIR" in line, (skill, line)
+            assert "`ouroboros.agents` package" in line, (skill, line)
+
+    evaluate = (repo_root / "skills" / "evaluate" / "SKILL.md").read_text(encoding="utf-8")
+    assert "ouroboros:evaluator" not in evaluate
