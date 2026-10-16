@@ -79,7 +79,6 @@ In Claude Code these phrases route to a command without the `ooo` prefix:
 | "cancel execution", "stop job", "kill stuck", "abort execution" | `ooo cancel` |
 | "update ouroboros", "upgrade ouroboros" | `ooo update` |
 | "brownfield defaults", "brownfield scan" | `ooo brownfield` |
-| "which repo handles X", "find repo for topic" | `ooo brownfield find <topic>` |
 
 ## Agents
 
