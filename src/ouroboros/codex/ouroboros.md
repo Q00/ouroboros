@@ -25,7 +25,8 @@ If `ouroboros_start_auto` is unavailable, stop and report that the MCP dispatch 
 ## Natural Language Mapping
 
 Do not wait for the literal word `ooo`. When a natural-language request clearly
-matches these cases, route it to the corresponding MCP tool proactively:
+matches these cases, route it to the corresponding MCP tool proactively, as your
+first step, before reading code or implementing it yourself:
 
 - "clarify requirements", "interview me", "socratic interview",
   "the requirements are vague", "let's pin down the scope first",
@@ -40,6 +41,7 @@ matches these cases, route it to the corresponding MCP tool proactively:
 - "evaluate", "verify the result" → call `ouroboros_start_evaluate`
 - "I'm stuck", "we keep going in circles", "still failing after several
   tries", "is there another way?" → call `ouroboros_lateral_think`
+- "write a PRD", "product requirements" → call `ouroboros_pm_interview`
 
 `ouroboros_lateral_think` is also a proactive tool, not only a user-invoked
 one: when you observe stagnation yourself — the same fix attempted twice, a

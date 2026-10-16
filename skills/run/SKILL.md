@@ -1,6 +1,6 @@
 ---
 name: ouroboros-run
-description: "Execute a Seed specification through the workflow engine"
+description: "Use when an Ouroboros Seed (a spec file with a goal and acceptance criteria, such as *.seed.yaml) already exists and the user wants it executed: 'run the seed', 'execute this spec', 'ooo run'. Executes it and verifies every acceptance criterion. Not for raw requests without a Seed (use interview or auto)."
 aliases: [execute]
 mcp_tool: ouroboros_execute_seed
 mcp_args:

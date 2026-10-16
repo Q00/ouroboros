@@ -1,6 +1,6 @@
 ---
 name: seed
-description: "Generate validated Seed specifications from interview results"
+description: "Use when goal, constraints, and success criteria are already settled and the user wants them frozen into a formal spec an agent can execute and verify: 'turn this into a spec', 'write it up as a Seed', or right after an interview. Returns an immutable Seed with acceptance criteria. Not for vague requests (use interview first)."
 aliases: [crystallize]
 mcp_tool: ouroboros_generate_seed
 mcp_args:

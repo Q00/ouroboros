@@ -1,6 +1,6 @@
 ---
 name: pm
-description: "Generate a PM through guided PM-focused interview with automatic question classification. Use when the user says 'ooo pm', 'prd', 'product requirements', or wants to create a PRD/PM document."
+description: "Use when the user wants product requirements rather than code: 'write a PRD', 'product requirements', 'spec this feature for the team', 'ooo pm'. Runs a PM-focused interview with automatic question classification and produces a PRD/PM document. Not for implementation requests."
 ---
 
 # /ouroboros:pm
