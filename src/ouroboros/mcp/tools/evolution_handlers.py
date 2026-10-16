@@ -819,6 +819,9 @@ class EvolveStepHandler(BridgeAwareMixin):
                     persisted=None,
                     fallback_source_cwd=source_cwd,
                     allow_untracked_evidence=True,
+                    # The lineage worktree is the evolution loop's project
+                    # directory, never a run's task workspace.
+                    resolves_managed_identity=False,
                 )
             except WorktreeError as e:
                 return Result.err(
