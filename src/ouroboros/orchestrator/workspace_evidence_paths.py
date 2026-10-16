@@ -92,9 +92,7 @@ def is_untracked_top_level_evidence_path(
 
 def is_declared_contract_path(relative: Path, declared_paths: set[Path]) -> bool:
     return any(
-        relative == declared
-        or relative in declared.parents
-        or declared in relative.parents
+        relative == declared or relative in declared.parents or declared in relative.parents
         for declared in declared_paths
     )
 
@@ -147,9 +145,7 @@ def collect_bounded_workspace_paths(
                 if depth >= max_depth:
                     return None
                 child_directories.append(path)
-        pending_directories.extend(
-            (path, depth + 1) for path in reversed(child_directories)
-        )
+        pending_directories.extend((path, depth + 1) for path in reversed(child_directories))
     return sorted(paths, key=lambda path: path.as_posix())
 
 
