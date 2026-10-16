@@ -589,12 +589,16 @@ ouroboros cancel execution [OPTIONS] [EXECUTION_ID]
 |--------|-------------|
 | `-a, --all` | Cancel all running/paused executions |
 | `-r, --reason TEXT` | Reason for cancellation (default: "Cancelled by user via CLI") |
+| `-l, --list` | List active executions and exit without prompting or cancelling |
 
 **Examples:**
 
 ```bash
 # Interactive mode - list active executions and pick one
 ouroboros cancel execution
+
+# List active executions without prompting (scripts, agents)
+ouroboros cancel execution --list
 
 # Cancel a specific execution by session ID
 ouroboros cancel execution orch_abc123def456
