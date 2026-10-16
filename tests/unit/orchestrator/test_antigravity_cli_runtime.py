@@ -120,19 +120,28 @@ def test_build_command_forwards_explicit_model() -> None:
     assert cmd[idx + 1] == "gemini-3.1-pro"
 
 
-def test_build_command_accepts_and_ignores_reasoning_effort() -> None:
-    """agy exposes no effort flag — reasoning_effort is accepted (shared
-    CodexCliRuntime contract) and ignored, never injected into the command."""
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
+def test_build_command_forwards_native_reasoning_effort(effort: str) -> None:
     runtime = _make_runtime()
-    cmd = runtime._build_command("/tmp/unused", prompt="x", reasoning_effort="high")
-    assert "high" not in cmd
-    injected = runtime._build_command("/tmp/unused", prompt="x", reasoning_effort="; rm -rf /")
-    assert "; rm -rf /" not in injected
+    command = runtime._build_command("unused", prompt="work", reasoning_effort=effort)
+    assert command[command.index("--effort") + 1] == effort
+    assert runtime.capabilities.reasoning_effort_support is ParamSupport.NATIVE
+    assert effort in runtime.capabilities.enforceable_reasoning_efforts
 
 
-# ---------------------------------------------------------------------------
-# Permission mode mapping
-# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("effort", ["", "minimal", "HIGH", "; rm -rf /"])
+def test_unsupported_reasoning_effort_is_rejected(effort: str) -> None:
+    with pytest.raises(ValueError, match="Unsupported Antigravity reasoning effort"):
+        _make_runtime()._build_command("unused", prompt="work", reasoning_effort=effort)
+
+
+def test_unspecified_effort_keeps_cli_default_and_legacy_permission() -> None:
+    for mode in (None, "default", "acceptEdits", "bypassPermissions"):
+        runtime = AntigravityCLIRuntime(cli_path="/usr/bin/agy", permission_mode=mode)
+        command = runtime._build_command("unused", prompt="work")
+        assert "--effort" not in command
+        assert "--mode" not in command
+        assert "--dangerously-skip-permissions" in command
 
 
 def test_accept_edits_and_bypass_both_skip_permissions() -> None:

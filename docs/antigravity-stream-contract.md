@@ -66,3 +66,21 @@ startup; they are not a filesystem sandbox and cannot undo work the child has
 already performed. `--add-dir` is not used as evidence of replacement or
 confinement. A live IDE-daemon workspace check is recorded separately from unit
 fixtures and standalone headless probes.
+
+
+## Native effort and permissions
+
+Supported per-invocation efforts (`low`, `medium`, `high`, `xhigh`, `max`) map to
+`--effort VALUE`; other values fail before launch. No effort input leaves the
+CLI default unchanged. Capability reporting advertises that exact native set.
+A task-owned live `-p --effort low` probe completed successfully.
+
+The existing `acceptEdits`, `bypassPermissions`, and normalized `default`
+settings all keep `--dangerously-skip-permissions`. This is full auto-approval,
+including shell tools; the setting name does not imply edit-only permission.
+A live skip-flag probe reported `always-proceed`; a separate native
+`--mode accept-edits` probe reported `request-review`. Those observations do
+not establish equivalent headless approval semantics, so this change does not
+replace the established bypass mapping with a different mode. Native `auto`
+was unavailable for the test account and warned that it fell back to default;
+that probe is not evidence of enforced auto mode.

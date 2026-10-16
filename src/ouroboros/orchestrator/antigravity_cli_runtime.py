@@ -13,8 +13,8 @@ The ``agy`` headless contract differs from the Gemini CLI:
   normalizer preserves tool names, inputs, errors, and conversation identifiers.
   Plain-text fallback remains available for wrapped output.
 - Permissions are all-or-nothing: ``--dangerously-skip-permissions``
-  auto-approves every tool request. ``agy`` has no granular ``auto_edit``
-  equivalent, so the non-blocking Ouroboros modes (``acceptEdits`` /
+  auto-approves every tool request. The existing runtime mapping is full bypass,
+  so the non-blocking Ouroboros modes (``acceptEdits`` /
   ``bypassPermissions``) both map to that single skip flag — a headless
   subprocess must never surface an interactive approval prompt or it would
   wedge indefinitely.
@@ -61,12 +61,13 @@ from ouroboros.providers.antigravity_event_normalizer import (
 log = structlog.get_logger(__name__)
 
 # ``agy`` exposes ``--dangerously-skip-permissions`` (auto-approve every tool
-# request) but no granular accept-edits-only mode. Map the non-blocking
+# request). Preserve the legacy full-bypass mapping for the non-blocking
 # Ouroboros permission vocabulary onto that single flag; ``"default"``
 # (interactive) is normalized to ``acceptEdits`` because the headless runtime
 # (``agy -p``) cannot honour an approval prompt without deadlocking.
 _AGY_PERMISSION_MODES = frozenset({"acceptEdits", "bypassPermissions"})
 _AGY_DEFAULT_PERMISSION_MODE = "acceptEdits"
+_AGY_REASONING_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
 # The sentinel ``"default"`` is the orchestrator-wide model placeholder for
 # CLI-owned model selection; ``agy`` does not understand it as a ``--model``
 # value, so it is never forwarded on the command line.
@@ -314,8 +315,8 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
         to :data:`_AGY_DEFAULT_PERMISSION_MODE` (``acceptEdits``). Both
         recognized non-blocking modes (``acceptEdits`` and
         ``bypassPermissions``) map to ``--dangerously-skip-permissions`` in
-        :meth:`_build_command` because ``agy`` has no granular auto-edit mode
-        and the headless ``agy -p`` invocation must never block on an approval
+        :meth:`_build_command`, preserving the existing full-bypass contract.
+        The native accept-edits mode is not equivalent, and headless execution must not block on an approval
         prompt. Anything else raises ``ValueError`` rather than silently
         falling back, so a typo on a permission boundary cannot escalate the
         runtime.
@@ -333,7 +334,7 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
                 reason=(
                     "Antigravity runtime is headless (agy -p); the interactive "
                     "'default' approval mode would block, so it is normalized to "
-                    "the safe non-blocking equivalent."
+                    "the legacy full-bypass mode; this is not edit-only permission."
                 ),
             )
             return _AGY_DEFAULT_PERMISSION_MODE
@@ -352,9 +353,7 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
         resume_session_id: str | None = None,
         prompt: str | None = None,
         runtime_handle: RuntimeHandle | None = None,
-        # Accepted to honor the shared CodexCliRuntime contract, but ignored:
-        # `agy` exposes no per-invocation effort flag (capabilities declares
-        # reasoning_effort_support=IGNORED, so it is surfaced as advised).
+        # Native effort is accepted only from the advertised CLI vocabulary.
         reasoning_effort: str | None = None,
     ) -> list[str]:
         """Build the Antigravity CLI command for non-interactive execution.
@@ -364,11 +363,11 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
           prints the response to stdout.
         - ``--dangerously-skip-permissions`` auto-approves tool requests so the
           subprocess never blocks. Both ``acceptEdits`` and
-          ``bypassPermissions`` resolve here — ``agy`` has no narrower mode.
+          ``bypassPermissions`` preserve the existing full-bypass mapping.
         - ``--model`` is forwarded only for an explicit, non-sentinel id;
           ``agy`` otherwise uses its own configured default.
         """
-        del output_last_message_path, reasoning_effort
+        del output_last_message_path
 
         command = [
             self._cli_path,
@@ -378,6 +377,10 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
             "--output-format",
             "stream-json",
         ]
+        if reasoning_effort is not None:
+            if reasoning_effort not in _AGY_REASONING_EFFORT_LEVELS:
+                raise ValueError(f"Unsupported Antigravity reasoning effort: {reasoning_effort!r}")
+            command.extend(["--effort", reasoning_effort])
         session_id = resume_session_id or self._resolve_resume_session_id(runtime_handle)
         if session_id:
             command.extend(["--conversation", session_id])
@@ -427,6 +430,8 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
             skill_dispatch=True,
             targeted_resume=True,
             structured_output=True,
+            reasoning_effort_support=ParamSupport.NATIVE,
+            enforceable_reasoning_efforts=_AGY_REASONING_EFFORT_LEVELS,
             system_prompt_support=ParamSupport.TRANSLATED,
             tool_restriction_support=ParamSupport.TRANSLATED,
             empty_tool_restriction_support=ParamSupport.IGNORED,
