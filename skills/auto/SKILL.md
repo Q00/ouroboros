@@ -130,10 +130,12 @@ once the provider is healthy.
    workers. Claim an observer only after the spawn returns a live child ID. The
    main session must not poll the same job.
 
-   - On Codex, call `spawn_agent` exactly once with `task_name="run_observer"`;
-     a `wait` call is not a spawn. Once acknowledged, keep the parent turn open
-     with `wait_agent` calls of at most 60 seconds: a child `send_message` only
-     queues a mailbox event and cannot revive an ended parent turn. Relay
+   - A `wait` call or a parent job-status poll is not a spawn. The contract's
+     `host_lifecycle` and the runtime's `orchestrate_subagents` guidance name
+     the concrete spawn and wait mechanics. Once acknowledged, if the runtime
+     cannot wake a parent turn that already ended when the child posts (a child
+     message only queues for the parent), keep the parent turn open with the
+     host's child-wait primitive in waits of at most 60 seconds. Relay
      meaningful updates and wait again until the terminal summary. User input
      may interrupt the wait; handle it and resume unless the user asks to stop
      live observation or replaces the request. Then end only the relay loop,
@@ -141,8 +143,6 @@ once the provider is healthy.
      catch-up. If the observer child fails, is cancelled, or exits early, use
      that same catch-up instead of waiting indefinitely. The relay loop must not
      poll job tools or take cursor ownership.
-   - On OMP, submit exactly one native Task child named `RunObserver`, require
-     its live agent/job ID, and relay through the host wait/inbox until terminal.
 
    If spawn fails, do not promise live relays. The detached worker continues
    after the stdio turn; say durable progress will be caught up next turn or on
