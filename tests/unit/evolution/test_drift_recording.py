@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from ouroboros.core.lineage import EvaluationSummary
 from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
 from ouroboros.evolution.drift_recording import record_generation_drift
 
@@ -52,7 +53,7 @@ async def test_existing_semantic_alignment_is_reused_for_goal_drift() -> None:
         2,
         seed,
         "Count valid and invalid CSV rows, calculate the average amount, and output JSON",
-        goal_alignment=0.95,
+        EvaluationSummary(final_approved=False, highest_stage_passed=2, goal_alignment=0.95),
     )
 
     event = event_store.append.await_args.args[0]
@@ -72,13 +73,22 @@ async def test_missing_or_invalid_alignment_keeps_lexical_goal_drift() -> None:
     expected = calculate_goal_drift("verified output", seed)
     for invalid_alignment in (None, nan, inf, -0.1, 1.1):
         event_store = AsyncMock()
+        summary = (
+            EvaluationSummary(final_approved=False, highest_stage_passed=1)
+            if invalid_alignment is None
+            else EvaluationSummary.model_construct(
+                final_approved=False,
+                highest_stage_passed=1,
+                goal_alignment=invalid_alignment,
+            )
+        )
         await record_generation_drift(
             event_store,
             "lin_1",
             2,
             seed,
             "verified output",
-            goal_alignment=invalid_alignment,
+            summary,
         )
 
         event = event_store.append.await_args.args[0]
