@@ -28,6 +28,7 @@ from ouroboros.auto.state import (
     AutoStore,
     AutoWorktreePolicy,
 )
+from ouroboros.config import policy_notice
 from ouroboros.core.types import Result
 from ouroboros.core.worktree import TaskWorkspace
 from ouroboros.mcp.errors import MCPToolError
@@ -164,8 +165,11 @@ def _assert_detached_start_text_has_guidance_with_handles(
     *,
     job_id: str,
     auto_session_id: str,
+    efficiency_requested: bool = False,
 ) -> None:
     text = result.text_content
+    # A start that took the shipped default policy names it and the change command.
+    notice = "" if efficiency_requested else policy_notice({})
     observer = extract_job_observer_inline_handoff(
         text,
         expected_job_id=job_id,
@@ -180,7 +184,7 @@ def _assert_detached_start_text_has_guidance_with_handles(
         f"auto_session_id: {auto_session_id}\n"
         f"Runtime Backend: {result.meta['runtime_backend']}\n"
         f"LLM Backend: {result.meta['llm_backend']}\n"
-        f"Efficiency Mode: {result.meta['efficiency_mode']}\n"
+        f"Efficiency Mode: {result.meta['efficiency_mode']}{notice}\n"
         f"Frugality Assurance: {result.meta['frugality_assurance']}\n\n"
         "The exact active model and first parallel level will be reported "
         "from run configuration and execution plan events.\n"
@@ -528,8 +532,8 @@ class TestBackgroundJobPath:
         assert result.value.meta["dispatch_mode"] == "job"
         assert result.value.meta["runtime_backend"]
         assert result.value.meta["llm_backend"]
-        assert result.value.meta["efficiency_mode"] == "adaptive"
-        assert result.value.meta["frugality_assurance"] == "observe"
+        assert result.value.meta["efficiency_mode"] == "quality_first"
+        assert result.value.meta["frugality_assurance"] == "off"
         assert result.value.meta["status_tool"] == "ouroboros_job_status"
         assert result.value.meta["wait_tool"] == "ouroboros_job_wait"
         assert result.value.meta["result_tool"] == "ouroboros_job_result"
@@ -779,8 +783,8 @@ class TestBackgroundJobPath:
                 "dispatch_mode": "job",
                 "runtime_backend": "claude",
                 "llm_backend": "claude_code",
-                "efficiency_mode": "adaptive",
-                "frugality_assurance": "observe",
+                "efficiency_mode": "quality_first",
+                "frugality_assurance": "off",
                 "status_tool": "ouroboros_job_status",
                 "wait_tool": "ouroboros_job_wait",
                 "result_tool": "ouroboros_job_result",
@@ -1634,8 +1638,8 @@ class TestBackgroundJobPath:
         assert meta["dispatch_mode"] == "plugin"
         assert meta["runtime_backend"] == "opencode"
         assert meta["llm_backend"]
-        assert meta["efficiency_mode"] == "adaptive"
-        assert meta["frugality_assurance"] == "observe"
+        assert meta["efficiency_mode"] == "quality_first"
+        assert meta["frugality_assurance"] == "off"
         assert isinstance(meta["auto_session_id"], str)
         assert store.path_for(meta["auto_session_id"]).exists()
         assert meta["_subagent"]["tool_name"] == "ouroboros_start_auto"
@@ -1645,8 +1649,8 @@ class TestBackgroundJobPath:
         assert body["auto_session_id"] == meta["auto_session_id"]
         assert body["runtime_backend"] == "opencode"
         assert body["llm_backend"] == meta["llm_backend"]
-        assert body["efficiency_mode"] == "adaptive"
-        assert body["frugality_assurance"] == "observe"
+        assert body["efficiency_mode"] == "quality_first"
+        assert body["frugality_assurance"] == "off"
         job_manager.start_job.assert_not_called()
         fake_inner_auto.handle.assert_not_called()
 
