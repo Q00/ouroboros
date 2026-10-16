@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import tempfile
 
+import ouroboros.evaluation.artifact_collector as artifact_collector_module
 from ouroboros.evaluation.artifact_collector import ArtifactCollector
 
 
@@ -126,3 +128,39 @@ class TestArtifactCollector:
         assert len(bundle.files) == 1
         assert bundle.files[0].file_path == path
         assert bundle.files[0].ac_indices == (0,)
+
+    def test_fallback_scan_is_bounded_and_marked_incomplete(self, monkeypatch) -> None:
+        tmpdir = self._create_project({"a.py": "a", "b.py": "b", "c.py": "c"})
+        monkeypatch.setattr(artifact_collector_module, "MAX_SCAN_ENTRIES", 2)
+
+        bundle = ArtifactCollector().collect("No file operations here.", project_dir=tmpdir)
+
+        assert bundle.scan_complete is False
+        assert bundle.scan_error == "entry limit (2) exceeded"
+
+    def test_fallback_scan_depth_limit_is_marked_incomplete(self, monkeypatch) -> None:
+        tmpdir = self._create_project({"nested/source.py": "code"})
+        monkeypatch.setattr(artifact_collector_module, "MAX_SCAN_DEPTH", 1)
+
+        bundle = ArtifactCollector().collect("No file operations here.", project_dir=tmpdir)
+
+        assert bundle.scan_complete is False
+        assert bundle.scan_error == "directory depth limit (1) exceeded"
+
+    def test_fallback_scan_prunes_symlinks_and_irrelevant_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent) / "workspace"
+            outside = Path(parent) / "outside"
+            root.mkdir()
+            outside.mkdir()
+            (root / "src.py").write_text("inside", encoding="utf-8")
+            (outside / "external.py").write_text("outside", encoding="utf-8")
+            (root / ".cache").mkdir()
+            (root / ".cache" / "ignored.py").write_text("ignored", encoding="utf-8")
+            (root / "external-link").symlink_to(outside, target_is_directory=True)
+            (root / "cycle").symlink_to(root, target_is_directory=True)
+
+            bundle = ArtifactCollector().collect("No file operations here.", project_dir=str(root))
+
+        assert bundle.scan_complete is True
+        assert {Path(item.file_path).name for item in bundle.files} == {"src.py"}

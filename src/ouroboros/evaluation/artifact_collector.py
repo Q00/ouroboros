@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 MAX_TOTAL_CHARS = 150_000  # ~37K tokens — sole budget limiter
 MAX_FILE_SIZE = 100 * 1024  # 100KB per file (accommodate large artifact summaries)
+MAX_SCAN_ENTRIES = 50_000
+MAX_SCAN_DEPTH = 32
 
 # Binary/generated extensions to skip — everything else is collected.
 _SKIP_EXTENSIONS: frozenset[str] = frozenset(
@@ -194,11 +196,14 @@ class ArtifactCollector:
             return ArtifactBundle(text_summary=execution_output)
 
         file_paths = self._extract_file_paths(execution_output, project_dir)
+        scan_complete = True
+        scan_error: str | None = None
+        used_fallback_scan = not file_paths
         if not file_paths:
             # Fallback: scan project_dir for source files when the artifact
             # text doesn't contain recognizable file path patterns (e.g.
             # prose summaries from orchestrator execution).
-            file_paths = self._scan_directory(project_dir)
+            file_paths, scan_complete, scan_error = self._scan_directory(project_dir)
 
         artifacts: list[FileArtifact] = []
         total_chars = 0
@@ -206,6 +211,9 @@ class ArtifactCollector:
         for path in file_paths:
             content = self._read_file(path)
             if content is None:
+                if used_fallback_scan:
+                    scan_complete = False
+                    scan_error = scan_error or "a scanned file could not be read"
                 continue
 
             truncated = False
@@ -234,6 +242,8 @@ class ArtifactCollector:
             files=tuple(artifacts),
             text_summary=execution_output,
             total_chars=total_chars,
+            scan_complete=scan_complete,
+            scan_error=scan_error,
         )
 
     def _extract_file_paths(
@@ -284,34 +294,68 @@ class ArtifactCollector:
 
         return paths
 
-    def _scan_directory(self, project_dir: str) -> list[str]:
+    def _scan_directory(self, project_dir: str) -> tuple[list[str], bool, str | None]:
         """Walk project_dir for source files when no paths were extractable.
 
         Skips binary/generated files and common dependency/cache directories.
+        Does not follow symlinks. Returns an incomplete status when the scan
+        cannot cover the full workspace within its entry and depth limits.
         Files are sorted by modification time (newest first) so the evaluator
         sees the most recently changed code. The total character budget
         (MAX_TOTAL_CHARS) limits how many are actually read upstream.
         """
         real_project = os.path.realpath(project_dir)
         paths: list[tuple[float, str]] = []
+        if not os.path.isdir(real_project):
+            return [], False, "workspace directory is unavailable"
 
-        for root, dirs, files in os.walk(real_project, topdown=True):
+        scan_error: str | None = None
+        visited = 0
+
+        def record_walk_error(error: OSError) -> None:
+            nonlocal scan_error
+            scan_error = f"unreadable directory: {error.filename or '<unknown>'}"
+
+        for root, dirs, files in os.walk(
+            real_project, topdown=True, followlinks=False, onerror=record_walk_error
+        ):
+            visited += len(dirs) + len(files)
+            if visited > MAX_SCAN_ENTRIES:
+                scan_error = f"entry limit ({MAX_SCAN_ENTRIES}) exceeded"
+                dirs.clear()
+                break
+            relative_root = os.path.relpath(root, real_project)
+            depth = 0 if relative_root == "." else relative_root.count(os.sep) + 1
+            if depth >= MAX_SCAN_DEPTH:
+                if dirs or files:
+                    scan_error = f"directory depth limit ({MAX_SCAN_DEPTH}) exceeded"
+                    dirs.clear()
+                continue
             # Prune skipped directories in-place
-            dirs[:] = [d for d in dirs if d not in _SKIP_DIRS and not d.startswith(".")]
+            dirs[:] = [
+                d
+                for d in dirs
+                if d not in _SKIP_DIRS
+                and not d.startswith(".")
+                and not os.path.islink(os.path.join(root, d))
+            ]
 
             for fname in files:
+                full = os.path.join(root, fname)
+                if os.path.islink(full):
+                    continue
                 ext = os.path.splitext(fname)[1].lower()
                 if ext in _SKIP_EXTENSIONS:
                     continue
                 if _is_sensitive_file(fname):
                     continue
-                full = os.path.join(root, fname)
                 try:
                     if os.path.getsize(full) > MAX_FILE_SIZE:
                         continue
                 except OSError:
-                    # Symlink loop, permission denied, or file vanished
-                    # between os.walk() and the stat — skip defensively.
+                    # A partial inventory must not be passed to the semantic
+                    # evaluator as if the scan covered the whole workspace.
+                    scan_error = f"unreadable file: {fname}"
                     continue
                 try:
                     mtime = os.path.getmtime(full)
@@ -321,7 +365,7 @@ class ArtifactCollector:
 
         # Newest files first — most likely to be the implementation.
         paths.sort(reverse=True)
-        return [p for _, p in paths]
+        return [p for _, p in paths], scan_error is None, scan_error
 
     def _read_file(self, file_path: str) -> str | None:
         """Read a file with size limits."""
