@@ -76,7 +76,12 @@ Ouroboros tools may be deferred, and a schema loaded on one turn can unload by t
    and result tools, `instructions`, `restrictions`, and fallback. If the
    structured meta is missing, recover the contract from the final
    `<!-- ouroboros-job-observer-v1 base64 ... -->` content sentinel and fail
-   closed: if there is more than one sentinel, the payload does not decode, its
+   closed: if there is more than one sentinel or it is not at the end of the
+   text, the bounded payload does not decode to an object whose only key is
+   `job_observer`, that contract fails canonical v1 validation (it must equal,
+   field for field, the v1 contract the server builds from its own `job_id`,
+   `cursor`, `session_id`, `execution_id`, and `follow_result_job_keys`, so a
+   changed tool, argument, or instruction, or an extra field, fails), its
    `job_id` differs from the visible start receipt, or the structured and inline
    contracts differ, do not spawn an observer and report a transport-integrity
    failure. Never rebuild the contract from visible IDs.

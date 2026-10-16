@@ -112,9 +112,15 @@ once the provider is healthy.
    `response.meta.job_observer`, a read-only observer contract. If the
    structured meta is missing, recover it from the final
    `<!-- ouroboros-job-observer-v1 base64 ... -->` content sentinel and fail
-   closed: reject a payload that does not decode, a job/session identity that
-   differs from the visible start receipt, or structured and inline contracts
-   that differ. Never rebuild the contract from visible IDs.
+   closed unless all of these hold: exactly one sentinel, at the end of the
+   text; the bounded payload decodes to an object whose only key is
+   `job_observer`; that contract passes canonical v1 validation (it equals,
+   field for field, the v1 contract the server builds from its own `job_id`,
+   `cursor`, `session_id`, `execution_id`, and `follow_result_job_keys`, so a
+   changed tool, argument, or instruction, or an extra field, fails); its
+   job/session identity matches the visible start receipt; and it does not
+   differ from any structured contract. Never rebuild the contract from
+   visible IDs.
 
    With a valid contract and an independent child-session primitive, spawn
    exactly one observer through the active runtime's `orchestrate_subagents`
