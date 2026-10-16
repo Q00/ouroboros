@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from ouroboros.evaluation import detector
+from ouroboros.evaluation import stdlib_unittest_discovery as unittest_discovery
 from ouroboros.evaluation.detector import ensure_mechanical_toml, has_mechanical_toml
 from ouroboros.evaluation.languages import build_mechanical_config
 from ouroboros.evaluation.mechanical import MechanicalVerifier
@@ -102,7 +102,7 @@ def test_manifest_free_unittest_budget_exhaustion_fails_closed(
     (tmp_path / "tests" / "test_helper.py").write_text(
         "def helper():\n    return True\n", encoding="utf-8"
     )
-    monkeypatch.setattr(detector, "_MAX_UNITTEST_DISCOVERY_ENTRIES", 1)
+    monkeypatch.setattr(unittest_discovery, "_MAX_UNITTEST_DISCOVERY_ENTRIES", 1)
 
     assert _run(ensure_mechanical_toml(tmp_path, None)) is False
     assert has_mechanical_toml(tmp_path) is False
