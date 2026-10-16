@@ -23,7 +23,7 @@ The `ouroboros_ralph` tool owns the loop (do not reimplement it): one background
 
 ### Loading MCP tools (deferred-schema guard)
 
-Ouroboros tools may be deferred, and a schema loaded on one turn can unload by the next. Immediately before each `ouroboros_*` call, load it with the active runtime's tool-discovery capability: `"+ouroboros ralph job"` for `ouroboros_ralph`, `ouroboros_job_wait`, `ouroboros_job_status`, `ouroboros_job_result`, and `ouroboros_cancel_job`; `"+ouroboros session signal"` for `ouroboros_session_signal_targets` and `ouroboros_session_signal`. A call whose schema is not loaded fails with "Invalid tool parameters". If the tool is already callable, discovery is a no-op and an empty result is expected. If the tools are genuinely absent, stop and tell the user that Ralph requires the Ouroboros MCP runtime.
+Ouroboros tools may be deferred, and a schema loaded on one turn can unload by the next. Immediately before each `ouroboros_*` call, load it with the active runtime's tool-discovery capability: `"+ouroboros ralph job"` for `ouroboros_ralph`, `ouroboros_job_wait`, `ouroboros_job_status`, `ouroboros_job_result`, and `ouroboros_cancel_job`; `"+ouroboros session signal"` for `ouroboros_session_signal_targets` and `ouroboros_session_signal`; `"+ouroboros conductor decision"` for `ouroboros_record_conductor_decision`. A call whose schema is not loaded fails with "Invalid tool parameters". If the tool is already callable, discovery is a no-op and an empty result is expected. If the tools are genuinely absent, stop and tell the user that Ralph requires the Ouroboros MCP runtime.
 
 ### 1. Prepare lineage input
 

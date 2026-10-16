@@ -61,7 +61,7 @@ Every invocation routes through the MCP tool, solo and debate, in every runtime;
 
 #### Loading MCP tools (deferred-schema guard)
 
-Ouroboros tools may be deferred, and a schema loaded on one turn can unload by the next. Immediately before each `ouroboros_*` call, load it with the active runtime's tool-discovery capability: `"+ouroboros lateral"` for `ouroboros_lateral_think`. A call whose schema is not loaded fails with "Invalid tool parameters". If the tool is already callable, discovery is a no-op and an empty result is expected. If the tool is genuinely absent (neither exposed nor loadable), stop and report that the MCP dispatch surface is broken; do not improvise solo or debate without it.
+Ouroboros tools may be deferred, and a schema loaded on one turn can unload by the next. Immediately before each `ouroboros_*` call, load it with the active runtime's tool-discovery capability: `"+ouroboros lateral"` for `ouroboros_lateral_think`; `"+ouroboros conductor decision"` for `ouroboros_record_conductor_decision` (decision mode). A call whose schema is not loaded fails with "Invalid tool parameters". If the tool is already callable, discovery is a no-op and an empty result is expected. If the tool is genuinely absent (neither exposed nor loadable), stop and report that the MCP dispatch surface is broken; do not improvise solo or debate without it.
 
 Call it with:
 - **Solo**: `persona=<one>`, `problem_context`, `current_approach`, `failed_attempts`.
