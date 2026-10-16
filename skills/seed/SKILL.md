@@ -95,7 +95,13 @@ Load `ouroboros_generate_seed` before choosing a path: if it is callable, use **
 
 ### Path B: No MCP Server
 
-1. Read `src/ouroboros/agents/seed-architect.md` and adopt that role.
+1. Read the `seed-architect` prompt and adopt that role: `$OUROBOROS_AGENTS_DIR/seed-architect.md` when that override is set; else the installed package's copy, printed with `run_shell`:
+
+   ```bash
+   uvx --isolated --python '>=3.12' --from ouroboros-ai python -c "import importlib.resources as r, sys; print(r.files('ouroboros.agents').joinpath(sys.argv[1]).read_text(encoding='utf-8'))" seed-architect.md
+   ```
+
+   else `src/ouroboros/agents/seed-architect.md` in a source checkout. Resolve every agent prompt this skill names the same way, substituting its file name.
 2. Recover the requirements before drafting; never invent missing context:
    - With a `session_id`, use current-thread Q&A and corrections only when they belong to that session; if incomplete, use `inspect_code` / `run_shell` to find persisted or exported artifacts for that ID (for example under `~/.ouroboros/data/`). Keep a persisted transcript as evidence, but let explicit same-thread corrections supersede it.
    - Without a `session_id`, use current-thread Q&A only when it forms one coherent interview.
@@ -122,7 +128,7 @@ Generation (Path A tool or Path B role) runs **exactly once** and fixes the Seed
    ```
 The 0.90 bar (stricter than the default 0.80) labels the verdict; it gates nothing.
 
-**Fallback QA mode** (QA tool absent): read `src/ouroboros/agents/qa-judge.md`, adopt that role, and evaluate the Seed with the same quality bar and threshold. It returns JSON with lowercase `verdict` (`pass`/`revise`/`fail`), `score`, `dimensions`, `differences`, `suggestions`, `reasoning`; uppercase the verdict only for display and add no non-schema fields. There is no `qa_session_id`; keep pass history in the audit block.
+**Fallback QA mode** (QA tool absent): read the `qa-judge` prompt (resolved as in Path B step 1), adopt that role, and evaluate the Seed with the same quality bar and threshold. It returns JSON with lowercase `verdict` (`pass`/`revise`/`fail`), `score`, `dimensions`, `differences`, `suggestions`, `reasoning`; uppercase the verdict only for display and add no non-schema fields. There is no `qa_session_id`; keep pass history in the audit block.
 
 Present, always in this order:
 1. `QA advisory: <PASS|REVISE|FAIL>, score X.XX (bar 0.90).`
@@ -138,7 +144,7 @@ Diverge across independent sources, debate, let the user decide, then apply. No 
 
 **Wonder: collect proposals.**
 - **QA**: the verdict's `suggestions` (structural gaps in the YAML; QA cannot see the interview).
-- **Socratic lens** (`src/ouroboros/agents/socratic-interviewer.md`): check the Seed against interview evidence (persisted session state first, then this conversation) for 2-4 items: dropped or softened user constraints, rejected scope that crept back, flattened nuance, unagreed assumptions. Without evidence, record `no Socratic proposal: dialectic context unavailable`; never invent preferences. A QA/Socratic conflict goes to Reflect; neither side wins automatically.
+- **Socratic lens** (`socratic-interviewer` prompt, resolved as in Path B step 1): check the Seed against interview evidence (persisted session state first, then this conversation) for 2-4 items: dropped or softened user constraints, rejected scope that crept back, flattened nuance, unagreed assumptions. Without evidence, record `no Socratic proposal: dialectic context unavailable`; never invent preferences. A QA/Socratic conflict goes to Reflect; neither side wins automatically.
 - **Lateral personas** (only if `ouroboros_lateral_think` is callable):
   ```
   Tool: ouroboros_lateral_think
