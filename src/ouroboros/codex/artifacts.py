@@ -633,7 +633,29 @@ def _atomic_install_file(
     )
 
 
-def _stage_install_directory(source_path: Path, target_path: Path) -> Path:
+def _rewrite_sibling_skill_links(skill_root: Path, install_names: dict[str, str]) -> None:
+    """Point ``../<skill>/`` links in staged Markdown at the namespaced install dirs.
+
+    Packaged skills link to each other as ``../<skill>/SKILL.md``. Codex setup
+    installs each skill as ``ouroboros-<skill>``, so those links must follow.
+    """
+    for markdown_path in sorted(skill_root.rglob("*.md")):
+        if markdown_path.is_symlink() or not markdown_path.is_file():
+            continue
+        text = markdown_path.read_text(encoding="utf-8")
+        rewritten = text
+        for source_name, install_name in install_names.items():
+            rewritten = rewritten.replace(f"../{source_name}/", f"../{install_name}/")
+        if rewritten != text:
+            markdown_path.write_text(rewritten, encoding="utf-8")
+
+
+def _stage_install_directory(
+    source_path: Path,
+    target_path: Path,
+    *,
+    sibling_install_names: dict[str, str] | None = None,
+) -> Path:
     """Copy one skill into a setup-owned sibling before touching its target."""
     staging_path = Path(
         tempfile.mkdtemp(
@@ -644,6 +666,8 @@ def _stage_install_directory(source_path: Path, target_path: Path) -> Path:
     )
     try:
         shutil.copytree(source_path, staging_path, dirs_exist_ok=True)
+        if sibling_install_names:
+            _rewrite_sibling_skill_links(staging_path, sibling_install_names)
     except BaseException:
         _remove_installed_artifact(staging_path)
         raise
@@ -1109,16 +1133,27 @@ def install_codex_skills(
     with _packaged_codex_skills_dir(skills_dir=skills_dir) as source_root:
         packaged_skills = _load_packaged_codex_skills(source_root)
         installed_names = {packaged_skill.install_dir_name for packaged_skill in packaged_skills}
+        sibling_install_names = {
+            packaged_skill.skill_name: packaged_skill.install_dir_name
+            for packaged_skill in packaged_skills
+        }
 
         for packaged_skill in packaged_skills:
             target_path = target_root / packaged_skill.install_dir_name
-            staging_path = _stage_install_directory(packaged_skill.source_dir, target_path)
+            staging_path = _stage_install_directory(
+                packaged_skill.source_dir,
+                target_path,
+                sibling_install_names=sibling_install_names,
+            )
             _commit_staged_artifact(
                 staging_path=staging_path,
                 target_path=target_path,
+                # The staged tree, not the packaged source, is the generation:
+                # sibling links were rewritten while staging. The callback runs
+                # before the staged tree is renamed into place.
                 generation=CodexArtifactGeneration(
                     target_path,
-                    source_path=packaged_skill.source_dir,
+                    source_path=staging_path,
                 ),
                 before_mutation=before_mutation,
                 on_generation=on_generation,
