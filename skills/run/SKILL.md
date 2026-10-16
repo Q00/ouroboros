@@ -63,9 +63,12 @@ fallback instead of retrying the failing call.
 
 ### Execution Steps
 
-1. **Git isolation is server-owned.** `use_worktree` defaults to true, so the
-   server runs the task in its own worktree and reports `worktree_path` /
-   `worktree_branch` in the result. Do not create or switch branches yourself.
+1. **Do not create or switch branches yourself.** For a background execution
+   job, `use_worktree` defaults to true: the server runs the task in its own
+   worktree and reports `worktree_path` / `worktree_branch` in the job result.
+   Tell the user the task was isolated only when those fields are present. A
+   `dispatch_mode="plugin"` response delegates to a child session and carries
+   no worktree.
 
 2. Check if the user provided seed content or a file path:
    - If a file path: Read the file with the Read tool
