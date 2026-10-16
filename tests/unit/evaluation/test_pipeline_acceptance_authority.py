@@ -17,6 +17,7 @@ from ouroboros.core.types import Result
 from ouroboros.evaluation.mechanical import MechanicalConfig
 from ouroboros.evaluation.models import (
     AcceptanceState,
+    ArtifactBundle,
     CheckResult,
     CheckType,
     ConsensusResult,
@@ -127,6 +128,27 @@ async def _evaluate(
 
 class TestRequiredScenarios:
     """The four scenarios the issue names, through the real pipeline."""
+
+    @pytest.mark.asyncio
+    async def test_incomplete_artifact_scan_is_refused(self) -> None:
+        pipeline = _pipeline(semantic=_semantic(approve=True))
+        context = _context()
+        context = EvaluationContext(
+            execution_id=context.execution_id,
+            seed_id=context.seed_id,
+            current_ac=context.current_ac,
+            artifact=context.artifact,
+            artifact_bundle=ArtifactBundle(
+                scan_complete=False,
+                scan_error="entry limit exceeded",
+            ),
+        )
+
+        result = await pipeline.evaluate(context)
+
+        assert result.is_err
+        assert "incomplete" in str(result.error)
+        pipeline._semantic.evaluate.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_semantic_approve_without_executed_evidence_is_not_approved(self) -> None:
