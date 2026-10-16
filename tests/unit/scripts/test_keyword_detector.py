@@ -8,6 +8,8 @@ import subprocess
 import sys
 from unittest.mock import patch
 
+import pytest
+
 # Load keyword-detector.py as a module (it uses hyphens in filename)
 _script_path = Path(__file__).resolve().parents[3] / "scripts" / "keyword-detector.py"
 _spec = importlib.util.spec_from_file_location("keyword_detector", _script_path)
@@ -420,6 +422,31 @@ class TestHookProtocol:
         context = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
         assert "/ouroboros:setup" in context
         assert "/ouroboros:ouroboros-status" not in context
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {
+                "session_id": "s",
+                "turn_id": "t",
+                "prompt": "hello",
+                "hook_event_name": "UserPromptSubmit",
+            },
+            {"session_id": "s", "prompt": "hello", "hook_event_name": "UserPromptSubmit"},
+        ],
+        ids=["codex", "claude"],
+    )
+    @patch.object(_mod, "is_first_time", return_value=True)
+    def test_first_run_welcome_uses_host_neutral_question_capability(self, _first, payload, capsys):
+        """The first-run suggestion must not name a Claude-only question tool."""
+        with patch("sys.stdin") as mock_stdin:
+            mock_stdin.read.return_value = json.dumps(payload)
+            main()
+
+        context = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+        assert "/ouroboros:welcome" in context
+        assert "`ask_user` capability" in context
+        assert "AskUserQuestion" not in context
 
     @patch.object(_mod, "is_mcp_configured", return_value=False)
     @patch.object(_mod, "is_first_time", return_value=False)

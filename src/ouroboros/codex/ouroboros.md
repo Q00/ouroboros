@@ -83,6 +83,11 @@ structured and inline contracts differ or validation fails, stop on
 transport-integrity failure.
 
 When the response exposes an observer contract, explicitly delegate that object to exactly one native Codex subagent session.
+This observer handoff applies to every background starter that returns an
+observer contract (`ooo run`, `ooo auto`, `ooo ralph`, evaluate, and evolve),
+not only to auto. The shared skills describe the observer generically; the
+Codex spawn and parent-relay mechanics below are the Codex mapping of that
+contract.
 That observer is read-only and exclusively owns `ouroboros_job_wait`, its cursor,
 `ouroboros_job_result`, and any downstream job IDs named by
 `follow_result_job_keys`. Keep the main session available for the user; do not
