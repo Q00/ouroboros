@@ -24,7 +24,7 @@ This skill interacts **directly with the event store** (not via MCP tool) to emi
 
 Three modes:
 
-1. **Bare (no args)**: Lists all active (running/paused) executions in a numbered table and prompts you to pick one to cancel
+1. **Bare (no args)**: Lists all active (running/paused) executions, asks you which one to cancel, then cancels it
 2. **Explicit (`execution_id`)**: Cancels the specified execution immediately
 3. **`--all` flag**: Cancels every running or paused execution at once
 
@@ -39,11 +39,15 @@ When the user invokes this skill:
 
 2. Run the appropriate CLI command using Bash:
 
-   **Bare mode** (interactive):
+   **Bare mode** (list, then ask):
    ```bash
-   ouroboros cancel execution
+   ouroboros cancel execution --list
    ```
-   This will list active executions and prompt for selection.
+   This prints the active executions and exits without prompting (the
+   command's own interactive prompt aborts when no terminal is attached).
+   Show the list, ask the user which session to cancel with the active
+   runtime's `ask_user` capability, then run explicit mode with that
+   `session_id`. If the user declines, cancel nothing.
 
    **Explicit mode** (specific execution):
    ```bash
@@ -62,7 +66,7 @@ When the user invokes this skill:
 
 3. Present results to the user:
    - Show which executions were cancelled
-   - If bare mode, show the list and selection prompt
+   - If bare mode, show the list and the user's choice
    - If no active executions, inform the user
 
 4. End with a next-step suggestion:
@@ -87,7 +91,7 @@ Run an execution first with: /ouroboros:ouroboros-run
 ```
 User: cancel that stuck execution
 
-> ouroboros cancel execution
+> ouroboros cancel execution --list
 
 Active Executions
 ┌───┬──────────────────┬──────────────┬─────────┬─────────┬──────────────┐
@@ -97,8 +101,9 @@ Active Executions
 │ 2 │ sess-def-456     │ exec-002     │ seed-99 │ paused  │ 2024-01-14   │
 └───┴──────────────────┴──────────────┴─────────┴─────────┴──────────────┘
 
-Enter number to cancel (1-2), or 'q' to quit: 1
-Cancel session sess-abc-123 (running)? [y/N]: y
+Which execution should I cancel? → sess-abc-123
+
+> ouroboros cancel execution sess-abc-123
 ✓ Cancelled execution: sess-abc-123
 
 ◆ Cancelled — use `ooo status` to verify, or `ooo run` to start fresh

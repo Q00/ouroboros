@@ -2,7 +2,10 @@
 
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 from unittest.mock import patch
 
 # Load keyword-detector.py as a module (it uses hyphens in filename)
@@ -467,3 +470,75 @@ class TestHookProtocol:
             main()
 
         assert capsys.readouterr().out == ""
+
+
+class TestPluginRegistrationDetection:
+    """The plugin bundle's own .mcp.json registers the server; setup never
+    writes ~/.claude/mcp.json, so a fresh plugin install must not be gated."""
+
+    @staticmethod
+    def _install(root: Path, *, mcp_json: str | None) -> Path:
+        scripts = root / "scripts"
+        scripts.mkdir(parents=True)
+        script = scripts / "keyword-detector.py"
+        script.write_text(_script_path.read_text(encoding="utf-8"), encoding="utf-8")
+        if mcp_json is not None:
+            (root / ".mcp.json").write_text(mcp_json, encoding="utf-8")
+        return script
+
+    @staticmethod
+    def _run(script: Path, home: Path, prompt: str) -> str:
+        home.mkdir(exist_ok=True)
+        payload = {
+            "session_id": "test-session",
+            "prompt": prompt,
+            "hook_event_name": "UserPromptSubmit",
+        }
+        env = {**os.environ, "HOME": str(home), "USERPROFILE": str(home)}
+        result = subprocess.run(
+            [sys.executable, str(script)],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            env=env,
+            check=True,
+        )
+        if not result.stdout:
+            return ""
+        return json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+
+    def test_plugin_declared_server_routes_without_setup(self, tmp_path):
+        script = self._install(
+            tmp_path / "plugin",
+            mcp_json='{"mcpServers": {"ouroboros": {"command": "uvx"}}}',
+        )
+        home = tmp_path / "home"
+        (home / ".ouroboros").mkdir(parents=True)
+        (home / ".ouroboros" / "prefs.json").write_text('{"welcomeCompleted": true}')
+
+        for prompt, skill in (
+            ("ooo run", "/ouroboros:ouroboros-run"),
+            ("ooo interview a todo app", "/ouroboros:interview"),
+            ("ooo publish", "/ouroboros:publish"),
+        ):
+            context = self._run(script, home, prompt)
+            assert skill in context
+            assert "/ouroboros:setup" not in context
+
+    def test_bundle_without_server_still_redirects_to_setup(self, tmp_path):
+        script = self._install(tmp_path / "plugin", mcp_json=None)
+        home = tmp_path / "home"
+        (home / ".ouroboros").mkdir(parents=True)
+        (home / ".ouroboros" / "prefs.json").write_text('{"welcomeCompleted": true}')
+
+        context = self._run(script, home, "ooo run")
+        assert "/ouroboros:setup" in context
+        assert "/ouroboros:ouroboros-run" not in context
+
+    def test_plugin_declared_server_does_not_suppress_first_run_welcome(self, tmp_path):
+        script = self._install(
+            tmp_path / "plugin",
+            mcp_json='{"mcpServers": {"ouroboros": {"command": "uvx"}}}',
+        )
+        context = self._run(script, tmp_path / "home", "hello")
+        assert "/ouroboros:welcome" in context

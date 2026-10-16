@@ -237,6 +237,52 @@ Great news! You're ready for the full Ouroboros experience.
 
 ---
 
+### Step 1.5: Runtime Configuration
+
+Write the Claude runtime selection to `~/.ouroboros/config.yaml`. The welcome
+gate and the CLI read it; nothing else in this wizard writes it. This step
+never touches `~/.claude/mcp.json`.
+
+Define `ouroboros_cli` in the same shell as each command below (shell state
+does not persist between commands):
+
+```bash
+ouroboros_cli() {
+  if command -v ouroboros >/dev/null 2>&1; then
+    command ouroboros "$@"
+  else
+    uvx --isolated --python '>=3.12' --from 'ouroboros-ai' ouroboros "$@"
+  fi
+}
+ouroboros_cli config show orchestrator
+ouroboros_cli config show llm
+```
+
+The welcome gate is ready only when `orchestrator.runtime_backend` is `claude`
+or `claude_mcp` AND `llm.backend` is `claude`. A missing file or section
+counts as not set.
+
+- Both conditions hold: already configured. Skip to Step 2.
+- `runtime_backend` is `claude_mcp` but `llm.backend` is not `claude`: run
+  `ouroboros_cli setup --runtime claude-cli --non-interactive` (keeps the CLI
+  transport).
+- `runtime_backend` is another runtime (for example `codex`): ask the user
+  whether to switch the default runtime to Claude. If they decline, keep the
+  existing configuration and skip to Step 2.
+- Otherwise (`runtime_backend` is `claude` with another `llm.backend`, no
+  config, no `orchestrator` section), or after the user agrees to switch, run:
+
+```bash
+ouroboros_cli setup --runtime claude --non-interactive
+```
+
+Both setup commands set `llm.backend: claude`; `--runtime claude` sets
+`orchestrator.runtime_backend: claude` and `--runtime claude-cli` sets `claude_mcp`.
+If it fails, show the error and continue the wizard; Step 4 reports the
+runtime as not configured.
+
+---
+
 ### Step 2: MCP Profile Boundary
 
 **Show progress:**
@@ -377,7 +423,8 @@ Check agents are available:
 ls src/ouroboros/agents/*.md | wc -l  # Should show 20+ bundled agents
 ```
 
-Confirm the saved Ouroboros config selects the default Claude Agent SDK runtime
+Confirm (with the Step 1.5 `config show` commands) that the saved Ouroboros
+config selects the default Claude Agent SDK runtime
 on MCP 1.x while `~/.claude/mcp.json` was not mutated by this setup. The
 dependency-free Claude CLI worker remains a distinct, explicit `[claude-cli]`
 selection for the isolated MCP 2 process.
