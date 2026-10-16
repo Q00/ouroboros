@@ -70,7 +70,8 @@ call with **"Invalid tool parameters"** before it ever reaches the server.
 Therefore: **immediately before EVERY `ouroboros_*` MCP call in this skill, re-run
 the tool-discovery load query for the specific MCP tool or documented tool family
 you are about to call**. Use `"+ouroboros evolve"` for `ouroboros_evolve_step`,
-`ouroboros_lineage_status`, and the evolve flow's documented tool family;
+`ouroboros_lineage_status`, `ouroboros_evolve_rewind`, and the evolve flow's
+documented tool family;
 use `"+ouroboros interview"` before `ouroboros_interview`, `"+ouroboros seed"`
 before `ouroboros_generate_seed`, and `"+ouroboros lateral"` before
 `ouroboros_lateral_think`. If a load returns no matching tool (and the tool is not already callable — an empty load for an already-exposed tool is an expected no-op, not absence), switch to the
@@ -109,21 +110,25 @@ documented fallback / Path B instead of retrying the failing call.
    explicit transition above, then process the `execute: true` response using
    step 6. Stop only on `converged`, `stagnated`, `exhausted`, or `failed`.
 8. When the loop terminates, display a result summary with next step:
-   - `converged`: `◆ Current state → next: Ontology converged! Run ooo evaluate for formal verification`
+   - `converged`: `◆ Current state → next: Evolution converged. Review it with ooo evolve --status <lineage_id>`
    - `ontology_stable`: `◆ Current state → next: Run the same lineage with execute=true for Execute→Evaluate; this is not verified convergence yet`
    - `stagnated`: `◆ Current state → next: ooo unstuck to break through, then ooo evolve --status <lineage_id> to resume`
-   - `exhausted`: `◆ Current state → next: ooo evaluate to check best result — or ooo unstuck to try a new approach`
+   - `exhausted`: `◆ Current state → next: ooo evolve --status <lineage_id> to review the best generation, or ooo unstuck to try a new approach`
    - `failed`: `◆ Current state → next: Check the error above. ooo status to inspect session, or ooo unstuck if blocked`
+
+   With `execute: true`, each generation already ran Execute→Evaluate. Do not
+   offer `ooo evaluate` with the `lineage_id`: formal evaluation takes an
+   execution `session_id`, which the lineage id is not.
 
 **Checking status:**
 1. Call `ouroboros_lineage_status` with the `lineage_id`
 2. Display: generation count, ontology evolution, convergence progress
 
 **Rewinding:**
-1. Call `ouroboros_evolve_step` with:
-   - `lineage_id`: the lineage to continue from a rewind point
-   - `seed_content`: the seed YAML from the target generation
-   (Future: dedicated `ouroboros_evolve_rewind` tool)
+1. Call `ouroboros_evolve_rewind` with `lineage_id` and `to_generation` (the
+   generation to keep, inclusive). Later generations are truncated.
+2. Continue from the rewind point by calling `ouroboros_evolve_step` with the
+   same `lineage_id`.
 
 ### Path B: Plugin-only (no MCP tools available)
 

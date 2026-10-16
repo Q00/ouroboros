@@ -56,7 +56,7 @@ stop with the MCP-not-available message instead of retrying the failing call.
    ```
    This walks `scan_root` (up to two directory levels deep) for valid seed repos/worktrees and registers them in DB. Each repo or worktree found directly by the walk is registered self-only — Git worktree families are not expanded, so worktrees outside the depth-bounded walk (e.g. under `.ouroboros/worktrees`) are not pulled in. Existing defaults are preserved.
 
-The scan response `text` already contains a pre-formatted numbered list with `[default]` markers. **Do NOT make any additional MCP calls to list or query repos.**
+The scan response `text` already contains a pre-formatted numbered list with ` *` markers on defaults. **Do NOT make any additional MCP calls to list or query repos.**
 
 **Display the repos in a plain-text 2-column grid** (NOT a markdown table). Use a code block so columns align. Example:
 
