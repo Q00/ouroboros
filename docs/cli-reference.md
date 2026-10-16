@@ -137,8 +137,8 @@ Where the answers are recorded:
 
 Time spent waiting for the requester counts against the interview phase
 timeout (`OUROBOROS_PHASE_TIMEOUT_INTERVIEW_SECONDS`, default 600 seconds).
-The MCP auto tools read only `OUROBOROS_AUTO_REQUESTER_COMMAND` from the
-server's environment; there is no tool argument for it.
+The requester is available from the CLI only; the MCP auto tools do not use it
+yet.
 
 ### Detached `auto` wait and retrieve
 

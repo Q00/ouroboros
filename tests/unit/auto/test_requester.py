@@ -40,6 +40,7 @@ from ouroboros.auto.requester import (
     CommandRequester,
     RequesterQuestion,
     RequesterReply,
+    ask_requester,
     build_requester,
     resolve_requester_command,
     resolve_requester_timeout,
@@ -324,6 +325,9 @@ async def test_requester_failure_keeps_draft_and_records_why(
     assert persisted["requester_log"][0]["outcome"] == outcome
 
 
+_TURN = InterviewTurn(FIRST_QUESTION, "s")
+
+
 class _RecordingRequester:
     def __init__(self) -> None:
         self.questions: list[RequesterQuestion] = []
@@ -364,7 +368,7 @@ async def test_only_conservative_default_and_assumption_go_to_requester(
     state = AutoPipelineState(goal=GOAL, cwd=str(tmp_path))
     draft = _draft(source)
 
-    out = await driver._ask_requester(draft, FIRST_QUESTION, state, round_number=2)
+    out = await ask_requester(driver, draft, FIRST_QUESTION, _TURN, state, 2)
 
     routed = {AutoAnswerSource.CONSERVATIVE_DEFAULT, AutoAnswerSource.ASSUMPTION}
     if source in routed:
@@ -392,7 +396,25 @@ async def test_blocked_draft_is_not_routed(tmp_path: Path) -> None:
         blocker=AutoBlocker(reason="unsafe", question=FIRST_QUESTION),
     )
 
-    out = await driver._ask_requester(draft, FIRST_QUESTION, state, round_number=1)
+    out = await ask_requester(driver, draft, FIRST_QUESTION, _TURN, state, 1)
+
+    assert out is draft
+    assert requester.questions == []
+
+
+@pytest.mark.asyncio
+async def test_driver_gap_reopen_prompt_is_not_routed(tmp_path: Path) -> None:
+    requester = _RecordingRequester()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(AsyncMock(), AsyncMock()),
+        store=AutoStore(tmp_path),
+        requester=requester,
+    )
+    state = AutoPipelineState(goal=GOAL, cwd=str(tmp_path))
+    draft = _draft(AutoAnswerSource.CONSERVATIVE_DEFAULT)
+    synthetic = "[driver gap-reopen 'actors': backend_completed=True ledger_done=False]"
+
+    out = await ask_requester(driver, draft, synthetic, _TURN, state, 1)
 
     assert out is draft
     assert requester.questions == []

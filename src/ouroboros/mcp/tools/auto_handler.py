@@ -49,7 +49,6 @@ from ouroboros.auto.ledger import (
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
 from ouroboros.auto.policies import apply_domain_policy_defaults
 from ouroboros.auto.repo_context import repo_auto_answer_context
-from ouroboros.auto.requester import build_requester
 from ouroboros.auto.resume_render import render_resume_lines
 from ouroboros.auto.runtime_routing import (
     AutoStageRuntimePlan,
@@ -554,14 +553,6 @@ class AutoHandler:
             lateral_thinker = HandlerLateralThinker(lateral_handler)
 
         runtime_event_store = await initialized_runtime_event_store(self.event_store)
-        # Requester (opt-in): read from the server's own environment only
-        # (OUROBOROS_AUTO_REQUESTER_COMMAND). There is no tool argument for it,
-        # so an MCP caller cannot choose a command for the server to run.
-        try:
-            requester = build_requester()
-        except ValueError as exc:
-            structlog.get_logger(__name__).warning("auto.requester.invalid_setting", error=str(exc))
-            requester = None
         driver = AutoInterviewDriver(
             HandlerInterviewBackend(interview_handler, cwd=state.cwd),
             store=store,
@@ -572,7 +563,6 @@ class AutoHandler:
             # AI answer refiner: concrete goal-specific answers so interview
             # ambiguity converges. Best-effort; None falls back to deterministic.
             answer_refiner=build_answer_refiner(),
-            requester=requester,
             event_store=runtime_event_store,
         )
         # RFC #809 Phase 2.1 — wire Seed QA on every MCP auto surface before

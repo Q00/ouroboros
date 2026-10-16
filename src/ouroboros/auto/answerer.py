@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 
 class AutoAnswerSource(StrEnum):
-    """Source categories for generated auto answers."""
+    """Source categories for auto answers (``requester``: auto/requester.py asked)."""
 
     USER_GOAL = "user_goal"
     REPO_FACT = "repo_fact"
@@ -25,9 +25,6 @@ class AutoAnswerSource(StrEnum):
     ASSUMPTION = "assumption"
     NON_GOAL = "non_goal"
     BLOCKER = "blocker"
-    # The requester answered the question directly (opt-in requester command;
-    # see ``ouroboros.auto.requester``). Replaces a CONSERVATIVE_DEFAULT or
-    # ASSUMPTION draft only.
     REQUESTER = "requester"
 
 
@@ -53,8 +50,7 @@ class AutoAnswerContext:
     section name (e.g. ``runtime_context``, ``constraints``, ``non_goals``).
     Only the Driver/MCP layer is allowed to populate this — the deterministic
     answerer just reads it. Matching answers are tagged
-    :attr:`AutoAnswerSource.USER_PREFERENCE` so provenance survives in the
-    ledger.
+    :attr:`AutoAnswerSource.USER_PREFERENCE` so provenance survives in the ledger.
     """
 
     repo_facts: Mapping[str, str] = field(default_factory=dict)

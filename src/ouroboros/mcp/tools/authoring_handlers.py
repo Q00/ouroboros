@@ -770,9 +770,7 @@ def _classify_interview_answer_source(answer: str) -> str:
     lowered = str(answer).lstrip().casefold()
     if lowered.startswith("[from-code]") or lowered.startswith("[from-repo]"):
         return "repo_fact"
-    # ``ooo auto`` relays the requester's own answer under this prefix (opt-in
-    # requester command). It is the requester's decision, not a generated one.
-    if lowered.startswith(REQUESTER_ANSWER_PREFIX):
+    if lowered.startswith(REQUESTER_ANSWER_PREFIX):  # auto relays the requester's own answer
         return "requester"
     if lowered.startswith("[from-auto]") or lowered.startswith("[from-safe-default]"):
         return "generated"

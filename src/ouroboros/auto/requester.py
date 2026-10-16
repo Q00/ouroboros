@@ -26,7 +26,18 @@ import json
 import os
 import shlex
 import time
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
+
+import structlog
+
+from ouroboros.auto.answerer import AutoAnswer, AutoAnswerSource
+from ouroboros.auto.ledger import DecisionProvenance, LedgerEntry, LedgerSource, LedgerStatus
+
+if TYPE_CHECKING:
+    from ouroboros.auto.interview_driver import AutoInterviewDriver, InterviewTurn
+    from ouroboros.auto.state import AutoPipelineState
+
+log = structlog.get_logger(__name__)
 
 REQUESTER_COMMAND_ENV = "OUROBOROS_AUTO_REQUESTER_COMMAND"
 REQUESTER_TIMEOUT_ENV = "OUROBOROS_AUTO_REQUESTER_TIMEOUT_SECONDS"
@@ -47,6 +58,13 @@ RequesterOutcome = Literal[
 
 # Bound on how much stderr is kept in a failure detail.
 _DETAIL_LIMIT = 300
+# Text fields in ``state.requester_log`` are cut like ``auto_answer_log``.
+_LOG_TEXT_LIMIT = 200
+# Generous bound: one entry per routed question, and an interview has at most
+# ``max_interview_rounds`` (default 50) rounds per run.
+_REQUESTER_LOG_LIMIT = 500
+# Draft sources where auto would otherwise assume; only these are routed.
+ROUTED_SOURCES = frozenset({AutoAnswerSource.CONSERVATIVE_DEFAULT, AutoAnswerSource.ASSUMPTION})
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,11 +194,11 @@ async def _kill(process: asyncio.subprocess.Process) -> None:
         return
 
 
-def _clip(text: str) -> str:
+def _clip(text: str, limit: int = _DETAIL_LIMIT) -> str:
     flat = " ".join(text.split())
-    if len(flat) <= _DETAIL_LIMIT:
+    if len(flat) <= limit:
         return flat
-    return f"{flat[: _DETAIL_LIMIT - 3]}..."
+    return f"{flat[: limit - 3]}..."
 
 
 def resolve_requester_command(
@@ -237,3 +255,132 @@ def build_requester(
     if argv is None:
         return None
     return CommandRequester(argv, resolve_requester_timeout(timeout_seconds, environ))
+
+
+# -- interview driver integration ---------------------------------------------
+
+
+async def ask_requester(
+    driver: AutoInterviewDriver,
+    answer: AutoAnswer,
+    question: str,
+    turn: InterviewTurn,
+    state: AutoPipelineState,
+    round_number: int,
+) -> AutoAnswer:
+    """Ask the requester instead of assuming; keep the draft on any failure.
+
+    Called by the interview driver for every round. Returns ``answer`` unchanged
+    unless a requester is wired, ``question`` is the interviewer's own question
+    (not the driver's synthetic gap-reopen prompt), and the draft is an
+    assumption (source in :data:`ROUTED_SOURCES`, no blocker). Every routed
+    question is recorded in ``state.requester_log`` and emitted as an
+    ``auto.interview.requester_asked`` event, answered or not.
+    """
+    requester = driver.requester
+    if (
+        requester is None
+        or question != turn.question
+        or answer.blocker is not None
+        or answer.source not in ROUTED_SOURCES
+    ):
+        return answer
+    state.mark_progress(f"asking requester (round {round_number}/{driver.max_rounds})")
+    driver._save(state)
+    request = RequesterQuestion(
+        question=question,
+        goal=state.goal,
+        draft_answer=answer.text,
+        draft_source=answer.source.value,
+        round=round_number,
+    )
+    try:
+        reply = await requester.ask(request)
+    except Exception as exc:  # noqa: BLE001 - requester is best-effort
+        reply = RequesterReply("launch_failed", detail=_clip(f"{type(exc).__name__}: {exc}"))
+    await _record_reply(driver, state, request, reply)
+    if reply.outcome != "answered" or not reply.answer:
+        return answer
+    return requester_answer(answer, reply.answer, round_number)
+
+
+async def _record_reply(
+    driver: AutoInterviewDriver,
+    state: AutoPipelineState,
+    request: RequesterQuestion,
+    reply: RequesterReply,
+) -> None:
+    answered = reply.outcome == "answered"
+    entry: dict[str, object] = {
+        "round": request.round,
+        "question": _clip(request.question, _LOG_TEXT_LIMIT),
+        "draft_source": request.draft_source,
+        "draft_answer": _clip(request.draft_answer, _LOG_TEXT_LIMIT),
+        "outcome": reply.outcome,
+        "used": answered,
+        "answer": _clip(reply.answer or "", _LOG_TEXT_LIMIT),
+        "detail": reply.detail,
+        "elapsed_seconds": round(reply.elapsed_seconds, 3),
+    }
+    state.requester_log.append(entry)
+    if len(state.requester_log) > _REQUESTER_LOG_LIMIT:
+        del state.requester_log[: len(state.requester_log) - _REQUESTER_LOG_LIMIT]
+    suffix = "" if answered else "; keeping auto draft"
+    state.mark_progress(
+        f"requester {reply.outcome} (round {request.round}/{driver.max_rounds}){suffix}"
+    )
+    driver._save(state)
+    (log.info if answered else log.warning)(
+        "auto.interview.requester_asked",
+        auto_session_id=state.auto_session_id,
+        round=request.round,
+        draft_source=request.draft_source,
+        outcome=reply.outcome,
+        detail=reply.detail,
+    )
+    await driver._emit_event(
+        "auto.interview.requester_asked",
+        state.auto_session_id,
+        aggregate_type="auto_session",
+        round=request.round,
+        draft_source=request.draft_source,
+        outcome=reply.outcome,
+        used=answered,
+        detail=reply.detail,
+        elapsed_seconds=entry["elapsed_seconds"],
+        question=entry["question"],
+    )
+
+
+def requester_answer(draft: AutoAnswer, text: str, round_number: int) -> AutoAnswer:
+    """Replace ``draft`` with the requester's answer, keeping its sections.
+
+    Each ledger section the draft would have filled gets the requester's text
+    as a confirmed user decision. The key is unique per round so a later
+    requester answer for the same facet never ties with an earlier one
+    (a same-key, same-source tie would mark the section CONFLICTING).
+    """
+    updates = [
+        (
+            section,
+            LedgerEntry(
+                key=f"{entry.key}.requester.round_{round_number}",
+                value=text,
+                source=LedgerSource.USER_PREFERENCE,
+                confidence=0.83,
+                status=LedgerStatus.CONFIRMED,
+                rationale="The requester answered this interview question.",
+                evidence=[f"requester answer, interview round {round_number}"],
+                provenance=DecisionProvenance.USER_CONFIRMED,
+            ),
+        )
+        for section, entry in draft.ledger_updates
+    ]
+    non_goals = [text] if any(section == "non_goals" for section, _ in updates) else []
+    return AutoAnswer(
+        text=text,
+        source=AutoAnswerSource.REQUESTER,
+        confidence=0.83,
+        ledger_updates=updates,
+        non_goals=non_goals,
+    )
