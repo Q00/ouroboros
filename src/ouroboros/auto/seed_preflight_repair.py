@@ -41,6 +41,7 @@ from ouroboros.auto.seed_preflight import (
     _STATIC_SHELL_WORD,
     PreflightFinding,
     SeedPreflightReport,
+    _command_program_tokens,
     _decode_static_shell_word,
     _normalize_workspace_path,
     run_seed_preflight,
@@ -143,17 +144,35 @@ def locate_program_candidates(
     return tuple(sorted(set(candidates)))
 
 
-def _rewrite_command(command: str, subject: str, replacement: str) -> str:
-    """Replace every static shell word naming ``subject`` with ``replacement``.
+_SEGMENT_SEPARATORS = (";", "\n", "&", "|")
 
-    A word written with a leading ``./`` keeps it so a direct invocation stays
-    a direct invocation; a word that needs quoting is quoted.
+
+def _rewrite_command(command: str, subject: str, replacement: str) -> str:
+    """Replace the verifier-program occurrences of ``subject`` with ``replacement``.
+
+    Only a word that *becomes* its command segment's program is rewritten:
+    the program set computed by preflight for the segment up to and including
+    the word contains ``subject``, and the set for the segment before the word
+    does not. Arguments and redirection targets that happen to spell the same
+    path (``./runtests.py > runtests.py``) are left intact, so a rewrite can
+    never point an output operand at the real script. A word written with a
+    leading ``./`` keeps it so a direct invocation stays a direct invocation;
+    a word that needs quoting is quoted.
     """
     pieces: list[str] = []
     cursor = 0
     for match in re.finditer(_STATIC_SHELL_WORD, command):
         decoded = _decode_static_shell_word(match.group(0))
         if decoded is None or _normalize_workspace_path(decoded) != subject:
+            continue
+        segment_start = (
+            max(command.rfind(separator, 0, match.start()) for separator in _SEGMENT_SEPARATORS) + 1
+        )
+        before_word = command[segment_start : match.start()]
+        through_word = command[segment_start : match.end()]
+        if subject in _command_program_tokens(before_word):
+            continue
+        if subject not in _command_program_tokens(through_word):
             continue
         new_word = f"./{replacement}" if decoded.startswith("./") else replacement
         pieces.append(command[cursor : match.start()])

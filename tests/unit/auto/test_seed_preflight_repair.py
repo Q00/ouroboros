@@ -73,6 +73,26 @@ def test_missing_root_script_is_rewritten_to_its_checkout_location(tmp_path: Pat
     assert [repair.evidence_path for repair in outcome.repairs] == ["tests/runtests.py"]
 
 
+def test_rewrite_leaves_arguments_and_redirection_targets_intact(tmp_path: Path) -> None:
+    _touch(tmp_path / "tests" / "runtests.py")
+    original = (tmp_path / "tests" / "runtests.py").read_text(encoding="utf-8")
+    seed = _seed(
+        "./runtests.py > runtests.py",
+        "python runtests.py runtests.py",
+        "./runtests.py a && cat runtests.py",
+    )
+
+    outcome = repair_seed_preflight(seed, tmp_path, max_rounds=5)
+
+    assert outcome.report.passed
+    assert _commands(outcome.seed) == [
+        "./tests/runtests.py > runtests.py",
+        "python tests/runtests.py runtests.py",
+        "./tests/runtests.py a && cat runtests.py",
+    ]
+    assert (tmp_path / "tests" / "runtests.py").read_text(encoding="utf-8") == original
+
+
 def test_script_absent_from_checkout_stays_blocking(tmp_path: Path) -> None:
     seed = _seed("./runtests.py migrations.test_writer")
 
