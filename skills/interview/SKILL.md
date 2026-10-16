@@ -1,6 +1,6 @@
 ---
 name: interview
-description: "Socratic interview to crystallize vague requirements"
+description: "Use when the user wants to build or change something but the request is vague or open-ended: 'help me figure out what to build', 'I'm not sure what it should do', 'add X' with no details, or no clear definition of done. Runs a short Socratic interview that turns the idea into goals, constraints, and acceptance criteria before any code is written. Not for simple questions, small clear edits, or an existing Seed."
 aliases: [socratic]
 mcp_tool: ouroboros_interview
 mcp_args:

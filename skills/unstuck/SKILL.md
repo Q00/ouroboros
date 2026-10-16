@@ -1,6 +1,6 @@
 ---
 name: unstuck
-description: "Break through stagnation with lateral thinking personas — single or multi-persona debate"
+description: "Use when the user is stuck or going in circles: the same fix failed twice or more, 'nothing works', 'I've tried everything', or a consequential choice with no clear winner that is hard to undo or splits the team (which database, which architecture). Brings hacker, researcher, simplifier, architect, and contrarian perspectives and converges on one recommendation. Not for a first error or normal progress."
 aliases: [stuck, lateral]
 ---
 
