@@ -38,15 +38,17 @@ When the user invokes this skill:
 1. Run the CLI command:
 
    ```
-   ouroboros resume
+   ouroboros resume --list
    ```
 
-   This reads the configured runtime EventStore directly — the MCP server does **not**
-   need to be running.
+   This reads the configured runtime EventStore directly; the MCP server does
+   **not** need to be running. `--list` prints the table and exits without the
+   interactive prompt, which aborts when no terminal is attached. Add `--all`
+   to show every active session.
 
-2. If sessions are listed, enter the number of the session you want to work
-   with. The command prints both the `session_id` and the `exec_id`, along
-   with the available re-attach paths.
+2. If sessions are listed, show the table and ask the user which session to
+   work with (active runtime's `ask_user` capability). Each row carries the
+   `session_id`, `exec_id`, and seed id used by the re-attach paths below.
 
 3. Pick the right re-attach path:
 
@@ -77,7 +79,7 @@ When the user invokes this skill:
 | Code | Meaning |
 |------|---------|
 | `0`  | Success — sessions listed, or no sessions found |
-| `1`  | Invalid user selection (non-numeric or out-of-range) |
+| `1`  | Invalid selection at the interactive prompt (not used with `--list`) |
 | `2`  | EventStore exists but could not be opened or read |
 
 ## Fallback (No sessions found)
@@ -95,12 +97,14 @@ ouroboros tui monitor
 ```
 User: ooo resume-session
 
+> ouroboros resume --list
+
 ┌─────────────────────── In-Flight Sessions ───────────────────────┐
 │  #  Session ID          Execution ID        Status    Started    │
 │  1  sess-abc123         exec-xyz789         running   2026-04-15 │
 └───────────────────────────────────────────────────────────────────┘
 
-Enter number to re-attach (1-1), or 'q' to quit: 1
+Which session should I re-attach? → sess-abc123
 
 ╭─ Re-attach ────────────────────────────────────────────────────────────────╮
 │ Session ID:   sess-abc123                                                  │
@@ -121,7 +125,7 @@ After you have the identifiers:
 - `ouroboros tui monitor` — launch the TUI and pick the session to inspect
 - `ouroboros run workflow --orchestrator --resume <session_id> <seed.yaml>` — resume execution
 - `ooo evaluate` — evaluate results once the execution completes
-- `ooo cancel execution <exec_id>` — cancel if the session is stuck
+- `ooo cancel <session_id>` — cancel if the session is stuck
 
 ## RFC #1392 State Breadcrumb Footer
 

@@ -4,8 +4,8 @@
 Detects trigger keywords in user prompts and suggests
 the appropriate Ouroboros skill to invoke.
 
-IMPORTANT: If MCP is not configured (ooo setup not run),
-ALL ooo commands (except setup/help) redirect to setup first.
+IMPORTANT: If no Ouroboros MCP server is registered for this host,
+ooo commands outside SETUP_BYPASS_SKILLS redirect to setup first.
 
 Hook: UserPromptSubmit
 Input: JSON hook payload via stdin, with raw prompt text supported as a fallback
@@ -164,8 +164,8 @@ KEYWORD_MAP = [
 ]
 
 
-def is_mcp_configured() -> bool:
-    """Check if MCP server is registered in ~/.claude/mcp.json."""
+def _user_registered_mcp() -> bool:
+    """Check for a legacy user-level registration in ~/.claude/mcp.json."""
     try:
         mcp_path = Path.home() / ".claude" / "mcp.json"
         if not mcp_path.exists():
@@ -173,6 +173,28 @@ def is_mcp_configured() -> bool:
         return "ouroboros" in mcp_path.read_text()
     except Exception:
         return False
+
+
+def _hook_root_declares_mcp() -> bool:
+    """Check whether the bundle that ships this hook also declares the server.
+
+    The marketplace plugin registers the Ouroboros MCP server through its own
+    ``.mcp.json`` (``plugin.json`` ``mcpServers``), and a source checkout
+    carries the same file at its root. ``ooo setup`` never writes
+    ``~/.claude/mcp.json``, so that file alone cannot tell whether MCP is
+    available.
+    """
+    try:
+        mcp_path = Path(__file__).resolve().parent.parent / ".mcp.json"
+        servers = json.loads(mcp_path.read_text()).get("mcpServers")
+        return isinstance(servers, dict) and "ouroboros" in servers
+    except Exception:
+        return False
+
+
+def is_mcp_configured() -> bool:
+    """Check if the Ouroboros MCP server is registered for this host."""
+    return _hook_root_declares_mcp() or _user_registered_mcp()
 
 
 def _has_prior_install_state() -> bool:
@@ -194,7 +216,9 @@ def _has_prior_install_state() -> bool:
     markers = ("config.yaml", "credentials.yaml", "ouroboros.db")
     if any((ouro_dir / marker).exists() for marker in markers):
         return True
-    return is_mcp_configured()
+    # Only a user-level registration counts here: the plugin bundle always
+    # declares the server, so it says nothing about prior use.
+    return _user_registered_mcp()
 
 
 def is_first_time() -> bool:
