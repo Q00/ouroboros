@@ -74,7 +74,7 @@ irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | i
 <td align="center" width="50%"><img src="./docs/images/host-kiro.gif" alt="10x screen recording of Kiro CLI running an Ouroboros interview"><br><sub><b>Kiro</b> — the Kiro CLI running the Ouroboros interview flow, turning a vague request into a structured, testable Seed</sub></td>
 </tr>
 <tr>
-<td align="center" colspan="2"><img src="./docs/images/host-antigravity.gif" alt="Screen recording of Antigravity running an Ouroboros interview and submitting the selected answer"><br><sub><b>Antigravity</b> — a YouTube-publishing automation interview: asks what to automate, shows advisory lanes, and submits the selected answer</sub></td>
+<td align="center" colspan="2"><img src="./docs/images/host-antigravity.gif" width="50%" alt="Screen recording of Antigravity running an Ouroboros interview and submitting the selected answer"><br><sub><b>Antigravity</b> — a YouTube-publishing automation interview: asks what to automate, shows advisory lanes, and submits the selected answer</sub></td>
 </tr>
 </table>
 

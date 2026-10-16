@@ -68,7 +68,7 @@ irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | i
 <td align="center" width="50%"><img src="./docs/images/host-kiro.gif" alt="Kiro CLI에서 Ouroboros 인터뷰를 실행하는 10배속 화면 녹화"><br><sub><b>Kiro</b> — Kiro CLI에서 Ouroboros 인터뷰 흐름을 실행해 모호한 요청을 구조화하고 검증 가능한 Seed로 구체화합니다</sub></td>
 </tr>
 <tr>
-<td align="center" colspan="2"><img src="./docs/images/host-antigravity.gif" alt="Antigravity에서 Ouroboros 인터뷰를 실행하고 선택한 답변을 제출하는 화면 녹화"><br><sub><b>Antigravity</b> — YouTube 게시 자동화 인터뷰. 자동화할 범위를 묻고, 어드바이저리 레인을 실행하며 선택한 답변을 제출합니다</sub></td>
+<td align="center" colspan="2"><img src="./docs/images/host-antigravity.gif" width="50%" alt="Antigravity에서 Ouroboros 인터뷰를 실행하고 선택한 답변을 제출하는 화면 녹화"><br><sub><b>Antigravity</b> — YouTube 게시 자동화 인터뷰. 자동화할 범위를 묻고, 어드바이저리 레인을 실행하며 선택한 답변을 제출합니다</sub></td>
 </tr>
 </table>
 
