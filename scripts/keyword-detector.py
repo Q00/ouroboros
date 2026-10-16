@@ -358,9 +358,9 @@ def main() -> None:
     if not result["detected"] and is_first_time():
         skill_name = "welcome"
         _emit_context(f"""<skill-suggestion>
-🎯 MATCHED SKILLS (use AskUserQuestion to let user choose):
+🎯 MATCHED SKILLS (ask with the active runtime's `ask_user` capability to let the user choose):
 - /ouroboros:{skill_name} - First time using Ouroboros! Starting welcome experience.
-IMPORTANT: Auto-triggering welcome experience now. Use AskUserQuestion to confirm or skip.
+IMPORTANT: Auto-triggering welcome experience now. Ask with the active runtime's `ask_user` capability to confirm or skip.
 </skill-suggestion>""")
         return
 
