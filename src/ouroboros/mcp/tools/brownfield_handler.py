@@ -76,11 +76,25 @@ def _detect_action(arguments: dict[str, Any]) -> str:
     return "query"
 
 
-def _repo_line(repo: BrownfieldRepo, *, fallback_id: int | None = None) -> str:
-    """Numbered registry line, ``{id}. {name}`` with `` *`` on defaults."""
+def _repo_line(
+    repo: BrownfieldRepo,
+    *,
+    fallback_id: int | None = None,
+    with_location: bool = False,
+) -> str:
+    """Numbered registry line, ``{id}. {name}`` with `` *`` on defaults.
+
+    ``with_location`` appends ``: {path}`` and `` - {desc}`` so hosts that
+    read repo locations from the ``query`` text keep finding them.
+    """
     rid = repo.id if repo.id is not None else (fallback_id if fallback_id is not None else "?")
     marker = " *" if repo.is_default else ""
-    return f"{rid:>2}. {repo.name}{marker}"
+    line = f"{rid:>2}. {repo.name}{marker}"
+    if with_location:
+        line += f": {repo.path}"
+        if repo.desc:
+            line += f" - {repo.desc}"
+    return line
 
 
 def _defaults_line(defaults: Sequence[BrownfieldRepo]) -> str:
@@ -573,7 +587,7 @@ class BrownfieldHandler:
             )
 
         lines = [f"Brownfield repositories ({total} total, showing {len(repos)}):", ""]
-        lines.extend(_repo_line(r) for r in repos)
+        lines.extend(_repo_line(r, with_location=True) for r in repos)
         lines.append("")
         lines.append(_defaults_line(defaults))
 
@@ -637,7 +651,9 @@ class BrownfieldHandler:
                 f"({len(ranked)} of {len(repos)} match, showing {len(page)}):",
                 "",
             ]
-            lines.extend(f"{_repo_line(r)}  (score {score:.2f})" for r, score in page)
+            lines.extend(
+                f"{_repo_line(r, with_location=True)}  (score {score:.2f})" for r, score in page
+            )
             text = "\n".join(lines)
         if repos and unindexed:
             text += (

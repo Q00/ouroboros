@@ -43,7 +43,7 @@ Scan boundaries:
 - Repos without remotes or with remotes not named `origin` are eligible. Existing defaults are preserved; repos no longer on disk are not removed.
 - A rescan skips the `git` check for already-registered repos and rebuilds a repo's search document (manifest name and description, README head, top-level entry names) only when those files changed.
 
-The query or scan response `text` already holds the numbered `{id}. {name}` list with ` *` markers on defaults; make no further MCP calls to list repos. Show the numbers and names (never the scores or paths) as a plain-text two-column grid in a code block (not a markdown table), keeping the `*` markers exactly:
+The query or scan response `text` already holds the numbered `{id}. {name}` list with ` *` markers on defaults (query lines also carry `: {path} - {desc}`); make no further MCP calls to list repos. Show the numbers and names (never the scores or paths) as a plain-text two-column grid in a code block (not a markdown table), keeping the `*` markers exactly:
 
 ```
 Scan complete. 8 repositories registered.

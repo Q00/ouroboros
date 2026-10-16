@@ -43,9 +43,9 @@ async def test_query_lists_registry_numbered_without_scanning(store) -> None:
 
     assert result.is_ok
     text = result.value.text_content
-    assert " 1. web-console" in text
-    assert " 2. billing *" in text
-    assert " 3. infra" in text
+    assert " 1. web-console: /w/web-console - React admin dashboard" in text
+    assert " 2. billing *: /w/billing\n" in text
+    assert " 3. infra: /w/infra\n" in text
     assert "Defaults (* marked): 2 (billing)" in text
     assert result.value.meta["total"] == 3
 
@@ -62,7 +62,7 @@ async def test_query_text_ranks_from_stored_documents(store) -> None:
     assert meta["matched"] == 1 and meta["total"] == 3
     assert meta["unindexed"] == 1  # web-console has no stored document
     text = result.value.text_content
-    assert " 2. billing *  (score" in text
+    assert " 2. billing *: /w/billing  (score" in text
     assert "1 repo(s) have no stored search document" in text
 
 

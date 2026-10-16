@@ -47,7 +47,7 @@ Each `ooo <name>` is also the skill `/ouroboros:<name>`, except `run`, `status`,
 | `ooo status` | Session status and goal drift | MCP |
 | `ooo qa` | General-purpose QA verdict for any artifact | MCP, in-session fallback |
 | `ooo pm` | PM-focused interview and PRD | MCP |
-| `ooo brownfield` | Scan and manage brownfield repo defaults | MCP |
+| `ooo brownfield` | Scan and manage brownfield repo defaults; `find <topic>` ranks registered repos | MCP |
 | `ooo config` | Settings GUI for per-stage agents and models | CLI |
 | `ooo cancel` | Cancel stuck or orphaned executions | CLI |
 | `ooo resume-session` | List in-flight sessions and re-attach commands | CLI |
@@ -79,6 +79,7 @@ In Claude Code these phrases route to a command without the `ooo` prefix:
 | "cancel execution", "stop job", "kill stuck", "abort execution" | `ooo cancel` |
 | "update ouroboros", "upgrade ouroboros" | `ooo update` |
 | "brownfield defaults", "brownfield scan" | `ooo brownfield` |
+| "which repo handles X", "find repo for topic" | `ooo brownfield find <topic>` |
 
 ## Agents
 
