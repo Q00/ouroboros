@@ -63,12 +63,12 @@ fallback instead of retrying the failing call.
 
 ### Execution Steps
 
-1. **Detect git workflow** (before any code changes):
-   - Read the project's `CLAUDE.md` for git workflow preferences
-   - If PR-based workflow detected and currently on `main`/`master`:
-     - Create a feature branch: `ooo/run/<session_id>`
-     - All code changes go to this branch
-   - If no preference: use current branch (backward compatible)
+1. **Do not create or switch branches yourself.** For a background execution
+   job, `use_worktree` defaults to true: the server runs the task in its own
+   worktree and reports `worktree_path` / `worktree_branch` in the job result.
+   Tell the user the task was isolated only when those fields are present. A
+   `dispatch_mode="plugin"` response delegates to a child session and carries
+   no worktree.
 
 2. Check if the user provided seed content or a file path:
    - If a file path: Read the file with the Read tool
@@ -245,7 +245,9 @@ fallback instead of retrying the failing call.
        or finished and the meaningful success/failure counts.
      - `ac_routing` / `harness_changed`: say "currently running with" and report
        only initial routing or a real model/tier/harness change.
-     - `ac_verified`: report the completed AC and its compact assurance evidence.
+     - `ac_attempt_judged`: at most one line on the AC attempt outcome.
+     - `ac_accepted` / `ac_rejected`: report the AC's final acceptance and its
+       compact disposition evidence.
    - `attention_required`: surface the blocker or pending decision immediately
      and ask the user only when human judgment is required.
    - `terminal`: fetch/present the final result and any chained evaluation.
