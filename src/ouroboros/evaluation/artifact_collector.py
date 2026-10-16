@@ -11,12 +11,13 @@ from __future__ import annotations
 import logging
 import os
 import re
+import stat
 
 from ouroboros.evaluation.models import ArtifactBundle, FileArtifact
 
 logger = logging.getLogger(__name__)
 
-MAX_TOTAL_CHARS = 150_000  # ~37K tokens — sole budget limiter
+MAX_TOTAL_CHARS = 150_000  # ~37K tokens
 MAX_FILE_SIZE = 100 * 1024  # 100KB per file (accommodate large artifact summaries)
 MAX_SCAN_ENTRIES = 50_000
 MAX_SCAN_DEPTH = 32
@@ -311,57 +312,56 @@ class ArtifactCollector:
 
         scan_error: str | None = None
         visited = 0
+        pending_directories = [(real_project, 0)]
 
-        def record_walk_error(error: OSError) -> None:
-            nonlocal scan_error
-            scan_error = f"unreadable directory: {error.filename or '<unknown>'}"
-
-        for root, dirs, files in os.walk(
-            real_project, topdown=True, followlinks=False, onerror=record_walk_error
-        ):
-            visited += len(dirs) + len(files)
-            if visited > MAX_SCAN_ENTRIES:
-                scan_error = f"entry limit ({MAX_SCAN_ENTRIES}) exceeded"
-                dirs.clear()
+        while pending_directories:
+            root, depth = pending_directories.pop()
+            try:
+                with os.scandir(root) as iterator:
+                    entries = []
+                    for entry in iterator:
+                        visited += 1
+                        if visited >= MAX_SCAN_ENTRIES:
+                            scan_error = f"entry budget ({MAX_SCAN_ENTRIES}) reached"
+                            break
+                        entries.append(entry)
+            except OSError as error:
+                scan_error = f"unreadable directory: {error.filename or '<unknown>'}"
                 break
-            relative_root = os.path.relpath(root, real_project)
-            depth = 0 if relative_root == "." else relative_root.count(os.sep) + 1
-            if depth >= MAX_SCAN_DEPTH:
-                if dirs or files:
-                    scan_error = f"directory depth limit ({MAX_SCAN_DEPTH}) exceeded"
-                    dirs.clear()
-                continue
-            # Prune skipped directories in-place
-            dirs[:] = [
-                d
-                for d in dirs
-                if d not in _SKIP_DIRS
-                and not d.startswith(".")
-                and not os.path.islink(os.path.join(root, d))
-            ]
 
-            for fname in files:
-                full = os.path.join(root, fname)
-                if os.path.islink(full):
-                    continue
-                ext = os.path.splitext(fname)[1].lower()
-                if ext in _SKIP_EXTENSIONS:
-                    continue
-                if _is_sensitive_file(fname):
-                    continue
+            child_directories: list[str] = []
+            for entry in sorted(entries, key=lambda item: item.name):
+                full = entry.path
                 try:
+                    if entry.is_symlink():
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        if entry.name in _SKIP_DIRS or entry.name.startswith("."):
+                            continue
+                        if depth >= MAX_SCAN_DEPTH:
+                            scan_error = f"directory depth limit ({MAX_SCAN_DEPTH}) exceeded"
+                            break
+                        child_directories.append(full)
+                        continue
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    fname = entry.name
+                    ext = os.path.splitext(fname)[1].lower()
+                    if ext in _SKIP_EXTENSIONS or _is_sensitive_file(fname):
+                        continue
                     if os.path.getsize(full) > MAX_FILE_SIZE:
                         continue
+                    mtime = os.path.getmtime(full)
                 except OSError:
                     # A partial inventory must not be passed to the semantic
                     # evaluator as if the scan covered the whole workspace.
-                    scan_error = f"unreadable file: {fname}"
-                    continue
-                try:
-                    mtime = os.path.getmtime(full)
-                except OSError:
-                    mtime = 0.0
+                    scan_error = f"unreadable path: {entry.name}"
+                    break
                 paths.append((mtime, full))
+
+            if scan_error:
+                break
+            pending_directories.extend((path, depth + 1) for path in reversed(child_directories))
 
         # Newest files first — most likely to be the implementation.
         paths.sort(reverse=True)
@@ -370,6 +370,8 @@ class ArtifactCollector:
     def _read_file(self, file_path: str) -> str | None:
         """Read a file with size limits."""
         try:
+            if not stat.S_ISREG(os.stat(file_path).st_mode):
+                return None
             size = os.path.getsize(file_path)
             if size > MAX_FILE_SIZE:
                 return None
