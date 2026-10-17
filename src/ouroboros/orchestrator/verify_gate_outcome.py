@@ -42,6 +42,10 @@ _VERIFY_GATE_CAUSES = frozenset(
         "exit_nonzero",
         "output_assertion_unmatched",
         "workspace_mutated",
+        # A code-task attempt that changed nothing in the workspace and ran no
+        # verify command: there is no evidence either way
+        # (``attempt_evidence.workspace_unchanged``).
+        "no_evidence",
     }
 )
 

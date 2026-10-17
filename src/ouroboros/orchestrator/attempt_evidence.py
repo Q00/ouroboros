@@ -53,6 +53,34 @@ async def attempt_workspace_evidence(executor: Any, result: Any) -> dict[str, ob
     return evidence
 
 
+NO_EVIDENCE_NOTE = (
+    "This attempt made no change to the workspace (no diff against the starting "
+    "commit, no new files) and ran no verify command, so it left no evidence that "
+    "the criterion is met."
+)
+
+
+def workspace_head(cwd: Path) -> str | None:
+    """The ``HEAD`` commit of ``cwd``, or ``None`` outside a Git work tree."""
+    head = _git(cwd, "rev-parse", "HEAD")
+    return head.strip() if head else None
+
+
+def workspace_unchanged(diff: Mapping[str, object] | None, base_head: str | None) -> bool:
+    """Whether ``diff`` (``workspace_diff_evidence``) shows no change since ``base_head``.
+
+    True only inside a Git work tree whose ``HEAD`` is still ``base_head`` (so
+    no commit hides a change), with an empty diff and no untracked file.
+    """
+    if diff is None or base_head is None:
+        return False
+    return (
+        diff.get("head") == base_head
+        and diff.get("diff_bytes") == 0
+        and diff.get("untracked_count") == 0
+    )
+
+
 def judgment_envelope_ok(data: Mapping[str, Any], required: frozenset[str]) -> bool:
     """Whether a judged-attempt payload has ``required`` keys plus only evidence keys."""
     return _mapping_has_bounded_keys(data, required=required, optional=ATTEMPT_EVIDENCE_KEYS)
@@ -106,7 +134,10 @@ def _git_bytes(cwd: Path, *args: str) -> bytes | None:
 
 __all__ = [
     "ATTEMPT_EVIDENCE_KEYS",
+    "NO_EVIDENCE_NOTE",
     "attempt_workspace_evidence",
     "judgment_envelope_ok",
     "workspace_diff_evidence",
+    "workspace_head",
+    "workspace_unchanged",
 ]
