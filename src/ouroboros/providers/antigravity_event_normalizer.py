@@ -53,11 +53,15 @@ class AntigravityEventNormalizer(GeminiEventNormalizer):
     """Unpack native envelopes and preserve conversation and tool correlation."""
 
     def _normalize_json_dict(self, parsed: dict[str, Any], *, original: str) -> dict[str, Any]:
+        if "event" not in parsed:
+            return super()._normalize_json_dict(parsed, original=original)
         kind = parsed.get("event")
         payload = parsed.get(kind) if isinstance(kind, str) else None
-        if not isinstance(kind, str) or kind not in {"init", "step_update", "result"}:
-            return super()._normalize_json_dict(parsed, original=original)
-        if not isinstance(payload, dict):
+        if (
+            not isinstance(kind, str)
+            or kind not in {"init", "step_update", "result"}
+            or not isinstance(payload, dict)
+        ):
             return self._build_event(
                 event_type="unknown", content="", raw=parsed, metadata={}, is_error=False
             )

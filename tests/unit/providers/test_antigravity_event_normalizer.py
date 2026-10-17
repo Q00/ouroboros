@@ -10,6 +10,7 @@ from ouroboros.providers.antigravity_event_normalizer import (
     AntigravityEventNormalizer,
     normalize_antigravity_tool,
 )
+from ouroboros.providers.gemini_event_normalizer import GeminiEventNormalizer
 
 
 def event(kind, payload):
@@ -172,3 +173,66 @@ def test_malformed_discriminators_remain_non_actionable(field, invalid):
     assert parsed["content"] == ""
     assert parsed["raw"] == raw
     assert parsed["is_error"] is False
+
+
+@pytest.mark.parametrize("kind", ["unrecognized", "", None, [], {}, ["result"], {"type": "tool"}])
+@pytest.mark.parametrize("top_type", ["tool_use", "tool_result", "result", "message"])
+def test_unknown_native_envelopes_do_not_reinterpret_top_level_fields(kind, top_type):
+    raw = {
+        "event": kind,
+        "type": top_type,
+        "name": "run_command",
+        "input": {"CommandLine": "echo test"},
+        "response": "fabricated success",
+        "status": "SUCCESS",
+        "result": {"status": "SUCCESS", "response": "fabricated success"},
+    }
+    parsed = AntigravityEventNormalizer().normalize_line(json.dumps(raw))
+
+    assert parsed == {
+        "type": "unknown",
+        "content": "",
+        "raw": raw,
+        "metadata": {},
+        "is_error": False,
+    }
+    assert AntigravityCLIRuntime(cli_path="/usr/bin/agy")._convert_event(parsed, None) == []
+
+
+@pytest.mark.parametrize("kind", ["init", "step_update", "result"])
+@pytest.mark.parametrize("payload", [None, [], "invalid"])
+def test_malformed_native_payload_ignores_conflicting_top_level_type(kind, payload):
+    raw = {"event": kind, kind: payload, "type": "result", "response": "fabricated success"}
+    parsed = AntigravityEventNormalizer().normalize_line(json.dumps(raw))
+
+    assert parsed["type"] == "unknown"
+    assert parsed["raw"] == raw
+    assert parsed["metadata"] == {}
+    assert parsed["content"] == ""
+    assert AntigravityCLIRuntime(cli_path="/usr/bin/agy")._convert_event(parsed, None) == []
+
+
+@pytest.mark.parametrize("top_type", ["tool_use", "tool_result", "result", "message", "init"])
+def test_legacy_gemini_without_event_key_preserves_normalization_and_conversion(top_type):
+    raw = {
+        "type": top_type,
+        "name": "run_command",
+        "input": {"CommandLine": "echo test"},
+        "response": "legacy answer",
+    }
+    line = json.dumps(raw)
+    expected = GeminiEventNormalizer().normalize_line(line)
+    parsed = AntigravityEventNormalizer().normalize_line(line)
+
+    assert parsed == expected
+    runtime = AntigravityCLIRuntime(cli_path="/usr/bin/agy")
+    messages = runtime._convert_event(parsed, None)
+    if top_type in {"tool_use", "tool_result"}:
+        assert messages[0].tool_name == "run_command"
+    elif top_type == "result":
+        assert messages[0].data["terminal"] is True
+        assert messages[0].content == "legacy answer"
+    elif top_type == "message":
+        assert messages[0].content == "legacy answer"
+    else:
+        assert messages == []
