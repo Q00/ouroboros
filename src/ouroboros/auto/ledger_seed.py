@@ -449,21 +449,37 @@ def _latest_value(ledger: SeedDraftLedger, section_name: str) -> str:
 def ledger_assumptions(ledger: SeedDraftLedger) -> tuple[str, ...]:
     """Return the ledger's unconfirmed requirement drafts as Seed assumptions.
 
-    These are the active values of every section but the goal that do not
+    These are the active entries of every section but the goal that do not
     bind (see
     :attr:`LedgerEntry.binds_seed`): auto's conservative defaults and
     assumptions, including a draft kept because the requester gave no answer.
-    The worker sees them as assumptions it may override. The generic
-    safe-default closure block is interview bookkeeping, not a statement about
-    the task, so it is left out.
+    An entry that answers an interviewer question (``LedgerEntry.question``)
+    is carried as that open question only: its drafted answer is a guess, and
+    a worker shown it implements it as the scope. An entry no question
+    produced keeps its value. The worker sees them as assumptions it may
+    override. The generic safe-default closure block is interview
+    bookkeeping, not a statement about the task, so it is left out.
     """
     lines: list[str] = []
     for section_name in _ASSUMPTION_SECTIONS:
-        values = _lines_from_section(
-            ledger, section_name, split_clauses=False, binding=False, closure=False
-        )
         prefix = _ASSUMPTION_PREFIXES.get(
             section_name, f"{section_name.replace('_', ' ').capitalize()}: "
+        )
+        open_questions = tuple(
+            dict.fromkeys(
+                entry.question.strip()
+                for entry in _active_entries(ledger, section_name)
+                if not entry.binds_seed and entry.question.strip()
+            )
+        )
+        lines.extend(f"Open question: {question}" for question in open_questions)
+        values = _lines_from_section(
+            ledger,
+            section_name,
+            split_clauses=False,
+            binding=False,
+            closure=False,
+            asked=False,
         )
         lines.extend(f"{prefix}{value}" for value in values)
     return tuple(dict.fromkeys(lines))
@@ -490,6 +506,7 @@ def _lines_from_section(
     split_clauses: bool = True,
     binding: bool | None = None,
     closure: bool = True,
+    asked: bool | None = None,
 ) -> tuple[str, ...]:
     """Split a ledger section's active values into deduplicated lines.
 
@@ -502,7 +519,8 @@ def _lines_from_section(
 
     ``binding`` keeps only entries that bind (``True``) or only those that do
     not (``False``); ``None`` keeps both. ``closure=False`` drops the
-    safe-default closure entry.
+    safe-default closure entry. ``asked`` keeps only entries that answer an
+    interviewer question (``True``) or only those that do not (``False``).
     """
     pattern = r"\r?\n\s*[-*]\s+" if not split_clauses else r"(?:\r?\n\s*[-*]\s+|\s*;\s+)"
     lines: list[str] = []
@@ -510,6 +528,8 @@ def _lines_from_section(
         if binding is not None and entry.binds_seed is not binding:
             continue
         if not closure and entry.key == f"{section_name}.safe_default_finalization":
+            continue
+        if asked is not None and bool(entry.question.strip()) is not asked:
             continue
         value = entry.value.strip()
         parts = re.split(pattern, value)

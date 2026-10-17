@@ -207,6 +207,11 @@ class LedgerEntry:
     # Writer sites whose origin ``source`` cannot express (deadline/timeout
     # backstops, lateral consensus) stamp this explicitly at the decision point.
     provenance: DecisionProvenance | str | None = None
+    # The interviewer's question this entry answers, when it came from one.
+    # Empty for entries no interview question produced (templated fills,
+    # gap reopening, legacy sessions). An entry that does not bind is shown
+    # to the worker as this open question, never as its drafted value.
+    question: str = ""
 
     def __post_init__(self) -> None:
         self.source = LedgerSource(str(self.source))
@@ -258,6 +263,8 @@ class LedgerEntry:
             data.pop("provenance", None)
         else:
             data["provenance"] = DecisionProvenance(self.provenance).value
+        if not self.question:
+            data.pop("question", None)
         return data
 
     @classmethod
@@ -279,6 +286,9 @@ class LedgerEntry:
             raise ValueError(msg)
         if not isinstance(data.get("rationale", ""), str):
             msg = "ledger entry rationale must be a string"
+            raise ValueError(msg)
+        if not isinstance(data.get("question", ""), str):
+            msg = "ledger entry question must be a string"
             raise ValueError(msg)
         evidence = data.get("evidence", [])
         if not isinstance(evidence, list) or not all(isinstance(item, str) for item in evidence):
