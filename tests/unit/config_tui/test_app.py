@@ -324,7 +324,7 @@ async def test_explicit_stage_agent_not_affected_by_global_change(app_env) -> No
         model_select = pilot.app.query_one(f"#stage-model-{stage}", Select)
         assert model_select.value == "default"
         values = {value for _, value in model_select._options}
-        assert "gpt-5" in values
+        assert "gpt-6.1-sol" in values
         assert "claude-opus-4-8" not in values  # stale global catalog was not applied
 
 
