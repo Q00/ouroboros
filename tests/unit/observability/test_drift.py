@@ -255,6 +255,40 @@ class TestGoalDriftCalculation:
         )
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("sync_call", [False, True])
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            '{"goal_alignment": 1.0}',
+            '{"goal_alignment": 1.0, "reasoning": null}',
+            '{"goal_alignment": 1.0, "reasoning": 42}',
+            '{"goal_alignment": 1.0, "reasoning": "ok", "unexpected": true}',
+        ],
+    )
+    async def test_schema_invalid_response_retains_lexical_fallback(
+        self, sample_seed: Seed, monkeypatch: pytest.MonkeyPatch, payload: str, sync_call: bool
+    ) -> None:
+        from ouroboros.core.types import Result
+        import ouroboros.evolution.provider_usage as provider_usage
+        from ouroboros.observability.drift import (
+            _calculate_lexical_goal_drift,
+            calculate_goal_drift,
+            calculate_goal_drift_async,
+        )
+
+        async def complete(_adapter: object, _messages: object, _config: object) -> object:
+            return Result.ok(type("Response", (), {"content": payload})())
+
+        monkeypatch.setattr(provider_usage, "tracked_complete", complete)
+        seed = sample_seed.model_copy(update={"goal": "CSV의 평균 금액을 계산한다"})
+        output = "Deploy a mountain weather dashboard"
+        if sync_call:
+            drift = calculate_goal_drift(output, seed, adapter_factory=lambda: object())
+        else:
+            drift = await calculate_goal_drift_async(output, seed, adapter_factory=lambda: object())
+        assert drift == _calculate_lexical_goal_drift(output, seed) == 1.0
+
+    @pytest.mark.asyncio
     async def test_sync_bridge_inside_event_loop_creates_adapter_in_worker(
         self, sample_seed: Seed, monkeypatch: pytest.MonkeyPatch
     ) -> None:

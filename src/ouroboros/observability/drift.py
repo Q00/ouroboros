@@ -43,6 +43,8 @@ import json
 import math
 import threading
 
+from jsonschema import validate
+
 from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.seed import Seed
 from ouroboros.events.base import BaseEvent
@@ -236,6 +238,7 @@ async def calculate_goal_drift_async(
         decoded = json.loads(payload)
         if not isinstance(decoded, dict):
             raise ValueError("semantic alignment response must be a JSON object")
+        validate(instance=decoded, schema=_GOAL_ALIGNMENT_RESPONSE_SCHEMA)
         raw_alignment = decoded.get("goal_alignment")
         if isinstance(raw_alignment, bool) or not isinstance(raw_alignment, (int, float)):
             raise ValueError("semantic alignment response is missing a numeric goal_alignment")
