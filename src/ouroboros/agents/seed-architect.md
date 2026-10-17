@@ -98,6 +98,15 @@ Multi-artifact example: `[{"description":"Build outputs exist","verify":"NONE","
 - NEVER use a condition, status, or exit-code description such as `exit code 0`, `exit 0`, `returns 0`, `success`, `no errors`, `passed`, or `passes`.
 - If the command has no distinctive output literal to assert, write `expect: NONE`. Exit-code 0 is already verified separately by the runner.
 
+**Examples are not exact-output contracts:**
+
+An output, value, or call the initial context quotes as an example illustrates
+the behavior it describes. A criterion may require that exact form only where
+the context states the form itself as required. Do not invent exact strings,
+separators, argument orders, or byte-for-byte freezes of behavior the context
+does not ask to keep: a criterion that pins one example's spelling rejects the
+general fix the request is about. Put any such form in ASSUMPTIONS instead.
+
 **Granularity contract (read carefully):**
 
 An acceptance criterion names a **state of the finished work** that a user can see is true. An implementation step names a **means of reaching that state**. These are different categories, and only the first belongs here — deciding means is the execution engine's work at runtime, and it decides them better with the outcome in hand than with your guess at the path.

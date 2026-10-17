@@ -2045,6 +2045,7 @@ ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verba
 ACCEPTANCE_CRITERIA exempt rule: prefer a real `verify` command for every criterion — a criterion without one can only be judged from the worker's own account of its work. Use `verify: NONE` only when no command could decide the outcome, and then add `"exempt": "<why no command can decide this>"`. Omit `exempt` (or set it to NONE) whenever `verify` is a command.
 
 CONSTRAINTS rule: respond with one single-line JSON array of strings, e.g. ["<constraint 1>", "<constraint 2>"]. Constraint values may contain any characters, including literal | pipes; never use a bare pipe as the list separator.
+ACCEPTANCE_CRITERIA example rule: an output, value, or call quoted in the initial context as an example illustrates the behavior; it is not an exact-output contract. A criterion may require it only in the form the context states as required. Never invent exact strings, separators, argument orders, or byte-for-byte freezes of behavior the context does not ask to keep; put any such form in ASSUMPTIONS.
 ASSUMPTIONS rule: CONSTRAINTS and ACCEPTANCE_CRITERIA hold only what the initial context or a recorded answer states. Anything you would have to guess (a scope limit, a default, an exact value or output nobody required) goes in ASSUMPTIONS, a single-line JSON array of strings, or `[]` when there is none. A withheld answer stays withheld: do not reconstruct it in any field.
 
 GOAL: <clear goal statement>
@@ -2161,6 +2162,7 @@ ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verba
 ACCEPTANCE_CRITERIA exempt rule: prefer a real `verify` command for every criterion — a criterion without one can only be judged from the worker's own account of its work. Use `verify: NONE` only when no command could decide the outcome, and then add `"exempt": "<why no command can decide this>"`. Omit `exempt` (or set it to NONE) whenever `verify` is a command.
 
 CONSTRAINTS rule: respond with one single-line JSON array of strings, e.g. ["<constraint 1>", "<constraint 2>"]. Constraint values may contain any characters, including literal | pipes; never use a bare pipe as the list separator.
+ACCEPTANCE_CRITERIA example rule: an output, value, or call quoted in the initial context as an example illustrates the behavior; it is not an exact-output contract. A criterion may require it only in the form the context states as required. Never invent exact strings, separators, argument orders, or byte-for-byte freezes of behavior the context does not ask to keep; put any such form in ASSUMPTIONS.
 ASSUMPTIONS rule: CONSTRAINTS and ACCEPTANCE_CRITERIA hold only what the initial context or a recorded answer states. Anything you would have to guess (a scope limit, a default, an exact value or output nobody required) goes in ASSUMPTIONS, a single-line JSON array of strings, or `[]` when there is none. A withheld answer stays withheld: do not reconstruct it in any field.
 
 GOAL: <clear goal statement>

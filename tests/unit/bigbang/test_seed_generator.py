@@ -3890,3 +3890,73 @@ class TestVerifyExemptionParsing:
                     ]
                 )
             )
+
+
+class TestExamplesAndAssumptionsContract:
+    """Guesses and issue examples go to ASSUMPTIONS, never to binding fields."""
+
+    @staticmethod
+    def _generator(tmp_dir: str) -> SeedGenerator:
+        return SeedGenerator(llm_adapter=AsyncMock(), output_dir=Path(tmp_dir) / "seeds")
+
+    def test_both_extraction_prompts_state_the_example_and_assumption_rules(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = self._generator(tmp_dir)
+            prompts = (
+                generator._build_extraction_user_prompt("Q: goal?\nA: build a thing"),
+                generator._build_retry_prompt("Q: goal?", "bad", "parse error"),
+            )
+
+        for prompt in prompts:
+            assert "ACCEPTANCE_CRITERIA example rule:" in prompt
+            assert "not an exact-output contract" in prompt
+            assert "ASSUMPTIONS rule:" in prompt
+            assert 'ASSUMPTIONS: ["<assumption 1>", ...]' in prompt
+
+    def test_seed_architect_prompt_states_the_example_rule(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            system_prompt = self._generator(tmp_dir)._build_extraction_system_prompt()
+
+        assert "Examples are not exact-output contracts" in system_prompt
+        assert "### 2b. ASSUMPTIONS" in system_prompt
+        assert "[assumption withheld" in system_prompt
+
+    def test_assumptions_field_is_parsed_into_seed_assumptions(self) -> None:
+        response = "\n".join(
+            [
+                "GOAL: Print Max(x, 2) in Mathematica syntax",
+                'CONSTRAINTS: ["Keep the public mathematica_code() signature"]',
+                "ASSUMPTIONS: [\"Arguments keep the order 'x, 2' from the issue example\"]",
+                'ACCEPTANCE_CRITERIA: [{"description": "mathematica_code(Max(x, 2)) prints '
+                'Max with square brackets", "verify": "NONE", "artifacts": "NONE", '
+                '"expect": "NONE", "exempt": "covered by the project test suite"}]',
+                "ONTOLOGY_NAME: Printer",
+                "ONTOLOGY_DESCRIPTION: Mathematica printer",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = self._generator(tmp_dir)
+            requirements = generator._parse_extraction_response(response)
+            seed = generator._build_seed(requirements, SeedMetadata(interview_id="i"))
+
+        assert seed.assumptions == ("Arguments keep the order 'x, 2' from the issue example",)
+        assert seed.constraints == ("Keep the public mathematica_code() signature",)
+
+    def test_missing_assumptions_field_yields_no_assumptions(self) -> None:
+        response = "\n".join(
+            [
+                "GOAL: g",
+                'CONSTRAINTS: ["c"]',
+                'ACCEPTANCE_CRITERIA: [{"description": "d", "verify": "true", '
+                '"artifacts": "NONE", "expect": "NONE"}]',
+                "ONTOLOGY_NAME: n",
+                "ONTOLOGY_DESCRIPTION: d",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = self._generator(tmp_dir)
+            seed = generator._build_seed(
+                generator._parse_extraction_response(response), SeedMetadata(interview_id="i")
+            )
+
+        assert seed.assumptions == ()
