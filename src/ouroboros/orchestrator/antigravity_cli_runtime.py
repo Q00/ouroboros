@@ -40,9 +40,8 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import aclosing
 from dataclasses import replace
-from typing import Any, cast
-
 from pathlib import Path
+from typing import Any, cast
 
 import structlog
 
@@ -83,6 +82,7 @@ class _ConversationMismatch(ValueError):
         super().__init__("Antigravity returned a different conversation than requested.")
         self.requested = requested
         self.observed = observed
+
 
 class _WorkspaceMismatchError(RuntimeError):
     """A native init contradicts the requested workspace."""
@@ -186,10 +186,29 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
             _resume_depth=_resume_depth,
         )
         verified = False
+        warned = False
+        current_handle = requested_handle
+
+        def unverified_message() -> AgentMessage:
+            return AgentMessage(
+                type="system",
+                content="Antigravity did not report an absolute working directory; the effective workspace is unverified. Filesystem access is not confined.",
+                data={
+                    "subtype": "workspace.unverified",
+                    "requested_cwd": str(Path(self._cwd or ".").resolve()),
+                },
+                resume_handle=current_handle,
+            )
+
         try:
             async with aclosing(cast(AsyncGenerator[AgentMessage, None], stream)):
                 async for message in stream:
+                    if message.resume_handle is not None:
+                        current_handle = message.resume_handle
                     verified = verified or message.data.get("subtype") == "workspace.binding"
+                    if message.is_final and not verified and not warned:
+                        yield unverified_message()
+                        warned = True
                     yield message
         except _ResumeUnavailable as error:
             yield AgentMessage(
@@ -198,6 +217,7 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
                 data={"subtype": "error", "terminal": True, "error_type": "ResumeUnavailable"},
                 resume_handle=requested_handle,
             )
+            return
         except _ConversationMismatch as error:
             yield AgentMessage(
                 type="result",
@@ -211,6 +231,7 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
                 },
                 resume_handle=requested_handle,
             )
+            return
         except _WorkspaceMismatchError as error:
             yield AgentMessage(
                 type="result",
@@ -219,15 +240,8 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
                 resume_handle=error.handle,
             )
             return
-        if not verified:
-            yield AgentMessage(
-                type="system",
-                content="Antigravity did not report an absolute working directory; the effective workspace is unverified. Filesystem access is not confined.",
-                data={
-                    "subtype": "workspace.unverified",
-                    "requested_cwd": str(Path(self._cwd or ".").resolve()),
-                },
-            )
+        if not verified and not warned:
+            yield unverified_message()
 
     def _resolve_resume_session_id(self, current_handle: RuntimeHandle | None) -> str | None:
         session_id = super()._resolve_resume_session_id(current_handle)

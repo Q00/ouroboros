@@ -1060,3 +1060,80 @@ async def test_missing_workspace_attestation_is_reported(tmp_path, events) -> No
         result = await runtime.execute_task_to_result("work")
     assert result.is_ok
     assert any(m.data.get("subtype") == "workspace.unverified" for m in result.value.messages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cwd_value", [None, "relative/workspace", []])
+@pytest.mark.parametrize("status", ["SUCCESS", "ERROR"])
+async def test_unverified_workspace_precedes_terminal_and_retains_handle(
+    tmp_path, cwd_value, status
+) -> None:
+    import json
+
+    runtime = AntigravityCLIRuntime(cli_path="/usr/bin/agy", cwd=str(tmp_path))
+    events = [
+        {"event": "init", "conversation_id": "native-session", "init": {"cwd": cwd_value}},
+        {"event": "result", "result": {"status": status, "response": "done"}},
+    ]
+    with patch(
+        "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+        return_value=_FakeProcess([json.dumps(event) for event in events]),
+    ):
+        messages = [message async for message in runtime.execute_task("work")]
+    warnings = [m for m in messages if m.data.get("subtype") == "workspace.unverified"]
+    assert len(warnings) == 1
+    assert messages[-1].is_final
+    assert messages.index(warnings[0]) < len(messages) - 1
+    assert warnings[0].resume_handle == messages[-1].resume_handle
+    assert warnings[0].resume_handle.native_session_id == "native-session"
+    assert messages[-1].is_error == (status == "ERROR")
+
+
+@pytest.mark.asyncio
+async def test_matching_workspace_needs_no_unverified_warning(tmp_path) -> None:
+    import json
+
+    runtime = AntigravityCLIRuntime(cli_path="/usr/bin/agy", cwd=str(tmp_path))
+    events = [
+        {"event": "init", "conversation_id": "native-session", "init": {"cwd": str(tmp_path)}},
+        {"event": "result", "result": {"status": "SUCCESS", "response": "done"}},
+    ]
+    with patch(
+        "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+        return_value=_FakeProcess([json.dumps(event) for event in events]),
+    ):
+        messages = [message async for message in runtime.execute_task("work")]
+    assert len([m for m in messages if m.data.get("subtype") == "workspace.binding"]) == 1
+    assert not any(m.data.get("subtype") == "workspace.unverified" for m in messages)
+    assert messages[-1].is_final
+
+
+@pytest.mark.asyncio
+async def test_unverified_workspace_without_final_keeps_last_observed_handle() -> None:
+    runtime = _make_runtime()
+    observed_handle = runtime._build_runtime_handle("observed-session")
+
+    async def no_final_stream(*args, **kwargs):
+        yield AgentMessage(type="system", content="observed", resume_handle=observed_handle)
+
+    with patch.object(GeminiCLIRuntime, "_execute_task_impl", new=no_final_stream):
+        messages = [message async for message in runtime._execute_task_impl("work")]
+    assert len(messages) == 2
+    assert messages[-1].data["subtype"] == "workspace.unverified"
+    assert messages[-1].resume_handle == observed_handle
+
+
+@pytest.mark.asyncio
+async def test_resume_unavailable_terminal_has_no_following_workspace_warning() -> None:
+    runtime = _make_runtime()
+    handle = runtime._build_runtime_handle("requested-session")
+    runtime._drift.observe("cli_executable", "test-only changed executable")
+    with patch("ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec") as spawn:
+        messages = [
+            message async for message in runtime.execute_task("continue", resume_handle=handle)
+        ]
+    spawn.assert_not_called()
+    assert len(messages) == 1
+    assert messages[-1].is_final and messages[-1].is_error
+    assert messages[-1].data["error_type"] == "ResumeUnavailable"
+    assert messages[-1].resume_handle == handle
