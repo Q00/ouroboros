@@ -1909,10 +1909,10 @@ def test_auto_contract_resumes_on_the_same_aliases(
     assert resumed._adapter._model == "sonnet"
 
 
-def test_auto_sentinel_ladder_keeps_an_enabled_route_contract(
+def test_auto_gemini_ladder_keeps_native_alias_route_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Tiers that share the ``default`` sentinel still form a Route B registry."""
+    """Gemini CLI aliases survive the persisted Route B contract and resume."""
     monkeypatch.delenv("OUROBOROS_PIN_MODELS", raising=False)
 
     def _gemini_runner() -> OrchestratorRunner:
@@ -1927,10 +1927,10 @@ def test_auto_sentinel_ladder_keeps_an_enabled_route_contract(
     )
     routing = persisted["model_routing"]
     assert routing["enabled"] is True
-    assert routing["resolved_models"]["tiers"] == {"frugal": "default", "standard": "default"}
+    assert routing["resolved_models"]["tiers"] == {"frugal": "flash", "standard": "pro"}
     projection = routing["route_compat"]["projection"]
     assert projection is not None
-    assert [c["model"] for c in projection["registry"]["candidates"]] == ["default", "default"]
+    assert [c["model"] for c in projection["registry"]["candidates"]] == ["flash", "pro"]
 
     resumed = _gemini_runner()
     changed = resumed._restore_execution_contract(
@@ -1940,6 +1940,8 @@ def test_auto_sentinel_ladder_keeps_an_enabled_route_contract(
 
     assert changed is False
     assert resumed._execution_contract == persisted
+    assert resumed._model_router is not None
+    assert dict(resumed._model_router.tier_models) == {"frugal": "flash", "standard": "pro"}
 
 
 def test_resume_rejects_resolved_tier_the_config_cannot_produce() -> None:
