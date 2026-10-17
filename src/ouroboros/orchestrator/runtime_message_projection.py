@@ -185,6 +185,8 @@ def _normalized_message_type_from_signal(
 ) -> str:
     """Derive normalized message type from pre-computed runtime signal."""
     subtype = message.data.get("subtype")
+    if subtype == "tool_progress":
+        return "system"
     if subtype == "tool_result":
         return "tool_result"
     if runtime_signal is not None and runtime_status in {"completed", "failed"}:
@@ -194,6 +196,27 @@ def _normalized_message_type_from_signal(
     if message.is_final:
         return "result"
     return message.type
+
+
+def should_emit_runtime_progress(
+    message: AgentMessage,
+    messages_processed: int,
+    *,
+    projected: ProjectedRuntimeMessage | None = None,
+    interval: int = 10,
+) -> bool:
+    """Never sample away text deltas; retain the existing lifecycle/tool policy."""
+    projected = projected or project_runtime_message(message)
+    return (
+        message.is_final
+        or messages_processed % interval == 0
+        or projected.is_tool_call
+        or projected.thinking is not None
+        or message.type == "system"
+        or (message.resume_handle is not None and message.resume_handle.backend == "opencode")
+        or projected.is_tool_result
+        or isinstance(message.data.get("content_delta"), str)
+    )
 
 
 def message_tool_name(message: AgentMessage) -> str | None:
@@ -232,6 +255,28 @@ def serialize_runtime_message_metadata(
     from ouroboros.orchestrator.workflow_state import resolve_ac_marker_update
 
     metadata = _project_runtime_verdict_fields(message.data, exclude={"is_error"})
+    for key in (
+        "content_delta",
+        "tool_output",
+        "agent_id",
+        "parent_tool_call_id",
+        "parent_event_id",
+        "source_event_id",
+        "source_timestamp",
+        "mcp_server_name",
+        "mcp_tool_name",
+        "tool_kind",
+        "runtime_transport",
+        "acp_session_id",
+        "acp_update_type",
+        "stop_reason",
+        "fallback_from",
+        "fallback_reason",
+    ):
+        value = message.data.get(key)
+        if isinstance(value, str):
+            # Preserve whitespace in deltas: content_preview is display-only.
+            metadata[key] = value[:65536]
     if "meta" in message.data:
         raw_meta = message.data["meta"]
         if isinstance(raw_meta, Mapping):
@@ -422,6 +467,9 @@ def derive_runtime_signal(
     if normalized_subtype == "permission_resolved":
         return ("permission_resolved", "running")
 
+    if normalized_subtype == "tool_progress":
+        return ("tool_progress", "running")
+
     if normalized_event_type in _RUNTIME_SESSION_RESUMED_EVENT_TYPES:
         return ("session_resumed", "running")
 
@@ -601,4 +649,5 @@ __all__ = [
     "project_runtime_message",
     "runtime_event_type",
     "serialize_runtime_message_metadata",
+    "should_emit_runtime_progress",
 ]
