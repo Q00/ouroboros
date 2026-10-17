@@ -350,3 +350,62 @@ def test_seed_without_assumptions_serializes_as_before() -> None:
 
     assert "assumptions" in seed.to_dict()
     assert "assumptions" not in seed.model_copy(update={"assumptions": ()}).to_dict()
+
+
+# -- end to end: the pipeline persists assumptions; withheld rounds never block --
+
+
+def test_pipeline_persists_ledger_drafts_as_assumptions_on_the_generated_seed(
+    tmp_path: Path,
+) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from ouroboros.auto.pipeline import AutoPipeline
+    from ouroboros.core.seed import Seed
+
+    ledger = _ready_ledger()
+    generated = synthesize_seed_from_ledger(ledger).model_copy(update={"assumptions": ()})
+    pipeline = AutoPipeline(MagicMock(), AsyncMock(), store=AutoStore(tmp_path / "store"))
+    state = AutoPipelineState(goal=GOAL, cwd=str(tmp_path))
+
+    pipeline._record_generated_seed(state, ledger, generated)
+    persisted = Seed.from_dict(state.seed_artifact)
+
+    assert DEFAULTED_CONSTRAINT in persisted.assumptions
+    assert UNSPECIFIED_DRAFT_CRITERION in persisted.assumptions
+    assert DEFAULTED_CONSTRAINT not in persisted.constraints
+    prompt = render_seed_contract_for_execution(SeedContract.from_seed(persisted))
+    assert DEFAULTED_CONSTRAINT in prompt.split("## Assumptions (non-binding)", 1)[1]
+
+
+def test_interview_with_only_assumption_answers_is_ready_for_seed_generation() -> None:
+    from ouroboros.bigbang.requirement_distillation import (
+        build_requirement_distillation,
+        is_reference_aware_distillation,
+        seed_readiness_details,
+    )
+    from ouroboros.core.requirement_candidate import evaluate_promotion
+
+    state = InterviewState(interview_id="interview_0000000000000003", initial_context=GOAL)
+    for question, answer in (
+        ("Must staticfiles.json keep identity paths?", f"It must hold: {DEFAULTED_CONSTRAINT}"),
+        ("Which extend values are in scope?", f"Required: {UNSPECIFIED_DRAFT_CRITERION}"),
+    ):
+        declare_provenance(
+            state.record_answer(question, answer), {ANSWER_PROVENANCE_ARGUMENT: "assumption"}
+        )
+
+    distillation = build_requirement_distillation(state)
+    promotion = evaluate_promotion(distillation)
+    details = seed_readiness_details(
+        promotion,
+        require_promoted_acceptance_criteria=is_reference_aware_distillation(distillation),
+    )
+    context = SeedGenerator(llm_adapter=None)._build_interview_context(state)  # type: ignore[arg-type]
+
+    assert details["blockers"] == []
+    # A withheld "must" answer is not promoted, so the verbatim-anchor backstop
+    # cannot re-append it to the Seed either.
+    assert all(DEFAULTED_CONSTRAINT not in candidate.text for candidate in promotion.promoted)
+    assert GOAL in context
+    assert DEFAULTED_CONSTRAINT not in context
