@@ -30,7 +30,7 @@ import structlog
 from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.project_env import project_venv_provides
 from ouroboros.evaluation.command_parsing import split_command
-from ouroboros.evaluation.languages import _ALLOWED_EXECUTABLES
+from ouroboros.evaluation.languages import _ALLOWED_EXECUTABLES, non_verifying_reason
 from ouroboros.evolution.provider_usage import tracked_complete
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -431,7 +431,7 @@ def _validate_proposal(
     for key, command in proposal.items():
         if key not in _COMMAND_KEYS:
             continue
-        if _command_is_valid(working_dir, command):
+        if _command_is_valid(working_dir, command, key):
             kept[key] = command
         else:
             log.info(
@@ -495,7 +495,7 @@ def _is_destructive_target(name: str) -> bool:
     return any(token in _DESTRUCTIVE_TARGET_NAMES for token in lowered.replace("_", "-").split("-"))
 
 
-def _command_is_valid(working_dir: Path, command: str) -> bool:
+def _command_is_valid(working_dir: Path, command: str, key: str | None = None) -> bool:
     """Return True iff ``command`` is safely runnable from ``working_dir``.
 
     Checks:
@@ -510,6 +510,8 @@ def _command_is_valid(working_dir: Path, command: str) -> bool:
        manifest, and bare tools (``pytest``, ``eslint`` …) must be
        declared by the repo itself. Host ``PATH`` lookup is intentionally
        not consulted.
+    5. The argv does not select a mode that cannot reflect the project for
+       ``key`` (``pytest --version``, ``make -n test``, ``ruff --exit-zero``).
     """
     if any(token in command for token in _FORBIDDEN_TOKENS):
         return False
@@ -539,6 +541,8 @@ def _command_is_valid(working_dir: Path, command: str) -> bool:
         return False
 
     if not _arguments_stay_within_repo(working_dir, head, parts[1:]):
+        return False
+    if non_verifying_reason(parts, key) is not None:
         return False
 
     return _verify_entry_point(working_dir, head, parts)
@@ -777,7 +781,9 @@ def _verify_entry_point(
 # (install a binary globally, publish to crates.io, add dependencies, modify
 # lockfiles, wipe build artifacts, fetch remote packages) are deliberately
 # omitted so a hallucinated proposal cannot turn Stage 1 into a state-change
-# or a publish attempt.
+# or a publish attempt. Reporting subcommands (``version``, ``env``, ``list``,
+# ``metadata``, ``tree`` …) are omitted too: they exit 0 whatever the code
+# does, so an executed pass from them is not evidence.
 # Maven lifecycle phases / plugin goals that are safe Stage 1 verification
 # steps: they do not mutate the local install repo, deploy artifacts, or
 # bump versions. Everything else (``install``, ``deploy``, ``release:*``,
@@ -794,10 +800,8 @@ _MAVEN_SAFE_GOALS: frozenset[str] = frozenset(
         "spotbugs:check",
         "spotless:check",
         "dependency:analyze",
-        "dependency:tree",
         "javadoc:javadoc",
         "site",
-        "help:help",
     }
 )
 
@@ -829,25 +833,14 @@ _CARGO_BUILTIN_SUBCOMMANDS: frozenset[str] = frozenset(
         "clippy",
         "doc",
         "fmt",  # users typically combine with ``-- --check`` for verification
-        "locate-project",
-        "metadata",
-        "pkgid",
-        "read-manifest",
         "test",
-        "tree",
-        "verify-project",
-        "version",
     }
 )
 
 _GO_BUILTIN_SUBCOMMANDS: frozenset[str] = frozenset(
     {
         "build",
-        "doc",
-        "env",
-        "list",
         "test",
-        "version",
         "vet",
     }
 )
@@ -860,20 +853,15 @@ _ZIG_BUILTIN_SUBCOMMANDS: frozenset[str] = frozenset(
         "build-obj",
         "fmt",  # users typically combine with ``--check`` for verification
         "test",
-        "version",
     }
 )
 
 # ``uv`` subcommands accepted outside of ``uv run``. ``run`` has its own
 # tool-level validation path; everything here must be non-mutating and
 # zero-cost. ``uv sync`` / ``uv lock`` / ``uv pip install`` / ``uv publish``
-# change project or global state and are deliberately excluded.
-_UV_NON_RUN_SUBCOMMANDS: frozenset[str] = frozenset(
-    {
-        "tree",
-        "version",
-    }
-)
+# change project or global state and are deliberately excluded; ``uv tree``
+# and ``uv version`` only report, so they are not evidence either.
+_UV_NON_RUN_SUBCOMMANDS: frozenset[str] = frozenset()
 
 
 def _first_positional(parts: list[str]) -> str | None:
@@ -1854,23 +1842,16 @@ def _requirements_files_declare(working_dir: Path, name: str) -> bool:
 # Python standard-library modules that are safe, zero-cost Stage 1 entries
 # via ``python -m <module>``. This list is intentionally conservative —
 # modules that would start network services or mutate state (``pip``,
-# ``venv``, ``http.server`` …) are excluded. Third-party modules are only
+# ``venv``, ``http.server`` …) are excluded, and so are modules whose exit
+# status cannot reflect the project (``pydoc``, ``timeit``, ``json.tool``,
+# ``tabnanny`` reports findings with exit 0 …). Third-party modules are only
 # accepted when they are declared as a project dependency.
 _PYTHON_STDLIB_RUNNABLE_MODULES: frozenset[str] = frozenset(
     {
         "unittest",
         "doctest",
         "compileall",
-        "pydoc",
-        "json.tool",
-        "pickletools",
-        "timeit",
-        "tabnanny",
         "py_compile",
-        "zipfile",
-        "zipapp",
-        "dis",
-        "ast",
         "cProfile",
     }
 )
@@ -1961,7 +1942,6 @@ _DOTNET_SAFE_SUBCOMMANDS: frozenset[str] = frozenset(
         "build",
         "test",
         "format",
-        "list",
     }
 )
 
@@ -2067,13 +2047,8 @@ _GRADLE_BUILTIN_TASKS: frozenset[str] = frozenset(
         "build",
         "check",
         "clean",
-        "dependencies",
-        "help",
         "jar",
         "javadoc",
-        "projects",
-        "properties",
-        "tasks",
         "test",
     }
 )
@@ -2298,7 +2273,6 @@ _MIX_BUILTIN_TASKS: frozenset[str] = frozenset(
         "compile",
         "format",
         "test",
-        "help",
         "docs",
     }
 )
