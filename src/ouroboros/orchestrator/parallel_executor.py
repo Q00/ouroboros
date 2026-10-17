@@ -106,6 +106,7 @@ from ouroboros.orchestrator.atomic_prompt_builder import (
     AtomicPromptBuilder,
     _build_success_contract_block,  # noqa: F401  (re-exported for tests/back-compat)
 )
+from ouroboros.orchestrator.attempt_evidence import attempt_workspace_evidence, judgment_envelope_ok
 from ouroboros.orchestrator.backend_limits import (
     BackendConcurrencyLimits,
     resolve_backend_limits,
@@ -10124,6 +10125,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     "call_site": "parallel",
                 }
             )
+        event_data.update(await attempt_workspace_evidence(self, result))
         event = BaseEvent(
             type="execution.ac.attempt_judged",
             aggregate_type="execution",
@@ -12193,7 +12195,7 @@ Respond with either ATOMIC or the structured JSON object only.
             # not participate in this replay episode.
             if data.get("route_contract_version") is None:
                 continue
-            if not _mapping_has_exact_keys(data, _PARALLEL_ROUTE_JUDGMENT_KEYS):
+            if not judgment_envelope_ok(data, _PARALLEL_ROUTE_JUDGMENT_KEYS):
                 raise RuntimeError("route-aware attempt judgment has an invalid event envelope")
             root_ac_index = data.get("root_ac_index")
             route_episode_id = data.get("route_episode_id")

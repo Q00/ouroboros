@@ -8,16 +8,53 @@ can be extracted from the artifact text.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+from pathlib import Path
 import re
 
+from ouroboros.config.models import get_config_dir
 from ouroboros.evaluation.models import ArtifactBundle, FileArtifact
 
 logger = logging.getLogger(__name__)
 
 MAX_TOTAL_CHARS = 150_000  # ~37K tokens — sole budget limiter
 MAX_FILE_SIZE = 100 * 1024  # 100KB per file (accommodate large artifact summaries)
+
+EVAL_ARTIFACT_FILENAME = ".ouroboros_eval_artifact.md"
+
+
+def eval_artifact_path(project_dir: Path) -> Path:
+    """Where evaluation keeps one project's artifact text: the data dir, never the project.
+
+    Written into the project, the file landed in the user's tree and shipped
+    in their patch. It is keyed by the resolved project path so concurrent
+    evaluations of different projects do not share one file.
+    """
+    key = hashlib.sha256(str(project_dir.resolve()).encode("utf-8")).hexdigest()[:16]
+    return get_config_dir() / "data" / "eval_artifacts" / key / EVAL_ARTIFACT_FILENAME
+
+
+def with_artifact_file(bundle: ArtifactBundle, path: Path, text: str) -> ArtifactBundle:
+    """Put the artifact text first among ``bundle``'s files.
+
+    The evaluation prompt omits the inline artifact text whenever file
+    artifacts are present, so the artifact must be one of the files. A bundle
+    without files keeps the inline text and is returned unchanged.
+    """
+    if not bundle.files or any(item.file_path == str(path) for item in bundle.files):
+        return bundle
+    content = text[:MAX_FILE_SIZE]
+    artifact = FileArtifact(
+        file_path=str(path), content=content, truncated=len(content) < len(text)
+    )
+    return ArtifactBundle(
+        files=(artifact, *bundle.files),
+        text_summary=bundle.text_summary,
+        total_chars=bundle.total_chars + len(content),
+    )
+
 
 # Binary/generated extensions to skip — everything else is collected.
 _SKIP_EXTENSIONS: frozenset[str] = frozenset(
