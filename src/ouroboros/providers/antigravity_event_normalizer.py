@@ -73,13 +73,15 @@ class AntigravityEventNormalizer(GeminiEventNormalizer):
         event_type = "init" if kind == "init" else "unknown"
         is_error = False
         if kind == "result":
+            status = payload.get("status")
+            if not isinstance(status, str):
+                return self._build_event(
+                    event_type="unknown", content="", raw=parsed, metadata={}, is_error=False
+                )
             event_type = "result"
             response = payload.get("response")
             content = response if isinstance(response, str) else ""
-            status = payload.get("status")
-            is_error = bool(payload.get("error")) or (
-                isinstance(status, str) and status.upper() not in {"SUCCESS", "COMPLETED"}
-            )
+            is_error = bool(payload.get("error")) or status.upper() not in {"SUCCESS", "COMPLETED"}
             if is_error and not content:
                 content = json.dumps(payload.get("error") or {"status": status})
         elif kind == "step_update":
@@ -96,6 +98,10 @@ class AntigravityEventNormalizer(GeminiEventNormalizer):
                     payload.get("tool_name", info.get("name")),
                     payload.get("tool_input", info.get("parameters")),
                 )
+                if not name:
+                    return self._build_event(
+                        event_type="unknown", content="", raw=parsed, metadata={}, is_error=False
+                    )
                 metadata.update(name=name, input=inputs)
                 state = payload.get("state")
                 if isinstance(state, str) and state in {"DONE", "ERROR"}:

@@ -236,3 +236,54 @@ def test_legacy_gemini_without_event_key_preserves_normalization_and_conversion(
         assert messages[0].content == "legacy answer"
     else:
         assert messages == []
+
+
+@pytest.mark.parametrize("name", [None, "", " ", [], {}, 0, False])
+@pytest.mark.parametrize("state", [None, "ACTIVE", "DONE", "ERROR"])
+def test_malformed_native_tool_identity_never_becomes_actionable(name, state):
+    payload = {
+        "step_type": "tool",
+        "state": state,
+        "tool_name": name,
+        "tool_info": {"output": "finished"},
+    }
+    parsed = event("step_update", payload)
+
+    assert parsed["type"] == "unknown"
+    assert parsed["metadata"] == {}
+    assert parsed["content"] == ""
+    assert parsed["raw"]["step_update"] == payload
+    assert AntigravityCLIRuntime(cli_path="/usr/bin/agy")._convert_event(parsed, None) == []
+
+
+@pytest.mark.parametrize("status", [{"state": "ERROR"}, {}, [], ["ERROR"], None, 0, False])
+def test_malformed_terminal_status_never_becomes_success(status):
+    payload = {"status": status, "response": "finished"}
+    parsed = event("result", payload)
+
+    assert parsed["type"] == "unknown"
+    assert parsed["metadata"] == {}
+    assert parsed["content"] == ""
+    assert parsed["raw"]["result"] == payload
+    assert AntigravityCLIRuntime(cli_path="/usr/bin/agy")._convert_event(parsed, None) == []
+
+
+@pytest.mark.parametrize("status", ["SUCCESS", "COMPLETED", "ERROR"])
+def test_valid_terminal_status_retains_success_or_error(status):
+    parsed = event("result", {"status": status, "response": "finished"})
+    message = AntigravityCLIRuntime(cli_path="/usr/bin/agy")._convert_event(parsed, None)[0]
+
+    assert parsed["type"] == "result"
+    assert parsed["is_error"] is (status == "ERROR")
+    assert message.data["terminal"] is True
+    assert message.is_error is (status == "ERROR")
+    assert message.content == "finished"
+
+
+@pytest.mark.parametrize("payload", [{}, {"response": "finished"}])
+def test_missing_native_terminal_status_never_implies_success(payload):
+    parsed = event("result", payload)
+
+    assert parsed["type"] == "unknown"
+    assert parsed["raw"]["result"] == payload
+    assert AntigravityCLIRuntime(cli_path="/usr/bin/agy")._convert_event(parsed, None) == []
