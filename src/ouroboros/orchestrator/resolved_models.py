@@ -129,7 +129,8 @@ def replay_route_economics(
     """Return ``economics`` carrying ``persisted_tiers``, or ``None`` when not replayable.
 
     ``configured`` is the unresolved configuration snapshot. The persisted ladder
-    must equal the ladder it resolves to automatically or when pinned.
+    must equal the ladder it resolves to automatically or when pinned, including
+    pre-family-namespace MCP resolution and its authorized historical IDs.
     """
     provider = _provider(runtime_backend)
     if provider is None or not persisted_tiers:
@@ -148,24 +149,61 @@ def replay_route_economics(
     if backend_model_selection(backend) == "sentinel":
         configured_models = _configured_models(configured, runtime_backend=backend) or {}
         candidates.append(dict.fromkeys(configured_models, "default"))
-    if dict(persisted_tiers) not in candidates:
-        # A pin bump changes new runs, not a frozen run. Accept an old shipped
-        # id only in the same provider AND tier whose current authorized model
-        # it normalizes to; never admit a cross-tier or arbitrary custom value.
-        def historically_authorized(candidate: Mapping[str, str] | None) -> bool:
-            if candidate is None or set(candidate) != set(persisted_tiers):
-                return False
-            for tier, model in persisted_tiers.items():
-                normalized = normalize_tier_model(model, provider=provider)
-                if backend == "gemini_cli" and provider == "google":
-                    normalized = {
-                        "gemini-2.0-flash": "flash",
-                        "gemini-2.5-pro": "pro",
-                    }.get(normalized, normalized)
-                if normalized != candidate[tier]:
-                    return False
-            return True
 
+    # A pin bump changes new runs, not a frozen run. Accept an old shipped
+    # id only in the same provider AND tier whose current authorized model
+    # it normalizes to; never admit a cross-tier or arbitrary custom value.
+    def historically_authorized(candidate: Mapping[str, str] | None) -> bool:
+        if candidate is None or set(candidate) != set(persisted_tiers):
+            return False
+        for tier, model in persisted_tiers.items():
+            normalized = normalize_tier_model(model, provider=provider)
+            if backend == "gemini_cli" and provider == "google":
+                normalized = {
+                    "gemini-2.0-flash": "flash",
+                    "gemini-2.5-pro": "pro",
+                }.get(normalized, normalized)
+            if normalized != candidate[tier]:
+                return False
+        return True
+
+    legacy_match = False
+    family = {"codex_mcp": "codex", "claude_mcp": "claude"}.get(backend)
+    if family is not None and dict(persisted_tiers) not in candidates:
+        # Before shared MCP family namespaces applied, only exact-runtime and
+        # vendor entries participated. Reproduce that whole resolution, never
+        # authorize individual lower-priority or mixed-family tier choices.
+        def without_family(snapshot: EconomicsConfig) -> EconomicsConfig:
+            return snapshot.model_copy(
+                update={
+                    "tiers": {
+                        name: tier.model_copy(
+                            update={"models": [m for m in tier.models if m.provider != family]}
+                        )
+                        for name, tier in snapshot.tiers.items()
+                    }
+                }
+            )
+
+        legacy_configured = without_family(configured)
+        legacy_candidates = [
+            _configured_models(
+                resolve_route_economics(legacy_configured, runtime_backend=backend, pinned=pinned),
+                runtime_backend=backend,
+            )
+            for pinned in (False, True)
+        ]
+        if backend_model_selection(backend) == "sentinel":
+            legacy_models = _configured_models(legacy_configured, runtime_backend=backend) or {}
+            legacy_candidates.append(dict.fromkeys(legacy_models, "default"))
+        legacy_match = dict(persisted_tiers) in legacy_candidates or any(
+            historically_authorized(candidate) for candidate in legacy_candidates
+        )
+        if legacy_match:
+            # Family-only tiers were absent from an old sparse map. Keep them
+            # absent while retaining the configured tier shape and costs.
+            economics = without_family(economics)
+    if dict(persisted_tiers) not in candidates and not legacy_match:
         if not any(historically_authorized(candidate) for candidate in candidates):
             return None
     # Only the validated frozen map enters this runtime-specific namespace.

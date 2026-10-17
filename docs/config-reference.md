@@ -411,10 +411,12 @@ economics:
 
 ### Native runtime ladders
 
-The existing Claude, Codex and Gemini routing backends prefer runtime-specific
-entries (`provider: claude`, `codex`, or `gemini`) over their vendor fallback
-(`anthropic`, `openai`, or `google`). Runtime property names such as `codex_cli`
-are accepted too. Other runtime extensions are tracked separately in #2658.
+For each tier, the existing Claude, Codex and Gemini routing backends prefer
+the exact runtime property, then its shared model family, then the vendor
+fallback: `codex_mcp` / `codex_cli` → `codex` → `openai`, `claude_mcp` /
+`claude_code` → `claude` → `anthropic`, and `gemini_cli` → `gemini` → `google`.
+These are `provider` namespace keys; lookup priority does not add per-call
+model-override support. Other runtime extensions are tracked separately in #2658.
 
 ```yaml
 economics:
@@ -463,7 +465,10 @@ Explicit model pins take precedence, and `0` / `off` / `false` disables routing.
 The router and Route B share model resolution. Same-runtime resume replays its
 validated frozen ladder, including a historical shipped pin in the same
 provider and tier; it never silently substitutes a newer model. If the runtime
-no longer serves that ID, its error remains visible. Cross-runtime redispatch
+no longer serves that ID, its error remains visible. Sessions from before shared
+MCP family lookup retain their validated prior runtime/vendor ladder as a whole,
+including known historical IDs in the same provider and tier; mixing rungs from
+the prior and current namespace resolutions is rejected. Cross-runtime redispatch
 does not forward the original harness's model IDs.
 
 ---
