@@ -466,6 +466,11 @@ class SeedDraftLedger:
                 )
         else:
             for existing in same_key_entries:
+                if existing.status == LedgerStatus.WEAK:
+                    # Already retired (superseded or corrected): it holds no
+                    # authority, so a new value must not tie with it and revive
+                    # it as CONFLICTING. Only active entries can conflict.
+                    continue
                 resolution = resolve_conflict(existing, entry)
                 if resolution is ConflictResolution.BLOCKED:
                     continue
