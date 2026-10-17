@@ -373,10 +373,11 @@ uv run ouroboros run workflow --runtime codex --resume <session_id> ~/.ouroboros
 >   grade A and **run**. Other grading axes still apply.
 > - **Degraded Seed**: the blocker is suppressed only so the run can emit a typed
 >   partial product. A blocker-free degraded Seed goes straight to the
->   partial-product terminal as `AutoPhase.COMPLETE` **regardless of grade or
->   `may_run`** ([`auto/pipeline.py:1286`](../../src/ouroboros/auto/pipeline.py)).
->   It never reaches RUN. Remaining blockers are hard safety blockers and still
->   terminate.
+>   partial-product terminal **regardless of grade or `may_run`**
+>   ([`auto/pipeline.py`](../../src/ouroboros/auto/pipeline.py)). It never
+>   reaches RUN, so the session stops `AutoPhase.BLOCKED` with stop reason
+>   `degraded_seed_not_executed`, never `COMPLETE`. Remaining blockers are hard
+>   safety blockers and still terminate.
 >
 > In practice: a hand-written seed carrying a high `ambiguity_score` is not blocked by
 > `ouroboros run workflow`. The field is provenance, not an enforcement gate.

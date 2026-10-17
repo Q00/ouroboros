@@ -26,6 +26,7 @@ from ouroboros.auto.domain_inference import derive_domain_from_ledger
 from ouroboros.auto.domain_profile import DEFAULT_REGISTRY
 from ouroboros.auto.execution_acceptance import normalize_execution_acceptance
 from ouroboros.auto.grade_gate_terminals import (
+    DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE,
     SEED_GRADE_BELOW_REQUIRED_STOP_REASON_CODE,
     SEED_REVIEW_WITHHELD_RUN_STOP_REASON_CODE,
     degraded_seed_safety_blocker,
@@ -1877,17 +1878,24 @@ class AutoPipeline:
                 "unresolved_slots": list(unresolved_slots),
             },
         )
-        state.transition(
-            AutoPhase.COMPLETE,
-            "degraded seed emitted as partial product with unresolved next steps",
-        )
         state.mark_progress(
             "Partial product emitted from degraded seed; "
             f"{len(unresolved_slots)} unresolved slot(s) carried forward as next steps",
             tool_name="partial_product_terminal",
         )
+        # The degraded Seed was never executed, so the session must not report
+        # complete: it stops BLOCKED with a typed code, the Seed kept on disk.
+        blocker = (
+            "Degraded seed emitted as a partial product and not executed; "
+            f"{len(unresolved_slots)} unresolved slot(s) need an answer before a run"
+        )
+        state.mark_blocked(
+            blocker,
+            tool_name="partial_product_terminal",
+            error_code=DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE,
+        )
         self._save(state)
-        return self._result(state, ledger, review=review)
+        return self._result(state, ledger, review=review, blocker=blocker)
 
     async def _emit_product_emitted_terminal(
         self,
@@ -2469,11 +2477,15 @@ class AutoPipeline:
         )
         partial_product_reason = seed_meta.get("recovery_reason") if seed_degraded else None
         # ``partial_product`` is True only at the typed terminal: a degraded
-        # Seed that reached :meth:`_emit_partial_product_terminal` and is now
-        # at ``AutoPhase.COMPLETE``. A degraded Seed that BLOCKED earlier
-        # (e.g. on a safety blocker) keeps ``partial_product=False`` so the
-        # field cannot be misread as "deadline recovery succeeded".
-        partial_product = seed_degraded and state.phase == AutoPhase.COMPLETE
+        # Seed that reached :meth:`_emit_partial_product_terminal`, which stops
+        # BLOCKED with ``DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE`` because
+        # the Seed was never executed. A degraded Seed that BLOCKED for another
+        # reason (e.g. a safety blocker) keeps ``partial_product=False``.
+        partial_product = (
+            seed_degraded
+            and state.phase == AutoPhase.BLOCKED
+            and state.last_error_code == DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE
+        )
         result_status = status_override or state.phase.value
         artifact_state = _artifact_state_for_result(
             status=result_status,

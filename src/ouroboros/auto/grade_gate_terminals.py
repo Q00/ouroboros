@@ -30,6 +30,9 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 SEED_GRADE_BELOW_REQUIRED_STOP_REASON_CODE = "seed_grade_below_required"
 SEED_REVIEW_WITHHELD_RUN_STOP_REASON_CODE = "seed_review_withheld_run"
 DEGRADED_SEED_SAFETY_BLOCKERS_STOP_REASON_CODE = "degraded_seed_safety_blockers"
+# A degraded (deadline-recovery) Seed is emitted for the user but never
+# executed, so the session stops here instead of reporting complete.
+DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE = "degraded_seed_not_executed"
 
 _GRADE_RANK = {"A": 0, "B": 1, "C": 2}
 
