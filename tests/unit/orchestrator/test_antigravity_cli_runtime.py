@@ -446,3 +446,54 @@ async def test_stream_unknown_foreign_identity_cannot_replace_current_or_bind_fi
     )
     if handle:
         assert handle.to_dict() == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["init", "step_update", "result"])
+@pytest.mark.parametrize("has_current_handle", [False, True])
+async def test_conflicting_native_stream_has_no_tool_or_transient_identity_effect(
+    kind, has_current_handle
+):
+    runtime = AntigravityCLIRuntime(cli_path="/usr/bin/agy", cwd="/tmp")
+    handle = runtime._build_runtime_handle("native-owned") if has_current_handle else None
+    payloads = {
+        "init": {},
+        "step_update": {
+            "step_type": "tool",
+            "state": "ACTIVE",
+            "tool_name": "run_command",
+            "tool_input": {"command": "echo"},
+        },
+        "result": {"status": "SUCCESS", "response": "foreign-finished"},
+    }
+    events = [
+        {"event": kind, "type": "tool_result", kind: payloads[kind], "conversation_id": "foreign"},
+        {"event": "init", "init": {}, "conversation_id": "native-owned"},
+        {
+            "event": "result",
+            "result": {"status": "SUCCESS", "response": "done", "conversation_id": "native-owned"},
+        },
+    ]
+    with (
+        patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            return_value=_FakeProcess([json.dumps(raw) for raw in events]),
+        ),
+        patch.object(
+            runtime, "_build_runtime_handle", wraps=runtime._build_runtime_handle
+        ) as build,
+    ):
+        result = await runtime.execute_task_to_result(
+            "synthetic conflict probe", resume_handle=handle
+        )
+
+    assert result.is_ok
+    assert result.value.final_message == "done"
+    assert not any(
+        message.tool_name is not None
+        or message.type == "tool_result"
+        or message.content == "foreign-finished"
+        for message in result.value.messages
+    )
+    bound_ids = [call.args[0] for call in build.call_args_list if call.args and call.args[0]]
+    assert bound_ids == ([] if has_current_handle else ["native-owned"])

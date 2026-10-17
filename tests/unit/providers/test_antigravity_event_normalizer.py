@@ -429,3 +429,97 @@ def test_matching_legacy_type_preserves_parent_selection_after_case_and_space_no
     assert AntigravityEventNormalizer().normalize_line(line) == (
         GeminiEventNormalizer().normalize_line(line)
     )
+
+
+_NATIVE_CONFLICT_PAYLOADS = {
+    "init": {},
+    "step_update": {
+        "step_type": "tool",
+        "state": "ACTIVE",
+        "tool_name": "run_command",
+        "tool_input": {"command": "echo"},
+    },
+    "result": {"status": "SUCCESS", "response": "done"},
+}
+_DISCRIMINATOR_TYPES = [
+    "init",
+    "step_update",
+    "result",
+    "message",
+    "text",
+    "thinking",
+    "tool_use",
+    "tool_result",
+    "error",
+    "done",
+    "fatal",
+    "exception",
+    "abort",
+    "unrecognized",
+]
+
+
+@pytest.mark.parametrize(
+    "kind,declared_type",
+    [
+        (kind, declared)
+        for kind in _NATIVE_CONFLICT_PAYLOADS
+        for declared in _DISCRIMINATOR_TYPES
+        if declared != kind
+    ],
+)
+def test_every_native_kind_rejects_distinct_nonempty_string_discriminators(kind, declared_type):
+    runtime = AntigravityCLIRuntime(cli_path="/usr/bin/agy")
+    raw = {
+        "event": kind,
+        "type": declared_type,
+        kind: _NATIVE_CONFLICT_PAYLOADS[kind],
+        "conversation_id": "foreign",
+        "session_id": "raw-spoof",
+    }
+    parsed = runtime._parse_json_event(json.dumps(raw))
+
+    assert parsed == {
+        "type": "unknown",
+        "content": "",
+        "raw": raw,
+        "metadata": {},
+        "is_error": False,
+    }
+    assert runtime._convert_event(parsed, None) == []
+    assert runtime._extract_event_session_id(parsed) is None
+
+
+@pytest.mark.parametrize("kind", ["init", "step_update", "result"])
+@pytest.mark.parametrize("declared_type", [None, [], {}, 0, False, "", " "])
+def test_native_payload_priority_preserves_nonstring_or_blank_type(kind, declared_type):
+    raw = {"event": kind, kind: _NATIVE_CONFLICT_PAYLOADS[kind], "conversation_id": "native-owned"}
+    expected = AntigravityEventNormalizer().normalize_line(json.dumps(raw))
+    raw["type"] = declared_type
+    parsed = AntigravityEventNormalizer().normalize_line(json.dumps(raw))
+
+    assert parsed["raw"] == raw
+    assert {key: value for key, value in parsed.items() if key != "raw"} == (
+        {key: value for key, value in expected.items() if key != "raw"}
+    )
+    assert (
+        AntigravityCLIRuntime(cli_path="/usr/bin/agy")._extract_event_session_id(parsed)
+        == "native-owned"
+    )
+
+
+@pytest.mark.parametrize("kind", ["init", "step_update", "result"])
+def test_native_matching_type_preserves_case_and_whitespace_normalized_identity(kind):
+    raw = {
+        "event": kind,
+        "type": f" {kind.upper()} ",
+        kind: _NATIVE_CONFLICT_PAYLOADS[kind],
+        "conversation_id": "native-owned",
+    }
+    parsed = AntigravityEventNormalizer().normalize_line(json.dumps(raw))
+
+    assert parsed["type"] != "unknown"
+    assert (
+        AntigravityCLIRuntime(cli_path="/usr/bin/agy")._extract_event_session_id(parsed)
+        == "native-owned"
+    )

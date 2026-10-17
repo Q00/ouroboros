@@ -64,23 +64,31 @@ def normalize_antigravity_tool(name: object, arguments: object) -> tuple[str, di
     return canonical, inputs
 
 
+def _has_conflicting_event_type(parsed: dict[str, Any]) -> bool:
+    """Reject distinct nonempty string discriminators for every envelope."""
+    event = parsed.get("event")
+    declared_type = parsed.get("type")
+    return (
+        isinstance(event, str)
+        and bool(event.strip())
+        and isinstance(declared_type, str)
+        and bool(declared_type.strip())
+        and event.strip().lower() != declared_type.strip().lower()
+    )
+
+
 def is_legacy_gemini_event(parsed: dict[str, Any]) -> bool:
     """Share legacy dispatch between normalization and session identity extraction."""
     if "event" not in parsed:
         return True
     kind = parsed.get("event")
     legacy_kind = kind.strip().lower() if isinstance(kind, str) else ""
-    declared_type = parsed.get("type", legacy_kind)
     # A nested native payload, even malformed, owns its envelope. Legacy
     # event spellings retain Gemini semantics only without that payload.
     return (
         legacy_kind in _LEGACY_EVENT_TYPES
         and not (legacy_kind in {"init", "result"} and legacy_kind in parsed)
-        and (
-            not isinstance(declared_type, str)
-            or not declared_type.strip()
-            or declared_type.strip().lower() == legacy_kind
-        )
+        and not _has_conflicting_event_type(parsed)
     )
 
 
@@ -88,6 +96,10 @@ class AntigravityEventNormalizer(GeminiEventNormalizer):
     """Unpack native envelopes and preserve conversation and tool correlation."""
 
     def _normalize_json_dict(self, parsed: dict[str, Any], *, original: str) -> dict[str, Any]:
+        if _has_conflicting_event_type(parsed):
+            return self._build_event(
+                event_type="unknown", content="", raw=parsed, metadata={}, is_error=False
+            )
         if is_legacy_gemini_event(parsed):
             return super()._normalize_json_dict(parsed, original=original)
         kind = parsed.get("event")
