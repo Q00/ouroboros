@@ -300,7 +300,10 @@ async def test_execute_task_to_result_preserves_multiline_response() -> None:
 
 
 @pytest.mark.asyncio
-async def test_structured_execution_records_tools_and_preserves_final_answer(tmp_path) -> None:
+@pytest.mark.parametrize("generated_name", ["a.py", "directory with spaces/a file.py"])
+async def test_structured_execution_records_tools_and_preserves_final_answer(
+    tmp_path, generated_name
+) -> None:
     import json
 
     from ouroboros.evaluation.artifact_collector import ArtifactCollector
@@ -311,7 +314,8 @@ async def test_structured_execution_records_tools_and_preserves_final_answer(tmp
     )
     from ouroboros.orchestrator.runtime_message_projection import project_runtime_message
 
-    generated = tmp_path / "a.py"
+    generated = tmp_path / generated_name
+    generated.parent.mkdir(parents=True, exist_ok=True)
     generated.write_text("answer = 42\n")
     runtime = AntigravityCLIRuntime(cli_path="/usr/bin/agy", cwd=str(tmp_path))
     events = [
@@ -386,6 +390,21 @@ async def test_structured_execution_records_tools_and_preserves_final_answer(tmp
     with patch.object(ArtifactCollector, "_scan_directory", side_effect=AssertionError("no scan")):
         bundle = ArtifactCollector().collect(report, str(tmp_path))
     assert [(f.file_path, f.content) for f in bundle.files] == [(str(generated), "answer = 42\n")]
+    from ouroboros.evaluation.artifact_collector import eval_artifact_path, with_artifact_file
+    from ouroboros.evaluation.models import EvaluationContext
+    from ouroboros.evaluation.semantic import build_evaluation_prompt
+
+    context = EvaluationContext(
+        execution_id="native-evidence",
+        seed_id="native-evidence",
+        current_ac="Write the source",
+        artifact=report,
+        artifact_type="code",
+        artifact_bundle=with_artifact_file(bundle, eval_artifact_path(tmp_path), report),
+    )
+    prompt = build_evaluation_prompt(context)
+    assert "answer = 42" in prompt
+    assert f"Write: {generated}" in prompt
 
 
 def test_plain_text_fallback_reports_unknown_tool_usage() -> None:

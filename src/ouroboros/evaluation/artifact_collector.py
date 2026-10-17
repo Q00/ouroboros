@@ -8,6 +8,7 @@ can be extracted from the artifact text.
 
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 import logging
 import os
@@ -52,9 +53,9 @@ def with_artifact_file(bundle: ArtifactBundle, path: Path, text: str) -> Artifac
     artifact = FileArtifact(
         file_path=str(path), content=content, truncated=len(content) < len(text)
     )
-    return ArtifactBundle(
+    return replace(
+        bundle,
         files=(artifact, *bundle.files),
-        text_summary=bundle.text_summary,
         total_chars=bundle.total_chars + len(content),
     )
 
@@ -296,9 +297,9 @@ class ArtifactCollector:
         """
         # Match common patterns from Claude tool use output
         patterns = [
-            r"(?:Write|Edit)(?:\s+to)?:\s*(/[^\s]+)",
-            r"(?:file_path|File):\s*(/[^\s]+)",
-            r"Created\s+(?:file\s+)?(/[^\s]+)",
+            r"(?:Write|Edit)(?:[ \t]+to)?:[ \t]*([^\r\n]+)",
+            r"(?:file_path|File):[ \t]*([^\r\n]+)",
+            r"Created[ \t]+(?:file[ \t]+)?([^\r\n]+)",
         ]
 
         real_project = os.path.realpath(project_dir) if project_dir else None
@@ -308,7 +309,14 @@ class ArtifactCollector:
 
         for pattern in patterns:
             for match in re.finditer(pattern, output):
-                path = match.group(1)
+                # Native evidence renders the complete path on one line. Do not
+                # split at spaces or guess a prefix when trailing prose or an
+                # unmatched quote makes the reported path invalid.
+                path = match.group(1).strip()
+                if len(path) >= 2 and path[0] == path[-1] and path[0] in "\"'":
+                    path = path[1:-1]
+                if not path.startswith("/"):
+                    continue
                 if path in seen:
                     continue
                 # Block sensitive files (env, credentials, private keys) even

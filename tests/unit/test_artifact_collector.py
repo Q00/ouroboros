@@ -215,3 +215,59 @@ class TestArtifactCollector:
 
         assert bundle.scan_complete is True
         assert bundle.files == ()
+
+
+@pytest.mark.parametrize("prefix", ["Write:", "Edit to:", "File:", "file_path:", "Created file"])
+@pytest.mark.parametrize("name", ["plain.py", "directory with spaces/a file.py"])
+@pytest.mark.parametrize("quote", ["", '"', "'"])
+def test_complete_reported_paths_preserve_spaces_and_quotes(tmp_path, prefix, name, quote):
+    source = tmp_path / name
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("reported source")
+    paths = ArtifactCollector()._extract_file_paths(
+        f"- {prefix} {quote}{source}{quote}\nBash: check", str(tmp_path)
+    )
+    assert paths == [str(source)]
+
+
+@pytest.mark.parametrize("suffix", [" trailing explanation", '"', "\tinvalid"])
+def test_malformed_reported_paths_do_not_read_existing_prefix(tmp_path, suffix):
+    source = tmp_path / "source.py"
+    source.write_text("must not guess prefix")
+    assert (
+        ArtifactCollector()._extract_file_paths(f"Write: {source}{suffix}\n", str(tmp_path)) == []
+    )
+
+
+def test_report_projection_preserves_all_collection_status(tmp_path):
+    from dataclasses import replace
+
+    from ouroboros.evaluation.artifact_collector import with_artifact_file
+    from ouroboros.evaluation.models import ArtifactBundle, FileArtifact
+
+    bundle = ArtifactBundle(
+        files=(FileArtifact(file_path=str(tmp_path / "source.py"), content="source"),),
+        text_summary="summary",
+        total_chars=6,
+        scan_complete=False,
+        scan_error="directory depth limit (1) exceeded",
+    )
+    projected = with_artifact_file(bundle, tmp_path / "report.md", "report")
+    assert replace(projected, files=bundle.files, total_chars=bundle.total_chars) == bundle
+
+
+def test_space_path_extraction_keeps_security_and_deduplication(tmp_path):
+    root = tmp_path / "project with spaces"
+    root.mkdir()
+    source = root / "source file.py"
+    source.write_text("safe")
+    secret = root / ".env"
+    secret.write_text("not collected")
+    outside = tmp_path / "outside file.py"
+    outside.write_text("outside")
+    link = root / "linked file.py"
+    link.symlink_to(outside)
+    report = "\n".join(
+        f"Write: {p}" for p in (source, source, secret, outside, link, root / "missing.py")
+    )
+    assert ArtifactCollector()._extract_file_paths(report, str(root)) == [str(source)]
