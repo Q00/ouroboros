@@ -120,8 +120,9 @@ class _VerifyGateOutcome:
     # command on the quiescent workspace before the AC is accepted.
     replay_required: bool = False
     # True when verify_command exited non-zero here and also on the untouched
-    # base snapshot (``verify_base_signal``). Such a command says nothing about
-    # the work, so the outcome passes and records why instead of rejecting.
+    # base snapshot (``verify_base_signal``). It cannot decide the criterion:
+    # the outcome does not pass and is also environment_unverifiable, so the
+    # criterion is reported as unverified instead of rejected or accepted.
     no_signal: bool = False
 
 

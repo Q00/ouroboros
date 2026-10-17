@@ -13,8 +13,9 @@ the base snapshot the check package already takes before any worker starts
 (``boundary.binding_flow.snapshot_base``). The snapshot is used only while its
 tree still has the digest recorded when it was taken, so a worker cannot make
 a command look signal-free by editing the snapshot. If the command fails on the
-base as well, the gate records ``no_signal=True``: the criterion is not rejected and
-not retried on that command. Without a snapshot, or when the base run cannot be
+base as well, the criterion is undecided, never accepted: the outcome takes the
+existing unverifiable route with ``no_signal=True`` recorded, so it neither rejects
+nor spends a retry, and the run reports the criterion as needing confirmation. Without a snapshot, or when the base run cannot be
 judged (timeout, start failure, digest mismatch), the gate keeps its usual
 verdict.
 """
@@ -107,15 +108,26 @@ class VerifyBaseSignal:
 def no_signal_outcome(
     returncode: int, output_tail: str, workspace_digest: str | None, replay_required: bool
 ) -> _VerifyGateOutcome:
-    """The gate outcome for a command that fails both on the base and after the patch."""
+    """The gate outcome for a command that fails both on the base and after the patch.
+
+    It is not a pass: a criterion's own command is expected to fail on the
+    base (the bug is there, or the test the worker adds does not exist yet),
+    so failing after the patch may mean the fix did not land. Nor can it
+    reject, since it fails on the untouched base as well. The criterion is
+    undecided, and it takes the existing undecided route
+    (``environment_unverifiable``, see ``verify_quarantine``): the worker
+    result is kept and reported as needing confirmation, and no retry is spent.
+    """
     return _VerifyGateOutcome(
-        passed=True,
+        passed=False,
         reason=(
-            f"verify_command exited with status {returncode} here and also exits non-zero "
-            "on the untouched base snapshot; it carries no signal about this work"
+            f"verify_command exited with status {returncode} and also exits non-zero on "
+            "the untouched base snapshot, so it cannot decide this criterion"
         ),
         output_tail=output_tail,
         workspace_digest=workspace_digest,
+        environment_unverifiable=True,
+        cause="exit_nonzero",
         replay_required=replay_required,
         no_signal=True,
     )

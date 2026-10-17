@@ -72,21 +72,83 @@ def _seed(spec: AcceptanceCriterionSpec) -> Seed:
 
 
 @pytest.mark.asyncio
-async def test_command_failing_on_base_and_after_patch_is_no_signal(tmp_path: Path) -> None:
+async def test_command_failing_on_base_and_after_patch_is_undecided_not_passed(
+    tmp_path: Path,
+) -> None:
     workspace, signal, _snapshot = _workspace_and_signal(tmp_path)
     executor = _executor(workspace, signal)
     spec = AcceptanceCriterionSpec(description="whole suite", verify_command="exit 3")
 
     outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(workspace))
 
-    assert outcome.passed is True
+    assert outcome.passed is False
     assert outcome.no_signal is True
-    assert outcome.cause is None
+    assert outcome.environment_unverifiable is True
+    assert outcome.cause == "exit_nonzero"
     assert "status 3" in (outcome.reason or "")
 
 
 @pytest.mark.asyncio
-async def test_no_signal_command_neither_rejects_nor_enters_retry(tmp_path: Path) -> None:
+@pytest.mark.parametrize("retry_budget", [0, 2])
+async def test_fails_on_base_and_after_patch_is_never_accepted_and_spends_no_retry(
+    tmp_path: Path, retry_budget: int
+) -> None:
+    """The discriminating case: the fix did not land, and the base fails too.
+
+    The criterion never comes out with ``verify_gate.passed == True``, and the
+    retry loop never re-dispatches the worker for it, whatever the budget.
+    """
+    workspace, signal, _snapshot = _workspace_and_signal(tmp_path)
+    executor = ParallelACExecutor(
+        adapter=_StubAdapter(str(workspace)),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        run_verify_commands=True,
+        ac_retry_attempts=retry_budget,
+        verify_command_timeout_seconds=30,
+    )
+    executor._verify_base_signal = signal
+    seed = _seed(
+        AcceptanceCriterionSpec(
+            description="regression test passes",
+            verify_command="python3 -c 'import sys; sys.exit(1)'",
+        )
+    )
+    dispatches: list[int] = []
+
+    async def fake_batch(**_kwargs: object) -> list[ACExecutionResult]:
+        dispatches.append(1)
+        return [ACExecutionResult(ac_index=0, ac_content="ac", success=True, retry_attempt=0)]
+
+    executor._execute_ac_batch = fake_batch  # type: ignore[method-assign]
+
+    results = await executor._run_batch_with_verify_and_retry(
+        seed=seed,
+        batch_executable=[0],
+        session_id="s",
+        execution_id="e",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts={0: 0},
+        execution_counters=None,
+    )
+
+    result = results[0]
+    assert isinstance(result, ACExecutionResult)
+    assert result.verify_gate_outcome is not None
+    assert result.verify_gate_outcome.passed is False
+    assert result.verify_gate_outcome.no_signal is True
+    assert result.outcome != ACExecutionOutcome.FAILED
+    assert dispatches == [1]
+    emitted = [call.args[0] for call in executor._event_store.append.await_args_list]
+    assert not any(event.type == "execution.ac.recovery_exhausted" for event in emitted)
+
+
+@pytest.mark.asyncio
+async def test_no_signal_command_is_quarantined_as_unverified(tmp_path: Path) -> None:
     workspace, signal, _snapshot = _workspace_and_signal(tmp_path)
     executor = _executor(workspace, signal)
     seed = _seed(AcceptanceCriterionSpec(description="whole suite", verify_command="exit 1"))
@@ -96,10 +158,14 @@ async def test_no_signal_command_neither_rejects_nor_enters_retry(tmp_path: Path
         seed=seed, ac_index=0, result=result, session_id="s", execution_id="e"
     )
 
+    # Undecided: the worker result stands for confirmation, nothing is retried,
+    # and the gate itself never reports a pass.
     assert gated.success is True
     assert gated.outcome != ACExecutionOutcome.FAILED
     assert gated.verify_gate_outcome is not None
+    assert gated.verify_gate_outcome.passed is False
     assert gated.verify_gate_outcome.no_signal is True
+    assert gated.verify_gate_outcome.environment_unverifiable is True
 
 
 @pytest.mark.asyncio

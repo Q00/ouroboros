@@ -71,9 +71,9 @@ async def test_attempt_evidence_records_verdict_and_diff(tmp_path: Path) -> None
 
     evidence = await attempt_workspace_evidence(executor, result)
 
-    assert evidence["verify_passed"] is True
+    assert evidence["verify_passed"] is False
     assert evidence["verify_no_signal"] is True
-    assert evidence["verify_cause"] is None
+    assert evidence["verify_cause"] == "exit_nonzero"
     assert "module.py" in str(evidence["workspace_diff"])
 
 

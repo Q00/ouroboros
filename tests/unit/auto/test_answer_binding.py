@@ -490,3 +490,52 @@ def test_ledger_seed_with_no_confirmed_constraint_keeps_only_the_scope_rule() ->
     seed = synthesize_seed_from_ledger(ledger)
 
     assert seed.constraints == (CONFIRMED_SCOPE_CONSTRAINT,)
+
+
+def test_guess_sources_are_assumptions_whatever_their_ledger_updates() -> None:
+    confirmed_fact = LedgerEntry(
+        key="runtime.repo_fact",
+        value="Python 3.12",
+        source=LedgerSource.REPO_FACT,
+        confidence=0.9,
+        status=LedgerStatus.CONFIRMED,
+    )
+    for source in (AutoAnswerSource.CONSERVATIVE_DEFAULT, AutoAnswerSource.ASSUMPTION):
+        answer = AutoAnswer("x", source, 0.8, [("runtime_context", confirmed_fact)])
+        assert answer_provenance(answer) == "assumption"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        LedgerSource.CONSERVATIVE_DEFAULT,
+        LedgerSource.ASSUMPTION,
+        LedgerSource.INFERENCE,
+        LedgerSource.AUTO_FILL_INFERENCE,
+    ],
+)
+@pytest.mark.parametrize("status", list(LedgerStatus))
+def test_guess_ledger_entries_never_bind(source: LedgerSource, status: LedgerStatus) -> None:
+    entry = LedgerEntry(key="k", value="v", source=source, confidence=1.0, status=status)
+
+    assert entry.binds_seed is False
+
+
+def test_worker_system_prompt_carries_assumptions_outside_the_per_ac_fence() -> None:
+    """Assumptions live in the Seed-level system prompt, labelled overridable.
+
+    The per-AC scope fence ("You are responsible only for the current
+    acceptance criterion") is part of each dispatch's own prompt, not of the
+    system prompt, so it does not fence the assumptions off.
+    """
+    from ouroboros.orchestrator.runner import build_system_prompt
+
+    seed = synthesize_seed_from_ledger(_ready_ledger())
+
+    prompt = build_system_prompt(seed, context_pack_enabled=False)
+
+    assert "## Assumptions (non-binding)" in prompt
+    assumptions_block = prompt.split("## Assumptions (non-binding)", 1)[1]
+    assert DEFAULTED_CONSTRAINT in assumptions_block
+    assert "override the assumption" in assumptions_block
+    assert "responsible only for the current acceptance criterion" not in prompt

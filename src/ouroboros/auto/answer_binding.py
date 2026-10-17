@@ -39,8 +39,17 @@ _BINDING_ANSWER_SOURCES = frozenset(
 )
 
 
+# Sources that are guesses by definition. Such an answer is an assumption
+# whatever its ledger updates carry, so no entry attached to it can lift it.
+_GUESS_ANSWER_SOURCES = frozenset(
+    {AutoAnswerSource.CONSERVATIVE_DEFAULT, AutoAnswerSource.ASSUMPTION}
+)
+
+
 def answer_provenance(answer: AutoAnswer) -> AnswerProvenance:
     """Return ``"user"`` for an answer that may bind, else ``"assumption"``."""
+    if answer.source in _GUESS_ANSWER_SOURCES:
+        return "assumption"
     if answer.source in _BINDING_ANSWER_SOURCES:
         return "user"
     if any(entry.binds_seed for _, entry in answer.ledger_updates):
