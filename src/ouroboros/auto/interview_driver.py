@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 import structlog
 
+from ouroboros.auto.answer_binding import answer_provenance, with_provenance
 from ouroboros.auto.answerer import (
     AutoAnswer,
     AutoAnswerContext,
@@ -879,7 +880,7 @@ class AutoInterviewDriver:
                 try:
                     synthesis_turn = _validate_turn(
                         await with_timeout(
-                            self.backend.answer(
+                            with_provenance(self.backend, "assumption").answer(
                                 state.interview_session_id,
                                 synthesis,
                                 last_question=(
@@ -1296,7 +1297,7 @@ class AutoInterviewDriver:
         try:
             turn = _validate_turn(
                 await with_transient_retry(
-                    lambda: self.backend.answer(
+                    lambda: with_provenance(self.backend, answer_provenance(answer)).answer(
                         answer_session_id,
                         answer.prefixed_text,
                         last_question=question_for_record,
@@ -1829,7 +1830,7 @@ class AutoInterviewDriver:
         try:
             new_turn = _validate_turn(
                 await with_timeout(
-                    self.backend.answer(
+                    with_provenance(self.backend, "assumption").answer(
                         state.interview_session_id,
                         f"{AUTO_ANSWER_PREFIX}[stagnation-concretization via "
                         f"{persona.value}] {decision}",
@@ -2135,7 +2136,7 @@ class AutoInterviewDriver:
             try:
                 synthesis_turn = _validate_turn(
                     await with_timeout(
-                        self.backend.answer(
+                        with_provenance(self.backend, "assumption").answer(
                             state.interview_session_id,
                             synthesis,
                             last_question=(

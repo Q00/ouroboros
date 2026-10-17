@@ -230,6 +230,23 @@ class LedgerEntry:
         source = self.source if isinstance(self.source, LedgerSource) else LedgerSource(self.source)
         return _PROVENANCE_FROM_SOURCE.get(source, _PROVENANCE_DEFAULT)
 
+    @property
+    def binds_seed(self) -> bool:
+        """Return True when this entry may become a binding Seed requirement.
+
+        Only what the user stated, the requester answered, or the repository
+        shows may bind: an evidence-backed ``source`` with a resolved status
+        other than ``DEFAULTED``. Every auto-generated stand-in is written
+        ``DEFAULTED``, including the templated ``existing_convention`` and
+        ``non_goal`` fallbacks, so a guess carrying a grounded source label
+        still does not bind. Everything else is an assumption.
+        """
+        return (
+            self.source in _EVIDENCE_BACKED_SOURCES
+            and self.status in _RESOLVED_STATUSES
+            and self.status is not LedgerStatus.DEFAULTED
+        )
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible data."""
         data = asdict(self)

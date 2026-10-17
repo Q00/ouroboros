@@ -32,6 +32,17 @@ not guess at it, and do not treat the note itself as a requirement. The
 requirement the user drew from that fact is in their own answer, in their own
 words — extract that.
 
+An answer guessed on the requester's behalf (an automatic default or
+assumption nobody confirmed) is withheld the same way:
+
+```
+A: [assumption withheld — a guess made on the requester's behalf, not a decision. It is kept as a non-binding assumption, never as a requirement.]
+```
+
+The guess is carried to the worker separately as a non-binding assumption. Do
+not reconstruct it, and do not turn the question it answered into a constraint
+or criterion. Where the only answer to a question is withheld, the point is open.
+
 Questions are shown in full, including any that restate an adopted fact. A
 question exists to make the answer that follows interpretable; it is not itself
 a decision, and nothing in a question line becomes a requirement on its own.
@@ -47,6 +58,15 @@ Hard limitations or requirements that must be satisfied.
 Format: single-line JSON array of strings. Values may contain any characters,
 including literal `|` pipes; never use a bare pipe as the list separator.
 Example: ["Python >= 3.12", "No external database", "Must work offline"]
+
+Only what the initial context or a recorded answer states is a constraint.
+
+### 2b. ASSUMPTIONS
+Points you would have to guess to make the Seed concrete: a scope limit, a
+default, an exact value or output nobody required. They never bind; the worker
+sees them as assumptions it may override when the issue or the code says
+otherwise. Never put a guess in CONSTRAINTS or ACCEPTANCE_CRITERIA instead.
+Format: single-line JSON array of strings, or `[]` when there is none.
 
 ### 3. ACCEPTANCE_CRITERIA
 Specific, measurable criteria for success.
@@ -117,6 +137,7 @@ Provide your analysis in this exact structure. In particular,
 ```
 GOAL: <clear goal statement>
 CONSTRAINTS: ["<constraint 1>", "<constraint 2>", ...]
+ASSUMPTIONS: ["<assumption 1>", ...]
 ACCEPTANCE_CRITERIA: [{"description": "Observable outcome", "verify": "python -m pytest -q", "artifacts": ["path/to/artifact"], "expect": "NONE"}]
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>

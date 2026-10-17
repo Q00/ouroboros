@@ -2045,9 +2045,11 @@ ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verba
 ACCEPTANCE_CRITERIA exempt rule: prefer a real `verify` command for every criterion — a criterion without one can only be judged from the worker's own account of its work. Use `verify: NONE` only when no command could decide the outcome, and then add `"exempt": "<why no command can decide this>"`. Omit `exempt` (or set it to NONE) whenever `verify` is a command.
 
 CONSTRAINTS rule: respond with one single-line JSON array of strings, e.g. ["<constraint 1>", "<constraint 2>"]. Constraint values may contain any characters, including literal | pipes; never use a bare pipe as the list separator.
+ASSUMPTIONS rule: CONSTRAINTS and ACCEPTANCE_CRITERIA hold only what the initial context or a recorded answer states. Anything you would have to guess (a scope limit, a default, an exact value or output nobody required) goes in ASSUMPTIONS, a single-line JSON array of strings, or `[]` when there is none. A withheld answer stays withheld: do not reconstruct it in any field.
 
 GOAL: <clear goal statement>
 CONSTRAINTS: ["<constraint 1>", "<constraint 2>", ...]
+ASSUMPTIONS: ["<assumption 1>", ...]
 ACCEPTANCE_CRITERIA: [{{"description": "<observable outcome>", "verify": "<single-line command or NONE>", "artifacts": ["<path>"], "expect": "<literal output or NONE>", "exempt": "<why no command can decide this, only when verify is NONE>"}}]
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
@@ -2159,9 +2161,11 @@ ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verba
 ACCEPTANCE_CRITERIA exempt rule: prefer a real `verify` command for every criterion — a criterion without one can only be judged from the worker's own account of its work. Use `verify: NONE` only when no command could decide the outcome, and then add `"exempt": "<why no command can decide this>"`. Omit `exempt` (or set it to NONE) whenever `verify` is a command.
 
 CONSTRAINTS rule: respond with one single-line JSON array of strings, e.g. ["<constraint 1>", "<constraint 2>"]. Constraint values may contain any characters, including literal | pipes; never use a bare pipe as the list separator.
+ASSUMPTIONS rule: CONSTRAINTS and ACCEPTANCE_CRITERIA hold only what the initial context or a recorded answer states. Anything you would have to guess (a scope limit, a default, an exact value or output nobody required) goes in ASSUMPTIONS, a single-line JSON array of strings, or `[]` when there is none. A withheld answer stays withheld: do not reconstruct it in any field.
 
 GOAL: <clear goal statement>
 CONSTRAINTS: ["<constraint 1>", "<constraint 2>", ...]
+ASSUMPTIONS: ["<assumption 1>", ...]
 ACCEPTANCE_CRITERIA: [{{"description": "<observable outcome>", "verify": "<single-line command or NONE>", "artifacts": ["<path>"], "expect": "<literal output or NONE>", "exempt": "<why no command can decide this, only when verify is NONE>"}}]
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
@@ -2173,6 +2177,7 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
     _KNOWN_PREFIXES = (
         "GOAL:",
         "CONSTRAINTS:",
+        "ASSUMPTIONS:",
         "ACCEPTANCE_CRITERIA:",
         "ONTOLOGY_NAME:",
         "ONTOLOGY_DESCRIPTION:",
@@ -2276,6 +2281,7 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
         # pipe-split downstream (#1696, #1729).
         for field_name, field_label in (
             ("constraints", "CONSTRAINTS"),
+            ("assumptions", "ASSUMPTIONS"),
             ("existing_patterns", "EXISTING_PATTERNS"),
             ("existing_dependencies", "EXISTING_DEPENDENCIES"),
         ):
@@ -2315,6 +2321,9 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
         # Parse constraints (JSON array preferred; legacy pipe list supported)
         constraints = _parse_string_array_values(
             requirements.get("constraints"), field_label="CONSTRAINTS"
+        )
+        assumptions = _parse_string_array_values(
+            requirements.get("assumptions"), field_label="ASSUMPTIONS"
         )
 
         # Parse acceptance criteria
@@ -2372,6 +2381,7 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
             brownfield_context=brownfield_context,
             constraints=constraints,
             acceptance_criteria=acceptance_criteria,
+            assumptions=assumptions,
             ontology_schema=ontology_schema,
             evaluation_principles=tuple(evaluation_principles),
             exit_conditions=tuple(exit_conditions),

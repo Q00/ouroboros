@@ -51,6 +51,7 @@ from ouroboros.auto.ledger_seed import (
     brownfield_context_from_cwd,
     partial_seed_from_evidence,
     synthesize_seed_from_ledger,
+    with_ledger_assumptions,
 )
 from ouroboros.auto.listeners import RALPH_CANCEL_BLOCKER_REASON
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
@@ -2385,11 +2386,9 @@ class AutoPipeline:
         floor = deterministic_floor(ledger)
         if floor > seed.metadata.ambiguity_score:
             seed = seed.model_copy(
-                update={
-                    "metadata": seed.metadata.model_copy(update={"ambiguity_score": floor}),
-                }
+                update={"metadata": seed.metadata.model_copy(update={"ambiguity_score": floor})}
             )
-        seed = normalize_execution_acceptance(seed)
+        seed = normalize_execution_acceptance(with_ledger_assumptions(seed, ledger))
         state.seed_id = seed.metadata.seed_id
         state.seed_artifact = seed.to_dict()
         state.seed_origin = SeedOrigin.AUTO_PIPELINE
