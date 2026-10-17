@@ -9861,6 +9861,10 @@ Respond with either ATOMIC or the structured JSON object only.
         if mutated is not None:
             return mutated
         returncode = run.returncode
+        if returncode != 0 and self._verify_base_signal.base_missing:
+            return no_signal_outcome(
+                returncode, tail, workspace_digest(), replay_required, base_missing=True
+            )
         if returncode != 0 and await self._verify_base_signal.fails_on_base(
             command,
             shell_path=verify_shell_path,

@@ -1013,6 +1013,9 @@ class OrchestratorRunner:
         # Optional acceptance authority (ouroboros.boundary.authority), set after
         # construction; see its call site in _execute_parallel.
         self.acceptance_authority: Any | None = None
+        # Set by the check package when it was attempted but not prepared, so
+        # the base snapshot the verify gate reads is missing, not just off.
+        self.check_package_unprepared = False
         self._session_signal_hub = session_signal_hub
         self._execution_preferences_override_explicit = (
             efficiency_mode is not None or frugality_assurance is not None
@@ -10395,8 +10398,9 @@ class OrchestratorRunner:
         # The check package's base snapshot lets the verify gate tell a failing
         # command that carries no signal (it fails on the base too) from a real
         # rejection. It is read in every mode, record included.
-        parallel_executor._verify_base_signal = VerifyBaseSignal.from_acceptance_authority(
-            self.acceptance_authority
+        parallel_executor._verify_base_signal = VerifyBaseSignal.for_run(
+            self.acceptance_authority,
+            check_package_unprepared=getattr(self, "check_package_unprepared", False),
         )
 
         raw_published_pause_owner = tracker.progress.get("pause_owner")

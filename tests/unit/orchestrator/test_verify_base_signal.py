@@ -272,3 +272,85 @@ def test_no_signal_outcome_round_trips_through_a_checkpoint() -> None:
 
     assert serialized is not None
     assert _deserialize_verify_gate_outcome(serialized) == outcome
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry_budget", [0, 2])
+async def test_unprepared_check_package_makes_a_failing_command_undecided_not_failed(
+    tmp_path: Path, retry_budget: int
+) -> None:
+    """The check package was attempted but not prepared, so no base snapshot exists.
+
+    A failing command takes the same route as one that fails on both base and
+    patch: unverified, no rejection, no retry spent.
+    """
+    executor = ParallelACExecutor(
+        adapter=_StubAdapter(str(tmp_path)),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        run_verify_commands=True,
+        ac_retry_attempts=retry_budget,
+        verify_command_timeout_seconds=30,
+    )
+    executor._verify_base_signal = VerifyBaseSignal.for_run(None, check_package_unprepared=True)
+    seed = _seed(AcceptanceCriterionSpec(description="regression", verify_command="exit 1"))
+    dispatches: list[int] = []
+
+    async def fake_batch(**_kwargs: object) -> list[ACExecutionResult]:
+        dispatches.append(1)
+        return [ACExecutionResult(ac_index=0, ac_content="ac", success=True, retry_attempt=0)]
+
+    executor._execute_ac_batch = fake_batch  # type: ignore[method-assign]
+
+    results = await executor._run_batch_with_verify_and_retry(
+        seed=seed,
+        batch_executable=[0],
+        session_id="s",
+        execution_id="e",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts={0: 0},
+        execution_counters=None,
+    )
+
+    result = results[0]
+    assert isinstance(result, ACExecutionResult)
+    assert result.outcome != ACExecutionOutcome.FAILED
+    assert result.verify_gate_outcome is not None
+    assert result.verify_gate_outcome.passed is False
+    assert result.verify_gate_outcome.no_signal is True
+    assert result.verify_gate_outcome.environment_unverifiable is True
+    assert "no base snapshot" in (result.verify_gate_outcome.reason or "")
+    assert dispatches == [1]
+
+
+@pytest.mark.asyncio
+async def test_check_package_off_keeps_rejecting_a_failing_command(tmp_path: Path) -> None:
+    executor = _executor(tmp_path, VerifyBaseSignal.for_run(None, check_package_unprepared=False))
+    seed = _seed(AcceptanceCriterionSpec(description="regression", verify_command="exit 1"))
+    result = ACExecutionResult(ac_index=0, ac_content="regression", success=True)
+
+    gated = await executor._apply_verify_gate(
+        seed=seed, ac_index=0, result=result, session_id="s", execution_id="e"
+    )
+
+    assert gated.success is False
+    assert gated.verify_gate_outcome is not None
+    assert gated.verify_gate_outcome.cause == "exit_nonzero"
+    assert gated.verify_gate_outcome.no_signal is False
+
+
+def test_a_prepared_authority_is_read_even_when_marked_unprepared(tmp_path: Path) -> None:
+    snapshot = tmp_path / "base_snapshot"
+    snapshot.mkdir()
+    authority = SimpleNamespace(
+        state=SimpleNamespace(base_snapshot=snapshot, admission=None, base_snapshot_digest="d" * 64)
+    )
+
+    signal = VerifyBaseSignal.for_run(authority, check_package_unprepared=True)
+
+    assert signal.available is True
+    assert signal.base_missing is False

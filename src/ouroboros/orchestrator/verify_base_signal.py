@@ -17,7 +17,11 @@ base as well, the criterion is undecided, never accepted: the outcome takes the
 existing unverifiable route with ``no_signal=True`` recorded, so it neither rejects
 nor spends a retry, and the run reports the criterion as needing confirmation. Without a snapshot, or when the base run cannot be
 judged (timeout, start failure, digest mismatch), the gate keeps its usual
-verdict.
+verdict. One exception: when the check package was on and attempted but its
+preparation failed, the base snapshot it should have taken is missing
+(``base_missing``). Whether the command fails on the base cannot be known
+then, so a failing command takes the same undecided route instead of
+rejecting. With the check package off nothing changes.
 """
 
 from __future__ import annotations
@@ -40,9 +44,18 @@ log = structlog.get_logger(__name__)
 class VerifyBaseSignal:
     """Run a verify command once on the untouched base, cached per command."""
 
-    def __init__(self, base_snapshot: Path | None = None, base_digest: str | None = None) -> None:
+    def __init__(
+        self,
+        base_snapshot: Path | None = None,
+        base_digest: str | None = None,
+        *,
+        base_missing: bool = False,
+    ) -> None:
         self._base_snapshot = base_snapshot
         self._base_digest = base_digest
+        # True only when the check package was attempted and its preparation
+        # failed, so the base snapshot it takes was never taken.
+        self._base_missing = base_missing and base_snapshot is None
         self._fails_on_base: dict[str, bool] = {}
         self._locks: dict[str, asyncio.Lock] = {}
 
@@ -59,9 +72,21 @@ class VerifyBaseSignal:
         )
         return cls(snapshot, digest if isinstance(digest, str) else None)
 
+    @classmethod
+    def for_run(cls, authority: Any, *, check_package_unprepared: bool) -> VerifyBaseSignal:
+        """The signal for a run: missing base only when the package was attempted and failed."""
+        if authority is None and check_package_unprepared is True:
+            return cls(base_missing=True)
+        return cls.from_acceptance_authority(authority)
+
     @property
     def available(self) -> bool:
         return self._base_snapshot is not None and self._base_digest is not None
+
+    @property
+    def base_missing(self) -> bool:
+        """Whether the check package's base snapshot should exist but does not."""
+        return self._base_missing
 
     async def fails_on_base(self, command: str, *, shell_path: str, timeout_seconds: float) -> bool:
         """Return True only when ``command`` exits non-zero on the untouched base."""
@@ -106,7 +131,12 @@ class VerifyBaseSignal:
 
 
 def no_signal_outcome(
-    returncode: int, output_tail: str, workspace_digest: str | None, replay_required: bool
+    returncode: int,
+    output_tail: str,
+    workspace_digest: str | None,
+    replay_required: bool,
+    *,
+    base_missing: bool = False,
 ) -> _VerifyGateOutcome:
     """The gate outcome for a command that fails both on the base and after the patch.
 
@@ -117,13 +147,20 @@ def no_signal_outcome(
     undecided, and it takes the existing undecided route
     (``environment_unverifiable``, see ``verify_quarantine``): the worker
     result is kept and reported as needing confirmation, and no retry is spent.
+
+    ``base_missing`` gives the same outcome when the check package was
+    attempted but left no base snapshot to run the command on.
     """
+    reason = (
+        f"verify_command exited with status {returncode} and no base snapshot exists "
+        "(the check package was not prepared), so it cannot decide this criterion"
+        if base_missing
+        else f"verify_command exited with status {returncode} and also exits non-zero on "
+        "the untouched base snapshot, so it cannot decide this criterion"
+    )
     return _VerifyGateOutcome(
         passed=False,
-        reason=(
-            f"verify_command exited with status {returncode} and also exits non-zero on "
-            "the untouched base snapshot, so it cannot decide this criterion"
-        ),
+        reason=reason,
         output_tail=output_tail,
         workspace_digest=workspace_digest,
         environment_unverifiable=True,
