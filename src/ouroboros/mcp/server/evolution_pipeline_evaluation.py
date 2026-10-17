@@ -189,7 +189,11 @@ async def evaluate_generation_with_pipeline(
         PipelineConfig,
         SemanticConfig,
     )
-    from ouroboros.evaluation.artifact_collector import ArtifactCollector
+    from ouroboros.evaluation.artifact_collector import (
+        ArtifactCollector,
+        eval_artifact_path,
+        with_artifact_file,
+    )
 
     acs = getattr(seed, "acceptance_criteria", None)
     if acs:
@@ -220,6 +224,10 @@ async def evaluate_generation_with_pipeline(
         ),
     )
 
+    bundle = ArtifactCollector().collect(artifact, project_dir)
+    if project_dir:
+        bundle = with_artifact_file(bundle, eval_artifact_path(Path(project_dir)), artifact)
+
     eval_context = EvaluationContext(
         execution_id=f"eval_{seed.metadata.seed_id}",
         seed_id=seed.metadata.seed_id,
@@ -228,7 +236,7 @@ async def evaluate_generation_with_pipeline(
         artifact_type="code",
         goal=seed.goal,
         constraints=tuple(seed.constraints),
-        artifact_bundle=ArtifactCollector().collect(artifact, project_dir),
+        artifact_bundle=bundle,
     )
 
     eval_result = await pipeline.evaluate(eval_context)
@@ -271,7 +279,11 @@ async def evaluate_criteria_with_pipeline(
         PipelineConfig,
         SemanticConfig,
     )
-    from ouroboros.evaluation.artifact_collector import ArtifactCollector
+    from ouroboros.evaluation.artifact_collector import (
+        ArtifactCollector,
+        eval_artifact_path,
+        with_artifact_file,
+    )
 
     criteria = tuple(getattr(seed, "acceptance_criteria", ()) or ())
     texts = ac_texts(criteria)
@@ -292,6 +304,8 @@ async def evaluate_criteria_with_pipeline(
         ),
     )
     bundle = ArtifactCollector().collect(artifact, project_dir)
+    if project_dir:
+        bundle = with_artifact_file(bundle, eval_artifact_path(Path(project_dir)), artifact)
     stage1 = None
     rows: dict[int, ACResult] = {}
     for index in indices:

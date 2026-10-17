@@ -259,3 +259,49 @@ async def test_semantic_goal_alignment_is_preserved_separately_from_drift_score(
     semantic.assert_awaited_once()
     assert summary.goal_alignment == 0.9
     assert summary.drift_score == 0.1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("caller", ["generation", "criteria"])
+@pytest.mark.parametrize("project_mode", ["source", "empty", "unresolved", "unresolved-existing"])
+async def test_execution_report_survives_semantic_projection(
+    tmp_path: Path, caller: str, project_mode: str
+) -> None:
+    """Native file hints must not suppress the accompanying command evidence."""
+    from ouroboros.evaluation.semantic import build_evaluation_prompt
+
+    source = tmp_path / "example.py"
+    if project_mode in {"source", "unresolved-existing"}:
+        source.write_text('print("source-evidence")\n')
+    report = f"Write: {source}\nBash: python -m pytest\n"
+    semantic = AsyncMock(return_value=Result.ok((_semantic(approve=True), [])))
+    project_dir = None if project_mode.startswith("unresolved") else str(tmp_path)
+    before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+    kwargs = {
+        "artifact": report,
+        "project_dir": project_dir,
+        "llm_adapter": AsyncMock(),
+        "semantic_model": "semantic-model",
+        "detector_backend": None,
+        "stage1_enabled": False,
+    }
+    with patch(SEMANTIC_PATH, semantic):
+        if caller == "generation":
+            await module.evaluate_generation_with_pipeline(seed=_seed(), **kwargs)
+        else:
+            await module.evaluate_criteria_with_pipeline(_seed(), (0, 1), **kwargs)
+
+    assert semantic.await_count == (1 if caller == "generation" else 2)
+    for call in semantic.await_args_list:
+        context = call.args[0]
+        prompt = build_evaluation_prompt(context)
+        assert "Bash: python -m pytest" in prompt
+        assert f"Write: {source}" in prompt
+        if project_mode == "source":
+            assert 'print("source-evidence")' in prompt
+            assert len(context.artifact_bundle.files) == 2
+            assert context.artifact_bundle.files[0].content == report
+        else:
+            assert not context.artifact_bundle.files
+            assert "## Artifact Content" in prompt
+    assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before
