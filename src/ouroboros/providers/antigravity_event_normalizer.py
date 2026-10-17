@@ -55,7 +55,7 @@ class AntigravityEventNormalizer(GeminiEventNormalizer):
     def _normalize_json_dict(self, parsed: dict[str, Any], *, original: str) -> dict[str, Any]:
         kind = parsed.get("event")
         payload = parsed.get(kind) if isinstance(kind, str) else None
-        if kind not in {"init", "step_update", "result"}:
+        if not isinstance(kind, str) or kind not in {"init", "step_update", "result"}:
             return super()._normalize_json_dict(parsed, original=original)
         if not isinstance(payload, dict):
             return self._build_event(
@@ -85,7 +85,7 @@ class AntigravityEventNormalizer(GeminiEventNormalizer):
                 delta = payload.get("text_delta")
                 content = delta if isinstance(delta, str) else ""
                 metadata["text_delta"] = True
-            elif step_type in {"tool", "tool_call"}:
+            elif isinstance(step_type, str) and step_type in {"tool", "tool_call"}:
                 info = payload.get("tool_info")
                 info = info if isinstance(info, dict) else {}
                 name, inputs = normalize_antigravity_tool(
@@ -94,7 +94,7 @@ class AntigravityEventNormalizer(GeminiEventNormalizer):
                 )
                 metadata.update(name=name, input=inputs)
                 state = payload.get("state")
-                if state in {"DONE", "ERROR"}:
+                if isinstance(state, str) and state in {"DONE", "ERROR"}:
                     event_type = "tool_result"
                     is_error = state == "ERROR" or bool(info.get("error"))
                     # Native result objects vary by tool; retain them without
@@ -105,7 +105,7 @@ class AntigravityEventNormalizer(GeminiEventNormalizer):
                         else info.get("output", info.get("result", ""))
                     )
                     content = output if isinstance(output, str) else json.dumps(output)
-                elif state in {None, "ACTIVE"}:
+                elif state is None or state == "ACTIVE":
                     event_type = "tool_use" if name else "unknown"
         return self._build_event(
             event_type=event_type,

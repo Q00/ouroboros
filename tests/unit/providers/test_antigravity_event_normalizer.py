@@ -147,3 +147,28 @@ def test_tool_and_thinking_content_do_not_pollute_final_answer():
         AgentMessage(type="assistant", content="thinking", data={"thinking": "thinking"}),
     ]:
         assert runtime._update_last_content("answer", m) == "answer"
+
+
+@pytest.mark.parametrize("invalid", [[], {}, ["tool"], {"type": "tool"}, 0, False])
+@pytest.mark.parametrize("field", ["event", "step_type", "state"])
+def test_malformed_discriminators_remain_non_actionable(field, invalid):
+    raw = {
+        "event": "step_update",
+        "step_update": {
+            "step_type": "tool",
+            "state": "ACTIVE",
+            "tool_name": "run_command",
+            "tool_input": {"CommandLine": "pytest"},
+        },
+    }
+    if field == "event":
+        raw[field] = invalid
+    else:
+        raw["step_update"][field] = invalid
+
+    parsed = AntigravityEventNormalizer().normalize_line(json.dumps(raw))
+
+    assert parsed["type"] == "unknown"
+    assert parsed["content"] == ""
+    assert parsed["raw"] == raw
+    assert parsed["is_error"] is False
