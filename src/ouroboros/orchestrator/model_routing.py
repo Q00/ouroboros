@@ -507,7 +507,7 @@ def decide_model(
     mode = (
         MODEL_MODE_ENFORCED
         if model_override_support is ParamSupport.NATIVE
-        and model not in {"default", "auto", "current"}
+        and model.strip().lower() not in {"", "default", "auto", "current"}
         else MODEL_MODE_ADVISED
     )
     return ModelDecision(tier=resolved_tier, model=model, mode=mode)
