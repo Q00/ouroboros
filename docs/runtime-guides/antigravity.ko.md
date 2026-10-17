@@ -90,7 +90,7 @@ agy -p <PROMPT> \
 
 > ⚠️ **보안 참고 — 여기서 `acceptEdits`는 모든 요청을 자동 승인합니다.** Gemini 상위 런타임에서는 `acceptEdits`가 편집만 허용하는 `--approval-mode auto_edit`로 연결되지만, `agy`에는 편집 전용 모드가 없습니다. 따라서 Antigravity에서는 기본값인 `acceptEdits`와 `bypassPermissions`가 모두 `--dangerously-skip-permissions`로 처리됩니다. 파일 편집뿐 아니라 모든 도구 요청을 자동 승인합니다. 이는 `agy`의 전부 아니면 전무인 권한 모델이며 `antigravity` 백엔드를 명시적으로 선택했을 때만 적용됩니다. Antigravity 단계는 샌드박스/worktree에서 실행하세요(Ouroboros는 기본적으로 관리형 git worktree를 사용합니다). 편집만 허용하는 격리가 필요하다면 신뢰하지 않는 입력에 Antigravity를 선택하지 말고 Claude, Codex 또는 Gemini 런타임을 사용하세요.
 
-사용 가능한 모델(`agy models`): Gemini 3.5 Flash, Gemini 3.1 Pro, Claude Sonnet 4.6, Claude Opus 4.6, GPT-OSS 120B(요금제에 따라 다름). Antigravity는 **센티널 모델 백엔드**입니다. 기본적으로 Ouroboros가 `agy`의 설정 모델 선택에 맡기며 명시적 ID를 지정한 경우에만 `--model`을 전달합니다.
+설치된 CLI와 계정의 목록은 [`agy models`](https://www.antigravity.google/docs/models/)로 확인합니다. `agy 1.4.0`에서 2026-10-18에 확인한 ID는 `gemini-3.8-flash-{low,medium,high}`, `gemini-4-argon-{low,medium,high}`, `claude-sonnet-5-5-{low,medium,high}`, `claude-opus-5-5-{low,medium,high}`, `gpt-oss-120b-medium`입니다. Google·Anthropic API 모델명과 다른 CLI 전용 ID이며, 버전·계정·요금제에 따라 사용 가능 목록이 달라집니다. Antigravity는 **센티널 모델 백엔드**입니다. 기본적으로 Ouroboros가 `agy`의 설정 모델 선택에 맡기며 명시적 ID를 지정한 경우에만 `--model`을 전달합니다.
 
 ## 기능
 

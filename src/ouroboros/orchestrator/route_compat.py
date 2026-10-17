@@ -21,7 +21,6 @@ from dataclasses import dataclass, replace
 import re
 from typing import TYPE_CHECKING
 
-from ouroboros.config._model_defaults import normalize_tier_model
 from ouroboros.core.security import is_stable_authority_identity
 from ouroboros.orchestrator.contract_numbers import (
     json_safe_nonnegative_int,
@@ -32,6 +31,7 @@ from ouroboros.orchestrator.model_routing import (
     MODEL_TIER_LADDER,
     ModelDecision,
     ModelRouter,
+    configured_tier_models,
 )
 from ouroboros.orchestrator.route_policy import (
     MAX_ROUTE_CANDIDATES,
@@ -249,22 +249,7 @@ def _configured_models(
 ) -> dict[str, str] | None:
     """Resolve the immutable config catalog for a runtime backend."""
 
-    provider = _BACKEND_PROVIDER.get(runtime_backend)
-    if provider is None:
-        return {}
-    configured: dict[str, str] = {}
-    for tier in MODEL_TIER_LADDER:
-        tier_config = economics.tiers.get(tier)
-        if tier_config is None:
-            continue
-        for model_config in tier_config.models:
-            if model_config.provider == provider:
-                configured[tier] = normalize_tier_model(
-                    model_config.model,
-                    provider=model_config.provider,
-                )
-                break
-    return configured
+    return configured_tier_models(economics, runtime_backend=runtime_backend)
 
 
 def _snapshot_router_models(model_router: ModelRouter) -> dict[str, str] | None:

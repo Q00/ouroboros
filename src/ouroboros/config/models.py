@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field, field_validator
 import yaml
 
 from ouroboros.config._model_defaults import (
+    CODEX_TIER_MODELS,
     DEFAULT_HAIKU_MODEL,
     DEFAULT_OPUS_MODEL,
     DEFAULT_SONNET_MODEL,
@@ -957,7 +958,7 @@ def get_default_config() -> OuroborosConfig:
                     cost_factor=1,
                     intelligence_range=(9, 11),
                     models=[
-                        ModelConfig(provider="openai", model="gpt-5.1-codex-mini"),
+                        ModelConfig(provider="openai", model=CODEX_TIER_MODELS["frugal"]),
                         ModelConfig(provider="google", model="gemini-2.0-flash"),
                         ModelConfig(provider="anthropic", model=DEFAULT_HAIKU_MODEL),
                     ],
@@ -967,7 +968,7 @@ def get_default_config() -> OuroborosConfig:
                     cost_factor=10,
                     intelligence_range=(14, 16),
                     models=[
-                        ModelConfig(provider="openai", model="gpt-5-codex"),
+                        ModelConfig(provider="openai", model=CODEX_TIER_MODELS["standard"]),
                         ModelConfig(provider="anthropic", model=DEFAULT_SONNET_MODEL),
                         ModelConfig(provider="google", model="gemini-2.5-pro"),
                     ],
@@ -977,7 +978,7 @@ def get_default_config() -> OuroborosConfig:
                     cost_factor=30,
                     intelligence_range=(18, 20),
                     models=[
-                        ModelConfig(provider="openai", model="gpt-5.2"),
+                        ModelConfig(provider="openai", model=CODEX_TIER_MODELS["frontier"]),
                         ModelConfig(provider="anthropic", model=DEFAULT_OPUS_MODEL),
                     ],
                     use_cases=["consensus", "lateral_thinking", "big_bang"],

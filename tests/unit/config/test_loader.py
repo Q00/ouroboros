@@ -2732,7 +2732,8 @@ class TestGetExecutionModel:
             assert get_execution_model() is None
 
     @pytest.mark.parametrize(
-        ("backend", "expected"), [("claude", "opus"), ("codex", None), ("litellm", "claude-opus-5")]
+        ("backend", "expected"),
+        [("claude", "opus"), ("codex", "gpt-6-astra"), ("litellm", "claude-opus-5")],
     )
     def test_global_model_choice_pins_execute(
         self, monkeypatch: pytest.MonkeyPatch, backend: str, expected: str | None
