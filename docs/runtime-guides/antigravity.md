@@ -91,8 +91,11 @@ agy -p <PROMPT> \
 | `--dangerously-skip-permissions` | Auto-approves tool requests so the subprocess never blocks|
 | `--model`                        | Forwarded only for an explicit, non-sentinel model id     |
 
-`agy` exposes no granular accept-edits-only mode, so both Ouroboros
-non-blocking permission modes map to the single skip flag:
+`agy` has a native `--mode accept-edits` option. In headless use, however,
+approval-required calls may be soft-denied without an interactive prompt; the
+native mode therefore does not establish an edit-only permission guarantee for
+Ouroboros. To preserve its existing behavior, both Ouroboros non-blocking
+permission modes continue to map to the skip flag:
 
 | Ouroboros permission mode | `agy` behavior                  | Notes                                         |
 |---------------------------|---------------------------------|-----------------------------------------------|
@@ -100,20 +103,20 @@ non-blocking permission modes map to the single skip flag:
 | `bypassPermissions`       | `--dangerously-skip-permissions`| Explicit full bypass                          |
 
 The interactive Ouroboros `default` mode is normalized to `acceptEdits` (with an
-audit log) because a headless `agy -p` invocation cannot service a TTY approval
-prompt.
+audit log), and consequently keeps the same full-bypass mapping in headless
+execution.
 
 > ⚠️ **Security note — `acceptEdits` is full auto-approval here.** Unlike the
 > Gemini parent runtime (where `acceptEdits` maps to the narrower edits-only
-> `--approval-mode auto_edit`), `agy` exposes no edits-only mode, so on
-> Antigravity **both** `acceptEdits` (the default) and `bypassPermissions`
-> resolve to `--dangerously-skip-permissions` — every tool request is
-> auto-approved, not just file edits. This is `agy`'s all-or-nothing permission
-> model, and it applies only when you explicitly select the `antigravity`
-> backend. Run Antigravity stages in a sandbox/worktree (Ouroboros uses managed
-> git worktrees by default) and do not select it for untrusted inputs if you
-> need edits-only containment — use the Claude, Codex, or Gemini runtime there
-> instead.
+> `--approval-mode auto_edit`), Antigravity's native `--mode accept-edits` does
+> not change Ouroboros's established mapping: **both** `acceptEdits` (the
+> default) and `bypassPermissions` resolve to
+> `--dangerously-skip-permissions` — every tool request is auto-approved, not
+> just file edits. This mapping applies only when you explicitly select the
+> `antigravity` backend. Run Antigravity stages in a sandbox/worktree
+> (Ouroboros uses managed git worktrees by default) and do not select it for
+> untrusted inputs if you need edits-only containment — use the Claude, Codex,
+> or Gemini runtime there instead.
 
 Available models (`agy models`): Gemini 3.5 Flash, Gemini 3.1 Pro, Claude
 Sonnet 4.6, Claude Opus 4.6, GPT-OSS 120B (subject to your plan). Antigravity is
@@ -139,10 +142,10 @@ Codex, or Grok runtime.
 `OUROBOROS_ANTIGRAVITY_CLI_PATH=/abs/path/to/agy` or
 `orchestrator.antigravity_cli_path`.
 
-**The CLI hangs waiting for input.** The runtime always passes
-`--dangerously-skip-permissions` and `-p`. If you see a hang, confirm you are
-invoking the runtime through `ouroboros run` (or the MCP server) rather than
-driving `agy` directly.
+**A headless call needs approval.** Ouroboros passes
+`--dangerously-skip-permissions`, which auto-approves tool requests. Direct
+headless use of `agy` with a mode that requires approval may soft-deny the call
+without an interactive prompt; it does not necessarily hang.
 
 **Gemini stopped working on 2026-06-18.** That is the consumer-tier Gemini CLI
 cutoff. Switch the affected stages to `antigravity`, or keep Gemini via an
