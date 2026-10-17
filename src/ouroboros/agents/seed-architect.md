@@ -79,7 +79,8 @@ Multi-artifact example: `[{"description":"Build outputs exist","verify":"NONE","
 `verify` / `verify_command` semantics:
 - Use exactly one single-line shell command.
 - NEVER use heredoc or multiline shell syntax such as `<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts, or an unterminated command block. The AC contract format is one line, so multiline command bodies will be lost.
-- For Python snippets, use `python -c "..."` / `python3 -c "..."`; for longer checks, require a pytest-discoverable test artifact and use `python -m pytest -q`.
+- For Python snippets, use `python -c "..."` / `python3 -c "..."`; for longer checks, require a pytest-discoverable test artifact and name it, e.g. `python -m pytest -q tests/test_tasks.py`.
+- Never use a bare whole-suite command such as `python -m pytest -q`. Unrelated failing tests make it fail on any work, so it cannot decide the criterion. Name the test files or test ids that decide it.
 - `verify` is an OBSERVER, never a writer. The runner hashes the workspace before and after the command and rejects any run that created, modified, or deleted a workspace file (`workspace_mutated`); no retry can repair that, because the contract itself is wrong. Bytecode caches and Git-ignored build outputs are exempt; state files, fixtures, logs, and generated data are not.
 - Therefore, when the program under test writes state (a JSON store, a database file, an output document), copy it into a scratch directory and run there: `t=$(mktemp -d) && cp app.py "$t"/ && cd "$t" && python3 app.py add x && python3 app.py list`. NEVER `rm -f state.json && python3 app.py ...` in the workspace.
 
@@ -147,7 +148,7 @@ Provide your analysis in this exact structure. In particular,
 GOAL: <clear goal statement>
 CONSTRAINTS: ["<constraint 1>", "<constraint 2>", ...]
 ASSUMPTIONS: ["<assumption 1>", ...]
-ACCEPTANCE_CRITERIA: [{"description": "Observable outcome", "verify": "python -m pytest -q", "artifacts": ["path/to/artifact"], "expect": "NONE"}]
+ACCEPTANCE_CRITERIA: [{"description": "Observable outcome", "verify": "<single-line command that decides this criterion, or NONE>", "artifacts": ["path/to/artifact"], "expect": "NONE"}]
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
 ONTOLOGY_FIELDS: [{"name": "<name>", "type": "<string|number|boolean|array|object>", "description": "<description>"}, ...]

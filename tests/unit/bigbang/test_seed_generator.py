@@ -3960,3 +3960,20 @@ class TestExamplesAndAssumptionsContract:
             )
 
         assert seed.assumptions == ()
+
+
+def test_seed_prompts_offer_no_bare_full_suite_verify_fallback() -> None:
+    """A bare ``python -m pytest -q`` fails on any work, so no prompt may suggest it."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        generator = SeedGenerator(llm_adapter=AsyncMock(), output_dir=Path(tmp_dir) / "seeds")
+        prompts = (
+            generator._build_extraction_user_prompt("Q: goal?\nA: build a thing"),
+            generator._build_retry_prompt("Q: goal?", "bad", "parse error"),
+            generator._build_extraction_system_prompt(),
+        )
+
+    for prompt in prompts:
+        assert "or `python -m pytest -q` instead" not in prompt
+        assert '"verify": "python -m pytest -q"' not in prompt
+        assert "and use `python -m pytest -q`." not in prompt
+        assert "bare whole-suite command" in prompt

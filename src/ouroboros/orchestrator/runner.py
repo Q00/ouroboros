@@ -217,6 +217,7 @@ from ouroboros.orchestrator.session import (
     _optional_create_session_kwargs,
     runtime_resume_identity_from_payload,
 )
+from ouroboros.orchestrator.verify_base_signal import VerifyBaseSignal
 from ouroboros.orchestrator.verify_shell import (
     capture_verify_shell_identity,
     resolve_verify_shell,
@@ -10391,6 +10392,12 @@ class OrchestratorRunner:
         if (install := getattr(self.acceptance_authority, "install", None)) is not None:
             # Check package on: it drives repairs; the legacy verifier is advisory.
             install(parallel_executor)
+        # The check package's base snapshot lets the verify gate tell a failing
+        # command that carries no signal (it fails on the base too) from a real
+        # rejection. It is read in every mode, record included.
+        parallel_executor._verify_base_signal = VerifyBaseSignal.from_acceptance_authority(
+            self.acceptance_authority
+        )
 
         raw_published_pause_owner = tracker.progress.get("pause_owner")
         if (
