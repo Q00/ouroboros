@@ -639,3 +639,13 @@ async def test_draft_kept_after_unanswered_requester_carries_its_question(
     assert f"Open question: {FIRST_QUESTION}" in rendered
     for entry in asked:
         assert all(entry.value.strip() not in line for line in rendered)
+
+
+def test_assumptions_block_puts_the_issue_and_code_over_any_assumption() -> None:
+    seed = synthesize_seed_from_ledger(_ledger_with_asked_draft())
+
+    prompt = render_seed_contract_for_execution(SeedContract.from_seed(seed))
+
+    header = prompt.split("## Assumptions (non-binding)", 1)[1].split("\n- ", 1)[0]
+    assert "a default only where the code itself settles nothing" in header
+    assert "follow the issue and the code over any assumption" in header

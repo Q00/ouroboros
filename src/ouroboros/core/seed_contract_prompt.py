@@ -34,9 +34,11 @@ def render_assumptions_section(contract: SeedContract) -> str:
         return ""
     assumptions_text = "\n".join(f"- {assumption}" for assumption in contract.assumptions)
     return f"""## Assumptions (non-binding)
-Nobody confirmed these. They are guesses made on the requester's behalf, not requirements.
-Follow one only where the goal and the code leave the point open; when the goal, the
-issue, or the code says otherwise, follow those and override the assumption.
+Nobody confirmed these. They are guesses and open questions on the requester's behalf,
+not requirements. An assumption is a default only where the code itself settles nothing;
+follow the issue and the code over any assumption, and override the assumption when they
+say otherwise.
+An open question has no answer yet: decide it from the goal, the issue, and the code.
 {assumptions_text}"""
 
 
