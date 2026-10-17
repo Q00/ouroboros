@@ -184,6 +184,20 @@ def test_project_without_discoverable_tests_stays_unverified(tmp_path: Path) -> 
             "    def test_value(self):\n        pass\n"
             "    test_value = None\n",
         ),
+        (
+            "test_module_shadowed_test_method.py",
+            "import unittest\n\n"
+            "class Tests(unittest.TestCase):\n"
+            "    def test_value(self):\n        pass\n\n"
+            "Tests.test_value = None\n",
+        ),
+        (
+            "test_module_deleted_test_method.py",
+            "import unittest\n\n"
+            "class Tests(unittest.TestCase):\n"
+            "    def test_value(self):\n        pass\n\n"
+            "del Tests.test_value\n",
+        ),
     ],
 )
 def test_manifest_free_unittest_rejects_non_discoverable_evidence(

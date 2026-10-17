@@ -82,7 +82,7 @@ def manifest_free_unittest_proposal(working_dir: Path) -> dict[str, str] | None:
 
 
 def _module_has_unittest_test(tree: ast.Module) -> bool:
-    """Find a unittest test class while honoring module-level rebinding order."""
+    """Find a unittest test class while honoring statically visible module writes."""
     imported_testcase_names: set[str] = set()
     unittest_aliases: set[str] = set()
     local_testcase_classes: set[str] = set()
@@ -141,6 +141,12 @@ def _module_has_unittest_test(tree: ast.Module) -> bool:
                     local_testcase_classes_with_tests.add(statement.name)
             continue
 
+        if _module_scope_test_method_mutation(statement, local_testcase_classes_with_tests):
+            # The class still exists, but a module-level attribute write/delete
+            # can remove its only discoverable method. Do not infer runtime
+            # unittest discovery from a class namespace we have seen mutated.
+            return False
+
         writes = _module_scope_writes(statement)
         if _UNITTEST_BASE_MUTATION in writes:
             unittest_aliases.clear()
@@ -150,6 +156,43 @@ def _module_has_unittest_test(tree: ast.Module) -> bool:
         local_testcase_classes_with_tests.difference_update(writes)
 
     return bool(local_testcase_classes_with_tests)
+
+
+def _module_scope_test_method_mutation(
+    statement: ast.stmt, testcase_classes_with_tests: set[str]
+) -> bool:
+    """Detect direct module-scope writes/deletes to known test-class methods."""
+    if not testcase_classes_with_tests:
+        return False
+
+    class MutationCollector(ast.NodeVisitor):
+        found = False
+
+        def visit_Attribute(self, node: ast.Attribute) -> None:
+            if (
+                isinstance(node.ctx, (ast.Store, ast.Del))
+                and node.attr.startswith("test")
+                and isinstance(node.value, ast.Name)
+                and node.value.id in testcase_classes_with_tests
+            ):
+                self.found = True
+            self.generic_visit(node)
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            return
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            return
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            return
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            return
+
+    collector = MutationCollector()
+    collector.visit(statement)
+    return collector.found
 
 
 def _class_has_test_method(node: ast.ClassDef) -> bool:
