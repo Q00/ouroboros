@@ -37,8 +37,10 @@ Custom CLI Path:
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import aclosing
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 
 import structlog
 
@@ -68,6 +70,13 @@ _AGY_DEFAULT_PERMISSION_MODE = "acceptEdits"
 # CLI-owned model selection; ``agy`` does not understand it as a ``--model``
 # value, so it is never forwarded on the command line.
 _SENTINEL_MODEL = "default"
+
+
+class _ConversationMismatch(ValueError):
+    def __init__(self, requested: str, observed: str) -> None:
+        super().__init__("Antigravity returned a different conversation than requested.")
+        self.requested = requested
+        self.observed = observed
 
 
 class AntigravityCLIRuntime(GeminiCLIRuntime):
@@ -137,6 +146,66 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
         if metadata.get("text_delta"):
             messages = [replace(m, data={**m.data, "text_delta": True}) for m in messages]
         return messages
+
+    async def _execute_task_impl(
+        self,
+        prompt: str,
+        tools: list[str] | None = None,
+        system_prompt: str | None = None,
+        resume_handle: RuntimeHandle | None = None,
+        resume_session_id: str | None = None,
+        reasoning_effort: str | None = None,
+        model: str | None = None,
+        _resume_depth: int = 0,
+    ) -> AsyncIterator[AgentMessage]:
+        """Reject a resumed stream that reports another native conversation."""
+        requested_handle = resume_handle or self._build_runtime_handle(resume_session_id)
+        stream = super()._execute_task_impl(
+            prompt=prompt,
+            tools=tools,
+            system_prompt=system_prompt,
+            resume_handle=resume_handle,
+            resume_session_id=resume_session_id,
+            reasoning_effort=reasoning_effort,
+            model=model,
+            _resume_depth=_resume_depth,
+        )
+        try:
+            async with aclosing(cast(AsyncGenerator[AgentMessage, None], stream)):
+                async for message in stream:
+                    yield message
+        except _ConversationMismatch as error:
+            yield AgentMessage(
+                type="result",
+                content=str(error),
+                data={
+                    "subtype": "error",
+                    "terminal": True,
+                    "error_type": "ConversationMismatch",
+                    "requested_session_id": error.requested,
+                    "observed_session_id": error.observed,
+                },
+                resume_handle=requested_handle,
+            )
+
+    def _prepare_runtime_event(
+        self,
+        event: dict[str, Any],
+        *,
+        previous_handle: RuntimeHandle | None,
+        current_handle: RuntimeHandle | None,
+        session_rebound: bool,
+    ) -> dict[str, Any]:
+        requested = self._resolve_resume_session_id(previous_handle)
+        observed = self._extract_event_session_id(event)
+        if requested and observed and requested != observed:
+            raise _ConversationMismatch(requested, observed)
+        return super()._prepare_runtime_event(
+            event,
+            previous_handle=previous_handle,
+            current_handle=current_handle,
+            session_rebound=session_rebound,
+        )
 
     # -- Permission mode overrides -----------------------------------------
 

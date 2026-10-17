@@ -482,6 +482,150 @@ async def test_unsupported_resume_cli_fails_without_fresh_session_retry() -> Non
     assert len(calls) == 1
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("from_handle", [False, True])
+@pytest.mark.parametrize("mismatch_event", ["init", "result"])
+async def test_resume_rejects_another_conversation(from_handle: bool, mismatch_event: str) -> None:
+    import json
+
+    runtime = _make_runtime()
+    handle = runtime._build_runtime_handle("requested-session") if from_handle else None
+    calls = []
+    event = (
+        {"event": "init", "conversation_id": "wrong-session", "init": {"cwd": "/tmp"}}
+        if mismatch_event == "init"
+        else {
+            "event": "result",
+            "result": {
+                "conversation_id": "wrong-session",
+                "status": "SUCCESS",
+                "response": "unrelated response",
+            },
+        }
+    )
+
+    async def fake_exec(*command: str, **kwargs: object) -> _FakeProcess:
+        calls.append(command)
+        return _FakeProcess([json.dumps(event)])
+
+    with (
+        patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            side_effect=fake_exec,
+        ),
+        patch.object(runtime, "_terminate_process") as terminate,
+        patch.object(runtime, "_process_group_id", return_value=None),
+    ):
+        messages = [
+            message
+            async for message in runtime.execute_task(
+                "continue",
+                resume_handle=handle,
+                resume_session_id=None if from_handle else "requested-session",
+            )
+        ]
+    terminate.assert_awaited_once()
+    assert len(calls) == 1
+    assert messages[-1].is_error
+    assert messages[-1].data["error_type"] == "ConversationMismatch"
+    assert messages[-1].resume_handle.native_session_id == "requested-session"
+    assert all("unrelated response" not in message.content for message in messages)
+    assert not any(message.is_final and not message.is_error for message in messages)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_resumes_keep_identity_checks_isolated() -> None:
+    import asyncio
+    import json
+
+    runtime = _make_runtime()
+
+    async def fake_exec(*command: str, **kwargs: object) -> _FakeProcess:
+        requested = command[command.index("--conversation") + 1]
+        await asyncio.sleep(0)
+        return _FakeProcess(
+            [
+                json.dumps(
+                    {
+                        "event": "result",
+                        "result": {
+                            "conversation_id": "other" if requested == "reject" else requested,
+                            "status": "SUCCESS",
+                            "response": "continued",
+                        },
+                    }
+                )
+            ]
+        )
+
+    with (
+        patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            side_effect=fake_exec,
+        ),
+        patch.object(runtime, "_terminate_process"),
+        patch.object(runtime, "_process_group_id", return_value=None),
+    ):
+        rejected, matched = await asyncio.gather(
+            runtime.execute_task_to_result("continue", resume_session_id="reject"),
+            runtime.execute_task_to_result("continue", resume_session_id="accept"),
+        )
+        assert rejected.is_err
+        assert matched.is_ok
+        assert matched.value.session_id == "accept"
+        event = runtime._parse_json_event(
+            json.dumps({"event": "init", "conversation_id": "fresh", "init": {}})
+        )
+        assert event is not None
+
+
+@pytest.mark.asyncio
+async def test_resumes_can_be_interleaved_in_the_same_task() -> None:
+    import json
+
+    runtime = _make_runtime()
+
+    async def fake_exec(*command: str, **kwargs: object) -> _FakeProcess:
+        requested = command[command.index("--conversation") + 1]
+        return _FakeProcess(
+            [
+                json.dumps(
+                    {
+                        "event": "result",
+                        "result": {
+                            "conversation_id": requested,
+                            "status": "SUCCESS",
+                            "response": requested,
+                        },
+                    }
+                )
+            ]
+        )
+
+    with (
+        patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            side_effect=fake_exec,
+        ),
+        patch.object(runtime, "_process_group_id", return_value=None),
+    ):
+        streams = [runtime.execute_task("continue", resume_session_id=s) for s in ("a", "b")]
+        results = [[], []]
+        pending = {0, 1}
+        while pending:
+            for index in sorted(pending):
+                try:
+                    results[index].append(await anext(streams[index]))
+                except StopAsyncIteration:
+                    pending.remove(index)
+        for messages, session_id in zip(results, ("a", "b"), strict=True):
+            assert messages[-1].is_final
+            assert not any(message.is_error for message in messages)
+            assert all(
+                message.resume_handle.native_session_id == session_id for message in messages
+            )
+
+
 @pytest.mark.parametrize(
     "kind,payload",
     [
