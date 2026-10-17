@@ -448,8 +448,10 @@ Aliases follow the CLI's permitted current models; Gemini 3 preview access
 remains account-dependent. Use `provider: gemini` for an explicit native pin.
 Custom runtime-specific and cross-provider IDs stay literal.
 
-Explicit tier choices (`models.default: frontier` or `--model frontier`) use
-the configured ladder even with `models.pin` off. Missing rungs select the
+Explicit non-Claude tier choices (`models.default: frontier` or
+`--model frontier`) use the configured ladder even with `models.pin` off.
+Claude role-level tier choices retain their existing `haiku` / `sonnet` /
+`opus` aliases; the per-AC economics router is a separate resolution path. Missing rungs select the
 nearest higher configured tier, then a lower tier only when no higher rung
 exists. An absent model namespace returns `default`; unresolved
 `default`/`auto`/`current` decisions are advisory, never proof of model enforcement.
