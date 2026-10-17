@@ -86,7 +86,7 @@ def _module_has_unittest_test(tree: ast.Module) -> bool:
     imported_testcase_names: set[str] = set()
     unittest_aliases: set[str] = set()
     local_testcase_classes: set[str] = set()
-    local_testcase_classes_with_tests: set[str] = set()
+    local_test_methods: dict[str, set[str]] = {}
 
     for statement in tree.body:
         if isinstance(statement, ast.Import):
@@ -94,7 +94,8 @@ def _module_has_unittest_test(tree: ast.Module) -> bool:
             imported_testcase_names.difference_update(writes)
             unittest_aliases.difference_update(writes)
             local_testcase_classes.difference_update(writes)
-            local_testcase_classes_with_tests.difference_update(writes)
+            for name in writes:
+                local_test_methods.pop(name, None)
             unittest_aliases.update(
                 alias.asname or "unittest" for alias in statement.names if alias.name == "unittest"
             )
@@ -105,7 +106,8 @@ def _module_has_unittest_test(tree: ast.Module) -> bool:
             imported_testcase_names.difference_update(writes)
             unittest_aliases.difference_update(writes)
             local_testcase_classes.difference_update(writes)
-            local_testcase_classes_with_tests.difference_update(writes)
+            for name in writes:
+                local_test_methods.pop(name, None)
             if statement.module == "unittest" and statement.level == 0:
                 imported_testcase_names.update(
                     alias.asname or alias.name
@@ -126,22 +128,23 @@ def _module_has_unittest_test(tree: ast.Module) -> bool:
                 or (isinstance(base, ast.Name) and base.id in local_testcase_classes)
                 for base in statement.bases
             )
-            has_test_method = _class_has_test_method(statement)
-            inherited_test_method = any(
-                isinstance(base, ast.Name) and base.id in local_testcase_classes_with_tests
-                for base in statement.bases
-            )
+            # Single local inheritance has a known namespace. For multiple or
+            # opaque bases, count only methods defined by this class rather than
+            # guessing Python's MRO or names supplied by external code.
+            inherited_methods: set[str] = set()
+            if len(statement.bases) == 1 and isinstance(statement.bases[0], ast.Name):
+                inherited_methods = local_test_methods.get(statement.bases[0].id, set())
+            method_names = _class_test_methods(statement, inherited_methods)
             imported_testcase_names.discard(statement.name)
             unittest_aliases.discard(statement.name)
             local_testcase_classes.discard(statement.name)
-            local_testcase_classes_with_tests.discard(statement.name)
+            local_test_methods.pop(statement.name, None)
             if known_testcase:
                 local_testcase_classes.add(statement.name)
-                if has_test_method or inherited_test_method:
-                    local_testcase_classes_with_tests.add(statement.name)
+                local_test_methods[statement.name] = method_names
             continue
 
-        if _module_scope_test_method_mutation(statement, local_testcase_classes_with_tests):
+        if _module_scope_test_method_mutation(statement, local_testcase_classes):
             # The class still exists, but a module-level attribute write/delete
             # can remove its only discoverable method. Do not infer runtime
             # unittest discovery from a class namespace we have seen mutated.
@@ -153,16 +156,15 @@ def _module_has_unittest_test(tree: ast.Module) -> bool:
         imported_testcase_names.difference_update(writes)
         unittest_aliases.difference_update(writes)
         local_testcase_classes.difference_update(writes)
-        local_testcase_classes_with_tests.difference_update(writes)
+        for name in writes:
+            local_test_methods.pop(name, None)
 
-    return bool(local_testcase_classes_with_tests)
+    return any(local_test_methods.values())
 
 
-def _module_scope_test_method_mutation(
-    statement: ast.stmt, testcase_classes_with_tests: set[str]
-) -> bool:
+def _module_scope_test_method_mutation(statement: ast.stmt, testcase_classes: set[str]) -> bool:
     """Detect direct module-scope writes/deletes to known test-class methods."""
-    if not testcase_classes_with_tests:
+    if not testcase_classes:
         return False
 
     class MutationCollector(ast.NodeVisitor):
@@ -173,7 +175,7 @@ def _module_scope_test_method_mutation(
                 isinstance(node.ctx, (ast.Store, ast.Del))
                 and node.attr.startswith("test")
                 and isinstance(node.value, ast.Name)
-                and node.value.id in testcase_classes_with_tests
+                and node.value.id in testcase_classes
             ):
                 self.found = True
             self.generic_visit(node)
@@ -195,12 +197,12 @@ def _module_scope_test_method_mutation(
     return collector.found
 
 
-def _class_has_test_method(node: ast.ClassDef) -> bool:
-    """Whether a class namespace ends with a callable test-method definition."""
+def _class_test_methods(node: ast.ClassDef, inherited_methods: set[str]) -> set[str]:
+    """Known callable test names after inherited names and local shadowing."""
     if node.decorator_list:
-        return False
+        return set()
 
-    method_names: set[str] = set()
+    method_names = inherited_methods.copy()
     for statement in node.body:
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
             method_names.discard(statement.name)
@@ -215,7 +217,7 @@ def _class_has_test_method(node: ast.ClassDef) -> bool:
             continue
         writes = _module_scope_writes(statement)
         method_names.difference_update(name for name in writes if name.startswith("test"))
-    return bool(method_names)
+    return method_names
 
 
 def _module_scope_writes(statement: ast.stmt) -> set[str]:

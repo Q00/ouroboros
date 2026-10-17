@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -241,3 +243,75 @@ def test_existing_manifest_keeps_llm_detection_path_and_is_unchanged(tmp_path: P
     assert adapter.calls == 1
     assert manifest.read_text(encoding="utf-8") == original
     assert has_mechanical_toml(tmp_path) is False
+
+
+@pytest.mark.parametrize(
+    ("child_source", "expected_count", "expect_proposal"),
+    [
+        ("class Tests(Base):\n    test_value = None\ndel Base\n", 0, False),
+        ("class Base(Base):\n    test_value = None\n", 0, False),
+        (
+            "class Tests(Base):\n"
+            "    @property\n    def test_value(self):\n        return None\ndel Base\n",
+            0,
+            False,
+        ),
+        (
+            "class Tests(Base):\n    if True:\n        test_value = None\ndel Base\n",
+            0,
+            False,
+        ),
+        (
+            "class Middle(Base):\n    test_value = None\n"
+            "class Tests(Middle):\n    pass\ndel Base, Middle\n",
+            0,
+            False,
+        ),
+        ("class Tests(Base):\n    pass\ndel Base\n", 1, True),
+        (
+            "class Tests(Base):\n    test_value = None\n"
+            "    def test_other(self):\n        pass\ndel Base\n",
+            1,
+            True,
+        ),
+        (
+            "class Tests(Base):\n    test_value = None\n"
+            "    def test_value(self):\n        pass\ndel Base\n",
+            1,
+            True,
+        ),
+        (
+            "class Hidden:\n    test_value = None\n"
+            "class Tests(Hidden, Base):\n    pass\ndel Base\n",
+            0,
+            False,
+        ),
+    ],
+)
+def test_inherited_test_names_respect_child_shadowing(
+    tmp_path: Path, child_source: str, expected_count: int, expect_proposal: bool
+) -> None:
+    """Proposals follow known callable names, not an inherited has-tests flag."""
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_inherited.py").write_text(
+        "import unittest\n"
+        "class Base(unittest.TestCase):\n"
+        "    def test_value(self):\n        pass\n" + child_source,
+        encoding="utf-8",
+    )
+    actual = subprocess.run(
+        [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    # Python 3.14 exits 5 for an empty suite; earlier supported versions exit 0.
+    expected_codes = {0} if expected_count else {0, 5}
+    assert actual.returncode in expected_codes, actual.stderr
+    assert f"Ran {expected_count} test" in actual.stderr
+    proposal = unittest_discovery.manifest_free_unittest_proposal(tmp_path)
+    assert (proposal is not None) is expect_proposal
+    assert _run(ensure_mechanical_toml(tmp_path, None)) is expect_proposal
+    assert has_mechanical_toml(tmp_path) is expect_proposal
