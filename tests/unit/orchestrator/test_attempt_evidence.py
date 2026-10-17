@@ -85,3 +85,12 @@ def test_route_judgment_envelope_admits_only_evidence_keys() -> None:
     assert judgment_envelope_ok({**base, "workspace_diff": {}, "verify_passed": True}, required)
     assert not judgment_envelope_ok({**base, "unexpected": 1}, required)
     assert not judgment_envelope_ok({"execution_id": "e"}, required)
+
+
+@pytest.mark.asyncio
+async def test_attempt_evidence_marks_no_verdict_explicitly(tmp_path: Path) -> None:
+    executor = SimpleNamespace(_task_cwd=str(tmp_path), _adapter=None)
+
+    evidence = await attempt_workspace_evidence(executor, SimpleNamespace(verify_gate_outcome=None))
+
+    assert evidence == {"verify_passed": None, "verify_cause": None, "verify_no_signal": None}

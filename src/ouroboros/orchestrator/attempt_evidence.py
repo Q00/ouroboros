@@ -34,12 +34,14 @@ _UNTRACKED_LISTED = 50
 
 async def attempt_workspace_evidence(executor: Any, result: Any) -> dict[str, object]:
     """Return event fields describing the workspace and verdict after ``result``."""
-    evidence: dict[str, object] = {}
+    # The verdict fields are always present; ``None`` means no verify gate ran
+    # for this attempt (no command, gate disabled, or the worker failed first).
     outcome = getattr(result, "verify_gate_outcome", None)
-    if outcome is not None:
-        evidence["verify_passed"] = outcome.passed
-        evidence["verify_cause"] = outcome.cause
-        evidence["verify_no_signal"] = outcome.no_signal
+    evidence: dict[str, object] = {
+        "verify_passed": getattr(outcome, "passed", None),
+        "verify_cause": getattr(outcome, "cause", None),
+        "verify_no_signal": getattr(outcome, "no_signal", None),
+    }
     cwd = (
         getattr(executor, "_task_cwd", None)
         or getattr(getattr(executor, "_adapter", None), "working_directory", None)
