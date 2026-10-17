@@ -415,7 +415,27 @@ def reset_ignored_model_warning() -> None:
 
 def _explicit_choice(value: str, spec: _RoleSpec, backend: str) -> str:
     if value in TIERS:
-        return tier_model(cast(Tier, value), backend)
+        if backend_model_selection(backend) == "alias" or backend in _SHIPPED_PIN_FALLBACK_BACKENDS:
+            return tier_model(cast(Tier, value), backend)
+        # An explicit tier is an opt-in to the native economics ladder, unlike
+        # plain auto which deliberately follows the CLI's configured model.
+        from ouroboros.config.models import get_default_config
+        from ouroboros.orchestrator.model_routing import (
+            _BACKEND_PROVIDER,
+            _resolve_model_for_tier,
+            configured_tier_models,
+        )
+
+        config = _load_config()
+        economics = config.economics if config is not None else get_default_config().economics
+        if not economics.tiers:
+            economics = get_default_config().economics
+        runtime = next(
+            (name for name in _BACKEND_PROVIDER if canonical_backend(name) == backend), backend
+        )
+        models = configured_tier_models(economics, runtime_backend=runtime)
+        resolved = _resolve_model_for_tier(value, models)
+        return resolved[1] if resolved is not None else _SENTINEL
     return tier_model(spec.tier, backend) if value == AUTO_MODEL else value
 
 

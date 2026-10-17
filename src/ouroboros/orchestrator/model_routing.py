@@ -63,18 +63,10 @@ MODEL_MODE_NONE = "none"
 # changed config/default ladder mid-session.
 MODEL_ROUTING_CONTRACT_VERSION = 1
 
-# Maps a runtime's ``runtime_backend`` property value to the config provider whose
-# tier models it can execute. Keyed on the EXACT strings each runtime returns from
-# ``runtime.runtime_backend`` (verified against the runtime classes:
-# ``codex_cli``/``codex_mcp`` from CodexCliRuntime/LeaderDrivenWorkerRuntime,
-# ``gemini_cli`` from GeminiCLIRuntime), NOT on the config ``backend`` literal — the
-# redispatch guard in :func:`resolve_execute_model` compares against the live
-# adapter's property, so the two must speak the same vocabulary. ``opencode`` is
-# intentionally absent: its models are addressed by a composite ``provider/model``
-# id (e.g. ``anthropic/claude-...``) that this flat provider->model map cannot
-# express, so opencode routing stays dormant (future work). ``gemini_cli`` maps to
-# ``google`` for observability only — the Gemini CLI has no per-call model-override
-# knob, so its decisions land *advised*, never enforced.
+# Runtime properties, not config selectors. Runtime-specific entries precede
+# vendor defaults, so a configured Codex proxy or Gemini CLI alias is never
+# mistaken for a vendor API catalog. Additional runtime support is tracked
+# separately in #2658; this registry retains the existing supported backends.
 _BACKEND_PROVIDER: Mapping[str, str] = {
     "claude": "anthropic",
     "claude_code": "anthropic",
@@ -83,6 +75,41 @@ _BACKEND_PROVIDER: Mapping[str, str] = {
     "codex_mcp": "openai",
     "gemini_cli": "google",
 }
+
+
+def tier_model_providers(runtime_backend: str) -> tuple[str, ...]:
+    """Accepted config namespaces, runtime-specific entries before vendor defaults."""
+    provider = _BACKEND_PROVIDER.get(runtime_backend)
+    if provider is None:
+        return ()
+    # Support both the public runtime property and its config selector. They
+    # denote one harness; never borrow another multi-provider CLI's catalog.
+    from ouroboros.config.model_selection import canonical_backend
+
+    return tuple(dict.fromkeys((runtime_backend, canonical_backend(runtime_backend), provider)))
+
+
+def configured_tier_models(economics: EconomicsConfig, *, runtime_backend: str) -> dict[str, str]:
+    """Resolve one native model per tier, identically for routing and replay."""
+    providers = tier_model_providers(runtime_backend)
+    models: dict[str, str] = {}
+    for tier in MODEL_TIER_LADDER:
+        config = economics.tiers.get(tier)
+        if config is None:
+            continue
+        for provider in providers:
+            entry = next((entry for entry in config.models if entry.provider == provider), None)
+            if entry is not None:
+                model = normalize_tier_model(entry.model, provider=provider)
+                # Gemini CLI owns evergreen model-class aliases. Historical
+                # shipped API pins are not a native CLI tier catalog; keep
+                # explicit runtime-specific and never-shipped custom ids exact.
+                if runtime_backend == "gemini_cli" and provider == "google":
+                    model = {"gemini-2.0-flash": "flash", "gemini-2.5-pro": "pro"}.get(model, model)
+                models[tier] = model
+                break
+    return models
+
 
 # ExecutionProfile SuggestedModelTier vocabulary -> internal tier names.
 _PROFILE_HINT_TO_TIER: Mapping[str, str] = {
@@ -357,22 +384,7 @@ def build_model_router(
     if provider is None:
         return None
 
-    tier_models: dict[str, str] = {}
-    for tier in MODEL_TIER_LADDER:
-        tier_config = economics.tiers.get(tier)
-        if tier_config is None:
-            continue
-        # First model whose provider matches this backend wins for the tier.
-        # Normalize a legacy shipped id (from an older persisted config) to its
-        # current replacement; cross-provider aliases and never-shipped explicit
-        # ids pass through untouched (same-provider historical ids are ambiguous).
-        for model_config in tier_config.models:
-            if model_config.provider == provider:
-                tier_models[tier] = normalize_tier_model(
-                    model_config.model,
-                    provider=model_config.provider,
-                )
-                break
+    tier_models = configured_tier_models(economics, runtime_backend=runtime_backend)
     if not tier_models:
         return None
 
@@ -493,7 +505,10 @@ def decide_model(
     resolved_tier, model = resolved
 
     mode = (
-        MODEL_MODE_ENFORCED if model_override_support is ParamSupport.NATIVE else MODEL_MODE_ADVISED
+        MODEL_MODE_ENFORCED
+        if model_override_support is ParamSupport.NATIVE
+        and model not in {"default", "auto", "current"}
+        else MODEL_MODE_ADVISED
     )
     return ModelDecision(tier=resolved_tier, model=model, mode=mode)
 

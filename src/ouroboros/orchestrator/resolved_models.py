@@ -1,11 +1,10 @@
 """Resolve the model-tier ladder a run executes on, and replay it on resume.
 
-Model settings default to ``auto`` (see :mod:`ouroboros.config.model_selection`):
-each tier runs on the latest model of that tier for the run's backend, the
-Claude CLI aliases on alias backends and the ``"default"`` sentinel elsewhere.
-The ``economics.tiers`` ladder keeps its shape (which tiers exist, their cost)
-but its model ids apply only when models are pinned or the backend takes
-explicit model ids (``litellm``, ``copilot``).
+Automatic role selection follows CLI-owned defaults. The execution-time
+model router separately resolves the economics ladder: Claude uses current
+tier aliases unless pinned, and other supported runtimes keep their native
+configured models. Costs and sparse ladder shape remain configuration.
+Codex's automatic-role path stays dormant unless routing is explicitly enabled.
 
 The runner resolves the ladder once into its economics snapshot, so the model
 router and every Route B projection built from that snapshot agree. A run
@@ -23,7 +22,7 @@ from collections.abc import Mapping
 import inspect
 from typing import TYPE_CHECKING, Any, cast
 
-from ouroboros.config._model_defaults import recognized_shipped_defaults
+from ouroboros.config._model_defaults import normalize_tier_model, recognized_shipped_defaults
 from ouroboros.config.model_selection import (
     ROLE_TIERS,
     SHIPPED_TIER_MODELS,
@@ -33,7 +32,10 @@ from ouroboros.config.model_selection import (
     tier_model,
 )
 from ouroboros.config.models import ModelConfig
-from ouroboros.orchestrator.model_routing import _BACKEND_PROVIDER, MODEL_TIER_LADDER
+from ouroboros.orchestrator.model_routing import (
+    _BACKEND_PROVIDER,
+    MODEL_TIER_LADDER,
+)
 from ouroboros.orchestrator.route_compat import _configured_models
 
 if TYPE_CHECKING:
@@ -60,10 +62,11 @@ def _with_tier_models(
         if model is None or not any(entry.provider == provider for entry in tier_config.models):
             tiers[name] = tier_config
             continue
-        others = [entry for entry in tier_config.models if entry.provider != provider]
-        tiers[name] = tier_config.model_copy(
-            update={"models": [ModelConfig(provider=provider, model=model), *others]}
-        )
+        entries = [
+            entry.model_copy(update={"model": model}) if entry.provider == provider else entry
+            for entry in tier_config.models
+        ]
+        tiers[name] = tier_config.model_copy(update={"models": entries})
     return economics.model_copy(update={"tiers": tiers})
 
 
@@ -76,11 +79,7 @@ def resolve_route_economics(
     otherwise each tier becomes :func:`tier_model` for the backend.
     """
     provider = _provider(runtime_backend)
-    if (
-        provider is None
-        or pinned
-        or backend_model_selection(cast(str, runtime_backend)) == "explicit"
-    ):
+    if provider is None or pinned or backend_model_selection(cast(str, runtime_backend)) != "alias":
         return economics
     backend = cast(str, runtime_backend)
     return _with_tier_models(
@@ -143,9 +142,47 @@ def replay_route_economics(
         )
         for pinned in (False, True)
     ]
+    # Before native tier routing, automatic sentinel backends persisted one
+    # unresolved default per configured tier. Replay that frozen contract as
+    # advisory instead of replacing it with newly shipped concrete models.
+    if backend_model_selection(backend) == "sentinel":
+        configured_models = _configured_models(configured, runtime_backend=backend) or {}
+        candidates.append(dict.fromkeys(configured_models, "default"))
     if dict(persisted_tiers) not in candidates:
-        return None
-    return _with_tier_models(economics, provider, persisted_tiers)
+        # A pin bump changes new runs, not a frozen run. Accept an old shipped
+        # id only in the same provider AND tier whose current authorized model
+        # it normalizes to; never admit a cross-tier or arbitrary custom value.
+        def historically_authorized(candidate: Mapping[str, str] | None) -> bool:
+            if candidate is None or set(candidate) != set(persisted_tiers):
+                return False
+            for tier, model in persisted_tiers.items():
+                normalized = normalize_tier_model(model, provider=provider)
+                if backend == "gemini_cli" and provider == "google":
+                    normalized = {
+                        "gemini-2.0-flash": "flash",
+                        "gemini-2.5-pro": "pro",
+                    }.get(normalized, normalized)
+                if normalized != candidate[tier]:
+                    return False
+            return True
+
+        if not any(historically_authorized(candidate) for candidate in candidates):
+            return None
+    # Only the validated frozen map enters this runtime-specific namespace.
+    # Vendor legacy-default normalization must not rewrite a resumed model.
+    tiers = dict(economics.tiers)
+    for name, model in persisted_tiers.items():
+        tier = tiers.get(name)
+        if tier is not None:
+            tiers[name] = tier.model_copy(
+                update={
+                    "models": [
+                        ModelConfig(provider=backend, model=model),
+                        *(entry for entry in tier.models if entry.provider != backend),
+                    ]
+                }
+            )
+    return economics.model_copy(update={"tiers": tiers})
 
 
 def replay_constructor_model(
