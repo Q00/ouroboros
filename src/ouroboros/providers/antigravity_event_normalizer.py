@@ -64,27 +64,33 @@ def normalize_antigravity_tool(name: object, arguments: object) -> tuple[str, di
     return canonical, inputs
 
 
+def is_legacy_gemini_event(parsed: dict[str, Any]) -> bool:
+    """Share legacy dispatch between normalization and session identity extraction."""
+    if "event" not in parsed:
+        return True
+    kind = parsed.get("event")
+    legacy_kind = kind.strip().lower() if isinstance(kind, str) else ""
+    declared_type = parsed.get("type", legacy_kind)
+    # A nested native payload, even malformed, owns its envelope. Legacy
+    # event spellings retain Gemini semantics only without that payload.
+    return (
+        legacy_kind in _LEGACY_EVENT_TYPES
+        and not (legacy_kind in {"init", "result"} and legacy_kind in parsed)
+        and (
+            not isinstance(declared_type, str)
+            or not declared_type.strip()
+            or declared_type.strip().lower() == legacy_kind
+        )
+    )
+
+
 class AntigravityEventNormalizer(GeminiEventNormalizer):
     """Unpack native envelopes and preserve conversation and tool correlation."""
 
     def _normalize_json_dict(self, parsed: dict[str, Any], *, original: str) -> dict[str, Any]:
-        if "event" not in parsed:
+        if is_legacy_gemini_event(parsed):
             return super()._normalize_json_dict(parsed, original=original)
         kind = parsed.get("event")
-        legacy_kind = kind.strip().lower() if isinstance(kind, str) else ""
-        declared_type = parsed.get("type", legacy_kind)
-        # A nested native payload, even malformed, owns its envelope. Legacy
-        # event spellings retain Gemini semantics only without that payload.
-        if (
-            legacy_kind in _LEGACY_EVENT_TYPES
-            and not (legacy_kind in {"init", "result"} and legacy_kind in parsed)
-            and (
-                not isinstance(declared_type, str)
-                or not declared_type.strip()
-                or declared_type.strip().lower() == legacy_kind
-            )
-        ):
-            return super()._normalize_json_dict(parsed, original=original)
         payload = parsed.get(kind) if isinstance(kind, str) else None
         if (
             not isinstance(kind, str)
@@ -95,6 +101,7 @@ class AntigravityEventNormalizer(GeminiEventNormalizer):
                 event_type="unknown", content="", raw=parsed, metadata={}, is_error=False
             )
         metadata = dict(payload)
+        metadata.pop("session_id", None)
         session_id = parsed.get("conversation_id", payload.get("conversation_id"))
         if isinstance(session_id, str) and session_id.strip():
             metadata["session_id"] = session_id.strip()

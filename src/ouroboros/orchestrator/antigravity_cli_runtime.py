@@ -51,7 +51,10 @@ from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
 )
 from ouroboros.orchestrator.gemini_cli_runtime import GeminiCLIRuntime
-from ouroboros.providers.antigravity_event_normalizer import AntigravityEventNormalizer
+from ouroboros.providers.antigravity_event_normalizer import (
+    AntigravityEventNormalizer,
+    is_legacy_gemini_event,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -94,6 +97,17 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
     _default_llm_backend = "claude_code"
     _tempfile_prefix = "ouroboros-antigravity-"
     _max_resume_retries = 0  # agy print mode does not support targeted resume
+
+    def _extract_event_session_id(self, event: dict[str, Any]) -> str | None:
+        """Trust canonical native identity; preserve legacy Gemini extraction."""
+        raw = event.get("raw")
+        if not isinstance(raw, dict) or is_legacy_gemini_event(raw):
+            return super()._extract_event_session_id(event)
+        if event.get("type") not in {"init", "message", "tool_use", "tool_result", "result"}:
+            return None
+        metadata = event.get("metadata")
+        session_id = metadata.get("session_id") if isinstance(metadata, dict) else None
+        return session_id.strip() if isinstance(session_id, str) and session_id.strip() else None
 
     def _parse_json_event(self, line: str) -> dict[str, Any] | None:
         if not line.strip():
