@@ -9,12 +9,7 @@ API-key Gemini access is unaffected). If you authenticated the Gemini runtime
 through a Pro/Ultra subscription, switch the affected stages to the
 `antigravity` runtime.
 
-The Antigravity runtime extends the Gemini runtime (Antigravity is Google's
-Gemini-CLI successor): Ouroboros owns the orchestration loop and shells out to
-`agy` per task. `agy -p` prints a **plain-text** response (there is no
-`--output-format` flag), so the runtime surfaces the final answer as assistant
-messages and checkpoints at the Ouroboros layer (event store + lineage) rather
-than inside the subprocess.
+The Antigravity runtime extends the Gemini runtime (Antigravity is Google's Gemini-CLI successor): Ouroboros owns the orchestration loop and invokes `agy -p --output-format stream-json` for each task. It normalizes native assistant, tool, session, and terminal events into Ouroboros messages. Workflow checkpoints remain at the Ouroboros layer (event store + lineage). The installed CLI must support `--output-format stream-json`; CLI-dependent behavior is documented in `docs/antigravity-stream-contract.md`.
 
 ## Prerequisites
 
