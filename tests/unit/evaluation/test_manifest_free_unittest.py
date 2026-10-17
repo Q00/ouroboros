@@ -307,7 +307,7 @@ def test_inherited_test_names_respect_child_shadowing(
         text=True,
         check=False,
     )
-    # Python 3.14 exits 5 for an empty suite; earlier supported versions exit 0.
+    # Empty-suite exit codes vary across supported Python versions.
     expected_codes = {0} if expected_count else {0, 5}
     assert actual.returncode in expected_codes, actual.stderr
     assert f"Ran {expected_count} test" in actual.stderr
