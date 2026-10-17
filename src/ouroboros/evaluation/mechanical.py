@@ -190,18 +190,29 @@ def parse_coverage_from_output(output: str) -> float | None:
     import re
 
     # Pattern matches lines like "TOTAL   1234   123  90%"
-    pattern = r"TOTAL\s+\d+\s+\d+\s+(\d+)%"
-    match = re.search(pattern, output)
-    if match:
-        return float(match.group(1)) / 100.0
+    pattern = r"^[ \t]*TOTAL\s+\d+\s+\d+\s+(\d+)%"
+    # Alternative pattern: a line that starts with "Coverage: XX%". Anchored so
+    # a requirement such as "Required Coverage: 70%" is not read as a result.
+    alt_pattern = r"^[ \t]*Coverage:\s*(\d+(?:\.\d+)?)%"
 
-    # Alternative pattern: "Coverage: XX%"
-    alt_pattern = r"Coverage:\s*(\d+(?:\.\d+)?)%"
-    alt_match = re.search(alt_pattern, output)
-    if alt_match:
-        return float(alt_match.group(1)) / 100.0
-
-    return None
+    # Every TOTAL row is a figure from the report. One in a shape the pattern
+    # cannot read (decimals, branch columns) makes the report ambiguous, so no
+    # other row or "Coverage:" line may stand in for it.
+    total_rows = re.findall(r"^[ \t]*TOTAL\b.*$", output, re.MULTILINE)
+    matches = [re.match(pattern, row) for row in total_rows]
+    if not all(matches):
+        return None
+    readings = [match.group(1) for match in matches if match]
+    readings += re.findall(alt_pattern, output, re.MULTILINE)
+    values = {float(reading) for reading in readings}
+    # More than one distinct figure, or a figure no tool can report, is not a
+    # measurement: return None so the threshold stays undecided.
+    if len(values) != 1:
+        return None
+    (value,) = values
+    if value > 100.0:
+        return None
+    return value / 100.0
 
 
 class MechanicalVerifier:
@@ -370,8 +381,22 @@ class MechanicalVerifier:
         # Extract coverage if this was a coverage check
         if check_type == CheckType.COVERAGE and passed:
             coverage = parse_coverage_from_output(cmd_result.stdout)
-            if coverage is not None:
-                details["coverage_score"] = coverage
+            if coverage is None:
+                # The exit code says the command ran, not that coverage met the
+                # threshold. Without a figure the threshold is undecided: not a
+                # pass, and not an executed failure that would claim a measurement.
+                return CheckResult(
+                    check_type=check_type,
+                    passed=False,
+                    message=(
+                        "Coverage command exited 0 but no coverage figure could be read "
+                        f"from its output; threshold {self.config.coverage_threshold:.1%} "
+                        "not verified"
+                    ),
+                    details={**details, "coverage_unparsed": True},
+                    executed=False,
+                )
+            details["coverage_score"] = coverage
 
         message = (
             f"Check {check_type.value} passed"

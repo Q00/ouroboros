@@ -2,10 +2,12 @@
 
 import asyncio
 import sys
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from ouroboros.core.acceptance import AcceptanceState
 from ouroboros.evaluation.mechanical import (
     CommandResult,
     MechanicalConfig,
@@ -14,7 +16,7 @@ from ouroboros.evaluation.mechanical import (
     run_command,
     run_mechanical_verification,
 )
-from ouroboros.evaluation.models import CheckType
+from ouroboros.evaluation.models import CheckType, MechanicalDisposition
 
 # Config with commands set for tests that need real/mocked command execution
 _TEST_CONFIG = MechanicalConfig(
@@ -58,6 +60,45 @@ class TestParseCoverageFromOutput:
         """Return None when no coverage found."""
         output = "All tests passed"
         assert parse_coverage_from_output(output) is None
+
+    @pytest.mark.parametrize(
+        "output",
+        [
+            "Required Coverage: 70%\nTOTAL   100   85   15.00%",
+            "Coverage: 70% required\nTOTAL   100   85   15.00%",
+            "Required Coverage: 70%",
+            "Coverage: 999%",
+            "TOTAL   100   0   101%",
+            "TOTAL   10   0   100%\nTOTAL   100   85   15%",
+            "Coverage: 100%\nCoverage: 15%",
+            "TOTAL   10   0   100%\nTOTAL   100   85   15.00%",
+            "TOTAL   10   0   100%\nTOTAL   100   85   40   30   15%",
+            "TOTAL   100   20   80%\nCoverage: 15%",
+        ],
+        ids=[
+            "requirement-beside-decimal-total",
+            "requirement-line-beside-decimal-total",
+            "requirement-only",
+            "over-100-colon",
+            "over-100-total",
+            "conflicting-totals",
+            "conflicting-colon",
+            "readable-beside-decimal-total",
+            "readable-beside-branch-total",
+            "total-disagrees-with-colon",
+        ],
+    )
+    def test_ambiguous_or_impossible_figures_are_unread(self, output: str) -> None:
+        """A figure the output does not pin down is not a measurement."""
+        assert parse_coverage_from_output(output) is None
+
+    @pytest.mark.parametrize(
+        "output",
+        ["TOTAL   100   20   80%\nTOTAL   100   20   80%", "TOTAL   100   20   80%\nCoverage: 80%"],
+        ids=["repeated-total", "total-agrees-with-colon"],
+    )
+    def test_agreeing_figures_are_one_reading(self, output: str) -> None:
+        assert parse_coverage_from_output(output) == 0.80
 
 
 class TestMechanicalConfig:
@@ -425,3 +466,117 @@ def test_run_command_resolves_tools_from_the_main_worktree_venv(tmp_path) -> Non
 
     assert result.return_code == 0, result.stderr
     assert "PROJECT_VENV_TOOL" in result.stdout
+
+
+# Coverage outputs the parser cannot read, one per common tool. Each reports
+# 15% against a 70% threshold, so any of them reaching approval is the defect.
+_UNPARSED_COVERAGE_OUTPUTS = {
+    "pytest-cov --cov-branch": (
+        "Name  Stmts Miss Branch BrPart Cover\nTOTAL   100   85   40   30   15%"
+    ),
+    "pytest-cov precision=2": "TOTAL   100   85   15.00%",
+    "go test -cover": "ok  \texample.com/m\t0.002s\tcoverage: 15.0% of statements",
+    "jest --coverage": "All files |   15.2 |   10.1 |   12.3 |   15.2 |",
+    "cargo tarpaulin": "15.00% coverage, 15/100 lines covered",
+    "coverage report --format=total": "15",
+    "no output": "",
+    "requirement beside decimal TOTAL": "Required Coverage: 70%\nTOTAL   100   85   15.00%",
+    "coverage over 100%": "Coverage: 999%",
+    "conflicting TOTAL rows": "TOTAL   10   0   100%\nTOTAL   100   85   15%",
+    "readable beside decimal TOTAL": "TOTAL   10   0   100%\nTOTAL   100   85   15.00%",
+}
+
+
+def _printing(text: str) -> tuple[str, ...]:
+    return (sys.executable, "-c", f"import sys; sys.stdout.write({text!r})")
+
+
+async def _evaluate_stage1_only(config: MechanicalConfig) -> Any:
+    from ouroboros.evaluation import EvaluationContext, EvaluationPipeline, PipelineConfig
+
+    pipeline = EvaluationPipeline(
+        llm_adapter=None,  # type: ignore[arg-type]
+        config=PipelineConfig(stage2_enabled=False, stage3_enabled=False, mechanical=config),
+    )
+    context = EvaluationContext(
+        execution_id="exec-cov",
+        seed_id="seed-cov",
+        current_ac="Coverage is at least 70%",
+        artifact="x",
+    )
+    result = await pipeline.evaluate(context)
+    assert result.is_ok, result
+    return result.value
+
+
+class TestUnparsedCoverageIsNotEvidence:
+    """A coverage command that exits 0 without a readable figure decides nothing."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("with_passing_test", [False, True], ids=["alone", "with-test"])
+    @pytest.mark.parametrize(
+        "output", _UNPARSED_COVERAGE_OUTPUTS.values(), ids=list(_UNPARSED_COVERAGE_OUTPUTS)
+    )
+    async def test_unreadable_coverage_is_not_approved(
+        self, output: str, with_passing_test: bool
+    ) -> None:
+        config = MechanicalConfig(
+            coverage_threshold=0.7,
+            coverage_command=_printing(output),
+            test_command=_printing("1 passed") if with_passing_test else None,
+        )
+
+        result = await _evaluate_stage1_only(config)
+
+        stage1 = result.stage1_result
+        coverage = next(c for c in stage1.checks if c.check_type is CheckType.COVERAGE)
+        assert coverage.passed is False
+        assert coverage.executed is False
+        assert coverage.details["coverage_unparsed"] is True
+        assert coverage.details["return_code"] == 0
+        assert "coverage_score" not in coverage.details
+        assert coverage.message == (
+            "Coverage command exited 0 but no coverage figure could be read from its "
+            "output; threshold 70.0% not verified"
+        )
+        assert stage1.coverage_score is None
+        assert stage1.passed is False
+        assert stage1.disposition is MechanicalDisposition.NO_EVIDENCE
+        assert result.final_approved is False
+        assert result.acceptance_state is AcceptanceState.UNVERIFIED
+        assert result.failure_reason == (
+            "Not approved: unverified. No executed verification evidence "
+            "(Stage 1 reported failures from no executed check)."
+        )
+        completed = next(e for e in result.events if e.type == "evaluation.stage1.completed")
+        assert completed.data["passed"] is False
+        assert completed.data["coverage_score"] is None
+        assert {"check_type": "coverage", "passed": False, "message": coverage.message} in (
+            completed.data["checks"]
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("output", "approved", "disposition"),
+        [
+            ("TOTAL   100   85   15%", False, MechanicalDisposition.EXECUTED_FAIL),
+            ("Coverage: 15.0%", False, MechanicalDisposition.EXECUTED_FAIL),
+            ("TOTAL   100   20   80%", True, MechanicalDisposition.EXECUTED_PASS),
+        ],
+        ids=["pytest-cov-below", "coverage-colon-below", "pytest-cov-above"],
+    )
+    async def test_readable_coverage_still_decides(
+        self, output: str, approved: bool, disposition: MechanicalDisposition
+    ) -> None:
+        config = MechanicalConfig(coverage_threshold=0.7, coverage_command=_printing(output))
+
+        result = await _evaluate_stage1_only(config)
+
+        coverage = next(
+            c for c in result.stage1_result.checks if c.check_type is CheckType.COVERAGE
+        )
+        assert coverage.executed is True
+        assert coverage.passed is approved
+        assert "coverage_unparsed" not in coverage.details
+        assert result.stage1_result.disposition is disposition
+        assert result.final_approved is approved
