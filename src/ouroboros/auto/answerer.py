@@ -337,10 +337,11 @@ class AutoAnswerer:
     ) -> None:
         """Apply answer updates to ``ledger``.
 
-        ``asked`` is the interviewer's own question when this answer replies
-        to one (not a driver gap-reopen prompt). It is kept on each new entry
-        (``LedgerEntry.question``) so an unconfirmed entry can reach the worker
-        as the open question instead of the drafted answer.
+        ``asked`` is the interviewer's current question. When the answer
+        replies to it (``question`` is that question, not a driver gap-reopen
+        prompt), it is kept on each new entry (``LedgerEntry.question``) so an
+        unconfirmed entry can reach the worker as the open question instead of
+        the drafted answer.
         """
         ledger.record_qa(question, answer.prefixed_text)
         if answer.blocker is not None:
@@ -357,7 +358,7 @@ class AutoAnswerer:
                 ),
             )
         for section, entry in answer.ledger_updates:
-            if asked and not entry.question:
+            if asked and asked == question and not entry.question:
                 entry = replace(entry, question=asked)
             ledger.add_entry(section, entry)
 

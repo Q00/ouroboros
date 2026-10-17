@@ -26,11 +26,12 @@ from ouroboros.auto.domain_inference import derive_domain_from_ledger
 from ouroboros.auto.domain_profile import DEFAULT_REGISTRY
 from ouroboros.auto.execution_acceptance import normalize_execution_acceptance
 from ouroboros.auto.grade_gate_terminals import (
-    DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE,
     SEED_GRADE_BELOW_REQUIRED_STOP_REASON_CODE,
     SEED_REVIEW_WITHHELD_RUN_STOP_REASON_CODE,
+    degraded_seed_not_executed_blocker,
     degraded_seed_safety_blocker,
     grade_meets_required,
+    is_degraded_seed_not_executed_stop,
     seed_review_gate_blocker,
 )
 from ouroboros.auto.grading import GradeGate, deterministic_floor
@@ -1883,17 +1884,8 @@ class AutoPipeline:
             f"{len(unresolved_slots)} unresolved slot(s) carried forward as next steps",
             tool_name="partial_product_terminal",
         )
-        # The degraded Seed was never executed, so the session must not report
-        # complete: it stops BLOCKED with a typed code, the Seed kept on disk.
-        blocker = (
-            "Degraded seed emitted as a partial product and not executed; "
-            f"{len(unresolved_slots)} unresolved slot(s) need an answer before a run"
-        )
-        state.mark_blocked(
-            blocker,
-            tool_name="partial_product_terminal",
-            error_code=DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE,
-        )
+        blocker, code = degraded_seed_not_executed_blocker(len(unresolved_slots))
+        state.mark_blocked(blocker, tool_name="partial_product_terminal", error_code=code)
         self._save(state)
         return self._result(state, ledger, review=review, blocker=blocker)
 
@@ -2481,11 +2473,7 @@ class AutoPipeline:
         # BLOCKED with ``DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE`` because
         # the Seed was never executed. A degraded Seed that BLOCKED for another
         # reason (e.g. a safety blocker) keeps ``partial_product=False``.
-        partial_product = (
-            seed_degraded
-            and state.phase == AutoPhase.BLOCKED
-            and state.last_error_code == DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE
-        )
+        partial_product = seed_degraded and is_degraded_seed_not_executed_stop(state)
         result_status = status_override or state.phase.value
         artifact_state = _artifact_state_for_result(
             status=result_status,

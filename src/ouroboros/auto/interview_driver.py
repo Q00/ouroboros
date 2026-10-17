@@ -1172,7 +1172,6 @@ class AutoInterviewDriver:
                 # send something through the backend instead of crashing.
                 answer = self._answer_with_gap_steering(turn.question, ledger, answer_context)
                 question_for_record = turn.question
-                asked_question: str | None = turn.question
             else:
                 first_gap = detected_gaps[0]
                 if first_gap.section == "goal" or first_gap.state in {
@@ -1200,12 +1199,9 @@ class AutoInterviewDriver:
                     f"[driver gap-reopen '{first_gap.section}': "
                     "backend_completed=True ledger_done=False]"
                 )
-                # A synthetic prompt, not a question the interviewer asked.
-                asked_question = None
         else:
             answer = self._answer_with_gap_steering(turn.question, ledger, answer_context)
             question_for_record = turn.question
-            asked_question = turn.question
 
         # Concretize a generic answer (LLM), then ask the requester where auto would assume.
         answer = await self._refine_answer(answer, question_for_record, state, ledger)
@@ -1279,7 +1275,7 @@ class AutoInterviewDriver:
         # deterministically re-computes the same answer, and the next
         # ``backend.answer`` attempt either succeeds (round completes
         # cleanly) or returns the same blocker.
-        self.answerer.apply(answer, ledger, question=question_for_record, asked=asked_question)
+        self.answerer.apply(answer, ledger, question=question_for_record, asked=turn.question)
 
         answer_session_id = turn.session_id
 

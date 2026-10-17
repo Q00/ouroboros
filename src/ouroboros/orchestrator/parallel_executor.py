@@ -106,14 +106,7 @@ from ouroboros.orchestrator.atomic_prompt_builder import (
     AtomicPromptBuilder,
     _build_success_contract_block,  # noqa: F401  (re-exported for tests/back-compat)
 )
-from ouroboros.orchestrator.attempt_evidence import (
-    NO_EVIDENCE_NOTE,
-    attempt_workspace_evidence,
-    judgment_envelope_ok,
-    workspace_diff_evidence,
-    workspace_head,
-    workspace_unchanged,
-)
+from ouroboros.orchestrator.attempt_evidence import attempt_workspace_evidence, judgment_envelope_ok
 from ouroboros.orchestrator.backend_limits import (
     BackendConcurrencyLimits,
     resolve_backend_limits,
@@ -364,6 +357,7 @@ from ouroboros.orchestrator.model_routing import (
     serialize_model_router,
     tier_from_profile_hint,
 )
+from ouroboros.orchestrator.no_evidence_route import NoEvidenceRoute
 from ouroboros.orchestrator.parallel_executor_models import (
     ACExecutionOutcome,
     ACExecutionResult,
@@ -439,7 +433,7 @@ from ouroboros.orchestrator.verifier import (
     VerifierVerdict,
     verifier_operational_failure_verdict,
 )
-from ouroboros.orchestrator.verify_base_signal import VerifyBaseSignal, no_signal_outcome
+from ouroboros.orchestrator.verify_base_signal import VerifyBaseSignal
 from ouroboros.orchestrator.verify_command_runner import run_with_shell
 from ouroboros.orchestrator.verify_gate_outcome import (
     _VERIFY_OUTPUT_TAIL_CHARS,
@@ -452,7 +446,6 @@ from ouroboros.orchestrator.verify_gate_outcome import (
     _VerifyGateOutcome,
 )
 from ouroboros.orchestrator.verify_quarantine import (
-    quarantine_reason,
     quarantine_unverifiable_result,
     render_unverifiable_summary,
 )
@@ -2562,8 +2555,7 @@ def render_parallel_verification_report(
         if (
             isinstance(result.verify_gate_outcome, _VerifyGateOutcome)
             and result.verify_gate_outcome.environment_unverifiable
-            # A no-evidence attempt is quarantined but BLOCKED, not succeeded.
-            and result.success
+            and result.success  # a no-evidence attempt is quarantined but BLOCKED
         )
         or (
             result.atomic_verifier_verdict is not None
@@ -2815,11 +2807,7 @@ class ParallelACExecutor:
         # The verify gate reads this to tell "my verify_command wrote" apart
         # from "a sibling worker wrote while my command ran".
         self._inflight_ac_workers = 0
-        # ``HEAD`` of the workspace when this run started (``execute_parallel``);
-        # ``None`` outside a Git work tree, which turns the no-evidence check off.
-        self._no_evidence_base_head: str | None = None
-        # Root ACs already re-dispatched once for an attempt without evidence.
-        self._no_evidence_redispatched: set[int] = set()
+        self._no_evidence = NoEvidenceRoute()  # code-task attempts that left no evidence
         if isinstance(verify_shell_identity, _AutoVerifyShell):
             verify_shell = resolve_verify_shell()
             self._verify_shell_identity = (
@@ -3899,10 +3887,7 @@ class ParallelACExecutor:
         )
 
         start_time = datetime.now(UTC)
-        self._no_evidence_base_head = await asyncio.to_thread(
-            workspace_head,
-            Path(self._task_cwd or self._adapter.working_directory or os.getcwd()),
-        )
+        await self._no_evidence.start(self._task_cwd or self._adapter.working_directory or ".")
         all_results: list[ACExecutionResult] = []
         failed_indices: set[int] = set()
         blocked_indices: set[int] = set()
@@ -9880,16 +9865,14 @@ Respond with either ATOMIC or the structured JSON object only.
         if mutated is not None:
             return mutated
         returncode = run.returncode
-        if returncode != 0 and self._verify_base_signal.base_missing:
-            return no_signal_outcome(
-                returncode, tail, workspace_digest(), replay_required, base_missing=True
-            )
         if returncode != 0 and await self._verify_base_signal.fails_on_base(
             command,
             shell_path=verify_shell_path,
             timeout_seconds=self._verify_command_timeout_seconds,
         ):
-            return no_signal_outcome(returncode, tail, workspace_digest(), replay_required)
+            return self._verify_base_signal.no_signal(
+                returncode, tail, workspace_digest(), replay_required
+            )
         if returncode != 0:
             return _VerifyGateOutcome(
                 passed=False,
@@ -9933,84 +9916,8 @@ Respond with either ATOMIC or the structured JSON object only.
         result = await self._apply_verify_command(seed=seed, ac_index=ac_index, **kwargs)
         if result.success and (gate := getattr(self, "check_package_gate", None)) is not None:
             result = await gate(seed=seed, ac_index=ac_index, **{**kwargs, "result": result})
-        if result.success and seed.task_type == "code":
-            result = await self._route_attempt_without_evidence(
-                seed=seed,
-                ac_index=ac_index,
-                result=result,
-                session_id=kwargs["session_id"],
-                execution_id=kwargs["execution_id"],
-            )
-        return result
-
-    async def _route_attempt_without_evidence(
-        self,
-        *,
-        seed: Seed,
-        ac_index: int,
-        result: ACExecutionResult,
-        session_id: str,
-        execution_id: str,
-    ) -> ACExecutionResult:
-        """A code-task attempt that changed nothing and ran no verify command is not done.
-
-        Evidence is read from structured state only: the verify gate outcome
-        (``None`` or never started means no verify command result) and the
-        workspace diff against the ``HEAD`` the run started from. The first such
-        attempt of a root AC fails with a short factual note so the retry loop
-        re-dispatches it once. After that (or with no retry left) it takes the
-        undecided route (``quarantine_unverifiable_result``, cause
-        ``no_evidence``) and is marked ``BLOCKED``, so it never counts as
-        complete on its own.
-        """
-        outcome = result.verify_gate_outcome
-        if outcome is not None and getattr(outcome, "cause", None) != "environment_unverifiable":
-            return result
-        if result.outcome not in (None, ACExecutionOutcome.SUCCEEDED):
-            return result
-        cwd = Path(self._task_cwd or self._adapter.working_directory or os.getcwd())
-        diff = await asyncio.to_thread(workspace_diff_evidence, cwd)
-        if not workspace_unchanged(diff, self._no_evidence_base_head):
-            return result
-        if (
-            ac_index not in self._no_evidence_redispatched
-            and result.retry_attempt < self._ac_retry_attempts
-        ):
-            self._no_evidence_redispatched.add(ac_index)
-            return replace(
-                result,
-                success=False,
-                error=NO_EVIDENCE_NOTE,
-                final_message=NO_EVIDENCE_NOTE,
-                outcome=ACExecutionOutcome.FAILED,
-            )
-        spec = seed.acceptance_criteria[ac_index]
-        no_evidence = _VerifyGateOutcome(
-            passed=False,
-            reason=NO_EVIDENCE_NOTE,
-            output_tail="",
-            workspace_digest=None,
-            environment_unverifiable=True,
-            cause="no_evidence",
-        )
-        quarantined = await quarantine_unverifiable_result(
-            result=result,
-            spec=spec,
-            ac_content=ac_text(spec),
-            ac_index=ac_index,
-            gate_reason=NO_EVIDENCE_NOTE,
-            verify_gate_outcome=no_evidence,
-            session_id=session_id,
-            execution_id=execution_id,
-            emit_event=self._safe_emit_event,
-        )
-        detail = quarantine_reason(NO_EVIDENCE_NOTE)
-        return replace(
-            quarantined,
-            success=False,
-            error=detail,
-            final_message=detail,
-            outcome=ACExecutionOutcome.BLOCKED,
+        return await self._no_evidence.route(
+            self, seed=seed, ac_index=ac_index, **{**kwargs, "result": result}
         )
 
     async def _apply_verify_command(

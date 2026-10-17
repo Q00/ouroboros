@@ -61,6 +61,27 @@ def degraded_seed_safety_blocker(review: SeedReview) -> tuple[str, str] | None:
     )
 
 
+def degraded_seed_not_executed_blocker(unresolved_slots: int) -> tuple[str, str]:
+    """Return ``(blocker, stop_reason_code)`` for the partial-product stop.
+
+    The degraded Seed is emitted for the user but never executed, so the
+    session must not report complete.
+    """
+    return (
+        "Degraded seed emitted as a partial product and not executed; "
+        f"{unresolved_slots} unresolved slot(s) need an answer before a run",
+        DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE,
+    )
+
+
+def is_degraded_seed_not_executed_stop(state: AutoPipelineState) -> bool:
+    """Whether ``state`` stopped at the partial-product terminal."""
+    return (
+        state.phase.value == "blocked"
+        and state.last_error_code == DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE
+    )
+
+
 def seed_review_gate_blocker(
     state: AutoPipelineState, review: SeedReview | None, *, skip_run: bool
 ) -> tuple[str, str] | None:

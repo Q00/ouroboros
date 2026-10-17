@@ -77,7 +77,7 @@ def _executor(repo: Path, retry_budget: int) -> ParallelACExecutor:
         ac_retry_attempts=retry_budget,
         verify_command_timeout_seconds=30,
     )
-    executor._no_evidence_base_head = workspace_head(repo)
+    executor._no_evidence.base_head = workspace_head(repo)
     return executor
 
 
@@ -222,7 +222,7 @@ async def test_outside_a_git_work_tree_the_check_is_off(tmp_path: Path) -> None:
     plain = tmp_path / "plain"
     plain.mkdir()
     executor = _executor(plain, retry_budget=2)
-    assert executor._no_evidence_base_head is None
+    assert executor._no_evidence.base_head is None
     seed = _seed(AcceptanceCriterionSpec(description="fix the bug"))
 
     result, dispatches = await _run(executor, seed)

@@ -89,7 +89,13 @@ class VerifyBaseSignal:
         return self._base_missing
 
     async def fails_on_base(self, command: str, *, shell_path: str, timeout_seconds: float) -> bool:
-        """Return True only when ``command`` exits non-zero on the untouched base."""
+        """Return True only when ``command`` exits non-zero on the untouched base.
+
+        Also True when the base snapshot is missing (``base_missing``): whether
+        the command fails there cannot be known, so it decides nothing either.
+        """
+        if self._base_missing:
+            return True
         if not self.available:
             return False
         lock = self._locks.setdefault(command, asyncio.Lock())
@@ -99,6 +105,18 @@ class VerifyBaseSignal:
                     command, shell_path=shell_path, timeout_seconds=timeout_seconds
                 )
             return self._fails_on_base[command]
+
+    def no_signal(
+        self, returncode: int, output_tail: str, workspace_digest: str | None, replay_required: bool
+    ) -> _VerifyGateOutcome:
+        """The undecided outcome for a command ``fails_on_base`` said carries no signal."""
+        return no_signal_outcome(
+            returncode,
+            output_tail,
+            workspace_digest,
+            replay_required,
+            base_missing=self._base_missing,
+        )
 
     async def _run_on_base(self, command: str, *, shell_path: str, timeout_seconds: float) -> bool:
         assert self._base_snapshot is not None

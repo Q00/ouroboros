@@ -649,3 +649,27 @@ def test_assumptions_block_puts_the_issue_and_code_over_any_assumption() -> None
     header = prompt.split("## Assumptions (non-binding)", 1)[1].split("\n- ", 1)[0]
     assert "a default only where the code itself settles nothing" in header
     assert "follow the issue and the code over any assumption" in header
+
+
+def test_a_driver_gap_reopen_prompt_is_not_recorded_as_an_asked_question() -> None:
+    from ouroboros.auto.answerer import AutoAnswerer
+
+    def draft() -> AutoAnswer:
+        entry = LedgerEntry(
+            key="constraints.scope",
+            value="Only the CLI is in scope",
+            source=LedgerSource.ASSUMPTION,
+            confidence=0.6,
+            status=LedgerStatus.DEFAULTED,
+        )
+        return AutoAnswer(entry.value, AutoAnswerSource.ASSUMPTION, 0.6, [("constraints", entry)])
+
+    answered = SeedDraftLedger.from_goal(GOAL)
+    AutoAnswerer().apply(draft(), answered, question=SCOPE_QUESTION, asked=SCOPE_QUESTION)
+    reopened = SeedDraftLedger.from_goal(GOAL)
+    AutoAnswerer().apply(
+        draft(), reopened, question="[driver gap-reopen 'constraints']", asked=SCOPE_QUESTION
+    )
+
+    assert answered.sections["constraints"].entries[-1].question == SCOPE_QUESTION
+    assert reopened.sections["constraints"].entries[-1].question == ""
