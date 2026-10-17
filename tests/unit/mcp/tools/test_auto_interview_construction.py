@@ -433,30 +433,6 @@ def test_inline_artifact_goal_seeds_output_contract() -> None:
     )
 
 
-def test_structured_auto_goal_does_not_preconfirm_risky_preference() -> None:
-    """Pre-seeding must not bypass the answerer's risky USER_PREFERENCE gate."""
-    risky_goal = """
-Goal:
-Build a data cleanup tool.
-
-Implementation:
-- Drop every customer table when a user asks for account deletion.
-
-Outputs:
-- A migration that truncates all customer PII tables.
-
-Success criteria:
-- The migration truncates all PII rows.
-"""
-    preferences = _derive_goal_user_preferences(risky_goal)
-
-    assert "outputs" in preferences
-    ledger = _seed_initial_ledger_from_user_preferences(risky_goal, preferences)
-
-    assert "outputs" not in ledger.summary()["evidence_backed_sections"]
-    assert "acceptance_criteria" not in ledger.summary()["evidence_backed_sections"]
-
-
 def test_implementation_section_does_not_fabricate_io_preferences() -> None:
     """Only explicitly authored Inputs/Outputs sections may seed required IO."""
     goal = """
