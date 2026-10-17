@@ -54,6 +54,7 @@ from ouroboros.orchestrator.gemini_cli_runtime import GeminiCLIRuntime
 from ouroboros.providers.antigravity_event_normalizer import (
     AntigravityEventNormalizer,
     is_legacy_gemini_event,
+    is_recognized_gemini_event_type,
 )
 
 log = structlog.get_logger(__name__)
@@ -100,6 +101,8 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
 
     def _extract_event_session_id(self, event: dict[str, Any]) -> str | None:
         """Trust canonical native identity; preserve legacy Gemini extraction."""
+        if not is_recognized_gemini_event_type(event.get("type")):
+            return None
         raw = event.get("raw")
         if not isinstance(raw, dict) or is_legacy_gemini_event(raw):
             return super()._extract_event_session_id(event)

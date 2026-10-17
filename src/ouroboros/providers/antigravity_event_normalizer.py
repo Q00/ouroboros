@@ -77,6 +77,11 @@ def _has_conflicting_event_type(parsed: dict[str, Any]) -> bool:
     )
 
 
+def is_recognized_gemini_event_type(event_type: object) -> bool:
+    """Identify normalized legacy types that may carry session identity."""
+    return isinstance(event_type, str) and event_type in _LEGACY_EVENT_TYPES
+
+
 def is_legacy_gemini_event(parsed: dict[str, Any]) -> bool:
     """Share legacy dispatch between normalization and session identity extraction."""
     if "event" not in parsed:
@@ -86,7 +91,7 @@ def is_legacy_gemini_event(parsed: dict[str, Any]) -> bool:
     # A nested native payload, even malformed, owns its envelope. Legacy
     # event spellings retain Gemini semantics only without that payload.
     return (
-        legacy_kind in _LEGACY_EVENT_TYPES
+        is_recognized_gemini_event_type(legacy_kind)
         and not (legacy_kind in {"init", "result"} and legacy_kind in parsed)
         and not _has_conflicting_event_type(parsed)
     )
