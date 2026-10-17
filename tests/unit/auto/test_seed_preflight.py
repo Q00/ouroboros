@@ -167,6 +167,32 @@ def test_command_bound_variables_are_not_flagged(tmp_path: Path) -> None:
     assert all(finding.code != "unbound_env_var" for finding in report.findings)
 
 
+@pytest.mark.parametrize(
+    "verify_command",
+    [
+        'for t in $(ls tests); do python -m pytest -q "$t"; done',
+        'for t in "$@"; do python -m pytest -q "$t"; done',
+        "for t; do python -m pytest -q $t; done",
+        "for t do python -m pytest -q $t; done",
+        "bash -c 'for t in $(ls tests); do python -m pytest -q \"$t\"; done'",
+    ],
+)
+def test_for_loop_variable_is_bound_whatever_its_items(tmp_path: Path, verify_command: str) -> None:
+    """A loop body only runs with its variable assigned (pytest-6197's ``$t``)."""
+    seed = _seed(
+        acceptance_criteria=(
+            AcceptanceCriterionSpec(
+                description="Every collected test module passes",
+                verify_command=verify_command,
+            ),
+        )
+    )
+
+    report = run_seed_preflight(seed, workspace_root=tmp_path)
+
+    assert all(finding.code != "unbound_env_var" for finding in report.findings)
+
+
 def test_verify_script_reference_is_advisory_not_blocking(tmp_path: Path) -> None:
     seed = _seed(
         acceptance_criteria=(
