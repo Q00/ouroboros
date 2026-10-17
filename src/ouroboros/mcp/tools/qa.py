@@ -12,8 +12,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import math
 import re
-from typing import Any
+from typing import Any, cast
 import uuid
 
 import structlog
@@ -164,23 +165,48 @@ def _build_qa_user_prompt(
 Provide your evaluation as a JSON object."""
 
 
-def _unwrap_verdict_data(data: dict[str, Any]) -> dict[str, Any]:
-    """Unwrap nested verdict objects.
+_VERDICT_WRAPPER_KEYS = ("qa_verdict", "verdict", "result", "evaluation")
+_VERDICT_FIELDS = frozenset(cast(dict[str, object], QA_VERDICT_SCHEMA["properties"]))
 
-    LLMs sometimes wrap the verdict in a key like ``{"qa_verdict": {...}}``.
-    This function detects that pattern and returns the inner dict.
+
+def _unwrap_verdict_data(data: dict[str, Any]) -> dict[str, Any]:
+    """Unwrap a pure envelope such as ``{"qa_verdict": {...}}``.
+
+    Only an outer object that is nothing but the envelope is unwrapped: exactly
+    one named wrapper key holds a dict carrying ``score``, no other key is a
+    verdict-schema field, and no other value is an object carrying one. An outer
+    object that carries its own verdict fields (``verdict``, ``reasoning``,
+    ``differences``, ...) *is* the verdict, missing its score — promoting a nested
+    object's score over it would discard the model's own verdict, so it is
+    returned unchanged and fails validation. A second object carrying verdict
+    fields (``{"qa_verdict": {"verdict": "fail"}, "result": {"score": 0.95}}``)
+    is a competing verdict, not envelope metadata, so it blocks unwrapping too.
     """
     if "score" in data:
         return data
-    # Check for single-key wrapper containing the score field
-    for key in ("qa_verdict", "verdict", "result", "evaluation"):
-        if key in data and isinstance(data[key], dict) and "score" in data[key]:
-            return data[key]
-    # Fallback: if there's exactly one dict-valued key containing 'score', use it
-    dict_values = [(k, v) for k, v in data.items() if isinstance(v, dict) and "score" in v]
-    if len(dict_values) == 1:
-        return dict_values[0][1]
-    return data
+    wrappers = [
+        key
+        for key in _VERDICT_WRAPPER_KEYS
+        if isinstance(data.get(key), dict) and "score" in data[key]
+    ]
+    if len(wrappers) != 1:
+        return data
+    for key, value in data.items():
+        if key == wrappers[0]:
+            continue
+        if key in _VERDICT_FIELDS:
+            return data
+        if isinstance(value, dict) and any(field in _VERDICT_FIELDS for field in value):
+            return data
+    inner: dict[str, Any] = data[wrappers[0]]
+    return inner
+
+
+def _is_finite_number(value: object) -> bool:
+    """True for a finite int/float; a JSON boolean is not a number here."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value)
 
 
 _LINE_DECORATION_RE = re.compile(r"^\s*(?:[-*]\s+|\d+[.)]\s+)")
@@ -276,6 +302,21 @@ def _parse_non_json_qa_response(response_text: str) -> dict[str, Any] | None:
     }
 
 
+_JSON_FENCE_RE = re.compile(r"(?im)^[ \t>]*(?:`{3,}|~{3,})[ \t]*json\b")
+# An object opening on a key, or an array opening on a JSON value. Prose
+# brackets such as ``[see AC 2]`` start with neither.
+_JSON_OPENER_RE = re.compile(r'\{\s*"|\[\s*(?:["{\[]|-?\d|true\b|false\b|null\b)')
+
+
+def _carries_json_object(text: str) -> bool:
+    """True when the text holds a JSON fence or a JSON object or array opener.
+
+    The plain-text fallback exists for providers that ignore the JSON
+    instruction entirely; text that attempted JSON is not that case.
+    """
+    return bool(_JSON_FENCE_RE.search(text)) or _JSON_OPENER_RE.search(text) is not None
+
+
 def _parse_qa_response(
     response_text: str,
     pass_threshold: float = DEFAULT_PASS_THRESHOLD,
@@ -291,6 +332,21 @@ def _parse_qa_response(
             data = json.loads(json_str)
         except json.JSONDecodeError as e:
             return Result.err(f"Invalid JSON in QA response: {e}")
+        if not isinstance(data, dict):
+            return Result.err("QA response JSON must be an object, got " + type(data).__name__)
+        if not _JSON_FENCE_RE.search(response_text) and _carries_json_object(
+            response_text.replace(json_str, "", 1)
+        ):
+            # The extractor counts only *valid* objects, so a malformed second
+            # verdict (``{"score": 0.1, "verdict": "fail",}``) beside a passing
+            # one leaves the passing one "unique". Any other object start
+            # outside the payload is a competing answer, not prose.
+            return Result.err("QA response contains JSON but no single unambiguous verdict object")
+    elif _carries_json_object(response_text):
+        # The model answered in JSON, but not with one authoritative object
+        # (competing fences, or several objects). Reading ``Score: 0.95`` out of
+        # the surrounding prose would let an example outrank that answer.
+        return Result.err("QA response contains JSON but no single unambiguous verdict object")
     else:
         data = _parse_non_json_qa_response(response_text)
         if data is None:
@@ -301,7 +357,7 @@ def _parse_qa_response(
 
     # Validate required fields
     score = data.get("score")
-    if not isinstance(score, (int, float)) or score < 0.0 or score > 1.0:
+    if not _is_finite_number(score) or score < 0.0 or score > 1.0:
         return Result.err(f"score must be a float between 0.0 and 1.0, got: {score}")
 
     verdict = data.get("verdict", "").lower().strip()
@@ -334,7 +390,7 @@ def _parse_qa_response(
         QAVerdict(
             score=float(score),
             verdict=verdict,
-            dimensions={k: float(v) for k, v in dimensions.items() if isinstance(v, (int, float))},
+            dimensions={k: float(v) for k, v in dimensions.items() if _is_finite_number(v)},
             differences=differences,
             suggestions=suggestions,
             reasoning=reasoning,
