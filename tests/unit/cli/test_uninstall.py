@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
+import textwrap
 import tomllib
 from unittest.mock import patch
 
@@ -858,3 +862,126 @@ class TestBridgeTailMatchRemoval:
 
         data = json.loads(json_file.read_text())
         assert data["plugin"] == unrelated
+
+
+# ── Locale independence ──────────────────────────────────────────
+
+
+class TestConfigEncodingLocaleIndependence:
+    """CLAUDE.md I/O must not depend on the process locale.
+
+    ``ouroboros uninstall`` reads the project CLAUDE.md during its target scan
+    and rewrites it when removing the managed block. Both used the platform
+    default encoding, so on any non-UTF-8 ANSI code page (cp936, cp1252) a
+    UTF-8 CLAUDE.md aborted the command with UnicodeDecodeError before
+    anything was removed.
+    """
+
+    def test_documented_dry_run_survives_non_utf8_locale(self, tmp_path: Path) -> None:
+        """`ouroboros uninstall --dry-run` must exit 0 under a non-UTF-8 default encoding."""
+        script = textwrap.dedent(
+            """
+            import locale
+            from pathlib import Path
+            import subprocess
+            import sys
+
+            preferred = locale.getpreferredencoding(False)
+            if "utf" in preferred.lower():
+                print(f"BADENV preferred={preferred}")
+                sys.exit(2)
+
+            project = Path(sys.argv[1])
+            (project / "CLAUDE.md").write_text(
+                "\\n".join(
+                    [
+                        "# 项目说明",
+                        "",
+                        "<!-- ooo:START -->",
+                        "## Ouroboros 集成",
+                        "运行 `ouroboros init` 完成初始化。",
+                        "<!-- ooo:END -->",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [sys.executable, "-m", "ouroboros", "uninstall", "--dry-run"],
+                cwd=project,
+                capture_output=True,
+            )
+            sys.stderr.write(completed.stderr.decode("utf-8", "replace")[-2000:])
+            print(f"RETURNCODE={completed.returncode}")
+            print("OK" if completed.returncode == 0 else "FAIL")
+            """
+        )
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith(("PYTHON", "OUROBOROS", "LC_", "LANG"))
+        }
+        env.update(
+            {
+                "PYTHONUTF8": "0",
+                "LC_ALL": "C",
+                "LANG": "C",
+                "HOME": str(tmp_path),
+                "USERPROFILE": str(tmp_path),
+                "OUROBOROS_TELEMETRY": "0",
+                "OUROBOROS_DASHBOARD": "0",
+            }
+        )
+        # The child must import the same package the parent is testing.
+        if os.environ.get("PYTHONPATH"):
+            env["PYTHONPATH"] = os.environ["PYTHONPATH"]
+        # The program goes through a UTF-8 script file, not -c: under the C
+        # locale the child cannot decode a non-ASCII command line, while
+        # Python source files are UTF-8 by default regardless of locale.
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        script_path = tmp_path / "locale_uninstall_repro.py"
+        script_path.write_text(script, encoding="utf-8")
+        result = subprocess.run(
+            [sys.executable, str(script_path), str(project_dir)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            check=False,
+        )
+        assert "BADENV" not in result.stdout, (
+            f"could not force a non-UTF-8 default encoding: stdout={result.stdout!r}"
+        )
+        assert result.returncode == 0 and "OK" in result.stdout, (
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+
+    def test_gbk_claude_md_is_skipped_and_left_byte_identical(self, tmp_path: Path) -> None:
+        """A CLAUDE.md that is not valid UTF-8 is skipped, not rewritten."""
+        claude_md = tmp_path / "CLAUDE.md"
+        original = ("# 项目说明\n\n<!-- ooo:START -->\n## Ouroboros\n<!-- ooo:END -->\n").encode(
+            "gbk"
+        )
+        claude_md.write_bytes(original)
+
+        result = _remove_claude_md_block(tmp_path, dry_run=False)
+
+        assert result is False
+        assert claude_md.read_bytes() == original
+
+    def test_dry_run_scan_tolerates_undecodable_claude_md(self, tmp_path: Path) -> None:
+        """The pre-flight target scan must not abort on a CLAUDE.md it cannot decode."""
+        (tmp_path / "CLAUDE.md").write_bytes(
+            b"# \xff\xfe broken\n\n<!-- ooo:START -->\n<!-- ooo:END -->\n"
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("pathlib.Path.cwd", return_value=tmp_path),
+        ):
+            result = runner.invoke(app, ["--dry-run"])
+
+        assert result.exit_code == 0
+        assert "UnicodeDecodeError" not in repr(result.exception)

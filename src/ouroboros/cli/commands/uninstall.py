@@ -262,8 +262,8 @@ def _remove_claude_md_block(project_dir: Path, dry_run: bool) -> bool:
         return False
 
     try:
-        content = claude_md.read_text()
-    except OSError:
+        content = claude_md.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
         print_warning(f"Could not read {claude_md} — skipping.")
         return False
     if "<!-- ooo:START -->" not in content:
@@ -280,7 +280,7 @@ def _remove_claude_md_block(project_dir: Path, dry_run: bool) -> bool:
         flags=re.DOTALL,
     )
     try:
-        claude_md.write_text(cleaned)
+        claude_md.write_text(cleaned, encoding="utf-8")
     except OSError:
         print_warning(f"Could not write {claude_md} — skipping.")
         return False
@@ -480,9 +480,9 @@ def uninstall(
     cwd = Path.cwd()
     claude_md = cwd / "CLAUDE.md"
     try:
-        if claude_md.exists() and "<!-- ooo:START -->" in claude_md.read_text():
+        if claude_md.exists() and "<!-- ooo:START -->" in claude_md.read_text(encoding="utf-8"):
             targets.append(f"CLAUDE.md integration block ({claude_md})")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         pass
 
     ooo_dir = cwd / ".ouroboros"
