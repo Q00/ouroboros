@@ -384,3 +384,48 @@ def test_native_payload_takes_priority_over_legacy_top_level_fields(kind, payloa
     assert parsed["content"] == ""
     assert parsed["metadata"].get("session_id") is None
     assert AntigravityCLIRuntime(cli_path="/usr/bin/agy")._convert_event(parsed, None) == []
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "init",
+        "message",
+        "text",
+        "thinking",
+        "tool_use",
+        "tool_result",
+        "error",
+        "result",
+        "done",
+        "fatal",
+        "exception",
+        "abort",
+    ],
+)
+@pytest.mark.parametrize("declared_type", [None, [], {}, 0, 1, 1.5, False, True, "", " "])
+def test_legacy_ignored_or_blank_type_follows_parent_discriminator_selection(kind, declared_type):
+    line = json.dumps(
+        {
+            "event": kind,
+            "type": declared_type,
+            "kind": "tool_use",
+            "category": "result",
+            "content": {"value": "object"},
+        }
+    )
+    parsed = AntigravityEventNormalizer().normalize_line(line)
+    expected = GeminiEventNormalizer().normalize_line(line)
+
+    assert parsed == expected
+    assert AntigravityCLIRuntime(cli_path="/usr/bin/agy")._convert_event(parsed, None) == (
+        GeminiCLIRuntime(cli_path="/usr/bin/gemini")._convert_event(expected, None)
+    )
+
+
+@pytest.mark.parametrize("kind", ["message", "tool_use", "tool_result", "init", "result"])
+def test_matching_legacy_type_preserves_parent_selection_after_case_and_space_normalization(kind):
+    line = json.dumps({"event": kind, "type": f" {kind.upper()} ", "content": ["value"]})
+    assert AntigravityEventNormalizer().normalize_line(line) == (
+        GeminiEventNormalizer().normalize_line(line)
+    )

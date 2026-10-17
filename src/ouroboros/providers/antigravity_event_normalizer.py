@@ -78,8 +78,11 @@ class AntigravityEventNormalizer(GeminiEventNormalizer):
         if (
             legacy_kind in _LEGACY_EVENT_TYPES
             and not (legacy_kind in {"init", "result"} and legacy_kind in parsed)
-            and isinstance(declared_type, str)
-            and declared_type.strip().lower() == legacy_kind
+            and (
+                not isinstance(declared_type, str)
+                or not declared_type.strip()
+                or declared_type.strip().lower() == legacy_kind
+            )
         ):
             return super()._normalize_json_dict(parsed, original=original)
         payload = parsed.get(kind) if isinstance(kind, str) else None
