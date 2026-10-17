@@ -11,6 +11,7 @@ from typing import Any
 
 _MAX_UNITTEST_DISCOVERY_ENTRIES = 512
 _MAX_UNITTEST_DISCOVERY_DEPTH = 12
+_UNITTEST_BASE_MUTATION = "__unittest_base_mutation__"
 
 
 def manifest_free_unittest_proposal(working_dir: Path) -> dict[str, str] | None:
@@ -85,6 +86,7 @@ def _module_has_unittest_test(tree: ast.Module) -> bool:
     imported_testcase_names: set[str] = set()
     unittest_aliases: set[str] = set()
     local_testcase_classes: set[str] = set()
+    local_testcase_classes_with_tests: set[str] = set()
 
     for statement in tree.body:
         if isinstance(statement, ast.Import):
@@ -92,6 +94,7 @@ def _module_has_unittest_test(tree: ast.Module) -> bool:
             imported_testcase_names.difference_update(writes)
             unittest_aliases.difference_update(writes)
             local_testcase_classes.difference_update(writes)
+            local_testcase_classes_with_tests.difference_update(writes)
             unittest_aliases.update(
                 alias.asname or "unittest" for alias in statement.names if alias.name == "unittest"
             )
@@ -102,7 +105,8 @@ def _module_has_unittest_test(tree: ast.Module) -> bool:
             imported_testcase_names.difference_update(writes)
             unittest_aliases.difference_update(writes)
             local_testcase_classes.difference_update(writes)
-            if statement.module == "unittest":
+            local_testcase_classes_with_tests.difference_update(writes)
+            if statement.module == "unittest" and statement.level == 0:
                 imported_testcase_names.update(
                     alias.asname or alias.name
                     for alias in statement.names
@@ -122,30 +126,53 @@ def _module_has_unittest_test(tree: ast.Module) -> bool:
                 or (isinstance(base, ast.Name) and base.id in local_testcase_classes)
                 for base in statement.bases
             )
-            has_test_method = any(
-                isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and member.name.startswith("test")
-                and not any(
-                    isinstance(decorator, ast.Name) and decorator.id == "property"
-                    for decorator in member.decorator_list
-                )
-                for member in statement.body
+            has_test_method = _class_has_test_method(statement)
+            inherited_test_method = any(
+                isinstance(base, ast.Name) and base.id in local_testcase_classes_with_tests
+                for base in statement.bases
             )
             imported_testcase_names.discard(statement.name)
             unittest_aliases.discard(statement.name)
             local_testcase_classes.discard(statement.name)
+            local_testcase_classes_with_tests.discard(statement.name)
             if known_testcase:
                 local_testcase_classes.add(statement.name)
-                if has_test_method:
-                    return True
+                if has_test_method or inherited_test_method:
+                    local_testcase_classes_with_tests.add(statement.name)
             continue
 
         writes = _module_scope_writes(statement)
+        if _UNITTEST_BASE_MUTATION in writes:
+            unittest_aliases.clear()
         imported_testcase_names.difference_update(writes)
         unittest_aliases.difference_update(writes)
         local_testcase_classes.difference_update(writes)
+        local_testcase_classes_with_tests.difference_update(writes)
 
-    return False
+    return bool(local_testcase_classes_with_tests)
+
+
+def _class_has_test_method(node: ast.ClassDef) -> bool:
+    """Whether a class namespace ends with a callable test-method definition."""
+    if node.decorator_list:
+        return False
+
+    method_names: set[str] = set()
+    for statement in node.body:
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            method_names.discard(statement.name)
+            if statement.name.startswith("test") and not any(
+                isinstance(decorator, ast.Name)
+                and decorator.id == "property"
+                or isinstance(decorator, ast.Attribute)
+                and decorator.attr == "property"
+                for decorator in statement.decorator_list
+            ):
+                method_names.add(statement.name)
+            continue
+        writes = _module_scope_writes(statement)
+        method_names.difference_update(name for name in writes if name.startswith("test"))
+    return bool(method_names)
 
 
 def _module_scope_writes(statement: ast.stmt) -> set[str]:
@@ -160,6 +187,14 @@ def _module_scope_writes(statement: ast.stmt) -> set[str]:
         def visit_Name(self, node: ast.Name) -> None:
             if isinstance(node.ctx, (ast.Store, ast.Del)):
                 self.names.add(node.id)
+
+        def visit_Attribute(self, node: ast.Attribute) -> None:
+            if isinstance(node.ctx, (ast.Store, ast.Del)) and node.attr in {
+                "TestCase",
+                "IsolatedAsyncioTestCase",
+            }:
+                self.names.add(_UNITTEST_BASE_MUTATION)
+            self.generic_visit(node)
 
         def visit_Import(self, node: ast.Import) -> None:
             self.names.update(alias.asname or alias.name.split(".")[0] for alias in node.names)
