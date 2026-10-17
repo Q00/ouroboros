@@ -391,7 +391,7 @@ economics:
 | `default_tier` | `"frugal"` \| `"standard"` \| `"frontier"` | `"frugal"` | The starting tier used when no task-specific override applies. |
 | `escalation_threshold` | `int >= 1` | `2` | The retry attempt at which tier escalation begins. From this attempt onward the tier climbs one notch per retry (progressive), capped at the frontier tier. Top-level and untrusted decomposed work start at the base tier. Only a decomposed child with explicit trust authorization starts one tier lower, so that trusted-child ladder may require one additional retry to reach the same frontier ceiling. Current live decomposition supplies no such trust authorization. |
 | `downgrade_success_streak` | `int >= 1` | `5` | Number of consecutive successes at the current tier before downgrading to the previous tier. |
-| `tiers` | `dict[str, TierConfig]` | (see above) | Tier definitions keyed by name. Explicit tier selection and enabled per-AC routing use the active runtime's native model entries. Unpinned Claude routing uses `haiku`/`sonnet`/`opus` aliases. A resumed run replays its resolved model ladder. |
+| `tiers` | `dict[str, TierConfig]` | (see above) | Tier definitions keyed by name. Explicit tier selection and enabled per-AC routing use the active runtime's native model entries. Unpinned Claude vendor defaults use `haiku`/`sonnet`/`opus` aliases; explicit runtime-specific economics entries remain literal. A resumed run replays its resolved model ladder. |
 
 **`TierConfig` fields:**
 

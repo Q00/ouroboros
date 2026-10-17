@@ -118,8 +118,12 @@ execution.
 > untrusted inputs if you need edits-only containment — use the Claude, Codex,
 > or Gemini runtime there instead.
 
-Available models (`agy models`): Gemini 3.5 Flash, Gemini 3.1 Pro, Claude
-Sonnet 4.6, Claude Opus 4.6, GPT-OSS 120B (subject to your plan). Antigravity is
+Use [`agy models`](https://www.antigravity.google/docs/models/) for the
+installed CLI/account catalog. On `agy 1.4.0` (checked 2026-10-18), it lists
+`gemini-3.8-flash-{low,medium,high}`, `gemini-4-argon-{low,medium,high}`,
+`claude-sonnet-5-5-{low,medium,high}`, `claude-opus-5-5-{low,medium,high}`, and
+`gpt-oss-120b-medium`. These are native CLI IDs, not Google or Anthropic API
+model IDs; availability varies by version, account, and plan. Antigravity is
 a **sentinel-model backend** — by default Ouroboros lets `agy` pick its own
 configured model and only forwards `--model` when you set an explicit id.
 
