@@ -73,9 +73,39 @@ _GOAL_PROOF_CRITERION = (
     "A command/API check returns stable observable output or artifacts proving the task goal."
 )
 
-# Sections whose ledger values become Seed ``constraints`` / ``acceptance_criteria``.
-# Only binding entries fill them; the rest are carried as Seed ``assumptions``.
-_REQUIREMENT_SECTIONS = ("constraints", "non_goals", "acceptance_criteria")
+# The constraint used when nothing confirmed one. It restates the binding
+# rule itself rather than guessing a limit on the task, so the Seed keeps a
+# hard constraint without narrowing what the user asked for.
+CONFIRMED_SCOPE_CONSTRAINT = (
+    "Scope comes only from the goal, the requester's answers, and the repository; "
+    "anything listed under Assumptions may be overridden."
+)
+
+# Stand-ins for a ledger section with no binding entry. They describe the
+# section as open instead of repeating a guess the worker would have to keep.
+_UNCONFIRMED_FIELD = "Not confirmed; see Assumptions."
+_UNCONFIRMED_VERIFICATION = "Each acceptance criterion passes its own verification."
+_UNCONFIRMED_FAILURE_MODES = "none confirmed"
+
+# Every ledger section except the goal. Only binding entries fill the Seed's
+# binding fields (constraints, criteria, ontology, principles, exit
+# conditions); the rest are carried as Seed ``assumptions``.
+_ASSUMPTION_SECTIONS = (
+    "constraints",
+    "non_goals",
+    "acceptance_criteria",
+    "actors",
+    "inputs",
+    "outputs",
+    "verification_plan",
+    "failure_modes",
+    "runtime_context",
+)
+_ASSUMPTION_PREFIXES = {
+    "constraints": "",
+    "non_goals": "Non-goal: ",
+    "acceptance_criteria": "",
+}
 
 
 def brownfield_context_from_cwd(cwd: str | Path | None) -> BrownfieldContext:
@@ -143,14 +173,15 @@ def synthesize_seed_from_ledger(
     non_goals = _lines_from_section(ledger, "non_goals", binding=True)
     if non_goals:
         constraints = (*constraints, *[f"Non-goal: {item}" for item in non_goals])
+    constraints = constraints or (CONFIRMED_SCOPE_CONSTRAINT,)
 
     # With no confirmed criterion, the criterion is proof of the goal itself: a
     # guessed criterion would narrow it.
     acceptance_criteria = _lines_from_section(
         ledger, "acceptance_criteria", split_clauses=False, binding=True
     ) or (_GOAL_PROOF_CRITERION,)
-    verification_plan = _joined_section(ledger, "verification_plan")
-    failure_modes = _joined_section(ledger, "failure_modes")
+    verification_plan = _binding_joined(ledger, "verification_plan") or _UNCONFIRMED_VERIFICATION
+    failure_modes = _binding_joined(ledger, "failure_modes") or _UNCONFIRMED_FAILURE_MODES
 
     return Seed(
         goal=goal,
@@ -161,28 +192,7 @@ def synthesize_seed_from_ledger(
         ontology_schema=OntologySchema(
             name=_ontology_name(goal),
             description="Auto-synthesized ontology from the completed Seed Draft Ledger.",
-            fields=(
-                OntologyField(
-                    name="actors",
-                    field_type="string",
-                    description=_joined_section(ledger, "actors"),
-                ),
-                OntologyField(
-                    name="inputs",
-                    field_type="string",
-                    description=_joined_section(ledger, "inputs"),
-                ),
-                OntologyField(
-                    name="outputs",
-                    field_type="string",
-                    description=_joined_section(ledger, "outputs"),
-                ),
-                OntologyField(
-                    name="runtime_context",
-                    field_type="string",
-                    description=_joined_section(ledger, "runtime_context"),
-                ),
-            ),
+            fields=_ontology_fields(ledger, placeholder=_UNCONFIRMED_FIELD),
         ),
         evaluation_principles=(
             EvaluationPrinciple(
@@ -319,6 +329,8 @@ def partial_seed_from_evidence(
     non_goals = _lines_from_section(ledger, "non_goals", binding=True)
     for item in non_goals:
         constraints.append(f"Non-goal: {item}")
+    if not constraints:
+        constraints.append(CONFIRMED_SCOPE_CONSTRAINT)
     for slot in unresolved_slots:
         constraints.append(
             f"Known unresolved slot ({slot}): treat as next-step requirement, not implicit success."
@@ -331,9 +343,9 @@ def partial_seed_from_evidence(
         acceptance = _PARTIAL_DEFAULT_ACCEPTANCE
 
     verification_plan = (
-        _joined_section(ledger, "verification_plan") or _PARTIAL_DEFAULT_VERIFICATION
+        _binding_joined(ledger, "verification_plan") or _PARTIAL_DEFAULT_VERIFICATION
     )
-    failure_modes = _joined_section(ledger, "failure_modes") or _PARTIAL_DEFAULT_FAILURE_MODES
+    failure_modes = _binding_joined(ledger, "failure_modes") or _PARTIAL_DEFAULT_FAILURE_MODES
 
     ontology_schema = OntologySchema(
         name=_ontology_name(goal),
@@ -341,29 +353,7 @@ def partial_seed_from_evidence(
             "Partial ontology synthesized from incomplete Seed Draft Ledger "
             f"under degraded-recovery reason: {reason}."
         ),
-        fields=(
-            OntologyField(
-                name="actors",
-                field_type="string",
-                description=_joined_section(ledger, "actors") or _PARTIAL_PLACEHOLDER_FIELD,
-            ),
-            OntologyField(
-                name="inputs",
-                field_type="string",
-                description=_joined_section(ledger, "inputs") or _PARTIAL_PLACEHOLDER_FIELD,
-            ),
-            OntologyField(
-                name="outputs",
-                field_type="string",
-                description=_joined_section(ledger, "outputs") or _PARTIAL_PLACEHOLDER_FIELD,
-            ),
-            OntologyField(
-                name="runtime_context",
-                field_type="string",
-                description=_joined_section(ledger, "runtime_context")
-                or _PARTIAL_PLACEHOLDER_FIELD,
-            ),
-        ),
+        fields=_ontology_fields(ledger, placeholder=_PARTIAL_PLACEHOLDER_FIELD),
     )
 
     # Degraded seeds carry a deliberately elevated ambiguity floor so that
@@ -426,6 +416,28 @@ def partial_seed_from_evidence(
     )
 
 
+def _ontology_fields(ledger: SeedDraftLedger, *, placeholder: str) -> tuple[OntologyField, ...]:
+    """Ontology fields from binding entries; an unconfirmed field is optional."""
+    fields: list[OntologyField] = []
+    for name in ("actors", "inputs", "outputs", "runtime_context"):
+        confirmed = _binding_joined(ledger, name)
+        fields.append(
+            OntologyField(
+                name=name,
+                field_type="string",
+                description=confirmed or placeholder,
+                required=bool(confirmed),
+            )
+        )
+    return tuple(fields)
+
+
+def _binding_joined(ledger: SeedDraftLedger, section_name: str) -> str:
+    return "; ".join(
+        entry.value.strip() for entry in _active_entries(ledger, section_name) if entry.binds_seed
+    )
+
+
 def _latest_value(ledger: SeedDraftLedger, section_name: str) -> str:
     values = _active_values(ledger, section_name)
     if not values:
@@ -434,15 +446,11 @@ def _latest_value(ledger: SeedDraftLedger, section_name: str) -> str:
     return values[-1]
 
 
-def _joined_section(ledger: SeedDraftLedger, section_name: str) -> str:
-    return "; ".join(_active_values(ledger, section_name))
-
-
 def ledger_assumptions(ledger: SeedDraftLedger) -> tuple[str, ...]:
     """Return the ledger's unconfirmed requirement drafts as Seed assumptions.
 
-    These are the active ``constraints`` / ``non_goals`` /
-    ``acceptance_criteria`` values that do not bind (see
+    These are the active values of every section but the goal that do not
+    bind (see
     :attr:`LedgerEntry.binds_seed`): auto's conservative defaults and
     assumptions, including a draft kept because the requester gave no answer.
     The worker sees them as assumptions it may override. The generic
@@ -450,11 +458,13 @@ def ledger_assumptions(ledger: SeedDraftLedger) -> tuple[str, ...]:
     the task, so it is left out.
     """
     lines: list[str] = []
-    for section_name in _REQUIREMENT_SECTIONS:
+    for section_name in _ASSUMPTION_SECTIONS:
         values = _lines_from_section(
             ledger, section_name, split_clauses=False, binding=False, closure=False
         )
-        prefix = "Non-goal: " if section_name == "non_goals" else ""
+        prefix = _ASSUMPTION_PREFIXES.get(
+            section_name, f"{section_name.replace('_', ' ').capitalize()}: "
+        )
         lines.extend(f"{prefix}{value}" for value in values)
     return tuple(dict.fromkeys(lines))
 

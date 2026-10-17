@@ -409,3 +409,84 @@ def test_interview_with_only_assumption_answers_is_ready_for_seed_generation() -
     assert all(DEFAULTED_CONSTRAINT not in candidate.text for candidate in promotion.promoted)
     assert GOAL in context
     assert DEFAULTED_CONSTRAINT not in context
+
+
+DEFAULTED_ACTOR = "Single local user running the CLI by hand"
+DEFAULTED_VERIFICATION = "Run the whole repository test suite and require it to pass"
+
+
+def _ledger_with_defaulted_context() -> SeedDraftLedger:
+    ledger = _ready_ledger()
+    for section, key, value in (
+        ("actors", "actors.default", DEFAULTED_ACTOR),
+        ("verification_plan", "verification_plan.default", DEFAULTED_VERIFICATION),
+    ):
+        ledger.add_entry(
+            section,
+            LedgerEntry(
+                key=key,
+                value=value,
+                source=LedgerSource.CONSERVATIVE_DEFAULT,
+                confidence=0.8,
+                status=LedgerStatus.DEFAULTED,
+            ),
+        )
+    return ledger
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_ledger_defaults_bind_no_ontology_principle_or_exit_condition(partial: bool) -> None:
+    from ouroboros.auto.ledger_seed import partial_seed_from_evidence
+
+    ledger = _ledger_with_defaulted_context()
+    seed = (
+        partial_seed_from_evidence(ledger, reason="interview_phase_deadline")
+        if partial
+        else synthesize_seed_from_ledger(ledger)
+    )
+
+    binding_text = " ".join(
+        [
+            *seed.constraints,
+            *(field.description for field in seed.ontology_schema.fields),
+            *(principle.description for principle in seed.evaluation_principles),
+            *(condition.description for condition in seed.exit_conditions),
+            *(condition.evaluation_criteria for condition in seed.exit_conditions),
+        ]
+    )
+    assert DEFAULTED_ACTOR not in binding_text
+    assert DEFAULTED_VERIFICATION not in binding_text
+    assert "generic safe default" not in binding_text
+    actors = next(field for field in seed.ontology_schema.fields if field.name == "actors")
+    assert actors.required is False
+    assert f"Actors: {DEFAULTED_ACTOR}" in seed.assumptions
+    assert f"Verification plan: {DEFAULTED_VERIFICATION}" in seed.assumptions
+
+
+def test_repair_of_missing_constraints_adds_no_guessed_limit() -> None:
+    from ouroboros.auto.ledger_seed import CONFIRMED_SCOPE_CONSTRAINT
+    from ouroboros.auto.seed_repairer import SeedRepairer
+    from ouroboros.auto.seed_reviewer import SeedReviewer
+
+    ledger = _ledger_with_defaulted_context()
+    seed = synthesize_seed_from_ledger(ledger).model_copy(update={"constraints": ()})
+    review = SeedReviewer().review(seed, ledger=ledger)
+    assert any(finding.code == "missing_constraints" for finding in review.findings)
+
+    repaired = SeedRepairer().repair_once(seed, review, ledger=ledger).seed
+
+    assert repaired.constraints == (CONFIRMED_SCOPE_CONSTRAINT,)
+    assert repaired.assumptions == seed.assumptions
+
+
+def test_ledger_seed_with_no_confirmed_constraint_keeps_only_the_scope_rule() -> None:
+    from ouroboros.auto.ledger_seed import CONFIRMED_SCOPE_CONSTRAINT
+
+    ledger = _ledger_with_defaulted_context()
+    for entry in ledger.sections["constraints"].entries:
+        if entry.binds_seed:
+            entry.status = LedgerStatus.WEAK
+
+    seed = synthesize_seed_from_ledger(ledger)
+
+    assert seed.constraints == (CONFIRMED_SCOPE_CONSTRAINT,)
