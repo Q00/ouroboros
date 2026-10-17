@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
+import subprocess
 import tempfile
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -268,6 +269,8 @@ class MockClaudeAgentAdapter:
     _execution_count: int = field(default=0, init=False)
     _execution_history: list[dict[str, Any]] = field(default_factory=list, init=False)
     _cwd: str | None = field(default=None, init=False)
+    _workspace: tempfile.TemporaryDirectory[str] | None = field(default=None, init=False)
+    _edit_count: int = field(default=0, init=False)
 
     @property
     def runtime_backend(self) -> str:
@@ -281,7 +284,31 @@ class MockClaudeAgentAdapter:
     def working_directory(self) -> str | None:
         # Executing adapters must identify the workspace they mutate.  The
         # production adapters do so; keep the E2E double on the same contract.
-        return self._cwd or str(Path.cwd())
+        # The default is a throwaway Git workspace, never the checkout the
+        # tests run from: the double writes the edits its messages claim.
+        return self._cwd or self._default_workspace()
+
+    def _default_workspace(self) -> str:
+        if self._workspace is None:
+            self._workspace = tempfile.TemporaryDirectory(prefix="ooo-e2e-workspace-")
+            root = self._workspace.name
+            Path(root, "README.md").write_text("e2e workspace\n", encoding="utf-8")
+            for args in (
+                ("init", "-q"),
+                ("add", "README.md"),
+                (
+                    "-c",
+                    "user.name=e2e",
+                    "-c",
+                    "user.email=e2e@example.com",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "base",
+                ),
+            ):
+                subprocess.run(("git", "-C", root, *args), check=True, capture_output=True)
+        return self._workspace.name
 
     @property
     def permission_mode(self) -> str | None:
@@ -379,6 +406,14 @@ class MockClaudeAgentAdapter:
         self._execution_count += 1
 
         for message in sequence:
+            if message.type == "tool" and message.tool_name in {"Edit", "Write"}:
+                # A worker that reports an edit leaves one in its workspace, as
+                # a real worker does; the no-evidence route reads the diff.
+                self._edit_count += 1
+                workspace = Path(cwd or self.working_directory or ".")
+                (workspace / f"mock_edit_{self._edit_count}.txt").write_text(
+                    f"{message.content}\n", encoding="utf-8"
+                )
             yield message
 
     @property
