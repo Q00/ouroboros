@@ -214,6 +214,7 @@ def is_retryable_failure(result: ACExecutionResult | BaseException) -> bool:
         and not result.is_blocked
         and not result.is_invalid
         and result.error != _STALL_SENTINEL
+        and failure_class_for_result(result) != FailureClass.BLOCKED.value
     )
 
 
