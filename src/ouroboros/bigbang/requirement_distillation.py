@@ -145,7 +145,7 @@ def build_requirement_distillation(state: InterviewState) -> RequirementDistilla
             # path promotes answers to RequirementCandidates and
             # build_promoted_reference_seed emits a Seed from them with no LLM
             # in between, so withholding at prompt assembly would never reach
-            # it — the rule has to sit on this walk too (#1755). Note the
+            # it, so the rule has to sit on this walk too (#1755). Note the
             # evidence kind below is USER_STATEMENT: either entering here
             # would be labelled a user statement. Assumptions are declared
             # only by ``ooo auto``, which supplies no reference cues, so this

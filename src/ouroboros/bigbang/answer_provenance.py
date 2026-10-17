@@ -81,7 +81,7 @@ WITHHELD_ANSWER_NOTE = (
 #: Rendered in place of an assumption's answer. The guess still reaches the
 #: worker, as a non-binding assumption carried outside the requirement fields.
 WITHHELD_ASSUMPTION_NOTE = (
-    "[assumption withheld — a guess made on the requester's behalf, not a decision. "
+    "[assumption withheld: a guess made on the requester's behalf, not a decision. "
     "It is kept as a non-binding assumption, never as a requirement.]"
 )
 

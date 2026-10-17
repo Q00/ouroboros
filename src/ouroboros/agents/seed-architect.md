@@ -36,7 +36,7 @@ An answer guessed on the requester's behalf (an automatic default or
 assumption nobody confirmed) is withheld the same way:
 
 ```
-A: [assumption withheld — a guess made on the requester's behalf, not a decision. It is kept as a non-binding assumption, never as a requirement.]
+A: [assumption withheld: a guess made on the requester's behalf, not a decision. It is kept as a non-binding assumption, never as a requirement.]
 ```
 
 The guess is carried to the worker separately as a non-binding assumption. Do
