@@ -248,3 +248,14 @@ def test_worker_self_report_alone_never_approves() -> None:
     )
     assert unavailable.final_approved is False
     assert unavailable.run_verdict_passed is False
+
+
+@pytest.mark.asyncio
+async def test_semantic_goal_alignment_is_preserved_separately_from_drift_score(
+    tmp_path: Path,
+) -> None:
+    summary, semantic, _ = await _run(tmp_path, approve=True, command=None)
+
+    semantic.assert_awaited_once()
+    assert summary.goal_alignment == 0.9
+    assert summary.drift_score == 0.1

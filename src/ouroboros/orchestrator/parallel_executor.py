@@ -456,8 +456,8 @@ from ouroboros.orchestrator.verify_shell import (
     verify_shell_unavailable_reason,
 )
 from ouroboros.orchestrator.workspace_evidence_paths import (
-    is_git_ignored_path,
-    is_untracked_top_level_evidence_path,
+    collect_bounded_workspace_paths,
+    is_declared_contract_path,
     load_ignored_workspace_paths,
     load_tracked_workspace_paths,
 )
@@ -1801,6 +1801,8 @@ _WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES = frozenset(
     }
 )
 _WORKSPACE_FINGERPRINT_IGNORED_REGULAR_FILE_SUFFIXES = frozenset({".pyc", ".pyo"})
+_WORKSPACE_FINGERPRINT_MAX_ENTRIES = 50_000
+_WORKSPACE_FINGERPRINT_MAX_DEPTH = 64
 _ROUTE_SUCCESS_CONTEXT_CHARS = 200
 _ROUTE_SUCCESS_PUBLIC_API_CHARS = 500
 _DURABLE_CONFLICT_PATH_CHARS = 32_768
@@ -5090,35 +5092,24 @@ class ParallelACExecutor:
                     if declared.is_relative_to(root):
                         declared_paths.add(declared.relative_to(root))
 
-            def is_declared_contract_path(relative: Path) -> bool:
-                return any(
-                    relative == declared
-                    or relative in declared.parents
-                    or declared in relative.parents
-                    for declared in declared_paths
-                )
-
             tracked_paths = load_tracked_workspace_paths(root)
             ignored_paths = load_ignored_workspace_paths(root)
 
             digest = hashlib.sha256()
-            paths = sorted(root.rglob("*"), key=lambda path: path.as_posix())
+            paths = collect_bounded_workspace_paths(
+                root,
+                declared_paths=declared_paths,
+                tracked_paths=tracked_paths,
+                ignored_paths=ignored_paths,
+                ignored_directory_names=_WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES,
+                max_entries=_WORKSPACE_FINGERPRINT_MAX_ENTRIES,
+                max_depth=_WORKSPACE_FINGERPRINT_MAX_DEPTH,
+            )
+            if paths is None:
+                return None
             for path in paths:
                 relative = path.relative_to(root)
-                declared_contract_path = is_declared_contract_path(relative)
-                if (
-                    is_untracked_top_level_evidence_path(
-                        relative,
-                        tracked_paths=tracked_paths,
-                        is_directory=path.is_dir() and not path.is_symlink(),
-                    )
-                    or is_git_ignored_path(relative, ignored_paths=ignored_paths)
-                    or any(
-                        part in _WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES
-                        for part in relative.parts
-                    )
-                ) and not declared_contract_path:
-                    continue
+                declared_contract_path = is_declared_contract_path(relative, declared_paths)
                 try:
                     stat = path.lstat()
                     if path.is_symlink():
