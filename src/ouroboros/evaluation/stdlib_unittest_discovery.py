@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 from collections.abc import Callable
+import fnmatch
 import os
 from pathlib import Path
 from typing import Any
@@ -49,15 +50,19 @@ def manifest_free_unittest_proposal(working_dir: Path) -> dict[str, str] | None:
                     continue
                 if entry.is_dir(follow_symlinks=False):
                     init_file = path / "__init__.py"
-                    if init_file.is_file() and not init_file.is_symlink():
+                    if (
+                        path.name.isidentifier()
+                        and init_file.is_file()
+                        and not init_file.is_symlink()
+                    ):
                         next_depth = depth + 1
                         if next_depth > _MAX_UNITTEST_DISCOVERY_DEPTH:
                             return None
                         pending.append((path, next_depth))
                 elif (
                     entry.is_file(follow_symlinks=False)
-                    and entry.name.startswith("test")
-                    and entry.name.endswith(".py")
+                    and fnmatch.fnmatchcase(entry.name, "test*.py")
+                    and path.stem.isidentifier()
                 ):
                     test_files.append(path)
             except OSError:
@@ -69,21 +74,43 @@ def manifest_free_unittest_proposal(working_dir: Path) -> dict[str, str] | None:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, SyntaxError):
             continue
-        imported_testcase_names: set[str] = set()
-        unittest_aliases = {"unittest"}
-        local_testcase_classes: set[str] = set()
-        for node in tree.body:
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    if alias.name == "unittest":
-                        unittest_aliases.add(alias.asname or "unittest")
-            elif isinstance(node, ast.ImportFrom) and node.module == "unittest":
-                for alias in node.names:
-                    if alias.name in {"TestCase", "IsolatedAsyncioTestCase"}:
-                        imported_testcase_names.add(alias.asname or alias.name)
-        for node in tree.body:
-            if not isinstance(node, ast.ClassDef):
-                continue
+        if _module_has_unittest_test(tree):
+            found_test_case = True
+            break
+    return {"test": "python3 -m unittest discover -s tests"} if found_test_case else None
+
+
+def _module_has_unittest_test(tree: ast.Module) -> bool:
+    """Find a unittest test class while honoring module-level rebinding order."""
+    imported_testcase_names: set[str] = set()
+    unittest_aliases: set[str] = set()
+    local_testcase_classes: set[str] = set()
+
+    for statement in tree.body:
+        if isinstance(statement, ast.Import):
+            writes = {alias.asname or alias.name.split(".")[0] for alias in statement.names}
+            imported_testcase_names.difference_update(writes)
+            unittest_aliases.difference_update(writes)
+            local_testcase_classes.difference_update(writes)
+            unittest_aliases.update(
+                alias.asname or "unittest" for alias in statement.names if alias.name == "unittest"
+            )
+            continue
+
+        if isinstance(statement, ast.ImportFrom):
+            writes = {alias.asname or alias.name for alias in statement.names}
+            imported_testcase_names.difference_update(writes)
+            unittest_aliases.difference_update(writes)
+            local_testcase_classes.difference_update(writes)
+            if statement.module == "unittest":
+                imported_testcase_names.update(
+                    alias.asname or alias.name
+                    for alias in statement.names
+                    if alias.name in {"TestCase", "IsolatedAsyncioTestCase"}
+                )
+            continue
+
+        if isinstance(statement, ast.ClassDef):
             known_testcase = any(
                 (isinstance(base, ast.Name) and base.id in imported_testcase_names)
                 or (
@@ -93,17 +120,93 @@ def manifest_free_unittest_proposal(working_dir: Path) -> dict[str, str] | None:
                     and base.value.id in unittest_aliases
                 )
                 or (isinstance(base, ast.Name) and base.id in local_testcase_classes)
-                for base in node.bases
+                for base in statement.bases
             )
+            has_test_method = any(
+                isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and member.name.startswith("test")
+                and not any(
+                    isinstance(decorator, ast.Name) and decorator.id == "property"
+                    for decorator in member.decorator_list
+                )
+                for member in statement.body
+            )
+            imported_testcase_names.discard(statement.name)
+            unittest_aliases.discard(statement.name)
+            local_testcase_classes.discard(statement.name)
             if known_testcase:
-                if any(
-                    isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
-                    and member.name.startswith("test")
-                    for member in node.body
-                ):
-                    found_test_case = True
-                local_testcase_classes.add(node.name)
-    return {"test": "python3 -m unittest discover -s tests"} if found_test_case else None
+                local_testcase_classes.add(statement.name)
+                if has_test_method:
+                    return True
+            continue
+
+        writes = _module_scope_writes(statement)
+        imported_testcase_names.difference_update(writes)
+        unittest_aliases.difference_update(writes)
+        local_testcase_classes.difference_update(writes)
+
+    return False
+
+
+def _module_scope_writes(statement: ast.stmt) -> set[str]:
+    """Find names written by a module statement without entering class/function bodies."""
+    if isinstance(statement, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+        return {statement.name}
+
+    class WriteCollector(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.names: set[str] = set()
+
+        def visit_Name(self, node: ast.Name) -> None:
+            if isinstance(node.ctx, (ast.Store, ast.Del)):
+                self.names.add(node.id)
+
+        def visit_Import(self, node: ast.Import) -> None:
+            self.names.update(alias.asname or alias.name.split(".")[0] for alias in node.names)
+
+        def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+            self.names.update(alias.asname or alias.name for alias in node.names)
+
+        def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+            if node.name:
+                self.names.add(node.name)
+            self.generic_visit(node)
+
+        def visit_MatchAs(self, node: ast.MatchAs) -> None:
+            if node.name:
+                self.names.add(node.name)
+            self.generic_visit(node)
+
+        def visit_MatchStar(self, node: ast.MatchStar) -> None:
+            if node.name:
+                self.names.add(node.name)
+            self.generic_visit(node)
+
+        def visit_MatchMapping(self, node: ast.MatchMapping) -> None:
+            if node.rest:
+                self.names.add(node.rest)
+            self.generic_visit(node)
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            self.names.add(node.name)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            self.names.add(node.name)
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            self.names.add(node.name)
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            return
+
+        def visit_comprehension(self, node: ast.comprehension) -> None:
+            # Comprehension targets live in their own scope in supported Python.
+            for expression in (node.iter, *node.ifs):
+                self.visit(expression)
+
+    collector = WriteCollector()
+    collector.visit(statement)
+    return collector.names
 
 
 def persist_manifest_free_unittest(

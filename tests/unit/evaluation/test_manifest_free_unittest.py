@@ -126,6 +126,60 @@ def test_project_without_discoverable_tests_stays_unverified(tmp_path: Path) -> 
     assert mechanical.checks[0].executed is False
 
 
+@pytest.mark.parametrize(
+    ("filename", "source"),
+    [
+        (
+            "test-bad.py",
+            "import unittest\n\n"
+            "class TestSample(unittest.TestCase):\n"
+            "    def test_value(self):\n"
+            "        pass\n",
+        ),
+        (
+            "test_shadowed_case.py",
+            "from unittest import TestCase\n"
+            "TestCase = object\n\n"
+            "class TestSample(TestCase):\n"
+            "    def test_value(self):\n"
+            "        pass\n",
+        ),
+        (
+            "test_conditional_shadowed_case.py",
+            "from unittest import TestCase\n"
+            "if True:\n"
+            "    TestCase = object\n\n"
+            "class TestSample(TestCase):\n"
+            "    def test_value(self):\n"
+            "        pass\n",
+        ),
+        (
+            "test_shadowed_module.py",
+            "import unittest as ut\n"
+            "ut = object\n\n"
+            "class TestSample(ut.TestCase):\n"
+            "    def test_value(self):\n"
+            "        pass\n",
+        ),
+        (
+            "test_unimported_module.py",
+            "class TestSample(unittest.TestCase):\n    def test_value(self):\n        pass\n",
+        ),
+    ],
+)
+def test_manifest_free_unittest_rejects_non_discoverable_evidence(
+    tmp_path: Path, filename: str, source: str
+) -> None:
+    """Invalid module names and rebound unittest symbols cannot imply real tests."""
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / filename).write_text(source, encoding="utf-8")
+
+    assert unittest_discovery.manifest_free_unittest_proposal(tmp_path) is None
+    assert _run(ensure_mechanical_toml(tmp_path, None)) is False
+    assert has_mechanical_toml(tmp_path) is False
+
+
 def test_existing_manifest_keeps_llm_detection_path_and_is_unchanged(tmp_path: Path) -> None:
     """The unittest fallback is limited to manifest-free projects."""
     manifest = tmp_path / "pyproject.toml"
