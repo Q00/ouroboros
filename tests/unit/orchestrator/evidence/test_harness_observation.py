@@ -101,10 +101,14 @@ class TestSnapshotDiff:
         assert set(snapshot.fingerprints) == {"real.txt"}
 
     def test_entry_budget_marks_snapshot_truncated(self, tmp_path: Path) -> None:
+        # Shared fixtures may place CLI support files beside the workspace.
+        (tmp_path / ".fixture-only").mkdir()
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
         for index in range(5):
-            (tmp_path / f"f{index}.txt").write_text("x", encoding="utf-8")
+            (workspace / f"f{index}.txt").write_text("x", encoding="utf-8")
 
-        snapshot = snapshot_workspace(tmp_path, max_entries=3)
+        snapshot = snapshot_workspace(workspace, max_entries=3)
 
         assert snapshot is not None
         assert snapshot.truncated is True
@@ -113,8 +117,12 @@ class TestSnapshotDiff:
     def test_entry_budget_bounds_actual_directory_enumeration(
         self, tmp_path: Path, monkeypatch
     ) -> None:
+        # Shared fixtures may place CLI support files beside the workspace.
+        (tmp_path / ".fixture-only").mkdir()
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
         for index in range(7):
-            (tmp_path / f"f{index}.txt").write_text("x", encoding="utf-8")
+            (workspace / f"f{index}.txt").write_text("x", encoding="utf-8")
         real_scandir = os.scandir
         enumerated = 0
 
@@ -137,7 +145,7 @@ class TestSnapshotDiff:
 
         monkeypatch.setattr(harness_observation_module.os, "scandir", CountingScandir)
 
-        snapshot = snapshot_workspace(tmp_path, max_entries=3)
+        snapshot = snapshot_workspace(workspace, max_entries=3)
 
         assert snapshot is not None
         assert snapshot.truncated is True
