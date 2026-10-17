@@ -78,15 +78,18 @@ _BACKEND_PROVIDER: Mapping[str, str] = {
 
 
 def tier_model_providers(runtime_backend: str) -> tuple[str, ...]:
-    """Accepted config namespaces, runtime-specific entries before vendor defaults."""
+    """Accepted namespaces: exact runtime, shared family, then vendor fallback."""
     provider = _BACKEND_PROVIDER.get(runtime_backend)
     if provider is None:
         return ()
-    # Support both the public runtime property and its config selector. They
-    # denote one harness; never borrow another multi-provider CLI's catalog.
+    # MCP is a distinct config selector, but shares its model namespace with
+    # the corresponding CLI family. Keep this limited to supported backends.
     from ouroboros.config.model_selection import canonical_backend
 
-    return tuple(dict.fromkeys((runtime_backend, canonical_backend(runtime_backend), provider)))
+    family = {"claude_mcp": "claude", "codex_mcp": "codex"}.get(
+        runtime_backend, canonical_backend(runtime_backend)
+    )
+    return tuple(dict.fromkeys((runtime_backend, family, provider)))
 
 
 def configured_tier_models(economics: EconomicsConfig, *, runtime_backend: str) -> dict[str, str]:
