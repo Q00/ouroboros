@@ -72,6 +72,10 @@ _AGY_DEFAULT_PERMISSION_MODE = "acceptEdits"
 _SENTINEL_MODEL = "default"
 
 
+class _ResumeUnavailable(ValueError):
+    """An explicit conversation cannot be safely resumed after runtime drift."""
+
+
 class _ConversationMismatch(ValueError):
     def __init__(self, requested: str, observed: str) -> None:
         super().__init__("Antigravity returned a different conversation than requested.")
@@ -174,6 +178,13 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
             async with aclosing(cast(AsyncGenerator[AgentMessage, None], stream)):
                 async for message in stream:
                     yield message
+        except _ResumeUnavailable as error:
+            yield AgentMessage(
+                type="result",
+                content=str(error),
+                data={"subtype": "error", "terminal": True, "error_type": "ResumeUnavailable"},
+                resume_handle=requested_handle,
+            )
         except _ConversationMismatch as error:
             yield AgentMessage(
                 type="result",
@@ -188,6 +199,14 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
                 resume_handle=requested_handle,
             )
 
+    def _resolve_resume_session_id(self, current_handle: RuntimeHandle | None) -> str | None:
+        session_id = super()._resolve_resume_session_id(current_handle)
+        if current_handle and current_handle.native_session_id and session_id is None:
+            raise _ResumeUnavailable(
+                "Cannot resume the requested Antigravity conversation after runtime inputs changed."
+            )
+        return session_id
+
     def _prepare_runtime_event(
         self,
         event: dict[str, Any],
@@ -196,7 +215,7 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
         current_handle: RuntimeHandle | None,
         session_rebound: bool,
     ) -> dict[str, Any]:
-        requested = self._resolve_resume_session_id(previous_handle)
+        requested = previous_handle.native_session_id if previous_handle else None
         observed = self._extract_event_session_id(event)
         if requested and observed and requested != observed:
             raise _ConversationMismatch(requested, observed)

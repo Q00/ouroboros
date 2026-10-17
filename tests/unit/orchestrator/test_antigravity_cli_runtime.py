@@ -626,6 +626,56 @@ async def test_resumes_can_be_interleaved_in_the_same_task() -> None:
             )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("from_handle", [False, True])
+async def test_resume_after_runtime_drift_fails_before_fresh_launch(from_handle: bool) -> None:
+    runtime = _make_runtime()
+    handle = runtime._build_runtime_handle("requested-session") if from_handle else None
+    runtime._drift.observe("cli_executable", "test-only changed executable")
+    with patch("ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec") as spawn:
+        result = await runtime.execute_task_to_result(
+            "continue",
+            resume_handle=handle,
+            resume_session_id=None if from_handle else "requested-session",
+        )
+    spawn.assert_not_called()
+    assert result.is_err
+    assert "resume" in str(result.error).lower()
+
+
+@pytest.mark.asyncio
+async def test_fresh_conversation_after_runtime_drift_remains_available() -> None:
+    import json
+
+    runtime = _make_runtime()
+    runtime._drift.observe("cli_executable", "test-only changed executable")
+
+    async def fake_exec(*command: str, **kwargs: object) -> _FakeProcess:
+        assert "--conversation" not in command
+        return _FakeProcess(
+            [
+                json.dumps(
+                    {
+                        "event": "result",
+                        "result": {
+                            "conversation_id": "new-session",
+                            "status": "SUCCESS",
+                            "response": "fresh",
+                        },
+                    }
+                )
+            ]
+        )
+
+    with patch(
+        "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+        side_effect=fake_exec,
+    ):
+        result = await runtime.execute_task_to_result("new task")
+    assert result.is_ok
+    assert result.value.session_id == "new-session"
+
+
 @pytest.mark.parametrize(
     "kind,payload",
     [
