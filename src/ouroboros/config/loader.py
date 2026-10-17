@@ -1831,7 +1831,20 @@ def _guard_llm_completion_backend(resolved: str) -> str:
     override = _explicit_llm_backend_override()
     if override and _backend_supports_llm(override):
         return override
-    return get_llm_backend()
+    fallback = get_llm_backend()
+    if _backend_supports_llm(fallback):
+        return fallback
+
+    # OUROBOROS_LLM_BACKEND can be runtime-only, so get_llm_backend() may
+    # return the same value that this guard just rejected. Prefer the
+    # configured completion backend before using the documented default.
+    try:
+        configured_backend = load_config().llm.backend
+    except ConfigError:
+        configured_backend = None
+    if _backend_supports_llm(configured_backend):
+        return configured_backend
+    return "claude_code"
 
 
 def get_llm_backend_for_role(
