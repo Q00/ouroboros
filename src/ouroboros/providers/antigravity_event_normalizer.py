@@ -11,6 +11,21 @@ from typing import Any
 
 from ouroboros.providers.gemini_event_normalizer import GeminiEventNormalizer
 
+_LEGACY_EVENT_TYPES = {
+    "init",
+    "message",
+    "text",
+    "thinking",
+    "tool_use",
+    "tool_result",
+    "error",
+    "result",
+    "done",
+    "fatal",
+    "exception",
+    "abort",
+}
+
 _TOOL_NAMES = {
     "view_file": "Read",
     "sed_file": "Read",
@@ -56,6 +71,17 @@ class AntigravityEventNormalizer(GeminiEventNormalizer):
         if "event" not in parsed:
             return super()._normalize_json_dict(parsed, original=original)
         kind = parsed.get("event")
+        legacy_kind = kind.strip().lower() if isinstance(kind, str) else ""
+        declared_type = parsed.get("type", legacy_kind)
+        # A nested native payload, even malformed, owns its envelope. Legacy
+        # event spellings retain Gemini semantics only without that payload.
+        if (
+            legacy_kind in _LEGACY_EVENT_TYPES
+            and not (legacy_kind in {"init", "result"} and legacy_kind in parsed)
+            and isinstance(declared_type, str)
+            and declared_type.strip().lower() == legacy_kind
+        ):
+            return super()._normalize_json_dict(parsed, original=original)
         payload = parsed.get(kind) if isinstance(kind, str) else None
         if (
             not isinstance(kind, str)

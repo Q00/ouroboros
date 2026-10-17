@@ -6,6 +6,7 @@ import pytest
 
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.antigravity_cli_runtime import AntigravityCLIRuntime
+from ouroboros.orchestrator.gemini_cli_runtime import GeminiCLIRuntime
 from ouroboros.providers.antigravity_event_normalizer import (
     AntigravityEventNormalizer,
     normalize_antigravity_tool,
@@ -286,4 +287,100 @@ def test_missing_native_terminal_status_never_implies_success(payload):
 
     assert parsed["type"] == "unknown"
     assert parsed["raw"]["result"] == payload
+    assert AntigravityCLIRuntime(cli_path="/usr/bin/agy")._convert_event(parsed, None) == []
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "init",
+        "message",
+        "text",
+        "thinking",
+        "tool_use",
+        "tool_result",
+        "error",
+        "result",
+        "done",
+        "fatal",
+        "exception",
+        "abort",
+    ],
+)
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"content": "Hello", "name": "run_command", "input": {"command": "echo test"}},
+        {"content": {"value": "object"}},
+        {"content": ["list", "content"]},
+    ],
+)
+def test_recognized_legacy_event_fixtures_match_gemini(kind, payload):
+    raw = {"event": kind, **payload}
+    line = json.dumps(raw)
+    expected = GeminiEventNormalizer().normalize_line(line)
+    parsed = AntigravityEventNormalizer().normalize_line(line)
+
+    assert parsed == expected
+    assert AntigravityCLIRuntime(cli_path="/usr/bin/agy")._convert_event(parsed, None) == (
+        GeminiCLIRuntime(cli_path="/usr/bin/gemini")._convert_event(expected, None)
+    )
+
+
+@pytest.mark.parametrize("key", ["type", "kind", "category"])
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "init",
+        "message",
+        "text",
+        "thinking",
+        "tool_use",
+        "tool_result",
+        "error",
+        "result",
+        "done",
+        "fatal",
+        "exception",
+        "abort",
+    ],
+)
+def test_no_event_discriminator_fixtures_match_gemini(key, kind):
+    line = json.dumps({key: kind, "content": {"value": "object"}, "name": "Read"})
+    assert AntigravityEventNormalizer().normalize_line(line) == (
+        GeminiEventNormalizer().normalize_line(line)
+    )
+
+
+@pytest.mark.parametrize("kind", ["message", "tool_use", "tool_result", "init", "result"])
+def test_legacy_event_with_conflicting_type_is_non_actionable(kind):
+    raw = {
+        "event": kind,
+        "type": "tool_result" if kind != "tool_result" else "result",
+        "name": "run_command",
+        "content": "fabricated",
+    }
+    parsed = AntigravityEventNormalizer().normalize_line(json.dumps(raw))
+
+    assert parsed["type"] == "unknown"
+    assert parsed["raw"] == raw
+    assert AntigravityCLIRuntime(cli_path="/usr/bin/agy")._convert_event(parsed, None) == []
+
+
+@pytest.mark.parametrize("kind", ["init", "result"])
+@pytest.mark.parametrize("payload", [None, [], "invalid", {}])
+def test_native_payload_takes_priority_over_legacy_top_level_fields(kind, payload):
+    raw = {
+        "event": kind,
+        kind: payload,
+        "type": kind,
+        "response": "legacy looking answer",
+        "session_id": "legacy looking session",
+    }
+    parsed = AntigravityEventNormalizer().normalize_line(json.dumps(raw))
+
+    assert parsed["raw"] == raw
+    assert parsed["content"] == ""
+    assert parsed["metadata"].get("session_id") is None
     assert AntigravityCLIRuntime(cli_path="/usr/bin/agy")._convert_event(parsed, None) == []
