@@ -145,16 +145,16 @@ class TestBuildModelRouter:
         assert router is not None
         assert router.runtime_backend == "codex_cli"
         assert router.tier_models == {
-            "frugal": "gpt-5.1-codex-mini",
-            "standard": "gpt-5-codex",
-            "frontier": "gpt-5.2",
+            "frugal": "gpt-6-luna",
+            "standard": "gpt-6.1-sol",
+            "frontier": "gpt-6-astra",
         }
 
     def test_codex_mcp_backend_resolves_openai_tier_models(self) -> None:
         economics = get_default_config().economics
         router = build_model_router(economics, runtime_backend="codex_mcp")
         assert router is not None
-        assert router.tier_models["standard"] == "gpt-5-codex"
+        assert router.tier_models["standard"] == "gpt-6.1-sol"
 
     def test_gemini_backend_builds_google_router(self) -> None:
         # Gemini has no frontier google model in the default config, so only the
@@ -164,8 +164,8 @@ class TestBuildModelRouter:
         assert router is not None
         assert router.runtime_backend == "gemini_cli"
         assert router.tier_models == {
-            "frugal": "gemini-2.0-flash",
-            "standard": "gemini-2.5-pro",
+            "frugal": "flash",
+            "standard": "pro",
         }
 
     def test_opencode_backend_is_dormant(self) -> None:
@@ -341,9 +341,9 @@ class TestLegacyTierModelNormalization:
         router = build_model_router(_legacy_persisted_economics(), runtime_backend="codex_cli")
         assert router is not None
         assert router.tier_models == {
-            "frugal": "gpt-5.1-codex-mini",
-            "standard": "gpt-5-codex",
-            "frontier": "gpt-5.2",
+            "frugal": "gpt-6-luna",
+            "standard": "gpt-6.1-sol",
+            "frontier": "gpt-6-astra",
         }
 
     def test_legacy_opus_4_6_normalizes_to_current(self) -> None:
@@ -620,7 +620,7 @@ class TestDecideModel:
         assert router is not None
         d = decide_model(ParamSupport.IGNORED, router=router, is_decomposed_child=False)
         assert d.tier == "standard"
-        assert d.model == "gemini-2.5-pro"
+        assert d.model == "pro"
         assert d.mode == "advised"
         assert d.is_enforced is False
 
@@ -821,14 +821,14 @@ class TestResolveRouteEconomics:
         }
 
     @pytest.mark.parametrize("backend", ["codex_cli", "codex_mcp", "gemini_cli"])
-    def test_auto_routes_sentinel_backends_to_default(self, backend: str) -> None:
+    def test_model_router_keeps_native_ladder_on_sentinel_backends(self, backend: str) -> None:
         shipped = get_default_config().economics
         resolved = resolve_route_economics(shipped, runtime_backend=backend, pinned=False)
 
         models = self._router_models(resolved, backend)
         assert models
-        assert set(models.values()) == {"default"}
-        assert set(models) == set(self._router_models(shipped, backend))
+        assert models == self._router_models(shipped, backend)
+        assert "default" not in models.values()
 
     def test_auto_keeps_other_providers_entries(self) -> None:
         shipped = get_default_config().economics
@@ -865,3 +865,28 @@ class TestResolveRouteEconomics:
             is economics
         )
         assert resolve_route_economics(economics, runtime_backend=None, pinned=False) is economics
+
+
+class TestExplicitNativeLadders:
+    def test_runtime_specific_codex_ladder_precedes_openai_defaults(self) -> None:
+        economics = _economics(
+            tiers={
+                "standard": TierConfig(
+                    cost_factor=10,
+                    models=[
+                        ModelConfig(provider="openai", model="gpt-4o"),
+                        ModelConfig(provider="codex", model="my-custom-proxy"),
+                    ],
+                )
+            }
+        )
+        router = build_model_router(economics, runtime_backend="codex_cli")
+        assert router is not None
+        assert dict(router.tier_models) == {"standard": "my-custom-proxy"}
+
+    @pytest.mark.parametrize("model", ["default", "auto", "current", " default ", "AUTO", ""])
+    def test_unresolved_sentinel_is_advisory_even_with_native_model_flag(self, model: str) -> None:
+        router = ModelRouter({"standard": model}, "codex_cli", "frugal", "standard", 2)
+        decision = decide_model(ParamSupport.NATIVE, router=router, is_decomposed_child=False)
+        assert decision.mode == "advised"
+        assert not decision.is_enforced

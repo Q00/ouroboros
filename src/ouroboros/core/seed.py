@@ -780,6 +780,9 @@ class Seed(BaseModel, frozen=True):
         goal: The primary objective of the workflow.
         constraints: Hard constraints that must be satisfied.
         acceptance_criteria: Specific criteria for success.
+        assumptions: Unconfirmed guesses made on the requester's behalf. They
+            never bind: the worker sees them as assumptions it may override when
+            the task or the code says otherwise.
         ontology_schema: Conceptual lens for workflow coherence.
         evaluation_principles: Principles for evaluating outputs.
         exit_conditions: Conditions for terminating the workflow.
@@ -845,6 +848,13 @@ class Seed(BaseModel, frozen=True):
     acceptance_criteria: tuple[AcceptanceCriterionSpec, ...] = Field(
         default_factory=tuple,
         description="Specific criteria for success evaluation",
+    )
+    assumptions: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Non-binding assumptions nobody confirmed; the worker may override them "
+            "when the task or the code says otherwise"
+        ),
     )
 
     # Conceptual lens
@@ -1012,7 +1022,12 @@ class Seed(BaseModel, frozen=True):
             Dictionary representation of the seed.
         """
         extra = self.model_extra or {}
-        data = self.model_dump(mode="json", by_alias=True, exclude=set(extra))
+        excluded = set(extra)
+        # Omit an empty assumptions list so a Seed without assumptions keeps
+        # serializing exactly as it did before the field existed.
+        if not self.assumptions:
+            excluded.add("assumptions")
+        data = self.model_dump(mode="json", by_alias=True, exclude=excluded)
         data.update({key: _thaw_seed_extra_value(value) for key, value in extra.items()})
         return data
 

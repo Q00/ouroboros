@@ -701,3 +701,110 @@ async def test_requester_answer_retires_earlier_fallback_draft_for_same_facet(
             assert ledger.sections[name].status() == LedgerStatus.CONFIRMED
             assert _active_values(ledger, name) == (REQUESTER_TEXT,)
     assert touched
+
+
+# -- requester must not create ledger conflicts the requester-off run avoids --
+
+
+def _catch_all(value: str) -> LedgerEntry:
+    return LedgerEntry(
+        key="constraints.conservative_mvp",
+        value=value,
+        source=LedgerSource.CONSERVATIVE_DEFAULT,
+        confidence=0.82,
+        status=LedgerStatus.DEFAULTED,
+    )
+
+
+def test_draft_after_retired_facet_does_not_tie_with_retired_entry() -> None:
+    """Study sequence (django-13012): draft A, requester answer for the facet,
+    then an auto draft B for a different question on the same catch-all key.
+
+    A is retired (WEAK) by the requester answer, so B must not tie with it and
+    revive it as CONFLICTING; the section stays usable.
+    """
+    ledger = SeedDraftLedger.from_goal(GOAL)
+    ledger.add_entry("constraints", _catch_all("Value A"))
+    draft = AutoAnswer(
+        text="Value A",
+        source=AutoAnswerSource.CONSERVATIVE_DEFAULT,
+        confidence=0.82,
+        ledger_updates=[("constraints", _catch_all("Value A"))],
+    )
+    for section, entry in requester_answer(draft, REQUESTER_TEXT, 3).ledger_updates:
+        ledger.add_entry(section, entry)
+    ledger.add_entry("constraints", _catch_all("Value B"))
+
+    statuses = [(e.key, e.value, e.status) for e in ledger.sections["constraints"].entries]
+    assert statuses == [
+        ("constraints.conservative_mvp", "Value A", LedgerStatus.WEAK),
+        (
+            f"constraints.conservative_mvp{REQUESTER_KEY_SUFFIX}",
+            REQUESTER_TEXT,
+            LedgerStatus.CONFIRMED,
+        ),
+        ("constraints.conservative_mvp", "Value B", LedgerStatus.DEFAULTED),
+    ]
+    assert ledger.sections["constraints"].status() != LedgerStatus.CONFLICTING
+
+
+class _ScriptedRequester:
+    """Replies per call from a script: an answer string, or None for empty."""
+
+    def __init__(self, script: list[str | None]) -> None:
+        self.script = list(script)
+        self.calls = 0
+
+    async def ask(self, question: RequesterQuestion) -> RequesterReply:  # noqa: ARG002
+        reply = self.script[self.calls] if self.calls < len(self.script) else None
+        self.calls += 1
+        if reply is None:
+            return RequesterReply("empty_answer", detail="empty stdout")
+        return RequesterReply("answered", answer=reply)
+
+
+async def _run_catch_all_interview(tmp_path: Path, requester) -> tuple[object, SeedDraftLedger]:
+    """Same catch-all question every round, a refiner that never repeats itself."""
+    counter = {"n": 0}
+
+    async def refiner(goal, question, section, generic, committed=()) -> str:  # noqa: ARG001
+        counter["n"] += 1
+        return f"{section} refined variant {counter['n']}"
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What else should we consider?", "s")
+
+    async def answer(session_id: str, text: str, *, last_question=None) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What else should we consider?", session_id)
+
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path / "store"),
+        max_rounds=8,
+        answer_refiner=refiner,
+        requester=requester,
+    )
+    state = AutoPipelineState(goal=GOAL, cwd=str(tmp_path))
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    result = await driver.run(state, SeedDraftLedger.from_goal(GOAL))
+    return result, SeedDraftLedger.from_dict(state.ledger)
+
+
+@pytest.mark.asyncio
+async def test_requester_does_not_block_on_conflict_the_off_run_avoids(tmp_path: Path) -> None:
+    """Study record: round 1 empty, rounds 2-4 answered, rounds 5-8 empty.
+
+    With the requester off the same interview never marks a section
+    CONFLICTING; with the requester on it must not either.
+    """
+    off_result, off_ledger = await _run_catch_all_interview(tmp_path / "off", None)
+    script = [None, "Keep the patch minimal.", "Only touch the parser.", "Add one test."]
+    on_result, on_ledger = await _run_catch_all_interview(
+        tmp_path / "on", _ScriptedRequester(script + [None] * 4)
+    )
+
+    for ledger in (off_ledger, on_ledger):
+        statuses = ledger.section_statuses()
+        assert LedgerStatus.CONFLICTING not in statuses.values(), statuses
+    for result in (off_result, on_result):
+        assert "conflicting" not in (getattr(result, "blocker", None) or "")

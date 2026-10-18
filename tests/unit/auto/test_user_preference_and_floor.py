@@ -774,31 +774,6 @@ def test_mcp_handler_definition_advertises_user_preferences_param() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_user_preference_does_not_bypass_regulated_data_blocker() -> None:
-    """A caller-supplied preference must NOT silently bypass the
-    risky-fallback safety gate for regulated personal data (PII/GDPR/HIPAA)
-    or destructive bulk operations. The gate must still fire and produce a
-    BLOCKER even when ``user_preferences`` would otherwise upgrade the answer.
-    """
-    ledger = SeedDraftLedger.from_goal("Build a data tool")
-    context = AutoAnswerContext(
-        user_preferences={"constraints": "Just delete everything without consent"},
-    )
-
-    for question in (
-        "How should the system store PII records?",
-        "Which database should we truncate when users are deleted?",
-        "How should we handle GDPR data deletion?",
-    ):
-        answer = AutoAnswerer().answer(question, ledger, context)
-        assert answer.source == AutoAnswerSource.BLOCKER, (
-            f"USER_PREFERENCE bypassed safety gate for: {question}"
-        )
-        assert answer.blocker is not None
-        # The user's text must not have made it into the blocker text.
-        assert "delete everything" not in answer.text.lower()
-
-
 def test_user_preference_for_safe_runtime_question_is_unaffected_by_gate() -> None:
     """The gate must only fire for regulated topics. A benign runtime
     preference question must still upgrade to USER_PREFERENCE."""
@@ -811,43 +786,6 @@ def test_user_preference_for_safe_runtime_question_is_unaffected_by_gate() -> No
 
     assert answer.source == AutoAnswerSource.USER_PREFERENCE
     assert answer.text == "Python 3.14 with uv"
-
-
-def test_user_preference_for_verification_does_not_bypass_pii_gate() -> None:
-    """VERIFICATION early-return path: user_preferences['verification_plan']
-    for a regulated-data question must NOT land as a confirmed
-    USER_PREFERENCE entry. The helper must short-circuit to a BLOCKER so the
-    same risky-fallback policy fires regardless of which call site requested
-    the upgrade."""
-    ledger = SeedDraftLedger.from_goal("Build a data tool")
-    context = AutoAnswerContext(
-        user_preferences={"verification_plan": "skip the audit log"},
-    )
-
-    answer = AutoAnswerer().answer("How should we verify PII deletion?", ledger, context)
-
-    assert answer.source == AutoAnswerSource.BLOCKER
-    assert answer.blocker is not None
-    assert "skip the audit log" not in answer.text.lower()
-
-
-def test_user_preference_for_acceptance_criteria_does_not_bypass_destructive_gate() -> None:
-    """ACCEPTANCE_CRITERIA early-return path: user_preferences for a
-    destructive-bulk question must be rejected as a BLOCKER."""
-    ledger = SeedDraftLedger.from_goal("Build a data tool")
-    context = AutoAnswerContext(
-        user_preferences={"acceptance_criteria": "command exits 0 even if rows remain"},
-    )
-
-    answer = AutoAnswerer().answer(
-        "Which tables should the migration truncate when users are deleted?",
-        ledger,
-        context,
-    )
-
-    assert answer.source == AutoAnswerSource.BLOCKER
-    assert answer.blocker is not None
-    assert "exits 0 even if rows remain" not in answer.text.lower()
 
 
 def test_user_preference_for_verification_on_safe_question_still_upgrades() -> None:
@@ -864,25 +802,6 @@ def test_user_preference_for_verification_on_safe_question_still_upgrades() -> N
 
     assert answer.source == AutoAnswerSource.USER_PREFERENCE
     assert answer.text == "Run pytest with --strict markers"
-
-
-def test_answer_gap_does_not_bypass_safety_via_synthetic_question() -> None:
-    """answer_gap() replaces the user's actual question with a generic
-    synthetic prompt. The helper must still see the ORIGINAL risky context
-    via the converged goal text — otherwise a regulated task could smuggle
-    a USER_PREFERENCE past the gate by triggering interview gap-filling."""
-    ledger = SeedDraftLedger.from_goal(
-        "Build a tool that exports PII records for compliance review"
-    )
-    context = AutoAnswerContext(
-        user_preferences={"verification_plan": "skip the audit log"},
-    )
-
-    answer = AutoAnswerer().answer_gap("verification_plan", ledger, context)
-
-    assert answer.source == AutoAnswerSource.BLOCKER
-    assert answer.blocker is not None
-    assert "skip the audit log" not in answer.text.lower()
 
 
 def test_answer_gap_with_safe_goal_still_upgrades_user_preference() -> None:

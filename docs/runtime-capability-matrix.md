@@ -91,9 +91,10 @@ allow-list, and `permission_mode`. Each is one of:
 > Gemini, Goose, Copilot, OpenCode, and Hermes also render requested tool
 > allow-lists only as prompt guidance, so `tools` is translated rather than a
 > native runtime allow-list when the list is non-empty. An explicit empty
-> allow-list (`tools=[]`) cannot be translated by those prompt-only composers
-> because no tool names are rendered; the orchestrator reports that no-tools
-> restriction as `ignored` for observability. Kiro maps `permission_mode` onto
+> allow-list (`tools=[]`) adds explicit no-tools advice through the shared Codex
+> prompt composer, including the Antigravity runtime. This is advisory text, not
+> enforcement: the orchestrator continues reporting the no-tools restriction as
+> `ignored` for runtimes without a native restriction. Kiro maps `permission_mode` onto
 > coarse `--trust-*` flags. When full bypass is requested, `--trust-all-tools`
 > takes precedence and any simultaneous tool envelope remains prompt guidance.
 > OpenCode and Hermes translate full bypass onto

@@ -444,6 +444,7 @@ class TestResumeRestore:
             final_approved=True,
             highest_stage_passed=3,
             score=0.92,
+            goal_alignment=0.92,
         ).model_dump(mode="json")
 
         partial_state = {
@@ -496,6 +497,14 @@ class TestResumeRestore:
         assert gen_result.evaluation_summary is not None
         assert gen_result.evaluation_summary.score == 0.92
         assert gen_result.evaluation_summary.final_approved is True
+        assert gen_result.evaluation_summary.goal_alignment == 0.92
+
+        drift_event = next(
+            call.args[0]
+            for call in loop.event_store.append.call_args_list
+            if call.args[0].type == "observability.drift.measured"
+        )
+        assert drift_event.data["goal_drift"] == pytest.approx(0.08)
 
         # evaluator should NOT have been called
         assert len(evaluator_called) == 0

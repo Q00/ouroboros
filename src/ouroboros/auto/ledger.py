@@ -207,6 +207,11 @@ class LedgerEntry:
     # Writer sites whose origin ``source`` cannot express (deadline/timeout
     # backstops, lateral consensus) stamp this explicitly at the decision point.
     provenance: DecisionProvenance | str | None = None
+    # The interviewer's question this entry answers, when it came from one.
+    # Empty for entries no interview question produced (templated fills,
+    # gap reopening, legacy sessions). An entry that does not bind is shown
+    # to the worker as this open question, never as its drafted value.
+    question: str = ""
 
     def __post_init__(self) -> None:
         self.source = LedgerSource(str(self.source))
@@ -230,6 +235,23 @@ class LedgerEntry:
         source = self.source if isinstance(self.source, LedgerSource) else LedgerSource(self.source)
         return _PROVENANCE_FROM_SOURCE.get(source, _PROVENANCE_DEFAULT)
 
+    @property
+    def binds_seed(self) -> bool:
+        """Return True when this entry may become a binding Seed requirement.
+
+        Only what the user stated, the requester answered, or the repository
+        shows may bind: an evidence-backed ``source`` with a resolved status
+        other than ``DEFAULTED``. Every auto-generated stand-in is written
+        ``DEFAULTED``, including the templated ``existing_convention`` and
+        ``non_goal`` fallbacks, so a guess carrying a grounded source label
+        still does not bind. Everything else is an assumption.
+        """
+        return (
+            self.source in _EVIDENCE_BACKED_SOURCES
+            and self.status in _RESOLVED_STATUSES
+            and self.status is not LedgerStatus.DEFAULTED
+        )
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible data."""
         data = asdict(self)
@@ -241,6 +263,8 @@ class LedgerEntry:
             data.pop("provenance", None)
         else:
             data["provenance"] = DecisionProvenance(self.provenance).value
+        if not self.question:
+            data.pop("question", None)
         return data
 
     @classmethod
@@ -262,6 +286,9 @@ class LedgerEntry:
             raise ValueError(msg)
         if not isinstance(data.get("rationale", ""), str):
             msg = "ledger entry rationale must be a string"
+            raise ValueError(msg)
+        if not isinstance(data.get("question", ""), str):
+            msg = "ledger entry question must be a string"
             raise ValueError(msg)
         evidence = data.get("evidence", [])
         if not isinstance(evidence, list) or not all(isinstance(item, str) for item in evidence):
@@ -466,6 +493,11 @@ class SeedDraftLedger:
                 )
         else:
             for existing in same_key_entries:
+                if existing.status == LedgerStatus.WEAK:
+                    # Already retired (superseded or corrected): it holds no
+                    # authority, so a new value must not tie with it and revive
+                    # it as CONFLICTING. Only active entries can conflict.
+                    continue
                 resolution = resolve_conflict(existing, entry)
                 if resolution is ConflictResolution.BLOCKED:
                     continue

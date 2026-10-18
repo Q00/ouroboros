@@ -55,6 +55,7 @@ class SeedContract:
     evaluation_principles: tuple[EvaluationPrinciple, ...]
     exit_conditions: tuple[ExitCondition, ...]
     brownfield_context: BrownfieldContext
+    assumptions: tuple[str, ...] = ()
 
     @classmethod
     def from_seed(cls, seed: Seed) -> SeedContract:
@@ -80,6 +81,7 @@ class SeedContract:
             evaluation_principles=seed.evaluation_principles,
             exit_conditions=seed.exit_conditions,
             brownfield_context=seed.brownfield_context,
+            assumptions=seed.assumptions,
         )
 
 

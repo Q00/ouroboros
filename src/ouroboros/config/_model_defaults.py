@@ -95,9 +95,12 @@ LEGACY_DEFAULT_MODELS: dict[str, tuple[str, ...]] = {
 # preserved as-is.
 LEGACY_TIER_MODELS: dict[str, str] = {
     # openai (Codex CLI) tier ids
-    "gpt-4o-mini": "gpt-5.1-codex-mini",
-    "gpt-4o": "gpt-5-codex",
-    "o3": "gpt-5.2",
+    "gpt-4o-mini": "gpt-6-luna",
+    "gpt-4o": "gpt-6.1-sol",
+    "o3": "gpt-6-astra",
+    "gpt-5.1-codex-mini": "gpt-6-luna",
+    "gpt-5-codex": "gpt-6.1-sol",
+    "gpt-5.2": "gpt-6-astra",
     # anthropic tier ids
     "claude-3-5-haiku": DEFAULT_HAIKU_MODEL,
     "claude-sonnet-4-20250514": DEFAULT_SONNET_MODEL,
@@ -111,6 +114,9 @@ LEGACY_TIER_MODELS: dict[str, str] = {
 # necessarily an explicit/custom routing choice (often a proxy alias) and must be
 # preserved verbatim.
 LEGACY_TIER_MODEL_PROVIDERS: dict[str, str] = {
+    "gpt-5.1-codex-mini": "openai",
+    "gpt-5-codex": "openai",
+    "gpt-5.2": "openai",
     "gpt-4o-mini": "openai",
     "gpt-4o": "openai",
     "o3": "openai",
@@ -119,6 +125,16 @@ LEGACY_TIER_MODEL_PROVIDERS: dict[str, str] = {
     "claude-opus-4-5-20251101": "anthropic",
     "claude-opus-4-6": "anthropic",
     "claude-opus-4-8": "anthropic",
+}
+
+
+# Official Codex model guide, verified 2026-10-18. Focused/high-volume work
+# uses Luna, complex coding uses Sol, hardest workflows use Astra. Availability
+# still depends on account, workspace, provider and CLI rollout.
+CODEX_TIER_MODELS: dict[str, str] = {
+    "frugal": "gpt-6-luna",
+    "standard": "gpt-6.1-sol",
+    "frontier": "gpt-6-astra",
 }
 
 

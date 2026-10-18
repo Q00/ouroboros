@@ -28,8 +28,10 @@ from ouroboros.auto.execution_acceptance import normalize_execution_acceptance
 from ouroboros.auto.grade_gate_terminals import (
     SEED_GRADE_BELOW_REQUIRED_STOP_REASON_CODE,
     SEED_REVIEW_WITHHELD_RUN_STOP_REASON_CODE,
+    degraded_seed_not_executed_blocker,
     degraded_seed_safety_blocker,
     grade_meets_required,
+    is_degraded_seed_not_executed_stop,
     seed_review_gate_blocker,
 )
 from ouroboros.auto.grading import GradeGate, deterministic_floor
@@ -51,6 +53,7 @@ from ouroboros.auto.ledger_seed import (
     brownfield_context_from_cwd,
     partial_seed_from_evidence,
     synthesize_seed_from_ledger,
+    with_ledger_assumptions,
 )
 from ouroboros.auto.listeners import RALPH_CANCEL_BLOCKER_REASON
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
@@ -1876,17 +1879,15 @@ class AutoPipeline:
                 "unresolved_slots": list(unresolved_slots),
             },
         )
-        state.transition(
-            AutoPhase.COMPLETE,
-            "degraded seed emitted as partial product with unresolved next steps",
-        )
         state.mark_progress(
             "Partial product emitted from degraded seed; "
             f"{len(unresolved_slots)} unresolved slot(s) carried forward as next steps",
             tool_name="partial_product_terminal",
         )
+        blocker, code = degraded_seed_not_executed_blocker(len(unresolved_slots))
+        state.mark_blocked(blocker, tool_name="partial_product_terminal", error_code=code)
         self._save(state)
-        return self._result(state, ledger, review=review)
+        return self._result(state, ledger, review=review, blocker=blocker)
 
     async def _emit_product_emitted_terminal(
         self,
@@ -2385,11 +2386,9 @@ class AutoPipeline:
         floor = deterministic_floor(ledger)
         if floor > seed.metadata.ambiguity_score:
             seed = seed.model_copy(
-                update={
-                    "metadata": seed.metadata.model_copy(update={"ambiguity_score": floor}),
-                }
+                update={"metadata": seed.metadata.model_copy(update={"ambiguity_score": floor})}
             )
-        seed = normalize_execution_acceptance(seed)
+        seed = normalize_execution_acceptance(with_ledger_assumptions(seed, ledger))
         state.seed_id = seed.metadata.seed_id
         state.seed_artifact = seed.to_dict()
         state.seed_origin = SeedOrigin.AUTO_PIPELINE
@@ -2470,11 +2469,11 @@ class AutoPipeline:
         )
         partial_product_reason = seed_meta.get("recovery_reason") if seed_degraded else None
         # ``partial_product`` is True only at the typed terminal: a degraded
-        # Seed that reached :meth:`_emit_partial_product_terminal` and is now
-        # at ``AutoPhase.COMPLETE``. A degraded Seed that BLOCKED earlier
-        # (e.g. on a safety blocker) keeps ``partial_product=False`` so the
-        # field cannot be misread as "deadline recovery succeeded".
-        partial_product = seed_degraded and state.phase == AutoPhase.COMPLETE
+        # Seed that reached :meth:`_emit_partial_product_terminal`, which stops
+        # BLOCKED with ``DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE`` because
+        # the Seed was never executed. A degraded Seed that BLOCKED for another
+        # reason (e.g. a safety blocker) keeps ``partial_product=False``.
+        partial_product = seed_degraded and is_degraded_seed_not_executed_stop(state)
         result_status = status_override or state.phase.value
         artifact_state = _artifact_state_for_result(
             status=result_status,

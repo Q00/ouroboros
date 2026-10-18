@@ -34,6 +34,7 @@ from typing import Any
 
 import pytest
 
+from ouroboros.auto.grade_gate_terminals import DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE
 from ouroboros.auto.ledger import (
     LedgerEntry,
     LedgerSource,
@@ -258,8 +259,9 @@ async def test_complete_ledger_deadline_cannot_reach_run_or_seed_qa(tmp_path) ->
     result = await pipeline.run(state)
     await asyncio.sleep(0)
 
-    # Terminal is the typed partial-product success, not RUN/BLOCKED.
-    assert state.phase == AutoPhase.COMPLETE
+    # Terminal is the typed partial-product stop: never RUN, never COMPLETE.
+    assert state.phase == AutoPhase.BLOCKED
+    assert result.stop_reason_code == DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE
     assert result.partial_product is True
     assert result.partial_product_reason == "interview_phase_deadline"
     # Complete ledger ⇒ no unresolved slots carried forward.

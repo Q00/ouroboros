@@ -106,6 +106,7 @@ from ouroboros.orchestrator.atomic_prompt_builder import (
     AtomicPromptBuilder,
     _build_success_contract_block,  # noqa: F401  (re-exported for tests/back-compat)
 )
+from ouroboros.orchestrator.attempt_evidence import attempt_workspace_evidence, judgment_envelope_ok
 from ouroboros.orchestrator.backend_limits import (
     BackendConcurrencyLimits,
     resolve_backend_limits,
@@ -356,6 +357,7 @@ from ouroboros.orchestrator.model_routing import (
     serialize_model_router,
     tier_from_profile_hint,
 )
+from ouroboros.orchestrator.no_evidence_route import NoEvidenceRoute
 from ouroboros.orchestrator.parallel_executor_models import (
     ACExecutionOutcome,
     ACExecutionResult,
@@ -431,6 +433,7 @@ from ouroboros.orchestrator.verifier import (
     VerifierVerdict,
     verifier_operational_failure_verdict,
 )
+from ouroboros.orchestrator.verify_base_signal import VerifyBaseSignal
 from ouroboros.orchestrator.verify_command_runner import run_with_shell
 from ouroboros.orchestrator.verify_gate_outcome import (
     _VERIFY_OUTPUT_TAIL_CHARS,
@@ -454,8 +457,8 @@ from ouroboros.orchestrator.verify_shell import (
     verify_shell_unavailable_reason,
 )
 from ouroboros.orchestrator.workspace_evidence_paths import (
-    is_git_ignored_path,
-    is_untracked_top_level_evidence_path,
+    collect_bounded_workspace_paths,
+    is_declared_contract_path,
     load_ignored_workspace_paths,
     load_tracked_workspace_paths,
 )
@@ -1799,6 +1802,8 @@ _WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES = frozenset(
     }
 )
 _WORKSPACE_FINGERPRINT_IGNORED_REGULAR_FILE_SUFFIXES = frozenset({".pyc", ".pyo"})
+_WORKSPACE_FINGERPRINT_MAX_ENTRIES = 50_000
+_WORKSPACE_FINGERPRINT_MAX_DEPTH = 64
 _ROUTE_SUCCESS_CONTEXT_CHARS = 200
 _ROUTE_SUCCESS_PUBLIC_API_CHARS = 500
 _DURABLE_CONFLICT_PATH_CHARS = 32_768
@@ -2550,6 +2555,7 @@ def render_parallel_verification_report(
         if (
             isinstance(result.verify_gate_outcome, _VerifyGateOutcome)
             and result.verify_gate_outcome.environment_unverifiable
+            and result.success  # a no-evidence attempt is quarantined but BLOCKED
         )
         or (
             result.atomic_verifier_verdict is not None
@@ -2795,10 +2801,13 @@ class ParallelACExecutor:
         # the live switch (``runtime.exec_sandbox.sandbox_enabled``).
         self._exec_sandbox_enabled = exec_sandbox_enabled
         self._verify_command_timeout_seconds = max(1, verify_command_timeout_seconds)
+        # Base snapshot check for failing verify commands; the runner installs it.
+        self._verify_base_signal = VerifyBaseSignal()
         # AC worker tasks currently executing against the shared workspace.
         # The verify gate reads this to tell "my verify_command wrote" apart
         # from "a sibling worker wrote while my command ran".
         self._inflight_ac_workers = 0
+        self._no_evidence = NoEvidenceRoute()  # code-task attempts that left no evidence
         if isinstance(verify_shell_identity, _AutoVerifyShell):
             verify_shell = resolve_verify_shell()
             self._verify_shell_identity = (
@@ -3878,6 +3887,7 @@ class ParallelACExecutor:
         )
 
         start_time = datetime.now(UTC)
+        await self._no_evidence.start(self._task_cwd or self._adapter.working_directory or ".")
         all_results: list[ACExecutionResult] = []
         failed_indices: set[int] = set()
         blocked_indices: set[int] = set()
@@ -5086,35 +5096,24 @@ class ParallelACExecutor:
                     if declared.is_relative_to(root):
                         declared_paths.add(declared.relative_to(root))
 
-            def is_declared_contract_path(relative: Path) -> bool:
-                return any(
-                    relative == declared
-                    or relative in declared.parents
-                    or declared in relative.parents
-                    for declared in declared_paths
-                )
-
             tracked_paths = load_tracked_workspace_paths(root)
             ignored_paths = load_ignored_workspace_paths(root)
 
             digest = hashlib.sha256()
-            paths = sorted(root.rglob("*"), key=lambda path: path.as_posix())
+            paths = collect_bounded_workspace_paths(
+                root,
+                declared_paths=declared_paths,
+                tracked_paths=tracked_paths,
+                ignored_paths=ignored_paths,
+                ignored_directory_names=_WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES,
+                max_entries=_WORKSPACE_FINGERPRINT_MAX_ENTRIES,
+                max_depth=_WORKSPACE_FINGERPRINT_MAX_DEPTH,
+            )
+            if paths is None:
+                return None
             for path in paths:
                 relative = path.relative_to(root)
-                declared_contract_path = is_declared_contract_path(relative)
-                if (
-                    is_untracked_top_level_evidence_path(
-                        relative,
-                        tracked_paths=tracked_paths,
-                        is_directory=path.is_dir() and not path.is_symlink(),
-                    )
-                    or is_git_ignored_path(relative, ignored_paths=ignored_paths)
-                    or any(
-                        part in _WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES
-                        for part in relative.parts
-                    )
-                ) and not declared_contract_path:
-                    continue
+                declared_contract_path = is_declared_contract_path(relative, declared_paths)
                 try:
                     stat = path.lstat()
                     if path.is_symlink():
@@ -9866,6 +9865,14 @@ Respond with either ATOMIC or the structured JSON object only.
         if mutated is not None:
             return mutated
         returncode = run.returncode
+        if returncode != 0 and await self._verify_base_signal.fails_on_base(
+            command,
+            shell_path=verify_shell_path,
+            timeout_seconds=self._verify_command_timeout_seconds,
+        ):
+            return self._verify_base_signal.no_signal(
+                returncode, tail, workspace_digest(), replay_required
+            )
         if returncode != 0:
             return _VerifyGateOutcome(
                 passed=False,
@@ -9909,7 +9916,9 @@ Respond with either ATOMIC or the structured JSON object only.
         result = await self._apply_verify_command(seed=seed, ac_index=ac_index, **kwargs)
         if result.success and (gate := getattr(self, "check_package_gate", None)) is not None:
             result = await gate(seed=seed, ac_index=ac_index, **{**kwargs, "result": result})
-        return result
+        return await self._no_evidence.route(
+            self, seed=seed, ac_index=ac_index, **{**kwargs, "result": result}
+        )
 
     async def _apply_verify_command(
         self,
@@ -10115,6 +10124,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     "call_site": "parallel",
                 }
             )
+        event_data.update(await attempt_workspace_evidence(self, result))
         event = BaseEvent(
             type="execution.ac.attempt_judged",
             aggregate_type="execution",
@@ -12184,7 +12194,7 @@ Respond with either ATOMIC or the structured JSON object only.
             # not participate in this replay episode.
             if data.get("route_contract_version") is None:
                 continue
-            if not _mapping_has_exact_keys(data, _PARALLEL_ROUTE_JUDGMENT_KEYS):
+            if not judgment_envelope_ok(data, _PARALLEL_ROUTE_JUDGMENT_KEYS):
                 raise RuntimeError("route-aware attempt judgment has an invalid event envelope")
             root_ac_index = data.get("root_ac_index")
             route_episode_id = data.get("route_episode_id")

@@ -33,7 +33,7 @@ from ouroboros.bigbang.ambiguity import (
     get_milestone,
     qualifies_for_seed_completion,
 )
-from ouroboros.bigbang.answer_provenance import extraction_rounds
+from ouroboros.bigbang.answer_provenance import declare_provenance, extraction_rounds
 from ouroboros.bigbang.interview import (
     INITIAL_CONTEXT_SUMMARY_QUESTION,
     MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS,
@@ -2313,7 +2313,7 @@ class InterviewHandler:
                             tool_name="ouroboros_interview",
                         )
                     )
-                state.record_answer(question_text, answer)
+                declare_provenance(state.record_answer(question_text, answer), arguments)
                 plugin_state_changed = True
             # Build transcript from persisted rounds
             transcript = _format_interview_transcript(state)
@@ -2881,20 +2881,19 @@ class InterviewHandler:
                         )
                     finally:
                         ambiguity_scoring_duration_ms = _elapsed_ms(ambiguity_scoring_started_at)
-                # Safe-default synthesis is emitted only after the
-                # auto driver has filled every remaining required
-                # ledger gap with audited conservative defaults. Do
-                # not require the semantic ambiguity scorer to also
-                # cross the normal human "done" threshold; that score
-                # can lag behind the ledger and would leave a trailing
-                # unanswered question in the persisted transcript.
+                # Safe-default synthesis is emitted only after the auto driver has filled every
+                # remaining required ledger gap with audited conservative defaults. Do not require
+                # the semantic ambiguity scorer to also cross the normal human "done" threshold;
+                # that score can lag behind the ledger and would leave a trailing unanswered
+                # question in the persisted transcript.
                 if is_safe_default_synthesis:
                     if has_pending_round:
                         state.rounds.pop()
-                    state.record_answer(
+                    synthesis_round = state.record_answer(
                         last_question or "[driver safe-default finalization]",
                         answer,
                     )
+                    declare_provenance(synthesis_round, arguments)
                     state.clear_stored_ambiguity()
                     state.mark_updated()
                     return await self._complete_interview_response(
@@ -3133,6 +3132,7 @@ class InterviewHandler:
                     )
                 )
             state = record_result.value
+            declare_provenance(state.rounds[-1] if state.rounds else None, arguments)
             state.clear_stored_ambiguity()
 
             # Emit response recorded event
