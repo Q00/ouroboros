@@ -332,6 +332,8 @@ Provider-specific fields use the same keys plus `profile`. `profile` is currentl
 
 Codex agent-runtime tasks also use these mappings. Runtime handles with `session_role: implementation`, `coordinator`, `interview`, or `evaluation` resolve through `agent_runtime_<session_role>`; tasks without a role fall back to `agent_runtime`. Explicit runtime models still win and are passed with `--model` instead of `--profile`.
 
+Anthropic API Claude Haiku/Sonnet/Opus 5.5 omit `temperature` and `top_p` at dispatch, including explicit overrides: these models reject non-default sampling. Their direct adapter steers JSON with a system instruction instead of assistant prefill and returns the complete response unchanged; LiteLLM Anthropic uses the same steering to avoid its bundled model map's forced-tool fallback. The supported Anthropic profile effort values `low`, `medium`, and `high` use adaptive thinking with `output_config.effort`, including when LiteLLM uses its bundled map. OpenRouter 5.5 calls also omit sampling and preserve `reasoning.effort`. Existing concrete older/custom models keep their prior request handling. This does not expand the effort enum: `xhigh` provider profiles remain Codex-only, and raw LiteLLM requests outside the supported Anthropic effort set retain LiteLLM's capability validation.
+
 ---
 
 ## `economics`

@@ -17,6 +17,12 @@ from ouroboros.core.errors import ProviderError
 from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH, InputValidator
 from ouroboros.core.types import Result
 from ouroboros.events.io_recorder import IOJournalRecorder, get_current_io_journal_recorder
+from ouroboros.providers.anthropic_models import (
+    is_claude_5_5,
+)
+from ouroboros.providers.anthropic_models import (
+    response_format_instruction as _response_format_instruction,
+)
 from ouroboros.providers.base import (
     CompletionConfig,
     CompletionResponse,
@@ -55,23 +61,7 @@ def _requires_adaptive_thinking_for_effort(model: str) -> bool:
 
 def _supports_sampling_and_prefill(model: str) -> bool:
     """Return whether optional sampling knobs and assistant prefill are allowed."""
-    return not _is_fable_or_mythos_5(model)
-
-
-def _response_format_instruction(response_format: dict[str, object]) -> str:
-    """Translate Anthropic response_format into prompt steering without prefill."""
-    import json
-
-    fmt_type = response_format.get("type")
-    if fmt_type == "json_schema":
-        schema = response_format.get("json_schema", {})
-        schema_json = json.dumps(schema, sort_keys=True, separators=(",", ":"))
-        return (
-            "Respond only with valid JSON that conforms to this JSON schema. "
-            f"Do not include prose or Markdown.\nSchema: {schema_json}"
-        )
-
-    return "Respond only with a valid JSON object. Do not include prose or Markdown."
+    return not (_is_fable_or_mythos_5(model) or is_claude_5_5(model))
 
 
 def _serialise_prompt_for_hash(
@@ -302,7 +292,7 @@ class AnthropicAdapter:
         supports_sampling_and_prefill = _supports_sampling_and_prefill(model)
 
         # Anthropic doesn't support response_format natively. Use assistant
-        # prefill where the model family supports it; Fable/Mythos 5 reject
+        # prefill where the model family supports it; Claude 5.5 and Fable/Mythos 5 reject
         # prefill, so steer JSON through system instructions instead.
         json_prefill = False
         if config.response_format and config.response_format.get("type") in (
