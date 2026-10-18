@@ -6558,7 +6558,10 @@ class OrchestratorRunner:
                 },
             )
 
-        from ouroboros.orchestrator.model_routing import deserialize_model_router
+        from ouroboros.orchestrator.model_routing import (
+            deserialize_model_router,
+            is_legacy_quality_first_router,
+        )
 
         recognized, restored_router = deserialize_model_router(raw_routing)
         if not recognized:
@@ -6587,16 +6590,9 @@ class OrchestratorRunner:
                     "execution_runtime_backend": persisted_runtime_backend,
                 },
             )
-        raw_router = raw_routing.get("router")
-        if (
-            persisted_preferences.efficiency_mode.value == "quality_first"
-            and restored_router is not None
-            and isinstance(raw_router, Mapping)
-            and "child_model_lowering_enabled" not in raw_router
+        if is_legacy_quality_first_router(
+            raw_routing, persisted_preferences.efficiency_mode.value, restored_router
         ):
-            # The saved proof authenticates this old routing shape. An explicit
-            # tier, pin, or routing environment override may replace a current
-            # contract, but cannot retarget this frozen quality-first run.
             raise OrchestratorError(
                 message="Cannot resume a legacy quality-first routing contract",
                 details={

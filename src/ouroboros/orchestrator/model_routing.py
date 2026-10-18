@@ -344,6 +344,19 @@ def deserialize_model_router(value: object) -> tuple[bool, ModelRouter | None]:
     )
 
 
+def is_legacy_quality_first_router(
+    routing: Mapping[str, Any], efficiency_mode: str, restored_router: ModelRouter | None
+) -> bool:
+    """Identify the old saved-router shape after the caller validates its proof."""
+    saved_router = routing.get("router")
+    return (
+        efficiency_mode == "quality_first"
+        and restored_router is not None
+        and isinstance(saved_router, Mapping)
+        and "child_model_lowering_enabled" not in saved_router
+    )
+
+
 def build_model_router(
     economics: EconomicsConfig,
     *,
