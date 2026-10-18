@@ -1218,6 +1218,7 @@ class OrchestratorRunner:
         self._model_router = replace(
             self._model_router,
             child_tier=self._model_router.base_tier,
+            child_model_lowering_enabled=False,
         )
 
     def _authoritative_model_router(
@@ -1239,7 +1240,11 @@ class OrchestratorRunner:
             base_tier_override=requested_model_tier,
         )
         if router is not None and not preferences.child_model_lowering_enabled:
-            router = replace(router, child_tier=router.base_tier)
+            router = replace(
+                router,
+                child_tier=router.base_tier,
+                child_model_lowering_enabled=False,
+            )
         return router
 
     def _resolved_shadow_replay_enabled(self) -> bool:
@@ -6580,6 +6585,23 @@ class OrchestratorRunner:
                 details={
                     "persisted_runtime_backend": restored_router.runtime_backend,
                     "execution_runtime_backend": persisted_runtime_backend,
+                },
+            )
+        raw_router = raw_routing.get("router")
+        if (
+            persisted_preferences.efficiency_mode.value == "quality_first"
+            and restored_router is not None
+            and isinstance(raw_router, Mapping)
+            and "child_model_lowering_enabled" not in raw_router
+        ):
+            # The saved proof authenticates this old routing shape. An explicit
+            # tier, pin, or routing environment override may replace a current
+            # contract, but cannot retarget this frozen quality-first run.
+            raise OrchestratorError(
+                message="Cannot resume a legacy quality-first routing contract",
+                details={
+                    "reason": "The saved child-routing behavior differs from the corrected quality-first policy",
+                    "hint": "Start a successor or new run under the corrected policy.",
                 },
             )
         if migrate_v2_contract or migrate_v3_contract:
