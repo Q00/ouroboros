@@ -26,6 +26,7 @@ from ouroboros.orchestrator.model_routing import (
     lower_one_notch,
     raise_one_notch,
     resolve_execute_model,
+    serialize_model_router,
     tier_from_model_tier_arg,
     tier_from_profile_hint,
 )
@@ -281,6 +282,21 @@ class TestDeserializeModelRouter:
         assert recognized is False
         assert router is None
 
+    @pytest.mark.parametrize("invalid", [None, 0, 1, "false", []])
+    def test_rejects_non_boolean_child_lowering_policy(self, invalid: object) -> None:
+        recognized, router = deserialize_model_router(
+            self._payload(child_model_lowering_enabled=invalid)
+        )
+        assert recognized is False
+        assert router is None
+
+    def test_missing_child_lowering_bit_keeps_legacy_semantics(self) -> None:
+        recognized, router = deserialize_model_router(self._payload())
+        assert recognized is True
+        assert router is not None
+        assert router.child_model_lowering_enabled is True
+        assert serialize_model_router(router)["router"]["child_model_lowering_enabled"] is True
+
 
 def _legacy_persisted_economics() -> EconomicsConfig:
     """Economics as an OLD release would have persisted it to ~/.ouroboros/config.yaml.
@@ -418,6 +434,61 @@ class TestDecideModel:
         )
         assert d.tier == "frugal"  # standard base dropped one notch
         assert d.model == "haiku-x"
+
+    def test_quality_first_keeps_trusted_child_starting_tier_and_retry_raise(self) -> None:
+        router = ModelRouter(
+            tier_models={"frugal": "haiku-x", "standard": "sonnet-x", "frontier": "opus-x"},
+            runtime_backend="claude",
+            child_tier="standard",
+            base_tier="standard",
+            escalation_retry_threshold=2,
+            child_model_lowering_enabled=False,
+        )
+        initial = decide_model(
+            ParamSupport.NATIVE,
+            router=router,
+            is_decomposed_child=True,
+            decomposition_trustworthy=True,
+        )
+        retry = decide_model(
+            ParamSupport.NATIVE,
+            router=router,
+            is_decomposed_child=True,
+            decomposition_trustworthy=True,
+            retry_attempt=2,
+        )
+        suggested = decide_model(
+            ParamSupport.NATIVE,
+            router=router,
+            is_decomposed_child=True,
+            decomposition_trustworthy=True,
+            suggested_tier="frugal",
+        )
+        assert (initial.tier, initial.model) == ("standard", "sonnet-x")
+        assert (retry.tier, retry.model) == ("frontier", "opus-x")
+        assert (suggested.tier, suggested.model) == ("frugal", "haiku-x")
+
+    def test_equal_child_and_base_tiers_do_not_disable_adaptive_lowering(self) -> None:
+        router = build_model_router(
+            _economics(default_tier="standard"),
+            runtime_backend="claude",
+            base_tier_override="standard",
+        )
+        assert router is not None
+        assert router.child_tier == router.base_tier == "standard"
+        decision = decide_model(
+            ParamSupport.NATIVE,
+            router=router,
+            is_decomposed_child=True,
+            decomposition_trustworthy=True,
+        )
+        assert decision.tier == "frugal"
+
+    def test_explicit_model_pin_still_disables_routing(self) -> None:
+        assert (
+            build_model_router(_economics(), runtime_backend="claude", pinned_model="user-sonnet")
+            is None
+        )
 
     def test_untrusted_decomposed_child_stays_at_base_tier(self) -> None:
         router = build_model_router(_economics(), runtime_backend="claude")
