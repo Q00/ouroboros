@@ -28,6 +28,27 @@ def render_constraints_section(contract: SeedContract) -> str:
 {constraints_text}"""
 
 
+def render_requester_answers_section(contract: SeedContract) -> str:
+    """Render the requester's answers verbatim, as quoted questions and answers."""
+    if not contract.requester_answers:
+        return ""
+    pairs = "\n\n".join(
+        (f"Question:\n{_quoted(item.question)}\n" if item.question.strip() else "")
+        + f"Answer:\n{_quoted(item.answer)}"
+        for item in contract.requester_answers
+    )
+    return f"""## Requester answers (confirmed)
+The person who made the request answered these questions. Each question and answer
+is quoted exactly, line by line after "> ". Follow what the answers say; do not read
+more into an answer than its words say.
+
+{pairs}"""
+
+
+def _quoted(text: str) -> str:
+    return "\n".join(f"> {line}".rstrip() for line in text.strip().splitlines())
+
+
 def render_assumptions_section(contract: SeedContract) -> str:
     """Render unconfirmed assumptions, kept apart from the binding constraints."""
     if not contract.assumptions:
@@ -168,6 +189,10 @@ def render_seed_contract_for_execution(contract: SeedContract) -> str:
         render_constraints_section(contract),
     ]
 
+    requester_answers = render_requester_answers_section(contract)
+    if requester_answers:
+        sections.extend(["", requester_answers])
+
     assumptions = render_assumptions_section(contract)
     if assumptions:
         sections.extend(["", assumptions])
@@ -199,5 +224,6 @@ __all__ = [
     "render_evaluation_principles_section",
     "render_exit_conditions_section",
     "render_ontology_lens_section",
+    "render_requester_answers_section",
     "render_seed_contract_for_execution",
 ]

@@ -630,8 +630,10 @@ def test_later_requester_correction_supersedes_earlier_answer_for_same_facet() -
     assert ledger.is_seed_ready()
 
     seed = synthesize_seed_from_ledger(ledger)
-    assert any("JSON instead of CSV" in item for item in seed.constraints)
-    assert all(item != "Write CSV" for item in seed.constraints)
+    # Both replies are the requester's own words, quoted in order; neither is
+    # rewritten into a constraint.
+    assert [item.answer for item in seed.requester_answers] == [first, correction]
+    assert all("CSV" not in item for item in seed.constraints)
 
 
 class _FailThenAnswerRequester:

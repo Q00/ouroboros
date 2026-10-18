@@ -8,7 +8,12 @@ from typing import Any
 from uuid import uuid4
 
 from ouroboros.auto.grading import deterministic_floor
-from ouroboros.auto.ledger import LedgerEntry, LedgerStatus, SeedDraftLedger
+from ouroboros.auto.ledger import (
+    REQUESTER_KEY_SUFFIX,
+    LedgerEntry,
+    LedgerStatus,
+    SeedDraftLedger,
+)
 from ouroboros.core.seed import (
     BrownfieldContext,
     ContextReference,
@@ -16,6 +21,7 @@ from ouroboros.core.seed import (
     ExitCondition,
     OntologyField,
     OntologySchema,
+    RequesterAnswer,
     Seed,
     SeedMetadata,
 )
@@ -189,6 +195,7 @@ def synthesize_seed_from_ledger(
         constraints=constraints,
         acceptance_criteria=acceptance_criteria,
         assumptions=ledger_assumptions(ledger),
+        requester_answers=ledger_requester_answers(ledger),
         ontology_schema=OntologySchema(
             name=_ontology_name(goal),
             description="Auto-synthesized ontology from the completed Seed Draft Ledger.",
@@ -372,6 +379,7 @@ def partial_seed_from_evidence(
         constraints=tuple(dict.fromkeys(constraints)),
         acceptance_criteria=acceptance,
         assumptions=ledger_assumptions(ledger),
+        requester_answers=ledger_requester_answers(ledger),
         ontology_schema=ontology_schema,
         evaluation_principles=(
             EvaluationPrinciple(
@@ -434,8 +442,20 @@ def _ontology_fields(ledger: SeedDraftLedger, *, placeholder: str) -> tuple[Onto
 
 def _binding_joined(ledger: SeedDraftLedger, section_name: str) -> str:
     return "; ".join(
-        entry.value.strip() for entry in _active_entries(ledger, section_name) if entry.binds_seed
+        entry.value.strip()
+        for entry in _active_entries(ledger, section_name)
+        if entry.binds_seed and not _is_requester_answer(entry)
     )
+
+
+def _is_requester_answer(entry: LedgerEntry) -> bool:
+    """Whether ``entry`` holds a requester's answer (``requester.requester_answer``).
+
+    Such an entry is a confirmed fact, but it reaches the worker verbatim as a
+    quoted question and answer (``Seed.requester_answers``), never rewritten
+    into a constraint, criterion or ontology field.
+    """
+    return entry.key.endswith(REQUESTER_KEY_SUFFIX)
 
 
 def _latest_value(ledger: SeedDraftLedger, section_name: str) -> str:
@@ -459,6 +479,12 @@ def ledger_assumptions(ledger: SeedDraftLedger) -> tuple[str, ...]:
     produced keeps its value. The worker sees them as assumptions it may
     override. The generic safe-default closure block is interview
     bookkeeping, not a statement about the task, so it is left out.
+
+    A draft kept because the requester was asked and gave no answer
+    (``LedgerEntry.requester_unanswered``) renders nothing at all, not even its
+    question: the requester already said the issue does not settle it, so the
+    worker decides from the goal, the issue and the code. A requester's answer
+    renders in ``Seed.requester_answers`` instead (``ledger_requester_answers``).
     """
     lines: list[str] = []
     for section_name in _ASSUMPTION_SECTIONS:
@@ -469,7 +495,9 @@ def ledger_assumptions(ledger: SeedDraftLedger) -> tuple[str, ...]:
             dict.fromkeys(
                 entry.question.strip()
                 for entry in _active_entries(ledger, section_name)
-                if not entry.binds_seed and entry.question.strip()
+                if not entry.binds_seed
+                and entry.question.strip()
+                and not entry.requester_unanswered
             )
         )
         lines.extend(f"Open question: {question}" for question in open_questions)
@@ -499,6 +527,31 @@ def with_ledger_assumptions(seed: Seed, ledger: SeedDraftLedger) -> Seed:
     return seed.model_copy(update={"assumptions": merged})
 
 
+def ledger_requester_answers(ledger: SeedDraftLedger) -> tuple[RequesterAnswer, ...]:
+    """Every answer the requester gave, with its question, verbatim and in ledger order.
+
+    One answer fills each section its question targeted, so the pairs are
+    de-duplicated. A later answer for the same facet retires the earlier entry
+    in ``add_entry``; both are still the requester's own words, so both are kept.
+    """
+    pairs: dict[tuple[str, str], RequesterAnswer] = {}
+    for section in ledger.sections.values():
+        for entry in section.entries:
+            if not _is_requester_answer(entry) or not entry.value.strip():
+                continue
+            key = (entry.question.strip(), entry.value.strip())
+            pairs.setdefault(key, RequesterAnswer(question=key[0], answer=key[1]))
+    return tuple(pairs.values())
+
+
+def with_requester_answers(seed: Seed, ledger: SeedDraftLedger) -> Seed:
+    """Carry the requester's answers into ``seed.requester_answers``, verbatim."""
+    merged = tuple(dict.fromkeys((*seed.requester_answers, *ledger_requester_answers(ledger))))
+    if merged == seed.requester_answers:
+        return seed
+    return seed.model_copy(update={"requester_answers": merged})
+
+
 def _lines_from_section(
     ledger: SeedDraftLedger,
     section_name: str,
@@ -526,6 +579,10 @@ def _lines_from_section(
     lines: list[str] = []
     for entry in _active_entries(ledger, section_name):
         if binding is not None and entry.binds_seed is not binding:
+            continue
+        if _is_requester_answer(entry):
+            continue  # quoted verbatim in ``Seed.requester_answers`` instead
+        if binding is False and entry.requester_unanswered:
             continue
         if not closure and entry.key == f"{section_name}.safe_default_finalization":
             continue

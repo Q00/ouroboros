@@ -54,6 +54,7 @@ from ouroboros.auto.ledger_seed import (
     partial_seed_from_evidence,
     synthesize_seed_from_ledger,
     with_ledger_assumptions,
+    with_requester_answers,
 )
 from ouroboros.auto.listeners import RALPH_CANCEL_BLOCKER_REASON
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
@@ -2388,7 +2389,8 @@ class AutoPipeline:
             seed = seed.model_copy(
                 update={"metadata": seed.metadata.model_copy(update={"ambiguity_score": floor})}
             )
-        seed = normalize_execution_acceptance(with_ledger_assumptions(seed, ledger))
+        seed = with_requester_answers(with_ledger_assumptions(seed, ledger), ledger)
+        seed = normalize_execution_acceptance(seed)
         state.seed_id = seed.metadata.seed_id
         state.seed_artifact = seed.to_dict()
         state.seed_origin = SeedOrigin.AUTO_PIPELINE

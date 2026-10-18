@@ -84,7 +84,7 @@ class NoEvidenceRoute:
         if not result.success or seed.task_type != "code" or self.base_head is None:
             return result
         outcome = result.verify_gate_outcome
-        no_signal = getattr(outcome, "no_signal", False) is True
+        no_signal = isinstance(outcome, _VerifyGateOutcome) and outcome.no_signal
         if (
             outcome is not None
             and not no_signal
@@ -104,7 +104,7 @@ class NoEvidenceRoute:
             diff, self.base_head, untracked=untracked, base_untracked=self.base_untracked
         ):
             return result
-        if no_signal:
+        if no_signal and isinstance(outcome, _VerifyGateOutcome):
             # The verify command reproduces the failure and nothing changed:
             # a failed attempt for the normal retry loop, not an undecided one.
             return replace(
