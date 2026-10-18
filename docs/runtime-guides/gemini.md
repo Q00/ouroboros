@@ -61,6 +61,26 @@ llm:
   backend: gemini                             # for interview / seed / eval
 ```
 
+### Completion model selection
+
+For the `llm.backend: gemini` completion path (interview, seed, and evaluation),
+an automatic role model resolves to Ouroboros' internal `default` sentinel.
+Without an explicit model preference, the completion adapter omits `--model`,
+leaving the installed Gemini CLI's configured/default selection in control.
+Ouroboros does not substitute a fixed Gemini model version.
+
+Explicit request models and role/provider profile pins retain their existing
+precedence. Direct adapter callers can also set a constructor model. These
+choices pass `--model` to the CLI; aliases such as `flash`, `pro`, and `auto`,
+as well as concrete IDs, remain explicit choices. Existing `gemini/` and
+`google/` prefixes are stripped before invocation. An invocation-level Ouroboros
+`auto` choice is different: the role resolver converts it to `default`.
+
+The completion response uses the model reported by the CLI's `init` event.
+If no model was selected and that event does not report one, the response uses
+`default` rather than inventing a concrete model ID. This completion behavior does not
+establish per-task adaptive model placement for the workflow runtime.
+
 The same `gemini` value is accepted by every CLI surface that takes a
 backend name:
 

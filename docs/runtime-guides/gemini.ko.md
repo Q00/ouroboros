@@ -53,6 +53,25 @@ llm:
   backend: gemini                             # for interview / seed / eval
 ```
 
+### 완료 요청의 모델 선택
+
+`llm.backend: gemini`를 사용하는 인터뷰·Seed·평가의 완료 요청에서 자동 역할 모델은
+Ouroboros 내부의 `default` 값으로 해석됩니다. 명시한 모델이 없으면 완료 어댑터는
+`--model`을 생략하므로 설치된 Gemini CLI의 설정과 기본 선택을 따릅니다.
+Ouroboros가 특정 Gemini 버전을 대신 지정하지 않습니다.
+
+명시한 요청 모델과 역할·공급자 프로필의 모델 지정은 기존 우선순위를 유지합니다.
+어댑터를 직접 사용하는 호출자는 생성자에 모델을 지정할 수도 있습니다. 이 선택은
+`--model`로 전달되며 `flash`, `pro`, `auto` 같은 별칭과 구체적인 모델 ID를
+그대로 사용할 수 있습니다. 기존 `gemini/`, `google/` 접두사는 실행 전에 제거됩니다.
+Ouroboros 호출 단계에서 고른 `auto`는 역할 해석기가 `default`로 바꾸므로
+CLI에 직접 전달하는 `auto` 별칭과 구분됩니다.
+
+완료 응답에는 CLI의 `init` 이벤트가 보고한 모델을 사용합니다. 모델을 명시하지
+않았고 해당 이벤트에도 모델이 없다면 구체적인 ID를 추측하지 않고
+`default`를 보고합니다. 이 완료 요청의 동작이 워크플로 런타임의 작업별 적응형
+모델 배치를 보장하는 것은 아닙니다.
+
 백엔드 이름을 받는 모든 CLI에서 같은 `gemini` 값을 사용할 수 있습니다.
 
 - `ouroboros setup --runtime gemini`
