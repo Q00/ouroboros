@@ -83,13 +83,13 @@ llm_profiles:
       codex:
         reasoning_effort: high
       claude_code:
-        model: claude-opus-5
+        model: claude-opus-5-5
       gemini:
         model: gemini-2.5-pro
       opencode:
         model: openai/gpt-5.4
       litellm:
-        model: openrouter/anthropic/claude-opus-5
+        model: openrouter/anthropic/claude-opus-5.5
 
   frontier:
     max_turns: 8
@@ -353,7 +353,7 @@ economics:
         - provider: google
           model: gemini-2.0-flash
         - provider: anthropic
-          model: claude-haiku-4-5
+          model: claude-haiku-5-5
       use_cases:
         - routine_coding
         - log_analysis
@@ -365,7 +365,7 @@ economics:
         - provider: openai
           model: gpt-6.1-sol
         - provider: anthropic
-          model: claude-sonnet-4-6
+          model: claude-sonnet-5-5
         - provider: google
           model: gemini-2.5-pro
       use_cases:
@@ -379,7 +379,7 @@ economics:
         - provider: openai
           model: gpt-6-astra
         - provider: anthropic
-          model: claude-opus-5
+          model: claude-opus-5-5
       use_cases:
         - consensus
         - lateral_thinking
@@ -870,8 +870,8 @@ consensus:
 | `min_models` | `int >= 2` | `3` | **Currently inert.** After reviewer-independence filtering, simple consensus separately requires at least two successfully collected votes; this top-level field is not wired to that rule. |
 | `threshold` | `float [0.0, 1.0]` | `0.67` | **Currently inert.** Runtime simple consensus compares approvals divided by successful post-filter votes with direct-Python `ConsensusConfig.majority_threshold` (default `0.66`); this top-level field is not copied into it. |
 | `diversity_required` | `bool` | `true` | **Currently inert.** The field exists on `ConsensusConfig` and in the schema, but nothing reads it. Provider diversity depends on actual adapter routing; neither this flag nor differently named roster entries attest it. See [Evaluation Pipeline Guide](./guides/evaluation-pipeline.md#stage-3-consensus-multi-model-or-single-model-fallback). |
-| `models` | `list[string]` | `["auto"]` | Model roster for Stage 3 simple voting. `auto` repeats the consensus role's model three times; on `litellm` it keeps the shipped OpenRouter roster (`openrouter/openai/gpt-4o`, `openrouter/anthropic/claude-opus-5`, `openrouter/google/gemini-2.5-pro`). With `llm.backend: litellm`, use `provider/model` or `openrouter/provider/model`. With `llm.backend: codex`, use Codex/OpenAI model IDs such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_MODELS` (comma-separated). |
-| `advocate_model` | `string` | `"auto"` (`litellm`: `"openrouter/anthropic/claude-opus-5"`) | Model that argues in favor of the proposed solution in deliberative consensus. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_ADVOCATE_MODEL`. |
+| `models` | `list[string]` | `["auto"]` | Model roster for Stage 3 simple voting. `auto` repeats the consensus role's model three times; on `litellm` it keeps the shipped OpenRouter roster (`openrouter/openai/gpt-4o`, `openrouter/anthropic/claude-opus-5.5`, `openrouter/google/gemini-2.5-pro`). With `llm.backend: litellm`, use `provider/model` or `openrouter/provider/model`. With `llm.backend: codex`, use Codex/OpenAI model IDs such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_MODELS` (comma-separated). |
+| `advocate_model` | `string` | `"auto"` (`litellm`: `"openrouter/anthropic/claude-opus-5.5"`) | Model that argues in favor of the proposed solution in deliberative consensus. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_ADVOCATE_MODEL`. |
 | `devil_model` | `string` | `"auto"` (`litellm`: `"openrouter/openai/gpt-4o"`) | Model that argues against (devil's advocate) in deliberative consensus. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_DEVIL_MODEL`. |
 | `judge_model` | `string` | `"auto"` (`litellm`: `"openrouter/google/gemini-2.5-pro"`) | Model that renders a final verdict after deliberation. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_JUDGE_MODEL`. |
 
@@ -1258,8 +1258,9 @@ an exact Copilot ID, then removes the known `openrouter/anthropic/` prefix or
 applies an explicit alias, and finally converts only the trailing Anthropic
 version separator (`claude-opus-4-8` → `claude-opus-4.8`). Every derived value
 must exist in the discovered or bundled Copilot catalog before it is returned.
-The current direct and OpenRouter Opus defaults therefore resolve to
-`claude-opus-5`; unknown IDs remain unchanged so Copilot emits its normal
+The prior direct and OpenRouter Opus 5 pins resolve to `claude-opus-5`
+when that ID is present. Current API pins require their own exact Copilot
+catalog candidate; unknown IDs remain unchanged so Copilot emits its normal
 unavailable-model error instead of silently choosing another model. See the
 [Copilot CLI runtime guide](runtime-guides/copilot.md) for full details.
 
@@ -1311,9 +1312,9 @@ llm:
   backend: claude_code
   permission_mode: default
   opencode_permission_mode: acceptEdits
-  qa_model: claude-sonnet-4-6
-  dependency_analysis_model: claude-sonnet-4-6
-  ontology_analysis_model: claude-sonnet-4-6
+  qa_model: claude-sonnet-5-5
+  dependency_analysis_model: claude-sonnet-5-5
+  ontology_analysis_model: claude-sonnet-5-5
   context_compression_model: gpt-4
 
 economics:
@@ -1330,7 +1331,7 @@ economics:
         - provider: google
           model: gemini-2.0-flash
         - provider: anthropic
-          model: claude-haiku-4-5
+          model: claude-haiku-5-5
       use_cases: [routine_coding, log_analysis, stage1_fix]
     standard:
       cost_factor: 10
@@ -1339,7 +1340,7 @@ economics:
         - provider: openai
           model: gpt-6.1-sol
         - provider: anthropic
-          model: claude-sonnet-4-6
+          model: claude-sonnet-5-5
         - provider: google
           model: gemini-2.5-pro
       use_cases: [logic_design, stage2_evaluation, refactoring]
@@ -1350,14 +1351,14 @@ economics:
         - provider: openai
           model: gpt-6-astra
         - provider: anthropic
-          model: claude-opus-5
+          model: claude-opus-5-5
       use_cases: [consensus, lateral_thinking, big_bang]
 
 clarification:
   ambiguity_threshold: 0.2
   max_interview_rounds: 10
   model_tier: standard
-  default_model: claude-opus-5
+  default_model: claude-opus-5-5
 
 execution:
   max_iterations_per_ac: 10
@@ -1368,8 +1369,8 @@ resilience:
   lateral_thinking_enabled: true
   lateral_model_tier: frontier
   lateral_temperature: 0.8
-  wonder_model: claude-opus-5
-  reflect_model: claude-opus-5
+  wonder_model: claude-opus-5-5
+  reflect_model: claude-opus-5-5
 
 evaluation:
   stage1_enabled: true         # Currently inert in config.yaml
@@ -1377,8 +1378,8 @@ evaluation:
   stage3_enabled: true         # Currently inert in config.yaml
   satisfaction_threshold: 0.8  # Currently inert; score gate is hardcoded to 0.8
   uncertainty_threshold: 0.3   # Currently inert in config.yaml
-  semantic_model: claude-opus-5
-  assertion_extraction_model: claude-sonnet-4-6
+  semantic_model: claude-opus-5-5
+  assertion_extraction_model: claude-sonnet-5-5
 
 consensus:
   min_models: 3               # Inert; runtime needs 2 successful post-filter votes
@@ -1386,9 +1387,9 @@ consensus:
   diversity_required: true    # Currently inert
   models:
     - openrouter/openai/gpt-4o
-    - openrouter/anthropic/claude-opus-5
+    - openrouter/anthropic/claude-opus-5.5
     - openrouter/google/gemini-2.5-pro
-  advocate_model: openrouter/anthropic/claude-opus-5
+  advocate_model: openrouter/anthropic/claude-opus-5.5
   devil_model: openrouter/openai/gpt-4o
   judge_model: openrouter/google/gemini-2.5-pro
 

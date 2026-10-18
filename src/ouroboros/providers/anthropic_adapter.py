@@ -12,6 +12,7 @@ from typing import Any
 
 import structlog
 
+from ouroboros.config._model_defaults import DEFAULT_SONNET_MODEL
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH, InputValidator
 from ouroboros.core.types import Result
@@ -32,7 +33,7 @@ from ouroboros.providers.profiles import resolve_completion_profile_result
 
 log = structlog.get_logger()
 
-DEFAULT_MODEL = "claude-sonnet-4-6"
+DEFAULT_MODEL = DEFAULT_SONNET_MODEL
 
 
 def _is_fable_or_mythos_5(model: str) -> bool:
@@ -123,7 +124,7 @@ class AnthropicAdapter:
         adapter = AnthropicAdapter()
         result = await adapter.complete(
             messages=[Message(role=MessageRole.USER, content="Hello!")],
-            config=CompletionConfig(model="claude-sonnet-4-6"),
+            config=CompletionConfig(model=DEFAULT_SONNET_MODEL),
         )
     """
 
