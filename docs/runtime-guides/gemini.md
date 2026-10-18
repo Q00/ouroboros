@@ -72,8 +72,8 @@ Ouroboros does not substitute a fixed Gemini model version.
 Explicit request models and role/provider profile pins retain their existing
 precedence. Direct adapter callers can also set a constructor model. These
 choices pass `--model` to the CLI; aliases such as `flash`, `pro`, and `auto`,
-as well as concrete IDs, remain explicit choices. Existing `gemini/` and
-`google/` prefixes are stripped before invocation. An invocation-level Ouroboros
+as well as concrete IDs, remain explicit choices. Request/profile model values
+keep the existing `gemini/` and `google/` prefix normalization. An invocation-level Ouroboros
 `auto` choice is different: the role resolver converts it to `default`.
 
 The completion response uses the model reported by the CLI's `init` event.
