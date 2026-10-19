@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-# Lines of slack on each side of the cited range (models miscount by a few).
+# Extra lines allowed on each side of the cited range (models miscount by a few).
 LINE_WINDOW = 3
 # A quote shorter than this (after whitespace normalization) proves nothing.
 MIN_QUOTE_CHARS = 8
