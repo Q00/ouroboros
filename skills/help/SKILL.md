@@ -53,7 +53,6 @@ Each `ooo <name>` is also the skill `/ouroboros:<name>`, except `run`, `status`,
 | `ooo resume-session` | List in-flight sessions and re-attach commands | CLI |
 | `ooo update` | Check for updates and upgrade | CLI |
 | `ooo publish` | Publish a Seed as GitHub Issues | `gh` |
-| `ooo maintain` | Triage and resolve maintainer issues and PRs | `gh` |
 
 **MCP** = the Ouroboros MCP server, which the Claude marketplace plugin or a
 supported host setup (`ouroboros setup --runtime <runtime>`) provides.

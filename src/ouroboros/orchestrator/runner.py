@@ -1218,6 +1218,7 @@ class OrchestratorRunner:
         self._model_router = replace(
             self._model_router,
             child_tier=self._model_router.base_tier,
+            child_model_lowering_enabled=False,
         )
 
     def _authoritative_model_router(
@@ -1239,7 +1240,11 @@ class OrchestratorRunner:
             base_tier_override=requested_model_tier,
         )
         if router is not None and not preferences.child_model_lowering_enabled:
-            router = replace(router, child_tier=router.base_tier)
+            router = replace(
+                router,
+                child_tier=router.base_tier,
+                child_model_lowering_enabled=False,
+            )
         return router
 
     def _resolved_shadow_replay_enabled(self) -> bool:
@@ -6553,7 +6558,10 @@ class OrchestratorRunner:
                 },
             )
 
-        from ouroboros.orchestrator.model_routing import deserialize_model_router
+        from ouroboros.orchestrator.model_routing import (
+            deserialize_model_router,
+            is_legacy_quality_first_router,
+        )
 
         recognized, restored_router = deserialize_model_router(raw_routing)
         if not recognized:
@@ -6580,6 +6588,16 @@ class OrchestratorRunner:
                 details={
                     "persisted_runtime_backend": restored_router.runtime_backend,
                     "execution_runtime_backend": persisted_runtime_backend,
+                },
+            )
+        if is_legacy_quality_first_router(
+            raw_routing, persisted_preferences.efficiency_mode.value, restored_router
+        ):
+            raise OrchestratorError(
+                message="Cannot resume a legacy quality-first routing contract",
+                details={
+                    "reason": "The saved child-routing behavior differs from the corrected quality-first policy",
+                    "hint": "Start a successor or new run under the corrected policy.",
                 },
             )
         if migrate_v2_contract or migrate_v3_contract:
