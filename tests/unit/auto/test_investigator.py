@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 import json
+import os
 from pathlib import Path
 import subprocess
 import time
@@ -32,6 +33,7 @@ from ouroboros.auto.interview_driver import (
     InterviewTurn,
 )
 from ouroboros.auto.investigation_workspace import (
+    IsolationError,
     create_isolated_copy,
     remove_isolated_copy,
     workspace_state,
@@ -943,6 +945,128 @@ def test_git_copy_holds_the_working_tree_without_ignored_files(tmp_path: Path) -
     assert workspace_state(root) == state
     (root / "new.py").write_text("untracked, edited\n", encoding="utf-8")
     assert workspace_state(root) != state
+
+
+# -- the copy never holds a path that resolves outside it --------------------
+
+
+def _linked_workspace(tmp_path: Path, *, git: bool) -> tuple[Path, Path]:
+    """A workspace with every kind of symbolic link, and an outside folder."""
+    root = tmp_path / "ws"
+    outside = tmp_path / "outside"
+    (root / "pkg").mkdir(parents=True)
+    outside.mkdir()
+    (root / "pkg" / "real.py").write_text("REAL = 1\n", encoding="utf-8")
+    (outside / "secret.txt").write_text("outside bytes\n", encoding="utf-8")
+    (root / "file_link.py").symlink_to("pkg/real.py")
+    (root / "abs_file_link.py").symlink_to(root / "pkg" / "real.py")
+    (root / "dir_link").symlink_to("pkg")
+    (root / "outside_file_link.txt").symlink_to(outside / "secret.txt")
+    (root / "outside_dir_link").symlink_to(outside)
+    (root / "dangling_outside").symlink_to(outside / "missing.txt")
+    (root / "dangling_inside").symlink_to("pkg/missing.py")
+    if git:
+        _git(root, "init", "-q")
+    return root, outside
+
+
+def _resolves_inside(path: Path, root: Path) -> bool:
+    resolved = Path(os.path.realpath(path))
+    return resolved == root or resolved.is_relative_to(root)
+
+
+@pytest.mark.parametrize("git", [False, True])
+def test_copy_links_never_lead_outside_the_copy(tmp_path: Path, git: bool) -> None:
+    root, outside = _linked_workspace(tmp_path, git=git)
+
+    copy = create_isolated_copy(root)
+    try:
+        for name in ("file_link.py", "abs_file_link.py", "dir_link", "dangling_inside"):
+            assert (copy / name).is_symlink()
+            assert _resolves_inside(copy / name, copy)
+        assert (copy / "file_link.py").read_text(encoding="utf-8") == "REAL = 1\n"
+        assert (copy / "dir_link" / "real.py").read_text(encoding="utf-8") == "REAL = 1\n"
+        # An outside regular file arrives as bytes, never as a link.
+        assert not (copy / "outside_file_link.txt").is_symlink()
+        assert (copy / "outside_file_link.txt").read_text(encoding="utf-8") == "outside bytes\n"
+        assert not (copy / "outside_dir_link").exists()
+        assert not (copy / "dangling_outside").exists()
+        assert not (copy / "dangling_outside").is_symlink()
+        for current, dirs, files in os.walk(copy):
+            for name in (*dirs, *files):
+                assert _resolves_inside(Path(current) / name, copy), name
+    finally:
+        remove_isolated_copy(copy)
+
+
+@pytest.mark.parametrize("git", [False, True])
+@pytest.mark.asyncio
+async def test_writing_runtime_through_links_leaves_real_targets_unchanged(
+    tmp_path: Path, git: bool
+) -> None:
+    root, outside = _linked_workspace(tmp_path, git=git)
+    (root / "src").mkdir()
+    (root / "src" / "cli.py").write_text(_SOURCE, encoding="utf-8")
+    calls: list[dict[str, Any]] = []
+
+    class _LinkWriter(_FakeRuntime):
+        _runtime_backend = "gemini"
+
+        def __init__(self, cwd: Path) -> None:
+            super().__init__(lambda _p: _found_reply(), calls)
+            self.cwd = Path(cwd)
+
+        async def execute_task_to_result(self, prompt: str, tools=None, system_prompt=None, **kw):
+            for name in ("file_link.py", "abs_file_link.py", "outside_file_link.txt"):
+                (self.cwd / name).write_text("OVERWRITTEN\n", encoding="utf-8")
+            (self.cwd / "dir_link" / "new.py").write_text("x\n", encoding="utf-8")
+            (self.cwd / "dangling_inside").write_text("x\n", encoding="utf-8")
+            return await super().execute_task_to_result(prompt, tools, system_prompt, **kw)
+
+    investigator = RepoInvestigator(
+        runtime_backend="gemini", runtime_factory=lambda **k: _LinkWriter(k["cwd"])
+    )
+
+    result = await investigator.investigate(GOAL, QUESTION, root)
+
+    assert len(calls) == 1
+    assert result is not None and result.isolation == "workspace_copy"
+    assert result.found  # checked against the real, unchanged workspace
+    assert (root / "pkg" / "real.py").read_text(encoding="utf-8") == "REAL = 1\n"
+    assert (outside / "secret.txt").read_text(encoding="utf-8") == "outside bytes\n"
+    assert not (root / "pkg" / "new.py").exists()
+    assert not (root / "pkg" / "missing.py").exists()
+    assert not (outside / "missing.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_copy_with_an_escaping_path_is_never_used(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ouroboros.auto import investigation_workspace
+
+    original = investigation_workspace._copy_entry
+
+    def leaky(root: Path, destination: Path, name: str) -> None:
+        original(root, destination, name)
+        if not (destination / "leak").exists():
+            (destination / "leak").symlink_to(root)
+
+    monkeypatch.setattr(investigation_workspace, "_copy_entry", leaky)
+    with pytest.raises(IsolationError):
+        create_isolated_copy(workspace)
+
+    calls: list[dict[str, Any]] = []
+    investigator = RepoInvestigator(
+        runtime_backend="gemini",
+        runtime_factory=lambda **k: _GeminiShapedRuntime(
+            lambda _p: _found_reply(), calls, k["cwd"]
+        ),
+    )
+    result = await investigator.investigate(GOAL, QUESTION, workspace)
+
+    assert result is not None and result.outcome == "isolation_failed"
+    assert calls == []
 
 
 def _real_runtime(backend: str, cwd: Path) -> Any:

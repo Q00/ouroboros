@@ -9,7 +9,9 @@ workspace:
   --exclude-standard``), without ``.git``; nothing is registered in the
   repository (no ``git worktree``);
 - outside git, the copy is the whole directory without ``.git`` and
-  ``__pycache__``.
+  ``__pycache__``;
+- a symbolic link never leads outside the copy (``_copy_entry``), and the
+  finished copy is walked to prove that no path resolves outside it.
 
 ``workspace_state`` fingerprints the real workspace (git: ``HEAD``, the
 ``git diff --binary HEAD`` bytes, and every untracked non-ignored file with its
@@ -30,6 +32,9 @@ import tempfile
 from ouroboros.boundary.tree import tree_digest
 
 _GIT_TIMEOUT_SECONDS = 120
+# A link to a file outside the workspace is copied as bytes only up to this size.
+MAX_LINKED_FILE_BYTES = 5_000_000
+_SKIPPED_DIRS = frozenset({".git", "__pycache__"})
 
 
 def _git(root: Path, *args: str) -> bytes:
@@ -74,30 +79,92 @@ def workspace_state(root: Path) -> str:
     return digest.hexdigest()
 
 
-def _copy_listed_files(root: Path, destination: Path) -> None:
-    for name in _listed(root, "--cached", "--others", "--exclude-standard"):
-        source = root / name
-        if source.is_dir() and not source.is_symlink():
-            continue  # a submodule (gitlink); its files are not listed here
-        if not source.exists() and not source.is_symlink():
-            continue  # a tracked file deleted on disk
-        target = destination / name
+class IsolationError(RuntimeError):
+    """The copy could not be made safe; no runtime may run in it."""
+
+
+def _inside(path: Path, root: Path) -> bool:
+    return path == root or path.is_relative_to(root)
+
+
+def _copy_entry(root: Path, destination: Path, name: str) -> None:
+    """Copy one workspace entry so that nothing in the copy leads outside it.
+
+    A regular file is copied. A symbolic link is never copied as it is:
+
+    - target inside the workspace: a relative link to the same path inside the
+      copy (it resolves inside the copy even when that path is absent);
+    - target outside the workspace: its bytes as a regular file when it is a
+      readable regular file up to ``MAX_LINKED_FILE_BYTES``, else skipped;
+    - a dangling link whose target would be outside the workspace: skipped.
+    """
+    source = root / name
+    target = destination / name
+    if source.is_symlink():
+        resolved = Path(os.path.realpath(source))
+        if _inside(resolved, root):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            relative = os.path.relpath(destination / resolved.relative_to(root), target.parent)
+            target.symlink_to(relative)
+            return
+        try:
+            if not resolved.is_file() or resolved.stat().st_size > MAX_LINKED_FILE_BYTES:
+                return
+            data = resolved.read_bytes()
+        except OSError:
+            return
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target, follow_symlinks=False)
+        target.write_bytes(data)
+        return
+    if source.is_dir() or not source.exists():
+        return  # a submodule (gitlink) or a tracked file deleted on disk
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target, follow_symlinks=False)
+
+
+def _workspace_entries(root: Path) -> list[str]:
+    """Every file and symbolic link to copy, relative to ``root``."""
+    if _in_git_work_tree(root):
+        return _listed(root, "--cached", "--others", "--exclude-standard")
+    entries: list[str] = []
+    for current, dirs, files in os.walk(root, followlinks=False):
+        base = Path(current)
+        kept = [d for d in dirs if d not in _SKIPPED_DIRS]
+        entries += [
+            (base / d).relative_to(root).as_posix() for d in kept if (base / d).is_symlink()
+        ]
+        dirs[:] = [d for d in kept if not (base / d).is_symlink()]
+        entries += [(base / f).relative_to(root).as_posix() for f in files]
+    return entries
+
+
+def _escaping_paths(copy: Path) -> list[str]:
+    """Paths in ``copy`` that resolve outside it (there must be none)."""
+    escaping: list[str] = []
+    for current, dirs, files in os.walk(copy, followlinks=False):
+        for name in (*dirs, *files):
+            path = Path(current) / name
+            if not _inside(Path(os.path.realpath(path)), copy):
+                escaping.append(path.relative_to(copy).as_posix())
+    return escaping
 
 
 def create_isolated_copy(root: Path) -> Path:
-    """Return a new throwaway copy of ``root``; remove it with :func:`remove_isolated_copy`."""
-    scratch = Path(tempfile.mkdtemp(prefix="ouroboros-investigation-"))
+    """Return a new throwaway copy of ``root``; remove it with :func:`remove_isolated_copy`.
+
+    Raises :class:`IsolationError` when any path in the finished copy resolves
+    outside it, so no runtime is launched there.
+    """
+    root = root.resolve()
+    scratch = Path(tempfile.mkdtemp(prefix="ouroboros-investigation-")).resolve()
     copy = scratch / "repo"
     try:
-        if _in_git_work_tree(root):
-            copy.mkdir()
-            _copy_listed_files(root, copy)
-        else:
-            shutil.copytree(
-                root, copy, symlinks=True, ignore=shutil.ignore_patterns(".git", "__pycache__")
-            )
+        copy.mkdir()
+        for name in _workspace_entries(root):
+            _copy_entry(root, copy, name)
+        escaping = _escaping_paths(copy)
+        if escaping:
+            raise IsolationError(f"copy paths resolve outside the copy: {escaping[:5]}")
     except BaseException:
         shutil.rmtree(scratch, ignore_errors=True)
         raise
@@ -109,4 +176,9 @@ def remove_isolated_copy(copy: Path) -> None:
     shutil.rmtree(copy.parent, ignore_errors=True)
 
 
-__all__ = ["create_isolated_copy", "remove_isolated_copy", "workspace_state"]
+__all__ = [
+    "IsolationError",
+    "create_isolated_copy",
+    "remove_isolated_copy",
+    "workspace_state",
+]
