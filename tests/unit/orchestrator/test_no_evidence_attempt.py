@@ -257,3 +257,148 @@ def test_no_evidence_outcome_round_trips_through_a_checkpoint() -> None:
 
     assert serialized is not None
     assert _deserialize_verify_gate_outcome(serialized) == outcome
+
+
+# The product writes its own state (``.ouroboros/context_pack.json``, the auto
+# traces) into the workspace before the worker starts. Those files are not the
+# worker's change, so they must not hide an attempt that changed nothing.
+
+
+def _write_product_state(repo: Path) -> None:
+    traces = repo / ".ouroboros" / "traces" / "auto_1"
+    traces.mkdir(parents=True)
+    (repo / ".ouroboros" / "context_pack.json").write_text("{}\n", encoding="utf-8")
+    (traces / "questions.jsonl").write_text("{}\n", encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_product_state_files_do_not_count_as_a_change(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _write_product_state(repo)
+    executor = _executor(repo, retry_budget=2)
+    await executor._no_evidence.start(str(repo))
+    seed = _seed(AcceptanceCriterionSpec(description="fix the bug"))
+
+    def worker(_dispatch: int) -> None:
+        # The run keeps writing traces while the worker changes no source file.
+        (repo / ".ouroboros" / "traces" / "auto_1" / "decisions.jsonl").write_text(
+            "{}\n", encoding="utf-8"
+        )
+
+    result, dispatches = await _run(executor, seed, worker)
+
+    assert len(dispatches) == 2
+    assert dispatches[1] is not None and NO_EVIDENCE_NOTE in dispatches[1][0]
+    assert result.outcome == ACExecutionOutcome.BLOCKED
+    assert result.verify_gate_outcome is not None
+    assert result.verify_gate_outcome.cause == "no_evidence"
+
+
+@pytest.mark.asyncio
+async def test_untracked_files_present_at_start_do_not_count_as_a_change(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    (repo / "notes.txt").write_text("left by the user\n", encoding="utf-8")
+    executor = _executor(repo, retry_budget=0)
+    await executor._no_evidence.start(str(repo))
+    seed = _seed(AcceptanceCriterionSpec(description="fix the bug"))
+
+    result, dispatches = await _run(executor, seed)
+
+    assert len(dispatches) == 1
+    assert result.outcome == ACExecutionOutcome.BLOCKED
+    assert result.verify_gate_outcome is not None
+    assert result.verify_gate_outcome.cause == "no_evidence"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change",
+    ["new_source_file", "edit_of_a_file_untracked_at_start"],
+)
+async def test_a_source_change_next_to_product_state_is_a_change(
+    tmp_path: Path, change: str
+) -> None:
+    repo = _repo(tmp_path)
+    _write_product_state(repo)
+    (repo / "scratch.py").write_text("X = 1\n", encoding="utf-8")
+    executor = _executor(repo, retry_budget=2)
+    await executor._no_evidence.start(str(repo))
+    seed = _seed(AcceptanceCriterionSpec(description="fix the bug"))
+
+    def worker(_dispatch: int) -> None:
+        if change == "new_source_file":
+            (repo / "fix.py").write_text("FIXED = True\n", encoding="utf-8")
+        else:
+            (repo / "scratch.py").write_text("X = 2\n", encoding="utf-8")
+
+    result, dispatches = await _run(executor, seed, worker)
+
+    assert len(dispatches) == 1
+    assert result.success is True
+    assert result.verify_gate_outcome is None
+
+
+# A verify command that fails on the untouched base and again on the attempt
+# is ``no_signal``. After an attempt that changed nothing it is not undecided:
+# the command reproduces the failure and nothing fixed it (pytest-6197).
+
+
+def _repo_with_base_signal(tmp_path: Path) -> tuple[Path, Any]:
+    from ouroboros.boundary.binding_flow import snapshot_base
+    from ouroboros.boundary.tree import tree_digest
+    from ouroboros.orchestrator.verify_base_signal import VerifyBaseSignal
+
+    repo = _repo(tmp_path)
+    _write_product_state(repo)
+    snapshot = snapshot_base(repo, tmp_path / "store")
+    return repo, VerifyBaseSignal(snapshot, tree_digest(snapshot))
+
+
+@pytest.mark.asyncio
+async def test_no_signal_after_an_empty_diff_is_a_failed_attempt(tmp_path: Path) -> None:
+    from ouroboros.orchestrator.attempt_evidence import NO_CHANGE_STILL_FAILS_NOTE
+
+    repo, signal = _repo_with_base_signal(tmp_path)
+    executor = _executor(repo, retry_budget=1)
+    executor._verify_base_signal = signal
+    await executor._no_evidence.start(str(repo))
+    seed = _seed(
+        AcceptanceCriterionSpec(description="reproduction passes", verify_command="exit 3")
+    )
+
+    result, dispatches = await _run(executor, seed)
+
+    # Re-dispatched through the normal retry loop, with the factual note.
+    assert len(dispatches) == 2
+    assert dispatches[1] is not None and NO_CHANGE_STILL_FAILS_NOTE in dispatches[1][0]
+    assert result.success is False
+    assert result.outcome == ACExecutionOutcome.FAILED
+    assert result.verify_gate_outcome is not None
+    assert result.verify_gate_outcome.passed is False
+    assert result.verify_gate_outcome.no_signal is False
+    assert result.verify_gate_outcome.environment_unverifiable is False
+    assert result.verify_gate_outcome.cause == "exit_nonzero"
+
+
+@pytest.mark.asyncio
+async def test_no_signal_after_a_change_stays_undecided(tmp_path: Path) -> None:
+    repo, signal = _repo_with_base_signal(tmp_path)
+    executor = _executor(repo, retry_budget=1)
+    executor._verify_base_signal = signal
+    await executor._no_evidence.start(str(repo))
+    seed = _seed(
+        AcceptanceCriterionSpec(description="reproduction passes", verify_command="exit 3")
+    )
+
+    def worker(_dispatch: int) -> None:
+        (repo / "module.py").write_text("VALUE = 2\n", encoding="utf-8")
+
+    result, dispatches = await _run(executor, seed, worker)
+
+    assert len(dispatches) == 1
+    assert result.success is True
+    assert result.verify_gate_outcome is not None
+    assert result.verify_gate_outcome.no_signal is True
+    assert result.verify_gate_outcome.environment_unverifiable is True

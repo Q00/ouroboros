@@ -15,7 +15,11 @@ from typing import Any
 from pydantic import BaseModel, Field, model_validator
 import structlog
 
-from ouroboros.bigbang.answer_provenance import AnswerProvenance, classify_answer_provenance
+from ouroboros.bigbang.answer_provenance import (
+    DECLARED_PROVENANCES,
+    AnswerProvenance,
+    classify_answer_provenance,
+)
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.file_lock import file_lock as _file_lock
@@ -210,10 +214,10 @@ class InterviewRound(BaseModel):
         requirement authority, so an answer's provenance is settled here too —
         one classifier, still no consumer reading the marker.
 
-        A declared ``"assumption"`` is not derived from the answer, so it is
-        kept as recorded rather than re-derived.
+        A declared provenance (``"assumption"``, ``"requester"``) is not derived
+        from the answer, so it is kept as recorded rather than re-derived.
         """
-        if self.user_response is not None and self.provenance != "assumption":
+        if self.user_response is not None and self.provenance not in DECLARED_PROVENANCES:
             answer_for_classification = self.user_response
             # PM interviews before #1823 decorated reframed answers after the
             # provenance marker had already been supplied, producing

@@ -129,13 +129,14 @@ async def test_draft_kept_after_unanswered_requester_is_an_assumption(
 
 
 @pytest.mark.asyncio
-async def test_requester_answer_is_declared_binding(tmp_path: Path) -> None:
+async def test_requester_answer_is_declared_requester(tmp_path: Path) -> None:
+    """Withheld from extraction; it reaches the worker verbatim instead."""
     requester = _StubRequester(RequesterReply("answered", answer=REQUESTER_CONSTRAINT))
 
     text, provenance = await _first_answer(tmp_path, requester)
 
     assert REQUESTER_CONSTRAINT in text
-    assert provenance == "user"
+    assert provenance == "requester"
 
 
 def test_answer_provenance_follows_source_and_ledger_status() -> None:
@@ -170,7 +171,7 @@ def test_answer_provenance_follows_source_and_ledger_status() -> None:
         )
         == "user"
     )
-    assert answer_provenance(AutoAnswer("x", AutoAnswerSource.REQUESTER, 0.83)) == "user"
+    assert answer_provenance(AutoAnswer("x", AutoAnswerSource.REQUESTER, 0.83)) == "requester"
 
 
 @pytest.mark.asyncio
@@ -316,7 +317,9 @@ def test_ledger_seed_keeps_defaulted_and_unspecified_drafts_out_of_binding_field
     assert DEFAULTED_CONSTRAINT not in binding_text
     assert UNSPECIFIED_DRAFT_CRITERION not in binding_text
     assert "generic safe default" not in binding_text
-    assert REQUESTER_CONSTRAINT in seed.constraints
+    # The requester's answer is quoted verbatim, never a rewritten constraint.
+    assert REQUESTER_CONSTRAINT not in binding_text
+    assert [item.answer for item in seed.requester_answers] == [REQUESTER_CONSTRAINT]
 
     assert DEFAULTED_CONSTRAINT in seed.assumptions
     assert UNSPECIFIED_DRAFT_CRITERION in seed.assumptions
@@ -594,7 +597,10 @@ def test_a_binding_answer_is_never_reduced_to_its_question() -> None:
 
     seed = synthesize_seed_from_ledger(ledger)
 
-    assert "Cover DateField, TimeField and DateTimeField" in seed.constraints
+    assert [(item.question, item.answer) for item in seed.requester_answers][-1] == (
+        SCOPE_QUESTION,
+        "Cover DateField, TimeField and DateTimeField",
+    )
     assert all(SCOPE_QUESTION not in item for item in seed.assumptions)
 
 
@@ -635,8 +641,11 @@ async def test_draft_kept_after_unanswered_requester_carries_its_question(
     ]
     assert asked, "the kept draft must remember the question it answered"
     assert all(not entry.binds_seed for entry in asked)
+    assert all(entry.requester_unanswered for entry in asked)
+    # The requester said the issue does not settle it: neither the question
+    # nor the draft reaches the worker.
     rendered = ledger_assumptions(result.ledger)
-    assert f"Open question: {FIRST_QUESTION}" in rendered
+    assert all(FIRST_QUESTION not in line for line in rendered)
     for entry in asked:
         assert all(entry.value.strip() not in line for line in rendered)
 
