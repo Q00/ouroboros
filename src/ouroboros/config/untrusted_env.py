@@ -230,6 +230,9 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # kept beside it so a cloned repo cannot shape how long it runs.
         "OUROBOROS_AUTO_REQUESTER_COMMAND",
         "OUROBOROS_AUTO_REQUESTER_TIMEOUT_SECONDS",
+        # ``ooo auto`` investigator call cap (auto/investigator.py): 0 turns
+        # off the repository reading, so a cloned repo must not set it.
+        "OUROBOROS_AUTO_INVESTIGATOR_MAX_CALLS",
         "DO_NOT_TRACK",
         "CI",
         "GITHUB_ACTIONS",

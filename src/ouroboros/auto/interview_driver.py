@@ -36,6 +36,7 @@ from ouroboros.auto.interview_recovery import (
     with_timeout,
     with_transient_retry,
 )
+from ouroboros.auto.investigator import RepoInvestigator, settle
 from ouroboros.auto.lateral_routing import (
     select_persona_for_qa_failure,
     select_persona_for_safe_default_block,
@@ -43,7 +44,7 @@ from ouroboros.auto.lateral_routing import (
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
 from ouroboros.auto.repo_context import repo_auto_answer_context
-from ouroboros.auto.requester import Requester, ask_requester
+from ouroboros.auto.requester import Requester
 from ouroboros.auto.safe_defaults import (
     AUTO_ANSWER_PREFIX,
     SafeDefaultFinalization,
@@ -343,6 +344,7 @@ class AutoInterviewDriver:
         | None
     ) = None
     requester: Requester | None = None  # opt-in: ask, not assume (auto/requester.py)
+    investigator: RepoInvestigator | None = None  # reads the repo to answer (auto/investigator.py)
     # RFC #1256 §I4 — Unified observability for ooo auto interview.
     # When set, the driver emits typed ``auto.interview.*`` events to the
     # EventStore alongside the existing structlog ``log.info(...)`` calls,
@@ -1203,9 +1205,7 @@ class AutoInterviewDriver:
             answer = self._answer_with_gap_steering(turn.question, ledger, answer_context)
             question_for_record = turn.question
 
-        # Concretize a generic answer (LLM), then ask the requester where auto would assume.
-        answer = await self._refine_answer(answer, question_for_record, state, ledger)
-        answer = await ask_requester(self, answer, question_for_record, turn, state, round_number)
+        answer = await settle(self, answer, question_for_record, turn, state, ledger, round_number)
 
         if answer.blocker is not None:
             self.answerer.apply(answer, ledger, question=question_for_record)
