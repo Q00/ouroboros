@@ -8186,6 +8186,11 @@ class TestParallelACExecutor:
         )
         assert "Do not implement, test, document, or pre-create work" in runtime.last_prompt
         assert "sibling or future ACs" in runtime.last_prompt
+        assert (
+            "Do not substitute a narrower, safer, or smaller solution than the goal asks for. "
+            "Before you finish, audit that the change covers every case the goal names."
+        ) in runtime.last_prompt
+        assert "then stop" not in runtime.last_prompt
         assert "current AC in this runtime session" in runtime.last_prompt
         assert "workspace-relative paths only" in runtime.last_prompt
         assert "never absolute paths" in runtime.last_prompt

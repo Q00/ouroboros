@@ -115,7 +115,10 @@ async def _auto_detect_mechanical_toml(
                 ),
             )
         except Exception:  # noqa: BLE001 — adapter construction must never break QA
-            return
+            # The detector has a deterministic standard-library unittest path
+            # that does not need a provider. Manifest-backed AI detection will
+            # still skip safely when no adapter can be constructed.
+            adapter = None
     try:
         await ensure_mechanical_toml(working_dir, adapter, backend=llm_backend)
     except Exception:  # noqa: BLE001 — detector must never break QA

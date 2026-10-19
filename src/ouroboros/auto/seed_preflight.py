@@ -109,7 +109,11 @@ _ENV_VAR_RE = re.compile(
 # ``for x in ...`` loop variables, and parameter expansions that do not
 # require a pre-existing value (defaults, assignments, and optional alternates).
 _ENV_ASSIGN_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)=")
-_FOR_VAR_RE = re.compile(r"\bfor\s+([A-Za-z_][A-Za-z0-9_]*)\s+in(?P<items>[^;\n]*)[;\n]")
+# ``for x in ...;`` plus the bare ``for x; do`` / ``for x do`` forms, which
+# iterate the positional parameters.
+_FOR_VAR_RE = re.compile(
+    r"\bfor\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+in(?P<items>[^;\n]*)[;\n]|\s*;|\s+do\b)"
+)
 _OPTIONAL_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*):?[-=+]")
 _ASSIGNING_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*):?=")
 _URL_RE = re.compile(r"\S+://\S+")
@@ -357,9 +361,13 @@ def _shell_variable_events(
         subprocess_separator = max(command.rfind("|", 0, position), command.rfind("&", 0, position))
         return subprocess_separator > boundary
 
+    # The loop body only runs once the variable holds an item, so a body that
+    # expands it is bound even when the items come from ``$(...)``, ``$@`` or
+    # another variable. Only a statically empty ``in`` list (the body never
+    # runs and nothing is assigned) leaves the name unbound.
     for match in _FOR_VAR_RE.finditer(command):
-        items = match.group("items").strip()
-        if unquoted[match.start()] and items and not re.search(r"[$`]", items):
+        items = match.group("items")
+        if unquoted[match.start()] and (items is None or items.strip()):
             events.append((match.start(), "bind", match.group(1)))
     for match in _ENV_VAR_RE.finditer(command):
         if not expandable[match.start()]:

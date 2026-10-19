@@ -15,8 +15,10 @@ from ouroboros.mcp.tools.authoring_handlers import (
     InterviewHandler,
     _attach_question_assist_requests,
     _build_interview_lateral_review_orchestration,
+    _build_interview_lateral_review_tool_args,
     _maybe_record_lateral_review_advisory,
 )
+from ouroboros.mcp.tools.question_advisory import required_advisory_personas
 from ouroboros.mcp.tools.subagent import SubagentDispatchMode
 from ouroboros.orchestrator.capabilities.interview_schemas import (
     _interview_question_advisory_fanout_metadata,
@@ -204,13 +206,11 @@ async def test_handler_surfaces_runnable_lateral_review_dispatch() -> None:
     assert result.value.meta["lateral_review_milestone"] == "progress"
     assert result.value.meta["lateral_review_reason"] == "first_forward_milestone_transition"
     assert result.value.meta["lateral_review_tool"] == "ouroboros_lateral_think"
-    assert result.value.meta["lateral_review_personas"] == [
-        "researcher",
-        "contrarian",
-        "simplifier",
-    ]
+    # contrarian and simplifier already run as required advisory lanes on this
+    # same question, so the milestone review adds only the missing perspective.
+    assert result.value.meta["lateral_review_personas"] == ["researcher"]
     tool_args = result.value.meta["lateral_review_tool_args"]
-    assert tool_args["personas"] == ["researcher", "contrarian", "simplifier"]
+    assert tool_args["personas"] == ["researcher"]
     assert "Milestone: initial -> progress" in tool_args["problem_context"]
     assert "Next interview question: What edge case remains?" in tool_args["problem_context"]
     orchestration = result.value.meta["lateral_review_orchestration"]
@@ -230,11 +230,7 @@ async def test_handler_surfaces_runnable_lateral_review_dispatch() -> None:
         "mode": "sequential_persona_payload_dispatch",
         "trigger": "runtime_has_no_native_parallel_subagent_primitive",
     }
-    assert [persona["persona_id"] for persona in panel["personas"]] == [
-        "researcher",
-        "contrarian",
-        "simplifier",
-    ]
+    assert [persona["persona_id"] for persona in panel["personas"]] == ["researcher"]
     assert panel["response_payload_refs"]["requires_prose_parsing"] is False
     assert "structured payload" in panel["runtime_instruction"]
     assert "legacy alias" in panel["runtime_instruction"]
@@ -288,13 +284,41 @@ async def test_handler_surfaces_runnable_lateral_review_dispatch() -> None:
     content_text = result.value.content[0].text
     assert content_text.startswith("Session sess-817\n\n")
     assert "What edge case remains?" in content_text
-    assert "Lateral review queued:" in content_text
-    assert content_text.index("What edge case remains?") < content_text.index(
-        "Lateral review queued:"
-    )
+    # The milestone review runs silently from meta; nothing narrates it.
+    assert "Lateral review queued" not in content_text
     assert "Session sess-817" in content_text
     assert state.lateral_review_advised_milestones == ["progress"]
     handler._emit_event_bg.assert_called()
+
+
+def test_required_advisory_personas_reads_the_interview_catalog() -> None:
+    # architect runs on architecture_implications, which is not required for
+    # fan-out completion, so the milestone review cannot count on its output.
+    assert required_advisory_personas("ouroboros_interview") == {"contrarian", "simplifier"}
+    assert required_advisory_personas("not_a_tool") == frozenset()
+
+
+def _milestone_tool_args() -> dict[str, object]:
+    return _build_interview_lateral_review_tool_args(
+        InterviewState(interview_id="sess-dedup"),
+        next_question="What edge case remains?",
+        score=_score(0.35),
+        lateral_review_meta={
+            "lateral_review_milestone": "progress",
+            "lateral_review_from_milestone": "initial",
+        },
+    )
+
+
+def test_milestone_review_personas_follow_the_advisory_catalog() -> None:
+    target = "ouroboros.mcp.tools.authoring_handlers.required_advisory_personas"
+    with patch(target, return_value=frozenset({"contrarian"})):
+        assert _milestone_tool_args()["personas"] == ["researcher", "simplifier"]
+    with patch(target, return_value=frozenset()):
+        assert _milestone_tool_args()["personas"] == ["researcher", "contrarian", "simplifier"]
+    # Never an empty panel: ouroboros_lateral_think rejects an empty list.
+    with patch(target, return_value=frozenset({"researcher", "contrarian", "simplifier"})):
+        assert _milestone_tool_args()["personas"] == ["researcher"]
 
 
 async def test_advisory_fanout_is_host_driven_stamped_on_codex_runtime() -> None:

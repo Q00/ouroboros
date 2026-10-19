@@ -65,7 +65,7 @@ def test_claude_catalog_lists_shipped_defaults_first() -> None:
 def test_codex_catalog_offers_known_models_after_sentinel() -> None:
     choices = mc.model_choices("codex")
     assert choices[0] == mc.DEFAULT_MODEL_SENTINEL
-    assert "gpt-5-codex" in choices
+    assert "gpt-6.1-sol" in choices
 
 
 def test_default_model_sentinel_support_follows_backend_contract() -> None:

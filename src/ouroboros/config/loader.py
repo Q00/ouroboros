@@ -46,6 +46,7 @@ from pydantic import ValidationError as PydanticValidationError
 import yaml
 
 from ouroboros.backends import get_backend_capability
+from ouroboros.config.completion_backend_guard import guard_completion_backend
 from ouroboros.config.model_selection import (
     backend_model_selection,
     pin_models_enabled,
@@ -1039,8 +1040,9 @@ def get_auto_evolve_enabled() -> bool:
 def default_execution_efficiency_mode() -> str | None:
     """Map ``execution.default_policy`` to a fresh-start efficiency mode.
 
-    ``None`` — for ``ask`` or an unreadable config — preserves the
-    interactive-prompt contract exactly (#1733). ``efficient`` and
+    ``None`` for an explicit ``ask`` keeps the interactive prompt (#1733); a missing or
+    unreadable config takes the shipped default, ``quality_first``, so a fresh start never
+    stalls on a policy question before anything is configured. ``efficient`` and
     ``quality_first`` return the efficiency mode whose documented coupling
     supplies the paired frugality default (adaptive/observe and
     quality_first/off); strict assurance never derives from here. Explicit
@@ -1049,8 +1051,8 @@ def default_execution_efficiency_mode() -> str | None:
     """
     try:
         policy = load_config().execution.default_policy
-    except ConfigError:
-        return None
+    except (ConfigError, OSError):
+        return "quality_first"
     if policy == "efficient":
         return "adaptive"
     if policy == "quality_first":
@@ -1781,7 +1783,7 @@ def get_llm_backend_for_stage(
     overrides remain honored for un-mapped stages.
     """
     if explicit_backend:
-        return explicit_backend
+        return _guard_llm_completion_backend(explicit_backend)
 
     parsed_stage = stage if isinstance(stage, Stage) else parse_stage(stage)
     try:
@@ -1801,36 +1803,13 @@ def get_llm_backend_for_stage(
     return _guard_llm_completion_backend(resolved)
 
 
-def _backend_supports_llm(name: str | None) -> bool:
-    """Whether a backend can serve LLM completions (vs. being runtime-only).
-
-    Runtime-only backends (e.g. ``antigravity``, ``grok``) declare
-    ``supports_llm=False`` in the capability registry: they drive the agentic
-    orchestrator runtime but have no LLM-completion adapter.
-    """
-    if not name:
-        return False
-    capability = get_backend_capability(name)
-    return capability is not None and capability.supports_llm
-
-
 def _guard_llm_completion_backend(resolved: str) -> str:
-    """Ensure a resolved internal-LLM backend can actually serve completions.
-
-    Per-stage routing may point a stage at a *runtime-only* backend
-    (``supports_llm=False`` — e.g. ``antigravity``/``grok``) for agentic
-    execution; using it for an internal LLM call would crash provider
-    construction. The agentic runtime still uses the runtime-only backend (via
-    ``resolve_runtime_for_stage``); only the LLM-completion call falls back to a
-    completion backend — the explicit ``llm.backend`` override when valid, else
-    the documented ``llm.backend`` default.
-    """
-    if _backend_supports_llm(resolved):
-        return resolved
-    override = _explicit_llm_backend_override()
-    if override and _backend_supports_llm(override):
-        return override
-    return get_llm_backend()
+    return guard_completion_backend(
+        resolved,
+        explicit_override=_explicit_llm_backend_override,
+        get_llm_backend=get_llm_backend,
+        load_config=load_config,
+    )
 
 
 def get_llm_backend_for_role(
@@ -1855,7 +1834,7 @@ def get_llm_backend_for_role(
     ``llm.backend`` default).
     """
     if explicit_backend:
-        return explicit_backend
+        return _guard_llm_completion_backend(explicit_backend)
 
     try:
         config = load_config()

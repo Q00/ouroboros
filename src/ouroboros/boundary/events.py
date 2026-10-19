@@ -139,6 +139,11 @@ class RunContract(_Payload):
     worker_test_gate: ArtifactCheckModeName = "off"
     """How the worker-test gate acts. Both are ``off`` when absent, so a run
     recorded before the settings existed resumes exactly as it started."""
+    check_package: Literal["decide", "record"] = "decide"
+    """Whether the package decides (``decide``) or only records what it would
+    have decided (``record``). ``decide`` when absent: a run recorded before
+    the setting existed decided, and resumes deciding. A ``record`` run's
+    journaled decision decides nothing anywhere (``decision.py``, resume)."""
 
     @field_validator("base_regression", "worker_test_gate", mode="before")
     @classmethod

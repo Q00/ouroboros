@@ -5,27 +5,20 @@ description: "Open or drive the Ouroboros settings GUI (browser, TUI, or convers
 
 # /ouroboros:ouroboros-config
 
-Settings for `~/.ouroboros/config.yaml`: per-stage runtime/model selects,
-global runtime + LLM backend, install badges for missing CLIs, and
-env-override warnings.
-
-## Usage
+Edit `~/.ouroboros/config.yaml`: global and per-stage runtime and model choices, the LLM backend, install badges for missing CLIs, and env-override warnings.
 
 ```
 ooo config
 /ouroboros:ouroboros-config
 ```
 
-**Trigger keywords:** "ooo config", "open settings", "configure ouroboros", "change model", "change agent"
-
 ## Instructions
 
-Pick the branch that matches where you (the agent) are running. The decisive
-question: **can the user open a browser pointed at this machine?**
+Pick the branch by one question: **can the user open a browser pointed at this machine?** Run commands with the active runtime's `run_shell` capability.
 
-### Branch A — local harness (Claude Code / Codex on the user's own machine)
+### Branch A: local harness on the user's own machine
 
-1. Launch in the background (the command serves until stopped):
+1. Launch in the background (it serves until stopped):
 
    ```bash
    if command -v ouroboros >/dev/null 2>&1; then
@@ -35,48 +28,26 @@ question: **can the user open a browser pointed at this machine?**
    fi
    ```
 
-   The command detects the non-interactive context itself and serves the
-   settings app over a local web server, auto-opening the user's browser. The
-   `uvx` fallback is required for a Marketplace-plugin-only install, where the
-   MCP server exists but `ouroboros` is not on `PATH`. In a development
-   checkout use `uv run ouroboros config`.
+   In a non-interactive context it serves the settings app on a local web server and opens the browser. The `uvx` fallback covers a plugin-only install where `ouroboros` is not on `PATH`; in a development checkout use `uv run ouroboros config`.
 
-2. Relay the `http://localhost:<port>` line from the output so the user can
-   open it manually if the browser did not pop up.
+2. Relay the `http://localhost:<port>` line in case the browser did not open.
 
-3. Tell the user: edit → Save → then ask you to stop the server. Remind them
-   a running MCP server may need a reconnect to pick up backend changes. Tell
-   them they can reopen these settings any time with `ooo config`; saving a
-   model choice never locks it permanently.
+3. Tell the user: edit, Save, then ask you to stop the server. A running MCP server may need a reconnect to pick up backend changes. `ooo config` reopens the settings any time; a saved model choice is never locked.
 
-### Branch B — remote host the user can reach over the network (SSH box, home server)
-
-The user cannot see a browser opened *here*, but may be able to reach this
-host. Serve without auto-open and hand over the URL:
+### Branch B: remote host the user can reach (SSH box, home server)
 
 ```bash
 ouroboros config --web --host 0.0.0.0 --no-browser
 ```
 
-Relay the printed URL with this host's address substituted, plus the SSH
-tunnel fallback the command prints
-(`ssh -L <port>:localhost:<port> <this-host>`).
+Relay the printed URL with this host's address substituted, plus the SSH tunnel fallback it prints (`ssh -L <port>:localhost:<port> <this-host>`).
 
-### Branch C — chat gateway, no browser path at all (e.g. hermes driven from Discord)
+### Branch C: chat gateway with no browser path (e.g. hermes driven from Discord)
 
-Do NOT start a server nobody can reach. Drive the same settings
-conversationally over the scriptable surface:
+Do not start a server nobody can reach. Drive the same settings in chat:
 
-1. Show the current state:
-
-   ```bash
-   ouroboros config show
-   ```
-
-2. Present the user a short menu in chat (default agent, per-stage agents,
-   and models: `auto`, a tier, or a model id for every role) with the current
-   values, and ask what to change.
-
+1. Show the current state with `ouroboros config show`.
+2. Offer a short menu with current values (default agent, per-stage agents, and models: `auto`, a tier, or a model id for every role) and ask what to change.
 3. Apply each choice with the validated setter (same write path as the GUI):
 
    ```bash
@@ -93,28 +64,10 @@ conversationally over the scriptable surface:
 
 4. Confirm with `ouroboros config show` and summarize what changed.
 
-If a `set` is rejected, relay the validation error verbatim — it lists the
-valid keys/values.
-
 ### All branches
 
-If the command fails with a missing-dependency hint, relay it verbatim
-(`pip install 'ouroboros-ai[tui]'`). Scriptable edits always remain on
-`ouroboros config show|set|backend|init|validate`.
-
-End your final message with the state breadcrumb footer (RFC #1392), e.g.:
-
-```
-◆ Settings GUI serving at <url> → next: Save in browser, then stop the server
-◆ Config updated via chat (<keys>) → next: reconnect MCP if the backend changed
-```
+Relay any rejected `set` validation error or missing-dependency hint (`pip install 'ouroboros-ai[tui]'`) verbatim. `ouroboros config undo` restores the configuration saved before the last change.
 
 ## RFC #1392 State Breadcrumb Footer
 
-Your final response MUST end with exactly one breadcrumb footer line:
-
-```
-◆ <current state> → next: <recommended action>
-```
-
-Derive `<current state>` from live session state via `ouroboros_session_status` when that MCP projection is available; otherwise derive it from this skill's actual outcome. Never use a linear `Step N of M` footer because Ouroboros is an evolutionary loop. When the next action is genuinely a choice, list 2-3 honest options in the `next:` clause. The breadcrumb line must be the last line of the response.
+End the final response with exactly one line `◆ <current state> → next: <recommended action>`. Derive the state from live session state via `ouroboros_session_status` when available, otherwise from this skill's actual outcome. Never use a linear `Step N of M` footer; when the next step is a real choice, list 2-3 options.

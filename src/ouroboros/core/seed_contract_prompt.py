@@ -28,6 +28,20 @@ def render_constraints_section(contract: SeedContract) -> str:
 {constraints_text}"""
 
 
+def render_assumptions_section(contract: SeedContract) -> str:
+    """Render unconfirmed assumptions, kept apart from the binding constraints."""
+    if not contract.assumptions:
+        return ""
+    assumptions_text = "\n".join(f"- {assumption}" for assumption in contract.assumptions)
+    return f"""## Assumptions (non-binding)
+Nobody confirmed these. They are guesses and open questions on the requester's behalf,
+not requirements. An assumption is a default only where the code itself settles nothing;
+follow the issue and the code over any assumption, and override the assumption when they
+say otherwise.
+An open question has no answer yet: decide it from the goal, the issue, and the code.
+{assumptions_text}"""
+
+
 def render_brownfield_section(contract: SeedContract) -> str:
     """Render existing-codebase boundaries from the Seed contract."""
     context = contract.brownfield_context
@@ -154,6 +168,10 @@ def render_seed_contract_for_execution(contract: SeedContract) -> str:
         render_constraints_section(contract),
     ]
 
+    assumptions = render_assumptions_section(contract)
+    if assumptions:
+        sections.extend(["", assumptions])
+
     brownfield = render_brownfield_section(contract)
     if brownfield:
         sections.extend(["", brownfield])
@@ -173,6 +191,7 @@ def render_seed_contract_for_execution(contract: SeedContract) -> str:
 
 __all__ = [
     "AUTO_RECURSION_GUARD",
+    "render_assumptions_section",
     "render_auto_recursion_guard",
     "render_brownfield_section",
     "render_acceptance_criteria_section",

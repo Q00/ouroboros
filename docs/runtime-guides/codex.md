@@ -81,6 +81,27 @@ Use `~/.ouroboros/config.yaml` for Ouroboros runtime settings. For everyday mode
 
 Choose **Use Codex default model** to keep Codex's current default model. This is the recommended setting: Ouroboros passes only the role's reasoning effort to each Codex invocation, so a newer model selected in Codex App or CLI is used automatically. Choose a listed model or **Enter another model ID…** only when you deliberately want to pin a model for a stage, including Execute.
 
+Per-AC model-tier routing preserves this automatic path. To deliberately use a
+concrete ladder, request an explicit tier (for example `--model frontier`) or
+set `OUROBOROS_MODEL_TIER_ROUTING=1`. The router prefers `provider: codex`
+entries in `economics.tiers`, then falls back to `openai`; explicit model pins
+still take precedence. See [native ladder configuration](../config-reference.md#native-runtime-ladders).
+
+The settings picker is a static catalog fallback, not a list guaranteed for
+your account. `codex-cli 0.160.0 --help` (checked 2026-10-18) confirms
+`--model` support but does not list valid model IDs. Verify pins against your
+Codex account and configured provider; an ID listed by OpenCode or the OpenAI
+API does not establish Codex CLI availability. The
+[official Codex model guidance](https://developers.openai.com/codex/models/)
+(checked 2026-10-18) documents `codex -m gpt-6-luna` for focused repeatable
+work, `codex -m gpt-6.1-sol` for complex coding/agentic work, and
+`codex -m gpt-6-astra` for the hardest work. These support a candidate
+frugal / standard / frontier ladder; availability remains subject to plan,
+client, workspace, and rollout. They do not establish an older release's
+defaults or your account's active catalog.
+Codex MCP remains advisory for per-call model routing: its resumed
+`codex-reply` operation cannot retarget the thread's model.
+
 Use `$CODEX_HOME/config.toml` for the Codex MCP/env hookup and any user-managed
 native Codex profiles. If `CODEX_HOME` is unset, Codex uses
 `~/.codex/config.toml`.
@@ -373,10 +394,11 @@ uv run ouroboros run workflow --runtime codex --resume <session_id> ~/.ouroboros
 >   grade A and **run**. Other grading axes still apply.
 > - **Degraded Seed**: the blocker is suppressed only so the run can emit a typed
 >   partial product. A blocker-free degraded Seed goes straight to the
->   partial-product terminal as `AutoPhase.COMPLETE` **regardless of grade or
->   `may_run`** ([`auto/pipeline.py:1286`](../../src/ouroboros/auto/pipeline.py)).
->   It never reaches RUN. Remaining blockers are hard safety blockers and still
->   terminate.
+>   partial-product terminal **regardless of grade or `may_run`**
+>   ([`auto/pipeline.py`](../../src/ouroboros/auto/pipeline.py)). It never
+>   reaches RUN, so the session stops `AutoPhase.BLOCKED` with stop reason
+>   `degraded_seed_not_executed`, never `COMPLETE`. Remaining blockers are hard
+>   safety blockers and still terminate.
 >
 > In practice: a hand-written seed carrying a high `ambiguity_score` is not blocked by
 > `ouroboros run workflow`. The field is provenance, not an enforcement gate.

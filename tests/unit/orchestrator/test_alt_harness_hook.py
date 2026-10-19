@@ -77,6 +77,7 @@ async def test_alternate_runtime_is_created_with_forced_bypass(
     executor = _make_executor(enabled=True)
     executor._run_verify_commands = False
     executor._verify_command_timeout_seconds = 17
+    executor._transcript_verifier = "record"
     executor_kwargs: dict[str, object] = {}
     original_init = ParallelACExecutor.__init__
 
@@ -130,6 +131,8 @@ async def test_alternate_runtime_is_created_with_forced_bypass(
     assert created_kwargs["permission_mode"] == "bypassPermissions"
     assert executor_kwargs["run_verify_commands"] is False
     assert executor_kwargs["verify_command_timeout_seconds"] == 17
+    # The alternate runtime accepts the criterion under the parent's verifier mode.
+    assert executor_kwargs["transcript_verifier"] == "record"
 
 
 @pytest.mark.asyncio

@@ -3509,7 +3509,8 @@ class TestCodexSetup:
             *,
             _seen: frozenset[Path] = frozenset(),
         ) -> setup_cmd._PathSnapshot:
-            if path.name == "auto" and path.is_dir() and not path.is_relative_to(tmp_path):
+            # The new generation is snapshotted from the staged tree.
+            if path.name.startswith(".ouroboros-auto.") and path.name.endswith(".tmp"):
                 raise OSError("synthetic packaged skill snapshot failure")
             return original_snapshot(path, _seen=_seen)
 
@@ -11737,19 +11738,19 @@ class TestCopilotSetup:
             ResolveRequest(prompt=f"ooo {completed_value}", cwd=session_cwd)
         )
         assert isinstance(resolved, Resolved)
-        assert resolved.mcp_tool == "ouroboros_execute_seed"
+        assert resolved.mcp_tool == "ouroboros_start_execute_seed"
         assert resolved.mcp_args["seed_path"] == absolute_path
 
         with patch("pathlib.Path.home", return_value=tmp_path):
             loaded = await ExecuteSeedHandler._resolve_seed_content(
                 arguments={"seed_path": absolute_path},
                 resolved_cwd=session_cwd,
-                tool_name="ouroboros_execute_seed",
+                tool_name="ouroboros_start_execute_seed",
             )
             bare_name = await ExecuteSeedHandler._resolve_seed_content(
                 arguments={"seed_path": "demo.yaml"},
                 resolved_cwd=session_cwd,
-                tool_name="ouroboros_execute_seed",
+                tool_name="ouroboros_start_execute_seed",
             )
 
         assert loaded.is_ok
@@ -11803,7 +11804,7 @@ class TestCopilotSetup:
             f"Pi full-prefix replacement produced undispatchable command: "
             f"{dispatched_text!r} -> {resolved!r}"
         )
-        assert resolved.mcp_tool == "ouroboros_execute_seed"
+        assert resolved.mcp_tool == "ouroboros_start_execute_seed"
         assert resolved.mcp_args["seed_path"] == absolute_path
 
         # --- Verify the OLD (broken) behavior would fail ---
@@ -11845,7 +11846,7 @@ class TestCopilotSetup:
             f"Quoted-path completion produced undispatchable command: "
             f"{dispatched_text!r} -> {resolved!r}"
         )
-        assert resolved.mcp_tool == "ouroboros_execute_seed"
+        assert resolved.mcp_tool == "ouroboros_start_execute_seed"
         assert resolved.mcp_args["seed_path"] == absolute_path
 
 

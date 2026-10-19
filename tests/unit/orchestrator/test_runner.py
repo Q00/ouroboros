@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import yaml
 
+from ouroboros.core import project_identity as project_identity_module
 from ouroboros.core.errors import ConfigError, PersistenceError
 from ouroboros.core.project_identity import resolve_project_identity
 from ouroboros.core.seed import (
@@ -3411,6 +3412,64 @@ class TestOrchestratorRunner:
             runner._retire_process_local_authority(
                 session_id="orch-project-anchor",
                 execution_id="exec-project-anchor",
+            )
+
+    @pytest.mark.asyncio
+    async def test_prepare_session_degrades_project_identity_on_old_git(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+        tmp_path: Path,
+    ) -> None:
+        """Git older than the topology grammar must not abort a direct run."""
+        repo_root = tmp_path / "repo"
+        _init_git_repo(repo_root)
+        workspace = repo_root / "packages" / "app"
+        workspace.mkdir(parents=True)
+        mock_adapter.working_directory = str(workspace)
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            task_cwd=str(workspace),
+        )
+
+        real_run_git_command = project_identity_module._run_git_command
+
+        def old_git(*arguments: str) -> bytes:
+            if arguments == ("--version",):
+                return b"git version 2.34.1\n"
+            if "worktree" in arguments or "--path-format=absolute" in arguments:
+                raise AssertionError(f"old Git must not run topology queries: {arguments}")
+            return real_run_git_command(*arguments)
+
+        with patch("ouroboros.core.project_identity._run_git_command", side_effect=old_git):
+            result = await runner.prepare_session(
+                sample_seed,
+                execution_id="exec-old-git",
+                session_id="orch-old-git",
+            )
+
+        try:
+            assert result.is_ok
+            start = next(
+                call.args[0]
+                for call in mock_event_store.append.await_args_list
+                if call.args[0].type == "orchestrator.session.started"
+            )
+            canonical = str(workspace.resolve())
+            assert start.data["project_root"] == canonical
+            assert start.data["workspace_path"] == "."
+            assert start.data["project_identity_degraded_reason"] == "git_version_unsupported"
+            proof = start.data["execution_contract"]["frugality_proof"]
+            assert proof["project_root"] == canonical
+            assert proof["workspace_path"] == "."
+        finally:
+            runner._retire_process_local_authority(
+                session_id="orch-old-git",
+                execution_id="exec-old-git",
             )
 
     @pytest.mark.asyncio
