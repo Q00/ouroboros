@@ -13,9 +13,11 @@ without spawning an agent CLI.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 import json
 from pathlib import Path
+import time
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -29,6 +31,8 @@ from ouroboros.auto.interview_driver import (
     InterviewTurn,
 )
 from ouroboros.auto.investigator import (
+    CALL_TIMEOUT_ENV,
+    DEFAULT_CALL_TIMEOUT_SECONDS,
     INVESTIGATOR_PERMISSION_MODE,
     INVESTIGATOR_TOOLS,
     MAX_CALLS_ENV,
@@ -37,19 +41,43 @@ from ouroboros.auto.investigator import (
     RepoInvestigator,
     build_repo_investigator,
     judge_reply,
+    resolve_call_timeout,
     resolve_max_calls,
 )
-from ouroboros.auto.ledger import LedgerSource, LedgerStatus, SeedDraftLedger
-from ouroboros.auto.ledger_seed import ledger_assumptions
+from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
+from ouroboros.auto.ledger_seed import (
+    ledger_assumptions,
+    partial_seed_from_evidence,
+    synthesize_seed_from_ledger,
+    with_ledger_carryover,
+)
+from ouroboros.auto.phase_clock import phase_clock_paused, wait_for_pausable
 from ouroboros.auto.requester import RequesterQuestion, RequesterReply
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
+from ouroboros.bigbang.answer_provenance import (
+    ANSWER_PROVENANCE_ARGUMENT,
+    WITHHELD_REPO_FACT_NOTE,
+    declare_provenance,
+    extraction_rounds,
+)
+from ouroboros.bigbang.interview import InterviewState
+from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.config.untrusted_env import is_untrusted_env_denied_key
+from ouroboros.core.seed import RepoFact, Seed, ac_texts
+from ouroboros.core.seed_contract import SeedContract
+from ouroboros.core.seed_contract_prompt import (
+    render_acceptance_criteria_section,
+    render_seed_contract_for_execution,
+)
 from ouroboros.core.types import Result
 from ouroboros.orchestrator.adapter import TaskResult
 
 GOAL = "Fix the parser so empty input exits with code 2"
 QUESTION = "Which output format should the CLI use?"
 GUESS = "GUESSED-TEXT-THAT-MUST-NOT-APPEAR"
+FOUND_ANSWER = "The CLI prints rows as indented JSON via render()."
+EVIDENCE_LINE = "src/cli.py:7-8: return json.dumps(rows, indent=2)"
+VERIFY_QUESTION = "Which command output verifies the acceptance criteria?"
 
 _SOURCE = """\
 def parse(text):
@@ -75,7 +103,7 @@ def _found_reply() -> str:
     return json.dumps(
         {
             "status": "found",
-            "answer": "The CLI prints rows as indented JSON via render().",
+            "answer": FOUND_ANSWER,
             "evidence": [
                 {
                     "path": "src/cli.py",
@@ -269,7 +297,7 @@ def test_judge_reads_fenced_json_and_rejects_garbage(workspace: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_found_answer_binds_as_confirmed_repo_fact(workspace: Path) -> None:
+async def test_found_answer_is_a_confirmed_checked_repo_fact(workspace: Path) -> None:
     investigator, calls, factory_kwargs = _investigator(lambda _p: _found_reply())
 
     _state, ledger, sent, _ = await _run(workspace, investigator=investigator)
@@ -285,12 +313,11 @@ async def test_found_answer_binds_as_confirmed_repo_fact(workspace: Path) -> Non
             "cwd": workspace,
         }
     ]
-    facts = _entries(ledger, ".repo.")
+    facts = _entries(ledger, ".repo_fact.")
     assert facts
     assert all(entry.source == LedgerSource.REPO_FACT for entry in facts)
     assert all(entry.status == LedgerStatus.CONFIRMED for entry in facts)
-    assert all(entry.binds_seed for entry in facts)
-    assert all(entry.evidence == ["src/cli.py:7-8"] for entry in facts)
+    assert all(entry.evidence == [EVIDENCE_LINE] for entry in facts)
     assert sent[0].startswith("[from-auto][repo_fact] The CLI prints rows as indented JSON")
     assert "src/cli.py:7-8" in sent[0]
 
@@ -330,7 +357,7 @@ async def test_failed_evidence_check_is_not_found_and_drops_answer(workspace: Pa
 
     _state, ledger, sent, _ = await _run(workspace, investigator=investigator)
 
-    assert not _entries(ledger, ".repo.")
+    assert not _entries(ledger, ".repo_fact.")
     assert _entries(ledger, ".investigated.")
     assert GUESS not in sent[0]
     assert sent[0].startswith(f"[from-auto][assumption] {NOT_SETTLED_REPLY}")
@@ -486,6 +513,216 @@ async def test_all_not_found_interview_converges_like_the_old_answerer(
     assert _unverified_provenance_findings(ledger_on) == []
 
 
+# -- found answers reach the worker only as checked repository facts --------
+
+
+class _ProvenanceBackend:
+    """Interview backend that records the provenance declared with each answer."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str | None]] = []
+
+    async def start(self, goal: str, *, cwd: str, interview_id: str | None = None) -> InterviewTurn:  # noqa: ARG002
+        return InterviewTurn(QUESTION, "s")
+
+    async def answer(
+        self,
+        session_id: str,
+        answer: str,
+        *,
+        last_question: str | None = None,  # noqa: ARG002
+        provenance: str | None = None,
+    ) -> InterviewTurn:
+        self.calls.append((answer, provenance))
+        return InterviewTurn("What else should we consider?", session_id)
+
+    async def resume(self, session_id: str) -> InterviewTurn:
+        return InterviewTurn(QUESTION, session_id)
+
+
+@pytest.mark.asyncio
+async def test_found_answer_is_declared_repo_fact_provenance(workspace: Path) -> None:
+    investigator, _calls, _ = _investigator(lambda _p: _found_reply())
+    backend = _ProvenanceBackend()
+    driver = AutoInterviewDriver(
+        backend,
+        store=AutoStore(workspace.parent / "store"),
+        max_rounds=1,
+        timeout_seconds=600,
+        investigator=investigator,
+    )
+    state = AutoPipelineState(goal=GOAL, cwd=str(workspace))
+    state.transition(AutoPhase.INTERVIEW, "interview")
+
+    await driver.run(state, SeedDraftLedger.from_goal(GOAL))
+
+    text, provenance = backend.calls[0]
+    assert FOUND_ANSWER in text
+    assert provenance == "repo_fact"
+
+
+def test_seed_extraction_withholds_a_repo_fact_answer() -> None:
+    state = InterviewState(interview_id="interview_0000000000000009", initial_context=GOAL)
+    declare_provenance(
+        state.record_answer(QUESTION, f"[from-auto][repo_fact] {FOUND_ANSWER}"),
+        {ANSWER_PROVENANCE_ARGUMENT: "repo_fact"},
+    )
+    state.record_answer("Which error must go away?", "The empty-input crash.")
+
+    projected = extraction_rounds(state)
+    context = SeedGenerator(llm_adapter=None)._build_interview_context(state)  # type: ignore[arg-type]
+    reloaded = InterviewState.model_validate(state.model_dump(mode="json"))
+
+    assert projected[0].withheld is True
+    assert projected[0].answer == WITHHELD_REPO_FACT_NOTE
+    assert FOUND_ANSWER not in context
+    assert WITHHELD_REPO_FACT_NOTE in context
+    assert "The empty-input crash." in context
+    assert [r.provenance for r in reloaded.rounds] == ["repo_fact", "user"]
+
+
+@pytest.mark.asyncio
+async def test_found_answer_reaches_worker_only_as_repo_facts_block(workspace: Path) -> None:
+    """A found answer settles its sections, but the Seed carries it only in
+    ``repo_facts``: never in constraints, acceptance criteria or ontology."""
+    investigator, _calls, _ = _investigator(lambda _p: _found_reply())
+
+    _state, ledger, _sent, result = await _run(
+        workspace, investigator=investigator, questions=(VERIFY_QUESTION,)
+    )
+
+    assert result.status == "seed_ready"
+    assert any(
+        ".repo_fact." in entry.key for entry in ledger.sections["acceptance_criteria"].entries
+    )
+    for seed in (
+        synthesize_seed_from_ledger(ledger),
+        partial_seed_from_evidence(ledger, reason="test"),
+    ):
+        assert seed.repo_facts == (
+            RepoFact(question=VERIFY_QUESTION, answer=FOUND_ANSWER, evidence=(EVIDENCE_LINE,)),
+        )
+        bound = [*ac_texts(seed.acceptance_criteria), *seed.constraints]
+        bound += [field.description for field in seed.ontology_schema.fields]
+        # Seed lines drop trailing punctuation, so look for the answer's core.
+        core = FOUND_ANSWER.rstrip(".")
+        assert not any(core in text for text in bound)
+        assert not any(core in text for text in seed.assumptions)
+        assert Seed.from_dict(seed.to_dict()).repo_facts == seed.repo_facts
+
+    contract = SeedContract.from_seed(synthesize_seed_from_ledger(ledger))
+    prompt = render_seed_contract_for_execution(contract)
+    block = prompt.split("## Repository facts (checked)", 1)[1].split("\n## ", 1)[0]
+    assert f"> {FOUND_ANSWER}" in block
+    assert f"- {EVIDENCE_LINE}" in block
+    assert f"> {VERIFY_QUESTION}" in block
+    assert FOUND_ANSWER.rstrip(".") not in render_acceptance_criteria_section(contract)
+
+
+def test_generated_seed_gets_repo_facts_from_the_ledger() -> None:
+    ledger = SeedDraftLedger.from_goal(GOAL)
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="constraints.output.repo_fact.1",
+            value=FOUND_ANSWER,
+            source=LedgerSource.REPO_FACT,
+            confidence=0.9,
+            status=LedgerStatus.CONFIRMED,
+            evidence=[EVIDENCE_LINE],
+            question=QUESTION,
+        ),
+    )
+    seed = partial_seed_from_evidence(SeedDraftLedger.from_goal(GOAL), reason="test")
+    assert seed.repo_facts == ()
+    assert "repo_facts" not in seed.to_dict()
+
+    carried = with_ledger_carryover(seed, ledger)
+
+    assert carried.repo_facts == (
+        RepoFact(question=QUESTION, answer=FOUND_ANSWER, evidence=(EVIDENCE_LINE,)),
+    )
+    assert with_ledger_carryover(carried, ledger) is carried
+
+
+# -- no time budget: the phase clock stops while the investigator runs ---------
+
+
+class _SlowRuntime(_FakeRuntime):
+    def __init__(self, reply: Callable[[str], str], calls: list[dict[str, Any]], delay: float):
+        super().__init__(reply, calls)
+        self._delay = delay
+
+    async def execute_task_to_result(self, prompt: str, tools=None, system_prompt=None, **kw):
+        await asyncio.sleep(self._delay)
+        return await super().execute_task_to_result(prompt, tools, system_prompt, **kw)
+
+
+@pytest.mark.asyncio
+async def test_paused_clock_stops_the_phase_timeout_and_moves_the_deadline() -> None:
+    state = AutoPipelineState(goal=GOAL, cwd=".")
+    state.deadline_at = time.monotonic() + 100.0
+    state.deadline_at_epoch = time.time() + 100.0
+    before = (state.deadline_at, state.deadline_at_epoch)
+
+    async def investigate() -> str:
+        async with phase_clock_paused(state):
+            await asyncio.sleep(0.3)
+        return "done"
+
+    assert await wait_for_pausable(investigate(), 0.1) == "done"
+    assert state.deadline_at - before[0] >= 0.29
+    assert state.deadline_at_epoch - before[1] >= 0.29
+
+    async def unpaused() -> None:
+        await asyncio.sleep(0.3)
+
+    with pytest.raises(TimeoutError):
+        await wait_for_pausable(unpaused(), 0.1)
+
+
+@pytest.mark.asyncio
+async def test_slow_investigation_never_hits_the_interview_phase_timeout(
+    workspace: Path,
+) -> None:
+    """Each investigation takes longer than the whole phase timeout; the
+    interview still finishes normally because the clock stops while it runs."""
+    calls: list[dict[str, Any]] = []
+    investigator = RepoInvestigator(
+        runtime_backend="codex",
+        runtime_factory=lambda **_k: _SlowRuntime(lambda _p: _not_found_reply(), calls, 0.4),
+    )
+
+    _state, _ledger, sent, result = await wait_for_pausable(
+        _run(
+            workspace,
+            investigator=investigator,
+            questions=(QUESTION, "Which output encoding should the CLI write?"),
+            max_rounds=2,
+        ),
+        0.3,
+    )
+
+    assert len(calls) == 2
+    assert result.status == "seed_ready"
+    assert all(text.startswith("[from-auto]") for text in sent)
+
+
+@pytest.mark.asyncio
+async def test_hang_guard_turns_a_stuck_call_into_not_found(workspace: Path) -> None:
+    calls: list[dict[str, Any]] = []
+    investigator = RepoInvestigator(
+        runtime_backend="codex",
+        call_timeout_seconds=0.05,
+        runtime_factory=lambda **_k: _SlowRuntime(lambda _p: _found_reply(), calls, 5.0),
+    )
+
+    _state, ledger, sent, _ = await _run(workspace, investigator=investigator)
+
+    assert not _entries(ledger, ".repo_fact.")
+    assert sent[0].startswith(f"[from-auto][assumption] {NOT_SETTLED_REPLY}")
+
+
 # -- configuration and wiring ---------------------------------------------------
 
 
@@ -500,11 +737,16 @@ def test_max_calls_config() -> None:
     assert build_repo_investigator(None, None, {}) is None
     built = build_repo_investigator("codex", None, {MAX_CALLS_ENV: "5"})
     assert built is not None and built.max_calls == 5
+    assert built.call_timeout_seconds == DEFAULT_CALL_TIMEOUT_SECONDS == 1800.0
+    assert resolve_call_timeout({CALL_TIMEOUT_ENV: "60"}) == 60.0
+    with pytest.raises(ValueError):
+        resolve_call_timeout({CALL_TIMEOUT_ENV: "0"})
 
 
 def test_plugin_dispatched_stage_gets_no_investigator() -> None:
     assert build_repo_investigator("opencode", "plugin", {}) is None
 
 
-def test_max_calls_env_is_denied_from_untrusted_project_env() -> None:
+def test_investigator_env_is_denied_from_untrusted_project_env() -> None:
     assert is_untrusted_env_denied_key(MAX_CALLS_ENV)
+    assert is_untrusted_env_denied_key(CALL_TIMEOUT_ENV)

@@ -12,7 +12,12 @@ session reads the task workspace and replies with JSON::
 Binding is decided without a model (``auto/evidence_check.py``):
 
 - ``found`` with at least one span, and every span passes the check: the
-  answer binds as a confirmed repository fact (``LedgerSource.REPO_FACT``).
+  answer is a confirmed repository fact (``LedgerSource.REPO_FACT``). It
+  settles the question for the interview, but it describes the code, not a
+  requirement: it reaches the worker only verbatim, with its checked quotes, in
+  ``Seed.repo_facts``, never as a constraint, criterion or ontology field, and
+  its transcript is declared provenance ``repo_fact`` so Seed extraction
+  withholds it.
 - anything else is not found. The interviewer is told what the checked spans
   show and that the code does not settle the question. The ledger entry is a
   non-binding assumption that carries the question, so the worker sees it only
@@ -31,11 +36,15 @@ read-only sandbox class), and only the ``Read``/``Glob``/``Grep`` tools. This is
 the same construction the check-package constructor uses
 (``boundary/constructor.py``).
 
-Budget: at most ``max_calls`` calls per interview (default 12,
-``OUROBOROS_AUTO_INVESTIGATOR_MAX_CALLS``; 0 turns the investigator off), and
-all calls together use at most half of the interview phase timeout. A question
-past either limit is not found without a call. Each call is a fresh session;
-earlier found answers are passed in the prompt as context.
+Limits: at most ``max_calls`` calls per interview run (default 12,
+``OUROBOROS_AUTO_INVESTIGATOR_MAX_CALLS``; 0 turns the investigator off); a
+question past the cap is not found without a call. There is no time budget:
+the interview waits for each investigation, and the interview phase clock and
+the pipeline deadline stop while it runs (``auto/phase_clock.py``). The only
+time limit is a hang guard per call for a runtime that never returns (default
+1800 s, ``OUROBOROS_AUTO_INVESTIGATOR_CALL_TIMEOUT_SECONDS``); a call past it is
+not found. Each call is a fresh session; earlier found answers are passed in
+the prompt as context.
 
 When no runtime can be built (no backend, a plugin-dispatched stage, a failed
 preflight), the deterministic answerer and refiner run exactly as before.
@@ -57,7 +66,8 @@ import structlog
 
 from ouroboros.auto.answerer import AutoAnswer, AutoAnswerSource
 from ouroboros.auto.evidence_check import EvidenceSpan, check_span
-from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus
+from ouroboros.auto.ledger import REPO_FACT_KEY_INFIX, LedgerEntry, LedgerSource, LedgerStatus
+from ouroboros.auto.phase_clock import phase_clock_paused
 from ouroboros.auto.requester import ROUTED_SOURCES, ask_requester
 
 if TYPE_CHECKING:
@@ -71,11 +81,9 @@ INVESTIGATOR_TOOLS: tuple[str, ...] = ("Read", "Glob", "Grep")
 INVESTIGATOR_PERMISSION_MODE = "default"
 MAX_CALLS_ENV = "OUROBOROS_AUTO_INVESTIGATOR_MAX_CALLS"
 DEFAULT_MAX_CALLS = 12
-# Share of the interview phase timeout all investigator calls may use together.
-BUDGET_SHARE_OF_PHASE = 0.5
-# Upper bound of one call, and the least time worth starting a call with.
-MAX_CALL_SECONDS = 300.0
-MIN_CALL_SECONDS = 30.0
+CALL_TIMEOUT_ENV = "OUROBOROS_AUTO_INVESTIGATOR_CALL_TIMEOUT_SECONDS"
+# Hang guard for one call: a runtime that never returns. Not a time budget.
+DEFAULT_CALL_TIMEOUT_SECONDS = 1800.0
 MAX_EVIDENCE_SPANS = 20
 MAX_REPLY_CHARS = 100_000
 # Earlier found answers passed to the next call as context.
@@ -111,6 +119,23 @@ INVESTIGATOR_SYSTEM_PROMPT = (
 RuntimeFactory = Callable[..., Any]
 
 
+def resolve_call_timeout(environ: Mapping[str, str] | None = None) -> float:
+    """Return the per-call hang guard from :data:`CALL_TIMEOUT_ENV` or the default."""
+    env = os.environ if environ is None else environ
+    raw = env.get(CALL_TIMEOUT_ENV)
+    if raw is None or not raw.strip():
+        return DEFAULT_CALL_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        msg = f"{CALL_TIMEOUT_ENV} must be a number of seconds, got {raw!r}"
+        raise ValueError(msg) from exc
+    if not value > 0:
+        msg = f"{CALL_TIMEOUT_ENV} must be greater than 0 seconds, got {value:g}"
+        raise ValueError(msg)
+    return value
+
+
 def resolve_max_calls(environ: Mapping[str, str] | None = None) -> int:
     """Return the per-interview call cap from :data:`MAX_CALLS_ENV` or the default."""
     env = os.environ if environ is None else environ
@@ -134,7 +159,7 @@ class Investigation:
 
     ``outcome`` is ``found``, ``not_found``, ``evidence_rejected`` (the reply
     said found but a span failed the check), ``reply_invalid``, ``timeout``,
-    ``call_failed``, ``cap_reached`` or ``budget_spent``. Only ``found``
+    ``call_failed`` or ``cap_reached``. Only ``found``
     binds. ``checked`` holds the spans that passed; ``failures`` the reasons
     of those that did not.
     """
@@ -222,8 +247,8 @@ class RepoInvestigator:
     runtime_backend: str
     max_calls: int = DEFAULT_MAX_CALLS
     runtime_factory: RuntimeFactory | None = None
+    call_timeout_seconds: float = DEFAULT_CALL_TIMEOUT_SECONDS
     calls_made: int = 0
-    spent_seconds: float = 0.0
     unavailable: str | None = None
     resolved_model: str | None = None
     resolved_effort: str | None = None
@@ -242,17 +267,12 @@ class RepoInvestigator:
             cwd=workspace,
         )
 
-    async def investigate(
-        self, goal: str, question: str, workspace: Path, *, budget_seconds: float
-    ) -> Investigation | None:
+    async def investigate(self, goal: str, question: str, workspace: Path) -> Investigation | None:
         """Investigate ``question``; ``None`` when no runtime is available."""
         if self.unavailable is not None:
             return None
         if self.calls_made >= self.max_calls:
             return Investigation("cap_reached")
-        remaining = budget_seconds - self.spent_seconds
-        if remaining < MIN_CALL_SECONDS:
-            return Investigation("budget_spent")
         try:
             runtime = await asyncio.to_thread(self._create_runtime, workspace)
         except Exception as exc:  # noqa: BLE001 - no runtime means the old answerer runs
@@ -275,7 +295,7 @@ class RepoInvestigator:
                     tools=list(INVESTIGATOR_TOOLS),
                     system_prompt=INVESTIGATOR_SYSTEM_PROMPT,
                 ),
-                timeout=min(MAX_CALL_SECONDS, remaining),
+                timeout=self.call_timeout_seconds,
             )
         except TimeoutError:
             result = None
@@ -286,7 +306,6 @@ class RepoInvestigator:
             if closer is not None and inspect.iscoroutinefunction(closer):
                 await closer()
         elapsed = time.monotonic() - started
-        self.spent_seconds += elapsed
         if result is None or result is False or result.is_err:
             outcome = "timeout" if result is None else "call_failed"
             return Investigation(outcome, called=True, elapsed_seconds=elapsed)
@@ -322,24 +341,27 @@ def _evidence_lines(spans: tuple[EvidenceSpan, ...]) -> list[str]:
 def found_answer(
     draft: AutoAnswer, found: Investigation, question: str, round_number: int
 ) -> AutoAnswer:
-    """The answer read from the repository, bound as a confirmed repo fact.
+    """The answer read from the repository, as a confirmed checked repo fact.
 
-    It fills the sections the draft targeted. Each entry key gets a
-    ``.repo.<round>`` suffix, so two found answers for the same facet in
+    Its entries settle the sections the draft targeted, but they never become a
+    constraint, criterion or ontology field: they reach the worker only as
+    ``Seed.repo_facts`` (``ledger_seed.ledger_repo_facts``), and the transcript
+    declares provenance ``repo_fact`` so Seed extraction withholds it. Each key
+    is ``<facet>.repo_fact.<round>``, so two found answers for one facet in
     different rounds are separate facts instead of a same-key tie.
     """
-    labels = [span.label for span in found.checked]
+    spans = [f"{span.label}: {' '.join(span.quote.split())}" for span in found.checked]
     updates = [
         (
             section,
             LedgerEntry(
-                key=f"{entry.key}.repo.{round_number}",
+                key=f"{entry.key}{REPO_FACT_KEY_INFIX}{round_number}",
                 value=found.answer,
                 source=LedgerSource.REPO_FACT,
                 confidence=0.9,
                 status=LedgerStatus.CONFIRMED,
                 rationale="Read from the repository; every cited span passed the evidence check.",
-                evidence=labels,
+                evidence=spans,
                 question=question,
             ),
         )
@@ -348,8 +370,9 @@ def found_answer(
     text = "\n".join(
         [found.answer, "", "Evidence from the repository:", *_evidence_lines(found.checked)]
     )
-    non_goals = [found.answer] if any(s == "non_goals" for s, _ in updates) else []
-    return AutoAnswer(text, AutoAnswerSource.REPO_FACT, 0.9, updates, non_goals=non_goals)
+    return AutoAnswer(
+        text, AutoAnswerSource.REPO_FACT, 0.9, updates, declared_provenance="repo_fact"
+    )
 
 
 def not_found_answer(
@@ -407,12 +430,9 @@ async def _investigate(
         return None
     state.mark_progress(f"investigating the repository (round {round_number}/{driver.max_rounds})")
     driver._save(state)
-    result = await investigator.investigate(
-        state.goal,
-        question,
-        Path(state.cwd),
-        budget_seconds=driver.timeout_seconds * BUDGET_SHARE_OF_PHASE,
-    )
+    # The interview waits for the investigation; its phase clock does not run.
+    async with phase_clock_paused(state):
+        result = await investigator.investigate(state.goal, question, Path(state.cwd))
     if result is None:
         log.warning(
             "auto.interview.investigator_unavailable",
@@ -483,16 +503,21 @@ def build_repo_investigator(
     through a host plugin (the synchronous interview cannot consume that).
     """
     max_calls = resolve_max_calls(environ)
+    call_timeout = resolve_call_timeout(environ)
     if max_calls == 0 or not runtime_backend:
         return None
     from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
 
     if should_dispatch_via_plugin(runtime_backend, opencode_mode):
         return None
-    return RepoInvestigator(runtime_backend=runtime_backend, max_calls=max_calls)
+    return RepoInvestigator(
+        runtime_backend=runtime_backend, max_calls=max_calls, call_timeout_seconds=call_timeout
+    )
 
 
 __all__ = [
+    "CALL_TIMEOUT_ENV",
+    "DEFAULT_CALL_TIMEOUT_SECONDS",
     "DEFAULT_MAX_CALLS",
     "INVESTIGATOR_PERMISSION_MODE",
     "INVESTIGATOR_TOOLS",
@@ -506,6 +531,7 @@ __all__ = [
     "judge_reply",
     "not_found_answer",
     "parse_reply",
+    "resolve_call_timeout",
     "resolve_max_calls",
     "settle",
 ]

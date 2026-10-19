@@ -106,6 +106,10 @@ class AutoAnswer:
     # interview driver can preserve repeated specific follow-ups instead of
     # treating them as repeated generic fallbacks.
     generic_default: bool = False
+    # Interview provenance declared with this answer when its source alone does
+    # not say it (``answer_binding.answer_provenance``). ``"repo_fact"``: a
+    # checked repository fact from ``auto/investigator.py``.
+    declared_provenance: str = ""
 
     @property
     def prefixed_text(self) -> str:

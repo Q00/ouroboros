@@ -53,10 +53,10 @@ from ouroboros.auto.ledger_seed import (
     brownfield_context_from_cwd,
     partial_seed_from_evidence,
     synthesize_seed_from_ledger,
-    with_ledger_assumptions,
-    with_requester_answers,
+    with_ledger_carryover,
 )
 from ouroboros.auto.listeners import RALPH_CANCEL_BLOCKER_REASON
+from ouroboros.auto.phase_clock import wait_for_pausable
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
 from ouroboros.auto.ralph_resume import reconcile_ralph_checkpoint
 from ouroboros.auto.recovery_plan import (
@@ -756,9 +756,9 @@ class AutoPipeline:
                 interview_timeout = self._deadline_capped_timeout(state, interview_phase_timeout)
                 try:
                     try:
-                        interview = await asyncio.wait_for(
-                            self.interview_driver.run(state, ledger),
-                            timeout=interview_timeout,
+                        # Repository investigation pauses this clock (auto/phase_clock.py).
+                        interview = await wait_for_pausable(
+                            self.interview_driver.run(state, ledger), interview_timeout
                         )
                     except TimeoutError:
                         if self._enforce_deadline(state):
@@ -2389,7 +2389,7 @@ class AutoPipeline:
             seed = seed.model_copy(
                 update={"metadata": seed.metadata.model_copy(update={"ambiguity_score": floor})}
             )
-        seed = with_requester_answers(with_ledger_assumptions(seed, ledger), ledger)
+        seed = with_ledger_carryover(seed, ledger)
         seed = normalize_execution_acceptance(seed)
         state.seed_id = seed.metadata.seed_id
         state.seed_artifact = seed.to_dict()

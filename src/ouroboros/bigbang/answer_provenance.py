@@ -41,13 +41,20 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: a confirmed fact, but the auto pipeline carries it to the worker verbatim, as
 #: a quoted question and answer (``Seed.requester_answers``), so extraction must
 #: not rewrite it into a constraint or criterion. It is declared the same way.
-AnswerProvenance = Literal["user", "observation", "assumption", "requester"]
+#:
+#: ``"repo_fact"`` marks an answer ``ooo auto`` read from the repository with
+#: every cited span checked (``auto/investigator.py``). It describes the code as
+#: it is, not a requirement, and reaches the worker verbatim as a checked
+#: repository fact (``Seed.repo_facts``). It is declared the same way.
+AnswerProvenance = Literal["user", "observation", "assumption", "requester", "repo_fact"]
 
 #: Provenances whose answer may never become a requirement.
-WITHHELD_PROVENANCES: frozenset[str] = frozenset({"observation", "assumption", "requester"})
+WITHHELD_PROVENANCES: frozenset[str] = frozenset(
+    {"observation", "assumption", "requester", "repo_fact"}
+)
 
 #: Provenances a caller declares with the answer; they are never re-derived from it.
-DECLARED_PROVENANCES: frozenset[str] = frozenset({"assumption", "requester"})
+DECLARED_PROVENANCES: frozenset[str] = frozenset({"assumption", "requester", "repo_fact"})
 
 #: Interview-tool argument a caller uses to declare an answer's provenance.
 ANSWER_PROVENANCE_ARGUMENT = "answer_provenance"
@@ -99,16 +106,23 @@ WITHHELD_REQUESTER_NOTE = (
     "requester answer, never rewritten as a constraint or criterion.]"
 )
 
+#: Rendered in place of a checked repository fact found by ``ooo auto``.
+WITHHELD_REPO_FACT_NOTE = (
+    "[repository fact withheld here: it describes the current code, not a requirement, "
+    "and reaches the worker verbatim as a checked repository fact.]"
+)
+
 _WITHHELD_NOTES: dict[str, str] = {
     "assumption": WITHHELD_ASSUMPTION_NOTE,
     "requester": WITHHELD_REQUESTER_NOTE,
+    "repo_fact": WITHHELD_REPO_FACT_NOTE,
 }
 
 
 def declare_provenance(round_data: InterviewRound | None, arguments: Mapping[str, Any]) -> None:
     """Apply a provenance the caller declared with the answer it just recorded.
 
-    Only ``"assumption"`` and ``"requester"`` can be declared, and both withhold
+    Only ``"assumption"``, ``"requester"`` and ``"repo_fact"`` can be declared, and all withhold
     the answer from requirement extraction. A declaration can lower an answer's
     authority but never raise it, so an unknown or missing value changes
     nothing and the provenance settled from the answer stands.
@@ -120,6 +134,8 @@ def declare_provenance(round_data: InterviewRound | None, arguments: Mapping[str
         round_data.provenance = "assumption"
     elif declared == "requester":
         round_data.provenance = "requester"
+    elif declared == "repo_fact":
+        round_data.provenance = "repo_fact"
 
 
 def classify_answer_provenance(answer: str | None) -> AnswerProvenance:
