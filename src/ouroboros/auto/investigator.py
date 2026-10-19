@@ -34,7 +34,9 @@ backend, no model pin (the runtime resolves model and reasoning effort from
 Ouroboros' role and profile configuration), permission mode ``default`` (the
 read-only sandbox class), and only the ``Read``/``Glob``/``Grep`` tools. This is
 the same construction the check-package constructor uses
-(``boundary/constructor.py``).
+(``boundary/constructor.py``). Only backends whose runtime enforces read-only
+for that mode are admitted (``READ_ONLY_ENFORCING_BACKENDS``: Codex, Claude),
+and the built runtime is checked again before any call (``enforces_read_only``).
 
 Limits: at most ``max_calls`` calls per interview run (default 12,
 ``OUROBOROS_AUTO_INVESTIGATOR_MAX_CALLS``; 0 turns the investigator off); a
@@ -79,6 +81,18 @@ log = structlog.get_logger(__name__)
 
 INVESTIGATOR_TOOLS: tuple[str, ...] = ("Read", "Glob", "Grep")
 INVESTIGATOR_PERMISSION_MODE = "default"
+# Runtime backends that enforce read-only for permission mode ``default``,
+# checked in their runtime code:
+# - ``codex`` (``CodexCliRuntime``): ``default`` maps to ``SandboxClass.READ_ONLY``
+#   and ``codex exec --sandbox read-only`` (``codex_permissions.py``).
+# - ``claude`` (``ClaudeAgentAdapter``): the Agent SDK gets
+#   ``permission_mode="default"`` (``SandboxClass.READ_ONLY`` in
+#   ``claude_permissions.py``) with ``allowed_tools`` limited to the tools passed.
+# Not admitted: ``gemini`` coerces ``default`` to ``acceptEdits`` and launches
+# with ``--approval-mode auto_edit`` (``gemini_cli_runtime.py``); every other
+# backend is not admitted until its read-only mode is checked the same way.
+# A backend outside this set gets no investigator (the old answerer runs).
+READ_ONLY_ENFORCING_BACKENDS = frozenset({"codex", "claude"})
 MAX_CALLS_ENV = "OUROBOROS_AUTO_INVESTIGATOR_MAX_CALLS"
 DEFAULT_MAX_CALLS = 12
 CALL_TIMEOUT_ENV = "OUROBOROS_AUTO_INVESTIGATOR_CALL_TIMEOUT_SECONDS"
@@ -280,6 +294,10 @@ class RepoInvestigator:
             return None
         from ouroboros.orchestrator.runtime_factory import preflight_agent_runtime
 
+        if not enforces_read_only(runtime):
+            backend = getattr(type(runtime), "_runtime_backend", None) or type(runtime).__name__
+            self.unavailable = f"runtime_not_read_only:{backend}"
+            return None
         blocker = preflight_agent_runtime(runtime)
         if blocker is not None:
             self.unavailable = f"runtime_unavailable:{blocker}"
@@ -324,6 +342,21 @@ class RepoInvestigator:
             called=True,
             elapsed_seconds=elapsed,
         )
+
+
+def enforces_read_only(runtime: Any) -> bool:
+    """Whether the built ``runtime`` will run read-only, read off the instance.
+
+    Codex: the exec flags it would pass are ``--sandbox read-only``. Claude:
+    its permission mode is ``default``. Any other runtime: no.
+    """
+    backend = getattr(type(runtime), "_runtime_backend", None)
+    if backend == "codex":
+        build_args = getattr(runtime, "_build_permission_args", None)
+        return callable(build_args) and list(build_args()) == ["--sandbox", "read-only"]
+    if backend == "claude":
+        return getattr(runtime, "permission_mode", None) == INVESTIGATOR_PERMISSION_MODE
+    return False
 
 
 def _runtime_attr(runtime: Any, *names: str) -> str | None:
@@ -499,19 +532,27 @@ def build_repo_investigator(
 ) -> RepoInvestigator | None:
     """The investigator for one auto interview, or ``None`` (old answerer).
 
-    ``None`` when the cap is 0, no backend is named, or the stage dispatches
-    through a host plugin (the synchronous interview cannot consume that).
+    ``None`` when the cap is 0, no backend is named, the stage dispatches
+    through a host plugin (the synchronous interview cannot consume that), or
+    the backend is not in :data:`READ_ONLY_ENFORCING_BACKENDS`.
     """
     max_calls = resolve_max_calls(environ)
     call_timeout = resolve_call_timeout(environ)
     if max_calls == 0 or not runtime_backend:
         return None
     from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
+    from ouroboros.orchestrator.runtime_factory import resolve_agent_runtime_backend
 
+    try:
+        resolved = resolve_agent_runtime_backend(runtime_backend)
+    except ValueError:
+        return None
+    if resolved not in READ_ONLY_ENFORCING_BACKENDS:
+        return None
     if should_dispatch_via_plugin(runtime_backend, opencode_mode):
         return None
     return RepoInvestigator(
-        runtime_backend=runtime_backend, max_calls=max_calls, call_timeout_seconds=call_timeout
+        runtime_backend=resolved, max_calls=max_calls, call_timeout_seconds=call_timeout
     )
 
 
@@ -524,9 +565,11 @@ __all__ = [
     "MAX_CALLS_ENV",
     "NOT_SETTLED_REPLY",
     "NOT_SETTLED_VALUE",
+    "READ_ONLY_ENFORCING_BACKENDS",
     "Investigation",
     "RepoInvestigator",
     "build_repo_investigator",
+    "enforces_read_only",
     "found_answer",
     "judge_reply",
     "not_found_answer",

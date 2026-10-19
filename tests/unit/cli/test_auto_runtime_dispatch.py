@@ -189,6 +189,51 @@ def test_run_auto_wires_repo_investigator_into_driver() -> None:
     assert build.call_args.args[0] == "claude"
 
 
+@pytest.mark.parametrize(("runtime", "expected"), [("codex", "codex"), ("gemini", None)])
+def test_run_auto_admits_only_read_only_runtimes_to_the_investigator(
+    runtime: str, expected: str | None
+) -> None:
+    """The real ``build_repo_investigator`` on the CLI path: Codex (read-only
+    sandbox) gets an investigator; Gemini (``default`` becomes ``auto_edit``)
+    gets none, so the old answerer runs."""
+    from ouroboros.auto.investigator import build_repo_investigator
+
+    handlers = _capture_handler_construction()
+    captured: dict[str, object] = {}
+
+    async def _capture_run(self, state):  # noqa: ANN001
+        captured["pipeline"] = self
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id=state.auto_session_id,
+            phase="complete",
+            grade="A",
+        )
+
+    with (
+        patch("ouroboros.cli.commands.auto.build_repo_investigator", build_repo_investigator),
+        patch("ouroboros.cli.commands.auto.InterviewHandler", handlers["interview"]),
+        patch("ouroboros.cli.commands.auto.GenerateSeedHandler", handlers["generate"]),
+        patch("ouroboros.cli.commands.auto.ExecuteSeedHandler", handlers["execute"]),
+        patch("ouroboros.cli.commands.auto.StartExecuteSeedHandler", handlers["start_execute"]),
+        patch("ouroboros.cli.commands.auto.AutoPipeline.run", new=_capture_run),
+    ):
+        asyncio.run(
+            _run_auto(
+                goal="wire the repo investigator",
+                resume=None,
+                runtime=runtime,
+                max_interview_rounds=2,
+                max_repair_rounds=1,
+                skip_run=True,
+            )
+        )
+
+    pipeline = captured["pipeline"]
+    investigator = pipeline.interview_driver.investigator
+    assert (investigator.runtime_backend if investigator else None) == expected
+
+
 def test_run_auto_demotes_persisted_opencode_plugin_to_subprocess(tmp_path) -> None:
     """`ooo auto` resume with persisted opencode-plugin mode must demote to subprocess.
 

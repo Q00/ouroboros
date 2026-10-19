@@ -40,6 +40,7 @@ from ouroboros.auto.investigator import (
     NOT_SETTLED_VALUE,
     RepoInvestigator,
     build_repo_investigator,
+    enforces_read_only,
     judge_reply,
     resolve_call_timeout,
     resolve_max_calls,
@@ -134,6 +135,13 @@ def _not_found_reply() -> str:
 
 
 class _FakeRuntime:
+    """A Codex-shaped runtime: its exec flags are the read-only sandbox."""
+
+    _runtime_backend = "codex"
+
+    def _build_permission_args(self) -> list[str]:
+        return ["--sandbox", "read-only"]
+
     def __init__(self, reply: Callable[[str], str], calls: list[dict[str, Any]]) -> None:
         self._reply = reply
         self._calls = calls
@@ -721,6 +729,80 @@ async def test_hang_guard_turns_a_stuck_call_into_not_found(workspace: Path) -> 
 
     assert not _entries(ledger, ".repo_fact.")
     assert sent[0].startswith(f"[from-auto][assumption] {NOT_SETTLED_REPLY}")
+
+
+# -- only runtimes that enforce read-only are dispatched -----------------------
+
+
+class _GeminiShapedRuntime(_FakeRuntime):
+    _runtime_backend = "gemini"
+
+
+class _WritableCodexRuntime(_FakeRuntime):
+    def _build_permission_args(self) -> list[str]:
+        return ["--sandbox", "workspace-write"]
+
+
+@pytest.mark.parametrize(
+    ("backend", "admitted"),
+    [
+        ("codex", "codex"),
+        ("codex_cli", "codex"),
+        ("claude", "claude"),
+        ("gemini", None),
+        ("opencode", None),
+        ("codex_mcp", None),
+        ("claude_mcp", None),
+        ("not-a-backend", None),
+    ],
+)
+def test_only_read_only_enforcing_backends_get_an_investigator(
+    backend: str, admitted: str | None
+) -> None:
+    built = build_repo_investigator(backend, None, {})
+    assert (built.runtime_backend if built else None) == admitted
+
+
+@pytest.mark.parametrize("runtime_cls", [_GeminiShapedRuntime, _WritableCodexRuntime])
+@pytest.mark.asyncio
+async def test_runtime_that_is_not_read_only_is_never_dispatched(
+    workspace: Path, runtime_cls: type
+) -> None:
+    calls: list[dict[str, Any]] = []
+    investigator = RepoInvestigator(
+        runtime_backend="codex",
+        runtime_factory=lambda **_k: runtime_cls(lambda _p: _found_reply(), calls),
+    )
+
+    _s1, ledger_on, sent_on, _ = await _run(workspace, investigator=investigator)
+    _s2, ledger_off, sent_off, _ = await _run(workspace, investigator=None)
+
+    assert calls == []
+    assert (investigator.unavailable or "").startswith("runtime_not_read_only:")
+    assert sent_on == sent_off
+    assert ledger_on.to_dict()["sections"] == ledger_off.to_dict()["sections"]
+
+
+def _real_runtime(backend: str, cwd: Path) -> Any:
+    from ouroboros.orchestrator.runtime_factory import create_agent_runtime
+
+    try:
+        return create_agent_runtime(
+            backend=backend, model=None, permission_mode=INVESTIGATOR_PERMISSION_MODE, cwd=cwd
+        )
+    except Exception as exc:  # noqa: BLE001 - a CLI missing on this machine
+        pytest.skip(f"{backend} runtime cannot be built here: {exc}")
+
+
+def test_real_runtime_permission_mapping(tmp_path: Path) -> None:
+    """Read off the real runtime classes: Codex runs ``--sandbox read-only``;
+    Gemini turns ``default`` into ``auto_edit`` and is refused."""
+    codex = _real_runtime("codex", tmp_path)
+    assert codex._build_permission_args() == ["--sandbox", "read-only"]
+    assert enforces_read_only(codex)
+    gemini = _real_runtime("gemini", tmp_path)
+    assert gemini._permission_mode != "default"
+    assert not enforces_read_only(gemini)
 
 
 # -- configuration and wiring ---------------------------------------------------
