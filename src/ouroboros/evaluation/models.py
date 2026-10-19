@@ -423,6 +423,8 @@ class ArtifactBundle:
     files: tuple[FileArtifact, ...] = ()
     text_summary: str = ""
     total_chars: int = 0
+    scan_complete: bool = True
+    scan_error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

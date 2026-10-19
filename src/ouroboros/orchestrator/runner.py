@@ -161,6 +161,7 @@ from ouroboros.orchestrator.execution_runtime_scope import (
 from ouroboros.orchestrator.execution_semantics import (
     CURRENT_EXECUTION_SEMANTICS_VERSION,
     migrated_pre_exec_sandbox_execution_semantics,
+    migrated_pre_transcript_verifier_execution_semantics,
     migrated_pre_verify_shell_execution_semantics,
     pre_adaptive_execution_semantics_rejection,
     valid_execution_semantics_contract,
@@ -216,6 +217,7 @@ from ouroboros.orchestrator.session import (
     _optional_create_session_kwargs,
     runtime_resume_identity_from_payload,
 )
+from ouroboros.orchestrator.verify_base_signal import VerifyBaseSignal
 from ouroboros.orchestrator.verify_shell import (
     capture_verify_shell_identity,
     resolve_verify_shell,
@@ -1011,6 +1013,9 @@ class OrchestratorRunner:
         # Optional acceptance authority (ouroboros.boundary.authority), set after
         # construction; see its call site in _execute_parallel.
         self.acceptance_authority: Any | None = None
+        # Set by the check package when it was attempted but not prepared, so
+        # the base snapshot the verify gate reads is missing, not just off.
+        self.check_package_unprepared = False
         self._session_signal_hub = session_signal_hub
         self._execution_preferences_override_explicit = (
             efficiency_mode is not None or frugality_assurance is not None
@@ -1109,6 +1114,8 @@ class OrchestratorRunner:
         self._route_economics = _economics_config
         _execution_config = _config.execution
         self._run_verify_commands = _execution_config.run_verify_commands
+        # Sealed in the execution-semantics contract; a resume uses the run's own mode.
+        self._transcript_verifier = _execution_config.transcript_verifier
         # Sealed in the execution-semantics contract; replay confines with it.
         self._exec_sandbox_enabled = exec_sandbox_enabled()
         self._verify_command_timeout_seconds = _execution_config.verify_command_timeout_seconds
@@ -1211,6 +1218,7 @@ class OrchestratorRunner:
         self._model_router = replace(
             self._model_router,
             child_tier=self._model_router.base_tier,
+            child_model_lowering_enabled=False,
         )
 
     def _authoritative_model_router(
@@ -1232,7 +1240,11 @@ class OrchestratorRunner:
             base_tier_override=requested_model_tier,
         )
         if router is not None and not preferences.child_model_lowering_enabled:
-            router = replace(router, child_tier=router.base_tier)
+            router = replace(
+                router,
+                child_tier=router.base_tier,
+                child_model_lowering_enabled=False,
+            )
         return router
 
     def _resolved_shadow_replay_enabled(self) -> bool:
@@ -3905,6 +3917,7 @@ class OrchestratorRunner:
                 max_limit=self._max_parallel_workers,
             ),
             "fat_harness_mode": self._fat_harness_mode,
+            "transcript_verifier": self._transcript_verifier,
             "shadow_replay_enabled": self._shadow_replay_enabled,
             "checkpoint_store_enabled": self._checkpoint_store is not None,
             "session_signal_hub_enabled": self._session_signal_hub is not None,
@@ -6138,6 +6151,25 @@ class OrchestratorRunner:
             )
             raw_execution_semantics = migrated_sandbox_semantics
 
+        migrated_verifier_semantics = migrated_pre_transcript_verifier_execution_semantics(
+            raw_execution_semantics
+        )
+        if migrated_verifier_semantics is not None:
+            if raw_proof.get("execution_semantics_fingerprint") != (
+                self._execution_semantics_fingerprint(raw_execution_semantics)
+            ):
+                raise OrchestratorError(
+                    message="Cannot resume with an invalid pre-transcript-verifier contract",
+                    details={"invalid": "execution_semantics_fingerprint"},
+                )
+            raw_contract = deepcopy(dict(raw_contract))
+            raw_proof = raw_contract["frugality_proof"]
+            raw_contract["execution_semantics"] = migrated_verifier_semantics
+            raw_proof["execution_semantics_fingerprint"] = self._execution_semantics_fingerprint(
+                migrated_verifier_semantics
+            )
+            raw_execution_semantics = migrated_verifier_semantics
+
         migrate_preflight_contract = self._valid_legacy_preflight_execution_semantics_contract(
             raw_execution_semantics
         )
@@ -6526,7 +6558,10 @@ class OrchestratorRunner:
                 },
             )
 
-        from ouroboros.orchestrator.model_routing import deserialize_model_router
+        from ouroboros.orchestrator.model_routing import (
+            deserialize_model_router,
+            is_legacy_quality_first_router,
+        )
 
         recognized, restored_router = deserialize_model_router(raw_routing)
         if not recognized:
@@ -6553,6 +6588,16 @@ class OrchestratorRunner:
                 details={
                     "persisted_runtime_backend": restored_router.runtime_backend,
                     "execution_runtime_backend": persisted_runtime_backend,
+                },
+            )
+        if is_legacy_quality_first_router(
+            raw_routing, persisted_preferences.efficiency_mode.value, restored_router
+        ):
+            raise OrchestratorError(
+                message="Cannot resume a legacy quality-first routing contract",
+                details={
+                    "reason": "The saved child-routing behavior differs from the corrected quality-first policy",
+                    "hint": "Start a successor or new run under the corrected policy.",
                 },
             )
         if migrate_v2_contract or migrate_v3_contract:
@@ -6686,6 +6731,16 @@ class OrchestratorRunner:
             )
         self._execution_preferences = persisted_preferences
         self._shadow_replay_enabled = self._resolved_shadow_replay_enabled()
+        persisted_verifier = (
+            raw_execution_semantics.get("transcript_verifier")
+            if isinstance(raw_execution_semantics, Mapping)
+            else None
+        )
+        if persisted_verifier in ("decide", "record"):
+            # The run's own sealed mode, never the live config: a run that
+            # started deciding (every run sealed before the setting existed)
+            # resumes deciding, one that started recording keeps recording.
+            self._transcript_verifier = persisted_verifier
         current_execution_semantics = self._execution_semantics_contract()
         if (
             not migrate_legacy_contract
@@ -10330,6 +10385,7 @@ class OrchestratorRunner:
             checkpoint_store=self._checkpoint_store,
             execution_profile=execution_profile,
             fat_harness_mode=execution_semantics["fat_harness_mode"],
+            transcript_verifier=execution_semantics["transcript_verifier"],
             reasoning_effort=self._reasoning_effort,
             # Legacy model selection predates Routing D and remains active when
             # durable route ownership is unavailable (for example, configured
@@ -10357,6 +10413,13 @@ class OrchestratorRunner:
         if (install := getattr(self.acceptance_authority, "install", None)) is not None:
             # Check package on: it drives repairs; the legacy verifier is advisory.
             install(parallel_executor)
+        # The check package's base snapshot lets the verify gate tell a failing
+        # command that carries no signal (it fails on the base too) from a real
+        # rejection. It is read in every mode, record included.
+        parallel_executor._verify_base_signal = VerifyBaseSignal.for_run(
+            self.acceptance_authority,
+            check_package_unprepared=getattr(self, "check_package_unprepared", False),
+        )
 
         raw_published_pause_owner = tracker.progress.get("pause_owner")
         if (

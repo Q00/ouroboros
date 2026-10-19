@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 
 import structlog
 
+from ouroboros.bigbang.brownfield_index import index_repo
 from ouroboros.config.loader import get_llm_backend_for_role
 from ouroboros.config.model_selection import resolve_role_model
 from ouroboros.core.errors import ProviderError
@@ -177,6 +178,7 @@ def scan_home_for_repos(
     root: Path | None = None,
     *,
     max_depth: int = _MAX_SCAN_DEPTH,
+    known_paths: frozenset[str] = frozenset(),
 ) -> list[dict[str, str]]:
     """Walk a root directory to find valid git repos/worktrees.
 
@@ -199,6 +201,9 @@ def scan_home_for_repos(
         root: Directory to start the seed filesystem walk. Defaults to the
             current user's home directory.
         max_depth: Maximum directory depth below ``root`` to search.
+        known_paths: Resolved paths already in the registry. Their ``.git``
+            entry was validated when they were first registered, so the
+            per-candidate ``git`` subprocess is skipped for them.
 
     Returns:
         Sorted list of ``{path, name}`` dicts for each discovered repo/worktree.
@@ -235,11 +240,20 @@ def scan_home_for_repos(
     # Phase 2 — validate candidates in parallel. Each check spawns a ``git``
     # subprocess (releases the GIL), so threads overlap the process-spawn cost.
     repos_by_path: dict[str, dict[str, str]] = {}
-    max_workers = min(16, (os.cpu_count() or 4) * 4, len(candidates))
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        for entry in pool.map(_scan_repo_entry, candidates):
-            if entry is not None:
-                repos_by_path.setdefault(entry["path"], entry)
+    unknown: list[Path] = []
+    for candidate in candidates:
+        entry = _repo_entry(candidate) if known_paths else None
+        if entry is not None and entry["path"] in known_paths:
+            repos_by_path.setdefault(entry["path"], entry)
+        else:
+            unknown.append(candidate)
+
+    if unknown:
+        max_workers = min(16, (os.cpu_count() or 4) * 4, len(unknown))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            for entry in pool.map(_scan_repo_entry, unknown):
+                if entry is not None:
+                    repos_by_path.setdefault(entry["path"], entry)
 
     repos = sorted(repos_by_path.values(), key=lambda r: r["path"])
     log.info("brownfield.scan.complete", root=str(root), found=len(repos))
@@ -345,6 +359,36 @@ async def generate_desc(
 # ── High-level orchestration ───────────────────────────────────────
 
 
+async def _refresh_index(store: BrownfieldStore, paths: list[str]) -> int:
+    """Rebuild stored search documents for ``paths`` whose inputs changed.
+
+    Unchanged repos (same stat fingerprint) are skipped without reading any
+    file. Index failures are logged and never fail the scan or register that
+    triggered them: ranking falls back to name, description, and path.
+    """
+    if not paths:
+        return 0
+    try:
+        known = await store.get_index_entries()
+
+        def _build() -> dict[str, tuple[str, str]]:
+            updates: dict[str, tuple[str, str]] = {}
+            for path in paths:
+                stored = known.get(path)
+                built = index_repo(Path(path), stored[1] if stored else None)
+                if built is not None:
+                    updates[path] = built
+            return updates
+
+        updates = await asyncio.to_thread(_build)
+        written = await store.upsert_index_entries(updates)
+    except Exception as exc:  # noqa: BLE001 - the index is best-effort, never fails a scan
+        log.warning("brownfield.index_refresh_failed", error=str(exc), count=len(paths))
+        return 0
+    log.info("brownfield.index_refreshed", checked=len(paths), rebuilt=written)
+    return written
+
+
 async def scan_and_register(
     store: BrownfieldStore,
     llm_adapter: LLMAdapter | None = None,  # noqa: ARG001
@@ -380,7 +424,10 @@ async def scan_and_register(
         re-discovered by this scan are not included; callers that need the
         full registry should call :py:meth:`BrownfieldStore.list` directly.
     """
-    scanned = scan_home_for_repos(root)
+    existing_repos = {r.path: r for r in await store.list()}
+    scanned = await asyncio.to_thread(
+        scan_home_for_repos, root, known_paths=frozenset(existing_repos)
+    )
 
     if not scanned:
         log.info("brownfield.scan_and_register.no_repos")
@@ -390,7 +437,6 @@ async def scan_and_register(
     # existing paths, preserving is_default and desc for repos already
     # in the DB.  Manual entries outside the scan root are NOT deleted.
     # Preserve user-curated names for existing repos by checking first.
-    existing_repos = {r.path: r for r in await store.list()}
     scanned_paths: set[str] = set()
     for repo_dict in scanned:
         path = repo_dict["path"]
@@ -402,6 +448,8 @@ async def scan_and_register(
         await store.register(path=path, name=name)
 
     log.info("brownfield.upsert_registered", count=len(scanned_paths))
+
+    await _refresh_index(store, sorted(scanned_paths))
 
     # Return only the repos that were just discovered/upserted. The full
     # registry can include manually-registered or previously-scanned repos
@@ -481,6 +529,8 @@ async def register_repo(
         name=resolved_name,
         desc=desc or None,
     )
+    if Path(canonical_path).is_dir():
+        await _refresh_index(store, [canonical_path])
 
     log.info(
         "brownfield.register_repo",

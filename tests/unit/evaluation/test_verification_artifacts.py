@@ -526,11 +526,11 @@ class TestAutoDetectIntegration:
         assert ensure_calls == [(workdir, default_adapter, None)]
 
     @pytest.mark.asyncio
-    async def test_auto_detect_swallows_adapter_construction_failure(
+    async def test_auto_detect_still_calls_detector_without_adapter(
         self,
         tmp_path: Path,
     ) -> None:
-        """If the default adapter cannot be built, detect is silently skipped."""
+        """A missing provider still reaches deterministic manifest-free discovery."""
         workdir = tmp_path / "project"
         workdir.mkdir()
 
@@ -561,7 +561,7 @@ class TestAutoDetectIntegration:
         ):
             await _auto_detect_mechanical_toml(workdir, None)
 
-        assert ensure_calls == []  # never invoked
+        assert ensure_calls == [(workdir, None, None)]
 
     @pytest.mark.asyncio
     async def test_build_skips_auto_detect_when_toml_exists(

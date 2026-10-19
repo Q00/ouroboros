@@ -1647,6 +1647,13 @@ class TestComposePromptDirectiveFencing:
         composed = self._runtime()._compose_prompt("Do the thing", None, None)
         assert composed == "Do the thing"
 
+    def test_explicit_empty_tools_preserves_no_tools_guidance(self) -> None:
+        composed = self._runtime()._compose_prompt("Classify this request", None, [])
+        assert "<tooling-guidance>" in composed
+        assert "Do not use any tools" in composed
+        assert composed.endswith("Classify this request")
+        assert composed != self._runtime()._compose_prompt("Classify this request", None, None)
+
     def test_task_text_is_not_wrapped(self) -> None:
         composed = self._runtime()._compose_prompt("Do the thing", "Be terse.", None)
         # Directive fences must not swallow the task text itself.

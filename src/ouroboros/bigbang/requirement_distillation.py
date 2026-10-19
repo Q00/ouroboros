@@ -6,7 +6,10 @@ from dataclasses import dataclass
 import re
 from typing import Any
 
-from ouroboros.bigbang.answer_provenance import classify_answer_provenance
+from ouroboros.bigbang.answer_provenance import (
+    WITHHELD_PROVENANCES,
+    classify_answer_provenance,
+)
 from ouroboros.bigbang.interview import INITIAL_CONTEXT_SUMMARY_QUESTION, InterviewState
 from ouroboros.core.requirement_candidate import (
     CandidateContentSource,
@@ -137,13 +140,16 @@ def build_requirement_distillation(state: InterviewState) -> RequirementDistilla
         answer = (round_data.user_response or "").strip()
         if not answer or round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION:
             continue
-        if round_data.provenance == "observation":
-            # An adopted fact, not a decision. This path promotes answers to
-            # RequirementCandidates and build_promoted_reference_seed emits a
-            # Seed from them with no LLM in between, so withholding at prompt
-            # assembly would never reach it — the rule has to sit on this walk
-            # too (#1755). Note the evidence kind below is USER_STATEMENT: an
-            # observation entering here would be labelled a user statement.
+        if round_data.provenance in WITHHELD_PROVENANCES:
+            # An adopted fact or a declared assumption, not a decision. This
+            # path promotes answers to RequirementCandidates and
+            # build_promoted_reference_seed emits a Seed from them with no LLM
+            # in between, so withholding at prompt assembly would never reach
+            # it, so the rule has to sit on this walk too (#1755). Note the
+            # evidence kind below is USER_STATEMENT: either entering here
+            # would be labelled a user statement. Assumptions are declared
+            # only by ``ooo auto``, which supplies no reference cues, so this
+            # never turns an answered contrast into an unresolved one there.
             continue
         reference_cue = reference_by_question.get(normalized_question_key(round_data.question))
         if reference_cue is not None:

@@ -97,6 +97,7 @@ def report_no_evidence(
     check_package: str,
     check_package_status: str,
     runtime_backend: str | None,
+    check_package_mode: str | None = None,
 ) -> None:
     """Send one ``acceptance_no_evidence`` event when any criterion was accepted without evidence.
 
@@ -114,6 +115,7 @@ def report_no_evidence(
             check_package=check_package,
             check_package_status=check_package_status,
             runtime_backend=runtime_backend,
+            check_package_mode=check_package_mode,
         )
     except Exception:  # noqa: BLE001 - telemetry must never affect the run
         pass

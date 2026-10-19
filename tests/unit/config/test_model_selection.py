@@ -293,7 +293,7 @@ class TestInvocationAndGlobalDefault:
 
     def test_invocation_tier_name_maps_through_the_tier_table(self) -> None:
         assert _resolve("qa", "claude", invocation_model="frontier").model == "opus"
-        assert _resolve("qa", "codex", invocation_model="frugal").model == "default"
+        assert _resolve("qa", "codex", invocation_model="frugal").model == "gpt-6-luna"
 
     def test_invocation_auto_ignores_pinned_values(self) -> None:
         resolved = _resolve(

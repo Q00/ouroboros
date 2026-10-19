@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 import re
 from typing import TYPE_CHECKING
@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 
 class AutoAnswerSource(StrEnum):
-    """Source categories for generated auto answers."""
+    """Source categories for auto answers (``requester``: auto/requester.py asked)."""
 
     USER_GOAL = "user_goal"
     REPO_FACT = "repo_fact"
@@ -25,6 +25,7 @@ class AutoAnswerSource(StrEnum):
     ASSUMPTION = "assumption"
     NON_GOAL = "non_goal"
     BLOCKER = "blocker"
+    REQUESTER = "requester"
 
 
 class QuestionIntent(StrEnum):
@@ -49,8 +50,7 @@ class AutoAnswerContext:
     section name (e.g. ``runtime_context``, ``constraints``, ``non_goals``).
     Only the Driver/MCP layer is allowed to populate this — the deterministic
     answerer just reads it. Matching answers are tagged
-    :attr:`AutoAnswerSource.USER_PREFERENCE` so provenance survives in the
-    ledger.
+    :attr:`AutoAnswerSource.USER_PREFERENCE` so provenance survives in the ledger.
     """
 
     repo_facts: Mapping[str, str] = field(default_factory=dict)
@@ -218,16 +218,12 @@ class AutoAnswerer:
                 self._verification_answer(question),
                 _INTENT_TO_SECTIONS[QuestionIntent.VERIFICATION],
                 context,
-                question=question,
-                lowered=lowered,
             )
         if QuestionIntent.ACCEPTANCE_CRITERIA in intents and not demote_for_user_verify:
             return _maybe_apply_user_preference(
                 self._feature_acceptance_answer(question),
                 _INTENT_TO_SECTIONS[QuestionIntent.ACCEPTANCE_CRITERIA],
                 context,
-                question=question,
-                lowered=lowered,
             )
         if QuestionIntent.RUNTIME_CONTEXT in intents and _should_preserve_runtime_route(lowered):
             answer = self._runtime_answer(question, context)
@@ -247,8 +243,6 @@ class AutoAnswerer:
             answer,
             _section_hints_for_intents(intents),
             context,
-            question=question,
-            lowered=lowered,
         )
 
         # When the chosen route produced a non-grounded fallback (ASSUMPTION,
@@ -264,19 +258,6 @@ class AutoAnswerer:
             lowered
         ):
             answer = self._product_behavior_answer(question)
-
-        if answer.source in _RISKY_FALLBACK_SOURCES:
-            risky_blocker = _risky_fallback_blocker_for(question, lowered)
-            if risky_blocker is not None:
-                return AutoAnswer(
-                    text=(
-                        "Cannot safely decide automatically with a generic default: "
-                        f"{risky_blocker.reason}"
-                    ),
-                    source=AutoAnswerSource.BLOCKER,
-                    confidence=1.0,
-                    blocker=risky_blocker,
-                )
         return answer
 
     def answer_gap(
@@ -301,20 +282,12 @@ class AutoAnswerer:
                 confidence=1.0,
                 blocker=blocker,
             )
-        # answer_gap replaces the user's actual question with a synthetic
-        # generic prompt, which would otherwise erase the original risky
-        # context from the safety gate. Pull the converged goal from the
-        # ledger and pass it to the helper so a regulated/destructive task
-        # cannot smuggle a USER_PREFERENCE past the gate via gap-filling.
-        goal_text = _latest_resolved_goal(ledger)
         if section in {"actors", "inputs", "outputs"}:
             gap_question = "Who are the actors, inputs, and outputs for this task?"
             return _maybe_apply_user_preference(
                 self._io_actor_answer(gap_question),
                 (section,),
                 context,
-                question=gap_question,
-                goal_text=goal_text,
             )
         if section in {"constraints", "failure_modes"}:
             gap_question = "What conservative constraints and failure modes should bound this MVP?"
@@ -322,8 +295,6 @@ class AutoAnswerer:
                 self._default_answer(gap_question, ledger),
                 (section,),
                 context,
-                question=gap_question,
-                goal_text=goal_text,
             )
         if section == "non_goals":
             # NON_GOAL source is not upgradable; preference will be ignored here
@@ -337,8 +308,6 @@ class AutoAnswerer:
                 self._verification_answer(gap_question),
                 (section,),
                 context,
-                question=gap_question,
-                goal_text=goal_text,
             )
         if section == "runtime_context":
             gap_question = "Which runtime stack, repo, and project patterns should be used?"
@@ -346,8 +315,6 @@ class AutoAnswerer:
                 self._runtime_answer(gap_question, context),
                 ("runtime_context",),
                 context,
-                question=gap_question,
-                goal_text=goal_text,
             )
         blocker = AutoBlocker(
             reason=f"unsupported ledger gap section: {section}",
@@ -360,8 +327,22 @@ class AutoAnswerer:
             blocker=blocker,
         )
 
-    def apply(self, answer: AutoAnswer, ledger: SeedDraftLedger, *, question: str) -> None:
-        """Apply answer updates to ``ledger``."""
+    def apply(
+        self,
+        answer: AutoAnswer,
+        ledger: SeedDraftLedger,
+        *,
+        question: str,
+        asked: str | None = None,
+    ) -> None:
+        """Apply answer updates to ``ledger``.
+
+        ``asked`` is the interviewer's current question. When the answer
+        replies to it (``question`` is that question, not a driver gap-reopen
+        prompt), it is kept on each new entry (``LedgerEntry.question``) so an
+        unconfirmed entry can reach the worker as the open question instead of
+        the drafted answer.
+        """
         ledger.record_qa(question, answer.prefixed_text)
         if answer.blocker is not None:
             ledger.add_entry(
@@ -377,6 +358,8 @@ class AutoAnswerer:
                 ),
             )
         for section, entry in answer.ledger_updates:
+            if asked and asked == question and not entry.question:
+                entry = replace(entry, question=asked)
             ledger.add_entry(section, entry)
 
     def _non_goal_answer(self, question: str, ledger: SeedDraftLedger) -> AutoAnswer:  # noqa: ARG002
@@ -1597,7 +1580,7 @@ def _is_product_behavior_question(lowered: str) -> bool:
         # ``download``.  Some of these verbs are already matched by the broader
         # patterns above; listing the full set here keeps the safe-allowlist
         # vocabulary explicitly aligned with the router so the two never drift
-        # silently. Any question allowed past the risky-fallback gate must also
+        # silently. Any regulated-product question the allowlist accepts must also
         # route through ``_product_behavior_answer()`` rather than silently
         # falling to ``_default_answer()``.
         or re.search(
@@ -1714,21 +1697,14 @@ _RISKY_FALLBACK_SOURCES: frozenset[AutoAnswerSource] = frozenset(
         # ``_runtime_answer`` returns EXISTING_CONVENTION when no concrete
         # repo fact was supplied. The text is still a generic
         # "use the existing repository runtime" template, so for regulated
-        # topics it must be gated like any other fallback. A REPO_FACT-backed
+        # topics it is re-routed like any other fallback. A REPO_FACT-backed
         # runtime answer (full ``runtime_context`` supplied) is unaffected.
         AutoAnswerSource.EXISTING_CONVENTION,
-        # USER_PREFERENCE is intentionally NOT in this set:
-        # ``_maybe_apply_user_preference`` already runs the risky-fallback
-        # gate at upgrade time (against both the question text and the
-        # converged goal), so by the time an answer carries
-        # source=USER_PREFERENCE it has already passed the same policy a
-        # CONSERVATIVE_DEFAULT/ASSUMPTION/EXISTING_CONVENTION answer would
-        # face here. Including USER_PREFERENCE in this set was wrong because
-        # the safe-product re-route at the routing-block tail would drop the
-        # user's value for allowlisted regulated-product questions (e.g.
-        # "Should the app export PII reports?"), silently replacing the
-        # caller-supplied preference with the generic
-        # ``_product_behavior_answer`` template. See PR #811 review feedback.
+        # USER_PREFERENCE is intentionally NOT in this set: the safe-product
+        # re-route at the routing-block tail would drop the user's value for
+        # regulated-product questions (e.g. "Should the app export PII
+        # reports?"), silently replacing the caller-supplied preference with
+        # the generic ``_product_behavior_answer`` template (PR #811 review).
     }
 )
 
@@ -1793,10 +1769,6 @@ def _maybe_apply_user_preference(
     answer: AutoAnswer,
     section_hints: tuple[str, ...],
     context: AutoAnswerContext,
-    *,
-    question: str = "",
-    lowered: str = "",
-    goal_text: str = "",
 ) -> AutoAnswer:
     """Replace an upgradable answer with a USER_PREFERENCE-tagged answer.
 
@@ -1808,18 +1780,6 @@ def _maybe_apply_user_preference(
     - ``context.user_preferences`` has a non-empty value for one of the
       provided ``section_hints``
     - ``answer.blocker`` is None
-    - **neither** the question **nor** ``goal_text`` is flagged as a
-      risky-fallback topic (regulated personal data, destructive bulk
-      operations, etc.). On early-return answer paths
-      (``VERIFICATION`` / ``ACCEPTANCE_CRITERIA``) and on ``answer_gap``,
-      the routing-block safety gate never runs, so a caller-supplied
-      preference could otherwise smuggle a regulated answer into the ledger
-      as a confirmed ``USER_PREFERENCE`` entry. ``answer_gap`` additionally
-      replaces the user's actual question with a generic synthetic prompt,
-      so the helper also inspects ``goal_text`` (the converged interview
-      goal) — preserving the risky-topic signal that a synthetic prompt
-      would otherwise erase. When either text matches a risky pattern the
-      helper short-circuits to a BLOCKER answer.
 
     The first matching section wins. The new answer carries the user's value
     verbatim and tags the corresponding ledger entry with
@@ -1840,26 +1800,6 @@ def _maybe_apply_user_preference(
         value = raw_value.strip()
         if not value:
             continue
-        # Safety gate: a caller-supplied preference must not bypass the
-        # risky-fallback policy. Inspect BOTH the current question and the
-        # converged goal text so synthetic gap-fill prompts (which erase the
-        # original risky context) cannot smuggle a confirmed USER_PREFERENCE
-        # past the gate.
-        risky_blocker = risky_user_preference_blocker_for(
-            question=question,
-            lowered=lowered,
-            goal_text=goal_text,
-        )
-        if risky_blocker is not None:
-            return AutoAnswer(
-                text=(
-                    "Cannot safely decide automatically with a generic default: "
-                    f"{risky_blocker.reason}"
-                ),
-                source=AutoAnswerSource.BLOCKER,
-                confidence=1.0,
-                blocker=risky_blocker,
-            )
         preserved = [
             (other_section, other_entry)
             for other_section, other_entry in answer.ledger_updates
@@ -1887,88 +1827,6 @@ def _maybe_apply_user_preference(
             generic_default=False,
         )
     return answer
-
-
-def risky_user_preference_blocker_for(
-    *,
-    question: str = "",
-    lowered: str = "",
-    goal_text: str = "",
-) -> AutoBlocker | None:
-    """Apply the risky-fallback gate for caller-supplied preferences.
-
-    ``user_preferences`` can enter the ledger through the answerer during an
-    interview or through MCP preallocation of a structured prompt. Both paths
-    must use the same gate so unsafe preference text cannot be persisted as
-    confirmed evidence before the interview has a chance to block it.
-    """
-    lowered_q = lowered or (_normalize_question(question) if question else "")
-    lowered_goal = _normalize_question(goal_text) if goal_text else ""
-    risky_blocker: AutoBlocker | None = None
-    if lowered_q and question:
-        risky_blocker = _risky_fallback_blocker_for(question, lowered_q)
-    if risky_blocker is None and lowered_goal and goal_text:
-        risky_blocker = _risky_fallback_blocker_for(goal_text, lowered_goal)
-    return risky_blocker
-
-
-_DESTRUCTIVE_BULK_VERBS = (
-    r"truncate|truncates|truncating|truncated|"
-    r"purge|purges|purging|purged|"
-    r"wipe|wipes|wiping|wiped|"
-    r"drop|drops|dropping|dropped|"
-    r"erase|erases|erasing|erased"
-)
-# Strong data-object nouns that unambiguously indicate schema/data destruction.
-_DESTRUCTIVE_BULK_NOUNS = (
-    r"table|tables|schema|schemas|"
-    r"database|databases|"
-    r"record|records|row|rows|"
-    r"audit log|audit logs|audit trail|audit trails|"
-    r"index|indexes|indices|"
-    r"migration|migrations"
-)
-# When the question contains one of these non-data qualifier phrases the
-# destructive-bulk match is referring to a process artefact (release plan, docs,
-# roadmap, …) rather than schema/data destruction — skip the gate for those.
-#
-# The qualifier is strictly phrase-scoped: bare tokens like ``documentation`` or
-# ``release plan`` anywhere in the sentence would let an actual destructive
-# operation slip past the gate (e.g. "Which tables should we drop according to
-# the documentation before redeploying?"). The exemption fires only when the
-# artefact is the explicit object of the drop/wipe — introduced by
-# ``from the …`` or ``in the …`` — which is the phrasing that signals
-# "remove/edit an entry inside a process artefact" rather than "delete data from
-# a system". Authority/reference phrasings (``according to the documentation``,
-# ``per the release plan``) do NOT match this pattern and therefore do NOT
-# suppress the destructive-bulk gate.
-_DESTRUCTIVE_BULK_NON_DATA_QUALIFIERS = re.compile(
-    r"\b(?:from|in)\s+the\s+"
-    r"(?:release\s+plan|docs|documentation|roadmap|backlog|changelog|spec)"
-    r"\b"
-)
-
-
-_RISKY_FALLBACK_PATTERNS: tuple[tuple[str, str], ...] = (
-    (
-        r"\b(pii|personally identifiable information)\b",
-        "regulated personal data handling",
-    ),
-    (
-        r"\b(gdpr|hipaa|sox|pci[- ]?dss)\b",
-        "regulated data handling",
-    ),
-    # Verb-then-noun, e.g. "How should the migration purge tables for old users?"
-    (
-        rf"\b(?:{_DESTRUCTIVE_BULK_VERBS})\b.+\b(?:{_DESTRUCTIVE_BULK_NOUNS})\b",
-        "destructive bulk data operation",
-    ),
-    # Noun-then-verb, e.g. "Which tables should the migration truncate?"
-    (
-        rf"\b(?:{_DESTRUCTIVE_BULK_NOUNS})\b.+\b(?:{_DESTRUCTIVE_BULK_VERBS})\b",
-        "destructive bulk data operation",
-    ),
-)
 
 
 _REGULATED_NOUNS_RE = re.compile(
@@ -2100,47 +1958,6 @@ def _is_safe_product_regulated_question(lowered: str) -> bool:
     if _BARE_COMPLIANCE_SCOPE_RE.search(lowered):
         return False
     return bool(_PRODUCT_SEMANTICS_REGULATED_VERBS_RE.search(lowered))
-
-
-def _risky_fallback_blocker_for(question: str, lowered: str) -> AutoBlocker | None:
-    """Return a blocker when a generative fallback answer would touch a high-risk topic.
-
-    The gate only fires for *generative* answer routes (actor/IO, runtime,
-    product behavior, default). Meta-question routes — non-goal listing,
-    verification policy, feature acceptance criteria — are checked earlier in
-    ``answer`` and never reach this function, because phrasing such as
-    "What acceptance criteria should the HIPAA worker satisfy?" is asking
-    about a generic acceptance template, not asking the auto pipeline to
-    decide regulated-data handling.
-
-    Targeted topics: regulated personal data (PII/GDPR/HIPAA/SOX/PCI-DSS) and
-    destructive bulk schema/table operations.  Production-deployment and
-    credential authority are already gated by the explicit ``_blocker_for``
-    allow/deny lists.
-
-    Product-feature questions covered by existing safe-allowlists — such as
-    "should users be able to configure production credentials?" or
-    "should the app export PII reports?" — are skipped so the auto pipeline
-    keeps answering them with feature semantics.
-    """
-    if (
-        _is_safe_product_branch_question(lowered)
-        or _is_safe_product_sensitive_question(lowered)
-        or _is_safe_product_regulated_question(lowered)
-    ):
-        return None
-    for pattern, reason in _RISKY_FALLBACK_PATTERNS:
-        if re.search(pattern, lowered):
-            # For destructive-bulk matches, skip when the question context
-            # indicates a non-data artefact (release plan, docs, etc.) rather
-            # than actual schema/data destruction.
-            if (
-                reason == "destructive bulk data operation"
-                and _DESTRUCTIVE_BULK_NON_DATA_QUALIFIERS.search(lowered)
-            ):
-                continue
-            return AutoBlocker(reason=reason, question=question)
-    return None
 
 
 _DEPLOYMENT_AUTHORITY_REASON = "deployment target requires human authority"
