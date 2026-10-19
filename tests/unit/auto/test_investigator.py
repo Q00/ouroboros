@@ -17,6 +17,7 @@ import asyncio
 from collections.abc import Callable
 import json
 from pathlib import Path
+import subprocess
 import time
 from typing import Any
 from unittest.mock import AsyncMock
@@ -29,6 +30,11 @@ from ouroboros.auto.interview_driver import (
     AutoInterviewDriver,
     FunctionInterviewBackend,
     InterviewTurn,
+)
+from ouroboros.auto.investigation_workspace import (
+    create_isolated_copy,
+    remove_isolated_copy,
+    workspace_state,
 )
 from ouroboros.auto.investigator import (
     CALL_TIMEOUT_ENV,
@@ -731,16 +737,46 @@ async def test_hang_guard_turns_a_stuck_call_into_not_found(workspace: Path) -> 
     assert sent[0].startswith(f"[from-auto][assumption] {NOT_SETTLED_REPLY}")
 
 
-# -- only runtimes that enforce read-only are dispatched -----------------------
+# -- isolation: read-only mode where verified, a throwaway copy elsewhere -------
 
 
 class _GeminiShapedRuntime(_FakeRuntime):
+    """A runtime without a read-only mode that edits whatever its cwd holds."""
+
     _runtime_backend = "gemini"
+
+    def __init__(self, reply, calls, cwd: Path, real: Path | None = None) -> None:
+        super().__init__(reply, calls)
+        self.cwd = Path(cwd)
+        self._real = real
+
+    async def execute_task_to_result(self, prompt: str, tools=None, system_prompt=None, **kw):
+        (self.cwd / "EDITED_BY_RUNTIME.txt").write_text("edit", encoding="utf-8")
+        (self.cwd / "src" / "cli.py").write_text("def invented():\n    pass\n", encoding="utf-8")
+        if self._real is not None:  # a runtime that escapes its cwd
+            (self._real / "ESCAPED.txt").write_text("escape", encoding="utf-8")
+        return await super().execute_task_to_result(prompt, tools, system_prompt, **kw)
 
 
 class _WritableCodexRuntime(_FakeRuntime):
     def _build_permission_args(self) -> list[str]:
         return ["--sandbox", "workspace-write"]
+
+
+def _isolating_investigator(
+    runtime_cls: type, reply: Callable[[str], str], **runtime_kwargs: Any
+) -> tuple[RepoInvestigator, list[dict[str, Any]], list[Path]]:
+    calls: list[dict[str, Any]] = []
+    cwds: list[Path] = []
+
+    def factory(**kwargs: Any) -> Any:
+        cwds.append(Path(kwargs["cwd"]))
+        if runtime_cls is _GeminiShapedRuntime:
+            return runtime_cls(reply, calls, kwargs["cwd"], **runtime_kwargs)
+        return runtime_cls(reply, calls)
+
+    backend = "gemini" if runtime_cls is _GeminiShapedRuntime else "codex"
+    return RepoInvestigator(runtime_backend=backend, runtime_factory=factory), calls, cwds
 
 
 @pytest.mark.parametrize(
@@ -749,38 +785,164 @@ class _WritableCodexRuntime(_FakeRuntime):
         ("codex", "codex"),
         ("codex_cli", "codex"),
         ("claude", "claude"),
-        ("gemini", None),
-        ("opencode", None),
-        ("codex_mcp", None),
-        ("claude_mcp", None),
+        ("gemini", "gemini"),
+        ("opencode", "opencode"),
+        ("codex_mcp", "codex_mcp"),
+        ("claude_mcp", "claude_mcp"),
         ("not-a-backend", None),
     ],
 )
-def test_only_read_only_enforcing_backends_get_an_investigator(
-    backend: str, admitted: str | None
-) -> None:
+def test_every_known_backend_gets_an_investigator(backend: str, admitted: str | None) -> None:
     built = build_repo_investigator(backend, None, {})
     assert (built.runtime_backend if built else None) == admitted
 
 
-@pytest.mark.parametrize("runtime_cls", [_GeminiShapedRuntime, _WritableCodexRuntime])
 @pytest.mark.asyncio
-async def test_runtime_that_is_not_read_only_is_never_dispatched(
-    workspace: Path, runtime_cls: type
-) -> None:
-    calls: list[dict[str, Any]] = []
-    investigator = RepoInvestigator(
-        runtime_backend="codex",
-        runtime_factory=lambda **_k: runtime_cls(lambda _p: _found_reply(), calls),
+async def test_codex_reads_the_real_workspace_in_read_only_mode(workspace: Path) -> None:
+    investigator, calls, kwargs = _investigator(lambda _p: _found_reply())
+
+    result = await investigator.investigate(GOAL, QUESTION, workspace)
+
+    assert result is not None and result.found
+    assert result.isolation == "read_only_mode"
+    assert [Path(k["cwd"]) for k in kwargs] == [workspace]
+    assert kwargs[0]["permission_mode"] == "default"
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_without_read_only_mode_reads_a_copy(workspace: Path) -> None:
+    """Gemini-shaped runtime edits its cwd; the real workspace is untouched and
+    the answer is still checked against the real files."""
+    before = (workspace / "src" / "cli.py").read_text(encoding="utf-8")
+    investigator, calls, cwds = _isolating_investigator(
+        _GeminiShapedRuntime, lambda _p: _found_reply()
     )
 
-    _s1, ledger_on, sent_on, _ = await _run(workspace, investigator=investigator)
-    _s2, ledger_off, sent_off, _ = await _run(workspace, investigator=None)
+    result = await investigator.investigate(GOAL, QUESTION, workspace)
 
-    assert calls == []
-    assert (investigator.unavailable or "").startswith("runtime_not_read_only:")
-    assert sent_on == sent_off
-    assert ledger_on.to_dict()["sections"] == ledger_off.to_dict()["sections"]
+    assert len(calls) == 1
+    assert result is not None and result.isolation == "workspace_copy"
+    assert cwds and cwds[0] != workspace and not cwds[0].is_relative_to(workspace)
+    assert not cwds[0].exists()  # the copy is deleted afterwards
+    assert not (workspace / "EDITED_BY_RUNTIME.txt").exists()
+    assert (workspace / "src" / "cli.py").read_text(encoding="utf-8") == before
+    # The runtime rewrote cli.py in its copy, yet the citation passes because it
+    # matches the real file.
+    assert result.found
+    assert [span.label for span in result.checked] == ["src/cli.py:7-8"]
+
+
+@pytest.mark.asyncio
+async def test_the_copy_cannot_fabricate_evidence(workspace: Path) -> None:
+    fabricated = json.dumps(
+        {
+            "status": "found",
+            "answer": GUESS,
+            "evidence": [
+                {"path": "src/cli.py", "start_line": 1, "end_line": 2, "quote": "def invented():"}
+            ],
+        }
+    )
+    investigator, _calls, _cwds = _isolating_investigator(
+        _GeminiShapedRuntime, lambda _p: fabricated
+    )
+
+    result = await investigator.investigate(GOAL, QUESTION, workspace)
+
+    assert result is not None and result.outcome == "evidence_rejected"
+    assert result.failures == ("quote_not_found",)
+
+
+@pytest.mark.asyncio
+async def test_absolute_paths_inside_the_copy_are_read_as_workspace_paths(
+    workspace: Path,
+) -> None:
+    seen: dict[str, Path] = {}
+
+    def reply(_prompt: str) -> str:
+        data = json.loads(_found_reply())
+        data["evidence"][0]["path"] = str(seen["cwd"] / "src" / "cli.py")
+        return json.dumps(data)
+
+    investigator, _calls, cwds = _isolating_investigator(_GeminiShapedRuntime, reply)
+    original = investigator.runtime_factory
+    assert original is not None
+
+    def factory(**kwargs: Any) -> Any:
+        seen["cwd"] = Path(kwargs["cwd"])
+        return original(**kwargs)
+
+    investigator.runtime_factory = factory
+
+    result = await investigator.investigate(GOAL, QUESTION, workspace)
+
+    assert result is not None and result.found
+
+
+@pytest.mark.asyncio
+async def test_real_workspace_change_discards_the_answer(workspace: Path) -> None:
+    investigator, _calls, _cwds = _isolating_investigator(
+        _GeminiShapedRuntime, lambda _p: _found_reply(), real=workspace
+    )
+
+    result = await investigator.investigate(GOAL, QUESTION, workspace)
+    assert result is not None and result.outcome == "workspace_changed"
+
+    (workspace / "ESCAPED.txt").unlink()
+    investigator2, _c, _w = _isolating_investigator(
+        _GeminiShapedRuntime, lambda _p: _found_reply(), real=workspace
+    )
+    _state, ledger, sent, _ = await _run(workspace, investigator=investigator2)
+    assert not _entries(ledger, ".repo_fact.")
+    assert sent[0].startswith(f"[from-auto][assumption] {NOT_SETTLED_REPLY}")
+
+
+@pytest.mark.asyncio
+async def test_codex_without_read_only_flags_reads_a_copy(workspace: Path) -> None:
+    investigator, calls, cwds = _isolating_investigator(
+        _WritableCodexRuntime, lambda _p: _found_reply()
+    )
+
+    result = await investigator.investigate(GOAL, QUESTION, workspace)
+
+    assert result is not None and result.isolation == "workspace_copy"
+    assert cwds[0] == workspace and cwds[-1] != workspace
+    assert len(calls) == 1
+
+
+def _git(root: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+
+
+def test_git_copy_holds_the_working_tree_without_ignored_files(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "t@example.com")
+    _git(root, "config", "user.name", "t")
+    (root / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+    (root / "tracked.py").write_text("committed\n", encoding="utf-8")
+    _git(root, "add", ".")
+    _git(root, "commit", "-q", "-m", "init")
+    (root / "tracked.py").write_text("edited on disk\n", encoding="utf-8")
+    (root / "new.py").write_text("untracked\n", encoding="utf-8")
+    (root / "ignored.txt").write_text("secret\n", encoding="utf-8")
+    state = workspace_state(root)
+
+    copy = create_isolated_copy(root)
+    try:
+        assert (copy / "tracked.py").read_text(encoding="utf-8") == "edited on disk\n"
+        assert (copy / "new.py").read_text(encoding="utf-8") == "untracked\n"
+        assert not (copy / "ignored.txt").exists()
+        assert not (copy / ".git").exists()
+        (copy / "tracked.py").write_text("changed in the copy\n", encoding="utf-8")
+    finally:
+        remove_isolated_copy(copy)
+    assert not copy.exists()
+    assert workspace_state(root) == state
+    (root / "new.py").write_text("untracked, edited\n", encoding="utf-8")
+    assert workspace_state(root) != state
 
 
 def _real_runtime(backend: str, cwd: Path) -> Any:

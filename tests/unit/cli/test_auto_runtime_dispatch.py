@@ -189,13 +189,11 @@ def test_run_auto_wires_repo_investigator_into_driver() -> None:
     assert build.call_args.args[0] == "claude"
 
 
-@pytest.mark.parametrize(("runtime", "expected"), [("codex", "codex"), ("gemini", None)])
-def test_run_auto_admits_only_read_only_runtimes_to_the_investigator(
-    runtime: str, expected: str | None
-) -> None:
+@pytest.mark.parametrize(("runtime", "expected"), [("codex", "codex"), ("gemini", "gemini")])
+def test_run_auto_gives_every_runtime_an_investigator(runtime: str, expected: str | None) -> None:
     """The real ``build_repo_investigator`` on the CLI path: Codex (read-only
-    sandbox) gets an investigator; Gemini (``default`` becomes ``auto_edit``)
-    gets none, so the old answerer runs."""
+    sandbox) and Gemini (no read-only mode; it reads a throwaway copy) both get
+    an investigator for the interview stage runtime."""
     from ouroboros.auto.investigator import build_repo_investigator
 
     handlers = _capture_handler_construction()

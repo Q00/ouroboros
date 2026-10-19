@@ -1158,12 +1158,12 @@ def test_auto_handler_wires_repo_investigator_into_driver(
     build.assert_called_once_with("opencode", "plugin")
 
 
-@pytest.mark.parametrize(("backend", "expected"), [("codex", "codex"), ("gemini", None)])
-def test_auto_handler_admits_only_read_only_runtimes_to_the_investigator(
+@pytest.mark.parametrize(("backend", "expected"), [("codex", "codex"), ("gemini", "gemini")])
+def test_auto_handler_gives_every_runtime_an_investigator(
     tmp_path: Path, backend: str, expected: str | None
 ) -> None:
     """The real ``build_repo_investigator`` on the MCP path, from the interview
-    stage runtime: Codex gets an investigator; Gemini gets none."""
+    stage runtime: Codex and Gemini both get an investigator."""
     from ouroboros.auto.investigator import build_repo_investigator
 
     engine = _FakeInterviewEngine(state_dir=tmp_path)

@@ -34,9 +34,15 @@ backend, no model pin (the runtime resolves model and reasoning effort from
 Ouroboros' role and profile configuration), permission mode ``default`` (the
 read-only sandbox class), and only the ``Read``/``Glob``/``Grep`` tools. This is
 the same construction the check-package constructor uses
-(``boundary/constructor.py``). Only backends whose runtime enforces read-only
-for that mode are admitted (``READ_ONLY_ENFORCING_BACKENDS``: Codex, Claude),
-and the built runtime is checked again before any call (``enforces_read_only``).
+(``boundary/constructor.py``). Isolation: a backend whose runtime enforces
+read-only for that mode (``READ_ONLY_ENFORCING_BACKENDS``: Codex, Claude; the
+built runtime is checked again, ``enforces_read_only``) reads the workspace
+itself. Every other backend reads a throwaway copy of the workspace, deleted
+afterwards (``auto/investigation_workspace.py``), so its edits cannot reach the
+real workspace. Evidence is always checked against the real workspace, and the
+real workspace's fingerprint (git HEAD, diff, untracked files) is compared
+before and after each investigation; a change discards the answer
+(``workspace_changed``) and is reported in the event.
 
 Limits: at most ``max_calls`` calls per interview run (default 12,
 ``OUROBOROS_AUTO_INVESTIGATOR_MAX_CALLS``; 0 turns the investigator off); a
@@ -56,7 +62,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import inspect
 import json
 import os
@@ -68,6 +74,11 @@ import structlog
 
 from ouroboros.auto.answerer import AutoAnswer, AutoAnswerSource
 from ouroboros.auto.evidence_check import EvidenceSpan, check_span
+from ouroboros.auto.investigation_workspace import (
+    create_isolated_copy,
+    remove_isolated_copy,
+    workspace_state,
+)
 from ouroboros.auto.ledger import REPO_FACT_KEY_INFIX, LedgerEntry, LedgerSource, LedgerStatus
 from ouroboros.auto.phase_clock import phase_clock_paused
 from ouroboros.auto.requester import ROUTED_SOURCES, ask_requester
@@ -88,10 +99,10 @@ INVESTIGATOR_PERMISSION_MODE = "default"
 # - ``claude`` (``ClaudeAgentAdapter``): the Agent SDK gets
 #   ``permission_mode="default"`` (``SandboxClass.READ_ONLY`` in
 #   ``claude_permissions.py``) with ``allowed_tools`` limited to the tools passed.
-# Not admitted: ``gemini`` coerces ``default`` to ``acceptEdits`` and launches
-# with ``--approval-mode auto_edit`` (``gemini_cli_runtime.py``); every other
-# backend is not admitted until its read-only mode is checked the same way.
-# A backend outside this set gets no investigator (the old answerer runs).
+# Any other backend has no verified read-only mode (``gemini`` coerces
+# ``default`` to ``acceptEdits`` and launches with ``--approval-mode auto_edit``,
+# ``gemini_cli_runtime.py``; its runtime offers no read-only mode), so it reads
+# a throwaway copy of the workspace (``auto/investigation_workspace.py``).
 READ_ONLY_ENFORCING_BACKENDS = frozenset({"codex", "claude"})
 MAX_CALLS_ENV = "OUROBOROS_AUTO_INVESTIGATOR_MAX_CALLS"
 DEFAULT_MAX_CALLS = 12
@@ -173,7 +184,9 @@ class Investigation:
 
     ``outcome`` is ``found``, ``not_found``, ``evidence_rejected`` (the reply
     said found but a span failed the check), ``reply_invalid``, ``timeout``,
-    ``call_failed`` or ``cap_reached``. Only ``found``
+    ``call_failed``, ``cap_reached``, ``isolation_failed`` (no copy could be
+    made; no call) or ``workspace_changed`` (the real workspace changed during
+    the investigation; the answer is discarded). Only ``found``
     binds. ``checked`` holds the spans that passed; ``failures`` the reasons
     of those that did not.
     """
@@ -185,6 +198,7 @@ class Investigation:
     cited: int = 0
     called: bool = False
     elapsed_seconds: float = 0.0
+    isolation: str = ""
 
     @property
     def found(self) -> bool:
@@ -215,12 +229,19 @@ def parse_reply(text: str) -> tuple[str, str, list[EvidenceSpan | None]]:
     return status, answer.strip(), [EvidenceSpan.from_reply(item) for item in evidence]
 
 
-def judge_reply(workspace: Path, text: str) -> Investigation:
-    """Apply the binding rule to one reply (no model involved)."""
+def judge_reply(workspace: Path, text: str, *, alias_root: Path | None = None) -> Investigation:
+    """Apply the binding rule to one reply (no model involved).
+
+    Spans are checked against ``workspace``, the real workspace. With
+    ``alias_root`` (the copy the runtime read), an absolute path inside the copy
+    is read as the same relative path in the real workspace.
+    """
     try:
         status, answer, spans = parse_reply(text)
     except ValueError:
         return Investigation("reply_invalid", called=True)
+    if alias_root is not None:
+        spans = [_unalias(span, alias_root) for span in spans]
     checked: list[EvidenceSpan] = []
     failures: list[str] = []
     for span in spans:
@@ -243,6 +264,16 @@ def judge_reply(workspace: Path, text: str) -> Investigation:
         cited=len(spans),
         called=True,
     )
+
+
+def _unalias(span: EvidenceSpan | None, alias_root: Path) -> EvidenceSpan | None:
+    if span is None or not Path(span.path).is_absolute():
+        return span
+    try:
+        relative = Path(span.path).resolve().relative_to(alias_root.resolve())
+    except (OSError, ValueError):
+        return span
+    return replace(span, path=relative.as_posix())
 
 
 def build_prompt(goal: str, question: str, prior: list[tuple[str, str]]) -> str:
@@ -281,31 +312,27 @@ class RepoInvestigator:
             cwd=workspace,
         )
 
-    async def investigate(self, goal: str, question: str, workspace: Path) -> Investigation | None:
-        """Investigate ``question``; ``None`` when no runtime is available."""
-        if self.unavailable is not None:
-            return None
-        if self.calls_made >= self.max_calls:
-            return Investigation("cap_reached")
+    async def _runtime(self, cwd: Path) -> Any | None:
+        """Build and preflight a runtime at ``cwd``; ``None`` marks it unavailable."""
         try:
-            runtime = await asyncio.to_thread(self._create_runtime, workspace)
+            runtime = await asyncio.to_thread(self._create_runtime, cwd)
         except Exception as exc:  # noqa: BLE001 - no runtime means the old answerer runs
             self.unavailable = f"runtime_create_failed:{type(exc).__name__}"
             return None
         from ouroboros.orchestrator.runtime_factory import preflight_agent_runtime
 
-        if not enforces_read_only(runtime):
-            backend = getattr(type(runtime), "_runtime_backend", None) or type(runtime).__name__
-            self.unavailable = f"runtime_not_read_only:{backend}"
-            return None
         blocker = preflight_agent_runtime(runtime)
         if blocker is not None:
             self.unavailable = f"runtime_unavailable:{blocker}"
+            await _close(runtime)
             return None
+        return runtime
+
+    async def _call(self, runtime: Any, goal: str, question: str) -> str | None:
+        """One session; the reply text, or ``None`` on timeout, ``""`` on failure."""
         self.resolved_model = _runtime_attr(runtime, "_resolved_fallback_model", "_model")
         self.resolved_effort = _runtime_attr(runtime, "_resolved_fallback_reasoning_effort")
         self.calls_made += 1
-        started = time.monotonic()
         try:
             result = await asyncio.wait_for(
                 runtime.execute_task_to_result(
@@ -316,21 +343,63 @@ class RepoInvestigator:
                 timeout=self.call_timeout_seconds,
             )
         except TimeoutError:
-            result = None
+            return None
         except Exception:  # noqa: BLE001 - a failed call is not found, never a guess
-            result = False
+            return ""
         finally:
-            closer = getattr(runtime, "aclose", None)
-            if closer is not None and inspect.iscoroutinefunction(closer):
-                await closer()
+            await _close(runtime)
+        if result.is_err:
+            return ""
+        return result.value.final_message or ""
+
+    async def investigate(self, goal: str, question: str, workspace: Path) -> Investigation | None:
+        """Investigate ``question``; ``None`` when no runtime is available.
+
+        A backend with a verified read-only mode reads ``workspace`` itself.
+        Any other backend reads a throwaway copy (``investigation_workspace``).
+        Either way the evidence is checked against the real ``workspace``, and
+        an answer is discarded when the real workspace changed meanwhile.
+        """
+        if self.unavailable is not None:
+            return None
+        if self.calls_made >= self.max_calls:
+            return Investigation("cap_reached")
+        before = await asyncio.to_thread(_state_or_none, workspace)
+        started = time.monotonic()
+        runtime: Any | None = None
+        copy: Path | None = None
+        isolation = "read_only_mode"
+        try:
+            if self.runtime_backend in READ_ONLY_ENFORCING_BACKENDS:
+                runtime = await self._runtime(workspace)
+                if runtime is None:
+                    return None
+                if not enforces_read_only(runtime):
+                    await _close(runtime)
+                    runtime = None
+            if runtime is None:
+                isolation = "workspace_copy"
+                try:
+                    copy = await asyncio.to_thread(create_isolated_copy, workspace)
+                except Exception:  # noqa: BLE001 - no isolation, no call
+                    return Investigation("isolation_failed", isolation=isolation)
+                runtime = await self._runtime(copy)
+                if runtime is None:
+                    return None
+            reply = await self._call(runtime, goal, question)
+        finally:
+            if copy is not None:
+                await asyncio.to_thread(remove_isolated_copy, copy)
         elapsed = time.monotonic() - started
-        if result is None or result is False or result.is_err:
-            outcome = "timeout" if result is None else "call_failed"
-            return Investigation(outcome, called=True, elapsed_seconds=elapsed)
-        reply = result.value.final_message or ""
+        after = await asyncio.to_thread(_state_or_none, workspace)
+        done = {"called": True, "elapsed_seconds": elapsed, "isolation": isolation}
+        if before is not None and after is not None and before != after:
+            return Investigation("workspace_changed", **done)
+        if reply is None or reply == "":
+            return Investigation("timeout" if reply is None else "call_failed", **done)
         if len(reply) > MAX_REPLY_CHARS:
-            return Investigation("reply_invalid", called=True, elapsed_seconds=elapsed)
-        verdict = judge_reply(workspace, reply)
+            return Investigation("reply_invalid", **done)
+        verdict = judge_reply(workspace, reply, alias_root=copy)
         if verdict.found:
             self._found.append((question.strip(), verdict.answer))
         return Investigation(
@@ -339,9 +408,22 @@ class RepoInvestigator:
             checked=verdict.checked,
             failures=verdict.failures,
             cited=verdict.cited,
-            called=True,
-            elapsed_seconds=elapsed,
+            **done,
         )
+
+
+async def _close(runtime: Any) -> None:
+    closer = getattr(runtime, "aclose", None)
+    if closer is not None and inspect.iscoroutinefunction(closer):
+        await closer()
+
+
+def _state_or_none(workspace: Path) -> str | None:
+    """The real workspace fingerprint, or ``None`` when it cannot be taken."""
+    try:
+        return workspace_state(workspace)
+    except Exception:  # noqa: BLE001 - the check is a second line; isolation is the first
+        return None
 
 
 def enforces_read_only(runtime: Any) -> bool:
@@ -483,6 +565,7 @@ async def _investigate(
         "evidence_passed": len(result.checked),
         "evidence_failures": list(result.failures),
         "elapsed_seconds": round(result.elapsed_seconds, 3),
+        "isolation": result.isolation,
         "runtime_backend": investigator.runtime_backend,
         "model": investigator.resolved_model,
         "reasoning_effort": investigator.resolved_effort,
@@ -495,6 +578,14 @@ async def _investigate(
         aggregate_type="auto_session",
         **data,
     )
+    if result.outcome == "workspace_changed":
+        log.warning("auto.interview.investigator_workspace_changed", **data)
+        await driver._emit_event(
+            "auto.interview.investigator_workspace_changed",
+            state.auto_session_id,
+            aggregate_type="auto_session",
+            **data,
+        )
     if result.found:
         return found_answer(draft, result, question, round_number)
     return not_found_answer(draft, result, question, round_number)
@@ -532,9 +623,11 @@ def build_repo_investigator(
 ) -> RepoInvestigator | None:
     """The investigator for one auto interview, or ``None`` (old answerer).
 
-    ``None`` when the cap is 0, no backend is named, the stage dispatches
-    through a host plugin (the synchronous interview cannot consume that), or
-    the backend is not in :data:`READ_ONLY_ENFORCING_BACKENDS`.
+    ``None`` when the cap is 0, no backend is named (or the name is unknown),
+    or the stage dispatches through a host plugin (the synchronous interview
+    cannot consume that). Every other backend gets one: a backend in
+    :data:`READ_ONLY_ENFORCING_BACKENDS` reads the workspace in its read-only
+    mode, any other reads a throwaway copy.
     """
     max_calls = resolve_max_calls(environ)
     call_timeout = resolve_call_timeout(environ)
@@ -546,8 +639,6 @@ def build_repo_investigator(
     try:
         resolved = resolve_agent_runtime_backend(runtime_backend)
     except ValueError:
-        return None
-    if resolved not in READ_ONLY_ENFORCING_BACKENDS:
         return None
     if should_dispatch_via_plugin(runtime_backend, opencode_mode):
         return None
