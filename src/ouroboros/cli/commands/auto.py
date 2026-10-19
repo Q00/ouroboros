@@ -28,6 +28,7 @@ from ouroboros.auto.domain_profile import DEFAULT_REGISTRY
 from ouroboros.auto.handoff_contract import RUN_HANDOFF_STARTED_STATUS
 from ouroboros.auto.intent_guard import diagnose_auto_pipeline_state
 from ouroboros.auto.interview_driver import AutoInterviewDriver
+from ouroboros.auto.investigator import build_repo_investigator
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
 from ouroboros.auto.policies import apply_domain_policy_defaults
 
@@ -643,6 +644,10 @@ async def _run_auto(
         lateral_thinker=lateral_thinker,
         answer_refiner=answer_refiner,
         requester=requester,
+        # The self-answer reads the repository first (auto/investigator.py).
+        investigator=build_repo_investigator(
+            runtime_plan.interview.runtime_backend, runtime_plan.interview.opencode_mode
+        ),
         event_store=watchdog_event_store,
     )
     # Auto does not have an execution id until interview/Seed handoff finishes.

@@ -52,9 +52,12 @@ _GUESS_ANSWER_SOURCES = frozenset(
 
 def answer_provenance(answer: AutoAnswer) -> AnswerProvenance:
     """Return ``"user"`` for an answer that may bind, ``"requester"`` for a
-    requester answer (quoted verbatim, never extracted), else ``"assumption"``."""
+    requester answer and ``"repo_fact"`` for a checked repository fact (both
+    quoted verbatim, never extracted), else ``"assumption"``."""
     if answer.source is AutoAnswerSource.REQUESTER:
         return "requester"
+    if answer.declared_provenance == "repo_fact":
+        return "repo_fact"
     if answer.source in _GUESS_ANSWER_SOURCES:
         return "assumption"
     if answer.source in _BINDING_ANSWER_SOURCES:

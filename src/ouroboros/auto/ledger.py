@@ -89,6 +89,11 @@ instead of inventing a merge.
 # as it also supersedes auto's own draft under the bare facet key.
 REQUESTER_KEY_SUFFIX = ".requester"
 
+# Key infix of a ledger entry written from a checked repository fact
+# (``auto/investigator.py``): ``<facet key>.repo_fact.<round>``. Such an entry
+# settles its section but reaches the worker only as ``Seed.repo_facts``.
+REPO_FACT_KEY_INFIX = ".repo_fact."
+
 
 REQUIRED_SECTIONS = (
     "goal",

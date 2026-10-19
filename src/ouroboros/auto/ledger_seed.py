@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from ouroboros.auto.grading import deterministic_floor
 from ouroboros.auto.ledger import (
+    REPO_FACT_KEY_INFIX,
     REQUESTER_KEY_SUFFIX,
     LedgerEntry,
     LedgerStatus,
@@ -21,6 +22,7 @@ from ouroboros.core.seed import (
     ExitCondition,
     OntologyField,
     OntologySchema,
+    RepoFact,
     RequesterAnswer,
     Seed,
     SeedMetadata,
@@ -196,6 +198,7 @@ def synthesize_seed_from_ledger(
         acceptance_criteria=acceptance_criteria,
         assumptions=ledger_assumptions(ledger),
         requester_answers=ledger_requester_answers(ledger),
+        repo_facts=ledger_repo_facts(ledger),
         ontology_schema=OntologySchema(
             name=_ontology_name(goal),
             description="Auto-synthesized ontology from the completed Seed Draft Ledger.",
@@ -380,6 +383,7 @@ def partial_seed_from_evidence(
         acceptance_criteria=acceptance,
         assumptions=ledger_assumptions(ledger),
         requester_answers=ledger_requester_answers(ledger),
+        repo_facts=ledger_repo_facts(ledger),
         ontology_schema=ontology_schema,
         evaluation_principles=(
             EvaluationPrinciple(
@@ -444,7 +448,7 @@ def _binding_joined(ledger: SeedDraftLedger, section_name: str) -> str:
     return "; ".join(
         entry.value.strip()
         for entry in _active_entries(ledger, section_name)
-        if entry.binds_seed and not _is_requester_answer(entry)
+        if entry.binds_seed and not _is_requester_answer(entry) and not _is_repo_fact(entry)
     )
 
 
@@ -456,6 +460,16 @@ def _is_requester_answer(entry: LedgerEntry) -> bool:
     into a constraint, criterion or ontology field.
     """
     return entry.key.endswith(REQUESTER_KEY_SUFFIX)
+
+
+def _is_repo_fact(entry: LedgerEntry) -> bool:
+    """Whether ``entry`` holds a checked repository fact (``auto/investigator.py``).
+
+    It settles its section, but it describes the current code, not a
+    requirement: it reaches the worker verbatim in ``Seed.repo_facts``, never
+    as a constraint, criterion or ontology field.
+    """
+    return REPO_FACT_KEY_INFIX in entry.key
 
 
 def _latest_value(ledger: SeedDraftLedger, section_name: str) -> str:
@@ -552,6 +566,33 @@ def with_requester_answers(seed: Seed, ledger: SeedDraftLedger) -> Seed:
     return seed.model_copy(update={"requester_answers": merged})
 
 
+def ledger_repo_facts(ledger: SeedDraftLedger) -> tuple[RepoFact, ...]:
+    """Every checked repository fact, with its question and evidence, in ledger order.
+
+    One fact fills each section its question targeted, so facts are
+    de-duplicated by question and answer.
+    """
+    facts: dict[tuple[str, str], RepoFact] = {}
+    for section in ledger.sections.values():
+        for entry in section.entries:
+            if not _is_repo_fact(entry) or not entry.value.strip():
+                continue
+            key = (entry.question.strip(), entry.value.strip())
+            facts.setdefault(
+                key, RepoFact(question=key[0], answer=key[1], evidence=tuple(entry.evidence))
+            )
+    return tuple(facts.values())
+
+
+def with_ledger_carryover(seed: Seed, ledger: SeedDraftLedger) -> Seed:
+    """Carry the ledger's assumptions, requester answers and repo facts into ``seed``."""
+    seed = with_requester_answers(with_ledger_assumptions(seed, ledger), ledger)
+    merged = tuple(dict.fromkeys((*seed.repo_facts, *ledger_repo_facts(ledger))))
+    if merged == seed.repo_facts:
+        return seed
+    return seed.model_copy(update={"repo_facts": merged})
+
+
 def _lines_from_section(
     ledger: SeedDraftLedger,
     section_name: str,
@@ -582,6 +623,8 @@ def _lines_from_section(
             continue
         if _is_requester_answer(entry):
             continue  # quoted verbatim in ``Seed.requester_answers`` instead
+        if _is_repo_fact(entry):
+            continue  # quoted verbatim in ``Seed.repo_facts`` instead
         if binding is False and entry.requester_unanswered:
             continue
         if not closure and entry.key == f"{section_name}.safe_default_finalization":

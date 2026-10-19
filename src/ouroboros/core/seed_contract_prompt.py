@@ -45,6 +45,27 @@ more into an answer than its words say.
 {pairs}"""
 
 
+def render_repo_facts_section(contract: SeedContract) -> str:
+    """Render checked repository facts verbatim, with their quoted evidence."""
+    if not contract.repo_facts:
+        return ""
+    items = []
+    for item in contract.repo_facts:
+        text = f"Question:\n{_quoted(item.question)}\n" if item.question.strip() else ""
+        text += f"Answer:\n{_quoted(item.answer)}"
+        if item.evidence:
+            text += "\nEvidence:\n" + "\n".join(f"- {span}" for span in item.evidence)
+        items.append(text)
+    pairs = "\n\n".join(items)
+    return f"""## Repository facts (checked)
+Auto read the repository to answer these interview questions. Each answer cites
+path:line spans whose quotes were checked against the files. They describe the code
+as it is now, not requirements: use them to understand the code, and follow the goal,
+the constraints and the acceptance criteria for what to change.
+
+{pairs}"""
+
+
 def _quoted(text: str) -> str:
     return "\n".join(f"> {line}".rstrip() for line in text.strip().splitlines())
 
@@ -193,6 +214,10 @@ def render_seed_contract_for_execution(contract: SeedContract) -> str:
     if requester_answers:
         sections.extend(["", requester_answers])
 
+    repo_facts = render_repo_facts_section(contract)
+    if repo_facts:
+        sections.extend(["", repo_facts])
+
     assumptions = render_assumptions_section(contract)
     if assumptions:
         sections.extend(["", assumptions])
@@ -224,6 +249,7 @@ __all__ = [
     "render_evaluation_principles_section",
     "render_exit_conditions_section",
     "render_ontology_lens_section",
+    "render_repo_facts_section",
     "render_requester_answers_section",
     "render_seed_contract_for_execution",
 ]
