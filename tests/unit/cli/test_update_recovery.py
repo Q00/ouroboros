@@ -331,9 +331,11 @@ def _printed_recovery_commands(
     ]
 
 
-def _run_recovery_shell(script: str, env: dict[str, str]) -> subprocess.CompletedProcess[bytes]:
+def _run_recovery_shell(
+    script: str, env: dict[str, str], *, windows_shell: str = "powershell"
+) -> subprocess.CompletedProcess[bytes]:
     windows = sys.platform == "win32"
-    shell = shutil.which("powershell") if windows else shutil.which("sh")
+    shell = shutil.which(windows_shell) if windows else shutil.which("sh")
     if shell is None:
         pytest.skip("Native shell is unavailable")
     if windows:
@@ -347,108 +349,6 @@ def _run_recovery_shell(script: str, env: dict[str, str]) -> subprocess.Complete
         capture_output=True,
         timeout=30,
         creationflags=subprocess.CREATE_NO_WINDOW if windows else 0,
-    )
-
-
-def _windows_recovery_failure_diagnostics(
-    script: str, env: dict[str, str], evidence_files: tuple[Path, ...] = ()
-) -> str:
-    """Replay a failed fixture; never replace the original assertion's evidence.
-
-    Instrumentation may change the failure, especially native last-error state.
-    Record only the fixture key's presence/type/length, never environment values.
-    """
-    if sys.platform != "win32":
-        return "Windows recovery diagnostics are unavailable on this platform."
-    marker = "OOO_RECOVERY_DIAGNOSTICS="
-    snapshot = (
-        f"    $oooPreviousEnv0 = [Environment]::GetEnvironmentVariable('{ENV_KEY}', 'Process')"
-    )
-    setter = (
-        "            if (!SetEnvironmentVariableW(name, (string)value))\n"
-        "                throw new Win32Exception(Marshal.GetLastWin32Error());"
-    )
-    if snapshot not in script or setter not in script:
-        return "Windows recovery diagnostic replay unavailable: generated helper changed."
-    records = """
-        public static readonly System.Collections.Generic.List<object> Records =
-            new System.Collections.Generic.List<object>();
-        private static int recovery = 0;
-        public static void Record(string stage, string name, object value,
-                                  object succeeded, object error) {
-            if (name != "OUROBOROS_CODEX_CLI_PATH" || Records.Count >= 20) return;
-            if (stage == "saved") recovery++;
-            var environment = System.Environment.GetEnvironmentVariables();
-            Records.Add(new {
-                recovery = recovery,
-                stage = stage,
-                isNull = value == null,
-                type = value == null ? null : value.GetType().FullName,
-                length = value is string ? (object)((string)value).Length : null,
-                present = environment.Contains(name),
-                processLength = environment[name] is string
-                    ? (object)((string)environment[name]).Length : null,
-                succeeded = succeeded,
-                error = error
-            });
-        }
-"""
-    instrumented = (
-        script.replace(
-            "    public static class EnvironmentV1 {",
-            "    public static class EnvironmentV1 {" + records,
-        )
-        .replace(
-            snapshot,
-            snapshot
-            + "\n    [Ouroboros.UpdateRecovery.EnvironmentV1]::Record("
-            + f"'saved', '{ENV_KEY}', $oooPreviousEnv0, $null, $null)",
-        )
-        .replace(
-            setter,
-            '            Record("argument", name, value, null, null);\n'
-            "            bool succeeded = SetEnvironmentVariableW(name, (string)value);\n"
-            "            int error = Marshal.GetLastWin32Error();\n"
-            '            Record("after-set", name, value, succeeded, error);\n'
-            "            if (!succeeded) throw new Win32Exception(error);",
-        )
-    )
-    # The first run is untouched. Even in this replay, record the saved value only
-    # after the original getter, and defer all output until execution completes.
-    diagnostic_script = (
-        "try {\n"
-        + instrumented
-        + "\n} finally {\n"
-        + "    $diagnostic = @{\n"
-        + "        replayMayChangeBehavior = $true\n"
-        + "        powershell = $PSVersionTable.PSVersion.ToString()\n"
-        + "        executable = (Get-Process -Id $PID).Path\n"
-        + "        clr = [Environment]::Version.ToString()\n"
-        + "        os = [Environment]::OSVersion.VersionString\n"
-        + "        records = @([Ouroboros.UpdateRecovery.EnvironmentV1]::Records)\n"
-        + "    }\n"
-        + f"    '{marker}' + ($diagnostic | ConvertTo-Json -Depth 5 -Compress)\n"
-        + "}\n"
-    )
-    try:
-        evidence = {path: path.read_bytes() for path in evidence_files}
-        try:
-            result = _run_recovery_shell(diagnostic_script, env)
-        finally:
-            # The replay executes the fixture again; keep the original failure's
-            # before/during/after files authoritative even if the replay differs.
-            for path, content in evidence.items():
-                path.write_bytes(content)
-    except (OSError, subprocess.SubprocessError, pytest.skip.Exception) as error:
-        return f"Windows recovery diagnostic replay unavailable: {type(error).__name__}."
-    for line in result.stdout.decode("utf-8", errors="replace").splitlines():
-        if line.startswith(marker) and len(line) <= 8192:
-            return (
-                "Original restoration assertion failed. Diagnostic replay may change behavior; "
-                f"exit={result.returncode}.\n{line}"
-            )
-    return (
-        f"Windows recovery diagnostic replay produced no bounded report; exit={result.returncode}."
     )
 
 
@@ -522,9 +422,63 @@ def test_copyable_command_round_trips_real_shell_and_restores_environment(
         "value": SPECIAL_TEXT,
         "present": True,
     }
-    assert json.loads(after.read_text(encoding="utf-8")) == original, (
-        _windows_recovery_failure_diagnostics(shell_script, env, (before, during, after))
+    assert json.loads(after.read_text(encoding="utf-8")) == original
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows environment keys are case-insensitive")
+@pytest.mark.parametrize("windows_shell", ["powershell", "pwsh"])
+@pytest.mark.parametrize("empty_override_prior", [None, "prior value"])
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_windows_multiple_environment_overrides_preserve_empty_and_missing_values(
+    windows_shell: str,
+    empty_override_prior: str | None,
+    exit_code: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Restore mixed-case snapshots and apply an empty override on both runtimes."""
+    keys = [
+        f"OUROBOROS_RECOVERY_FIXTURE_{suffix}" for suffix in ("MISSING", "EMPTY", "VALUE", "SET")
+    ]
+    prior = dict(zip(keys, [None, "", SPECIAL_TEXT, empty_override_prior], strict=True))
+    overrides = dict(zip(keys, [SPECIAL_TEXT, "temporary", "changed", ""], strict=True))
+    recorder = tmp_path / "environment.py"
+    recorder.write_text(
+        "import json, os, pathlib, sys\n"
+        "values = {key.upper(): value for key, value in os.environ.items()}\n"
+        "pathlib.Path(sys.argv[1]).write_text(json.dumps({\n"
+        "    key: [key in values, values.get(key)] for key in sys.argv[3:]\n"
+        "}), encoding='utf-8')\n"
+        "sys.exit(int(sys.argv[2]))\n",
+        encoding="utf-8",
     )
+    before, during, after = [tmp_path / f"{phase}.json" for phase in ("before", "during", "after")]
+    recovery = _printed_recovery_commands(
+        monkeypatch, [sys.executable, str(recorder), str(during), str(exit_code), *keys], overrides
+    )[0]
+
+    def observe(path: Path) -> str:
+        return update._format_recovery_command(
+            [sys.executable, str(recorder), str(path), "0", *keys]
+        )
+
+    check_exit = f"if ($LASTEXITCODE -ne {exit_code}) {{ exit 91 }}"
+    # Repeat the command so restoration must also work with the cached helper.
+    script = "\n".join(
+        [observe(before), recovery, check_exit, recovery, check_exit, observe(after)]
+    )
+    env = {key: value for key, value in os.environ.items() if key.upper() not in keys}
+    env.update({key.lower(): value for key, value in prior.items() if value is not None})
+
+    result = _run_recovery_shell(script, env, windows_shell=windows_shell)
+
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    original = {key: [value is not None, value] for key, value in prior.items()}
+    assert json.loads(before.read_text(encoding="utf-8")) == original
+    assert json.loads(during.read_text(encoding="utf-8")) == {
+        key: [True, value] for key, value in overrides.items()
+    }
+    assert json.loads(after.read_text(encoding="utf-8")) == original
 
 
 @pytest.mark.parametrize("follow_up", [False, True])
@@ -571,9 +525,10 @@ def test_printed_posix_control_executable_path_runs(
     assert result.stdout == b"executed\n"
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="Windows native helper initialization")
-def test_windows_helper_failure_leaves_environment_and_command_untouched(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows recovery initialization")
+@pytest.mark.parametrize("failure", ["helper", "snapshot"])
+def test_windows_initialization_failure_leaves_environment_and_command_untouched(
+    failure: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     marker = tmp_path / "must-not-run"
     command = [sys.executable, "-c", f"from pathlib import Path; Path({str(marker)!r}).touch()"]
@@ -585,14 +540,27 @@ def test_windows_helper_failure_leaves_environment_and_command_untouched(
             f"import json, os; print(json.dumps(dict(os.environ).get({ENV_KEY!r})))",
         ]
     )
-    script = (
-        "function Add-Type { throw 'fixture: native helper unavailable' }\n"
-        "try {\n" + printed + "\n} catch {}\n" + observer
-    )
+    if failure == "helper":
+        prefix = "function Add-Type { throw 'fixture: native helper unavailable' }\n"
+        script = prefix + "try {\n" + printed + "\n} catch {}\n" + observer
+    else:
+        # A null dictionary makes the Hashtable constructor fail before mutation.
+        snapshot = "[Environment]::GetEnvironmentVariables('Process')"
+        assert snapshot in printed
+        script = printed.replace(snapshot, "$null").replace(
+            "[Ouroboros.UpdateRecovery.EnvironmentV1]::Set(",
+            "Write-Output 'mutation attempted'; [Ouroboros.UpdateRecovery.EnvironmentV1]::Set(",
+        )
+        # An outer try/catch would itself make the constructor error terminating,
+        # hiding a missing guard. Observe attempted mutations before each setter.
     result = _run_recovery_shell(script, {**os.environ, ENV_KEY: ""})
-    assert result.returncode == 0, result.stderr
     assert not marker.exists()
-    assert json.loads(result.stdout) == ""
+    if failure == "helper":
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == ""
+    else:
+        assert result.returncode != 0
+        assert result.stdout == b""
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX filesystem byte names")
@@ -676,88 +644,4 @@ def test_windows_launch_failure_is_explicit_and_restores_environment(
     failure, restored = [json.loads(line) for line in result.stdout.splitlines()]
     assert "CommandNotFoundException" in failure["failure"]
     assert failure["nativeExit"] == 0  # stale status cannot establish recovery success
-    assert restored == [prior_value is not None, prior_value], (
-        _windows_recovery_failure_diagnostics(script, env)
-    )
-
-
-@pytest.mark.skipif(sys.platform != "win32", reason="Windows recovery failure diagnostics")
-@pytest.mark.parametrize("prior_value", [None, "", "fixture private value"])
-def test_windows_recovery_diagnostics_distinguish_presence_without_values(
-    prior_value: str | None, tmp_path: Path
-) -> None:
-    """The optional replay identifies the failing boundary without logging values."""
-    secret = "fixture override never included in diagnostics"
-    evidence = tmp_path / "original-evidence.txt"
-    evidence.write_text("original fixture evidence", encoding="utf-8")
-    script = update._format_recovery_command(
-        [
-            sys.executable,
-            "-c",
-            f"from pathlib import Path; Path({str(evidence)!r}).write_text('replayed')",
-        ],
-        {ENV_KEY: secret},
-        windows=True,
-    )
-    env = dict(os.environ)
-    if prior_value is None:
-        env.pop(ENV_KEY, None)
-    else:
-        env[ENV_KEY] = prior_value
-
-    report = _windows_recovery_failure_diagnostics(script + "\n" + script, env, (evidence,))
-
-    assert evidence.read_text(encoding="utf-8") == "original fixture evidence"
-    assert secret not in report
-    assert "fixture private value" not in report
-    payload = json.loads(report.split("OOO_RECOVERY_DIAGNOSTICS=", 1)[1])
-    assert payload["replayMayChangeBehavior"] is True
-    assert all(payload[key] for key in ("powershell", "executable", "clr", "os"))
-    records = payload["records"]
-    assert len(records) == 10
-    expected_stages = [
-        "saved",
-        "argument",
-        "after-set",
-        "argument",
-        "after-set",
-    ]
-    assert records[0]["present"] is (prior_value is not None)
-    assert records[0]["processLength"] == (len(prior_value) if prior_value is not None else None)
-    assert records[5]["present"] is records[4]["present"]
-    for index in (0, 5):
-        saved, override, during, restore, after = records[index : index + 5]
-        assert [record["stage"] for record in records[index : index + 5]] == expected_stages
-        assert all(record["recovery"] == index // 5 + 1 for record in records[index : index + 5])
-        # Capturing null for an existing empty value is exactly what this probe
-        # must report if the host reproduces the bug, not a diagnostic failure.
-        assert saved["type"] == (None if saved["isNull"] else "System.String")
-        if saved["isNull"]:
-            assert saved["length"] is None
-        else:
-            assert isinstance(saved["length"], int)
-        assert override["length"] == len(secret)
-        assert during["present"] is True and during["succeeded"] is True
-        assert all(restore[key] == saved[key] for key in ("isNull", "type", "length"))
-        assert isinstance(after["present"], bool)
-        assert after["succeeded"] is True
-
-
-@pytest.mark.parametrize(
-    "error",
-    [
-        OSError("fixture"),
-        subprocess.TimeoutExpired("fixture", 30),
-        pytest.skip.Exception("fixture"),
-    ],
-)
-def test_windows_recovery_diagnostic_error_does_not_replace_original_assertion(
-    error: BaseException, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    script = update._format_recovery_command(["fixture.exe"], {ENV_KEY: "fixture"}, windows=True)
-    monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setitem(globals(), "_run_recovery_shell", MagicMock(side_effect=error))
-
-    restored, expected = [False, None], [True, ""]
-    with pytest.raises(AssertionError, match="diagnostic replay unavailable"):
-        assert restored == expected, _windows_recovery_failure_diagnostics(script, {})
+    assert restored == [prior_value is not None, prior_value]

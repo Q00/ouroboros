@@ -524,12 +524,19 @@ def _format_recovery_command(
         "'@",
         "    }",
     ]
+    # Capture existing empty values from the environment block, retaining
+    # Windows' case-insensitive keys. A failed snapshot must prevent mutation.
+    lines.extend(
+        [
+            "    try {",
+            "        $oooPreviousEnvironment = [System.Collections.Hashtable]::new(",
+            "            [Environment]::GetEnvironmentVariables('Process'),",
+            "            [System.StringComparer]::OrdinalIgnoreCase)",
+        ]
+    )
     for index, key in enumerate(env_overrides):
-        lines.append(
-            f"    $oooPreviousEnv{index} = "
-            f"[Environment]::GetEnvironmentVariable({quote(key)}, 'Process')"
-        )
-    lines.append("    try {")
+        lines.append(f"        $oooPreviousEnv{index} = $oooPreviousEnvironment[{quote(key)}]")
+    lines.extend(["    } catch { throw }", "    try {"])
     for key, value in env_overrides.items():
         lines.append(
             f"        [Ouroboros.UpdateRecovery.EnvironmentV1]::Set({quote(key)}, {quote(value)})"
