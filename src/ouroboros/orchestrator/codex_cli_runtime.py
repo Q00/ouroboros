@@ -3592,6 +3592,7 @@ class CodexCliRuntime:
             key: details[key]
             for key in (
                 "failure_category",
+                "http_status",
                 "model_guidance",
                 "codex_app_version",
                 "codex_cli_version",
