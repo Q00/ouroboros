@@ -481,7 +481,12 @@ def uninstall(
     try:
         if claude_md.exists() and "<!-- ooo:START -->" in claude_md.read_text(encoding="utf-8"):
             targets.append(f"CLAUDE.md integration block ({claude_md})")
-    except (OSError, UnicodeDecodeError):
+    except UnicodeDecodeError:
+        # _remove_claude_md_block skips this file with the same warning, but
+        # --dry-run returns right after the scan, so the helper never runs and
+        # the user would only see "Nothing to remove".
+        print_warning(f"Could not read {claude_md} — skipping.")
+    except OSError:
         pass
 
     ooo_dir = cwd / ".ouroboros"

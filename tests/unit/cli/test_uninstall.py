@@ -992,3 +992,4 @@ class TestConfigEncodingLocaleIndependence:
 
         assert result.exit_code == 0
         assert "UnicodeDecodeError" not in repr(result.exception)
+        assert "Could not read" in result.output, result.output
