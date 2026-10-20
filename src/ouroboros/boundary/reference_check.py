@@ -13,7 +13,15 @@ runs the reference on every case input through the product harness
 the same caps, in a scratch directory holding only the reference module, the
 comparison inside the controller; the oracle's setup calls are not made there,
 and a symbol reference in a case's inputs reaches the reference as its
-dotted path) and compares:
+dotted path) and compares. The reference takes the declared params, the
+JSON data of each case, by name: an oracle's built call (``inputs``, a
+``receiver``, ``$call`` chains) is neither passed to it nor executed, no
+projection is applied to its result (it returns the projected value
+itself); a CLI case's files are case data, written into the reference's
+working directory as into the target's. A method oracle with a
+built receiver needs a function reference (``symbol`` without a dot); any
+other symbol there is ``reference_unavailable``. A ``no_raise`` case agrees
+with any reference that returns. The outcomes:
 
 - a held-out case whose stated expectation disagrees with the reference is
   excluded (``oracle_inconsistent``): it is not in the frozen package, so it
@@ -146,13 +154,24 @@ class ReferenceCheck:
         }
 
 
-def _reference_binding(spec: OracleSpec, reference: OracleReference) -> Binding:
-    if spec.call_kind is CallKind.CLI:
+def _reference_binding(spec: OracleSpec, reference: OracleReference) -> Binding | None:
+    """How the reference is called, or ``None`` when its symbol does not fit the oracle.
+
+    A method oracle whose receiver is built (``receiver``) has no class
+    arguments to give a reference class, so its reference is a function of
+    the declared params; any other symbol there is unavailable.
+    """
+    kind = spec.call_kind
+    if kind is CallKind.CLI:
         symbol = f"{REFERENCE_MODULE}.py"
+    elif spec.receiver is not None:
+        if "." in reference.symbol:
+            return None
+        kind, symbol = CallKind.FUNCTION, f"{REFERENCE_MODULE}.{reference.symbol}"
     else:
         symbol = f"{REFERENCE_MODULE}.{reference.symbol}"
     # Every input by its declared name: the reference takes the params by name.
-    return Binding(criterion_key=spec.criterion_key, symbol=symbol, call_kind=spec.call_kind)
+    return Binding(criterion_key=spec.criterion_key, symbol=symbol, call_kind=kind)
 
 
 async def _disagreeing_cases(
@@ -165,6 +184,9 @@ async def _disagreeing_cases(
 ) -> list[str] | None:
     """Ids of the cases the reference disagrees with, or ``None`` when it could not run."""
     if spec.call_kind is not CallKind.CLI and not reference.symbol:
+        return None
+    binding = _reference_binding(spec, reference)
+    if binding is None:
         return None
     scratch = Path(tempfile.mkdtemp(prefix="ouroboros-reference-"))
     try:
@@ -180,7 +202,7 @@ async def _disagreeing_cases(
             on_base=True,
             env=env,
             interpreter=interpreter,
-            binding=_reference_binding(spec, reference),
+            binding=binding,
             reference_run=True,
         )
     finally:

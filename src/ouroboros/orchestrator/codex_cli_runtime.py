@@ -1599,14 +1599,12 @@ class CodexCliRuntime:
                 "</system-directive>"
             )
 
-        if tools:
-            tool_list = "\n".join(f"- {tool}" for tool in tools)
-            parts.append(
-                "<tooling-guidance>\n"
-                "Prefer to solve the task using the following tool set when possible:\n"
-                f"{tool_list}\n"
-                "</tooling-guidance>"
-            )
+        if tools is not None:
+            guidance = "Do not use any tools for this task. Respond using reasoning only."
+            if tools:
+                tool_list = "\n".join(f"- {tool}" for tool in tools)
+                guidance = f"Prefer to solve the task using the following tool set when possible:\n{tool_list}"
+            parts.append(f"<tooling-guidance>\n{guidance}\n</tooling-guidance>")
 
         parts.append(prompt)
         return "\n\n".join(part for part in parts if part.strip())

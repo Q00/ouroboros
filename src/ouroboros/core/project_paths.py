@@ -10,6 +10,11 @@ import structlog
 
 log = structlog.get_logger(__name__)
 
+#: The product's own state directory inside a workspace: the context pack cache
+#: and the auto run traces are written there. Files under it are the product's,
+#: never a worker's change.
+WORKSPACE_STATE_DIR = ".ouroboros"
+
 
 @dataclass(frozen=True, slots=True)
 class SeedProjectPathResolution:

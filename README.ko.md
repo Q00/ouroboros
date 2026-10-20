@@ -52,19 +52,23 @@ irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | i
 
 <p align="center"><sub>설치는 위 한 줄입니다. 이후 코딩 에이전트 안에서 <code>ooo setup</code>을 한 번 실행하세요. 자세한 내용은 <a href="#빠른-시작">빠른 시작</a>에 있습니다.</sub></p>
 
-<p align="center"><sub><b>서로 다른 다섯 번의 실행, 다섯 개의 호스트. 과제가 다른 건 의도한 것입니다 — 공유되는 건 엔진이지 프롬프트가 아닙니다</b></sub></p>
+<p align="center"><sub><b>서로 다른 일곱 번의 실행, 일곱 개의 호스트. 과제가 다른 건 의도한 것입니다 — 공유되는 건 엔진이지 프롬프트가 아닙니다</b></sub></p>
 
 <table align="center">
 <tr>
-<td align="center" width="50%"><img src="./docs/images/ooo-interview.gif" width="440" alt="Terminal recording of the ouroboros CLI interview reporting an ambiguity score"><br><sub><b>터미널 CLI</b> — 할 일 관리 CLI 과제. <code>ouroboros init start</code>가 순서와 범위를 묻고 모호도 점수를 보고합니다</sub></td>
-<td align="center" width="50%"><img src="./docs/images/host-codex.gif" width="440" alt="Screen recording of the ChatGPT app calling Ouroboros as an integration"><br><sub><b>ChatGPT (Codex)</b> — 영상 퍼블리싱 하네스 과제. integration으로 호출되어 인터뷰·어드바이저리 레인·모호도 원장이 한 화면에</sub></td>
+<td align="center" width="50%"><img src="./docs/images/ooo-interview.gif" alt="Terminal recording of the ouroboros CLI interview reporting an ambiguity score"><br><sub><b>터미널 CLI</b> — 할 일 관리 CLI 과제. <code>ouroboros init start</code>가 순서와 범위를 묻고 모호도 점수를 보고합니다</sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-codex.gif" alt="Screen recording of the ChatGPT app calling Ouroboros as an integration"><br><sub><b>ChatGPT (Codex)</b> — 영상 퍼블리싱 하네스 과제. integration으로 호출되어 인터뷰·어드바이저리 레인·모호도 원장이 한 화면에</sub></td>
 </tr>
 <tr>
-<td align="center" width="50%"><img src="./docs/images/host-claude.gif" width="440" alt="Screen recording of Claude Code running six Ouroboros interview advisory lanes in parallel"><br><sub><b>Claude Code</b> — YouTube 자동화 과제. 어드바이저리 6개가 병렬로 돌고 나서 인터뷰가 결과를 제출합니다</sub></td>
-<td align="center" width="50%"><img src="./docs/images/host-hermes.gif" width="440" alt="Screen recording of a Discord bot running the Ouroboros interview and reporting a final ambiguity of 0.15"><br><sub><b>Hermes (Discord)</b> — 카트 레이싱 게임 과제를 챗봇으로. <code>Final ambiguity: 0.15</code>에서 끝납니다</sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-claude.gif" alt="Screen recording of Claude Code running six Ouroboros interview advisory lanes in parallel"><br><sub><b>Claude Code</b> — YouTube 자동화 과제. 어드바이저리 6개가 병렬로 돌고 나서 인터뷰가 결과를 제출합니다</sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-hermes.gif" alt="Screen recording of a Discord bot running the Ouroboros interview and reporting a final ambiguity of 0.15"><br><sub><b>Hermes (Discord)</b> — 카트 레이싱 게임 과제를 챗봇으로. <code>Final ambiguity: 0.15</code>에서 끝납니다</sub></td>
 </tr>
 <tr>
-<td align="center" colspan="2"><img src="./docs/images/host-kiro.gif" width="440" alt="Kiro CLI에서 Ouroboros 인터뷰를 실행하는 10배속 화면 녹화"><br><sub><b>Kiro</b> — Kiro CLI에서 Ouroboros 인터뷰 흐름을 실행해 모호한 요청을 구조화하고 검증 가능한 Seed로 구체화합니다</sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-dsh.gif" alt="DeepSeek Harness가 Ouroboros 인터뷰 도구를 호출하고 어드바이저리 fan-out 결과를 제출하는 화면 녹화"><br><sub><b>DeepSeek Harness</b> — OSS 트렌드 아웃리치 스크립트 과제. dsh 대화에서 <code>mcp__ouroboros__ouroboros_interview</code>를 차례로 호출하고 라운드 사이에 fan-out 결과를 제출합니다</sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-kiro.gif" alt="Kiro CLI에서 Ouroboros 인터뷰를 실행하는 10배속 화면 녹화"><br><sub><b>Kiro</b> — Kiro CLI에서 Ouroboros 인터뷰 흐름을 실행해 모호한 요청을 구조화하고 검증 가능한 Seed로 구체화합니다</sub></td>
+</tr>
+<tr>
+<td align="center" colspan="2"><img src="./docs/images/host-antigravity.gif" width="50%" alt="Antigravity에서 Ouroboros 인터뷰를 실행하고 선택한 답변을 제출하는 화면 녹화"><br><sub><b>Antigravity</b> — YouTube 게시 자동화 인터뷰. 자동화할 범위를 묻고, 어드바이저리 레인을 실행하며 선택한 답변을 제출합니다</sub></td>
 </tr>
 </table>
 
@@ -287,7 +291,7 @@ ouroboros setup                         # 런타임 설정
 ```
 homebrew-core에는 아직 등록되지 않은 자가 호스팅 탭입니다. PyPI에 게시된 것과 동일한 패키지를 설치합니다.
 
-런타임별 가이드: [Claude Code](./docs/runtime-guides/claude-code.ko.md) · [Codex CLI](./docs/runtime-guides/codex.ko.md) · [Hermes](./docs/runtime-guides/hermes.ko.md) · [OpenCode](./docs/runtime-guides/opencode.md) · [Kiro CLI](./docs/runtime-guides/kiro.ko.md) · [Gemini CLI](./docs/runtime-guides/gemini.md) · [GitHub Copilot CLI](./docs/runtime-guides/copilot.ko.md) · [Zcode](./docs/runtime-guides/zcode.md) · [Pi JSON mode](https://pi.dev/docs/latest/json) · [OMP (Oh My Pi)](./docs/runtime-guides/omp.md) · [Goose](./docs/runtime-guides/goose.ko.md) · [GJC](./docs/runtime-guides/gjc.md) · [Antigravity CLI](./docs/runtime-guides/antigravity.md) · [Grok Build CLI](./docs/runtime-guides/grok.md)
+런타임별 가이드: [Claude Code](./docs/runtime-guides/claude-code.ko.md) · [Codex CLI](./docs/runtime-guides/codex.ko.md) · [Hermes](./docs/runtime-guides/hermes.ko.md) · [OpenCode](./docs/runtime-guides/opencode.ko.md) · [Kiro CLI](./docs/runtime-guides/kiro.ko.md) · [Gemini CLI](./docs/runtime-guides/gemini.ko.md) · [GitHub Copilot CLI](./docs/runtime-guides/copilot.ko.md) · [Zcode](./docs/runtime-guides/zcode.ko.md) · [Pi JSON mode](https://pi.dev/docs/latest/json) · [OMP (Oh My Pi)](./docs/runtime-guides/omp.md) · [Goose](./docs/runtime-guides/goose.ko.md) · [GJC](./docs/runtime-guides/gjc.ko.md) · [Antigravity CLI](./docs/runtime-guides/antigravity.ko.md) · [Grok Build CLI](./docs/runtime-guides/grok.ko.md)
 
 </details>
 
@@ -457,9 +461,8 @@ Gen 3: {Task, Priority, Status, DueDate}     → similarity 1.00 → CONVERGED �
 | `ooo update` | 최신 버전 확인 + 업그레이드 |
 | `ooo brownfield` | 기존 저장소 스캔 + 기본값 관리 |
 | `ooo publish` | Seed를 GitHub Epic/Task 이슈로 발행 |
-| `ooo maintain` | 우로보로스 이슈·PR 검토 및 처리 |
 
-> `ooo publish`와 `ooo maintain`은 직접적인 `ouroboros` 셸 서브커맨드가 아니라, AI 런타임 세션에서 실행되는 스킬이며 내부적으로 `gh` CLI를 사용합니다.
+> `ooo publish`는 직접적인 `ouroboros` 셸 서브커맨드가 아니라, AI 런타임 세션에서 실행되는 스킬이며 내부적으로 `gh` CLI를 사용합니다.
 
 > Claude Code의 `/run`, `/status`, `/help`, `/config`는 예약 명령입니다.
 > Ouroboros skill을 직접 호출할 때는 `/ouroboros:ouroboros-run`,

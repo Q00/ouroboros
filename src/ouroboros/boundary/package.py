@@ -784,6 +784,7 @@ def _file_manifest(package: CheckPackage) -> tuple[set[str], list[dict[str, Any]
 
 
 _MAX_SCAN_ENTRIES = 200_000
+_MAX_SCAN_DEPTH = 64
 """Entries the scan reads through links that lead out of the workspace before it refuses."""
 
 
@@ -813,7 +814,9 @@ class _Scan:
         if sha256_bytes(data) in candidates:
             self.leaks.append(relative)
 
-    def directory(self, directory: str, prefix: str, root: str) -> None:
+    def directory(self, directory: str, prefix: str, root: str, depth: int = 0) -> None:
+        if self.budget <= 0:
+            return
         try:
             status = os.stat(directory)
         except OSError:
@@ -823,24 +826,34 @@ class _Scan:
         if key in self.visited:
             return
         self.visited.add(key)
+        if depth >= _MAX_SCAN_DEPTH:
+            self.leaks.append(prefix.rstrip("/") or ".")
+            return
         try:
-            entries = list(os.scandir(directory))
+            entries = []
+            with os.scandir(directory) as iterator:
+                for entry in iterator:
+                    self.budget -= 1
+                    if self.budget <= 0:
+                        # Reaching the cap is itself indeterminate: stop before
+                        # enumerating another entry and refuse the package run.
+                        self.leaks.append(prefix.rstrip("/") or ".")
+                        return
+                    entries.append(entry)
         except OSError:
             # An unreadable directory may hide package material: refused.
             self.leaks.append(prefix.rstrip("/") or ".")
             return
         for entry in entries:
-            relative = prefix + entry.name
-            self.budget -= 1
-            if self.budget < 0:
-                self.leaks.append(relative)
+            if self.budget <= 0:
                 return
+            relative = prefix + entry.name
             if relative in self.paths:
                 self.leaks.append(relative)
                 continue
-            self.entry(entry, relative, root)
+            self.entry(entry, relative, root, depth)
 
-    def entry(self, entry: os.DirEntry[str], relative: str, root: str) -> None:
+    def entry(self, entry: os.DirEntry[str], relative: str, root: str, depth: int) -> None:
         if entry.is_symlink():
             # Resolved, never trusted: the target is judged by what it is.
             try:
@@ -854,13 +867,13 @@ class _Scan:
                 resolved = os.path.realpath(entry.path)
                 if resolved == root or resolved.startswith(root + os.sep):
                     return  # inside the workspace: scanned on its own path
-                self.directory(resolved, relative + "/", root)
+                self.directory(resolved, relative + "/", root, depth + 1)
             elif stat.S_ISREG(target.st_mode):
                 self.file(entry.path, relative, target.st_size)
             return
         try:
             if entry.is_dir(follow_symlinks=False):
-                self.directory(entry.path, relative + "/", root)
+                self.directory(entry.path, relative + "/", root, depth + 1)
             elif entry.is_file(follow_symlinks=False):
                 self.file(entry.path, relative, entry.stat(follow_symlinks=False).st_size)
         except OSError:

@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import yaml
 
+from ouroboros.core import project_identity as project_identity_module
 from ouroboros.core.errors import ConfigError, PersistenceError
 from ouroboros.core.project_identity import resolve_project_identity
 from ouroboros.core.seed import (
@@ -3280,6 +3281,92 @@ class TestOrchestratorRunner:
             )
 
     @pytest.mark.asyncio
+    async def test_prepare_session_passes_source_interview_from_seed_metadata(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+    ) -> None:
+        """Runner forwards the Seed-owned link without deriving another identity."""
+        linked_seed = sample_seed.model_copy(
+            update={
+                "metadata": sample_seed.metadata.model_copy(
+                    update={"interview_id": "interview_runner_source"}
+                )
+            }
+        )
+        tracker = SessionTracker.create(
+            "exec_interview_link",
+            linked_seed.metadata.seed_id,
+            session_id="orch_interview_link",
+        )
+        create_session = AsyncMock(return_value=Result.ok(tracker))
+
+        with patch.object(runner._session_repo, "create_session", create_session):
+            result = await runner.prepare_session(
+                linked_seed,
+                execution_id=tracker.execution_id,
+                session_id=tracker.session_id,
+            )
+
+        try:
+            assert result.is_ok
+            assert create_session.await_args.kwargs["interview_id"] == ("interview_runner_source")
+        finally:
+            runner._retire_process_local_authority(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+
+    @pytest.mark.asyncio
+    async def test_prepare_session_omits_absent_source_interview_for_legacy_repository(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+    ) -> None:
+        """A legacy Seed and narrow repository double keep their old call shape."""
+        tracker = SessionTracker.create(
+            "exec_legacy_link",
+            sample_seed.metadata.seed_id,
+            session_id="orch_legacy_link",
+        )
+
+        async def legacy_create_session(
+            *,
+            execution_id: str,
+            seed_id: str,
+            session_id: str,
+            seed_goal: str,
+            runtime_backend: str,
+            llm_backend: str,
+            execution_contract: object,
+            project_identity: object,
+            project_workspace: str,
+        ) -> Result[SessionTracker, object]:
+            assert execution_id == tracker.execution_id
+            assert seed_id == sample_seed.metadata.seed_id
+            assert session_id == tracker.session_id
+            return Result.ok(tracker)
+
+        with patch.object(
+            runner._session_repo,
+            "create_session",
+            new=legacy_create_session,
+        ):
+            result = await runner.prepare_session(
+                sample_seed,
+                execution_id=tracker.execution_id,
+                session_id=tracker.session_id,
+            )
+
+        try:
+            assert result.is_ok
+        finally:
+            runner._retire_process_local_authority(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+
+    @pytest.mark.asyncio
     async def test_prepare_session_publishes_matching_project_anchor_and_contract(
         self,
         mock_adapter: MagicMock,
@@ -3325,6 +3412,64 @@ class TestOrchestratorRunner:
             runner._retire_process_local_authority(
                 session_id="orch-project-anchor",
                 execution_id="exec-project-anchor",
+            )
+
+    @pytest.mark.asyncio
+    async def test_prepare_session_degrades_project_identity_on_old_git(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+        tmp_path: Path,
+    ) -> None:
+        """Git older than the topology grammar must not abort a direct run."""
+        repo_root = tmp_path / "repo"
+        _init_git_repo(repo_root)
+        workspace = repo_root / "packages" / "app"
+        workspace.mkdir(parents=True)
+        mock_adapter.working_directory = str(workspace)
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            task_cwd=str(workspace),
+        )
+
+        real_run_git_command = project_identity_module._run_git_command
+
+        def old_git(*arguments: str) -> bytes:
+            if arguments == ("--version",):
+                return b"git version 2.34.1\n"
+            if "worktree" in arguments or "--path-format=absolute" in arguments:
+                raise AssertionError(f"old Git must not run topology queries: {arguments}")
+            return real_run_git_command(*arguments)
+
+        with patch("ouroboros.core.project_identity._run_git_command", side_effect=old_git):
+            result = await runner.prepare_session(
+                sample_seed,
+                execution_id="exec-old-git",
+                session_id="orch-old-git",
+            )
+
+        try:
+            assert result.is_ok
+            start = next(
+                call.args[0]
+                for call in mock_event_store.append.await_args_list
+                if call.args[0].type == "orchestrator.session.started"
+            )
+            canonical = str(workspace.resolve())
+            assert start.data["project_root"] == canonical
+            assert start.data["workspace_path"] == "."
+            assert start.data["project_identity_degraded_reason"] == "git_version_unsupported"
+            proof = start.data["execution_contract"]["frugality_proof"]
+            assert proof["project_root"] == canonical
+            assert proof["workspace_path"] == "."
+        finally:
+            runner._retire_process_local_authority(
+                session_id="orch-old-git",
+                execution_id="exec-old-git",
             )
 
     @pytest.mark.asyncio

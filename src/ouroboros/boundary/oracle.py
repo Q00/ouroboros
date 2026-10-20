@@ -30,10 +30,24 @@ Library targets: a case input may name an importable object instead of a
 JSON value (``{"$symbol": "package.module.Name"}``, ``harness.SYMBOL_REF``),
 and an oracle may declare ``setup``: calls of checkout callables, with JSON
 arguments, that the harness makes in the target process before it resolves
-the target (a library that must be configured first). Both are data the
-constructor writes; the harness that interprets them is the product's, and
-both are frozen in ``oracle.json`` with the cases. Neither applies to a CLI
-oracle, whose inputs are command-line text.
+the target (a library that must be configured first). Neither applies to a
+CLI oracle, whose inputs are command-line text.
+
+Built calls (``boundary/call_grammar.py``): a case's ``args`` are the JSON
+data of the declared ``params``, which the reference takes by name. An oracle
+may declare how the target's call is built from them: ``inputs`` (the call's
+parameters, each a template over the params; ``$call`` chains build objects
+such as a fitted model), ``receiver`` (a method oracle's instance, built the
+same way, instead of the class called with ``init``), and ``project`` (reads
+applied to each returned value before it is compared, for a result that is
+not JSON). A case may expect ``no_raise`` (the call returns anything); such
+a case can fail a candidate but never verifies a pass, because a target
+that returns anything passes it (``boundary/acceptance.py``). A CLI case
+may carry ``files``, which the controller writes into a fresh directory
+that becomes the command's working directory. All of it is data the
+constructor writes; the harness that interprets it is the product's, and
+all of it is frozen in ``oracle.json`` with the cases, each new field only
+when declared, so an oracle without one freezes the same data as before.
 
 Held-out cases: the constructor declares, per case, whether the case is one
 the specification states (``held_out: false``) or one it withheld
@@ -66,7 +80,15 @@ from ouroboros.boundary.binding import (
     CheckTier,
     is_dotted_symbol,
 )
-from ouroboros.boundary.harness import symbol_refs
+from ouroboros.boundary.call_grammar import (
+    GrammarError,
+    check_case_files,
+    check_reads,
+    check_template,
+    has_built_value,
+    is_receiver,
+)
+from ouroboros.boundary.harness import bind_params, symbol_refs
 
 ORACLE_SCHEMA = "ouroboros.oracle.v1"
 ORACLE_DIR = ".ouroboros_checks/oracle"
@@ -144,7 +166,7 @@ class OracleExpectation(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    kind: Literal["returns", "raises", "cli"]
+    kind: Literal["returns", "raises", "no_raise", "cli"]
     value: Any = None
     approx: float | None = Field(default=None, ge=0)
     exception: str | None = None
@@ -164,6 +186,8 @@ class OracleExpectation(BaseModel):
                 raise ValueError("raises expects an exception class name")
         elif self.exception is not None:
             raise ValueError("exception is only valid for kind 'raises'")
+        if self.kind == "no_raise" and (self.value is not None or self.approx is not None):
+            raise ValueError("no_raise expects no value")
         cli_fields = (self.exit_code, self.stdout, self.stdout_contains)
         if self.kind == "cli":
             if all(item is None for item in cli_fields):
@@ -184,6 +208,8 @@ class OracleCase(BaseModel):
     stdin: str | None = None
     expect: OracleExpectation
     held_out: bool = False
+    files: dict[str, str] | None = None
+    """A CLI case's files (relative path to text), written into its working directory."""
 
     @field_validator("case_id")
     @classmethod
@@ -195,7 +221,23 @@ class OracleCase(BaseModel):
     @field_validator("args", "init")
     @classmethod
     def _plain_args(cls, value: Any) -> Any:
-        return None if value is None else _json_value(value)
+        if value is None:
+            return None
+        if has_built_value(_json_value(value)):
+            raise ValueError("case data holds no $call or $param; the oracle's inputs build values")
+        return value
+
+    @field_validator("files")
+    @classmethod
+    def _files(cls, value: dict[str, str] | None) -> dict[str, str] | None:
+        if value is not None:
+            check_case_files(value)
+        return value
+
+    @property
+    def verifies(self) -> bool:
+        """Whether a pass of this case can verify a criterion (every kind but ``no_raise``)."""
+        return self.expect.kind != "no_raise"
 
 
 def imported_before_checkout(module: str) -> bool:
@@ -262,6 +304,12 @@ class OracleSpec(BaseModel):
     """The constructor declared that the criterion names the default symbol."""
     setup: tuple[SetupCall, ...] = ()
     """Calls the harness makes, in order, before it resolves the target."""
+    inputs: dict[str, Any] | None = None
+    """The target call's parameters, each a template over ``params`` (``call_grammar``)."""
+    receiver: Any = None
+    """A method oracle's instance: a ``$call`` or ``$symbol`` template over ``params``."""
+    project: tuple[dict[str, Any], ...] = ()
+    """Reads applied to each returned value of a ``returns`` case before comparison."""
 
     @model_validator(mode="after")
     def _consistent(self) -> OracleSpec:
@@ -276,6 +324,7 @@ class OracleSpec(BaseModel):
             # candidate controls what its target process reports, see
             # boundary/acceptance.py), so an oracle without one decides nothing.
             raise ValueError(f"{self.check_id}: an oracle needs at least one held-out case")
+        self._check_built_call()
         positions = [case_position(case.case_id) or 0 for case in self.cases]
         if positions != sorted(set(positions)):
             # Increasing and unique; gaps remain where the reference check
@@ -288,8 +337,12 @@ class OracleSpec(BaseModel):
                 )
             if (case.expect.kind == "cli") != (self.call_kind is CallKind.CLI):
                 raise ValueError(f"{self.check_id}: case {case.case_id} expectation kind")
-            if case.init is not None and self.call_kind is not CallKind.METHOD:
+            if case.init is not None and (
+                self.call_kind is not CallKind.METHOD or self.receiver is not None
+            ):
                 raise ValueError(f"{self.check_id}: init is only valid for method oracles")
+            if case.files is not None and self.call_kind is not CallKind.CLI:
+                raise ValueError(f"{self.check_id}: files are only valid for CLI oracles")
             refs = symbol_refs(case.args) + symbol_refs(case.init)
             if refs and self.call_kind is CallKind.CLI:
                 raise ValueError(f"{self.check_id}: a CLI case takes no symbol reference")
@@ -301,9 +354,53 @@ class OracleSpec(BaseModel):
         binding = self.default_binding
         if binding.criterion_key != self.criterion_key or binding.call_kind is not self.call_kind:
             raise ValueError(f"{self.check_id}: default binding does not match the oracle")
-        if binding.arg_map and set(binding.arg_map) != set(self.params):
+        if binding.arg_map and set(binding.arg_map) != set(self.call_params):
             raise ValueError(f"{self.check_id}: default binding arg_map keys")
         return self
+
+    def _check_built_call(self) -> None:
+        """``inputs``, ``receiver`` and ``project`` satisfy the grammar and fit the call kind."""
+        built = self.inputs is not None or self.receiver is not None or bool(self.project)
+        if built and self.call_kind is CallKind.CLI:
+            raise ValueError(f"{self.check_id}: inputs, receiver and project are not for CLI")
+        if self.receiver is not None and self.call_kind is not CallKind.METHOD:
+            raise ValueError(f"{self.check_id}: a receiver is only valid for method oracles")
+        try:
+            if self.inputs is not None:
+                if not all(_IDENTIFIER.fullmatch(name) for name in self.inputs):
+                    raise ValueError(f"{self.check_id}: inputs are named by identifiers")
+                for template in self.inputs.values():
+                    check_template(template, self.params)
+            if self.receiver is not None:
+                if not is_receiver(self.receiver):
+                    raise ValueError(f"{self.check_id}: a receiver is a $call or $symbol")
+                check_template(self.receiver, self.params)
+            if self.project:
+                check_reads(list(self.project), self.params)
+        except GrammarError as exc:
+            raise ValueError(f"{self.check_id}: {exc.code}") from exc
+
+    @property
+    def call_params(self) -> tuple[str, ...]:
+        """The names the target is called with: ``inputs`` when declared, else ``params``.
+
+        A binding's ``arg_map`` maps these, and a worker declaring its own
+        entry point sees these (``interface``).
+        """
+        return tuple(self.inputs) if self.inputs is not None else self.params
+
+    def call_frame(self, case: OracleCase) -> dict[str, Any]:
+        """What the target process receives for ``case`` besides the split arguments.
+
+        The receiver and the projection, each ``$param`` bound to the case's
+        value; never an expected value.
+        """
+        frame: dict[str, Any] = {}
+        if self.receiver is not None:
+            frame["receiver"] = bind_params(self.receiver, case.args)
+        if self.project and case.expect.kind == "returns":
+            frame["project"] = bind_params(list(self.project), case.args)
+        return frame
 
     @property
     def failure_signature(self) -> str:
@@ -338,8 +435,8 @@ class OracleSpec(BaseModel):
         return CheckTier.U
 
     def interface(self) -> dict[str, Any]:
-        """What a worker may learn: call kind and parameter names, no cases."""
-        return {"call_kind": self.call_kind.value, "params": list(self.params)}
+        """What a worker may learn: call kind and the call's parameter names, no cases."""
+        return {"call_kind": self.call_kind.value, "params": list(self.call_params)}
 
 
 # --------------------------------------------------------------------------
@@ -363,11 +460,24 @@ def _oracle_entry(spec: OracleSpec) -> dict[str, Any]:
         "params": list(spec.params),
         "failure_signature": spec.failure_signature,
         "default_binding": spec.default_binding.to_dict(),
-        "cases": [case.model_dump(mode="json") for case in spec.cases],
+        "cases": [_case_entry(case) for case in spec.cases],
     }
+    # Each only when declared: an oracle without one freezes the same bytes as before.
     if spec.setup:
-        # Only when declared: an oracle without setup freezes the same bytes as before.
         entry["setup"] = [call.model_dump(mode="json") for call in spec.setup]
+    if spec.inputs is not None:
+        entry["inputs"] = spec.inputs
+    if spec.receiver is not None:
+        entry["receiver"] = spec.receiver
+    if spec.project:
+        entry["project"] = list(spec.project)
+    return entry
+
+
+def _case_entry(case: OracleCase) -> dict[str, Any]:
+    entry = case.model_dump(mode="json")
+    if entry.get("files") is None:
+        entry.pop("files", None)
     return entry
 
 

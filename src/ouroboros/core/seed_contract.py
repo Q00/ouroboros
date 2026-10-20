@@ -14,6 +14,8 @@ from ouroboros.core.seed import (
     BrownfieldContext,
     EvaluationPrinciple,
     ExitCondition,
+    RepoFact,
+    RequesterAnswer,
     Seed,
     ac_texts,
 )
@@ -55,6 +57,9 @@ class SeedContract:
     evaluation_principles: tuple[EvaluationPrinciple, ...]
     exit_conditions: tuple[ExitCondition, ...]
     brownfield_context: BrownfieldContext
+    assumptions: tuple[str, ...] = ()
+    requester_answers: tuple[RequesterAnswer, ...] = ()
+    repo_facts: tuple[RepoFact, ...] = ()
 
     @classmethod
     def from_seed(cls, seed: Seed) -> SeedContract:
@@ -80,6 +85,9 @@ class SeedContract:
             evaluation_principles=seed.evaluation_principles,
             exit_conditions=seed.exit_conditions,
             brownfield_context=seed.brownfield_context,
+            assumptions=seed.assumptions,
+            requester_answers=seed.requester_answers,
+            repo_facts=seed.repo_facts,
         )
 
 

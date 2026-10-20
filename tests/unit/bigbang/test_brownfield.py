@@ -528,6 +528,7 @@ class TestScanAndRegister:
 
         # Set up store mock — register returns the repo, list returns it
         store = AsyncMock(spec=BrownfieldStore)
+        store.get_index_entries.return_value = {}
         store.register.return_value = BrownfieldRepo(path=resolved, name="my-repo")
         store.list.return_value = [BrownfieldRepo(path=resolved, name="my-repo")]
 
@@ -557,6 +558,8 @@ class TestScanAndRegister:
         mock_adapter = AsyncMock()
 
         store = AsyncMock(spec=BrownfieldStore)
+
+        store.get_index_entries.return_value = {}
         store.register.return_value = BrownfieldRepo(path=resolved, name="proj", is_default=True)
         store.list.return_value = [BrownfieldRepo(path=resolved, name="proj", is_default=True)]
 
@@ -579,6 +582,7 @@ class TestScanAndRegister:
 
         resolved = str(repo.resolve())
         store = AsyncMock(spec=BrownfieldStore)
+        store.get_index_entries.return_value = {}
         store.register.return_value = BrownfieldRepo(path=resolved, name="repo")
         # Existing default repo is preserved (not deleted by upsert approach)
         existing_default = BrownfieldRepo(path="/some/other", name="other", is_default=True)
@@ -598,6 +602,7 @@ class TestScanAndRegister:
     @pytest.mark.asyncio
     async def test_no_repos_found(self, tmp_path: Path) -> None:
         store = AsyncMock(spec=BrownfieldStore)
+        store.get_index_entries.return_value = {}
         store.list.return_value = []
 
         result = await scan_and_register(store, root=tmp_path)
@@ -629,6 +634,8 @@ class TestScanAndRegister:
         beta_path = str((tmp_path / "beta").resolve())
 
         store = AsyncMock(spec=BrownfieldStore)
+
+        store.get_index_entries.return_value = {}
         store.register.return_value = BrownfieldRepo(path=alpha_path, name="alpha")
         store.list.return_value = [
             BrownfieldRepo(path=alpha_path, name="alpha"),
@@ -653,6 +660,7 @@ class TestRegisterRepo:
     @pytest.mark.asyncio
     async def test_registers_with_explicit_name_and_desc(self) -> None:
         store = AsyncMock(spec=BrownfieldStore)
+        store.get_index_entries.return_value = {}
         store.register.return_value = BrownfieldRepo(
             path="/home/user/my-repo", name="my-repo", desc="A cool project"
         )
@@ -675,6 +683,8 @@ class TestRegisterRepo:
         repo_dir.mkdir()
 
         store = AsyncMock(spec=BrownfieldStore)
+
+        store.get_index_entries.return_value = {}
         store.register.return_value = BrownfieldRepo(
             path=str(repo_dir.resolve()), name="my-project"
         )
@@ -699,6 +709,8 @@ class TestRegisterRepo:
         mock_adapter.complete.return_value = Result.ok(mock_response)
 
         store = AsyncMock(spec=BrownfieldStore)
+
+        store.get_index_entries.return_value = {}
         store.register.return_value = BrownfieldRepo(
             path=str(repo_dir.resolve()), name="proj", desc="A great project"
         )
@@ -722,6 +734,8 @@ class TestRegisterRepo:
         mock_adapter = AsyncMock()
 
         store = AsyncMock(spec=BrownfieldStore)
+
+        store.get_index_entries.return_value = {}
         store.register.return_value = BrownfieldRepo(
             path=str(repo_dir.resolve()), name="proj", desc="Manual desc"
         )
@@ -748,6 +762,8 @@ class TestRegisterRepo:
         mock_adapter.complete.side_effect = ProviderError("LLM down")
 
         store = AsyncMock(spec=BrownfieldStore)
+
+        store.get_index_entries.return_value = {}
         store.register.return_value = BrownfieldRepo(path=str(repo_dir.resolve()), name="proj")
 
         # Should not raise
@@ -768,6 +784,8 @@ class TestRegisterRepo:
         repo_dir.mkdir()
 
         store = AsyncMock(spec=BrownfieldStore)
+
+        store.get_index_entries.return_value = {}
         store.register.return_value = BrownfieldRepo(path=str(repo_dir.resolve()), name="proj")
 
         await register_repo(store=store, path=str(repo_dir))
@@ -780,6 +798,7 @@ class TestRegisterRepo:
     @pytest.mark.asyncio
     async def test_preserves_nonexistent_path(self) -> None:
         store = AsyncMock(spec=BrownfieldStore)
+        store.get_index_entries.return_value = {}
         store.register.return_value = BrownfieldRepo(path="/nonexistent/repo", name="repo")
 
         await register_repo(store=store, path="/nonexistent/repo")
@@ -798,6 +817,7 @@ class TestSetDefaultRepo:
     @pytest.mark.asyncio
     async def test_sets_default_successfully(self) -> None:
         store = AsyncMock(spec=BrownfieldStore)
+        store.get_index_entries.return_value = {}
         store.update_is_default.return_value = BrownfieldRepo(
             path="/home/user/repo-a", name="repo-a", is_default=True
         )
@@ -812,6 +832,7 @@ class TestSetDefaultRepo:
     @pytest.mark.asyncio
     async def test_returns_none_for_unregistered_path(self) -> None:
         store = AsyncMock(spec=BrownfieldStore)
+        store.get_index_entries.return_value = {}
         store.update_is_default.return_value = None
 
         repo = await set_default_repo(store=store, path="/nonexistent")
@@ -822,6 +843,7 @@ class TestSetDefaultRepo:
     @pytest.mark.asyncio
     async def test_delegates_to_store(self) -> None:
         store = AsyncMock(spec=BrownfieldStore)
+        store.get_index_entries.return_value = {}
         expected = BrownfieldRepo(path="/repo", name="repo", desc="Desc", is_default=True)
         store.update_is_default.return_value = expected
 
@@ -838,6 +860,8 @@ class TestSetDefaultRepo:
         (repo_dir / "README.md").write_text("# My Repo\nA great tool for devs")
 
         store = AsyncMock(spec=BrownfieldStore)
+
+        store.get_index_entries.return_value = {}
         store.update_is_default.return_value = BrownfieldRepo(
             path=str(repo_dir), name="my-repo", desc=None, is_default=True
         )
@@ -868,6 +892,7 @@ class TestSetDefaultRepo:
     async def test_skips_desc_generation_when_desc_exists(self) -> None:
         """set_default does NOT call LLM if desc already exists."""
         store = AsyncMock(spec=BrownfieldStore)
+        store.get_index_entries.return_value = {}
         store.update_is_default.return_value = BrownfieldRepo(
             path="/repo", name="repo", desc="Already has desc", is_default=True
         )
@@ -889,6 +914,7 @@ class TestSetDefaultRepo:
     async def test_skips_desc_generation_when_no_llm(self) -> None:
         """set_default does NOT generate desc without LLM adapter."""
         store = AsyncMock(spec=BrownfieldStore)
+        store.get_index_entries.return_value = {}
         store.update_is_default.return_value = BrownfieldRepo(
             path="/repo", name="repo", desc=None, is_default=True
         )
@@ -902,6 +928,7 @@ class TestSetDefaultRepo:
     async def test_unset_default_preserves_existing_desc(self) -> None:
         """When switching default, the previously-default repo keeps its desc."""
         store = AsyncMock(spec=BrownfieldStore)
+        store.get_index_entries.return_value = {}
         # update_is_default returns the NEW default repo — its desc should be intact
         store.update_is_default.return_value = BrownfieldRepo(
             path="/repo-b", name="repo-b", desc="B description", is_default=True
@@ -928,6 +955,7 @@ class TestSetDefaultRepo:
             path=str(repo_dir), name="my-repo", desc=None, is_default=True
         )
         store = AsyncMock(spec=BrownfieldStore)
+        store.get_index_entries.return_value = {}
         store.update_is_default.return_value = original_repo
 
         mock_adapter = AsyncMock()
@@ -1073,6 +1101,8 @@ class TestScanAndRegisterMocked:
         ]
 
         store = AsyncMock(spec=BrownfieldStore)
+
+        store.get_index_entries.return_value = {}
         store.register.return_value = BrownfieldRepo(path="/home/user/alpha", name="alpha")
         store.list.return_value = [
             BrownfieldRepo(path="/home/user/alpha", name="alpha"),
@@ -1095,6 +1125,8 @@ class TestScanAndRegisterMocked:
         fake_repos = [{"path": "/a", "name": "a"}]
 
         store = AsyncMock(spec=BrownfieldStore)
+
+        store.get_index_entries.return_value = {}
         store.register.return_value = BrownfieldRepo(path="/a", name="a")
         store.list.return_value = [
             BrownfieldRepo(path="/a", name="a"),
@@ -1119,6 +1151,8 @@ class TestScanAndRegisterMocked:
         )
 
         store = AsyncMock(spec=BrownfieldStore)
+
+        store.get_index_entries.return_value = {}
         store.register.return_value = BrownfieldRepo(path="/new", name="new")
         # list returns the existing default + newly scanned repo
         store.list.return_value = [existing_default, BrownfieldRepo(path="/new", name="new")]
@@ -1142,6 +1176,7 @@ class TestScanAndRegisterMocked:
         found. Callers that need the full registry must call store.list() directly.
         """
         store = AsyncMock(spec=BrownfieldStore)
+        store.get_index_entries.return_value = {}
         pre_registered = [BrownfieldRepo(path="/existing", name="existing")]
         store.list.return_value = pre_registered
 
@@ -1160,6 +1195,7 @@ class TestScanAndRegisterMocked:
         """Result must contain only repos discovered by THIS scan, not the whole DB."""
         fake_repos = [{"path": "/scanned", "name": "scanned"}]
         store = AsyncMock(spec=BrownfieldStore)
+        store.get_index_entries.return_value = {}
         store.register.return_value = BrownfieldRepo(path="/scanned", name="scanned")
         # store.list() includes both the scanned repo AND an unrelated, manually
         # registered repo outside the scan root.
@@ -1183,6 +1219,8 @@ class TestScanAndRegisterMocked:
         mock_adapter = AsyncMock()
 
         store = AsyncMock(spec=BrownfieldStore)
+
+        store.get_index_entries.return_value = {}
         store.get_default.return_value = BrownfieldRepo(
             path="/repo",
             name="repo",

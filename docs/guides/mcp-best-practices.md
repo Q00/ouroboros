@@ -48,10 +48,10 @@ This is a process boundary, not a feature flag. Data crossing it should use
 explicit serializable requests and application handles rather than imported
 SDK objects.
 
-### Known SDK v2.0.0 limitation
+### Known SDK v2.2.0 limitation
 
 The SDK model layer accepts arbitrary JSON for `structuredContent`, and the
-Ouroboros mapper preserves JSON null. However, `mcp==2.0.0` currently drops an
+Ouroboros mapper preserves JSON null. However, `mcp==2.2.0` currently drops an
 explicit wire-level `structuredContent: null`; when a tool has an output schema,
 the SDK validator then reports the value as missing. The dual-era integration
 matrix keeps this case as a strict expected failure so a future SDK patch cannot

@@ -1,13 +1,16 @@
 """One run's check package boundary, shared by ``ooo run`` and ``ouroboros_execute_seed``.
 
-``CheckPackageRun`` resolves the switch (``boundary/switch.py``, on by
-default), prepares the package before the worker starts, installs
+``CheckPackageRun`` resolves the switch (``boundary/switch.py``, ``record``
+by default), prepares the package before the worker starts, installs
 ``CheckPackageAuthority`` on the runner so the package decides the criteria it
-covers before the terminal status is persisted, and afterwards renders the
+covers before the terminal status is persisted (in ``record`` mode it only
+records what it would have decided), and afterwards renders the
 outcome and a closed-value summary of it (``outcome_meta``) that the MCP
 ``execute_seed`` result carries. The only telemetry is one anonymous
 ``acceptance_no_evidence`` count per decided run of the criteria accepted
-without evidence and why (``boundary/no_evidence.py``); it decides nothing.
+without evidence and why (``boundary/no_evidence.py``), and one
+``acceptance_artifact_checks`` row of what the controller-run artifact checks
+observed (``boundary/base_regression.py``); neither decides anything.
 
 With the switch ``off`` nothing here calls a model, writes an event, or
 touches the runner: the run is the legacy run.
@@ -40,9 +43,11 @@ from ouroboros.boundary.authority import (
     AuthorityOutcome,
     CheckPackageAuthority,
 )
+from ouroboros.boundary.base_regression import ArtifactEffect, report_artifact_checks
 from ouroboros.boundary.ledger import BoundaryLedger, BoundaryOrderError
 from ouroboros.boundary.no_evidence import report_no_evidence
 from ouroboros.boundary.resume import (
+    NO_ADMITTED_PACKAGE,
     ResumedBoundary,
     ResumedCheckPackageAuthority,
     load_resumed_boundary,
@@ -77,11 +82,22 @@ _FAILURE_CLASS_VALUES = frozenset(
         "blocked",
         "transcript_missing_infrastructure",
         "script_absent_from_artifact",
+        "no_call_evidence",
+        "cited_call_failed",
     }
 )
 SWITCH_TEXT = (
     "on by default; opt out with --no-check-package, OUROBOROS_CHECK_PACKAGE=off, "
     "or boundary.check_package: off"
+)
+RECORD_TEXT = (
+    "record only by default: it decides nothing and the run's outcome is unchanged; "
+    "let it decide with --check-package, OUROBOROS_CHECK_PACKAGE=decide, or "
+    "boundary.check_package: decide; turn it off with --no-check-package"
+)
+RECORD_HEADER = (
+    "Check package, record mode: the lines below are what it would have decided; "
+    "it decided nothing, and the run's outcome is unchanged."
 )
 
 
@@ -214,6 +230,11 @@ class CheckPackageRun:
     def enabled(self) -> bool:
         return self.settings.enabled
 
+    @property
+    def records_only(self) -> bool:
+        """Whether the package only records what it would have decided (``record`` mode)."""
+        return self.enabled and self.settings.mode == "record"
+
     async def prepare(
         self,
         runner: Any,
@@ -250,9 +271,10 @@ class CheckPackageRun:
             from ouroboros.boundary.constructor import CheckConstructor
 
             constructor_factory = CheckConstructor
+        switch_text = RECORD_TEXT if self.records_only else SWITCH_TEXT
         lines = [
             "Check package: constructing checks from the acceptance criteria "
-            f"(read-only; {SWITCH_TEXT})..."
+            f"(read-only; {switch_text})..."
         ]
         try:
             constructor = constructor_factory(
@@ -274,6 +296,9 @@ class CheckPackageRun:
             raise
         except Exception as exc:  # noqa: BLE001 - a preparation fault must not fail the run
             self.preparation_error = type(exc).__name__
+            # The base snapshot this run should have is missing: the verify
+            # gate cannot tell a signal-free command from a real failure.
+            runner.check_package_unprepared = True
             log.warning(
                 "boundary.run_control.prepare_failed",
                 execution_id=execution_id,
@@ -285,12 +310,17 @@ class CheckPackageRun:
                 "the existing verifier decides this run.",
             ]
         self.state = state
-        if not state.admitted:
+        modes = {state.contract.base_regression, state.contract.worker_test_gate}
+        checks_on = modes != {"off"}
+        if not state.admitted and not (checks_on and state.base_snapshot is not None):
             # No admitted package: this run is the legacy run, exactly as with
             # the check package off. Nothing is
             # installed on the runner; the outcome summary keeps the failure
             # status and reports reconciliation=fallback_to_legacy.
             return [*lines, *render_preparation(state)]
+        # With no admitted package the authority installs no gate: the legacy
+        # verifier decides every attempt, and at the end the artifact checks
+        # may still fail the (all uncovered) criteria.
         self.authority = CheckPackageAuthority(
             state, self.settings, event_store=event_store, candidate_checkout=worker_dir
         )
@@ -311,12 +341,25 @@ class CheckPackageRun:
             raise BoundaryOrderError("a resumed run needs its execution id")
         self.skipped_reason = "resume"
         try:
-            boundary = await load_resumed_boundary(event_store, execution_id)
             # The mode and the settings are the run's, from its enabled record
             # (``boundary.check_package.enabled``), never the live config: a
             # run that was off resumes off, one that was on keeps its settings.
             # A malformed record is an undecidable boundary (on, nothing runs).
-            recorded = await BoundaryLedger(event_store).check_package_enabled(execution_id)
+            ledger = BoundaryLedger(event_store)
+            recorded = await ledger.check_package_enabled(execution_id)
+            run_contract = await ledger.run_contract(execution_id) if recorded else None
+            if run_contract is not None and run_contract.check_package == "record":
+                # A recording run decided nothing live; its resume decides
+                # nothing either, whatever its journal holds.
+                self.settings = CheckPackageSettings(
+                    enabled=True,
+                    check_timeout_seconds=run_contract.check_timeout_seconds,
+                    mode="record",
+                )
+                self.resuming = True
+                self._resume_boundary = None
+                return
+            boundary = await load_resumed_boundary(event_store, execution_id)
             contract = boundary.contract if boundary is not None else None
         except Exception as exc:  # noqa: BLE001 - any read failure refuses the resume
             log.warning("boundary.run_control.resume_unreadable", error_type=type(exc).__name__)
@@ -339,6 +382,11 @@ class CheckPackageRun:
         if boundary is None:
             if not self.enabled:
                 return []
+            if self.records_only:
+                return [
+                    "Check package is not run on resume: the run only records "
+                    "(record mode), and the legacy verifier decides, as in the live run."
+                ]
             return ["Check package is not applied on resume: no admitted package was bound."]
         self.resumed = ResumedCheckPackageAuthority(
             boundary, event_store=event_store, candidate_checkout=worker_dir
@@ -348,6 +396,11 @@ class CheckPackageRun:
             return [
                 "Check package: resumed run whose boundary records are missing "
                 f"({boundary.reason}); every criterion is undecided."
+            ]
+        if boundary.reason == NO_ADMITTED_PACKAGE:
+            return [
+                "Check package: resumed run with no admitted package; the artifact-check "
+                "fails the run recorded are replayed, the legacy verifier decides the rest."
             ]
         if boundary.source == "memory":
             return [
@@ -409,7 +462,11 @@ class CheckPackageRun:
         """
         if not self.enabled:
             return {"check_package": "off", "check_package_status": "not_run"}
-        return {"check_package": "on", "check_package_status": "pending"}
+        return {
+            "check_package": "on",
+            "check_package_status": "pending",
+            "check_package_mode": self.settings.mode,
+        }
 
     def keeps_runner_result(self) -> bool:
         """Whether a background job must keep the runner's returned result authoritative.
@@ -456,7 +513,10 @@ class CheckPackageRun:
         """``check_package_status`` of the outcome summary (``outcome_meta``)."""
         if self.resumed is not None:
             # Only a run whose worker was bound to an admitted package resumes
-            # with a package decision.
+            # with a package decision; one bound to none resumes only to replay
+            # its recorded artifact-check fails.
+            if self.resumed.boundary.reason == NO_ADMITTED_PACKAGE:
+                return "construction_failed"
             return "admitted"
         if not self.enabled or not self.attempted:
             return "not_run"
@@ -468,12 +528,22 @@ class CheckPackageRun:
         return "rejected" if reason.startswith("package_") else "construction_failed"
 
     def render_outcome(self) -> list[str]:
-        """Lines describing what the package decided (empty when it did not run)."""
+        """Lines describing what the package decided (empty when it did not run).
+
+        In record mode a header says the package decided nothing.
+        """
+        lines = self._render_outcome()
+        if not self.records_only or not lines:
+            return lines
+        return [RECORD_HEADER, *lines]
+
+    def _render_outcome(self) -> list[str]:
         if self.resumed is not None:
             return self.resumed.render()
+        if self.state is not None and not self.state.admitted:
+            lines = [unavailable_line(self.state), _no_package_coverage_line(self.state)]
+            return lines + self._artifact_check_lines()
         if self.authority is None:
-            if self.state is not None and not self.state.admitted:
-                return [unavailable_line(self.state), _no_package_coverage_line(self.state)]
             return []
         outcome = self.authority.outcome
         if outcome is None:
@@ -504,18 +574,70 @@ class CheckPackageRun:
                 "Attempts the legacy verifier rejected on legacy-decided criteria: "
                 f"{self.authority.gate.legacy_failures}."
             )
+        if self.authority.gate.artifact_repairs:
+            lines.append(
+                "Repairs driven by failing existing or added tests: "
+                f"{self.authority.gate.artifact_repairs}."
+            )
         reconciliation = outcome.reconciliation
         if reconciliation is not None:
             from ouroboros.boundary.acceptance import render_reconciliation
 
             lines.extend(render_reconciliation(reconciliation))
-            if reconciliation.run_accepted and not outcome.legacy_run_accepted:
+            if self.records_only:
+                if reconciliation.run_accepted != outcome.legacy_run_accepted:
+                    lines.append(
+                        "The check package would have "
+                        + ("accepted" if reconciliation.run_accepted else "rejected")
+                        + " this run; it only records, so the run's outcome is unchanged."
+                    )
+            elif reconciliation.run_accepted and not outcome.legacy_run_accepted:
                 lines.append(
                     "The check package accepted criteria the legacy verifier rejected; "
                     "the legacy verdict is advisory only."
                 )
             elif outcome.legacy_run_accepted and not reconciliation.run_accepted:
                 lines.append("The finished workspace fails the frozen check package.")
+        lines.extend(self._undecided_finding_lines())
+        return lines
+
+    def _artifact_check_lines(self) -> list[str]:
+        """What the artifact checks failed, or found without deciding, on a run with no package."""
+        outcome = self.authority.outcome if self.authority is not None else None
+        reconciliation = outcome.reconciliation if outcome is not None else None
+        if reconciliation is None:
+            return []
+        lines = self._undecided_finding_lines()
+        if not any(d.artifact_check for d in reconciliation.decisions):
+            return lines
+        from ouroboros.boundary.acceptance import render_reconciliation
+
+        assert outcome is not None and outcome.verdict is not None
+        return [
+            *(
+                f"- {example.check_id} ({example.role}): {example.reason}\n{example.output_tail}"
+                for example in outcome.verdict.counterexamples
+            ),
+            *lines,
+            *render_reconciliation(reconciliation),
+        ]
+
+    def _undecided_finding_lines(self) -> list[str]:
+        """The findings that decided nothing: unadjudicated regressions and recorded findings."""
+        authority = self.authority
+        if authority is None:
+            return []
+        lines = []
+        for finding in authority.artifact_findings:
+            effect = authority.artifact_effects.get(finding.check)
+            names = ", ".join(finding.failed[:10])
+            if effect is ArtifactEffect.UNADJUDICATED:
+                lines.append(
+                    "Existing tests passed on the base and fail on the finished workspace, and no "
+                    f"admitted package adjudicates them ({names}); the criteria stay unverified."
+                )
+            elif effect is ArtifactEffect.RECORDED:
+                lines.append(f"Recorded only ({finding.check.value}, decides nothing): {names}.")
         return lines
 
     def _coverage(self) -> str | None:
@@ -561,6 +683,13 @@ class CheckPackageRun:
         if outcome is None or outcome.reconciliation is None:
             return "fallback_to_legacy"
         reconciliation = outcome.reconciliation
+        if (
+            self.state is not None
+            and not self.state.admitted
+            and not any(d.artifact_check for d in reconciliation.decisions)
+        ):
+            # No admitted package and no artifact check decided: the legacy run.
+            return "fallback_to_legacy"
         rejected = [d for d in reconciliation.decisions if not d.accepted]
         if rejected and all(d.legacy_decided for d in rejected):
             # Every rejection came from the legacy verifier on a criterion the
@@ -583,7 +712,8 @@ class CheckPackageRun:
         ``paused``) after the authority decided, the in-process state that
         still holds the held-out cases is dropped (the authority already did
         for its own), and the criteria accepted without evidence are counted
-        once per run (``report_no_evidence``; ``surface`` names the caller).
+        once per run (``report_no_evidence``; ``surface`` names the caller),
+        with what the artifact checks observed (``report_artifact_checks``).
         """
         if terminal_status in ("completed", "failed", "cancelled") and (
             self.authority is None or self.authority.outcome is not None
@@ -602,7 +732,34 @@ class CheckPackageRun:
                 check_package="on" if self.enabled or self.resumed is not None else "off",
                 check_package_status=self.status,
                 runtime_backend=self.runtime_backend,
+                check_package_mode=(
+                    self.settings.mode if self.enabled or self.resumed is not None else "off"
+                ),
             )
+            self._report_artifact_checks(outcome, surface)
+
+    def _report_artifact_checks(self, outcome: AuthorityOutcome, surface: str | None) -> None:
+        """One ``acceptance_artifact_checks`` row when this run's authority ran the checks."""
+        authority = self.authority
+        reconciliation = outcome.reconciliation
+        if authority is None or not authority.artifact_findings or reconciliation is None:
+            return
+        report_artifact_checks(
+            authority.artifact_findings,
+            modes=authority.artifact_modes,
+            effects=authority.artifact_effects,
+            would_fail=authority.artifact_would_fail,
+            # Record mode: no criterion was failed (``would_fail`` has them).
+            failed_criteria=(
+                0
+                if self.records_only
+                else sum(1 for d in reconciliation.decisions if d.artifact_check)
+            ),
+            criterion_count=len(reconciliation.decisions),
+            repairs=authority.gate.artifact_repairs,
+            surface=surface,
+            runtime_backend=self.runtime_backend,
+        )
 
     async def outcome_meta(
         self,
@@ -639,6 +796,10 @@ class CheckPackageRun:
         coverage = self._coverage()
         if coverage is not None:
             meta["verification_coverage"] = coverage
+        # ``record``: everything above is what the package would have decided.
+        meta["check_package_mode"] = (
+            self.settings.mode if self.enabled or self.resumed is not None else "off"
+        )
         return meta
 
 

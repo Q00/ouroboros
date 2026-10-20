@@ -18,6 +18,7 @@ import structlog
 import yaml
 
 from ouroboros.auto.intent_guard import IntentGuardReport, IntentGuardStatus, guard_interview_turn
+from ouroboros.auto.requester import REQUESTER_ANSWER_PREFIX
 from ouroboros.backends import (
     backend_supports_tool_envelope,
 )
@@ -32,7 +33,7 @@ from ouroboros.bigbang.ambiguity import (
     get_milestone,
     qualifies_for_seed_completion,
 )
-from ouroboros.bigbang.answer_provenance import extraction_rounds
+from ouroboros.bigbang.answer_provenance import declare_provenance, extraction_rounds
 from ouroboros.bigbang.interview import (
     INITIAL_CONTEXT_SUMMARY_QUESTION,
     MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS,
@@ -60,7 +61,6 @@ from ouroboros.interview_adapters import (
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.host_context import resolve_request_subagent_dispatch
 from ouroboros.mcp.tools.advisory_dispatch import (
-    append_lateral_review_notice,
     append_question_advisory_dispatch,
     echo_carries_dispatch,
     strip_bridge_notice,
@@ -71,6 +71,7 @@ from ouroboros.mcp.tools.interview_advisory import (
 )
 from ouroboros.mcp.tools.question_advisory import (
     build_question_advisory_request,
+    required_advisory_personas,
 )
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
@@ -457,7 +458,8 @@ def _build_interview_lateral_review_tool_args(
     score: AmbiguityScore | None,
     lateral_review_meta: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build deterministic ``ouroboros_lateral_think`` args for interview review."""
+    """Build lateral-review args, skipping personas the advisory lanes already run."""
+    covered = required_advisory_personas("ouroboros_interview")
     latest = _latest_answered_round(state)
     milestone = lateral_review_meta["lateral_review_milestone"]
     from_milestone = lateral_review_meta["lateral_review_from_milestone"]
@@ -483,10 +485,10 @@ def _build_interview_lateral_review_tool_args(
         "problem_context": "\n".join(problem_lines),
         "current_approach": (
             "The main session is continuing a Socratic interview and is about to "
-            "route the next question. Review hidden assumptions, missing context, "
-            "and simplifications before asking the user or auto-answering from code."
+            "route the next question. Surface what the per-question advisory lanes "
+            "cannot: facts, evidence, or context the interview has not gathered yet."
         ),
-        "personas": list(_INTERVIEW_LATERAL_PERSONAS),
+        "personas": [p for p in _INTERVIEW_LATERAL_PERSONAS if p not in covered] or ["researcher"],
         "failed_attempts": [],
     }
 
@@ -581,7 +583,7 @@ def _with_lateral_review_dispatch(
         {
             "lateral_review_required": True,
             "lateral_review_tool": "ouroboros_lateral_think",
-            "lateral_review_personas": list(_INTERVIEW_LATERAL_PERSONAS),
+            "lateral_review_personas": list(tool_args["personas"]),
             "lateral_review_tool_args": tool_args,
             "lateral_review_orchestration": (
                 _build_interview_lateral_review_orchestration(
@@ -768,6 +770,8 @@ def _classify_interview_answer_source(answer: str) -> str:
     lowered = str(answer).lstrip().casefold()
     if lowered.startswith("[from-code]") or lowered.startswith("[from-repo]"):
         return "repo_fact"
+    if lowered.startswith(REQUESTER_ANSWER_PREFIX):  # auto relays the requester's own answer
+        return "requester"
     if lowered.startswith("[from-auto]") or lowered.startswith("[from-safe-default]"):
         return "generated"
     if lowered.startswith("[from-assumption]") or lowered.startswith("[from-inference]"):
@@ -1963,19 +1967,18 @@ class InterviewHandler:
         return MCPToolDefinition(
             name="ouroboros_interview",
             description=(
-                "Socratic interview that clarifies requirements before any "
-                "implementation. "
-                "Use when: a request is ambiguous, has unclear scope, or lacks "
-                "acceptance criteria — even if the user never says 'ooo'. "
-                "Result: a closed requirements state ready for Seed generation. "
-                "Do not use when: a validated Seed already exists "
-                "(use ouroboros_start_execute_seed) or the request is a simple "
-                "question or small unambiguous edit. "
-                "Start a new interview with initial_context, resume with session_id, "
-                "or record an answer to the current question. "
-                "In plugin mode, returns a delegation receipt "
-                "(status=delegated_to_subagent) and the interview executes in an "
-                "OpenCode Task pane — the real session_id is returned there."
+                "Clarify a vague request before any implementation. Use when: the user wants "
+                'something built but is unsure what ("help me figure out what to build", "add '
+                'notifications", "make it production-ready", "build me X"), the request is '
+                "ambiguous, or it lacks acceptance criteria; call it first, even if the user never "
+                "says 'ooo'. Result: a short Socratic interview, one question at a time, that "
+                "closes goals, constraints, and acceptance criteria, ready for Seed generation. Do "
+                "not use when: a validated Seed already exists (use ouroboros_start_execute_seed) "
+                "or the request is a simple question or small unambiguous edit. Start a new "
+                "interview with initial_context, resume with session_id, or record an answer to "
+                "the current question. In plugin mode, returns a delegation receipt "
+                "(status=delegated_to_subagent) and the interview executes in an OpenCode Task "
+                "pane; the real session_id is returned there."
             ),
             parameters=(
                 MCPToolParameter(
@@ -2310,7 +2313,7 @@ class InterviewHandler:
                             tool_name="ouroboros_interview",
                         )
                     )
-                state.record_answer(question_text, answer)
+                declare_provenance(state.record_answer(question_text, answer), arguments)
                 plugin_state_changed = True
             # Build transcript from persisted rounds
             transcript = _format_interview_transcript(state)
@@ -2878,20 +2881,19 @@ class InterviewHandler:
                         )
                     finally:
                         ambiguity_scoring_duration_ms = _elapsed_ms(ambiguity_scoring_started_at)
-                # Safe-default synthesis is emitted only after the
-                # auto driver has filled every remaining required
-                # ledger gap with audited conservative defaults. Do
-                # not require the semantic ambiguity scorer to also
-                # cross the normal human "done" threshold; that score
-                # can lag behind the ledger and would leave a trailing
-                # unanswered question in the persisted transcript.
+                # Safe-default synthesis is emitted only after the auto driver has filled every
+                # remaining required ledger gap with audited conservative defaults. Do not require
+                # the semantic ambiguity scorer to also cross the normal human "done" threshold;
+                # that score can lag behind the ledger and would leave a trailing unanswered
+                # question in the persisted transcript.
                 if is_safe_default_synthesis:
                     if has_pending_round:
                         state.rounds.pop()
-                    state.record_answer(
+                    synthesis_round = state.record_answer(
                         last_question or "[driver safe-default finalization]",
                         answer,
                     )
+                    declare_provenance(synthesis_round, arguments)
                     state.clear_stored_ambiguity()
                     state.mark_updated()
                     return await self._complete_interview_response(
@@ -3130,6 +3132,7 @@ class InterviewHandler:
                     )
                 )
             state = record_result.value
+            declare_provenance(state.rounds[-1] if state.rounds else None, arguments)
             state.clear_stored_ambiguity()
 
             # Emit response recorded event
@@ -3684,10 +3687,6 @@ class InterviewHandler:
             answer_meta.update(lateral_review_dispatch_meta)
 
         answer_response_text = f"Session {session_id}\n\n{display_question}"
-        answer_response_text = append_lateral_review_notice(
-            answer_response_text,
-            lateral_review_dispatch_meta,
-        )
         answer_response_text = append_question_advisory_dispatch(answer_response_text, answer_meta)
         # Q00/ouroboros#831 (diagnostics): response-shape event for
         # the answer branch.  Pure observability.

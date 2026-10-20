@@ -60,6 +60,7 @@ from ouroboros.boundary.check_env import (
     default_interpreter,
     spawn_check_process,
 )
+from ouroboros.boundary.footprint import OracleFootprint
 from ouroboros.boundary.oracle import OracleResult, is_oracle_file
 from ouroboros.boundary.oracle_run import (
     CappedOutput,
@@ -416,6 +417,7 @@ async def _execute_check(
     bindings: Mapping[str, Binding] | None = None,
     tier: str | None = None,
     include_held_out: bool = True,
+    footprint: OracleFootprint | None = None,
 ) -> CheckExecution:
     try:
         copy_checkout(source, copy_root)
@@ -462,6 +464,7 @@ async def _execute_check(
             scratch_parent=copy_root.parent,
             writable_root=copy_root,
             include_held_out=include_held_out,
+            footprint=footprint,
         )
         completed = _Completed(
             oracle_run.return_code,
@@ -592,6 +595,7 @@ async def _run_package(
     check_tiers: Mapping[str, str] | None = None,
     only_checks: frozenset[str] | None = None,
     include_held_out: bool = True,
+    footprint: OracleFootprint | None = None,
 ) -> _Run:
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
@@ -660,6 +664,7 @@ async def _run_package(
                             bindings=bindings,
                             tier=(check_tiers or {}).get(check.check_id),
                             include_held_out=include_held_out,
+                            footprint=footprint,
                         )
                     )
                 finally:
@@ -797,6 +802,7 @@ async def verify_candidate(
     only_checks: Sequence[str] | None = None,
     check_tiers: Mapping[str, CheckTier | str] | None = None,
     include_held_out: bool = True,
+    footprint: OracleFootprint | None = None,
 ) -> CandidateVerification:
     """Run the unchanged frozen package on a candidate checkout.
 
@@ -807,6 +813,8 @@ async def verify_candidate(
     ``check_tiers`` is recorded on each check and in the receipt. With
     ``include_held_out`` false an oracle check runs its visible cases only
     (the per-attempt gate): no held-out input reaches a target process.
+    ``footprint`` (``boundary/footprint.py``) collects which changed functions
+    each oracle check's target processes entered; it decides nothing here.
 
     Every check must exit 0. A reproduction check fails only when it exits
     non-zero with its ``failure_signature``; a non-zero exit without it (setup,
@@ -842,6 +850,7 @@ async def verify_candidate(
         only_checks=selection,
         include_held_out=include_held_out,
         extra_preconditions=refused,
+        footprint=footprint,
     )
     mutated, reasons = _mutation_reasons(run)
     reasons = [*run.preconditions, *reasons]

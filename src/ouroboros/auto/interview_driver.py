@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 import structlog
 
+from ouroboros.auto.answer_binding import answer_provenance, with_provenance
 from ouroboros.auto.answerer import (
     AutoAnswer,
     AutoAnswerContext,
@@ -35,6 +36,7 @@ from ouroboros.auto.interview_recovery import (
     with_timeout,
     with_transient_retry,
 )
+from ouroboros.auto.investigator import RepoInvestigator, settle
 from ouroboros.auto.lateral_routing import (
     select_persona_for_qa_failure,
     select_persona_for_safe_default_block,
@@ -42,6 +44,7 @@ from ouroboros.auto.lateral_routing import (
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
 from ouroboros.auto.repo_context import repo_auto_answer_context
+from ouroboros.auto.requester import Requester
 from ouroboros.auto.safe_defaults import (
     AUTO_ANSWER_PREFIX,
     SafeDefaultFinalization,
@@ -340,6 +343,8 @@ class AutoInterviewDriver:
         ]
         | None
     ) = None
+    requester: Requester | None = None  # opt-in: ask, not assume (auto/requester.py)
+    investigator: RepoInvestigator | None = None  # reads the repo to answer (auto/investigator.py)
     # RFC #1256 §I4 — Unified observability for ooo auto interview.
     # When set, the driver emits typed ``auto.interview.*`` events to the
     # EventStore alongside the existing structlog ``log.info(...)`` calls,
@@ -877,7 +882,7 @@ class AutoInterviewDriver:
                 try:
                     synthesis_turn = _validate_turn(
                         await with_timeout(
-                            self.backend.answer(
+                            with_provenance(self.backend, "assumption").answer(
                                 state.interview_session_id,
                                 synthesis,
                                 last_question=(
@@ -1200,11 +1205,7 @@ class AutoInterviewDriver:
             answer = self._answer_with_gap_steering(turn.question, ledger, answer_context)
             question_for_record = turn.question
 
-        # Upgrade a generic template answer to a concrete, goal-specific one
-        # via the interview-runtime LLM (when wired). This is what actually
-        # drives ambiguity down round-over-round; the deterministic answerer
-        # above still owns all safety/routing.
-        answer = await self._refine_answer(answer, question_for_record, state, ledger)
+        answer = await settle(self, answer, question_for_record, turn, state, ledger, round_number)
 
         if answer.blocker is not None:
             self.answerer.apply(answer, ledger, question=question_for_record)
@@ -1274,7 +1275,7 @@ class AutoInterviewDriver:
         # deterministically re-computes the same answer, and the next
         # ``backend.answer`` attempt either succeeds (round completes
         # cleanly) or returns the same blocker.
-        self.answerer.apply(answer, ledger, question=question_for_record)
+        self.answerer.apply(answer, ledger, question=question_for_record, asked=turn.question)
 
         answer_session_id = turn.session_id
 
@@ -1296,7 +1297,7 @@ class AutoInterviewDriver:
         try:
             turn = _validate_turn(
                 await with_transient_retry(
-                    lambda: self.backend.answer(
+                    lambda: with_provenance(self.backend, answer_provenance(answer)).answer(
                         answer_session_id,
                         answer.prefixed_text,
                         last_question=question_for_record,
@@ -1829,7 +1830,7 @@ class AutoInterviewDriver:
         try:
             new_turn = _validate_turn(
                 await with_timeout(
-                    self.backend.answer(
+                    with_provenance(self.backend, "assumption").answer(
                         state.interview_session_id,
                         f"{AUTO_ANSWER_PREFIX}[stagnation-concretization via "
                         f"{persona.value}] {decision}",
@@ -2135,7 +2136,7 @@ class AutoInterviewDriver:
             try:
                 synthesis_turn = _validate_turn(
                     await with_timeout(
-                        self.backend.answer(
+                        with_provenance(self.backend, "assumption").answer(
                             state.interview_session_id,
                             synthesis,
                             last_question=(

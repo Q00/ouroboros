@@ -33,6 +33,7 @@ from ouroboros.dashboard_web.reader import (
 _POLL_INTERVAL_SEC = 0.7
 # Heartbeat comment cadence so idle connections stay open through proxies/tunnels.
 _HEARTBEAT_SEC = 15.0
+_SNAPSHOT_BATCH_SIZE = 5000
 _PICKER_CONTRACT_ERROR = "picker_index_contract_unavailable"
 
 
@@ -124,7 +125,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         tail = EventTail(self.server.db_path, run_id)
         try:
-            events = tail.fetch_new(limit=100000)
+            events = tail.fetch_all(limit=_SNAPSHOT_BATCH_SIZE)
         except PickerIndexContractError:
             self._send_json({"error": _PICKER_CONTRACT_ERROR}, status=503)
             return

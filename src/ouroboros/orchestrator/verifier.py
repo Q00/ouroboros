@@ -97,14 +97,17 @@ _VALID_FAILURE_CLASSES: frozenset[str] = frozenset(
         # module, so the vocabulary cannot be derived from the enum here.
         "TRANSCRIPT_MISSING_INFRASTRUCTURE",
         "SCRIPT_ABSENT_FROM_ARTIFACT",
+        "NO_CALL_EVIDENCE",
+        "CITED_CALL_FAILED",
     }
 )
 
 # Failure classes of a verifier that had no evidence to judge, not a
-# rejection: the transcript was lost, or every unproven claim is a recorded
-# run that cannot be replayed because its script left the workspace.
+# rejection: the transcript was lost, every unproven claim is a recorded run
+# that cannot be replayed because its script left the workspace, or no
+# transcript call the worker cited qualifies as evidence.
 _UNAVAILABLE_FAILURE_CLASSES: frozenset[str] = frozenset(
-    {"TRANSCRIPT_MISSING_INFRASTRUCTURE", "SCRIPT_ABSENT_FROM_ARTIFACT"}
+    {"TRANSCRIPT_MISSING_INFRASTRUCTURE", "SCRIPT_ABSENT_FROM_ARTIFACT", "NO_CALL_EVIDENCE"}
 )
 
 
@@ -214,8 +217,8 @@ class VerifierVerdict:
         )
         if unavailable_claimed and not unavailable_valid:
             raise VerifierContractError(
-                "UNAVAILABLE requires TRANSCRIPT_MISSING_INFRASTRUCTURE or "
-                "SCRIPT_ABSENT_FROM_ARTIFACT, and ACCEPT"
+                "UNAVAILABLE requires TRANSCRIPT_MISSING_INFRASTRUCTURE, "
+                "SCRIPT_ABSENT_FROM_ARTIFACT or NO_CALL_EVIDENCE, and ACCEPT"
             )
         if self.passed and status is not VerifierStatus.PASS:
             msg = "VerifierVerdict(passed=True) must have status PASS"
@@ -305,7 +308,7 @@ def _default_retry_admission_for_failure_class(
         return RetryAdmission.REDISPATCH
     if failure_class == "BLOCKED":
         return RetryAdmission.BLOCK
-    if failure_class in {"EVIDENCE_MISSING", "EVIDENCE_FORM_MISMATCH"}:
+    if failure_class in {"EVIDENCE_MISSING", "EVIDENCE_FORM_MISMATCH", "CITED_CALL_FAILED"}:
         return RetryAdmission.RETRY
     return RetryAdmission.REDISPATCH
 

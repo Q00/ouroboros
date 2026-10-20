@@ -231,8 +231,10 @@ def _format_reattach_guidance(tracker) -> str:
     return "\n".join(lines)
 
 
-async def _interactive_resume(show_all: bool = False) -> int:
+async def _interactive_resume(show_all: bool = False, *, list_only: bool = False) -> int:
     """List in-flight sessions and prompt the user to pick one to re-attach.
+
+    With ``list_only`` the table is printed and no prompt is shown.
 
     Returns the integer exit code the CLI should emit so callers can pin
     distinct codes for missing DB vs. corrupted DB vs. happy path.
@@ -272,6 +274,9 @@ async def _interactive_resume(show_all: bool = False) -> int:
     _display_sessions(sessions)
     console.print()
 
+    if list_only:
+        return 0
+
     choice = typer.prompt(
         f"Enter number to re-attach (1-{len(sessions)}), or 'q' to quit",
         default="q",
@@ -309,6 +314,14 @@ def resume(
             ),
         ),
     ] = False,
+    list_only: Annotated[
+        bool,
+        typer.Option(
+            "--list",
+            "-l",
+            help="List in-flight sessions and exit without prompting.",
+        ),
+    ] = False,
 ) -> None:
     """List in-flight sessions and get re-attach instructions.
 
@@ -332,10 +345,13 @@ def resume(
 
         # Show every stale active session, not just the 20 most recent
         ouroboros resume --all
+
+        # List without prompting (scripts, agents)
+        ouroboros resume --list
     """
     if ctx.invoked_subcommand is not None:
         return
-    exit_code = asyncio.run(_interactive_resume(show_all=show_all))
+    exit_code = asyncio.run(_interactive_resume(show_all=show_all, list_only=list_only))
     if exit_code != 0:
         raise typer.Exit(exit_code)
 
