@@ -45,8 +45,14 @@ before and after each investigation; a change discards the answer
 (``workspace_changed``) and is reported in the event.
 
 Limits: at most ``max_calls`` calls per interview run (default 12,
-``OUROBOROS_AUTO_INVESTIGATOR_MAX_CALLS``; 0 turns the investigator off); a
-question past the cap is not found without a call. There is no time budget:
+``OUROBOROS_AUTO_INVESTIGATOR_MAX_CALLS``; 0 turns the investigator off). With
+a requester, a question past the cap is not found without a call and goes to
+the requester. Without one, the interview closes once the last call is spent
+(``close_at_cap``) instead of asking questions that can only end not found.
+Without a requester, a not-settled question is closed for the interview and
+the Seed (its ledger entry is ``DEFAULTED``), reaches the worker as an
+``Open question:`` line, and the reply tells the interviewer it stays open for
+the implementer. There is no time budget:
 the interview waits for each investigation, and the interview phase clock and
 the pipeline deadline stop while it runs (``auto/phase_clock.py``). The only
 time limit is a hang guard per call for a runtime that never returns (default
@@ -84,7 +90,12 @@ from ouroboros.auto.phase_clock import phase_clock_paused
 from ouroboros.auto.requester import ROUTED_SOURCES, ask_requester
 
 if TYPE_CHECKING:
-    from ouroboros.auto.interview_driver import AutoInterviewDriver, InterviewTurn
+    from ouroboros.auto.interview_driver import (
+        AutoInterviewDriver,
+        AutoInterviewResult,
+        InterviewTurn,
+        _InterviewRoundOutcome,
+    )
     from ouroboros.auto.ledger import SeedDraftLedger
     from ouroboros.auto.state import AutoPipelineState
 
@@ -120,6 +131,12 @@ _LOG_TEXT_LIMIT = 200
 # active and states the fact without guessing.
 NOT_SETTLED_VALUE = "The repository code does not settle this interview question."
 NOT_SETTLED_REPLY = "The repository code does not settle this question."
+# Added to the not-found reply when no requester is wired: nobody else can
+# answer, so the question stays open for the implementer, who reads the code.
+OPEN_FOR_IMPLEMENTER_REPLY = (
+    "It stays an open question for the implementer, who decides it from the code "
+    "when making the change."
+)
 
 INVESTIGATOR_SYSTEM_PROMPT = (
     "You answer one interview question about a software task by reading the "
@@ -491,12 +508,22 @@ def found_answer(
 
 
 def not_found_answer(
-    draft: AutoAnswer, result: Investigation, question: str, round_number: int
+    draft: AutoAnswer,
+    result: Investigation,
+    question: str,
+    round_number: int,
+    *,
+    open_for_implementer: bool = False,
 ) -> AutoAnswer:
     """What the checked code shows, and that it does not settle the question.
 
     No model answer text is kept. Each entry is a non-binding assumption
     (``DEFAULTED``) that carries the question, keyed ``.investigated.<round>``.
+    ``DEFAULTED`` counts as resolved for the ledger, so the section is closed
+    for interview readiness and Seed completeness, and the worker sees the
+    question as an ``Open question:`` line. ``open_for_implementer`` (no
+    requester) also tells the interviewer that the question stays open for the
+    implementer.
     """
     labels = [span.label for span in result.checked]
     updates = [
@@ -515,7 +542,11 @@ def not_found_answer(
         )
         for section, entry in draft.ledger_updates
     ]
-    lines = [NOT_SETTLED_REPLY]
+    lines = (
+        [f"{NOT_SETTLED_REPLY} {OPEN_FOR_IMPLEMENTER_REPLY}"]
+        if open_for_implementer
+        else [NOT_SETTLED_REPLY]
+    )
     if result.checked:
         lines += ["", "What the code shows:", *_evidence_lines(result.checked)]
     return AutoAnswer("\n".join(lines), AutoAnswerSource.ASSUMPTION, 0.5, updates)
@@ -588,7 +619,9 @@ async def _investigate(
         )
     if result.found:
         return found_answer(draft, result, question, round_number)
-    return not_found_answer(draft, result, question, round_number)
+    return not_found_answer(
+        draft, result, question, round_number, open_for_implementer=driver.requester is None
+    )
 
 
 async def settle(
@@ -614,6 +647,127 @@ async def settle(
     else:
         answer = investigated
     return await ask_requester(driver, answer, question, turn, state, round_number)
+
+
+CAP_CLOSURE_MODE = "ledger_only"
+
+
+async def close_at_cap(
+    driver: AutoInterviewDriver,
+    state: AutoPipelineState,
+    ledger: SeedDraftLedger,
+    outcome: _InterviewRoundOutcome,
+) -> AutoInterviewResult | None:
+    """Close the interview once the investigator call cap is used up.
+
+    Without a requester, every later question could only end ``cap_reached``
+    (not found without a call), so more rounds add nothing and run toward
+    the interview deadline. Called after each round; it closes only when no
+    requester is wired, the investigator spent its last call, and the backend
+    has not already confirmed readiness (the mutual-agreement close handles
+    that).
+
+    It closes with what is known: sections that no question reached get the
+    existing safe-default policy (``finalize_safe_defaultable_gaps``, the same
+    as at ``max_rounds``), pushed to the transcript as an assumption. Answered
+    and investigated sections stay as they are; a not-settled question stays
+    an open question for the worker. The closure mode is ``ledger_only``: the
+    ledger is complete, so the backend ambiguity score is not the gate. When
+    the ledger cannot be completed (an unsafe gap) or the synthesis cannot be
+    recorded, nothing changes and the interview goes on under the existing
+    rules.
+    """
+    from ouroboros.auto.answer_binding import with_provenance
+    from ouroboros.auto.interview_driver import (
+        AutoInterviewResult,
+        _backend_confirmed_seed_ready,
+        _revert_safe_default_entries,
+        _validate_turn,
+    )
+    from ouroboros.auto.interview_recovery import with_timeout
+    from ouroboros.auto.safe_defaults import (
+        build_safe_default_synthesis,
+        finalize_safe_defaultable_gaps,
+    )
+
+    turn = outcome.turn
+    investigator = driver.investigator
+    if (
+        investigator is None
+        or driver.requester is not None
+        or investigator.unavailable is not None
+        or investigator.calls_made < investigator.max_calls
+        or (ledger.is_seed_ready() and _backend_confirmed_seed_ready(turn))
+    ):
+        return None
+    open_before = list(ledger.open_gaps())
+    defaulted: tuple[str, ...] = ()
+    if open_before:
+        finalization = finalize_safe_defaultable_gaps(
+            ledger,
+            goal=state.goal,
+            provenance=f"auto interview closed at the investigator cap ({investigator.max_calls})",
+            pending_question=turn.question,
+            active_profile=getattr(driver.answerer, "active_profile", None),
+        )
+        if finalization is None or not finalization.completed or not ledger.is_seed_ready():
+            if finalization is not None:
+                _revert_safe_default_entries(ledger, finalization.defaulted_sections)
+            return None
+        defaulted = tuple(finalization.defaulted_sections)
+        synthesis = build_safe_default_synthesis(finalization)
+        if synthesis and state.interview_session_id:
+            try:
+                synthesis_turn = _validate_turn(
+                    await with_timeout(
+                        with_provenance(driver.backend, "assumption").answer(
+                            state.interview_session_id,
+                            synthesis,
+                            last_question="[driver closure: investigator call cap reached]",
+                        ),
+                        state,
+                        tool_name="interview.investigator_cap_synthesis",
+                        timeout_seconds=driver.timeout_seconds,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - keep the transcript and ledger in sync
+                _revert_safe_default_entries(ledger, defaulted)
+                log.warning(
+                    "auto.interview.investigator_cap_synthesis_failed",
+                    auto_session_id=state.auto_session_id,
+                    error=str(exc),
+                )
+                return None
+            state.interview_session_id = synthesis_turn.session_id
+    data: dict[str, object] = {
+        "calls_made": investigator.calls_made,
+        "max_calls": investigator.max_calls,
+        "open_gaps_before": open_before,
+        "defaulted_sections": list(defaulted),
+        "closure_mode": CAP_CLOSURE_MODE,
+        "round": state.current_round,
+    }
+    log.info(
+        "auto.interview.closed_at_investigator_cap", auto_session_id=state.auto_session_id, **data
+    )
+    await driver._emit_event(
+        "auto.interview.closed_at_investigator_cap",
+        state.auto_session_id,
+        aggregate_type="auto_session",
+        **data,
+    )
+    state.ledger = ledger.to_dict()
+    state.pending_question = None
+    state.interview_completed = True
+    state.interview_closure_mode = CAP_CLOSURE_MODE
+    state.mark_progress(
+        f"interview closed at the investigator call cap ({investigator.max_calls} calls)",
+        tool_name="interview_driver",
+    )
+    driver._save(state)
+    return AutoInterviewResult(
+        "seed_ready", state.interview_session_id, ledger, state.current_round
+    )
 
 
 def build_repo_investigator(
@@ -660,6 +814,7 @@ __all__ = [
     "Investigation",
     "RepoInvestigator",
     "build_repo_investigator",
+    "close_at_cap",
     "enforces_read_only",
     "found_answer",
     "judge_reply",
