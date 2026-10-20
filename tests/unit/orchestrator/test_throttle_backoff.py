@@ -340,6 +340,7 @@ async def test_investigator_reissues_a_throttled_call_without_using_the_cap(
     (tmp_path / "a.py").write_text("def handler():\n    return 'value ok'\n", encoding="utf-8")
     reply = json.dumps(
         {
+            "kind": "current_behavior",
             "status": "found",
             "answer": "handler returns a fixed value.",
             "evidence": [

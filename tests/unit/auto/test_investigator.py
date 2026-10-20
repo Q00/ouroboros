@@ -73,7 +73,7 @@ from ouroboros.bigbang.answer_provenance import (
 from ouroboros.bigbang.interview import InterviewState
 from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.config.untrusted_env import is_untrusted_env_denied_key
-from ouroboros.core.seed import RepoFact, Seed, ac_texts
+from ouroboros.core.seed import OntologySchema, RepoFact, Seed, SeedMetadata, ac_texts
 from ouroboros.core.seed_contract import SeedContract
 from ouroboros.core.seed_contract_prompt import (
     render_acceptance_criteria_section,
@@ -112,6 +112,7 @@ def workspace(tmp_path: Path) -> Path:
 def _found_reply() -> str:
     return json.dumps(
         {
+            "kind": "current_behavior",
             "status": "found",
             "answer": FOUND_ANSWER,
             "evidence": [
@@ -298,7 +299,9 @@ def test_judge_found_requires_every_span_to_pass(workspace: Path) -> None:
 
 
 def test_judge_found_without_evidence_is_not_found(workspace: Path) -> None:
-    reply = json.dumps({"status": "found", "answer": GUESS, "evidence": []})
+    reply = json.dumps(
+        {"kind": "current_behavior", "status": "found", "answer": GUESS, "evidence": []}
+    )
     verdict = judge_reply(workspace, reply)
     assert verdict.outcome == "evidence_rejected"
     assert verdict.answer == ""
@@ -363,6 +366,7 @@ async def test_not_found_renders_only_the_open_question(workspace: Path) -> None
 async def test_failed_evidence_check_is_not_found_and_drops_answer(workspace: Path) -> None:
     bad = json.dumps(
         {
+            "kind": "current_behavior",
             "status": "found",
             "answer": GUESS,
             "evidence": [
@@ -546,6 +550,7 @@ async def test_two_found_answers_on_one_facet_do_not_conflict(workspace: Path) -
             _found_reply(),
             json.dumps(
                 {
+                    "kind": "current_behavior",
                     "status": "found",
                     "answer": "Empty input exits with code 2.",
                     "evidence": [
@@ -724,7 +729,7 @@ async def test_found_answer_reaches_worker_only_as_repo_facts_block(workspace: P
 
     contract = SeedContract.from_seed(synthesize_seed_from_ledger(ledger))
     prompt = render_seed_contract_for_execution(contract)
-    block = prompt.split("## Repository facts (checked)", 1)[1].split("\n## ", 1)[0]
+    block = prompt.split("## Current behavior of the code (checked)", 1)[1].split("\n## ", 1)[0]
     assert f"> {FOUND_ANSWER}" in block
     assert f"- {EVIDENCE_LINE}" in block
     assert f"> {VERIFY_QUESTION}" in block
@@ -935,6 +940,7 @@ async def test_runtime_without_read_only_mode_reads_a_copy(workspace: Path) -> N
 async def test_the_copy_cannot_fabricate_evidence(workspace: Path) -> None:
     fabricated = json.dumps(
         {
+            "kind": "current_behavior",
             "status": "found",
             "answer": GUESS,
             "evidence": [
@@ -1306,3 +1312,80 @@ async def test_backend_done_with_only_open_questions_closes_without_requester(
         assert state.interview_closure_mode == "ledger_only"
         assert len(sent) == 1
         assert f"Open question: {QUESTION}" in ledger_assumptions(ledger)
+
+
+# -- the model declares the question kind; only current behavior can be found --
+
+
+def _reply_with_kind(kind: object = "__missing__") -> str:
+    data = json.loads(_found_reply())
+    data.pop("kind", None)
+    if kind != "__missing__":
+        data["kind"] = kind
+    return json.dumps(data)
+
+
+@pytest.mark.parametrize(
+    "kind", ["intended_behavior", "__missing__", "bogus", None, 3, ["current_behavior"], {"x": 1}]
+)
+def test_found_reply_that_is_not_current_behavior_is_not_found(
+    workspace: Path, kind: object
+) -> None:
+    """A "should" answer (or one without a valid kind) never binds; its checked
+    spans are kept as what the code shows."""
+    verdict = judge_reply(workspace, _reply_with_kind(kind))
+
+    assert verdict.outcome == "intended_behavior"
+    assert not verdict.found
+    assert verdict.answer == ""
+    assert verdict.kind == "intended_behavior"
+    assert [span.label for span in verdict.checked] == ["src/cli.py:7-8"]
+
+
+def test_current_behavior_reply_is_found(workspace: Path) -> None:
+    verdict = judge_reply(workspace, _reply_with_kind("current_behavior"))
+
+    assert verdict.found and verdict.kind == "current_behavior"
+
+
+@pytest.mark.asyncio
+async def test_intended_behavior_answer_reaches_the_worker_as_an_open_question(
+    workspace: Path,
+) -> None:
+    """Study shape (django-13925): "should W042 remain?" answered from current
+    code. It must not become a repository fact; the question stays open and the
+    interviewer sees only what the code shows."""
+    investigator, _calls, _ = _investigator(lambda _p: _reply_with_kind("intended_behavior"))
+
+    _state, ledger, sent, _ = await _run(workspace, investigator=investigator)
+
+    assert not _entries(ledger, ".repo_fact.")
+    assert sent[0].startswith(f"[from-auto][assumption] {NOT_SETTLED_REPLY}")
+    assert "src/cli.py:7-8" in sent[0]
+    assert FOUND_ANSWER not in sent[0]
+    assert f"Open question: {QUESTION}" in ledger_assumptions(ledger)
+
+
+def test_prompt_tells_the_investigator_the_code_may_be_the_defect() -> None:
+    from ouroboros.auto.investigator import INVESTIGATOR_SYSTEM_PROMPT
+
+    assert "may be the code that has the defect" in INVESTIGATOR_SYSTEM_PROMPT
+    assert '"current_behavior"' in INVESTIGATOR_SYSTEM_PROMPT
+    assert '"intended_behavior"' in INVESTIGATOR_SYSTEM_PROMPT
+    assert "should" in INVESTIGATOR_SYSTEM_PROMPT
+
+
+def test_worker_block_names_current_behavior_and_the_defect() -> None:
+    seed = Seed(
+        goal=GOAL,
+        acceptance_criteria=("Empty input exits with code 2",),
+        ontology_schema=OntologySchema(name="n", description="d"),
+        metadata=SeedMetadata(ambiguity_score=0.05),
+        repo_facts=(RepoFact(question=QUESTION, answer=FOUND_ANSWER, evidence=(EVIDENCE_LINE,)),),
+    )
+    prompt = render_seed_contract_for_execution(SeedContract.from_seed(seed))
+
+    assert "## Current behavior of the code (checked)" in prompt
+    assert "## Repository facts (checked)" not in prompt
+    assert "The issue reports a defect, so this behavior may be exactly what has to" in prompt
+    assert Seed.from_dict(seed.to_dict()).repo_facts == seed.repo_facts
