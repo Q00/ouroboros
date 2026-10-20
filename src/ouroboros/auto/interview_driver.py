@@ -28,7 +28,6 @@ from ouroboros.auto.answerer import (
 )
 from ouroboros.auto.blocker_attribution import record_authoring_backend
 from ouroboros.auto.gap_detector import GapDetector
-from ouroboros.auto.intent_guard import IntentGuardStatus, guard_auto_answer
 from ouroboros.auto.interview_recovery import (
     ReconcileOutcome,
     reconcile_persisted_session,
@@ -39,15 +38,13 @@ from ouroboros.auto.interview_recovery import (
 from ouroboros.auto.investigator import RepoInvestigator, close_known, settle
 from ouroboros.auto.lateral_routing import (
     select_persona_for_qa_failure,
-    select_persona_for_safe_default_block,
 )
-from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
+from ouroboros.auto.ledger import LedgerEntry, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
 from ouroboros.auto.repo_context import repo_auto_answer_context
 from ouroboros.auto.requester import Requester
 from ouroboros.auto.safe_defaults import (
     AUTO_ANSWER_PREFIX,
-    SafeDefaultFinalization,
     build_safe_default_synthesis,
     finalize_safe_defaultable_gaps,
 )
@@ -166,52 +163,6 @@ _STAGNATION_LATERAL_SUGGESTIONS = (
     "snapshot below; only resolve what is still genuinely unspecified.",
 )
 
-# Issue #1248 — L5 ladder typed terminal for a safe-default lateral escalation
-# that exhausted every available persona without resolving the matcher fire.
-# Mirrors the runtime ``watchdog_wall_clock_exceeded`` / interview
-# ``interview_unsafe_gaps_remain`` patterns: a module-level const so callers
-# emit the same string, and so the alphabet of valid stop_reason_code values
-# can be discovered by reading the module surface.
-UNSTUCK_EXHAUSTED_STOP_REASON_CODE = "unstuck_exhausted"
-
-# Issue #1248 PR-B review — the safe-default lateral escalation may only
-# demote active ``CONSERVATIVE_DEFAULT`` ledger entries to ``ASSUMPTION``
-# when the lateral persona response includes a machine-checkable clearance
-# line. The auto pipeline's production ``ouroboros_lateral_think`` inline
-# path returns a *prompt template* (not an executed judgement), so without
-# this gate a bare prompt would be enough to reclassify entries — including
-# entries that record genuinely unsafe scope (production deploys, credential
-# handling). The canonical line, anchored to its own line so a stray mention
-# inside prose does not satisfy the gate, is:
-#
-#     CLEARANCE: lexical_false_positive
-#
-# Any other shape (no marker, an explicit ``UNSAFE_CONFIRMED: <reason>``
-# counter-marker, a plain prompt template) means *the lateral was attempted
-# but no judgement is available* — the persona invocation is still recorded
-# on ``state.personas_invoked`` for audit, but the ledger stays put and the
-# loop either tries the next persona or, after both are tried, surfaces a
-# typed ``unstuck_exhausted`` BLOCKED. This is conservative-by-default: the
-# matcher fire stays loud (no silent closure on unsafe scope) until a real
-# judge layered on top of the prompt emits the marker.
-_LATERAL_CLEARANCE_MARKER_RE = re.compile(
-    r"^\s*CLEARANCE:\s*lexical_false_positive\s*$",
-    re.IGNORECASE | re.MULTILINE,
-)
-
-
-def _lateral_response_authorizes_demotion(text: str | None) -> bool:
-    """Return ``True`` iff the lateral response includes the canonical clearance marker.
-
-    Empty / ``None`` / unmarked responses return ``False`` — the inline
-    ``ouroboros_lateral_think`` path's bare prompt template falls in this
-    bucket, so a successful prompt-generation call is *not* enough to
-    authorize ledger demotion.
-    """
-    if not text:
-        return False
-    return bool(_LATERAL_CLEARANCE_MARKER_RE.search(text))
-
 
 def _backend_confirmed_seed_ready(turn: InterviewTurn) -> bool:
     """Return True when the backend closed the interview within the ambiguity gate.
@@ -316,13 +267,8 @@ class AutoInterviewDriver:
     timeout_seconds: float = 60.0
     max_rounds: int = 12
     progress_callback: AutoProgressCallback | None = None
-    # Issue #1248 — optional lateral-thinker handle used by the safe-default
-    # escalation path to disambiguate matcher-fire false positives from
-    # real unsafe scope before falling to BLOCKED. ``None`` preserves the
-    # pre-issue behavior (matcher fire → immediate
-    # ``interview_unsafe_gaps_remain`` BLOCKED), so existing call sites and
-    # tests that construct the driver without this argument are unaffected.
-    # The behavior change that consumes this field ships in a separate PR.
+    # Optional lateral-thinker handle for stagnation-driven concretization
+    # (``_maybe_concretize_on_stagnation``). ``None`` turns that off.
     lateral_thinker: LateralThinker | None = None
     # Optional AI answer refiner. The deterministic ``AutoAnswerer`` still owns
     # all routing + safety (blocker detection, intent classification, source
@@ -859,21 +805,6 @@ class AutoInterviewDriver:
                     auto_session_id=state.auto_session_id,
                     unsafe_gaps=finalization.unsafe_gaps,
                 )
-                # Issue #1248 — escalate the matcher fire through a
-                # lateral persona before letting safe-default closure
-                # die in place. ``self.lateral_thinker`` is wired only
-                # when the runtime constructed one (MCP complete-product
-                # path); when ``None``, the existing BLOCKED branch
-                # downstream still applies, preserving pre-issue
-                # behaviour for runtime contexts that do not yet have a
-                # lateral handler.
-                if self.lateral_thinker is not None:
-                    finalization = await self._escalate_safe_default_unsafe_context(
-                        state,
-                        ledger,
-                        finalization,
-                        pending_question=turn.question,
-                    )
 
         if finalization is not None and finalization.completed and ledger.is_seed_ready():
             synthesis = build_safe_default_synthesis(finalization)
@@ -1043,22 +974,10 @@ class AutoInterviewDriver:
                 f"unsafe_remaining={list(finalization.unsafe_gaps)}"
             )
             state.ledger = ledger.to_dict()
-            # Issue #1248 — when the lateral escalation chain exhausted
-            # the available personas before reaching this branch it has
-            # already stamped ``UNSTUCK_EXHAUSTED_STOP_REASON_CODE`` on
-            # ``state.last_error_code``. Surface that typed L5 terminal
-            # instead of the generic ``interview_unsafe_gaps_remain``
-            # so the result envelope distinguishes "tried lateral and
-            # failed" from "lateral never engaged".
-            error_code = (
-                UNSTUCK_EXHAUSTED_STOP_REASON_CODE
-                if state.last_error_code == UNSTUCK_EXHAUSTED_STOP_REASON_CODE
-                else "interview_unsafe_gaps_remain"
-            )
             state.mark_blocked(
                 blocker,
                 tool_name="interview_driver",
-                error_code=error_code,
+                error_code="interview_unsafe_gaps_remain",
             )
             record_authoring_backend(state)
             self._save(state)
@@ -1077,19 +996,10 @@ class AutoInterviewDriver:
             f"backend_done={backend_done} ({ambiguity_part}), "
             f"ledger_done={ledger_done} ({gaps_part})"
         )
-        # Issue #1248 — same UNSTUCK_EXHAUSTED override as the
-        # partial-unsafe BLOCKED branch above. The lateral escalation
-        # may have run with no defaulted sections (only unsafe_gaps),
-        # in which case the flow lands here after exhausting personas.
-        error_code = (
-            UNSTUCK_EXHAUSTED_STOP_REASON_CODE
-            if state.last_error_code == UNSTUCK_EXHAUSTED_STOP_REASON_CODE
-            else "interview_max_rounds_exhausted"
-        )
         state.mark_blocked(
             blocker,
             tool_name="interview_driver",
-            error_code=error_code,
+            error_code="interview_max_rounds_exhausted",
         )
         record_authoring_backend(state)
         self._save(state)
@@ -1212,32 +1122,6 @@ class AutoInterviewDriver:
             state.ledger = ledger.to_dict()
             blocker_text = answer.blocker.reason
             state.mark_blocked(blocker_text, tool_name="auto_answerer")
-            record_authoring_backend(state)
-            self._save(state)
-            return _InterviewRoundOutcome(
-                turn,
-                prev_ambiguity,
-                stagnant_rounds,
-                AutoInterviewResult(
-                    "blocked",
-                    state.interview_session_id,
-                    ledger,
-                    state.current_round,
-                    blocker_text,
-                ),
-            )
-        answer = self._guard_intent_answer(
-            state,
-            answer,
-            ledger,
-            answer_context,
-            question=question_for_record,
-        )
-        if answer.blocker is not None:
-            self.answerer.apply(answer, ledger, question=question_for_record)
-            state.ledger = ledger.to_dict()
-            blocker_text = answer.blocker.reason
-            state.mark_blocked(blocker_text, tool_name="intent_guard")
             record_authoring_backend(state)
             self._save(state)
             return _InterviewRoundOutcome(
@@ -1548,47 +1432,6 @@ class AutoInterviewDriver:
             blocker=blocker,
         )
 
-    def _guard_intent_answer(
-        self,
-        state: AutoPipelineState,
-        answer: AutoAnswer,
-        ledger: SeedDraftLedger,
-        context: AutoAnswerContext,
-        *,
-        question: str,
-    ) -> AutoAnswer:
-        """Fail closed when generated interview framing conflicts with user intent."""
-        if answer.blocker is not None:
-            return answer
-        report = guard_auto_answer(
-            goal=state.goal,
-            user_preferences=context.user_preferences,
-            ledger=ledger,
-            question=question,
-            answer_text=answer.text,
-            answer_source=answer.source.value,
-        )
-        if not report.failed:
-            return answer
-        failure = next(check for check in report.checks if check.status is IntentGuardStatus.FAIL)
-        reason = f"IntentGuard blocked auto answer: {failure.message}"
-        if failure.action:
-            reason = f"{reason} ({failure.action})"
-        log.warning(
-            "auto.interview.intent_guard_blocked",
-            auto_session_id=state.auto_session_id,
-            code=failure.code,
-            answer_source=answer.source.value,
-            question=question[:500],
-            answer=answer.text[:500],
-        )
-        return AutoAnswer(
-            text=f"Cannot safely decide automatically: {reason}",
-            source=AutoAnswerSource.BLOCKER,
-            confidence=1.0,
-            blocker=AutoBlocker(reason=reason, question=question),
-        )
-
     def _answer_reduces_open_gaps(
         self,
         question: str,
@@ -1765,8 +1608,8 @@ class AutoInterviewDriver:
 
         # Bound total interventions to avoid accumulating contradictory
         # concretizations (see ``_STAGNATION_MAX_INTERVENTIONS``).
-        # ``personas_invoked`` is shared across phases (safe-default unsafe-context
-        # escalation, and later the EVALUATE/Seed-QA lateral paths), but those run
+        # ``personas_invoked`` is shared across phases (the EVALUATE/Seed-QA
+        # lateral paths), but those run
         # strictly AFTER the interview loop, so during this loop its length equals
         # the number of stagnation interventions so far. If that ordering ever
         # changes, this would under-count — track a dedicated counter instead.
@@ -1875,218 +1718,6 @@ class AutoInterviewDriver:
         )
         self._save(state)
         return new_turn.ambiguity_score, 0, new_turn
-
-    async def _escalate_safe_default_unsafe_context(
-        self,
-        state: AutoPipelineState,
-        ledger: SeedDraftLedger,
-        finalization: SafeDefaultFinalization,
-        *,
-        pending_question: str,
-    ) -> SafeDefaultFinalization:
-        """Walk the lateral persona chain to clear a safe-default matcher fire.
-
-        Issue #1248 — when ``_unsafe_context_reason`` fires during a
-        safe-default closure attempt, the SSOT #1157 L5 invariant
-        requires escalation through bounded lateral persona reframes
-        before falling to BLOCKED. ``self.lateral_thinker`` is the same
-        callable shape the EVALUATE → UNSTUCK_LATERAL path uses, so the
-        reframe inherits its timeout / error / persona-tracking
-        contract.
-
-        Behaviour:
-
-        * Pick the next persona via
-          :func:`select_persona_for_safe_default_block`, honoring
-          ``state.personas_invoked``.
-        * Invoke the lateral thinker once.
-
-          - On **chain exhaustion** (selector returns ``None``), stamp
-            the typed ``unstuck_exhausted`` reason on
-            ``state.last_error_code`` and return the original
-            finalization. The caller's BLOCKED branch then surfaces the
-            typed terminal.
-          - On **timeout** / **handler exception** / **transient
-            ``LateralResult.error``**, record the persona attempt for
-            audit + chain progression but leave ``state.last_error_code``
-            alone so the existing ``interview_unsafe_gaps_remain`` /
-            ``interview_max_rounds_exhausted`` code applies. Only the
-            chain-exhausted path stamps ``unstuck_exhausted``.
-
-        * On a successful lateral response, persist the persona's text
-          on state for audit (``last_lateral_*``), append the persona
-          to ``personas_invoked``, and — only if the response carries
-          the canonical ``CLEARANCE: lexical_false_positive`` marker
-          (see :func:`_lateral_response_authorizes_demotion`) — demote
-          every active CONSERVATIVE_DEFAULT ledger entry to ASSUMPTION
-          and snapshot the mutated ledger onto ``state.ledger`` before
-          checkpointing so a resume after demotion sees the same input
-          the runtime path saw. The re-run of
-          :func:`finalize_safe_defaultable_gaps` then either clears
-          ``unsafe_gaps`` (returning the new finalization) or surfaces
-          the same matcher fire to the next persona.
-
-        The function only mutates the caller's path of execution; the
-        existing safe-default closure / BLOCKED branches downstream are
-        unchanged. When ``self.lateral_thinker is None`` the caller is
-        expected to short-circuit before invoking this method.
-        """
-        assert self.lateral_thinker is not None  # noqa: S101 - caller guards
-
-        while finalization.unsafe_gaps:
-            already_tried = tuple(ThinkingPersona(value) for value in state.personas_invoked)
-            persona = select_persona_for_safe_default_block(already_tried_personas=already_tried)
-            if persona is None:
-                log.warning(
-                    "auto.interview.safe_default.lateral_chain_exhausted",
-                    auto_session_id=state.auto_session_id,
-                    personas_invoked=tuple(state.personas_invoked),
-                    unsafe_gaps=finalization.unsafe_gaps,
-                )
-                state.last_error_code = UNSTUCK_EXHAUSTED_STOP_REASON_CODE
-                self._save(state)
-                return finalization
-
-            qa_differences = tuple(finalization.unsafe_gaps)
-            qa_suggestions = (
-                "Disambiguate: is this matcher fire a lexical false "
-                "positive (e.g. 'contract' inside 'acceptance contract', "
-                "'license: MIT', 'compliance check') or does the "
-                "surrounding ledger context assert genuine unsafe "
-                "scope (production deploys, credential handling, "
-                "legal/medical adjudication, etc.)? The auto pipeline "
-                "will demote active conservative_default ledger entries "
-                "to assumption ONLY when your response includes the "
-                "exact line `CLEARANCE: lexical_false_positive` on its "
-                "own line. Without that marker the matcher input is "
-                "left untouched and the safe-default closure stays "
-                "blocked — this is the safety default. If you observe "
-                "genuinely unsafe scope, do NOT emit the clearance "
-                "marker; instead emit `UNSAFE_CONFIRMED: <one-line "
-                "reason>` so the audit trail records why the matcher "
-                "fire was not cleared.",
-            )
-            run_artifact = _build_safe_default_lateral_artifact(ledger, finalization)
-
-            log.info(
-                "auto.interview.safe_default.lateral_invoked",
-                auto_session_id=state.auto_session_id,
-                persona=persona.value,
-                unsafe_gaps=qa_differences,
-            )
-            try:
-                lateral_result = await asyncio.wait_for(
-                    self.lateral_thinker(
-                        persona=persona,
-                        qa_differences=qa_differences,
-                        qa_suggestions=qa_suggestions,
-                        run_artifact=run_artifact,
-                    ),
-                    timeout=self.timeout_seconds,
-                )
-            except TimeoutError:
-                log.warning(
-                    "auto.interview.safe_default.lateral_timeout",
-                    auto_session_id=state.auto_session_id,
-                    persona=persona.value,
-                    timeout_seconds=self.timeout_seconds,
-                )
-                if persona.value not in state.personas_invoked:
-                    state.personas_invoked.append(persona.value)
-                self._save(state)
-                return finalization
-            except Exception as exc:  # noqa: BLE001 - any handler error => terminal
-                log.warning(
-                    "auto.interview.safe_default.lateral_invocation_failed",
-                    auto_session_id=state.auto_session_id,
-                    persona=persona.value,
-                    error=str(exc),
-                )
-                if persona.value not in state.personas_invoked:
-                    state.personas_invoked.append(persona.value)
-                self._save(state)
-                return finalization
-
-            # Track the persona regardless of payload outcome so the
-            # next attempt picks a different angle. Mirrors the
-            # EVALUATE-side append-then-evaluate ordering.
-            if persona.value not in state.personas_invoked:
-                state.personas_invoked.append(persona.value)
-
-            if lateral_result.error:
-                log.warning(
-                    "auto.interview.safe_default.lateral_transient_error",
-                    auto_session_id=state.auto_session_id,
-                    persona=persona.value,
-                    error=lateral_result.error,
-                )
-                self._save(state)
-                return finalization
-
-            state.last_lateral_persona = lateral_result.persona or persona.value
-            state.last_lateral_approach_summary = lateral_result.approach_summary
-            state.last_lateral_text = lateral_result.text
-
-            # Demotion is gated on a machine-checkable clearance marker
-            # (see ``_LATERAL_CLEARANCE_MARKER_RE``). A bare prompt-only
-            # response from the inline ``ouroboros_lateral_think`` path
-            # — which is what the production auto pipeline gets today
-            # — does NOT authorize reclassifying ledger entries that may
-            # record genuinely unsafe scope. The persona invocation is
-            # still recorded above for audit; without clearance the
-            # loop falls through to the next persona or exhausts.
-            if _lateral_response_authorizes_demotion(lateral_result.text):
-                demoted = _demote_conservative_defaults_for_safe_default(ledger)
-                log.info(
-                    "auto.interview.safe_default.lateral_demoted_entries",
-                    auto_session_id=state.auto_session_id,
-                    persona=persona.value,
-                    demoted_entry_count=demoted,
-                )
-                # The lateral audit (last_lateral_*, personas_invoked) and the
-                # ledger mutation must persist atomically: ``AutoStore.save``
-                # only writes ``state.to_dict()``, so without this snapshot a
-                # crash between the checkpoint here and the next ledger sync
-                # later in ``run()`` would replay with the persona "spent" but
-                # the matcher input un-demoted — the matcher would re-fire on
-                # resume with no fresh persona to clear it. Snapshot the
-                # mutated ledger before saving so resume sees what runtime saw.
-                state.ledger = ledger.to_dict()
-            else:
-                log.info(
-                    "auto.interview.safe_default.lateral_no_clearance",
-                    auto_session_id=state.auto_session_id,
-                    persona=persona.value,
-                    has_text=bool(lateral_result.text),
-                )
-            self._save(state)
-
-            finalization = finalize_safe_defaultable_gaps(
-                ledger,
-                goal=state.goal,
-                provenance=(
-                    f"auto interview max_rounds={self.max_rounds} after lateral={persona.value}"
-                ),
-                pending_question=pending_question,
-                active_profile=getattr(self.answerer, "active_profile", None),
-            )
-            if not finalization.unsafe_gaps:
-                log.info(
-                    "auto.interview.safe_default.lateral_resolved",
-                    auto_session_id=state.auto_session_id,
-                    persona=persona.value,
-                    defaulted_sections=finalization.defaulted_sections,
-                )
-                return finalization
-
-            log.info(
-                "auto.interview.safe_default.lateral_retry_required",
-                auto_session_id=state.auto_session_id,
-                persona=persona.value,
-                remaining_unsafe_gaps=finalization.unsafe_gaps,
-            )
-
-        return finalization
 
     async def _try_close_backend_ready_safe_defaults(
         self,
@@ -2304,72 +1935,6 @@ def _revert_safe_default_entries(
         # wrote) and safer (matches only those entries).
         canonical_key = f"{section_name}.safe_default_finalization"
         section.entries = [entry for entry in section.entries if entry.key != canonical_key]
-
-
-def _demote_conservative_defaults_for_safe_default(ledger: SeedDraftLedger) -> int:
-    """Demote active CONSERVATIVE_DEFAULT ledger entries to ASSUMPTION source.
-
-    Issue #1248 — after a lateral persona has been invoked to review a
-    matcher fire on the safe-default unsafe-context gate, treat every
-    active ``conservative_default`` entry the auto-answerer wrote as
-    boundary text (matching the docstring intent of ``ASSUMPTION``)
-    rather than as active scope. ``ASSUMPTION`` is in
-    ``_SKIP_SOURCES_FOR_UNSAFE_GATE`` (see ``safe_defaults.py``), so a
-    subsequent ``finalize_safe_defaultable_gaps`` pass will not re-fire
-    the matcher on these entries.
-
-    Demotion is the lateral persona's authoritative effect on the
-    ledger: we asked the system to judge, and the audit trail of that
-    invocation (``state.last_lateral_*`` fields) is the record that
-    justifies treating boundary text as boundary. Inactive entries are
-    untouched — they are already excluded from the gate by status.
-
-    Returns the count of demoted entries so the caller can log
-    observable evidence of the lateral reframe.
-    """
-    inactive_statuses: frozenset[LedgerStatus] = frozenset(
-        {LedgerStatus.WEAK, LedgerStatus.CONFLICTING, LedgerStatus.BLOCKED}
-    )
-    count = 0
-    for section in ledger.sections.values():
-        for entry in section.entries:
-            if entry.status in inactive_statuses:
-                continue
-            if entry.source != LedgerSource.CONSERVATIVE_DEFAULT:
-                continue
-            entry.source = LedgerSource.ASSUMPTION
-            count += 1
-    return count
-
-
-def _build_safe_default_lateral_artifact(
-    ledger: SeedDraftLedger, finalization: SafeDefaultFinalization
-) -> str:
-    """Compact ledger projection passed as ``run_artifact`` to the lateral persona.
-
-    The lateral handler's contract expects an opaque text blob describing
-    the current approach (originally the Run artifact for an EVALUATE-side
-    persona; here, the snapshot of the ledger state that triggered the
-    matcher fire). We surface the unsafe-gap labels and a per-section
-    summary of active ledger entries so the persona can see *which*
-    boundary text the matcher reacted to without us pre-deciding whether
-    each entry is benign or genuinely unsafe.
-    """
-    lines: list[str] = [
-        "Safe-default unsafe-context matcher fired during auto interview closure.",
-        f"Unsafe gaps reported: {', '.join(finalization.unsafe_gaps)}",
-        "Active ledger entries (source-tagged):",
-    ]
-    inactive_statuses: frozenset[LedgerStatus] = frozenset(
-        {LedgerStatus.WEAK, LedgerStatus.CONFLICTING, LedgerStatus.BLOCKED}
-    )
-    for section_name, section in ledger.sections.items():
-        for entry in section.entries:
-            if entry.status in inactive_statuses:
-                continue
-            truncated = entry.value if len(entry.value) <= 200 else f"{entry.value[:200]}…"
-            lines.append(f"  - [{section_name}|{entry.source}] {truncated}")
-    return "\n".join(lines)
 
 
 def _build_stagnation_lateral_artifact(goal: str, ledger: SeedDraftLedger) -> str:

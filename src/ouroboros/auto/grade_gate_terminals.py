@@ -11,8 +11,7 @@ Seed still carries hard safety blockers" (resolve the markers).
 
 Module-level consts, so every call site emits the same string and the alphabet
 of valid codes stays discoverable by reading a module surface -- the same
-convention as the interview layer's ``UNSTUCK_EXHAUSTED_STOP_REASON_CODE`` and
-the runtime's ``watchdog_wall_clock_exceeded``.
+convention as the runtime's ``watchdog_wall_clock_exceeded``.
 
 The gate's own verdict lives here beside them rather than in ``pipeline``,
 because a code that is decided in one module and named in another is a code

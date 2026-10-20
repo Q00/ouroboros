@@ -17,6 +17,7 @@ from ouroboros.auto.interview_driver import (
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.pipeline import AutoPipeline
 from ouroboros.auto.repo_context import repo_auto_answer_context
+import ouroboros.auto.safe_defaults as safe_defaults_module
 from ouroboros.auto.safe_defaults import finalize_safe_defaultable_gaps
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.seed_reviewer import ReviewFinding, SeedReview, SeedReviewer
@@ -40,7 +41,6 @@ from ouroboros.events.base import BaseEvent
 # is disabled by default under the freedom policy (empty production bank);
 # re-inject the historical bank so the mechanism stays covered.
 # See tests/unit/auto/conftest.py.
-pytestmark = pytest.mark.usefixtures("_legacy_unsafe_bank")
 
 
 def _fill_ready(ledger: SeedDraftLedger) -> None:
@@ -301,25 +301,6 @@ def test_revert_safe_default_entries_preserves_user_keys_with_matching_suffix() 
     assert "constraints.other" in remaining_keys
 
 
-def test_safe_default_blocks_when_interview_answer_introduces_unsafe_context() -> None:
-    ledger = SeedDraftLedger.from_goal("Build a small local CLI")
-    ledger.record_qa(
-        "How should the CLI authenticate?",
-        "It needs to call the production OAuth provider with the customer access token.",
-    )
-
-    result = finalize_safe_defaultable_gaps(
-        ledger,
-        goal="Build a small local CLI",
-        provenance="unit test",
-    )
-
-    assert not result.completed
-    assert result.unsafe_gaps  # at least one gap stays unsafe
-    assert any("unsafe default context" in gap for gap in result.unsafe_gaps)
-    assert not ledger.is_seed_ready()
-
-
 def test_safe_default_ignores_from_auto_answers_in_question_history() -> None:
     # AutoAnswerer prefixes every policy-emitted answer with "[from-auto]".
     # Those answers routinely mention auth/credentials/production as
@@ -372,60 +353,6 @@ def test_safe_default_finalization_is_idempotent_against_its_own_synthesis() -> 
     assert ledger.is_seed_ready()
 
 
-def test_safe_default_blocks_when_conservative_default_entry_authorizes_unsafe_scope() -> None:
-    # CONSERVATIVE_DEFAULT entries land with status DEFAULTED but still carry
-    # user-derived scope — the unsafe gate must not silently treat them as
-    # safe just because their status is DEFAULTED.
-    goal = "Build a small local CLI"
-    ledger = SeedDraftLedger.from_goal(goal)
-    ledger.add_entry(
-        "runtime_context",
-        LedgerEntry(
-            key="runtime_context.conservative_default",
-            value="Deploys to production with customer credentials as the conservative default.",
-            source=LedgerSource.CONSERVATIVE_DEFAULT,
-            confidence=0.6,
-            status=LedgerStatus.DEFAULTED,
-            rationale="Recorded by an earlier auto round.",
-        ),
-    )
-
-    result = finalize_safe_defaultable_gaps(
-        ledger,
-        goal=goal,
-        provenance="unit test",
-    )
-
-    assert not result.completed
-    assert any("unsafe default context" in gap for gap in result.unsafe_gaps)
-    assert not ledger.is_seed_ready()
-
-
-def test_safe_default_blocks_when_non_user_goal_entry_introduces_unsafe_context() -> None:
-    ledger = SeedDraftLedger.from_goal("Build a small local CLI")
-    ledger.add_entry(
-        "inputs",
-        LedgerEntry(
-            key="inputs.repo_fact",
-            value="Reads the production database credentials file from disk.",
-            source=LedgerSource.REPO_FACT,
-            confidence=0.9,
-            status=LedgerStatus.CONFIRMED,
-            rationale="Surfaced from repo scan during interview.",
-        ),
-    )
-
-    result = finalize_safe_defaultable_gaps(
-        ledger,
-        goal="Build a small local CLI",
-        provenance="unit test",
-    )
-
-    assert not result.completed
-    assert any("unsafe default context" in gap for gap in result.unsafe_gaps)
-    assert not ledger.is_seed_ready()
-
-
 @pytest.mark.parametrize(
     "goal",
     [
@@ -451,79 +378,6 @@ def test_safe_default_allows_benign_production_mentions(goal: str) -> None:
     )
     assert result.unsafe_gaps == ()
     assert ledger.is_seed_ready()
-
-
-@pytest.mark.parametrize(
-    "goal",
-    [
-        # Fullwidth Latin block (U+FF21..U+FF5A) — visually identical to
-        # ASCII for end users and routinely produced by IMEs that round-trip
-        # through CJK keyboards. The unsafe-context "external side effect"
-        # arm matches the action verbs (``deploy``/``release``/``publish``/
-        # ``go live``/``push live``/``database migration``/...). Without
-        # NFKC normalization those alternations cannot see the fullwidth
-        # form, and the gate silently authorizes a production cutover.
-        "ｄｅｐｌｏｙ to ｐｒｏｄｕｃｔｉｏｎ this Friday",
-        "ｒｅｌｅａｓｅ version 2 to ｐｒｏｄ",
-        # Compatibility ligature (U+FB01 ``ﬁ``) paired with a real
-        # production-action verb so the regression covers normalization on
-        # the verb-token side as well.
-        "ﬁnalize ｄｅｐｌｏｙ to production tomorrow",
-    ],
-)
-def test_safe_default_blocks_unicode_compat_production_actions(goal: str) -> None:
-    """Fullwidth/ligature Unicode must not bypass the unsafe-context regex bank.
-
-    The relevant arm is the "ambiguous external side effect" pattern,
-    which matches the action verbs (``deploy``/``release``/``publish``/
-    ``send email``/``webhook``/``database migration``/``go live``/
-    ``push live``/...). Bare ``production``/``prod``/``live`` is *not*
-    by itself flagged any more — the verb token is what carries the
-    block decision. Without ``unicodedata.normalize("NFKC", context)``
-    before the ``re.search`` calls in ``_unsafe_context_reason``, those
-    verb alternations cannot see fullwidth Latin (``ｄｅｐｌｏｙ``) or
-    ligature (``ﬁ``) variants, and the safe-default policy
-    auto-defaults a session that actually authorizes a production
-    deploy.
-    """
-    ledger = SeedDraftLedger.from_goal(goal)
-
-    result = finalize_safe_defaultable_gaps(
-        ledger,
-        goal=goal,
-        provenance="unit test",
-    )
-
-    assert not result.completed, (
-        f"NFKC-equivalent goal {goal!r} authorizes a production action; finalization must block"
-    )
-    assert any("external side effect" in gap.lower() for gap in result.unsafe_gaps)
-    assert not ledger.is_seed_ready()
-
-
-@pytest.mark.parametrize(
-    "goal",
-    [
-        "Deploy the new service to production for the launch event",
-        "Release version 2 to prod after the freeze",
-        "Push live the cutover migration on Friday",
-        "Going live with the rebuilt checkout flow next week",
-    ],
-)
-def test_safe_default_blocks_genuine_production_actions(goal: str) -> None:
-    ledger = SeedDraftLedger.from_goal(goal)
-
-    result = finalize_safe_defaultable_gaps(
-        ledger,
-        goal=goal,
-        provenance="unit test",
-    )
-
-    assert not result.completed, (
-        f"goal {goal!r} authorizes a production-class action; finalization must block"
-    )
-    assert any("external side effect" in gap.lower() for gap in result.unsafe_gaps)
-    assert not ledger.is_seed_ready()
 
 
 @pytest.mark.parametrize(
@@ -574,78 +428,6 @@ def test_safe_default_respects_negated_unsafe_terms(answer: str) -> None:
     assert result.completed, f"negated answer {answer!r} should not block finalization"
     assert result.unsafe_gaps == ()
     assert ledger.is_seed_ready()
-
-
-def test_safe_default_still_blocks_when_negation_does_not_cover_unsafe_term() -> None:
-    goal = "Build a small local CLI"
-    ledger = SeedDraftLedger.from_goal(goal)
-    # Contrastive conjunctions cancel the negation scope — the second half is
-    # a positive assertion and must still flag.
-    ledger.record_qa(
-        "Walk me through the auth model.",
-        "No prod deploys, but log credentials in env so the daemon can read them.",
-    )
-
-    result = finalize_safe_defaultable_gaps(
-        ledger,
-        goal=goal,
-        provenance="unit test",
-    )
-
-    assert not result.completed
-    assert any("unsafe default context" in gap for gap in result.unsafe_gaps)
-
-
-@pytest.mark.parametrize(
-    ("answer", "expected_reason_substring"),
-    [
-        # Comma + imperative verb breaks the negation scope, leaving the
-        # second clause visible to the unsafe regex bank.
-        (
-            "No production deploys, use customer credentials from Vault.",
-            "credentials",
-        ),
-        (
-            "Without billing integration, send email notifications to customers.",
-            "external side effect",
-        ),
-        # Comma + noun-led counter-clause (no imperative verb) also breaks
-        # the scope when the sentence has no list connector — the second
-        # clause is a positive assertion that must still flag.
-        (
-            "No production deploys, customer credentials from Vault are still required.",
-            "credentials",
-        ),
-        # Semicolon also breaks the scope.
-        (
-            "No external API; deploy to production for the first launch.",
-            "external side effect",
-        ),
-    ],
-)
-def test_safe_default_blocks_when_negation_does_not_cover_subsequent_clause(
-    answer: str, expected_reason_substring: str
-) -> None:
-    goal = "Build a small local CLI"
-    ledger = SeedDraftLedger.from_goal(goal)
-    ledger.record_qa("How should this work?", answer)
-
-    result = finalize_safe_defaultable_gaps(
-        ledger,
-        goal=goal,
-        provenance="unit test",
-    )
-
-    assert not result.completed, (
-        f"answer {answer!r} contains a positively asserted clause; "
-        "finalization must not auto-default"
-    )
-    joined = "\n".join(result.unsafe_gaps).lower()
-    assert expected_reason_substring.lower() in joined, (
-        f"expected unsafe reason matching {expected_reason_substring!r} for {answer!r}, "
-        f"got {result.unsafe_gaps!r}"
-    )
-    assert not ledger.is_seed_ready()
 
 
 def test_safe_default_treats_confirmed_non_goals_as_exclusions_not_unsafe_scope() -> None:
@@ -954,13 +736,18 @@ async def test_interview_driver_blocks_when_synthesis_does_not_close_backend(tmp
 
 
 @pytest.mark.asyncio
-async def test_interview_driver_keeps_unsafe_gaps_blocking_after_max_rounds(tmp_path) -> None:
+async def test_interview_driver_keeps_unsafe_gaps_blocking_after_max_rounds(
+    tmp_path, monkeypatch
+) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         return InterviewTurn("What should we verify?", "interview_1")
 
     async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
         return InterviewTurn("What else?", session_id, seed_ready=False)
 
+    # No safe-default policy for any section: a structural reason closure
+    # cannot complete (no wording is read to decide it).
+    monkeypatch.setattr(safe_defaults_module, "_SAFE_DEFAULTS", {})
     state = AutoPipelineState(
         goal="Deploy the service to production and configure the required credentials",
         cwd=str(tmp_path),
@@ -993,7 +780,7 @@ async def test_interview_driver_keeps_unsafe_gaps_blocking_after_max_rounds(tmp_
 
 
 @pytest.mark.asyncio
-async def test_interview_driver_blocks_on_backend_timeout(tmp_path) -> None:
+async def test_interview_driver_blocks_on_backend_timeout(tmp_path, monkeypatch) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         await asyncio.sleep(0.05)
         return InterviewTurn("What should we verify?", "interview_1")
@@ -1001,6 +788,9 @@ async def test_interview_driver_blocks_on_backend_timeout(tmp_path) -> None:
     async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
         return InterviewTurn("done", session_id, seed_ready=True)
 
+    # No safe-default policy for any section: a structural reason closure
+    # cannot complete (no wording is read to decide it).
+    monkeypatch.setattr(safe_defaults_module, "_SAFE_DEFAULTS", {})
     state = AutoPipelineState(goal="Deploy to production", cwd=str(tmp_path))
     ledger = SeedDraftLedger.from_goal(state.goal)
     driver = AutoInterviewDriver(
@@ -1016,7 +806,9 @@ async def test_interview_driver_blocks_on_backend_timeout(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_interview_driver_timeout_message_records_state_policy_source(tmp_path) -> None:
+async def test_interview_driver_timeout_message_records_state_policy_source(
+    tmp_path, monkeypatch
+) -> None:
     """Regression for #686: timeout error must report seconds + state-policy source."""
 
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
@@ -1026,6 +818,9 @@ async def test_interview_driver_timeout_message_records_state_policy_source(tmp_
     async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
         return InterviewTurn("done", session_id, seed_ready=True)
 
+    # No safe-default policy for any section: a structural reason closure
+    # cannot complete (no wording is read to decide it).
+    monkeypatch.setattr(safe_defaults_module, "_SAFE_DEFAULTS", {})
     state = AutoPipelineState(goal="Deploy to production", cwd=str(tmp_path))
     ledger = SeedDraftLedger.from_goal(state.goal)
     driver = AutoInterviewDriver(
@@ -6449,7 +6244,9 @@ async def test_pipeline_resumes_no_backend_completed_interview_without_session_i
 
 
 @pytest.mark.asyncio
-async def test_interview_driver_persists_partial_session_id_on_start_failure(tmp_path) -> None:
+async def test_interview_driver_persists_partial_session_id_on_start_failure(
+    tmp_path, monkeypatch
+) -> None:
     """A handler-level partial-success error keeps the pre-allocated id on state."""
 
     async def start(goal: str, cwd: str, *, interview_id: str | None = None) -> InterviewTurn:  # noqa: ARG001
@@ -6463,6 +6260,9 @@ async def test_interview_driver_persists_partial_session_id_on_start_failure(tmp
     async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
         raise AssertionError("answer must not be called when start fails")
 
+    # No safe-default policy for any section: a structural reason closure
+    # cannot complete (no wording is read to decide it).
+    monkeypatch.setattr(safe_defaults_module, "_SAFE_DEFAULTS", {})
     state = AutoPipelineState(goal="Deploy to production", cwd=str(tmp_path))
     ledger = SeedDraftLedger.from_goal(state.goal)
     store = AutoStore(tmp_path)
@@ -6786,7 +6586,7 @@ async def test_max_rounds_ledger_only_consensus_closes_interview(tmp_path) -> No
 
 
 @pytest.mark.asyncio
-async def test_max_rounds_genuine_deadlock_still_blocks(tmp_path) -> None:
+async def test_max_rounds_genuine_deadlock_still_blocks(tmp_path, monkeypatch) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         return InterviewTurn("What should we verify?", "interview_deadlock")
 
@@ -6795,6 +6595,9 @@ async def test_max_rounds_genuine_deadlock_still_blocks(tmp_path) -> None:
     ) -> InterviewTurn:  # noqa: ARG001
         return InterviewTurn("Still need more info", session_id, seed_ready=False, completed=False)
 
+    # No safe-default policy for any section: a structural reason closure
+    # cannot complete (no wording is read to decide it).
+    monkeypatch.setattr(safe_defaults_module, "_SAFE_DEFAULTS", {})
     state = AutoPipelineState(
         goal="Deploy the service to production and configure the required credentials",
         cwd=str(tmp_path),

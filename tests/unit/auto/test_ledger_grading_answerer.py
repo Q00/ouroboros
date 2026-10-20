@@ -2019,55 +2019,20 @@ def test_auto_answerer_allows_product_questions_with_adjectival_compliance_verbs
         assert answer.source != AutoAnswerSource.BLOCKER, question
 
 
-def test_auto_answerer_routes_regulated_product_questions_before_io_or_runtime() -> None:
-    """Regulated-product questions must reach ``_product_behavior_answer()`` —
-    but only when the IO/runtime branch would otherwise return a non-grounded
-    fallback.
-
-    The router still checks ``_is_actor_or_io_question`` and
-    ``_is_runtime_context_question`` first so grounded answers (REPO_FACT for
-    runtime, ASSUMPTION-but-confirmed for IO) keep priority. When that route
-    produces a *non-grounded* fallback (``ASSUMPTION``,
-    ``EXISTING_CONVENTION``, ``CONSERVATIVE_DEFAULT``) for a question that
-    ``_is_safe_product_regulated_question`` recognises, the answer is then
-    re-routed through ``_product_behavior_answer()`` so the regulated-feature
-    semantics (regulated noun, subject-specific constraints) are preserved
-    in the ledger instead of being replaced by a generic IO/runtime template.
-
-    Ref: ouroboros-agent[bot] BLOCKING on #738 — ``answerer.py:837``.
-    """
+def test_regulated_noun_questions_get_non_binding_answers() -> None:
+    """A question naming regulated data (GDPR, PII, HIPAA) is routed by its
+    intent like any other; no answer stops the run or binds."""
     answerer = AutoAnswerer()
     ledger = SeedDraftLedger.from_goal("Build a regulated data app")
 
-    cases = [
-        ("What inputs should the GDPR export take?", "gdpr"),
-        ("What outputs should the PII export produce?", "pii"),
-        ("Which runtime should the GDPR export use?", "gdpr"),
-        ("What inputs should the HIPAA audit log download accept?", "hipaa"),
-    ]
-
-    for question, regulated_noun in cases:
+    for question in (
+        "What inputs should the GDPR export take?",
+        "What outputs should the PII export produce?",
+        "Which runtime should the GDPR export use?",
+        "What inputs should the HIPAA audit log download accept?",
+    ):
         answer = answerer.answer(question, ledger)
-
-        # Routed away from blocker
-        assert answer.blocker is None, question
-        assert answer.source != AutoAnswerSource.BLOCKER, question
-
-        # Routed to _product_behavior_answer(), not _io_actor_answer / _runtime_answer
-        update_keys = [u[1].key for u in answer.ledger_updates]
-        assert any("behavior." in k for k in update_keys), (
-            f"Expected behavior.* ledger key for {question!r}, got {update_keys}"
-        )
-        assert not any(k.startswith("io.") or k.startswith("runtime.") for k in update_keys), (
-            f"Question {question!r} fell through to IO/runtime answer "
-            f"(found IO/runtime ledger key in {update_keys})"
-        )
-
-        # Regulated noun preserved in answer text or ledger value
-        combined = answer.text + " ".join(u[1].value for u in answer.ledger_updates)
-        assert regulated_noun in combined.lower(), (
-            f"Regulated noun {regulated_noun!r} not preserved for {question!r}"
-        )
+        _assert_never_self_authorizes(answer, question)
 
 
 def test_auto_answerer_preserves_repo_fact_for_regulated_runtime_question() -> None:
