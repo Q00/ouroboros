@@ -36,7 +36,7 @@ from ouroboros.auto.interview_recovery import (
     with_timeout,
     with_transient_retry,
 )
-from ouroboros.auto.investigator import RepoInvestigator, settle
+from ouroboros.auto.investigator import RepoInvestigator, close_known, settle
 from ouroboros.auto.lateral_routing import (
     select_persona_for_qa_failure,
     select_persona_for_safe_default_block,
@@ -781,8 +781,8 @@ class AutoInterviewDriver:
                 prev_ambiguity=prev_ambiguity,
                 stagnant_rounds=stagnant_rounds,
             )
-            if outcome.terminal is not None:
-                return outcome.terminal
+            if terminal := outcome.terminal or await close_known(self, state, ledger, outcome):
+                return terminal
             turn = outcome.turn
             prev_ambiguity = outcome.prev_ambiguity
             stagnant_rounds = outcome.stagnant_rounds
