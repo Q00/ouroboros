@@ -88,6 +88,11 @@ from ouroboros.auto.investigation_workspace import (
 from ouroboros.auto.ledger import REPO_FACT_KEY_INFIX, LedgerEntry, LedgerSource, LedgerStatus
 from ouroboros.auto.phase_clock import phase_clock_paused
 from ouroboros.auto.requester import ROUTED_SOURCES, ask_requester
+from ouroboros.providers.throttle import (
+    THROTTLE_TOTAL_CEILING_SECONDS,
+    is_throttled,
+    throttle_backoff_seconds,
+)
 
 if TYPE_CHECKING:
     from ouroboros.auto.interview_driver import (
@@ -159,6 +164,8 @@ INVESTIGATOR_SYSTEM_PROMPT = (
 )
 
 RuntimeFactory = Callable[..., Any]
+# Seam for tests; the throttle wait itself (``_call_through_throttle``).
+_throttle_sleep = asyncio.sleep
 
 
 def resolve_call_timeout(environ: Mapping[str, str] | None = None) -> float:
@@ -216,6 +223,7 @@ class Investigation:
     called: bool = False
     elapsed_seconds: float = 0.0
     isolation: str = ""
+    throttle_waited_seconds: float = 0.0
 
     @property
     def found(self) -> bool:
@@ -315,6 +323,7 @@ class RepoInvestigator:
     resolved_model: str | None = None
     resolved_effort: str | None = None
     _found: list[tuple[str, str]] = field(default_factory=list)
+    _last_error: object = None
 
     def _create_runtime(self, workspace: Path) -> Any:
         factory = self.runtime_factory
@@ -345,11 +354,20 @@ class RepoInvestigator:
             return None
         return runtime
 
-    async def _call(self, runtime: Any, goal: str, question: str) -> str | None:
-        """One session; the reply text, or ``None`` on timeout, ``""`` on failure."""
+    async def _call(
+        self, runtime: Any, goal: str, question: str, *, counted: bool = True
+    ) -> str | None:
+        """One session; the reply text, or ``None`` on timeout, ``""`` on failure.
+
+        A failure's error is kept in ``_last_error`` so a throttled call can be
+        recognized. ``counted=False`` re-issues a throttled call without using
+        a call from the cap.
+        """
         self.resolved_model = _runtime_attr(runtime, "_resolved_fallback_model", "_model")
         self.resolved_effort = _runtime_attr(runtime, "_resolved_fallback_reasoning_effort")
-        self.calls_made += 1
+        self._last_error = None
+        if counted:
+            self.calls_made += 1
         try:
             result = await asyncio.wait_for(
                 runtime.execute_task_to_result(
@@ -361,13 +379,45 @@ class RepoInvestigator:
             )
         except TimeoutError:
             return None
-        except Exception:  # noqa: BLE001 - a failed call is not found, never a guess
+        except Exception as exc:  # noqa: BLE001 - a failed call is not found, never a guess
+            self._last_error = exc
             return ""
         finally:
             await _close(runtime)
         if result.is_err:
+            self._last_error = result.error
             return ""
         return result.value.final_message or ""
+
+    async def _call_through_throttle(
+        self, runtime: Any, cwd: Path, goal: str, question: str
+    ) -> tuple[str | None, float]:
+        """Call once; re-issue a throttled call (HTTP 429) after a capped, doubling wait.
+
+        Re-issues do not use calls from the cap. The waits stop at
+        ``THROTTLE_TOTAL_CEILING_SECONDS``; the call then counts as failed.
+        Returns the reply and the seconds waited.
+        """
+        reply = await self._call(runtime, goal, question)
+        throttled_attempts = 0
+        waited = 0.0
+        while reply == "" and is_throttled(self._last_error):
+            wait = throttle_backoff_seconds(throttled_attempts + 1)
+            if waited + wait > THROTTLE_TOTAL_CEILING_SECONDS:
+                break
+            throttled_attempts += 1
+            waited += wait
+            log.warning(
+                "auto.interview.investigator_throttle_backoff",
+                wait_seconds=wait,
+                throttled_attempts=throttled_attempts,
+            )
+            await _throttle_sleep(wait)
+            runtime = await self._runtime(cwd)
+            if runtime is None:
+                break
+            reply = await self._call(runtime, goal, question, counted=False)
+        return reply, waited
 
     async def investigate(self, goal: str, question: str, workspace: Path) -> Investigation | None:
         """Investigate ``question``; ``None`` when no runtime is available.
@@ -383,6 +433,7 @@ class RepoInvestigator:
             return Investigation("cap_reached")
         before = await asyncio.to_thread(_state_or_none, workspace)
         started = time.monotonic()
+        throttle_waited = 0.0
         runtime: Any | None = None
         copy: Path | None = None
         isolation = "read_only_mode"
@@ -403,13 +454,20 @@ class RepoInvestigator:
                 runtime = await self._runtime(copy)
                 if runtime is None:
                     return None
-            reply = await self._call(runtime, goal, question)
+            reply, throttle_waited = await self._call_through_throttle(
+                runtime, copy or workspace, goal, question
+            )
         finally:
             if copy is not None:
                 await asyncio.to_thread(remove_isolated_copy, copy)
         elapsed = time.monotonic() - started
         after = await asyncio.to_thread(_state_or_none, workspace)
-        done = {"called": True, "elapsed_seconds": elapsed, "isolation": isolation}
+        done = {
+            "called": True,
+            "elapsed_seconds": elapsed,
+            "isolation": isolation,
+            "throttle_waited_seconds": throttle_waited,
+        }
         if before is not None and after is not None and before != after:
             return Investigation("workspace_changed", **done)
         if reply is None or reply == "":
@@ -597,6 +655,7 @@ async def _investigate(
         "evidence_failures": list(result.failures),
         "elapsed_seconds": round(result.elapsed_seconds, 3),
         "isolation": result.isolation,
+        "throttle_waited_seconds": round(result.throttle_waited_seconds, 3),
         "runtime_backend": investigator.runtime_backend,
         "model": investigator.resolved_model,
         "reasoning_effort": investigator.resolved_effort,
