@@ -36,10 +36,25 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: draft kept because the requester gave no answer). It is never derived from
 #: answer text: the caller declares it with the answer (see
 #: :func:`declare_provenance`), and it stays put once recorded.
-AnswerProvenance = Literal["user", "observation", "assumption"]
+#:
+#: ``"requester"`` marks an answer ``ooo auto`` relayed from the requester. It is
+#: a confirmed fact, but the auto pipeline carries it to the worker verbatim, as
+#: a quoted question and answer (``Seed.requester_answers``), so extraction must
+#: not rewrite it into a constraint or criterion. It is declared the same way.
+#:
+#: ``"repo_fact"`` marks an answer ``ooo auto`` read from the repository with
+#: every cited span checked (``auto/investigator.py``). It describes the code as
+#: it is, not a requirement, and reaches the worker verbatim as a checked
+#: repository fact (``Seed.repo_facts``). It is declared the same way.
+AnswerProvenance = Literal["user", "observation", "assumption", "requester", "repo_fact"]
 
 #: Provenances whose answer may never become a requirement.
-WITHHELD_PROVENANCES: frozenset[str] = frozenset({"observation", "assumption"})
+WITHHELD_PROVENANCES: frozenset[str] = frozenset(
+    {"observation", "assumption", "requester", "repo_fact"}
+)
+
+#: Provenances a caller declares with the answer; they are never re-derived from it.
+DECLARED_PROVENANCES: frozenset[str] = frozenset({"assumption", "requester", "repo_fact"})
 
 #: Interview-tool argument a caller uses to declare an answer's provenance.
 ANSWER_PROVENANCE_ARGUMENT = "answer_provenance"
@@ -85,18 +100,42 @@ WITHHELD_ASSUMPTION_NOTE = (
     "It is kept as a non-binding assumption, never as a requirement.]"
 )
 
+#: Rendered in place of a requester answer relayed by ``ooo auto``.
+WITHHELD_REQUESTER_NOTE = (
+    "[requester answer withheld here: it reaches the worker verbatim as a quoted "
+    "requester answer, never rewritten as a constraint or criterion.]"
+)
+
+#: Rendered in place of a checked repository fact found by ``ooo auto``.
+WITHHELD_REPO_FACT_NOTE = (
+    "[repository fact withheld here: it describes the current code, not a requirement, "
+    "and reaches the worker verbatim as a checked repository fact.]"
+)
+
+_WITHHELD_NOTES: dict[str, str] = {
+    "assumption": WITHHELD_ASSUMPTION_NOTE,
+    "requester": WITHHELD_REQUESTER_NOTE,
+    "repo_fact": WITHHELD_REPO_FACT_NOTE,
+}
+
 
 def declare_provenance(round_data: InterviewRound | None, arguments: Mapping[str, Any]) -> None:
     """Apply a provenance the caller declared with the answer it just recorded.
 
-    Only ``"assumption"`` can be declared. A declaration can lower an answer's
+    Only ``"assumption"``, ``"requester"`` and ``"repo_fact"`` can be declared, and all withhold
+    the answer from requirement extraction. A declaration can lower an answer's
     authority but never raise it, so an unknown or missing value changes
     nothing and the provenance settled from the answer stands.
     """
     if round_data is None or not round_data.user_response:
         return
-    if arguments.get(ANSWER_PROVENANCE_ARGUMENT) == "assumption":
+    declared = arguments.get(ANSWER_PROVENANCE_ARGUMENT)
+    if declared == "assumption":
         round_data.provenance = "assumption"
+    elif declared == "requester":
+        round_data.provenance = "requester"
+    elif declared == "repo_fact":
+        round_data.provenance = "repo_fact"
 
 
 def classify_answer_provenance(answer: str | None) -> AnswerProvenance:
@@ -147,11 +186,7 @@ def extraction_rounds(state: InterviewState) -> list[ExtractionRound]:
     projected: list[ExtractionRound] = []
     for round_data in state.rounds:
         withheld = bool(round_data.user_response) and round_data.provenance in WITHHELD_PROVENANCES
-        note = (
-            WITHHELD_ASSUMPTION_NOTE
-            if round_data.provenance == "assumption"
-            else WITHHELD_ANSWER_NOTE
-        )
+        note = _WITHHELD_NOTES.get(round_data.provenance, WITHHELD_ANSWER_NOTE)
         projected.append(
             ExtractionRound(
                 round_number=round_data.round_number,

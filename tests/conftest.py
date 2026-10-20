@@ -211,6 +211,22 @@ def block_interview_answer_refiner_cli_spawn(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def block_interview_investigator_cli_spawn(monkeypatch):
+    """Stop the auto self-answer investigator from spawning real agent CLIs.
+
+    ``build_repo_investigator()`` returns a ``RepoInvestigator`` that builds an
+    agent runtime (claude, codex, ...) per routed interview question. Its own
+    fallback, ``None``, keeps the deterministic answerer, so this matches a
+    machine without any agent CLI. Tests that exercise the investigator inject
+    one directly or re-patch after this fixture and win.
+    """
+    for mod_name in ("ouroboros.mcp.tools.auto_handler", "ouroboros.cli.commands.auto"):
+        mod = sys.modules.get(mod_name)
+        if mod is not None and hasattr(mod, "build_repo_investigator"):
+            monkeypatch.setattr(mod, "build_repo_investigator", lambda *_a, **_k: None)
+
+
+@pytest.fixture(autouse=True)
 def block_setup_probe_cli_spawns(monkeypatch):
     """Stop ``ooo setup`` capability probes from spawning real codex/opencode CLIs.
 

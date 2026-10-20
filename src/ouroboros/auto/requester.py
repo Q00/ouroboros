@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import os
 import shlex
@@ -282,6 +282,11 @@ async def ask_requester(
     assumption (source in :data:`ROUTED_SOURCES`, no blocker). Every routed
     question is recorded in ``state.requester_log`` and emitted as an
     ``auto.interview.requester_asked`` event, answered or not.
+
+    A draft kept because the requester gave no answer has its ledger entries
+    marked ``requester_unanswered``: the requester already said the issue does
+    not settle the question, so the worker sees neither the draft nor the
+    question (``ledger_seed.ledger_assumptions``).
     """
     requester = driver.requester
     if (
@@ -306,8 +311,14 @@ async def ask_requester(
         reply = RequesterReply("launch_failed", detail=_clip(f"{type(exc).__name__}: {exc}"))
     await _record_reply(driver, state, request, reply)
     if reply.outcome != "answered" or not reply.answer:
-        return answer
-    return requester_answer(answer, reply.answer, round_number)
+        return replace(
+            answer,
+            ledger_updates=[
+                (section, replace(entry, requester_unanswered=True))
+                for section, entry in answer.ledger_updates
+            ],
+        )
+    return requester_answer(answer, reply.answer, round_number, question=question)
 
 
 async def _record_reply(
@@ -358,7 +369,9 @@ async def _record_reply(
     )
 
 
-def requester_answer(draft: AutoAnswer, text: str, round_number: int) -> AutoAnswer:
+def requester_answer(
+    draft: AutoAnswer, text: str, round_number: int, *, question: str = ""
+) -> AutoAnswer:
     """Replace ``draft`` with the requester's answer, keeping its sections.
 
     Each ledger section the draft would have filled gets the requester's text
@@ -367,6 +380,9 @@ def requester_answer(draft: AutoAnswer, text: str, round_number: int) -> AutoAns
     answer for the same facet supersedes the earlier one in
     ``SeedDraftLedger.add_entry`` (the earlier entry becomes WEAK) instead of
     tying with it as CONFLICTING. The transcript keeps every answer in order.
+
+    Each entry also keeps ``question``, the question the requester answered, so
+    the Seed can quote the pair verbatim (``ledger_seed.ledger_requester_answers``).
     """
     updates = [
         (
@@ -380,6 +396,7 @@ def requester_answer(draft: AutoAnswer, text: str, round_number: int) -> AutoAns
                 rationale="The requester answered this interview question.",
                 evidence=[f"requester answer, interview round {round_number}"],
                 provenance=DecisionProvenance.USER_CONFIRMED,
+                question=question,
             ),
         )
         for section, entry in draft.ledger_updates

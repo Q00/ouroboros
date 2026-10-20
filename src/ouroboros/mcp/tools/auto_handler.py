@@ -36,6 +36,7 @@ from ouroboros.auto.execution_acceptance import (
 )
 from ouroboros.auto.handoff_contract import RUN_HANDOFF_STARTED_STATUS
 from ouroboros.auto.interview_driver import AutoInterviewDriver
+from ouroboros.auto.investigator import build_repo_investigator
 from ouroboros.auto.ledger import (
     REQUIRED_SECTIONS,
     LedgerEntry,
@@ -560,6 +561,10 @@ class AutoHandler:
             # AI answer refiner: concrete goal-specific answers so interview
             # ambiguity converges. Best-effort; None falls back to deterministic.
             answer_refiner=build_answer_refiner(),
+            # The self-answer reads the repository first (auto/investigator.py).
+            investigator=build_repo_investigator(
+                runtime_plan.interview.runtime_backend, runtime_plan.interview.opencode_mode
+            ),
             event_store=runtime_event_store,
         )
         # RFC #809 Phase 2.1 — wire Seed QA on every MCP auto surface before

@@ -20,6 +20,7 @@ from pathlib import Path
 import subprocess
 from typing import Any
 
+from ouroboros.core.project_paths import WORKSPACE_STATE_DIR
 from ouroboros.orchestrator.verify_gate_outcome import _mapping_has_bounded_keys
 
 #: Keys this module may add to an ``execution.ac.attempt_judged`` payload.
@@ -66,19 +67,55 @@ def workspace_head(cwd: Path) -> str | None:
     return head.strip() if head else None
 
 
-def workspace_unchanged(diff: Mapping[str, object] | None, base_head: str | None) -> bool:
+NO_CHANGE_STILL_FAILS_NOTE = (
+    "The verify command still fails and this attempt made no change to the workspace "
+    "(no diff against the starting commit, no new files), so the failure it reproduces "
+    "is not fixed."
+)
+
+
+def workspace_untracked(cwd: Path) -> dict[str, str] | None:
+    """Content hash of every untracked file outside the product's state directory.
+
+    ``None`` outside a Git work tree. Files under ``WORKSPACE_STATE_DIR`` (the
+    context pack, the auto traces) are the product's own and are left out.
+    """
+    text = _git(cwd, "ls-files", "--others", "--exclude-standard", "-z")
+    if text is None:
+        return None
+    hashes: dict[str, str] = {}
+    for path in text.split("\0"):
+        if not path or Path(path).parts[0] == WORKSPACE_STATE_DIR:
+            continue
+        try:
+            hashes[path] = hashlib.sha256((cwd / path).read_bytes()).hexdigest()
+        except OSError:
+            hashes[path] = "unreadable"
+    return hashes
+
+
+def workspace_unchanged(
+    diff: Mapping[str, object] | None,
+    base_head: str | None,
+    *,
+    untracked: Mapping[str, str] | None = None,
+    base_untracked: Mapping[str, str] | None = None,
+) -> bool:
     """Whether ``diff`` (``workspace_diff_evidence``) shows no change since ``base_head``.
 
     True only inside a Git work tree whose ``HEAD`` is still ``base_head`` (so
-    no commit hides a change), with an empty diff and no untracked file.
+    no commit hides a change), with an empty diff. With ``untracked``
+    (``workspace_untracked``), the untracked files outside the product's state
+    directory must be exactly ``base_untracked`` (the set recorded when the run
+    started), with the same contents; without it, no untracked file may exist.
     """
     if diff is None or base_head is None:
         return False
-    return (
-        diff.get("head") == base_head
-        and diff.get("diff_bytes") == 0
-        and diff.get("untracked_count") == 0
-    )
+    if diff.get("head") != base_head or diff.get("diff_bytes") != 0:
+        return False
+    if untracked is None:
+        return diff.get("untracked_count") == 0
+    return dict(untracked) == dict(base_untracked or {})
 
 
 def judgment_envelope_ok(data: Mapping[str, Any], required: frozenset[str]) -> bool:
@@ -134,10 +171,12 @@ def _git_bytes(cwd: Path, *args: str) -> bytes | None:
 
 __all__ = [
     "ATTEMPT_EVIDENCE_KEYS",
+    "NO_CHANGE_STILL_FAILS_NOTE",
     "NO_EVIDENCE_NOTE",
     "attempt_workspace_evidence",
     "judgment_envelope_ok",
     "workspace_diff_evidence",
     "workspace_head",
     "workspace_unchanged",
+    "workspace_untracked",
 ]
