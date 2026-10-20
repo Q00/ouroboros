@@ -13,6 +13,11 @@ extraction withholds the answer. Nothing downstream reads the ``[from-auto]``
 text prefix to decide. The guesses still reach the worker: the auto pipeline
 carries the unconfirmed ledger drafts into ``Seed.assumptions``
 (``auto/ledger_seed.py``).
+
+A requester answer is a confirmed fact, but it is declared ``"requester"``:
+extraction withholds it too, and the auto pipeline carries it to the worker
+verbatim as a quoted question and answer (``Seed.requester_answers``) instead
+of a rewritten constraint or criterion.
 """
 
 from __future__ import annotations
@@ -26,15 +31,14 @@ from ouroboros.bigbang.answer_provenance import AnswerProvenance
 if TYPE_CHECKING:
     from ouroboros.auto.interview_driver import InterviewBackend, InterviewTurn
 
-# Answer sources whose text is what the user stated, the requester answered,
-# or the repository shows. Any other source binds only through a ledger entry
-# that binds on its own (``LedgerEntry.binds_seed``).
+# Answer sources whose text is what the user stated or the repository shows.
+# Any other source binds only through a ledger entry that binds on its own
+# (``LedgerEntry.binds_seed``). The requester's answer is declared on its own.
 _BINDING_ANSWER_SOURCES = frozenset(
     {
         AutoAnswerSource.USER_GOAL,
         AutoAnswerSource.REPO_FACT,
         AutoAnswerSource.USER_PREFERENCE,
-        AutoAnswerSource.REQUESTER,
     }
 )
 
@@ -47,7 +51,13 @@ _GUESS_ANSWER_SOURCES = frozenset(
 
 
 def answer_provenance(answer: AutoAnswer) -> AnswerProvenance:
-    """Return ``"user"`` for an answer that may bind, else ``"assumption"``."""
+    """Return ``"user"`` for an answer that may bind, ``"requester"`` for a
+    requester answer and ``"repo_fact"`` for a checked repository fact (both
+    quoted verbatim, never extracted), else ``"assumption"``."""
+    if answer.source is AutoAnswerSource.REQUESTER:
+        return "requester"
+    if answer.declared_provenance == "repo_fact":
+        return "repo_fact"
     if answer.source in _GUESS_ANSWER_SOURCES:
         return "assumption"
     if answer.source in _BINDING_ANSWER_SOURCES:

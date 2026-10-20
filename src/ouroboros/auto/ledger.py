@@ -89,6 +89,11 @@ instead of inventing a merge.
 # as it also supersedes auto's own draft under the bare facet key.
 REQUESTER_KEY_SUFFIX = ".requester"
 
+# Key infix of a ledger entry written from a checked repository fact
+# (``auto/investigator.py``): ``<facet key>.repo_fact.<round>``. Such an entry
+# settles its section but reaches the worker only as ``Seed.repo_facts``.
+REPO_FACT_KEY_INFIX = ".repo_fact."
+
 
 REQUIRED_SECTIONS = (
     "goal",
@@ -212,6 +217,11 @@ class LedgerEntry:
     # gap reopening, legacy sessions). An entry that does not bind is shown
     # to the worker as this open question, never as its drafted value.
     question: str = ""
+    # True for auto's draft kept because the requester was asked this question
+    # and gave no answer (``auto/requester.py``). The requester already said the
+    # issue does not settle it, so the worker sees neither the draft nor the
+    # question. Omitted from ``to_dict`` when False.
+    requester_unanswered: bool = False
 
     def __post_init__(self) -> None:
         self.source = LedgerSource(str(self.source))
@@ -265,6 +275,8 @@ class LedgerEntry:
             data["provenance"] = DecisionProvenance(self.provenance).value
         if not self.question:
             data.pop("question", None)
+        if not self.requester_unanswered:
+            data.pop("requester_unanswered", None)
         return data
 
     @classmethod
@@ -296,6 +308,9 @@ class LedgerEntry:
             raise ValueError(msg)
         if "reversible" in data and not isinstance(data["reversible"], bool):
             msg = "ledger entry reversible must be a boolean"
+            raise ValueError(msg)
+        if not isinstance(data.get("requester_unanswered", False), bool):
+            msg = "ledger entry requester_unanswered must be a boolean"
             raise ValueError(msg)
         try:
             confidence = float(data["confidence"])

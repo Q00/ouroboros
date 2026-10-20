@@ -253,6 +253,36 @@ def validate_ac_success_contract_values(
         )
 
 
+class RequesterAnswer(BaseModel, frozen=True):
+    """A question the requester answered, quoted verbatim.
+
+    Attributes:
+        question: The interview question the requester was asked.
+        answer: The requester's answer, word for word.
+    """
+
+    question: str
+    answer: str = Field(..., min_length=1)
+
+
+class RepoFact(BaseModel, frozen=True):
+    """A question ``ooo auto`` answered by reading the repository, quoted verbatim.
+
+    Every evidence span was checked against the workspace: the file is inside
+    it and the quote occurs in the cited lines. A repo fact describes the code
+    as it is; it is not a requirement.
+
+    Attributes:
+        question: The interview question.
+        answer: The answer read from the code, word for word.
+        evidence: Checked spans, each ``path:start-end: quote``.
+    """
+
+    question: str
+    answer: str = Field(..., min_length=1)
+    evidence: tuple[str, ...] = ()
+
+
 class ExitCondition(BaseModel, frozen=True):
     """Defines when the workflow should terminate.
 
@@ -783,6 +813,12 @@ class Seed(BaseModel, frozen=True):
         assumptions: Unconfirmed guesses made on the requester's behalf. They
             never bind: the worker sees them as assumptions it may override when
             the task or the code says otherwise.
+        requester_answers: Questions the requester answered, with the answer
+            quoted verbatim. Confirmed facts the worker must follow, never
+            rewritten into constraints or criteria.
+        repo_facts: Questions auto answered from the repository, with the
+            answer and its checked evidence quoted verbatim. They describe the
+            current code and are never rewritten into constraints or criteria.
         ontology_schema: Conceptual lens for workflow coherence.
         evaluation_principles: Principles for evaluating outputs.
         exit_conditions: Conditions for terminating the workflow.
@@ -854,6 +890,20 @@ class Seed(BaseModel, frozen=True):
         description=(
             "Non-binding assumptions nobody confirmed; the worker may override them "
             "when the task or the code says otherwise"
+        ),
+    )
+    requester_answers: tuple[RequesterAnswer, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Questions the requester answered, with the answer quoted verbatim; "
+            "confirmed facts the worker must follow"
+        ),
+    )
+    repo_facts: tuple[RepoFact, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Questions answered from the repository, with the answer and its checked "
+            "evidence quoted verbatim; they describe the current code, not requirements"
         ),
     )
 
@@ -1027,6 +1077,10 @@ class Seed(BaseModel, frozen=True):
         # serializing exactly as it did before the field existed.
         if not self.assumptions:
             excluded.add("assumptions")
+        if not self.requester_answers:
+            excluded.add("requester_answers")
+        if not self.repo_facts:
+            excluded.add("repo_facts")
         data = self.model_dump(mode="json", by_alias=True, exclude=excluded)
         data.update({key: _thaw_seed_extra_value(value) for key, value in extra.items()})
         return data

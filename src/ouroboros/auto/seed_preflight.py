@@ -247,8 +247,13 @@ def _shell_variable_events(
     assignment = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
     persistent_bindings: list[tuple[int, str]] = []
     persistent_unbindings: list[tuple[int, str]] = []
+    # An assignment after ``&&`` runs only when the AND-list got that far, so
+    # it binds the rest of that AND-list (every later command in it runs only
+    # after the assignment did) and nothing after the list ends at ``;``, a
+    # newline, ``||`` or ``&``.
+    and_list_bindings: list[tuple[int, int, str]] = []
     subshell_separators = {"&", "|"}
-    for start, end, separator_before, separator_after in segments:
+    for segment_index, (start, end, separator_before, separator_after) in enumerate(segments):
         words = shell_words(command[start:end].strip())
         if not words:
             continue
@@ -278,6 +283,26 @@ def _shell_variable_events(
         if assignment_only and persists:
             persistent_bindings.extend(
                 (end, word.partition("=")[0]) for word in words if assignment.fullmatch(word)
+            )
+        elif (
+            assignment_only
+            and separator_before == "&&"
+            and separator_after not in subshell_separators
+        ):
+            list_end = next(
+                (
+                    later_start - 1  # the separator that ends the list
+                    for later_start, _later_end, later_before, _later_after in segments[
+                        segment_index + 1 :
+                    ]
+                    if later_before not in {"&&", "|"}
+                ),
+                len(command),
+            )
+            and_list_bindings.extend(
+                (end, list_end, word.partition("=")[0])
+                for word in words
+                if assignment.fullmatch(word)
             )
         elif assignment_builtin and persists:
             persistent_bindings.extend(
@@ -321,6 +346,9 @@ def _shell_variable_events(
     events: list[tuple[int, str, str]] = []
     events.extend((position, "bind", name) for position, name in persistent_bindings)
     events.extend((position, "unbind", name) for position, name in persistent_unbindings)
+    for position, list_end, name in and_list_bindings:
+        events.append((position, "scope_bind", name))
+        events.append((list_end, "scope_end", name))
 
     def in_command_substitution(position: int) -> bool:
         depth = 0
@@ -1302,6 +1330,8 @@ def _check_verify_commands(
             command_bound: set[str] = set(inherited_bindings) | set(_SHELL_INITIALIZED_ENV_VARS)
             if shell_dialect == "bash":
                 command_bound.update(_BASH_INITIALIZED_ENV_VARS)
+            # Assignments bound only for the rest of their AND-list (``a && X=1 && use $X``).
+            and_list_bound: dict[str, int] = {}
             for position, event, variable in _shell_variable_events(
                 shell_command, shell_dialect=shell_dialect
             ):
@@ -1310,6 +1340,12 @@ def _check_verify_commands(
                     continue
                 if event == "unbind":
                     command_bound.discard(variable)
+                    continue
+                if event in {"scope_bind", "scope_end"}:
+                    step = 1 if event == "scope_bind" else -1
+                    and_list_bound[variable] = and_list_bound.get(variable, 0) + step
+                    continue
+                if and_list_bound.get(variable, 0) > 0:
                     continue
                 if variable == "OLDPWD" and re.search(
                     r"(?:^|[;&|\n]\s*)cd(?:\s|$)", shell_command[:position]

@@ -1130,6 +1130,46 @@ def test_conditional_assignments_are_not_guaranteed_bindings(tmp_path: Path, com
     assert runtime.returncode != 0
 
 
+@pytest.mark.parametrize(
+    ("command", "runtime_passed"),
+    (
+        # pytest-6197: the reproduction captures its output after ``&&``.
+        (
+            't=$(mktemp -d) && output=$(cd "$t" && echo ok) && printf "%s\\n" "$output"',
+            True,
+        ),
+        ('true && FOO=bar && test -n "$FOO"', True),
+        ('true && FOO=bar && echo "$FOO" | grep -q bar', True),
+        # The AND-list ends at ``||`` and ``;``: the assignment may not have run.
+        ('false && FOO=bar || test -n "$FOO"', False),
+        ('false && FOO=bar; test -n "$FOO"', False),
+    ),
+)
+def test_assignment_after_and_binds_the_rest_of_its_and_list(
+    tmp_path: Path, command: str, runtime_passed: bool
+) -> None:
+    environment = os.environ.copy()
+    environment.pop("FOO", None)
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="AND-list binding", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+    runtime = subprocess.run(
+        ["sh", "-uc", command],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        check=False,
+    )
+
+    assert report.passed is runtime_passed
+    assert (runtime.returncode == 0) is runtime_passed
+
+
 def test_empty_environment_shell_initializes_path(tmp_path: Path) -> None:
     command = "env -i /bin/sh -c 'test -n \"$PATH\"'"
     report = run_seed_preflight(
