@@ -240,19 +240,6 @@ class AutoAnswerer:
             context,
         )
 
-        # When the chosen route produced a non-grounded fallback (ASSUMPTION,
-        # EXISTING_CONVENTION, CONSERVATIVE_DEFAULT) for a question that the
-        # safe-allowlist recognises as a regulated-product question, re-route
-        # to _product_behavior_answer() so the regulated-feature semantics
-        # (regulated noun, subject-specific constraints) are preserved in the
-        # ledger instead of being replaced by a generic IO/runtime/default
-        # template. Grounded answers (REPO_FACT etc.) are NOT in
-        # _RISKY_FALLBACK_SOURCES and so are left untouched — preserving the
-        # existing runtime/IO contract that "concrete repo fact wins".
-        if answer.source in _RISKY_FALLBACK_SOURCES and _is_safe_product_regulated_question(
-            lowered
-        ):
-            answer = self._product_behavior_answer(question)
         return answer
 
     def answer_gap(
@@ -1567,16 +1554,9 @@ def _is_product_behavior_question(lowered: str) -> bool:
             r"\b(should|must|can|will|do|does|enforce|track|edit|subscribe)\b",
             lowered,
         )
-        # Covers every product-semantics verb that
-        # ``_is_safe_product_regulated_question()`` allows (export, download,
-        # render, display, show, expose, support, enable, allow, view, access)
-        # and the "be able to <verb>" phrasing gap for ``view`` / ``access`` /
-        # ``download``.  Some of these verbs are already matched by the broader
-        # patterns above; listing the full set here keeps the safe-allowlist
-        # vocabulary explicitly aligned with the router so the two never drift
-        # silently. Any regulated-product question the allowlist accepts must also
-        # route through ``_product_behavior_answer()`` rather than silently
-        # falling to ``_default_answer()``.
+        # Product-semantics verbs (export, download, render, display, show,
+        # expose, support, enable, allow, view, access) and the "be able to
+        # <verb>" phrasing.
         or re.search(
             r"\b(should|must|can|will|do|does|is|are)\b.+\b(be able to\s+)?"
             r"(export|download|render|display|show|expose|support|enable|allow|view|access)\b",
@@ -1627,25 +1607,6 @@ def _latest_resolved_goal(ledger: SeedDraftLedger) -> str:
     return ""
 
 
-_RISKY_FALLBACK_SOURCES: frozenset[AutoAnswerSource] = frozenset(
-    {
-        AutoAnswerSource.CONSERVATIVE_DEFAULT,
-        AutoAnswerSource.ASSUMPTION,
-        # ``_runtime_answer`` returns EXISTING_CONVENTION when no concrete
-        # repo fact was supplied. The text is still a generic
-        # "use the existing repository runtime" template, so for regulated
-        # topics it is re-routed like any other fallback. A REPO_FACT-backed
-        # runtime answer (full ``runtime_context`` supplied) is unaffected.
-        AutoAnswerSource.EXISTING_CONVENTION,
-        # USER_PREFERENCE is intentionally NOT in this set: the safe-product
-        # re-route at the routing-block tail would drop the user's value for
-        # regulated-product questions (e.g. "Should the app export PII
-        # reports?"), silently replacing the caller-supplied preference with
-        # the generic ``_product_behavior_answer`` template (PR #811 review).
-    }
-)
-
-
 # Sources that may be replaced by a caller-supplied USER_PREFERENCE when one
 # matches the question's intent section. Grounded sources (USER_GOAL,
 # REPO_FACT, NON_GOAL) are intentionally NOT upgradable — explicit grounded
@@ -1654,8 +1615,7 @@ _RISKY_FALLBACK_SOURCES: frozenset[AutoAnswerSource] = frozenset(
 # EXISTING_CONVENTION is included because the auto answerer's existing
 # fallback paths (notably ``_runtime_answer``) tag generic template responses
 # as EXISTING_CONVENTION even when no actual repo convention was observed —
-# the same labelling inflation called out in the comment block on
-# :data:`_RISKY_FALLBACK_SOURCES`. A caller-supplied preference is more
+# the same labelling inflation. A caller-supplied preference is more
 # specific than a generic "use the existing repository runtime" template, so
 # the upgrade is allowed here. Phase 4 ledger-level conflict resolution will
 # distinguish evidence-grounded EXISTING_CONVENTION entries from the template
@@ -1764,134 +1724,3 @@ def _maybe_apply_user_preference(
             generic_default=False,
         )
     return answer
-
-
-_REGULATED_NOUNS_RE = re.compile(
-    r"\b(pii|personally identifiable information|gdpr|hipaa|sox|pci[- ]?dss)\b"
-)
-_PRODUCT_SEMANTICS_REGULATED_VERBS_RE = re.compile(
-    r"\b(export|exports|exporting|exported|"
-    r"download|downloads|downloading|downloaded|"
-    r"render|renders|rendering|rendered|"
-    r"display|displays|displaying|displayed|"
-    r"show|shows|showing|shown|"
-    r"expose|exposes|exposing|exposed|"
-    r"support|supports|supporting|supported|"
-    r"enable|enables|enabling|enabled|"
-    r"allow|allows|allowing|allowed|"
-    r"view|views|viewing|viewed|"
-    r"access|accesses|accessing|accessed)\b"
-)
-# Compliance-policy verbs in *active* form only (base / -s / -ing).
-# Past-participle forms (``stored``, ``encrypted``, ``retained``, …) are
-# deliberately excluded because they routinely act as adjectives modifying a
-# regulated noun (``view stored PII``, ``display encrypted HIPAA files``) — the
-# main verb of those sentences is the product-semantics one, not a request for
-# a compliance-policy decision.
-#
-# When an active-form compliance verb appears, the question is asking the
-# pipeline to decide regulated-data handling (``How should the system store …?``,
-# ``Should we retain and export PII records?``) and must remain blocked even if
-# the same sentence also mentions a product-semantics verb.
-_COMPLIANCE_POLICY_ACTIVE_VERBS_RE = re.compile(
-    r"\b(store|stores|storing|"
-    r"handle|handles|handling|"
-    r"retain|retains|retaining|"
-    r"collect|collects|collecting|"
-    r"encrypt|encrypts|encrypting|"
-    r"process|processes|processing|"
-    r"transmit|transmits|transmitting|"
-    r"disclose|discloses|disclosing|"
-    r"share|shares|sharing|"
-    r"manage|manages|managing|"
-    r"govern|governs|governing)\b"
-)
-# Broad product-question indicator: contains a modal/question word.  Looser than
-# ``_is_product_behavior_question`` so that phrasings like "Should users be able
-# to download …" are captured even when ``download`` is not in that helper's verb list.
-_PRODUCT_QUESTION_MODAL_RE = re.compile(r"\b(should|must|can|will|do|does|is|are)\b")
-# Reject "compliance-scope-as-feature-flag" phrasings: a wide-coverage
-# enablement verb (``support`` / ``enable`` / ``allow``) followed by a
-# regulated noun used as a policy scope rather than a concrete feature.
-# Two shapes are rejected:
-#
-#   1. Bare regulated noun with no further qualifying noun
-#      (``Should the platform support HIPAA?``, ``Should the app enable GDPR?``).
-#      The trailing negative lookahead ``(?!\s+[a-z])`` fires when the
-#      regulated noun is the last lexical token of the clause.
-#
-#   2. Regulated noun followed (optionally bridged by ``data``) by a
-#      compliance-policy noun that names the policy regime itself —
-#      ``retention``, ``storage``, ``encryption``, ``handling``, ``processing``,
-#      ``collection``, ``disclosure``, ``governance``, ``compliance``,
-#      ``transmission``, ``redaction``.  Phrasings such as
-#      ``support HIPAA data retention`` and ``enable GDPR data storage`` frame
-#      the entire compliance policy as a toggle and are still
-#      regulated-policy decisions, not bounded product behaviour, so they
-#      remain blocked.  A trailing word boundary keeps concrete-feature
-#      variants ("support HIPAA retention reports", "enable GDPR consent
-#      banners") off this path because the policy noun is then followed by a
-#      qualifying feature noun rather than ending the clause.
-#
-# Concrete-feature qualifiers that follow the regulated noun directly
-# ("HIPAA audit logs", "GDPR consent banners", "PII redaction in exports",
-# "GDPR data exports") still describe bounded product features and are not
-# rejected.
-_BARE_COMPLIANCE_SCOPE_RE = re.compile(
-    r"\b(?:support|supports|supporting|supported|"
-    r"enable|enables|enabling|enabled|"
-    r"allow|allows|allowing|allowed)\s+"
-    r"(?:pii|personally identifiable information|gdpr|hipaa|sox|pci[- ]?dss)\b"
-    r"(?:"
-    r"(?!\s+[a-z])"
-    r"|"
-    r"(?:\s+data)?\s+"
-    r"(?:retention|storage|encryption|handling|processing|collection|"
-    r"disclosure|governance|compliance|transmission|redaction)"
-    r"(?!\s+[a-z])"
-    r")"
-)
-
-
-def _is_safe_product_regulated_question(lowered: str) -> bool:
-    """Allow product-semantics questions that mention regulated-data nouns.
-
-    Auto mode must not decide compliance policy (how to store/handle/retain PII,
-    which fields are HIPAA-regulated, etc.), but it can answer bounded product
-    requirements questions such as "Should the app export PII reports?" or
-    "Should users be able to download GDPR exports?".  Those are asking for
-    feature-level behavior, not compliance-policy decisions.
-
-    Strategy: pass through when the question
-      1. mentions a regulated noun (PII/GDPR/HIPAA/SOX/PCI-DSS),
-      2. contains a product-question modal (should/can/will/must/do/does/is/are),
-      3. does NOT use an *active*-form compliance-policy verb (``store``,
-         ``stores``, ``storing``, ``handle``, ``encrypt``, ``share``, …) — those
-         signal a regulated-data handling decision and must stay blocked even
-         when mixed with product-semantics verbs (``How should the system store
-         and display HIPAA files?``, ``Should we retain and export PII
-         records?``),
-      4. is NOT a bare compliance-scope-as-feature-flag phrasing
-         (``support|enable|allow`` + bare regulated noun with no qualifying
-         feature noun). ``Should the platform support HIPAA?`` and
-         ``Should the app enable GDPR?`` are framing the entire regulatory
-         regime as a toggle, which remains a compliance-policy decision.
-      5. uses a product-semantics verb (export, download, display, show, view …).
-
-    Past-participle compliance forms (``stored``, ``encrypted``, ``retained``,
-    …) are intentionally NOT in the negative list: in product-behavior questions
-    they routinely act as adjectives modifying a regulated noun (``view stored
-    PII``, ``display encrypted HIPAA files``), and the sentence's main action is
-    the product-semantics verb. Pure-compliance phrasings using past-participle
-    forms (``Should PII be stored …?``) lack a product-semantics verb and are
-    rejected by step (4) instead.
-    """
-    if not _REGULATED_NOUNS_RE.search(lowered):
-        return False
-    if not _PRODUCT_QUESTION_MODAL_RE.search(lowered):
-        return False
-    if _COMPLIANCE_POLICY_ACTIVE_VERBS_RE.search(lowered):
-        return False
-    if _BARE_COMPLIANCE_SCOPE_RE.search(lowered):
-        return False
-    return bool(_PRODUCT_SEMANTICS_REGULATED_VERBS_RE.search(lowered))

@@ -1,27 +1,18 @@
-"""Freedom-policy guard for the unsafe-context veto.
+"""Safe-default closure reads no keywords.
 
-The unsafe-context bank that vetoed safe-default closure is intentionally
-empty: ``ooo auto`` must NOT block autonomous gap-defaulting just because the
-interview context mentions an everyday software word like ``contract``,
-``license``, ``security``, ``deploy``, or ``credentials``. These keywords
-previously over-blocked benign runs (a CSV→JSON tool was classified as
-"legal/medical judgment" because an answer said "contract").
-
-This module deliberately does NOT opt into the ``_legacy_unsafe_bank``
-fixture (see conftest.py) — it asserts the production default directly.
+``finalize_safe_defaultable_gaps`` decides only from ledger structure (a
+missing goal, a conflicting or blocked section, a section with no default
+policy). A goal full of words such as ``contract``, ``license``, ``deploy`` or
+``credentials`` closes like any other, and every default it writes is a
+non-binding assumption.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from ouroboros.auto.ledger import SeedDraftLedger
-from ouroboros.auto.safe_defaults import _UNSAFE_CONTEXT_PATTERNS, _unsafe_context_reason
-
-
-def test_production_unsafe_context_bank_is_empty() -> None:
-    """The shipped default vetoes nothing — freedom policy."""
-    assert _UNSAFE_CONTEXT_PATTERNS == ()
+from ouroboros.auto.ledger import LedgerStatus, SeedDraftLedger
+from ouroboros.auto.safe_defaults import finalize_safe_defaultable_gaps
 
 
 @pytest.mark.parametrize(
@@ -35,7 +26,25 @@ def test_production_unsafe_context_bank_is_empty() -> None:
         "Charge the customer's credit card for the subscription",
     ],
 )
-def test_everyday_keywords_do_not_veto_safe_default_closure(goal: str) -> None:
-    """Goals full of formerly-blocked keywords no longer trip the matcher."""
+def test_goal_wording_never_vetoes_safe_default_closure(goal: str) -> None:
     ledger = SeedDraftLedger.from_goal(goal)
-    assert _unsafe_context_reason(ledger, goal=goal, pending_question=None) is None
+
+    finalization = finalize_safe_defaultable_gaps(ledger, goal=goal, provenance="test")
+
+    assert finalization.completed
+    assert not finalization.unsafe_gaps
+    assert ledger.is_seed_ready()
+    for section in finalization.defaulted_sections:
+        for entry in ledger.sections[section].entries:
+            if entry.key == f"{section}.safe_default_finalization":
+                assert entry.status == LedgerStatus.DEFAULTED
+                assert not entry.binds_seed
+
+
+def test_structural_gaps_still_block_closure() -> None:
+    ledger = SeedDraftLedger.from_goal("   ")
+
+    finalization = finalize_safe_defaultable_gaps(ledger, goal="", provenance="test")
+
+    assert not finalization.completed
+    assert any(gap.startswith("goal:") for gap in finalization.unsafe_gaps)
