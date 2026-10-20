@@ -185,15 +185,6 @@ class AutoAnswerer:
             intents = _classify_question_intents(question)
         # ---------------------------------------------------------------------
 
-        blocker = _blocker_for(question)
-        if blocker is not None:
-            return AutoAnswer(
-                text=f"Cannot safely decide automatically: {blocker.reason}",
-                source=AutoAnswerSource.BLOCKER,
-                confidence=1.0,
-                blocker=blocker,
-            )
-
         if QuestionIntent.NON_GOALS in intents:
             # NON_GOAL source is grounded (explicit non-goal) and is NOT
             # upgradable to USER_PREFERENCE — observed in priority order.
@@ -1393,8 +1384,7 @@ def _has_user_verify_feature_shape(lowered: str) -> bool:
     verify their email?"``) and PRODUCT_BEHAVIOR should win over the
     VERIFICATION cue path.  An actor noun is mandatory so engineering-side
     QA questions like ``"How should we verify the HIPAA worker tests
-    pass?"`` continue to route to ``_verification_answer()`` and through
-    the existing regulated-data blocker.
+    pass?"`` continue to route to ``_verification_answer()``.
 
     A first-person-plural subject (``we``/``nous``/``wir``/``我们``/``우리``…)
     is also disqualifying — those questions ask about engineering-side QA
@@ -1635,63 +1625,6 @@ def _latest_resolved_goal(ledger: SeedDraftLedger) -> str:
         if entry.status not in inactive and entry.value.strip():
             return entry.value
     return ""
-
-
-def _is_safe_product_branch_question(lowered: str) -> bool:
-    return bool(
-        _matches_any(
-            lowered,
-            (
-                r"\b(users?|customers?|admins?|maintainers?|owners?)\b.+\b(delete|remove)\b.+\b(branch|branches)\b",
-                r"\b(app|application|tool|system|service|cli|workflow|feature)\b.+\b(delete|remove)\b.+\b(branch|branches)\b",
-            ),
-        )
-        and _is_product_behavior_question(lowered)
-        and not re.search(
-            r"\b(current|this|production|prod|live|external|remote|local)\b.+\b(branch|branches)\b",
-            lowered,
-        )
-    )
-
-
-def _asks_for_sensitive_value_or_authority(lowered: str) -> bool:
-    """Return True when the question asks auto mode to choose/use real secrets."""
-    return bool(
-        _matches_any(
-            lowered,
-            (
-                r"\b(provide|enter|paste|supply)\b.+\b(credential|credentials|secret|token|key|password)\b",
-                r"\b(credential|credentials|secret|token|key|password)\b.+\b(value|secret)\b",
-                r"\b(which|what)\b.+\b(credential|credentials|access token|auth token|private key|api key|password|secret)\b.+\b(use|configure|set|env|environment|workflow|ci)\b",
-                r"\b(which|what)\b.+\b(value|secret)\b.+\b(credential|credentials|access token|auth token|private key|api key|password)\b",
-                r"\b(use|configure|set)\b.+\b(production|prod|live|external)\b.+\b(credential|credentials|secret|api key|private key|access token|auth token)\b",
-                r"\b(use|configure|set)\b.+\b(credential|credentials|secret|api key|private key|access token|auth token)\b.+\b(production|prod|live|external)\b",
-            ),
-        )
-    )
-
-
-def _is_safe_product_sensitive_question(lowered: str) -> bool:
-    """Allow product-semantics questions that mention sensitive-domain nouns.
-
-    Auto mode must not invent real credential values or production authority,
-    but it can answer bounded requirements questions about product-managed
-    credential/token/key/secret features.  These questions are routed to the
-    product-behavior answerer so the Seed keeps the requested semantics.
-    """
-    if not _is_product_behavior_question(lowered):
-        return False
-    if _asks_for_sensitive_value_or_authority(lowered):
-        return False
-    return bool(
-        _matches_any(
-            lowered,
-            (
-                r"\b(users?|customers?|admins?|maintainers?|owners?|the app|app|system|settings form)\b.+\b(credential|credentials|secret|token|tokens|api keys?|private keys?|passwords?)\b",
-                r"\b(credential|credentials|secret|token|tokens|api keys?|private keys?|passwords?)\b.+\b(fields?|settings?|form|login|authentication|rotation|display|store|save|delete|remove)\b",
-            ),
-        )
-    )
 
 
 _RISKY_FALLBACK_SOURCES: frozenset[AutoAnswerSource] = frozenset(
@@ -1962,147 +1895,3 @@ def _is_safe_product_regulated_question(lowered: str) -> bool:
     if _BARE_COMPLIANCE_SCOPE_RE.search(lowered):
         return False
     return bool(_PRODUCT_SEMANTICS_REGULATED_VERBS_RE.search(lowered))
-
-
-_DEPLOYMENT_AUTHORITY_REASON = "deployment target requires human authority"
-
-
-def _is_safe_implementation_choice_question(lowered: str) -> bool:
-    """True for questions about implementation substrate or project placement.
-
-    Choosing a programming language / runtime / framework, or deciding between a
-    greenfield project and an existing repository (where the code should "live"),
-    are safe-defaultable engineering decisions — never external-authority actions.
-
-    Motivating false positive (#1170 canonical cli-todo R3): the question
-    "What programming language and runtime should this CLI be built in ... and is
-    there an existing project or repository this tool should live inside, or will
-    it be a standalone greenfield project?" matched the deployment pattern because
-    the verb "live" ("where should it live") collided with the deployment-sense
-    "live" token and "project" matched the deployment-target noun group. The
-    session terminated as BLOCKED("deployment target requires human authority")
-    instead of safe-defaulting to greenfield, breaking the product-or-die path.
-
-    This predicate intentionally governs **only** suppression of the deployment
-    false positive (see `_blocker_for`): it can never shadow credential, payment,
-    legal, medical, or destructive blockers, so it does not need to mirror their
-    vocabularies. The single negative check below keeps a *genuine* deployment
-    question (which also names a language/runtime) blocked.
-    """
-    # A genuine deployment-sense signal means this is a real deployment-target
-    # question, not the benign "where should the code live" collision → do not
-    # suppress the deployment blocker.
-    if re.search(
-        r"\b(deploy|deployment|release|publish|production|prod|hosting|host)\b",
-        lowered,
-    ):
-        return False
-    return _matches_any(
-        lowered,
-        (
-            r"\b(which|what)\b.+\b(programming language|language|runtime|"
-            r"framework|frameworks|libraries|library|tech stack|stack)\b",
-            r"\b(greenfield|standalone)\b.+\bproject\b",
-            r"\b(existing|new)\b.+\b(project|repo|repository|codebase)\b.+"
-            r"\b(live|reside|inside|within|build|built|placed|located)\b",
-            r"\bwhere\b.+\b(should|will|does|to)\b.+\b(live|reside|placed|located)\b",
-        ),
-    )
-
-
-def _blocker_for(question: str) -> AutoBlocker | None:
-    lowered = question.lower()
-    if _is_safe_product_branch_question(lowered) or _is_safe_product_sensitive_question(lowered):
-        return None
-
-    external_action_patterns = (
-        (
-            r"\b(credential value|credential secret)\b",
-            "credential or secret value required",
-        ),
-        (
-            r"\b(provide|enter|paste|supply|configure|set)\b.+\b(access token|auth token|private key)\b",
-            "credential or secret value required",
-        ),
-        (
-            r"\b(which|what)\b.+\b(access token|auth token|private key)\b.+\b(use|configure|set|env|environment|workflow|ci|production|prod)\b",
-            "credential or secret value required",
-        ),
-        (
-            r"\b(provide|enter|paste|supply|configure|set)\b.+\b(credentials?)\b.+\b(value|secret|token|key|password|env|environment|workflow|ci|production|prod)\b",
-            "credential or secret value required",
-        ),
-        (
-            r"\b(which|what)\s+credentials?\b.+\b(use|configure|set|env|environment|workflow|ci|production|prod)\b",
-            "credential or secret value required",
-        ),
-        (
-            r"\b(provide|enter|use|configure|set)\b.+\b(api keys?|passwords?)\b.+\b(value|secret|token|credential|env|environment|workflow|ci|production|prod)\b",
-            "credential or secret value required",
-        ),
-        (
-            r"\b(which|what)\b.+\b(api keys?|passwords?)\b.+\b(value|secret|token|credential|env|environment|workflow|ci|production|prod)\b",
-            "credential or secret value required",
-        ),
-        (
-            r"\b(credential|credentials)\b.+\b(value|secret|token|key|password|env|environment|workflow|ci)\b",
-            "credential or secret value required",
-        ),
-        (
-            r"\b(charge|purchase|subscribe|provide|enter|use|configure|set)\b.+\b(payment|billing|paid service|credit card|bank account|invoice)\b.+\b(account|provider|key|secret|production|live)\b",
-            "paid service or financial decision required",
-        ),
-        (
-            r"\b(payment|billing|paid service|credit card|bank account|invoice)\b.+\b(account|provider|key|secret|production|live)\b.+\b(charge|purchase|subscribe|pay)\b",
-            "paid service or financial decision required",
-        ),
-        (
-            r"\b(which|what|provide|obtain|get|use|choose|select)\b.+\b(legal|compliance|license|contract)\b.+\b(advice|judgment|review|approval|liability|risk|interpretation)\b",
-            "legal judgment required",
-        ),
-        (
-            r"\b(which|what|provide|use|choose|select)\b.+\b(medical|clinical|diagnosis|treatment|health)\b.+\b(advice|judgment|diagnose|prescribe|triage|recommendation)\b",
-            "medical judgment required",
-        ),
-        (
-            r"\b(should|can|may|will|do we|should we)\b.+\b(deploy|release|publish)\b.+\b(to|against|on)\s+\b(production|prod|live|external)\b",
-            _DEPLOYMENT_AUTHORITY_REASON,
-        ),
-        (
-            r"\b(which|what|choose|select|use|configure|set)\b.+\b(production|prod|live|external)\b.+\b(environment|target|account|project|cluster|region)\b",
-            _DEPLOYMENT_AUTHORITY_REASON,
-        ),
-        (
-            r"\b(which|what|choose|select|use|configure|set)\b.+\b(environment|target|account|project|cluster|region)\b.+\b(deploy|release|publish)\b.+\b(production|prod|live|external)\b",
-            _DEPLOYMENT_AUTHORITY_REASON,
-        ),
-        (
-            r"\b(provide|enter|paste|supply|use|configure|set)\b.+\b(production|prod|live|external)\b.+\b(credential|secret|api key)\b",
-            "production deployment or irreversible external action required",
-        ),
-        (
-            r"\b(delete|drop|erase|wipe|remove)\b.+\b(database|db|branch|production|prod)\b",
-            "destructive external operation requires human authority",
-        ),
-        (
-            r"\b(provide|enter|paste|supply|use|configure|set)\b.+\bsecret\b.+\b(value|key|token|credential|env|environment|workflow|ci|production|prod)\b",
-            "credential or secret value required",
-        ),
-        (
-            r"\b(which|what)\s+secret\b.+\b(use|configure|set|env|environment|workflow|ci|production|prod)\b",
-            "credential or secret value required",
-        ),
-    )
-    safe_implementation_choice = _is_safe_implementation_choice_question(lowered)
-    for pattern, reason in external_action_patterns:
-        if re.search(pattern, lowered):
-            # The implementation-choice guard may suppress ONLY the deployment
-            # false positive (the verb-"live" / "project" collision, #1170 R3).
-            # It is structurally incapable of shadowing credential, payment,
-            # legal, medical, or destructive blockers, so it never needs to mirror
-            # their vocabularies (#1295 review: a parallel negative list was
-            # brittle and missed plural credential forms).
-            if safe_implementation_choice and reason == _DEPLOYMENT_AUTHORITY_REASON:
-                continue
-            return AutoBlocker(reason=reason, question=question)
-    return None

@@ -3547,7 +3547,8 @@ async def test_interview_driver_persists_blocker_ledger_entry(tmp_path) -> None:
         raise AssertionError("blocker should stop before backend answer")
 
     state = AutoPipelineState(goal="Deploy a service", cwd=str(tmp_path))
-    ledger = SeedDraftLedger.from_goal(state.goal)
+    # An unresolved goal is a blocker the auto answer cannot fill.
+    ledger = SeedDraftLedger.from_goal("   ")
     driver = AutoInterviewDriver(
         FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=1
     )
@@ -5757,7 +5758,8 @@ async def test_interview_blocker_does_not_consume_pending_final_round(tmp_path) 
     state.interview_session_id = "interview_1"
     state.pending_question = "Should we use a billing provider for the live account?"
     state.current_round = 1
-    ledger = SeedDraftLedger.from_goal(state.goal)
+    # An unresolved goal is a blocker the auto answer cannot fill.
+    ledger = SeedDraftLedger.from_goal("   ")
     driver = AutoInterviewDriver(
         FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=2
     )
@@ -6607,33 +6609,61 @@ async def test_convergence_contract_broad_benign_goal_resolves_with_safe_assumpt
     )
 
 
+@pytest.mark.parametrize("with_requester", [False, True])
 @pytest.mark.asyncio
-async def test_convergence_contract_unsafe_authority_question_blocks(tmp_path) -> None:
-    """Unsafe authority gaps are blockers, not auto-filled defaults."""
+async def test_convergence_contract_authority_question_is_never_self_authorized(
+    tmp_path, with_requester: bool
+) -> None:
+    """A question about an action on the user's environment does not stop the
+    run on its wording, and auto never authorizes it: without a requester the
+    draft is a non-binding guess that reaches the worker as the open question;
+    with one, the question goes to the requester (the human authority)."""
+    from ouroboros.auto.ledger_seed import ledger_assumptions
+    from ouroboros.auto.requester import RequesterQuestion, RequesterReply
+
+    question = "Which production access token should auto configure?"
+    sent: list[str] = []
+    asked: list[RequesterQuestion] = []
+
+    class _Requester:
+        async def ask(self, request: RequesterQuestion) -> RequesterReply:
+            asked.append(request)
+            return RequesterReply("empty_answer", detail="no answer")
 
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
-        return InterviewTurn(
-            "Which production access token should auto configure?",
-            "interview_contract",
-        )
+        return InterviewTurn(question, "interview_contract")
 
     async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
-        raise AssertionError("unsafe blocker should stop before backend.answer")
+        sent.append(text)
+        return InterviewTurn("What else?", session_id)
 
     state = AutoPipelineState(goal="Deploy a service", cwd=str(tmp_path))
     ledger = SeedDraftLedger.from_goal(state.goal)
     driver = AutoInterviewDriver(
         FunctionInterviewBackend(start, answer),
         store=AutoStore(tmp_path),
-        max_rounds=3,
+        max_rounds=1,
         timeout_seconds=1,
+        requester=_Requester() if with_requester else None,
     )
 
-    result = await driver.run(state, ledger)
+    await driver.run(state, ledger)
 
-    assert result.status == "blocked"
-    assert state.phase == AutoPhase.BLOCKED
-    assert "credential or secret value required" in (result.blocker or "")
+    assert sent and not sent[0].startswith("Cannot safely decide")
+    assert not any(
+        entry.status == LedgerStatus.BLOCKED
+        for section in ledger.sections.values()
+        for entry in section.entries
+    )
+    assert not any(
+        entry.binds_seed and entry.question == question
+        for section in ledger.sections.values()
+        for entry in section.entries
+    )
+    if with_requester:
+        assert [request.question for request in asked] == [question]
+    else:
+        assert f"Open question: {question}" in ledger_assumptions(ledger)
 
 
 @pytest.mark.asyncio

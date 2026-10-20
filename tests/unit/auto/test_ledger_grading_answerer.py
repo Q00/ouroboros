@@ -74,6 +74,22 @@ def _seed(
     )
 
 
+def _assert_never_self_authorizes(answer, question: str) -> None:
+    """The answerer stops nothing on question wording, and nothing it writes binds.
+
+    Auto may not self-authorize actions on the user's environment. That is
+    carried by the binding rule, not by matching words in the question: an
+    auto answer is a guess (``DEFAULTED``, never binding, reaching the worker
+    as an open question) unless it is a caller-supplied repo fact.
+    """
+    assert answer.blocker is None, question
+    assert answer.source != AutoAnswerSource.BLOCKER, question
+    for _section, entry in answer.ledger_updates:
+        if entry.source == LedgerSource.REPO_FACT:
+            continue
+        assert not entry.binds_seed, (question, entry)
+
+
 def test_auto_answerer_uses_supplied_repo_fact_for_runtime_questions() -> None:
     ledger = SeedDraftLedger.from_goal("Update the CLI")
     context = AutoAnswerContext(
@@ -181,20 +197,18 @@ def test_auto_answerer_partial_runtime_facts_do_not_confirm_runtime_context() ->
     assert ledger.sections["runtime_context"].status() == LedgerStatus.DEFAULTED
 
 
-def test_auto_answerer_context_does_not_override_blockers() -> None:
+def test_auto_answerer_answers_deploy_question_from_supplied_repo_fact() -> None:
+    """A deployment question is not stopped by its wording; the only binding
+    content is the caller-supplied repository fact, with its evidence."""
     context = AutoAnswerContext(
         repo_facts={"runtime_context": "Production deployment uses AWS."},
         evidence={"runtime_context": ("docs/deploy.md",)},
     )
+    question = "Which production environment should we deploy to?"
 
-    answer = AutoAnswerer().answer(
-        "Which production environment should we deploy to?",
-        SeedDraftLedger.from_goal("Deploy a service"),
-        context,
-    )
+    answer = AutoAnswerer().answer(question, SeedDraftLedger.from_goal("Deploy a service"), context)
 
-    assert answer.blocker is not None
-    assert answer.source == AutoAnswerSource.BLOCKER
+    _assert_never_self_authorizes(answer, question)
 
 
 def test_ledger_not_ready_until_required_sections_are_resolved() -> None:
@@ -755,40 +769,38 @@ def test_auto_answerer_preserves_passive_product_behavior_variants() -> None:
     assert all("product behavior" in answer.text.lower() for answer in answers)
 
 
-def test_auto_answerer_still_blocks_current_branch_deletion_authority() -> None:
+def test_auto_answerer_does_not_stop_on_branch_deletion_wording() -> None:
+    question = "Should we delete the current branch?"
     answer = AutoAnswerer().answer(
-        "Should we delete the current branch?",
-        SeedDraftLedger.from_goal("Clean up repository branches"),
+        question, SeedDraftLedger.from_goal("Clean up repository branches")
     )
-
-    assert answer.blocker is not None
-    assert answer.source == AutoAnswerSource.BLOCKER
+    _assert_never_self_authorizes(answer, question)
 
 
-def test_auto_answerer_returns_blocker_for_plain_secret_questions() -> None:
-    answer = AutoAnswerer().answer(
-        "Which secret should the workflow use?",
-        SeedDraftLedger.from_goal("Deploy a service"),
-    )
-
-    assert answer.blocker is not None
-    assert answer.source == AutoAnswerSource.BLOCKER
+def test_auto_answerer_does_not_stop_on_secret_wording() -> None:
+    question = "Which secret should the workflow use?"
+    answer = AutoAnswerer().answer(question, SeedDraftLedger.from_goal("Deploy a service"))
+    _assert_never_self_authorizes(answer, question)
 
 
-def test_auto_answerer_returns_blocker_for_credentials() -> None:
+def test_credential_question_stays_an_open_question_for_the_worker() -> None:
+    """The question is kept, the guessed draft never binds, nothing is blocked."""
+    from ouroboros.auto.ledger_seed import ledger_assumptions
+
     ledger = SeedDraftLedger.from_goal("Deploy a service")
     answerer = AutoAnswerer()
+    question = "Which production API key should the workflow use?"
 
-    answer = answerer.answer("Which production API key should the workflow use?", ledger)
-    answerer.apply(answer, ledger, question="Which production API key should the workflow use?")
+    answer = answerer.answer(question, ledger)
+    answerer.apply(answer, ledger, question=question, asked=question)
 
-    assert answer.blocker is not None
-    assert answer.source == AutoAnswerSource.BLOCKER
-    assert "constraints" in ledger.open_gaps()
-    assert not ledger.is_seed_ready()
-    assert any(
-        entry.status == LedgerStatus.BLOCKED for entry in ledger.sections["constraints"].entries
+    _assert_never_self_authorizes(answer, question)
+    assert not any(
+        entry.status == LedgerStatus.BLOCKED
+        for section in ledger.sections.values()
+        for entry in section.entries
     )
+    assert f"Open question: {question}" in ledger_assumptions(ledger)
 
 
 def test_auto_answerer_allows_benign_sensitive_domain_vocabulary() -> None:
@@ -813,9 +825,9 @@ def test_auto_answerer_allows_benign_sensitive_domain_vocabulary() -> None:
         assert answer.source != AutoAnswerSource.BLOCKER
 
 
-def test_auto_answerer_blocks_contextual_human_authority_questions() -> None:
+def test_auto_answerer_does_not_stop_on_human_authority_wording() -> None:
     answerer = AutoAnswerer()
-    blocking_questions = (
+    questions = (
         "Which credential value should production use?",
         "Which production credential should the workflow use?",
         "Which payment provider account should we charge?",
@@ -823,12 +835,16 @@ def test_auto_answerer_blocks_contextual_human_authority_questions() -> None:
         "What medical advice should the app recommend?",
         "What API key should the workflow use?",
         "Which password should CI configure?",
+        # Ambig-SWE v0.59.0 questions the keyword rule stopped (django-11179,
+        # django-16819): they ask what the code under change should do.
+        "After a successful delete, should the model's primary key be cleared for every "
+        "instance, including models with no dependencies?",
+        "When reducing index operations, should the optimizer also account for execution "
+        "cost and risks such as table locks or downtime?",
     )
-
-    for question in blocking_questions:
+    for question in questions:
         answer = answerer.answer(question, SeedDraftLedger.from_goal("Deploy a service"))
-        assert answer.blocker is not None
-        assert answer.source == AutoAnswerSource.BLOCKER
+        _assert_never_self_authorizes(answer, question)
 
 
 def test_auto_answerer_allows_implementation_choice_questions() -> None:
@@ -861,57 +877,35 @@ def test_auto_answerer_allows_implementation_choice_questions() -> None:
         assert answer.source != AutoAnswerSource.BLOCKER
 
 
-def test_implementation_choice_guard_does_not_weaken_deployment_blocking() -> None:
-    """The implementation-choice guard must keep genuine deployment / production
-    authority questions blocked (the verb-"live" fix is deliberately narrow)."""
+def test_auto_answerer_does_not_stop_on_deployment_wording() -> None:
     answerer = AutoAnswerer()
-    blocking_questions = (
+    questions = (
         "Which production environment should we deploy the CLI to?",
         "Which production cluster and region should we deploy to?",
         "Should we deploy to production or live?",
-        # The deployment-sense negative check must stay load-bearing: a genuine
-        # deployment question that *also* names a language/runtime (so it matches a
-        # positive implementation-choice pattern) must still block — otherwise the
-        # guard would suppress the deployment authority gate.
         "Which language should we use, and which production cluster should we deploy to?",
         "What runtime and which production environment should we deploy to?",
     )
-    for question in blocking_questions:
+    for question in questions:
         answer = answerer.answer(question, SeedDraftLedger.from_goal("Deploy a service"))
-        assert answer.blocker is not None, f"expected blocker for: {question!r}"
-        assert answer.source == AutoAnswerSource.BLOCKER
+        _assert_never_self_authorizes(answer, question)
 
 
-def test_implementation_choice_guard_defers_to_other_authority_blockers() -> None:
-    """The implementation-choice guard must not short-circuit *any* genuine
-    external-authority blocker when the prompt merely also carries
-    language/runtime/framework wording.
-
-    Regression for the #1295 review blocker: the guard's negative-signal check
-    originally excluded only deployment/credential/payment terms, so a destructive
-    operation phrased as an implementation choice — e.g. "what language should the
-    cleanup script use to remove the database?" — bypassed the destructive-operation
-    blocker and returned a conservative default with no blocker. The guard now
-    defers whenever any external-action signal (destructive / credential / payment /
-    legal / medical) is present, so these still block."""
+def test_auto_answerer_does_not_stop_on_destructive_or_credential_wording() -> None:
     answerer = AutoAnswerer()
-    blocking_questions = (
-        # Destructive operation wrapped in a language/runtime/framework choice.
+    questions = (
         "What language should the cleanup script use to remove the database?",
         "What runtime should the tool use to delete the prod branch?",
         "Which framework should we use to wipe the production database?",
         "Which programming language should the migration use to drop the db?",
-        # Credential authority — singular and plural forms, with CI/workflow/env
-        # context — must all stay blocked even when phrased as a language choice.
         "Which language should we use to enter the production api key value?",
         "Which language should we use to configure API keys value?",
         "Which framework should we use to configure passwords in CI?",
         "What runtime should we use to set the api keys in the workflow?",
     )
-    for question in blocking_questions:
+    for question in questions:
         answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a CLI"))
-        assert answer.blocker is not None, f"expected blocker for: {question!r}"
-        assert answer.source == AutoAnswerSource.BLOCKER
+        _assert_never_self_authorizes(answer, question)
 
 
 def test_blank_goal_remains_open_gap() -> None:
@@ -1432,15 +1426,14 @@ def test_auto_answerer_unknown_multilingual_question_uses_safe_default() -> None
     ]
 
 
-def test_auto_answerer_blocks_production_environment_selection_variants() -> None:
+def test_auto_answerer_does_not_stop_on_production_environment_selection() -> None:
     questions = (
         "Which production environment should we deploy to?",
         "Which AWS account should we deploy production to?",
     )
     for question in questions:
         answer = AutoAnswerer().answer(question, SeedDraftLedger.from_goal("Deploy a service"))
-        assert answer.blocker is not None
-        assert answer.source == AutoAnswerSource.BLOCKER
+        _assert_never_self_authorizes(answer, question)
 
 
 def test_ledger_later_same_key_correction_resolves_conflict() -> None:
@@ -1789,18 +1782,16 @@ def test_auto_answerer_allows_production_credential_product_semantics() -> None:
         assert "product behavior" in answer.text.lower()
 
 
-def test_auto_answerer_still_blocks_real_production_credential_authority() -> None:
+def test_auto_answerer_does_not_stop_on_production_credential_wording() -> None:
     answerer = AutoAnswerer()
     questions = (
         "Which credential value should production use?",
         "Which credentials should CI configure for production?",
         "Use the production credential secret for deployment?",
     )
-
     for question in questions:
         answer = answerer.answer(question, SeedDraftLedger.from_goal("Deploy a service"))
-        assert answer.blocker is not None
-        assert answer.source == AutoAnswerSource.BLOCKER
+        _assert_never_self_authorizes(answer, question)
 
 
 def test_auto_answerer_does_not_block_regulated_topic_when_repo_fact_supplied() -> None:
