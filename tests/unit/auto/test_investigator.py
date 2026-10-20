@@ -1325,7 +1325,9 @@ def _reply_with_kind(kind: object = "__missing__") -> str:
     return json.dumps(data)
 
 
-@pytest.mark.parametrize("kind", ["intended_behavior", "__missing__", "bogus", None, 3])
+@pytest.mark.parametrize(
+    "kind", ["intended_behavior", "__missing__", "bogus", None, 3, ["current_behavior"], {"x": 1}]
+)
 def test_found_reply_that_is_not_current_behavior_is_not_found(
     workspace: Path, kind: object
 ) -> None:

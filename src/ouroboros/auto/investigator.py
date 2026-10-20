@@ -276,7 +276,7 @@ def parse_reply(text: str) -> tuple[str, str, list[EvidenceSpan | None], str]:
     if len(evidence) > MAX_EVIDENCE_SPANS:
         raise ValueError("too many evidence spans")
     kind = value.get("kind")
-    if kind not in ANSWER_KINDS:
+    if not isinstance(kind, str) or kind not in ANSWER_KINDS:
         kind = "intended_behavior"
     spans = [EvidenceSpan.from_reply(item) for item in evidence]
     return status, answer.strip(), spans, kind
