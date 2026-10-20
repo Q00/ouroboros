@@ -481,7 +481,7 @@ async def test_without_requester_the_interview_closes_at_the_call_cap(workspace:
     answers = [text for text in sent if "[safe-default-synthesis]" not in text]
     assert len(answers) == 3  # one answer per investigated question, none after the cap
     assert ledger.is_seed_ready()
-    closed = [data for kind, data in events if kind == "auto.interview.closed_at_investigator_cap"]
+    closed = [data for kind, data in events if kind == "auto.interview.closed_with_open_questions"]
     assert len(closed) == 1 and closed[0]["calls_made"] == 3
     outcomes = [data["outcome"] for kind, data in events if kind == "auto.interview.investigated"]
     assert "cap_reached" not in outcomes
@@ -504,7 +504,7 @@ async def test_with_requester_the_cap_does_not_close_the_interview(workspace: Pa
 
     assert len(calls) == 2
     assert state.interview_closure_mode != "ledger_only"
-    assert not [kind for kind, _ in events if kind == "auto.interview.closed_at_investigator_cap"]
+    assert not [kind for kind, _ in events if kind == "auto.interview.closed_with_open_questions"]
     assert len(requester.questions) == 5  # every round, past the cap too
     assert len([text for text in sent if "[safe-default-synthesis]" not in text]) >= 5
 
@@ -1233,5 +1233,76 @@ async def test_cap_closure_does_nothing_when_the_ledger_cannot_be_completed(
 
     assert len(calls) == 2
     assert state.interview_closure_mode != "ledger_only"
-    assert not [kind for kind, _ in events if kind == "auto.interview.closed_at_investigator_cap"]
+    assert not [kind for kind, _ in events if kind == "auto.interview.closed_with_open_questions"]
     assert len(sent) >= 4
+
+
+def _ready_ledger() -> SeedDraftLedger:
+    ledger = SeedDraftLedger.from_goal(GOAL)
+    for section in ("actors", "inputs", "outputs", "constraints", "non_goals"):
+        ledger.add_entry(
+            section,
+            LedgerEntry(
+                key=f"{section}.stated",
+                value=f"The {section} the request states.",
+                source=LedgerSource.USER_GOAL,
+                confidence=0.9,
+                status=LedgerStatus.CONFIRMED,
+            ),
+        )
+    for section in ("acceptance_criteria", "verification_plan", "failure_modes", "runtime_context"):
+        ledger.add_entry(
+            section,
+            LedgerEntry(
+                key=f"{section}.stated",
+                value=f"The {section} the request states.",
+                source=LedgerSource.USER_GOAL,
+                confidence=0.9,
+                status=LedgerStatus.CONFIRMED,
+            ),
+        )
+    return ledger
+
+
+@pytest.mark.parametrize("with_requester", [False, True])
+@pytest.mark.asyncio
+async def test_backend_done_with_only_open_questions_closes_without_requester(
+    workspace: Path, with_requester: bool
+) -> None:
+    """The backend says the interview is complete but its ambiguity stays above
+    the gate because the code left a question open. Without a requester the
+    open question does not keep the interview going; with one, nothing changes."""
+    sent: list[str] = []
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(QUESTION, "s")
+
+    async def answer(session_id: str, text: str, *, last_question=None) -> InterviewTurn:  # noqa: ARG001
+        sent.append(text)
+        return InterviewTurn(
+            "done", session_id, seed_ready=True, completed=True, ambiguity_score=0.5
+        )
+
+    investigator, calls, _ = _investigator(lambda _p: _not_found_reply())
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(workspace.parent / "store"),
+        max_rounds=3,
+        timeout_seconds=600,
+        requester=_CountingRequester(None) if with_requester else None,
+        investigator=investigator,
+    )
+    state = AutoPipelineState(goal=GOAL, cwd=str(workspace))
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    ledger = _ready_ledger()
+
+    result = await driver.run(state, ledger)
+
+    if with_requester:
+        assert state.interview_closure_mode != "ledger_only"
+    else:
+        assert len(calls) == 1
+        assert result.status == "seed_ready"
+        assert state.interview_closure_mode == "ledger_only"
+        assert len(sent) == 1
+        assert f"Open question: {QUESTION}" in ledger_assumptions(ledger)

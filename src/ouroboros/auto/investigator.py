@@ -48,7 +48,7 @@ Limits: at most ``max_calls`` calls per interview run (default 12,
 ``OUROBOROS_AUTO_INVESTIGATOR_MAX_CALLS``; 0 turns the investigator off). With
 a requester, a question past the cap is not found without a call and goes to
 the requester. Without one, the interview closes once the last call is spent
-(``close_at_cap``) instead of asking questions that can only end not found.
+(``close_known``) instead of asking questions that can only end not found.
 Without a requester, a not-settled question is closed for the interview and
 the Seed (its ledger entry is ``DEFAULTED``), reaches the worker as an
 ``Open question:`` line, and the reply tells the interviewer it stays open for
@@ -652,20 +652,28 @@ async def settle(
 CAP_CLOSURE_MODE = "ledger_only"
 
 
-async def close_at_cap(
+async def close_known(
     driver: AutoInterviewDriver,
     state: AutoPipelineState,
     ledger: SeedDraftLedger,
     outcome: _InterviewRoundOutcome,
 ) -> AutoInterviewResult | None:
-    """Close the interview once the investigator call cap is used up.
+    """Without a requester, close the interview with what is known.
 
-    Without a requester, every later question could only end ``cap_reached``
-    (not found without a call), so more rounds add nothing and run toward
-    the interview deadline. Called after each round; it closes only when no
-    requester is wired, the investigator spent its last call, and the backend
-    has not already confirmed readiness (the mutual-agreement close handles
-    that).
+    Called after each round. It acts only when no requester is wired and the
+    investigator has run, and only in one of two cases:
+
+    - the investigator spent its last call: every later question could only
+      end ``cap_reached`` (not found without a call), so more rounds add
+      nothing and run toward the interview deadline;
+    - the backend reports the interview complete (``seed_ready`` or
+      ``completed``) and the ledger is complete, but the backend ambiguity is
+      above the gate. A not-settled question counts as closed for readiness
+      without a requester, so the open questions alone must not keep the
+      interview going.
+
+    When the backend already confirmed readiness within the gate, the
+    mutual-agreement close handles it and this does nothing.
 
     It closes with what is known: sections that no question reached get the
     existing safe-default policy (``finalize_safe_defaultable_gaps``, the same
@@ -696,9 +704,13 @@ async def close_at_cap(
         investigator is None
         or driver.requester is not None
         or investigator.unavailable is not None
-        or investigator.calls_made < investigator.max_calls
+        or investigator.calls_made == 0
         or (ledger.is_seed_ready() and _backend_confirmed_seed_ready(turn))
     ):
+        return None
+    cap_spent = investigator.calls_made >= investigator.max_calls
+    backend_done_open = bool(turn.seed_ready or turn.completed) and ledger.is_seed_ready()
+    if not (cap_spent or backend_done_open):
         return None
     open_before = list(ledger.open_gaps())
     defaulted: tuple[str, ...] = ()
@@ -706,7 +718,7 @@ async def close_at_cap(
         finalization = finalize_safe_defaultable_gaps(
             ledger,
             goal=state.goal,
-            provenance=f"auto interview closed at the investigator cap ({investigator.max_calls})",
+            provenance="auto interview closed with what is known (no requester)",
             pending_question=turn.question,
             active_profile=getattr(driver.answerer, "active_profile", None),
         )
@@ -723,23 +735,24 @@ async def close_at_cap(
                         with_provenance(driver.backend, "assumption").answer(
                             state.interview_session_id,
                             synthesis,
-                            last_question="[driver closure: investigator call cap reached]",
+                            last_question="[driver closure: interview closed with what is known]",
                         ),
                         state,
-                        tool_name="interview.investigator_cap_synthesis",
+                        tool_name="interview.closure_synthesis",
                         timeout_seconds=driver.timeout_seconds,
                     )
                 )
             except Exception as exc:  # noqa: BLE001 - keep the transcript and ledger in sync
                 _revert_safe_default_entries(ledger, defaulted)
                 log.warning(
-                    "auto.interview.investigator_cap_synthesis_failed",
+                    "auto.interview.closure_synthesis_failed",
                     auto_session_id=state.auto_session_id,
                     error=str(exc),
                 )
                 return None
             state.interview_session_id = synthesis_turn.session_id
     data: dict[str, object] = {
+        "reason": "call_cap" if cap_spent else "backend_done_with_open_questions",
         "calls_made": investigator.calls_made,
         "max_calls": investigator.max_calls,
         "open_gaps_before": open_before,
@@ -748,10 +761,10 @@ async def close_at_cap(
         "round": state.current_round,
     }
     log.info(
-        "auto.interview.closed_at_investigator_cap", auto_session_id=state.auto_session_id, **data
+        "auto.interview.closed_with_open_questions", auto_session_id=state.auto_session_id, **data
     )
     await driver._emit_event(
-        "auto.interview.closed_at_investigator_cap",
+        "auto.interview.closed_with_open_questions",
         state.auto_session_id,
         aggregate_type="auto_session",
         **data,
@@ -761,7 +774,8 @@ async def close_at_cap(
     state.interview_completed = True
     state.interview_closure_mode = CAP_CLOSURE_MODE
     state.mark_progress(
-        f"interview closed at the investigator call cap ({investigator.max_calls} calls)",
+        "interview closed with what is known: "
+        + ("investigator call cap reached" if cap_spent else "open questions left to the worker"),
         tool_name="interview_driver",
     )
     driver._save(state)
@@ -814,7 +828,7 @@ __all__ = [
     "Investigation",
     "RepoInvestigator",
     "build_repo_investigator",
-    "close_at_cap",
+    "close_known",
     "enforces_read_only",
     "found_answer",
     "judge_reply",
