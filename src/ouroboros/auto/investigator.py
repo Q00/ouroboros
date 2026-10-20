@@ -11,8 +11,15 @@ session reads the task workspace and replies with JSON::
 
 Binding is decided without a model (``auto/evidence_check.py``):
 
-- ``found`` with at least one span, and every span passes the check: the
-  answer is a confirmed repository fact (``LedgerSource.REPO_FACT``). It
+- The reply declares the question's kind: ``current_behavior`` (what the
+  code does now) or ``intended_behavior`` (what it should do; a missing or
+  unknown kind counts as this). The code under change may be the defect the
+  task reports, so it cannot settle an ``intended_behavior`` question: such a
+  reply is not found, whatever its status, and keeps its checked spans as what
+  the code shows. The kind is a model-declared label; the evidence check still
+  decides binding.
+- ``found`` for a ``current_behavior`` question, with at least one span, and
+  every span passes the check: the answer is a confirmed repository fact (``LedgerSource.REPO_FACT``). It
   settles the question for the interview, but it describes the code, not a
   requirement: it reaches the worker only verbatim, with its checked quotes, in
   ``Seed.repo_facts``, never as a constraint, criterion or ontology field, and
@@ -148,20 +155,32 @@ INVESTIGATOR_SYSTEM_PROMPT = (
     "repository in the current working directory. Only read and search files. "
     "Do not edit, create, or delete files, and do not run commands that change "
     "anything.\n\n"
-    "Find what the code shows about the question, then reply with one JSON "
-    "object and nothing else:\n"
-    '{"status": "found" | "not_found", "answer": string, "evidence": '
+    "The task usually reports a defect, and the code you read may be the code "
+    "that has the defect. What the code does now is not evidence of what it "
+    "should do.\n\n"
+    "First decide the kind of the question:\n"
+    '- "current_behavior": the question asks what the code does now, where '
+    "something is defined, or which API or option already exists.\n"
+    '- "intended_behavior": the question asks what the code should do, how the '
+    "fix should behave, what success or acceptance should require, or whether "
+    'the current behavior should stay. Every "should" question about the change '
+    "is intended_behavior.\n\n"
+    "Then reply with one JSON object and nothing else:\n"
+    '{"kind": "current_behavior" | "intended_behavior", '
+    '"status": "found" | "not_found", "answer": string, "evidence": '
     '[{"path": string, "start_line": integer, "end_line": integer, "quote": string}]}\n\n'
-    'Use "found" only when the code itself settles the question. Then write the '
-    "answer in one to four sentences and cite every fact it rests on: the path "
-    "relative to the repository root, the 1-based first and last line, and a "
-    "quote copied exactly from those lines.\n"
-    'Use "not_found" when the code does not settle the question, for example '
-    "when it asks for a decision the code has not made. Then leave answer empty "
-    "and cite what the code does show, if anything.\n"
+    'Use "found" only for a current_behavior question the code itself settles. '
+    "Then write the answer in one to four sentences describing what the code "
+    "does now, and cite every fact it rests on: the path relative to the "
+    "repository root, the 1-based first and last line, and a quote copied "
+    "exactly from those lines.\n"
+    "For an intended_behavior question, or when the code does not settle the "
+    'question, use "not_found", leave answer empty, and cite what the code does '
+    "show, if anything.\n"
     "Never guess. A citation that does not match the file makes the answer count "
     "as not found."
 )
+ANSWER_KINDS = frozenset({"current_behavior", "intended_behavior"})
 
 RuntimeFactory = Callable[..., Any]
 # Seam for tests; the throttle wait itself (``_call_through_throttle``).
@@ -208,7 +227,9 @@ class Investigation:
 
     ``outcome`` is ``found``, ``not_found``, ``evidence_rejected`` (the reply
     said found but a span failed the check), ``reply_invalid``, ``timeout``,
-    ``call_failed``, ``cap_reached``, ``isolation_failed`` (no copy could be
+    ``call_failed``, ``intended_behavior`` (the reply declared the question
+    one about what the code should do, which the code under change cannot
+    settle), ``cap_reached``, ``isolation_failed`` (no copy could be
     made; no call) or ``workspace_changed`` (the real workspace changed during
     the investigation; the answer is discarded). Only ``found``
     binds. ``checked`` holds the spans that passed; ``failures`` the reasons
@@ -224,17 +245,20 @@ class Investigation:
     elapsed_seconds: float = 0.0
     isolation: str = ""
     throttle_waited_seconds: float = 0.0
+    kind: str = ""
 
     @property
     def found(self) -> bool:
         return self.outcome == "found"
 
 
-def parse_reply(text: str) -> tuple[str, str, list[EvidenceSpan | None]]:
-    """Read ``(status, answer, spans)`` from the reply; ``ValueError`` if unusable.
+def parse_reply(text: str) -> tuple[str, str, list[EvidenceSpan | None], str]:
+    """Read ``(status, answer, spans, kind)`` from the reply; ``ValueError`` if unusable.
 
     The first JSON object in the text is used (bare or inside a code fence).
     A malformed evidence item is kept as ``None`` so it counts as a failed span.
+    ``kind`` is the model-declared question kind; a missing or unknown value
+    counts as ``intended_behavior``, the kind that cannot be found.
     """
     start = text.find("{")
     if start < 0:
@@ -251,7 +275,11 @@ def parse_reply(text: str) -> tuple[str, str, list[EvidenceSpan | None]]:
         raise ValueError("answer or evidence has the wrong type")
     if len(evidence) > MAX_EVIDENCE_SPANS:
         raise ValueError("too many evidence spans")
-    return status, answer.strip(), [EvidenceSpan.from_reply(item) for item in evidence]
+    kind = value.get("kind")
+    if kind not in ANSWER_KINDS:
+        kind = "intended_behavior"
+    spans = [EvidenceSpan.from_reply(item) for item in evidence]
+    return status, answer.strip(), spans, kind
 
 
 def judge_reply(workspace: Path, text: str, *, alias_root: Path | None = None) -> Investigation:
@@ -262,7 +290,7 @@ def judge_reply(workspace: Path, text: str, *, alias_root: Path | None = None) -
     is read as the same relative path in the real workspace.
     """
     try:
-        status, answer, spans = parse_reply(text)
+        status, answer, spans, kind = parse_reply(text)
     except ValueError:
         return Investigation("reply_invalid", called=True)
     if alias_root is not None:
@@ -275,7 +303,11 @@ def judge_reply(workspace: Path, text: str, *, alias_root: Path | None = None) -
             checked.append(span)
         else:
             failures.append(reason or "malformed_span")
-    if status == "found" and answer and checked and not failures:
+    if status == "found" and kind != "current_behavior":
+        # The code under change cannot settle what it should do; the checked
+        # spans stay as what the code shows.
+        outcome = "intended_behavior"
+    elif status == "found" and answer and checked and not failures:
         outcome = "found"
     elif status == "found":
         outcome = "evidence_rejected"
@@ -288,6 +320,7 @@ def judge_reply(workspace: Path, text: str, *, alias_root: Path | None = None) -
         failures=tuple(failures),
         cited=len(spans),
         called=True,
+        kind=kind,
     )
 
 
@@ -483,6 +516,7 @@ class RepoInvestigator:
             checked=verdict.checked,
             failures=verdict.failures,
             cited=verdict.cited,
+            kind=verdict.kind,
             **done,
         )
 
@@ -655,6 +689,7 @@ async def _investigate(
         "evidence_failures": list(result.failures),
         "elapsed_seconds": round(result.elapsed_seconds, 3),
         "isolation": result.isolation,
+        "kind": result.kind,
         "throttle_waited_seconds": round(result.throttle_waited_seconds, 3),
         "runtime_backend": investigator.runtime_backend,
         "model": investigator.resolved_model,
