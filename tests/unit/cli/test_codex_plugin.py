@@ -132,6 +132,74 @@ def test_invalid_json_is_unknown_without_echoing_output(output: str) -> None:
     assert result.reason == "Codex returned invalid plugin JSON"
 
 
+@pytest.mark.parametrize("depth", [63, 64, 65])
+@pytest.mark.parametrize("containers", ["arrays", "objects", "mixed"])
+@pytest.mark.parametrize("installed", [[], [_ENTRY], [{**_ENTRY, "installed": False}]])
+def test_inventory_depth_is_bounded_before_classifying_installation(
+    depth: int, containers: str, installed: list[dict[str, object]]
+) -> None:
+    """All records and private metadata share the fixed 64-container limit."""
+    metadata: object = 0
+    for index in range(depth - 1):  # The inventory object is the outer container.
+        metadata = (
+            {"private": metadata}
+            if containers == "objects" or (containers == "mixed" and index % 2)
+            else [metadata]
+        )
+    result = _inspect_inventory({"installed": installed, "private": metadata})
+    if depth > 64:
+        assert result == CodexPluginVersion("unknown", reason="Codex returned invalid plugin JSON")
+    elif installed and installed[0]["installed"]:
+        assert result == CodexPluginVersion("installed", version="0.55.6")
+    else:
+        assert result == CodexPluginVersion("not_installed")
+
+
+@pytest.mark.parametrize("depth", [64, 65])
+def test_empty_containers_also_count_toward_inventory_depth(depth: int) -> None:
+    metadata: object = []
+    for _ in range(depth - 2):
+        metadata = {"private": metadata}
+    result = _inspect_inventory({"installed": [], "private": metadata})
+    assert result.status == ("unknown" if depth > 64 else "not_installed")
+
+
+@pytest.mark.parametrize("installed", [[], [_ENTRY]])
+def test_duplicate_keys_cannot_hide_deep_inventory(installed: list[dict[str, object]]) -> None:
+    output = (
+        '{"installed": '
+        + json.dumps(installed)
+        + ', "private": '
+        + "[" * 10_000
+        + "0"
+        + "]" * 10_000
+        + ', "private": 0}'
+    )
+    completed = subprocess.CompletedProcess(_COMMAND, 0, output.encode(), b"")
+    with patch("ouroboros.cli.codex_plugin.subprocess.run", return_value=completed):
+        result = inspect_codex_plugin(_COMMAND[0])
+    assert result == CodexPluginVersion("unknown", reason="Codex returned invalid plugin JSON")
+
+
+@pytest.mark.parametrize("text", ["[{" * 10_000, 'brackets \\"[{]}', "\\\\", '"quoted"'])
+def test_quoted_keys_and_values_do_not_count_as_inventory_depth(text: str) -> None:
+    assert _inspect_inventory({"installed": [_ENTRY], text: text}) == CodexPluginVersion(
+        "installed", version="0.55.6"
+    )
+
+
+@pytest.mark.parametrize("backslashes", [0, 1, 2, 3])
+def test_escaped_quotes_and_trailing_backslashes_do_not_hide_depth(backslashes: int) -> None:
+    text = "\\" * backslashes + '"' + "[{" * 65 + "\\" * backslashes
+    assert _inspect_inventory({"installed": [_ENTRY], "text": text}).status == "installed"
+    metadata: object = 0
+    for _ in range(64):
+        metadata = [metadata]
+    assert _inspect_inventory(
+        {"installed": [_ENTRY], "text": text, "private": metadata}
+    ).status == ("unknown")
+
+
 @pytest.mark.parametrize("executable", [None, ""])
 def test_missing_executable_is_unknown_without_launching(executable: str | None) -> None:
     with patch("ouroboros.cli.codex_plugin.subprocess.run") as run:

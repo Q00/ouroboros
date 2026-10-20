@@ -1029,6 +1029,8 @@ advance it. The diagnostic never changes refs or configuration, and does not
 certify the version loaded by an already-running Codex session or MCP server.
 An unavailable CLI, unsupported command, five-second timeout, or unreadable
 inventory is reported as **unknown**, separately from **not installed**.
+Inventory with more than 64 nested object/array containers (including the root)
+is also **unknown**, consistently across supported Python versions.
 These advisory results do not change the update command's exit status.
 An editable package reporting `0.0.0` is shown without inferring version drift.
 Other selected runtimes, `--runtime none`, and `--dry-run` skip this query.

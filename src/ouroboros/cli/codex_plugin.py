@@ -11,6 +11,7 @@ from typing import Literal
 
 _PLUGIN_ID = "ouroboros@ouroboros"
 _QUERY_TIMEOUT_SECONDS = 5
+_MAX_INVENTORY_DEPTH = 64
 _RELEASE_VERSION = re.compile(
     r"v?(?P<release>[0-9]+(?:\.[0-9]+)*)"
     r"(?:(?P<pre_kind>a|b|rc)(?P<pre_number>[0-9]+))?"
@@ -62,8 +63,39 @@ def plugin_versions_match(plugin_version: str, package_version: str) -> bool | N
     return None if plugin is None or package is None else plugin == package
 
 
+def _inventory_depth_exceeded(output: str) -> bool:
+    """Bound raw container nesting; leave JSON syntax validation to json.loads.
+
+    Parser recursion limits vary across Python versions. Inspect the text before
+    decoding so duplicate keys cannot hide an excessively deep earlier value.
+    The root container counts as depth one; quoted brackets are ordinary text.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    for character in output:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+        elif character == '"':
+            in_string = True
+        elif character in "{[":
+            depth += 1
+            if depth > _MAX_INVENTORY_DEPTH:
+                return True
+        elif character in "}]":
+            depth -= 1
+    return False
+
+
 def _parse_inventory(output: str) -> CodexPluginVersion:
     try:
+        if _inventory_depth_exceeded(output):
+            return CodexPluginVersion("unknown", reason="Codex returned invalid plugin JSON")
         inventory = json.loads(output)
     except (ValueError, TypeError, RecursionError):
         return CodexPluginVersion("unknown", reason="Codex returned invalid plugin JSON")

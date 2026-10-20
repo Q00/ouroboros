@@ -124,6 +124,33 @@ jobs:
           retention-days: 1
 
 
+  codex-plugin-python314:
+    # PRs otherwise run the full suite only on 3.12. Keep the parser-depth
+    # contract covered before merge on the newer interpreter as well.
+    if: github.event_name == 'pull_request'
+    name: Codex plugin inventory (Python 3.14)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7.0.1
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "latest"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Install dependencies
+        run: uv sync --frozen --python 3.14 --dev
+      - name: Run Codex plugin inventory regressions
+        run: uv run --python 3.14 --no-sync pytest tests/unit/cli/test_codex_plugin.py tests/unit/cli/test_update_plugin_version.py -n 0 -q -W error::pytest.PytestUnhandledThreadExceptionWarning
+
   runtime-sandbox-windows:
     # The execution sandbox's Windows backend (an AppContainer) runs only on
     # Windows. Its tests fail, rather than skip, on this runner when the
