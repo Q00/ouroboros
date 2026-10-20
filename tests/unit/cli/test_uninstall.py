@@ -921,9 +921,16 @@ class TestConfigEncodingLocaleIndependence:
             for key, value in os.environ.items()
             if not key.startswith(("PYTHON", "OUROBOROS", "LC_", "LANG"))
         }
+        # The child must reach the CLAUDE.md encoding failure, not die while
+        # drawing a Rich panel: under LC_ALL=C stdout is ASCII, and a box border
+        # or the em dash in the final "Dry run — no changes made." line, cannot be encoded.
+        # PYTHONIOENCODING only sets the console encoding, so
+        # locale.getpreferredencoding() stays non-UTF-8 and file I/O keeps the
+        # default encoding this test is about.
         env.update(
             {
                 "PYTHONUTF8": "0",
+                "PYTHONIOENCODING": "utf-8",
                 "LC_ALL": "C",
                 "LANG": "C",
                 "HOME": str(tmp_path),
