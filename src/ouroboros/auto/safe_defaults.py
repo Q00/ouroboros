@@ -192,13 +192,14 @@ def finalize_safe_defaultable_gaps(
     blocked, and missing-goal gaps remain hard blockers regardless of policy.
 
     No text is matched to decide this. A former keyword veto on the goal and
-    answers (credential, payment, production, legal or medical words) is gone:
-    it had shipped empty under the freedom policy, and what it guarded is held
-    structurally. Every default written here is an ``ASSUMPTION`` with status
-    ``DEFAULTED``: it never binds a Seed, and the worker sees it as an
-    overridable assumption. The conservative ``non_goals`` default assumes
-    credential, billing, production, legal and medical work out of scope, so
-    closure assumes those domains away rather than acting inside them.
+    answers (credential, payment, production, legal or medical words) is gone;
+    it had shipped empty under the freedom policy (an operator decision), so
+    removing it changes no closure. Every default written here is an
+    ``ASSUMPTION`` with status ``DEFAULTED``: it never binds a Seed. These
+    closure defaults are interview bookkeeping: ``ledger_seed`` leaves them
+    out of the worker's assumptions as before, so they give the worker no
+    instruction in either direction, and the goal, the requester's answers
+    and the code decide the scope.
 
     ``goal`` and ``pending_question`` are kept for call-site compatibility.
 
