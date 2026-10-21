@@ -1284,6 +1284,7 @@ class TestExitDoesNotBlock:
         server.listen(1)
         host, port = server.getsockname()[:2]
         stop = threading.Event()
+        connected = threading.Event()
 
         def accept_and_stall() -> None:
             server.settimeout(0.5)
@@ -1296,11 +1297,13 @@ class TestExitDoesNotBlock:
                     # Server socket was closed out from under a blocked
                     # accept() during shutdown -- stop, don't propagate.
                     break
+                connected.set()
                 stop.wait()
                 conn.close()
 
         acceptor = threading.Thread(target=accept_and_stall, daemon=True)
         acceptor.start()
+        child: subprocess.Popen[str] | None = None
         try:
             env = os.environ.copy()
             for key in ("DO_NOT_TRACK", "OUROBOROS_TELEMETRY", "OUROBOROS_POSTHOG_HOST"):
@@ -1308,24 +1311,37 @@ class TestExitDoesNotBlock:
             env["HOME"] = str(tmp_path)
             env["OUROBOROS_POSTHOG_API_KEY"] = "phc_test"
             env["OUROBOROS_POSTHOG_HOST"] = f"http://{host}:{port}"
+            env["NO_PROXY"] = env["no_proxy"] = "127.0.0.1"
             repo_root = Path(__file__).resolve().parents[2]
             env["PYTHONPATH"] = str(repo_root / "src")
 
-            start = time.monotonic()
-            subprocess.run(
+            child = subprocess.Popen(
                 [
                     sys.executable,
                     "-c",
-                    "from ouroboros import telemetry; telemetry.capture('test_event')",
+                    "import sys; from ouroboros import telemetry; "
+                    "telemetry.capture('workflow_outcome'); "
+                    "sys.stdin.readline(); "
+                    "assert telemetry._worker is not None and telemetry._worker.is_alive(); "
+                    "assert telemetry._queue.unfinished_tasks > 0",
                 ],
                 env=env,
                 text=True,
-                capture_output=True,
-                timeout=10,
-                check=True,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
+            assert connected.wait(timeout=10), "telemetry never connected to the stalled transport"
+            # Exclude interpreter/import startup; release only after the HTTP call starts.
+            start = time.monotonic()
+            stdout, stderr = child.communicate(input="\n", timeout=10)
             elapsed = time.monotonic() - start
+            assert child.returncode == 0, f"stdout={stdout!r}, stderr={stderr!r}"
         finally:
+            if child is not None:
+                if child.poll() is None:
+                    child.kill()
+                child.communicate(timeout=5)
             # Signal and join the acceptor before closing the socket: the
             # thread wakes on its own (0.5s accept timeout, or the stop
             # event if it is parked past an accepted connection), so the
@@ -1335,8 +1351,7 @@ class TestExitDoesNotBlock:
             server.close()
 
         # Old (atexit-registered flush) behavior measured ~2s against a
-        # stalled transport. Keep generous headroom for interpreter/import
-        # startup while staying strictly below the old blocking bound.
+        # stalled transport. Keep the exit bound strictly below that delay.
         assert elapsed < 1.2, (
             f"subprocess took {elapsed:.2f}s to exit against a stalled transport "
             "-- telemetry may be blocking process exit again"
