@@ -80,6 +80,7 @@ from ouroboros.cli.opencode_config import (
 from ouroboros.cli.opencode_config import (
     find_opencode_config,
     opencode_config_dir,
+    plugin_version_error,
 )
 from ouroboros.cli.opencode_config import (
     is_bridge_plugin_entry as _is_bridge_plugin_entry,
@@ -4470,12 +4471,12 @@ def _setup_opencode(opencode_path: str, mode: str = "plugin") -> bool:
     """
     if mode not in ("plugin", "subprocess"):
         raise ValueError(f"Invalid opencode mode: {mode!r} (expected 'plugin' or 'subprocess')")
+    if mode == "plugin" and (version_error := plugin_version_error(opencode_path)):
+        print_error(version_error)
+        return False
 
     from ouroboros.config.loader import create_default_config, ensure_config_dir
 
-    # Persist mode to config.yaml for both branches so the MCP runtime gate
-    # can read it later. Plugin branch still writes (no runtime_backend/cli
-    # fields — plugin runs in-process inside OpenCode; but mode signal matters).
     config_dir = ensure_config_dir()
     config_path = config_dir / "config.yaml"
     if config_path.exists():
