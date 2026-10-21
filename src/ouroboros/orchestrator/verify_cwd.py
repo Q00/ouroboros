@@ -195,7 +195,7 @@ def bind_verify_command_cwd(root_cwd: str, spec: AcceptanceCriterionSpec) -> Bou
     resolved_cwd, error = resolve_verify_command_cwd(root_cwd, spec)
     if error is not None:
         return BoundVerifyCommandCwd(cwd=root_cwd, error=error)
-    if resolved_cwd == root_cwd:
+    if not spec.verify_cwd and resolved_cwd == root_cwd:
         return BoundVerifyCommandCwd(cwd=root_cwd)
     root = Path(root_cwd).expanduser().resolve(strict=False)
     if spec.verify_cwd:

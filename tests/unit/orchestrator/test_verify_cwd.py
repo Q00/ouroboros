@@ -65,6 +65,44 @@ def test_resolve_verify_cwd_uses_sole_node_manifest_directory(tmp_path: Any) -> 
     assert Path(resolved) == (tmp_path / "app").resolve()
 
 
+@pytest.mark.parametrize("verify_cwd", ["alias", "alias/app"])
+def test_binding_rejects_root_alias_paths(tmp_path: Path, verify_cwd: str) -> None:
+    from ouroboros.orchestrator.verify_cwd import bind_verify_command_cwd
+
+    root = tmp_path.resolve()
+    (root / "app").mkdir()
+    (root / "alias").symlink_to(root, target_is_directory=True)
+    spec = AcceptanceCriterionSpec(
+        description="reject root alias", verify_command="exit 0", verify_cwd=verify_cwd
+    )
+    bound = bind_verify_command_cwd(str(root), spec)
+    try:
+        assert bound.error is not None
+        assert "could not be securely bound" in bound.error
+        assert bound.capability is None
+    finally:
+        bound.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verify_cwd", ["alias", "alias/app"])
+async def test_verify_gate_rejects_root_alias_paths(tmp_path: Path, verify_cwd: str) -> None:
+    root = tmp_path.resolve()
+    (root / "app").mkdir()
+    (root / "alias").symlink_to(root, target_is_directory=True)
+    spec = AcceptanceCriterionSpec(
+        description="reject root alias",
+        verify_command="printf ROOT_ALIAS_ACCEPTED",
+        verify_cwd=verify_cwd,
+    )
+    outcome = await _make_executor(working_directory=str(root))._run_ac_verify_gate(
+        spec=spec, cwd=str(root)
+    )
+    assert outcome.passed is False
+    assert "could not be securely bound" in (outcome.reason or "")
+    assert "ROOT_ALIAS_ACCEPTED" not in (outcome.output_tail or "")
+
+
 @pytest.mark.parametrize(
     "command",
     [
