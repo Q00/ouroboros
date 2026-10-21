@@ -127,3 +127,43 @@ def test_preformatted_exception_text_retains_existing_redaction(
         exception = json.loads(output)["exception"]
         assert "plainsecretabc" not in exception
         assert "ValueError" in exception
+
+
+@pytest.mark.parametrize("mode", [LogMode.PROD, LogMode.DEV])
+@pytest.mark.parametrize("sink", ["console", "file"])
+@pytest.mark.parametrize("source", ["key", "note"])
+def test_exception_keys_and_notes_cannot_bypass_redaction(
+    mode: LogMode,
+    sink: str,
+    source: str,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    configure_logging(LoggingConfig(mode=mode, log_dir=tmp_path))
+    credential = "sk-live-abc123def456ghi789" if source == "key" else "plainsecretabc"
+    payload = {"api_key": "privatevalue", "password": "privatevalue", "attempt": 7}
+    if source == "key":
+        payload[f"api_key_{credential}"] = 123
+    error = ValueError(payload)
+    error.add_note("retry remains available")
+    if source == "note":
+        error.add_note(str({"api_key": credential, "detail": "upstream unavailable"}))
+    try:
+        raise error
+    except ValueError:
+        get_logger().exception("review.exception")
+
+    console = capsys.readouterr().err
+    (tmp_path / "console.log").write_text(console, encoding="utf-8")
+    persistent = (tmp_path / "ouroboros.log").read_text(encoding="utf-8")
+    output = console if sink == "console" else persistent
+    assert credential not in output
+    assert "privatevalue" not in output
+    assert "api_key" in output
+    assert "password" in output
+    assert "attempt" in output
+    assert "ValueError" in output
+    assert "retry remains available" in output
+    assert "test_exception_keys_and_notes_cannot_bypass_redaction" in output
+    if source == "note":
+        assert "upstream unavailable" in output

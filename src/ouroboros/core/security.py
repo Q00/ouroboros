@@ -701,6 +701,8 @@ def _sanitize_logging_key(key: Any) -> tuple[Any, bool]:
             normalized = str.__str__(key)
         except Exception:
             return "<REDACTED>", True
+        if is_opaque_credential_shaped(normalized):
+            return "<REDACTED>", True
         if is_sensitive_field(normalized):
             return normalized, True
         if is_credential_shaped(normalized):

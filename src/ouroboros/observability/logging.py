@@ -206,7 +206,7 @@ _EXCEPTION_SECRET_ASSIGNMENT = re.compile(
 
 
 def _sanitize_exception_text(text: str) -> str:
-    """Retain existing redaction for caller-supplied string arguments only."""
+    """Redact caller-supplied string arguments and exception notes."""
 
     def replace_quoted(match: re.Match[str]) -> str:
         key_quote, key, value_quote = match.group(1), match.group(2), match.group(3)
@@ -278,6 +278,8 @@ def _format_exception_safely(
             parts.append(_format_exception_safely(child, child.__traceback__, seen))
     notes = sanitize_for_logging({"notes": getattr(exception, "__notes__", ())})["notes"]
     for note in notes:
+        if isinstance(note, str):
+            note = _sanitize_exception_text(note)
         parts.append(f"{note}\n")
     return _mask_exception_tokens("".join(parts))
 
