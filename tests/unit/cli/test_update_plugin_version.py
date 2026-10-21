@@ -326,7 +326,14 @@ def test_deep_plugin_json_remains_advisory_in_update_flows(
 ) -> None:
     flow.current = current
     flow.setup_returncode = setup_returncode
-    flow.stdout = '{"installed": [], "private": ' + "[" * 10_000 + "0" + "]" * 10_000 + "}"
+    private_marker = "codex-plugin-private-inventory-sentinel"
+    flow.stdout = (
+        '{"installed": [], "private": '
+        + "[" * 10_000
+        + json.dumps(private_marker)
+        + "]" * 10_000
+        + "}"
+    )
 
     result = flow.invoke(*args)
 
@@ -338,7 +345,9 @@ def test_deep_plugin_json_remains_advisory_in_update_flows(
         assert result.exception is None
     output = _plain(result.output)
     assert "Codex plugin version: unknown (Codex returned invalid plugin JSON)" in output
-    assert "not installed" not in output and "private" not in output
+    assert "not installed" not in output
+    assert '"private":' not in output
+    assert private_marker not in output
     assert [command for command, _ in flow.calls][-1] == flow.query
     if current == flow.latest or "--check" in args:
         assert [command for command, _ in flow.calls] == [flow.query]
