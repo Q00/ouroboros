@@ -13,12 +13,25 @@ import pytest
 import pytest_asyncio
 
 
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Classify tests before marker selection and xdist's loadgroup scheduling."""
+    integration_root = Path(__file__).resolve().parent / "integration"
+    for item in items:
+        if item.path.is_relative_to(integration_root):
+            item.add_marker(pytest.mark.integration)
+        if isinstance(item, pytest.Function) and "built_wheel" in item.fixturenames:
+            item.add_marker(pytest.mark.slow)
+            item.add_marker(pytest.mark.xdist_group("built_wheel"))
+
+
 @pytest.fixture(scope="session")
 def built_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Build one wheel for packaging-contract tests that inspect its contents.
 
     The wheel is an immutable artifact for the duration of a test session;
     rebuilding it in each test only repeats a 20–30 second subprocess.
+    Parallel runs must use --dist loadgroup so every consumer shares a worker.
     """
     uv = shutil.which("uv")
     if uv is None:

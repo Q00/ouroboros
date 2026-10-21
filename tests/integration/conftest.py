@@ -10,8 +10,6 @@ from typing import Any
 
 import pytest
 
-pytestmark = pytest.mark.integration
-
 
 class FakeCLIStream:
     """Minimal async byte stream for subprocess stdout/stderr tests."""
