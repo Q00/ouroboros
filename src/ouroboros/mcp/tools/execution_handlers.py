@@ -1055,7 +1055,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
             name="ouroboros_execute_seed",
             description=(
                 "Execute a seed (task specification) in Ouroboros. "
-                "A seed defines a task to be executed with acceptance criteria. "
+                "Worktree provisioning is internal; use_worktree is not a public argument. "
                 "This is the handler for 'ooo run' commands — "
                 "do NOT run 'ooo' in the shell; call this MCP tool instead."
             ),
@@ -2431,7 +2431,8 @@ class StartExecuteSeedHandler:
                 "ouroboros_start_auto instead). In plugin mode, execution is delegated to an "
                 "OpenCode Task pane and job_id is None; results appear in the Task pane instead "
                 "of being pollable via job_status/job_result. This is the handler for 'ooo run' "
-                "commands; do NOT run 'ooo' in the shell; call this MCP tool instead."
+                "commands; call this MCP tool instead of the shell. Worktree provisioning is "
+                "internal; use_worktree is not a public argument."
             ),
             parameters=(
                 *ExecuteSeedHandler().definition.parameters,
