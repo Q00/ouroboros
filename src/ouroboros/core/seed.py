@@ -819,6 +819,11 @@ class Seed(BaseModel, frozen=True):
         repo_facts: Questions auto answered from the repository, with the
             answer and its checked evidence quoted verbatim. They describe the
             current code and are never rewritten into constraints or criteria.
+        open_questions: Interview questions nobody answered, verbatim and in
+            ledger order. They stay in the Seed file and the auto result so
+            the self-interview is visible, but no execution prompt renders them:
+            a worker shown a question with its candidate answers builds the fix
+            around one of them.
         ontology_schema: Conceptual lens for workflow coherence.
         evaluation_principles: Principles for evaluating outputs.
         exit_conditions: Conditions for terminating the workflow.
@@ -904,6 +909,13 @@ class Seed(BaseModel, frozen=True):
         description=(
             "Questions answered from the repository, with the answer and its checked "
             "evidence quoted verbatim; they describe the current code, not requirements"
+        ),
+    )
+    open_questions: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Interview questions nobody answered, verbatim and in order; kept for the "
+            "record and never rendered into the worker's execution input"
         ),
     )
 
@@ -1081,6 +1093,8 @@ class Seed(BaseModel, frozen=True):
             excluded.add("requester_answers")
         if not self.repo_facts:
             excluded.add("repo_facts")
+        if not self.open_questions:
+            excluded.add("open_questions")
         data = self.model_dump(mode="json", by_alias=True, exclude=excluded)
         data.update({key: _thaw_seed_extra_value(value) for key, value in extra.items()})
         return data
