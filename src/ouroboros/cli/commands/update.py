@@ -191,6 +191,8 @@ class InstallationIdentity:
     console_path: Path
     manager_binary: str
     manager_home: Path
+    version_specifier: str = ""
+    requirement_marker: str = ""
 
 
 @dataclass(frozen=True)
@@ -275,7 +277,8 @@ _UV_REGISTRY_REQUIREMENT_FIELDS = frozenset(
 )
 
 
-def _uv_profile(receipt_path: Path) -> str:
+def _uv_profile(receipt_path: Path) -> tuple[str, str, str]:
+    """Read the display profile and the root requirement's constraint together."""
     try:
         with receipt_path.open("rb") as receipt_file:
             data = tomllib.load(receipt_file)
@@ -303,7 +306,7 @@ def _uv_profile(receipt_path: Path) -> str:
             )
         rendered.append((requirement, label))
     main = [
-        label
+        (requirement, label)
         for requirement, label in rendered
         if _normalise_distribution_name(str(requirement.get("name", ""))) == PACKAGE_NAME
     ]
@@ -311,8 +314,14 @@ def _uv_profile(receipt_path: Path) -> str:
         raise InstallationIdentityError(
             f"uv receipt {receipt_path} does not identify exactly one {PACKAGE_NAME} requirement"
         )
-    additions = [label for _, label in rendered if label != main[0]]
-    return main[0] if not additions else f"{main[0]} (with {', '.join(additions)})"
+    requirement, root_label = main[0]
+    specifier = requirement.get("specifier", "")
+    marker = requirement.get("marker", "")
+    if not isinstance(specifier, str) or not isinstance(marker, str):
+        raise InstallationIdentityError(f"uv receipt {receipt_path} has an invalid root constraint")
+    additions = [label for _, label in rendered if label != root_label]
+    profile = root_label if not additions else f"{root_label} (with {', '.join(additions)})"
+    return profile, specifier, marker
 
 
 _PYPI_OUROBOROS_SPEC = re.compile(
@@ -391,14 +400,17 @@ def _detect_installation_identity(prefix: Path | None = None) -> InstallationIde
             raise InstallationIdentityError(
                 "uv owns this environment but the uv executable is unavailable"
             )
+        profile, specifier, marker = _uv_profile(uv_receipt)
         return InstallationIdentity(
             manager="uv",
             tool_name=environment.name,
             environment=environment,
-            profile=_uv_profile(uv_receipt),
+            profile=profile,
             console_path=console_path,
             manager_binary=binary,
             manager_home=environment.parent,
+            version_specifier=specifier,
+            requirement_marker=marker,
         )
     if pipx_receipt.is_file():
         binary = shutil.which("pipx")
@@ -423,6 +435,50 @@ def _detect_installation_identity(prefix: Path | None = None) -> InstallationIde
         "the running environment has no uv or pipx receipt; direct pip installs do not "
         "record requested extras, so the installed profile cannot be preserved automatically"
     )
+
+
+def _check_uv_target(identity: InstallationIdentity, target: str) -> None:
+    """Reject a known-ineligible target without relaxing the operator's constraint."""
+    if identity.manager != "uv":
+        return
+    if not identity.version_specifier and not identity.requirement_marker:
+        return
+    try:
+        from packaging.markers import (
+            InvalidMarker,
+            Marker,
+            UndefinedComparison,
+            UndefinedEnvironmentName,
+        )
+        from packaging.specifiers import InvalidSpecifier, SpecifierSet
+        from packaging.version import InvalidVersion
+    except ImportError as exc:
+        raise InstallationIdentityError(
+            "this installation lacks packaging, which is required to validate its uv "
+            "root constraint; restore packaging in this tool environment using the original "
+            "manager and installation options, then retry. No constraint was relaxed"
+        ) from exc
+    try:
+        specifier = SpecifierSet(identity.version_specifier)
+        if identity.requirement_marker and not Marker(identity.requirement_marker).evaluate():
+            return
+        # Target selection already applied the requested prerelease policy.
+        allowed = specifier.contains(target, prereleases=True)
+    except (
+        InvalidSpecifier,
+        InvalidVersion,
+        InvalidMarker,
+        UndefinedComparison,
+        UndefinedEnvironmentName,
+        KeyError,
+    ) as exc:
+        raise InstallationIdentityError(
+            f"cannot validate uv root version constraint: {exc}"
+        ) from exc
+    if not allowed:
+        raise InstallationIdentityError(
+            f"uv root version constraint {identity.version_specifier!r} excludes target v{target}"
+        )
 
 
 def _upgrade_command(identity: InstallationIdentity, prerelease: bool) -> list[str]:
@@ -588,6 +644,7 @@ def _run_step(
     env_overrides: Mapping[str, str] | None = None,
     recovery: bool = False,
     recovery_follow_up: list[list[str]] | None = None,
+    report_success: bool = True,
 ) -> bool:
     """Run one update step, streaming its output. Returns True on success."""
     if dry_run:
@@ -605,7 +662,8 @@ def _run_step(
         print_warning(f"{description} failed — could not run {command[0]!r}.")
     else:
         if result.returncode == 0:
-            print_success(description)
+            if report_success:
+                print_success(description)
             return True
         print_warning(f"{description} exited with code {result.returncode}.")
     if recovery:
@@ -1034,7 +1092,24 @@ def update(
         raise typer.Exit(1) from exc
     console.print(f"Installer:   [cyan]{identity.manager}[/cyan]")
     console.print(f"Environment: [cyan]{identity.environment}[/cyan]")
-    console.print(f"Profile:     [cyan]{identity.profile}[/cyan]\n")
+    console.print(f"Profile:     {identity.profile}\n", markup=False)
+
+    try:
+        _check_uv_target(identity, latest)
+    except InstallationIdentityError as exc:
+        console.print(f"Cannot update: {exc}.", style="yellow", markup=False)
+        console.print(
+            f"Receipt: {identity.environment / 'uv-receipt.toml'}\n"
+            f"Manager: {identity.manager_binary}\n"
+            f"UV_TOOL_DIR: {identity.manager_home}\n"
+            "No changes were made. The recorded version constraint is preserved.\n"
+            "To update beyond it, explicitly revise the root version requirement in your "
+            "original uv tool install command. Preserve the same tool root and executable "
+            "directory, Python selection, extras, additional requirements, and index/options "
+            "recorded in the receipt. Do not edit the receipt directly.",
+            markup=False,
+        )
+        raise typer.Exit(1) from exc
 
     if not yes and not dry_run:
         if not typer.confirm(f"Update to v{latest}?", default=True):
@@ -1043,9 +1118,10 @@ def update(
 
     if not _run_step(
         _upgrade_command(identity, include_prereleases),
-        description=f"Upgraded {identity.profile} via {identity.manager}",
+        description=f"Package upgrade via {identity.manager}",
         dry_run=dry_run,
         env_overrides=_upgrade_environment(identity),
+        report_success=False,
     ):
         console.print(
             "\n[bold yellow]Update failed — package upgrade did not complete.[/bold yellow]\n"
@@ -1069,6 +1145,8 @@ def update(
             )
             console.print("[bold yellow]Runtime integration was not refreshed.[/bold yellow]\n")
             raise typer.Exit(1)
+
+        print_success(f"Upgraded {PACKAGE_NAME} to v{installed} via {identity.manager}")
 
     failed: list[str] = []
     resolved_runtime = _resolve_runtime(

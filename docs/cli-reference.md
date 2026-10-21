@@ -1005,6 +1005,24 @@ ouroboros update --runtime none -y
 5. Re-runs `ouroboros setup --runtime <rt> --non-interactive` for a single selected
    runtime, or `ouroboros setup refresh` for `--runtime all`
 
+For a uv installation, the updater first checks the active root package's
+recorded version constraint against the selected PyPI target. A conflicting
+pin, bound, or exclusion exits with code 1 before confirmation or package
+mutation, including with `--dry-run`. The diagnostic identifies the constraint,
+target and receipt, and explains how to deliberately revise the original install
+command while preserving its uv root, executable directory, Python, extras,
+additional requirements and index/options. It never removes the constraint or
+rewrites the receipt. Compatible ranges and wildcards retain the normal upgrade
+path; additional packages' constraints are left to uv. `--check` remains a
+version-only query and does not inspect the installation receipt. Package upgrade
+success is reported only after the installed version has been verified.
+
+Older environments without `packaging` can still start the updater, check
+versions, and upgrade unconstrained uv installations. If their receipt contains
+a root constraint or marker, validation stops before mutation with a diagnostic
+to restore `packaging` using the original manager and installation options.
+The updater does not guess whether that constraint permits the target.
+
 If the package upgrade is verified but a required integration refresh fails,
 the command reports a partial update and exits with code `1`. Each failed step
 prints its recovery command, including the selected executable and any explicit
