@@ -67,12 +67,13 @@ _CHILD_ENV_STRIP_KEYS = DEFAULT_OUROBOROS_STRIP_KEYS
 def _profile_name_from_home(profile_home: str | Path) -> str | None:
     """Return a Hermes profile name for a canonical profile directory."""
     try:
-        candidate = Path(profile_home).expanduser().resolve()
+        candidate = Path(profile_home).expanduser()
         real_home = os.environ.get("HERMES_REAL_HOME", "").strip()
-        profiles_root = (
-            (Path(real_home).expanduser() if real_home else Path.home()) / ".hermes" / "profiles"
-        )
-        profiles_root = profiles_root.resolve()
+        home = Path(real_home).expanduser() if real_home else Path.home()
+        if not candidate.is_absolute() or not home.is_absolute():
+            return None
+        candidate = candidate.resolve()
+        profiles_root = (home / ".hermes" / "profiles").resolve()
     except OSError:
         return None
 
