@@ -484,6 +484,11 @@ _UNPARSED_COVERAGE_OUTPUTS = {
     "coverage over 100%": "Coverage: 999%",
     "conflicting TOTAL rows": "TOTAL   10   0   100%\nTOTAL   100   85   15%",
     "readable beside decimal TOTAL": "TOTAL   10   0   100%\nTOTAL   100   85   15.00%",
+    "trailing requirement": "Coverage: 70% required",
+    "parenthesized requirement": "Coverage: 70% (minimum required)",
+    "requirement beside measurement": "Coverage: 70% required\nCoverage: 80%",
+    "TOTAL trailing requirement": "TOTAL 100 0 100% required",
+    "malformed coverage beside measurement": "Coverage: unknown\nCoverage: 80%",
 }
 
 
@@ -562,8 +567,10 @@ class TestUnparsedCoverageIsNotEvidence:
             ("TOTAL   100   85   15%", False, MechanicalDisposition.EXECUTED_FAIL),
             ("Coverage: 15.0%", False, MechanicalDisposition.EXECUTED_FAIL),
             ("TOTAL   100   20   80%", True, MechanicalDisposition.EXECUTED_PASS),
+            ("\tCoverage: 80.0% \r\n", True, MechanicalDisposition.EXECUTED_PASS),
+            ("TOTAL 100 20 80%\r\nCoverage: 80%\r\n", True, MechanicalDisposition.EXECUTED_PASS),
         ],
-        ids=["pytest-cov-below", "coverage-colon-below", "pytest-cov-above"],
+        ids=["pytest-cov-below", "coverage-colon-below", "pytest-cov-above", "crlf", "agreeing"],
     )
     async def test_readable_coverage_still_decides(
         self, output: str, approved: bool, disposition: MechanicalDisposition

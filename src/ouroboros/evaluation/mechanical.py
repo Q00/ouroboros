@@ -190,20 +190,21 @@ def parse_coverage_from_output(output: str) -> float | None:
     import re
 
     # Pattern matches lines like "TOTAL   1234   123  90%"
-    pattern = r"^[ \t]*TOTAL\s+\d+\s+\d+\s+(\d+)%"
+    pattern = r"[ \t]*TOTAL[ \t]+\d+[ \t]+\d+[ \t]+(\d+)%[ \t]*"
     # Alternative pattern: a line that starts with "Coverage: XX%". Anchored so
     # a requirement such as "Required Coverage: 70%" is not read as a result.
-    alt_pattern = r"^[ \t]*Coverage:\s*(\d+(?:\.\d+)?)%"
+    alt_pattern = r"[ \t]*Coverage:[ \t]*(\d+(?:\.\d+)?)%[ \t]*"
 
     # Every TOTAL row is a figure from the report. One in a shape the pattern
     # cannot read (decimals, branch columns) makes the report ambiguous, so no
     # other row or "Coverage:" line may stand in for it.
-    total_rows = re.findall(r"^[ \t]*TOTAL\b.*$", output, re.MULTILINE)
-    matches = [re.match(pattern, row) for row in total_rows]
+    total_rows = [row for row in output.splitlines() if re.match(r"[ \t]*TOTAL\b", row)]
+    coverage_rows = [row for row in output.splitlines() if re.match(r"[ \t]*Coverage:", row)]
+    matches = [re.fullmatch(pattern, row) for row in total_rows]
+    matches += [re.fullmatch(alt_pattern, row) for row in coverage_rows]
     if not all(matches):
         return None
     readings = [match.group(1) for match in matches if match]
-    readings += re.findall(alt_pattern, output, re.MULTILINE)
     values = {float(reading) for reading in readings}
     # More than one distinct figure, or a figure no tool can report, is not a
     # measurement: return None so the threshold stays undecided.
