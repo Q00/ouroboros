@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 
@@ -183,6 +184,51 @@ def test_board_ambiguous_sessions_do_not_share_final_acceptance():
     )
     cards = [card for column in board["columns"].values() for card in column]
     assert all(card["runtime"]["acceptance"] == "unfinalized" for card in cards)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("session_id", [None, "s1"])
+async def test_history_freezes_high_water_across_pages(monkeypatch, session_id):
+    store = EventStore("sqlite+aiosqlite:///:memory:")
+    await store.initialize()
+    try:
+        now = datetime.now(UTC)
+        events = [
+            event(
+                "execution.node.updated",
+                node_id="ac_1",
+                root_ac_number=1,
+                status="completed" if i == 1000 else "executing",
+            ).model_copy(update={"timestamp": now - timedelta(seconds=i)})
+            for i in range(1001)
+        ]
+        await store.append_batch(events)
+        appended = event("execution.node.updated", node_id="ac_1", status="failed")
+        method = "query_session_related_events_after" if session_id else "get_events_after"
+        read_page = getattr(store, method)
+        calls = 0
+
+        async def append_after_first_page(*args: Any, **kwargs: Any):
+            nonlocal calls
+            page = await read_page(*args, **kwargs)
+            calls += 1
+            if calls == 1:
+                await store.append(appended)
+            return page
+
+        monkeypatch.setattr(store, method, append_after_first_page)
+        cold, cursor = await read_runtime_history(store, execution_id="e1", session_id=session_id)
+        assert [item.id for item in cold] == [item.id for item in events]
+        assert calls == 2
+        assert project(cold).for_node("ac_1").lifecycle == "completed"
+        live, advanced = await read_runtime_history(
+            store, execution_id="e1", session_id=session_id, after_cursor=cursor
+        )
+        assert [item.id for item in live] == [appended.id]
+        assert advanced > cursor
+        assert project([*cold, *live]).for_node("ac_1").lifecycle == "failed"
+    finally:
+        await store.close()
 
 
 @pytest.mark.asyncio

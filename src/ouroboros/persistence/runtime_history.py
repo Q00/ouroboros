@@ -15,6 +15,8 @@ async def read_runtime_history(
     """Read finite cursor pages without changing the store's legacy ordering."""
     history: list[BaseEvent] = []
     cursor = after_cursor
+    if max_row_id is None:
+        max_row_id = await store.get_current_rowid()
     while True:
         if session_id:
             page, next_cursor = await store.query_session_related_events_after(
