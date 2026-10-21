@@ -97,9 +97,7 @@ REFLECT_LLM_ROLES: Final[frozenset[str]] = frozenset(
         "context_compression",
     }
 )
-# Execution-phase planning roles. They have an EXECUTE-stage backend but no
-# dedicated stage *model* field, so model resolution falls through to the
-# evaluate model (or an explicit legacy override).
+# Execution-phase planning roles use an Execute pin or the Execute backend default.
 EXECUTE_LLM_ROLES: Final[frozenset[str]] = frozenset(
     {
         "atomicity",

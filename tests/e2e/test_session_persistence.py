@@ -153,6 +153,9 @@ class TestSessionEventTracking:
         messages = []
         for i in range(15):  # PROGRESS_EMIT_INTERVAL is 10
             messages.append(AgentMessage(type="assistant", content=f"Step {i}"))
+        # The run must complete, and a code task that changed nothing is not
+        # complete; the worker makes its one edit before reporting success.
+        messages.append(AgentMessage(type="tool", content="Writing", tool_name="Write"))
         messages.append(
             AgentMessage(
                 type="result",

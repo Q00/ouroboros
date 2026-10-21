@@ -23,6 +23,7 @@ from ouroboros.auto.interview_driver import (
 )
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.pipeline import AutoPipeline
+import ouroboros.auto.safe_defaults as safe_defaults_module
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 from ouroboros.core.seed import (
     EvaluationPrinciple,
@@ -37,7 +38,6 @@ from ouroboros.core.seed import (
 # unsafe-context matcher firing (an unsafe goal blocks safe-default closure),
 # which is disabled by default under the freedom policy (empty production
 # bank); re-inject the historical bank. See tests/unit/auto/conftest.py.
-pytestmark = pytest.mark.usefixtures("_legacy_unsafe_bank")
 
 # The grade-gate codes are asserted as literals, not imported from
 # ``ouroboros.auto.grade_gate_terminals``. The import would be tidier and it is
@@ -68,7 +68,7 @@ async def _blocked_seed_generator(session_id: str):  # noqa: ARG001
 
 
 @pytest.mark.asyncio
-async def test_interview_max_rounds_exhausted_sets_stop_reason_code(tmp_path) -> None:
+async def test_interview_max_rounds_exhausted_sets_stop_reason_code(tmp_path, monkeypatch) -> None:
     """AutoPipeline result carries ``interview_max_rounds_exhausted`` when the
     driver exhausts ``max_rounds`` with an unsafe-context goal so safe-default
     finalization cannot close the ledger.
@@ -83,6 +83,9 @@ async def test_interview_max_rounds_exhausted_sets_stop_reason_code(tmp_path) ->
 
     # Unsafe-context goal prevents safe-default finalization from closing the
     # ledger, so the driver is forced to emit the max_rounds_exhausted blocker.
+    # No safe-default policy for any section: a structural reason closure
+    # cannot complete (no wording is read to decide it).
+    monkeypatch.setattr(safe_defaults_module, "_SAFE_DEFAULTS", {})
     state = AutoPipelineState(
         goal="Deploy the service to production and configure the required credentials",
         cwd=str(tmp_path),

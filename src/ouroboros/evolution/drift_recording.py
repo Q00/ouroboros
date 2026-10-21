@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from ouroboros.core.lineage import EvaluationSummary
 from ouroboros.core.seed import Seed
 from ouroboros.observability.drift import DriftMeasuredEvent, DriftMeasurement
 from ouroboros.persistence.event_store import EventStore
@@ -17,16 +18,20 @@ async def record_generation_drift(
     generation_number: int,
     seed: Seed,
     execution_output: str | None,
+    evaluation_summary: EvaluationSummary | None = None,
 ) -> None:
     """Persist drift telemetry without making observation a generation gate."""
     if not execution_output:
         return
     try:
-        metrics = DriftMeasurement().measure(
+        metrics = await DriftMeasurement().measure_async(
             current_output=execution_output,
             constraint_violations=[],
             current_concepts=[],
             seed=seed,
+            goal_alignment=(
+                evaluation_summary.goal_alignment if evaluation_summary is not None else None
+            ),
         )
         await event_store.append(
             DriftMeasuredEvent(

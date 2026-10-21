@@ -65,6 +65,7 @@ async def quarantine_unverifiable_result(
                 "reason": gate_reason,
                 "status": "unverified",
                 "verify_cause": getattr(verify_gate_outcome, "cause", None),
+                "verify_no_signal": getattr(verify_gate_outcome, "no_signal", False),
             },
         )
     )

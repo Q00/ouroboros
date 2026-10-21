@@ -158,12 +158,35 @@ class TestVerifierVerdict:
         assert verdict.status is VerifierStatus.UNAVAILABLE
         assert verdict.retry_admission is RetryAdmission.ACCEPT
 
+    def test_script_absent_defaults_to_unavailable_accept(self) -> None:
+        verdict = VerifierVerdict(
+            passed=False,
+            reasons=("not_replayed: script_absent_from_artifact: tests_passed: python x.py",),
+            failure_class="SCRIPT_ABSENT_FROM_ARTIFACT",
+        )
+
+        assert verdict.status is VerifierStatus.UNAVAILABLE
+        assert verdict.retry_admission is RetryAdmission.ACCEPT
+
+    def test_cited_call_failed_defaults_to_fail_retry(self) -> None:
+        verdict = VerifierVerdict(
+            passed=False,
+            reasons=("cited_call_failed: call 1: replay_failed",),
+            failure_class="CITED_CALL_FAILED",
+        )
+
+        assert verdict.status is VerifierStatus.FAIL
+        assert verdict.retry_admission is RetryAdmission.RETRY
+
     @pytest.mark.parametrize(
         ("failure_class", "status", "retry_admission"),
         [
             ("EVIDENCE_MISSING", "UNAVAILABLE", "ACCEPT"),
+            ("SCRIPT_ABSENT_FROM_ARTIFACT", "FAIL", "ACCEPT"),
             ("TRANSCRIPT_MISSING_INFRASTRUCTURE", "FAIL", "ACCEPT"),
             ("TRANSCRIPT_MISSING_INFRASTRUCTURE", "UNAVAILABLE", "RETRY"),
+            ("CITED_CALL_FAILED", "UNAVAILABLE", "ACCEPT"),
+            ("CITED_CALL_FAILED", "FAIL", "ACCEPT"),
         ],
     )
     def test_unavailable_contract_rejects_inconsistent_triplets(
@@ -187,6 +210,7 @@ class TestVerifierVerdict:
             "SCOPE_CREEP",
             "STALL",
             "BLOCKED",
+            "CITED_CALL_FAILED",
         ],
     )
     def test_known_failure_classes_accepted(self, klass: str) -> None:

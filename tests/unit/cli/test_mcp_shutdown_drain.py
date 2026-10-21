@@ -11,6 +11,8 @@ hard exit, but only after every cleanup in the finally block has run.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -146,6 +148,187 @@ async def test_stuck_serve_loop_hard_exits_after_cleanup(monkeypatch) -> None:
 
     assert hard_exit_codes == [0]
     # Cleanup must have completed BEFORE the hard exit fired.
+    mock_server.shutdown.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_residual_uncancellable_task_hard_exits_after_cleanup(monkeypatch) -> None:
+    """A server-spawned task that outlives cleanup must force a hard exit.
+
+    Models the MCP SDK's shielded stdio-client drain of a bridged upstream
+    whose close never ran (#2325): the serve loop itself ends cleanly, but the
+    surviving task would keep asyncio.run() teardown blocked forever.
+    """
+    mock_es, mock_repo, mock_server = _make_mocks()
+    monkeypatch.setattr(mcp_module, "_SHUTDOWN_DRAIN_GRACE_SECONDS", 0.1)
+
+    release = asyncio.Event()
+    hard_exit_codes: list[int] = []
+
+    def fake_hard_exit(code: int) -> None:
+        hard_exit_codes.append(code)
+        release.set()
+        raise _HardExitCalled
+
+    monkeypatch.setattr(mcp_module, "_flush_and_hard_exit", fake_hard_exit)
+
+    async def shielded_drain() -> None:
+        while True:
+            try:
+                await release.wait()
+                return
+            except asyncio.CancelledError:
+                continue
+
+    async def serve_spawning_residual(*args, **kwargs):
+        asyncio.get_running_loop().create_task(shielded_drain())
+        # Client EOF: the serve loop returns on its own.
+
+    mock_server.serve.side_effect = serve_spawning_residual
+    monkeypatch.setattr(mcp_module, "_resolve_client_identity", lambda _ppid: None)
+
+    es_patch, repo_patch, server_patch = _patches(mock_es, mock_repo, mock_server)
+    try:
+        with es_patch, repo_patch, server_patch, pytest.raises(_HardExitCalled):
+            await asyncio.wait_for(
+                mcp_module._run_mcp_server("localhost", 8080, "stdio"),
+                timeout=10.0,
+            )
+    finally:
+        # Without the backstop the residual task would hang this test's loop
+        # teardown instead of failing the assertion above.
+        release.set()
+
+    assert hard_exit_codes == [0]
+    mock_server.shutdown.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_residual_survivor_hard_exits_nonzero_when_serve_failed(monkeypatch) -> None:
+    """A residual survivor must force a hard exit even when serve also failed.
+
+    Under the all-sockets-closed condition the stdout writer can fail while a
+    bridged drain survives cancellation; raising the serve error instead would
+    leave asyncio.run() teardown blocked on that survivor.
+    """
+    mock_es, mock_repo, mock_server = _make_mocks()
+    monkeypatch.setattr(mcp_module, "_SHUTDOWN_DRAIN_GRACE_SECONDS", 0.1)
+
+    release = asyncio.Event()
+    hard_exit_codes: list[int] = []
+
+    def fake_hard_exit(code: int) -> None:
+        hard_exit_codes.append(code)
+        release.set()
+        raise _HardExitCalled
+
+    monkeypatch.setattr(mcp_module, "_flush_and_hard_exit", fake_hard_exit)
+
+    async def shielded_drain() -> None:
+        while True:
+            try:
+                await release.wait()
+                return
+            except asyncio.CancelledError:
+                continue
+
+    async def serve_spawning_residual_then_failing(*args, **kwargs):
+        asyncio.get_running_loop().create_task(shielded_drain())
+        raise BrokenPipeError("stdout peer closed")
+
+    mock_server.serve.side_effect = serve_spawning_residual_then_failing
+    monkeypatch.setattr(mcp_module, "_resolve_client_identity", lambda _ppid: None)
+
+    es_patch, repo_patch, server_patch = _patches(mock_es, mock_repo, mock_server)
+    try:
+        with es_patch, repo_patch, server_patch, pytest.raises(_HardExitCalled):
+            await asyncio.wait_for(
+                mcp_module._run_mcp_server("localhost", 8080, "stdio"),
+                timeout=10.0,
+            )
+    finally:
+        release.set()
+
+    assert hard_exit_codes == [1]
+    mock_server.shutdown.assert_awaited_once()
+
+
+@pytest.fixture
+def dead_stderr_console(monkeypatch):
+    """Point the stdio console at a pipe whose reader is gone (#2325)."""
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    dead_file = os.fdopen(write_fd, "w")
+    console = mcp_module._DeadPeerSafeConsole(file=dead_file)
+    monkeypatch.setattr(mcp_module, "_stderr_console", console)
+    yield console
+    with contextlib.suppress(OSError):
+        dead_file.close()
+
+
+@pytest.mark.asyncio
+async def test_watchdog_signals_stop_with_dead_stderr(monkeypatch, dead_stderr_console) -> None:
+    """The orphan notice on a dead stderr must not abort the stop signal."""
+    current_ppid = os.getppid()
+    monkeypatch.setattr(mcp_module.os, "getppid", lambda: current_ppid)
+    stop = asyncio.Event()
+
+    await asyncio.wait_for(
+        mcp_module._orphan_watchdog_loop(
+            stop=stop,
+            orig_ppid=current_ppid,
+            client_identity=None,
+            stdin_peer_dead=lambda: True,
+            poll_seconds=0.05,
+        ),
+        timeout=5.0,
+    )
+
+    assert stop.is_set()
+    assert dead_stderr_console.quiet
+
+
+@pytest.mark.asyncio
+async def test_forced_exit_warning_with_dead_stderr_still_cleans_up(
+    monkeypatch, dead_stderr_console
+) -> None:
+    """Lifecycle notices on a dead stderr must not skip shutdown cleanup."""
+    mock_es, mock_repo, mock_server = _make_mocks()
+    monkeypatch.setattr(mcp_module, "_SHUTDOWN_DRAIN_GRACE_SECONDS", 0.1)
+
+    release = asyncio.Event()
+    hard_exit_codes: list[int] = []
+
+    def fake_hard_exit(code: int) -> None:
+        hard_exit_codes.append(code)
+        release.set()
+        raise _HardExitCalled
+
+    monkeypatch.setattr(mcp_module, "_flush_and_hard_exit", fake_hard_exit)
+
+    async def stuck_serve(*args, **kwargs):
+        while True:
+            try:
+                await release.wait()
+                return
+            except asyncio.CancelledError:
+                continue
+
+    mock_server.serve.side_effect = stuck_serve
+    monkeypatch.setattr(mcp_module, "_resolve_client_identity", lambda _ppid: (4242, 1.0))
+    monkeypatch.setattr(mcp_module, "_client_is_alive", lambda _pid, _start_marker=None: False)
+
+    es_patch, repo_patch, server_patch = _patches(mock_es, mock_repo, mock_server)
+    try:
+        with es_patch, repo_patch, server_patch, pytest.raises(_HardExitCalled):
+            await asyncio.wait_for(
+                mcp_module._run_mcp_server("localhost", 8080, "stdio"),
+                timeout=10.0,
+            )
+    finally:
+        release.set()
+
+    assert hard_exit_codes == [0]
     mock_server.shutdown.assert_awaited_once()
 
 

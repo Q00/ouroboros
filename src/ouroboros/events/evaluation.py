@@ -227,6 +227,7 @@ def create_pipeline_completed_event(
     final_approved: bool,
     highest_stage: int,
     failure_reason: str | None,
+    acceptance_state: str | None = None,
 ) -> BaseEvent:
     """Create event for full evaluation pipeline completion.
 
@@ -235,17 +236,22 @@ def create_pipeline_completed_event(
         final_approved: Overall approval status
         highest_stage: Highest stage number completed
         failure_reason: Reason for failure if not approved
+        acceptance_state: ``approved``, ``rejected`` or ``unverified`` when
+            the producer classified the outcome
 
     Returns:
         BaseEvent for pipeline completion
     """
+    data: dict[str, Any] = {
+        "final_approved": final_approved,
+        "highest_stage": highest_stage,
+        "failure_reason": failure_reason,
+    }
+    if acceptance_state is not None:
+        data["acceptance_state"] = acceptance_state
     return BaseEvent(
         type="evaluation.pipeline.completed",
         aggregate_type="evaluation",
         aggregate_id=execution_id,
-        data={
-            "final_approved": final_approved,
-            "highest_stage": highest_stage,
-            "failure_reason": failure_reason,
-        },
+        data=data,
     )

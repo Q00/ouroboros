@@ -32,6 +32,10 @@ def _typed_evidence_is_usable_for_sibling_reconciliation(result: ACExecutionResu
         return False
     if result.typed_evidence_validation is not None and not result.typed_evidence_validation.ok:
         return False
+    if result.recorded_rejection:
+        # The verifier only recorded its rejection (record mode): it rules out
+        # nothing here either, as if it had not run.
+        return True
     return result.atomic_verifier_verdict is None or result.atomic_verifier_verdict.passed
 
 

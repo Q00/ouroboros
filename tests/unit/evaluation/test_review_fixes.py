@@ -21,9 +21,13 @@ import pytest
 
 from ouroboros.core.types import Result
 from ouroboros.evaluation.models import (
+    AcceptanceState,
+    CheckResult,
+    CheckType,
     ConsensusResult,
     EvaluationContext,
     EvaluationResult,
+    MechanicalResult,
     SemanticResult,
     Vote,
 )
@@ -34,6 +38,12 @@ from ouroboros.mcp.server.adapter import _project_dir_from_artifact
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+# Executed, passing Stage 1 evidence: the only source that can grant approval.
+EXECUTED_STAGE1 = MechanicalResult(
+    passed=True,
+    checks=(CheckResult(check_type=CheckType.TEST, passed=True, message="ok", executed=True),),
+)
 
 
 def _make_semantic(score: float = 0.72, compliance: bool = True) -> SemanticResult:
@@ -105,7 +115,7 @@ class TestFinding1PrePopulatedTriggerContext:
     @pytest.mark.asyncio
     async def test_trigger_consensus_merged_into_existing_context(self) -> None:
         """Pre-populated TriggerContext + trigger_consensus=True → Stage 3 fires."""
-        p = _pipeline(consensus_approved=True)
+        p = _pipeline(stage2_score=0.9, consensus_approved=True)
         ctx = _context(trigger=True)
 
         # Caller passes TriggerContext with drift data but without manual flag
@@ -115,7 +125,7 @@ class TestFinding1PrePopulatedTriggerContext:
             manual_consensus_request=False,
         )
 
-        result = await p.evaluate(ctx, trigger_context=existing_tc)
+        result = await p.evaluate(ctx, trigger_context=existing_tc, stage1_result=EXECUTED_STAGE1)
         assert result.is_ok
         assert result.value.final_approved is True
         p._consensus.evaluate.assert_called_once()
@@ -123,7 +133,7 @@ class TestFinding1PrePopulatedTriggerContext:
     @pytest.mark.asyncio
     async def test_existing_context_with_manual_true_preserved(self) -> None:
         """If TriggerContext already has manual=True, don't break it."""
-        p = _pipeline(consensus_approved=True)
+        p = _pipeline(stage2_score=0.9, consensus_approved=True)
         ctx = _context(trigger=True)
 
         existing_tc = TriggerContext(
@@ -131,7 +141,7 @@ class TestFinding1PrePopulatedTriggerContext:
             manual_consensus_request=True,
         )
 
-        result = await p.evaluate(ctx, trigger_context=existing_tc)
+        result = await p.evaluate(ctx, trigger_context=existing_tc, stage1_result=EXECUTED_STAGE1)
         assert result.is_ok
         assert result.value.final_approved is True
         p._consensus.evaluate.assert_called_once()
@@ -174,7 +184,7 @@ class TestFinding2Stage2Disabled:
         )
         ctx = _context(trigger=True)
 
-        result = await p.evaluate(ctx)
+        result = await p.evaluate(ctx, stage1_result=EXECUTED_STAGE1)
         assert result.is_ok
         assert result.value.final_approved is True
         p._consensus.evaluate.assert_called_once()
@@ -193,9 +203,17 @@ class TestFinding2Stage2Disabled:
 
         result = await p.evaluate(ctx)
         assert result.is_ok
-        # No Stage 2 data, no manual trigger → approved by default
-        assert result.value.final_approved is True
+        # No Stage 2 data, no manual trigger, and no executed evidence:
+        # nothing can grant acceptance, so the result is unverified.
+        assert result.value.final_approved is False
+        assert result.value.acceptance_state is AcceptanceState.UNVERIFIED
         p._consensus.evaluate.assert_not_called()
+
+        # The same run with executed Stage 1 evidence is approved: no model
+        # review ran to withhold it.
+        verified = await p.evaluate(ctx, stage1_result=EXECUTED_STAGE1)
+        assert verified.is_ok
+        assert verified.value.final_approved is True
 
 
 # ---------------------------------------------------------------------------

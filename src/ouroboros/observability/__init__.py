@@ -17,6 +17,7 @@ from ouroboros.observability.drift import (
     DriftThresholdExceededEvent,
     calculate_constraint_drift,
     calculate_goal_drift,
+    calculate_goal_drift_async,
     calculate_ontology_drift,
 )
 from ouroboros.observability.logging import (
@@ -54,6 +55,7 @@ __all__ = [
     "DriftThresholdExceededEvent",
     "calculate_constraint_drift",
     "calculate_goal_drift",
+    "calculate_goal_drift_async",
     "calculate_ontology_drift",
     # Retrospective
     "DEFAULT_RETROSPECTIVE_INTERVAL",

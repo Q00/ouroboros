@@ -25,6 +25,7 @@ from ouroboros.dashboard_web.reader import (
     EventTail,
     PickerIndexContractError,
     list_recent_executions,
+    list_recent_interviews,
 )
 
 # SSE poll cadence. Fast enough to feel live, slow enough that tailing a shared
@@ -32,6 +33,7 @@ from ouroboros.dashboard_web.reader import (
 _POLL_INTERVAL_SEC = 0.7
 # Heartbeat comment cadence so idle connections stay open through proxies/tunnels.
 _HEARTBEAT_SEC = 15.0
+_SNAPSHOT_BATCH_SIZE = 5000
 _PICKER_CONTRACT_ERROR = "picker_index_contract_unavailable"
 
 
@@ -83,6 +85,18 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_bytes(INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
         elif path == "/healthz":
             self._send_bytes(b"ok", "text/plain")
+        elif path == "/api/interviews":
+            try:
+                limit = int((query.get("limit") or ["10"])[0])
+                interviews = list_recent_interviews(self.server.db_path, limit=limit)
+            except ValueError:
+                self._send_json({"error": "limit must be an integer from 1 to 100"}, status=400)
+                return
+            except PickerIndexContractError:
+                self._send_json({"interviews": [], "error": _PICKER_CONTRACT_ERROR}, status=503)
+                return
+            self._send_json({"interviews": interviews})
+            self.server.touch()
         elif path == "/api/runs":
             try:
                 runs = list_recent_executions(self.server.db_path)
@@ -111,7 +125,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         tail = EventTail(self.server.db_path, run_id)
         try:
-            events = tail.fetch_new(limit=100000)
+            events = tail.fetch_all(limit=_SNAPSHOT_BATCH_SIZE)
         except PickerIndexContractError:
             self._send_json({"error": _PICKER_CONTRACT_ERROR}, status=503)
             return

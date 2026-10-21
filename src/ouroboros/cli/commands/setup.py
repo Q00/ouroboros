@@ -38,6 +38,10 @@ import yaml
 
 from ouroboros import package_profiles
 from ouroboros.bigbang.brownfield import scan_and_register, set_default_repo
+from ouroboros.cli.codex_mcp_launcher import (
+    is_setup_owned_codex_uvx_args,
+    release_codex_mcp_launcher,
+)
 from ouroboros.cli.commands import ooo_bridges
 from ouroboros.cli.commands.claude_setup import (
     setup_claude as _setup_claude,
@@ -86,19 +90,20 @@ from ouroboros.cli.setup_model_config import (
 from ouroboros.cli.setup_model_config import (
     is_shipped_default_roster as _is_shipped_default_roster,
 )
-from ouroboros.cli.setup_model_config import (
-    neutralize_fresh_codex_model_defaults as _neutralize_fresh_codex_model_defaults,
-)
 from ouroboros.cli.windows_codex_mcp import apply_windows_codex_mcp_mode, is_native_windows
 from ouroboros.codex.cli_policy import resolve_codex_cli_path
 from ouroboros.codex.home import resolve_codex_home
 from ouroboros.codex.runtime_profile import codex_uses_profile_v2 as _shared_codex_uses_profile_v2
+from ouroboros.codex.runtime_profile import (
+    existing_codex_profile_names as _existing_codex_profile_names,
+)
 from ouroboros.config._model_defaults import (
     DEFAULT_CONSENSUS_OPUS_MODEL,
     DEFAULT_OPUS_MODEL,
     DEFAULT_SONNET_MODEL,
     recognized_shipped_defaults,
 )
+from ouroboros.config.model_selection import AUTO_MODEL
 from ouroboros.core.errors import ConfigError
 from ouroboros.persistence.brownfield import BrownfieldStore
 
@@ -454,6 +459,7 @@ _CODEX_MCP_SECTION_TEMPLATE = """# Ouroboros MCP hookup for Codex CLI.
 
 [mcp_servers.ouroboros]
 {command_lines}
+startup_timeout_sec = 180
 
 [mcp_servers.ouroboros.env]
 OUROBOROS_AGENT_RUNTIME = "codex"
@@ -673,40 +679,23 @@ def _toml_string(value: str) -> str:
 
 
 def _codex_release_mcp_launcher() -> tuple[str, list[str]] | None:
-    """Resolve a launchable release MCP command for the current machine."""
-    uvx_path = shutil.which("uvx")
-    if uvx_path:
-        return uvx_path, list(_CODEX_UVX_MCP_ARGS)
-
-    ouroboros_path = shutil.which("ouroboros")
-    if ouroboros_path:
-        try:
-            result = subprocess.run(
-                [ouroboros_path, "mcp", "serve", "--help"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            result = None
-        if result is not None and result.returncode == 0:
-            return ouroboros_path, list(_CODEX_DIRECT_MCP_ARGS)
-
-    if (
-        Path(sys.executable).is_file()
-        and os.access(sys.executable, os.X_OK)
-        and importlib_util.find_spec("mcp") is not None
-    ):
-        return sys.executable, list(_CODEX_MODULE_MCP_ARGS)
-    return None
+    """Resolve a pinned release launcher with current-environment fallbacks."""
+    return release_codex_mcp_launcher(
+        which=shutil.which,
+        run=subprocess.run,
+        executable=sys.executable,
+        find_spec=importlib_util.find_spec,
+        uvx_args=_CODEX_UVX_MCP_ARGS,
+        direct_args=_CODEX_DIRECT_MCP_ARGS,
+        module_args=_CODEX_MODULE_MCP_ARGS,
+    )
 
 
 def _render_codex_mcp_section() -> str | None:
     """Render the managed Codex MCP block for the current install source.
 
-    Release installs use ``uvx --isolated --from ouroboros-ai[mcp]`` so Codex
-    can bootstrap the MCP extra without reusing a conflicting installed tool.
+    Release installs pin ``uvx --from ouroboros-ai[mcp]==<installed version>``
+    so the MCP server cannot drift from the setup release.
     Dev/git installs must instead point Codex at this
     Python environment; otherwise setup silently downgrades the MCP server back
     to the latest PyPI release and hides main-branch fixes under test.
@@ -767,11 +756,18 @@ def _is_setup_managed_codex_mcp_entry(
     env = entry.get("env")
     if env is not None and env != _CODEX_MANAGED_MCP_ENV and env != _CODEX_HOST_MCP_ENV:
         return False
-    if set(entry) - {"command", "args", "env"}:
+    if set(entry) - {"command", "args", "env", "startup_timeout_sec"}:
+        return False
+    timeout = entry.get("startup_timeout_sec", 180)
+    if timeout != 180:
         return False
 
     if Path(command).name == "uvx":
-        return tuple(str(arg) for arg in args) in _CODEX_LEGACY_UVX_MCP_ARGS
+        return is_setup_owned_codex_uvx_args(
+            [str(arg) for arg in args],
+            _CODEX_LEGACY_UVX_MCP_ARGS,
+            has_managed_comment=has_managed_comment,
+        )
     if Path(command).name == "ouroboros":
         args_tuple = tuple(str(arg) for arg in args)
         if has_managed_comment:
@@ -1243,9 +1239,9 @@ def _upsert_codex_mcp_section(raw: str, section: str) -> tuple[str, bool]:
     return "\n".join(output_lines).rstrip() + "\n", existed_before
 
 
-def _codex_uses_profile_v2(codex_path: str | None = None) -> bool:
+def _codex_uses_profile_v2(codex_path: str | None = None) -> bool | None:
     """Return whether ``codex --profile`` expects ``<name>.config.toml`` files."""
-    return _shared_codex_uses_profile_v2(codex_path, run_command=subprocess.run) is True
+    return _shared_codex_uses_profile_v2(codex_path, run_command=subprocess.run)
 
 
 def _register_codex_mcp_server(
@@ -1451,23 +1447,6 @@ def _render_toml_mapping(settings: _CodexProfileSettings, prefix: str = "") -> l
         lines.extend(_render_toml_mapping(value, section_name))
 
     return lines
-
-
-def _existing_codex_profile_names(raw: str) -> set[str]:
-    """Return configured Codex profile names from a TOML document."""
-    import tomllib
-
-    if not raw.strip():
-        return set()
-
-    parsed = tomllib.loads(raw)
-    profiles = parsed.get("profiles")
-    if profiles is None:
-        return set()
-    if not isinstance(profiles, dict):
-        msg = "Codex config contains a non-table 'profiles' key."
-        raise ValueError(msg)
-    return {str(name) for name in profiles}
 
 
 def _upsert_codex_profile_sections(raw: str) -> tuple[str, list[str]]:
@@ -1881,11 +1860,18 @@ def _register_codex_default_profiles(*, codex_path: str | None = None) -> None:
     """Register default Codex profile anchors for Ouroboros task profiles."""
     import tomllib
 
+    profile_v2 = _codex_uses_profile_v2(codex_path)
+    if profile_v2 is None:
+        print_warning(
+            "Cannot determine Codex profile format; check 'codex --help' and rerun setup."
+        )
+        return
+
     codex_config = resolve_codex_home() / "config.toml"
     codex_config.parent.mkdir(parents=True, exist_ok=True)
     raw = codex_config.read_text(encoding="utf-8") if codex_config.exists() else ""
 
-    if _codex_uses_profile_v2(codex_path):
+    if profile_v2:
         existing_v2_profiles = {
             name
             for name in _CODEX_DEFAULT_PROFILE_SECTIONS
@@ -1959,6 +1945,13 @@ def _register_codex_worker_profile(
     """Register the managed Codex worker profile in ~/.codex/config.toml."""
     import tomllib
 
+    profile_v2 = _codex_uses_profile_v2(codex_path)
+    if profile_v2 is None:
+        print_warning(
+            "Cannot determine Codex profile format; check 'codex --help' and rerun setup."
+        )
+        return False
+
     codex_config = resolve_codex_home() / "config.toml"
     codex_config.parent.mkdir(parents=True, exist_ok=True)
     expected_config = (
@@ -1979,7 +1972,7 @@ def _register_codex_worker_profile(
     else:
         raw = ""
 
-    if _codex_uses_profile_v2(codex_path):
+    if profile_v2:
         profile_path = codex_config.parent / f"{_CODEX_WORKER_PROFILE_NAME}.config.toml"
         legacy_profiles = _existing_codex_profile_names(raw)
         try:
@@ -2759,8 +2752,11 @@ def _setup_codex(
     preserve_existing_llm: bool = False,
 ) -> bool:
     """Configure Ouroboros for the Codex runtime."""
-    from ouroboros.config.loader import ensure_config_dir, get_default_config
-    from ouroboros.config.models import get_config_dir, get_default_credentials
+    from ouroboros.config.loader import (
+        ensure_config_dir,
+        telemetry_opt_out_in_env,
+    )
+    from ouroboros.config.models import fresh_config_data, get_config_dir, get_default_credentials
 
     codex_home = resolve_codex_home()
     config_dir_candidate = get_config_dir()
@@ -2798,7 +2794,7 @@ def _setup_codex(
             print_error(f"Could not read config.yaml; aborting without changes: {exc}")
             return False
     else:
-        config_dict = get_default_config().model_dump(mode="json")
+        config_dict = fresh_config_data()
 
     if not isinstance(config_dict, dict):
         _restore_created_directory_topology(setup_directory_topology_snapshot)
@@ -2818,8 +2814,15 @@ def _setup_codex(
         if not preserve_existing_llm or fresh_config or not llm_config.get("backend"):
             llm_config["backend"] = "codex"
 
-        if fresh_config:
-            _neutralize_fresh_codex_model_defaults(config_dict)
+        if telemetry_opt_out_in_env():
+            # Codex launches the MCP server with only the registered env block,
+            # so a process-level opt-out (DO_NOT_TRACK / OUROBOROS_TELEMETRY=0)
+            # would not reach later sessions. Persist it in the config the MCP
+            # server loads instead of relying on the caller's environment.
+            if "telemetry" in config_dict and not isinstance(config_dict["telemetry"], dict):
+                raise ValueError("Invalid non-mapping 'telemetry' section in config.yaml.")
+            telemetry_config = _ensure_mapping_section(config_dict, "telemetry")
+            telemetry_config["enabled"] = False
 
         added_profiles, updated_profiles, added_role_profiles = _install_codex_default_llm_profiles(
             config_dict,
@@ -3095,7 +3098,7 @@ def _register_hermes_mcp_server(*, detected: dict[str, object] | None = None) ->
 def _setup_hermes(hermes_path: str) -> bool:
     """Configure Ouroboros for the Hermes runtime."""
     from ouroboros.config.loader import create_default_config, ensure_config_dir
-    from ouroboros.config.models import get_default_config
+    from ouroboros.config.models import fresh_config_data
 
     detected = _detect_mcp_entry()
     if detected is None:
@@ -3112,7 +3115,7 @@ def _setup_hermes(hermes_path: str) -> bool:
     if not config_was_missing:
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     else:
-        config_dict = get_default_config().model_dump(mode="json")
+        config_dict = fresh_config_data()
 
     if not isinstance(config_dict, dict):
         print_warning("~/.ouroboros/config.yaml top-level is not a mapping — resetting.")
@@ -3329,7 +3332,7 @@ def _setup_kiro(kiro_path: str) -> bool:
     hand-editing any config file.
     """
     from ouroboros.config.loader import create_default_config, ensure_config_dir
-    from ouroboros.config.models import get_default_config
+    from ouroboros.config.models import fresh_config_data
 
     detected = _detect_mcp_entry_for_kiro()
     if detected is None:
@@ -3346,7 +3349,7 @@ def _setup_kiro(kiro_path: str) -> bool:
     if not config_was_missing:
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     else:
-        config_dict = get_default_config().model_dump(mode="json")
+        config_dict = fresh_config_data()
 
     if not isinstance(config_dict, dict):
         print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting Kiro setup.")
@@ -3525,7 +3528,10 @@ def _apply_copilot_default_model(
     for section_name, key, shipped_default in _COPILOT_DEFAULT_MODEL_TARGETS:
         section = _ensure_mapping_section(config_dict, section_name)
         current = section.get(key)
-        if current is None or current in recognized_shipped_defaults(shipped_default):
+        if current is None or current in (
+            AUTO_MODEL,
+            *recognized_shipped_defaults(shipped_default),
+        ):
             section[key] = chosen_model
 
     for section_name, key, shipped_default in _COPILOT_DEFAULT_MODEL_LIST_TARGETS:
@@ -3547,8 +3553,9 @@ def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> bool:
     registers the MCP server in ``~/.copilot/mcp-config.json``.
     """
     from ouroboros.config.loader import create_default_config, ensure_config_dir
-    from ouroboros.config.models import get_default_config
+    from ouroboros.config.models import fresh_config_data
     from ouroboros.copilot.model_discovery import (
+        latest_opus_model,
         list_copilot_models,
         used_fallback,
     )
@@ -3568,7 +3575,7 @@ def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> bool:
     if not config_was_missing:
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     else:
-        config_dict = get_default_config().model_dump(mode="json")
+        config_dict = fresh_config_data()
 
     if not isinstance(config_dict, dict):
         print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting Copilot setup.")
@@ -3587,10 +3594,7 @@ def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> bool:
         print_error("No Copilot models available; cannot pick a default.")
         return False
 
-    preferred_default = next(
-        (m.id for m in models if m.id.startswith("claude-opus-4.6")),
-        models[0].id,
-    )
+    preferred_default = latest_opus_model(models) or models[0].id
 
     if non_interactive:
         chosen_model = preferred_default

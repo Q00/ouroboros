@@ -20,6 +20,10 @@ credential authority, or permission to change execution or acceptance policy.
 
 ## Problem
 
+The process counts and source counts below record the original September 2026
+diagnosis for #2325. They are not a fresh measurement of current main; an
+accepted implementation step must recheck its affected call sites.
+
 Every MCP client session spawns its own `ouroboros mcp serve`. Each process holds its own
 SQLite handles and its own copy of every bridged upstream. Production machines
 reached 48–119 serve processes, SQLite write-lock contention and gigabytes of
@@ -206,7 +210,9 @@ the following:
 6. Passes its own stdin/stdout descriptors over `SCM_RIGHTS`
    (`socket.send_fds`). The server then serves the session directly on the
    client's pipes, using `stdio_server(stdin=…, stdout=…)` with explicit
-   streams (mcp==2.0.0 skips its fd claim in that case). The launcher relays
+    streams. The original RFC checked this behavior with mcp==2.0.0; the
+    implementation step must verify descriptor ownership against its installed
+    MCP version before relying on it. The launcher relays
    nothing, never reads or probes stdin again (the stdin-peer probe and
    watchdog move to the server, which now sees the client's EOF directly), and
    closes its local copies of the transferred stdin/stdout descriptors after

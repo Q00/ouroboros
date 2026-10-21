@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from ouroboros.auto.grading import VAGUE_TERMS, SeedGrade
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
+from ouroboros.auto.ledger_seed import CONFIRMED_SCOPE_CONSTRAINT
 from ouroboros.auto.seed_reviewer import ReviewFinding, SeedReview, SeedReviewer
 from ouroboros.core.seed import (
     AcceptanceCriterionInput,
@@ -174,9 +175,9 @@ class SeedRepairer:
                 )
                 applied.append(finding.fingerprint)
             elif finding.code == "missing_constraints":
-                constraints.append(
-                    "Use existing project patterns and avoid new dependencies unless required by acceptance criteria."
-                )
+                # Not a guessed limit ("avoid new dependencies", ...): only the
+                # binding rule itself, so repair adds no unconfirmed requirement.
+                constraints.append(CONFIRMED_SCOPE_CONSTRAINT)
                 applied.append(finding.fingerprint)
             elif finding.code == "missing_non_goals" and ledger is not None:
                 ledger.add_entry(

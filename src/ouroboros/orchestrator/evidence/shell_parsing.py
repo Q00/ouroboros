@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 import re
 import shlex
 
@@ -31,6 +33,10 @@ def _test_command_invocation(command: str) -> str | None:
     if not normalized:
         return None
 
+    leading_cd = _split_leading_cd(normalized)
+    if leading_cd is not None:
+        return _test_invocation_from_prefix(leading_cd[1])
+
     direct_candidate = _strip_command_output_plumbing(normalized)
     if (
         _has_trailing_output_filter_pipeline(normalized)
@@ -52,6 +58,50 @@ def _test_command_invocation(command: str) -> str | None:
     # wrapper, so look one layer further. Recursion ends when the body is no
     # longer a shell ``-c`` form.
     return _test_command_invocation(body)
+
+
+# Characters that give a bare ``cd <dir> && <cmd>`` any shell meaning beyond
+# "change directory, then run one command". The single ``&&`` is checked
+# separately; any other control operator, redirection, substitution, grouping,
+# or line break keeps the command unrecognized.
+_LEADING_CD_FORBIDDEN_CHARACTERS = frozenset("`$;|<>(){}\n\r")
+
+
+def _split_leading_cd(command: str) -> tuple[str, str] | None:
+    """Return ``(relative_dir, remainder)`` for ``cd <relative-dir> && <cmd>``.
+
+    Recognized only when the whole text is exactly one ``cd`` with one
+    workspace-relative directory, one standalone ``&&`` token, and a remainder
+    free of shell operators. A second ``&&``, ``;``, ``||``, a pipe (including
+    ``| tail``), a redirection, or an absolute, home-relative, or ``..``
+    directory returns None, so such text stays unrecognized as before.
+    """
+    text = command.strip()
+    if text.count("&") != 2 or "&&" not in text:
+        return None
+    if any(char in _LEADING_CD_FORBIDDEN_CHARACTERS for char in text):
+        return None
+    try:
+        parts = shlex.split(text)
+    except ValueError:
+        return None
+    if len(parts) < 4 or parts[0] != "cd" or parts[2] != "&&":
+        return None
+    if not _is_workspace_relative_directory(parts[1]):
+        return None
+    remainder = text.split("&&", 1)[1].strip()
+    if not remainder:
+        return None
+    return parts[1], remainder
+
+
+def _is_workspace_relative_directory(value: str) -> bool:
+    """Return True for a lexically workspace-confined relative directory."""
+    if not value or value[0] in {"/", "~", "-"}:
+        return False
+    if any(char in value for char in "\\*?["):
+        return False
+    return ".." not in PurePosixPath(value).parts
 
 
 def _test_command_invocation_allowing_output_plumbing(command: str) -> str | None:
@@ -590,6 +640,8 @@ def _test_invocation_from_prefix(command: str) -> str | None:
         and parts[2] in {"pytest", "unittest"}
     ):
         return _normalized_evidence_text(" ".join(parts))
+    if _is_django_test_subcommand(parts) or _project_test_runner_script(parts) is not None:
+        return _normalized_evidence_text(" ".join(parts))
     executable = Path(parts[0]).name
     if (
         executable in {"gradle", "gradlew", "mvn", "mvnw"}
@@ -597,6 +649,65 @@ def _test_invocation_from_prefix(command: str) -> str | None:
         and any(part in {"test", "check", "verify"} or part.endswith(":test") for part in parts[1:])
     ):
         return _normalized_evidence_text(" ".join(parts))
+    return None
+
+
+def _is_django_test_subcommand(parts: Sequence[str]) -> bool:
+    """Return True for Django's installed ``test`` management command.
+
+    ``django-admin test`` and ``python -m django test``: the executable or
+    module is Django itself and the subcommand, which Django reads from the
+    first argument, is ``test``. Like ``pytest``, the program comes from the
+    environment, so the executable must be the bare name.
+    """
+    if len(parts) >= 2 and parts[0] == "django-admin" and parts[1] == "test":
+        return True
+    return (
+        len(parts) >= 4
+        and _is_python_executable(parts[0])
+        and parts[1:4] == ["-m", "django", "test"]
+    )
+
+
+def _project_test_runner_script(parts: Sequence[str]) -> str | None:
+    """Return the script token when argv runs a project's own test-runner script.
+
+    Recognized by the script's name (and subcommand), never by substring:
+
+    - ``runtests.py`` (Django's ``tests/runtests.py``);
+    - ``manage.py test`` (a Django project's test command);
+    - ``bin/test`` and ``bin/doctest`` (SymPy); the last two path components
+      must be exactly ``bin/test`` or ``bin/doctest`` and the path must be
+      relative, because a bare or absolute ``test`` is the shell builtin or
+      ``/usr/bin/test``.
+
+    The script is either the first argument of a Python interpreter
+    (``python tests/runtests.py``) or argv[0] given as a path
+    (``./tests/runtests.py``); a bare argv[0] would be a PATH lookup, not the
+    project's file. Re-execution additionally requires the script to be a
+    regular file inside the workspace, as an inline program's imported module
+    must be a workspace file to anchor anything.
+    """
+    if len(parts) >= 2 and _is_python_executable(parts[0]):
+        index = 1
+    elif parts and "/" in parts[0]:
+        index = 0
+    else:
+        return None
+    script = parts[index]
+    if not script or script.startswith("-") or "\\" in script:
+        return None
+    path = PurePosixPath(script)
+    if path.name == "runtests.py":
+        return script
+    if path.name == "manage.py":
+        return script if len(parts) > index + 1 and parts[index + 1] == "test" else None
+    if (
+        path.parts[-2:] in {("bin", "test"), ("bin", "doctest")}
+        and not path.is_absolute()
+        and ".." not in path.parts
+    ):
+        return script
     return None
 
 
@@ -805,7 +916,11 @@ def _has_trailing_output_filter_pipeline(command: str) -> bool:
 
 
 def _output_filter_pipeline_is_pipefail_protected(command: str) -> bool:
-    """Return True when pipefail is enabled before the first stripped pipeline."""
+    """Return True when pipefail is enabled before the first stripped pipeline.
+
+    A later ``set`` that names ``pipefail`` without enabling it
+    (``set +o pipefail``) turns the protection off again.
+    """
     pipefail_enabled = False
     for segment in re.split(r"\s*(?:&&|;)\s*", command.strip()):
         normalized_segment = segment.strip()
@@ -813,6 +928,9 @@ def _output_filter_pipeline_is_pipefail_protected(command: str) -> bool:
             continue
         if _is_pipefail_preamble(normalized_segment):
             pipefail_enabled = True
+            continue
+        if _may_disable_pipefail(normalized_segment):
+            pipefail_enabled = False
             continue
         if _has_trailing_output_filter_pipeline(normalized_segment):
             return pipefail_enabled
@@ -831,6 +949,16 @@ def _uses_pipefail(command: str) -> bool:
     return False
 
 
+def _may_disable_pipefail(segment: str) -> bool:
+    """Return True for a ``set`` naming ``pipefail`` that does not enable it
+    (``set +o pipefail``, ``set +euo pipefail``, unparseable text)."""
+    try:
+        parts = shlex.split(segment)
+    except ValueError:
+        return "pipefail" in segment
+    return bool(parts) and parts[0] == "set" and "pipefail" in parts
+
+
 def _is_pipefail_preamble(segment: str) -> bool:
     try:
         parts = shlex.split(segment)
@@ -839,8 +967,35 @@ def _is_pipefail_preamble(segment: str) -> bool:
     return _is_pipefail_parts(parts)
 
 
+# ``set`` options that may accompany ``pipefail`` in a recognized preamble:
+# each only makes a failure more visible, none prints or runs anything.
+_PIPEFAIL_COMPANION_OPTIONS = frozenset({"pipefail", "errexit", "nounset"})
+_SET_OPTION_CLUSTER_RE = re.compile(r"-[eu]*o?")
+
+
 def _is_pipefail_parts(parts: list[str]) -> bool:
-    return parts == ["set", "-o", "pipefail"]
+    """Return True for a ``set`` that enables pipefail.
+
+    ``set -o pipefail``, and the same with ``-e``/``-u`` or
+    ``-o errexit``/``-o nounset`` beside it, clustered or not
+    (``set -euo pipefail``, ``set -e -o pipefail``). Any other option is not
+    recognized.
+    """
+    if len(parts) < 3 or parts[0] != "set":
+        return False
+    pipefail = False
+    index = 1
+    while index < len(parts):
+        token = parts[index]
+        if token == "-" or not _SET_OPTION_CLUSTER_RE.fullmatch(token):
+            return False
+        index += 1
+        if token.endswith("o"):
+            if index >= len(parts) or parts[index] not in _PIPEFAIL_COMPANION_OPTIONS:
+                return False
+            pipefail = pipefail or parts[index] == "pipefail"
+            index += 1
+    return pipefail
 
 
 def _normalized_command_claim_aliases(command: str) -> tuple[str, ...]:
@@ -918,3 +1073,389 @@ def _single_exact_command_after_safe_shell_preamble(command: str) -> str | None:
     if len(segments) != 1:
         return None
     return _normalize_exact_command(segments[0])
+
+
+# ---------------------------------------------------------------------------
+# Executed-command analysis. What a command line runs: its simple commands,
+# the runtime shell wrappers around it, and, for each simple command, the
+# wrappers and launchers in front of the program that finally runs. Replay
+# authorization and the denylist (``replay_policy``), test
+# target linkage and inline-import anchoring (``test_detection``) all consume
+# this one analysis instead of reading the command text themselves.
+# ---------------------------------------------------------------------------
+
+_MAX_RESOLVE_DEPTH = 6
+# Programs whose argv cannot be known from the transcript, or that run a
+# command line through a shell of their own. Never replayed.
+REFUSED_WRAPPERS = frozenset({"xargs", "watch", "script", "flock", "parallel"})
+
+_DURATION_RE = re.compile(r"\d+(?:\.\d+)?[smhd]?")
+_NUMERIC_OPTION_RE = re.compile(r"-\d+")
+
+
+@dataclass(frozen=True, slots=True)
+class _OptionSpec:
+    """Options a wrapper or launcher accepts before the program it runs."""
+
+    values: frozenset[str] = frozenset()
+    flags: frozenset[str] = frozenset()
+    refused: frozenset[str] = frozenset()
+    positionals: int = 0
+    positional_re: re.Pattern[str] | None = None
+    assignments: bool = False
+    numeric_flags: bool = False
+
+
+def _spec(
+    values: set[str] | frozenset[str] = frozenset(),
+    flags: set[str] | frozenset[str] = frozenset(),
+    refused: set[str] | frozenset[str] = frozenset(),
+    **options: object,
+) -> _OptionSpec:
+    return _OptionSpec(
+        values=frozenset(values),
+        flags=frozenset(flags),
+        refused=frozenset(refused),
+        **options,  # type: ignore[arg-type]
+    )
+
+
+# Wrappers: they run the rest of the argv. Options taking a separate value are
+# listed so the value is never mistaken for the program.
+_WRAPPERS: Mapping[str, _OptionSpec] = {
+    "timeout": _spec(
+        {"-s", "--signal", "-k", "--kill-after"},
+        {"--preserve-status", "--foreground", "-v", "--verbose", "-f", "-p"},
+        positionals=1,
+        positional_re=_DURATION_RE,
+    ),
+    "stdbuf": _spec({"-i", "-o", "-e", "--input", "--output", "--error"}),
+    "time": _spec(
+        {"-o", "--output", "-f", "--format"},
+        {"-p", "-a", "--append", "-v", "--verbose", "-q", "--quiet", "-l", "--portability"},
+    ),
+    "nice": _spec({"-n", "--adjustment"}, numeric_flags=True),
+    "ionice": _spec(
+        {"-c", "--class", "-n", "--classdata"},
+        {"-t", "--ignore"},
+        {"-p", "--pid", "-P", "--pgid", "-u", "--uid"},
+    ),
+    "env": _spec(
+        {"-u", "--unset"},
+        {"-i", "--ignore-environment", "-0", "--null", "-v", "--debug"},
+        {"-C", "--chdir", "-S", "--split-string", "-P"},
+        assignments=True,
+    ),
+    "nohup": _spec(),
+    "command": _spec(flags={"-p"}, refused={"-v", "-V"}),
+    "exec": _spec({"-a"}, {"-c", "-l"}),
+    "setsid": _spec(flags={"-c", "--ctty", "-w", "--wait", "-f", "--fork"}),
+}
+
+_UV_RUN_SPEC = _spec(
+    (_UV_VALUE_OPTIONS - {"--directory", "--project"})
+    | {f"-{option}" for option in _UV_SHORT_VALUE_OPTIONS},
+    _UV_FLAG_OPTIONS | {f"-{option}" for option in _UV_SHORT_FLAG_OPTIONS},
+    {"--directory", "--project", "--script", "-s", "--gui-script", "-m", "--module"}
+    | {"--env-file"},
+)
+# Launchers: they run another program by name. The launched program must pass
+# the allowlist itself.
+_LAUNCHERS: Mapping[tuple[str, ...], _OptionSpec] = {
+    ("uv", "run"): _UV_RUN_SPEC,
+    ("uvx",): _UV_RUN_SPEC,
+    ("poetry", "run"): _spec(
+        flags={"-q", "--quiet", "-v", "-vv", "-vvv", "--verbose", "-n", "--no-interaction"}
+        | {"--ansi", "--no-ansi"},
+        refused={"-C", "--directory", "-P", "--project"},
+    ),
+    ("pipenv", "run"): _spec(),
+    ("pdm", "run"): _spec(
+        flags={"-v", "-q", "--verbose", "--quiet"},
+        refused={"-p", "--project", "-g", "--global"},
+    ),
+    ("bundle", "exec"): _spec(flags={"--keep-file-descriptors"}),
+    ("npx",): _spec(
+        {"-p", "--package"},
+        {"-y", "--yes", "--no", "-q", "--quiet", "--no-install", "--ignore-existing"}
+        | {"--prefer-offline", "--offline"},
+        {"-c", "--call"},
+    ),
+    ("bunx",): _spec({"-p", "--package"}, {"--bun"}),
+}
+
+_PYTHON_FLAGS = frozenset(
+    {"-u", "-B", "-O", "-OO", "-E", "-s", "-S", "-I", "-b", "-bb", "-q", "-P", "-d", "-R"}
+)
+_PYTHON_VALUE_OPTIONS = frozenset({"-W", "-X"})
+
+
+def _program_name(value: str) -> str:
+    name = PurePosixPath(value.replace("\\", "/")).name.lower()
+    return name[:-4] if name.endswith(".exe") else name
+
+
+def _skip_options(parts: Sequence[str], index: int, spec: _OptionSpec) -> int | None:
+    """Return the index of the program after ``parts[index:]``'s options, or None.
+
+    None when an option is refused or unknown, a value is missing, or no
+    program follows: the program cannot be identified with certainty.
+    """
+    remaining = spec.positionals
+    while index < len(parts):
+        token = parts[index]
+        if token == "--":
+            index += 1
+            return index if remaining == 0 and index < len(parts) else None
+        if spec.assignments and _is_env_assignment(token):
+            index += 1
+            continue
+        if token.startswith("-") and token != "-":
+            name, separator, _ = token.partition("=")
+            if token.startswith("--"):
+                if name in spec.refused:
+                    return None
+                if name in spec.values:
+                    index += 1 if separator else 2
+                elif name in spec.flags and not separator:
+                    index += 1
+                else:
+                    return None
+                continue
+            short = token[:2]
+            if short in spec.refused or token in spec.refused:
+                return None
+            if short in spec.values:
+                index += 1 if len(token) > 2 else 2
+            elif token in spec.flags or (
+                spec.numeric_flags and _NUMERIC_OPTION_RE.fullmatch(token)
+            ):
+                index += 1
+            else:
+                return None
+            continue
+        if remaining:
+            if spec.positional_re is not None and not spec.positional_re.fullmatch(token):
+                return None
+            remaining -= 1
+            index += 1
+            continue
+        return index
+    return None
+
+
+def _walk(parts: tuple[str, ...]) -> tuple[tuple[tuple[str, ...], ...] | None, tuple[str, ...]]:
+    """Walk ``parts`` through its wrappers and launchers.
+
+    Returns ``(programs, assignments)``. ``programs`` is the argv of each
+    launcher in the chain followed by the argv of the program that finally
+    runs, or None when a wrapper or launcher option cannot be classified with
+    certainty, a refused wrapper appears, or the chain is too deep.
+    ``assignments`` are the ``NAME=value`` tokens consumed by ``env`` wrappers
+    up to where the walk stopped. A path program (``./uv``, ``.venv/bin/uv``)
+    is never a launcher: launchers are matched by bare name only.
+    """
+    programs: list[tuple[str, ...]] = []
+    assignments: list[str] = []
+    for _ in range(2 * _MAX_RESOLVE_DEPTH):
+        if not parts:
+            return None, tuple(assignments)
+        name = _program_name(parts[0])
+        if name in REFUSED_WRAPPERS:
+            return None, tuple(assignments)
+        spec = _WRAPPERS.get(name)
+        if spec is not None:
+            index = _skip_options(parts, 1, spec)
+            if index is None:
+                return None, tuple(assignments)
+            if spec.assignments:
+                assignments.extend(token for token in parts[1:index] if _is_env_assignment(token))
+            parts = parts[index:]
+            continue
+        launcher = next(
+            (
+                (key, option_spec)
+                for key, option_spec in _LAUNCHERS.items()
+                if tuple(token.lower() for token in parts[: len(key)]) == key
+            ),
+            None,
+        )
+        if launcher is None:
+            programs.append(parts)
+            return tuple(programs), tuple(assignments)
+        index = _skip_options(parts, len(launcher[0]), launcher[1])
+        if index is None:
+            return None, tuple(assignments)
+        programs.append(parts)
+        parts = parts[index:]
+    return None, tuple(assignments)
+
+
+def program_chain(argv: Sequence[str]) -> tuple[tuple[str, ...], ...] | None:
+    """Return the argv of every program ``argv`` runs, or None when unknown.
+
+    Wrappers (``timeout``, ``env``, ...) are peeled; each launcher (``uv run``,
+    ``npx``, ``bundle exec``, ...) is kept with its own argv and followed to
+    the program it launches, whose argv comes last. ``uv run .venv/bin/pip
+    install x`` yields ``("uv", "run", ...)`` and ``(".venv/bin/pip",
+    "install", "x")``. This is the one resolution the allowlist
+    (``replay_policy.resolve_replay_program``), the denylist
+    (``replay_policy.replay_denied``) and the command-line assignments
+    (``command_line_assignments``) share.
+    """
+    programs, _ = _walk(tuple(argv))
+    return programs
+
+
+def command_line_assignments(argv: Sequence[str]) -> tuple[str, ...]:
+    """Return the ``NAME=value`` tokens ``argv`` sets for the program it runs.
+
+    Leading assignments, and those consumed by an ``env`` wrapper anywhere in
+    the chain of wrappers and launchers (``timeout 60 env X=1 pytest``,
+    ``uv run env X=1 pytest``), as ``program_chain`` walks it.
+    """
+    parts = tuple(argv)
+    index = 0
+    while index < len(parts) and _is_env_assignment(parts[index]):
+        index += 1
+    _, assignments = _walk(parts[index:])
+    return (*parts[:index], *assignments)
+
+
+@dataclass(frozen=True, slots=True)
+class InlinePython:
+    """A ``python -c`` call: its program text and the interpreter options before ``-c``.
+
+    ``options`` holds each short option as ``-X`` (``-Bc`` gives ``-B``), so a
+    consumer can tell whether module resolution departs from the default
+    (``replay_policy.inline_python_alters_imports``).
+    """
+
+    program: str
+    options: frozenset[str]
+
+
+def python_inline_program(argv: Sequence[str]) -> InlinePython | None:
+    """Return the ``python -c`` call ``argv`` makes, or None.
+
+    The program is the last one ``program_chain`` resolves (``timeout 5 uv
+    run python3 -c ...`` counts), and it must be a Python interpreter whose
+    options, read with the interpreter option tables replay admission uses,
+    end in ``-c`` (alone, as the last letter of a flag cluster such as
+    ``-Bc``, or with the program attached as in ``-cCODE``). A script, ``-m``
+    or an unknown option before any ``-c`` means no inline program.
+    """
+    programs = program_chain(argv)
+    if not programs or not _is_python_executable(_program_name(programs[-1][0])):
+        return None
+    parts = programs[-1]
+    options: set[str] = set()
+    index = 1
+    while index < len(parts):
+        token = parts[index]
+        if token in _PYTHON_FLAGS or token in _PYTHON_VALUE_OPTIONS:
+            options.add(token)
+            index += 2 if token in _PYTHON_VALUE_OPTIONS else 1
+            continue
+        if not token.startswith("-") or token.startswith("--") or token == "-":
+            return None
+        cluster = token[1:]
+        for position, letter in enumerate(cluster):
+            if letter == "c":
+                rest = cluster[position + 1 :]
+                program = rest or (parts[index + 1] if index + 1 < len(parts) else None)
+                return None if program is None else InlinePython(program, frozenset(options))
+            options.add(f"-{letter}")
+            if f"-{letter}" in _PYTHON_VALUE_OPTIONS:
+                break
+            if f"-{letter}" not in _PYTHON_FLAGS:
+                return None
+        index += 1
+    return None
+
+
+_DIRECTORY_CHANGING_PROGRAMS = frozenset({"cd", "pushd", "popd"})
+
+
+def _command_lists(command: str) -> list[list[tuple[tuple[str, ...], str | None]]]:
+    """Return a shell line's command lists: ``(argv, operator before it)`` pairs per list.
+
+    The line is tokenized with shell quoting; ``;``, ``&``, a newline and
+    parentheses end a list, so only the last list decides the line's exit
+    status. Inside a list ``&&``, ``||`` and ``|`` join commands and are
+    recorded as the operator before each command. A redirection (``> out``,
+    ``2>&1``, ``<<EOF``) and its target stay with their command. [] when the
+    line cannot be tokenized.
+    """
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars="();<>|&\n")
+        lexer.whitespace = " \t\r"
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return []
+    lists: list[list[tuple[tuple[str, ...], str | None]]] = [[]]
+    argv: list[str] = []
+    operator: str | None = None
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        index += 1
+        if not token or not set(token) <= set("();<>|&\n"):
+            argv.append(token)
+            continue
+        if "<" in token or ">" in token:
+            index += 1  # the redirection's target
+            continue
+        if argv:
+            lists[-1].append((tuple(argv), operator))
+        argv = []
+        joined = token.replace("\n", "")
+        if joined in {"&&", "||", "|", "|&"}:
+            operator = "|" if joined == "|&" else joined
+            continue
+        lists.append([])
+        operator = None
+    if argv:
+        lists[-1].append((tuple(argv), operator))
+    return lists
+
+
+def _changes_directory(argv: Sequence[str]) -> bool:
+    """Return True when ``argv`` changes the shell's working directory."""
+    return bool(argv) and _program_name(argv[0]) in _DIRECTORY_CHANGING_PROGRAMS
+
+
+def _commands_implied_by_success(command: str) -> tuple[tuple[str, ...], ...]:
+    """Return the argv of each command whose success a zero exit of ``command`` implies.
+
+    The last command of the last list, unless ``||`` precedes it (``a || b``
+    exits 0 when ``a`` succeeds and ``b`` never runs); then, walking back,
+    each command joined to an implied one by ``&&``, under the same ``||``
+    condition. A pipeline stage before ``|`` is not implied: without
+    ``pipefail`` the pipeline's status is its last stage's. ``a; b`` implies
+    only ``b``.
+    """
+    lists = _command_lists(command)
+    tail = lists[-1] if lists else []
+    implied: list[tuple[str, ...]] = []
+    for argv, operator in reversed(tail):
+        if operator == "||":
+            break
+        implied.append(argv)
+        if operator != "&&":
+            break
+    return tuple(implied)
+
+
+_MAX_SHELL_WRAPPER_DEPTH = 4
+
+
+def _peel_shell_wrappers(command: str) -> str:
+    text = command.strip()
+    for _ in range(_MAX_SHELL_WRAPPER_DEPTH):
+        body = _shell_command_body(text)
+        if body is None or body.strip() == text:
+            break
+        text = body.strip()
+    return text

@@ -14,7 +14,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+from textual.app import App, ComposeResult
+from textual.containers import Horizontal
+from textual.widgets import Label, Static
 
+from ouroboros.core.acceptance import AcceptanceState
 from ouroboros.core.lineage import (
     EvaluationSummary,
     GenerationPhase,
@@ -29,7 +33,11 @@ from ouroboros.events.base import BaseEvent
 from ouroboros.evolution.rewind import CommittedRewindResult
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.tui.events import GenerationSelected, LineageSelected
-from ouroboros.tui.screens.lineage_detail import GenerationDetailPanel, LineageDetailScreen
+from ouroboros.tui.screens.lineage_detail import (
+    _ACCEPTANCE_BADGES,
+    GenerationDetailPanel,
+    LineageDetailScreen,
+)
 from ouroboros.tui.screens.lineage_selector import LineageSelectorScreen
 from ouroboros.tui.widgets.lineage_tree import (
     GenerationNodeSelected,
@@ -256,6 +264,71 @@ class TestGenerationDetailPanel:
         gen = make_generation(1)
         panel.previous_generation = gen
         assert panel.previous_generation == gen
+
+
+class _DetailPanelApp(App[None]):
+    def compose(self) -> ComposeResult:
+        yield GenerationDetailPanel()
+
+
+async def _evaluation_rows(summary: EvaluationSummary) -> dict[str, str]:
+    """Mount the panel on a generation and return its detail rows as label -> text."""
+    app = _DetailPanelApp()
+    async with app.run_test(size=(120, 60)) as pilot:
+        panel = app.query_one(GenerationDetailPanel)
+        panel.selected_generation = make_generation(1, eval_summary=summary)
+        await pilot.pause()
+        rows: dict[str, str] = {}
+        for row in panel.query(".detail-row").results(Horizontal):
+            label = str(row.query_one(".label", Label).render()).strip()
+            rows[label] = str(row.query_one(".value", Static).render())
+        return rows
+
+
+class TestGenerationDetailAcceptance:
+    """The Result row keeps approved, rejected, and unverified distinct."""
+
+    def test_every_acceptance_state_has_a_distinct_badge(self) -> None:
+        assert set(_ACCEPTANCE_BADGES) == set(AcceptanceState)
+        assert len(set(_ACCEPTANCE_BADGES.values())) == len(AcceptanceState)
+        assert "red" not in _ACCEPTANCE_BADGES[AcceptanceState.UNVERIFIED]
+
+    @pytest.mark.asyncio
+    async def test_approved(self) -> None:
+        rows = await _evaluation_rows(
+            EvaluationSummary(final_approved=True, highest_stage_passed=1, score=0.9)
+        )
+
+        assert rows["Result:"] == "APPROVED"
+        assert "Failure:" not in rows
+
+    @pytest.mark.asyncio
+    async def test_rejected(self) -> None:
+        rows = await _evaluation_rows(
+            EvaluationSummary(
+                final_approved=False,
+                highest_stage_passed=1,
+                failure_reason="Stage 1 failed: test",
+            )
+        )
+
+        assert rows["Result:"] == "REJECTED"
+        assert rows["Failure:"] == "Stage 1 failed: test"
+
+    @pytest.mark.asyncio
+    async def test_unverified_is_not_rejected(self) -> None:
+        rows = await _evaluation_rows(
+            EvaluationSummary(
+                final_approved=False,
+                highest_stage_passed=2,
+                approval_status="not_evaluated",
+                failure_reason="Not approved: unverified.",
+            )
+        )
+
+        assert rows["Result:"] == "NOT APPROVED (unverified)"
+        assert rows["Reason:"] == "Not approved: unverified."
+        assert "Failure:" not in rows
 
 
 # =============================================================================
