@@ -15,7 +15,11 @@ from typing import Any
 from pydantic import BaseModel, Field, model_validator
 import structlog
 
-from ouroboros.bigbang.answer_provenance import AnswerProvenance, classify_answer_provenance
+from ouroboros.bigbang.answer_provenance import (
+    DECLARED_PROVENANCES,
+    AnswerProvenance,
+    classify_answer_provenance,
+)
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.file_lock import file_lock as _file_lock
@@ -34,6 +38,8 @@ from ouroboros.interview_adapters import (
     build_reference_contrast_question,
     detect_explicit_confusion_terms,
     next_unresolved_reference,
+    normalized_question_key,
+    reference_question_anchor,
     select_glossary_injection,
 )
 from ouroboros.providers.base import (
@@ -178,8 +184,9 @@ class InterviewRound(BaseModel):
         round_number: 1-based round number (no upper limit - user controls).
         question: The question asked by the system.
         user_response: The user's response (None if not yet answered).
-        provenance: Whether the answer is a decision the caller made or a fact
-            the caller adopted from elsewhere. Consumers read this field rather
+        provenance: Whether the answer is a decision the caller made, a fact
+            the caller adopted from elsewhere, or a guess the caller declared as
+            an assumption (see ``answer_provenance``). Consumers read this field rather
             than re-reading the ``[from-*]`` marker, which is what drifted
             before (#1755).
         timestamp: When this round was created.
@@ -206,8 +213,11 @@ class InterviewRound(BaseModel):
         leave every in-flight interview holding observations that still carry
         requirement authority, so an answer's provenance is settled here too —
         one classifier, still no consumer reading the marker.
+
+        A declared provenance (``"assumption"``, ``"requester"``) is not derived
+        from the answer, so it is kept as recorded rather than re-derived.
         """
-        if self.user_response is not None:
+        if self.user_response is not None and self.provenance not in DECLARED_PROVENANCES:
             answer_for_classification = self.user_response
             # PM interviews before #1823 decorated reframed answers after the
             # provenance marker had already been supplied, producing
@@ -470,11 +480,16 @@ class InterviewState(BaseModel):
         """
         provenance = classify_answer_provenance(answer)
 
+        stored_question = ""
         if self.rounds and self.rounds[-1].user_response is None:
             # A round persisted question-only. Refresh the question text when a
             # caller supplies one, since the stored copy can be a placeholder
-            # from a partial persistence.
+            # from a partial persistence. The engine-persisted copy is still
+            # kept as a matching candidate below: for reference contrasts it is
+            # the authoritative text, and letting a host-rendered echo replace
+            # it silently used to break resolution matching.
             round_data = self.rounds[-1]
+            stored_question = round_data.question
             if question:
                 round_data.question = question
             round_data.user_response = answer
@@ -488,7 +503,7 @@ class InterviewState(BaseModel):
             )
             self.rounds.append(round_data)
 
-        self.record_adapter_answer(round_data.question, answer)
+        self.record_adapter_answer(round_data.question, answer, stored_question=stored_question)
         detected_terms = detect_explicit_confusion_terms(answer)
         if detected_terms:
             self.merge_turn_context(InterviewTurnContext(confused_terms=detected_terms))
@@ -503,20 +518,59 @@ class InterviewState(BaseModel):
         self.mark_updated()
         return round_data
 
-    def record_adapter_answer(self, question: str, answer: str) -> None:
-        """Resolve a persisted reference contrast when its exact question is answered."""
+    def record_adapter_answer(
+        self, question: str, answer: str, *, stored_question: str = ""
+    ) -> None:
+        """Resolve a persisted reference contrast when its question is answered.
+
+        Byte-exact matching against the caller-echoed ``last_question`` is not
+        a real invariant: MCP hosts re-render the question (whitespace reflow,
+        truncation, case drift) before echoing it back, and an unmatched
+        contrast is fatal — ``next_unresolved_reference`` skips ASKED
+        resolutions, so the cue is never re-asked and Seed generation stays
+        blocked on ``reference_confirmation_required`` forever. Matching is
+        therefore a deterministic cascade, per candidate question (the
+        engine-persisted round text first, then the caller's echo):
+
+        1. normalized equality (whitespace-collapse + casefold);
+        2. anchor containment — every contrast question deterministically
+           starts with ``Reference `<label>```, so an echo that was truncated
+           or reformatted still identifies its cue when it carries that anchor.
+
+        No similarity scoring: a question that matches neither rule resolves
+        nothing, exactly as before.
+        """
+        candidates = tuple(
+            key
+            for key in (
+                normalized_question_key(stored_question),
+                normalized_question_key(question),
+            )
+            if key
+        )
+        if not candidates:
+            return
+        cues_by_id = {cue.reference_id: cue for cue in self.reference_cues}
+
+        def _matches(resolution: ReferenceContrastResolution) -> bool:
+            asked_key = normalized_question_key(resolution.asked_question)
+            if asked_key and asked_key in candidates:
+                return True
+            cue = cues_by_id.get(resolution.reference_id)
+            if cue is None:
+                return False
+            anchor = reference_question_anchor(cue)
+            return bool(anchor) and any(anchor in key for key in candidates)
+
         updated: list[ReferenceContrastResolution] = []
         changed = False
         for resolution in self.reference_resolutions:
-            if (
-                resolution.status is ReferenceResolutionStatus.ASKED
-                and resolution.asked_question == question
-            ):
+            if resolution.status is ReferenceResolutionStatus.ASKED and _matches(resolution):
                 updated.append(
                     ReferenceContrastResolution(
                         reference_id=resolution.reference_id,
                         status=ReferenceResolutionStatus.RESOLVED,
-                        asked_question=question,
+                        asked_question=resolution.asked_question,
                         answer=answer,
                     )
                 )

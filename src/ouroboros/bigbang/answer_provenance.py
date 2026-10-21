@@ -24,13 +24,40 @@ same text plays two roles, and the rule is per-role rather than per-string.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from ouroboros.bigbang.interview import InterviewState
+    from ouroboros.bigbang.interview import InterviewRound, InterviewState
 
-AnswerProvenance = Literal["user", "observation"]
+#: ``"assumption"`` marks an answer the caller *guessed* on the requester's
+#: behalf (``ooo auto``'s conservative defaults and assumptions, including a
+#: draft kept because the requester gave no answer). It is never derived from
+#: answer text: the caller declares it with the answer (see
+#: :func:`declare_provenance`), and it stays put once recorded.
+#:
+#: ``"requester"`` marks an answer ``ooo auto`` relayed from the requester. It is
+#: a confirmed fact, but the auto pipeline carries it to the worker verbatim, as
+#: a quoted question and answer (``Seed.requester_answers``), so extraction must
+#: not rewrite it into a constraint or criterion. It is declared the same way.
+#:
+#: ``"repo_fact"`` marks an answer ``ooo auto`` read from the repository with
+#: every cited span checked (``auto/investigator.py``). It describes the code as
+#: it is, not a requirement, and reaches the worker verbatim as a checked
+#: repository fact (``Seed.repo_facts``). It is declared the same way.
+AnswerProvenance = Literal["user", "observation", "assumption", "requester", "repo_fact"]
+
+#: Provenances whose answer may never become a requirement.
+WITHHELD_PROVENANCES: frozenset[str] = frozenset(
+    {"observation", "assumption", "requester", "repo_fact"}
+)
+
+#: Provenances a caller declares with the answer; they are never re-derived from it.
+DECLARED_PROVENANCES: frozenset[str] = frozenset({"assumption", "requester", "repo_fact"})
+
+#: Interview-tool argument a caller uses to declare an answer's provenance.
+ANSWER_PROVENANCE_ARGUMENT = "answer_provenance"
 
 #: Prefixes marking an answer as an adopted fact rather than a decision.
 #: Compound and refined forms (``[from-code][auto-confirmed]``,
@@ -65,6 +92,50 @@ WITHHELD_ANSWER_NOTE = (
     "[observation withheld — an adopted fact, not a decision. "
     "It informed the questions that follow.]"
 )
+
+#: Rendered in place of an assumption's answer. The guess still reaches the
+#: worker, as a non-binding assumption carried outside the requirement fields.
+WITHHELD_ASSUMPTION_NOTE = (
+    "[assumption withheld: a guess made on the requester's behalf, not a decision. "
+    "It is kept as a non-binding assumption, never as a requirement.]"
+)
+
+#: Rendered in place of a requester answer relayed by ``ooo auto``.
+WITHHELD_REQUESTER_NOTE = (
+    "[requester answer withheld here: it reaches the worker verbatim as a quoted "
+    "requester answer, never rewritten as a constraint or criterion.]"
+)
+
+#: Rendered in place of a checked repository fact found by ``ooo auto``.
+WITHHELD_REPO_FACT_NOTE = (
+    "[repository fact withheld here: it describes the current code, not a requirement, "
+    "and reaches the worker verbatim as a checked repository fact.]"
+)
+
+_WITHHELD_NOTES: dict[str, str] = {
+    "assumption": WITHHELD_ASSUMPTION_NOTE,
+    "requester": WITHHELD_REQUESTER_NOTE,
+    "repo_fact": WITHHELD_REPO_FACT_NOTE,
+}
+
+
+def declare_provenance(round_data: InterviewRound | None, arguments: Mapping[str, Any]) -> None:
+    """Apply a provenance the caller declared with the answer it just recorded.
+
+    Only ``"assumption"``, ``"requester"`` and ``"repo_fact"`` can be declared, and all withhold
+    the answer from requirement extraction. A declaration can lower an answer's
+    authority but never raise it, so an unknown or missing value changes
+    nothing and the provenance settled from the answer stands.
+    """
+    if round_data is None or not round_data.user_response:
+        return
+    declared = arguments.get(ANSWER_PROVENANCE_ARGUMENT)
+    if declared == "assumption":
+        round_data.provenance = "assumption"
+    elif declared == "requester":
+        round_data.provenance = "requester"
+    elif declared == "repo_fact":
+        round_data.provenance = "repo_fact"
 
 
 def classify_answer_provenance(answer: str | None) -> AnswerProvenance:
@@ -108,15 +179,19 @@ def extraction_rounds(state: InterviewState) -> list[ExtractionRound]:
 
     Rounds still awaiting an answer are projected as-is; they carry no answer to
     withhold and consumers already render a bare question line for them.
+
+    An assumption's answer renders as :data:`WITHHELD_ASSUMPTION_NOTE` for the
+    same reason: only a decision may become a requirement.
     """
     projected: list[ExtractionRound] = []
     for round_data in state.rounds:
-        withheld = bool(round_data.user_response) and round_data.provenance == "observation"
+        withheld = bool(round_data.user_response) and round_data.provenance in WITHHELD_PROVENANCES
+        note = _WITHHELD_NOTES.get(round_data.provenance, WITHHELD_ANSWER_NOTE)
         projected.append(
             ExtractionRound(
                 round_number=round_data.round_number,
                 question=round_data.question,
-                answer=WITHHELD_ANSWER_NOTE if withheld else round_data.user_response,
+                answer=note if withheld else round_data.user_response,
                 withheld=withheld,
             )
         )

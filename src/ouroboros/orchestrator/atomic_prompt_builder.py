@@ -255,6 +255,9 @@ class AtomicPromptBuilder:
                 "that belongs only to sibling or future ACs. If another AC mentions "
                 "related files, future functions, tests, or docs, treat that work as "
                 "out of scope unless the current AC explicitly requires it.\n"
+                "Do not substitute a narrower, safer, or smaller solution than the "
+                "goal asks for. Before you finish, audit that the change covers every "
+                "case the goal names.\n"
                 "Your final evidence JSON must cite only files, commands, and tests "
                 "directly changed or run for this current AC in this runtime session. "
                 "For files_touched, cite workspace-relative paths only, never absolute "
@@ -264,15 +267,25 @@ class AtomicPromptBuilder:
                 "as test, build, lint, generation, or docs verification commands; omit "
                 "exploratory discovery commands such as rg, grep, sed, cat, ls, find, "
                 "or pwd unless the current AC explicitly requires that command as validation.\n"
+                "For tests_passed and commands_run, list the exact command strings you "
+                "executed, one command per item, with no annotations such as test counts, "
+                "pass markers, or explanations.\n"
                 f"{doc_only_note}{validation_only_note}\n"
                 "Use the available tools to accomplish this task. Report progress through "
                 "tool-visible work, not a prose-only completion claim.\n"
                 "When complete, emit exactly ONE fenced JSON evidence record as the "
-                "final response and then stop. Populate the active profile fields "
+                "final response. Populate the active profile fields "
                 f"directly ({required_fields}); do not emit a generic command_result "
                 "wrapper. Do not prefix it with [TASK_COMPLETE] or any prose; the "
                 "harness decides success from typed evidence plus the verifier PASS."
             )
+            interfaces = getattr(executor, "check_package_interfaces", None) or {}
+            root_index = parent_ac_index if is_sub_ac else ac_index
+            if root_index in interfaces:
+                # An admitted oracle checks this root: ask for its entry_points.
+                from ouroboros.boundary.binding import entry_points_request
+
+                completion_instruction += entry_points_request(interfaces[root_index])
         else:
             completion_instruction = (
                 "Use the available tools to accomplish this task. Report your progress "

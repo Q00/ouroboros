@@ -23,10 +23,11 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+import inspect
 import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -59,6 +60,28 @@ log = get_logger(__name__)
 SESSION_START_IDENTITY_PROGRESS_KEY = "_session_start_identity"
 SESSION_RUNTIME_IDENTITY_PROGRESS_KEY = "_session_runtime_identity"
 ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY = "acceptance_root_indices"
+
+
+def _optional_create_session_kwargs(
+    create_session: Callable[..., Any],
+    *,
+    interview_id: object,
+    acceptance_criteria_count: int,
+) -> dict[str, object]:
+    """Return supported optional metadata for legacy session repositories."""
+    try:
+        parameters = inspect.signature(create_session).parameters
+    except (TypeError, ValueError):
+        return {}
+    accepts_extra = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+    kwargs: dict[str, object] = {}
+    if interview_id is not None and ("interview_id" in parameters or accepts_extra):
+        kwargs["interview_id"] = interview_id
+    if "acceptance_root_indices" in parameters:
+        kwargs["acceptance_root_indices"] = range(acceptance_criteria_count)
+    return kwargs
 
 
 def _normalize_pause_owner(value: object) -> dict[str, object]:
@@ -199,6 +222,7 @@ _STABLE_RUNTIME_RESUME_BACKENDS: dict[str, str] = {
     "codex_cli": "codex_cli",
     "goose": "goose",
     "pi": "pi",
+    "omp": "omp",
     "hermes": "hermes_cli",
     "hermes_cli": "hermes_cli",
     "opencode": "opencode",
@@ -817,11 +841,13 @@ class SessionRepository:
         seed_goal: str | None = None,
         runtime_backend: str | None = None,
         llm_backend: str | None = None,
+        gate_forced: bool | None = None,
         execution_contract: Mapping[str, Any] | None = None,
         acceptance_root_indices: Iterable[int] | None = None,
         project_identity: ProjectIdentity | None = None,
         project_workspace: str | None = None,
         project_task_workspace: TaskWorkspace | None = None,
+        interview_id: str | None = None,
     ) -> Result[SessionTracker, PersistenceError]:
         """Create a new session and persist start event.
 
@@ -829,11 +855,15 @@ class SessionRepository:
             execution_id: Workflow execution ID.
             seed_id: Seed ID being executed.
             session_id: Optional custom session ID.
+            interview_id: Optional nonblank source interview aggregate ID.
+                Omission preserves the legacy session-start event shape.
             seed_goal: Optional goal text to persist with the start event.
             runtime_backend: Agent runtime backend (claude/codex/hermes/…), persisted
                 so observers (the live dashboard) can tag the run's provider even for
                 simple, non-decomposed runs that emit no per-worker session events.
             llm_backend: Resolved LLM backend, persisted alongside for the same reason.
+            gate_forced: Whether the Seed bypassed the ambiguity gate. ``None``
+                preserves the legacy event shape when the decision is unknown.
             execution_contract: Resolved immutable run inputs needed for safe
                 resume and proof-cohort attribution. The same payload is also
                 written to the initial progress checkpoint by the runner.
@@ -863,11 +893,19 @@ class SessionRepository:
         )
         tracker = SessionTracker.create(execution_id, seed_id, session_id)
 
+        if interview_id is not None:
+            if not isinstance(interview_id, str) or not interview_id.strip():
+                raise ValueError("interview_id must be a nonblank string")
+            if interview_id != interview_id.strip():
+                raise ValueError("interview_id must not contain surrounding whitespace")
+
         event_data = {
             "execution_id": execution_id,
             "seed_id": seed_id,
             "start_time": tracker.start_time.isoformat(),
         }
+        if interview_id is not None:
+            event_data["interview_id"] = interview_id
         if acceptance_root_indices is not None:
             event_data[ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY] = _normalize_acceptance_root_indices(
                 acceptance_root_indices
@@ -878,6 +916,8 @@ class SessionRepository:
             event_data["runtime_backend"] = runtime_backend
         if llm_backend:
             event_data["llm_backend"] = llm_backend
+        if gate_forced is not None:
+            event_data["gate_forced"] = gate_forced
         if project_identity is not None:
             event_data.update(project_identity.to_event_data())
         if execution_contract_snapshot is not None:
@@ -1354,6 +1394,7 @@ class SessionRepository:
                     "seed_goal",
                     "runtime_backend",
                     "llm_backend",
+                    "gate_forced",
                     "project_id",
                     "project_root",
                     "workspace_path",

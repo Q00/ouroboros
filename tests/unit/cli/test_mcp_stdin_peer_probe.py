@@ -75,6 +75,58 @@ class TestMakeStdinPeerProbe:
             os.close(devnull)
             ours.close()
 
+    def test_probe_leaves_shared_blocking_flag_untouched(self) -> None:
+        """Building the probe must not flip O_NONBLOCK on the wire (#2337).
+
+        The probe watches a dup of fd 0, and O_NONBLOCK lives on the open file
+        description the dup shares with the original. #2331 called
+        setblocking(False) on the dup, which made the MCP SDK's blocking
+        readline on an idle socketpair stdin return "" (EOF) — the server
+        exited ~5 ms after `initialize` under every Node/libuv client.
+        """
+        ours, theirs = socket.socketpair()
+        try:
+            assert os.get_blocking(ours.fileno()) is True
+            probe = mcp_module._make_stdin_peer_probe(ours.fileno())
+            assert probe is not None
+            assert os.get_blocking(ours.fileno()) is True
+            assert probe() is False
+            assert os.get_blocking(ours.fileno()) is True, "peeking must not mutate it either"
+        finally:
+            ours.close()
+            theirs.close()
+
+    def test_sdk_style_blocking_reader_survives_idle_peer(self) -> None:
+        """A blocking text reader on the same wire must not observe EOF while idle.
+
+        Mirrors the mcp>=2.0 stdio transport: a private dup of fd 0 wrapped in
+        a TextIOWrapper, read line by line. The first line is already queued
+        (like `initialize`); the second arrives only after the reader is
+        already blocked waiting for it (like `tools/list`). A wire left
+        non-blocking returns "" immediately instead — the #2337 exit.
+        """
+        import io
+        import threading
+
+        ours, theirs = socket.socketpair()
+        private_fd = os.dup(ours.fileno())
+        late_writer = threading.Timer(0.2, lambda: theirs.sendall(b"second\n"))
+        try:
+            probe = mcp_module._make_stdin_peer_probe(ours.fileno())
+            assert probe is not None
+            reader = io.TextIOWrapper(os.fdopen(private_fd, "rb", closefd=False), encoding="utf-8")
+            theirs.sendall(b"first\n")
+            assert reader.readline() == "first\n"
+            assert probe() is False
+            late_writer.start()
+            assert reader.readline() == "second\n"
+        finally:
+            if late_writer.is_alive():  # join() raises if start() was never reached
+                late_writer.join()
+            os.close(private_fd)
+            ours.close()
+            theirs.close()
+
     def test_non_socket_stdin_returns_none(self, tmp_path) -> None:
         read_fd, write_fd = os.pipe()
         try:

@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-import re
 from typing import TYPE_CHECKING
-import unicodedata
 
 import structlog
 
@@ -106,58 +104,8 @@ _SAFE_DEFAULTS: dict[str, _DefaultSpec] = {
 }
 
 
-# Line-anchored marker for a user-declared non-goal / exclusion section in
-# a free-form goal string. Examples that match:
-#   ``non_goals: …``         ``non-goals: …``        ``Non Goals: …``
-#   ``excludes: …``          ``Out-of-scope: …``     ``- non_goals:``
-# The trailing colon is required so that prose that merely mentions
-# ``non-goals`` in a sentence is not mistaken for a section header.
-_PROMPT_NON_GOAL_HEADER = re.compile(
-    r"^\s*(?:[-*•]\s+)?(?:non[ _-]?goals?|excludes?|out[ _-]?of[ _-]?scope)\s*:",
-    re.IGNORECASE,
-)
-
-# Any other line-anchored ``<label>:`` header, used to detect the *next*
-# section that ends a multi-line non-goals body. Matches things like
-# ``actors:``, ``inputs:``, ``- constraints:`` while leaving body lines
-# such as ``  - production deploy`` unmatched.
-_PROMPT_SECTION_HEADER = re.compile(
-    r"^\s*(?:[-*•]\s+)?[A-Za-z][A-Za-z0-9_ -]{0,40}\s*:(?:\s|$)",
-)
-
-_PROMPT_LIST_ITEM = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
-
-
-# Freedom policy (operator decision): the unsafe-context veto on
-# safe-default closure is intentionally disabled — this bank is empty so
-# ``_unsafe_context_reason`` always returns ``None`` and autonomous
-# gap-defaulting is never blocked on a keyword match.
-#
-# Rationale: the previous bank vetoed safe-default closure whenever the
-# interview context mentioned credential, payment, legal/medical,
-# security, or external-side-effect keywords. But those single words
-# (``contract``, ``license``, ``security``, ``authentication``,
-# ``permissions`` …) appear constantly in ordinary software work, so the
-# gate over-blocked benign ``ooo auto`` runs — e.g. a CSV→JSON tool was
-# classified as "legal/medical judgment" solely because an interview
-# answer used the word "contract" (a data contract). The conservative
-# ``non_goals`` safe-default (see ``_SAFE_DEFAULTS["non_goals"]``) still
-# assumes credential/billing/production/legal/medical work is OUT of
-# scope, so emptying this matcher means auto-closure assumes those
-# domains away rather than autonomously acting inside them — it does not
-# grant the pipeline new authority to perform sensitive actions.
-#
-# To restore a veto for a stricter deployment, add ``(reason, pattern)``
-# tuples here; the matcher/lateral-escalation machinery downstream is
-# unchanged and will pick them up automatically.
-_UNSAFE_CONTEXT_PATTERNS: tuple[tuple[str, str], ...] = ()
-
-
 # Prefix matching :pyattr:`AutoAnswer.prefixed_text` and tagging this module's
-# safe-default synthesis. ``_interview_answers`` filters on this prefix so the
-# unsafe-context gate never re-feeds policy-emitted answers (auto answers or
-# our own synthesis) back into itself — keeping safe-default finalization
-# idempotent across resume/re-finalize calls.
+# safe-default synthesis.
 #
 # These constants are public because the interview driver also needs to build
 # follow-up completion signals tagged the same way (see
@@ -204,8 +152,7 @@ def build_safe_default_synthesis(finalization: SafeDefaultFinalization) -> str:
     ``backend.answer``) so the downstream seed generator — which reads the
     persisted interview rounds, not the in-memory ledger — sees the same
     assumptions the ledger now records. The text is tagged with the same
-    ``[from-auto]`` prefix that :class:`AutoAnswerer` uses so the
-    unsafe-context gate skips it on a later pass.
+    ``[from-auto]`` prefix that :class:`AutoAnswerer` uses.
     """
     if not finalization.defaulted_sections:
         return ""
@@ -234,9 +181,9 @@ def build_safe_default_synthesis(finalization: SafeDefaultFinalization) -> str:
 def finalize_safe_defaultable_gaps(
     ledger: SeedDraftLedger,
     *,
-    goal: str,
+    goal: str,  # noqa: ARG001 - kept for call-site compatibility
     provenance: str,
-    pending_question: str | None = None,
+    pending_question: str | None = None,  # noqa: ARG001 - kept for call-site compatibility
     active_profile: DomainProfile | None = None,
 ) -> SafeDefaultFinalization:
     """Fill safe-defaultable required gaps with auditable assumptions.
@@ -244,18 +191,17 @@ def finalize_safe_defaultable_gaps(
     Only missing or weak required Seed sections may be defaulted; conflicting,
     blocked, and missing-goal gaps remain hard blockers regardless of policy.
 
-    Unsafe-context veto (DISABLED BY DEFAULT — freedom policy): historically a
-    section was also refused when ``_unsafe_context_reason`` detected unsafe
-    authority, irreversible production actions, payment/billing,
-    legal/medical/security-sensitive decisions, or ambiguous external effects in
-    the unresolved context. That keyword veto is intentionally disabled —
-    ``_UNSAFE_CONTEXT_PATTERNS`` ships empty (see its docstring) because the
-    single common words it matched (``contract``, ``license``, ``security`` …)
-    over-blocked ordinary software goals. The conservative ``non_goals``
-    safe-default still assumes credential/billing/production/legal/medical work
-    is OUT of scope, so closure assumes those domains *away* rather than acting
-    inside them; the veto is not removed for safety but for usability, and is
-    re-enabled by re-populating ``_UNSAFE_CONTEXT_PATTERNS``.
+    No text is matched to decide this. A former keyword veto on the goal and
+    answers (credential, payment, production, legal or medical words) is gone;
+    it had shipped empty under the freedom policy (an operator decision), so
+    removing it changes no closure. Every default written here is an
+    ``ASSUMPTION`` with status ``DEFAULTED``: it never binds a Seed. These
+    closure defaults are interview bookkeeping: ``ledger_seed`` leaves them
+    out of the worker's assumptions as before, so they give the worker no
+    instruction in either direction, and the goal, the requester's answers
+    and the code decide the scope.
+
+    ``goal`` and ``pending_question`` are kept for call-site compatibility.
 
     When *active_profile* is supplied its ``safe_defaults`` dict is consulted
     first for each section; missing keys fall through to the hardcoded
@@ -266,7 +212,6 @@ def finalize_safe_defaultable_gaps(
     if not gaps:
         return SafeDefaultFinalization((), ())
 
-    unsafe_reason = _unsafe_context_reason(ledger, goal=goal, pending_question=pending_question)
     statuses = ledger.section_statuses()
     defaulted: list[str] = []
     defaulted_specs: list[tuple[str, _DefaultSpec]] = []
@@ -279,9 +224,6 @@ def finalize_safe_defaultable_gaps(
             continue
         if status in {LedgerStatus.CONFLICTING, LedgerStatus.BLOCKED}:
             unsafe.append(f"{section}: {status.value} ledger state cannot be defaulted")
-            continue
-        if unsafe_reason is not None:
-            unsafe.append(f"{section}: unsafe default context ({unsafe_reason})")
             continue
         # Prefer domain-profile override; fall back to hardcoded coding defaults.
         spec = _resolve_spec(section, active_profile)
@@ -304,7 +246,7 @@ def finalize_safe_defaultable_gaps(
                 rationale=f"{spec.rationale} Applied at {provenance}.",
                 evidence=[
                     provenance,
-                    "safe-default policy: missing/weak required gap, local and reversible, no unsafe context detected",
+                    "safe-default policy: missing/weak required gap, local and reversible",
                 ],
             ),
         )
@@ -318,419 +260,3 @@ def finalize_safe_defaultable_gaps(
         )
 
     return SafeDefaultFinalization(tuple(defaulted), tuple(unsafe), tuple(defaulted_specs))
-
-
-def _unsafe_context_reason(
-    ledger: SeedDraftLedger,
-    *,
-    goal: str,
-    pending_question: str | None,  # noqa: ARG001 - kept for backward-compatible call sites
-) -> str | None:
-    """Detect whether the user-asserted context authorizes any unsafe action.
-
-    The detector inspects only assertions the user (or repo) has actually
-    affirmed: the original goal, active non-NON_GOAL ledger entries, and the
-    interview answers the user gave. It deliberately ignores backend-authored
-    interview questions and the still-open ``pending_question``, because a
-    clarifying question like "should this deploy to production?" does not
-    authorize a deploy — only the answer does. It also ignores ``NON_GOAL``
-    ledger entries because confirmed non-goals are explicit *exclusions*;
-    treating "non-goals are credentials and production deployment" as active
-    unsafe scope would invert the user's intent.
-
-    The same exclusion principle is applied at the *string* level to any
-    ``non_goals: …`` / ``excludes: …`` / ``out-of-scope: …`` section in the
-    free-form ``goal`` argument — see :func:`_strip_prompt_non_goal_sections`
-    for the rationale. Without this pre-pass, a caller that already declares
-    its non-goals in the goal string (e.g. a handoff prompt body) would have
-    those exclusions silently flipped into "active unsafe scope" because the
-    interview has not yet had a chance to register them as ``NON_GOAL``
-    ledger entries.
-    """
-    # NFKC compatibility decomposition collapses fullwidth/half-width Latin,
-    # ligatures and other compatibility variants onto their canonical ASCII
-    # form, so the unsafe-context regex bank cannot be silently bypassed by
-    # text such as ``ｄｅｐｌｏｙ to ｐｒｏｄｕｃｔｉｏｎ`` (fullwidth Latin
-    # block, U+FF21..U+FF5A) or ``ﬁnalize`` (the ``fi`` ligature U+FB01).
-    # Without the normalization step ``\b(deploy|production|...)\b`` would
-    # not match those forms, defeating the gate's purpose.
-    sanitized_goal = _strip_prompt_non_goal_sections(goal)
-    context = unicodedata.normalize(
-        "NFKC",
-        "\n".join(
-            value
-            for value in (
-                sanitized_goal,
-                *_unsafe_ledger_values(ledger),
-                *_interview_answers(ledger),
-            )
-            if value.strip()
-        ),
-    ).lower()
-    context = _strip_negated_clauses(context)
-    for reason, pattern in _UNSAFE_CONTEXT_PATTERNS:
-        match = re.search(pattern, context)
-        if match:
-            log.info(
-                "auto.safe_default.unsafe_context_match",
-                pattern_name=reason,
-                context_length=len(context),
-                match_start=match.start(),
-                match_end=match.end(),
-                matched_length=match.end() - match.start(),
-            )
-            return reason
-    return None
-
-
-# Imperative verbs that mark a *new* action clause when they follow a comma.
-# Used to break the negation scope on ``,\s*<verb>`` so that mixed clauses
-# like ``No production deploys, use customer credentials`` only blank the
-# negated half — the second half stays visible to the unsafe regex bank.
-_IMPERATIVE_VERBS_AFTER_COMMA = (
-    "use",
-    "uses",
-    "using",
-    "send",
-    "sends",
-    "sending",
-    "log",
-    "logs",
-    "logging",
-    "logged",
-    "deploy",
-    "deploys",
-    "deploying",
-    "deployed",
-    "write",
-    "writes",
-    "writing",
-    "wrote",
-    "call",
-    "calls",
-    "calling",
-    "called",
-    "push",
-    "pushes",
-    "pushing",
-    "pushed",
-    "pull",
-    "pulls",
-    "pulling",
-    "pulled",
-    "store",
-    "stores",
-    "storing",
-    "stored",
-    "configure",
-    "configures",
-    "configuring",
-    "configured",
-    "connect",
-    "connects",
-    "connecting",
-    "connected",
-    "publish",
-    "publishes",
-    "publishing",
-    "published",
-    "run",
-    "runs",
-    "running",
-    "expose",
-    "exposes",
-    "exposing",
-    "exposed",
-    "read",
-    "reads",
-    "reading",
-    "fetch",
-    "fetches",
-    "fetching",
-    "create",
-    "creates",
-    "creating",
-    "created",
-    "delete",
-    "deletes",
-    "deleting",
-    "deleted",
-    "update",
-    "updates",
-    "updating",
-    "updated",
-    "sync",
-    "syncs",
-    "syncing",
-    "synced",
-    "forward",
-    "forwards",
-    "forwarding",
-    "forwarded",
-    "invoke",
-    "invokes",
-    "invoking",
-    "invoked",
-    "provision",
-    "provisions",
-    "provisioning",
-    "provisioned",
-    "grant",
-    "grants",
-    "granting",
-    "granted",
-    "access",
-    "accesses",
-    "accessing",
-    "accessed",
-    "trigger",
-    "triggers",
-    "triggering",
-    "triggered",
-    "load",
-    "loads",
-    "loading",
-    "loaded",
-    "save",
-    "saves",
-    "saving",
-    "saved",
-    "transfer",
-    "transfers",
-    "transferring",
-    "transferred",
-    "charge",
-    "charges",
-    "charging",
-    "charged",
-    "notify",
-    "notifies",
-    "notifying",
-    "notified",
-    "encrypt",
-    "encrypts",
-    "encrypting",
-    "encrypted",
-    "authenticate",
-    "authenticates",
-    "authenticating",
-    "authenticated",
-    "authorize",
-    "authorizes",
-    "authorizing",
-    "authorized",
-)
-
-_IMPERATIVE_VERBS_ALT = "|".join(_IMPERATIVE_VERBS_AFTER_COMMA)
-
-_NEGATION_CUES = (
-    r"\b(?:no|not|never|don[’']t|do not|do n[’']t|without|none(?:\s+of)?|neither|nor|"
-    r"skip|skips|skipped|avoid|avoids|avoided|exclude|excludes|excluded|"
-    r"forbid|forbids|forbidden)\b"
-)
-
-# Negation pattern with two scope modes:
-#
-# * List mode (lookahead succeeds): the same sentence contains "and"/"or"/"nor"
-#   somewhere before the next sentence break. Scope extends through commas so
-#   list-style negations like "No auth, credentials, and production deployment"
-#   stay fully scoped. A comma followed by an imperative verb still ends the
-#   scope, and the first contrastive conjunction (but/however/although/except)
-#   ends it too.
-#
-# * Non-list mode: no list connector ahead. Scope ends at the FIRST comma in
-#   addition to the usual sentence breaks and contrastive conjunctions.
-#   This is what catches mixed clauses like
-#   "No production deploys, customer credentials from Vault are still required"
-#   or "Without billing integration, send email notifications" — the second
-#   clause stays visible to the unsafe regex bank because the negation only
-#   covers up to the first comma.
-_NEGATION_CLAUSE_PATTERN = re.compile(
-    rf"{_NEGATION_CUES}"
-    r"(?:"
-    # ----- Alt 1: list-mode (scope continues past commas) -----
-    r"(?="
-    r"(?:(?!\b(?:but|however|although|except)\b)[^.;?!\n])*?"
-    r"\b(?:and|or|nor)\b"
-    r")"
-    r"(?:"
-    r"(?!\b(?:but|however|although|except)\b)"
-    rf"(?!,\s*\b(?:{_IMPERATIVE_VERBS_ALT})\b)"
-    r"[^.;?!\n]"
-    r")*"
-    r"|"
-    # ----- Alt 2: non-list mode (scope ends at first comma too) -----
-    r"(?:"
-    r"(?!\b(?:but|however|although|except)\b)"
-    r"[^.;?!\n,]"
-    r")*"
-    r")",
-    re.IGNORECASE,
-)
-
-
-def _strip_prompt_non_goal_sections(text: str) -> str:
-    """Remove user-declared non-goal sections from a goal string before
-    unsafe-context matching.
-
-    :func:`_unsafe_context_reason` already excludes ledger ``NON_GOAL``
-    entries on the documented principle that confirmed non-goals are
-    explicit *exclusions* and must not be treated as active unsafe scope.
-    That exclusion only fires after the interview has structured those
-    exclusions into the ledger. Callers that pre-declare their non-goals
-    inside the free-form goal string — typically scripted invocations or
-    handoff prompts that bundle the seven canonical interview slots in
-    the request body — would otherwise see the same words leak into the
-    matcher input before the interview ever ran, flipping the gate into
-    an unsafe-context block on the user's own exclusion text.
-
-    The helper recognises a non-goal section header
-    (``non_goals:``, ``non-goals:``, ``non goals:``, ``excludes:`` or
-    ``out-of-scope:``) at the start of a line (allowing leading
-    whitespace or a list bullet). Inline header bodies are stripped on
-    that line only. Separate section bodies are stripped only while their
-    continuation is structurally clear: indented lines or list items. This
-    intentionally fails closed for unindented prose following an inline or
-    empty non-goal header, because such prose may be active unsafe scope.
-    A multi-line body ends when one of these terminators is reached:
-
-    * a blank line, or
-    * an unindented non-list line, or
-    * a non-empty line that begins another labelled section header
-      (``actors:``, ``inputs:``, ``- constraints:``, …), which is then
-      preserved.
-
-    Free-form prose that merely mentions ``non-goals`` mid-sentence does
-    not match because the regex is line-anchored and requires a trailing
-    colon.
-    """
-    lines = text.splitlines()
-    out: list[str] = []
-    skipping = False
-    for line in lines:
-        header_match = _PROMPT_NON_GOAL_HEADER.search(line)
-        if header_match:
-            # Inline body belongs to this line only; do not let it swallow
-            # following active prose.
-            skipping = not line[header_match.end() :].strip()
-            continue
-        if not skipping:
-            out.append(line)
-            continue
-        # We are inside a non-goal block — decide whether to keep skipping.
-        if not line.strip():
-            skipping = False
-            continue
-        if line[:1].isspace():
-            # Still inside a structurally clear non-goal body; drop it
-            # from the matcher input. This must run before section-header
-            # detection so indented YAML-ish body lines such as
-            # ``  deploy: production`` stay scoped under non-goals.
-            continue
-        if _PROMPT_SECTION_HEADER.match(line):
-            # A new section starts — stop skipping, keep this line.
-            skipping = False
-            out.append(line)
-            continue
-        if _PROMPT_LIST_ITEM.match(line):
-            # Unindented non-labelled list items still belong to the
-            # non-goal body.
-            continue
-        # Unindented prose after a non-goal header is ambiguous and may be
-        # active scope. Fail closed by preserving it for matching.
-        skipping = False
-        out.append(line)
-    return "\n".join(out)
-
-
-def _strip_negated_clauses(text: str) -> str:
-    """Blank clauses the user has explicitly negated.
-
-    The unsafe-context gate must not trip on phrases like ``No production
-    deployment`` or ``Do not use customer credentials``: those are explicit
-    *exclusions*, not authorizations. We replace the negation cue plus the
-    rest of the clause it scopes with whitespace so the regex bank only sees
-    positively asserted scope.
-
-    Scope ends at sentence-break punctuation (``.``, ``;``, ``?``, ``!``,
-    newlines), contrastive conjunctions (``but``, ``however``, ``although``,
-    ``except``), or a comma that is followed by a fresh imperative verb
-    (``use``, ``send``, ``log``, ``deploy``, etc.). The comma + imperative
-    boundary lets mixed clauses such as ``No production deploys, use
-    customer credentials from Vault`` keep the second half visible — the
-    ``credentials`` token is still flagged by the unsafe regex bank — while
-    plain list-style negations such as ``No auth, credentials, and
-    production deployment`` (no imperative verb after the comma) remain
-    fully scoped under the negation.
-    """
-    return _NEGATION_CLAUSE_PATTERN.sub(" ", text)
-
-
-_INACTIVE_LEDGER_STATUSES: frozenset[LedgerStatus] = frozenset(
-    {LedgerStatus.WEAK, LedgerStatus.CONFLICTING, LedgerStatus.BLOCKED}
-)
-
-# Sources whose entries describe boundary defaults or explicit exclusions
-# rather than user-asserted scope. Filtering on source (not status) keeps
-# CONSERVATIVE_DEFAULT entries — which can land with status DEFAULTED but
-# may still carry production/auth/billing scope that needs to flag — visible
-# to the unsafe-context gate.
-_SKIP_SOURCES_FOR_UNSAFE_GATE: frozenset[LedgerSource] = frozenset(
-    {LedgerSource.ASSUMPTION, LedgerSource.NON_GOAL}
-)
-
-
-def _unsafe_ledger_values(ledger: SeedDraftLedger) -> tuple[str, ...]:
-    """Return active ledger entry values that may carry unsafe user assertions.
-
-    Includes USER_GOAL, REPO_FACT, EXISTING_CONVENTION, INFERENCE, BLOCKER,
-    and CONSERVATIVE_DEFAULT entries. Excludes:
-
-    * inactive entries (weak/conflicting/blocked) — superseded or rejected,
-    * any ASSUMPTION-source entry — assumptions describe boundary defaults
-      (including the safe-default policy's own outputs), not user-affirmed
-      scope, so re-feeding them would re-flag the gate's own boundary text
-      on a subsequent pass, and
-    * ``NON_GOAL`` entries — confirmed non-goals are explicit exclusions
-      ("non-goals are auth and production deployment"), and reading them as
-      active unsafe scope would invert the user's intent.
-
-    DEFAULTED-status entries from other sources (notably
-    ``CONSERVATIVE_DEFAULT``) remain visible because they can still encode
-    user-derived unsafe scope — for example, a prior round may have recorded
-    a conservative default that nonetheless authorizes a production deploy.
-    """
-    values: list[str] = []
-    for section in ledger.sections.values():
-        for entry in section.entries:
-            if entry.status in _INACTIVE_LEDGER_STATUSES:
-                continue
-            if entry.source in _SKIP_SOURCES_FOR_UNSAFE_GATE:
-                continue
-            values.append(entry.value)
-    return tuple(values)
-
-
-def _interview_answers(ledger: SeedDraftLedger) -> tuple[str, ...]:
-    """Return user-supplied interview answers only.
-
-    Backend-authored questions are deliberately excluded because a clarifying
-    question (for example "Does this deploy to production?") does not assert
-    that the deploy will happen — only an answer can.
-
-    Policy-authored answers are also excluded. :class:`AutoAnswerer` records
-    its own answers with a ``[from-auto]`` prefix, and this module's safe-
-    default synthesis is tagged the same way. Re-feeding either of those
-    into the unsafe-context gate would let the gate flag its own boundary
-    text on a subsequent pass and break finalization idempotence (a problem
-    visible on resume/re-finalize flows).
-    """
-    values: list[str] = []
-    for item in ledger.question_history:
-        answer = item.get("answer", "")
-        if not answer:
-            continue
-        if answer.lstrip().startswith(_AUTO_ANSWER_PREFIX):
-            continue
-        values.append(answer)
-    return tuple(values)

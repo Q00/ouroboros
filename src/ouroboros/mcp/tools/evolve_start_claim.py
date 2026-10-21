@@ -11,7 +11,7 @@ from ouroboros.core.types import Result
 from ouroboros.evolution import loop_support
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks
-from ouroboros.mcp.tools.background import WorkFn
+from ouroboros.mcp.tools.background import WorkFn, job_work_error
 from ouroboros.mcp.types import MCPToolResult
 
 _CLAIM_PREPARATION_TIMEOUT_SECONDS = 1.0
@@ -103,7 +103,7 @@ class PreparedEvolveClaim:
             raise RuntimeError("Prepared evolve claim has not been started")
         result = await self._task
         if result.is_err:
-            raise RuntimeError(str(result.error))
+            raise job_work_error(result.error)
         return result.value
 
     async def abort(self) -> None:

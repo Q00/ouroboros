@@ -15,6 +15,7 @@ import yaml
 from ouroboros.config import get_auto_evolve_max_generations
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.seed import Seed, ac_text
+from ouroboros.mcp.tools.background import job_work_error
 from ouroboros.mcp.tools.evaluate_ralph_chain import enqueue_chained_ralph
 from ouroboros.mcp.tools.seed_handoff import project_worker_safe_seed
 from ouroboros.mcp.tools.subagent import (
@@ -246,7 +247,11 @@ async def run_evaluation_job(
     job_manager: Any,
     start_ralph_handler: Any | None,
 ) -> MCPToolResult:
-    """Run formal evaluation and, on explicit rejection, enqueue Ralph."""
+    """Run formal evaluation and, when it does not approve, enqueue Ralph.
+
+    Any ``final_approved=False`` result chains, including an unverified one
+    (no executed evidence), so its advisory review seeds the next generation.
+    """
 
     evaluation_arguments = (
         {**arguments, "_force_in_process": True} if force_in_process else arguments
@@ -284,7 +289,7 @@ async def run_evaluation_job(
             },
         )
     if result.is_err:
-        raise RuntimeError(str(result.error))
+        raise job_work_error(result.error)
     if auto_evolve and result.value.meta.get("final_approved") is False:
         return await enqueue_chained_ralph(
             result.value,

@@ -12,7 +12,9 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import yaml
 
+from ouroboros.core import project_identity as project_identity_module
 from ouroboros.core.errors import ConfigError, PersistenceError
 from ouroboros.core.project_identity import resolve_project_identity
 from ouroboros.core.seed import (
@@ -1552,6 +1554,128 @@ class TestOrchestratorRunner:
         )
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("legacy_success", [False, True])
+    async def test_acceptance_authority_decides_before_the_terminal_plan(
+        self,
+        legacy_success: bool,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """An installed acceptance authority sees the executor's result once and
+        the runner persists the result it returns: the durable acceptance plan,
+        the session status, and the returned success all carry its decision."""
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        seed = sample_seed.model_copy(
+            update={"acceptance_criteria": (sample_seed.acceptance_criteria[0],)}
+        )
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            enable_decomposition=False,
+        )
+        runner._run_verify_commands = False
+        tracker = SessionTracker.create(
+            f"execution-authority-{legacy_success}",
+            seed.metadata.seed_id,
+            session_id=f"session-authority-{legacy_success}",
+        )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            seed,
+            session_id=tracker.session_id,
+        )
+        graph = DependencyGraph(
+            nodes=(ACNode(index=0, content=seed.acceptance_criteria[0]),),
+            execution_levels=((0,),),
+        )
+        legacy = ParallelExecutionResult(
+            results=(
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content=seed.acceptance_criteria[0],
+                    success=legacy_success,
+                    outcome=(
+                        ACExecutionOutcome.SUCCEEDED
+                        if legacy_success
+                        else ACExecutionOutcome.FAILED
+                    ),
+                ),
+            ),
+            success_count=1 if legacy_success else 0,
+            failure_count=0 if legacy_success else 1,
+        )
+        decided = ParallelExecutionResult(
+            results=(
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content=seed.acceptance_criteria[0],
+                    success=not legacy_success,
+                    outcome=(
+                        ACExecutionOutcome.FAILED
+                        if legacy_success
+                        else ACExecutionOutcome.SUCCEEDED
+                    ),
+                ),
+            ),
+            success_count=0 if legacy_success else 1,
+            failure_count=1 if legacy_success else 0,
+        )
+        seen: list[Any] = []
+
+        async def authority(*, seed: Seed, execution_id: str, parallel_result: Any) -> Any:
+            seen.append((execution_id, parallel_result))
+            return decided
+
+        runner.acceptance_authority = authority
+        mark_completed = AsyncMock(return_value=Result.ok(True))
+        mark_failed = AsyncMock(return_value=Result.ok(True))
+        with (
+            patch(
+                "ouroboros.orchestrator.dependency_analyzer.DependencyAnalyzer.analyze",
+                AsyncMock(return_value=Result.ok(graph)),
+            ),
+            patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+            patch(
+                "ouroboros.orchestrator.parallel_executor.ParallelACExecutor.execute_parallel",
+                AsyncMock(return_value=legacy),
+            ),
+            patch.object(runner._session_repo, "mark_completed", mark_completed),
+            patch.object(runner._session_repo, "mark_failed", mark_failed),
+            patch.object(
+                runner,
+                "_report_frugality_retrospective",
+                AsyncMock(return_value=False),
+            ),
+        ):
+            result = await runner._execute_parallel(
+                seed=seed,
+                exec_id=tracker.execution_id,
+                tracker=tracker,
+                merged_tools=[],
+                tool_catalog=assemble_session_tool_catalog([]),
+                system_prompt="system",
+                start_time=tracker.start_time,
+            )
+
+        assert seen == [(tracker.execution_id, legacy)]
+        assert result.is_ok and result.value.success is (not legacy_success)
+        persisted = mark_failed if legacy_success else mark_completed
+        persisted.assert_awaited_once()
+        (plan,) = persisted.await_args.kwargs["acceptance_finalizations"]
+        assert plan["accepted"] is (not legacy_success)
+        assert plan["outcome"] == ("failed" if legacy_success else "succeeded")
+        (mark_completed if legacy_success else mark_failed).assert_not_awaited()
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+
+    @pytest.mark.asyncio
     async def test_parallel_pause_consumes_pre_effect_durable_pause_policy(
         self,
         mock_adapter: MagicMock,
@@ -1647,6 +1771,102 @@ class TestOrchestratorRunner:
         assert result.is_ok and result.value.success is False
         mark_paused.assert_awaited_once()
         assert mark_paused.await_args.kwargs["pause_seconds"] == 3600
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+
+    @pytest.mark.asyncio
+    async def test_acceptance_authority_is_not_called_on_a_pausing_result(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """A paused run is decided when it resumes, never while it pauses (M1)."""
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        seed = sample_seed.model_copy(
+            update={"acceptance_criteria": (sample_seed.acceptance_criteria[0],)}
+        )
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            enable_decomposition=False,
+        )
+        runner._run_verify_commands = False
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        tracker = SessionTracker.create(
+            "execution-authority-pause",
+            seed.metadata.seed_id,
+            session_id="session-authority-pause",
+        )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            seed,
+            session_id=tracker.session_id,
+        )
+        graph = DependencyGraph(
+            nodes=(ACNode(index=0, content=seed.acceptance_criteria[0]),),
+            execution_levels=((0,),),
+        )
+        pause_message = AgentMessage(
+            type="result",
+            content="Usage limit reached. Please try again later.",
+            data={"subtype": "error", "error_type": "CodexCliError"},
+        )
+        pausing = ParallelExecutionResult(
+            results=(
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content=seed.acceptance_criteria[0],
+                    success=False,
+                    messages=(pause_message,),
+                    final_message=pause_message.content,
+                    outcome=ACExecutionOutcome.FAILED,
+                ),
+            ),
+            success_count=0,
+            failure_count=1,
+            recoverable_route_pause=True,
+        )
+        authority = AsyncMock(side_effect=AssertionError("decided a pausing result"))
+        authority.install = MagicMock()
+        runner.acceptance_authority = authority
+        mark_paused = AsyncMock(return_value=Result.ok(True))
+        with (
+            patch(
+                "ouroboros.orchestrator.dependency_analyzer.DependencyAnalyzer.analyze",
+                AsyncMock(return_value=Result.ok(graph)),
+            ),
+            patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+            patch(
+                "ouroboros.orchestrator.parallel_executor.ParallelACExecutor.execute_parallel",
+                AsyncMock(return_value=pausing),
+            ),
+            patch.object(runner._session_repo, "mark_paused", mark_paused),
+            patch.object(
+                runner,
+                "_report_frugality_retrospective",
+                AsyncMock(return_value=False),
+            ),
+        ):
+            result = await runner._execute_parallel(
+                seed=seed,
+                exec_id=tracker.execution_id,
+                tracker=tracker,
+                merged_tools=[],
+                tool_catalog=assemble_session_tool_catalog([]),
+                system_prompt="system",
+                start_time=tracker.start_time,
+            )
+
+        assert result.is_ok and result.value.success is False
+        mark_paused.assert_awaited_once()
+        authority.assert_not_awaited()
         runner._retire_process_local_authority(
             session_id=tracker.session_id,
             execution_id=tracker.execution_id,
@@ -3027,6 +3247,126 @@ class TestOrchestratorRunner:
             )
 
     @pytest.mark.asyncio
+    async def test_prepare_session_persists_seed_metadata_gate_forced(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+    ) -> None:
+        """A generated Seed loaded from YAML carries gate provenance to its event."""
+        serialized_seed = sample_seed.model_copy(
+            update={"metadata": sample_seed.metadata.model_copy(update={"gate_forced": True})}
+        )
+        loaded_seed = Seed.from_dict(yaml.safe_load(yaml.safe_dump(serialized_seed.to_dict())))
+        tracker = SessionTracker.create(
+            "exec_yaml_gate",
+            loaded_seed.metadata.seed_id,
+            session_id="orch_yaml_gate",
+        )
+        create_session = AsyncMock(return_value=Result.ok(tracker))
+
+        with patch.object(runner._session_repo, "create_session", create_session):
+            result = await runner.prepare_session(
+                loaded_seed,
+                execution_id=tracker.execution_id,
+                session_id=tracker.session_id,
+            )
+
+        try:
+            assert result.is_ok
+            assert create_session.await_args.kwargs["gate_forced"] is True
+        finally:
+            runner._retire_process_local_authority(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+
+    @pytest.mark.asyncio
+    async def test_prepare_session_passes_source_interview_from_seed_metadata(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+    ) -> None:
+        """Runner forwards the Seed-owned link without deriving another identity."""
+        linked_seed = sample_seed.model_copy(
+            update={
+                "metadata": sample_seed.metadata.model_copy(
+                    update={"interview_id": "interview_runner_source"}
+                )
+            }
+        )
+        tracker = SessionTracker.create(
+            "exec_interview_link",
+            linked_seed.metadata.seed_id,
+            session_id="orch_interview_link",
+        )
+        create_session = AsyncMock(return_value=Result.ok(tracker))
+
+        with patch.object(runner._session_repo, "create_session", create_session):
+            result = await runner.prepare_session(
+                linked_seed,
+                execution_id=tracker.execution_id,
+                session_id=tracker.session_id,
+            )
+
+        try:
+            assert result.is_ok
+            assert create_session.await_args.kwargs["interview_id"] == ("interview_runner_source")
+        finally:
+            runner._retire_process_local_authority(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+
+    @pytest.mark.asyncio
+    async def test_prepare_session_omits_absent_source_interview_for_legacy_repository(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+    ) -> None:
+        """A legacy Seed and narrow repository double keep their old call shape."""
+        tracker = SessionTracker.create(
+            "exec_legacy_link",
+            sample_seed.metadata.seed_id,
+            session_id="orch_legacy_link",
+        )
+
+        async def legacy_create_session(
+            *,
+            execution_id: str,
+            seed_id: str,
+            session_id: str,
+            seed_goal: str,
+            runtime_backend: str,
+            llm_backend: str,
+            execution_contract: object,
+            project_identity: object,
+            project_workspace: str,
+        ) -> Result[SessionTracker, object]:
+            assert execution_id == tracker.execution_id
+            assert seed_id == sample_seed.metadata.seed_id
+            assert session_id == tracker.session_id
+            return Result.ok(tracker)
+
+        with patch.object(
+            runner._session_repo,
+            "create_session",
+            new=legacy_create_session,
+        ):
+            result = await runner.prepare_session(
+                sample_seed,
+                execution_id=tracker.execution_id,
+                session_id=tracker.session_id,
+            )
+
+        try:
+            assert result.is_ok
+        finally:
+            runner._retire_process_local_authority(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+
+    @pytest.mark.asyncio
     async def test_prepare_session_publishes_matching_project_anchor_and_contract(
         self,
         mock_adapter: MagicMock,
@@ -3072,6 +3412,64 @@ class TestOrchestratorRunner:
             runner._retire_process_local_authority(
                 session_id="orch-project-anchor",
                 execution_id="exec-project-anchor",
+            )
+
+    @pytest.mark.asyncio
+    async def test_prepare_session_degrades_project_identity_on_old_git(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+        tmp_path: Path,
+    ) -> None:
+        """Git older than the topology grammar must not abort a direct run."""
+        repo_root = tmp_path / "repo"
+        _init_git_repo(repo_root)
+        workspace = repo_root / "packages" / "app"
+        workspace.mkdir(parents=True)
+        mock_adapter.working_directory = str(workspace)
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            task_cwd=str(workspace),
+        )
+
+        real_run_git_command = project_identity_module._run_git_command
+
+        def old_git(*arguments: str) -> bytes:
+            if arguments == ("--version",):
+                return b"git version 2.34.1\n"
+            if "worktree" in arguments or "--path-format=absolute" in arguments:
+                raise AssertionError(f"old Git must not run topology queries: {arguments}")
+            return real_run_git_command(*arguments)
+
+        with patch("ouroboros.core.project_identity._run_git_command", side_effect=old_git):
+            result = await runner.prepare_session(
+                sample_seed,
+                execution_id="exec-old-git",
+                session_id="orch-old-git",
+            )
+
+        try:
+            assert result.is_ok
+            start = next(
+                call.args[0]
+                for call in mock_event_store.append.await_args_list
+                if call.args[0].type == "orchestrator.session.started"
+            )
+            canonical = str(workspace.resolve())
+            assert start.data["project_root"] == canonical
+            assert start.data["workspace_path"] == "."
+            assert start.data["project_identity_degraded_reason"] == "git_version_unsupported"
+            proof = start.data["execution_contract"]["frugality_proof"]
+            assert proof["project_root"] == canonical
+            assert proof["workspace_path"] == "."
+        finally:
+            runner._retire_process_local_authority(
+                session_id="orch-old-git",
+                execution_id="exec-old-git",
             )
 
     @pytest.mark.asyncio
@@ -7678,6 +8076,63 @@ class TestOrchestratorRunner:
         assert result is expected
         assert execute.await_args.kwargs["seed"] is single_ac_seed
         assert "force_sequential_levels" not in execute.await_args.kwargs
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("parallel", [True, False])
+    @pytest.mark.parametrize("criteria", [1, 2])
+    async def test_a_check_package_uses_ac_executor_path_and_keeps_sequential_runs_sequential(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+        parallel: bool,
+        criteria: int,
+    ) -> None:
+        """An installed check package decides only on the per-AC path, even for one AC.
+
+        A run requested as sequential stays sequential on that path.
+        """
+        assert len(sample_seed.acceptance_criteria) >= criteria
+        single_ac_seed = sample_seed.model_copy(
+            update={"acceptance_criteria": sample_seed.acceptance_criteria[:criteria]}
+        )
+        tracker = SessionTracker.create("exec_single_pkg", single_ac_seed.metadata.seed_id)
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        runner.acceptance_authority = MagicMock()
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            single_ac_seed,
+            session_id=tracker.session_id,
+        )
+        expected: Result[OrchestratorResult, OrchestratorError] = Result.ok(
+            OrchestratorResult(
+                success=True,
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+        )
+
+        with (
+            patch.object(runner, "_check_startup_cancellation", AsyncMock(return_value=False)),
+            patch.object(
+                runner,
+                "_get_merged_tools",
+                AsyncMock(wraps=runner._get_merged_tools),
+            ),
+            patch.object(runner, "_execute_parallel", AsyncMock(return_value=expected)) as execute,
+        ):
+            result = await runner.execute_precreated_session(
+                single_ac_seed,
+                tracker,
+                parallel=parallel,
+            )
+
+        assert result is expected
+        assert execute.await_args.kwargs["seed"] is single_ac_seed
+        sequential = execute.await_args.kwargs.get("force_sequential_levels", False)
+        assert sequential is (not parallel)
 
     @pytest.mark.asyncio
     async def test_single_ac_investment_uses_ac_executor_path(

@@ -44,6 +44,7 @@ _INTEGRATION_ID = "copilot-cli"
 _EDITOR_VERSION = "ouroboros-discovery/1.0"
 _OPENROUTER_ANTHROPIC_PREFIX = "openrouter/anthropic/"
 _ANTHROPIC_HYPHEN_VERSION = re.compile(r"^(?P<stem>claude-[a-z0-9]+-\d+)-(?P<minor>\d+)$")
+_CLAUDE_OPUS_ID = re.compile(r"^claude-opus-(?P<major>\d+)(?:\.(?P<minor>\d+))?$")
 
 
 @dataclass(frozen=True)
@@ -254,6 +255,16 @@ def list_copilot_models(*, refresh: bool = False) -> list[CopilotModel]:
 def used_fallback() -> bool:
     """Return True if the last :func:`list_copilot_models` call used the snapshot."""
     return _cached_used_fallback
+
+
+def latest_opus_model(models: Iterable[CopilotModel]) -> str | None:
+    """The newest Claude Opus id in ``models`` (the frontier tier), if any."""
+    versions: dict[str, tuple[int, int]] = {}
+    for entry in models:
+        match = _CLAUDE_OPUS_ID.fullmatch(entry.id)
+        if match is not None:
+            versions[entry.id] = (int(match.group("major")), int(match.group("minor") or 0))
+    return max(versions, key=versions.__getitem__) if versions else None
 
 
 def _unqualified_anthropic_model(model: str) -> str:

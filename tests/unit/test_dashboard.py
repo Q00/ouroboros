@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import pytest
 
+from ouroboros.core.acceptance import AcceptanceState
 from ouroboros.core.lineage import (
+    ACAuthorityState,
     ACResult,
     EvaluationSummary,
     GenerationPhase,
@@ -22,6 +24,10 @@ from ouroboros.mcp.tools.dashboard import (
 )
 
 # -- Helpers --
+
+PASS = ACAuthorityState.PASS
+FAIL = ACAuthorityState.FAIL
+UNRESOLVED = ACAuthorityState.UNRESOLVED
 
 
 def _schema() -> OntologySchema:
@@ -90,8 +96,8 @@ class TestExtractACHistory:
         )
         history = _extract_ac_history(lineage)
         assert len(history) == 2
-        assert history[0] == [(1, True), (2, True)]
-        assert history[1] == [(1, False), (2, True)]
+        assert history[0] == [(1, PASS), (2, PASS)]
+        assert history[1] == [(1, FAIL), (2, PASS)]
 
     def test_empty_lineage(self) -> None:
         lineage = OntologyLineage(lineage_id="empty", goal="test")
@@ -115,19 +121,23 @@ class TestTrendDots:
     """Tests for _trend_dots."""
 
     def test_all_pass(self) -> None:
-        results = [(1, True), (2, True), (3, True)]
+        results = [(1, PASS), (2, PASS), (3, PASS)]
         trend = _trend_dots(results)
         assert "PPP" in trend
         assert "3/3" in trend
 
     def test_mixed(self) -> None:
-        results = [(1, False), (2, True), (3, False)]
+        results = [(1, FAIL), (2, PASS), (3, FAIL)]
         trend = _trend_dots(results)
         assert "FPF" in trend
         assert "1/3" in trend
 
+    def test_unresolved_is_marked_apart_from_fail(self) -> None:
+        results = [(1, FAIL), (2, UNRESOLVED), (3, PASS)]
+        assert _trend_dots(results) == "FUP (1/3)"
+
     def test_truncates_to_max_dots(self) -> None:
-        results = [(i, True) for i in range(10)]
+        results = [(i, PASS) for i in range(10)]
         trend = _trend_dots(results, max_dots=5)
         assert trend.count("P") == 5
 
@@ -136,23 +146,31 @@ class TestClassifyAC:
     """Tests for _classify_ac."""
 
     def test_stable(self) -> None:
-        results = [(1, True), (2, True), (3, True)]
+        results = [(1, PASS), (2, PASS), (3, PASS)]
         assert _classify_ac(results) == "stable"
 
     def test_failing(self) -> None:
-        results = [(1, False), (2, False), (3, False)]
+        results = [(1, FAIL), (2, FAIL), (3, FAIL)]
         assert _classify_ac(results) == "failing"
 
     def test_flaky(self) -> None:
-        results = [(1, True), (2, False), (3, True)]
+        results = [(1, PASS), (2, FAIL), (3, PASS)]
         assert _classify_ac(results) == "flaky"
 
     def test_new(self) -> None:
         assert _classify_ac([]) == "new"
 
+    def test_all_unresolved_is_not_failing(self) -> None:
+        results = [(1, UNRESOLVED), (2, UNRESOLVED), (3, UNRESOLVED)]
+        assert _classify_ac(results) == "unresolved"
+
+    def test_unresolved_among_fails_is_not_failing(self) -> None:
+        results = [(1, FAIL), (2, UNRESOLVED), (3, FAIL)]
+        assert _classify_ac(results) == "flaky"
+
     def test_single_pass_not_stable(self) -> None:
         """Need >= 2 results for stable."""
-        results = [(1, True)]
+        results = [(1, PASS)]
         classification = _classify_ac(results)
         assert classification != "stable"
 
@@ -180,7 +198,8 @@ class TestFormatSummary:
         output = format_summary(_lineage_with_gens((unknown,)))
 
         assert "UNRESOLVED" in output
-        assert "F (0/1)" in output
+        assert "U (0/1)" in output
+        assert "F (0/1)" not in output
 
     def test_no_generations(self) -> None:
         lineage = OntologyLineage(lineage_id="empty", goal="test")
@@ -331,3 +350,186 @@ class TestACDashboardHandler:
         result = await handler.handle({"lineage_id": "lin_ac_mode", "mode": "ac"})
         assert result.is_err
         assert "ac_index" in str(result.error)
+
+
+# -- Acceptance tri-state (approved, rejected, unverified) --
+
+
+def _unverified_ac(idx: int, content: str = "") -> ACResult:
+    """An AC row as the Ralph chain projects it when no executed check ran."""
+    return ACResult(
+        ac_index=idx,
+        ac_content=content or f"AC {idx + 1} description",
+        passed=False,
+        score=0.0,
+        evidence="No executed verification evidence; formal AC verdict not evaluated.",
+        verification_method="formal_evaluation",
+        ac_verdict_state="not_evaluated",
+        final_verdict="fail",
+        rendered_verdict="NOT_EVALUATED",
+    )
+
+
+def _summary(state: AcceptanceState, ac_results: tuple[ACResult, ...]) -> EvaluationSummary:
+    approval_status = {
+        AcceptanceState.APPROVED: "approved",
+        AcceptanceState.REJECTED: "rejected",
+        AcceptanceState.UNVERIFIED: "not_evaluated",
+    }[state]
+    return EvaluationSummary(
+        final_approved=state is AcceptanceState.APPROVED,
+        highest_stage_passed=2,
+        score=0.5,
+        ac_results=ac_results,
+        approval_status=approval_status,
+    )
+
+
+def _lineage_from_summaries(*summaries: EvaluationSummary) -> OntologyLineage:
+    gens = tuple(
+        GenerationRecord(
+            generation_number=i + 1,
+            seed_id=f"seed_{i + 1}",
+            ontology_snapshot=_schema(),
+            evaluation_summary=summary,
+            phase=GenerationPhase.COMPLETED,
+        )
+        for i, summary in enumerate(summaries)
+    )
+    return OntologyLineage(lineage_id="tri_lin", goal="test goal", generations=gens)
+
+
+class TestAcceptanceTriState:
+    """Each surface keeps approved, rejected, and unverified distinct."""
+
+    def test_summary_header_approved(self) -> None:
+        summary = _summary(AcceptanceState.APPROVED, (_ac_result(0, True),))
+
+        output = format_summary(_lineage_from_summaries(summary))
+
+        assert "### Gen 1 | Score: 0.50 | APPROVED" in output
+        assert "NOT APPROVED" not in output
+
+    def test_summary_header_rejected(self) -> None:
+        summary = _summary(AcceptanceState.REJECTED, (_ac_result(0, False),))
+
+        output = format_summary(_lineage_from_summaries(summary))
+
+        assert "### Gen 1 | Score: 0.50 | REJECTED" in output
+        assert "| 1 | FAIL |" in output
+        assert "unverified" not in output
+
+    def test_summary_unverified_is_not_rejected_or_failing(self) -> None:
+        summary = _summary(
+            AcceptanceState.UNVERIFIED,
+            (_unverified_ac(0, "Create tasks"), _unverified_ac(1, "Delete tasks")),
+        )
+
+        output = format_summary(_lineage_from_summaries(summary))
+
+        assert "### Gen 1 | Score: 0.50 | NOT APPROVED (unverified)" in output
+        assert "REJECTED" not in output
+        assert "| 1 | UNRESOLVED | Create tasks | U (0/1) |" in output
+        assert "| 2 | UNRESOLVED | Delete tasks | U (0/1) |" in output
+        assert "FAIL" not in output
+
+    def test_summary_sorts_unresolved_after_failing_and_flaky(self) -> None:
+        gen1 = _summary(
+            AcceptanceState.REJECTED,
+            (_ac_result(0, True), _ac_result(1, False), _unverified_ac(2), _ac_result(3, False)),
+        )
+        gen2 = _summary(
+            AcceptanceState.REJECTED,
+            (_ac_result(0, True), _ac_result(1, False), _unverified_ac(2), _ac_result(3, True)),
+        )
+
+        output = format_summary(_lineage_from_summaries(gen1, gen2))
+        cells = [line.split("|")[1].strip() for line in output.splitlines() if line.startswith("|")]
+
+        # AC 2 failing, AC 4 flaky, AC 3 unresolved, AC 1 stable.
+        assert [cell for cell in cells if cell.isdigit()] == ["2", "4", "3", "1"]
+
+    def test_full_matrix_marks_each_state(self) -> None:
+        lineage = _lineage_from_summaries(
+            _summary(AcceptanceState.REJECTED, (_ac_result(0, False),)),
+            _summary(AcceptanceState.UNVERIFIED, (_unverified_ac(0),)),
+            _summary(AcceptanceState.APPROVED, (_ac_result(0, True),)),
+        )
+
+        output = format_full(lineage)
+        row = next(line for line in output.splitlines() if line.startswith("AC 1"))
+
+        assert row.split()[2:5] == ["[F]", "[U]", "[P]"]
+        assert "U = unresolved" in output
+
+    def test_full_matrix_all_unresolved_is_not_failing(self) -> None:
+        lineage = _lineage_from_summaries(
+            _summary(AcceptanceState.UNVERIFIED, (_unverified_ac(0),)),
+            _summary(AcceptanceState.UNVERIFIED, (_unverified_ac(0),)),
+        )
+
+        output = format_full(lineage)
+        row = next(line for line in output.splitlines() if line.startswith("AC 1"))
+
+        assert row.split()[2:] == ["[U]", "[U]", "unresolved"]
+        assert "[F]" not in output
+        assert "failing" not in output
+
+    def test_single_ac_timeline_keeps_each_state(self) -> None:
+        lineage = _lineage_from_summaries(
+            _summary(AcceptanceState.REJECTED, (_ac_result(0, False, "Create tasks"),)),
+            _summary(AcceptanceState.UNVERIFIED, (_unverified_ac(0, "Create tasks"),)),
+            _summary(AcceptanceState.APPROVED, (_ac_result(0, True, "Create tasks"),)),
+        )
+
+        output = format_single_ac(lineage, 0)
+
+        assert "| Gen 1 | FAIL |" in output
+        assert "| Gen 2 | UNRESOLVED |" in output
+        assert "| Gen 3 | PASS |" in output
+        assert "**Pass rate**: 1/3" in output
+
+    def test_single_ac_all_unresolved_timeline(self) -> None:
+        lineage = _lineage_from_summaries(
+            _summary(AcceptanceState.UNVERIFIED, (_unverified_ac(0),)),
+            _summary(AcceptanceState.UNVERIFIED, (_unverified_ac(0),)),
+        )
+
+        output = format_single_ac(lineage, 0)
+
+        assert "**Classification**: unresolved" in output
+        assert "FAIL" not in output
+
+    @pytest.mark.asyncio
+    async def test_handler_renders_unverified_generation_from_events(self) -> None:
+        """The persisted not_evaluated status survives projection into the dashboard."""
+        from ouroboros.events.lineage import lineage_created, lineage_generation_completed
+        from ouroboros.mcp.tools.definitions import ACDashboardHandler
+        from ouroboros.persistence.event_store import EventStore
+
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        await store.initialize()
+        await store.append(lineage_created("lin_unverified", "test"))
+        summary = _summary(AcceptanceState.UNVERIFIED, (_unverified_ac(0, "Create tasks"),))
+        await store.append(
+            lineage_generation_completed(
+                "lin_unverified",
+                1,
+                "seed_1",
+                _schema().model_dump(mode="json"),
+                summary.model_dump(mode="json"),
+                [],
+            )
+        )
+
+        handler = ACDashboardHandler(event_store=store)
+        handler._event_store = store
+        handler._initialized = True
+
+        result = await handler.handle({"lineage_id": "lin_unverified", "mode": "summary"})
+
+        assert result.is_ok
+        text = result.value.text_content
+        assert "NOT APPROVED (unverified)" in text
+        assert "REJECTED" not in text
+        assert "| 1 | UNRESOLVED | Create tasks | U (0/1) |" in text

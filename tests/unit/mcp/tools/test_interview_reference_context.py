@@ -383,3 +383,58 @@ async def test_plugin_reference_seed_succeeds_for_confirmed_requirement() -> Non
     assert confirmed["confirmation_authority"] == "user"
     save_state.assert_awaited_once()
     dispatch.assert_not_awaited()
+
+
+# --- Interview-less session-context path (grounded-lateral RFC D6) ---------
+
+
+@pytest.mark.asyncio
+async def test_session_context_generates_seed_without_interview() -> None:
+    from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler
+
+    handler = GenerateSeedHandler()
+    result = await handler.handle(
+        {
+            "session_context": {
+                "goal": "Ship a commit-message linter CLI",
+                "acceptance_criteria": ["lint-commit HEAD exits 0 on a good message"],
+                "decisions": ["Rules live in pyproject.toml"],
+            }
+        }
+    )
+
+    assert result.is_ok, result
+    payload = result.unwrap()
+    assert payload.meta is not None
+    assert payload.meta["status"] == "seed_generated"
+    assert payload.meta["source"] == "session_context"
+    assert payload.meta["interview_id"] == "session-context"
+    text = payload.content[0].text
+    assert "Ship a commit-message linter CLI" in text
+    assert "Rules live in pyproject.toml" in text
+
+
+@pytest.mark.asyncio
+async def test_session_context_gaps_return_questions_not_error() -> None:
+    from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler
+
+    handler = GenerateSeedHandler()
+    result = await handler.handle({"session_context": {"goal": "Build a thing"}})
+
+    assert result.is_ok, result
+    payload = result.unwrap()
+    assert payload.meta is not None
+    assert payload.meta["status"] == "gap_questions_required"
+    assert len(payload.meta["gap_questions"]) == 1
+    assert "observable checks" in payload.meta["gap_questions"][0]
+
+
+@pytest.mark.asyncio
+async def test_missing_both_session_id_and_context_stays_an_error() -> None:
+    from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler
+
+    handler = GenerateSeedHandler()
+    result = await handler.handle({})
+
+    assert result.is_err
+    assert "session_id is required" in str(result.error)

@@ -187,13 +187,22 @@ class GooseCliRuntime(CodexCliRuntime):
         Goose does not have an equivalent flag; the base completion path falls
         back to the last streamed assistant/result content.
         """
-        self._assert_cli_executable_identity_unchanged()
+        self._reconcile_cli_executable_identity()
+        requested_resume_session_id = resume_session_id
+        resume_session_id = self._drift.retire_resume(resume_session_id, runtime_handle)
         del output_last_message_path, prompt
 
+        # A retired resume target must not leak back in as the ``-n`` name:
+        # that would address the pre-drift session under the new inputs.
+        resume_retired = requested_resume_session_id is not None and resume_session_id is None
         session_name = (
             resume_session_id
-            or (runtime_handle.native_session_id if runtime_handle is not None else None)
-            or self._derive_session_name(runtime_handle)
+            or (
+                runtime_handle.native_session_id
+                if runtime_handle is not None and not resume_retired
+                else None
+            )
+            or self._derive_session_name(runtime_handle, drift_epoch=self._drift.epoch)
             or f"ouroboros-{uuid4().hex[:12]}"
         )
         command = [
@@ -217,7 +226,9 @@ class GooseCliRuntime(CodexCliRuntime):
 
         return command
 
-    def _derive_session_name(self, runtime_handle: RuntimeHandle | None) -> str | None:
+    def _derive_session_name(
+        self, runtime_handle: RuntimeHandle | None, *, drift_epoch: int | None = None
+    ) -> str | None:
         """Derive a stable Goose name for an AC-scoped pre-session handle.
 
         The executor seeds runtime handles with exact logical-attempt metadata
@@ -225,6 +236,11 @@ class GooseCliRuntime(CodexCliRuntime):
         not echo the ``-n`` name in current stream-json output, so both command
         construction and event normalization must be able to recover the same
         name independently.
+
+        Goose resolves ``--resume`` by *name* and ``goose run -n`` happily
+        creates a second session under an existing name, so a thread retired
+        by drift must not share its name with the one launched after it: the
+        admitted drift epoch is folded into the name once it is non-zero.
         """
         if runtime_handle is None:
             return None
@@ -232,13 +248,16 @@ class GooseCliRuntime(CodexCliRuntime):
             value = runtime_handle.metadata.get(key)
             if isinstance(value, str) and value.strip():
                 material = f"{self._cwd}\0{key}\0{value.strip()}".encode()
-                return f"ouroboros-{hashlib.sha256(material).hexdigest()[:12]}"
+                name = f"ouroboros-{hashlib.sha256(material).hexdigest()[:12]}"
+                return f"{name}-g{drift_epoch}" if drift_epoch else name
         return None
 
     def _build_runtime_handle(
         self,
         session_id: str | None,
         current_handle: RuntimeHandle | None = None,
+        *,
+        drift_epoch: int | None = None,
     ) -> RuntimeHandle | None:
         """Build a handle that preserves Ouroboros's generated Goose session name.
 
@@ -250,7 +269,7 @@ class GooseCliRuntime(CodexCliRuntime):
         if generated_session_name:
             session_id = f"ouroboros-{uuid4().hex[:12]}"
 
-        handle = super()._build_runtime_handle(session_id, current_handle)
+        handle = super()._build_runtime_handle(session_id, current_handle, drift_epoch=drift_epoch)
         if handle is None:
             return None
 
@@ -265,7 +284,7 @@ class GooseCliRuntime(CodexCliRuntime):
         self,
         current_handle: RuntimeHandle | None,
     ) -> str | None:
-        if current_handle is None:
+        if current_handle is None or self._drift.handle_predates_drift(current_handle):
             return None
         if current_handle.metadata.get(_GOOSE_INITIAL_LAUNCH_METADATA_KEY) == "pending":
             return None
@@ -397,9 +416,18 @@ class GooseCliRuntime(CodexCliRuntime):
         event_type = self._extract_event_type(event)
         session_id = self._extract_event_session_id(event)
         if session_id is None and current_handle is not None:
-            session_id = self._derive_session_name(current_handle)
+            session_id = self._derive_session_name(
+                current_handle,
+                drift_epoch=item_scope.admitted_drift_epoch if item_scope is not None else None,
+            )
         event_handle = (
-            self._build_runtime_handle(session_id, current_handle) if session_id else current_handle
+            self._build_runtime_handle(
+                session_id,
+                current_handle,
+                drift_epoch=item_scope.admitted_drift_epoch if item_scope is not None else None,
+            )
+            if session_id
+            else current_handle
         )
         if (
             event_handle is not None

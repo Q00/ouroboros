@@ -42,6 +42,7 @@ from ouroboros.auto.ledger import (
     LedgerStatus,
     SeedDraftLedger,
 )
+from ouroboros.core.project_paths import WORKSPACE_STATE_DIR
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ouroboros.auto.state import AutoPipelineState, AutoStore
@@ -494,7 +495,7 @@ def _resolve_out_root(state: AutoPipelineState, out_root: Path | None) -> Path:
     if out_root is not None:
         return Path(out_root)
     base = Path(state.cwd).expanduser() if state.cwd else Path.cwd()
-    return base / ".ouroboros" / "traces" / state.auto_session_id
+    return base / WORKSPACE_STATE_DIR / "traces" / state.auto_session_id
 
 
 async def _run_detached(fn: Callable[[], None]) -> None:

@@ -42,6 +42,16 @@ not require users to acknowledge a new notice.
   durations, tool names, provider details, Python version, frontdoor/onboarding
   attribution, recovery actions, and subagent dispatch data; added daily
   deduplication for retained command and service activity.
+- 2026-10: added `acceptance_no_evidence`, closed-reason counts of criteria a
+  run accepted without evidence from any verifier (see the table below). On
+  by default under the existing opt-outs: closed failure reason codes and
+  counts, the same class of data as `ac_verify_failed`, so not a scope
+  expansion.
+- 2026-10: added `acceptance_artifact_checks`, the closed outcome of each
+  controller-run artifact check (base regression, worker tests) of a decided
+  run, with counts. On by default under the existing opt-outs: closed reason
+  codes and counts of the same class as `acceptance_no_evidence`, so not a
+  scope expansion.
 
 ## How to opt out
 
@@ -87,10 +97,13 @@ use. Each row below is the exact property set accepted by the serializer.
 | `service_active` | The running MCP service receives its first tool request that day | service (`mcp`), runtime_backend, app_version, os, ci, `$insert_id` |
 | `mcp_serve_started` | A host attaches the Ouroboros MCP server — at most one row per user/day/transport | transport (`stdio`/`sse`/`streamable-http`/`unknown`), runtime_backend, app_version, os, ci, `$insert_id` |
 | `subagent_dispatch` | A session used subagent fan-out — at most one row per user/day/phase/fanout_kind | phase (`emitted`/`submitted`/`unknown`), fanout_kind, runtime_backend, app_version, os, ci, `$insert_id` |
-| `command_run` (service=mcp) | A retained lifecycle MCP command succeeds/is accepted, or any MCP command fails/is blocked | command, service, status (`succeeded`, `accepted`, `failed`, `rejected`, `blocked`), error_type (exception failures only), runtime_backend, app_version, os, ci, `$insert_id` |
+| `command_run` (service=mcp) | A retained lifecycle MCP command succeeds/is accepted, or any MCP command fails/is blocked | command, service, status (`succeeded`, `accepted`, `failed`, `rejected`, `blocked`), error_type (exception failures only), origin (`command=seed` only; closed enum, see below), runtime_backend, app_version, os, ci, `$insert_id` |
 | `command_run` (service=cli) | A direct non-internal `ooo <command>` is invoked | command, service (`cli`), status (`invoked`), app_version, os, ci, `$insert_id` |
-| `workflow_outcome` | A background workflow or direct evaluation reaches a terminal result inside Ouroboros | command, terminal_status, verified, failure_reason_code (non-success only), runtime_backend, app_version, os, ci, `$insert_id` |
+| `workflow_outcome` | A background workflow, a terminal `ooo run`, or direct evaluation reaches a terminal result inside Ouroboros (a paused run is not terminal and emits nothing) | command, terminal_status, verified, failure_reason_code (non-success only), failure_cause (non-success `run` only; closed enum, see below), runtime_backend, app_version, os, ci, `$insert_id` |
+| `runtime_drift` | A frozen runtime authority input (Codex config, CLI executable, dispatch registry, profile routing) is observed to have changed after the runtime initialized; the run continues on the re-baselined input | kind (closed enum: `codex_config`/`cli_executable`/`skill_dispatcher`/`mcp_handler_registry`/`skill_dispatch_registry`/`profile_routing`/`baseline_unavailable`/`attestation_timeout`/`unknown`), runtime_backend, app_version, os, ci |
 | `ac_verify_failed` | The orchestrator's deterministic AC verify gate rejects an attempt (`run_verify_commands` enabled) | cause (closed enum: `invalid_contract`/`artifacts_missing`/`artifacts_missing_found_elsewhere`/`environment_unverifiable`/`timeout`/`exit_nonzero`/`output_assertion_unmatched`/`workspace_mutated`/`unknown`), runtime_backend, app_version, os, ci |
+| `acceptance_no_evidence` | A terminal `ooo run`, MCP `execute_seed` run, or evolve generation whose acceptance the check package authority reconciled, when that decision accepted at least one criterion that no verifier had evidence for (the check package did not decide it and the legacy verifier had no evidence); at most one row per run, none when every accepted criterion had evidence. The acceptance itself is unchanged | `pair_<package_reason>__<replay_reason>` (integer count per reason pair; only non-zero pairs are sent; both reasons are closed enums, see below), criterion_count, no_evidence_count, verification_coverage (`full`/`partial`/`low`/`unknown`), surface (`cli_run`/`mcp_execute`/`evolve`/`unknown`), check_package (`on`/`off`/`unknown`), check_package_status (`admitted`/`construction_failed`/`rejected`/`not_run`/`unknown`), runtime_backend (a shipped runtime backend name, else `unknown`), app_version, os, ci |
+| `acceptance_artifact_checks` | A terminal `ooo run`, MCP `execute_seed` run, or evolve generation whose acceptance the check package authority reconciled with an artifact check not `off` (`boundary.base_regression`, `boundary.worker_test_gate`); at most one row per run. It reports what the checks observed and decides nothing | base_regression and worker_tests (each a closed enum: `rejected`/`exempted`/`passed`/`timeout`/`base_runner_crash`/`no_selected_files`/`unsupported_runner`/`not_a_test_result`/`unavailable`/`imported_outside_copy`/`not_run`/`no_admitted_command`/`unconfirmed`/`unknown`, see below), base_regression_mode and worker_test_gate_mode (`decide`/`record`/`off`/`unknown`), base_regression_effect and worker_tests_effect (`decided`/`recorded`/`regression_unadjudicated`/`none`/`unknown`), would_fail_criteria, exemption (`applied`/`none_inside`/`no_passing_oracle`/`mass_breakage`/`no_changed_function`/`no_oracle_footprint`/`change_outside_functions`/`unknown`, only when a base regression was found), exempted_tests, failed_criteria, criterion_count, repairs, surface (`cli_run`/`mcp_execute`/`evolve`/`unknown`), runtime_backend (a shipped runtime backend name, else `unknown`), app_version, os, ci |
 
 Notes:
 
@@ -103,6 +116,13 @@ Notes:
   removed. `mcp_serve_started` is the top of the activation funnel ("MCP
   attached"), distinct from `service_active` ("made a tool request").
 
+- `origin` on a `command=seed` row names which entrance produced the row:
+  `interview` (a completed interview session), `session_context` (the
+  interview-less path crystallized a Seed from session-settled material), or
+  `session_context_gap` (the interview-less path returned gap questions
+  instead of a Seed). It answers one adoption question — is the
+  interview-less path used, and does it close — and carries none of the
+  goal, criteria, or question text. Any other value is dropped.
 - `cause` on `ac_verify_failed` names which structural branch of the
   deterministic verify gate rejected the attempt — e.g.
   `artifacts_missing_found_elsewhere` means the expected artifact exists in
@@ -112,6 +132,66 @@ Notes:
   stay in the local event store (`execution.verify.failed`), which also
   records `verify_cause` and the local-only `verify_cwd` for per-session
   debugging.
+- `acceptance_no_evidence` counts why a run accepted criteria without
+  evidence, so coverage can be improved where it is missing. It is on by
+  default, under every opt-out above (`DO_NOT_TRACK`, `OUROBOROS_TELEMETRY=0`,
+  `telemetry.enabled: false`). It is not a scope expansion and needs no fresh
+  notice: it sends only closed-enum verification reason codes and counts,
+  the same class of data as the default-on `ac_verify_failed` event and
+  within the "failure reason codes" the privacy contract already names. `package_reason`
+  says why the check package did not decide the criterion: `uncovered` (no
+  admitted check is linked to it), `no_admitted_package` (the run was decided
+  with no admitted package), `no_binding`, `no_binding_after_request`,
+  `no_binding_budget_exhausted` (no binding reaches the target),
+  `script_check_advisory` (only model-written script checks passed),
+  `no_held_out_case` (no reproduction oracle passed a held-out case the base
+  failed), `no_reproduction_check` (only preservation checks passed), or
+  `unknown`. `replay_reason` says why the legacy verifier had no evidence:
+  `environment_unverifiable`, `transcript_unavailable`,
+  `script_absent_from_artifact`, `no_call_evidence` (no transcript call the
+  worker cited qualified as evidence), `no_verifier_verdict`,
+  `verifier_verdict_not_passed`, `no_legacy_record`, or `unknown`. Both are
+  read from the product's typed decision state, never from text, and anything
+  else folds to `unknown` before serialization. The event never carries a
+  criterion, check, binding, path, or identifier. A run whose check package
+  was off, or not consulted by its execution path, is not reconciled, so it
+  sends no row; nor is one with no admitted package while
+  `boundary.base_regression` is off (with it on, such a run is reconciled for
+  the artifact checks, and its criteria report `no_admitted_package`).
+- `acceptance_artifact_checks` reports, for each controller-run artifact
+  check (`base_regression`: the base tree's existing tests that pair with or
+  import a changed module; `worker_tests`: the test files the worker added),
+  whether it decided (`rejected`: it failed the criteria the check package
+  left undecided), ran and found nothing (`passed`), or had no observation
+  and why: `timeout`, `base_runner_crash` (the runner wrote no report on the
+  base), `no_selected_files`, `unsupported_runner` (no command can run the
+  selected test files), `no_admitted_command` (commands exist, but none passed
+  admission on the base: passing there twice and failing when the file is
+  broken), `unconfirmed` (a failure whose rerun gave no result for it), `not_a_test_result` (an added test file's run exited with
+  neither 0 nor 1), `unavailable` (the sandbox, the pinned interpreter or
+  the base snapshot refused the run), or `imported_outside_copy` (a changed
+  module was imported from outside the run's copy, such as an editable
+  install of the live workspace). `failed_criteria` counts the criteria
+  the checks failed in the final decision and `repairs` the attempts they
+  sent back to the worker. `exemption` says how the footprint exemption
+  treated a base regression (`applied`: some regressed tests reached changed
+  functions, all of which a passing admitted oracle also reached;
+  `none_inside`; `no_passing_oracle`; `mass_breakage`: more than 20 tests
+  regressed; `no_changed_function`: the change touched no function;
+  `no_oracle_footprint`: the passing oracles entered no changed function;
+  `change_outside_functions`: the change also touched module or class level
+  code, a deleted function or a removed import) and
+  `exempted_tests` how many it set aside; `exempted` as the outcome means
+  every regression was set aside, so the check decided nothing. Each check's
+  mode is reported with what its finding did: `decided` (it failed
+  criteria), `recorded` (record mode: it would have decided),
+  `regression_unadjudicated` (decide mode with no admitted package: a
+  regression was found, the worker was told once, and the criteria stayed
+  unverified), or `none`; `would_fail_criteria` counts the criteria the
+  findings that did not decide would have failed. On by default under every opt-out above, for the
+  same reason as `acceptance_no_evidence`. It never carries a test name, file,
+  path, criterion, or identifier; outcomes come from the product's typed
+  state and anything else folds to `unknown`.
 - `ref` is one of `direct`, `readme`, `readme-hero`, `readme-ko`,
   `readme-hero-ko`, `readme-zh`, `readme-hero-zh`, or `docs-getting-started`.
   Every other value folds to `direct` before serialization.
@@ -129,6 +209,25 @@ Notes:
 - `error_type` is only an audited exception class name, never a message or
   traceback. `failure_reason_code` is one of `config`, `auth`, `timeout`,
   `model`, `tool`, `validation`, `cancelled`, or `unknown`.
+- `failure_cause` on a failed/cancelled `run` names which structural branch
+  failed the run, derived only from the executor's durable machine-readable
+  evidence (never prose, commands, paths, or output). Closed enum:
+  `verify_<cause>` (the `ac_verify_failed` cause that rejected the run at
+  final settlement or exhausted an AC's retries), `worker_evidence_missing`,
+  `worker_fabrication_suspected`, `worker_blocked`, `worker_failed` (an AC was
+  judged not done and no retry budget or route remained), `dependency_blocked`
+  (every judged AC was blocked upstream), `runtime_error` (the orchestrator
+  raised an audited exception class), `launch_<branch>` (the run was rejected
+  before any executor evidence existed: `launch_workspace_unavailable`,
+  `launch_seed_invalid`, `launch_resume_blocked`, `launch_config_error`,
+  `launch_prepare_failed`, `launch_rejected`), `cancelled`, or `unknown`.
+  Anything else folds to `unknown` before serialization. A job that fails
+  before its work function returns (pre-launch rejection, or a run whose
+  terminal is recovered from linked execution evidence after a restart)
+  carries the same closed values; a background `evaluate` job that fails
+  carries only the branch-level `failure_reason_code` its handler already
+  reports on the direct path (`validation`/`config`/`auth`/`timeout`/`model`),
+  never a `failure_cause`.
 - `command` values come only from static built-in command/tool/job registries.
 - `$insert_id` on `command_run` and `service_active` is a SHA-256 digest of the
   anonymous ID, UTC day, event, and retained dimensions. Job-derived
@@ -163,6 +262,11 @@ Collection is triggered only at these audited call sites:
   `EvaluateHandler.handle()` (direct `ouroboros_evaluate`) and
   `ChecklistVerifyHandler`'s nested multi-AC delegation; suppresses it when
   the same handler runs behind the job-backed `ouroboros_start_evaluate` path;
+- [`src/ouroboros/boundary/run_control.py`](src/ouroboros/boundary/run_control.py):
+  once per decided run, the `acceptance_no_evidence` counts
+  ([`src/ouroboros/boundary/no_evidence.py`](src/ouroboros/boundary/no_evidence.py))
+  and the `acceptance_artifact_checks` outcomes
+  ([`src/ouroboros/boundary/base_regression.py`](src/ouroboros/boundary/base_regression.py));
 - [`scripts/install.sh`](scripts/install.sh) — successful install completion.
   [`scripts/install.ps1`](scripts/install.ps1), the Windows installer, emits
   neither `install_started` nor `install_completed`. The `ouroboros setup`

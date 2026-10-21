@@ -722,8 +722,24 @@ def attach_question_advisory(
     )
 
 
+def required_advisory_personas(tool_name: str) -> frozenset[str]:
+    """Return the lateral personas one tool's required advisory lanes run.
+
+    Those lanes run on every question the tool shows, so a caller adding its own
+    lateral review on the same turn can skip these personas instead of paying
+    for them twice.
+    """
+    lanes = _tool_advisory_catalog(tool_name).get("lanes", [])
+    return frozenset(
+        str(lane["persona"])
+        for lane in lanes
+        if isinstance(lane, Mapping) and lane.get("required") and lane.get("persona")
+    )
+
+
 __all__ = [
     "attach_question_advisory",
     "build_question_advisory_request",
     "build_question_advisory_subagents",
+    "required_advisory_personas",
 ]

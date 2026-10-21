@@ -97,6 +97,8 @@ def test_built_wheel_preserves_packaging_contracts(tmp_path: Path) -> None:
             f"Missing: {sorted(missing)}. Wheel ships: {sorted(present_set)}"
         )
 
+        assert "ouroboros/skills/maintain/SKILL.md" not in names
+
         metadata_paths = [name for name in names if name.endswith(".dist-info/METADATA")]
         assert len(metadata_paths) == 1, f"expected one METADATA file, got {metadata_paths}"
         metadata = Parser().parsestr(archive.read(metadata_paths[0]).decode("utf-8"))

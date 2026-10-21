@@ -282,6 +282,21 @@ independently-verifiable units.
 - `orchestrator/decomposition_params.py` - Profile-driven decomposition prompts (axis / `min_unit` / branching)
 - `orchestrator/runner.py` - Orchestration entry point and dependency analysis
 
+**Dependency planning:**
+
+For dependency-analyzed AC execution, the analyzer combines structured constraints
+with inferred edges and computes deterministic topological levels. A cycle in the
+resulting graph returns `Result.err(DependencyCycleError)`, including the blocked
+AC indices (which may also contain downstream dependents). The runner must not
+replace this error with an independent parallel plan: it records the planning
+failure through its existing session failure path before dispatching any workers.
+Direct planner callers receive the same `ExecutionPlanningError`-compatible error.
+
+Cycle detection does not add model calls or attempt automatic graph repair.
+Ordinary provider or response-parsing failures still use the existing structured
+fallback, which is checked for cycles too. Explicit sequential execution and
+reuse of a persisted resume plan retain their existing behavior.
+
 **Recursive Decomposition:**
 
 Each AC defaults to **atomic** execution. Preflight splitting is retired: a split
@@ -352,12 +367,13 @@ Three-stage progressive evaluation ensures quality while minimizing cost.
 1. **Mechanical ($0)** — Lint, build, test, static analysis, coverage (threshold: 70%)
    - Auto-detects project language from marker files (e.g., `uv.lock` → Python/uv, `Cargo.toml` → Rust, `go.mod` → Go, `package-lock.json` → Node). Supported: Python, Rust, Go, Zig, Node (npm/pnpm/bun/yarn).
    - Projects can override or extend commands via `.ouroboros/mechanical.toml`. Overrides are validated against an executable allowlist for security in CI/CD environments.
-   - If no language is detected, Stage 1 checks are skipped and evaluation proceeds to Stage 2.
+   - If no command is configured, Stage 1 checks are skipped and evaluation proceeds to Stage 2, but a skipped check is not evidence: the result is unverified, never approved.
    - If any check fails → pipeline stops, returns failure
+   - Stage 1 is the only stage that can grant acceptance: approval requires at least one executed check and every check passing.
 2. **Semantic ($$)** — AC compliance, goal alignment, drift, uncertainty scoring
-   - If score >= 0.8 and no trigger → approved without consensus
+   - Advisory: non-compliance, a score below 0.8, or reward-hacking risk >= 0.7 withholds approval; a favorable review grants nothing on its own and is attached as feedback
    - Uses Standard tier model (temperature: 0.2)
-3. **Consensus ($$$)** — Multi-model voting, only when triggered by 1 of 6 conditions
+3. **Consensus ($$$)**: Multi-model voting, only when triggered by 1 of 6 conditions; advisory like Stage 2 (a rejection withholds, an approval cannot lift a Stage 2 block or grant acceptance)
    - Simple mode: 3 models vote (GPT-4o, Claude Sonnet 4, Gemini 2.5 Pro), 2/3 majority required
    - Deliberative mode: Advocate/Devil's Advocate/Judge roles with ontological questioning
 
@@ -559,10 +575,21 @@ worker transports; the remaining entries are user-selectable runtimes.
 | `opencode` | `OpenCodeRuntime` | `opencode_cli` | `src/ouroboros/orchestrator/opencode_runtime.py` |
 | `goose` | `GooseCliRuntime` | `goose_cli` | `src/ouroboros/orchestrator/goose_runtime.py` |
 | `pi` | `PiRuntime` | `pi_cli` | `src/ouroboros/orchestrator/pi_runtime.py` |
+| `omp` | `OmpRuntime` | `omp_cli` | `src/ouroboros/orchestrator/omp_runtime.py` |
 | `gjc` | `GjcRuntime` | `gajae-code`, `gajae_code` | `src/ouroboros/orchestrator/gjc_runtime.py` |
 | `antigravity` | `AntigravityCLIRuntime` | `agy` | `src/ouroboros/orchestrator/antigravity_cli_runtime.py` |
 | `grok` | `GrokCliRuntime` | `grok_cli`, `grok_build` | `src/ouroboros/orchestrator/grok_cli_runtime.py` |
 | `host` | Host-dispatch runtime bridge | `host_dispatch` | `src/ouroboros/orchestrator/host_dispatch.py` |
+
+`PiRuntime` and `OmpRuntime` drive their CLIs in JSON mode with skill dispatch,
+session resumption, and JSONL event normalization. For LLM-only flows such as
+interview and seed extraction, `PiLLMAdapter`
+(`src/ouroboros/providers/pi_llm_adapter.py`) and `OmpLLMAdapter`
+(`src/ouroboros/providers/omp_llm_adapter.py`) provide structured responses
+through prompt instructions and adapter-side extraction/validation; these
+CLIs have no native `--output-schema` flag. `CopilotCliLLMAdapter`
+(`src/ouroboros/providers/copilot_cli_adapter.py`) provides the Copilot LLM
+surface, including live model discovery and model-name normalization.
 
 > Each runtime has different tool sets, permission models, and streaming
 > semantics. Ouroboros normalizes these differences at the adapter boundary,
@@ -629,4 +656,4 @@ For environment variables, `config.yaml` schema, and all configuration options, 
 ---
 
 > For install instructions and first-run onboarding, see **[Getting Started](getting-started.md)**.
-> For backend-specific configuration, see the [Claude Code](runtime-guides/claude-code.md), [Codex CLI](runtime-guides/codex.md), [OpenCode](runtime-guides/opencode.md), [Hermes](runtime-guides/hermes.md), [Gemini](runtime-guides/gemini.md), [Kiro CLI](runtime-guides/kiro.md), [GitHub Copilot CLI](runtime-guides/copilot.md), and [Pi CLI](runtime-guides/pi.md) references.
+> For backend-specific configuration, see the [Claude Code](runtime-guides/claude-code.md), [Codex CLI](runtime-guides/codex.md), [OpenCode](runtime-guides/opencode.md), [Hermes](runtime-guides/hermes.md), [Gemini](runtime-guides/gemini.md), [Kiro CLI](runtime-guides/kiro.md), [GitHub Copilot CLI](runtime-guides/copilot.md), [Pi CLI](runtime-guides/pi.md), and [OMP CLI](runtime-guides/omp.md) references.

@@ -229,7 +229,7 @@ class GrokCliRuntime(CodexCliRuntime):
         - ``--permission-mode`` forwards the resolved non-blocking mode.
         - ``-m`` is forwarded only for an explicit, non-sentinel model id.
         """
-        self._assert_cli_executable_identity_unchanged()
+        self._reconcile_cli_executable_identity()
         del output_last_message_path, resume_session_id, runtime_handle, reasoning_effort
 
         command = [

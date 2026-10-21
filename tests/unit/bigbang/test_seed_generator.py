@@ -352,6 +352,7 @@ class TestSeedGeneratorAmbiguityGating:
 
             assert result.is_ok
             assert isinstance(result.value, Seed)
+            assert result.value.metadata.gate_forced is False
 
     @pytest.mark.asyncio
     async def test_generate_requires_summary_for_large_initial_context(self) -> None:
@@ -415,6 +416,7 @@ class TestSeedGeneratorAmbiguityGating:
             assert isinstance(result.value, Seed)
             # Provenance: forced seeds carry the real (high) score, not a fabricated one.
             assert result.value.metadata.ambiguity_score == 0.5
+            assert result.value.metadata.gate_forced is True
 
     @pytest.mark.asyncio
     async def test_generate_with_force_bypasses_just_above_threshold(self) -> None:
@@ -2698,6 +2700,24 @@ class TestSeedGeneratorErrorHandling:
 class TestSeedGeneratorRobustParsing:
     """Test SeedGenerator handles non-ideal LLM responses."""
 
+    def test_parse_response_with_cli_timestamp_prefix(self) -> None:
+        """A wall-clock prefix on the GOAL line does not drop the goal field."""
+        generator = SeedGenerator(llm_adapter=AsyncMock())
+        response = "[13:57:34] " + create_valid_extraction_response(goal="Stamped goal")
+
+        requirements = generator._parse_extraction_response(response)
+
+        assert requirements["goal"] == "Stamped goal"
+
+    def test_parse_response_keeps_mid_line_bracket_timestamp(self) -> None:
+        """Only a line-leading stamp is stripped; values keep their brackets."""
+        generator = SeedGenerator(llm_adapter=AsyncMock())
+        response = create_valid_extraction_response(goal="Ship by [13:57:34] sharp")
+
+        requirements = generator._parse_extraction_response(response)
+
+        assert requirements["goal"] == "Ship by [13:57:34] sharp"
+
     @pytest.mark.asyncio
     async def test_parse_response_with_conversational_preamble(self) -> None:
         """Parser handles LLM response with prose before structured output."""
@@ -3870,3 +3890,90 @@ class TestVerifyExemptionParsing:
                     ]
                 )
             )
+
+
+class TestExamplesAndAssumptionsContract:
+    """Guesses and issue examples go to ASSUMPTIONS, never to binding fields."""
+
+    @staticmethod
+    def _generator(tmp_dir: str) -> SeedGenerator:
+        return SeedGenerator(llm_adapter=AsyncMock(), output_dir=Path(tmp_dir) / "seeds")
+
+    def test_both_extraction_prompts_state_the_example_and_assumption_rules(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = self._generator(tmp_dir)
+            prompts = (
+                generator._build_extraction_user_prompt("Q: goal?\nA: build a thing"),
+                generator._build_retry_prompt("Q: goal?", "bad", "parse error"),
+            )
+
+        for prompt in prompts:
+            assert "ACCEPTANCE_CRITERIA example rule:" in prompt
+            assert "not an exact-output contract" in prompt
+            assert "ASSUMPTIONS rule:" in prompt
+            assert 'ASSUMPTIONS: ["<assumption 1>", ...]' in prompt
+
+    def test_seed_architect_prompt_states_the_example_rule(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            system_prompt = self._generator(tmp_dir)._build_extraction_system_prompt()
+
+        assert "Examples are not exact-output contracts" in system_prompt
+        assert "### 2b. ASSUMPTIONS" in system_prompt
+        assert "[assumption withheld" in system_prompt
+
+    def test_assumptions_field_is_parsed_into_seed_assumptions(self) -> None:
+        response = "\n".join(
+            [
+                "GOAL: Print Max(x, 2) in Mathematica syntax",
+                'CONSTRAINTS: ["Keep the public mathematica_code() signature"]',
+                "ASSUMPTIONS: [\"Arguments keep the order 'x, 2' from the issue example\"]",
+                'ACCEPTANCE_CRITERIA: [{"description": "mathematica_code(Max(x, 2)) prints '
+                'Max with square brackets", "verify": "NONE", "artifacts": "NONE", '
+                '"expect": "NONE", "exempt": "covered by the project test suite"}]',
+                "ONTOLOGY_NAME: Printer",
+                "ONTOLOGY_DESCRIPTION: Mathematica printer",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = self._generator(tmp_dir)
+            requirements = generator._parse_extraction_response(response)
+            seed = generator._build_seed(requirements, SeedMetadata(interview_id="i"))
+
+        assert seed.assumptions == ("Arguments keep the order 'x, 2' from the issue example",)
+        assert seed.constraints == ("Keep the public mathematica_code() signature",)
+
+    def test_missing_assumptions_field_yields_no_assumptions(self) -> None:
+        response = "\n".join(
+            [
+                "GOAL: g",
+                'CONSTRAINTS: ["c"]',
+                'ACCEPTANCE_CRITERIA: [{"description": "d", "verify": "true", '
+                '"artifacts": "NONE", "expect": "NONE"}]',
+                "ONTOLOGY_NAME: n",
+                "ONTOLOGY_DESCRIPTION: d",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = self._generator(tmp_dir)
+            seed = generator._build_seed(
+                generator._parse_extraction_response(response), SeedMetadata(interview_id="i")
+            )
+
+        assert seed.assumptions == ()
+
+
+def test_seed_prompts_offer_no_bare_full_suite_verify_fallback() -> None:
+    """A bare ``python -m pytest -q`` fails on any work, so no prompt may suggest it."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        generator = SeedGenerator(llm_adapter=AsyncMock(), output_dir=Path(tmp_dir) / "seeds")
+        prompts = (
+            generator._build_extraction_user_prompt("Q: goal?\nA: build a thing"),
+            generator._build_retry_prompt("Q: goal?", "bad", "parse error"),
+            generator._build_extraction_system_prompt(),
+        )
+
+    for prompt in prompts:
+        assert "or `python -m pytest -q` instead" not in prompt
+        assert '"verify": "python -m pytest -q"' not in prompt
+        assert "and use `python -m pytest -q`." not in prompt
+        assert "bare whole-suite command" in prompt

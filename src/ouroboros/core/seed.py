@@ -253,6 +253,36 @@ def validate_ac_success_contract_values(
         )
 
 
+class RequesterAnswer(BaseModel, frozen=True):
+    """A question the requester answered, quoted verbatim.
+
+    Attributes:
+        question: The interview question the requester was asked.
+        answer: The requester's answer, word for word.
+    """
+
+    question: str
+    answer: str = Field(..., min_length=1)
+
+
+class RepoFact(BaseModel, frozen=True):
+    """A question ``ooo auto`` answered by reading the repository, quoted verbatim.
+
+    Every evidence span was checked against the workspace: the file is inside
+    it and the quote occurs in the cited lines. A repo fact describes the code
+    as it is; it is not a requirement.
+
+    Attributes:
+        question: The interview question.
+        answer: The answer read from the code, word for word.
+        evidence: Checked spans, each ``path:start-end: quote``.
+    """
+
+    question: str
+    answer: str = Field(..., min_length=1)
+    evidence: tuple[str, ...] = ()
+
+
 class ExitCondition(BaseModel, frozen=True):
     """Defines when the workflow should terminate.
 
@@ -384,6 +414,9 @@ class SeedMetadata(BaseModel, frozen=True):
         version: Schema version for forward compatibility.
         created_at: When this seed was generated.
         ambiguity_score: The ambiguity score at generation time.
+        gate_forced: Whether Gen-1 generation bypassed the ambiguity gate with
+            ``force=True``. ``None`` means the historical or non-Gen-1 path
+            did not record a gate decision.
         interview_id: Reference to the source interview.
         generation_mode: Provenance label for how the Seed was synthesized.
             ``"normal"`` is the legacy ledger-complete path; degraded recovery
@@ -419,6 +452,7 @@ class SeedMetadata(BaseModel, frozen=True):
     version: str = Field(default="1.0.0")
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     ambiguity_score: float = Field(default=0.15, ge=0.0, le=1.0)
+    gate_forced: bool | None = Field(default=None)
     interview_id: str | None = Field(default=None)
     parent_seed_id: str | None = Field(default=None)
     generation_mode: str = Field(default=_DEFAULT_GENERATION_MODE, min_length=1)
@@ -463,13 +497,14 @@ class SeedMetadata(BaseModel, frozen=True):
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        """Serialize additively: omit ``decision_provenance`` when empty.
+        """Serialize additively: omit unset provenance fields.
 
-        Keeps legacy Seed JSON byte-identical after a round-trip (the histogram
-        is only present for ledger-synthesized seeds) while still emitting it
-        whenever an auto ledger populated it.
+        Keeps legacy Seed JSON byte-identical after a round-trip while still
+        emitting gate and ledger provenance whenever it is known.
         """
         data = handler(self)
+        if self.gate_forced is None:
+            data.pop("gate_forced", None)
         if not self.decision_provenance:
             data.pop("decision_provenance", None)
         return data
@@ -641,7 +676,7 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
         if isinstance(value, list | tuple | set):
             if any(not isinstance(item, str) for item in value):
                 raise ValueError("expected_artifacts entries must be strings")
-            artifacts = tuple(value)
+            artifacts = tuple(sorted(value)) if isinstance(value, set) else tuple(value)
             if any(
                 not artifact
                 or any(ord(character) < 32 or ord(character) == 127 for character in artifact)
@@ -775,6 +810,15 @@ class Seed(BaseModel, frozen=True):
         goal: The primary objective of the workflow.
         constraints: Hard constraints that must be satisfied.
         acceptance_criteria: Specific criteria for success.
+        assumptions: Unconfirmed guesses made on the requester's behalf. They
+            never bind: the worker sees them as assumptions it may override when
+            the task or the code says otherwise.
+        requester_answers: Questions the requester answered, with the answer
+            quoted verbatim. Confirmed facts the worker must follow, never
+            rewritten into constraints or criteria.
+        repo_facts: Questions auto answered from the repository, with the
+            answer and its checked evidence quoted verbatim. They describe the
+            current code and are never rewritten into constraints or criteria.
         ontology_schema: Conceptual lens for workflow coherence.
         evaluation_principles: Principles for evaluating outputs.
         exit_conditions: Conditions for terminating the workflow.
@@ -840,6 +884,27 @@ class Seed(BaseModel, frozen=True):
     acceptance_criteria: tuple[AcceptanceCriterionSpec, ...] = Field(
         default_factory=tuple,
         description="Specific criteria for success evaluation",
+    )
+    assumptions: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Non-binding assumptions nobody confirmed; the worker may override them "
+            "when the task or the code says otherwise"
+        ),
+    )
+    requester_answers: tuple[RequesterAnswer, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Questions the requester answered, with the answer quoted verbatim; "
+            "confirmed facts the worker must follow"
+        ),
+    )
+    repo_facts: tuple[RepoFact, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Questions answered from the repository, with the answer and its checked "
+            "evidence quoted verbatim; they describe the current code, not requirements"
+        ),
     )
 
     # Conceptual lens
@@ -1007,7 +1072,16 @@ class Seed(BaseModel, frozen=True):
             Dictionary representation of the seed.
         """
         extra = self.model_extra or {}
-        data = self.model_dump(mode="json", by_alias=True, exclude=set(extra))
+        excluded = set(extra)
+        # Omit an empty assumptions list so a Seed without assumptions keeps
+        # serializing exactly as it did before the field existed.
+        if not self.assumptions:
+            excluded.add("assumptions")
+        if not self.requester_answers:
+            excluded.add("requester_answers")
+        if not self.repo_facts:
+            excluded.add("repo_facts")
+        data = self.model_dump(mode="json", by_alias=True, exclude=excluded)
         data.update({key: _thaw_seed_extra_value(value) for key, value in extra.items()})
         return data
 

@@ -231,6 +231,10 @@ class ExecutionPlanningError(Exception):
     """Raised when dependency analysis cannot produce safe execution stages."""
 
 
+class DependencyCycleError(DependencyAnalysisError, ExecutionPlanningError):
+    """A cyclic graph cannot be scheduled or replaced by an independent fallback."""
+
+
 DEPENDENCY_ANALYSIS_PROMPT = """Analyze the following acceptance criteria and determine their dependencies.
 
 Acceptance Criteria:
@@ -389,23 +393,21 @@ class DependencyAnalyzer:
         self,
         acceptance_criteria: Sequence[AcceptanceCriterionInput] | Sequence[ACDependencySpec],
     ) -> Result[DependencyGraph, DependencyAnalysisError]:
-        """Analyze AC dependencies and return a graph with execution levels."""
+        """Return execution levels, or a cycle error without discarding dependency edges."""
         specs = self._normalize_specs(acceptance_criteria)
         count = len(specs)
 
         log.info("dependency_analyzer.analysis.started", ac_count=count)
 
-        if count <= 1:
-            nodes = tuple(ACNode(index=spec.index, content=spec.content) for spec in specs)
-            levels = ((specs[0].index,),) if specs else ()
-            return Result.ok(DependencyGraph(nodes=nodes, execution_levels=levels))
+        if count == 0:
+            return Result.ok(DependencyGraph(nodes=(), execution_levels=()))
 
         structured_dependencies, serialization_reasons = self._analyze_structured_dependencies(
             specs
         )
 
         dependencies = {index: set(values) for index, values in structured_dependencies.items()}
-        if self._llm is not None:
+        if self._llm is not None and count > 1:
             try:
                 llm_dependencies = await self._analyze_with_llm(
                     tuple(spec.content for spec in specs)
@@ -424,7 +426,10 @@ class DependencyAnalyzer:
             method = "structured_only"
 
         nodes = self._build_nodes(specs, dependencies, serialization_reasons)
-        levels = _apply_serial_only_constraints(_compute_execution_levels(nodes), nodes)
+        try:
+            levels = _apply_serial_only_constraints(_compute_execution_levels(nodes), nodes)
+        except DependencyCycleError as exc:
+            return Result.err(exc)
         graph = DependencyGraph(nodes=nodes, execution_levels=levels)
 
         log.info(
@@ -469,7 +474,7 @@ class DependencyAnalyzer:
         for spec in specs:
             for raw_reference in spec.prerequisites:
                 resolved = self._resolve_reference(raw_reference, key_to_index, len(specs))
-                if resolved is None or resolved == spec.index:
+                if resolved is None:
                     continue
                 dependencies[spec.index].add(resolved)
                 reasons[spec.index].append(f"prerequisite AC {resolved + 1}")
@@ -478,7 +483,7 @@ class DependencyAnalyzer:
                 raw_value = spec.metadata.get(metadata_key)
                 for raw_reference in _coerce_reference_list(raw_value):
                     resolved = self._resolve_reference(raw_reference, key_to_index, len(specs))
-                    if resolved is None or resolved == spec.index:
+                    if resolved is None:
                         continue
                     dependencies[spec.index].add(resolved)
                     reasons[spec.index].append(f"metadata dependency on AC {resolved + 1}")
@@ -486,14 +491,14 @@ class DependencyAnalyzer:
             for context_name, context in _iter_dependency_contexts(spec):
                 for raw_reference in _collect_context_dependency_references(context):
                     resolved = self._resolve_reference(raw_reference, key_to_index, len(specs))
-                    if resolved is None or resolved == spec.index:
+                    if resolved is None:
                         continue
                     dependencies[spec.index].add(resolved)
                     reasons[spec.index].append(f"{context_name} dependency on AC {resolved + 1}")
 
                 for raw_reference in _collect_context_shared_prerequisites(context):
                     resolved = self._resolve_reference(raw_reference, key_to_index, len(specs))
-                    if resolved is None or resolved == spec.index:
+                    if resolved is None:
                         continue
                     dependencies[spec.index].add(resolved)
                     reasons[spec.index].append(
@@ -584,9 +589,7 @@ class DependencyAnalyzer:
             ac_index = item.get("ac_index", 0)
             raw_dependencies = item.get("depends_on", [])
             valid_dependencies = [
-                dep
-                for dep in raw_dependencies
-                if isinstance(dep, int) and 0 <= dep < len(criteria) and dep != ac_index
+                dep for dep in raw_dependencies if isinstance(dep, int) and 0 <= dep < len(criteria)
             ]
             dependencies[ac_index] = valid_dependencies
 
@@ -675,7 +678,9 @@ def _compute_execution_levels(
                 "dependency_analyzer.circular_dependency_detected",
                 remaining=sorted(remaining),
             )
-            ready = tuple(sorted(remaining))
+            raise DependencyCycleError(
+                f"Circular AC dependencies detected; blocked AC indices: {sorted(remaining)}"
+            )
 
         levels.append(ready)
         for node_index in ready:
@@ -894,6 +899,7 @@ __all__ = [
     "ACSharedRuntimeResource",
     "DependencyAnalysisError",
     "DependencyAnalyzer",
+    "DependencyCycleError",
     "DependencyGraph",
     "ExecutionPlanningError",
     "ExecutionStage",

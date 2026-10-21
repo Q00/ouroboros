@@ -9,12 +9,20 @@ from typing import Any
 
 import structlog
 
+from ouroboros.auto.phase_clock import phase_clock_paused
 from ouroboros.auto.state import AutoPipelineState
+from ouroboros.providers.throttle import (
+    THROTTLE_TOTAL_CEILING_SECONDS,
+    is_throttled,
+    throttle_backoff_seconds,
+)
 
 log = structlog.get_logger(__name__)
 
 _INTERVIEW_TRANSIENT_ATTEMPTS = 3
 _INTERVIEW_TRANSIENT_BACKOFF_SECONDS = (1.0, 5.0)
+# Seam for tests; the throttle wait in ``with_transient_retry``.
+_throttle_sleep = asyncio.sleep
 
 
 @dataclass(frozen=True)
@@ -51,8 +59,19 @@ async def with_transient_retry[T](
     reconcile: Callable[[Exception], Awaitable[T | ReconcileOutcome[T] | None]] | None = None,
     require_reconcile_confirmation: bool = False,
 ) -> T:
-    """Retry one idempotently re-enterable interview backend operation."""
-    for attempt in range(1, _INTERVIEW_TRANSIENT_ATTEMPTS + 1):
+    """Retry one idempotently re-enterable interview backend operation.
+
+    A throttled failure (HTTP 429, ``providers.throttle``) is re-issued after a
+    doubling, capped wait that does not use up a transient attempt, until the
+    waits reach ``THROTTLE_TOTAL_CEILING_SECONDS``. The wait does not count
+    against the interview phase clock or the pipeline deadline
+    (``phase_clock_paused``).
+    """
+    attempt = 0
+    throttled_attempts = 0
+    throttle_waited = 0.0
+    while True:
+        attempt += 1
         try:
             return await with_timeout(
                 make_awaitable(), state, tool_name=tool_name, timeout_seconds=timeout_seconds
@@ -74,14 +93,27 @@ async def with_transient_retry[T](
                     return reconciled
                 elif require_reconcile_confirmation:
                     raise exc
-            if attempt == _INTERVIEW_TRANSIENT_ATTEMPTS:
+            wait = throttle_backoff_seconds(throttled_attempts + 1)
+            if is_throttled(exc) and throttle_waited + wait <= THROTTLE_TOTAL_CEILING_SECONDS:
+                throttled_attempts += 1
+                throttle_waited += wait
+                attempt -= 1
+                log.warning(
+                    "auto.interview.throttle_backoff",
+                    tool_name=tool_name,
+                    wait_seconds=wait,
+                    throttled_attempts=throttled_attempts,
+                )
+                async with phase_clock_paused(state):
+                    await _throttle_sleep(wait)
+                continue
+            if attempt >= _INTERVIEW_TRANSIENT_ATTEMPTS:
                 raise
             backoff = _INTERVIEW_TRANSIENT_BACKOFF_SECONDS[
                 min(attempt - 1, len(_INTERVIEW_TRANSIENT_BACKOFF_SECONDS) - 1)
             ]
             if backoff:
                 await asyncio.sleep(backoff)
-    raise AssertionError("unreachable: loop always returns or raises on last attempt")
 
 
 async def reconcile_persisted_session(backend: Any, session_id: str | None) -> Any | None:

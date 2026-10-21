@@ -34,6 +34,7 @@ from ouroboros.bigbang.interview import (
     prompt_safe_initial_context,
 )
 from ouroboros.bigbang.requirement_distillation import (
+    anchor_promoted_requirements,
     apply_requirement_distillation,
     build_promoted_reference_seed,
     build_requirement_distillation,
@@ -66,6 +67,10 @@ _MAX_EXTRACTION_RETRIES = 1
 _AC_RESERVED_FIELD_NAMES = ("verify", "artifacts", "expect")
 _AC_FIELD_NAME_OBFUSCATORS = frozenset({"'", '"', "\\"})
 _WORD_APOSTROPHE_SUFFIXES = frozenset({"d", "ll", "m", "re", "s", "t", "ve"})
+# Some CLI agents prefix emitted lines with a wall-clock stamp ("[13:57:34] GOAL: ...").
+# It breaks the line-anchored field prefixes, and the preamble scan then drops
+# the whole GOAL line as conversational text.
+_LINE_TIMESTAMP_RE = re.compile(r"^\[\d{2}:\d{2}:\d{2}\]\s*", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -1725,6 +1730,7 @@ class SeedGenerator:
                     state,
                     distillation,
                     ambiguity_score=ambiguity_score.overall_score,
+                    gate_forced=force,
                 )
             )
 
@@ -1744,10 +1750,23 @@ class SeedGenerator:
                 )
             )
         requirements = applied.requirements
+        # Verbatim-anchor backstop (grounded-lateral RFC D6): re-append any
+        # user-committed promoted requirement the LLM extraction dropped or
+        # re-worded. This is the one chokepoint every entry path shares —
+        # interview, auto, and host-context all converge here or on the fully
+        # deterministic builders.
+        requirements, anchored_count = anchor_promoted_requirements(requirements, applied.promotion)
+        if anchored_count:
+            log.info(
+                "seed.generation.anchor_backstop",
+                interview_id=state.interview_id,
+                appended=anchored_count,
+            )
 
         # Create metadata
         metadata = SeedMetadata(
             ambiguity_score=ambiguity_score.overall_score,
+            gate_forced=force,
             interview_id=state.interview_id,
             parent_seed_id=parent_seed.metadata.seed_id if parent_seed else None,
         )
@@ -2020,15 +2039,18 @@ You MUST respond with ONLY the following format, one field per line, no other te
 
 ACCEPTANCE_CRITERIA rule: an acceptance criterion names a state of the finished work that a user can see is true; an implementation step names a means of reaching that state. Only the first belongs here — deciding means is the execution engine's work at runtime. A criterion intelligible only as a move toward a sibling is that sibling's means and belongs merged into the outcome it serves. How many criteria a goal has is discovered by that judgment.
 ACCEPTANCE_CRITERIA JSON rule: emit exactly one `ACCEPTANCE_CRITERIA:` field containing a non-empty single-line JSON array. Every object must contain `description`, `verify`, `artifacts`, and `expect`, plus `exempt` only when `verify` is NONE (see the exempt rule); no other keys, no aliases.
-ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
+ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or a test command naming the exact test files or test ids that decide this criterion. Never use a bare whole-suite command such as `python -m pytest -q`: unrelated failing tests make it fail on any work, so it cannot decide the criterion.
 ACCEPTANCE_CRITERIA artifacts rule: `artifacts` must be a JSON array of exact portable file or directory paths relative to the run workspace, or the string `NONE`. The runner resolves every path literally and requires it to exist. Prefix a top-level path containing spaces with `./`. Never use a descriptive label.
 ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in the combined stdout and stderr of `verify`, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
 ACCEPTANCE_CRITERIA exempt rule: prefer a real `verify` command for every criterion — a criterion without one can only be judged from the worker's own account of its work. Use `verify: NONE` only when no command could decide the outcome, and then add `"exempt": "<why no command can decide this>"`. Omit `exempt` (or set it to NONE) whenever `verify` is a command.
 
 CONSTRAINTS rule: respond with one single-line JSON array of strings, e.g. ["<constraint 1>", "<constraint 2>"]. Constraint values may contain any characters, including literal | pipes; never use a bare pipe as the list separator.
+ACCEPTANCE_CRITERIA example rule: an output, value, or call quoted in the initial context as an example illustrates the behavior; it is not an exact-output contract. A criterion may require it only in the form the context states as required. Never invent exact strings, separators, argument orders, or byte-for-byte freezes of behavior the context does not ask to keep; put any such form in ASSUMPTIONS.
+ASSUMPTIONS rule: CONSTRAINTS and ACCEPTANCE_CRITERIA hold only what the initial context or a recorded answer states. Anything you would have to guess (a scope limit, a default, an exact value or output nobody required) goes in ASSUMPTIONS, a single-line JSON array of strings, or `[]` when there is none. A withheld answer stays withheld: do not reconstruct it in any field.
 
 GOAL: <clear goal statement>
 CONSTRAINTS: ["<constraint 1>", "<constraint 2>", ...]
+ASSUMPTIONS: ["<assumption 1>", ...]
 ACCEPTANCE_CRITERIA: [{{"description": "<observable outcome>", "verify": "<single-line command or NONE>", "artifacts": ["<path>"], "expect": "<literal output or NONE>", "exempt": "<why no command can decide this, only when verify is NONE>"}}]
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
@@ -2134,15 +2156,18 @@ Respond ONLY with the structured format below. Do NOT add explanations, question
 
 ACCEPTANCE_CRITERIA rule: an acceptance criterion names a state of the finished work that a user can see is true; an implementation step names a means of reaching that state. Only the first belongs here — deciding means is the execution engine's work at runtime. Read each criterion beside its siblings and ask which kind it is: one that stands on its own as something a user would value is an outcome, while one intelligible only as a move toward a sibling is that sibling's means and belongs merged into the outcome it serves. Leaving a means in the list is a defect as severe as a missing requirement, because it commits the seed to a path no one has verified. How many criteria a goal has is discovered by making this judgment.
 ACCEPTANCE_CRITERIA JSON rule: emit exactly one `ACCEPTANCE_CRITERIA:` field containing a non-empty single-line JSON array. Every object must contain `description`, `verify`, `artifacts`, and `expect`, plus `exempt` only when `verify` is NONE (see the exempt rule); no other keys, no aliases.
-ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
+ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or a test command naming the exact test files or test ids that decide this criterion. Never use a bare whole-suite command such as `python -m pytest -q`: unrelated failing tests make it fail on any work, so it cannot decide the criterion.
 ACCEPTANCE_CRITERIA artifacts rule: `artifacts` must be a JSON array of exact portable file or directory paths relative to the run workspace, or the string `NONE`. The runner resolves every path literally and requires it to exist. Prefix a top-level path containing spaces with `./`. Never use a descriptive label.
 ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in the combined stdout and stderr of `verify`, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
 ACCEPTANCE_CRITERIA exempt rule: prefer a real `verify` command for every criterion — a criterion without one can only be judged from the worker's own account of its work. Use `verify: NONE` only when no command could decide the outcome, and then add `"exempt": "<why no command can decide this>"`. Omit `exempt` (or set it to NONE) whenever `verify` is a command.
 
 CONSTRAINTS rule: respond with one single-line JSON array of strings, e.g. ["<constraint 1>", "<constraint 2>"]. Constraint values may contain any characters, including literal | pipes; never use a bare pipe as the list separator.
+ACCEPTANCE_CRITERIA example rule: an output, value, or call quoted in the initial context as an example illustrates the behavior; it is not an exact-output contract. A criterion may require it only in the form the context states as required. Never invent exact strings, separators, argument orders, or byte-for-byte freezes of behavior the context does not ask to keep; put any such form in ASSUMPTIONS.
+ASSUMPTIONS rule: CONSTRAINTS and ACCEPTANCE_CRITERIA hold only what the initial context or a recorded answer states. Anything you would have to guess (a scope limit, a default, an exact value or output nobody required) goes in ASSUMPTIONS, a single-line JSON array of strings, or `[]` when there is none. A withheld answer stays withheld: do not reconstruct it in any field.
 
 GOAL: <clear goal statement>
 CONSTRAINTS: ["<constraint 1>", "<constraint 2>", ...]
+ASSUMPTIONS: ["<assumption 1>", ...]
 ACCEPTANCE_CRITERIA: [{{"description": "<observable outcome>", "verify": "<single-line command or NONE>", "artifacts": ["<path>"], "expect": "<literal output or NONE>", "exempt": "<why no command can decide this, only when verify is NONE>"}}]
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
@@ -2154,6 +2179,7 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
     _KNOWN_PREFIXES = (
         "GOAL:",
         "CONSTRAINTS:",
+        "ASSUMPTIONS:",
         "ACCEPTANCE_CRITERIA:",
         "ONTOLOGY_NAME:",
         "ONTOLOGY_DESCRIPTION:",
@@ -2175,7 +2201,7 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
         Returns:
             Cleaned response starting from first recognized prefix.
         """
-        text = response.strip()
+        text = _LINE_TIMESTAMP_RE.sub("", response.strip())
 
         # Strip markdown code block markers
         code_block_match = re.search(r"```(?:\w*)\n(.*?)```", text, re.DOTALL)
@@ -2257,6 +2283,7 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
         # pipe-split downstream (#1696, #1729).
         for field_name, field_label in (
             ("constraints", "CONSTRAINTS"),
+            ("assumptions", "ASSUMPTIONS"),
             ("existing_patterns", "EXISTING_PATTERNS"),
             ("existing_dependencies", "EXISTING_DEPENDENCIES"),
         ):
@@ -2296,6 +2323,9 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
         # Parse constraints (JSON array preferred; legacy pipe list supported)
         constraints = _parse_string_array_values(
             requirements.get("constraints"), field_label="CONSTRAINTS"
+        )
+        assumptions = _parse_string_array_values(
+            requirements.get("assumptions"), field_label="ASSUMPTIONS"
         )
 
         # Parse acceptance criteria
@@ -2353,6 +2383,7 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
             brownfield_context=brownfield_context,
             constraints=constraints,
             acceptance_criteria=acceptance_criteria,
+            assumptions=assumptions,
             ontology_schema=ontology_schema,
             evaluation_principles=tuple(evaluation_principles),
             exit_conditions=tuple(exit_conditions),

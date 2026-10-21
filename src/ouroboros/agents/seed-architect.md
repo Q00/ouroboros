@@ -32,6 +32,17 @@ not guess at it, and do not treat the note itself as a requirement. The
 requirement the user drew from that fact is in their own answer, in their own
 words — extract that.
 
+An answer guessed on the requester's behalf (an automatic default or
+assumption nobody confirmed) is withheld the same way:
+
+```
+A: [assumption withheld: a guess made on the requester's behalf, not a decision. It is kept as a non-binding assumption, never as a requirement.]
+```
+
+The guess is carried to the worker separately as a non-binding assumption. Do
+not reconstruct it, and do not turn the question it answered into a constraint
+or criterion. Where the only answer to a question is withheld, the point is open.
+
 Questions are shown in full, including any that restate an adopted fact. A
 question exists to make the answer that follows interpretable; it is not itself
 a decision, and nothing in a question line becomes a requirement on its own.
@@ -48,6 +59,15 @@ Format: single-line JSON array of strings. Values may contain any characters,
 including literal `|` pipes; never use a bare pipe as the list separator.
 Example: ["Python >= 3.12", "No external database", "Must work offline"]
 
+Only what the initial context or a recorded answer states is a constraint.
+
+### 2b. ASSUMPTIONS
+Points you would have to guess to make the Seed concrete: a scope limit, a
+default, an exact value or output nobody required. They never bind; the worker
+sees them as assumptions it may override when the issue or the code says
+otherwise. Never put a guess in CONSTRAINTS or ACCEPTANCE_CRITERIA instead.
+Format: single-line JSON array of strings, or `[]` when there is none.
+
 ### 3. ACCEPTANCE_CRITERIA
 Specific, measurable criteria for success.
 Format: exactly one non-empty, single-line JSON array. Every object contains
@@ -59,7 +79,10 @@ Multi-artifact example: `[{"description":"Build outputs exist","verify":"NONE","
 `verify` / `verify_command` semantics:
 - Use exactly one single-line shell command.
 - NEVER use heredoc or multiline shell syntax such as `<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts, or an unterminated command block. The AC contract format is one line, so multiline command bodies will be lost.
-- For Python snippets, use `python -c "..."` / `python3 -c "..."`; for longer checks, require a pytest-discoverable test artifact and use `python -m pytest -q`.
+- For Python snippets, use `python -c "..."` / `python3 -c "..."`; for longer checks, require a pytest-discoverable test artifact and name it, e.g. `python -m pytest -q tests/test_tasks.py`.
+- Never use a bare whole-suite command such as `python -m pytest -q`. Unrelated failing tests make it fail on any work, so it cannot decide the criterion. Name the test files or test ids that decide it.
+- `verify` is an OBSERVER, never a writer. The runner hashes the workspace before and after the command and rejects any run that created, modified, or deleted a workspace file (`workspace_mutated`); no retry can repair that, because the contract itself is wrong. Bytecode caches and Git-ignored build outputs are exempt; state files, fixtures, logs, and generated data are not.
+- Therefore, when the program under test writes state (a JSON store, a database file, an output document), copy it into a scratch directory and run there: `t=$(mktemp -d) && cp app.py "$t"/ && cd "$t" && python3 app.py add x && python3 app.py list`. NEVER `rm -f state.json && python3 app.py ...` in the workspace.
 
 `artifacts` / `expected_artifacts` semantics:
 - Every entry is an exact portable file or directory path relative to the run workspace. The runner resolves each entry literally and requires it to exist.
@@ -75,6 +98,15 @@ Multi-artifact example: `[{"description":"Build outputs exist","verify":"NONE","
 - Use `expect` ONLY for a literal string present verbatim in the verify command's combined stdout and stderr, such as `OK` or `5 passed`.
 - NEVER use a condition, status, or exit-code description such as `exit code 0`, `exit 0`, `returns 0`, `success`, `no errors`, `passed`, or `passes`.
 - If the command has no distinctive output literal to assert, write `expect: NONE`. Exit-code 0 is already verified separately by the runner.
+
+**Examples are not exact-output contracts:**
+
+An output, value, or call the initial context quotes as an example illustrates
+the behavior it describes. A criterion may require that exact form only where
+the context states the form itself as required. Do not invent exact strings,
+separators, argument orders, or byte-for-byte freezes of behavior the context
+does not ask to keep: a criterion that pins one example's spelling rejects the
+general fix the request is about. Put any such form in ASSUMPTIONS instead.
 
 **Granularity contract (read carefully):**
 
@@ -115,7 +147,8 @@ Provide your analysis in this exact structure. In particular,
 ```
 GOAL: <clear goal statement>
 CONSTRAINTS: ["<constraint 1>", "<constraint 2>", ...]
-ACCEPTANCE_CRITERIA: [{"description": "Observable outcome", "verify": "python -m pytest -q", "artifacts": ["path/to/artifact"], "expect": "NONE"}]
+ASSUMPTIONS: ["<assumption 1>", ...]
+ACCEPTANCE_CRITERIA: [{"description": "Observable outcome", "verify": "<single-line command that decides this criterion, or NONE>", "artifacts": ["path/to/artifact"], "expect": "NONE"}]
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
 ONTOLOGY_FIELDS: [{"name": "<name>", "type": "<string|number|boolean|array|object>", "description": "<description>"}, ...]

@@ -28,6 +28,63 @@ def render_constraints_section(contract: SeedContract) -> str:
 {constraints_text}"""
 
 
+def render_requester_answers_section(contract: SeedContract) -> str:
+    """Render the requester's answers verbatim, as quoted questions and answers."""
+    if not contract.requester_answers:
+        return ""
+    pairs = "\n\n".join(
+        (f"Question:\n{_quoted(item.question)}\n" if item.question.strip() else "")
+        + f"Answer:\n{_quoted(item.answer)}"
+        for item in contract.requester_answers
+    )
+    return f"""## Requester answers (confirmed)
+The person who made the request answered these questions. Each question and answer
+is quoted exactly, line by line after "> ". Follow what the answers say; do not read
+more into an answer than its words say.
+
+{pairs}"""
+
+
+def render_repo_facts_section(contract: SeedContract) -> str:
+    """Render checked repository facts as the code's current behavior, with quoted evidence."""
+    if not contract.repo_facts:
+        return ""
+    items = []
+    for item in contract.repo_facts:
+        text = f"Question:\n{_quoted(item.question)}\n" if item.question.strip() else ""
+        text += f"Answer:\n{_quoted(item.answer)}"
+        if item.evidence:
+            text += "\nEvidence:\n" + "\n".join(f"- {span}" for span in item.evidence)
+        items.append(text)
+    pairs = "\n\n".join(items)
+    return f"""## Current behavior of the code (checked)
+Auto read the repository to answer these interview questions. Each answer describes
+what the code does now and cites path:line spans whose quotes were checked against
+the files. The issue reports a defect, so this behavior may be exactly what has to
+change; use it to understand the code, and follow the goal, the constraints and the
+acceptance criteria for what to change.
+
+{pairs}"""
+
+
+def _quoted(text: str) -> str:
+    return "\n".join(f"> {line}".rstrip() for line in text.strip().splitlines())
+
+
+def render_assumptions_section(contract: SeedContract) -> str:
+    """Render unconfirmed assumptions, kept apart from the binding constraints."""
+    if not contract.assumptions:
+        return ""
+    assumptions_text = "\n".join(f"- {assumption}" for assumption in contract.assumptions)
+    return f"""## Assumptions (non-binding)
+Nobody confirmed these. They are guesses and open questions on the requester's behalf,
+not requirements. An assumption is a default only where the code itself settles nothing;
+follow the issue and the code over any assumption, and override the assumption when they
+say otherwise.
+An open question has no answer yet: decide it from the goal, the issue, and the code.
+{assumptions_text}"""
+
+
 def render_brownfield_section(contract: SeedContract) -> str:
     """Render existing-codebase boundaries from the Seed contract."""
     context = contract.brownfield_context
@@ -154,6 +211,18 @@ def render_seed_contract_for_execution(contract: SeedContract) -> str:
         render_constraints_section(contract),
     ]
 
+    requester_answers = render_requester_answers_section(contract)
+    if requester_answers:
+        sections.extend(["", requester_answers])
+
+    repo_facts = render_repo_facts_section(contract)
+    if repo_facts:
+        sections.extend(["", repo_facts])
+
+    assumptions = render_assumptions_section(contract)
+    if assumptions:
+        sections.extend(["", assumptions])
+
     brownfield = render_brownfield_section(contract)
     if brownfield:
         sections.extend(["", brownfield])
@@ -173,6 +242,7 @@ def render_seed_contract_for_execution(contract: SeedContract) -> str:
 
 __all__ = [
     "AUTO_RECURSION_GUARD",
+    "render_assumptions_section",
     "render_auto_recursion_guard",
     "render_brownfield_section",
     "render_acceptance_criteria_section",
@@ -180,5 +250,7 @@ __all__ = [
     "render_evaluation_principles_section",
     "render_exit_conditions_section",
     "render_ontology_lens_section",
+    "render_repo_facts_section",
+    "render_requester_answers_section",
     "render_seed_contract_for_execution",
 ]

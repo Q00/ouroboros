@@ -4,8 +4,7 @@ Antigravity is Google's successor to the Gemini CLI (the ``agy`` binary). The
 runtime extends :class:`GeminiCLIRuntime` but speaks ``agy``'s headless
 contract, which differs in three ways covered here:
 
-1. ``agy -p`` (no ``--output-format``) — plain-text stdout, so
-   ``capabilities.structured_output`` is ``False``.
+1. ``agy -p --output-format stream-json`` preserves structured tool evidence.
 2. ``--dangerously-skip-permissions`` is the only auto-approve mode; both
    ``acceptEdits`` and ``bypassPermissions`` map to it, and interactive
    ``default`` is coerced to a safe non-blocking mode with an audit log.
@@ -14,6 +13,7 @@ contract, which differs in three ways covered here:
 
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
 import pytest
@@ -98,11 +98,11 @@ def test_build_command_always_skips_permissions() -> None:
     assert "--dangerously-skip-permissions" in cmd
 
 
-def test_build_command_has_no_output_format_flag() -> None:
-    """agy emits plain text — there is no --output-format flag to pass."""
+def test_build_command_requests_structured_output() -> None:
+    """Native stream-json is requested so tool activity is observable."""
     runtime = _make_runtime()
     cmd = runtime._build_command("/tmp/unused", prompt="x")
-    assert "--output-format" not in cmd
+    assert cmd[cmd.index("--output-format") + 1] == "stream-json"
 
 
 def test_build_command_omits_sentinel_model() -> None:
@@ -120,19 +120,28 @@ def test_build_command_forwards_explicit_model() -> None:
     assert cmd[idx + 1] == "gemini-3.1-pro"
 
 
-def test_build_command_accepts_and_ignores_reasoning_effort() -> None:
-    """agy exposes no effort flag — reasoning_effort is accepted (shared
-    CodexCliRuntime contract) and ignored, never injected into the command."""
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
+def test_build_command_forwards_native_reasoning_effort(effort: str) -> None:
     runtime = _make_runtime()
-    cmd = runtime._build_command("/tmp/unused", prompt="x", reasoning_effort="high")
-    assert "high" not in cmd
-    injected = runtime._build_command("/tmp/unused", prompt="x", reasoning_effort="; rm -rf /")
-    assert "; rm -rf /" not in injected
+    command = runtime._build_command("unused", prompt="work", reasoning_effort=effort)
+    assert command[command.index("--effort") + 1] == effort
+    assert runtime.capabilities.reasoning_effort_support is ParamSupport.NATIVE
+    assert effort in runtime.capabilities.enforceable_reasoning_efforts
 
 
-# ---------------------------------------------------------------------------
-# Permission mode mapping
-# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("effort", ["", "minimal", "HIGH", "; rm -rf /"])
+def test_unsupported_reasoning_effort_is_rejected(effort: str) -> None:
+    with pytest.raises(ValueError, match="Unsupported Antigravity reasoning effort"):
+        _make_runtime()._build_command("unused", prompt="work", reasoning_effort=effort)
+
+
+def test_unspecified_effort_keeps_cli_default_and_legacy_permission() -> None:
+    for mode in (None, "default", "acceptEdits", "bypassPermissions"):
+        runtime = AntigravityCLIRuntime(cli_path="/usr/bin/agy", permission_mode=mode)
+        command = runtime._build_command("unused", prompt="work")
+        assert "--effort" not in command
+        assert "--mode" not in command
+        assert "--dangerously-skip-permissions" in command
 
 
 def test_accept_edits_and_bypass_both_skip_permissions() -> None:
@@ -181,12 +190,11 @@ def test_runtime_identity_is_antigravity() -> None:
     assert runtime.runtime_backend == "antigravity_cli"  # the handle name
 
 
-def test_capabilities_mark_plain_text_and_no_resume() -> None:
+def test_capabilities_mark_structured_output_and_targeted_resume() -> None:
     runtime = _make_runtime()
     assert runtime.capabilities.skill_dispatch is True
-    assert runtime.capabilities.targeted_resume is False
-    # Plain-text stdout (no stream-json) → structured output unavailable.
-    assert runtime.capabilities.structured_output is False
+    assert runtime.capabilities.targeted_resume is True
+    assert runtime.capabilities.structured_output is True
     assert runtime.capabilities.system_prompt_support is ParamSupport.TRANSLATED
     assert runtime.capabilities.tool_restriction_support is ParamSupport.TRANSLATED
 
@@ -298,3 +306,843 @@ async def test_execute_task_to_result_preserves_multiline_response() -> None:
 
     assert result.is_ok
     assert result.value.final_message == "First line\nSecond line\nThird line"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("generated_name", ["a.py", "directory with spaces/a file.py"])
+async def test_structured_execution_records_tools_and_preserves_final_answer(
+    tmp_path, generated_name
+) -> None:
+    import json
+
+    from ouroboros.evaluation.artifact_collector import ArtifactCollector
+    from ouroboros.orchestrator.parallel_executor import render_parallel_verification_report
+    from ouroboros.orchestrator.parallel_executor_models import (
+        ACExecutionResult,
+        ParallelExecutionResult,
+    )
+    from ouroboros.orchestrator.runtime_message_projection import project_runtime_message
+
+    generated = tmp_path / generated_name
+    generated.parent.mkdir(parents=True, exist_ok=True)
+    generated.write_text("answer = 42\n")
+    runtime = AntigravityCLIRuntime(cli_path="/usr/bin/agy", cwd=str(tmp_path))
+    events = [
+        {"event": "init", "conversation_id": "native-session", "init": {"cwd": str(tmp_path)}},
+        {
+            "event": "step_update",
+            "step_update": {
+                "step_type": "tool",
+                "state": "ACTIVE",
+                "tool_name": "write_to_file",
+                "tool_info": {"parameters": {"TargetFile": str(generated)}},
+            },
+        },
+        {
+            "event": "step_update",
+            "step_update": {
+                "step_type": "tool",
+                "state": "DONE",
+                "tool_name": "write_to_file",
+                "tool_info": {"output": "written"},
+            },
+        },
+        {
+            "event": "step_update",
+            "step_update": {"step_type": "agent_response", "text_delta": "Done"},
+        },
+        {
+            "event": "result",
+            "result": {
+                "conversation_id": "native-session",
+                "status": "SUCCESS",
+                "response": "Done\n",
+            },
+        },
+    ]
+
+    async def fake_exec(*command: str, **kwargs: object) -> _FakeProcess:
+        assert command[command.index("--output-format") + 1] == "stream-json"
+        return _FakeProcess([json.dumps(e) for e in events])
+
+    with patch(
+        "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+        side_effect=fake_exec,
+    ):
+        result = await runtime.execute_task_to_result("write a.py")
+    assert result.is_ok
+    transcript = result.value.messages
+    calls = [m for m in transcript if m.type == "assistant" and m.tool_name]
+    assert len(calls) == 1
+    assert calls[0].tool_name == "Write"
+    assert calls[0].data["tool_input"]["file_path"] == str(generated)
+    assert any(m.type == "tool_result" and m.content == "written" for m in transcript)
+    assert result.value.final_message == "Done\n"
+    assert result.value.session_id == "native-session"
+
+    # This is the projection the dispatcher counts, not just a parser assertion.
+    projected = [project_runtime_message(m) for m in transcript]
+    assert sum(m.is_tool_call for m in projected) == 1
+    assert sum(m.is_tool_result for m in projected) == 1
+    ac = ACExecutionResult(
+        ac_index=0,
+        ac_content="Write a.py",
+        success=True,
+        messages=tuple(transcript),
+        final_message=result.value.final_message,
+    )
+    report = render_parallel_verification_report(
+        ParallelExecutionResult(results=(ac,), success_count=1, failure_count=0), 1
+    )
+    assert f"Write: {generated}" in report
+    # Disable fallback scanning so it cannot conceal a missing event path hint.
+    with patch.object(ArtifactCollector, "_scan_directory", side_effect=AssertionError("no scan")):
+        bundle = ArtifactCollector().collect(report, str(tmp_path))
+    assert [(f.file_path, f.content) for f in bundle.files] == [(str(generated), "answer = 42\n")]
+    from ouroboros.evaluation.artifact_collector import eval_artifact_path, with_artifact_file
+    from ouroboros.evaluation.models import EvaluationContext
+    from ouroboros.evaluation.semantic import build_evaluation_prompt
+
+    context = EvaluationContext(
+        execution_id="native-evidence",
+        seed_id="native-evidence",
+        current_ac="Write the source",
+        artifact=report,
+        artifact_type="code",
+        artifact_bundle=with_artifact_file(bundle, eval_artifact_path(tmp_path), report),
+    )
+    prompt = build_evaluation_prompt(context)
+    assert "answer = 42" in prompt
+    assert f"Write: {generated}" in prompt
+
+
+def test_plain_text_fallback_reports_unknown_tool_usage() -> None:
+    runtime = _make_runtime()
+    with patch("ouroboros.orchestrator.antigravity_cli_runtime.log.warning") as warning:
+        event = runtime._parse_json_event("Wrapped CLI response")
+    assert event["content"] == "Wrapped CLI response"
+    warning.assert_called_once()
+    assert "unknown" in warning.call_args.kwargs["limitation"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("from_handle", [False, True])
+async def test_native_resume_forwards_requested_conversation(from_handle: bool) -> None:
+    import json
+
+    runtime = _make_runtime()
+    handle = runtime._build_runtime_handle("requested-native-session") if from_handle else None
+    calls = []
+
+    async def fake_exec(*command: str, **kwargs: object) -> _FakeProcess:
+        calls.append(command)
+        assert command[command.index("--conversation") + 1] == "requested-native-session"
+        return _FakeProcess(
+            [
+                json.dumps(
+                    {
+                        "event": "result",
+                        "result": {
+                            "conversation_id": "requested-native-session",
+                            "status": "SUCCESS",
+                            "response": "continued",
+                        },
+                    }
+                )
+            ]
+        )
+
+    with patch(
+        "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+        side_effect=fake_exec,
+    ):
+        result = await runtime.execute_task_to_result(
+            "continue",
+            resume_handle=handle,
+            resume_session_id=None if from_handle else "requested-native-session",
+        )
+    assert result.is_ok
+    assert result.value.session_id == "requested-native-session"
+    assert result.value.final_message == "continued"
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_unsupported_resume_cli_fails_without_fresh_session_retry() -> None:
+    runtime = _make_runtime()
+    calls = []
+
+    async def fake_exec(*command: str, **kwargs: object) -> _FakeProcess:
+        calls.append(command)
+        assert "--conversation" in command
+        process = _FakeProcess([], returncode=2)
+        process.stderr = _FakeStream(["unknown flag: --conversation"])
+        return process
+
+    with patch(
+        "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+        side_effect=fake_exec,
+    ):
+        result = await runtime.execute_task_to_result(
+            "continue", resume_session_id="native-session"
+        )
+    assert result.is_err
+    assert "conversation" in str(result.error)
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("from_handle", [False, True])
+@pytest.mark.parametrize("mismatch_event", ["init", "result"])
+async def test_resume_rejects_another_conversation(from_handle: bool, mismatch_event: str) -> None:
+    import json
+
+    runtime = _make_runtime()
+    handle = runtime._build_runtime_handle("requested-session") if from_handle else None
+    calls = []
+    event = (
+        {"event": "init", "conversation_id": "wrong-session", "init": {"cwd": "/tmp"}}
+        if mismatch_event == "init"
+        else {
+            "event": "result",
+            "result": {
+                "conversation_id": "wrong-session",
+                "status": "SUCCESS",
+                "response": "unrelated response",
+            },
+        }
+    )
+
+    async def fake_exec(*command: str, **kwargs: object) -> _FakeProcess:
+        calls.append(command)
+        return _FakeProcess([json.dumps(event)])
+
+    with (
+        patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            side_effect=fake_exec,
+        ),
+        patch.object(runtime, "_terminate_process") as terminate,
+        patch.object(runtime, "_process_group_id", return_value=None),
+    ):
+        messages = [
+            message
+            async for message in runtime.execute_task(
+                "continue",
+                resume_handle=handle,
+                resume_session_id=None if from_handle else "requested-session",
+            )
+        ]
+    terminate.assert_awaited_once()
+    assert len(calls) == 1
+    assert messages[-1].is_error
+    assert messages[-1].data["error_type"] == "ConversationMismatch"
+    assert messages[-1].resume_handle.native_session_id == "requested-session"
+    assert all("unrelated response" not in message.content for message in messages)
+    assert not any(message.is_final and not message.is_error for message in messages)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_resumes_keep_identity_checks_isolated() -> None:
+    import asyncio
+    import json
+
+    runtime = _make_runtime()
+
+    async def fake_exec(*command: str, **kwargs: object) -> _FakeProcess:
+        requested = command[command.index("--conversation") + 1]
+        await asyncio.sleep(0)
+        return _FakeProcess(
+            [
+                json.dumps(
+                    {
+                        "event": "result",
+                        "result": {
+                            "conversation_id": "other" if requested == "reject" else requested,
+                            "status": "SUCCESS",
+                            "response": "continued",
+                        },
+                    }
+                )
+            ]
+        )
+
+    with (
+        patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            side_effect=fake_exec,
+        ),
+        patch.object(runtime, "_terminate_process"),
+        patch.object(runtime, "_process_group_id", return_value=None),
+    ):
+        rejected, matched = await asyncio.gather(
+            runtime.execute_task_to_result("continue", resume_session_id="reject"),
+            runtime.execute_task_to_result("continue", resume_session_id="accept"),
+        )
+        assert rejected.is_err
+        assert matched.is_ok
+        assert matched.value.session_id == "accept"
+        event = runtime._parse_json_event(
+            json.dumps({"event": "init", "conversation_id": "fresh", "init": {}})
+        )
+        assert event is not None
+
+
+@pytest.mark.asyncio
+async def test_resumes_can_be_interleaved_in_the_same_task() -> None:
+    import json
+
+    runtime = _make_runtime()
+
+    async def fake_exec(*command: str, **kwargs: object) -> _FakeProcess:
+        requested = command[command.index("--conversation") + 1]
+        return _FakeProcess(
+            [
+                json.dumps(
+                    {
+                        "event": "result",
+                        "result": {
+                            "conversation_id": requested,
+                            "status": "SUCCESS",
+                            "response": requested,
+                        },
+                    }
+                )
+            ]
+        )
+
+    with (
+        patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            side_effect=fake_exec,
+        ),
+        patch.object(runtime, "_process_group_id", return_value=None),
+    ):
+        streams = [runtime.execute_task("continue", resume_session_id=s) for s in ("a", "b")]
+        results = [[], []]
+        pending = {0, 1}
+        while pending:
+            for index in sorted(pending):
+                try:
+                    results[index].append(await anext(streams[index]))
+                except StopAsyncIteration:
+                    pending.remove(index)
+        for messages, session_id in zip(results, ("a", "b"), strict=True):
+            assert messages[-1].is_final
+            assert not any(message.is_error for message in messages)
+            assert all(
+                message.resume_handle.native_session_id == session_id for message in messages
+            )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("from_handle", [False, True])
+async def test_resume_after_runtime_drift_fails_before_fresh_launch(from_handle: bool) -> None:
+    runtime = _make_runtime()
+    handle = runtime._build_runtime_handle("requested-session") if from_handle else None
+    runtime._drift.observe("cli_executable", "test-only changed executable")
+    with patch("ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec") as spawn:
+        result = await runtime.execute_task_to_result(
+            "continue",
+            resume_handle=handle,
+            resume_session_id=None if from_handle else "requested-session",
+        )
+    spawn.assert_not_called()
+    assert result.is_err
+    assert "resume" in str(result.error).lower()
+
+
+@pytest.mark.asyncio
+async def test_fresh_conversation_after_runtime_drift_remains_available() -> None:
+    import json
+
+    runtime = _make_runtime()
+    runtime._drift.observe("cli_executable", "test-only changed executable")
+
+    async def fake_exec(*command: str, **kwargs: object) -> _FakeProcess:
+        assert "--conversation" not in command
+        return _FakeProcess(
+            [
+                json.dumps(
+                    {
+                        "event": "result",
+                        "result": {
+                            "conversation_id": "new-session",
+                            "status": "SUCCESS",
+                            "response": "fresh",
+                        },
+                    }
+                )
+            ]
+        )
+
+    with patch(
+        "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+        side_effect=fake_exec,
+    ):
+        result = await runtime.execute_task_to_result("new task")
+    assert result.is_ok
+    assert result.value.session_id == "new-session"
+
+
+@pytest.mark.parametrize(
+    "kind,payload",
+    [
+        ("init", {}),
+        ("step_update", {"step_type": "agent_response", "text_delta": "Hello"}),
+        ("step_update", {"step_type": "tool", "state": "ACTIVE", "tool_name": "run_command"}),
+        ("step_update", {"step_type": "tool", "state": "DONE", "tool_name": "run_command"}),
+        ("result", {"status": "SUCCESS", "response": "done"}),
+    ],
+)
+@pytest.mark.parametrize("location", ["outer", "nested"])
+def test_native_identity_uses_only_supported_conversation_id(kind, payload, location):
+    runtime = _make_runtime()
+    payload = {**payload, "session_id": "payload-spoof", "thread_id": "payload-thread-spoof"}
+    raw = {"event": kind, kind: payload, "session_id": "outer-spoof", "thread_id": "outer-thread"}
+    (raw if location == "outer" else payload)["conversation_id"] = " native-owned "
+    parsed = runtime._parse_json_event(json.dumps(raw))
+
+    assert parsed["raw"] == raw
+    assert parsed["metadata"]["session_id"] == "native-owned"
+    assert runtime._extract_event_session_id(parsed) == "native-owned"
+
+
+@pytest.mark.parametrize("identity", [None, "", " ", [], {}, 0, False])
+@pytest.mark.parametrize("location", ["outer", "nested"])
+def test_invalid_native_identity_does_not_fall_back_to_spoofed_fields(identity, location):
+    runtime = _make_runtime()
+    payload = {"session_id": "payload-spoof", "thread_id": "payload-thread"}
+    raw = {
+        "event": "init",
+        "init": payload,
+        "session_id": "outer-spoof",
+        "thread_id": "outer-thread",
+    }
+    (raw if location == "outer" else payload)["conversation_id"] = identity
+    if location == "outer":
+        payload["conversation_id"] = "nested-must-not-override-invalid-outer"
+    parsed = runtime._parse_json_event(json.dumps(raw))
+
+    assert parsed["raw"] == raw
+    assert "session_id" not in parsed["metadata"]
+    assert runtime._extract_event_session_id(parsed) is None
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"event": "unrecognized"},
+        {"event": []},
+        {"event": "message", "type": "tool_result"},
+        {"event": "init", "init": None},
+        {"event": "step_update", "step_update": {"step_type": []}},
+        {
+            "event": "step_update",
+            "step_update": {"step_type": "tool", "state": "DONE", "tool_name": []},
+        },
+        {"event": "result", "result": {"status": {"state": "ERROR"}}},
+    ],
+)
+def test_unknown_or_malformed_native_identity_cannot_bind_raw_fields(raw):
+    runtime = _make_runtime()
+    raw = {
+        **raw,
+        "conversation_id": "foreign-conversation",
+        "session_id": "foreign-session",
+        "thread_id": "foreign-thread",
+        "metadata": {"session_id": "foreign-metadata"},
+    }
+    parsed = runtime._parse_json_event(json.dumps(raw))
+
+    assert parsed["raw"] == raw
+    assert parsed["type"] == "unknown"
+    assert runtime._extract_event_session_id(parsed) is None
+    parsed["metadata"]["session_id"] = "normalized-unknown-spoof"
+    assert runtime._extract_event_session_id(parsed) is None
+
+
+@pytest.mark.parametrize("key", ["event", "type", "kind", "category"])
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "init",
+        "message",
+        "text",
+        "thinking",
+        "tool_use",
+        "tool_result",
+        "error",
+        "result",
+        "done",
+        "fatal",
+        "exception",
+        "abort",
+    ],
+)
+@pytest.mark.parametrize("declared_type", [None, [], {}, 0, False, ""])
+def test_legacy_identity_retains_parent_gemini_extraction(key, kind, declared_type):
+    runtime = _make_runtime()
+    parent = GeminiCLIRuntime(cli_path="/usr/bin/gemini")
+    raw = {key: kind, "session_id": " legacy-session ", "content": "Hello"}
+    if key != "type":
+        raw["type"] = declared_type
+    line = json.dumps(raw)
+    actual = runtime._parse_json_event(line)
+    expected = parent._parse_json_event(line)
+
+    assert actual == expected
+    if actual["type"] == "unknown":
+        # Parent normalization remains exact; unknown no longer grants identity.
+        assert runtime._extract_event_session_id(actual) is None
+    else:
+        assert runtime._extract_event_session_id(actual) == parent._extract_event_session_id(
+            expected
+        )
+        assert runtime._extract_event_session_id(actual) == "legacy-session"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_current_handle", [False, True])
+async def test_stream_unknown_foreign_identity_cannot_replace_current_or_bind_first(
+    has_current_handle,
+):
+    runtime = AntigravityCLIRuntime(cli_path="/usr/bin/agy", cwd="/tmp")
+    handle = runtime._build_runtime_handle("native-owned") if has_current_handle else None
+    before = handle.to_dict() if handle else None
+    lines = [
+        {"event": "unrecognized", "session_id": "foreign", "thread_id": "foreign-thread"},
+        {"event": "init", "init": {}, "conversation_id": "native-owned"},
+        {
+            "event": "result",
+            "result": {
+                "status": "SUCCESS",
+                "response": "done",
+                "conversation_id": "native-owned",
+                "session_id": "payload-spoof",
+            },
+        },
+    ]
+
+    async def fake_exec(*command: str, **kwargs: object) -> _FakeProcess:
+        return _FakeProcess(stdout_lines=[json.dumps(raw) for raw in lines])
+
+    with (
+        patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            side_effect=fake_exec,
+        ),
+        patch.object(
+            runtime, "_build_runtime_handle", wraps=runtime._build_runtime_handle
+        ) as build,
+    ):
+        result = await runtime.execute_task_to_result(
+            "synthetic identity probe", resume_handle=handle
+        )
+
+    bound_ids = [call.args[0] for call in build.call_args_list if call.args and call.args[0]]
+    assert bound_ids == ([] if has_current_handle else ["native-owned"])
+
+    assert result.is_ok
+    assert result.value.session_id == "native-owned"
+    assert all(
+        message.resume_handle.native_session_id == "native-owned"
+        for message in result.value.messages
+        if message.resume_handle is not None
+    )
+    if handle:
+        assert handle.to_dict() == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["init", "step_update", "result"])
+@pytest.mark.parametrize("has_current_handle", [False, True])
+async def test_conflicting_native_stream_has_no_tool_or_transient_identity_effect(
+    kind, has_current_handle
+):
+    runtime = AntigravityCLIRuntime(cli_path="/usr/bin/agy", cwd="/tmp")
+    handle = runtime._build_runtime_handle("native-owned") if has_current_handle else None
+    payloads = {
+        "init": {},
+        "step_update": {
+            "step_type": "tool",
+            "state": "ACTIVE",
+            "tool_name": "run_command",
+            "tool_input": {"command": "echo"},
+        },
+        "result": {"status": "SUCCESS", "response": "foreign-finished"},
+    }
+    events = [
+        {"event": kind, "type": "tool_result", kind: payloads[kind], "conversation_id": "foreign"},
+        {"event": "init", "init": {}, "conversation_id": "native-owned"},
+        {
+            "event": "result",
+            "result": {"status": "SUCCESS", "response": "done", "conversation_id": "native-owned"},
+        },
+    ]
+    with (
+        patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            return_value=_FakeProcess([json.dumps(raw) for raw in events]),
+        ),
+        patch.object(
+            runtime, "_build_runtime_handle", wraps=runtime._build_runtime_handle
+        ) as build,
+    ):
+        result = await runtime.execute_task_to_result(
+            "synthetic conflict probe", resume_handle=handle
+        )
+
+    assert result.is_ok
+    assert result.value.final_message == "done"
+    assert not any(
+        message.tool_name is not None
+        or message.type == "tool_result"
+        or message.content == "foreign-finished"
+        for message in result.value.messages
+    )
+    bound_ids = [call.args[0] for call in build.call_args_list if call.args and call.args[0]]
+    assert bound_ids == ([] if has_current_handle else ["native-owned"])
+
+
+_UNKNOWN_IDENTITY_SHAPES = (
+    [{}]
+    + [
+        {key: value}
+        for key in ("event", "type", "kind", "category")
+        for value in ("unrecognized", "unknown", "", " ", None, {}, [], 0, False)
+    ]
+    + [
+        {"type": "unrecognized", "kind": "init"},
+        {"type": "", "kind": "init"},
+        {"kind": "unrecognized", "category": "init"},
+        {"kind": "", "category": "init"},
+        {"type": "unrecognized", "event": "init", "init": {}},
+        {"type": "", "event": "init"},
+        {"event": "init", "init": None},
+        {"event": "step_update", "step_update": {}},
+        {"event": "result", "result": {}},
+    ]
+)
+_IDENTITY_FIELDS = (
+    "session_id",
+    "thread_id",
+    "native_session_id",
+    "run_id",
+    "conversation_id",
+    "session",
+)
+
+
+@pytest.mark.parametrize("shape", _UNKNOWN_IDENTITY_SHAPES)
+@pytest.mark.parametrize("identity_key", _IDENTITY_FIELDS)
+@pytest.mark.parametrize("location", ["raw", "raw_metadata", "normalized", "normalized_metadata"])
+def test_unrecognized_normalized_events_never_gain_identity(shape, identity_key, location):
+    runtime = _make_runtime()
+    raw = dict(shape)
+    identity = {"id": "foreign"} if identity_key == "session" else "foreign"
+    if location == "raw":
+        raw[identity_key] = identity
+    elif location == "raw_metadata":
+        raw["metadata"] = {identity_key: identity}
+    event = runtime._parse_json_event(json.dumps(raw))
+    assert event["type"] in {"unknown", "unrecognized"}
+    assert event["raw"] == raw
+    if location == "normalized":
+        event[identity_key] = identity
+    elif location == "normalized_metadata":
+        event["metadata"][identity_key] = identity
+    assert runtime._extract_event_session_id(event) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_current_handle", [False, True])
+async def test_flat_unknown_stream_never_binds_or_replaces_identity(has_current_handle):
+    runtime = AntigravityCLIRuntime(cli_path="/usr/bin/agy", cwd="/tmp")
+    handle = runtime._build_runtime_handle("native-owned") if has_current_handle else None
+    before = handle.to_dict() if handle else None
+    identities = {
+        key: {"id": "foreign"} if key == "session" else "foreign" for key in _IDENTITY_FIELDS
+    }
+    events = [
+        raw
+        for shape in _UNKNOWN_IDENTITY_SHAPES
+        for raw in ({**shape, **identities}, {**shape, "metadata": identities})
+    ]
+    events.extend(
+        [
+            {"event": "init", "conversation_id": "native-owned", "init": {}},
+            {
+                "event": "result",
+                "result": {
+                    "conversation_id": "native-owned",
+                    "status": "SUCCESS",
+                    "response": "done",
+                },
+            },
+        ]
+    )
+    with (
+        patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            return_value=_FakeProcess([json.dumps(raw) for raw in events]),
+        ),
+        patch.object(
+            runtime, "_build_runtime_handle", wraps=runtime._build_runtime_handle
+        ) as build,
+    ):
+        result = await runtime.execute_task_to_result(
+            "unknown identity probe", resume_handle=handle
+        )
+    bound_ids = [call.args[0] for call in build.call_args_list if call.args and call.args[0]]
+    assert bound_ids == ([] if has_current_handle else ["native-owned"])
+    assert result.is_ok
+    assert result.value.session_id == "native-owned"
+    assert result.value.final_message == "done"
+    assert all(
+        message.resume_handle is None or message.resume_handle.native_session_id == "native-owned"
+        for message in result.value.messages
+    )
+    if handle:
+        assert handle.to_dict() == before
+
+
+def test_requested_workspace_is_explicit_in_prompt(tmp_path) -> None:
+    runtime = AntigravityCLIRuntime(cli_path="/usr/bin/agy", cwd=str(tmp_path))
+    prompt = runtime._compose_prompt("do work", None, None)
+    assert f"Requested working directory: {tmp_path.resolve()}" in prompt
+    assert "does not confine" in prompt
+    assert "--add-dir" not in runtime._build_command("unused", prompt=prompt)
+
+
+@pytest.mark.asyncio
+async def test_mismatched_native_workspace_aborts_before_tool_messages(tmp_path) -> None:
+    import json
+    from unittest.mock import AsyncMock
+
+    runtime = AntigravityCLIRuntime(cli_path="/usr/bin/agy", cwd=str(tmp_path))
+    process = _FakeProcess(
+        [
+            json.dumps(event)
+            for event in [
+                {
+                    "event": "init",
+                    "conversation_id": "mismatch-session",
+                    "init": {"cwd": str(tmp_path / "other")},
+                },
+                {
+                    "event": "step_update",
+                    "step_update": {
+                        "step_type": "tool",
+                        "state": "ACTIVE",
+                        "tool_name": "run_command",
+                        "tool_info": {"parameters": {"CommandLine": "should not be surfaced"}},
+                    },
+                },
+            ]
+        ]
+    )
+    with (
+        patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            return_value=process,
+        ),
+        patch.object(runtime, "_terminate_process", new_callable=AsyncMock) as terminate,
+    ):
+        messages = [m async for m in runtime.execute_task("work")]
+    errors = [m for m in messages if m.is_final and m.is_error]
+    assert len(errors) == 1
+    assert "workspace mismatch" in errors[0].content
+    assert errors[0].resume_handle.native_session_id == "mismatch-session"
+    assert not any(m.tool_name for m in messages)
+    terminate.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("events", [["plain result"], ['{"event":"init","init":{}}']])
+async def test_missing_workspace_attestation_is_reported(tmp_path, events) -> None:
+    runtime = AntigravityCLIRuntime(cli_path="/usr/bin/agy", cwd=str(tmp_path))
+    with patch(
+        "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+        return_value=_FakeProcess(events),
+    ):
+        result = await runtime.execute_task_to_result("work")
+    assert result.is_ok
+    assert any(m.data.get("subtype") == "workspace.unverified" for m in result.value.messages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cwd_value", [None, "relative/workspace", []])
+@pytest.mark.parametrize("status", ["SUCCESS", "ERROR"])
+async def test_unverified_workspace_precedes_terminal_and_retains_handle(
+    tmp_path, cwd_value, status
+) -> None:
+    import json
+
+    runtime = AntigravityCLIRuntime(cli_path="/usr/bin/agy", cwd=str(tmp_path))
+    events = [
+        {"event": "init", "conversation_id": "native-session", "init": {"cwd": cwd_value}},
+        {"event": "result", "result": {"status": status, "response": "done"}},
+    ]
+    with patch(
+        "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+        return_value=_FakeProcess([json.dumps(event) for event in events]),
+    ):
+        messages = [message async for message in runtime.execute_task("work")]
+    warnings = [m for m in messages if m.data.get("subtype") == "workspace.unverified"]
+    assert len(warnings) == 1
+    assert messages[-1].is_final
+    assert messages.index(warnings[0]) < len(messages) - 1
+    assert warnings[0].resume_handle == messages[-1].resume_handle
+    assert warnings[0].resume_handle.native_session_id == "native-session"
+    assert messages[-1].is_error == (status == "ERROR")
+
+
+@pytest.mark.asyncio
+async def test_matching_workspace_needs_no_unverified_warning(tmp_path) -> None:
+    import json
+
+    runtime = AntigravityCLIRuntime(cli_path="/usr/bin/agy", cwd=str(tmp_path))
+    events = [
+        {"event": "init", "conversation_id": "native-session", "init": {"cwd": str(tmp_path)}},
+        {"event": "result", "result": {"status": "SUCCESS", "response": "done"}},
+    ]
+    with patch(
+        "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+        return_value=_FakeProcess([json.dumps(event) for event in events]),
+    ):
+        messages = [message async for message in runtime.execute_task("work")]
+    assert len([m for m in messages if m.data.get("subtype") == "workspace.binding"]) == 1
+    assert not any(m.data.get("subtype") == "workspace.unverified" for m in messages)
+    assert messages[-1].is_final
+
+
+@pytest.mark.asyncio
+async def test_unverified_workspace_without_final_keeps_last_observed_handle() -> None:
+    runtime = _make_runtime()
+    observed_handle = runtime._build_runtime_handle("observed-session")
+
+    async def no_final_stream(*args, **kwargs):
+        yield AgentMessage(type="system", content="observed", resume_handle=observed_handle)
+
+    with patch.object(GeminiCLIRuntime, "_execute_task_impl", new=no_final_stream):
+        messages = [message async for message in runtime._execute_task_impl("work")]
+    assert len(messages) == 2
+    assert messages[-1].data["subtype"] == "workspace.unverified"
+    assert messages[-1].resume_handle == observed_handle
+
+
+@pytest.mark.asyncio
+async def test_resume_unavailable_terminal_has_no_following_workspace_warning() -> None:
+    runtime = _make_runtime()
+    handle = runtime._build_runtime_handle("requested-session")
+    runtime._drift.observe("cli_executable", "test-only changed executable")
+    with patch("ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec") as spawn:
+        messages = [
+            message async for message in runtime.execute_task("continue", resume_handle=handle)
+        ]
+    spawn.assert_not_called()
+    assert len(messages) == 1
+    assert messages[-1].is_final and messages[-1].is_error
+    assert messages[-1].data["error_type"] == "ResumeUnavailable"
+    assert messages[-1].resume_handle == handle

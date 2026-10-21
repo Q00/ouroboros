@@ -74,6 +74,12 @@ def _safe_meta(value: Any) -> Any:
     return str(value)
 
 
+def _job_work_failure_meta(exc: BaseException) -> dict[str, Any]:
+    """Lift the closed ``result_meta`` a ``JobWorkError`` carries, if any."""
+    meta = getattr(exc, "result_meta", None)
+    return {"result_meta": _safe_meta(meta)} if isinstance(meta, dict) and meta else {}
+
+
 def _safe_result_payload(result: Any) -> dict[str, Any]:
     """Return a JSON-safe representation of an MCP tool result."""
     content = []
@@ -279,7 +285,9 @@ def _progress_accounting_failed_job_event(job_id: str, blocker: str) -> BaseEven
     )
 
 
-def _linked_execution_failed_job_event(job_id: str, failure: str) -> BaseEvent:
+def _linked_execution_failed_job_event(
+    job_id: str, failure: str, failure_meta: Mapping[str, Any] | None = None
+) -> BaseEvent:
     """Build a job-failure event from linked execution failure evidence."""
     return BaseEvent(
         id=f"{_RECOVERED_LINKED_FAILURE_EVENT_ID_PREFIX}{job_id}",
@@ -292,7 +300,10 @@ def _linked_execution_failed_job_event(job_id: str, failure: str) -> BaseEvent:
                 "message": "Job failed: linked execution recorded failure",
                 "error": failure,
                 "result_text": failure,
-                "result_meta": {"failed_from_linked_execution_failure": True},
+                "result_meta": {
+                    "failed_from_linked_execution_failure": True,
+                    **dict(failure_meta or {}),
+                },
                 "is_error": True,
                 "timestamp": datetime.now(UTC).isoformat(),
             }
@@ -643,6 +654,7 @@ class JobManager:
                     "message": f"Job failed: {exc}",
                     "error": str(exc),
                     "is_error": True,
+                    **_job_work_failure_meta(exc),
                 }
                 intended_terminal = ("mcp.job.failed", failed_data)
                 await self._append_terminal_event_with_fallback(
@@ -1238,6 +1250,7 @@ class JobManager:
         *,
         check_current: bool = True,
         event_id: str | None = None,
+        failure_meta: Mapping[str, Any] | None = None,
     ) -> bool:
         """Persist durable job failure derived from linked execution evidence."""
         if check_current:
@@ -1252,7 +1265,10 @@ class JobManager:
                 "message": "Job failed: linked execution recorded failure",
                 "error": failure,
                 "result_text": failure,
-                "result_meta": {"failed_from_linked_execution_failure": True},
+                "result_meta": {
+                    "failed_from_linked_execution_failure": True,
+                    **dict(failure_meta or {}),
+                },
                 "is_error": True,
             },
             event_id=event_id,
@@ -1958,10 +1974,11 @@ class JobManager:
         """Turn a fold into the reconciled snapshot ``get_snapshot`` promises."""
         self._telemetry.remember(job_id, fold.created_data)
         snapshot = fold.to_snapshot(job_id)
-        owner_is_dead = self._job_owner_is_dead(fold.created_data)
+        owner_alive = persisted_process_owner_alive(fold.created_data)
         snapshot = await self._recover_linked_execution_terminal_snapshot(
             snapshot,
-            owner_is_dead=owner_is_dead,
+            owner_is_dead=owner_alive is False,
+            owner_is_alive=owner_alive is True,
         )
         snapshot = await self._reconcile_orphaned_job_snapshot(
             snapshot,
@@ -1969,11 +1986,31 @@ class JobManager:
         )
         return await self._reconcile_stranded_started_job_snapshot(snapshot)
 
+    async def _derive_linked_run_failure_meta(self, snapshot: JobSnapshot) -> dict[str, Any]:
+        """Name why a recovered ``execute_seed`` job's linked run failed.
+
+        Same closed vocabulary and evidence as the live handler path
+        (``derive_run_failure_meta``); only run jobs carry ``failure_cause``.
+        """
+        if snapshot.job_type != "execute_seed":
+            return {}
+        if not snapshot.links.session_id or not snapshot.links.execution_id:
+            return {}
+        from ouroboros.mcp.tools.run_failure_meta import derive_run_failure_meta
+
+        return await derive_run_failure_meta(
+            self._event_store,
+            session_id=snapshot.links.session_id,
+            execution_id=snapshot.links.execution_id,
+            session_status=SessionStatus.FAILED,
+        )
+
     async def _recover_linked_execution_terminal_snapshot(
         self,
         snapshot: JobSnapshot,
         *,
         owner_is_dead: bool = False,
+        owner_is_alive: bool = False,
     ) -> JobSnapshot:
         """Recover linked execution terminal jobs when no live runner remains.
 
@@ -1983,6 +2020,13 @@ class JobManager:
         runner left to write that event; if the linked execution already has
         authoritative terminal evidence, materialize the job terminal event
         from that durable evidence.
+
+        A live runner is not only one in this process: a durable job is run by
+        a detached worker, and while its recorded owner is alive
+        (``owner_is_alive``) that worker still has post-terminal work to do
+        (QA, the chained evaluation) and writes the terminal event itself.
+        Materializing it here would make the worker see a terminal job and
+        stop before that work.
         """
         if (
             snapshot.is_terminal
@@ -1990,6 +2034,7 @@ class JobManager:
             or not snapshot.links.execution_id
             or snapshot.job_id in self._tasks
             or snapshot.job_id in self._runner_tasks
+            or owner_is_alive
         ):
             return snapshot
         completed_result = await self._derive_completed_execution_result(snapshot)
@@ -2008,6 +2053,11 @@ class JobManager:
         )
         if completed_result is None and progress_blocker is None and linked_failure is None:
             return snapshot
+        linked_failure_meta = (
+            await self._derive_linked_run_failure_meta(snapshot)
+            if linked_failure is not None
+            else None
+        )
         if getattr(self._event_store, "_read_only", False):
             if completed_result is not None:
                 event = _execution_completed_job_event(
@@ -2018,7 +2068,9 @@ class JobManager:
             elif progress_blocker is not None:
                 event = _progress_accounting_failed_job_event(snapshot.job_id, progress_blocker)
             else:
-                event = _linked_execution_failed_job_event(snapshot.job_id, linked_failure or "")
+                event = _linked_execution_failed_job_event(
+                    snapshot.job_id, linked_failure or "", linked_failure_meta
+                )
             return _snapshot_with_terminal_event(snapshot, event, snapshot.cursor)
         lock = self._recovery_locks.setdefault(snapshot.job_id, asyncio.Lock())
         async with lock:
@@ -2056,6 +2108,7 @@ class JobManager:
                         linked_failure or "",
                         check_current=False,
                         event_id=(f"{_RECOVERED_LINKED_FAILURE_EVENT_ID_PREFIX}{snapshot.job_id}"),
+                        failure_meta=linked_failure_meta,
                     )
             except PersistenceError:
                 events, cursor = await self._event_store.get_events_after(

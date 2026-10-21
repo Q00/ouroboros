@@ -38,6 +38,10 @@ class ConductorActorMode(StrEnum):
     RUN = "run"
     AUTO = "auto"
     RALPH = "ralph"
+    # A decision-mode lateral advisory the user accepted (grounded-lateral
+    # RFC P3). Advisory records are read-only by construction; like AUTO and
+    # RALPH, an advisory actor may never carry a relaxing directive.
+    ADVISORY = "advisory"
 
 
 class ConductorDecisionPhase(StrEnum):
@@ -224,9 +228,11 @@ class ConductorDirective:
 
     def validate_actor_policy(self, actor_mode: ConductorActorMode) -> None:
         """Prevent autonomous Auto/Ralph from weakening the approved contract."""
-        if actor_mode in {ConductorActorMode.AUTO, ConductorActorMode.RALPH} and not (
-            self.is_non_relaxing and self.deterministic
-        ):
+        if actor_mode in {
+            ConductorActorMode.AUTO,
+            ConductorActorMode.RALPH,
+            ConductorActorMode.ADVISORY,
+        } and not (self.is_non_relaxing and self.deterministic):
             raise ValueError(
                 "Auto/Ralph conductor successors require a deterministic non-relaxing directive"
             )

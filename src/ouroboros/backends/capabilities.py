@@ -615,6 +615,23 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         skill_execution_capabilities=_GENERIC_SKILL_EXECUTION_CAPABILITIES,
     ),
     BackendCapability(
+        # Oh My Pi (``omp``) is a Pi-family coding agent speaking the same
+        # JSON event protocol as Pi, so it drives the same generic runtime /
+        # LLM adapter surfaces. Runtime-only differences (``--resume`` for
+        # session resume, ``glob`` instead of ``find``) live in
+        # ``orchestrator/omp_runtime.py``.
+        name="omp",
+        aliases=("omp_cli",),
+        supports_runtime=True,
+        supports_llm=True,
+        supports_interview_driver=True,
+        switchable_runtime=True,
+        cli_name="omp",
+        cli_config_key="omp_cli_path",
+        supports_tool_envelope=False,
+        skill_execution_capabilities=_GENERIC_SKILL_EXECUTION_CAPABILITIES,
+    ),
+    BackendCapability(
         name="gjc",
         aliases=("gajae-code", "gajae_code"),
         supports_runtime=True,
@@ -742,42 +759,45 @@ def render_mcp_server_instructions() -> str:
     budget (Claude Code truncates at ~2KB) with the load-bearing rules first.
     """
     return (
-        "Ouroboros drives interview/seed/run/evaluate/evolve workflows through "
-        "MCP tools named `...ouroboros_*`.\n"
+        "Ouroboros turns a coding request into a spec with acceptance criteria, "
+        "then builds and verifies it.\n"
         "\n"
-        "WHEN TO USE OUROBOROS: use BEFORE implementation when a request is "
-        "ambiguous, lacks acceptance criteria, is multi-step, or is a "
-        "migration. Unclear request → "
-        "`ouroboros_interview`; substantial end-to-end task → "
-        "`ouroboros_start_auto`; existing Seed → "
-        "`ouroboros_start_execute_seed`; stuck or repeated failures → "
-        "`ouroboros_lateral_think`. Do not wait for the literal word "
-        '"ooo". '
+        "WHEN TO USE OUROBOROS: when the user's request matches a case below, "
+        "make the Ouroboros call your FIRST step, BEFORE reading code or "
+        'implementing it yourself. Do not wait for the literal word "ooo".\n'
+        '- Unsure what to build, a vague ask ("add notifications", "make it '
+        'production-ready", "build me X"), or no clear done: '
+        "`ouroboros_interview`.\n"
+        "- Work that spans several files or replaces a framework, language, "
+        "auth, storage, or API layer, and should end up working and tested: "
+        "`ouroboros_start_auto`.\n"
+        "- A Seed spec already exists: `ouroboros_start_execute_seed`.\n"
+        "- Goal, constraints, and success criteria already settled: "
+        "`ouroboros_generate_seed` (no interview).\n"
+        "- The user is stuck after several failed fixes, or faces a "
+        "consequential choice with no clear winner (hard to undo, team split): "
+        "`ouroboros_lateral_think`.\n"
+        "- A PRD: `ouroboros_pm_interview`. Prove done work meets its "
+        "criteria: `ouroboros_start_evaluate`.\n"
         "Do not route simple questions or small unambiguous edits.\n"
         "\n"
-        "TOOL DISCOVERY: these tools may be DEFERRED — the tool exists but its "
-        "schema is not loaded, so it is not in your immediate tool list. Do NOT "
-        "conclude a tool is unavailable from its absence. Load it through your "
-        "runtime's own tool-discovery mechanism using the query "
-        "`+ouroboros <skill>` (e.g. `+ouroboros evaluate`), then call it by its "
-        "full `...ouroboros_*` name. A deferred schema can unload between turns, "
-        "so re-run discovery immediately before each call. If a tool is already "
-        "exposed, call it directly — discovery is a no-op then, and an empty "
-        "discovery result is expected, not a failure. Never surface this "
-        "tool-discovery plumbing to the user.\n"
+        "TOOL DISCOVERY: tools may be DEFERRED (absent until loaded); absence "
+        "is not unavailability. Load with your runtime's tool discovery, query "
+        "`+ouroboros <skill>`, then call the full `...ouroboros_*` name, "
+        "re-running discovery before each call. If already exposed, call it "
+        "directly; an empty result is then expected. Never surface this to "
+        "the user.\n"
         "\n"
-        "SUBAGENT FAN-OUT: when a tool result carries a payload array, obey its "
-        "dispatch contract. `host_action=spawn_subagents` means the host declared "
-        "parallel support: spawn ONE child per payload using your runtime's native "
-        "primitive, give each the payload `prompt`, await all, correlate by "
+        "SUBAGENT FAN-OUT: obey a result's payload dispatch contract. "
+        "`host_action=spawn_subagents`: spawn ONE child per payload natively, "
+        "give each its `prompt`, await all, correlate by "
         "`result_correlation_key`, then synthesize. "
-        "`host_action=dispatch_subagents_if_supported` means host capability was "
-        "not declared: use the host's native parallel primitive when available, "
-        "otherwise process the same payloads sequentially. A passive plugin bridge "
-        "consumes `_subagents` itself. Preserve user-facing content while assistive "
-        "work runs. During background execution, keep pumping `ouroboros_job_wait` "
-        "with bounded timeouts: spawn each `pending_host_dispatches` entry the same "
-        "way and submit each result via `ouroboros_submit_fanout_results`."
+        "`host_action=dispatch_subagents_if_supported`: go parallel if "
+        "available, else sequential. A passive plugin bridge consumes "
+        "`_subagents` itself. Preserve user-facing content while assistive "
+        "work runs. In background execution keep pumping `ouroboros_job_wait` "
+        "with bounded timeouts; spawn each `pending_host_dispatches` entry the "
+        "same way and submit results via `ouroboros_submit_fanout_results`."
     )
 
 

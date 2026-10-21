@@ -51,6 +51,10 @@ def __getattr__(name: str) -> object:
         from ouroboros.providers.pi_llm_adapter import PiLLMAdapter
 
         return PiLLMAdapter
+    if name == "OmpLLMAdapter":
+        from ouroboros.providers.omp_llm_adapter import OmpLLMAdapter
+
+        return OmpLLMAdapter
     if name == "GjcLLMAdapter":
         from ouroboros.providers.gjc_llm_adapter import GjcLLMAdapter
 
@@ -87,6 +91,7 @@ __all__ = [
     "HermesCliLLMAdapter",
     "GooseCliLLMAdapter",
     "PiLLMAdapter",
+    "OmpLLMAdapter",
     "GjcLLMAdapter",
     "OurocodeLLMAdapter",
     "DshLLMAdapter",

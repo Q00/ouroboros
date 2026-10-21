@@ -159,15 +159,15 @@ def test_private_tool_spec_attributes_remain_importable_from_capabilities_root()
 _EXPECTED_OUROBOROS_REQUIRED_CONTEXT_KEYS = {
     "ouroboros_ac_tree_hud": ("session_id", "cursor"),
     "ouroboros_auto": (),
-    "ouroboros_brownfield": ("indices",),
+    "ouroboros_brownfield": ("indices", "text"),
     "ouroboros_cancel_execution": ("execution_id",),
     "ouroboros_cancel_job": ("job_id",),
     "ouroboros_checklist_verify": ("session_id", "seed_content", "artifact"),
     "ouroboros_evaluate": ("session_id", "artifact"),
     "ouroboros_evolve_rewind": ("lineage_id", "to_generation"),
     "ouroboros_evolve_step": ("lineage_id",),
-    "ouroboros_execute_seed": ("seed_path", "cwd"),
-    "ouroboros_generate_seed": ("session_id",),
+    "ouroboros_execute_seed": (),
+    "ouroboros_generate_seed": ("session_id", "session_context"),
     "ouroboros_interview": (
         "initial_context",
         "cwd",
@@ -233,6 +233,8 @@ _EXPECTED_OUROBOROS_REQUIRED_CONTEXT_KEYS = {
     ),
     "ouroboros_start_evolve_step": ("lineage_id",),
     "ouroboros_start_execute_seed": (
+        "seed_path",
+        "cwd",
         "seed_content",
         "efficiency_mode",
         "frugality_assurance",
@@ -1614,7 +1616,7 @@ def test_owned_required_context_keys_union_definition_and_skill_usage(
 def test_packaged_skill_tool_mappings_are_stored_apart_from_descriptors() -> None:
     expected = {
         "auto": "ouroboros_start_auto",
-        "run": "ouroboros_execute_seed",
+        "run": "ouroboros_start_execute_seed",
         "ralph": "ouroboros_ralph",
         "status": "ouroboros_session_status",
         "seed": "ouroboros_generate_seed",
@@ -1647,7 +1649,7 @@ def test_packaged_skill_tool_mappings_are_stored_apart_from_descriptors() -> Non
 def test_skill_capability_resolution_maps_core_skills_to_owned_mcp_tools() -> None:
     expected = {
         "auto": "ouroboros_start_auto",
-        "run": "ouroboros_execute_seed",
+        "run": "ouroboros_start_execute_seed",
         "ralph": "ouroboros_ralph",
         "status": "ouroboros_session_status",
         "seed": "ouroboros_generate_seed",
@@ -1687,8 +1689,8 @@ def test_core_skills_resolve_end_to_end_to_explicit_mcp_capabilities() -> None:
             "side_effects": ("workspace_write", "event_store_write"),
         },
         "run": {
-            "tool_name": "ouroboros_execute_seed",
-            "execution_mode": "blocking",
+            "tool_name": "ouroboros_start_execute_seed",
+            "execution_mode": "background",
             "side_effects": ("workspace_write", "event_store_write"),
         },
         "ralph": {

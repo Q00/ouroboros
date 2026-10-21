@@ -12,6 +12,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from ouroboros.config._model_defaults import (
+    DEFAULT_HAIKU_MODEL,
+    DEFAULT_OPUS_MODEL,
+    DEFAULT_SONNET_MODEL,
+)
 from ouroboros.config.models import (
     EconomicsConfig,
     ModelConfig,
@@ -86,11 +91,21 @@ def _init_git_repo(root: Path) -> None:
     )
 
 
+def _project_dir() -> str:
+    """Return the default project directory, created: project identity
+    requires it to exist, and a runtime built here, not through ``_adapter``,
+    may be the first test on an xdist worker."""
+    Path("/tmp/project").mkdir(parents=True, exist_ok=True)
+    return "/tmp/project"
+
+
 def _adapter(
     cwd: str = "/tmp/project",
     *,
     constructor_model: str | None = "constructor-sonnet",
 ) -> MagicMock:
+    if cwd == "/tmp/project":
+        Path(cwd).mkdir(parents=True, exist_ok=True)
     adapter = MagicMock()
     adapter.runtime_backend = "claude"
     adapter.llm_backend = "anthropic"
@@ -225,7 +240,7 @@ def _assert_runtime_identity_observed(contract: dict[str, object]) -> dict[str, 
 def _clear_model_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OUROBOROS_MODEL_TIER_ROUTING", raising=False)
     monkeypatch.delenv("OUROBOROS_EXECUTION_MODEL", raising=False)
-    monkeypatch.setattr("ouroboros.config.get_execution_model", lambda: None)
+    monkeypatch.setattr("ouroboros.config.get_execution_model", lambda _backend=None: None)
     monkeypatch.setattr("ouroboros.config.load_config", get_default_config)
 
 
@@ -546,7 +561,7 @@ def test_v9_inputs_freeze_context_profile_parent_lineage_pause_and_runtime_capab
     inputs = contract["execution_inputs"]
     semantics = contract["execution_semantics"]
     assert inputs["schema_version"] == 2
-    assert semantics["version"] == 7
+    assert semantics["version"] == CURRENT_EXECUTION_SEMANTICS_VERSION
     assert semantics["verify_shell_identity"] is None or isinstance(
         semantics["verify_shell_identity"], dict
     )
@@ -994,6 +1009,131 @@ def test_v5_lexical_shell_path_migrates_to_unavailable_identity() -> None:
     migrated = resumed._execution_contract["execution_semantics"]
     assert migrated["version"] == CURRENT_EXECUTION_SEMANTICS_VERSION
     assert migrated["verify_shell_identity"] is None
+
+
+def test_execution_semantics_seal_the_exec_sandbox_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OUROBOROS_EXEC_SANDBOX", "on")
+    confined = _runner()
+    monkeypatch.setenv("OUROBOROS_EXEC_SANDBOX", "off")
+    unconfined = _runner()
+
+    assert confined._execution_semantics_contract()["exec_sandbox_enabled"] is True
+    assert unconfined._execution_semantics_contract()["exec_sandbox_enabled"] is False
+
+
+@pytest.mark.parametrize(("sealed", "live"), [("on", "off"), ("off", "on")])
+def test_resume_rejects_changed_exec_sandbox_policy(
+    monkeypatch: pytest.MonkeyPatch, sealed: str, live: str
+) -> None:
+    monkeypatch.setenv("OUROBOROS_EXEC_SANDBOX", sealed)
+    original = _runner()
+    persisted = original._build_execution_contract(project_identity=original._project_identity())
+
+    monkeypatch.setenv("OUROBOROS_EXEC_SANDBOX", live)
+    with pytest.raises(OrchestratorError, match="changed execution semantics"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
+@pytest.mark.parametrize(("live", "resumes"), [("on", True), ("off", False)])
+def test_v7_execution_semantics_migrate_to_the_confined_sandbox_policy(
+    monkeypatch: pytest.MonkeyPatch, live: str, resumes: bool
+) -> None:
+    monkeypatch.setenv("OUROBOROS_EXEC_SANDBOX", "on")
+    original = _runner()
+    persisted = copy.deepcopy(
+        original._build_execution_contract(project_identity=original._project_identity())
+    )
+    semantics = persisted["execution_semantics"]
+    semantics["version"] = 7
+    del semantics["exec_sandbox_enabled"]
+    persisted["frugality_proof"]["execution_semantics_fingerprint"] = (
+        OrchestratorRunner._execution_semantics_fingerprint(semantics)
+    )
+
+    monkeypatch.setenv("OUROBOROS_EXEC_SANDBOX", live)
+    resumed = _runner()
+    if not resumes:
+        # A v7 run resumes confined; a controller switched off is drift.
+        with pytest.raises(OrchestratorError, match="changed execution semantics"):
+            resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+        return
+    resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+    migrated = resumed._execution_contract["execution_semantics"]
+    assert migrated["version"] == CURRENT_EXECUTION_SEMANTICS_VERSION
+    assert migrated["exec_sandbox_enabled"] is True
+
+
+def test_v7_sandbox_migration_rejects_unsealed_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OUROBOROS_EXEC_SANDBOX", "on")
+    original = _runner()
+    persisted = copy.deepcopy(
+        original._build_execution_contract(project_identity=original._project_identity())
+    )
+    persisted["execution_semantics"]["version"] = 7
+    del persisted["execution_semantics"]["exec_sandbox_enabled"]
+
+    with pytest.raises(OrchestratorError, match="invalid pre-exec-sandbox contract"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
+@pytest.mark.parametrize("mode", ["decide", "record"])
+def test_execution_semantics_seal_the_transcript_verifier_mode(mode: str) -> None:
+    runner = _runner()
+    runner._transcript_verifier = mode
+    assert runner._execution_semantics_contract()["transcript_verifier"] == mode
+
+
+@pytest.mark.parametrize(("sealed", "live"), [("record", "decide"), ("decide", "record")])
+def test_resume_keeps_the_run_own_transcript_verifier_mode(sealed: str, live: str) -> None:
+    """A resume takes the sealed mode, never the live config: acceptance does not change mid-run."""
+    original = _runner()
+    original._transcript_verifier = sealed
+    persisted = original._build_execution_contract(project_identity=original._project_identity())
+
+    resumed = _runner()
+    resumed._transcript_verifier = live
+    resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+    assert resumed._transcript_verifier == sealed
+    assert resumed._execution_contract["execution_semantics"]["transcript_verifier"] == sealed
+
+
+@pytest.mark.parametrize("live", ["decide", "record"])
+def test_v8_execution_semantics_migrate_to_the_deciding_verifier(live: str) -> None:
+    """A run sealed before the setting existed decided; it resumes deciding."""
+    original = _runner()
+    persisted = copy.deepcopy(
+        original._build_execution_contract(project_identity=original._project_identity())
+    )
+    semantics = persisted["execution_semantics"]
+    semantics["version"] = 8
+    del semantics["transcript_verifier"]
+    persisted["frugality_proof"]["execution_semantics_fingerprint"] = (
+        OrchestratorRunner._execution_semantics_fingerprint(semantics)
+    )
+
+    resumed = _runner()
+    resumed._transcript_verifier = live
+    resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+    migrated = resumed._execution_contract["execution_semantics"]
+    assert migrated["version"] == CURRENT_EXECUTION_SEMANTICS_VERSION
+    assert migrated["transcript_verifier"] == "decide"
+    assert resumed._transcript_verifier == "decide"
+
+
+def test_v8_transcript_verifier_migration_rejects_unsealed_semantics() -> None:
+    original = _runner()
+    persisted = copy.deepcopy(
+        original._build_execution_contract(project_identity=original._project_identity())
+    )
+    persisted["execution_semantics"]["version"] = 8
+    del persisted["execution_semantics"]["transcript_verifier"]
+
+    with pytest.raises(OrchestratorError, match="invalid pre-transcript-verifier contract"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
 
 def test_resume_rejects_changed_verify_shell_authority() -> None:
@@ -1685,11 +1825,187 @@ def test_constructor_model_pin_is_persisted_and_mismatch_is_rejected() -> None:
         )
 
 
+_CONCRETE_TIERS = {
+    "frugal": DEFAULT_HAIKU_MODEL,
+    "standard": DEFAULT_SONNET_MODEL,
+    "frontier": DEFAULT_OPUS_MODEL,
+}
+_ALIAS_TIERS = {"frugal": "haiku", "standard": "sonnet", "frontier": "opus"}
+
+
+def _pre_upgrade_contract(contract: dict) -> dict:
+    """Return ``contract`` in the 0.55.x shape: no ``resolved_models`` key."""
+    legacy = copy.deepcopy(contract)
+    routing = legacy["model_routing"]
+    del routing["resolved_models"]
+    legacy["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
+        routing
+    )
+    return legacy
+
+
+def test_pre_upgrade_concrete_contract_resumes_on_its_persisted_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run started before ``auto`` replays its concrete ids instead of resolving again."""
+    monkeypatch.setenv("OUROBOROS_PIN_MODELS", "1")
+    original = _runner(constructor_model=DEFAULT_SONNET_MODEL)
+    assert original._model_router is not None
+    assert dict(original._model_router.tier_models) == _CONCRETE_TIERS
+    persisted = _pre_upgrade_contract(
+        original._build_execution_contract(
+            project_identity=original._project_identity(), seed=_seed()
+        )
+    )
+
+    monkeypatch.delenv("OUROBOROS_PIN_MODELS")
+    resumed = _runner(constructor_model="sonnet")
+    assert resumed._model_router is not None
+    assert dict(resumed._model_router.tier_models) == _ALIAS_TIERS
+
+    changed = resumed._restore_execution_contract(
+        {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+        seed=_seed(),
+    )
+
+    assert changed is False
+    assert resumed._execution_contract == persisted
+    assert dict(resumed._model_router.tier_models) == _CONCRETE_TIERS
+    assert resumed._adapter._model == DEFAULT_SONNET_MODEL
+    projection = resumed._execution_contract["model_routing"]["route_compat"]["projection"]
+    assert [c["model"] for c in projection["registry"]["candidates"]] == list(
+        _CONCRETE_TIERS.values()
+    )
+
+
+@pytest.mark.parametrize("pin_on_resume", [False, True])
+def test_auto_contract_resumes_on_the_same_aliases(
+    monkeypatch: pytest.MonkeyPatch, pin_on_resume: bool
+) -> None:
+    monkeypatch.delenv("OUROBOROS_PIN_MODELS", raising=False)
+    original = _runner(constructor_model="sonnet")
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
+    assert persisted["model_routing"]["resolved_models"] == {
+        "execute": "sonnet",
+        "tiers": dict(sorted(_ALIAS_TIERS.items())),
+    }
+    fingerprint = persisted["frugality_proof"]["routing_fingerprint"]
+
+    if pin_on_resume:
+        monkeypatch.setenv("OUROBOROS_PIN_MODELS", "1")
+    resumed = _runner(constructor_model="sonnet")
+    changed = resumed._restore_execution_contract(
+        {EXECUTION_CONTRACT_PROGRESS_KEY: copy.deepcopy(persisted)},
+        seed=_seed(),
+    )
+
+    assert changed is False
+    assert resumed._execution_contract == persisted
+    assert resumed._execution_contract["frugality_proof"]["routing_fingerprint"] == fingerprint
+    assert resumed._model_router is not None
+    assert dict(resumed._model_router.tier_models) == _ALIAS_TIERS
+    assert resumed._adapter._model == "sonnet"
+
+
+def test_auto_gemini_ladder_keeps_native_alias_route_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gemini CLI aliases survive the persisted Route B contract and resume."""
+    monkeypatch.delenv("OUROBOROS_PIN_MODELS", raising=False)
+
+    def _gemini_runner() -> OrchestratorRunner:
+        # A constructor model keeps the unrelated effective-model guard satisfied.
+        adapter = _adapter(constructor_model="gemini-constructor")
+        adapter.runtime_backend = "gemini_cli"
+        return OrchestratorRunner(adapter, AsyncMock(), MagicMock())
+
+    original = _gemini_runner()
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
+    routing = persisted["model_routing"]
+    assert routing["enabled"] is True
+    assert routing["resolved_models"]["tiers"] == {"frugal": "flash", "standard": "pro"}
+    projection = routing["route_compat"]["projection"]
+    assert projection is not None
+    assert [c["model"] for c in projection["registry"]["candidates"]] == ["flash", "pro"]
+
+    resumed = _gemini_runner()
+    changed = resumed._restore_execution_contract(
+        {EXECUTION_CONTRACT_PROGRESS_KEY: copy.deepcopy(persisted)},
+        seed=_seed(),
+    )
+
+    assert changed is False
+    assert resumed._execution_contract == persisted
+    assert resumed._model_router is not None
+    assert dict(resumed._model_router.tier_models) == {"frugal": "flash", "standard": "pro"}
+
+
+def test_resume_rejects_resolved_tier_the_config_cannot_produce() -> None:
+    original = _runner(constructor_model="sonnet")
+    persisted = copy.deepcopy(
+        original._build_execution_contract(
+            project_identity=original._project_identity(), seed=_seed()
+        )
+    )
+    routing = persisted["model_routing"]
+    routing["resolved_models"]["tiers"]["standard"] = "never-configured"
+    routing["router"]["tier_models"]["standard"] = "never-configured"
+    persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
+        routing
+    )
+
+    with pytest.raises(OrchestratorError, match="changed model-routing policy"):
+        _runner(constructor_model="sonnet")._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+
+
+def test_resume_rejects_malformed_resolved_models() -> None:
+    original = _runner(constructor_model="sonnet")
+    persisted = copy.deepcopy(
+        original._build_execution_contract(
+            project_identity=original._project_identity(), seed=_seed()
+        )
+    )
+    routing = persisted["model_routing"]
+    routing["resolved_models"]["tiers"]["bananas"] = "sonnet"
+    persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
+        routing
+    )
+
+    with pytest.raises(OrchestratorError, match="invalid execution contract"):
+        _runner(constructor_model="sonnet")._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+
+
+def test_automatic_constructor_does_not_replay_an_unconfigured_model() -> None:
+    """Replay is bounded: an automatic adapter adopts only a model config could run."""
+    original = _runner(constructor_model="claude-sonnet-original")
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
+
+    resumed = _runner(constructor_model="sonnet")
+    with pytest.raises(OrchestratorError, match="different constructor model"):
+        resumed._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+    assert resumed._adapter._model == "sonnet"
+
+
 def test_codex_dynamic_profiles_do_not_create_a_portable_resume_identity() -> None:
     original_runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     original_runtime._runtime_profile = "zep-runtime"
     original_runtime._codex_profile = "zep-proxy-a"
@@ -1703,7 +2019,7 @@ def test_codex_dynamic_profiles_do_not_create_a_portable_resume_identity() -> No
     resumed_runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     resumed_runtime._runtime_profile = "zep-runtime"
     resumed_runtime._codex_profile = "zep-proxy-b"
@@ -1781,7 +2097,7 @@ def test_runner_rejects_untrusted_codex_runtime_subclass_identity() -> None:
     runtime = SpoofedCodexRuntime(
         cli_path="/bin/echo",
         model="spoofed",
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     runner = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
 
@@ -1792,7 +2108,7 @@ def test_codex_resolved_fallback_state_stays_out_of_durable_runtime_identity() -
     original_runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     original_runtime._resolved_fallback_model = "gpt-original"
     original_runtime._resolved_fallback_profile = None
@@ -1812,7 +2128,7 @@ def test_codex_resolved_fallback_state_stays_out_of_durable_runtime_identity() -
     resumed_runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     resumed_runtime._resolved_fallback_model = "gpt-changed"
     resumed_runtime._resolved_fallback_profile = None
@@ -1840,7 +2156,7 @@ def test_codex_profile_name_alone_stays_process_local(
     runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     runtime._codex_profile = "same-name-mutable-profile"
     runtime._resolved_fallback_model = None
@@ -1857,11 +2173,11 @@ def test_automatic_codex_default_resume_requires_observed_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Fingerprints alone do not prove the App/CLI-selected concrete model."""
-    monkeypatch.setattr("ouroboros.config.get_execution_model", lambda: None)
+    monkeypatch.setattr("ouroboros.config.get_execution_model", lambda _backend=None: None)
     original_runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     original_runtime._runtime_profile = None
     original_runtime._codex_profile = None
@@ -1885,7 +2201,7 @@ def test_automatic_codex_default_resume_requires_observed_model(
     resumed_runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     resumed_runtime._runtime_profile = None
     resumed_runtime._codex_profile = None
@@ -1905,14 +2221,14 @@ def test_automatic_codex_default_resume_rejects_a_different_executable_path(
     tmp_path: Path,
 ) -> None:
     """The automatic default is bound to its resolved Codex executable."""
-    monkeypatch.setattr("ouroboros.config.get_execution_model", lambda: None)
+    monkeypatch.setattr("ouroboros.config.get_execution_model", lambda _backend=None: None)
     first_cli = tmp_path / "codex-a"
     second_cli = tmp_path / "codex-b"
     for cli in (first_cli, second_cli):
         cli.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         cli.chmod(0o755)
 
-    original_runtime = CodexCliRuntime(cli_path=first_cli, model=None, cwd="/tmp/project")
+    original_runtime = CodexCliRuntime(cli_path=first_cli, model=None, cwd=_project_dir())
     original_runtime._runtime_profile = None
     original_runtime._codex_profile = None
     original_runtime._resolved_fallback_model = None
@@ -1929,7 +2245,7 @@ def test_automatic_codex_default_resume_rejects_a_different_executable_path(
     persisted_identity = persisted["model_routing"]["runtime_execution"]["identity"]
     assert persisted_identity["cli_executable_path"] == str(first_cli.absolute())
 
-    resumed_runtime = CodexCliRuntime(cli_path=second_cli, model=None, cwd="/tmp/project")
+    resumed_runtime = CodexCliRuntime(cli_path=second_cli, model=None, cwd=_project_dir())
     resumed_runtime._runtime_profile = None
     resumed_runtime._codex_profile = None
     resumed_runtime._resolved_fallback_model = None
@@ -1948,12 +2264,12 @@ def test_automatic_codex_default_resume_rejects_in_place_cli_upgrade(
     tmp_path: Path,
 ) -> None:
     """The same executable path must not conceal a changed Codex version."""
-    monkeypatch.setattr("ouroboros.config.get_execution_model", lambda: None)
+    monkeypatch.setattr("ouroboros.config.get_execution_model", lambda _backend=None: None)
     cli = tmp_path / "codex"
     cli.write_text("#!/bin/sh\necho codex 1.0\n", encoding="utf-8")
     cli.chmod(0o755)
 
-    original_runtime = CodexCliRuntime(cli_path=cli, model=None, cwd="/tmp/project")
+    original_runtime = CodexCliRuntime(cli_path=cli, model=None, cwd=_project_dir())
     original_runtime._runtime_profile = None
     original_runtime._codex_profile = None
     original_runtime._resolved_fallback_model = None
@@ -1968,7 +2284,7 @@ def test_automatic_codex_default_resume_rejects_in_place_cli_upgrade(
     )
 
     cli.write_text("#!/bin/sh\necho codex 2.0\n", encoding="utf-8")
-    resumed_runtime = CodexCliRuntime(cli_path=cli, model=None, cwd="/tmp/project")
+    resumed_runtime = CodexCliRuntime(cli_path=cli, model=None, cwd=_project_dir())
     resumed_runtime._runtime_profile = None
     resumed_runtime._codex_profile = None
     resumed_runtime._resolved_fallback_model = None
@@ -1986,12 +2302,12 @@ def test_automatic_codex_default_resume_rejects_same_version_changed_executable(
     tmp_path: Path,
 ) -> None:
     """A wrapper with unchanged --version output must not hide changed bytes."""
-    monkeypatch.setattr("ouroboros.config.get_execution_model", lambda: None)
+    monkeypatch.setattr("ouroboros.config.get_execution_model", lambda _backend=None: None)
     cli = tmp_path / "codex"
     cli.write_text("#!/bin/sh\n# one\necho codex 1.0\n", encoding="utf-8")
     cli.chmod(0o755)
 
-    original_runtime = CodexCliRuntime(cli_path=cli, model=None, cwd="/tmp/project")
+    original_runtime = CodexCliRuntime(cli_path=cli, model=None, cwd=_project_dir())
     original_runtime._runtime_profile = None
     original_runtime._codex_profile = None
     original_runtime._resolved_fallback_model = None
@@ -2006,7 +2322,7 @@ def test_automatic_codex_default_resume_rejects_same_version_changed_executable(
     )
 
     cli.write_text("#!/bin/sh\n# two\necho codex 1.0\n", encoding="utf-8")
-    resumed_runtime = CodexCliRuntime(cli_path=cli, model=None, cwd="/tmp/project")
+    resumed_runtime = CodexCliRuntime(cli_path=cli, model=None, cwd=_project_dir())
     resumed_runtime._runtime_profile = None
     resumed_runtime._codex_profile = None
     resumed_runtime._resolved_fallback_model = None
@@ -2026,7 +2342,7 @@ def test_non_codex_subclass_does_not_inherit_codex_profile_as_model_identity(
     runtime = GooseCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     runtime._codex_profile = "irrelevant-codex-profile"
     runtime._resolved_fallback_model = "irrelevant-codex-model"
@@ -2052,8 +2368,8 @@ def test_non_codex_runtime_identity_tracks_executable_path(
     second_cli.write_text("#!/bin/sh\necho gemini-b\n", encoding="utf-8")
     first_cli.chmod(0o755)
     second_cli.chmod(0o755)
-    true_runtime = GeminiCLIRuntime(cli_path=first_cli, model="gemini-pro", cwd="/tmp/project")
-    false_runtime = GeminiCLIRuntime(cli_path=second_cli, model="gemini-pro", cwd="/tmp/project")
+    true_runtime = GeminiCLIRuntime(cli_path=first_cli, model="gemini-pro", cwd=_project_dir())
+    false_runtime = GeminiCLIRuntime(cli_path=second_cli, model="gemini-pro", cwd=_project_dir())
 
     true_identity = true_runtime.execution_identity_contract()
     false_identity = false_runtime.execution_identity_contract()
@@ -2071,12 +2387,12 @@ def test_copilot_runtime_identity_tracks_native_agent_precedence(
     model_runtime = CopilotCliRuntime(
         cli_path="/bin/echo",
         model="claude-opus-4.6",
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     agent_runtime = CopilotCliRuntime(
         cli_path="/bin/echo",
         model="claude-opus-4.6",
-        cwd="/tmp/project",
+        cwd=_project_dir(),
         runtime_profile="worker",
     )
 
@@ -2102,7 +2418,7 @@ def test_runtime_model_sentinel_is_not_persisted_as_a_constructor_pin(
     runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model="default",
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     runner = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
     persisted = runner._build_execution_contract(
@@ -2141,7 +2457,7 @@ def test_codex_profile_file_changes_do_not_create_a_portable_runtime_identity(
     original_runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     original_runtime._codex_profile = "stable-name"
     original = OrchestratorRunner(original_runtime, AsyncMock(), MagicMock())
@@ -2153,7 +2469,7 @@ def test_codex_profile_file_changes_do_not_create_a_portable_runtime_identity(
     resumed_runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     resumed_runtime._codex_profile = "stable-name"
     resumed_contract = OrchestratorRunner(
@@ -2185,7 +2501,7 @@ def test_codex_home_changes_do_not_create_a_portable_runtime_identity(
     original_runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     original_contract = OrchestratorRunner(
         original_runtime,
@@ -2204,7 +2520,7 @@ def test_codex_home_changes_do_not_create_a_portable_runtime_identity(
     resumed_runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     resumed_contract = OrchestratorRunner(
         resumed_runtime,
@@ -2227,7 +2543,7 @@ def test_contract_build_records_codex_runtime_execution_identity() -> None:
     runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
 
     contract = OrchestratorRunner(
@@ -2253,7 +2569,7 @@ def test_resume_rejects_unobserved_runtime_identity_for_pinned_codex_v9() -> Non
     runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model="gpt-5",
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     original = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
     persisted = original._build_execution_contract(
@@ -2286,7 +2602,7 @@ def test_codex_runtime_with_custom_skills_dir_is_not_portable_identity(tmp_path:
     runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
         skills_dir=tmp_path,
     )
 
@@ -2306,7 +2622,7 @@ def test_codex_runtime_with_custom_skill_dispatcher_is_not_portable_identity() -
     runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
         skill_dispatcher=_dispatcher,
     )
 
@@ -2335,7 +2651,7 @@ def test_codex_runtime_with_spoofed_dispatcher_identity_is_not_portable() -> Non
     runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
         skill_dispatcher=_SpoofedDispatcher().dispatch,
     )
 
@@ -2354,7 +2670,7 @@ def test_factory_codex_runtime_records_portable_dispatcher_identity() -> None:
         "ouroboros.orchestrator.runtime_factory.get_codex_cli_path",
         return_value="/bin/echo",
     ):
-        runtime = create_agent_runtime(backend="codex", cwd="/tmp/project")
+        runtime = create_agent_runtime(backend="codex", cwd=_project_dir())
 
     contract = OrchestratorRunner(
         runtime,
@@ -2382,13 +2698,13 @@ def test_factory_codex_runtime_identity_tracks_cli_path_drift() -> None:
         "ouroboros.orchestrator.runtime_factory.get_codex_cli_path",
         return_value="/bin/echo",
     ):
-        original_runtime = create_agent_runtime(backend="codex", cwd="/tmp/project")
+        original_runtime = create_agent_runtime(backend="codex", cwd=_project_dir())
 
     with patch(
         "ouroboros.orchestrator.runtime_factory.get_codex_cli_path",
         return_value="/bin/true",
     ):
-        drifted_runtime = create_agent_runtime(backend="codex", cwd="/tmp/project")
+        drifted_runtime = create_agent_runtime(backend="codex", cwd=_project_dir())
 
     original_identity = original_runtime.execution_identity_contract()
     drifted_identity = drifted_runtime.execution_identity_contract()
@@ -2408,7 +2724,10 @@ def test_trusted_codex_family_runtime_rejects_executable_content_drift(
     runtime_cls: type[CodexCliRuntime],
     tmp_path: Path,
 ) -> None:
-    """Every portable Codex-family runtime must guard command-time binary drift."""
+    """Every portable Codex-family runtime observes command-time binary drift.
+
+    Detection is shared; the response is observe + re-attest, not a failed AC.
+    """
     cli = tmp_path / "runtime-cli"
     cli.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     cli.chmod(0o755)
@@ -2417,17 +2736,16 @@ def test_trusted_codex_family_runtime_rejects_executable_content_drift(
     cli.write_text("#!/bin/sh\necho changed\nexit 0\n", encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="CLI executable changed"):
-        runtime._build_command(
-            str(tmp_path / "last-message.txt"),
-            prompt="hello",
-        )
+        runtime._verify_cli_executable_identity_unchanged()
+    assert runtime._build_command(str(tmp_path / "last-message.txt"), prompt="hello")
+    assert runtime._drift.epoch == 1
 
 
 def test_zcode_runtime_is_not_trusted_as_portable_identity() -> None:
     runtime = ZcodeCLIRuntime(
         cli_path="/tmp/zcode.cjs",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
 
     contract = OrchestratorRunner(
@@ -2469,14 +2787,16 @@ def test_codex_profile_reasoning_effort_drift_is_rejected_before_command_build(
     )
 
     with patch("ouroboros.providers.profiles.load_config", return_value=original_config):
-        runtime = CodexCliRuntime(cli_path="/bin/echo", model=None, cwd="/tmp/project")
+        runtime = CodexCliRuntime(cli_path="/bin/echo", model=None, cwd=_project_dir())
         original_command = runtime._build_command("/tmp/output", runtime_handle=handle)
 
     expected_effort = "xhigh" if original_provider_effort else "high"
     assert f"model_reasoning_effort={expected_effort}" in original_command
     with patch("ouroboros.providers.profiles.load_config", return_value=drifted_config):
-        with pytest.raises(RuntimeError, match="profile routing changed"):
-            runtime._build_command("/tmp/output", runtime_handle=handle)
+        drifted_command = runtime._build_command("/tmp/output", runtime_handle=handle)
+    # Observed, not fatal: threads retire and the drifted effort is honored.
+    assert runtime._drift.epoch >= 1
+    assert "model_reasoning_effort=low" in drifted_command
 
 
 def test_provider_neutral_llm_profile_model_changes_runtime_identity() -> None:
@@ -2491,9 +2811,9 @@ def test_provider_neutral_llm_profile_model_changes_runtime_identity() -> None:
     )
 
     with patch("ouroboros.providers.profiles.load_config", return_value=original_config):
-        original_runtime = CodexCliRuntime(cli_path="/bin/echo", model=None, cwd="/tmp/project")
+        original_runtime = CodexCliRuntime(cli_path="/bin/echo", model=None, cwd=_project_dir())
     with patch("ouroboros.providers.profiles.load_config", return_value=drifted_config):
-        drifted_runtime = CodexCliRuntime(cli_path="/bin/echo", model=None, cwd="/tmp/project")
+        drifted_runtime = CodexCliRuntime(cli_path="/bin/echo", model=None, cwd=_project_dir())
 
     assert (
         original_runtime.execution_identity_contract()["profile_resolution_fingerprint"]
@@ -2518,7 +2838,7 @@ def test_unselected_native_codex_profile_changes_runtime_identity(
         patch("ouroboros.codex.home.resolve_codex_home", return_value=codex_home),
         patch("ouroboros.providers.profiles.load_config", return_value=base_config),
     ):
-        original_runtime = CodexCliRuntime(cli_path="/bin/echo", model=None, cwd="/tmp/project")
+        original_runtime = CodexCliRuntime(cli_path="/bin/echo", model=None, cwd=_project_dir())
 
     config_toml.write_text(
         'model = "gpt-5"\n\n[profiles.unselected]\nmodel = "gpt-b"\n',
@@ -2528,7 +2848,7 @@ def test_unselected_native_codex_profile_changes_runtime_identity(
         patch("ouroboros.codex.home.resolve_codex_home", return_value=codex_home),
         patch("ouroboros.providers.profiles.load_config", return_value=base_config),
     ):
-        drifted_runtime = CodexCliRuntime(cli_path="/bin/echo", model=None, cwd="/tmp/project")
+        drifted_runtime = CodexCliRuntime(cli_path="/bin/echo", model=None, cwd=_project_dir())
 
     assert (
         original_runtime.execution_identity_contract()["codex_config_fingerprint"]
@@ -2561,7 +2881,7 @@ def test_runtime_selector_validation_rejects_changed_resume_handle(
     runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     runner = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
     runner._execution_contract = runner._build_execution_contract(
@@ -2576,7 +2896,7 @@ def test_runtime_selector_validation_accepts_default_handle() -> None:
     runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     runner = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
     runner._execution_contract = runner._build_execution_contract(
@@ -2595,7 +2915,7 @@ def test_contract_build_binds_inherited_runtime_handle_selector() -> None:
     runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model="gpt-pinned",
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     handle = RuntimeHandle(
         backend="codex_cli",
@@ -2630,7 +2950,7 @@ def test_restore_accepts_same_bound_runtime_handle_selector() -> None:
     runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model="gpt-pinned",
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     handle = RuntimeHandle(
         backend="codex_cli",
@@ -2656,7 +2976,7 @@ def test_restore_rejects_different_bound_runtime_handle_selector() -> None:
     runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model="gpt-pinned",
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     original_handle = RuntimeHandle(
         backend="codex_cli",
@@ -2707,7 +3027,7 @@ def test_non_codex_runtime_rejects_cross_backend_handle() -> None:
     runtime = GooseCliRuntime(
         cli_path="/bin/echo",
         model="pinned-goose-model",
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     runner = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
 
@@ -2740,7 +3060,7 @@ def test_codex_runner_forces_native_bypass_flag() -> None:
         cli_path="/bin/echo",
         permission_mode="acceptEdits",
         model="gpt-pinned",
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     OrchestratorRunner(runtime, AsyncMock(), MagicMock())
 
@@ -2754,7 +3074,7 @@ def test_codex_command_consumes_frozen_fallback_model(
     runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
-        cwd="/tmp/project",
+        cwd=_project_dir(),
     )
     runtime._resolved_fallback_model = "gpt-frozen"
     runtime._resolved_fallback_profile = None

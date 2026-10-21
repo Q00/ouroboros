@@ -1060,3 +1060,71 @@ def test_gen1_summary_missing_stage_falls_back_conservatively() -> None:
     summary = evaluation_summary_from_eval_meta(seed, meta)
 
     assert summary.highest_stage_passed == 1
+
+
+def test_gen1_summary_carries_single_ac_unverified_reason() -> None:
+    """A single-AC unverified result feeds its reason, not a generic rejection."""
+    seed = _seed()
+    reason = (
+        "Not approved: unverified. No executed verification evidence (Stage 1 ran no "
+        "configured check). Advisory model review raised no objection, but cannot grant "
+        "acceptance."
+    )
+    meta = {
+        "final_approved": False,
+        "acceptance_state": "unverified",
+        "failure_reason": reason,
+        "highest_stage": 2,
+    }
+
+    summary = evaluation_summary_from_eval_meta(seed, meta)
+
+    assert summary.final_approved is False
+    assert summary.failure_reason == reason
+    assert summary.approval_status == "not_evaluated"
+    assert summary.ac_results == ()
+
+
+def test_gen1_summary_does_not_mint_evaluated_failures_for_unverified_checklist() -> None:
+    """Multi-AC rows without executed evidence stay not evaluated, not FAIL."""
+    seed = _seed()
+    meta = {
+        "final_approved": False,
+        "acceptance_state": "unverified",
+        "highest_stage": 2,
+        "multi_ac": True,
+        "pass_rate": 0.0,
+        "run_feedback": ["AC not met: passing AC (unverified)"],
+        "checklist": [
+            {
+                "ac_text": text,
+                "passed": False,
+                "reasoning": "looks done",
+                "evidence": [],
+                "questions_used": [],
+                "failure_reason": "Not approved: unverified.",
+            }
+            for text in ("passing AC", "failing AC")
+        ],
+    }
+
+    summary = evaluation_summary_from_eval_meta(seed, meta)
+
+    assert summary.final_approved is False
+    assert summary.approval_status == "not_evaluated"
+    assert [r.ac_verdict_state for r in summary.ac_results] == ["not_evaluated"] * 2
+    assert [r.rendered_verdict for r in summary.ac_results] == ["NOT_EVALUATED"] * 2
+    assert all(not r.verdict_is_authoritative for r in summary.ac_results)
+    assert all(r.unresolved for r in summary.ac_results)
+    assert summary.run_verdict_passed is False
+
+
+def test_gen1_summary_ignores_unrecognized_acceptance_state() -> None:
+    """Only the exact handler value marks a result unverified."""
+    seed = _seed()
+    meta = {**_rejected_result().meta, "acceptance_state": "UNVERIFIED "}
+
+    summary = evaluation_summary_from_eval_meta(seed, meta)
+
+    assert summary.approval_status == "rejected"
+    assert [r.ac_verdict_state for r in summary.ac_results] == ["evaluated"] * 2

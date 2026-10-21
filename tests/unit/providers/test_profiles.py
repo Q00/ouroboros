@@ -440,6 +440,7 @@ def test_resolve_completion_profile_threads_reasoning_effort() -> None:
         "hermes",
         "opencode",
         "pi",
+        "omp",
         "gjc",
         "litellm",
         "ourocode",

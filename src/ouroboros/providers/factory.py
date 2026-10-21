@@ -24,6 +24,7 @@ from ouroboros.config import (
     get_pi_cli_path,
     get_runtime_profile,
     get_zcode_cli_path,
+    resolve_omp_cli_path,
 )
 from ouroboros.providers.base import LLMAdapter
 from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
@@ -32,6 +33,7 @@ from ouroboros.providers.copilot_cli_adapter import CopilotCliLLMAdapter
 from ouroboros.providers.gemini_cli_adapter import GeminiCLIAdapter
 from ouroboros.providers.gjc_llm_adapter import GjcLLMAdapter
 from ouroboros.providers.goose_cli_adapter import GooseCliLLMAdapter
+from ouroboros.providers.omp_llm_adapter import OmpLLMAdapter
 from ouroboros.providers.opencode_adapter import OpenCodeLLMAdapter
 from ouroboros.providers.ourocode_llm_adapter import OurocodeLLMAdapter
 from ouroboros.providers.pi_llm_adapter import PiLLMAdapter
@@ -132,6 +134,7 @@ def resolve_llm_permission_mode(
         "hermes",
         "opencode",
         "pi",
+        "omp",
         "gjc",
     ):
         # Interview uses LLM to generate questions — no file writes, but
@@ -256,6 +259,19 @@ def _create_pi_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
     )
 
 
+def _create_omp_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
+    return OmpLLMAdapter(
+        cli_path=request.cli_path or resolve_omp_cli_path(),
+        cwd=request.cwd,
+        permission_mode=request.permission_mode,
+        allowed_tools=request.allowed_tools,
+        max_turns=request.max_turns,
+        on_message=request.on_message,
+        timeout=request.timeout,
+        max_retries=request.max_retries,
+    )
+
+
 def _create_gjc_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
     return GjcLLMAdapter(
         cli_path=request.cli_path or get_gjc_cli_path(),
@@ -365,6 +381,7 @@ _LLM_ADAPTER_FACTORIES: dict[str, Callable[[_LLMAdapterRequest], LLMAdapter]] = 
     "_create_hermes_adapter": _create_hermes_adapter,
     "_create_goose_adapter": _create_goose_adapter,
     "_create_pi_adapter": _create_pi_adapter,
+    "_create_omp_adapter": _create_omp_adapter,
     "_create_gjc_adapter": _create_gjc_adapter,
     "_create_ourocode_adapter": _create_ourocode_adapter,
     "_create_dsh_adapter": _create_dsh_adapter,

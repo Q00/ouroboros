@@ -130,6 +130,7 @@ class TestBrownfieldHandlerDefinition:
             "offset",
             "limit",
             "indices",
+            "text",
         }
 
     def test_input_schema_generation(self) -> None:

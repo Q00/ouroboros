@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
@@ -18,7 +19,12 @@ from ouroboros.orchestrator.decomposition_policy import redact_and_truncate_text
 from ouroboros.orchestrator.evidence.runtime_metadata import _STALL_SENTINEL
 from ouroboros.orchestrator.execution_runtime_scope import build_ac_runtime_identity
 from ouroboros.orchestrator.failure_taxonomy import FailureClass, classify_hard_precondition
-from ouroboros.orchestrator.parallel_executor_models import ACExecutionOutcome, ACExecutionResult
+from ouroboros.orchestrator.parallel_executor_models import (
+    ACExecutionOutcome,
+    ACExecutionResult,
+    package_failure_class,
+    package_repair,
+)
 from ouroboros.resilience.lateral import build_lateral_change_of_approach_directive
 
 if TYPE_CHECKING:
@@ -99,7 +105,14 @@ def build_assertion_safe_retry_hint(
         if outcome.reason:
             observations.append("Harness verification failed: " + outcome.reason)
         if outcome.workspace_mutated:
-            observations.append("The workspace changed while harness verification was running.")
+            observations.append(
+                "verify_command itself created, modified, or deleted workspace files. "
+                "Verification must only observe. If your tests or the program under "
+                "test write state (fixtures, JSON stores, logs, generated data), make "
+                "them write to a temporary directory instead of the workspace. "
+                "Bytecode caches and Git-ignored outputs are already exempt, so "
+                "disabling them changes nothing."
+            )
         if observations:
             sections.append(
                 "### Harness observations\n"
@@ -139,7 +152,11 @@ def build_ac_retry_prompt(
     parts: list[str] = []
     if failure_class:
         parts.append(f"### Prior failure classification\n{failure_class}")
-    if result.error != _STALL_SENTINEL:
+    if repair := package_repair(result):
+        # The frozen check package failed this criterion; its counterexample is
+        # the repair signal (held-out inputs are already withheld upstream).
+        parts.append("### Check package counterexample\n" + _sanitize_fragment(repair, spec))
+    elif result.error != _STALL_SENTINEL:
         hint = build_assertion_safe_retry_hint(
             outcome=outcome,
             result=result,
@@ -167,6 +184,9 @@ def failure_class_for_result(result: ACExecutionResult) -> str | None:
 
     if result.outcome is ACExecutionOutcome.BLOCKED:
         return FailureClass.BLOCKED.value
+    if (package_class := package_failure_class(result)) is not None:
+        # A package-owned failure; a legacy-owned one keeps the legacy class below.
+        return package_class
     for message in reversed(result.messages):
         if not (message.is_final and message.is_error):
             continue
@@ -225,3 +245,72 @@ async def load_ac_retry_manifest(
             error=str(exc),
         )
         return None
+
+
+# A throttled attempt (HTTP 429 or rate-limit pressure) is retried only after a
+# wait, so the re-dispatch does not land in the same throttle window. The wait
+# doubles with each retry of the AC and is capped; a provider retry-after is
+# honored up to the same ceiling.
+THROTTLE_BACKOFF_BASE_SECONDS = 60.0
+THROTTLE_BACKOFF_MAX_SECONDS = 300.0
+THROTTLE_RETRY_AFTER_CEILING_SECONDS = 600.0
+# Seam for tests; the wait in ``throttle_wait``.
+_throttle_sleep = asyncio.sleep
+
+
+def throttle_retry_delay(result: ACExecutionResult | BaseException, retry_attempt: int) -> float:
+    """Seconds to wait before re-dispatching ``result``'s AC, or 0 when not throttled.
+
+    Throttling is read from the attempt's provider messages by the shared
+    capacity classifier (``adaptive_concurrency.classify_backend_pressure``):
+    a structured ``http_status`` of 429 first, then the classifier's existing
+    fallback for runtimes that report no status.
+    """
+    if not isinstance(result, ACExecutionResult) or result.success:
+        return 0.0
+    from ouroboros.orchestrator.adaptive_concurrency import (
+        BackendPressureKind,
+        capacity_feedback_messages,
+        classify_backend_pressure,
+    )
+
+    observation = classify_backend_pressure(
+        capacity_feedback_messages(result), provider_completed=False
+    )
+    if observation.kind is not BackendPressureKind.CONCURRENCY_REJECTION:
+        return 0.0
+    scheduled = min(
+        THROTTLE_BACKOFF_MAX_SECONDS,
+        THROTTLE_BACKOFF_BASE_SECONDS * 2 ** max(0, retry_attempt - 1),
+    )
+    retry_after = float(observation.retry_after_seconds or 0)
+    return min(THROTTLE_RETRY_AFTER_CEILING_SECONDS, max(scheduled, retry_after))
+
+
+async def throttle_wait(
+    results: list[ACExecutionResult | BaseException],
+    position_by_idx: Mapping[int, int],
+    retry_idxs: list[int],
+    retry_attempts: Mapping[int, int],
+    *,
+    sleep: Any = None,
+) -> float:
+    """Wait once before a retry batch for the longest throttle delay among its ACs.
+
+    Returns the seconds waited (0 when no AC in the batch was throttled).
+    """
+    delay = max(
+        (
+            throttle_retry_delay(results[position_by_idx[ac_idx]], retry_attempts[ac_idx])
+            for ac_idx in retry_idxs
+        ),
+        default=0.0,
+    )
+    if delay > 0:
+        log.info(
+            "parallel_executor.ac.throttle_backoff",
+            ac_indices=list(retry_idxs),
+            wait_seconds=delay,
+        )
+        await (sleep or _throttle_sleep)(delay)
+    return delay

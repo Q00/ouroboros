@@ -1,4 +1,4 @@
-"""Codex-side mapping for the orchestrator-level ``runtime_profile``.
+"""Codex profile capability detection, configuration, and runtime mapping.
 
 The ``OrchestratorConfig.runtime_profile`` setting names a profile in the
 orchestrator's own vocabulary (e.g. ``"worker"``). The Codex backend
@@ -43,7 +43,7 @@ HELP_PROBE_TIMEOUT_SECONDS = 5.0
 def codex_uses_profile_v2(
     codex_path: str | None,
     *,
-    run_command: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    run_command: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
 ) -> bool | None:
     """Detect whether ``--profile`` selects ``<name>.config.toml`` files.
 
@@ -59,14 +59,20 @@ def codex_uses_profile_v2(
         result = run_command(
             [codex_path, "--help"],
             capture_output=True,
-            text=True,
             timeout=HELP_PROBE_TIMEOUT_SECONDS,
             check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return None
 
-    help_text = f"{result.stdout}\n{result.stderr}"
+    if result.returncode != 0:
+        return None
+    try:
+        # Decode in this thread: Windows text-mode pipe readers can lose decode
+        # errors in background threads and leave an apparently successful probe.
+        help_text = result.stdout.decode("utf-8") + "\n" + result.stderr.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
     lines = help_text.splitlines()
     for index, line in enumerate(lines):
         if "--profile-v2" in line:
@@ -95,6 +101,23 @@ def codex_uses_profile_v2(
         return None
 
     return None
+
+
+def existing_codex_profile_names(raw: str) -> set[str]:
+    """Return configured Codex profile names from a TOML document."""
+    import tomllib
+
+    if not raw.strip():
+        return set()
+
+    parsed = tomllib.loads(raw)
+    profiles = parsed.get("profiles")
+    if profiles is None:
+        return set()
+    if not isinstance(profiles, dict):
+        msg = "Codex config contains a non-table 'profiles' key."
+        raise ValueError(msg)
+    return {str(name) for name in profiles}
 
 
 def resolve_codex_profile(
@@ -140,5 +163,6 @@ def resolve_codex_profile(
 __all__ = [
     "RUNTIME_PROFILE_TO_CODEX_PROFILE",
     "codex_uses_profile_v2",
+    "existing_codex_profile_names",
     "resolve_codex_profile",
 ]

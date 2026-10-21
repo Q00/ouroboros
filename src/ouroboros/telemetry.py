@@ -19,6 +19,7 @@ Privacy contract — see TELEMETRY.md at the repository root:
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 import hashlib
 import json
 import os
@@ -34,7 +35,11 @@ import urllib.request
 import uuid
 
 from ouroboros import __version__
-from ouroboros.mcp.failure_taxonomy import classify_failure
+from ouroboros.mcp.failure_taxonomy import (
+    RUN_FAILURE_CAUSES,
+    UNKNOWN_RUN_FAILURE_CAUSE,
+    classify_failure,
+)
 
 # PostHog project API key. This is a *public, write-only* key (it can only
 # ingest events, never read them) — embedding it in an open-source repo is
@@ -245,6 +250,7 @@ _COMMAND_RUN_MCP_KEYS = frozenset(
         "service",
         "status",
         "error_type",
+        "origin",
         "$insert_id",
         "runtime_backend",
         "app_version",
@@ -252,6 +258,12 @@ _COMMAND_RUN_MCP_KEYS = frozenset(
         "ci",
     }
 )
+# ``origin`` exists for exactly one question -- is the interview-less Seed
+# path (``ouroboros_generate_seed`` with ``session_context``) being used, and
+# does it produce a Seed or bounce back gap questions? It is stamped only on
+# ``command=seed`` rows and only from this closed set; any other value or
+# command drops it before the properties dict is built.
+_SEED_ORIGINS = frozenset({"interview", "session_context", "session_context_gap"})
 _COMMAND_RUN_CLI_KEYS = frozenset(
     {
         "command",
@@ -269,6 +281,7 @@ _WORKFLOW_OUTCOME_KEYS = frozenset(
         "terminal_status",
         "verified",
         "failure_reason_code",
+        "failure_cause",
         "$insert_id",
         "runtime_backend",
         "app_version",
@@ -348,9 +361,159 @@ _AC_VERIFY_CAUSES = frozenset(
         "exit_nonzero",
         "output_assertion_unmatched",
         "workspace_mutated",
+        "no_evidence",
     }
 )
 _UNKNOWN_VERIFY_CAUSE = "unknown"
+# A frozen runtime authority input (CLI config, executable, dispatch registry,
+# profile routing) changed after a runtime initialized. SSOT pairing with
+# orchestrator/codex_cli_runtime.py `_RUNTIME_DRIFT_KINDS` — edit both
+# together. The run continues; this counts how often the world moves under it.
+_RUNTIME_DRIFT_KEYS = frozenset(
+    {
+        "kind",
+        "runtime_backend",
+        "app_version",
+        "os",
+        "ci",
+    }
+)
+_RUNTIME_DRIFT_KINDS = frozenset(
+    {
+        "codex_config",
+        "cli_executable",
+        "skill_dispatcher",
+        "mcp_handler_registry",
+        "skill_dispatch_registry",
+        "profile_routing",
+        "baseline_unavailable",
+        "attestation_timeout",
+    }
+)
+_UNKNOWN_DRIFT_KIND = "unknown"
+# A run accepted criteria no verifier had evidence for. The acceptance itself
+# is unchanged (``boundary/acceptance.py``); this counts how often it happens
+# and why, per (package_reason, replay_reason) pair. SSOT pairing with
+# boundary/no_evidence.py (package reasons) and boundary/acceptance.py
+# ``LegacyNoEvidenceReason`` (replay reasons) -- edit them together. Only
+# closed tokens and counts; never a criterion, check, binding, or path.
+_NO_EVIDENCE_PACKAGE_REASONS = frozenset(
+    {
+        "uncovered",
+        "no_admitted_package",
+        "no_binding",
+        "no_binding_after_request",
+        "no_binding_budget_exhausted",
+        "script_check_advisory",
+        "no_held_out_case",
+        "no_reproduction_check",
+    }
+)
+_NO_EVIDENCE_REPLAY_REASONS = frozenset(
+    {
+        "environment_unverifiable",
+        "transcript_unavailable",
+        "script_absent_from_artifact",
+        "no_call_evidence",
+        "no_verifier_verdict",
+        "verifier_verdict_not_passed",
+        "no_legacy_record",
+    }
+)
+_NO_EVIDENCE_SURFACES = frozenset({"cli_run", "mcp_execute", "evolve"})
+_NO_EVIDENCE_COVERAGES = frozenset({"full", "partial", "low"})
+_NO_EVIDENCE_CHECK_PACKAGE = frozenset({"on", "off"})
+_NO_EVIDENCE_CHECK_PACKAGE_MODES = frozenset({"record", "decide", "off"})
+_NO_EVIDENCE_PACKAGE_STATUSES = frozenset(
+    {"admitted", "construction_failed", "rejected", "not_run"}
+)
+_UNKNOWN_NO_EVIDENCE_VALUE = "unknown"
+_NO_EVIDENCE_PAIR_PREFIX = "pair_"
+
+
+def _no_evidence_pair_key(package_reason: str, replay_reason: str) -> str:
+    return f"{_NO_EVIDENCE_PAIR_PREFIX}{package_reason}__{replay_reason}"
+
+
+_ACCEPTANCE_NO_EVIDENCE_KEYS = frozenset(
+    {
+        "criterion_count",
+        "no_evidence_count",
+        "verification_coverage",
+        "surface",
+        "check_package",
+        "check_package_mode",
+        "check_package_status",
+        "runtime_backend",
+        "app_version",
+        "os",
+        "ci",
+    }
+    | {
+        _no_evidence_pair_key(package_reason, replay_reason)
+        for package_reason in _NO_EVIDENCE_PACKAGE_REASONS | {_UNKNOWN_NO_EVIDENCE_VALUE}
+        for replay_reason in _NO_EVIDENCE_REPLAY_REASONS | {_UNKNOWN_NO_EVIDENCE_VALUE}
+    }
+)
+# The controller-run artifact checks of a decided run (boundary/base_regression.py):
+# what each observed, closed tokens and counts only. SSOT pairing with
+# ``base_regression.ArtifactCheckOutcome``; edit them together. Never a test
+# name, file, path, or criterion.
+_ARTIFACT_CHECK_OUTCOMES = frozenset(
+    {
+        "rejected",
+        "exempted",
+        "passed",
+        "timeout",
+        "base_runner_crash",
+        "no_selected_files",
+        "unsupported_runner",
+        "not_a_test_result",
+        "unavailable",
+        "imported_outside_copy",
+        "not_run",
+        "no_admitted_command",
+        "unconfirmed",
+    }
+)
+# Each check's mode and what its finding did. SSOT pairing with
+# ``base_regression.ArtifactCheckMode`` and ``ArtifactEffect``.
+_ARTIFACT_CHECK_MODES = frozenset({"decide", "record", "off"})
+_ARTIFACT_EFFECTS = frozenset({"decided", "recorded", "regression_unadjudicated", "none"})
+# How the footprint exemption treated a base regression. SSOT pairing with
+# ``base_regression.Exemption``; edit them together.
+_ARTIFACT_EXEMPTIONS = frozenset(
+    {
+        "applied",
+        "none_inside",
+        "no_passing_oracle",
+        "mass_breakage",
+        "no_changed_function",
+        "no_oracle_footprint",
+        "change_outside_functions",
+    }
+)
+_ACCEPTANCE_ARTIFACT_CHECKS_KEYS = frozenset(
+    {
+        "base_regression",
+        "worker_tests",
+        "exemption",
+        "exempted_tests",
+        "base_regression_mode",
+        "worker_test_gate_mode",
+        "base_regression_effect",
+        "worker_tests_effect",
+        "would_fail_criteria",
+        "failed_criteria",
+        "criterion_count",
+        "repairs",
+        "surface",
+        "runtime_backend",
+        "app_version",
+        "os",
+        "ci",
+    }
+)
 # Bound on any single string property. Dropped, not truncated -- a truncated
 # value could still leak the start of a prompt or path.
 _MAX_PROPERTY_STR_LEN = 200
@@ -896,6 +1059,12 @@ def _resolve_allowed_keys(event: str, properties: dict[str, Any] | None) -> froz
         return _SUBAGENT_DISPATCH_KEYS
     if event == "ac_verify_failed":
         return _AC_VERIFY_FAILED_KEYS
+    if event == "runtime_drift":
+        return _RUNTIME_DRIFT_KEYS
+    if event == "acceptance_no_evidence":
+        return _ACCEPTANCE_NO_EVIDENCE_KEYS
+    if event == "acceptance_artifact_checks":
+        return _ACCEPTANCE_ARTIFACT_CHECKS_KEYS
     return None
 
 
@@ -915,6 +1084,7 @@ def _daily_insert_id(
         properties.get("transport"),
         properties.get("phase"),
         properties.get("fanout_kind"),
+        properties.get("origin"),
     )
     material = "\0".join(str(value or "") for value in (distinct_id_value, day, event, *dimensions))
     return hashlib.sha256(material.encode()).hexdigest()
@@ -977,8 +1147,13 @@ def capture_tool_call(
     error_type: str | None = None,
     blocked: bool = False,
     registered: bool = True,
+    origin: str | None = None,
 ) -> None:
-    """Capture service activity plus retained lifecycle/failure commands."""
+    """Capture service activity plus retained lifecycle/failure commands.
+
+    ``origin`` is honoured only for ``command=seed`` and only when it is one
+    of ``_SEED_ORIGINS``; every other combination is dropped silently.
+    """
     del duration_ms
     try:
         if not registered:
@@ -995,15 +1170,16 @@ def capture_tool_call(
             status = "accepted" if ok else "rejected"
         else:
             status = "succeeded" if ok else "failed"
-        capture(
-            "command_run",
-            {
-                "command": command or name.removeprefix("ouroboros_"),
-                "service": "mcp",
-                "status": status,
-                "error_type": error_type,
-            },
-        )
+        command_value = command or name.removeprefix("ouroboros_")
+        properties: dict[str, Any] = {
+            "command": command_value,
+            "service": "mcp",
+            "status": status,
+            "error_type": error_type,
+        }
+        if command_value == "seed" and origin in _SEED_ORIGINS:
+            properties["origin"] = origin
+        capture("command_run", properties)
     except Exception:
         pass
 
@@ -1020,6 +1196,141 @@ def capture_ac_verify_failed(cause: str | None) -> None:
         capture(
             "ac_verify_failed",
             {"cause": cause if cause in _AC_VERIFY_CAUSES else _UNKNOWN_VERIFY_CAUSE},
+        )
+    except Exception:
+        pass
+
+
+def capture_runtime_drift(kind: str | None) -> None:
+    """Capture one observed mid-run change of a frozen runtime authority input.
+
+    Folds anything outside the audited ``_RUNTIME_DRIFT_KINDS`` vocabulary to
+    a fixed ``unknown`` literal; never a path, config value, or message.
+    """
+    try:
+        capture(
+            "runtime_drift",
+            {"kind": kind if kind in _RUNTIME_DRIFT_KINDS else _UNKNOWN_DRIFT_KIND},
+        )
+    except Exception:
+        pass
+
+
+def _fold(value: Any, vocabulary: frozenset[str]) -> str:
+    return value if isinstance(value, str) and value in vocabulary else _UNKNOWN_NO_EVIDENCE_VALUE
+
+
+def _canonical_runtime_backend(value: Any) -> str:
+    """A shipped runtime backend name, else ``unknown`` (never a caller string)."""
+    try:
+        from ouroboros.backends.capabilities import runtime_backend_choices
+
+        return _fold(value, frozenset(runtime_backend_choices()))
+    except Exception:
+        return _UNKNOWN_NO_EVIDENCE_VALUE
+
+
+def capture_acceptance_no_evidence(
+    pairs: Iterable[tuple[str | None, str | None]],
+    *,
+    criterion_count: int,
+    verification_coverage: str | None,
+    surface: str | None,
+    check_package: str | None,
+    check_package_status: str | None,
+    runtime_backend: str | None,
+    check_package_mode: str | None = None,
+) -> None:
+    """Capture one run's criteria accepted without evidence from any verifier.
+
+    ``pairs`` holds one ``(package_reason, replay_reason)`` per such
+    criterion: why the check package did not decide it, and why the legacy
+    verifier (claim replay) had no evidence. Each axis folds anything outside
+    its audited vocabulary to ``unknown``; the counts are sent as
+    ``pair_<package_reason>__<replay_reason>`` integers. Nothing is sent when
+    no criterion was accepted without evidence. Never raises.
+    """
+    try:
+        counts: dict[str, int] = {}
+        for package_reason, replay_reason in pairs:
+            key = _no_evidence_pair_key(
+                _fold(package_reason, _NO_EVIDENCE_PACKAGE_REASONS),
+                _fold(replay_reason, _NO_EVIDENCE_REPLAY_REASONS),
+            )
+            counts[key] = counts.get(key, 0) + 1
+        total = sum(counts.values())
+        if total == 0:
+            return
+        capture(
+            "acceptance_no_evidence",
+            {
+                **counts,
+                "criterion_count": criterion_count,
+                "no_evidence_count": total,
+                "verification_coverage": _fold(verification_coverage, _NO_EVIDENCE_COVERAGES),
+                "surface": _fold(surface, _NO_EVIDENCE_SURFACES),
+                "check_package": _fold(check_package, _NO_EVIDENCE_CHECK_PACKAGE),
+                "check_package_mode": _fold(check_package_mode, _NO_EVIDENCE_CHECK_PACKAGE_MODES),
+                "check_package_status": _fold(check_package_status, _NO_EVIDENCE_PACKAGE_STATUSES),
+                "runtime_backend": _canonical_runtime_backend(runtime_backend),
+            },
+        )
+    except Exception:
+        pass
+
+
+def capture_acceptance_artifact_checks(
+    *,
+    base_regression: str | None,
+    worker_tests: str | None,
+    failed_criteria: int,
+    criterion_count: int,
+    repairs: int,
+    surface: str | None,
+    runtime_backend: str | None,
+    exemption: str | None = None,
+    exempted_tests: int = 0,
+    base_regression_mode: str | None = None,
+    worker_test_gate_mode: str | None = None,
+    base_regression_effect: str | None = None,
+    worker_tests_effect: str | None = None,
+    would_fail_criteria: int = 0,
+) -> None:
+    """Capture what the controller-run artifact checks observed on one decided run.
+
+    ``base_regression`` and ``worker_tests`` are each check's outcome: it
+    decided (``rejected``), ran and found nothing (``passed``), or had no
+    observation and why; anything outside the audited vocabulary folds to
+    ``unknown``. ``failed_criteria`` counts the criteria the checks failed in
+    the final decision and ``repairs`` the attempts they sent back to the
+    worker. ``exemption`` is how the footprint exemption treated a base
+    regression (absent when nothing regressed) and ``exempted_tests`` how many
+    regressed tests it set aside. ``*_mode`` is each check's mode
+    (``decide``/``record``/``off``) and ``*_effect`` what its finding did
+    (``decided``, ``recorded`` in record mode, ``regression_unadjudicated``
+    when a regression found without an admitted package decided nothing, or
+    ``none``); ``would_fail_criteria`` counts the criteria the findings that
+    did not decide would have failed. Never raises.
+    """
+    try:
+        capture(
+            "acceptance_artifact_checks",
+            {
+                "base_regression": _fold(base_regression, _ARTIFACT_CHECK_OUTCOMES),
+                "worker_tests": _fold(worker_tests, _ARTIFACT_CHECK_OUTCOMES),
+                "failed_criteria": failed_criteria,
+                "criterion_count": criterion_count,
+                "repairs": repairs,
+                "exemption": None if exemption is None else _fold(exemption, _ARTIFACT_EXEMPTIONS),
+                "exempted_tests": exempted_tests,
+                "base_regression_mode": _fold(base_regression_mode, _ARTIFACT_CHECK_MODES),
+                "worker_test_gate_mode": _fold(worker_test_gate_mode, _ARTIFACT_CHECK_MODES),
+                "base_regression_effect": _fold(base_regression_effect, _ARTIFACT_EFFECTS),
+                "worker_tests_effect": _fold(worker_tests_effect, _ARTIFACT_EFFECTS),
+                "would_fail_criteria": would_fail_criteria,
+                "surface": _fold(surface, _NO_EVIDENCE_SURFACES),
+                "runtime_backend": _canonical_runtime_backend(runtime_backend),
+            },
         )
     except Exception:
         pass
@@ -1118,6 +1429,14 @@ def capture_job_outcome(
         }
         if resolution is not None:
             properties["failure_reason_code"] = resolution.reason_code.value
+            # The fine-grained run cause (SSOT: orchestrator/run_failure_cause.py)
+            # is producer-owned but folded to the closed vocabulary here anyway
+            # so a replayed or spoofed value is counted, never forwarded.
+            raw_cause = meta.get("failure_cause")
+            if isinstance(raw_cause, str):
+                properties["failure_cause"] = (
+                    raw_cause if raw_cause in RUN_FAILURE_CAUSES else UNKNOWN_RUN_FAILURE_CAUSE
+                )
         capture("workflow_outcome", properties)
     except Exception:
         pass
@@ -1270,6 +1589,7 @@ def _reset_for_tests() -> None:
 __all__ = [
     "capture",
     "capture_ac_verify_failed",
+    "capture_runtime_drift",
     "capture_cli_command",
     "capture_job_outcome",
     "capture_mcp_serve_started",

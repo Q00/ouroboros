@@ -82,6 +82,7 @@ def test_runtime_choices_include_runtime_only_backends() -> None:
     choices = runtime_backend_choices()
     assert "hermes" in choices
     assert "pi" in choices
+    assert "omp" in choices
     assert "gjc" in choices
     assert resolve_runtime_backend_name("gajae_code") == "gjc"
     assert "litellm" not in choices
@@ -92,6 +93,7 @@ def test_llm_choices_include_hermes_adapter() -> None:
     assert "codex" in choices
     assert "hermes" in choices
     assert "pi" in choices
+    assert "omp" in choices
     assert "gjc" in choices
 
 
@@ -116,6 +118,7 @@ def test_tool_envelope_support_is_registry_owned() -> None:
     assert backend_supports_tool_envelope("gemini_cli")
     assert not backend_supports_tool_envelope("hermes")
     assert not backend_supports_tool_envelope("pi")
+    assert not backend_supports_tool_envelope("omp")
     assert not backend_supports_tool_envelope("gjc")
 
 
@@ -496,9 +499,13 @@ def test_mcp_server_instructions_are_provider_neutral_and_budget_safe() -> None:
     assert "`ouroboros_interview`" in text
     assert "`ouroboros_start_auto`" in text
     assert "`ouroboros_start_execute_seed`" in text
-    # Stagnation signals route to lateral thinking proactively.
+    # Stagnation signals AND consequential decisions route to lateral thinking
+    # proactively; a session that already settled the spec routes straight to
+    # seed generation without the interview (grounded-lateral RFC D1/D6).
     assert "`ouroboros_lateral_think`" in text
     assert "stuck" in text
+    assert "consequential choice" in text
+    assert "`ouroboros_generate_seed`" in text
     assert 'Do not wait for the literal word "ooo"' in text
     # Guardrail: trivial work must not be force-routed through Ouroboros.
     assert "Do not route simple questions or small unambiguous edits" in text

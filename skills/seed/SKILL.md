@@ -1,6 +1,6 @@
 ---
 name: seed
-description: "Generate validated Seed specifications from interview results"
+description: "Use when goal, constraints, and success criteria are already settled and the user wants them frozen into a formal spec an agent can execute and verify: 'turn this into a spec', 'write it up as a Seed', or right after an interview. Returns an immutable Seed with acceptance criteria. Not for vague requests (use interview first)."
 aliases: [crystallize]
 mcp_tool: ouroboros_generate_seed
 mcp_args:
@@ -9,16 +9,11 @@ mcp_args:
 
 # /ouroboros:seed
 
-Generate validated Seed specifications from interview results.
+Generate a validated Seed specification from an interview or from requirements this conversation already settled.
 
 ## Required Skill Capabilities
 
-- `ask_user` — ask human-judgment questions through the active runtime's user-question surface.
-- `inspect_code` — read repo-local agent roles and recover exact context from local files before guessing.
-- `call_mcp` — use available Ouroboros MCP tools directly, including runtime tool discovery when a deferred MCP surface must be loaded.
-- `run_shell` — run bounded local commands for audit-trail writes and setup steps.
-- `refine_answer` — confirm free-form user decisions before treating them as accepted seed revisions.
-- `maintain_ledger` — keep QA scores, candidate decisions, rejected proposals, and audit trail keys visible.
+`ask_user` (the active runtime's user-question surface), `inspect_code`, `call_mcp`, `orchestrate_subagents` (lateral persona payloads), `run_shell` (audit-trail and prefs writes), `refine_answer` (confirm free-form decisions), `maintain_ledger` (QA scores, candidate decisions, rejected proposals).
 
 ## Usage
 
@@ -27,20 +22,11 @@ ooo seed [session_id]
 /ouroboros:seed [session_id]
 ```
 
-**Trigger keywords:** "crystallize", "generate seed"
-
 ## Instructions
-
-When the user invokes this skill:
 
 ### Python Runtime (Required)
 
-Before running any shell snippet below, define this resolver in the same shell.
-It accepts only Python 3.12 or newer, prefers `python3` and then `python`, and
-uses uv as the final fallback. Call `ouroboros_python` directly and quote every
-argument passed to it; the function preserves arguments and heredoc/stdin input.
-Only the probe and child interpreter discard inherited CPython path-selection
-overrides; the caller shell keeps its environment unchanged.
+Define this resolver in the same shell before running any shell snippet below, and call `ouroboros_python` with every argument quoted. It accepts only Python 3.12 or newer and falls back to uv.
 
 <!-- ouroboros-python-resolver:start -->
 ```bash
@@ -67,92 +53,68 @@ ouroboros_python() {
 ```
 <!-- ouroboros-python-resolver:end -->
 
-### Load MCP Tools (Required before Path A/B decision)
+### Loading MCP tools (deferred-schema guard)
 
-The Ouroboros MCP tools are often registered as **deferred tools** that must be explicitly loaded before use. **You MUST perform this step before deciding between Path A and Path B.**
+Ouroboros tools may be deferred, and a schema loaded on one turn can unload by the next. Immediately before each `ouroboros_*` call, load it with the active runtime's tool-discovery capability: `"+ouroboros seed"` for `ouroboros_generate_seed`; `"+ouroboros qa"` for `ouroboros_qa`; `"+ouroboros lateral"` for `ouroboros_lateral_think`. A call whose schema is not loaded fails with "Invalid tool parameters". If the tool is already callable, discovery is a no-op and an empty result is expected. Use the fallback only when the tool is genuinely absent.
 
-1. Use the active runtime's `call_mcp` capability to find and load the seed generation MCP tool through runtime tool discovery when needed:
-   ```
-   tool discovery query: "+ouroboros seed"
-   ```
-2. The tool will typically be named `mcp__plugin_ouroboros_ouroboros__ouroboros_generate_seed` (with a plugin prefix). After runtime tool discovery returns, the tool becomes callable through the active runtime's `call_mcp` capability.
-3. If the tool is callable — already exposed, or loaded by discovery — proceed to **Path A**. An empty discovery result for an already-exposed tool is expected, not a failure. Proceed to **Path B** only if the tool is genuinely absent (no Ouroboros MCP server).
+Load `ouroboros_generate_seed` before choosing a path: if it is callable, use **Path A**; use **Path B** only when it is genuinely absent (no Ouroboros MCP server).
 
-**IMPORTANT**: Do NOT skip this step. Do NOT assume MCP tools are unavailable just because they don't appear in your immediate tool list. They are almost always available as deferred tools that need to be loaded first.
-
-**CRITICAL — deferred-schema guard (prevents "Invalid tool parameters"):**
-This skill makes `ouroboros_*` MCP calls across multiple turns, and each turn runs
-in a fresh tool context. A deferred tool's schema loaded on one turn is NOT
-guaranteed to still be loaded on the next. If you call any `ouroboros_*` MCP tool
-while its schema is not loaded in the **current** turn, the runtime rejects the
-call with **"Invalid tool parameters"** before it ever reaches the server.
-Therefore: **immediately before EVERY `ouroboros_*` MCP call in this skill, re-run
-the tool-discovery load query for the specific MCP tool you are about to call**
-(idempotent — a no-op when the schema is already loaded) so the correct schema is
-guaranteed present for that call. Use `"+ouroboros seed"` before
-`ouroboros_generate_seed`, `"+ouroboros qa"` before `ouroboros_qa`, and
-`"+ouroboros lateral"` before `ouroboros_lateral_think`. If a load ever returns
-no matching tool (and the tool is not already callable — an empty load for an already-exposed tool is an expected no-op, not absence), switch to the documented fallback / Path B instead of retrying
-the failing call.
+**Delegated responses are not artifacts.** If any tool below returns `status: "delegated_to_subagent"` (with `dispatch_mode: "plugin"` and possibly an `_subagents` array), keep the returned session ID, wait for the plugin-managed subagent results, and parse the artifact (Seed YAML, QA verdict, or persona texts) from those results, never from the envelope or its prompts.
 
 ### Path A: MCP Mode (Preferred)
 
-If the `ouroboros_generate_seed` MCP tool is available (loaded via runtime tool discovery above):
+1. Pick the entrance:
+   - `session_id` given, or a recent `ouroboros_interview` session ID in the conversation: use the interview session (step 2).
+   - No interview, but THIS conversation already settled the goal, the constraints, and verifiable success criteria (a lateral decision, a brownfield scan, or plain discussion that converged): use the interview-less path below. Do not send the user to `ooo interview` to repeat what they already said.
+   - Otherwise ask the user which interview or requirements to seed.
 
-1. Determine the interview session:
-   - If `session_id` provided: Use it directly
-   - If no session_id: Check conversation for a recent `ouroboros_interview` session ID
-   - If none found: Ask the user
+   **Interview-less path** (`session_context`):
+   ```
+   Tool: ouroboros_generate_seed
+   Arguments:
+     session_context:
+       goal: <the user's own settled wording, verbatim, never your paraphrase>
+       acceptance_criteria: [<verifiable checks: a command, a visible behaviour, a measurable state>]
+       constraints: [<optional>]
+       decisions: [<optional; each becomes a constraint>]
+       project_type: greenfield | brownfield
+   ```
+   Every value enters the Seed byte-for-byte, so shell chains in an AC (`ruff check && pytest`) are allowed. If the response has `status: "gap_questions_required"`, ask the user exactly the listed questions, merge the answers into `session_context`, and call again; that is the whole interview.
 
-2. Call the MCP tool through the active runtime's `call_mcp` capability:
+2. Interview session:
    ```
    Tool: ouroboros_generate_seed
    Arguments:
      session_id: <interview session ID>
    ```
+   The tool extracts requirements from persisted interview state, scores ambiguity (must be <= 0.2), and returns Seed YAML.
 
-3. The tool extracts requirements from persisted interview state, calculates ambiguity score, and generates the Seed YAML.
+3. If no Seed YAML results, stop and ask the user to resume generation or supply the artifact. Never fabricate a Seed.
 
-   **Seed generation response shapes**: Branch only after an actual Seed YAML artifact is available.
-   - If the response has `status: "delegated_to_subagent"` and `dispatch_mode: "plugin"`, keep the returned `session_id`, wait for the plugin-managed subagent result, then extract the Seed YAML from that result. Do not run the advisory QA check using the delegation envelope as the artifact.
-   - If the response directly contains Seed YAML, extract that YAML directly.
-   - If neither shape yields Seed YAML, stop and ask the user to resume generation or provide the missing artifact; do not fabricate a seed just to satisfy the advisory QA check.
+4. Run the Advisory QA Check below, then go to "After Seed Generation".
 
-4. Run the single-pass Advisory QA Check below, then present the seed as final and proceed to "After Seed Generation". Do not enter any refinement iteration unless the user explicitly opts in.
+### Path B: No MCP Server
 
-**Advantages of MCP mode**: Automated ambiguity scoring (must be <= 0.2), structured extraction from persisted interview state, reproducible.
+1. Read the `seed-architect` prompt and adopt that role: `$OUROBOROS_AGENTS_DIR/seed-architect.md` when that override is set; else the installed package's copy, printed with `run_shell`:
 
-### Path B: Plugin Fallback (No MCP Server)
+   ```bash
+   uvx --isolated --python '>=3.12' --from ouroboros-ai python -c "import importlib.resources as r, sys; print(r.files('ouroboros.agents').joinpath(sys.argv[1]).read_text(encoding='utf-8'))" seed-architect.md
+   ```
 
-If the MCP tool is NOT available, fall back to agent-based generation:
-
-1. Read `src/ouroboros/agents/seed-architect.md` and adopt that role.
-2. Recover the interview requirements before drafting; do not invent missing context:
-   - If `session_id` was provided, first identify context for that same session: use current-thread interview Q&A only when it clearly belongs to that `session_id`, and use current-thread corrections only when they explicitly amend that same interview or seed request.
-   - If same-session conversation context is incomplete, use the active runtime's `inspect_code` / `run_shell` capabilities to look for persisted interview artifacts under the Ouroboros data directory (for example `~/.ouroboros/data/`), exported session artifacts, or other exact local records for that ID.
-   - If both same-session conversation context and a persisted artifact are available, merge them conservatively: keep the persisted transcript as evidence, but let explicit same-thread user corrections or clarifications supersede older persisted wording.
-   - If no `session_id` was provided, use current-thread interview Q&A only when it is complete enough to identify one coherent interview; otherwise ask which interview or requirements summary should be seeded.
-   - If no matching artifact is found, or if local artifacts plus matching conversation history still do not provide enough requirements, ask the user for the missing interview transcript / concise requirement summary, or ask them to run or resume `ooo interview`. Do not generate a seed from an absent or mismatched transcript.
-3. Generate a Seed YAML specification from the recovered requirements.
-4. Run the single-pass Advisory QA Check below, then present the seed as final and proceed to "After Seed Generation". Do not enter any refinement iteration unless the user explicitly opts in.
+   else `src/ouroboros/agents/seed-architect.md` in a source checkout. Resolve every agent prompt this skill names the same way, substituting its file name.
+2. Recover the requirements before drafting; never invent missing context:
+   - With a `session_id`, use current-thread Q&A and corrections only when they belong to that session; if incomplete, use `inspect_code` / `run_shell` to find persisted or exported artifacts for that ID (for example under `~/.ouroboros/data/`). Keep a persisted transcript as evidence, but let explicit same-thread corrections supersede it.
+   - Without a `session_id`, use current-thread Q&A only when it forms one coherent interview.
+   - Otherwise ask for the transcript or a requirement summary, or suggest `ooo interview`. Never seed from an absent or mismatched transcript.
+3. Generate the Seed YAML, run the Advisory QA Check, then go to "After Seed Generation".
 
 ### Advisory QA Check (single pass, non-blocking)
 
-After Path A or Path B produces a seed, run QA **exactly once** and surface the verdict as advisory information. **The verdict never blocks.** The seed is presented as final regardless of score; the user decides whether any refinement is worth their time. Do not run QA-until-PASS iterations — that loop is retired because it front-loads heavy interaction the user did not ask for.
+Run QA **exactly once** on the generated Seed. The verdict is advisory and never blocks: the Seed is presented as final regardless of score, and there is no QA-until-PASS loop.
 
-The generation (Path A `ouroboros_generate_seed` or Path B agent role) runs **exactly once** and establishes the seed's ontology. Any later revision is a direct YAML edit by you (main session) — do not call `ouroboros_generate_seed` again. It does not accept revision hints, and re-running it would discard the established ontology.
+Generation (Path A tool or Path B role) runs **exactly once** and fixes the Seed's ontology. Any later revision is a direct YAML edit by you; never call `ouroboros_generate_seed` again (it takes no revision hints and would discard the ontology).
 
-**Advisory bar**: `pass_threshold: 0.90` (stricter than default 0.80 — seeds are structural specs). The bar labels the verdict; it does not gate anything.
-
-**Check**:
-
-1. Establish the QA evaluator for this run:
-   - **MCP QA mode**: Load the QA tool via the active runtime's `call_mcp` capability using runtime tool discovery query `"+ouroboros qa"` if not already loaded.
-   - **Fallback QA mode**: If MCP is unavailable, read `src/ouroboros/agents/qa-judge.md`, adopt that evaluator role, and return its exact JSON schema: lowercase `verdict` (`pass`/`revise`/`fail`), numeric `score`, `dimensions`, `differences`, `suggestions`, and `reasoning`. In this mode there is no MCP-owned `qa_session_id`; track iteration history in the audit block and local loop ledger instead.
-
-2. Obtain a QA verdict using the available mode:
-
-   **MCP QA mode** — call QA on the generated seed through the active runtime's `call_mcp` capability:
+**MCP QA mode:**
    ```
    Tool: ouroboros_qa
    Arguments:
@@ -164,289 +126,63 @@ The generation (Path A `ouroboros_generate_seed` or Path B agent role) runs **ex
      qa_session_id: <reuse across passes>
      iteration_history: <accumulated across passes>
    ```
+The 0.90 bar (stricter than the default 0.80) labels the verdict; it gates nothing.
 
-   **Fallback QA mode** — skip the tool call and evaluate the current seed text under the QA Judge role from step 1, using the same quality bar and threshold. Treat the locally produced verdict exactly like the MCP verdict for the advisory presentation below.
+**Fallback QA mode** (QA tool absent): read the `qa-judge` prompt (resolved as in Path B step 1), adopt that role, and evaluate the Seed with the same quality bar and threshold. It returns JSON with lowercase `verdict` (`pass`/`revise`/`fail`), `score`, `dimensions`, `differences`, `suggestions`, `reasoning`; uppercase the verdict only for display and add no non-schema fields. There is no `qa_session_id`; keep pass history in the audit block.
 
-   **QA response shapes**: Branch only after a usable verdict is available.
-   - In MCP QA mode, if the response has `status: "delegated_to_subagent"` and no verdict payload, keep the returned `qa_session_id`, wait for the plugin-managed subagent result, then parse that result as the QA verdict. Do not treat the delegation envelope itself as PASS/REVISE/FAIL.
-   - In MCP QA mode, if the response already includes a scored verdict, parse that inline verdict directly.
-   - In fallback QA mode, parse the exact QA Judge JSON. Normalize `verdict` to uppercase only for the labels below (`pass`→PASS, `revise`→REVISE, `fail`→FAIL). Treat `differences` and `suggestions` as advisory findings; do not add non-schema fields such as `loop_action`.
-   - If the user later opts into a refinement pass, append the parsed verdict plus applied/rejected revision decisions to `iteration_history` before that next QA pass.
+Present, always in this order:
+1. `QA advisory: <PASS|REVISE|FAIL>, score X.XX (bar 0.90).`
+2. Below the bar: the top 2-3 suggestions as short advisory bullets (findings, not tasks). Apply none automatically.
+3. The complete Seed YAML in a fenced `yaml` block.
+4. For REVISE or FAIL, one opt-in line such as `Want a refinement pass on these findings? Otherwise the seed stands as-is.` For FAIL (< 0.40) also mention `ooo interview` (revisit requirements) or `ooo unstuck` (challenge assumptions). Then continue to "After Seed Generation"; the Seed is final unless the user opts in.
 
-3. Present the advisory verdict and the final seed — always in this order, never gated on score:
-   1. One advisory line: `QA advisory: <PASS|REVISE|FAIL> — score X.XX (bar 0.90).`
-   2. If the verdict is below the bar, list the top 2–3 QA suggestions as short advisory bullets — findings, not tasks. Do not apply any of them automatically.
-   3. Present the complete final Seed YAML in a fenced `yaml` block.
-   4. If the verdict was REVISE or FAIL, offer exactly one opt-in line — e.g. `Want a refinement pass on these findings? Otherwise the seed stands as-is.` For FAIL (< 0.40) additionally mention that `ooo interview` (revisit requirements) or `ooo unstuck` (challenge assumptions) may serve better than YAML edits. Then proceed to "After Seed Generation" regardless of the answer being pending — the seed is final unless the user opts in.
+Only on an explicit opt-in, run one refinement pass (below), re-run QA once for an updated advisory line, and present the revised YAML. Each further pass needs a fresh explicit opt-in; never chain passes. Before each later QA call, append the previous verdict and the applied/rejected decisions to `iteration_history`.
 
-4. Only if the user explicitly opts in, run one **Wonder → Reflect → Refine → Restate** pass (below), re-run the QA check once on the revised seed for an updated advisory line, and present the revised YAML. Each additional pass requires a fresh explicit opt-in; never chain passes autonomously.
+#### Refinement pass: Wonder → Reflect → Refine → Restate (opt-in)
 
-#### Wonder → Reflect → Refine → Restate (opt-in refinement pass)
+Diverge across independent sources, debate, let the user decide, then apply. No candidate is accepted by default, and you never apply a revision on your own (User Adoption Gate).
 
-This refinement pass mirrors the Double Diamond Define cycle: **diverge via multiple perspectives first, then converge through debate, user decision, and structural application.** Revisions must NEVER be auto-applied by the main session alone — *"No candidate is accepted by default."* (Symposium User Adoption Gate)
+**Wonder: collect proposals.**
+- **QA**: the verdict's `suggestions` (structural gaps in the YAML; QA cannot see the interview).
+- **Socratic lens** (`socratic-interviewer` prompt, resolved as in Path B step 1): check the Seed against interview evidence (persisted session state first, then this conversation) for 2-4 items: dropped or softened user constraints, rejected scope that crept back, flattened nuance, unagreed assumptions. Without evidence, record `no Socratic proposal: dialectic context unavailable`; never invent preferences. A QA/Socratic conflict goes to Reflect; neither side wins automatically.
+- **Lateral personas** (only if `ouroboros_lateral_think` is callable):
+  ```
+  Tool: ouroboros_lateral_think
+  Arguments:
+    problem_context: |
+      User opted into a refinement pass (QA advisory score X.XX, bar 0.90).
+      Current seed YAML:
+      <YAML>
+      QA suggestions:
+      - <suggestion 1>
+      Original user goal from interview: <recall>
+    current_approach: "The seed as currently drafted (above)."
+    persona: "all"
+    failed_attempts:
+      - <candidates rejected in earlier passes>
+  ```
+  Extract at most 1-2 concrete, discrete revisions from each persona's prose and drop abstract advice. If the response carries the `<!-- ouroboros-lateral-inline-dispatch-v1 base64 ... -->` sentinel and the runtime can dispatch isolated subagents, decode it and send each `payload.prompt` + `payload.context` through `orchestrate_subagents`; otherwise read the visible persona sections (split on section headers, not bare `---`). If the tool is absent, record `no lateral proposals: MCP lateral tool unavailable` and do not emulate personas.
 
-Four explicit phases per pass:
-- **Wonder** — diverge: collect raw proposals from independent sources
-- **Reflect** — debate: surface where sources agree and where they conflict
-- **Refine** — user gate: human picks which proposals enter the next seed
-- **Restate** — apply: edit YAML in place with accepted items only
+**Reflect: structure the debate.** Tag each candidate with its backing sources and a type (`expand`, `sharpen`, `remove`, `resolve_conflict`): convergent (two or more sources agree, strong), divergent (sources conflict; the user resolves it), singleton (weaker). Show a balance line such as `Balance: 4 expand / 2 sharpen / 1 remove` as information, not a warning.
 
-**Phase 1 — Wonder (diverge): collect raw proposals from available sources**
+**Refine: user gate.** Ask single-choice `ask_user` questions only, conflicts first: one per conflict group (one option per resolution plus "Leave unchanged"), then strong revisions ("apply all, review one by one, or skip"), then singletons ("review one by one or skip all"). Every batch offers "keep current seed"; confirm free-form answers with `refine_answer`. Pass rejected candidates as `failed_attempts` on later lateral calls.
 
-**Source 1 — QA Judge** (structural, external)
-The `suggestions` from the QA verdict. These are gaps, contradictions, and quality issues in the YAML itself. QA cannot see the interview.
+**Restate: apply accepted items only.** Edit the existing YAML in place, keep fields that were already correct, and do not regenerate. If everything was skipped, the Seed stands unchanged.
 
-**Source 2 — Socrates** (dialectical, user-intent evidence)
-You are Socrates — the Socratic facilitator lens from `skills/interview/SKILL.md` and `src/ouroboros/agents/socratic-interviewer.md`. Review the current seed YAML against verifiable interview evidence, in this order:
-
-1. If a `session_id` exists, first use available persisted interview/session state for that session. Path A may run from `ooo seed <session_id>` in a fresh conversation, so persisted state can be the only reliable dialectic record.
-2. Use conversation memory when it is available in the current thread.
-3. If no persisted state or conversation evidence is available for a point, mark Socrates output as `no Socrates-only proposal: dialectic context unavailable` for that point. Do not invent user preferences, rejected scope, or interview nuance.
-
-From the available evidence, surface 2–4 items neither QA nor lateral personas can see:
-- Did the user emphasize a constraint that got softened or dropped?
-- Did something the user explicitly rejected sneak back in?
-- Did the seed flatten nuance the user spent multiple turns clarifying?
-- Are there silent assumptions the user never agreed to?
-- Does wording contradict stated priorities (e.g., "MVP in a week" but 8 acceptance criteria)?
-
-If QA and Socrates conflict, do not resolve the conflict silently in Wonder. Carry both candidates into Reflect as a divergent signal, cite the available evidence for each side, and let the Refine user gate choose the resolution. Do not assume the Socratic lens is automatically authoritative; QA can be correct when no user-intent evidence contradicts it.
-
-**Source 3 — `ouroboros_lateral_think` (independent perspectives, MCP-only when available)**
-Attempt to load the MCP tool with the active runtime's `call_mcp` capability using runtime tool discovery query `"+ouroboros lateral"` if needed. If the tool loads, call it through the active runtime's `call_mcp` capability to collect 5 independent MCP personas or isolated perspectives:
-
-```
-Tool: ouroboros_lateral_think
-Arguments:
-  problem_context: |
-    User opted into a refinement pass (QA advisory score X.XX, bar 0.90).
-    Current seed YAML:
-    <YAML>
-    QA suggestions:
-    - <suggestion 1>
-    - <suggestion 2>
-    Original user goal from interview: <recall>
-  current_approach: "The seed as currently drafted (above)."
-  persona: "all"
-  failed_attempts:
-    - <previously rejected candidate from earlier iterations>
-    - ...
-```
-
-The 5 personas return distinct revision angles:
-- **hacker**: unconventional workarounds (e.g., reframe a constraint instead of adding criteria)
-- **researcher**: knowledge the seed assumes but doesn't pin down
-- **simplifier**: criteria/constraints to *remove* for sharper convergence
-- **architect**: structural reorganization without expansion
-- **contrarian**: challenges to assumptions the seed treats as settled
-
-**Parsing persona outputs when lateral MCP is available**: Each persona returns free-form prose, not a structured list. After the parallel call returns, read each persona's text and extract its concrete proposals into discrete candidates (one revision per candidate, not bundled). If a persona's output is purely abstract advice with no actionable revision, drop it from the candidate list rather than inventing one. Aim for 1–2 candidates per persona — if a persona produced 5, pick the 2 most concrete and discard the rest.
-
-**Lateral response shapes**: `ouroboros_lateral_think` does not have one universal synchronous shape. After calling it with all personas, branch on the returned shape before extracting candidates:
-
-- **Plugin delegation**: If the response has `status: "delegated_to_subagent"`, `dispatch_mode: "plugin"`, and an `_subagents` array, wait for every plugin-managed subagent result. Extract concrete revision candidates from those returned persona texts. Do not attempt to parse candidates from the envelope prompts themselves.
-- **Inline fallback with dispatch block**: If the response returns markdown `content` plus the hidden sentinel `<!-- ouroboros-lateral-inline-dispatch-v1 base64 ... -->`, keep the visible markdown as the lateral scaffold. If the active runtime can dispatch isolated subagents, decode the sentinel JSON (`dispatch_mode`, `persona_count`, `payloads`) and send each `payload.prompt` + `payload.context` through that isolated subagent surface, then extract candidates from the returned persona texts. If the runtime cannot dispatch subagents, synthesize candidates directly from the visible inline persona sections.
-- **Inline fallback without dispatch block**: Treat the returned markdown as the complete lateral output and synthesize candidates directly from the visible persona sections. Do not split solely on `---` if doing so would corrupt user-provided content; prefer section headers and visible persona boundaries.
-
-If runtime tool discovery cannot load `ouroboros_lateral_think`, do not emulate lateral personas or read persona files directly. Record `no lateral proposals: MCP lateral tool unavailable` as Source 3 output and proceed with QA plus Socrates/available sources. The User Adoption Gate still applies to any proposed revision.
-
-**Phase 2 — Reflect (debate): structure proposals by agreement and conflict**
-
-Do not just dedupe. Read all proposals from the available Wonder sources (Sources 1–2, plus Source 3 only when `ouroboros_lateral_think` loaded successfully) and surface the *structure of the debate*:
-
-- **Convergent signals (strong)**: same revision proposed by ≥2 independent sources. Example: QA says "criterion 3 is unmeasurable" AND simplifier says "drop criterion 3 or sharpen it" → strong signal to act on criterion 3.
-- **Divergent signals (decisions)**: sources conflict. Example: researcher says "add User entity to ontology" but simplifier says "remove the User reference from goal — single-user implied". This is a decision the *user* must resolve, not the main session.
-- **Singleton signals (weaker)**: one source only. Keep but mark as weaker.
-- **Balance signal**: count expansion proposals (add) vs convergence proposals (sharpen/remove). Show the ratio above the user gate as information, not warning — e.g., `Balance: 4 expand / 2 sharpen / 1 remove`. Both directions are legitimate; the user decides what mix to accept.
-
-Output of Reflect: a tagged candidate list with per-item metadata `(sources_backing, type=expand|sharpen|remove|resolve_conflict)`.
-
-**Phase 3 — Refine (User Adoption Gate)**
-
-Use the active runtime's `ask_user` capability with executable single-choice questions only. Do not ask one multi-select question or present options that can be selected contradictorily.
-
-Ask sequential single-choice questions in this order:
-
-1. For each conflict group, ask one question with exactly one option per mutually exclusive resolution plus "Leave unchanged"; handle the runtime's free-form "Other" response if available. Record the chosen option as accepted and mark the other options in that group rejected.
-2. For non-conflicting convergent signals, ask one single-choice batch question: "Apply all strong non-conflicting revisions, review one by one, or skip them?" If the user chooses review, ask each revision as a Yes/No/Other single-choice question.
-3. For singleton signals, ask one single-choice batch question: "Review singleton revisions one by one, skip all singleton revisions, or other?" If the user chooses review, ask each revision as a Yes/No/Other single-choice question.
-4. Always include a skip option at the batch level: "None of the above / keep current seed for now". If selected, skip applying this candidate batch; the current seed simply stands as-is.
-
-Convergent signals still appear first in summaries, conflicts second, singletons last. Conflict questions must be asked before any non-conflicting batch is applied so contradictory revisions cannot both enter the next seed.
-
-```
-Refinement pass — QA advisory score X.XX
-
-Which revisions should enter the next seed?
-(Nothing accepted by default. Questions are single-choice and may be sequential.)
-
-Strong (multiple sources agree):
-A. [QA + Simplifier] Criterion 3 "easy to use" — sharpen to measurable predicate
-B. [QA + Socrates] Re-add "single-user only" constraint dropped from iter-0
-
-Conflicts (mutually exclusive — pick at most one per group):
-C1. [Researcher] Add User entity to ontology
-C2. [Simplifier] Remove User reference from goal (single-user implied)
-C3. Neither — leave ontology untouched on this point
-
-Singletons:
-D. [Contrarian] Constraint "no external DB" contradicts criterion 7
-E. [Architect] Group 3 user-management criteria under one parent
-F. [Hacker] Replace "user authentication" with "device-local key file"
-
-Other:
-G. None of the above (keep current seed)
-H. Other — describe a different change
-```
-
-Portable gate example:
-
-```json
-{
-  "questions": [{
-    "question": "Conflict: how should the seed handle User in the ontology?",
-    "header": "Conflict C",
-    "options": [
-      {"label": "Add User", "description": "Accept C1 and reject C2/C3"},
-      {"label": "Remove User", "description": "Accept C2 and reject C1/C3"},
-      {"label": "Leave unchanged", "description": "Accept C3 and reject C1/C2"}
-    ],
-    "multiSelect": false
-  }]
-}
-```
-
-Balance line shown above the question: `Balance: 4 expand / 2 sharpen / 1 remove` (informational, not a warning).
-
-Track all rejected candidates across iterations and pass them as `failed_attempts` to subsequent `ouroboros_lateral_think` calls when the MCP lateral tool is available, so personas don't re-propose them.
-
-**Phase 4 — Restate (apply accepted only)**
-
-Edit the previous seed YAML in place. Apply ONLY user-accepted items. Do not start from scratch. Do not lose fields that were already correct. Do not call `ouroboros_generate_seed` again — that tool runs only at initial generation.
-
-If the user skips all proposed revisions, the current seed stands unchanged. After applying accepted items (or after a full skip), re-run the QA check once for an updated advisory line and present the complete Seed YAML in a fenced `yaml` block so the standing artifact is explicit. Do not start another pass without a fresh explicit opt-in.
-
-Common edit shapes (both expansion and convergence are legitimate when the user accepted them):
-- Sharpen: replace vague phrase with measurable predicate (`"fast"` → `"p95 latency < 200ms"`)
-- Tighten: harden a soft constraint (`"some kind of storage"` → `"SQLite, single file, no server"`)
-- Make implicit explicit: surface a silent assumption as a constraint
-- Remove: drop a contradicting or redundant criterion
-- Expand (when accepted): add an ontology entity, criterion, or constraint that fills a gap the user confirmed
-
-**Audit trail**
-
-After each revision, append a brief audit block to `~/.ouroboros/seed-revisions/<revision_key>.md` (create the directory if it doesn't exist) capturing: iteration N, QA score, all candidates with source tag, user's accept/reject decisions, and the resulting diff vs. previous iteration. This makes the convergence path inspectable and lets the user replay decisions later.
-
-Choose `revision_key` deterministically:
-- If `session_id` exists, use that exact `session_id`.
-- If no `session_id` exists (common in Path B), derive a stable seed label from the seed goal or project name plus the current UTC timestamp, for example `<slugified-goal>-YYYYMMDDTHHMMSSZ`. Once derived, reuse the same key for every iteration in the current seed run.
-- If the filesystem write is unavailable, include the same audit block in the assistant response instead of silently dropping it.
-
-Format:
-```markdown
-## Iteration N — score X.XX
-
-### Candidates
-- [A] [QA+Simplifier] sharpen criterion 3 — **accepted**
-- [B] [Socrates] re-add single-user constraint — **accepted**
-- [C1] [Researcher] add User entity — rejected
-- [C2] [Simplifier] remove User from goal — **accepted**
-- [D] [Contrarian] resolve no-DB / criterion-7 conflict — rejected
-- ...
-
-### Diff vs. iteration N-1
-- criteria[2]: "easy to use" → "first-time user completes flow in < 3 clicks"
-- constraints: + "single-user only"
-- goal: "...for users..." → "...for the single operator..."
-```
-
-## Seed Components
-
-The seed contains:
-
-- **GOAL**: Clear primary objective
-- **CONSTRAINTS**: Hard limitations (e.g., Python >= 3.12, no external DB)
-- **ACCEPTANCE_CRITERIA**: Measurable success criteria
-- **ONTOLOGY_SCHEMA**: Data structure definition (name, fields, types)
-- **EVALUATION_PRINCIPLES**: Quality principles with weights
-- **EXIT_CONDITIONS**: When the workflow should terminate
-- **METADATA**: Version, timestamp, ambiguity score, interview ID
-
-## Example Output
-
-```yaml
-goal: Build a CLI task management tool
-constraints:
-  - Python >= 3.12
-  - No external database
-  - SQLite for persistence
-acceptance_criteria:
-  - Tasks can be created
-  - Tasks can be listed
-  - Tasks can be marked complete
-ontology_schema:
-  name: TaskManager
-  description: Task management domain model
-  fields:
-    - name: tasks
-      type: array
-      description: List of tasks
-    - name: title
-      type: string
-      description: Task title
-evaluation_principles:
-  - name: completeness
-    description: All requirements are implemented
-    weight: 1.0
-  - name: usability
-    description: CLI commands are clear and easy to use
-    weight: 0.7
-exit_conditions:
-  - name: all_criteria_met
-    description: All acceptance criteria pass
-    criteria: 100% of acceptance criteria are satisfied
-  - name: tests_green
-    description: The project test suite passes
-    criteria: Required automated tests exit successfully
-metadata:
-  ambiguity_score: 0.15
-```
+**Audit trail.** After each pass, append to `~/.ouroboros/seed-revisions/<revision_key>.md` (create the directory if needed): pass number, QA score, every candidate with its source tag and accepted/rejected decision, and the diff against the previous YAML. `revision_key` is the `session_id`, or, without one, `<slugified-goal>-YYYYMMDDTHHMMSSZ` derived once and reused for every pass. If the write fails, include the audit block in the response.
 
 ## After Seed Generation
 
-On successful seed generation, first announce:
+Announce `Your seed has been crystallized!`
 
-```
-Your seed has been crystallized!
-```
+Then read `~/.ouroboros/prefs.json`. If `star_asked` is not `true`, ask one single-choice question with `ask_user`: "If Ouroboros helped clarify your thinking, a GitHub star supports continued development." with options:
 
-Then check `~/.ouroboros/prefs.json` for `star_asked`. If `star_asked` is not set to `true`, use the active runtime's `ask_user` capability with this single question:
+- **⭐ Star**: run `gh api -X PUT /user/starred/Q00/ouroboros`, then record `star_asked`.
+- **Not now**: record `star_asked`.
 
-```json
-{
-  "questions": [{
-    "question": "If Ouroboros helped clarify your thinking, a GitHub star supports continued development. Ready to unlock Full Mode?",
-    "header": "Next step",
-    "options": [
-      {
-        "label": "\u2b50 Star & Setup",
-        "description": "Star on GitHub + run ooo setup to enable run, evaluate, status"
-      },
-      {
-        "label": "Just Setup",
-        "description": "Skip star, go straight to ooo setup for Full Mode"
-      }
-    ],
-    "multiSelect": false
-  }]
-}
-```
+Offer setup only when this Seed came from Path B (no Ouroboros MCP server): say that `ooo setup` enables `ooo run` and evaluation, and point the footer at it. After Path A, MCP already works: never suggest `ooo setup`; the footer points to `ooo run`.
 
-- **Star & Setup**: Run `gh api -X PUT /user/starred/Q00/ouroboros`, merge `{"star_asked": true}` into `~/.ouroboros/prefs.json`, then read and execute `../setup/SKILL.md`
-- **Just Setup**: Merge `{"star_asked": true}` into `~/.ouroboros/prefs.json`, then read and execute `../setup/SKILL.md`
-- **Other** (user provides custom text): Merge `{"star_asked": true}` into `~/.ouroboros/prefs.json`, skip setup
-
-Create `~/.ouroboros/` directory if it doesn't exist. Preserve existing keys such as `welcomeShown`, `welcomeCompleted`, and `welcomeVersion` when updating `star_asked`:
+Record `star_asked` with this snippet, which preserves existing keys such as `welcomeShown`, `welcomeCompleted`, and `welcomeVersion`:
 
 ```bash
 ouroboros_python - <<'PY'
@@ -467,19 +203,8 @@ with open(path, 'w', encoding='utf-8') as f:
 PY
 ```
 
-If `star_asked` is already `true`, skip the question and just announce:
-
-```
-Your seed has been crystallized!
-◆ Current state → next: `ooo run` to execute this seed (requires `ooo setup` first)
-```
+If `star_asked` is already `true`, skip the question.
 
 ## RFC #1392 State Breadcrumb Footer
 
-Your final response MUST end with exactly one breadcrumb footer line:
-
-```
-◆ <current state> → next: <recommended action>
-```
-
-Derive `<current state>` from live session state via `ouroboros_session_status` when that MCP projection is available; otherwise derive it from this skill's actual outcome. Never use a linear `Step N of M` footer because Ouroboros is an evolutionary loop. When the next action is genuinely a choice, list 2-3 honest options in the `next:` clause. The breadcrumb line must be the last line of the response.
+End the final response with exactly one line `◆ <current state> → next: <recommended action>`. Derive the state from live session state via `ouroboros_session_status` when available, otherwise from this skill's actual outcome. Never use a linear `Step N of M` footer; when the next step is a real choice, list 2-3 options.

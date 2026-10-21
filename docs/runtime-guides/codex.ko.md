@@ -128,6 +128,25 @@ uv run ouroboros run workflow --runtime codex ~/.ouroboros/seeds/seed_abcd1234ef
 
 **Use Codex default model**을 고르면 Codex의 현재 기본 모델을 그대로 씁니다. 이게 권장 설정입니다 — Ouroboros가 Codex 호출마다 역할별 추론 강도만 넘기므로, Codex App이나 CLI에서 새 모델로 바꾸면 자동으로 그게 쓰입니다. 목록에서 모델을 고르거나 **Enter another model ID…**를 쓰는 건, 특정 단계(Execute 포함)에 모델을 의도적으로 고정하고 싶을 때만 하세요.
 
+AC별 모델 티어 라우팅도 이 자동 선택을 유지합니다. 구체적인 사다리를
+사용하려면 `--model frontier`처럼 티어를 명시하거나
+`OUROBOROS_MODEL_TIER_ROUTING=1`을 설정하세요. `economics.tiers`의
+`provider: codex` 항목이 `openai` 항목보다 우선하며, 명시적 모델 고정은
+라우팅보다 우선합니다. [설정 예시](../config-reference.md#native-runtime-ladders)를 보세요.
+
+설정 화면의 정적 모델 목록은 계정별 사용 가능 목록을 보장하지 않습니다.
+2026-10-18에 확인한 `codex-cli 0.160.0 --help`는 `--model`을 지원하지만
+허용 ID 목록은 제공하지 않습니다. Codex 계정과 공급자 설정에서 확인하세요.
+OpenCode나 OpenAI API에 있는 ID만으로 Codex CLI 지원을 판단할 수 없습니다.
+2026-10-18에 확인한 [공식 Codex 모델 안내](https://developers.openai.com/codex/models/)는
+반복 작업에 `codex -m gpt-6-luna`, 복잡한 코딩·에이전트 작업에
+`codex -m gpt-6.1-sol`, 가장 어려운 작업에 `codex -m gpt-6-astra`를
+제시합니다. frugal / standard / frontier 후보로 설정할 근거는 되지만,
+사용 가능 여부는 요금제·클라이언트·워크스페이스·출시 범위에 달려 있습니다.
+과거 릴리스 기본값이나 현재 계정의 활성 목록을 입증하지는 않습니다.
+Codex MCP의 재개 호출 `codex-reply`는 스레드 모델을 바꿀 수 없어 AC별
+모델 라우팅을 강제된 선택으로 기록하지 않습니다.
+
 **Codex의 MCP/env 연결과 사용자가 직접 관리하는 네이티브 Codex 프로필은 `$CODEX_HOME/config.toml`입니다.** `CODEX_HOME`이 설정돼 있지 않으면 Codex는 `~/.codex/config.toml`을 씁니다.
 
 Codex 기반 Ouroboros 역할들이 Codex CLI의 활성 기본값/프로필을 물려받는 대신 명시적 모델을 쓰게 하려면, `config.yaml` 키를 직접 지정하세요.

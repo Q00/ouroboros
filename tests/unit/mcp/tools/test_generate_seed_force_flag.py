@@ -127,6 +127,7 @@ class TestPluginPathForce:
         assert result.is_ok
         meta = result.value.meta
         assert meta["force"] is True
+        assert meta["gate_forced"] is True
         ctx = meta["_subagent"]["context"]
         assert ctx["force"] is True
         # Bypass note must reach the subagent so it does not re-impose the gate.
@@ -145,6 +146,7 @@ class TestPluginPathForce:
 
         assert result.is_ok
         assert result.value.meta["force"] is False
+        assert result.value.meta["gate_forced"] is False
         assert result.value.meta["_subagent"]["context"]["force"] is False
 
 
