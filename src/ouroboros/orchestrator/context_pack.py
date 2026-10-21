@@ -30,6 +30,7 @@ import subprocess
 import tomllib
 from typing import Any
 
+from ouroboros.core.project_paths import WORKSPACE_STATE_DIR
 from ouroboros.observability.logging import get_logger
 
 log = get_logger(__name__)
@@ -38,7 +39,7 @@ log = get_logger(__name__)
 # first when the pack would exceed this.
 MAX_PACK_CHARS = 6000
 
-_CACHE_RELATIVE_PATH = Path(".ouroboros") / "context_pack.json"
+_CACHE_RELATIVE_PATH = Path(WORKSPACE_STATE_DIR) / "context_pack.json"
 
 # Working-tree files the scanner parses. The cache key must cover these in
 # addition to git HEAD: HEAD only moves on commit, while the pack is built

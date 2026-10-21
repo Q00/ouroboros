@@ -56,6 +56,7 @@ RUN_FAILURE_CAUSES = LAUNCH_FAILURE_CAUSES | frozenset(
         "verify_exit_nonzero",
         "verify_output_assertion_unmatched",
         "verify_workspace_mutated",
+        "verify_no_evidence",
         "worker_evidence_missing",
         "worker_fabrication_suspected",
         "worker_blocked",

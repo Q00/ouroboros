@@ -14,6 +14,7 @@ import structlog
 import yaml
 
 from ouroboros.auto.interview_driver import InterviewBackend, InterviewTurn
+from ouroboros.bigbang.answer_provenance import ANSWER_PROVENANCE_ARGUMENT, AnswerProvenance
 from ouroboros.core.owner_only import write_owner_only
 from ouroboros.core.requirement_candidate import RequirementDistillation
 from ouroboros.core.seed import Seed, ac_texts
@@ -151,11 +152,18 @@ class HandlerInterviewBackend(InterviewBackend):
         return _turn_from_result(result)
 
     async def answer(
-        self, session_id: str, answer: str, *, last_question: str | None = None
+        self,
+        session_id: str,
+        answer: str,
+        *,
+        last_question: str | None = None,
+        provenance: AnswerProvenance | None = None,
     ) -> InterviewTurn:
         arguments = {"session_id": session_id, "answer": answer}
         if last_question:
             arguments["last_question"] = last_question
+        if provenance is not None:
+            arguments[ANSWER_PROVENANCE_ARGUMENT] = provenance
         result = _unwrap(
             await self.handler.handle(arguments),
             tool_name="ouroboros_interview",

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from pathlib import Path
 import shutil
 import subprocess
+from typing import Any
 from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
@@ -683,6 +685,180 @@ def test_unsupported_git_is_a_non_retryable_configuration_error(
 def test_supported_git_version_grammar_is_explicit(output: bytes) -> None:
     with patch("ouroboros.core.project_identity._run_git_command", return_value=output):
         _require_supported_git()
+
+
+def _git_reporting_version(version: bytes) -> AbstractContextManager[Any]:
+    """Fake ``git --version``; on old Git, fail any worktree or path-format query."""
+    real_run_git_command = project_identity._run_git_command
+
+    def fake(*arguments: str) -> bytes:
+        if arguments == ("--version",):
+            return version
+        if version == b"git version 2.34.1\n" and (
+            "worktree" in arguments or "--path-format=absolute" in arguments
+        ):
+            raise AssertionError(f"old Git must not run topology queries: {arguments}")
+        return real_run_git_command(*arguments)
+
+    return patch("ouroboros.core.project_identity._run_git_command", side_effect=fake)
+
+
+def test_old_git_degrades_direct_identity_to_effective_cwd(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    workspace = repo / "packages" / "app"
+    workspace.mkdir(parents=True)
+
+    with _git_reporting_version(b"git version 2.34.1\n"):
+        identity = resolve_project_identity(workspace)
+
+    canonical = workspace.resolve()
+    assert identity.project_root == str(canonical)
+    assert identity.project_id == project_id_for_root(canonical)
+    assert identity.workspace_path == "."
+    assert identity.degraded_reason == project_identity.DEGRADED_REASON_GIT_VERSION
+    assert identity.to_event_data()["project_identity_degraded_reason"] == (
+        project_identity.DEGRADED_REASON_GIT_VERSION
+    )
+    assert identity.to_workspace_data() == {
+        "project_root": str(canonical),
+        "workspace_path": ".",
+    }
+
+
+def test_old_git_never_joins_a_linked_worktree_to_its_source(tmp_path: Path) -> None:
+    primary = tmp_path / "primary"
+    linked = tmp_path / "linked"
+    _init_repo(primary)
+    _add_linked(primary, linked)
+
+    with _git_reporting_version(b"git version 2.34.1\n"):
+        identity = resolve_project_identity(linked)
+
+    assert identity.project_root == str(linked.resolve())
+    assert identity.degraded_reason == project_identity.DEGRADED_REASON_GIT_VERSION
+
+
+def test_old_git_non_git_identity_is_unchanged_and_unmarked(tmp_path: Path) -> None:
+    plain = tmp_path / "plain"
+    plain.mkdir()
+
+    supported = resolve_project_identity(plain)
+    with _git_reporting_version(b"git version 2.34.1\n"):
+        degraded = resolve_project_identity(plain)
+
+    assert degraded == supported
+    assert degraded.degraded_reason is None
+    assert "project_identity_degraded_reason" not in degraded.to_event_data()
+
+
+def test_old_git_root_identity_equals_supported_git_identity(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+
+    # The Git-proven identity of a simple checkout root, as Git >= 2.36 returns it.
+    supported = ProjectIdentity.from_root(repo, workspace_path=".", require_exists=True)
+    with _git_reporting_version(b"git version 2.34.1\n"):
+        degraded = resolve_project_identity(repo)
+
+    # The reason records how the key was derived, not which project it names,
+    # so a resume across a Git upgrade at the checkout root stays equal.
+    assert degraded == supported
+    assert degraded.degraded_reason is not None
+    assert supported.degraded_reason is None
+
+
+def test_old_git_publication_always_escalates_to_full_resolution(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+
+    with _git_reporting_version(b"git version 2.34.1\n"):
+        identity, evidence = project_identity.resolve_project_identity_for_publication(repo)
+        revalidated = resolve_project_identity(repo)
+
+    assert identity.degraded_reason == project_identity.DEGRADED_REASON_GIT_VERSION
+    assert evidence.escalate is True
+    assert project_identity.publication_evidence_is_stable(evidence, repo) is False
+    assert revalidated == identity
+
+
+@pytest.mark.parametrize(
+    "marker",
+    ["gitdir: /missing-ouroboros-admin-dir\n", "not a gitfile\n"],
+    ids=["dangling-gitfile", "garbage-gitfile"],
+)
+def test_old_git_malformed_marker_cannot_publish_identity(tmp_path: Path, marker: str) -> None:
+    root = tmp_path / "broken"
+    workspace = root / "nested"
+    workspace.mkdir(parents=True)
+    (root / ".git").write_text(marker)
+
+    with (
+        _git_reporting_version(b"git version 2.34.1\n"),
+        pytest.raises(ProjectIdentityUnavailableError),
+    ):
+        resolve_project_identity(workspace)
+    with (
+        _git_reporting_version(b"git version 2.34.1\n"),
+        pytest.raises(ProjectIdentityUnavailableError),
+    ):
+        project_identity.resolve_project_identity_for_publication(workspace)
+
+
+def test_old_git_malformed_bare_shape_cannot_publish_identity(tmp_path: Path) -> None:
+    bare = tmp_path / "bare"
+    for name in ("objects", "refs"):
+        (bare / name).mkdir(parents=True)
+    (bare / "HEAD").write_text("garbage\n")
+    workspace = bare / "objects"
+
+    with (
+        _git_reporting_version(b"git version 2.34.1\n"),
+        pytest.raises(ProjectIdentityUnavailableError),
+    ):
+        resolve_project_identity(workspace)
+
+
+def test_old_git_valid_bare_repository_degrades_to_effective_cwd(tmp_path: Path) -> None:
+    bare = tmp_path / "bare.git"
+    _git("init", "-q", "--bare", str(bare))
+
+    with _git_reporting_version(b"git version 2.34.1\n"):
+        identity = resolve_project_identity(bare)
+
+    assert identity.project_root == str(bare.resolve())
+    assert identity.degraded_reason == project_identity.DEGRADED_REASON_GIT_VERSION
+
+
+def test_old_git_managed_ownership_still_requires_topology_grammar(tmp_path: Path) -> None:
+    primary = tmp_path / "primary"
+    linked = tmp_path / "linked"
+    _init_repo(primary)
+    _add_linked(primary, linked)
+
+    with (
+        _git_reporting_version(b"git version 2.34.1\n"),
+        pytest.raises(ProjectIdentityGitVersionError, match="found 2.34.1"),
+    ):
+        resolve_managed_project_identity(
+            linked,
+            source_root=primary,
+            source_workspace=primary,
+            worktree_root=linked,
+        )
+
+
+def test_unrepresentable_git_version_still_fails_direct_resolution(tmp_path: Path) -> None:
+    with (
+        _git_reporting_version(b"git version unknown\n"),
+        pytest.raises(ProjectIdentityGitVersionError, match="2.36.0"),
+    ):
+        resolve_project_identity(tmp_path)
+
+
+def test_degraded_reason_is_validated(tmp_path: Path) -> None:
+    with pytest.raises(ProjectIdentityError, match="degraded_reason"):
+        ProjectIdentity.from_root(tmp_path, degraded_reason="anything")
 
 
 def test_git_version_probe_does_not_depend_on_workdir_capability() -> None:

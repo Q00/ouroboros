@@ -106,7 +106,7 @@ private SDK WebSocket. GJC's Broker and `SessionRouter` remain the sole owners
 of endpoint discovery, authentication, generation fencing, and turn delivery.
 
 The GJC adapter is an MCP v2 integration. Setup validates that the running
-Ouroboros interpreter has the pinned `mcp==2.0.0` client before it writes
+Ouroboros interpreter has the pinned `mcp==2.2.0` client before it writes
 `runtime_backend: gjc` or `llm.backend: gjc`. This profile must remain isolated
 from the Claude Agent SDK profiles, which retain their MCP 1.x dependency.
 

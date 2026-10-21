@@ -4,16 +4,29 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from ouroboros.core.lineage import EvaluationSummary
 from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
 from ouroboros.evolution.drift_recording import record_generation_drift
 
 
-def _seed() -> Seed:
+def _seed(goal: str = "Preserve the verified outcome") -> Seed:
     return Seed(
-        goal="Preserve the verified outcome",
+        goal=goal,
         acceptance_criteria=("Outcome holds",),
         ontology_schema=OntologySchema(name="outcome", description="Verified outcome"),
         metadata=SeedMetadata(seed_id="seed_drift", ambiguity_score=0.1),
+    )
+
+
+@pytest.fixture(autouse=True)
+def use_lexical_fallback_in_legacy_recording_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ouroboros.observability.drift import _calculate_lexical_goal_drift
+
+    async def lexical_fallback(current_output: str, seed: Seed, **_kwargs: object) -> float:
+        return _calculate_lexical_goal_drift(current_output, seed)
+
+    monkeypatch.setattr(
+        "ouroboros.observability.drift.calculate_goal_drift_async", lexical_fallback
     )
 
 
@@ -42,6 +55,59 @@ async def test_execution_output_emits_lineage_bound_drift_event() -> None:
 
 
 @pytest.mark.asyncio
+async def test_existing_semantic_alignment_is_reused_for_goal_drift() -> None:
+    event_store = AsyncMock()
+    seed = _seed("CSV에서 유효 행과 무효 행을 세고 평균 금액을 JSON으로 출력한다")
+
+    await record_generation_drift(
+        event_store,
+        "lin_1",
+        2,
+        seed,
+        "Count valid and invalid CSV rows, calculate the average amount, and output JSON",
+        EvaluationSummary(final_approved=False, highest_stage_passed=2, goal_alignment=0.95),
+    )
+
+    event = event_store.append.await_args.args[0]
+    assert event.data["goal_drift"] == pytest.approx(0.05)
+    assert event.data["constraint_drift"] == 0.0
+    assert event.data["ontology_drift"] == 1.0
+    assert event.data["combined_drift"] == pytest.approx(0.225)
+
+
+@pytest.mark.asyncio
+async def test_missing_or_invalid_alignment_keeps_lexical_goal_drift() -> None:
+    from math import inf, nan
+
+    from ouroboros.observability.drift import _calculate_lexical_goal_drift
+
+    seed = _seed()
+    expected = _calculate_lexical_goal_drift("verified output", seed)
+    for invalid_alignment in (None, nan, inf, -0.1, 1.1):
+        event_store = AsyncMock()
+        summary = (
+            EvaluationSummary(final_approved=False, highest_stage_passed=1)
+            if invalid_alignment is None
+            else EvaluationSummary.model_construct(
+                final_approved=False,
+                highest_stage_passed=1,
+                goal_alignment=invalid_alignment,
+            )
+        )
+        await record_generation_drift(
+            event_store,
+            "lin_1",
+            2,
+            seed,
+            "verified output",
+            summary,
+        )
+
+        event = event_store.append.await_args.args[0]
+        assert event.data["goal_drift"] == expected
+
+
+@pytest.mark.asyncio
 async def test_drift_failure_does_not_fail_generation(monkeypatch: pytest.MonkeyPatch) -> None:
     event_store = AsyncMock()
 
@@ -49,7 +115,7 @@ async def test_drift_failure_does_not_fail_generation(monkeypatch: pytest.Monkey
         raise RuntimeError("telemetry unavailable")
 
     monkeypatch.setattr(
-        "ouroboros.evolution.drift_recording.DriftMeasurement.measure",
+        "ouroboros.evolution.drift_recording.DriftMeasurement.measure_async",
         fail_measurement,
     )
 

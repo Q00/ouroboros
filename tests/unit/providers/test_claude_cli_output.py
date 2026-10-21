@@ -74,6 +74,36 @@ def test_normalizes_top_level_event_array_and_uses_terminal_result() -> None:
     assert normalized.raw_payload["type"] == "result"
 
 
+def test_normalizes_hook_lifecycle_events_before_init() -> None:
+    final = _result()
+    events = [
+        {"type": "system", "subtype": "hook_started", "hook_event": "SessionStart"},
+        {"type": "system", "subtype": "hook_response", "hook_event": "SessionStart"},
+        {"type": "system", "subtype": "init", "session_id": "session-1"},
+        final,
+    ]
+
+    normalized = normalize_claude_cli_output(json.dumps(events))
+
+    assert normalized.result == "done"
+    assert normalized.raw_payload["type"] == "result"
+    assert normalized.session_id == "session-1"
+    assert normalized.event_count == 4
+
+
+def test_rejects_duplicate_init_after_hook_lifecycle_events() -> None:
+    events = [
+        {"type": "system", "subtype": "hook_started", "hook_event": "SessionStart"},
+        {"type": "system", "subtype": "hook_response", "hook_event": "SessionStart"},
+        {"type": "system", "subtype": "init"},
+        {"type": "system", "subtype": "init"},
+        _result(),
+    ]
+
+    with pytest.raises(ClaudeCliOutputError, match="system/init event is duplicated"):
+        normalize_claude_cli_output(json.dumps(events))
+
+
 def test_normalizes_ndjson_with_plain_diagnostic_lines() -> None:
     stdout = "\n".join(
         [

@@ -63,6 +63,11 @@ class FailureClass(StrEnum):
             calls exist and the transcript recorded them, but none is a
             replayed, passing base-tree test that runs the changed code. The
             criterion has no evidence; it is not fabrication.
+        CITED_CALL_FAILED: The worker cited a transcript call the transcript
+            recorded as passing, and the controller's replay of that call on
+            the final artifact failed. The controller executed the check and
+            saw it fail: an executed failure, not missing evidence, and not
+            fabrication. Retryable with the failed call named.
     """
 
     EVIDENCE_MISSING = "EVIDENCE_MISSING"
@@ -74,6 +79,7 @@ class FailureClass(StrEnum):
     TRANSCRIPT_MISSING_INFRASTRUCTURE = "TRANSCRIPT_MISSING_INFRASTRUCTURE"
     SCRIPT_ABSENT_FROM_ARTIFACT = "SCRIPT_ABSENT_FROM_ARTIFACT"
     NO_CALL_EVIDENCE = "NO_CALL_EVIDENCE"
+    CITED_CALL_FAILED = "CITED_CALL_FAILED"
 
 
 _HARD_PRECONDITION_VALUE_KEY_TOKENS = frozenset(
@@ -291,6 +297,13 @@ _POLICY_TABLE: dict[FailureClass, RecoveryPolicy] = {
         rationale=(
             "The cited transcript calls are real but none qualifies as evidence. "
             "Preserve the work as unverified instead of repeating it."
+        ),
+    ),
+    FailureClass.CITED_CALL_FAILED: RecoveryPolicy(
+        action=RecoveryAction.RETRY,
+        rationale=(
+            "The controller replayed a cited call on the artifact and it failed; "
+            "retry with the failed call named so the worker fixes the work."
         ),
     ),
 }

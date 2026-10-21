@@ -2,8 +2,13 @@
 
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 from unittest.mock import patch
+
+import pytest
 
 # Load keyword-detector.py as a module (it uses hyphens in filename)
 _script_path = Path(__file__).resolve().parents[3] / "scripts" / "keyword-detector.py"
@@ -181,10 +186,9 @@ class TestDetectKeywords:
         assert result["detected"] is True
         assert result["suggested_skill"] == "/ouroboros:publish"
 
-    def test_ooo_maintain_with_issue(self):
+    def test_removed_maintain_command_is_not_routed(self):
         result = detect_keywords("ooo maintain #2308")
-        assert result["detected"] is True
-        assert result["suggested_skill"] == "/ouroboros:maintain"
+        assert result["detected"] is False
 
     def test_ooo_resume_session_detected(self):
         result = detect_keywords("ooo resume-session")
@@ -272,13 +276,13 @@ class TestMainGate:
 
     @patch.object(_mod, "is_mcp_configured", return_value=False)
     @patch.object(_mod, "is_first_time", return_value=False)
-    def test_maintain_bypasses_setup_gate(self, _first, _mcp, capsys):
+    def test_removed_maintain_command_does_not_bypass_setup_gate(self, _first, _mcp, capsys):
         with patch("sys.stdin") as mock_stdin:
             mock_stdin.read.return_value = "ooo maintain"
             main()
         out = capsys.readouterr().out
         assert "/ouroboros:setup" not in out
-        assert "/ouroboros:maintain" in out
+        assert "/ouroboros:maintain" not in out
 
     @patch.object(_mod, "is_mcp_configured", return_value=False)
     @patch.object(_mod, "is_first_time", return_value=False)
@@ -418,6 +422,31 @@ class TestHookProtocol:
         assert "/ouroboros:setup" in context
         assert "/ouroboros:ouroboros-status" not in context
 
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {
+                "session_id": "s",
+                "turn_id": "t",
+                "prompt": "hello",
+                "hook_event_name": "UserPromptSubmit",
+            },
+            {"session_id": "s", "prompt": "hello", "hook_event_name": "UserPromptSubmit"},
+        ],
+        ids=["codex", "claude"],
+    )
+    @patch.object(_mod, "is_first_time", return_value=True)
+    def test_first_run_welcome_uses_host_neutral_question_capability(self, _first, payload, capsys):
+        """The first-run suggestion must not name a Claude-only question tool."""
+        with patch("sys.stdin") as mock_stdin:
+            mock_stdin.read.return_value = json.dumps(payload)
+            main()
+
+        context = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+        assert "/ouroboros:welcome" in context
+        assert "`ask_user` capability" in context
+        assert "AskUserQuestion" not in context
+
     @patch.object(_mod, "is_mcp_configured", return_value=False)
     @patch.object(_mod, "is_first_time", return_value=False)
     def test_raw_text_fallback_remains_supported(self, _first, _mcp, capsys):
@@ -467,3 +496,75 @@ class TestHookProtocol:
             main()
 
         assert capsys.readouterr().out == ""
+
+
+class TestPluginRegistrationDetection:
+    """The plugin bundle's own .mcp.json registers the server; setup never
+    writes ~/.claude/mcp.json, so a fresh plugin install must not be gated."""
+
+    @staticmethod
+    def _install(root: Path, *, mcp_json: str | None) -> Path:
+        scripts = root / "scripts"
+        scripts.mkdir(parents=True)
+        script = scripts / "keyword-detector.py"
+        script.write_text(_script_path.read_text(encoding="utf-8"), encoding="utf-8")
+        if mcp_json is not None:
+            (root / ".mcp.json").write_text(mcp_json, encoding="utf-8")
+        return script
+
+    @staticmethod
+    def _run(script: Path, home: Path, prompt: str) -> str:
+        home.mkdir(exist_ok=True)
+        payload = {
+            "session_id": "test-session",
+            "prompt": prompt,
+            "hook_event_name": "UserPromptSubmit",
+        }
+        env = {**os.environ, "HOME": str(home), "USERPROFILE": str(home)}
+        result = subprocess.run(
+            [sys.executable, str(script)],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            env=env,
+            check=True,
+        )
+        if not result.stdout:
+            return ""
+        return json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+
+    def test_plugin_declared_server_routes_without_setup(self, tmp_path):
+        script = self._install(
+            tmp_path / "plugin",
+            mcp_json='{"mcpServers": {"ouroboros": {"command": "uvx"}}}',
+        )
+        home = tmp_path / "home"
+        (home / ".ouroboros").mkdir(parents=True)
+        (home / ".ouroboros" / "prefs.json").write_text('{"welcomeCompleted": true}')
+
+        for prompt, skill in (
+            ("ooo run", "/ouroboros:ouroboros-run"),
+            ("ooo interview a todo app", "/ouroboros:interview"),
+            ("ooo publish", "/ouroboros:publish"),
+        ):
+            context = self._run(script, home, prompt)
+            assert skill in context
+            assert "/ouroboros:setup" not in context
+
+    def test_bundle_without_server_still_redirects_to_setup(self, tmp_path):
+        script = self._install(tmp_path / "plugin", mcp_json=None)
+        home = tmp_path / "home"
+        (home / ".ouroboros").mkdir(parents=True)
+        (home / ".ouroboros" / "prefs.json").write_text('{"welcomeCompleted": true}')
+
+        context = self._run(script, home, "ooo run")
+        assert "/ouroboros:setup" in context
+        assert "/ouroboros:ouroboros-run" not in context
+
+    def test_plugin_declared_server_does_not_suppress_first_run_welcome(self, tmp_path):
+        script = self._install(
+            tmp_path / "plugin",
+            mcp_json='{"mcpServers": {"ouroboros": {"command": "uvx"}}}',
+        )
+        context = self._run(script, tmp_path / "home", "hello")
+        assert "/ouroboros:welcome" in context

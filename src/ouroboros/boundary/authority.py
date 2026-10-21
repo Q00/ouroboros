@@ -65,6 +65,16 @@ no admitted package nothing is covered, so the same rule gives the legacy
 verdicts. Only when even that decision cannot be built is every root result
 failed (``_fail_attempted``).
 
+Record mode (``RunContract.check_package == "record"``, the default). The
+package is constructed, admitted, run on the finished workspace, and its
+decision is journaled exactly as above, but it decides nothing: no gate is
+installed (no repair turn, no per-attempt check run, no entry-point
+interfaces in the worker prompt, and the legacy verifier is not made
+advisory), and the terminal call returns the executor result unchanged on
+every path, the fail-closed ones included (``records_only``). What it would
+have decided stays on ``outcome`` and in the journal; a ``record`` run's
+journaled decision is not read as a decision (``decision.py``, resume).
+
 The authority belongs to one run: the execution id, Seed digest and
 criterion keys its state was prepared for. A gate or terminal call for any
 other run is refused (``run_mismatch:<field>``): the gate lets the legacy
@@ -499,6 +509,9 @@ class CheckPackageGate:
         execution_id: str | None = None,
         session_id: str | None = None,
     ) -> Any:
+        if self._authority.records_only:
+            # Record mode installs no gate; a gate handed over anyway judges nothing.
+            return result
         mismatch = self._authority.run_mismatch(seed, execution_id)
         if mismatch is not None:
             # Another run's attempt: the package does not judge it, and the
@@ -751,6 +764,9 @@ class CheckPackageAuthority:
         self._settings = settings
         self._event_store = event_store
         self._candidate = candidate_checkout
+        # Record mode: the package runs and its decision is journaled, but
+        # the executor result is never changed (see the module docstring).
+        self.records_only = state.contract.check_package == "record"
         self.outcome: AuthorityOutcome | None = None
         self.gate = CheckPackageGate(self)
         self.installed = False
@@ -917,8 +933,11 @@ class CheckPackageAuthority:
         Otherwise the executor is left untouched, so the run is exactly the
         legacy run (legacy rejections fail attempts and drive retries), and
         the terminal decision reconciles every criterion as uncovered from
-        the unmodified results.
+        the unmodified results. In record mode the executor is never touched.
         """
+        if self.records_only:
+            # Record mode: the executor stays exactly as with the check package off.
+            return
         repairs = self.artifact_checks is not None and DECIDE in self.artifact_modes.values()
         if not self._state.admitted and not repairs:
             return
@@ -930,6 +949,14 @@ class CheckPackageAuthority:
         self.installed = True
 
     async def __call__(self, *, seed: Seed, execution_id: str, parallel_result: Any) -> Any:
+        decided = await self._terminal(
+            seed=seed, execution_id=execution_id, parallel_result=parallel_result
+        )
+        # Record mode: what the package would have decided is on ``outcome``
+        # and in the journal; the run's outcome is the executor's own.
+        return parallel_result if self.records_only else decided
+
+    async def _terminal(self, *, seed: Seed, execution_id: str, parallel_result: Any) -> Any:
         if self.outcome is not None:
             # One verdict per run: a second call (for example a resumed
             # parallel pass on the same runner) keeps the first decision.
@@ -1126,6 +1153,17 @@ class CheckPackageAuthority:
         self.artifact_would_fail = sum(
             1 for key, item in would.items() if item is not verdicts.get(key)
         )
+        if self.records_only:
+            # Under a recording package a check in ``decide`` mode decides
+            # nothing either: its fails are part of the journaled would-be
+            # decision, and telemetry reports them as recorded.
+            self.artifact_effects = {
+                check: ArtifactEffect.RECORDED if value is ArtifactEffect.DECIDED else value
+                for check, value in self.artifact_effects.items()
+            }
+            self.artifact_would_fail += sum(
+                1 for key, item in verdicts.items() if item is not verdict.verdicts.get(key)
+            )
         if not rejecting:
             return verdict
         overall = artifact_verdict(item.status for item in verdicts.values())

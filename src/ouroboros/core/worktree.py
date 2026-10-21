@@ -18,6 +18,11 @@ from ouroboros.config.loader import load_config
 from ouroboros.config.models import OrchestratorConfig
 from ouroboros.core.errors import ConfigError, OuroborosError
 from ouroboros.core.file_lock import file_lock
+from ouroboros.core.project_identity import (
+    ProjectIdentityGitVersionError,
+    ProjectIdentityUnavailableError,
+    require_managed_identity_git,
+)
 
 log = structlog.get_logger()
 
@@ -854,19 +859,49 @@ def restore_task_workspace(
     return prepare_task_workspace(fallback_source_cwd, durable_id, allow_dirty=allow_dirty)
 
 
+def _require_managed_identity_git() -> None:
+    """Refuse a run's task worktree before creating it when Git cannot prove ownership.
+
+    A run in a task worktree resolves its project identity by proving, from
+    Git's worktree population, that the worktree belongs to its source
+    checkout; that query needs Git 2.36.0 or newer. Checking here, before any
+    worktree, branch or lock exists, turns a failure at session start into an
+    immediate refusal the caller can act on.
+    """
+    try:
+        require_managed_identity_git()
+    except ProjectIdentityGitVersionError as exc:
+        raise WorktreeError(
+            f"{exc}. A run in a managed task worktree needs it to prove the worktree "
+            "belongs to its source checkout. Upgrade Git to 2.36.0 or newer, or set "
+            "orchestrator.use_worktrees: false in the Ouroboros config to run in the "
+            "checkout itself.",
+            details={"cause": str(exc)},
+        ) from exc
+    except ProjectIdentityUnavailableError as exc:
+        raise WorktreeError(str(exc), details={"cause": str(exc)}) from exc
+
+
 def maybe_prepare_task_workspace(
     source_cwd: str | Path,
     durable_id: str,
     *,
     allow_dirty: bool = False,
     allow_untracked_evidence: bool = False,
+    resolves_managed_identity: bool = True,
 ) -> TaskWorkspace | None:
-    """Provision a task workspace only when worktrees are enabled."""
+    """Provision a task workspace only when worktrees are enabled.
+
+    ``resolves_managed_identity`` says the workspace goes to a run that proves
+    it belongs to its source checkout; see :func:`_require_managed_identity_git`.
+    """
     if not _worktrees_enabled():
         return None
     repo_root = _try_resolve_repo_root(source_cwd)
     if repo_root is None:
         return None
+    if resolves_managed_identity:
+        _require_managed_identity_git()
     if allow_untracked_evidence:
         return prepare_task_workspace(
             source_cwd,
@@ -884,8 +919,12 @@ def maybe_restore_task_workspace(
     fallback_source_cwd: str | Path | None = None,
     allow_dirty: bool = False,
     allow_untracked_evidence: bool = False,
+    resolves_managed_identity: bool = True,
 ) -> TaskWorkspace | None:
-    """Restore or bootstrap a task workspace when worktrees are enabled."""
+    """Restore or bootstrap a task workspace when worktrees are enabled.
+
+    ``resolves_managed_identity`` is as for :func:`maybe_prepare_task_workspace`.
+    """
     if persisted is None and not _worktrees_enabled():
         return None
     if persisted is None:
@@ -893,6 +932,8 @@ def maybe_restore_task_workspace(
             return None
         if _try_resolve_repo_root(fallback_source_cwd) is None:
             return None
+    if resolves_managed_identity:
+        _require_managed_identity_git()
     if allow_untracked_evidence:
         return restore_task_workspace(
             durable_id,

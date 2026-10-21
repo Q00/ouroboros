@@ -35,3 +35,12 @@ def test_generated_page_executes_picker_state_machine_in_node_vm() -> None:
         f"stderr:\n{completed.stderr}"
     )
     assert completed.stdout.strip() == "dashboard browser state machine: PASS"
+
+
+def test_generated_page_has_no_interview_mutation_transport() -> None:
+    script = _live_script()
+    assert "renderInterview" in script
+    assert 'method:"POST"' not in script
+    assert 'method:"PUT"' not in script
+    assert 'method:"PATCH"' not in script
+    assert 'method:"DELETE"' not in script

@@ -32,7 +32,11 @@ from ouroboros.orchestrator.parallel_executor_models import (
     package_repair,
 )
 from ouroboros.orchestrator.profile_loader import load_profile
-from ouroboros.orchestrator.retry_hints import build_ac_retry_prompt, failure_class_for_result
+from ouroboros.orchestrator.retry_hints import (
+    build_ac_retry_prompt,
+    failure_class_for_result,
+    is_retryable_failure,
+)
 
 
 def _make_replaying_event_store() -> tuple[AsyncMock, list[BaseEvent]]:
@@ -139,7 +143,7 @@ def _runtime(final: str = EVIDENCE, *, support: bool = True) -> _FinalMessageRun
     )
 
 
-def _executor(runtime: Any) -> ParallelACExecutor:
+def _executor(runtime: Any, *, transcript_verifier: str = "decide") -> ParallelACExecutor:
     event_store, _ = _make_replaying_event_store()
     return ParallelACExecutor(
         adapter=runtime,
@@ -148,6 +152,7 @@ def _executor(runtime: Any) -> ParallelACExecutor:
         enable_decomposition=False,
         execution_profile=load_profile("code"),
         fat_harness_mode=True,
+        transcript_verifier=transcript_verifier,  # type: ignore[arg-type]
     )
 
 
@@ -238,6 +243,67 @@ async def test_legacy_rejection_is_advisory_only_with_a_gate_installed() -> None
         seed=seed, ac_index=0, result=advisory, session_id="s", execution_id="e"
     )
     assert calls == [0] and gated is advisory
+
+
+def _typed_evidence_event(executor: ParallelACExecutor) -> dict[str, Any]:
+    (event,) = [
+        call.args[0]
+        for call in executor._event_store.append.call_args_list  # noqa: SLF001 - test read
+        if call.args and getattr(call.args[0], "type", "") == "execution.ac.typed_evidence.observed"
+    ]
+    return dict(event.data)
+
+
+@pytest.mark.asyncio
+async def test_transcript_verifier_record_mode_records_a_rejection_without_deciding() -> None:
+    """Record mode: the verifier's would-be rejection is data; the attempt keeps its outcome."""
+    executor = _executor(_runtime(support=False), transcript_verifier="record")
+    recorded = await _run(executor)
+    assert recorded.success is True and recorded.error is None
+    assert recorded.outcome is ACExecutionOutcome.SUCCEEDED
+    assert recorded.recorded_rejection and "Fat-harness verifier failed" in (
+        recorded.recorded_rejection
+    )
+    assert recorded.legacy_rejection is None
+    # The verdict stays on the result, but nothing routes on it and no retry follows.
+    assert recorded.atomic_verifier_verdict is not None
+    assert recorded.atomic_verifier_verdict.passed is False
+    assert governing_verifier_verdict(recorded) is None
+    assert is_retryable_failure(recorded) is False
+    data = _typed_evidence_event(executor)
+    assert data["transcript_verifier"] == "record"
+    assert data["would_have_rejected"] == recorded.recorded_rejection
+    assert data["enforcement_error"] is None and data["enforced"] is False
+    assert data["verifier_passed"] is False and data["verifier_failure_class"]
+
+
+@pytest.mark.asyncio
+async def test_transcript_verifier_decide_mode_rejects_and_drives_the_retry() -> None:
+    """Explicit decide: the same rejection fails the attempt, as before record mode existed."""
+    executor = _executor(_runtime(support=False), transcript_verifier="decide")
+    rejected = await _run(executor)
+    assert rejected.success is False and rejected.error
+    assert "Fat-harness verifier failed" in rejected.error
+    assert rejected.recorded_rejection is None
+    assert governing_verifier_verdict(rejected) is rejected.atomic_verifier_verdict
+    assert is_retryable_failure(rejected) is True
+    data = _typed_evidence_event(executor)
+    assert data["transcript_verifier"] == "decide"
+    assert data["would_have_rejected"] is None
+    assert data["enforcement_error"] == rejected.error and data["enforced"] is True
+
+
+@pytest.mark.asyncio
+async def test_transcript_verifier_record_mode_keeps_a_passing_attempt_unchanged() -> None:
+    accepted = await _run(_executor(_runtime(), transcript_verifier="record"))
+    assert accepted.success is True and accepted.recorded_rejection is None
+    assert accepted.atomic_verifier_verdict is not None
+    assert accepted.atomic_verifier_verdict.passed is True
+
+
+def test_transcript_verifier_mode_is_closed() -> None:
+    with pytest.raises(ValueError, match="transcript_verifier"):
+        _executor(_runtime(), transcript_verifier="warn")
 
 
 def _one_criterion_seed() -> Any:
