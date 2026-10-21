@@ -268,6 +268,48 @@ def test_detector_still_persists_a_real_check(tmp_path: Path, key: str, command:
     assert getattr(config, f"{key}_command") == tuple(shlex.split(command))
 
 
+@pytest.mark.parametrize("source", ["detector", "override"])
+@pytest.mark.parametrize("option", ["-D{}", "-D {}", "--define={}", "--define {}"])
+@pytest.mark.parametrize(
+    "property_name", ["skipTests", "maven.test.skip", "maven.test.failure.ignore"]
+)
+def test_explicit_false_maven_properties_preserve_checks(
+    tmp_path: Path, source: str, option: str, property_name: str
+) -> None:
+    root = _project(tmp_path)
+    command = f"mvn test {option.format(f'{property_name}=false')}"
+    if source == "detector":
+        ok, _ = _detect(root, {"test": command})
+        assert ok is True
+        config = build_mechanical_config(root)
+    else:
+        config = build_mechanical_config(root, overrides={"test": command})
+    assert config.test_command == tuple(shlex.split(command))
+
+
+@pytest.mark.parametrize(
+    "properties",
+    [
+        "-DskipTests=false -Dmaven.test.failure.ignore=true",
+        "-DskipTests=true -DskipTests=false",
+        "-DskipTests=false -DskipTests=true",
+        "-DskipTests=false -Dsurefire.failIfNoSpecifiedTests=false",
+        "-DskipTests=unknown",
+        "-Dmaven.test.failure.ignore=unknown",
+    ],
+)
+def test_maven_false_does_not_hide_non_verifying_properties(
+    tmp_path: Path, properties: str
+) -> None:
+    root = _project(tmp_path)
+    command = f"mvn test {properties}"
+    ok, _ = _detect(root, {"test": command})
+    assert ok is False
+    assert not toml_path(root).exists()
+    config = build_mechanical_config(root, overrides={"test": command})
+    assert config.test_command is None
+
+
 def test_refused_command_leaves_siblings_intact(tmp_path: Path) -> None:
     root = _project(tmp_path)
     ok, _ = _detect(root, {"test": "pytest --collect-only", "lint": "ruff check ."})

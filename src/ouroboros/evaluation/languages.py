@@ -842,7 +842,10 @@ def _maven_property_skips(token: str, previous: str, build: bool) -> bool:
         prop = token
     else:
         return False
-    name = prop.split("=", 1)[0].lower()
+    name, _, value = prop.partition("=")
+    name = name.lower()
+    if value.lower() == "false" and "failifno" not in name:
+        return False
     if any(marker in name for marker in _MAVEN_IGNORE_MARKERS):
         return True
     return not build and "skip" in name
