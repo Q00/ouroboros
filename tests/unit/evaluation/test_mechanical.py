@@ -2,12 +2,13 @@
 
 import asyncio
 import sys
-from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from ouroboros.core.acceptance import AcceptanceState
+from ouroboros.core.errors import ProviderError
+from ouroboros.core.types import Result
 from ouroboros.evaluation.mechanical import (
     CommandResult,
     MechanicalConfig,
@@ -16,7 +17,8 @@ from ouroboros.evaluation.mechanical import (
     run_command,
     run_mechanical_verification,
 )
-from ouroboros.evaluation.models import CheckType, MechanicalDisposition
+from ouroboros.evaluation.models import CheckType, EvaluationResult, MechanicalDisposition
+from ouroboros.providers.base import CompletionConfig, CompletionResponse, Message
 
 # Config with commands set for tests that need real/mocked command execution
 _TEST_CONFIG = MechanicalConfig(
@@ -489,6 +491,11 @@ _UNPARSED_COVERAGE_OUTPUTS = {
     "requirement beside measurement": "Coverage: 70% required\nCoverage: 80%",
     "TOTAL trailing requirement": "TOTAL 100 0 100% required",
     "malformed coverage beside measurement": "Coverage: unknown\nCoverage: 80%",
+    "space before coverage colon": "TOTAL 100 20 80%\nCoverage : 15%",
+    "tab before coverage colon": "TOTAL 100 20 80%\nCoverage\t: 15%",
+    "spaces before coverage colon": "TOTAL 100 20 80%\nCoverage  : 15%",
+    "coverage prefix whitespace with CRLF": "TOTAL 100 20 80%\r\n\tCoverage \t: 15%\r\n",
+    "spaced coverage colon with unknown value": "TOTAL 100 20 80%\nCoverage : unknown",
 }
 
 
@@ -496,11 +503,18 @@ def _printing(text: str) -> tuple[str, ...]:
     return (sys.executable, "-c", f"import sys; sys.stdout.write({text!r})")
 
 
-async def _evaluate_stage1_only(config: MechanicalConfig) -> Any:
+class _UnexpectedLLMAdapter:
+    async def complete(
+        self, messages: list[Message], config: CompletionConfig
+    ) -> Result[CompletionResponse, ProviderError]:
+        pytest.fail("Stage 1-only evaluation must not call an LLM")
+
+
+async def _evaluate_stage1_only(config: MechanicalConfig) -> EvaluationResult:
     from ouroboros.evaluation import EvaluationContext, EvaluationPipeline, PipelineConfig
 
     pipeline = EvaluationPipeline(
-        llm_adapter=None,  # type: ignore[arg-type]
+        llm_adapter=_UnexpectedLLMAdapter(),
         config=PipelineConfig(stage2_enabled=False, stage3_enabled=False, mechanical=config),
     )
     context = EvaluationContext(
@@ -534,6 +548,7 @@ class TestUnparsedCoverageIsNotEvidence:
         result = await _evaluate_stage1_only(config)
 
         stage1 = result.stage1_result
+        assert stage1 is not None
         coverage = next(c for c in stage1.checks if c.check_type is CheckType.COVERAGE)
         assert coverage.passed is False
         assert coverage.executed is False
@@ -569,8 +584,22 @@ class TestUnparsedCoverageIsNotEvidence:
             ("TOTAL   100   20   80%", True, MechanicalDisposition.EXECUTED_PASS),
             ("\tCoverage: 80.0% \r\n", True, MechanicalDisposition.EXECUTED_PASS),
             ("TOTAL 100 20 80%\r\nCoverage: 80%\r\n", True, MechanicalDisposition.EXECUTED_PASS),
+            ("\tCoverage:\t80% \r\n", True, MechanicalDisposition.EXECUTED_PASS),
+            (
+                "Required Coverage: 70%\nTOTAL 100 20 80%",
+                True,
+                MechanicalDisposition.EXECUTED_PASS,
+            ),
         ],
-        ids=["pytest-cov-below", "coverage-colon-below", "pytest-cov-above", "crlf", "agreeing"],
+        ids=[
+            "pytest-cov-below",
+            "coverage-colon-below",
+            "pytest-cov-above",
+            "crlf",
+            "agreeing",
+            "whitespace-after-colon",
+            "requirement-beside-measurement",
+        ],
     )
     async def test_readable_coverage_still_decides(
         self, output: str, approved: bool, disposition: MechanicalDisposition
@@ -579,18 +608,26 @@ class TestUnparsedCoverageIsNotEvidence:
 
         result = await _evaluate_stage1_only(config)
 
-        coverage = next(
-            c for c in result.stage1_result.checks if c.check_type is CheckType.COVERAGE
-        )
+        stage1 = result.stage1_result
+        assert stage1 is not None
+        coverage = next(c for c in stage1.checks if c.check_type is CheckType.COVERAGE)
         assert coverage.executed is True
         assert coverage.passed is approved
         assert "coverage_unparsed" not in coverage.details
-        assert result.stage1_result.disposition is disposition
+        assert stage1.disposition is disposition
         assert result.final_approved is approved
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("output", ["no report", "Coverage: 70% required", "Coverage: unknown"])
+@pytest.mark.parametrize(
+    "output",
+    [
+        "no report",
+        "Coverage: 70% required",
+        "Coverage: unknown",
+        "TOTAL 100 20 80%\nCoverage : unknown",
+    ],
+)
 @pytest.mark.parametrize("return_code", [0, 1])
 @pytest.mark.parametrize("failing_test", [False, True])
 async def test_disabled_coverage_threshold_preserves_exit_status(
@@ -609,6 +646,7 @@ async def test_disabled_coverage_threshold_preserves_exit_status(
     )
     result = await _evaluate_stage1_only(config)
     stage1 = result.stage1_result
+    assert stage1 is not None
     coverage = next(c for c in stage1.checks if c.check_type is CheckType.COVERAGE)
     assert coverage.executed is True
     assert coverage.passed is (return_code == 0)

@@ -199,7 +199,9 @@ def parse_coverage_from_output(output: str) -> float | None:
     # cannot read (decimals, branch columns) makes the report ambiguous, so no
     # other row or "Coverage:" line may stand in for it.
     total_rows = [row for row in output.splitlines() if re.match(r"[ \t]*TOTAL\b", row)]
-    coverage_rows = [row for row in output.splitlines() if re.match(r"[ \t]*Coverage:", row)]
+    # A malformed prefix is still a candidate measurement: do not let another
+    # readable row hide it. Only alt_pattern decides whether it is supported.
+    coverage_rows = [row for row in output.splitlines() if re.match(r"[ \t]*Coverage[ \t]*:", row)]
     matches = [re.fullmatch(pattern, row) for row in total_rows]
     matches += [re.fullmatch(alt_pattern, row) for row in coverage_rows]
     if not all(matches):
