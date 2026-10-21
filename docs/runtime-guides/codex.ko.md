@@ -217,13 +217,13 @@ codex --version
 - 가능하면 `orchestrator.codex_cli_path`를 기록합니다
 - 관리되는 Ouroboros 규칙을 `~/.codex/rules/`에 설치합니다
 - 관리되는 Ouroboros 스킬을 `~/.codex/skills/`에 설치합니다
-- `~/.codex/config.toml`에 Ouroboros MCP/env 연결이 없으면 등록하고, setup이 관리하는 stdio 블록은 갱신하되, 사용자가 관리하는 URL·커스텀 항목은 기본적으로 보존합니다
+- 지원되는 호스트에서는 `~/.codex/config.toml`에 Ouroboros MCP/env 연결이 없으면 등록하고, setup이 관리하는 stdio 블록은 갱신하되, 사용자가 관리하는 URL·커스텀 항목은 기본적으로 보존합니다. 네이티브 Windows의 기본 `auto` 모드는 기존 MCP 설정을 보존하고 새 MCP 연결은 등록하지 않습니다. `--mcp-mode http`를 명시한 뒤, Codex Desktop을 열기 전에 안내된 loopback 서버 명령을 직접 실행하세요. setup은 이 서버를 백그라운드 서비스로 설치하지 않습니다
 - 손대지 않은 레거시 자동생성 `ouroboros-*.config.toml` 태스크 프로파일 앵커만 정리합니다. 사용자가 만든 Codex 프로파일은 보존됩니다
 - 관리되는 `ouroboros-worker.config.toml`을 등록해서, Agent OS 워커 서브프로세스가 MCP/env 연결을 잃지 않고도 대화형 Codex 기본값에서 빠질 수 있게 합니다
 
 `~/.codex/` 밖의 전역 산출물도 함께 생깁니다. `ensure_config_dir()`가 `~/.ouroboros/data/`와 `~/.ouroboros/logs/`를 만들고([`setup.py:2632`](../../src/ouroboros/cli/commands/setup.py)), 설정이 처음이면 `~/.ouroboros/credentials.yaml`을 `0600` 권한으로 새로 씁니다([`setup.py:2771`](../../src/ouroboros/cli/commands/setup.py)).
 
-`~/.codex/config.toml`은 **Ouroboros 스테이지 모델 핀을 둘 자리가 아닙니다.** 설정 UI나 그에 대응하는 `~/.ouroboros/config.yaml` 값을 쓰고, 명시적인 `--profile`이 필요할 때만 사용자가 관리하는 네이티브 Codex 프로파일을 유지하세요. 장기 실행 URL 기반 Ouroboros MCP 서버를 직접 운영한다면 그 URL 항목을 `~/.codex/config.toml`에 그대로 두면 됩니다. `ouroboros setup --runtime codex`가 기본적으로 보존합니다. setup이 그 항목을 관리형 command-spawn 서버로 **바꾸길 원할 때만** `--mcp-mode stdio`를 쓰세요.
+`~/.codex/config.toml`은 **Ouroboros 스테이지 모델 핀을 둘 자리가 아닙니다.** 설정 UI나 그에 대응하는 `~/.ouroboros/config.yaml` 값을 쓰고, 명시적인 `--profile`이 필요할 때만 사용자가 관리하는 네이티브 Codex 프로파일을 유지하세요. 장기 실행 URL 기반 Ouroboros MCP 서버를 직접 운영한다면 그 URL 항목을 `~/.codex/config.toml`에 그대로 두면 됩니다. `ouroboros setup --runtime codex`가 기본적으로 보존합니다. 지원되는 호스트에서 setup이 그 항목을 관리형 command-spawn 서버로 **바꾸길 원할 때만** `--mcp-mode stdio`를 쓰세요. 네이티브 Windows에서는 앱 서버 종료 위험 때문에 이 방식을 거절합니다. 대신 `--mcp-mode http`를 명시하고, 안내된 loopback MCP 서버를 직접 실행·관리하세요.
 
 ### 워커 서브프로세스 격리 (Agent OS `runtime_profile`)
 
