@@ -343,10 +343,13 @@ class TestExtractEvidence:
 
     @pytest.mark.parametrize("fence_tag", ["json", ""])
     @pytest.mark.parametrize("terminal_payload", ["[undefined]", "{undefined}", "[NaN,]"])
+    @pytest.mark.parametrize("separator", ["\n", " ", ""])
     def test_malformed_terminal_fence_never_promotes_stale_evidence(
-        self, fence_tag: str, terminal_payload: str
+        self, fence_tag: str, terminal_payload: str, separator: str
     ) -> None:
-        text = f'```{fence_tag}\n{{"files_touched": ["stale.py"]}}\n{terminal_payload}\n```'
+        text = (
+            f'```{fence_tag}\n{{"files_touched": ["stale.py"]}}{separator}{terminal_payload}\n```'
+        )
 
         with pytest.raises(EvidenceError):
             extract_evidence(text)
