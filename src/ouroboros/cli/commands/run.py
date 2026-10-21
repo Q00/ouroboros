@@ -634,6 +634,7 @@ async def _record_cli_run_outcome(
     status and sends only its anonymous no-evidence count
     (``acceptance_no_evidence``). Never raises.
     """
+    from ouroboros.mcp.tools.run_ac_tally import derive_run_ac_tally
     from ouroboros.mcp.tools.run_failure_meta import derive_run_failure_meta
     from ouroboros.orchestrator.session import SessionStatus
 
@@ -680,6 +681,16 @@ async def _record_cli_run_outcome(
             try:
                 # A paused run returned above: the final verdict exists.
                 check_package_run.finish(terminal_status, surface="cli_run")
+            except Exception:
+                pass
+        if session_id is not None:
+            # Same enrichment rule: the tally never blocks the outcome.
+            try:
+                result_meta.update(
+                    await derive_run_ac_tally(
+                        event_store, session_id=session_id, execution_id=execution_id
+                    )
+                )
             except Exception:
                 pass
         usage_telemetry.capture_job_outcome(

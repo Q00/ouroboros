@@ -88,6 +88,126 @@ async def _wait_for_job_status(
 class TestJobManager:
     """Test background job lifecycle behavior."""
 
+    @pytest.mark.parametrize(
+        ("judged", "unreadable", "job_type", "hostile", "slow"),
+        [
+            (True, False, "execute_seed", False, False),
+            (False, False, "execute_seed", False, False),
+            (True, True, "execute_seed", False, False),
+            (True, False, "evaluate", False, False),
+            (True, False, "execute_seed", True, False),
+            (True, False, "execute_seed", False, True),
+        ],
+    )
+    async def test_cancelled_job_tally_survives_terminal_boundary(
+        self,
+        tmp_path,
+        monkeypatch,
+        judged: bool,
+        unreadable: bool,
+        job_type: str,
+        hostile: bool,
+        slow: bool,
+    ) -> None:
+        from ouroboros import telemetry
+
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        await store.initialize()
+        release = asyncio.Event()
+        session_id, execution_id = "orch_cancel_tally", "exec_cancel_tally"
+        if judged:
+            await store.append(
+                BaseEvent(
+                    type="execution.ac.attempt_judged",
+                    aggregate_type="execution",
+                    aggregate_id=execution_id,
+                    data={
+                        "execution_id": execution_id,
+                        "session_id": session_id,
+                        "root_ac_index": 0,
+                        "ac_index": 0,
+                        "retry_attempt": 0,
+                        "attempt_number": 1,
+                        "is_decomposed": False,
+                        "outcome": "succeeded",
+                        "success": True,
+                        "ac_text": "PRIVATE_CANCEL_AC_TEXT",
+                    },
+                )
+            )
+        original_query = store.query_events
+
+        async def unreadable_judgments(**kwargs):
+            if kwargs.get("event_type") == "execution.ac.attempt_judged":
+                if unreadable:
+                    raise PersistenceError("unreadable judgment", operation="query")
+                if slow:
+                    await asyncio.Event().wait()
+            return await original_query(**kwargs)
+
+        async def runner() -> MCPToolResult:
+            await release.wait()
+            return MCPToolResult()
+
+        try:
+            if unreadable or slow:
+                monkeypatch.setattr(store, "query_events", unreadable_judgments)
+            if slow:
+                monkeypatch.setattr(
+                    "ouroboros.mcp.tools.run_ac_tally._CANCEL_TALLY_TIMEOUT_SECONDS", 0.01
+                )
+            with patch.object(telemetry, "capture") as capture:
+                started = await manager.start_job(
+                    job_type=job_type,
+                    initial_message="queued",
+                    runner=runner(),
+                    links=JobLinks(session_id=session_id, execution_id=execution_id),
+                )
+                await _wait_for_job_status(manager, started.job_id, JobStatus.RUNNING)
+                if hostile:
+                    task = manager._tasks[started.job_id]
+                    async with asyncio.timeout(5):
+                        while not task.done():
+                            task.cancel()
+                            await asyncio.sleep(0)
+                else:
+                    await manager.cancel_job(started.job_id)
+                snapshot = await _wait_for_job_status(manager, started.job_id, JobStatus.CANCELLED)
+                await manager.cancel_job(started.job_id)
+            events = await original_query(aggregate_id=started.job_id)
+            terminals = [event for event in events if event.type == "mcp.job.cancelled"]
+            assert len(terminals) == 1
+            expected = (
+                {"ac_passed": 1, "ac_total": 1}
+                if (judged and not unreadable and not slow and job_type == "execute_seed")
+                else {}
+            )
+            outcomes = [
+                call.args[1]
+                for call in capture.call_args_list
+                if call.args[0] == "workflow_outcome"
+            ]
+            assert len(outcomes) == 1
+            for meta in (snapshot.result_meta, terminals[0].data["result_meta"], outcomes[0]):
+                assert {
+                    key: meta[key] for key in ("ac_passed", "ac_total") if key in meta
+                } == expected
+                assert meta["failure_reason_code"] == "cancelled"
+            assert outcomes[0]["terminal_status"] == "cancelled"
+            assert outcomes[0]["verified"] is False
+            assert "PRIVATE_CANCEL_AC_TEXT" not in str(outcomes)
+            recovered = await JobManager(store).get_snapshot(started.job_id)
+            assert recovered.result_meta == snapshot.result_meta
+            execution_events = await original_query(aggregate_id=execution_id)
+            assert [event.type for event in execution_events] == (
+                ["execution.ac.attempt_judged"] if judged else []
+            )
+        finally:
+            release.set()
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
     async def test_durable_terminal_event_emits_one_truthful_outcome(self, tmp_path) -> None:
         store = _build_store(tmp_path)
         manager = JobManager(store)
@@ -1364,6 +1484,24 @@ class TestJobManager:
             )
             await store.append(
                 BaseEvent(
+                    type="execution.ac.attempt_judged",
+                    aggregate_type="execution",
+                    aggregate_id="exec_recover_failed",
+                    data={
+                        "execution_id": "exec_recover_failed",
+                        "session_id": "orch_recover_failed",
+                        "root_ac_index": 0,
+                        "ac_index": 0,
+                        "retry_attempt": 0,
+                        "attempt_number": 1,
+                        "is_decomposed": False,
+                        "success": True,
+                        "outcome": "succeeded",
+                    },
+                )
+            )
+            await store.append(
+                BaseEvent(
                     type="execution.session.completed",
                     aggregate_type="execution",
                     aggregate_id="exec_recover_failed_ac_1",
@@ -1393,6 +1531,8 @@ class TestJobManager:
             assert snapshot.result_meta["failure_reason_code"] == "timeout"
             assert snapshot.result_meta["recovery_action"] == "retry"
             assert snapshot.result_meta["next_step"] == "Retry the workflow."
+            assert snapshot.result_meta["ac_passed"] == 1
+            assert snapshot.result_meta["ac_total"] == 1
             assert "workflow progress accounting stalled" in (snapshot.error or "")
             events, _ = await store.get_events_after("job", "job_recover_failed", last_row_id=0)
             assert [event.type for event in events] == ["mcp.job.created", "mcp.job.failed"]
@@ -1633,6 +1773,24 @@ class TestJobManager:
                     },
                 )
             )
+            for root, outcome in ((0, "failed"), (1, "succeeded")):
+                await store.append(
+                    BaseEvent(
+                        type="execution.ac.attempt_judged",
+                        aggregate_type="execution",
+                        aggregate_id="exec_default_failed",
+                        data={
+                            "execution_id": "exec_default_failed",
+                            "session_id": "orch_default_failed",
+                            "root_ac_index": root,
+                            "retry_attempt": 0,
+                            "attempt_number": 1,
+                            "is_decomposed": False,
+                            "success": outcome == "succeeded",
+                            "outcome": outcome,
+                        },
+                    )
+                )
 
             with (
                 patch.object(
@@ -1653,10 +1811,13 @@ class TestJobManager:
             # workflow_outcome as ``unknown``.
             assert snapshot.result_meta["failure_cause"] == "worker_fabrication_suspected"
             assert snapshot.result_meta["failure_reason_code"] == "validation"
+            assert snapshot.result_meta["ac_passed"] == 1
+            assert snapshot.result_meta["ac_total"] == 2
             capture.assert_called_once()
             forwarded = capture.call_args.kwargs["result_meta"]
             assert forwarded["failure_cause"] == "worker_fabrication_suspected"
             assert forwarded["failure_reason_code"] == "validation"
+            assert (forwarded["ac_passed"], forwarded["ac_total"]) == (1, 2)
         finally:
             await store.close()
 
@@ -1963,6 +2124,24 @@ class TestJobManager:
             )
             await store.append(
                 BaseEvent(
+                    type="execution.ac.attempt_judged",
+                    aggregate_type="execution",
+                    aggregate_id="exec_recover",
+                    data={
+                        "execution_id": "exec_recover",
+                        "session_id": "orch_recover",
+                        "root_ac_index": 0,
+                        "ac_index": 0,
+                        "retry_attempt": 0,
+                        "attempt_number": 1,
+                        "is_decomposed": False,
+                        "success": True,
+                        "outcome": "succeeded",
+                    },
+                )
+            )
+            await store.append(
+                BaseEvent(
                     type="execution.terminal",
                     aggregate_type="execution",
                     aggregate_id="exec_recover",
@@ -1975,6 +2154,8 @@ class TestJobManager:
             assert snapshot.status is JobStatus.COMPLETED
             assert snapshot.message == "Execution complete; formal evaluation not run"
             assert snapshot.result_meta["completed_from_execution_terminal"] is True
+            assert snapshot.result_meta["ac_passed"] == 1
+            assert snapshot.result_meta["ac_total"] == 1
             assert snapshot.result_meta["evaluated"] is False
             assert snapshot.result_meta["verification_status"] == "executed_unverified"
             assert snapshot.result_meta["formal_evaluation_required"] is True
