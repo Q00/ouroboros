@@ -1,8 +1,8 @@
 """Observability tests for safe-default finalization structured-log events.
 
 Verifies that the structured-log events added by PR-A (instrumentation) are
-emitted at the correct decision points inside ``AutoInterviewDriver.run`` and
-``_unsafe_context_reason``.  Zero behaviour change is asserted by checking
+emitted at the correct decision points inside ``AutoInterviewDriver.run``.
+Zero behaviour change is asserted by checking
 that existing result semantics (status, blocker strings) are unchanged.
 """
 
@@ -18,13 +18,7 @@ from ouroboros.auto.interview_driver import (
     InterviewTurn,
 )
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
-from ouroboros.auto.safe_defaults import _unsafe_context_reason
 from ouroboros.auto.state import AutoPipelineState, AutoStore
-
-# The unsafe-context matcher is disabled by default under the freedom policy
-# (empty production bank); re-inject the historical bank so the matcher
-# observability + blocking paths stay covered. See tests/unit/auto/conftest.py.
-pytestmark = pytest.mark.usefixtures("_legacy_unsafe_bank")
 
 
 class _StructuredLogRecorder:
@@ -302,68 +296,20 @@ async def test_no_backend_safe_default_persists_closure_events(tmp_path) -> None
 
 
 # ---------------------------------------------------------------------------
-# Test 3: unsafe_context_match logs pattern_name and safe metrics
-# ---------------------------------------------------------------------------
-
-
-def test_unsafe_context_match_logs_pattern_name_without_raw_text(
-    captured_structured_logs,
-) -> None:
-    """Unsafe context logs bounded diagnostics without raw user/secret text.
-
-    ``_unsafe_context_reason`` must emit ``auto.safe_default.unsafe_context_match``
-    with ``pattern_name`` and useful metrics, but must not include raw goal,
-    answer, ledger, or matched-token text.
-    """
-    raw_secret = "sk_live_review_secret_12345"
-    raw_goal = f"Build a local CLI that uses the customer access token {raw_secret}"
-    ledger = SeedDraftLedger.from_goal(raw_goal)
-    ledger.record_qa(
-        "Which credential should the CLI use?",
-        f"Use the access token {raw_secret} from the user.",
-    )
-
-    reason = _unsafe_context_reason(
-        ledger,
-        goal=raw_goal,
-        pending_question=None,
-    )
-
-    assert reason == "credentials/secrets"
-
-    match_events = [
-        e
-        for e in captured_structured_logs
-        if e["event"] == "auto.safe_default.unsafe_context_match"
-    ]
-    assert len(match_events) == 1
-    event = match_events[0]
-    assert event["pattern_name"] == "credentials/secrets"
-    assert event["context_length"] > 0
-    assert event["match_start"] >= 0
-    assert event["match_end"] > event["match_start"]
-    assert event["matched_length"] == event["match_end"] - event["match_start"]
-    assert "context_sha256" not in event
-    assert "match_sha256" not in event
-    assert "matched_token" not in event
-    assert "matched_text_prefix" not in event
-    event_repr = repr(event)
-    assert raw_secret not in event_repr
-    assert raw_goal not in event_repr
-    assert "Which credential should the CLI use?" not in event_repr
-    assert "Use the access token" not in event_repr
-
-
-# ---------------------------------------------------------------------------
 # Test 4: unsafe_context_observed emitted when finalization stays blocked
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_safe_default_logs_unsafe_context_observed_without_raw_text(
-    tmp_path, captured_structured_logs
+    tmp_path, captured_structured_logs, monkeypatch
 ) -> None:
-    """Unsafe finalization emits the blocking event without raw user/secret text."""
+    """Unsafe finalization emits the blocking event without raw user/secret text.
+
+    Closure is made impossible structurally (no safe-default policy for any
+    section), not by the goal's wording.
+    """
+    monkeypatch.setattr(safe_defaults_module, "_SAFE_DEFAULTS", {})
     raw_secret = "prod-token-please-do-not-log"
     raw_goal = f"Use the customer access token {raw_secret} for a local helper"
     ledger = SeedDraftLedger.from_goal(raw_goal)

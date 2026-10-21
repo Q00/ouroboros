@@ -88,7 +88,7 @@ gjc mcp-serve coordinator
 
 Ouroboros는 GJC 엔드포인트 기록이나 인증 정보를 읽지 않으며 비공개 SDK WebSocket도 열지 않습니다. 엔드포인트 발견, 인증, 세대 펜싱, 턴 전달은 GJC Broker와 `SessionRouter`만 관리합니다.
 
-GJC 어댑터는 MCP v2 통합입니다. setup은 `runtime_backend: gjc` 또는 `llm.backend: gjc`를 기록하기 전에 현재 Ouroboros 인터프리터에 고정 버전 `mcp==2.0.0` 클라이언트가 있는지 확인합니다. 이 프로필은 MCP 1.x 의존성을 유지하는 Claude Agent SDK 프로필과 분리해야 합니다.
+GJC 어댑터는 MCP v2 통합입니다. setup은 `runtime_backend: gjc` 또는 `llm.backend: gjc`를 기록하기 전에 현재 Ouroboros 인터프리터에 고정 버전 `mcp==2.2.0` 클라이언트가 있는지 확인합니다. 이 프로필은 MCP 1.x 의존성을 유지하는 Claude Agent SDK 프로필과 분리해야 합니다.
 
 ## GJC에서 `ooo`의 동작
 

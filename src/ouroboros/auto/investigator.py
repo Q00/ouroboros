@@ -11,8 +11,15 @@ session reads the task workspace and replies with JSON::
 
 Binding is decided without a model (``auto/evidence_check.py``):
 
-- ``found`` with at least one span, and every span passes the check: the
-  answer is a confirmed repository fact (``LedgerSource.REPO_FACT``). It
+- The reply declares the question's kind: ``current_behavior`` (what the
+  code does now) or ``intended_behavior`` (what it should do; a missing or
+  unknown kind counts as this). The code under change may be the defect the
+  task reports, so it cannot settle an ``intended_behavior`` question: such a
+  reply is not found, whatever its status, and keeps its checked spans as what
+  the code shows. The kind is a model-declared label; the evidence check still
+  decides binding.
+- ``found`` for a ``current_behavior`` question, with at least one span, and
+  every span passes the check: the answer is a confirmed repository fact (``LedgerSource.REPO_FACT``). It
   settles the question for the interview, but it describes the code, not a
   requirement: it reaches the worker only verbatim, with its checked quotes, in
   ``Seed.repo_facts``, never as a constraint, criterion or ontology field, and
@@ -45,8 +52,14 @@ before and after each investigation; a change discards the answer
 (``workspace_changed``) and is reported in the event.
 
 Limits: at most ``max_calls`` calls per interview run (default 12,
-``OUROBOROS_AUTO_INVESTIGATOR_MAX_CALLS``; 0 turns the investigator off); a
-question past the cap is not found without a call. There is no time budget:
+``OUROBOROS_AUTO_INVESTIGATOR_MAX_CALLS``; 0 turns the investigator off). With
+a requester, a question past the cap is not found without a call and goes to
+the requester. Without one, the interview closes once the last call is spent
+(``close_known``) instead of asking questions that can only end not found.
+Without a requester, a not-settled question is closed for the interview and
+the Seed (its ledger entry is ``DEFAULTED``), reaches the worker as an
+``Open question:`` line, and the reply tells the interviewer it stays open for
+the implementer. There is no time budget:
 the interview waits for each investigation, and the interview phase clock and
 the pipeline deadline stop while it runs (``auto/phase_clock.py``). The only
 time limit is a hang guard per call for a runtime that never returns (default
@@ -82,9 +95,19 @@ from ouroboros.auto.investigation_workspace import (
 from ouroboros.auto.ledger import REPO_FACT_KEY_INFIX, LedgerEntry, LedgerSource, LedgerStatus
 from ouroboros.auto.phase_clock import phase_clock_paused
 from ouroboros.auto.requester import ROUTED_SOURCES, ask_requester
+from ouroboros.providers.throttle import (
+    THROTTLE_TOTAL_CEILING_SECONDS,
+    is_throttled,
+    throttle_backoff_seconds,
+)
 
 if TYPE_CHECKING:
-    from ouroboros.auto.interview_driver import AutoInterviewDriver, InterviewTurn
+    from ouroboros.auto.interview_driver import (
+        AutoInterviewDriver,
+        AutoInterviewResult,
+        InterviewTurn,
+        _InterviewRoundOutcome,
+    )
     from ouroboros.auto.ledger import SeedDraftLedger
     from ouroboros.auto.state import AutoPipelineState
 
@@ -120,28 +143,48 @@ _LOG_TEXT_LIMIT = 200
 # active and states the fact without guessing.
 NOT_SETTLED_VALUE = "The repository code does not settle this interview question."
 NOT_SETTLED_REPLY = "The repository code does not settle this question."
+# Added to the not-found reply when no requester is wired: nobody else can
+# answer, so the question stays open for the implementer, who reads the code.
+OPEN_FOR_IMPLEMENTER_REPLY = (
+    "It stays an open question for the implementer, who decides it from the code "
+    "when making the change."
+)
 
 INVESTIGATOR_SYSTEM_PROMPT = (
     "You answer one interview question about a software task by reading the "
     "repository in the current working directory. Only read and search files. "
     "Do not edit, create, or delete files, and do not run commands that change "
     "anything.\n\n"
-    "Find what the code shows about the question, then reply with one JSON "
-    "object and nothing else:\n"
-    '{"status": "found" | "not_found", "answer": string, "evidence": '
+    "The task usually reports a defect, and the code you read may be the code "
+    "that has the defect. What the code does now is not evidence of what it "
+    "should do.\n\n"
+    "First decide the kind of the question:\n"
+    '- "current_behavior": the question asks what the code does now, where '
+    "something is defined, or which API or option already exists.\n"
+    '- "intended_behavior": the question asks what the code should do, how the '
+    "fix should behave, what success or acceptance should require, or whether "
+    'the current behavior should stay. Every "should" question about the change '
+    "is intended_behavior.\n\n"
+    "Then reply with one JSON object and nothing else:\n"
+    '{"kind": "current_behavior" | "intended_behavior", '
+    '"status": "found" | "not_found", "answer": string, "evidence": '
     '[{"path": string, "start_line": integer, "end_line": integer, "quote": string}]}\n\n'
-    'Use "found" only when the code itself settles the question. Then write the '
-    "answer in one to four sentences and cite every fact it rests on: the path "
-    "relative to the repository root, the 1-based first and last line, and a "
-    "quote copied exactly from those lines.\n"
-    'Use "not_found" when the code does not settle the question, for example '
-    "when it asks for a decision the code has not made. Then leave answer empty "
-    "and cite what the code does show, if anything.\n"
+    'Use "found" only for a current_behavior question the code itself settles. '
+    "Then write the answer in one to four sentences describing what the code "
+    "does now, and cite every fact it rests on: the path relative to the "
+    "repository root, the 1-based first and last line, and a quote copied "
+    "exactly from those lines.\n"
+    "For an intended_behavior question, or when the code does not settle the "
+    'question, use "not_found", leave answer empty, and cite what the code does '
+    "show, if anything.\n"
     "Never guess. A citation that does not match the file makes the answer count "
     "as not found."
 )
+ANSWER_KINDS = frozenset({"current_behavior", "intended_behavior"})
 
 RuntimeFactory = Callable[..., Any]
+# Seam for tests; the throttle wait itself (``_call_through_throttle``).
+_throttle_sleep = asyncio.sleep
 
 
 def resolve_call_timeout(environ: Mapping[str, str] | None = None) -> float:
@@ -184,7 +227,9 @@ class Investigation:
 
     ``outcome`` is ``found``, ``not_found``, ``evidence_rejected`` (the reply
     said found but a span failed the check), ``reply_invalid``, ``timeout``,
-    ``call_failed``, ``cap_reached``, ``isolation_failed`` (no copy could be
+    ``call_failed``, ``intended_behavior`` (the reply declared the question
+    one about what the code should do, which the code under change cannot
+    settle), ``cap_reached``, ``isolation_failed`` (no copy could be
     made; no call) or ``workspace_changed`` (the real workspace changed during
     the investigation; the answer is discarded). Only ``found``
     binds. ``checked`` holds the spans that passed; ``failures`` the reasons
@@ -199,17 +244,21 @@ class Investigation:
     called: bool = False
     elapsed_seconds: float = 0.0
     isolation: str = ""
+    throttle_waited_seconds: float = 0.0
+    kind: str = ""
 
     @property
     def found(self) -> bool:
         return self.outcome == "found"
 
 
-def parse_reply(text: str) -> tuple[str, str, list[EvidenceSpan | None]]:
-    """Read ``(status, answer, spans)`` from the reply; ``ValueError`` if unusable.
+def parse_reply(text: str) -> tuple[str, str, list[EvidenceSpan | None], str]:
+    """Read ``(status, answer, spans, kind)`` from the reply; ``ValueError`` if unusable.
 
     The first JSON object in the text is used (bare or inside a code fence).
     A malformed evidence item is kept as ``None`` so it counts as a failed span.
+    ``kind`` is the model-declared question kind; a missing or unknown value
+    counts as ``intended_behavior``, the kind that cannot be found.
     """
     start = text.find("{")
     if start < 0:
@@ -226,7 +275,11 @@ def parse_reply(text: str) -> tuple[str, str, list[EvidenceSpan | None]]:
         raise ValueError("answer or evidence has the wrong type")
     if len(evidence) > MAX_EVIDENCE_SPANS:
         raise ValueError("too many evidence spans")
-    return status, answer.strip(), [EvidenceSpan.from_reply(item) for item in evidence]
+    kind = value.get("kind")
+    if not isinstance(kind, str) or kind not in ANSWER_KINDS:
+        kind = "intended_behavior"
+    spans = [EvidenceSpan.from_reply(item) for item in evidence]
+    return status, answer.strip(), spans, kind
 
 
 def judge_reply(workspace: Path, text: str, *, alias_root: Path | None = None) -> Investigation:
@@ -237,7 +290,7 @@ def judge_reply(workspace: Path, text: str, *, alias_root: Path | None = None) -
     is read as the same relative path in the real workspace.
     """
     try:
-        status, answer, spans = parse_reply(text)
+        status, answer, spans, kind = parse_reply(text)
     except ValueError:
         return Investigation("reply_invalid", called=True)
     if alias_root is not None:
@@ -250,7 +303,11 @@ def judge_reply(workspace: Path, text: str, *, alias_root: Path | None = None) -
             checked.append(span)
         else:
             failures.append(reason or "malformed_span")
-    if status == "found" and answer and checked and not failures:
+    if status == "found" and kind != "current_behavior":
+        # The code under change cannot settle what it should do; the checked
+        # spans stay as what the code shows.
+        outcome = "intended_behavior"
+    elif status == "found" and answer and checked and not failures:
         outcome = "found"
     elif status == "found":
         outcome = "evidence_rejected"
@@ -263,6 +320,7 @@ def judge_reply(workspace: Path, text: str, *, alias_root: Path | None = None) -
         failures=tuple(failures),
         cited=len(spans),
         called=True,
+        kind=kind,
     )
 
 
@@ -298,6 +356,7 @@ class RepoInvestigator:
     resolved_model: str | None = None
     resolved_effort: str | None = None
     _found: list[tuple[str, str]] = field(default_factory=list)
+    _last_error: object = None
 
     def _create_runtime(self, workspace: Path) -> Any:
         factory = self.runtime_factory
@@ -328,11 +387,20 @@ class RepoInvestigator:
             return None
         return runtime
 
-    async def _call(self, runtime: Any, goal: str, question: str) -> str | None:
-        """One session; the reply text, or ``None`` on timeout, ``""`` on failure."""
+    async def _call(
+        self, runtime: Any, goal: str, question: str, *, counted: bool = True
+    ) -> str | None:
+        """One session; the reply text, or ``None`` on timeout, ``""`` on failure.
+
+        A failure's error is kept in ``_last_error`` so a throttled call can be
+        recognized. ``counted=False`` re-issues a throttled call without using
+        a call from the cap.
+        """
         self.resolved_model = _runtime_attr(runtime, "_resolved_fallback_model", "_model")
         self.resolved_effort = _runtime_attr(runtime, "_resolved_fallback_reasoning_effort")
-        self.calls_made += 1
+        self._last_error = None
+        if counted:
+            self.calls_made += 1
         try:
             result = await asyncio.wait_for(
                 runtime.execute_task_to_result(
@@ -344,13 +412,45 @@ class RepoInvestigator:
             )
         except TimeoutError:
             return None
-        except Exception:  # noqa: BLE001 - a failed call is not found, never a guess
+        except Exception as exc:  # noqa: BLE001 - a failed call is not found, never a guess
+            self._last_error = exc
             return ""
         finally:
             await _close(runtime)
         if result.is_err:
+            self._last_error = result.error
             return ""
         return result.value.final_message or ""
+
+    async def _call_through_throttle(
+        self, runtime: Any, cwd: Path, goal: str, question: str
+    ) -> tuple[str | None, float]:
+        """Call once; re-issue a throttled call (HTTP 429) after a capped, doubling wait.
+
+        Re-issues do not use calls from the cap. The waits stop at
+        ``THROTTLE_TOTAL_CEILING_SECONDS``; the call then counts as failed.
+        Returns the reply and the seconds waited.
+        """
+        reply = await self._call(runtime, goal, question)
+        throttled_attempts = 0
+        waited = 0.0
+        while reply == "" and is_throttled(self._last_error):
+            wait = throttle_backoff_seconds(throttled_attempts + 1)
+            if waited + wait > THROTTLE_TOTAL_CEILING_SECONDS:
+                break
+            throttled_attempts += 1
+            waited += wait
+            log.warning(
+                "auto.interview.investigator_throttle_backoff",
+                wait_seconds=wait,
+                throttled_attempts=throttled_attempts,
+            )
+            await _throttle_sleep(wait)
+            runtime = await self._runtime(cwd)
+            if runtime is None:
+                break
+            reply = await self._call(runtime, goal, question, counted=False)
+        return reply, waited
 
     async def investigate(self, goal: str, question: str, workspace: Path) -> Investigation | None:
         """Investigate ``question``; ``None`` when no runtime is available.
@@ -366,6 +466,7 @@ class RepoInvestigator:
             return Investigation("cap_reached")
         before = await asyncio.to_thread(_state_or_none, workspace)
         started = time.monotonic()
+        throttle_waited = 0.0
         runtime: Any | None = None
         copy: Path | None = None
         isolation = "read_only_mode"
@@ -386,13 +487,20 @@ class RepoInvestigator:
                 runtime = await self._runtime(copy)
                 if runtime is None:
                     return None
-            reply = await self._call(runtime, goal, question)
+            reply, throttle_waited = await self._call_through_throttle(
+                runtime, copy or workspace, goal, question
+            )
         finally:
             if copy is not None:
                 await asyncio.to_thread(remove_isolated_copy, copy)
         elapsed = time.monotonic() - started
         after = await asyncio.to_thread(_state_or_none, workspace)
-        done = {"called": True, "elapsed_seconds": elapsed, "isolation": isolation}
+        done = {
+            "called": True,
+            "elapsed_seconds": elapsed,
+            "isolation": isolation,
+            "throttle_waited_seconds": throttle_waited,
+        }
         if before is not None and after is not None and before != after:
             return Investigation("workspace_changed", **done)
         if reply is None or reply == "":
@@ -408,6 +516,7 @@ class RepoInvestigator:
             checked=verdict.checked,
             failures=verdict.failures,
             cited=verdict.cited,
+            kind=verdict.kind,
             **done,
         )
 
@@ -491,12 +600,22 @@ def found_answer(
 
 
 def not_found_answer(
-    draft: AutoAnswer, result: Investigation, question: str, round_number: int
+    draft: AutoAnswer,
+    result: Investigation,
+    question: str,
+    round_number: int,
+    *,
+    open_for_implementer: bool = False,
 ) -> AutoAnswer:
     """What the checked code shows, and that it does not settle the question.
 
     No model answer text is kept. Each entry is a non-binding assumption
     (``DEFAULTED``) that carries the question, keyed ``.investigated.<round>``.
+    ``DEFAULTED`` counts as resolved for the ledger, so the section is closed
+    for interview readiness and Seed completeness, and the worker sees the
+    question as an ``Open question:`` line. ``open_for_implementer`` (no
+    requester) also tells the interviewer that the question stays open for the
+    implementer.
     """
     labels = [span.label for span in result.checked]
     updates = [
@@ -515,7 +634,11 @@ def not_found_answer(
         )
         for section, entry in draft.ledger_updates
     ]
-    lines = [NOT_SETTLED_REPLY]
+    lines = (
+        [f"{NOT_SETTLED_REPLY} {OPEN_FOR_IMPLEMENTER_REPLY}"]
+        if open_for_implementer
+        else [NOT_SETTLED_REPLY]
+    )
     if result.checked:
         lines += ["", "What the code shows:", *_evidence_lines(result.checked)]
     return AutoAnswer("\n".join(lines), AutoAnswerSource.ASSUMPTION, 0.5, updates)
@@ -566,6 +689,8 @@ async def _investigate(
         "evidence_failures": list(result.failures),
         "elapsed_seconds": round(result.elapsed_seconds, 3),
         "isolation": result.isolation,
+        "kind": result.kind,
+        "throttle_waited_seconds": round(result.throttle_waited_seconds, 3),
         "runtime_backend": investigator.runtime_backend,
         "model": investigator.resolved_model,
         "reasoning_effort": investigator.resolved_effort,
@@ -588,7 +713,9 @@ async def _investigate(
         )
     if result.found:
         return found_answer(draft, result, question, round_number)
-    return not_found_answer(draft, result, question, round_number)
+    return not_found_answer(
+        draft, result, question, round_number, open_for_implementer=driver.requester is None
+    )
 
 
 async def settle(
@@ -614,6 +741,141 @@ async def settle(
     else:
         answer = investigated
     return await ask_requester(driver, answer, question, turn, state, round_number)
+
+
+CAP_CLOSURE_MODE = "ledger_only"
+
+
+async def close_known(
+    driver: AutoInterviewDriver,
+    state: AutoPipelineState,
+    ledger: SeedDraftLedger,
+    outcome: _InterviewRoundOutcome,
+) -> AutoInterviewResult | None:
+    """Without a requester, close the interview with what is known.
+
+    Called after each round. It acts only when no requester is wired and the
+    investigator has run, and only in one of two cases:
+
+    - the investigator spent its last call: every later question could only
+      end ``cap_reached`` (not found without a call), so more rounds add
+      nothing and run toward the interview deadline;
+    - the backend reports the interview complete (``seed_ready`` or
+      ``completed``) and the ledger is complete, but the backend ambiguity is
+      above the gate. A not-settled question counts as closed for readiness
+      without a requester, so the open questions alone must not keep the
+      interview going.
+
+    When the backend already confirmed readiness within the gate, the
+    mutual-agreement close handles it and this does nothing.
+
+    It closes with what is known: sections that no question reached get the
+    existing safe-default policy (``finalize_safe_defaultable_gaps``, the same
+    as at ``max_rounds``), pushed to the transcript as an assumption. Answered
+    and investigated sections stay as they are; a not-settled question stays
+    an open question for the worker. The closure mode is ``ledger_only``: the
+    ledger is complete, so the backend ambiguity score is not the gate. When
+    the ledger cannot be completed (an unsafe gap) or the synthesis cannot be
+    recorded, nothing changes and the interview goes on under the existing
+    rules.
+    """
+    from ouroboros.auto.answer_binding import with_provenance
+    from ouroboros.auto.interview_driver import (
+        AutoInterviewResult,
+        _backend_confirmed_seed_ready,
+        _revert_safe_default_entries,
+        _validate_turn,
+    )
+    from ouroboros.auto.interview_recovery import with_timeout
+    from ouroboros.auto.safe_defaults import (
+        build_safe_default_synthesis,
+        finalize_safe_defaultable_gaps,
+    )
+
+    turn = outcome.turn
+    investigator = driver.investigator
+    if (
+        investigator is None
+        or driver.requester is not None
+        or investigator.unavailable is not None
+        or investigator.calls_made == 0
+        or (ledger.is_seed_ready() and _backend_confirmed_seed_ready(turn))
+    ):
+        return None
+    cap_spent = investigator.calls_made >= investigator.max_calls
+    backend_done_open = bool(turn.seed_ready or turn.completed) and ledger.is_seed_ready()
+    if not (cap_spent or backend_done_open):
+        return None
+    open_before = list(ledger.open_gaps())
+    defaulted: tuple[str, ...] = ()
+    if open_before:
+        finalization = finalize_safe_defaultable_gaps(
+            ledger,
+            goal=state.goal,
+            provenance="auto interview closed with what is known (no requester)",
+            pending_question=turn.question,
+            active_profile=getattr(driver.answerer, "active_profile", None),
+        )
+        if finalization is None or not finalization.completed or not ledger.is_seed_ready():
+            if finalization is not None:
+                _revert_safe_default_entries(ledger, finalization.defaulted_sections)
+            return None
+        defaulted = tuple(finalization.defaulted_sections)
+        synthesis = build_safe_default_synthesis(finalization)
+        if synthesis and state.interview_session_id:
+            try:
+                synthesis_turn = _validate_turn(
+                    await with_timeout(
+                        with_provenance(driver.backend, "assumption").answer(
+                            state.interview_session_id,
+                            synthesis,
+                            last_question="[driver closure: interview closed with what is known]",
+                        ),
+                        state,
+                        tool_name="interview.closure_synthesis",
+                        timeout_seconds=driver.timeout_seconds,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - keep the transcript and ledger in sync
+                _revert_safe_default_entries(ledger, defaulted)
+                log.warning(
+                    "auto.interview.closure_synthesis_failed",
+                    auto_session_id=state.auto_session_id,
+                    error=str(exc),
+                )
+                return None
+            state.interview_session_id = synthesis_turn.session_id
+    data: dict[str, object] = {
+        "reason": "call_cap" if cap_spent else "backend_done_with_open_questions",
+        "calls_made": investigator.calls_made,
+        "max_calls": investigator.max_calls,
+        "open_gaps_before": open_before,
+        "defaulted_sections": list(defaulted),
+        "closure_mode": CAP_CLOSURE_MODE,
+        "round": state.current_round,
+    }
+    log.info(
+        "auto.interview.closed_with_open_questions", auto_session_id=state.auto_session_id, **data
+    )
+    await driver._emit_event(
+        "auto.interview.closed_with_open_questions",
+        state.auto_session_id,
+        aggregate_type="auto_session",
+        **data,
+    )
+    state.ledger = ledger.to_dict()
+    state.pending_question = None
+    state.interview_completed = True
+    state.interview_closure_mode = CAP_CLOSURE_MODE
+    state.mark_progress(
+        "interview closed with what is known: "
+        + ("investigator call cap reached" if cap_spent else "open questions left to the worker"),
+        tool_name="interview_driver",
+    )
+    driver._save(state)
+    return AutoInterviewResult(
+        "seed_ready", state.interview_session_id, ledger, state.current_round
+    )
 
 
 def build_repo_investigator(
@@ -660,6 +922,7 @@ __all__ = [
     "Investigation",
     "RepoInvestigator",
     "build_repo_investigator",
+    "close_known",
     "enforces_read_only",
     "found_answer",
     "judge_reply",

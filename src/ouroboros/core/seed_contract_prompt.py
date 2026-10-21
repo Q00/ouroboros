@@ -46,7 +46,7 @@ more into an answer than its words say.
 
 
 def render_repo_facts_section(contract: SeedContract) -> str:
-    """Render checked repository facts verbatim, with their quoted evidence."""
+    """Render checked repository facts as the code's current behavior, with quoted evidence."""
     if not contract.repo_facts:
         return ""
     items = []
@@ -57,11 +57,12 @@ def render_repo_facts_section(contract: SeedContract) -> str:
             text += "\nEvidence:\n" + "\n".join(f"- {span}" for span in item.evidence)
         items.append(text)
     pairs = "\n\n".join(items)
-    return f"""## Repository facts (checked)
-Auto read the repository to answer these interview questions. Each answer cites
-path:line spans whose quotes were checked against the files. They describe the code
-as it is now, not requirements: use them to understand the code, and follow the goal,
-the constraints and the acceptance criteria for what to change.
+    return f"""## Current behavior of the code (checked)
+Auto read the repository to answer these interview questions. Each answer describes
+what the code does now and cites path:line spans whose quotes were checked against
+the files. The issue reports a defect, so this behavior may be exactly what has to
+change; use it to understand the code, and follow the goal, the constraints and the
+acceptance criteria for what to change.
 
 {pairs}"""
 

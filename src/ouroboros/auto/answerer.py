@@ -185,15 +185,6 @@ class AutoAnswerer:
             intents = _classify_question_intents(question)
         # ---------------------------------------------------------------------
 
-        blocker = _blocker_for(question)
-        if blocker is not None:
-            return AutoAnswer(
-                text=f"Cannot safely decide automatically: {blocker.reason}",
-                source=AutoAnswerSource.BLOCKER,
-                confidence=1.0,
-                blocker=blocker,
-            )
-
         if QuestionIntent.NON_GOALS in intents:
             # NON_GOAL source is grounded (explicit non-goal) and is NOT
             # upgradable to USER_PREFERENCE — observed in priority order.
@@ -249,19 +240,6 @@ class AutoAnswerer:
             context,
         )
 
-        # When the chosen route produced a non-grounded fallback (ASSUMPTION,
-        # EXISTING_CONVENTION, CONSERVATIVE_DEFAULT) for a question that the
-        # safe-allowlist recognises as a regulated-product question, re-route
-        # to _product_behavior_answer() so the regulated-feature semantics
-        # (regulated noun, subject-specific constraints) are preserved in the
-        # ledger instead of being replaced by a generic IO/runtime/default
-        # template. Grounded answers (REPO_FACT etc.) are NOT in
-        # _RISKY_FALLBACK_SOURCES and so are left untouched — preserving the
-        # existing runtime/IO contract that "concrete repo fact wins".
-        if answer.source in _RISKY_FALLBACK_SOURCES and _is_safe_product_regulated_question(
-            lowered
-        ):
-            answer = self._product_behavior_answer(question)
         return answer
 
     def answer_gap(
@@ -1393,8 +1371,7 @@ def _has_user_verify_feature_shape(lowered: str) -> bool:
     verify their email?"``) and PRODUCT_BEHAVIOR should win over the
     VERIFICATION cue path.  An actor noun is mandatory so engineering-side
     QA questions like ``"How should we verify the HIPAA worker tests
-    pass?"`` continue to route to ``_verification_answer()`` and through
-    the existing regulated-data blocker.
+    pass?"`` continue to route to ``_verification_answer()``.
 
     A first-person-plural subject (``we``/``nous``/``wir``/``我们``/``우리``…)
     is also disqualifying — those questions ask about engineering-side QA
@@ -1577,16 +1554,9 @@ def _is_product_behavior_question(lowered: str) -> bool:
             r"\b(should|must|can|will|do|does|enforce|track|edit|subscribe)\b",
             lowered,
         )
-        # Covers every product-semantics verb that
-        # ``_is_safe_product_regulated_question()`` allows (export, download,
-        # render, display, show, expose, support, enable, allow, view, access)
-        # and the "be able to <verb>" phrasing gap for ``view`` / ``access`` /
-        # ``download``.  Some of these verbs are already matched by the broader
-        # patterns above; listing the full set here keeps the safe-allowlist
-        # vocabulary explicitly aligned with the router so the two never drift
-        # silently. Any regulated-product question the allowlist accepts must also
-        # route through ``_product_behavior_answer()`` rather than silently
-        # falling to ``_default_answer()``.
+        # Product-semantics verbs (export, download, render, display, show,
+        # expose, support, enable, allow, view, access) and the "be able to
+        # <verb>" phrasing.
         or re.search(
             r"\b(should|must|can|will|do|does|is|are)\b.+\b(be able to\s+)?"
             r"(export|download|render|display|show|expose|support|enable|allow|view|access)\b",
@@ -1637,82 +1607,6 @@ def _latest_resolved_goal(ledger: SeedDraftLedger) -> str:
     return ""
 
 
-def _is_safe_product_branch_question(lowered: str) -> bool:
-    return bool(
-        _matches_any(
-            lowered,
-            (
-                r"\b(users?|customers?|admins?|maintainers?|owners?)\b.+\b(delete|remove)\b.+\b(branch|branches)\b",
-                r"\b(app|application|tool|system|service|cli|workflow|feature)\b.+\b(delete|remove)\b.+\b(branch|branches)\b",
-            ),
-        )
-        and _is_product_behavior_question(lowered)
-        and not re.search(
-            r"\b(current|this|production|prod|live|external|remote|local)\b.+\b(branch|branches)\b",
-            lowered,
-        )
-    )
-
-
-def _asks_for_sensitive_value_or_authority(lowered: str) -> bool:
-    """Return True when the question asks auto mode to choose/use real secrets."""
-    return bool(
-        _matches_any(
-            lowered,
-            (
-                r"\b(provide|enter|paste|supply)\b.+\b(credential|credentials|secret|token|key|password)\b",
-                r"\b(credential|credentials|secret|token|key|password)\b.+\b(value|secret)\b",
-                r"\b(which|what)\b.+\b(credential|credentials|access token|auth token|private key|api key|password|secret)\b.+\b(use|configure|set|env|environment|workflow|ci)\b",
-                r"\b(which|what)\b.+\b(value|secret)\b.+\b(credential|credentials|access token|auth token|private key|api key|password)\b",
-                r"\b(use|configure|set)\b.+\b(production|prod|live|external)\b.+\b(credential|credentials|secret|api key|private key|access token|auth token)\b",
-                r"\b(use|configure|set)\b.+\b(credential|credentials|secret|api key|private key|access token|auth token)\b.+\b(production|prod|live|external)\b",
-            ),
-        )
-    )
-
-
-def _is_safe_product_sensitive_question(lowered: str) -> bool:
-    """Allow product-semantics questions that mention sensitive-domain nouns.
-
-    Auto mode must not invent real credential values or production authority,
-    but it can answer bounded requirements questions about product-managed
-    credential/token/key/secret features.  These questions are routed to the
-    product-behavior answerer so the Seed keeps the requested semantics.
-    """
-    if not _is_product_behavior_question(lowered):
-        return False
-    if _asks_for_sensitive_value_or_authority(lowered):
-        return False
-    return bool(
-        _matches_any(
-            lowered,
-            (
-                r"\b(users?|customers?|admins?|maintainers?|owners?|the app|app|system|settings form)\b.+\b(credential|credentials|secret|token|tokens|api keys?|private keys?|passwords?)\b",
-                r"\b(credential|credentials|secret|token|tokens|api keys?|private keys?|passwords?)\b.+\b(fields?|settings?|form|login|authentication|rotation|display|store|save|delete|remove)\b",
-            ),
-        )
-    )
-
-
-_RISKY_FALLBACK_SOURCES: frozenset[AutoAnswerSource] = frozenset(
-    {
-        AutoAnswerSource.CONSERVATIVE_DEFAULT,
-        AutoAnswerSource.ASSUMPTION,
-        # ``_runtime_answer`` returns EXISTING_CONVENTION when no concrete
-        # repo fact was supplied. The text is still a generic
-        # "use the existing repository runtime" template, so for regulated
-        # topics it is re-routed like any other fallback. A REPO_FACT-backed
-        # runtime answer (full ``runtime_context`` supplied) is unaffected.
-        AutoAnswerSource.EXISTING_CONVENTION,
-        # USER_PREFERENCE is intentionally NOT in this set: the safe-product
-        # re-route at the routing-block tail would drop the user's value for
-        # regulated-product questions (e.g. "Should the app export PII
-        # reports?"), silently replacing the caller-supplied preference with
-        # the generic ``_product_behavior_answer`` template (PR #811 review).
-    }
-)
-
-
 # Sources that may be replaced by a caller-supplied USER_PREFERENCE when one
 # matches the question's intent section. Grounded sources (USER_GOAL,
 # REPO_FACT, NON_GOAL) are intentionally NOT upgradable — explicit grounded
@@ -1721,8 +1615,7 @@ _RISKY_FALLBACK_SOURCES: frozenset[AutoAnswerSource] = frozenset(
 # EXISTING_CONVENTION is included because the auto answerer's existing
 # fallback paths (notably ``_runtime_answer``) tag generic template responses
 # as EXISTING_CONVENTION even when no actual repo convention was observed —
-# the same labelling inflation called out in the comment block on
-# :data:`_RISKY_FALLBACK_SOURCES`. A caller-supplied preference is more
+# the same labelling inflation. A caller-supplied preference is more
 # specific than a generic "use the existing repository runtime" template, so
 # the upgrade is allowed here. Phase 4 ledger-level conflict resolution will
 # distinguish evidence-grounded EXISTING_CONVENTION entries from the template
@@ -1831,278 +1724,3 @@ def _maybe_apply_user_preference(
             generic_default=False,
         )
     return answer
-
-
-_REGULATED_NOUNS_RE = re.compile(
-    r"\b(pii|personally identifiable information|gdpr|hipaa|sox|pci[- ]?dss)\b"
-)
-_PRODUCT_SEMANTICS_REGULATED_VERBS_RE = re.compile(
-    r"\b(export|exports|exporting|exported|"
-    r"download|downloads|downloading|downloaded|"
-    r"render|renders|rendering|rendered|"
-    r"display|displays|displaying|displayed|"
-    r"show|shows|showing|shown|"
-    r"expose|exposes|exposing|exposed|"
-    r"support|supports|supporting|supported|"
-    r"enable|enables|enabling|enabled|"
-    r"allow|allows|allowing|allowed|"
-    r"view|views|viewing|viewed|"
-    r"access|accesses|accessing|accessed)\b"
-)
-# Compliance-policy verbs in *active* form only (base / -s / -ing).
-# Past-participle forms (``stored``, ``encrypted``, ``retained``, …) are
-# deliberately excluded because they routinely act as adjectives modifying a
-# regulated noun (``view stored PII``, ``display encrypted HIPAA files``) — the
-# main verb of those sentences is the product-semantics one, not a request for
-# a compliance-policy decision.
-#
-# When an active-form compliance verb appears, the question is asking the
-# pipeline to decide regulated-data handling (``How should the system store …?``,
-# ``Should we retain and export PII records?``) and must remain blocked even if
-# the same sentence also mentions a product-semantics verb.
-_COMPLIANCE_POLICY_ACTIVE_VERBS_RE = re.compile(
-    r"\b(store|stores|storing|"
-    r"handle|handles|handling|"
-    r"retain|retains|retaining|"
-    r"collect|collects|collecting|"
-    r"encrypt|encrypts|encrypting|"
-    r"process|processes|processing|"
-    r"transmit|transmits|transmitting|"
-    r"disclose|discloses|disclosing|"
-    r"share|shares|sharing|"
-    r"manage|manages|managing|"
-    r"govern|governs|governing)\b"
-)
-# Broad product-question indicator: contains a modal/question word.  Looser than
-# ``_is_product_behavior_question`` so that phrasings like "Should users be able
-# to download …" are captured even when ``download`` is not in that helper's verb list.
-_PRODUCT_QUESTION_MODAL_RE = re.compile(r"\b(should|must|can|will|do|does|is|are)\b")
-# Reject "compliance-scope-as-feature-flag" phrasings: a wide-coverage
-# enablement verb (``support`` / ``enable`` / ``allow``) followed by a
-# regulated noun used as a policy scope rather than a concrete feature.
-# Two shapes are rejected:
-#
-#   1. Bare regulated noun with no further qualifying noun
-#      (``Should the platform support HIPAA?``, ``Should the app enable GDPR?``).
-#      The trailing negative lookahead ``(?!\s+[a-z])`` fires when the
-#      regulated noun is the last lexical token of the clause.
-#
-#   2. Regulated noun followed (optionally bridged by ``data``) by a
-#      compliance-policy noun that names the policy regime itself —
-#      ``retention``, ``storage``, ``encryption``, ``handling``, ``processing``,
-#      ``collection``, ``disclosure``, ``governance``, ``compliance``,
-#      ``transmission``, ``redaction``.  Phrasings such as
-#      ``support HIPAA data retention`` and ``enable GDPR data storage`` frame
-#      the entire compliance policy as a toggle and are still
-#      regulated-policy decisions, not bounded product behaviour, so they
-#      remain blocked.  A trailing word boundary keeps concrete-feature
-#      variants ("support HIPAA retention reports", "enable GDPR consent
-#      banners") off this path because the policy noun is then followed by a
-#      qualifying feature noun rather than ending the clause.
-#
-# Concrete-feature qualifiers that follow the regulated noun directly
-# ("HIPAA audit logs", "GDPR consent banners", "PII redaction in exports",
-# "GDPR data exports") still describe bounded product features and are not
-# rejected.
-_BARE_COMPLIANCE_SCOPE_RE = re.compile(
-    r"\b(?:support|supports|supporting|supported|"
-    r"enable|enables|enabling|enabled|"
-    r"allow|allows|allowing|allowed)\s+"
-    r"(?:pii|personally identifiable information|gdpr|hipaa|sox|pci[- ]?dss)\b"
-    r"(?:"
-    r"(?!\s+[a-z])"
-    r"|"
-    r"(?:\s+data)?\s+"
-    r"(?:retention|storage|encryption|handling|processing|collection|"
-    r"disclosure|governance|compliance|transmission|redaction)"
-    r"(?!\s+[a-z])"
-    r")"
-)
-
-
-def _is_safe_product_regulated_question(lowered: str) -> bool:
-    """Allow product-semantics questions that mention regulated-data nouns.
-
-    Auto mode must not decide compliance policy (how to store/handle/retain PII,
-    which fields are HIPAA-regulated, etc.), but it can answer bounded product
-    requirements questions such as "Should the app export PII reports?" or
-    "Should users be able to download GDPR exports?".  Those are asking for
-    feature-level behavior, not compliance-policy decisions.
-
-    Strategy: pass through when the question
-      1. mentions a regulated noun (PII/GDPR/HIPAA/SOX/PCI-DSS),
-      2. contains a product-question modal (should/can/will/must/do/does/is/are),
-      3. does NOT use an *active*-form compliance-policy verb (``store``,
-         ``stores``, ``storing``, ``handle``, ``encrypt``, ``share``, …) — those
-         signal a regulated-data handling decision and must stay blocked even
-         when mixed with product-semantics verbs (``How should the system store
-         and display HIPAA files?``, ``Should we retain and export PII
-         records?``),
-      4. is NOT a bare compliance-scope-as-feature-flag phrasing
-         (``support|enable|allow`` + bare regulated noun with no qualifying
-         feature noun). ``Should the platform support HIPAA?`` and
-         ``Should the app enable GDPR?`` are framing the entire regulatory
-         regime as a toggle, which remains a compliance-policy decision.
-      5. uses a product-semantics verb (export, download, display, show, view …).
-
-    Past-participle compliance forms (``stored``, ``encrypted``, ``retained``,
-    …) are intentionally NOT in the negative list: in product-behavior questions
-    they routinely act as adjectives modifying a regulated noun (``view stored
-    PII``, ``display encrypted HIPAA files``), and the sentence's main action is
-    the product-semantics verb. Pure-compliance phrasings using past-participle
-    forms (``Should PII be stored …?``) lack a product-semantics verb and are
-    rejected by step (4) instead.
-    """
-    if not _REGULATED_NOUNS_RE.search(lowered):
-        return False
-    if not _PRODUCT_QUESTION_MODAL_RE.search(lowered):
-        return False
-    if _COMPLIANCE_POLICY_ACTIVE_VERBS_RE.search(lowered):
-        return False
-    if _BARE_COMPLIANCE_SCOPE_RE.search(lowered):
-        return False
-    return bool(_PRODUCT_SEMANTICS_REGULATED_VERBS_RE.search(lowered))
-
-
-_DEPLOYMENT_AUTHORITY_REASON = "deployment target requires human authority"
-
-
-def _is_safe_implementation_choice_question(lowered: str) -> bool:
-    """True for questions about implementation substrate or project placement.
-
-    Choosing a programming language / runtime / framework, or deciding between a
-    greenfield project and an existing repository (where the code should "live"),
-    are safe-defaultable engineering decisions — never external-authority actions.
-
-    Motivating false positive (#1170 canonical cli-todo R3): the question
-    "What programming language and runtime should this CLI be built in ... and is
-    there an existing project or repository this tool should live inside, or will
-    it be a standalone greenfield project?" matched the deployment pattern because
-    the verb "live" ("where should it live") collided with the deployment-sense
-    "live" token and "project" matched the deployment-target noun group. The
-    session terminated as BLOCKED("deployment target requires human authority")
-    instead of safe-defaulting to greenfield, breaking the product-or-die path.
-
-    This predicate intentionally governs **only** suppression of the deployment
-    false positive (see `_blocker_for`): it can never shadow credential, payment,
-    legal, medical, or destructive blockers, so it does not need to mirror their
-    vocabularies. The single negative check below keeps a *genuine* deployment
-    question (which also names a language/runtime) blocked.
-    """
-    # A genuine deployment-sense signal means this is a real deployment-target
-    # question, not the benign "where should the code live" collision → do not
-    # suppress the deployment blocker.
-    if re.search(
-        r"\b(deploy|deployment|release|publish|production|prod|hosting|host)\b",
-        lowered,
-    ):
-        return False
-    return _matches_any(
-        lowered,
-        (
-            r"\b(which|what)\b.+\b(programming language|language|runtime|"
-            r"framework|frameworks|libraries|library|tech stack|stack)\b",
-            r"\b(greenfield|standalone)\b.+\bproject\b",
-            r"\b(existing|new)\b.+\b(project|repo|repository|codebase)\b.+"
-            r"\b(live|reside|inside|within|build|built|placed|located)\b",
-            r"\bwhere\b.+\b(should|will|does|to)\b.+\b(live|reside|placed|located)\b",
-        ),
-    )
-
-
-def _blocker_for(question: str) -> AutoBlocker | None:
-    lowered = question.lower()
-    if _is_safe_product_branch_question(lowered) or _is_safe_product_sensitive_question(lowered):
-        return None
-
-    external_action_patterns = (
-        (
-            r"\b(credential value|credential secret)\b",
-            "credential or secret value required",
-        ),
-        (
-            r"\b(provide|enter|paste|supply|configure|set)\b.+\b(access token|auth token|private key)\b",
-            "credential or secret value required",
-        ),
-        (
-            r"\b(which|what)\b.+\b(access token|auth token|private key)\b.+\b(use|configure|set|env|environment|workflow|ci|production|prod)\b",
-            "credential or secret value required",
-        ),
-        (
-            r"\b(provide|enter|paste|supply|configure|set)\b.+\b(credentials?)\b.+\b(value|secret|token|key|password|env|environment|workflow|ci|production|prod)\b",
-            "credential or secret value required",
-        ),
-        (
-            r"\b(which|what)\s+credentials?\b.+\b(use|configure|set|env|environment|workflow|ci|production|prod)\b",
-            "credential or secret value required",
-        ),
-        (
-            r"\b(provide|enter|use|configure|set)\b.+\b(api keys?|passwords?)\b.+\b(value|secret|token|credential|env|environment|workflow|ci|production|prod)\b",
-            "credential or secret value required",
-        ),
-        (
-            r"\b(which|what)\b.+\b(api keys?|passwords?)\b.+\b(value|secret|token|credential|env|environment|workflow|ci|production|prod)\b",
-            "credential or secret value required",
-        ),
-        (
-            r"\b(credential|credentials)\b.+\b(value|secret|token|key|password|env|environment|workflow|ci)\b",
-            "credential or secret value required",
-        ),
-        (
-            r"\b(charge|purchase|subscribe|provide|enter|use|configure|set)\b.+\b(payment|billing|paid service|credit card|bank account|invoice)\b.+\b(account|provider|key|secret|production|live)\b",
-            "paid service or financial decision required",
-        ),
-        (
-            r"\b(payment|billing|paid service|credit card|bank account|invoice)\b.+\b(account|provider|key|secret|production|live)\b.+\b(charge|purchase|subscribe|pay)\b",
-            "paid service or financial decision required",
-        ),
-        (
-            r"\b(which|what|provide|obtain|get|use|choose|select)\b.+\b(legal|compliance|license|contract)\b.+\b(advice|judgment|review|approval|liability|risk|interpretation)\b",
-            "legal judgment required",
-        ),
-        (
-            r"\b(which|what|provide|use|choose|select)\b.+\b(medical|clinical|diagnosis|treatment|health)\b.+\b(advice|judgment|diagnose|prescribe|triage|recommendation)\b",
-            "medical judgment required",
-        ),
-        (
-            r"\b(should|can|may|will|do we|should we)\b.+\b(deploy|release|publish)\b.+\b(to|against|on)\s+\b(production|prod|live|external)\b",
-            _DEPLOYMENT_AUTHORITY_REASON,
-        ),
-        (
-            r"\b(which|what|choose|select|use|configure|set)\b.+\b(production|prod|live|external)\b.+\b(environment|target|account|project|cluster|region)\b",
-            _DEPLOYMENT_AUTHORITY_REASON,
-        ),
-        (
-            r"\b(which|what|choose|select|use|configure|set)\b.+\b(environment|target|account|project|cluster|region)\b.+\b(deploy|release|publish)\b.+\b(production|prod|live|external)\b",
-            _DEPLOYMENT_AUTHORITY_REASON,
-        ),
-        (
-            r"\b(provide|enter|paste|supply|use|configure|set)\b.+\b(production|prod|live|external)\b.+\b(credential|secret|api key)\b",
-            "production deployment or irreversible external action required",
-        ),
-        (
-            r"\b(delete|drop|erase|wipe|remove)\b.+\b(database|db|branch|production|prod)\b",
-            "destructive external operation requires human authority",
-        ),
-        (
-            r"\b(provide|enter|paste|supply|use|configure|set)\b.+\bsecret\b.+\b(value|key|token|credential|env|environment|workflow|ci|production|prod)\b",
-            "credential or secret value required",
-        ),
-        (
-            r"\b(which|what)\s+secret\b.+\b(use|configure|set|env|environment|workflow|ci|production|prod)\b",
-            "credential or secret value required",
-        ),
-    )
-    safe_implementation_choice = _is_safe_implementation_choice_question(lowered)
-    for pattern, reason in external_action_patterns:
-        if re.search(pattern, lowered):
-            # The implementation-choice guard may suppress ONLY the deployment
-            # false positive (the verb-"live" / "project" collision, #1170 R3).
-            # It is structurally incapable of shadowing credential, payment,
-            # legal, medical, or destructive blockers, so it never needs to mirror
-            # their vocabularies (#1295 review: a parallel negative list was
-            # brittle and missed plural credential forms).
-            if safe_implementation_choice and reason == _DEPLOYMENT_AUTHORITY_REASON:
-                continue
-            return AutoBlocker(reason=reason, question=question)
-    return None

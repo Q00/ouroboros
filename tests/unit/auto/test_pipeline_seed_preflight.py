@@ -33,8 +33,6 @@ from ouroboros.core.seed import (
 )
 from ouroboros.events.base import BaseEvent
 
-pytestmark = pytest.mark.usefixtures("_legacy_unsafe_bank")
-
 
 def _fill_ready(ledger: SeedDraftLedger) -> None:
     for section, value in {

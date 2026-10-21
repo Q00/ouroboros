@@ -10838,6 +10838,7 @@ Respond with either ATOMIC or the structured JSON object only.
             retry_batch_final = all(
                 ac_retry_attempts[ac_idx] >= self._ac_retry_attempts for ac_idx in retry_idxs
             )
+            await retry_hints.throttle_wait(results, position_by_idx, retry_idxs, ac_retry_attempts)
             retry_results = await self._execute_ac_batch(
                 seed=seed,
                 batch_indices=retry_idxs,

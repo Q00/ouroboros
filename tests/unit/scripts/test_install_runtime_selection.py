@@ -305,7 +305,7 @@ def test_piped_installer_defaults_to_mcp_v2_and_settings_gui(tmp_path: Path) -> 
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert "installing MCP v2 + settings GUI" in result.stdout
-    assert "--with mcp==2.0.0" in calls
+    assert "--with mcp==2.2.0" in calls
     assert "--with textual==8.2.8" in calls
     assert "--with textual-serve==1.1.3" in calls
 
@@ -1912,7 +1912,7 @@ def test_preserves_opencode_backend_from_existing_config(tmp_path: Path) -> None
     assert "Runtime: opencode (preserved from" in result.stdout
     assert "Installing .[mcp,tui] ..." in result.stdout
     assert (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines() == [
-        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with mcp==2.0.0 --with textual==8.2.8 --with textual-serve==1.1.3",
+        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with mcp==2.2.0 --with textual==8.2.8 --with textual-serve==1.1.3",
         "ouroboros setup --runtime opencode --non-interactive",
         "ouroboros setup refresh",
     ]
@@ -1946,7 +1946,7 @@ def test_explicit_claude_cli_uses_dependency_free_mcp2_profile(tmp_path: Path) -
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert "Installing .[mcp,tui]" in result.stdout
     assert "--with claude-agent-sdk" not in calls
-    assert "--with mcp==2.0.0" in calls
+    assert "--with mcp==2.2.0" in calls
     assert "ouroboros setup --runtime claude-cli --non-interactive" in calls
 
 
@@ -2031,7 +2031,7 @@ def test_explicit_pi_installs_base_and_runs_pi_setup(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
     assert "Runtime: pi (from --runtime / OUROBOROS_INSTALL_RUNTIME)" in result.stdout
     assert calls == [
-        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with mcp==2.0.0 --with textual==8.2.8 --with textual-serve==1.1.3",
+        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with mcp==2.2.0 --with textual==8.2.8 --with textual-serve==1.1.3",
         "ouroboros setup --runtime pi --non-interactive",
         "ouroboros setup refresh",
     ]
@@ -2329,7 +2329,7 @@ def test_detects_pi_as_single_runtime_and_runs_pi_setup(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
     assert "Pi:" in result.stdout
     assert calls == [
-        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with mcp==2.0.0 --with textual==8.2.8 --with textual-serve==1.1.3",
+        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with mcp==2.2.0 --with textual==8.2.8 --with textual-serve==1.1.3",
         "ouroboros setup --runtime pi --non-interactive",
         "ouroboros setup refresh",
     ]
@@ -2458,7 +2458,7 @@ def test_pypi_lookup_failure_stays_stable_only_for_remote_install(tmp_path: Path
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert (
-        "uv tool install --upgrade --python >=3.12 ouroboros-ai --with click>=8.1.0,<9.0.0 --with mcp==2.0.0 --with textual==8.2.8 --with textual-serve==1.1.3"
+        "uv tool install --upgrade --python >=3.12 ouroboros-ai --with click>=8.1.0,<9.0.0 --with mcp==2.2.0 --with textual==8.2.8 --with textual-serve==1.1.3"
         in calls
     )
     assert "--prerelease=allow" not in calls
