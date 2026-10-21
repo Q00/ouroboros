@@ -45,6 +45,7 @@ from ouroboros.orchestrator.parallel_executor import (
     render_parallel_completion_message,
     render_parallel_verification_report,
 )
+from ouroboros.orchestrator.parallel_executor_models import governing_verifier_verdict
 from ouroboros.orchestrator.retry_hints import is_retryable_failure
 from ouroboros.orchestrator.verifier import VerifierVerdict
 from ouroboros.orchestrator.verify_shell import verify_shell_path_from_identity
@@ -170,6 +171,35 @@ async def test_verify_gate_rejects_assertion_only_constructed_contract(tmp_path:
 
     assert outcome.passed is False
     assert outcome.reason == "output_assertion requires verify_command"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX virtualenv layout")
+async def test_verify_gate_resolves_tools_from_the_main_worktree_venv(tmp_path: Any) -> None:
+    """A task worktree lacks the gitignored ``.venv``; the gate uses the main tree's."""
+    main = tmp_path / "project"
+    bin_dir = main / ".venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    (main / ".venv" / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    for name, body in (("python3", ""), ("projtool", "echo PROJECT_VENV_TOOL")):
+        script = bin_dir / name
+        script.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+        script.chmod(0o755)
+    gitdir = main / ".git" / "worktrees" / "orch_1"
+    gitdir.mkdir(parents=True)
+    worktree = tmp_path / "worktrees" / "orch_1"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+    executor = _make_executor(working_directory=str(worktree))
+    spec = AcceptanceCriterionSpec(
+        description="project tool",
+        verify_command="projtool",
+        output_assertion="PROJECT_VENV_TOOL",
+    )
+
+    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(worktree))
+
+    assert outcome.passed is True, outcome.reason
 
 
 @pytest.mark.asyncio
@@ -617,6 +647,33 @@ async def test_apply_verify_gate_flips_success_to_failed(tmp_path: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_failing_verify_command_replaces_a_recorded_only_verifier_rejection(
+    tmp_path: Any,
+) -> None:
+    """A deciding verify gate's verdict routes the failure; a recorded-only one no longer hides it."""
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command="exit 1"))
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content="ac",
+        success=True,
+        atomic_verifier_verdict=VerifierVerdict(
+            passed=False, reasons=("fabrication",), failure_class="FABRICATION_SUSPECTED"
+        ),
+        recorded_rejection="Fat-harness verifier failed (fabrication).",
+    )
+    assert governing_verifier_verdict(result) is None
+
+    gated = await executor._apply_verify_gate(
+        seed=seed, ac_index=0, result=result, session_id="s", execution_id="e"
+    )
+
+    assert gated.success is False and gated.recorded_rejection is None
+    verdict = governing_verifier_verdict(gated)
+    assert verdict is not None and verdict.failure_class == "EVIDENCE_MISSING"
+
+
+@pytest.mark.asyncio
 async def test_apply_verify_gate_reuses_cached_success_outcome(tmp_path: Any) -> None:
     executor = _make_executor(working_directory=str(tmp_path))
     seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command="exit 0"))
@@ -803,6 +860,9 @@ async def test_batch_emits_outer_outcome_marker_after_verify_failure(tmp_path: A
         "outcome": "failed",
         "is_decomposed": True,
         "is_decomposed_child": True,
+        "verify_passed": False,
+        "verify_cause": "exit_nonzero",
+        "verify_no_signal": False,
     }
 
 

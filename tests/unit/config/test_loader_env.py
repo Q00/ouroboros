@@ -186,6 +186,8 @@ def test_denylist_covers_known_execution_routing_keys() -> None:
         "OUROBOROS_BACKEND_LIMITS",
         "OUROBOROS_MCP_AUTH_TOKEN",
         "OUROBOROS_IO_JOURNAL_PREVIEWS",
+        # Evolve fallback execution toggle (#2449).
+        "OUROBOROS_EVOLVE_STAGE1",
     }
     missing = required - UNTRUSTED_ENV_DENYLIST
     assert not missing, f"denylist regressed, missing: {sorted(missing)}"
@@ -484,6 +486,48 @@ with patch.object(Path, "home", side_effect=lambda: home):
     )
 
     assert completed.stdout.splitlines() == ["1", "False"]
+
+
+def test_project_evolve_stage1_cannot_override_persisted_operator_opt_out(
+    tmp_path: Path,
+) -> None:
+    """A project `.env` enabling evolve Stage 1 must not defeat a persisted
+    `OUROBOROS_EVOLVE_STAGE1=false` in the trusted ~/.ouroboros/.env. Spawned
+    as a real subprocess so both import-time `.env` loads run in production
+    order (project first, then home) before the adapter-level reader runs."""
+    project = tmp_path / "project"
+    home = tmp_path / "home"
+    project.mkdir()
+    (home / ".ouroboros").mkdir(parents=True)
+    (project / ".env").write_text("OUROBOROS_EVOLVE_STAGE1=true\n", encoding="utf-8")
+    (home / ".ouroboros" / ".env").write_text("OUROBOROS_EVOLVE_STAGE1=false\n", encoding="utf-8")
+
+    script = f"""
+import os
+from pathlib import Path
+from unittest.mock import patch
+
+home = Path({str(home)!r})
+with patch.object(Path, "home", side_effect=lambda: home):
+    import ouroboros.config.loader
+    from ouroboros.mcp.server.evolution_pipeline_evaluation import evolve_stage1_enabled
+    print(os.environ.get("OUROBOROS_EVOLVE_STAGE1", "<unset>"))
+    print(evolve_stage1_enabled())
+"""
+    environment = os.environ.copy()
+    for key in ("HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "OUROBOROS_EVOLVE_STAGE1"):
+        environment.pop(key, None)
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=project,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.stdout.splitlines() == ["false", "False"]
 
 
 @pytest.mark.parametrize("key", ["CI", "GITHUB_ACTIONS"])

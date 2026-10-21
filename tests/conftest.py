@@ -241,6 +241,22 @@ def block_interview_answer_refiner_cli_spawn(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def block_interview_investigator_cli_spawn(monkeypatch):
+    """Stop the auto self-answer investigator from spawning real agent CLIs.
+
+    ``build_repo_investigator()`` returns a ``RepoInvestigator`` that builds an
+    agent runtime (claude, codex, ...) per routed interview question. Its own
+    fallback, ``None``, keeps the deterministic answerer, so this matches a
+    machine without any agent CLI. Tests that exercise the investigator inject
+    one directly or re-patch after this fixture and win.
+    """
+    for mod_name in ("ouroboros.mcp.tools.auto_handler", "ouroboros.cli.commands.auto"):
+        mod = sys.modules.get(mod_name)
+        if mod is not None and hasattr(mod, "build_repo_investigator"):
+            monkeypatch.setattr(mod, "build_repo_investigator", lambda *_a, **_k: None)
+
+
+@pytest.fixture(autouse=True)
 def block_setup_probe_cli_spawns(monkeypatch):
     """Stop ``ooo setup`` capability probes from spawning real codex/opencode CLIs.
 
@@ -308,3 +324,17 @@ async def close_test_owned_stores(monkeypatch):
                     await close_result
                 except Exception:
                     pass
+
+
+@pytest.fixture(autouse=True)
+def reset_ignored_model_warning():
+    """Make the once-per-process ignored-model warning independent of test order.
+
+    ``config.model_selection`` warns only on the first ignored persisted model id
+    in a process. Under ``pytest -n`` that first call would otherwise land in
+    whichever test a worker happens to run first. Reset it per test so a test
+    that reads CLI output sees the same stream alone or in the full suite.
+    """
+    selection_mod = sys.modules.get("ouroboros.config.model_selection")
+    if selection_mod is not None:
+        selection_mod.reset_ignored_model_warning()

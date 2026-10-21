@@ -187,17 +187,35 @@ class TestMapToCopilotModel:
                 == "claude-opus-4.6"
             )
 
-    def test_current_default_maps_to_exact_catalog_id(self) -> None:
+    def test_prior_default_maps_to_exact_catalog_id(self) -> None:
         pool = [md.CopilotModel(id="claude-opus-5", family="claude-opus-5")]
 
-        assert md.map_to_copilot_model(DEFAULT_OPUS_MODEL, available=pool) == "claude-opus-5"
+        assert md.map_to_copilot_model("claude-opus-5", available=pool) == "claude-opus-5"
         assert (
-            md.map_to_copilot_model(DEFAULT_CONSENSUS_OPUS_MODEL, available=pool) == "claude-opus-5"
+            md.map_to_copilot_model("openrouter/anthropic/claude-opus-5", available=pool)
+            == "claude-opus-5"
         )
 
-    def test_current_default_maps_from_bundled_catalog_when_discovery_fails(self) -> None:
+    def test_current_api_pin_requires_its_own_copilot_catalog_entry(self) -> None:
+        old_pool = [md.CopilotModel(id="claude-opus-5")]
+        assert md.map_to_copilot_model(DEFAULT_OPUS_MODEL, available=old_pool) == DEFAULT_OPUS_MODEL
+        assert (
+            md.map_to_copilot_model(DEFAULT_CONSENSUS_OPUS_MODEL, available=old_pool)
+            == DEFAULT_CONSENSUS_OPUS_MODEL
+        )
+        current_pool = [md.CopilotModel(id="claude-opus-5.5")]
+        assert (
+            md.map_to_copilot_model(DEFAULT_OPUS_MODEL, available=current_pool) == "claude-opus-5.5"
+        )
+        assert (
+            md.map_to_copilot_model(DEFAULT_CONSENSUS_OPUS_MODEL, available=current_pool)
+            == "claude-opus-5.5"
+        )
+
+    def test_prior_default_maps_from_bundled_catalog_when_discovery_fails(self) -> None:
         with patch.object(md, "_resolve_token", return_value=None):
-            assert md.map_to_copilot_model(DEFAULT_OPUS_MODEL) == "claude-opus-5"
+            assert md.map_to_copilot_model("claude-opus-5") == "claude-opus-5"
+            assert md.map_to_copilot_model(DEFAULT_OPUS_MODEL) == DEFAULT_OPUS_MODEL
             assert md.used_fallback() is True
 
     def test_future_anthropic_version_uses_catalog_driven_candidate(self) -> None:
@@ -358,3 +376,17 @@ class TestResolveToken:
             patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="gh", timeout=5)),
         ):
             assert md._resolve_token() is None
+
+
+def test_latest_opus_model_picks_the_newest_version() -> None:
+    from ouroboros.copilot.model_discovery import CopilotModel, latest_opus_model
+
+    models = [
+        CopilotModel(id="claude-opus-4.6"),
+        CopilotModel(id="claude-opus-5"),
+        CopilotModel(id="claude-opus-4.8"),
+        CopilotModel(id="claude-opus-5-preview"),
+        CopilotModel(id="gpt-5.4"),
+    ]
+    assert latest_opus_model(models) == "claude-opus-5"
+    assert latest_opus_model([CopilotModel(id="gpt-5.4")]) is None

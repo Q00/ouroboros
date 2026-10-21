@@ -22,6 +22,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
+import hashlib
 import importlib.util
 import math
 import os
@@ -34,6 +35,7 @@ from ouroboros.core.session_signal import SessionSignalCapabilities
 from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.backend_limits import resolve_backend_limits
+from ouroboros.orchestrator.claude_model_observation import claude_init_data
 from ouroboros.orchestrator.rate_limit import (
     DEFAULT_ANTHROPIC_RPM_CEILING,
     DEFAULT_ANTHROPIC_TPM_CEILING,
@@ -1149,6 +1151,9 @@ class ClaudeAgentAdapter:
     _runtime_handle_backend = "claude"
     _runtime_backend = "claude"
     _provider_name = "claude"
+    #: Extra CLI ``(flag, value)`` pairs; ``_log_message_text=False`` logs text as length, SHA-256.
+    _session_cli_args: tuple[tuple[str, str | None], ...] = ()
+    _log_message_text = True
 
     #: This adapter runs its own shared RPM/TPM bucket
     #: (:meth:`_build_rate_limit_bucket`), so the parallel executor must NOT add a
@@ -1655,6 +1660,9 @@ class ClaudeAgentAdapter:
                 if self._cli_path:
                     options_kwargs["cli_path"] = self._cli_path
 
+                if self._session_cli_args:
+                    options_kwargs["extra_args"] = dict(self._session_cli_args)
+
                 if system_prompt:
                     options_kwargs["system_prompt"] = system_prompt
 
@@ -1670,7 +1678,7 @@ class ClaudeAgentAdapter:
                 # Stream messages from SDK
                 session_id: str | None = None
                 async for sdk_message in query(prompt=prompt, options=options):
-                    agent_message = self._convert_message(sdk_message)
+                    agent_message = self._convert_message(sdk_message, effective_model)
 
                     # Capture session ID from init message
                     session_id = getattr(sdk_message, "session_id", None) or agent_message.data.get(
@@ -1775,11 +1783,16 @@ class ClaudeAgentAdapter:
                 resume_handle=current_runtime_handle,
             )
 
-    def _convert_message(self, sdk_message: Any) -> AgentMessage:
+    def _loggable(self, text: str, limit: int) -> Any:
+        if self._log_message_text:
+            return text[:limit]
+        return {"chars": len(text), "sha256": hashlib.sha256(text.encode()).hexdigest()}
+
+    def _convert_message(self, sdk_message: Any, model: str | None = None) -> AgentMessage:
         """Convert SDK message to internal AgentMessage format.
 
         Args:
-            sdk_message: Message from Claude Agent SDK.
+            sdk_message: Message from Claude Agent SDK; ``model`` is the one requested.
 
         Returns:
             Normalized AgentMessage.
@@ -1790,7 +1803,7 @@ class ClaudeAgentAdapter:
         log.debug(
             "orchestrator.adapter.message_received",
             class_name=class_name,
-            sdk_message=str(sdk_message)[:500],
+            sdk_message=self._loggable(str(sdk_message), 500),
         )
 
         # Extract content based on message class
@@ -1859,7 +1872,7 @@ class ClaudeAgentAdapter:
                 data["total_cost_usd"] = total_cost_usd
             log.info(
                 "orchestrator.adapter.result_message",
-                result_content=content[:200] if content else "empty",
+                result_content=self._loggable(content, 200) if content else "empty",
                 subtype=data["subtype"],
                 is_error=data["is_error"],
             )
@@ -1869,9 +1882,8 @@ class ClaudeAgentAdapter:
             subtype = getattr(sdk_message, "subtype", "")
             msg_data = getattr(sdk_message, "data", {})
             if subtype == "init":
-                session_id = msg_data.get("session_id")
-                content = f"Session initialized: {session_id}"
-                data["session_id"] = session_id
+                data.update(claude_init_data(msg_data, requested_model=model))
+                content = f"Session initialized: {data['session_id']}"
             else:
                 content = f"System: {subtype}"
             data["subtype"] = subtype

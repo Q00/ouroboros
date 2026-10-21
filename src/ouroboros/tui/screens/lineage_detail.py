@@ -16,6 +16,7 @@ from textual.reactive import reactive
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Label, Static
 
+from ouroboros.core.acceptance import AcceptanceState
 from ouroboros.core.lineage import (
     GenerationRecord,
     OntologyDelta,
@@ -24,6 +25,13 @@ from ouroboros.core.lineage import (
 )
 from ouroboros.tui.screens.confirm_rewind import ConfirmRewindScreen
 from ouroboros.tui.widgets.lineage_tree import GenerationNodeSelected, LineageTreeWidget
+
+# Unverified is not a rejection: no executed verification minted a verdict.
+_ACCEPTANCE_BADGES: dict[AcceptanceState, str] = {
+    AcceptanceState.APPROVED: "[bold green]APPROVED[/]",
+    AcceptanceState.REJECTED: "[bold red]REJECTED[/]",
+    AcceptanceState.UNVERIFIED: "[bold yellow]NOT APPROVED (unverified)[/]",
+}
 
 # =============================================================================
 # GENERATION DETAIL PANEL
@@ -194,14 +202,12 @@ class GenerationDetailPanel(Static):
         # Evaluation
         if gen.evaluation_summary:
             ev = gen.evaluation_summary
+            acceptance = ev.acceptance_state
             yield Label("Evaluation:", classes="section-header")
 
-            approved_str = (
-                "[bold green]APPROVED[/]" if ev.final_approved else "[bold red]REJECTED[/]"
-            )
             with Horizontal(classes="detail-row"):
                 yield Label("Result:", classes="label")
-                yield Static(approved_str, classes="value")
+                yield Static(_ACCEPTANCE_BADGES[acceptance], classes="value")
 
             if ev.score is not None:
                 score_color = "green" if ev.score >= 0.8 else "yellow" if ev.score >= 0.5 else "red"
@@ -219,14 +225,18 @@ class GenerationDetailPanel(Static):
                     yield Static(f"{ev.drift_score:.3f}", classes="value")
 
             if ev.failure_reason:
+                # An unverified result's reason explains the missing evidence;
+                # it is not a failure.
+                unverified = acceptance is AcceptanceState.UNVERIFIED
                 with Horizontal(classes="detail-row"):
-                    yield Label("Failure:", classes="label")
+                    yield Label("Reason:" if unverified else "Failure:", classes="label")
                     reason = (
                         ev.failure_reason[:50] + "..."
                         if len(ev.failure_reason) > 50
                         else ev.failure_reason
                     )
-                    yield Static(f"[red]{reason}[/]", classes="value")
+                    color = "yellow" if unverified else "red"
+                    yield Static(f"[{color}]{reason}[/]", classes="value")
 
         # Wonder questions
         if gen.wonder_questions:

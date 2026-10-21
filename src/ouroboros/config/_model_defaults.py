@@ -20,31 +20,31 @@ Copilot setup path selects models from GitHub Copilot's own discovery catalog
 out of scope here — it is not driven by these pins.
 
 Note on id formats across providers (they are NOT interchangeable):
-- Anthropic direct API uses hyphenated, dateless ids: ``claude-opus-5``.
-- OpenRouter uses dotted slugs: ``anthropic/claude-opus-5``
-  (https://openrouter.ai/anthropic/claude-opus-5).
+- Anthropic direct API uses hyphenated, dateless ids: ``claude-opus-5-5``.
+- OpenRouter uses dotted slugs: ``anthropic/claude-opus-5.5``
+  (https://openrouter.ai/anthropic/claude-opus-5.5).
 """
 
 # Frontier reasoning tier (interview, seed, ontology, evaluation, execution
 # analysis, consensus advocate). Anthropic-direct API id. Bump on each new
 # Opus release.
-DEFAULT_OPUS_MODEL = "claude-opus-5"
+DEFAULT_OPUS_MODEL = "claude-opus-5-5"
 
 # Speed/judgment tier (QA verdicts, assertion extraction). Bump on each new
 # Sonnet release.
-DEFAULT_SONNET_MODEL = "claude-sonnet-4-6"
+DEFAULT_SONNET_MODEL = "claude-sonnet-5-5"
 
 # Frugal execution tier for explicitly trusted decomposed children. Child status
 # alone stays at the base tier; a deterministic trust issuer must authorize this
 # RLM discount while top-level ACs keep the Sonnet default.
 # Anthropic-direct API id. Bump on each new Haiku release.
-DEFAULT_HAIKU_MODEL = "claude-haiku-4-5"
+DEFAULT_HAIKU_MODEL = "claude-haiku-5-5"
 
 # OpenRouter-routed Opus for the multi-provider consensus roster. This is the
-# OpenRouter slug (dotted ``claude-opus-5``), which differs from the
+# OpenRouter slug (dotted ``claude-opus-5.5``), which differs from the
 # Anthropic-direct id above — LiteLLM forwards it verbatim to OpenRouter, so it
 # must match OpenRouter's published model id exactly or consensus voting fails.
-DEFAULT_CONSENSUS_OPUS_MODEL = "openrouter/anthropic/claude-opus-5"
+DEFAULT_CONSENSUS_OPUS_MODEL = "openrouter/anthropic/claude-opus-5.5"
 
 
 # Historical shipped default pins from prior releases, keyed by the *current*
@@ -58,9 +58,11 @@ DEFAULT_CONSENSUS_OPUS_MODEL = "openrouter/anthropic/claude-opus-5"
 # default in an already-persisted config as an explicit user override and leaks
 # a Claude id to a backend that cannot execute it (Q00/ouroboros#1324 review).
 LEGACY_DEFAULT_MODELS: dict[str, tuple[str, ...]] = {
-    DEFAULT_OPUS_MODEL: ("claude-opus-4-8", "claude-opus-4-6"),
-    DEFAULT_SONNET_MODEL: ("claude-sonnet-4-20250514",),
+    DEFAULT_OPUS_MODEL: ("claude-opus-5", "claude-opus-4-8", "claude-opus-4-6"),
+    DEFAULT_SONNET_MODEL: ("claude-sonnet-4-6", "claude-sonnet-4-20250514"),
+    DEFAULT_HAIKU_MODEL: ("claude-haiku-4-5",),
     DEFAULT_CONSENSUS_OPUS_MODEL: (
+        "openrouter/anthropic/claude-opus-5",
         "openrouter/anthropic/claude-opus-4.8",
         "openrouter/anthropic/claude-opus-4-6",
     ),
@@ -95,10 +97,16 @@ LEGACY_DEFAULT_MODELS: dict[str, tuple[str, ...]] = {
 # preserved as-is.
 LEGACY_TIER_MODELS: dict[str, str] = {
     # openai (Codex CLI) tier ids
-    "gpt-4o-mini": "gpt-5.1-codex-mini",
-    "gpt-4o": "gpt-5-codex",
-    "o3": "gpt-5.2",
+    "gpt-4o-mini": "gpt-6-luna",
+    "gpt-4o": "gpt-6.1-sol",
+    "o3": "gpt-6-astra",
+    "gpt-5.1-codex-mini": "gpt-6-luna",
+    "gpt-5-codex": "gpt-6.1-sol",
+    "gpt-5.2": "gpt-6-astra",
     # anthropic tier ids
+    "claude-haiku-4-5": DEFAULT_HAIKU_MODEL,
+    "claude-sonnet-4-6": DEFAULT_SONNET_MODEL,
+    "claude-opus-5": DEFAULT_OPUS_MODEL,
     "claude-3-5-haiku": DEFAULT_HAIKU_MODEL,
     "claude-sonnet-4-20250514": DEFAULT_SONNET_MODEL,
     "claude-opus-4-5-20251101": DEFAULT_OPUS_MODEL,
@@ -111,14 +119,30 @@ LEGACY_TIER_MODELS: dict[str, str] = {
 # necessarily an explicit/custom routing choice (often a proxy alias) and must be
 # preserved verbatim.
 LEGACY_TIER_MODEL_PROVIDERS: dict[str, str] = {
+    "gpt-5.1-codex-mini": "openai",
+    "gpt-5-codex": "openai",
+    "gpt-5.2": "openai",
     "gpt-4o-mini": "openai",
     "gpt-4o": "openai",
     "o3": "openai",
+    "claude-haiku-4-5": "anthropic",
+    "claude-sonnet-4-6": "anthropic",
+    "claude-opus-5": "anthropic",
     "claude-3-5-haiku": "anthropic",
     "claude-sonnet-4-20250514": "anthropic",
     "claude-opus-4-5-20251101": "anthropic",
     "claude-opus-4-6": "anthropic",
     "claude-opus-4-8": "anthropic",
+}
+
+
+# Official Codex model guide, verified 2026-10-18. Focused/high-volume work
+# uses Luna, complex coding uses Sol, hardest workflows use Astra. Availability
+# still depends on account, workspace, provider and CLI rollout.
+CODEX_TIER_MODELS: dict[str, str] = {
+    "frugal": "gpt-6-luna",
+    "standard": "gpt-6.1-sol",
+    "frontier": "gpt-6-astra",
 }
 
 

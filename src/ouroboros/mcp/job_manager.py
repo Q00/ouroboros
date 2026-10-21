@@ -1974,10 +1974,11 @@ class JobManager:
         """Turn a fold into the reconciled snapshot ``get_snapshot`` promises."""
         self._telemetry.remember(job_id, fold.created_data)
         snapshot = fold.to_snapshot(job_id)
-        owner_is_dead = self._job_owner_is_dead(fold.created_data)
+        owner_alive = persisted_process_owner_alive(fold.created_data)
         snapshot = await self._recover_linked_execution_terminal_snapshot(
             snapshot,
-            owner_is_dead=owner_is_dead,
+            owner_is_dead=owner_alive is False,
+            owner_is_alive=owner_alive is True,
         )
         snapshot = await self._reconcile_orphaned_job_snapshot(
             snapshot,
@@ -2009,6 +2010,7 @@ class JobManager:
         snapshot: JobSnapshot,
         *,
         owner_is_dead: bool = False,
+        owner_is_alive: bool = False,
     ) -> JobSnapshot:
         """Recover linked execution terminal jobs when no live runner remains.
 
@@ -2018,6 +2020,13 @@ class JobManager:
         runner left to write that event; if the linked execution already has
         authoritative terminal evidence, materialize the job terminal event
         from that durable evidence.
+
+        A live runner is not only one in this process: a durable job is run by
+        a detached worker, and while its recorded owner is alive
+        (``owner_is_alive``) that worker still has post-terminal work to do
+        (QA, the chained evaluation) and writes the terminal event itself.
+        Materializing it here would make the worker see a terminal job and
+        stop before that work.
         """
         if (
             snapshot.is_terminal
@@ -2025,6 +2034,7 @@ class JobManager:
             or not snapshot.links.execution_id
             or snapshot.job_id in self._tasks
             or snapshot.job_id in self._runner_tasks
+            or owner_is_alive
         ):
             return snapshot
         completed_result = await self._derive_completed_execution_result(snapshot)

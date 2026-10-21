@@ -58,8 +58,19 @@ def _evidence_text(item: Mapping[str, Any]) -> str:
     return "; ".join(parts)
 
 
-def ac_results_from_checklist(seed: Seed, checklist: object) -> tuple[ACResult, ...]:
-    """Map evaluator checklist rows onto the Seed's stable AC order."""
+def ac_results_from_checklist(
+    seed: Seed,
+    checklist: object,
+    *,
+    unverified: bool = False,
+) -> tuple[ACResult, ...]:
+    """Map evaluator checklist rows onto the Seed's stable AC order.
+
+    ``unverified`` means the evaluation ran no executed verification (its
+    shared Stage 1 produced no evidence). Its rows then carry no authoritative
+    verdict: they are recorded as not evaluated rather than as evaluated
+    failures, and none of them can pass.
+    """
 
     # Single-AC evaluations do not emit the checklist contract. Ralph still
     # converges via its full-graph fallback, so do not fabricate a verdict.
@@ -80,6 +91,23 @@ def ac_results_from_checklist(seed: Seed, checklist: object) -> tuple[ACResult, 
                     passed=False,
                     score=0.0,
                     evidence="No formal evaluation checklist result was produced for this AC.",
+                    verification_method="formal_evaluation",
+                    ac_verdict_state="not_evaluated",
+                    final_verdict="fail",
+                    rendered_verdict="NOT_EVALUATED",
+                )
+            )
+            continue
+        if unverified:
+            results.append(
+                ACResult(
+                    ac_index=index,
+                    ac_content=content,
+                    semantic_ac_key=criterion.semantic_ac_key,
+                    passed=False,
+                    score=0.0,
+                    evidence=_evidence_text(item)
+                    or "No executed verification evidence; formal AC verdict not evaluated.",
                     verification_method="formal_evaluation",
                     ac_verdict_state="not_evaluated",
                     final_verdict="fail",
@@ -114,6 +142,9 @@ def evaluation_summary_from_eval_meta(
     """Build the generation-1 evaluation snapshot consumed by focused evolve."""
 
     approved = meta.get("final_approved") is True
+    # Only the exact state the evaluate handler emits marks a result as
+    # unverified; anything else keeps the existing rejected projection.
+    unverified = not approved and meta.get("acceptance_state") == "unverified"
     score_value = meta.get("pass_rate")
     score = float(score_value) if isinstance(score_value, int | float) else None
     feedback = meta.get("run_feedback")
@@ -122,6 +153,12 @@ def evaluation_summary_from_eval_meta(
         rendered = [str(item).strip() for item in feedback if str(item).strip()]
         if rendered:
             failure_reason = "; ".join(rendered)
+    if not approved and failure_reason is None:
+        # Single-AC evaluation carries its reason (including an unverified
+        # result's advisory model review) instead of a per-AC feedback list.
+        single_reason = meta.get("failure_reason")
+        if isinstance(single_reason, str) and single_reason.strip():
+            failure_reason = single_reason.strip()
     if not approved and failure_reason is None:
         failure_reason = "formal evaluation rejected the run"
     raw_highest_stage = meta.get("highest_stage")
@@ -143,9 +180,9 @@ def evaluation_summary_from_eval_meta(
         highest_stage_passed=highest_stage,
         score=score,
         failure_reason=failure_reason,
-        ac_results=ac_results_from_checklist(seed, meta.get("checklist")),
+        ac_results=ac_results_from_checklist(seed, meta.get("checklist"), unverified=unverified),
         execution_completion_status=source_status,
-        approval_status="approved" if approved else "rejected",
+        approval_status="approved" if approved else ("not_evaluated" if unverified else "rejected"),
     )
 
 

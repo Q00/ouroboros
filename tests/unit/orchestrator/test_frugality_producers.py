@@ -574,6 +574,60 @@ class TestTokenAttribution:
         assert _token_events(events) == []
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("init_model", ["claude-opus-5-5", None])
+    async def test_claude_sdk_stream_is_attributed_to_the_model_its_init_reports(
+        self, init_model: str | None
+    ) -> None:
+        # The stream is what ClaudeAgentAdapter actually yields for an SDK init
+        # message and a result carrying usage: the init message is the only one
+        # carrying ``model_observation``, and only when the SDK reports a model.
+        from ouroboros.orchestrator.adapter import ClaudeAgentAdapter
+
+        def _sdk_message(class_name: str, **attrs: object) -> object:
+            message = type(class_name, (), {})()
+            for key, value in attrs.items():
+                setattr(message, key, value)
+            return message
+
+        init_data: dict = {"session_id": "sess_claude"}
+        if init_model is not None:
+            init_data["model"] = init_model
+        adapter = ClaudeAgentAdapter(api_key="test")
+        stream = [
+            adapter._convert_message(
+                _sdk_message("SystemMessage", subtype="init", data=init_data), "opus"
+            ),
+            adapter._convert_message(
+                _sdk_message(
+                    "ResultMessage",
+                    result="[TASK_COMPLETE]",
+                    subtype="success",
+                    is_error=False,
+                    session_id="sess_claude",
+                    usage={"input_tokens": 30, "output_tokens": 12},
+                ),
+                "opus",
+            ),
+        ]
+        store, events = _capturing_event_store()
+        executor = ParallelACExecutor(
+            adapter=_ScriptedRuntime(stream),
+            event_store=store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        await _run_one_ac(executor)
+
+        token = _token_events(events)
+        if init_model is None:
+            assert token == []
+            return
+        assert len(token) == 1
+        assert token[0].data["effective_model"] == "claude-opus-5-5"
+        assert token[0].data["token_spend"] == 42
+
+    @pytest.mark.asyncio
     async def test_failure_path_still_emits_when_usage_present(self) -> None:
         # Spend is spend: a runtime that reports usage then raises mid-stream must
         # still have its spend attributed on the exception path.

@@ -13,6 +13,15 @@ from ouroboros.bigbang.ambiguity import (
     format_score_display,
     is_ready_for_seed,
 )
+from ouroboros.bigbang.ambiguity_evidence import (
+    AmbiguityEvidenceEntry,
+    AmbiguityEvidenceLedger,
+    AmbiguityEvidenceSourceKind,
+    AmbiguityEvidenceStatus,
+    EvidenceConflict,
+    EvidenceSource,
+    parse_ambiguity_evidence_ledger,
+)
 from ouroboros.bigbang.brownfield import (
     BrownfieldEntry,
     generate_desc,
@@ -65,6 +74,14 @@ __all__ = [
     "ScoreBreakdown",
     "format_score_display",
     "is_ready_for_seed",
+    # Ambiguity evidence
+    "AmbiguityEvidenceEntry",
+    "AmbiguityEvidenceLedger",
+    "AmbiguityEvidenceSourceKind",
+    "AmbiguityEvidenceStatus",
+    "EvidenceConflict",
+    "EvidenceSource",
+    "parse_ambiguity_evidence_ledger",
     # Explore
     "CodebaseExploreResult",
     "CodebaseExplorer",

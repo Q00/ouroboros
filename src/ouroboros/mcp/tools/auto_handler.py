@@ -27,10 +27,7 @@ from ouroboros.auto.adapters import (
     load_seed,
     save_seed,
 )
-from ouroboros.auto.answerer import (
-    AutoAnswerContext,
-    risky_user_preference_blocker_for,
-)
+from ouroboros.auto.answerer import AutoAnswerContext
 from ouroboros.auto.domain_profile import DEFAULT_REGISTRY
 from ouroboros.auto.execution_acceptance import (
     has_auto_wrapper_context,
@@ -39,6 +36,7 @@ from ouroboros.auto.execution_acceptance import (
 )
 from ouroboros.auto.handoff_contract import RUN_HANDOFF_STARTED_STATUS
 from ouroboros.auto.interview_driver import AutoInterviewDriver
+from ouroboros.auto.investigator import build_repo_investigator
 from ouroboros.auto.ledger import (
     REQUIRED_SECTIONS,
     LedgerEntry,
@@ -73,7 +71,7 @@ from ouroboros.auto.worktree import (
     ensure_auto_worktree,
     release_auto_worktree,
 )
-from ouroboros.config import default_execution_efficiency_mode, get_opencode_mode
+from ouroboros.config import default_execution_efficiency_mode, get_opencode_mode, policy_notice
 from ouroboros.core.execution_preferences import resolve_execution_preferences
 from ouroboros.core.file_lock import file_lock
 from ouroboros.core.types import Result
@@ -156,8 +154,10 @@ class AutoHandler:
         return MCPToolDefinition(
             name="ouroboros_auto",
             description=(
-                "Run full-quality ooo auto: automatically interview, generate an A-grade Seed, "
-                "and start execution only after the A-grade gate passes. All loops are bounded."
+                "Blocking form of ouroboros_start_auto (prefer that one; this call can outlast the "
+                "client timeout). Runs ooo auto in the foreground: automatically interview, "
+                "generate an A-grade Seed, and start execution only after the A-grade gate passes. "
+                "All loops are bounded."
             ),
             parameters=(
                 MCPToolParameter(
@@ -258,8 +258,8 @@ class AutoHandler:
                         "Execution efficiency policy: adaptive may use lower-cost child "
                         "tiers with recovery escalation; quality_first keeps child ACs "
                         "at the parent starting tier. When omitted on a fresh start, a "
-                        "configured execution.default_policy supplies it; otherwise "
-                        "defaults to adaptive."
+                        "configured execution.default_policy supplies it (default "
+                        "quality_first; adaptive only when the policy is ask)."
                     ),
                     required=False,
                     enum=("adaptive", "quality_first"),
@@ -561,6 +561,10 @@ class AutoHandler:
             # AI answer refiner: concrete goal-specific answers so interview
             # ambiguity converges. Best-effort; None falls back to deterministic.
             answer_refiner=build_answer_refiner(),
+            # The self-answer reads the repository first (auto/investigator.py).
+            investigator=build_repo_investigator(
+                runtime_plan.interview.runtime_backend, runtime_plan.interview.opencode_mode
+            ),
             event_store=runtime_event_store,
         )
         # RFC #809 Phase 2.1 — wire Seed QA on every MCP auto surface before
@@ -599,7 +603,7 @@ class AutoHandler:
             run_starter=HandlerRunStarter(
                 start_execute,
                 cwd=state.cwd,
-                use_worktree=auto_workspace is None,
+                use_worktree=False,  # auto's worktree policy alone decides isolation
                 efficiency_mode=state.efficiency_mode,
                 frugality_assurance=state.frugality_assurance,
                 frugality_assurance_explicit=state.frugality_assurance_explicit,
@@ -694,20 +698,18 @@ class StartAutoHandler:
         return MCPToolDefinition(
             name="ouroboros_start_auto",
             description=(
-                "Default entry point for substantial end-to-end work: "
-                "multi-step features, migrations, and high-risk changes that "
-                "need verified execution. "
-                "Use when: the user wants a task taken from clarification "
-                "through verified execution — even if they never say 'ooo'. "
-                "Result: bounded interview → A-grade Seed → execution handoff, "
-                "started in the background and returning auto_session_id + "
-                "job_id immediately. "
-                "Do not use when: the request is a simple question or small "
-                "unambiguous edit, or a validated Seed already exists "
-                "(use ouroboros_start_execute_seed). "
-                "Resume with the returned auto_session_id; "
-                "poll with ouroboros_job_status / ouroboros_job_wait and read "
-                "final state via ouroboros_job_result."
+                "Build and verify a substantial change end-to-end. Use when: the work spans "
+                "several files or replaces a framework, language, auth, storage, or API layer "
+                "(rewrites and migrations included), or is a high-risk change, and the user wants "
+                "it to end up working and tested; call it first instead of implementing inline, "
+                "even if the user never says 'ooo'. Result: a bounded interview fills only the "
+                "gaps, an A-grade Seed with acceptance criteria, then execution that verifies each "
+                "criterion, started in the background and returning auto_session_id + job_id "
+                "immediately. Do not use when: the request is a simple question or small "
+                "unambiguous edit, or a validated Seed already exists (use "
+                "ouroboros_start_execute_seed). Resume with the returned auto_session_id; poll "
+                "with ouroboros_job_status / ouroboros_job_wait and read final state via "
+                "ouroboros_job_result."
             ),
             parameters=inner_def.parameters,
         )
@@ -983,7 +985,7 @@ class StartAutoHandler:
             f"auto_session_id: {auto_session_id}\n"
             f"Runtime Backend: {start_briefing['runtime_backend']}\n"
             f"LLM Backend: {start_briefing['llm_backend']}\n"
-            f"Efficiency Mode: {start_briefing['efficiency_mode']}\n"
+            f"Efficiency Mode: {start_briefing['efficiency_mode']}{policy_notice(arguments)}\n"
             f"Frugality Assurance: {start_briefing['frugality_assurance']}\n"
             f"{dashboard_line}\n"
             "The exact active model and first parallel level will be reported "
@@ -1907,8 +1909,6 @@ def _seed_initial_ledger_from_user_preferences(
         value = user_preferences.get(section)
         if not value:
             continue
-        if _user_preference_would_bypass_risky_gate(goal, value):
-            continue
         ledger.add_entry(
             section,
             LedgerEntry(
@@ -1955,20 +1955,6 @@ def _reseed_preference_ledger(
                 continue
             refreshed.add_entry(section_name, entry)
     return refreshed
-
-
-def _user_preference_would_bypass_risky_gate(goal: str, value: str) -> bool:
-    """Return True when pre-confirming a preference would skip answerer safety.
-
-    Normal user_preferences only become confirmed ledger entries through
-    ``AutoAnswerer._maybe_apply_user_preference()``, which runs the risky
-    fallback gate against both the current question and the converged goal.
-    Preallocating a ledger for structured MCP prompts must honor that same
-    policy: unsafe preference text may remain in ``state.user_preferences`` so
-    the interview answerer can surface the blocker at the right question, but
-    it must not be persisted as already-confirmed ledger evidence.
-    """
-    return risky_user_preference_blocker_for(question=value, goal_text=goal) is not None
 
 
 def _derive_goal_user_preferences(goal: str) -> dict[str, str]:
