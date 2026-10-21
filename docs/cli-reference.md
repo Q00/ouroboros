@@ -531,11 +531,13 @@ commands for inspection, monitoring, and resuming execution; it does not resume
 a session by itself.
 
 ```bash
-ouroboros resume [--all]
+ouroboros resume [--all] [--list]
 ```
 
 By default, the 20 most recent in-flight sessions are shown. Pass `--all` to
-show every in-flight session.
+show every in-flight session. After listing sessions, the command prompts for
+a session and prints re-attachment guidance. Pass `--list` (`-l`) to print the
+table and exit without prompting, for example from scripts or agents.
 
 ---
 
