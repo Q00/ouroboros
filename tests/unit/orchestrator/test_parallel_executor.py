@@ -8186,11 +8186,20 @@ class TestParallelACExecutor:
         )
         assert "Do not implement, test, document, or pre-create work" in runtime.last_prompt
         assert "sibling or future ACs" in runtime.last_prompt
+        assert (
+            "Do not substitute a narrower, safer, or smaller solution than the goal asks for. "
+            "Before you finish, audit that the change covers every case the goal names."
+        ) in runtime.last_prompt
+        assert "then stop" not in runtime.last_prompt
         assert "current AC in this runtime session" in runtime.last_prompt
         assert "workspace-relative paths only" in runtime.last_prompt
         assert "never absolute paths" in runtime.last_prompt
         assert "omit exploratory" in runtime.last_prompt
         assert "rg, grep, sed, cat, ls, find, or pwd" in runtime.last_prompt
+        assert (
+            "For tests_passed and commands_run, list the exact command strings you "
+            "executed, one command per item, with no annotations"
+        ) in runtime.last_prompt
         assert "Auto Recursion Guard" in runtime.last_prompt
         assert "ouroboros_auto" in runtime.last_prompt
         assert "nested auto session" in runtime.last_prompt
@@ -10507,7 +10516,7 @@ class TestParallelACExecutor:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("tests_pass", [True, False])
     async def test_fat_harness_exit_code_only_test_output_is_settled_by_harness_reexecution(
-        self, tmp_path, tests_pass: bool
+        self, tmp_path, monkeypatch, tests_pass: bool
     ) -> None:
         """A zero exit without execution output cannot prove that tests ran.
 
@@ -10515,6 +10524,11 @@ class TestParallelACExecutor:
         claimed test command in the workspace and the verdict follows what
         that run actually produced.
         """
+        # Replay runs only under the execution sandbox; switch it off so the
+        # verdict does not depend on whether this host has a backend.
+        from ouroboros.config.exec_sandbox import EXEC_SANDBOX_ENV_VAR
+
+        monkeypatch.setenv(EXEC_SANDBOX_ENV_VAR, "off")
         hello_file = tmp_path / "hello.py"
         test_file = tmp_path / "test_hello.py"
         hello_file.write_text('def hello():\n    return "hello"\n', encoding="utf-8")

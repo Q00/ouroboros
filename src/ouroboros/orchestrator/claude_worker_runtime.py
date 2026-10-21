@@ -26,6 +26,7 @@ from ouroboros.orchestrator.adapter import (
     WORKER_CWD_UNAVAILABLE_MESSAGE,
     ParamSupport,
 )
+from ouroboros.orchestrator.claude_model_observation import claude_model_observation
 from ouroboros.orchestrator.worker_runtime import (
     LeaderDrivenWorkerRuntime,
     ResolvedWorkerCwd,
@@ -192,7 +193,14 @@ class ClaudeWorkerTransport:
             ),
         )
 
-    async def _run(self, command: list[str], prompt: str, cwd: str | None) -> WorkerTurn:
+    async def _run(
+        self,
+        command: list[str],
+        prompt: str,
+        cwd: str | None,
+        *,
+        requested_model: str | None = None,
+    ) -> WorkerTurn:
         if cwd is None:
             return WorkerTurn(
                 text="",
@@ -228,10 +236,16 @@ class ClaudeWorkerTransport:
 
         stdout = stdout_b.decode("utf-8", errors="replace").strip()
         stderr = stderr_b.decode("utf-8", errors="replace").strip()
-        return self._parse_turn(stdout, stderr, proc.returncode)
+        return self._parse_turn(stdout, stderr, proc.returncode, requested_model=requested_model)
 
     @staticmethod
-    def _parse_turn(stdout: str, stderr: str, returncode: int | None) -> WorkerTurn:
+    def _parse_turn(
+        stdout: str,
+        stderr: str,
+        returncode: int | None,
+        *,
+        requested_model: str | None = None,
+    ) -> WorkerTurn:
         try:
             payload = normalize_claude_cli_output(stdout)
         except ClaudeCliOutputError as exc:
@@ -273,6 +287,12 @@ class ClaudeWorkerTransport:
             is_error=is_error,
             error=error,
             usage=payload.usage,
+            # Recorded even on a failed turn: the model still ran and spent.
+            model_observation=claude_model_observation(
+                payload.model,
+                requested_model=requested_model,
+                source=payload.model_source,
+            ),
         )
 
     async def spawn(
@@ -304,11 +324,12 @@ class ClaudeWorkerTransport:
             command.extend(self._name_args(label))
         if system_prompt:
             command.extend(["--append-system-prompt", system_prompt])
-        if model and model != "default":
-            command.extend(["--model", model])
+        requested_model = model if model and model != "default" else None
+        if requested_model:
+            command.extend(["--model", requested_model])
         if reasoning_effort and reasoning_effort in CLAUDE_REASONING_EFFORT_LEVELS:
             command.extend(["--effort", reasoning_effort])
-        return await self._run(command, prompt, cwd)
+        return await self._run(command, prompt, cwd, requested_model=requested_model)
 
     async def resume(
         self,
@@ -337,11 +358,12 @@ class ClaudeWorkerTransport:
         # only from the SAME cwd the session was created in (cwd-scoped store).
         command = [*self._base_command(cwd=self._cwd), "--resume", session_id]
         command.extend(self._permission_args(permission_mode))
-        if model and model != "default":
-            command.extend(["--model", model])
+        requested_model = model if model and model != "default" else None
+        if requested_model:
+            command.extend(["--model", requested_model])
         if reasoning_effort and reasoning_effort in CLAUDE_REASONING_EFFORT_LEVELS:
             command.extend(["--effort", reasoning_effort])
-        return await self._run(command, prompt, self._cwd)
+        return await self._run(command, prompt, self._cwd, requested_model=requested_model)
 
 
 def build_claude_worker_runtime(

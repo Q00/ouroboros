@@ -90,8 +90,55 @@ ouroboros auto "Build a local-first habit tracker CLI"
 | `--skip-run` | Stop after creating an A-grade Seed |
 | `--show-ledger` | Print assumptions and non-goals captured during auto convergence |
 | `--status` | Print the persisted state for `--resume <id>` without running |
+| `--requester-command CMD` | Ask the requester instead of assuming (off by default; see below). Overrides `OUROBOROS_AUTO_REQUESTER_COMMAND` |
+| `--requester-timeout SECONDS` | Seconds to wait for one requester answer before keeping auto's draft (default 300). Overrides `OUROBOROS_AUTO_REQUESTER_TIMEOUT_SECONDS` |
 
 Auto mode starts execution only after the generated Seed reaches A-grade. If a phase times out or hits a hard blocker, the command prints the auto session id and a resume command instead of hanging indefinitely.
+
+### Asking the requester instead of assuming
+
+Auto answers interview questions itself. When a draft answer has source
+`conservative_default` or `assumption`, auto is guessing. With
+`--requester-command CMD` (or `OUROBOROS_AUTO_REQUESTER_COMMAND`), auto asks the
+requester at exactly those questions and still answers every other question
+itself.
+
+For each such question, auto runs `CMD` once. The command is split like a
+shell command (`shlex.split`) but runs without a shell. Its stdin is one JSON
+object:
+
+```json
+{"question": "...", "goal": "...", "draft_answer": "...", "draft_source": "conservative_default", "round": 3}
+```
+
+Its stdout is either `{"answer": "..."}` or plain text. A nonempty answer
+replaces the draft. A timeout, a nonzero exit, an empty answer, or a JSON object
+without a string `answer` keeps the draft. The option wins over the variable,
+and `--requester-command ""` turns the requester off. The command is read again
+on every invocation and is not stored in the session, so pass it again with
+`--resume`.
+
+Where the answers are recorded:
+
+- The interview transcript gets `[from-auto][requester] <answer>` in place of the
+  draft (`rounds[].user_response` in
+  `~/.ouroboros/data/interview_<interview_session_id>.json`).
+- In the auto session file (`~/.ouroboros/data/<auto_session_id>.json`),
+  `auto_answer_log[].source` is `requester`. `requester_log` has one entry per
+  question sent to the requester: `round`, `question`, `draft_source`,
+  `draft_answer`, `outcome` (`answered`, `timeout`, `nonzero_exit`,
+  `empty_answer`, `invalid_output` or `launch_failed`), `used`, `answer`,
+  `detail` and `elapsed_seconds`. The key is absent when no question went to the
+  requester. Text fields in both logs are cut to 200 characters; the full
+  answer is in the interview transcript.
+- Each question also emits an `auto.interview.requester_asked` event (fields
+  `round`, `draft_source`, `outcome`, `used`, `detail`, `elapsed_seconds`,
+  `question`) to the event store.
+
+Time spent waiting for the requester counts against the interview phase
+timeout (`OUROBOROS_PHASE_TIMEOUT_INTERVIEW_SECONDS`, default 600 seconds).
+The requester is available from the CLI only; the MCP auto tools do not use it
+yet.
 
 ### Detached `auto` wait and retrieve
 
@@ -320,8 +367,10 @@ for permissions, authentication and streaming diagnostics.
 - For Codex CLI: sets `orchestrator.codex_cli_path` and `llm.backend: codex` in `~/.ouroboros/config.yaml`
 - For Codex CLI: installs managed Ouroboros rules into `~/.codex/rules/`
 - For Codex CLI: installs managed Ouroboros skills into `~/.codex/skills/`
+- For Codex release installs using `uvx`: pins the MCP package to the installed setup version (`ouroboros-ai[mcp]==<version>`). Source/dev installs keep serving their current Python environment.
 - For Codex CLI: registers or refreshes setup-managed stdio blocks on supported hosts and preserves user-managed URL/custom blocks by default. A legacy PATH-selected `ouroboros mcp serve` entry with the canonical Codex environment is migrated to the isolated managed launcher; custom executable paths and extra process controls remain untouched. Native Windows `auto` creates no MCP child, `stdio` is refused, and explicit `http` writes the loopback URL only after resolving a launchable MCP command; the operator owns that visible server process.
 - For Codex CLI: adds missing Ouroboros task profiles whose per-role reasoning effort is passed to each `codex exec` invocation; it retires only untouched legacy generated profile anchors and preserves user-created Codex profiles
+- For Codex CLI: reads `codex --help` as UTF-8 to determine the worker-profile format. If the probe fails or the format is unknown, setup reports failure and rolls back its managed changes instead of assuming a legacy profile. Check that the configured Codex executable's `--help` succeeds, then rerun setup.
 - For OpenCode: registers the Ouroboros MCP server in OpenCode's configuration
 - For OpenCode (plugin mode): installs the bridge plugin into `<opencode_config_dir>/plugins/ouroboros-bridge/`
 - For OpenCode: installs the runtime skill capability guide into global `AGENTS.md` in the active OpenCode config directory
@@ -399,6 +448,8 @@ ouroboros init [start] [OPTIONS] [CONTEXT]
 | `--runtime TEXT` | Agent runtime backend for the workflow execution step after seed generation. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `omp`, `gjc`, `antigravity`, `grok`, `zcode`. Custom adapters registered in `runtime_factory.py` are also accepted. |
 | `--llm-backend TEXT` | LLM backend for interview, ambiguity scoring, and seed generation (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `omp`, `zcode`, `dsh`). `dsh` needs two more settings — see [the DeepSeek Harness guide](guides/deepseek-harness.md). |
 | `-d, --debug` | Show verbose logs including debug messages |
+| `-m, --model TEXT` | Model for every role in this command: `auto` (latest of each role's tier), `frugal`, `standard`, `frontier`, or a model id. Tier names work on every backend; Claude aliases such as `opus` only on Claude backends. Default: `models.default` in config (`auto`) |
+| `--pin-models/--no-pin-models` | Run the per-role model ids saved in config for this command (research and reproducibility). Default: `models.pin` in config (off) |
 
 **Examples:**
 
@@ -417,6 +468,9 @@ ouroboros init --orchestrator --runtime codex "Build a REST API"
 
 # Use Codex as the LLM backend for interview and seed generation
 ouroboros init --llm-backend codex "Build a REST API"
+
+# Run the interview and seed generation on the frontier tier
+ouroboros init start --model frontier "Build a REST API"
 
 # Resume an interrupted interview
 ouroboros init start --resume interview_20260116_120000
@@ -470,13 +524,18 @@ ouroboros run [workflow] [OPTIONS] SEED_FILE
 |--------|-------------|
 | `-o/-O, --orchestrator/--no-orchestrator` | Use the agent-runtime orchestrator for execution (default: enabled) |
 | `--runtime TEXT` | Agent runtime backend override (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `copilot`, `goose`, `kiro`, `pi`, `omp`, `gjc`, `antigravity`, `grok`, `zcode`). Uses configured default if omitted |
-| `-r, --resume TEXT` | Resume a previous orchestrator session by ID |
+| `-r, --resume TEXT` | Resume a previous orchestrator session by ID. A run continues only while the process that started it holds its live state (its check package's held-out cases never leave that process); resumed from a new process, the run is recorded as failed and a new attempt starts from the project, while the interrupted attempt's work stays on its task branch |
 | `--mcp-config PATH` | Path to MCP client configuration YAML file |
 | `--mcp-tool-prefix TEXT` | Prefix to add to all MCP tool names (e.g., `mcp_`) |
 | `-s, --sequential` | Execute ACs sequentially instead of in parallel |
 | `--max-decomposition-depth INTEGER` | Maximum recursive AC decomposition depth (any non-negative integer; default `2`). Values `0..4` are eligible for Routing D durable replay. Larger legacy values remain executable but do not publish the Routing D parallel resume-owner guarantee. The same contract applies to `OUROBOROS_MAX_DECOMPOSITION_DEPTH` and `seed.orchestrator.max_decomposition_depth` |
 | `-n, --dry-run` | Validate seed without executing. **Currently only takes effect with `--no-orchestrator`.** In default orchestrator mode this flag is accepted but has no effect — the full workflow executes |
 | `--no-qa` | Skip post-execution QA evaluation |
+| `--auto-evaluate/--no-auto-evaluate` | After the run finishes (completed or failed), enqueue formal evaluation of the directory the run executed in (inside its task worktree) and wait for its result, as `ooo run` does. A paused or cancelled run is not evaluated. Default: `execution.auto_evaluate` in config (on) |
+| `--auto-evolve/--no-auto-evolve` | When formal evaluation is not approved, continue into the bounded Ralph job the evaluation chains and wait for its result. Default: `execution.auto_evolve` in config (on) |
+| `--check-package/--no-check-package` | Build executable checks from the acceptance criteria before the worker starts, admit them on the current tree, and run them on the finished workspace. By default they only record what they would have decided (record mode): no criterion or run outcome changes and the worker gets no repair turn. `--check-package` lets them decide the criteria they cover for this run (the existing verifier stays advisory for those and decides the rest); `--no-check-package` turns them off for this run. Default: `OUROBOROS_CHECK_PACKAGE` (exactly `decide`, `on` (the same as `decide`), `record` or `off`; any other set value, such as `1`, `true` or `ON`, means off), then `boundary.check_package` in config, then `record`. The checks are model-written Python scripts: they run on throwaway copies of the project with the project's interpreter, a per-check timeout, and an allowlisted environment, confined by the execution sandbox (they can write only inside their copy and a scratch directory, and have no network); they can read files you can read. Where the sandbox is unavailable, a check is undecided and does not run. The same switch applies to `ooo run` from a plugin host, meaning the in-process `ouroboros_execute_seed` / `ouroboros_start_execute_seed` path; an execution dispatched to the OpenCode plugin's child session is not governed and reports `check_package: not_applied`. Only Claude Code and Codex CLI can construct checks; with another runtime the existing verifier decides the run. |
+| `-m, --model TEXT` | Model for every role in this run, the check package and the evaluation it continues into included: `auto` (latest of each role's tier), `frugal`, `standard`, `frontier`, or a model id. Tier names work on every backend; Claude aliases such as `opus` only on Claude backends. Default: `models.default` in config (`auto`) |
+| `--pin-models/--no-pin-models` | Run the per-role model ids saved in config for this run (research and reproducibility). Default: `models.pin` in config (off) |
 | `-d, --debug` | Show logs and agent thinking (verbose output) |
 
 **Examples:**
@@ -500,6 +559,23 @@ ouroboros run seed.yaml --resume orch_abc123
 # Skip post-execution QA
 ouroboros run seed.yaml --no-qa
 
+# Stop after the run instead of continuing into formal evaluation
+ouroboros run seed.yaml --no-auto-evaluate
+
+# Evaluate, but do not continue a rejected evaluation into Ralph
+ouroboros run seed.yaml --no-auto-evolve
+
+# Run every role on the frontier tier
+ouroboros run seed.yaml --model frontier
+
+# Let the check package decide for this run instead of only recording
+# (or: OUROBOROS_CHECK_PACKAGE=decide, or boundary.check_package: decide)
+ouroboros run seed.yaml --check-package
+
+# Turn the check package off for this run (or: OUROBOROS_CHECK_PACKAGE=off,
+# or boundary.check_package: off in ~/.ouroboros/config.yaml)
+ouroboros run seed.yaml --no-check-package
+
 # Debug output
 ouroboros run seed.yaml --debug
 
@@ -509,6 +585,15 @@ ouroboros run seed.yaml --sequential
 # Allow up to four recursive splits with Routing D durable replay
 ouroboros run seed.yaml --max-decomposition-depth 4
 ```
+
+After execution (and post-execution QA on success), `ouroboros run` continues into formal
+evaluation and, when the evaluation is not approved, a bounded Ralph job, the same chain
+`ooo run` uses. The evaluation and Ralph jobs run in detached background workers; the command
+waits for each, prints its result, and keeps the run's own exit code (a failed run still exits
+`1`, and a failure to start evaluation is only a warning). Ctrl-C while waiting stops waiting
+without cancelling the jobs and prints their job ids; follow them with
+`ouroboros job wait <job_id> --timeout-seconds 60 --view compact` and
+`ouroboros job result <job_id>`.
 
 Depth values above `4` remain accepted for compatibility and execute through the
 historical legacy parallel path. They do not publish the Routing D parallel
@@ -562,12 +647,16 @@ ouroboros cancel execution [OPTIONS] [EXECUTION_ID]
 |--------|-------------|
 | `-a, --all` | Cancel all running/paused executions |
 | `-r, --reason TEXT` | Reason for cancellation (default: "Cancelled by user via CLI") |
+| `-l, --list` | List active executions and exit without prompting or cancelling |
 
 **Examples:**
 
 ```bash
 # Interactive mode - list active executions and pick one
 ouroboros cancel execution
+
+# List active executions without prompting (scripts, agents)
+ouroboros cancel execution --list
 
 # Cancel a specific execution by session ID
 ouroboros cancel execution orch_abc123def456
@@ -651,12 +740,24 @@ persist into `orchestrator.runtime_profile.stages`. The shipped presets:
 > already encodes in `consensus.diversity_required`. A preset may reference a
 > backend whose CLI is not installed; staging still works and the per-card
 > warning flags it. Pick the preset closest to your subscriptions, then tune
-> individual cards. Model-tier presets (Frugal / Balanced / Frontier) sit in a
-> separate row and stage per-stage models rather than backends.
+> individual cards. Model presets (Auto / Frugal / Standard / Frontier) sit in
+> the Defaults band and set the one `models.default` switch; the field under
+> them takes any model id. The **Pin per-role model ids** switch sets
+> `models.pin`, and the per-stage model ids it applies are grouped under
+> **Advanced**.
 
 ### `config show`
 
 Display current configuration summary, or a specific section.
+
+The summary includes a models table: one row per role (the check package runs
+on the Execute model) with its tier, backend, resolved model, and source
+(`auto`, `pin`, `invocation`, `configured`, or `shipped_fallback`), under a
+`models: auto (pin off)`, `models: pinned`, or
+`models: <value> for every role (<source>)` header. Saved per-role model ids
+that are not applied because pin is off are listed under `ignored (pin off)`,
+each with the hint `set models.pin: true to use`. `--json` emits the same data
+under the `models` key.
 
 ```bash
 ouroboros config show [SECTION]
@@ -671,8 +772,11 @@ ouroboros config show [SECTION]
 **Examples:**
 
 ```bash
-# Show configuration summary (backend, CLI path, DB, log level)
+# Show configuration summary (backend, models, CLI path, DB, log level)
 ouroboros config show
+
+# Machine-readable view; the models table is under the "models" key
+ouroboros config show --json
 
 # Show only orchestrator section
 ouroboros config show orchestrator
@@ -744,6 +848,12 @@ ouroboros config set logging.level debug
 
 # Override LLM backend separately from runtime backend
 ouroboros config set llm.backend litellm
+
+# One model switch for every role: auto, frugal, standard, frontier, or a model id
+ouroboros config set models.default frontier
+
+# Run the per-role model ids saved in config (research and reproducibility)
+ouroboros config set models.pin true
 ```
 
 ### `config validate`
@@ -1173,6 +1283,46 @@ ouroboros tui monitor --backend slt
 
 MCP (Model Context Protocol) server commands for Claude Desktop and other MCP-compatible clients.
 
+### `mcp doctor --machine-snapshot`
+
+Run read-only MCP environment diagnostics. The default command prints health checks; `--json` emits the existing list of checks. Add `--machine-snapshot` to opt into a typed, content-free static snapshot; with `--json`, the result is an object containing the existing `checks` list and `machine_snapshot` fields.
+
+The snapshot covers OS, architecture, Python, current executable, installed `ouroboros-ai` version/location, home-directory disk usage, and fixed `~/.ouroboros/config.yaml` `lstat` metadata. It never reads configuration contents or credentials, invokes commands, scans `PATH`, inspects processes, probes ports or networks, writes files, or repairs anything. Missing, permission, unsupported, and unexpected probe failures are reported as `not_checked` with stable reasons. Native Windows machine architecture is explicitly `not_checked` rather than inferred from shell commands or environment variables. PATH collisions, loopback/port checks, and owned-process metadata are outside this static snapshot.
+
+```bash
+ouroboros mcp doctor [--json] [--machine-snapshot]
+```
+
+### `mcp doctor-runtime`
+
+Show bounded, read-only runtime metadata for local MCP diagnostics. `--json`
+emits typed fields for fixed PATH executable provenance and collisions,
+ephemeral IPv4/IPv6 loopback bindability, and metadata for Ouroboros's own MCP
+PID registry.
+
+Human-readable output shows the bounded executable candidates and collisions,
+unavailable reasons, loopback results, and each registry record's metadata.
+The registry location is displayed using the stable label
+`~/.ouroboros/mcp-servers`; the resolved absolute home path is not included.
+
+The command reads only `PATH` and the home-location information used by the
+server's normal `Path.home()` lookup (including a `HOME` override on POSIX).
+The resolved home and absolute registry path are used only for the bounded
+registry lookup; neither value is included in output or stored. PATH candidate
+and collision paths under that home are displayed with a `~` prefix in both
+JSON and human output after lexical dot-segment normalization; paths outside
+that home retain their location provenance. It reads no
+configuration, registry contents, process arguments, or credentials, executes
+no commands, connects to no network, and does not mutate the machine. PATH
+and registry scans have fixed bounds. Loopback probes only bind an ephemeral
+socket and close it immediately. An invalid or unresolvable home location
+reports registry status `not_checked` with reason `owner_unavailable`, without
+including the location or exception details.
+
+```bash
+ouroboros mcp doctor-runtime [--json]
+```
+
 ### `mcp serve`
 
 Start the MCP server to expose Ouroboros tools to Claude Desktop or other MCP clients.
@@ -1294,6 +1444,44 @@ orchestrator:
 ```
 
 Override per-session with the `OUROBOROS_AGENT_RUNTIME` environment variable if needed.
+
+### `mcp doctor`
+
+Run fast, read-only environment diagnostics. The default command does not
+start a server:
+
+```bash
+ouroboros mcp doctor
+ouroboros mcp doctor --json
+```
+
+Use the opt-in local stdio probe when the environment checks pass but an MCP
+host still cannot discover Ouroboros:
+
+```bash
+ouroboros mcp doctor --probe-local-stdio
+```
+
+The probe launches this installation's own server with the current Python
+interpreter in isolated mode, with a temporary home and working directory.
+It loads the production server composition directly, bypassing shell profiles,
+project dotenv files, update checks, and normal CLI startup. Network and child
+command execution are disabled inside the probe. It reports stable stages for local
+startup/stdio transport, protocol discovery, and expected tool recognition.
+It lists tools but never calls one. The child uses stdio only, has telemetry
+disabled, does not read configured MCP launch commands, and cannot modify the
+user's Ouroboros configuration, EventStore, or PID registry. The temporary
+child and its isolated state are cleaned up on both success and failure.
+Transport success is observed before protocol discovery, and a cleanup failure
+causes the probe to fail even when tool discovery succeeded. The three diagnostic
+stage results remain unchanged; teardown failures add a `local_stdio_cleanup`
+failure result and force the overall exit status to 1.
+
+This first diagnostic increment does not probe configured or third-party MCP
+servers, execute arbitrary launchers, open a network transport, inventory the
+whole machine, invoke an LLM, or repair the installation. A failed probe is a
+normal Doctor failure: all emitted stages remain visible and the command exits
+with status 1.
 
 ### `mcp info`
 

@@ -72,6 +72,17 @@ class TestLivePage:
         # neither collapsed into the empty-run state nor allowed to spin hot.
         assert "await refreshRunList()" in INDEX_HTML
 
+    def test_index_html_renders_interview_as_read_only_run_detail(self) -> None:
+        assert 'id="interview-panel" hidden' in INDEX_HTML
+        assert "function renderInterview(interview)" in INDEX_HTML
+        assert "renderInterview(meta && meta.interview)" in INDEX_HTML
+        assert "interview.last_event" in INDEX_HTML
+        assert "interview.error" in INDEX_HTML
+        assert 'method:"POST"' not in INDEX_HTML
+        assert 'method:"PUT"' not in INDEX_HTML
+        assert 'method:"PATCH"' not in INDEX_HTML
+        assert 'method:"DELETE"' not in INDEX_HTML
+
 
 class TestStaticSnapshot:
     def test_static_html_is_self_contained_and_sse_free(self) -> None:
@@ -167,3 +178,30 @@ class TestStaticSnapshot:
         assert "proven" in html
         assert "frugality_retrospective" in html
         assert "retry_associated_tokens" in html
+
+    def test_static_snapshot_inlines_same_linked_interview_panel(self) -> None:
+        board = {
+            "meta": {
+                "interview": {
+                    "interview_id": "interview-static",
+                    "status": "completed",
+                    "round": 2,
+                    "total_rounds": 3,
+                    "last_event": "interview.completed",
+                }
+            },
+            "columns": {
+                "pending": [],
+                "executing": [],
+                "completed": [],
+                "failed": [],
+            },
+            "providers": [],
+        }
+
+        html = static_html(board, run_id="exec-static")
+
+        assert "interview-panel" in html
+        assert "interview-static" in html
+        assert "interview.completed" in html
+        assert "EventSource" not in html

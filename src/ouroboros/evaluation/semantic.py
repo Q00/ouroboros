@@ -14,8 +14,9 @@ import json
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.types import Result
+from ouroboros.evaluation.executed_evidence import render_executed_evidence
 from ouroboros.evaluation.json_utils import extract_json_payload
-from ouroboros.evaluation.models import EvaluationContext, SemanticResult
+from ouroboros.evaluation.models import EvaluationContext, MechanicalResult, SemanticResult
 from ouroboros.events.base import BaseEvent
 from ouroboros.events.evaluation import (
     create_stage2_completed_event,
@@ -103,7 +104,9 @@ def _get_evaluation_system_prompt() -> str:
     return load_agent_prompt("semantic-evaluator")
 
 
-def build_evaluation_prompt(context: EvaluationContext) -> str:
+def build_evaluation_prompt(
+    context: EvaluationContext, stage1_result: MechanicalResult | None = None
+) -> str:
     """Build the user prompt for evaluation.
 
     When file artifacts are available (from ArtifactCollector), omits the
@@ -113,6 +116,9 @@ def build_evaluation_prompt(context: EvaluationContext) -> str:
 
     Args:
         context: Evaluation context with artifact and criteria
+        stage1_result: Stage 1 result for this criterion; the checks it
+            executed are shown to the judge with their scope
+            (``executed_evidence``)
 
     Returns:
         Formatted prompt string
@@ -169,6 +175,7 @@ def build_evaluation_prompt(context: EvaluationContext) -> str:
 ## Acceptance Criterion
 {context.current_ac}
 {contract_section}
+{render_executed_evidence(stage1_result)}
 
 ## Original Goal
 {context.goal if context.goal else "Not specified"}
@@ -249,6 +256,16 @@ def parse_semantic_response(response_text: str) -> Result[SemanticResult, Valida
             )
         )
 
+    ac_compliance = data["ac_compliance"]
+    if not isinstance(ac_compliance, bool):
+        return Result.err(
+            ValidationError(
+                "'ac_compliance' must be a boolean",
+                field="ac_compliance",
+                value=ac_compliance,
+            )
+        )
+
     if "reward_hacking_risk" not in data:
         data["reward_hacking_risk"] = 0.0
 
@@ -279,7 +296,7 @@ def parse_semantic_response(response_text: str) -> Result[SemanticResult, Valida
         return Result.ok(
             SemanticResult(
                 score=score,
-                ac_compliance=bool(data["ac_compliance"]),
+                ac_compliance=ac_compliance,
                 goal_alignment=goal_alignment,
                 drift_score=drift_score,
                 uncertainty=uncertainty,
@@ -327,11 +344,13 @@ class SemanticEvaluator:
     async def evaluate(
         self,
         context: EvaluationContext,
+        stage1_result: MechanicalResult | None = None,
     ) -> Result[tuple[SemanticResult, list[BaseEvent]], ProviderError | ValidationError]:
         """Evaluate an artifact semantically.
 
         Args:
             context: Evaluation context
+            stage1_result: Stage 1 result whose executed checks the judge sees
 
         Returns:
             Result containing SemanticResult and events, or error
@@ -350,7 +369,7 @@ class SemanticEvaluator:
         # Build messages
         messages = [
             Message(role=MessageRole.SYSTEM, content=_get_evaluation_system_prompt()),
-            Message(role=MessageRole.USER, content=build_evaluation_prompt(context)),
+            Message(role=MessageRole.USER, content=build_evaluation_prompt(context, stage1_result)),
         ]
 
         # Call LLM with structured JSON output to ensure valid JSON

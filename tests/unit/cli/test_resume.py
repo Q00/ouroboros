@@ -542,6 +542,29 @@ class TestResumeCLIWithSessions:
         assert "ouroboros tui monitor" in result.output
         assert "ouroboros status execution exec-xyz789 --events" in result.output
 
+    def test_list_flag_prints_sessions_without_prompting(self) -> None:
+        """--list exits 0 with no stdin and never prompts."""
+        tracker, event_store, ok_result = self._build_mocks()
+
+        async def _fake_get_event_store(db_path=None):
+            return event_store
+
+        with (
+            patch(
+                "ouroboros.cli.commands.resume._get_event_store",
+                side_effect=_fake_get_event_store,
+            ),
+            patch(_SESSION_REPO_PATH, autospec=True) as MockRepo,
+            patch("ouroboros.cli.commands.resume.typer.prompt") as prompt,
+        ):
+            MockRepo.return_value.reconstruct_session = AsyncMock(return_value=ok_result)
+            result = runner.invoke(app, ["--list"], catch_exceptions=False)
+
+        assert result.exit_code == 0
+        assert "sess-abc123" in result.output
+        assert "exec-xyz789" in result.output
+        prompt.assert_not_called()
+
     def test_resume_hint_matches_run_workflow_contract(self) -> None:
         """The output surfaces `ouroboros run workflow --orchestrator --resume <session_id>`."""
         result = self._invoke_with_sessions("1\n")

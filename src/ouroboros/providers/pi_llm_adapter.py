@@ -12,6 +12,7 @@ from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.types import Result
 from ouroboros.providers.base import CompletionConfig, CompletionResponse, Message, MessageRole
 from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
+from ouroboros.providers.pi_message_error import assistant_message_error
 from ouroboros.providers.profiles import resolve_completion_profile_result
 from ouroboros.providers.response_format import (
     build_response_format_directive,
@@ -275,14 +276,7 @@ class PiLLMAdapter(CodexCliLLMAdapter):
         """
 
         def from_message(message: Any) -> str | None:
-            if not isinstance(message, dict) or message.get("role") != "assistant":
-                return None
-            if message.get("stopReason") != "error":
-                return None
-            error = message.get("errorMessage") or message.get("error")
-            if isinstance(error, str) and error.strip():
-                return error.strip()
-            return self._extract_text_from_message(message)
+            return assistant_message_error(message, self._extract_text_from_message)
 
         event_type = event.get("type")
         if event_type in {"message_start", "message_end", "turn_end"}:

@@ -11,6 +11,8 @@ Tests that need config isolation now patch ``opencode_config_dir`` directly
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 
@@ -19,3 +21,17 @@ def _isolate_opencode_config_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Clear env vars that bypass Path.home() in opencode_config_dir()."""
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.delenv("APPDATA", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_run_evaluation_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep ``_run_orchestrator`` tests off the post-run evaluation chain.
+
+    A finished ``ouroboros run`` continues into formal evaluation, which builds
+    the whole MCP server. Tests of the run itself do not exercise that chain;
+    ``tests/unit/cli/test_run_successors.py`` does, and overrides this fixture.
+    """
+    monkeypatch.setattr(
+        "ouroboros.cli.commands.run_successors.continue_run_into_evaluation",
+        AsyncMock(),
+    )

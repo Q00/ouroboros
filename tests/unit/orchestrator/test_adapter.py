@@ -1039,6 +1039,79 @@ class TestClaudeAgentAdapter:
         assert result.type == "system"
         assert "sess_abc123" in result.content
         assert result.data["session_id"] == "sess_abc123"
+        assert "model_observation" not in result.data
+
+    @pytest.mark.parametrize(
+        ("requested", "mode"),
+        [("opus", "pinned"), (None, "automatic")],
+    )
+    def test_convert_system_init_message_records_the_reported_model(
+        self, requested: str | None, mode: str
+    ) -> None:
+        """The init event's concrete model is observed; the request is kept beside it."""
+        adapter = ClaudeAgentAdapter(api_key="test")
+        mock_message = _create_mock_sdk_message(
+            "SystemMessage",
+            subtype="init",
+            data={"session_id": "sess_abc123", "model": "claude-opus-5-5"},
+        )
+
+        result = adapter._convert_message(mock_message, requested)
+
+        assert result.data["session_id"] == "sess_abc123"
+        assert result.data["subtype"] == "init"
+        assert result.data["model_observation"] == {
+            "mode": mode,
+            "status": "observed",
+            "requested_model": requested,
+            "effective_model": "claude-opus-5-5",
+            "source": "runtime_stream:system.init:event.model",
+        }
+
+    @pytest.mark.parametrize("model", ["", "   ", 7, None, "claude opus", ["claude-opus-5-5"]])
+    def test_convert_system_init_message_ignores_malformed_model(self, model: object) -> None:
+        """An absent or malformed model is no observation, and never an error."""
+        adapter = ClaudeAgentAdapter(api_key="test")
+        mock_message = _create_mock_sdk_message(
+            "SystemMessage",
+            subtype="init",
+            data={"session_id": "sess_abc123", "model": model},
+        )
+
+        result = adapter._convert_message(mock_message, "opus")
+
+        assert result.data["session_id"] == "sess_abc123"
+        assert "model_observation" not in result.data
+
+    @pytest.mark.asyncio
+    async def test_execute_task_records_the_model_the_sdk_reports(self) -> None:
+        """The per-call model is the request; the init message's model is what ran."""
+        adapter = ClaudeAgentAdapter(api_key="test", cwd="/tmp/project", model="sonnet")
+
+        async def mock_query(*, prompt: str, options: Any):
+            yield _create_mock_sdk_message(
+                "SystemMessage",
+                subtype="init",
+                data={"session_id": "sess_789", "model": "claude-opus-5-5"},
+            )
+            yield _create_mock_sdk_message(
+                "ResultMessage",
+                result="done",
+                subtype="success",
+                is_error=False,
+                session_id="sess_789",
+                usage={"input_tokens": 4, "output_tokens": 2},
+            )
+
+        sdk_modules = _build_mock_claude_agent_sdk(query_impl=mock_query)
+
+        with patch.dict("sys.modules", sdk_modules):
+            messages = [message async for message in adapter.execute_task("hi", model="opus")]
+
+        observation = messages[0].data["model_observation"]
+        assert observation["requested_model"] == "opus"
+        assert observation["effective_model"] == "claude-opus-5-5"
+        assert "model_observation" not in messages[1].data
 
     @pytest.mark.asyncio
     async def test_execute_task_sdk_not_installed(self) -> None:

@@ -13,6 +13,8 @@ verify gate each keep the current rejection.
 from __future__ import annotations
 
 import shlex
+import subprocess
+import sys
 
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.evidence.test_detection import (
@@ -82,6 +84,12 @@ def test_invoked_files_require_an_interpreter_and_a_file_token() -> None:
     assert _functional_command_invoked_files("cp habit_tracker.py /tmp/") == ()
     assert _functional_command_invoked_files("echo ok") == ()
     assert _functional_command_invoked_files("./run.sh") == ("run.sh",)
+    assert "hello.exe" in _functional_command_invoked_files(r".\hello.exe")
+    assert "hello.exe" in _functional_command_invoked_files(
+        r"Start-Process -FilePath .\hello.exe -Wait"
+    )
+    assert _functional_command_invoked_files("echo fake.exe") == ()
+    assert _functional_command_invoked_files("echo -FilePath fake.exe") == ()
     # Heredoc drivers reference the artifact inside their body.
     heredoc = (
         "python3 - <<'PY'\nimport subprocess, sys\n"
@@ -136,6 +144,133 @@ def test_claim_without_transcript_execution_does_not_support() -> None:
         _functional_command_supports_test_claim(value=CLAIM, messages=messages, task_cwd=None)
         is False
     )
+
+
+def test_windows_executable_functional_claim_is_admitted(tmp_path) -> None:
+    """A Windows artifact invoked directly is valid functional evidence."""
+    artifact = tmp_path / "hello.exe"
+    artifact.write_bytes(b"MZ")
+    claim = r".\hello.exe"
+    start, result = _codex_bash_pair(claim)
+    verdict = _verify_atomic_evidence_against_runtime_messages(
+        messages=(
+            *_edit_pair("hello.exe"),
+            start,
+            result,
+            AgentMessage(type="result", content="done"),
+        ),
+        typed_evidence=EvidenceRecord(
+            data={
+                "files_touched": ["hello.exe"],
+                "commands_run": [claim],
+                "tests_passed": [claim],
+            }
+        ),
+        ac_content="hello.exe prints the required output",
+        execution_profile=load_profile("code"),
+        task_cwd=str(tmp_path),
+        adapter_working_directory=str(tmp_path),
+        has_success_contract=True,
+        verify_gate_active=True,
+    )
+    assert verdict.passed is True, verdict.reasons
+
+
+def test_windows_powershell_wrapper_functional_claim_is_admitted(tmp_path) -> None:
+    """The native Codex PowerShell wrapper can prove a produced executable."""
+    artifact = tmp_path / "hello.exe"
+    artifact.write_bytes(b"MZ")
+    claim = r"Start-Process -FilePath .\hello.exe -Wait -PassThru"
+    wrapped = (
+        '"C:\\Users\\runner\\pwsh.exe" -NoProfile -Command '
+        "'Start-Process -FilePath .\\\\hello.exe -Wait -PassThru'"
+    )
+    start = AgentMessage(
+        type="assistant",
+        content=f"Calling tool: Bash: {wrapped}",
+        tool_name="Bash",
+        data={"tool_input": {"command": wrapped}, "tool_call_id": "item-win"},
+    )
+    result = AgentMessage(
+        type="tool_result",
+        content="hello.exe",
+        data={"tool_call_id": "item-win", "exit_code": 0, "is_error": False},
+    )
+    verdict = _verify_atomic_evidence_against_runtime_messages(
+        messages=(
+            *_edit_pair("hello.exe"),
+            start,
+            result,
+            AgentMessage(type="result", content="done"),
+        ),
+        typed_evidence=EvidenceRecord(
+            data={
+                "files_touched": ["hello.exe"],
+                "commands_run": [claim],
+                "tests_passed": [claim],
+            }
+        ),
+        ac_content="hello.exe prints the required output",
+        execution_profile=load_profile("code"),
+        task_cwd=str(tmp_path),
+        adapter_working_directory=str(tmp_path),
+        has_success_contract=True,
+        verify_gate_active=True,
+    )
+    assert verdict.passed is True, verdict.reasons
+
+
+def test_windows_executable_functional_claim_rejects_missing_artifact(tmp_path) -> None:
+    """A direct Windows command cannot prove a ghost artifact."""
+    claim = r".\missing.exe"
+    start, result = _codex_bash_pair(claim)
+    verdict = _verify_atomic_evidence_against_runtime_messages(
+        messages=(start, result, AgentMessage(type="result", content="done")),
+        typed_evidence=EvidenceRecord(
+            data={
+                "files_touched": [],
+                "commands_run": [claim],
+                "tests_passed": [claim],
+            }
+        ),
+        ac_content="hello.exe prints the required output",
+        execution_profile=load_profile("code"),
+        task_cwd=str(tmp_path),
+        adapter_working_directory=str(tmp_path),
+        has_success_contract=True,
+        verify_gate_active=True,
+    )
+    assert verdict.passed is False
+
+
+def test_windows_option_form_rejects_non_powershell_command(tmp_path) -> None:
+    """An option-shaped mention must not certify an artifact that was not run."""
+    artifact = tmp_path / "fake.exe"
+    artifact.write_bytes(b"MZ")
+    claim = "echo -FilePath fake.exe"
+    start, result = _codex_bash_pair(claim)
+    verdict = _verify_atomic_evidence_against_runtime_messages(
+        messages=(
+            *_edit_pair("fake.exe"),
+            start,
+            result,
+            AgentMessage(type="result", content="done"),
+        ),
+        typed_evidence=EvidenceRecord(
+            data={
+                "files_touched": ["fake.exe"],
+                "commands_run": [claim],
+                "tests_passed": [claim],
+            }
+        ),
+        ac_content="fake.exe prints the required output",
+        execution_profile=load_profile("code"),
+        task_cwd=str(tmp_path),
+        adapter_working_directory=str(tmp_path),
+        has_success_contract=True,
+        verify_gate_active=True,
+    )
+    assert verdict.passed is False
 
 
 def _verdict(*, verify_gate_active: bool):
@@ -463,3 +598,162 @@ def test_named_files_touched_on_verification_only_run_is_admitted(tmp_path) -> N
     v = verdict((_observation_message(),), evidence=ghost)
     assert v.passed is False
     assert any("ghost.py" in reason for reason in v.reasons)
+
+
+INLINE_IMPORT_CLAIM = (
+    'python3 -c "from mathutils import clamp; assert clamp(15, 0, 10) == 10; '
+    'assert clamp(-3, 0, 10) == 0; assert clamp(7, 0, 10) == 7"'
+)
+
+
+def _inline_import_verdict(tmp_path, claim: str, *, edited: str = "mathutils.py"):
+    start, result = _codex_bash_pair(claim)
+    return _verify_atomic_evidence_against_runtime_messages(
+        messages=(
+            *_edit_pair(str(tmp_path / edited)),
+            start,
+            result,
+            AgentMessage(type="result", content="done"),
+        ),
+        typed_evidence=EvidenceRecord(
+            data={"files_touched": [edited], "commands_run": [claim], "tests_passed": [claim]}
+        ),
+        ac_content="clamp(value, low, high) returns high when value > high",
+        execution_profile=load_profile("code"),
+        task_cwd=str(tmp_path),
+        adapter_working_directory=None,
+        has_success_contract=False,
+        verify_gate_active=True,
+    )
+
+
+def test_inline_python_import_of_workspace_module_supports_claim(tmp_path) -> None:
+    """Frozen from `ooo run` exec_0b2fef7bc932 (2026-09-25): a correct clamp fix
+    verified with ``python3 -c "from mathutils import clamp; assert ..."`` (exit 0,
+    correlated completion) was rejected twice as an evidence-form mismatch because
+    the inline program names ``mathutils`` only as a module, never as a file."""
+    (tmp_path / "mathutils.py").write_text(
+        "def clamp(value, low, high):\n    return max(low, min(value, high))\n",
+        encoding="utf-8",
+    )
+    assert "mathutils.py" in _functional_command_invoked_files(INLINE_IMPORT_CLAIM)
+    verdict = _inline_import_verdict(tmp_path, INLINE_IMPORT_CLAIM)
+    assert verdict.passed is True, verdict.reasons
+
+
+def test_inline_python_import_stays_fail_closed(tmp_path) -> None:
+    # The imported module is not a workspace file: nothing anchors the claim.
+    (tmp_path / "other.py").write_text("x = 1\n", encoding="utf-8")
+    missing = _inline_import_verdict(tmp_path, INLINE_IMPORT_CLAIM, edited="other.py")
+    assert missing.passed is False
+    assert any("tests_passed" in reason for reason in missing.reasons)
+    # A stdlib import anchors nothing either.
+    stdlib_claim = 'python3 -c "import os; assert os.sep"'
+    assert "os.py" in _functional_command_invoked_files(stdlib_claim)
+    stdlib = _inline_import_verdict(tmp_path, stdlib_claim, edited="other.py")
+    assert stdlib.passed is False
+    # A non-zero exit still fails the tier.
+    (tmp_path / "mathutils.py").write_text("def clamp(v, lo, hi):\n    return v\n", "utf-8")
+    start, result = _codex_bash_pair(INLINE_IMPORT_CLAIM, exit_code=1)
+    assert (
+        _functional_command_supports_test_claim(
+            value=INLINE_IMPORT_CLAIM,
+            messages=(*_edit_pair(str(tmp_path / "mathutils.py")), start, result),
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+    # Non-Python interpreters do not gain module anchors.
+    assert _functional_command_invoked_files('node -e "import x from y"') == ()
+
+
+def test_inline_python_text_that_only_mentions_an_import_anchors_nothing(tmp_path) -> None:
+    """``python -c "print('import app')"`` never
+    imports ``app``. Only the parsed first import statement of the ``-c``
+    program anchors a module, so a touched ``app.py`` and a correlated zero exit
+    do not make the printed text a ``tests_passed`` check."""
+    (tmp_path / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    inert = "python -c \"print('import app')\""
+    assert "app.py" not in _functional_command_invoked_files(inert)
+    verdict = _inline_import_verdict(tmp_path, inert, edited="app.py")
+    assert verdict.passed is False
+    assert any("tests_passed" in reason for reason in verdict.reasons)
+    for command in (
+        "python3 -c \"exec('import app')\"",
+        'python3 -c "if 0: import app"',
+        'python3 -c "def f():\n    import app"',
+        'python3 -c "import app(("',
+        'python3 -m json.tool -c "import app"',
+        'echo "python3 -c import app"',
+        'python3 -c "raise SystemExit(0); import app"',
+        'python3 -c "import os; os._exit(0); import app"',
+        'python3 -c "import os, app"',
+        # The line's zero exit does not imply the inline program's.
+        'python3 -c "import app"; true',
+        'python3 -c "import app" || true',
+        'python3 -c "import app" | tail -3',
+        'python3 -c "import app" &',
+        '(python3 -c "import app")',
+    ):
+        assert "app.py" not in _functional_command_invoked_files(command), command
+
+
+def test_inline_python_real_imports_still_anchor(tmp_path) -> None:
+    (tmp_path / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    for command in (
+        'python3 -c "import app; assert app.run() == 1"',
+        'python3 -B -c "from app import run; assert run() == 1"',
+        'python3 -c"import app"',
+        'timeout 5 uv run python3 -X dev -c "import app, os"',
+        'cd . && python3 -c "import app; assert app.run() == 1" 2>&1',
+        'true && python3 -c "import app"',
+    ):
+        assert "app.py" in _functional_command_invoked_files(command), command
+    claim = 'python3 -c "import app; assert app.run() == 1"'
+    verdict = _inline_import_verdict(tmp_path, claim, edited="app.py")
+    assert verdict.passed is True, verdict.reasons
+
+
+def test_inline_python_import_after_an_exit_anchors_nothing(tmp_path) -> None:
+    """``raise SystemExit(0); import app`` exits 0 without importing ``app``;
+    only the first import of the program is certain to run."""
+    marker = tmp_path / "imported.marker"
+    (tmp_path / "app.py").write_text(f"open({str(marker)!r}, 'w').close()\n", encoding="utf-8")
+    claim = 'python3 -c "raise SystemExit(0); import app"'
+    completed = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", "raise SystemExit(0); import app"],
+        cwd=tmp_path,
+        check=False,
+    )
+    assert completed.returncode == 0 and not marker.exists()
+    assert "app.py" not in _functional_command_invoked_files(claim)
+    verdict = _inline_import_verdict(tmp_path, claim, edited="app.py")
+    assert verdict.passed is False
+    assert any("tests_passed" in reason for reason in verdict.reasons)
+
+
+def test_inline_python_import_resolved_elsewhere_anchors_nothing(tmp_path) -> None:
+    """A changed import path or working directory means ``import app`` may not
+    be the workspace's ``app.py``."""
+    (tmp_path / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    for command in (
+        'env PYTHONPATH=/tmp/elsewhere python3 -P -c "import app"',
+        'PYTHONPATH=/tmp/elsewhere python3 -c "import app"',
+        'export PYTHONPATH=/tmp/elsewhere && python3 -c "import app"',
+        'python3 -I -c "import app"',
+        'python3 -Pc "import app"',
+        'cd /tmp && python3 -c "import app"',
+        'cd sub; python3 -c "import app"',
+        'true && cd sub && python3 -c "import app"',
+    ):
+        assert "app.py" not in _functional_command_invoked_files(command), command
+        verdict = _inline_import_verdict(tmp_path, command, edited="app.py")
+        assert verdict.passed is False, command
+    # A narrowing variable an earlier call exported applies as well.
+    assert "app.py" not in _functional_command_invoked_files(
+        'python3 -c "import app"', ("PYTHONPATH",)
+    )
+    # One leading workspace-relative ``cd`` resolves the module inside it.
+    assert _functional_command_invoked_files('cd pkg && python3 -c "import app"')[:1] == (
+        "pkg/app.py",
+    )

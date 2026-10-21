@@ -41,6 +41,7 @@ from ouroboros.providers.codex_cli_stream import (
     parse_json_event,
     terminate_runtime_process,
 )
+from ouroboros.providers.pi_message_error import assistant_message_error
 
 log = get_logger(__name__)
 
@@ -430,14 +431,7 @@ class PiRuntime:
         """
 
         def from_message(message: Any) -> str | None:
-            if not isinstance(message, dict) or message.get("role") != "assistant":
-                return None
-            if message.get("stopReason") != "error":
-                return None
-            error = message.get("errorMessage") or message.get("error")
-            if isinstance(error, str) and error.strip():
-                return error.strip()
-            return self._extract_text_from_message(message)
+            return assistant_message_error(message, self._extract_text_from_message)
 
         event_type = event.get("type")
         if event_type in {"message_start", "message_end", "turn_end"}:

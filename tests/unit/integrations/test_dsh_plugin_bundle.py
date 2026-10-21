@@ -87,7 +87,7 @@ def test_row_spawns_ouroboros_mcp_server_over_stdio() -> None:
         "--from",
         "ouroboros-ai[mcp]",
         "--with",
-        "mcp==2.0.0",
+        "mcp==2.2.0",
         "ouroboros",
         "mcp",
         "serve",

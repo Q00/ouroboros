@@ -42,6 +42,10 @@ _VERIFY_GATE_CAUSES = frozenset(
         "exit_nonzero",
         "output_assertion_unmatched",
         "workspace_mutated",
+        # A code-task attempt that changed nothing in the workspace and ran no
+        # verify command: there is no evidence either way
+        # (``attempt_evidence.workspace_unchanged``).
+        "no_evidence",
     }
 )
 
@@ -119,6 +123,11 @@ class _VerifyGateOutcome:
     # deferred the mutation verdict: final settlement MUST replay this
     # command on the quiescent workspace before the AC is accepted.
     replay_required: bool = False
+    # True when verify_command exited non-zero here and also on the untouched
+    # base snapshot (``verify_base_signal``). It cannot decide the criterion:
+    # the outcome does not pass and is also environment_unverifiable, so the
+    # criterion is reported as unverified instead of rejected or accepted.
+    no_signal: bool = False
 
 
 def _serialize_verify_gate_outcome(outcome: object) -> dict[str, object] | None:
@@ -134,6 +143,7 @@ def _serialize_verify_gate_outcome(outcome: object) -> dict[str, object] | None:
         or not isinstance(outcome.workspace_mutated, bool)
         or not isinstance(outcome.environment_unverifiable, bool)
         or not isinstance(outcome.replay_required, bool)
+        or not isinstance(outcome.no_signal, bool)
         or (
             outcome.workspace_digest is not None
             and (
@@ -155,6 +165,7 @@ def _serialize_verify_gate_outcome(outcome: object) -> dict[str, object] | None:
         "environment_unverifiable": outcome.environment_unverifiable,
         "cause": outcome.cause,
         "replay_required": outcome.replay_required,
+        "no_signal": outcome.no_signal,
     }
 
 
@@ -178,7 +189,7 @@ def _deserialize_verify_gate_outcome(value: object) -> _VerifyGateOutcome | None
     if not _mapping_has_bounded_keys(
         value,
         required=legacy_keys,
-        optional=frozenset({"environment_unverifiable", "cause", "replay_required"}),
+        optional=frozenset({"environment_unverifiable", "cause", "replay_required", "no_signal"}),
     ):
         return None
     assert isinstance(value, Mapping)
@@ -198,6 +209,9 @@ def _deserialize_verify_gate_outcome(value: object) -> _VerifyGateOutcome | None
     # their gate either rejected the mutation outright or never observed one.
     replay_required = value.get("replay_required", False)
     if not isinstance(replay_required, bool):
+        return None
+    no_signal = value.get("no_signal", False)
+    if not isinstance(no_signal, bool):
         return None
     if not isinstance(passed, bool) or not isinstance(output_tail, str):
         return None
@@ -226,6 +240,7 @@ def _deserialize_verify_gate_outcome(value: object) -> _VerifyGateOutcome | None
         environment_unverifiable=environment_unverifiable,
         cause=cause,
         replay_required=replay_required,
+        no_signal=no_signal,
     )
 
 

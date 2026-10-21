@@ -71,8 +71,9 @@ _EXIT_INPUT_ERROR = 42
 _EXIT_CONFIG_ERROR = 52
 _EXIT_TURN_LIMIT = 53
 
-# Default model when none is specified
-_DEFAULT_MODEL = "gemini-2.5-flash"
+# Keep the internal sentinel until command construction so automatic completion
+# follows the installed CLI's own configured/default model selection.
+_DEFAULT_MODEL = "default"
 
 # Maximum response size to guard against runaway output
 _MAX_RESPONSE_BYTES = MAX_LLM_RESPONSE_LENGTH
@@ -96,7 +97,7 @@ class GeminiCLIAdapter:
     Attributes:
         cli_path: Path to the ``gemini`` binary.  Resolved from constructor,
             ``OUROBOROS_GEMINI_CLI_PATH`` environment variable or ``PATH``.
-        model: Gemini model name (e.g. ``gemini-2.5-flash``).
+        model: Gemini model name, or ``default`` for CLI-owned selection.
         cwd: Working directory for the subprocess.
         timeout: Maximum seconds to wait for a response.  ``None`` means no
             limit.
@@ -124,7 +125,8 @@ class GeminiCLIAdapter:
         Args:
             cli_path: Explicit path to the ``gemini`` binary.  Falls back to
                 ``OUROBOROS_GEMINI_CLI_PATH`` env var, then ``PATH``.
-            model: Gemini model identifier.  Defaults to ``gemini-2.5-flash``.
+            model: Optional Gemini model identifier.  When omitted, leaves
+                model selection to the Gemini CLI.
             cwd: Working directory for the subprocess.
             max_turns: Maximum conversational turns (kept for API symmetry; the
                 Gemini CLI non-interactive mode always runs a single turn).
@@ -547,11 +549,10 @@ class GeminiCLIAdapter:
             str(self._cli_path),
             "--output-format",
             output_format,
-            "--model",
-            model,
-            "-p",
-            prompt,
         ]
+        if model and model != _DEFAULT_MODEL:
+            cmd.extend(["--model", model])
+        cmd.extend(["-p", prompt])
 
         # Forward generation controls that the Gemini CLI accepts.
         # Unsupported controls are logged so callers can diagnose parity gaps.

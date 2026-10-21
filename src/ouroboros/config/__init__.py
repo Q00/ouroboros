@@ -91,6 +91,7 @@ from ouroboros.config.loader import (
     resolve_omp_cli_path,
 )
 from ouroboros.config.models import (
+    BoundaryConfig,
     ClarificationConfig,
     ConsensusConfig,
     CredentialsConfig,
@@ -117,12 +118,14 @@ from ouroboros.config.models import (
     get_default_config,
     get_default_credentials,
 )
+from ouroboros.config.policy_notice import policy_notice
 
 __all__ = [
     # Models
     "OuroborosConfig",
     "CredentialsConfig",
     "SeedConfig",
+    "BoundaryConfig",
     "TelemetryConfig",
     "TierConfig",
     "ModelConfig",
@@ -145,6 +148,7 @@ __all__ = [
     "RuntimeProfileConfig",
     # Loader functions
     "default_execution_efficiency_mode",
+    "policy_notice",
     "load_config",
     "load_credentials",
     "create_default_config",

@@ -34,19 +34,20 @@ control of the receipt and of any compose-around bookkeeping.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 import inspect
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ouroboros.mcp.detached_jobs import (
     DetachedJobAcceptanceTimeout,
     DetachedJobRequest,
     launch_detached_job,
 )
-from ouroboros.mcp.errors import MCPToolError
+from ouroboros.mcp.errors import JobWorkError, MCPToolError
+from ouroboros.mcp.failure_taxonomy import RUN_FAILURE_CAUSES, FailureReasonCode
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator.agent_process import run_with_agent_process
 
@@ -377,3 +378,35 @@ async def start_background_tool_job(
         await on_started(snapshot)
 
     return snapshot
+
+
+_REASON_CODE_VALUES = frozenset(code.value for code in FailureReasonCode)
+
+
+def job_work_error(error: object) -> JobWorkError:
+    """Wrap a handler's ``Result.err`` for a background job runner.
+
+    Replaces ``RuntimeError(str(error))`` at the job runners so the failed
+    terminal payload keeps the same human-readable message while lifting only
+    closed vocabulary out of ``MCPToolError.failure_meta``: a
+    ``failure_cause`` from ``RUN_FAILURE_CAUSES`` (with its derived reason
+    code) and/or an explicit ``failure_reason_code``. Anything else stays
+    behind — prose, paths, and identifiers never reach ``result_meta``.
+    """
+    from ouroboros.orchestrator.run_failure_cause import failure_reason_code_for_run_cause
+
+    meta: dict[str, Any] = {}
+    details = getattr(error, "failure_meta", None)
+    if isinstance(details, Mapping):
+        cause = details.get("failure_cause")
+        if isinstance(cause, str) and cause in RUN_FAILURE_CAUSES:
+            meta["failure_cause"] = cause
+            meta["failure_reason_code"] = failure_reason_code_for_run_cause(cause).value
+        reason = details.get("failure_reason_code")
+        if (
+            "failure_reason_code" not in meta
+            and isinstance(reason, str)
+            and reason in _REASON_CODE_VALUES
+        ):
+            meta["failure_reason_code"] = reason
+    return JobWorkError(str(error), result_meta=meta)

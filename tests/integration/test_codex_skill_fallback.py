@@ -117,14 +117,14 @@ async def test_codex_mcp_timeout_falls_back_to_pass_through_cli_flow(tmp_path: P
 
     assert captured_processes[0].stdin.written == b"ooo run seed.yaml"
     fake_server.call_tool.assert_awaited_once_with(
-        "ouroboros_execute_seed",
+        "ouroboros_start_execute_seed",
         {"seed_path": "seed.yaml", "cwd": str(tmp_path)},
     )
     mock_exec.assert_called_once()
     mock_warning.assert_called_once()
     assert mock_warning.call_args[0][0] == "codex_cli_runtime.skill_intercept_dispatch_failed"
     assert mock_warning.call_args.kwargs["skill"] == "run"
-    assert mock_warning.call_args.kwargs["tool"] == "ouroboros_execute_seed"
+    assert mock_warning.call_args.kwargs["tool"] == "ouroboros_start_execute_seed"
     assert mock_warning.call_args.kwargs["command_prefix"] == "ooo run"
     assert mock_warning.call_args.kwargs["recoverable"] is True
     assert mock_warning.call_args.kwargs["error_type"] == "MCPTimeoutError"

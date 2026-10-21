@@ -28,7 +28,11 @@ from typing import Literal
 import structlog
 
 from ouroboros.core.json_utils import extract_json_payload
+from ouroboros.core.project_env import project_venv_provides
+from ouroboros.evaluation.command_parsing import split_command
 from ouroboros.evaluation.languages import _ALLOWED_EXECUTABLES
+from ouroboros.evaluation.mechanical_toml_writer import persist_mechanical_toml
+from ouroboros.evaluation.stdlib_unittest_discovery import persist_manifest_free_unittest
 from ouroboros.evolution.provider_usage import tracked_complete
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -128,21 +132,24 @@ def has_mechanical_toml(working_dir: Path) -> bool:
 
 async def ensure_mechanical_toml(
     working_dir: Path,
-    adapter: LLMAdapter,
+    adapter: LLMAdapter | None,
     *,
     model: str | None = None,
     backend: str | None = None,
     force: bool = False,
 ) -> bool:
-    """Write ``.ouroboros/mechanical.toml`` via one AI detect call.
+    """Write ``.ouroboros/mechanical.toml`` from a validated detector result.
 
     Idempotent: when the toml already exists and ``force`` is False, returns
-    True immediately. Otherwise makes one LLM call, validates the proposals,
-    and persists the file. Never raises — returns False on any failure.
+    True immediately. Manifest-backed projects use one LLM call. Projects
+    without manifests may use the narrow standard-library unittest fallback
+    when a real ``TestCase`` suite is discoverable. Every command is validated
+    before persistence. Never raises — returns False on any failure.
 
     Args:
         working_dir: Project root to detect against.
-        adapter: LLM adapter used for the single detect call.
+        adapter: LLM adapter used for manifest-backed detection. It may be
+            ``None`` when only deterministic manifest-free discovery is needed.
         model: Explicit model identifier. When ``None``, resolved via
             ``get_mechanical_detector_model(backend)`` so Codex / OpenCode
             backends receive the ``"default"`` sentinel instead of a Claude
@@ -153,19 +160,25 @@ async def ensure_mechanical_toml(
     Returns:
         True on success (toml exists after the call), False otherwise.
     """
-    model_is_explicit = model is not None
-    if model is None:
-        from ouroboros.config.loader import get_mechanical_detector_model
-
-        model = get_mechanical_detector_model(backend=backend)
     target = toml_path(working_dir)
     if target.is_file() and not force:
         return True
 
     manifests = _collect_manifests(working_dir)
     if not manifests:
-        log.info("detector.skipped", reason="no_manifests", working_dir=str(working_dir))
+        return persist_manifest_free_unittest(
+            working_dir, target, _validate_proposal, _persist_toml, log
+        )
+
+    if adapter is None:
+        log.info("detector.skipped", reason="no_adapter", working_dir=str(working_dir))
         return False
+
+    model_is_explicit = model is not None
+    if model is None:
+        from ouroboros.config.loader import get_mechanical_detector_model
+
+        model = get_mechanical_detector_model(backend=backend)
 
     proposal = await _ask_llm(
         adapter,
@@ -186,31 +199,11 @@ async def ensure_mechanical_toml(
         )
         return False
 
-    # Atomic replace: write the new toml to a sibling file first and
-    # ``os.replace`` it over the existing one. This keeps the prior
-    # known-good file intact if rendering or writing fails on any
-    # transient error — ``ouroboros detect --force`` never destroys the
-    # last working config before a replacement is ready.
-    temp = target.with_name(target.name + ".tmp")
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temp.write_text(_render_toml(validated), encoding="utf-8")
-        os.replace(temp, target)
-    except OSError as exc:
-        log.warning("detector.write_failed", path=str(target), error=str(exc))
-        try:
-            if temp.exists():
-                temp.unlink()
-        except OSError:
-            pass
-        return False
+    return _persist_toml(target, validated)
 
-    log.info(
-        "detector.toml_written",
-        path=str(target),
-        commands={k: getattr(validated, k) for k in _COMMAND_KEYS},
-    )
-    return True
+
+def _persist_toml(target: Path, commands: DetectedCommands) -> bool:
+    return persist_mechanical_toml(target, commands, _render_toml, _COMMAND_KEYS, log)
 
 
 # Glob patterns for manifests whose name varies per project (common in
@@ -513,16 +506,14 @@ def _command_is_valid(working_dir: Path, command: str) -> bool:
         return False
 
     try:
-        import shlex
-
-        parts = shlex.split(command, posix=(os.name != "nt"))
+        parts = split_command(command)
     except ValueError:
         return False
     if not parts:
         return False
 
     raw_head = parts[0]
-    if raw_head.startswith(("/", "~")) or ".." in Path(raw_head).parts:
+    if PureWindowsPath(raw_head).anchor or raw_head.startswith("~") or ".." in Path(raw_head).parts:
         return False
     # ``./mvnw`` is fine, but any other path that points outside the cwd
     # component (e.g. ``bin/foo`` pointing at a committed shim) would still
@@ -1916,13 +1907,11 @@ def _bare_tool_declared_by_repo(working_dir: Path, tool: str) -> bool:
     """True when a bare tool (pytest, ruff, eslint…) is provisioned by the repo.
 
     Accepts any of:
-      * Project-local bin: ``.venv/bin/<tool>`` or ``node_modules/.bin/<tool>``
+      * Project virtualenv (``core/project_env``, a task worktree's main tree too) or ``node_modules/.bin/<tool>``
       * Python: declared in ``pyproject.toml`` or ``requirements*.txt``
       * Node: declared in ``package.json`` dependencies
     """
-    if (working_dir / ".venv" / "bin" / tool).exists():
-        return True
-    if (working_dir / ".venv" / "Scripts" / f"{tool}.exe").exists():
+    if project_venv_provides(working_dir, tool):
         return True
     if (working_dir / "node_modules" / ".bin" / tool).exists():
         return True

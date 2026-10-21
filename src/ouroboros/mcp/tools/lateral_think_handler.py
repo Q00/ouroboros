@@ -87,12 +87,15 @@ class LateralThinkHandler(BridgeAwareMixin):
         return MCPToolDefinition(
             name="ouroboros_lateral_think",
             description=(
-                "Generate alternative thinking approaches using lateral thinking personas. "
-                "Use when: stuck on a problem, going in circles, the same fix has "
+                "Get unstuck, or decide a hard trade-off, with lateral thinking personas. "
+                "Use when: the user says they are stuck or going in circles "
+                '("I\'ve tried three fixes", "nothing works"), the same fix has '
                 "failed twice, progress has stalled, OR the user faces a "
-                "consequential choice with no clear winner (architecture, library, "
-                "trade-off) — call proactively on these "
-                "signals; do not wait for the user to ask for 'lateral' or 'unstuck'. "
+                "consequential choice with no clear winner (architecture, "
+                "library, trade-off; hard to undo, or the team is split); call "
+                "it proactively on these "
+                "signals, before proposing yet another fix; do not wait for the "
+                "user to ask for 'lateral' or 'unstuck'. "
                 "Result: fresh perspectives from "
                 "different thinking modes: hacker (unconventional workarounds), "
                 "researcher (seeks information), simplifier (reduces complexity), "
@@ -167,6 +170,16 @@ class LateralThinkHandler(BridgeAwareMixin):
                     name="failed_attempts",
                     type=ToolInputType.ARRAY,
                     description="Previous failed approaches to avoid repeating",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="session_id",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Interview/lateral session id the fan-out belongs to. The id is "
+                        "recorded with the fan-out so a later "
+                        "ouroboros_submit_fanout_results from a different session is refused."
+                    ),
                     required=False,
                 ),
                 *_lateral_mode_parameters(),
@@ -595,6 +608,10 @@ class LateralThinkHandler(BridgeAwareMixin):
                 )
 
                 response_text += DECISION_INLINE_CONTRACT_TEXT
+            if research:
+                from ouroboros.mcp.tools.lateral_decision import build_lateral_research_block
+
+                response_text += build_lateral_research_block(True)
 
             single_meta = stamp_decision_meta(
                 {
@@ -604,6 +621,8 @@ class LateralThinkHandler(BridgeAwareMixin):
                 },
                 mode,
             )
+            if research:
+                single_meta["research"] = True
             return Result.ok(
                 MCPToolResult(
                     content=(MCPContentItem(type=ContentType.TEXT, text=response_text),),

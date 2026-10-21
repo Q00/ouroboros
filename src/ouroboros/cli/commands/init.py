@@ -35,6 +35,7 @@ from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.cli.formatters.prompting import multiline_prompt_async
 from ouroboros.cli.logging_setup import configure_cli_logging
+from ouroboros.cli.model_options import ModelOption, PinModelsOption, model_options
 from ouroboros.config import get_clarification_model, get_llm_backend
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.hitl_contract import (
@@ -1081,6 +1082,8 @@ def start(
             help="Show verbose logs including debug messages.",
         ),
     ] = False,
+    model: ModelOption = None,
+    pin_models: PinModelsOption = None,
 ) -> None:
     """Start an interactive interview to refine your requirements.
 
@@ -1097,6 +1100,8 @@ def start(
         ouroboros init start --llm-backend codex "Build a REST API"
 
         ouroboros init start --resume interview_20260116_120000
+
+        ouroboros init start --model frontier "Build a REST API"
 
         ouroboros init start
     """
@@ -1180,17 +1185,18 @@ def start(
 
     # Run interview
     try:
-        asyncio.run(
-            _run_interview(
-                context or "",
-                resume,
-                state_dir,
-                orchestrator,
-                debug,
-                public_runtime_backend(runtime.value if runtime else None),
-                llm_backend.value if llm_backend else None,
+        with model_options(model, pin_models):
+            asyncio.run(
+                _run_interview(
+                    context or "",
+                    resume,
+                    state_dir,
+                    orchestrator,
+                    debug,
+                    public_runtime_backend(runtime.value if runtime else None),
+                    llm_backend.value if llm_backend else None,
+                )
             )
-        )
     except typer.Exit:
         raise
     except KeyboardInterrupt:

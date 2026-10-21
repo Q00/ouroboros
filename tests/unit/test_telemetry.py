@@ -18,7 +18,7 @@ import uuid
 import pytest
 
 from ouroboros import telemetry
-from ouroboros.config.loader import get_telemetry_enabled
+from ouroboros.config.loader import get_telemetry_enabled, telemetry_opt_out_in_env
 
 
 @pytest.fixture(autouse=True)
@@ -214,6 +214,30 @@ class TestOptOut:
         telemetry.capture("command_run", {"command": "run"})
         telemetry.flush(timeout=1.0)
         assert events == []
+
+
+class TestTelemetryOptOutInEnv:
+    """The env half of the telemetry opt-out contract, persisted by setup."""
+
+    def test_do_not_track_truthy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DO_NOT_TRACK", "1")
+        monkeypatch.delenv("OUROBOROS_TELEMETRY", raising=False)
+        assert telemetry_opt_out_in_env() is True
+
+    def test_ouroboros_telemetry_falsy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+        monkeypatch.setenv("OUROBOROS_TELEMETRY", "off")
+        assert telemetry_opt_out_in_env() is True
+
+    def test_ouroboros_telemetry_1_is_not_an_opt_out(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+        monkeypatch.setenv("OUROBOROS_TELEMETRY", "1")
+        assert telemetry_opt_out_in_env() is False
+
+    def test_unset_env_is_not_an_opt_out(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+        monkeypatch.delenv("OUROBOROS_TELEMETRY", raising=False)
+        assert telemetry_opt_out_in_env() is False
 
 
 class TestDistinctId:
@@ -786,6 +810,22 @@ class TestCapture:
         props = sent[0]["properties"]
         assert props["failure_reason_code"] == "validation"
         assert props["failure_cause"] == "verify_workspace_mutated"
+
+    def test_failed_run_forwards_launch_cause(self, sent: list[dict[str, Any]]) -> None:
+        telemetry.capture_job_outcome(
+            "job-private-id",
+            "execute_seed",
+            terminal_status="failed",
+            result_meta={
+                "failure_reason_code": "config",
+                "failure_cause": "launch_workspace_unavailable",
+            },
+        )
+        telemetry.flush(timeout=2.0)
+
+        props = sent[0]["properties"]
+        assert props["failure_reason_code"] == "config"
+        assert props["failure_cause"] == "launch_workspace_unavailable"
 
     def test_unaudited_failure_cause_folds_to_unknown(self, sent: list[dict[str, Any]]) -> None:
         telemetry.capture_job_outcome(
@@ -1565,3 +1605,234 @@ class TestAcVerifyFailed:
         from ouroboros.orchestrator.verify_gate_outcome import _VERIFY_GATE_CAUSES
 
         assert telemetry._AC_VERIFY_CAUSES == _VERIFY_GATE_CAUSES
+
+
+class TestAcceptanceNoEvidence:
+    """Closed-vocabulary counts of criteria accepted without evidence."""
+
+    @staticmethod
+    def _config(text: str) -> None:
+        config_dir = Path.home() / ".ouroboros"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "config.yaml").write_text(text, encoding="utf-8")
+
+    @staticmethod
+    def _capture(pairs: Any, **overrides: Any) -> None:
+        kwargs: dict[str, Any] = {
+            "criterion_count": 4,
+            "verification_coverage": "low",
+            "surface": "cli_run",
+            "check_package": "on",
+            "check_package_status": "admitted",
+            "runtime_backend": "codex",
+        }
+        kwargs.update(overrides)
+        telemetry.capture_acceptance_no_evidence(pairs, **kwargs)
+
+    def test_counts_each_reason_pair(self, sent: list[dict[str, Any]]) -> None:
+        self._capture(
+            [
+                ("uncovered", "no_verifier_verdict"),
+                ("uncovered", "no_verifier_verdict"),
+                ("no_binding", "transcript_unavailable"),
+            ]
+        )
+        telemetry.flush(timeout=2.0)
+
+        assert len(sent) == 1
+        assert sent[0]["event"] == "acceptance_no_evidence"
+        props = sent[0]["properties"]
+        assert props["pair_uncovered__no_verifier_verdict"] == 2
+        assert props["pair_no_binding__transcript_unavailable"] == 1
+        assert props["no_evidence_count"] == 3
+        assert props["criterion_count"] == 4
+        assert props["verification_coverage"] == "low"
+        assert props["surface"] == "cli_run"
+        assert props["check_package"] == "on"
+        assert props["check_package_status"] == "admitted"
+        assert props["runtime_backend"] == "codex"
+        assert set(props) <= telemetry._ACCEPTANCE_NO_EVIDENCE_KEYS
+
+    def test_folds_unaudited_values_to_unknown(self, sent: list[dict[str, Any]]) -> None:
+        hostile = "/private/seed.yaml: add(2, 3) returns 5"
+        self._capture(
+            [(hostile, hostile), (None, None)],
+            verification_coverage=hostile,
+            surface=hostile,
+            check_package=hostile,
+            check_package_status=hostile,
+            runtime_backend=hostile,
+        )
+        telemetry.flush(timeout=2.0)
+
+        props = sent[0]["properties"]
+        assert props["pair_unknown__unknown"] == 2
+        for key in (
+            "verification_coverage",
+            "surface",
+            "check_package",
+            "check_package_status",
+            "runtime_backend",
+        ):
+            assert props[key] == "unknown"
+        assert hostile not in json.dumps(sent[0])
+
+    def test_sends_nothing_without_a_no_evidence_acceptance(
+        self, sent: list[dict[str, Any]]
+    ) -> None:
+        self._capture([])
+        telemetry.flush(timeout=2.0)
+        assert sent == []
+
+    def test_on_by_default_without_any_config(self, sent: list[dict[str, Any]]) -> None:
+        assert not (Path.home() / ".ouroboros" / "config.yaml").exists()
+        self._capture([("uncovered", "no_verifier_verdict")])
+        telemetry.flush(timeout=2.0)
+        assert len(sent) == 1
+
+    @pytest.mark.parametrize(
+        ("env", "config"),
+        (
+            ({"DO_NOT_TRACK": "1"}, None),
+            ({"OUROBOROS_TELEMETRY": "0"}, None),
+            ({}, "telemetry:\n  enabled: false\n"),
+        ),
+    )
+    def test_every_opt_out_suppresses_it(
+        self,
+        sent: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
+        env: dict[str, str],
+        config: str | None,
+    ) -> None:
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        if config is not None:
+            self._config(config)
+        self._capture([("uncovered", "no_verifier_verdict")])
+        telemetry.flush(timeout=2.0)
+        assert sent == []
+
+    def test_never_raises(self, sent: list[dict[str, Any]]) -> None:
+        def broken() -> Any:
+            yield ("uncovered", "no_verifier_verdict")
+            raise RuntimeError("boom")
+
+        self._capture(broken())
+        self._capture(None)
+        telemetry.flush(timeout=2.0)
+        assert sent == []
+
+
+class TestAcceptanceArtifactChecks:
+    """Closed-vocabulary outcomes of the controller-run artifact checks."""
+
+    @staticmethod
+    def _capture(**overrides: Any) -> None:
+        kwargs: dict[str, Any] = {
+            "base_regression": "rejected",
+            "worker_tests": "no_selected_files",
+            "failed_criteria": 2,
+            "criterion_count": 3,
+            "repairs": 1,
+            "surface": "cli_run",
+            "runtime_backend": "codex",
+        }
+        kwargs.update(overrides)
+        telemetry.capture_acceptance_artifact_checks(**kwargs)
+
+    def test_reports_what_each_check_observed(self, sent: list[dict[str, Any]]) -> None:
+        self._capture()
+        telemetry.flush(timeout=2.0)
+
+        assert len(sent) == 1
+        assert sent[0]["event"] == "acceptance_artifact_checks"
+        props = sent[0]["properties"]
+        assert props["base_regression"] == "rejected"
+        assert props["worker_tests"] == "no_selected_files"
+        assert (props["failed_criteria"], props["criterion_count"], props["repairs"]) == (2, 3, 1)
+        assert props["surface"] == "cli_run"
+        assert props["runtime_backend"] == "codex"
+        assert set(props) <= telemetry._ACCEPTANCE_ARTIFACT_CHECKS_KEYS
+
+    @pytest.mark.parametrize(
+        "reason",
+        ("timeout", "base_runner_crash", "no_selected_files", "unsupported_runner", "unavailable"),
+    )
+    def test_reports_why_a_check_had_no_observation(
+        self, sent: list[dict[str, Any]], reason: str
+    ) -> None:
+        self._capture(base_regression=reason, worker_tests="not_a_test_result", failed_criteria=0)
+        telemetry.flush(timeout=2.0)
+        props = sent[0]["properties"]
+        assert props["base_regression"] == reason
+        assert props["worker_tests"] == "not_a_test_result"
+
+    def test_folds_unaudited_values_to_unknown(self, sent: list[dict[str, Any]]) -> None:
+        hostile = "tests/test_calc.py::test_add"
+        self._capture(
+            base_regression=hostile, worker_tests=None, surface=hostile, runtime_backend=hostile
+        )
+        telemetry.flush(timeout=2.0)
+        props = sent[0]["properties"]
+        for key in ("base_regression", "worker_tests", "surface", "runtime_backend"):
+            assert props[key] == "unknown"
+        assert hostile not in json.dumps(sent[0])
+
+    def test_the_vocabulary_matches_the_product(self) -> None:
+        from ouroboros.boundary.base_regression import (
+            ArtifactCheckMode,
+            ArtifactCheckOutcome,
+            ArtifactEffect,
+            Exemption,
+        )
+
+        assert {item.value for item in ArtifactCheckOutcome} == telemetry._ARTIFACT_CHECK_OUTCOMES
+        assert {item.value for item in Exemption} == telemetry._ARTIFACT_EXEMPTIONS
+        assert {item.value for item in ArtifactCheckMode} == telemetry._ARTIFACT_CHECK_MODES
+        assert {item.value for item in ArtifactEffect} == telemetry._ARTIFACT_EFFECTS
+
+    def test_reports_each_modes_effect_and_what_would_have_failed(
+        self, sent: list[dict[str, Any]]
+    ) -> None:
+        self._capture(
+            base_regression_mode="decide",
+            worker_test_gate_mode="record",
+            base_regression_effect="regression_unadjudicated",
+            worker_tests_effect="recorded",
+            would_fail_criteria=2,
+        )
+        self._capture(base_regression_mode="/a/path", worker_tests_effect="maybe")
+        telemetry.flush(timeout=2.0)
+        first, second = (row["properties"] for row in sent)
+        assert (
+            first["base_regression_mode"],
+            first["worker_test_gate_mode"],
+            first["base_regression_effect"],
+            first["worker_tests_effect"],
+            first["would_fail_criteria"],
+        ) == ("decide", "record", "regression_unadjudicated", "recorded", 2)
+        assert second["base_regression_mode"] == "unknown"
+        assert second["worker_tests_effect"] == "unknown"
+
+    def test_reports_how_many_regressions_the_exemption_set_aside(
+        self, sent: list[dict[str, Any]]
+    ) -> None:
+        self._capture(base_regression="exempted", exemption="applied", exempted_tests=3)
+        self._capture(exemption="/private/path", exempted_tests=0)
+        telemetry.flush(timeout=2.0)
+        first, second = (row["properties"] for row in sent)
+        assert (first["base_regression"], first["exemption"], first["exempted_tests"]) == (
+            "exempted",
+            "applied",
+            3,
+        )
+        assert second["exemption"] == "unknown"
+
+    def test_an_opt_out_suppresses_it(
+        self, sent: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("DO_NOT_TRACK", "1")
+        self._capture()
+        telemetry.flush(timeout=2.0)
+        assert sent == []

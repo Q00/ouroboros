@@ -33,8 +33,6 @@ from ouroboros.core.seed import (
 )
 from ouroboros.events.base import BaseEvent
 
-pytestmark = pytest.mark.usefixtures("_legacy_unsafe_bank")
-
 
 def _fill_ready(ledger: SeedDraftLedger) -> None:
     for section, value in {
@@ -245,3 +243,161 @@ def test_seed_reviewer_timeout_block_resumes_into_review() -> None:
     # Pre-run review timeout blocks with tool_name="seed_reviewer" — a pure
     # transient that must not be a permanent dead end on --resume.
     assert _recoverable_phase_for_tool("seed_reviewer") is AutoPhase.REVIEW
+
+
+def _runtests_seed() -> Seed:
+    return Seed(
+        acceptance_criteria=(
+            AcceptanceCriterionSpec(
+                description="Generated migrations import every referenced module",
+                verify_command="./runtests.py migrations.test_writer",
+            ),
+        ),
+        **_seed_base(),  # type: ignore[arg-type]
+    )
+
+
+def _write_script(path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_pipeline_repairs_verifier_path_from_workspace_listing(tmp_path) -> None:
+    """A verifier script the checkout keeps elsewhere is repaired, not asked about."""
+    workspace = tmp_path / "checkout"
+    _write_script(workspace / "tests" / "runtests.py")
+    started: list[Seed] = []
+    saved: list[Seed] = []
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _runtests_seed()
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
+        started.append(seed)
+        return {"job_id": "job_preflight_repaired"}
+
+    def save_seed(seed: Seed) -> str:
+        saved.append(seed)
+        return str(tmp_path / f"{seed.metadata.seed_id}.yaml")
+
+    event_store = _RecordingEventStore()
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(workspace))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    pipeline = AutoPipeline(
+        _driver(tmp_path, event_store),
+        generate_seed,
+        run_starter=run_seed,
+        store=AutoStore(tmp_path),
+        seed_saver=save_seed,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert result.job_id == "job_preflight_repaired"
+    assert len(started) == 1
+    criterion = started[0].acceptance_criteria[0]
+    assert isinstance(criterion, AcceptanceCriterionSpec)
+    assert criterion.verify_command == "./tests/runtests.py migrations.test_writer"
+    assert started[0].metadata.parent_seed_id is not None
+    assert state.seed_id == started[0].metadata.seed_id
+    assert saved[-1].metadata.seed_id == started[0].metadata.seed_id
+    assert state.repair_round >= 1
+    repaired_events = [
+        event for event in event_store.appended if event.type == "auto.seed_preflight.repaired"
+    ]
+    assert len(repaired_events) == 1
+    repair = repaired_events[0].data["repairs"][0]
+    assert repair["subject"] == "runtests.py"
+    assert repair["evidence_path"] == "tests/runtests.py"
+    assert not [
+        event for event in event_store.appended if event.type == "auto.seed_preflight.blocked"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_ambiguous_verifier_location_still_blocks(tmp_path) -> None:
+    """Two files could be the script, so the listing does not decide; preflight blocks."""
+    workspace = tmp_path / "checkout"
+    _write_script(workspace / "a" / "runtests.py")
+    _write_script(workspace / "b" / "runtests.py")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _runtests_seed()
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
+        raise AssertionError("run must not start when Seed preflight blocks")
+
+    event_store = _RecordingEventStore()
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(workspace))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    pipeline = AutoPipeline(
+        _driver(tmp_path, event_store),
+        generate_seed,
+        run_starter=run_seed,
+        store=AutoStore(tmp_path),
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert result.stop_reason_code == "seed_preflight_unexecutable"
+    assert result.blocker is not None
+    assert "'runtests.py'" in result.blocker
+    assert not [
+        event for event in event_store.appended if event.type == "auto.seed_preflight.repaired"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_preflight_blocker_lists_only_blocking_questions(tmp_path) -> None:
+    """An advisory question is kept in the event, not presented as the stop reason."""
+    seed = Seed(
+        acceptance_criteria=(
+            AcceptanceCriterionSpec(
+                description="Verifier passes",
+                verify_command="./runtests.py migrations.test_writer",
+            ),
+            AcceptanceCriterionSpec(description="Reviewers can read the change summary"),
+        ),
+        **_seed_base(),  # type: ignore[arg-type]
+    )
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return seed
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
+        raise AssertionError("run must not start when Seed preflight blocks")
+
+    event_store = _RecordingEventStore()
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    pipeline = AutoPipeline(
+        _driver(tmp_path, event_store),
+        generate_seed,
+        run_starter=run_seed,
+        store=AutoStore(tmp_path),
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert result.blocker is not None
+    assert "'runtests.py'" in result.blocker
+    blocked = [
+        event for event in event_store.appended if event.type == "auto.seed_preflight.blocked"
+    ]
+    assert len(blocked) == 1
+    # The event keeps the advisory question (the criterion without a success
+    # contract); the blocker names only the blocking one it counts.
+    blocking_question, advisory_question = blocked[0].data["open_questions"]
+    assert result.blocker.startswith("Seed preflight found 1 unexecutable contract claim(s)")
+    assert blocking_question in result.blocker
+    assert advisory_question not in result.blocker

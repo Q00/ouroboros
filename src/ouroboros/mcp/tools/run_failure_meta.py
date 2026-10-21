@@ -13,6 +13,8 @@ from typing import Any
 
 import structlog
 
+from ouroboros.mcp.errors import MCPToolError
+from ouroboros.mcp.failure_taxonomy import LAUNCH_FAILURE_CAUSES
 from ouroboros.orchestrator.run_failure_cause import (
     UNKNOWN_RUN_FAILURE_CAUSE,
     derive_run_failure_cause,
@@ -29,6 +31,29 @@ _RUN_FAILURE_EVIDENCE_EVENT_TYPES = (
     "execution.ac.attempt_judged",
 )
 _RUN_FAILURE_EVIDENCE_LIMIT = 5000
+FAILURE_CAUSE_KEY = "failure_cause"
+
+
+def launch_error(cause: str, message: str, **kwargs: Any) -> MCPToolError:
+    """Build the ``execute_seed`` error for a run rejected before launch.
+
+    ``cause`` is one of ``LAUNCH_FAILURE_CAUSES`` and rides in
+    ``MCPToolError.failure_meta`` — never ``error_code`` (which would move
+    the error onto the SDK's JSON-RPC channel) and never ``details`` (which
+    ``__str__`` renders), so the message the synchronous
+    ``ouroboros_execute_seed`` caller sees is byte-identical to before. Only
+    the background job runner reads it (``mcp.tools.background.job_work_error``)
+    so the failed terminal payload, and from there ``workflow_outcome``, can
+    name the branch.
+    """
+    if cause not in LAUNCH_FAILURE_CAUSES:
+        raise ValueError(f"not a launch failure cause: {cause!r}")
+    return MCPToolError(
+        message,
+        tool_name="ouroboros_execute_seed",
+        failure_meta={FAILURE_CAUSE_KEY: cause},
+        **kwargs,
+    )
 
 
 async def derive_run_failure_meta(
@@ -79,4 +104,4 @@ async def derive_run_failure_meta(
     }
 
 
-__all__ = ["derive_run_failure_meta"]
+__all__ = ["FAILURE_CAUSE_KEY", "derive_run_failure_meta", "launch_error"]
