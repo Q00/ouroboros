@@ -98,8 +98,13 @@ heartbeat lock and cancellation directories, preventing illustrative session
 IDs from colliding across workers while preserving lease semantics within one.
 
 ```bash
-uv run --python 3.12 --no-sync pytest tests/unit/test_home_isolation.py -n 2 --dist worksteal -q
+uv run --python 3.12 --no-sync pytest tests/unit/test_home_isolation.py -n 2 --dist loadgroup -q
 ```
+
+Use `--dist loadgroup` for parallel runs that include wheel-building tests.
+The collection hook marks consumers of the shared `built_wheel` fixture,
+including indirect consumers, as `slow` and groups them on one worker. This
+lets them reuse one session-scoped wheel instead of building one per worker.
 
 ## Writing Tests
 
@@ -228,12 +233,20 @@ async def test_dashboard_renders():
 | Integration | `tests/integration/` | Varies | Real local components or external services, as specified by fixtures | Before PR |
 | E2E | `tests/e2e/` | Varies | CLI/system prerequisites specified by each test | Before release |
 
+The collection hook marks every test under `tests/integration/` as
+`integration`, so `-m integration` selects that directory's tests. Marker
+filters are independent of directory selection: `slow` wheel consumers also
+exist under `tests/unit/`.
+
 ## CI Commands
 
 ```bash
 # Python 3.12 pull-request test job in .github/workflows/test.yml
 uv sync --python 3.12 --dev --group mcp-test --group litellm-test
-uv run --python 3.12 --no-sync pytest tests/ -n 4 --dist worksteal --durations=25 -m "not performance" -q
+uv run --python 3.12 --no-sync pytest tests/ -n 4 --dist loadgroup --durations=25 -m "not performance and not slow" -q
+
+# Python 3.12 push test job: includes slow tests and collects coverage
+uv run --python 3.12 --no-sync pytest tests/ -n 4 --dist loadgroup --durations=25 -m "not performance" --cov=src/ouroboros --cov-report=xml -q
 
 # Separate lint and type-check gates
 uv run ruff check src/ tests/
@@ -242,5 +255,8 @@ uv run mypy src/ouroboros
 ```
 
 Pushes to main/develop also test Python 3.13 and 3.14. The 3.14 job omits
-`litellm-test`; the 3.12 push job adds coverage. The workflow is authoritative
-for the matrix and platform-specific jobs; see [CI Gates](ci-gates.md).
+`litellm-test`. Pull requests exclude `performance` and `slow` tests; push
+correctness jobs exclude only `performance`. Performance tests run separately
+on pushes with `-m performance -n 0` in an advisory job. The workflow is
+authoritative for the matrix and platform-specific jobs; see
+[CI Gates](ci-gates.md).
