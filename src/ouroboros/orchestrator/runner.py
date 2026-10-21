@@ -46,6 +46,7 @@ from ouroboros.config import (
     get_llm_model_for_role,
     get_usage_limit_pause_seconds,
 )
+from ouroboros.config.exec_sandbox import exec_sandbox_enabled
 from ouroboros.core.conductor import ConductorDirective
 from ouroboros.core.errors import ConfigError, OuroborosError, PersistenceError
 from ouroboros.core.execution_preferences import (
@@ -54,16 +55,22 @@ from ouroboros.core.execution_preferences import (
     resolve_execution_preferences,
 )
 from ouroboros.core.project_identity import (
-    ManagedProjectOwnershipError,
-    ManagedProjectScopeError,
+    ManagedProjectOwnershipError as ManagedProjectOwnershipError,
+)
+from ouroboros.core.project_identity import (
+    ManagedProjectScopeError as ManagedProjectScopeError,
+)
+from ouroboros.core.project_identity import (
     ProjectIdentity,
     ProjectIdentityError,
-    ProjectIdentityUnavailableError,
     active_publication_evidence_sink,
     publication_evidence_sink,
     resolve_managed_project_identity,
     resolve_project_identity,
     resolve_project_identity_for_publication,
+)
+from ouroboros.core.project_identity import (
+    ProjectIdentityUnavailableError as ProjectIdentityUnavailableError,
 )
 from ouroboros.core.seed import AcceptanceCriterionSpec, ac_text, ac_texts
 from ouroboros.core.seed_contract import SeedContract
@@ -153,6 +160,8 @@ from ouroboros.orchestrator.execution_runtime_scope import (
 )
 from ouroboros.orchestrator.execution_semantics import (
     CURRENT_EXECUTION_SEMANTICS_VERSION,
+    migrated_pre_exec_sandbox_execution_semantics,
+    migrated_pre_transcript_verifier_execution_semantics,
     migrated_pre_verify_shell_execution_semantics,
     pre_adaptive_execution_semantics_rejection,
     valid_execution_semantics_contract,
@@ -181,6 +190,7 @@ from ouroboros.orchestrator.policy import (
 )
 from ouroboros.orchestrator.profile_loader import ExecutionProfile, ProfileError, load_profile
 from ouroboros.orchestrator.profile_strategy import ProfileBackedStrategy
+from ouroboros.orchestrator.project_anchor import ProjectAnchor
 from ouroboros.orchestrator.recoverable_failure import (
     is_usage_limit_pause_message,
     project_failure_metadata,
@@ -204,8 +214,10 @@ from ouroboros.orchestrator.session import (
     SessionRepository,
     SessionStatus,
     SessionTracker,
+    _optional_create_session_kwargs,
     runtime_resume_identity_from_payload,
 )
+from ouroboros.orchestrator.verify_base_signal import VerifyBaseSignal
 from ouroboros.orchestrator.verify_shell import (
     capture_verify_shell_identity,
     resolve_verify_shell,
@@ -979,9 +991,31 @@ class OrchestratorRunner:
         self._task_workspace_value: TaskWorkspace | None = None
         self._task_workspace_lock_held = False
         self._task_workspace = task_workspace
+        self._project_anchor = ProjectAnchor(
+            workspace=lambda: self._task_workspace,
+            effective_cwd=lambda: self._effective_cwd(),
+            canonical_path=lambda value: self._canonical_path(value),
+            task_identity=lambda workspace: self._task_workspace_project_identity(workspace),
+            translate_error=lambda exc: self._project_identity_error(exc),
+            project_identity=lambda: self._project_identity(),
+            resolved_identity=lambda identity: self._resolved_proof_workspace_identity(identity),
+            task_resume_identity=lambda workspace: self._task_resume_workspace_identity(workspace),
+            resolve_identity=lambda cwd: resolve_project_identity(cwd),
+            resolve_publication_identity=lambda cwd: resolve_project_identity_for_publication(cwd),
+            publication_sink=lambda: active_publication_evidence_sink(),
+            legacy_identity=lambda workspace, canonical: legacy_task_workspace_identity(
+                workspace, canonical
+            ),
+        )
         self._max_decomposition_depth = validate_max_decomposition_depth(max_decomposition_depth)
         self._max_parallel_workers = max(1, max_parallel_workers)
         self._fat_harness_mode = fat_harness_mode
+        # Optional acceptance authority (ouroboros.boundary.authority), set after
+        # construction; see its call site in _execute_parallel.
+        self.acceptance_authority: Any | None = None
+        # Set by the check package when it was attempted but not prepared, so
+        # the base snapshot the verify gate reads is missing, not just off.
+        self.check_package_unprepared = False
         self._session_signal_hub = session_signal_hub
         self._execution_preferences_override_explicit = (
             efficiency_mode is not None or frugality_assurance is not None
@@ -1012,10 +1046,10 @@ class OrchestratorRunner:
         # it). The DEFAULT sonnet fallback that execution_handlers/run.py pass to
         # create_agent_runtime is a shipped default, not a user pin; explicit
         # environment or persisted Execute-stage pins both count here.
-        _model_pin = get_execution_model()
+        _runtime_backend = str(getattr(adapter, "runtime_backend", "")).strip().lower()
+        _model_pin = get_execution_model(_runtime_backend)
         self._model_routing_disabled = _model_routing_disabled
         self._model_pin = _model_pin
-        _runtime_backend = str(getattr(adapter, "runtime_backend", "")).strip().lower()
         _model_routing_explicit = bool(
             _model_routing_env is not None and _model_routing_env.strip()
         )
@@ -1066,9 +1100,24 @@ class OrchestratorRunner:
         # Routing B compatibility bridge rebuilds its immutable registry from
         # this snapshot at the effect boundary, so a mutable/resumed router can
         # never introduce an unconfigured model or cost.
+        from ouroboros.config.model_selection import pin_models_enabled
+        from ouroboros.orchestrator.resolved_models import resolve_route_economics
+
+        # Under ``auto`` each tier runs on the backend's latest model of that tier;
+        # the configured ladder is kept for replaying pre-upgrade contracts.
+        self._configured_route_economics = _economics_config
+        _economics_config = resolve_route_economics(
+            _economics_config,
+            runtime_backend=getattr(adapter, "runtime_backend", None),
+            pinned=pin_models_enabled(_config),
+        )
         self._route_economics = _economics_config
         _execution_config = _config.execution
         self._run_verify_commands = _execution_config.run_verify_commands
+        # Sealed in the execution-semantics contract; a resume uses the run's own mode.
+        self._transcript_verifier = _execution_config.transcript_verifier
+        # Sealed in the execution-semantics contract; replay confines with it.
+        self._exec_sandbox_enabled = exec_sandbox_enabled()
         self._verify_command_timeout_seconds = _execution_config.verify_command_timeout_seconds
         verify_shell = resolve_verify_shell() if self._run_verify_commands else None
         self._verify_shell_identity = (
@@ -1169,6 +1218,7 @@ class OrchestratorRunner:
         self._model_router = replace(
             self._model_router,
             child_tier=self._model_router.base_tier,
+            child_model_lowering_enabled=False,
         )
 
     def _authoritative_model_router(
@@ -1190,7 +1240,11 @@ class OrchestratorRunner:
             base_tier_override=requested_model_tier,
         )
         if router is not None and not preferences.child_model_lowering_enabled:
-            router = replace(router, child_tier=router.base_tier)
+            router = replace(
+                router,
+                child_tier=router.base_tier,
+                child_model_lowering_enabled=False,
+            )
         return router
 
     def _resolved_shadow_replay_enabled(self) -> bool:
@@ -3284,65 +3338,25 @@ class OrchestratorRunner:
     @staticmethod
     def _canonical_path(value: str) -> str:
         """Return a symlink-resolved absolute path without requiring existence."""
-        return str(Path(value).expanduser().resolve(strict=False))
+        return ProjectAnchor.canonical_path(value)
 
     @classmethod
     def _task_workspace_project_identity(cls, workspace: TaskWorkspace) -> ProjectIdentity:
         """Resolve a managed worktree against its durable source checkout."""
-        try:
-            return resolve_managed_project_identity(
-                workspace.effective_cwd,
-                source_root=workspace.repo_root,
-                source_workspace=workspace.original_cwd,
-                worktree_root=workspace.worktree_path,
-            )
-        except ManagedProjectScopeError as exc:
-            raise OrchestratorError(
-                message="Managed source and execution workspace scopes do not match",
-                details={
-                    "invalid": "runtime_cwd",
-                    "source_cwd": exc.source_workspace,
-                    "execution_cwd": exc.execution_workspace,
-                    "resume_blocked": "runtime_cwd_mismatch",
-                },
-            ) from exc
-        except ManagedProjectOwnershipError as exc:
-            raise OrchestratorError(
-                message="Managed worktree does not belong to its source project",
-                details={
-                    "invalid": "project_identity",
-                    "source_identity": exc.source_identity.to_workspace_data(),
-                    "execution_identity": exc.execution_identity.to_workspace_data(),
-                    "resume_blocked": "project_identity_mismatch",
-                },
-            ) from exc
+        return ProjectAnchor.task_workspace_project_identity(
+            workspace,
+            resolve_managed=resolve_managed_project_identity,
+            error_type=OrchestratorError,
+        )
 
     @staticmethod
     def _project_identity_error(exc: ProjectIdentityError) -> OrchestratorError:
         """Normalize resolver failures at the orchestration lifecycle boundary."""
-        details: dict[str, Any] = {"invalid": "project_identity", "cause": str(exc)}
-        if isinstance(exc, ProjectIdentityUnavailableError):
-            details.update(
-                resume_blocked="project_identity_unavailable",
-                retryable=True,
-            )
-        return OrchestratorError(message="Cannot resolve project identity", details=details)
+        return ProjectAnchor.project_identity_error(exc, error_type=OrchestratorError)
 
     def _project_identity(self) -> ProjectIdentity | None:
         """Return the single canonical identity shared by event and contract."""
-        try:
-            if self._task_workspace is not None:
-                self._effective_cwd()
-                return self._task_workspace_project_identity(self._task_workspace)
-            effective_cwd = self._effective_cwd()
-            if not isinstance(effective_cwd, str) or not effective_cwd.strip():
-                return None
-            if active_publication_evidence_sink() is None:
-                return resolve_project_identity(effective_cwd)
-            identity, _evidence = resolve_project_identity_for_publication(effective_cwd)
-            return identity
-        except ProjectIdentityError as exc:
-            raise self._project_identity_error(exc) from exc
+        return self._project_anchor.project_identity()
 
     def _proof_workspace_identity(self) -> dict[str, str] | None:
         """Return the stable project + source-workspace identity for this run.
@@ -3354,82 +3368,40 @@ class OrchestratorRunner:
         to their primary source root. Non-Git callers retain the conservative
         canonical effective-cwd identity.
         """
-        return self._resolved_proof_workspace_identity(self._project_identity())
+        return self._project_anchor.proof_workspace_identity()
 
     @staticmethod
     def _resolved_proof_workspace_identity(
         project_identity: ProjectIdentity | None,
     ) -> dict[str, str] | None:
         """Project one already-resolved identity without another resolver call."""
-        return project_identity.to_workspace_data() if project_identity is not None else None
+        return ProjectAnchor.resolved_proof_workspace_identity(project_identity)
 
     def _legacy_proof_workspace_identity(self) -> dict[str, str] | None:
         """Reproduce the pre-Project-Map V1 nested workspace representation."""
-        if self._task_workspace is not None:
-            return legacy_task_workspace_identity(self._task_workspace, self._canonical_path)
-        effective_cwd = self._effective_cwd()
-        if not isinstance(effective_cwd, str) or not effective_cwd.strip():
-            return None
-        return {
-            "project_root": self._canonical_path(effective_cwd),
-            "workspace_path": ".",
-        }
+        return self._project_anchor.legacy_proof_workspace_identity()
 
     @staticmethod
     def _project_start_identity(
         progress: Mapping[str, Any],
     ) -> tuple[bool, ProjectIdentity | None]:
         """Parse the all-or-none immutable Project Map session anchor."""
-        raw_start_identity = progress.get(SESSION_START_IDENTITY_PROGRESS_KEY)
-        if not isinstance(raw_start_identity, Mapping):
-            return False, None
-        project_keys = frozenset({"project_id", "project_root", "workspace_path"})
-        present_keys = {key for key in project_keys if key in raw_start_identity}
-        if not present_keys:
-            return False, None
-        if present_keys != project_keys:
-            raise OrchestratorError(
-                message="Cannot resume with a partial project identity anchor",
-                details={"invalid": "project_identity_anchor"},
-            )
-        try:
-            identity = ProjectIdentity(
-                project_id=raw_start_identity["project_id"],
-                project_root=raw_start_identity["project_root"],
-                workspace_path=raw_start_identity["workspace_path"],
-            )
-        except ProjectIdentityUnavailableError as exc:
-            raise OrchestratorRunner._project_identity_error(exc) from exc
-        except (KeyError, TypeError, ValueError) as exc:
-            raise OrchestratorError(
-                message="Cannot resume with an invalid project identity anchor",
-                details={"invalid": "project_identity_anchor"},
-            ) from exc
-        return True, identity
+        return ProjectAnchor.project_start_identity(
+            progress,
+            translate_error=OrchestratorRunner._project_identity_error,
+            error_type=OrchestratorError,
+        )
 
     @classmethod
     def _task_resume_workspace_identity(cls, workspace: TaskWorkspace) -> dict[str, str]:
         """Return the exact managed checkout identity required for safe resume."""
-        return {
-            "mode": "task_workspace",
-            "durable_id": workspace.durable_id,
-            "repo_root": cls._canonical_path(workspace.repo_root),
-            "worktree_path": cls._canonical_path(workspace.worktree_path),
-            "effective_cwd": cls._canonical_path(workspace.effective_cwd),
-            "branch": workspace.branch,
-        }
+        return ProjectAnchor.task_resume_workspace_identity(
+            workspace, canonical_path=cls._canonical_path
+        )
 
     def _resume_workspace_identity(self) -> dict[str, str] | None:
         """Return session-specific checkout identity, unlike stable proof cohorting."""
-        if self._task_workspace is not None:
-            return self._task_resume_workspace_identity(self._task_workspace)
-        effective_cwd = self._effective_cwd()
-        if not isinstance(effective_cwd, str) or not effective_cwd.strip():
-            return None
-        return {
-            "mode": "direct",
-            "effective_cwd": self._canonical_path(effective_cwd),
-        }
+        return self._project_anchor.resume_workspace_identity()
 
     @staticmethod
     def _routing_fingerprint(routing_contract: Mapping[str, Any]) -> str:
@@ -3926,6 +3898,7 @@ class OrchestratorRunner:
         return {
             "version": CURRENT_EXECUTION_SEMANTICS_VERSION,
             "run_verify_commands": self._run_verify_commands,
+            "exec_sandbox_enabled": self._exec_sandbox_enabled,
             "verify_command_timeout_seconds": self._verify_command_timeout_seconds,
             "verify_shell_identity": (
                 dict(self._verify_shell_identity)
@@ -3944,6 +3917,7 @@ class OrchestratorRunner:
                 max_limit=self._max_parallel_workers,
             ),
             "fat_harness_mode": self._fat_harness_mode,
+            "transcript_verifier": self._transcript_verifier,
             "shadow_replay_enabled": self._shadow_replay_enabled,
             "checkpoint_store_enabled": self._checkpoint_store is not None,
             "session_signal_hub_enabled": self._session_signal_hub is not None,
@@ -5594,6 +5568,7 @@ class OrchestratorRunner:
     ) -> dict[str, Any]:
         """Build the durable resolved inputs shared by resume and proof cohorting."""
         from ouroboros.orchestrator.model_routing import serialize_model_router
+        from ouroboros.orchestrator.resolved_models import resolved_models_contract
         from ouroboros.orchestrator.route_compat import (
             build_route_compat_projection,
             serialize_route_compat_contract,
@@ -5632,6 +5607,11 @@ class OrchestratorRunner:
         # change cannot silently alter ``model_reasoning_effort`` on resume.
         routing_contract["base_reasoning_effort"] = self._reasoning_effort
         routing_contract["constructor_model"] = self._constructor_model_contract()
+        routing_contract["resolved_models"] = resolved_models_contract(
+            self._route_economics,
+            runtime_backend=getattr(self._adapter, "runtime_backend", None),
+            execute_model=routing_contract["constructor_model"].get("model"),
+        )
         routing_contract["runtime_execution"] = self._runtime_execution_identity_contract(
             runtime_handle
         )
@@ -6152,6 +6132,44 @@ class OrchestratorRunner:
             raw_execution_semantics = migrated_verify_shell_semantics
             self._verify_shell_identity = None
 
+        migrated_sandbox_semantics = migrated_pre_exec_sandbox_execution_semantics(
+            raw_execution_semantics
+        )
+        if migrated_sandbox_semantics is not None:
+            if raw_proof.get("execution_semantics_fingerprint") != (
+                self._execution_semantics_fingerprint(raw_execution_semantics)
+            ):
+                raise OrchestratorError(
+                    message="Cannot resume with an invalid pre-exec-sandbox contract",
+                    details={"invalid": "execution_semantics_fingerprint"},
+                )
+            raw_contract = deepcopy(dict(raw_contract))
+            raw_proof = raw_contract["frugality_proof"]
+            raw_contract["execution_semantics"] = migrated_sandbox_semantics
+            raw_proof["execution_semantics_fingerprint"] = self._execution_semantics_fingerprint(
+                migrated_sandbox_semantics
+            )
+            raw_execution_semantics = migrated_sandbox_semantics
+
+        migrated_verifier_semantics = migrated_pre_transcript_verifier_execution_semantics(
+            raw_execution_semantics
+        )
+        if migrated_verifier_semantics is not None:
+            if raw_proof.get("execution_semantics_fingerprint") != (
+                self._execution_semantics_fingerprint(raw_execution_semantics)
+            ):
+                raise OrchestratorError(
+                    message="Cannot resume with an invalid pre-transcript-verifier contract",
+                    details={"invalid": "execution_semantics_fingerprint"},
+                )
+            raw_contract = deepcopy(dict(raw_contract))
+            raw_proof = raw_contract["frugality_proof"]
+            raw_contract["execution_semantics"] = migrated_verifier_semantics
+            raw_proof["execution_semantics_fingerprint"] = self._execution_semantics_fingerprint(
+                migrated_verifier_semantics
+            )
+            raw_execution_semantics = migrated_verifier_semantics
+
         migrate_preflight_contract = self._valid_legacy_preflight_execution_semantics_contract(
             raw_execution_semantics
         )
@@ -6217,6 +6235,8 @@ class OrchestratorRunner:
         persisted_execution_semantics_fingerprint = raw_proof.get("execution_semantics_fingerprint")
         persisted_execution_inputs_fingerprint = raw_proof.get("execution_inputs_fingerprint")
         persisted_seed_fingerprint = raw_proof.get("seed_fingerprint")
+        from ouroboros.orchestrator import resolved_models as model_replay
+
         persisted_constructor_model = raw_routing.get("constructor_model")
         persisted_runtime_execution = raw_routing.get("runtime_execution")
         persisted_runtime_backend = raw_routing.get("runtime_backend")
@@ -6290,6 +6310,7 @@ class OrchestratorRunner:
                 self._valid_constructor_model_contract(persisted_constructor_model)
                 or (prepared_live_execution and persisted_constructor_model == {"observed": False})
             )
+            or not model_replay.valid_resolved_models(raw_routing.get("resolved_models"))
             or not self._valid_runtime_execution_identity_contract(persisted_runtime_execution)
             or not (
                 isinstance(persisted_runtime_backend, str)
@@ -6499,6 +6520,17 @@ class OrchestratorRunner:
                     "hint": "Start a new session for changed goals, constraints, or ACs.",
                 },
             )
+        # Replay the models the run started on instead of resolving them again.
+        persisted_resolved = raw_routing.get("resolved_models") or {}
+        runtime_backend = getattr(self._adapter, "runtime_backend", None)
+        if not self._model_routing_override_explicit:
+            model_replay.replay_constructor_model(
+                self._adapter,
+                runtime_backend=runtime_backend,
+                persisted=persisted_resolved.get(
+                    "execute", persisted_constructor_model.get("model")
+                ),
+            )
         current_constructor_model = self._constructor_model_contract()
         if persisted_constructor_model != current_constructor_model:
             raise OrchestratorError(
@@ -6526,7 +6558,10 @@ class OrchestratorRunner:
                 },
             )
 
-        from ouroboros.orchestrator.model_routing import deserialize_model_router
+        from ouroboros.orchestrator.model_routing import (
+            deserialize_model_router,
+            is_legacy_quality_first_router,
+        )
 
         recognized, restored_router = deserialize_model_router(raw_routing)
         if not recognized:
@@ -6555,10 +6590,30 @@ class OrchestratorRunner:
                     "execution_runtime_backend": persisted_runtime_backend,
                 },
             )
+        if is_legacy_quality_first_router(
+            raw_routing, persisted_preferences.efficiency_mode.value, restored_router
+        ):
+            raise OrchestratorError(
+                message="Cannot resume a legacy quality-first routing contract",
+                details={
+                    "reason": "The saved child-routing behavior differs from the corrected quality-first policy",
+                    "hint": "Start a successor or new run under the corrected policy.",
+                },
+            )
         if migrate_v2_contract or migrate_v3_contract:
             persisted_requested_model_tier = (
                 restored_router.base_tier if restored_router is not None else None
             )
+        replayed_economics = model_replay.replay_route_economics(
+            self._route_economics,
+            self._configured_route_economics,
+            runtime_backend=runtime_backend,
+            persisted_tiers=persisted_resolved.get(
+                "tiers", restored_router.tier_models if restored_router is not None else {}
+            ),
+        )
+        if replayed_economics is not None and not self._model_routing_override_explicit:
+            self._route_economics = replayed_economics
         authoritative_router = self._authoritative_model_router(
             persisted_preferences,
             requested_model_tier=persisted_requested_model_tier,
@@ -6676,6 +6731,16 @@ class OrchestratorRunner:
             )
         self._execution_preferences = persisted_preferences
         self._shadow_replay_enabled = self._resolved_shadow_replay_enabled()
+        persisted_verifier = (
+            raw_execution_semantics.get("transcript_verifier")
+            if isinstance(raw_execution_semantics, Mapping)
+            else None
+        )
+        if persisted_verifier in ("decide", "record"):
+            # The run's own sealed mode, never the live config: a run that
+            # started deciding (every run sealed before the setting existed)
+            # resumes deciding, one that started recording keeps recording.
+            self._transcript_verifier = persisted_verifier
         current_execution_semantics = self._execution_semantics_contract()
         if (
             not migrate_legacy_contract
@@ -8643,18 +8708,13 @@ class OrchestratorRunner:
                 create_session_kwargs["gate_forced"] = seed.metadata.gate_forced
             if self._task_workspace is not None:
                 create_session_kwargs["project_task_workspace"] = self._task_workspace
-            try:
-                if (
-                    "acceptance_root_indices"
-                    in inspect.signature(self._session_repo.create_session).parameters
-                ):
-                    create_session_kwargs["acceptance_root_indices"] = range(
-                        len(seed.acceptance_criteria)
-                    )
-            except (TypeError, ValueError):
-                # Legacy/mock repositories may not expose an inspectable signature;
-                # the durable SessionRepository path always does.
-                pass
+            create_session_kwargs.update(
+                _optional_create_session_kwargs(
+                    self._session_repo.create_session,
+                    interview_id=getattr(seed.metadata, "interview_id", None),
+                    acceptance_criteria_count=len(seed.acceptance_criteria),
+                )
+            )
             # Establish the exact capability and PID liveness lease before any
             # durable RUNNING tracker can be reconstructed by an observer. The
             # resolved session id is allocated locally for that purpose rather
@@ -9266,12 +9326,15 @@ class OrchestratorRunner:
             # uses the AC executor even for single-AC or --sequential runs so
             # the evidence gate is never silently bypassed. Investment metadata
             # likewise requires per-AC dispatch so direct whole-seed execution
-            # cannot discard difficulty/stakes authority.
+            # cannot discard difficulty/stakes authority. An installed check
+            # package authority decides only on the per-AC path, so it takes
+            # that path for one AC or a sequential run too.
             has_investment_metadata = _seed_has_investment_metadata(seed)
             if (
                 self._fat_harness_mode
                 or force_sequential_levels
                 or has_investment_metadata
+                or self.acceptance_authority is not None
                 or (parallel and len(seed.acceptance_criteria) > 1)
             ):
                 parallel_kwargs: dict[str, Any] = {
@@ -9286,9 +9349,9 @@ class OrchestratorRunner:
                 }
                 if externally_satisfied_acs:
                     parallel_kwargs["externally_satisfied_acs"] = externally_satisfied_acs
-                if force_sequential_levels or (
-                    not parallel and (self._fat_harness_mode or has_investment_metadata)
-                ):
+                # A sequential run that takes the per-AC path stays sequential,
+                # whatever sent it there.
+                if force_sequential_levels or not parallel:
                     parallel_kwargs["force_sequential_levels"] = True
 
                 try:
@@ -10230,21 +10293,21 @@ class OrchestratorRunner:
 
             analyzer = self._build_dependency_analyzer()
             dep_result = await analyzer.analyze(seed.acceptance_criteria)
-
             if dep_result.is_err:
+                from ouroboros.orchestrator.dependency_analyzer import DependencyCycleError
+
+                if isinstance(dep_result.error, DependencyCycleError):
+                    raise dep_result.error
                 log.warning(
                     "orchestrator.runner.dependency_analysis_failed",
                     execution_id=exec_id,
                     error=str(dep_result.error),
                 )
                 # Fallback: run all ACs in a single parallel level
-                all_indices = tuple(range(len(seed.acceptance_criteria)))
+                acs = tuple(ACNode(i, ac_text(ac)) for i, ac in enumerate(seed.acceptance_criteria))
                 dependency_graph = DependencyGraph(
-                    nodes=tuple(
-                        ACNode(index=i, content=ac_text(ac), depends_on=())
-                        for i, ac in enumerate(seed.acceptance_criteria)
-                    ),
-                    execution_levels=(all_indices,) if all_indices else (),
+                    nodes=acs,
+                    execution_levels=(tuple(node.index for node in acs),) if acs else (),
                 )
             else:
                 dependency_graph = dep_result.value
@@ -10322,6 +10385,7 @@ class OrchestratorRunner:
             checkpoint_store=self._checkpoint_store,
             execution_profile=execution_profile,
             fat_harness_mode=execution_semantics["fat_harness_mode"],
+            transcript_verifier=execution_semantics["transcript_verifier"],
             reasoning_effort=self._reasoning_effort,
             # Legacy model selection predates Routing D and remains active when
             # durable route ownership is unavailable (for example, configured
@@ -10330,6 +10394,7 @@ class OrchestratorRunner:
             model_router=self._model_router,
             route_economics=self._route_economics,
             run_verify_commands=execution_semantics["run_verify_commands"],
+            exec_sandbox_enabled=execution_semantics["exec_sandbox_enabled"],
             verify_command_timeout_seconds=execution_semantics["verify_command_timeout_seconds"],
             verify_shell_identity=cast(
                 Mapping[str, object] | None,
@@ -10344,6 +10409,16 @@ class OrchestratorRunner:
             resolved_self_governs_rate_limit=execution_semantics["backend_self_governs_rate_limit"],
             expected_runtime_effect_capabilities=execution_semantics["runtime_effect_capabilities"],
             usage_limit_pause_seconds=execution_semantics["usage_limit_pause_seconds"],
+        )
+        if (install := getattr(self.acceptance_authority, "install", None)) is not None:
+            # Check package on: it drives repairs; the legacy verifier is advisory.
+            install(parallel_executor)
+        # The check package's base snapshot lets the verify gate tell a failing
+        # command that carries no signal (it fails on the base too) from a real
+        # rejection. It is read in every mode, record included.
+        parallel_executor._verify_base_signal = VerifyBaseSignal.for_run(
+            self.acceptance_authority,
+            check_package_unprepared=getattr(self, "check_package_unprepared", False),
         )
 
         raw_published_pause_owner = tracker.progress.get("pause_owner")
@@ -10457,6 +10532,14 @@ class OrchestratorRunner:
                 ),
                 default_pause_seconds=execution_semantics["usage_limit_pause_seconds"],
             )
+        if self.acceptance_authority is not None and recoverable_failure_pause is None:
+            # Terminal, non-pausing results only (a paused run is decided when it
+            # resumes); it may replace covered root results before the terminal
+            # plan is built, so the durable status carries its decision.
+            parallel_result = await self.acceptance_authority(
+                seed=seed, execution_id=exec_id, parallel_result=parallel_result
+            )
+            success = parallel_result.all_succeeded
 
         final_message = render_parallel_completion_message(
             parallel_result,

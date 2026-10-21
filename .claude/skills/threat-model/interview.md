@@ -180,7 +180,9 @@ Goal: validate before writing.
 
 ## Emit
 
-Write `<target-dir>/THREAT_MODEL.md` per `schema.md`. Set `## 7. Provenance`:
+Publish `<target-dir>/THREAT_MODEL.md` per `schema.md` through the shared
+`checkpoint.py append --replace --from` output contract. For the Ouroboros
+target, use `docs/security/THREAT_MODEL.md`. Set `## 7. Provenance`:
 
 ```
 - mode: interview

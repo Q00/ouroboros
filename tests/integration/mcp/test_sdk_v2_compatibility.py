@@ -255,7 +255,7 @@ def _lossless_protocol_server() -> Server[Any]:
             marks=pytest.mark.xfail(
                 strict=True,
                 reason=(
-                    "mcp 2.0.0 drops explicit structuredContent:null and its output-schema "
+                    "mcp 2.2.0 drops explicit structuredContent:null and its output-schema "
                     "validator treats null as an absent field"
                 ),
             ),

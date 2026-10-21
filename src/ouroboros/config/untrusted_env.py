@@ -220,6 +220,20 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # Onboarding attribution is an analytics boundary. A cloned repo must
         # not rewrite the surface label used to compare activation cohorts.
         "OUROBOROS_FIRST_COMMAND_SURFACE",
+        # Check-package switch (boundary/switch.py): a cloned repo must not
+        # turn off the verification layer that judges its own changes, nor
+        # decide whether model-written checks execute.
+        "OUROBOROS_CHECK_PACKAGE",
+        # ``ooo auto`` requester command (auto/requester.py): the value names a
+        # program auto runs for each routed interview question, the same
+        # executable-selection class as the CLI paths above. The timeout is
+        # kept beside it so a cloned repo cannot shape how long it runs.
+        "OUROBOROS_AUTO_REQUESTER_COMMAND",
+        "OUROBOROS_AUTO_REQUESTER_TIMEOUT_SECONDS",
+        # ``ooo auto`` investigator call cap and hang guard (auto/investigator.py): 0 turns
+        # off the repository reading, so a cloned repo must not set it.
+        "OUROBOROS_AUTO_INVESTIGATOR_MAX_CALLS",
+        "OUROBOROS_AUTO_INVESTIGATOR_CALL_TIMEOUT_SECONDS",
         "DO_NOT_TRACK",
         "CI",
         "GITHUB_ACTIONS",
@@ -245,6 +259,11 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # is therefore an approval-gate-bypass sink — same class as the
         # permission-mode overrides above.
         "OUROBOROS_TOOL_CAPABILITIES",
+        # Execution-sandbox off switch (`runtime/exec_sandbox.py`): turning it
+        # off lets controller-run commands (verifier replay) write outside
+        # their workspace copy and use the network. A cloned repository must
+        # not be able to lift the confinement its own scripts run under.
+        "OUROBOROS_EXEC_SANDBOX",
         # Backend limits YAML root (`orchestrator/backend_limits.py`); a
         # relative value resolves against the cloned repository — same
         # config-root class as the tool-capability override above.
@@ -265,11 +284,36 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # disables tier routing by design, so an untrusted project .env must not
         # be able to force an arbitrary model or bypass the frugality policy.
         "OUROBOROS_EXECUTION_MODEL",
+        # Every other model choice is the same trust class: the global model
+        # and the pin switch that makes persisted ids run, plus each role's
+        # model variable (``config.model_selection.MODEL_ENV_VARS``).
+        "OUROBOROS_MODEL",
+        "OUROBOROS_PIN_MODELS",
+        "OUROBOROS_CLARIFICATION_MODEL",
+        "OUROBOROS_QA_MODEL",
+        "OUROBOROS_DEPENDENCY_ANALYSIS_MODEL",
+        "OUROBOROS_ONTOLOGY_ANALYSIS_MODEL",
+        "OUROBOROS_CONTEXT_COMPRESSION_MODEL",
+        "OUROBOROS_WONDER_MODEL",
+        "OUROBOROS_REFLECT_MODEL",
+        "OUROBOROS_SEMANTIC_MODEL",
+        "OUROBOROS_ASSERTION_EXTRACTION_MODEL",
+        "OUROBOROS_DETECTOR_MODEL",
+        "OUROBOROS_VALIDATION_MODEL",
+        "OUROBOROS_CONSENSUS_MODELS",
+        "OUROBOROS_CONSENSUS_ADVOCATE_MODEL",
+        "OUROBOROS_CONSENSUS_DEVIL_MODEL",
+        "OUROBOROS_CONSENSUS_JUDGE_MODEL",
         # Model-tier experiment controls are the same trust class: a cloned repo
         # must not disable routing or opt the user into shadow replay, which
         # re-executes successful children and can double token spend.
         "OUROBOROS_MODEL_TIER_ROUTING",
         "OUROBOROS_SHADOW_REPLAY",
+        # Evolve fallback Stage 1 toggle: whether project mechanical.toml
+        # commands run for unmarked evolve output. An operator's persisted
+        # opt-out in ~/.ouroboros/.env must not lose the load-order race to a
+        # cloned repository's `.env` (same class as DO_NOT_TRACK above).
+        "OUROBOROS_EVOLVE_STAGE1",
         # Shell startup files, read before the first command of *any* shell
         # this process spawns — including the verify gate's `bash -c`. A repo
         # `.env` pointing `BASH_ENV` at a file containing `exit 0` turns

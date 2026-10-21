@@ -173,6 +173,7 @@ def test_single_ac_existing_stage1_presentation_is_preserved() -> None:
                         "stdout_tail": "build output",
                         "stderr_tail": "actual failure",
                     },
+                    executed=True,
                 ),
             ),
         ),
@@ -210,7 +211,7 @@ def test_serializer_keeps_only_known_details_and_bounds_oversized_tails() -> Non
     }
     stage1 = MechanicalResult(
         passed=False,
-        checks=(CheckResult(CheckType.BUILD, False, "failed", details),),
+        checks=(CheckResult(CheckType.BUILD, False, "failed", details, executed=True),),
     )
     serialized = serialize_stage1_result(stage1)
     assert serialized is not None
@@ -228,7 +229,8 @@ def test_serializer_keeps_only_known_details_and_bounds_oversized_tails() -> Non
     assert "s" * 501 not in text
 
 
-def test_passing_skipped_and_absent_stage1_are_not_changed() -> None:
+def test_skipped_only_stage1_is_reported_as_not_evidence() -> None:
+    """A Stage 1 that ran nothing keeps ``passed`` but is not called a pass."""
     skipped = MechanicalResult(
         passed=True,
         checks=(CheckResult(CheckType.TEST, True, "not configured", {"skipped": True}),),
@@ -236,7 +238,23 @@ def test_passing_skipped_and_absent_stage1_are_not_changed() -> None:
     serialized = serialize_stage1_result(skipped)
     assert serialized is not None
     assert serialized["passed"] is True
+    assert serialized["executed_evidence"] is False
+    assert serialized["checks"][0]["executed"] is False
     assert serialized["checks"][0]["details"] == {"skipped": True}
-    assert "Status: PASSED" in format_stage1_result(skipped)
+    text = format_stage1_result(skipped)
+    assert "Status: NO CHECKS EXECUTED (not verification evidence)" in text
+    assert "Status: PASSED" not in text
     assert serialize_stage1_result(None) is None
     assert format_stage1_result(None) == []
+
+
+def test_executed_passing_stage1_is_reported_as_passed() -> None:
+    executed = MechanicalResult(
+        passed=True,
+        checks=(CheckResult(CheckType.TEST, True, "ok", {"return_code": 0}, executed=True),),
+    )
+    serialized = serialize_stage1_result(executed)
+    assert serialized is not None
+    assert serialized["executed_evidence"] is True
+    assert serialized["checks"][0]["executed"] is True
+    assert "Status: PASSED" in format_stage1_result(executed)

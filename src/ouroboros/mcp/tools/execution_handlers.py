@@ -18,6 +18,8 @@ from rich.console import Console
 import structlog
 import yaml
 
+from ouroboros.boundary.ledger import BoundaryOrderError
+from ouroboros.boundary.run_control import CheckPackageRun, NotAppliedReason, not_applied_meta
 from ouroboros.config.loader import (
     default_execution_efficiency_mode,
     get_auto_evaluate_enabled,
@@ -25,6 +27,7 @@ from ouroboros.config.loader import (
     get_max_parallel_workers,
     resolve_execution_model,
 )
+from ouroboros.config.policy_notice import policy_notice
 from ouroboros.core.conductor import (
     ConductorDirective,
     validate_conductor_successor_authorization,
@@ -607,13 +610,6 @@ def _result_session_id(result: MCPToolResult, fallback: str | None) -> str | Non
     return session_id if isinstance(session_id, str) and session_id else fallback
 
 
-def _result_evaluation_working_dir(result: MCPToolResult, fallback: Path) -> Path:
-    worktree_path = result.meta.get("worktree_path")
-    if isinstance(worktree_path, str) and worktree_path:
-        return Path(worktree_path)
-    return fallback
-
-
 def _plugin_verification_meta(
     session_id: str | None,
     *,
@@ -1097,8 +1093,8 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                         "Execution efficiency policy. adaptive may start decomposed ACs "
                         "on lower-cost tiers and escalate on recovery; quality_first keeps "
                         "children at the parent starting tier. When omitted on a fresh "
-                        "start, a configured execution.default_policy supplies it; "
-                        "otherwise defaults to adaptive."
+                        "start, execution.default_policy supplies it (default "
+                        "quality_first; adaptive only when the policy is ask)."
                     ),
                     required=False,
                     enum=("adaptive", "quality_first"),
@@ -1193,6 +1189,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
         execution_id: str | None = None,
         session_id_override: str | None = None,
         synchronous: bool = False,
+        check_package: CheckPackageRun | None = None,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Handle a seed execution request.
 
@@ -1204,6 +1201,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
             synchronous: When True, run execution inline (blocking) instead of
                 fire-and-forget.  Used by StartExecuteSeedHandler so the Job
                 system can track the real execution lifetime.
+            check_package: The run's loaded control (StartExecuteSeedHandler's).
 
         Returns:
             Result containing execution result or error.
@@ -1384,6 +1382,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     "status": DELEGATED_TO_SUBAGENT,
                     "dispatch_mode": "plugin",
                     "runtime_backend": self.agent_runtime_backend,
+                    **not_applied_meta(NotAppliedReason.PLUGIN_DISPATCH),
                     "model_tier": model_tier,
                     "efficiency_mode": execution_preferences.efficiency_mode.value,
                     "frugality_assurance": execution_preferences.frugality_assurance.value,
@@ -1663,6 +1662,15 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 )
 
                 skip_qa = arguments.get("skip_qa", False)
+                check_package = (
+                    check_package
+                    or await CheckPackageRun.load(event_store, workspace_execution_id, is_resume)
+                ).bind(
+                    runner,
+                    event_store,
+                    Path(workspace.effective_cwd) if workspace else resolved_cwd,
+                    effective_runtime_backend,
+                )
                 if not is_resume:
                     prepared = await runner.prepare_session(
                         seed,
@@ -1809,6 +1817,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                                 **mark_failed_kwargs,
                             )
 
+                        await check_package.prepare_bound(_seed, _tracker.execution_id)
                         if _resume_existing:
                             result = await _runner.resume_session(_tracker.session_id, _seed)
                         else:
@@ -2029,11 +2038,13 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     f"Status: {status_label}\n"
                     f"Runtime Backend: {effective_runtime_backend}\n"
                     f"LLM Backend: {resolved_llm_backend}\n"
-                    f"Efficiency Mode: {execution_preferences.efficiency_mode.value}\n"
+                    f"Efficiency Mode: {execution_preferences.efficiency_mode.value}"
+                    f"{policy_notice(arguments)}\n"
                     "Frugality Assurance: "
                     f"{execution_preferences.frugality_assurance.value}\n"
                 )
                 message += _run_only_verification_text(tracker.session_id)
+                message += "".join(f"{line}\n" for line in check_package.render_outcome())
                 # Best-effort live dashboard URL (singleton daemon, reused across
                 # runs; default on, opt out via OUROBOROS_DASHBOARD=0). Offloaded
                 # to a thread so the healthz/first-spawn wait never blocks the loop.
@@ -2079,6 +2090,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 }
                 if success is not None:
                     meta["success"] = success
+                meta.update(await check_package.meta_for(tracker, session_status))
                 if synchronous and session_status in {
                     SessionStatus.FAILED,
                     SessionStatus.CANCELLED,
@@ -2412,19 +2424,16 @@ class StartExecuteSeedHandler:
         return MCPToolDefinition(
             name="ouroboros_start_execute_seed",
             description=(
-                "Execute an existing Seed specification. "
-                "Use when: a validated Seed (file path or YAML) already exists. "
-                "Result: a background execution returning a job ID immediately; "
-                "use ouroboros_ac_tree_hud for live progress snapshots and "
-                "ouroboros_job_result for terminal output. "
-                "Do not use when: the request is raw or ambiguous natural "
-                "language with no Seed (use ouroboros_interview or "
-                "ouroboros_start_auto instead). "
-                "In plugin mode, execution is delegated to an OpenCode Task pane and "
-                "job_id is None — results appear in the Task pane instead of being "
-                "pollable via job_status/job_result. "
-                "This is the handler for 'ooo run' commands — "
-                "do NOT run 'ooo' in the shell; call this MCP tool instead."
+                "Execute an existing Seed specification. Use when: a validated Seed (file path "
+                'such as *.seed.yaml, or YAML) already exists and the user wants it run ("run the '
+                'seed", "execute this spec"). Result: a background execution returning a job ID '
+                "immediately; use ouroboros_ac_tree_hud for live progress snapshots and "
+                "ouroboros_job_result for terminal output. Do not use when: the request is raw or "
+                "ambiguous natural language with no Seed (use ouroboros_interview or "
+                "ouroboros_start_auto instead). In plugin mode, execution is delegated to an "
+                "OpenCode Task pane and job_id is None; results appear in the Task pane instead "
+                "of being pollable via job_status/job_result. This is the handler for 'ooo run' "
+                "commands; do NOT run 'ooo' in the shell; call this MCP tool instead."
             ),
             parameters=(
                 *ExecuteSeedHandler().definition.parameters,
@@ -2675,6 +2684,7 @@ class StartExecuteSeedHandler:
                 "status": DELEGATED_TO_PLUGIN,
                 "dispatch_mode": "plugin",
                 "runtime_backend": self.agent_runtime_backend,
+                **not_applied_meta(NotAppliedReason.PLUGIN_DISPATCH),
                 "efficiency_mode": execution_preferences.efficiency_mode.value,
                 "frugality_assurance": execution_preferences.frugality_assurance.value,
                 **({} if is_resume else _plugin_fat_harness_downgrade_meta(execution_mode)),
@@ -2727,6 +2737,10 @@ class StartExecuteSeedHandler:
             configured_auto_evaluate=get_auto_evaluate_enabled(),
             configured_auto_evolve=get_auto_evolve_enabled(),
         )
+        try:  # one loaded run control answers for the job; Execute runs under it
+            check_package = await CheckPackageRun.load(self._event_store, execution_id, is_resume)
+        except BoundaryOrderError as exc:
+            return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_execute_seed"))
 
         # The shared pipeline owns the ``should_cancel()`` pre-work guard.
         async def _runner(_handle) -> MCPToolResult:
@@ -2735,6 +2749,7 @@ class StartExecuteSeedHandler:
                 execution_id=execution_id,
                 session_id_override=new_session_id,
                 synchronous=True,
+                check_package=check_package,
             )
             if result.is_err:
                 raise job_work_error(result.error)
@@ -2752,7 +2767,7 @@ class StartExecuteSeedHandler:
                     run_result,
                     session_id=run_session_id,
                     seed_content=seed_content,
-                    working_dir=_result_evaluation_working_dir(
+                    working_dir=run_evaluate_chain.result_evaluation_working_dir(
                         run_result,
                         resolved_cwd,
                     ),
@@ -2771,7 +2786,7 @@ class StartExecuteSeedHandler:
             links=JobLinks(
                 session_id=session_id or new_session_id,
                 execution_id=execution_id,
-                preserve_runner_result=auto_evaluate_enabled,
+                preserve_runner_result=auto_evaluate_enabled or check_package.keeps_runner_result(),
             ),
             work_fn=_runner,
             cancelled_text="Seed execution cancelled before restart work began.",
@@ -2817,7 +2832,7 @@ class StartExecuteSeedHandler:
             f"Execution ID: {snapshot.links.execution_id or 'pending'}\n\n"
             f"Runtime Backend: {runtime_backend}\n"
             f"LLM Backend: {llm_backend}\n"
-            f"Efficiency Mode: {execution_preferences.efficiency_mode.value}\n"
+            f"Efficiency Mode: {execution_preferences.efficiency_mode.value}{policy_notice(arguments)}\n"
             "Frugality Assurance: "
             f"{execution_preferences.frugality_assurance.value}\n"
             f"{dashboard_line}\n"
@@ -2839,6 +2854,7 @@ class StartExecuteSeedHandler:
             "frugality_assurance": execution_preferences.frugality_assurance.value,
             "job_observer": observer,
             **_run_only_verification_meta(snapshot.links.session_id),
+            **check_package.pending_meta(),
         }
         if idempotency_key:
             self._idempotency_meta[idempotency_key] = dict(meta)

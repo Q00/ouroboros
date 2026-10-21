@@ -1894,7 +1894,6 @@ class EvolutionaryLoop:
                 )
                 validation_output = f"Validation skipped: {e}"
 
-        # Check for graceful shutdown after executing
         interrupted = await self._check_shutdown(
             lineage.lineage_id,
             generation_number,
@@ -1909,7 +1908,6 @@ class EvolutionaryLoop:
             return Result.ok(interrupted)
 
         if not _should_skip("evaluating"):
-            # Phase transition: → evaluating
             await self.event_store.append(
                 loop_support.generation_phase_checkpoint(
                     lineage_id=lineage.lineage_id,
@@ -1928,8 +1926,7 @@ class EvolutionaryLoop:
                 )
             )
 
-        # Evaluate phase (placeholder - actual evaluation via EvaluationPipeline)
-        # Skip if already completed before interruption (use restored summary)
+        # Reuse the restored summary when evaluation already completed.
         evaluation_summary: EvaluationSummary | None = restored_evaluation_summary
         if _should_skip("evaluating"):
             logger.info(
@@ -1938,10 +1935,10 @@ class EvolutionaryLoop:
             )
         elif execute and self.evaluator:
             try:
-                from ouroboros.evolution.evaluation_result import normalize_evaluator_result
-
-                eval_result = await focus.call(self.evaluator, current_seed, execution_output)
-                evaluation_summary = normalize_evaluator_result(eval_result)
+                carried = generation_focus.carried_verdicts(prev_gen)
+                evaluation_summary = await focus.call_evaluator(
+                    self.evaluator, current_seed, execution_output, execution_id, carried
+                )
             except Exception as e:
                 logger.warning(
                     "evolution.evaluation.failed",
@@ -1971,10 +1968,14 @@ class EvolutionaryLoop:
         )
 
         await record_generation_drift(
-            self.event_store, lineage.lineage_id, generation_number, current_seed, execution_output
+            self.event_store,
+            lineage.lineage_id,
+            generation_number,
+            current_seed,
+            execution_output,
+            evaluation_summary,
         )
 
-        # Check for graceful shutdown after evaluating
         interrupted = await self._check_shutdown(
             lineage.lineage_id,
             generation_number,

@@ -290,6 +290,7 @@ class _FakeExecuteHandler:
         execution_id: str | None = None,
         session_id_override: str | None = None,
         synchronous: bool = False,
+        check_package: Any = None,  # noqa: ARG002 - protocol fixture
     ):
         assert synchronous is True
         meta = {
@@ -324,6 +325,7 @@ class _BlockingExecuteHandler:
         execution_id: str | None = None,  # noqa: ARG002 - protocol fixture
         session_id_override: str | None = None,  # noqa: ARG002 - protocol fixture
         synchronous: bool = False,  # noqa: ARG002 - protocol fixture
+        check_package: Any = None,  # noqa: ARG002 - protocol fixture
     ):
         self.started.set()
         try:

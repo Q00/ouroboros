@@ -32,7 +32,6 @@ Classes:
 """
 
 from ouroboros.evaluation.consensus import (
-    DEFAULT_CONSENSUS_MODELS,
     ConsensusConfig,
     ConsensusEvaluator,
     DeliberativeConfig,
@@ -56,6 +55,7 @@ from ouroboros.evaluation.mechanical import (
     run_mechanical_verification,
 )
 from ouroboros.evaluation.models import (
+    AcceptanceState,
     CheckResult,
     CheckType,
     ConsensusResult,
@@ -64,6 +64,7 @@ from ouroboros.evaluation.models import (
     EvaluationResult,
     FinalVerdict,
     JudgmentResult,
+    MechanicalDisposition,
     MechanicalResult,
     SemanticResult,
     Vote,
@@ -91,6 +92,7 @@ from ouroboros.evaluation.trigger import (
 
 __all__ = [
     # Models
+    "AcceptanceState",
     "CheckResult",
     "CheckType",
     "ConsensusResult",
@@ -99,6 +101,7 @@ __all__ = [
     "EvaluationResult",
     "FinalVerdict",
     "JudgmentResult",
+    "MechanicalDisposition",
     "MechanicalResult",
     "SemanticResult",
     "Vote",
@@ -119,7 +122,6 @@ __all__ = [
     "SemanticEvaluator",
     "run_semantic_evaluation",
     # Stage 3 - Simple Consensus
-    "DEFAULT_CONSENSUS_MODELS",
     "ConsensusConfig",
     "ConsensusEvaluator",
     "run_consensus_evaluation",

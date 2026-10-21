@@ -471,6 +471,33 @@ class TestLogRotation:
         if log_subdir.exists():
             assert not any(log_subdir.iterdir())
 
+    def test_dead_stderr_never_raises_and_still_writes_file(self, temp_log_dir: Path) -> None:
+        """A stderr whose peer is gone must not abort the log call (#2325).
+
+        The MCP client closes the server's stderr socket on exit; the console
+        print then raises BrokenPipeError. Shutdown paths start with a log
+        call, so a raise here skipped every resource close.
+        """
+
+        class _DeadStderr(io.StringIO):
+            def write(self, _s: str) -> int:
+                raise BrokenPipeError(32, "Broken pipe")
+
+        config = LoggingConfig(log_dir=temp_log_dir, enable_file_logging=True)
+        configure_logging(config)
+        log = get_logger()
+
+        with patch.object(sys, "stderr", _DeadStderr()):
+            log.info("dead.stderr.first")
+            log.info("dead.stderr.second")
+
+        assert ouroboros_logging.is_console_logging_enabled() is False
+        for handler in logging.getLogger().handlers:
+            handler.flush()
+        content = (temp_log_dir / "ouroboros.log").read_text()
+        assert "dead.stderr.first" in content
+        assert "dead.stderr.second" in content
+
 
 class TestResetLogging:
     """Test reset_logging function."""

@@ -55,6 +55,9 @@ BROWNFIELD_CONSTRAINT_CLARITY_WEIGHT = 0.25
 BROWNFIELD_SUCCESS_CRITERIA_CLARITY_WEIGHT = 0.25
 BROWNFIELD_CONTEXT_CLARITY_WEIGHT = 0.15
 
+# Deterministic ambiguity floor for unanswered non-initial interview rounds.
+MISSING_RESPONSE_AMBIGUITY_FLOOR = 0.21
+
 # ---------------------------------------------------------------------------
 # Per-dimension scoring rubrics (K1 fan-out panel)
 # ---------------------------------------------------------------------------
@@ -504,6 +507,7 @@ class AmbiguityScorer:
                     result.value.content,
                     is_brownfield=is_brownfield,
                 )
+                ambiguity_score = self._apply_missing_response_floor(state, ambiguity_score)
                 breakdown = ambiguity_score.breakdown
                 overall_score = ambiguity_score.overall_score
 
@@ -576,6 +580,24 @@ class AmbiguityScorer:
                 f"Failed to parse scoring response after {self.max_retries} attempts: {last_error}",
                 details={"response_preview": last_response[:200] if last_response else None},
             )
+        )
+
+    def _apply_missing_response_floor(
+        self,
+        state: InterviewState,
+        score: AmbiguityScore,
+    ) -> AmbiguityScore:
+        """Raise the overall score when a non-initial round is unanswered."""
+        has_missing_response = any(
+            round_data.question != INITIAL_CONTEXT_SUMMARY_QUESTION
+            and (round_data.user_response is None or not round_data.user_response.strip())
+            for round_data in state.rounds
+        )
+        if not has_missing_response or score.overall_score >= MISSING_RESPONSE_AMBIGUITY_FLOOR:
+            return score
+        return AmbiguityScore(
+            overall_score=MISSING_RESPONSE_AMBIGUITY_FLOOR,
+            breakdown=score.breakdown,
         )
 
     def _build_interview_context(self, state: InterviewState) -> str:
@@ -1008,6 +1030,8 @@ Additional context (intentional deferrals — do not penalise):
         )
         overall_score = self._calculate_overall_score(breakdown)
         ambiguity_score = AmbiguityScore(overall_score=overall_score, breakdown=breakdown)
+        ambiguity_score = self._apply_missing_response_floor(state, ambiguity_score)
+        overall_score = ambiguity_score.overall_score
 
         log.info(
             "ambiguity.scoring.completed",

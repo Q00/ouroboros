@@ -24,6 +24,7 @@ from textual.widgets import (
     OptionList,
     Select,
     Static,
+    Switch,
 )
 from textual.widgets.option_list import Option
 
@@ -35,19 +36,20 @@ from ouroboros.backends import (
 from ouroboros.backends.model_catalog import (
     DEFAULT_MODEL_SENTINEL,
     configured_default_model,
-    get_model_catalog,
     installed_backends,
     model_choices,
     refresh_models,
     uses_default_model_sentinel,
 )
-from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL, DEFAULT_SONNET_MODEL
+from ouroboros.config.model_selection import AUTO_MODEL, TIERS
 from ouroboros.config.models import OuroborosConfig, get_config_dir
 from ouroboros.config_tui import persistence
 from ouroboros.config_tui.fields import (
     ADVANCED_MODEL_FIELDS,
     GLOBAL_LLM_BACKEND_FIELD,
     GLOBAL_RUNTIME_FIELD,
+    MODELS_DEFAULT_FIELD,
+    MODELS_PIN_FIELD,
     STAGE_MODEL_FIELDS,
     SettingField,
     active_env_overrides,
@@ -66,13 +68,10 @@ INSTALL_REQUIRED_SUFFIX = "install required"
 # of inlining the whole listing (opencode reports ~400 ids).
 SEARCH_THRESHOLD = 20
 
-# One-click model presets: per-backend picks, falling back to the backend's
-# catalog default where no differentiated tier exists (sentinel backends).
-PRESET_MODELS: dict[str, dict[str, str]] = {
-    "frugal": {"claude": "claude-haiku-4-5-20251001", "codex": "gpt-5-mini"},
-    "balanced": {"claude": DEFAULT_SONNET_MODEL, "codex": "gpt-5"},
-    "frontier": {"claude": DEFAULT_OPUS_MODEL, "codex": "gpt-5-codex"},
-}
+# One-click presets for ``models.default``: auto (the latest model of each
+# role's tier) or one tier for every role. Any other model id is free entry.
+PRESET_MODELS: tuple[str, ...] = (AUTO_MODEL, *TIERS)
+_TRUE_TEXT = frozenset({"1", "true", "yes", "on"})
 
 # One-click multi-LLM stage-routing presets: per-stage runtime backend picks
 # for the four pipeline stages (interview → execute → evaluate → reflect). Each
@@ -585,20 +584,13 @@ class SettingsApp(App[None]):
                         "inherits this unless you override it.",
                         classes="field-help",
                     )
+                with Container(classes="global-cell"):
+                    yield from self._compose_models_cell()
 
             yield Static(
                 "Per-stage overrides — interview → execute → evaluate → reflect",
                 classes="section-title",
             )
-            with Container(id="preset-row"):
-                yield Button("⚡ Frugal", id="preset-frugal")
-                yield Button("⚖ Balanced", id="preset-balanced")
-                yield Button("🚀 Frontier", id="preset-frontier")
-                yield Static(
-                    "one-click models for every stage — review, then Save",
-                    classes="field-help",
-                    id="preset-help",
-                )
             with Container(id="routing-preset-row"):
                 yield Button("All Claude", id="route-all-claude")
                 yield Button("Claude+Verify", id="route-claude-verify")
@@ -614,17 +606,23 @@ class SettingsApp(App[None]):
                 for stage in Stage:
                     yield from self._compose_stage_card(stage)
 
-            if ADVANCED_MODEL_FIELDS:
-                with Collapsible(title="Advanced", collapsed=True):
-                    for field in ADVANCED_MODEL_FIELDS:
-                        yield Static(field.label, classes="field-label")
-                        warning = _env_warning_text(field)
-                        if warning:
-                            yield Static(warning, classes="env-warning")
-                        yield Input(
-                            value=str(self._current(field.key) or ""),
-                            id=f"adv-{_slug(field.key)}",
-                        )
+            with Collapsible(
+                title="Advanced: per-role model ids (run only with pin on, or on litellm "
+                "and copilot)",
+                collapsed=True,
+                id="advanced-models",
+            ):
+                for stage in Stage:
+                    yield from self._compose_stage_model_field(stage)
+                for field in ADVANCED_MODEL_FIELDS:
+                    yield Static(field.label, classes="field-label")
+                    warning = _env_warning_text(field)
+                    if warning:
+                        yield Static(warning, classes="env-warning")
+                    yield Input(
+                        value=str(self._current(field.key) or ""),
+                        id=f"adv-{_slug(field.key)}",
+                    )
 
             with Container(id="action-bar"):
                 yield Button("Save", variant="primary", id="save-button")
@@ -651,13 +649,42 @@ class SettingsApp(App[None]):
             id=select_id,
         )
 
+    def _compose_models_cell(self) -> ComposeResult:
+        """The one model switch (``models.default``) and the research pin."""
+        yield Static(MODELS_DEFAULT_FIELD.label, classes="field-label")
+        warning = _env_warning_text(MODELS_DEFAULT_FIELD)
+        if warning:
+            yield Static(warning, classes="env-warning")
+        with Container(id="preset-row"):
+            for preset in PRESET_MODELS:
+                yield Button(preset.title(), id=f"preset-{preset}")
+        yield Input(
+            value=str(self._current(MODELS_DEFAULT_FIELD.key) or AUTO_MODEL),
+            placeholder="auto, frugal, standard, frontier, or a model id",
+            id="models-default",
+        )
+        yield Static(
+            "Auto runs the latest model of each role's tier. A tier or a model id "
+            "applies to every role.",
+            classes="field-help",
+            id="preset-help",
+        )
+        yield Static(MODELS_PIN_FIELD.label, classes="field-label")
+        warning = _env_warning_text(MODELS_PIN_FIELD)
+        if warning:
+            yield Static(warning, classes="env-warning")
+        pinned = str(self._current(MODELS_PIN_FIELD.key)).strip().lower() in _TRUE_TEXT
+        yield Switch(value=pinned, id="models-pin")
+        yield Static(
+            "Off: the per-role ids under Advanced are ignored, except on litellm and "
+            "copilot. On: they run, for research and reproducibility.",
+            classes="field-help",
+        )
+
     def _compose_stage_card(self, stage: Stage) -> ComposeResult:
         runtime_field = stage_runtime_field(stage)
-        model_field = STAGE_MODEL_FIELDS.get(stage)
         stage_value = get_value(self._raw, runtime_field.key)
         effective_backend = self._effective_stage_backend(stage)
-        completion_backend = self._effective_completion_backend(stage)
-        current_model = str(self._current(model_field.key) or "") if model_field else ""
 
         with Container(classes="stage-card", id=f"stage-card-{stage.value}"):
             yield Static(
@@ -681,28 +708,34 @@ class SettingsApp(App[None]):
                 classes="install-warning hidden",
                 id=f"stage-install-warning-{stage.value}",
             )
-            if model_field is not None:
-                yield Static(model_field.label, classes="field-label")
-                warning = _env_warning_text(model_field)
-                if warning:
-                    yield Static(warning, classes="env-warning")
-                initial_model = current_model
-                if not initial_model:
-                    concrete_models = self._all_models(completion_backend)
-                    if concrete_models:
-                        initial_model = concrete_models[0]
-                        self._automatic_stage_model_values[stage.value] = initial_model
-                yield Select(
-                    self._model_options(completion_backend, initial_model),
-                    value=initial_model if initial_model else Select.NULL,
-                    allow_blank=True,
-                    id=f"stage-model-{stage.value}",
-                )
-                yield Input(
-                    placeholder="custom model id",
-                    classes="hidden",
-                    id=f"stage-model-custom-{stage.value}",
-                )
+
+    def _compose_stage_model_field(self, stage: Stage) -> ComposeResult:
+        """A per-stage model id, grouped under Advanced."""
+        model_field = STAGE_MODEL_FIELDS.get(stage)
+        if model_field is None:
+            return
+        completion_backend = self._effective_completion_backend(stage)
+        yield Static(model_field.label, classes="field-label")
+        warning = _env_warning_text(model_field)
+        if warning:
+            yield Static(warning, classes="env-warning")
+        initial_model = str(self._current(model_field.key) or "")
+        if not initial_model:
+            concrete_models = self._all_models(completion_backend)
+            if concrete_models:
+                initial_model = concrete_models[0]
+                self._automatic_stage_model_values[stage.value] = initial_model
+        yield Select(
+            self._model_options(completion_backend, initial_model),
+            value=initial_model if initial_model else Select.NULL,
+            allow_blank=True,
+            id=f"stage-model-{stage.value}",
+        )
+        yield Input(
+            placeholder="custom model id",
+            classes="hidden",
+            id=f"stage-model-custom-{stage.value}",
+        )
 
     # ── events ───────────────────────────────────────────────────────
 
@@ -988,23 +1021,12 @@ class SettingsApp(App[None]):
             self._apply_preset(button_id.removeprefix("preset-"))
 
     def _apply_preset(self, level: str) -> None:
-        """Stage a one-click model preset across all stage cards (not saved yet)."""
-        picks = PRESET_MODELS.get(level)
-        if picks is None:
+        """Stage a one-click ``models.default`` preset (not saved yet)."""
+        if level not in PRESET_MODELS:
             return
-        for stage in Stage:
-            if stage not in STAGE_MODEL_FIELDS:
-                continue
-            try:
-                backend = self._selected_runtime(stage)
-                model = picks.get(backend)
-                if model is None:
-                    model = get_model_catalog(backend).default_model
-                self._set_stage_model(stage, model)
-            except (NoMatches, ValueError):
-                continue
+        self.query_one("#models-default", Input).value = level
         status = self.query_one("#status-bar", Static)
-        status.update(f"Preset [bold]{level}[/bold] staged — review the cards, then Save.")
+        status.update(f"Models preset [bold]{level}[/bold] staged. Review, then Save.")
 
     def _set_stage_runtime(self, stage: Stage, backend: str) -> None:
         """Stage a per-stage runtime backend selection and cascade its card.
@@ -1058,6 +1080,11 @@ class SettingsApp(App[None]):
         global_runtime = self.query_one("#global-runtime", Select).value
         if not _is_blank(global_runtime):
             record_backend(GLOBAL_RUNTIME_FIELD.key, str(global_runtime))
+
+        models_default = self.query_one("#models-default", Input).value.strip()
+        if models_default:
+            record(MODELS_DEFAULT_FIELD.key, models_default)
+        record(MODELS_PIN_FIELD.key, self.query_one("#models-pin", Switch).value)
 
         for stage in Stage:
             runtime_field = stage_runtime_field(stage)

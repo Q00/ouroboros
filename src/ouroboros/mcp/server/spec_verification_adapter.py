@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, TypeGuard
 
 
@@ -379,4 +380,148 @@ def evaluation_summary_for_unavailable_spec_verification(
         feedback_metadata=mechanical.feedback_metadata,
         execution_completion_status=mechanical.execution_completion_status,
         approval_status="rejected",
+    )
+
+
+def apply_package_decisions(
+    summary: Any,
+    decisions: tuple[Any, ...],
+    seed: Any,
+    *,
+    carried: Mapping[int, Any] | None = None,
+    evaluated: Mapping[int, Any] | None = None,
+) -> Any:
+    """Resolve each Seed criterion's verdict for an evolve generation.
+
+    ``decisions`` are the run's recorded per-criterion decisions in Seed order
+    (``boundary.decision.recorded_criterion_decisions``; empty when there are
+    none). For each criterion, in order:
+
+    1. a check package ``pass`` or ``fail`` (``governed_by == "check_package"``)
+       decides it, instead of the source-scan verifier, which cannot see behavior;
+    2. an authoritative spec-verifier failure in ``summary`` rejects it;
+    3. any other recorded criterion takes the acceptance the run reconciled for
+       it (``accepted``), as ``ooo run`` decided it: the existing verifier's
+       verdict for a criterion the package could not evaluate, and a rejection
+       for one the package found indeterminate whatever that verifier said;
+    4. an authoritative spec-verifier pass in ``summary`` stands;
+    5. ``carried``: a frozen criterion's passing verdict from the previous
+       generation (``EvolutionFocus.carried_verdicts``);
+    6. ``evaluated``: the per-criterion evaluation pipeline's verdict
+       (``evaluate_criteria_with_pipeline``) for a criterion still undecided,
+       which is one with no recorded decision (the package was off or none was
+       admitted);
+    7. otherwise it is not evaluated.
+
+    Approval is always recomputed and needs every Seed criterion proven, so a
+    summary approved in aggregate, with no per-criterion rows, is not approved
+    unless each criterion gets a passing verdict here.
+    """
+    from ouroboros.core.lineage import ACResult
+    from ouroboros.core.seed import ac_texts
+
+    if summary is None:
+        return summary
+    seed_criteria = tuple(getattr(seed, "acceptance_criteria", ()) or ())
+    if decisions and len(decisions) != len(seed_criteria):
+        decisions = ()
+    texts = ac_texts(seed_criteria)
+    decided: dict[int, ACResult] = {}
+    existing: dict[int, ACResult] = {}
+    for index, record in enumerate(decisions):
+        if record.governed_by != "check_package" or record.package_status not in ("pass", "fail"):
+            accepted = bool(record.accepted)
+            verdict = "pass" if accepted else "fail"
+            outcome = record.existing_failure_class or record.existing_outcome or "no outcome"
+            by_verifier = record.governed_by == "existing_verifier"
+            existing[index] = ACResult(
+                ac_index=index,
+                ac_content=texts[index],
+                semantic_ac_key=getattr(seed_criteria[index], "semantic_ac_key", None),
+                passed=accepted,
+                score=1.0 if accepted else 0.0,
+                evidence=(
+                    f"run {'accepted' if accepted else 'rejected'} it ({record.governed_by}); "
+                    f"existing verifier {'accepted' if record.existing_accepted else 'rejected'} "
+                    f"({outcome}); check package {record.package_status} ({record.reason})"
+                ),
+                verification_method="existing_verifier" if by_verifier else "check_package",
+                ac_verdict_state="evaluated",
+                final_verdict=verdict,
+                rendered_verdict=verdict.upper(),
+            )
+            continue
+        passed = record.package_status == "pass"
+        decided[index] = ACResult(
+            ac_index=index,
+            ac_content=texts[index],
+            semantic_ac_key=getattr(seed_criteria[index], "semantic_ac_key", None),
+            passed=passed,
+            score=1.0 if passed else 0.0,
+            evidence=f"check package {record.package_status} ({record.reason})",
+            verification_method="check_package",
+            ac_verdict_state="evaluated",
+            final_verdict="pass" if passed else "fail",
+            rendered_verdict="PASS" if passed else "FAIL",
+        )
+    carried = carried or {}
+    evaluated = evaluated or {}
+    current = {result.ac_index: result for result in summary.ac_results}
+    results: list[ACResult] = []
+    for index in range(len(seed_criteria)):
+        row = current.get(index)
+        authoritative = row is not None and row.verdict_is_authoritative
+        if index in decided:
+            results.append(decided[index])
+        elif authoritative and row is not None and not row.passed:
+            results.append(row)
+        elif index in existing:
+            results.append(existing[index])
+        elif authoritative and row is not None:
+            results.append(row)
+        elif index in carried:
+            results.append(carried[index])
+        elif index in evaluated:
+            results.append(evaluated[index])
+        elif row is not None:
+            results.append(row)
+        else:
+            # Every Seed criterion must be proven: one with no verdict is not evaluated.
+            results.append(
+                ACResult(
+                    ac_index=index,
+                    ac_content=texts[index],
+                    semantic_ac_key=getattr(seed_criteria[index], "semantic_ac_key", None),
+                    passed=False,
+                    score=0.0,
+                    evidence="No check package, verifier or evaluation decided this AC.",
+                    verification_method="formal_evaluation",
+                    ac_verdict_state="not_evaluated",
+                    final_verdict="fail",
+                    rendered_verdict="NOT_EVALUATED",
+                )
+            )
+    results.sort(key=lambda result: result.ac_index)
+    total = len(results)
+    passed_count = sum(1 for result in results if result.authoritative_pass)
+    approved = (
+        total > 0 and passed_count == total and summary.execution_completion_status == "completed"
+    )
+    failure_reason = None
+    if not approved:
+        unresolved = [result for result in results if not result.authoritative_pass]
+        failure_reason = "; ".join(
+            f"AC {result.ac_index + 1} {result.rendered_verdict or 'NOT_EVALUATED'}: "
+            f"{result.evidence}".strip()
+            for result in unresolved
+        ) or (summary.failure_reason or "the run was not approved")
+    return summary.model_copy(
+        update={
+            "final_approved": approved,
+            "highest_stage_passed": 3 if approved else summary.highest_stage_passed,
+            "score": passed_count / total if total else 0.0,
+            "failure_reason": failure_reason,
+            "ac_results": tuple(results),
+            "approval_status": "approved" if approved else "rejected",
+        }
     )

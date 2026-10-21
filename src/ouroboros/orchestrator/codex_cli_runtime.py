@@ -281,8 +281,8 @@ class CodexCliRuntime:
     _provider_name, _runtime_error_type = "codex_cli", "CodexCliError"
     _log_namespace = "codex_cli_runtime"
     _display_name = "Codex CLI"
-    _default_cli_name = "codex"
-    _default_llm_backend = "codex"
+    _default_cli_name, _default_llm_backend = "codex", "codex"
+    _exec_session_flags: tuple[str, ...] = ()  # ("--ephemeral",): keep no session on disk
     _tempfile_prefix = "ouroboros-codex-"
     _skills_package_uri = "packaged://ouroboros.codex/skills"
     _process_shutdown_timeout_seconds = 5.0
@@ -1599,14 +1599,12 @@ class CodexCliRuntime:
                 "</system-directive>"
             )
 
-        if tools:
-            tool_list = "\n".join(f"- {tool}" for tool in tools)
-            parts.append(
-                "<tooling-guidance>\n"
-                "Prefer to solve the task using the following tool set when possible:\n"
-                f"{tool_list}\n"
-                "</tooling-guidance>"
-            )
+        if tools is not None:
+            guidance = "Do not use any tools for this task. Respond using reasoning only."
+            if tools:
+                tool_list = "\n".join(f"- {tool}" for tool in tools)
+                guidance = f"Prefer to solve the task using the following tool set when possible:\n{tool_list}"
+            parts.append(f"<tooling-guidance>\n{guidance}\n</tooling-guidance>")
 
         parts.append(prompt)
         return "\n\n".join(part for part in parts if part.strip())
@@ -2081,7 +2079,7 @@ class CodexCliRuntime:
             self._reconcile_profile_resolution_config(runtime_handle)
         self._reconcile_codex_config_files(runtime_handle)
         self._reconcile_cli_executable_identity()
-        command = [self._cli_path, "exec"]
+        command = [self._cli_path, "exec", *self._exec_session_flags]
 
         normalized_model = self._normalize_model(model or self._model)
         runtime_model: str | None = None
@@ -3594,6 +3592,7 @@ class CodexCliRuntime:
             key: details[key]
             for key in (
                 "failure_category",
+                "http_status",
                 "model_guidance",
                 "codex_app_version",
                 "codex_cli_version",

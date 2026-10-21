@@ -151,3 +151,7 @@ src/ouroboros/opencode/plugin/bun.lock
 .vuln-scan-state/
 docs/security/VULN-FINDINGS.*
 docs/security/TRIAGE.*
+/TRIAGE.json
+/TRIAGE.md
+/VULN-FINDINGS.json
+/VULN-FINDINGS.md

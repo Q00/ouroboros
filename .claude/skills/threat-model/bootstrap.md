@@ -380,12 +380,12 @@ class-level control exists.
 
 Assemble the file **incrementally** in `./.threat-model-state/THREAT_MODEL.md`
 (one chunk per `## N.` section; a stalled chunk loses that section, not the
-file), then copy the assembled result to `<target-dir>/THREAT_MODEL.md` in
-one Write. The assembly happens in cwd because `checkpoint.py append` is
-cwd-confined; the final Write tool call is not.
+file), then publish the assembled result through the same confined helper.
+For the Ouroboros target, the final path is `docs/security/THREAT_MODEL.md`.
 
-1. Write tool → `./.threat-model-state/THREAT_MODEL.md` (clobbers any prior
-   file) containing only the title line and `## 1. Context` section.
+1. Stage the title and `## 1. Context` section in a new operator-controlled
+   payload file under cwd, then run
+   `python3 .claude/skills/_lib/checkpoint.py append ./.threat-model-state/THREAT_MODEL.md --replace --from <payload-file>`.
 2. For each remaining section (`## 2. Assets`, `## 3. Entry points`,
    `## 4. Threats`, `## 5. Deprioritized`, `## 6. Open questions`,
    `## 7. Provenance`, `## 8. Recommended mitigations`):
@@ -393,8 +393,8 @@ cwd-confined; the final Write tool call is not.
      section's markdown.
    - Bash:
      `python3 .claude/skills/_lib/checkpoint.py append ./.threat-model-state/THREAT_MODEL.md --from ./.threat-model-state/_chunk.tmp`
-3. Read tool → `./.threat-model-state/THREAT_MODEL.md`, then Write tool →
-   `<target-dir>/THREAT_MODEL.md` with the same content.
+3. Run `python3 .claude/skills/_lib/checkpoint.py append <output-file> --replace --from ./.threat-model-state/THREAT_MODEL.md`.
+   Use the final output path from the shared output contract; stop on refusal.
 
 Set `## 7. Provenance`:
 

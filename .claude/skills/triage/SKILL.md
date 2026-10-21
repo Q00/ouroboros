@@ -824,7 +824,11 @@ Order all findings by:
    descending, then `severity_alignment` descending.
 3. Within others: original `id`.
 
-### 6b. Write `./TRIAGE.json`
+### 6b. Write `docs/security/TRIAGE.json`
+
+Stage JSON in a new operator-controlled payload file under cwd, then publish with
+`python3 .claude/skills/_lib/checkpoint.py append docs/security/TRIAGE.json --replace --from <payload-file>`.
+Do not use Write directly on final reports. Stop if the helper refuses a path.
 
 ```json
 {
@@ -882,13 +886,14 @@ Every input finding appears exactly once (duplicates reference their
 canonical via `duplicate_of`). Do not silently drop anything. Do not print
 this JSON to the terminal; write to file only.
 
-### 6c. Write `./TRIAGE.md`
+### 6c. Write `docs/security/TRIAGE.md`
 
 Reviewer-facing report. Build it **incrementally**. Do NOT emit the whole
 file in one Write. One chunk per finding; a stalled chunk loses that one
 section, not the file.
 
-**Step 1 — header.** Write tool → `./TRIAGE.md` (clobbers any prior file)
+**Step 1 — header.** Stage a new operator-controlled payload file under cwd, then
+`python3 .claude/skills/_lib/checkpoint.py append docs/security/TRIAGE.md --replace --from <payload-file>`
 containing only the title block, summary, and `## Act on these` heading:
 
 ```
@@ -918,7 +923,7 @@ Context: {mode}; environment = {environment}; scoring = {scoring}; {votes}-vote 
 ```
 
 2. Bash:
-   `python3 .claude/skills/_lib/checkpoint.py append ./TRIAGE.md --from ./.triage-state/_chunk.tmp`
+   `python3 .claude/skills/_lib/checkpoint.py append docs/security/TRIAGE.md --from ./.triage-state/_chunk.tmp`
 
 Repeat for each true_positive.
 
@@ -953,7 +958,7 @@ Triage complete: {N} findings -> {T} confirmed, {F} false positives, {D} duplica
 
   Top refute reasons: {top 3 refute_reasons with counts}
 
-Wrote ./TRIAGE.md and ./TRIAGE.json
+Wrote docs/security/TRIAGE.md and docs/security/TRIAGE.json
 ```
 
 ---

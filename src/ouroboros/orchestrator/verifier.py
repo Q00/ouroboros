@@ -96,10 +96,19 @@ _VALID_FAILURE_CLASSES: frozenset[str] = frozenset(
         # Kept in sync by hand with FailureClass: failure_taxonomy imports this
         # module, so the vocabulary cannot be derived from the enum here.
         "TRANSCRIPT_MISSING_INFRASTRUCTURE",
+        "SCRIPT_ABSENT_FROM_ARTIFACT",
+        "NO_CALL_EVIDENCE",
+        "CITED_CALL_FAILED",
     }
 )
 
-_UNAVAILABLE_FAILURE_CLASS = "TRANSCRIPT_MISSING_INFRASTRUCTURE"
+# Failure classes of a verifier that had no evidence to judge, not a
+# rejection: the transcript was lost, every unproven claim is a recorded run
+# that cannot be replayed because its script left the workspace, or no
+# transcript call the worker cited qualifies as evidence.
+_UNAVAILABLE_FAILURE_CLASSES: frozenset[str] = frozenset(
+    {"TRANSCRIPT_MISSING_INFRASTRUCTURE", "SCRIPT_ABSENT_FROM_ARTIFACT", "NO_CALL_EVIDENCE"}
+)
 
 
 class VerifierStatus(StrEnum):
@@ -140,6 +149,10 @@ class VerifierVerdict:
         status: Typed verifier status. Defaults from ``passed`` and
             ``failure_class`` for backward compatibility.
         evidence_used: Stable evidence refs used by the verifier.
+        not_replayed: Claims the transcript recorded running that could not
+            be replayed, each as ``<reason>: <field>: <claim>`` (reason
+            ``script_absent_from_artifact``). Recorded on a pass as well: a
+            pass rests on the other, proven claims, never on these.
         retry_admission: Machine-readable next-action admission. Defaults to
             ACCEPT for passes and the H7 recovery policy for failures.
     """
@@ -150,6 +163,7 @@ class VerifierVerdict:
     status: VerifierStatus | str | None = None
     evidence_used: tuple[str, ...] = ()
     retry_admission: RetryAdmission | str | None = None
+    not_replayed: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         status = _normalize_verifier_status(
@@ -191,19 +205,20 @@ class VerifierVerdict:
             )
             raise VerifierContractError(msg)
         unavailable_claimed = (
-            self.failure_class == _UNAVAILABLE_FAILURE_CLASS
+            self.failure_class in _UNAVAILABLE_FAILURE_CLASSES
             or status is VerifierStatus.UNAVAILABLE
             or (not self.passed and retry_admission is RetryAdmission.ACCEPT)
         )
         unavailable_valid = (
             not self.passed
-            and self.failure_class == _UNAVAILABLE_FAILURE_CLASS
+            and self.failure_class in _UNAVAILABLE_FAILURE_CLASSES
             and status is VerifierStatus.UNAVAILABLE
             and retry_admission is RetryAdmission.ACCEPT
         )
         if unavailable_claimed and not unavailable_valid:
             raise VerifierContractError(
-                "UNAVAILABLE requires TRANSCRIPT_MISSING_INFRASTRUCTURE and ACCEPT"
+                "UNAVAILABLE requires TRANSCRIPT_MISSING_INFRASTRUCTURE, "
+                "SCRIPT_ABSENT_FROM_ARTIFACT or NO_CALL_EVIDENCE, and ACCEPT"
             )
         if self.passed and status is not VerifierStatus.PASS:
             msg = "VerifierVerdict(passed=True) must have status PASS"
@@ -224,6 +239,7 @@ class VerifierVerdict:
         object.__setattr__(self, "status", status)
         object.__setattr__(self, "retry_admission", retry_admission)
         object.__setattr__(self, "evidence_used", _normalize_evidence_used(self.evidence_used))
+        object.__setattr__(self, "not_replayed", _normalize_evidence_used(self.not_replayed))
 
 
 def _normalize_verifier_status(
@@ -237,7 +253,7 @@ def _normalize_verifier_status(
             return VerifierStatus.PASS
         if failure_class == "BLOCKED":
             return VerifierStatus.BLOCKED
-        if failure_class == _UNAVAILABLE_FAILURE_CLASS:
+        if failure_class in _UNAVAILABLE_FAILURE_CLASSES:
             return VerifierStatus.UNAVAILABLE
         return VerifierStatus.FAIL
     try:
@@ -284,7 +300,7 @@ def _normalize_evidence_used(evidence_used: tuple[str, ...]) -> tuple[str, ...]:
 def _default_retry_admission_for_failure_class(
     failure_class: str | None,
 ) -> RetryAdmission:
-    if failure_class == _UNAVAILABLE_FAILURE_CLASS:
+    if failure_class in _UNAVAILABLE_FAILURE_CLASSES:
         return RetryAdmission.ACCEPT
     if failure_class == "FABRICATION_SUSPECTED":
         return RetryAdmission.ESCALATE_MODEL
@@ -292,7 +308,7 @@ def _default_retry_admission_for_failure_class(
         return RetryAdmission.REDISPATCH
     if failure_class == "BLOCKED":
         return RetryAdmission.BLOCK
-    if failure_class in {"EVIDENCE_MISSING", "EVIDENCE_FORM_MISMATCH"}:
+    if failure_class in {"EVIDENCE_MISSING", "EVIDENCE_FORM_MISMATCH", "CITED_CALL_FAILED"}:
         return RetryAdmission.RETRY
     return RetryAdmission.REDISPATCH
 

@@ -15,6 +15,7 @@ import time
 
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.evidence.claims import _runtime_messages_support_file_claim
+import ouroboros.orchestrator.evidence.harness_observation as harness_observation_module
 from ouroboros.orchestrator.evidence.harness_observation import (
     HARNESS_OBSERVATION_DATA_KEY,
     HARNESS_OBSERVATION_MESSAGE_TYPE,
@@ -100,14 +101,80 @@ class TestSnapshotDiff:
         assert set(snapshot.fingerprints) == {"real.txt"}
 
     def test_entry_budget_marks_snapshot_truncated(self, tmp_path: Path) -> None:
+        # Shared fixtures may place CLI support files beside the workspace.
+        (tmp_path / ".fixture-only").mkdir()
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
         for index in range(5):
-            (tmp_path / f"f{index}.txt").write_text("x", encoding="utf-8")
+            (workspace / f"f{index}.txt").write_text("x", encoding="utf-8")
 
-        snapshot = snapshot_workspace(tmp_path, max_entries=3)
+        snapshot = snapshot_workspace(workspace, max_entries=3)
 
         assert snapshot is not None
         assert snapshot.truncated is True
         assert len(snapshot.fingerprints) == 3
+
+    def test_entry_budget_bounds_actual_directory_enumeration(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        # Shared fixtures may place CLI support files beside the workspace.
+        (tmp_path / ".fixture-only").mkdir()
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        for index in range(7):
+            (workspace / f"f{index}.txt").write_text("x", encoding="utf-8")
+        real_scandir = os.scandir
+        enumerated = 0
+
+        class CountingScandir:
+            def __init__(self, path):
+                self._iterator = real_scandir(path)
+
+            def __enter__(self):
+                self._iterator.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self._iterator.__exit__(*args)
+
+            def __iter__(self):
+                nonlocal enumerated
+                for entry in self._iterator:
+                    enumerated += 1
+                    yield entry
+
+        monkeypatch.setattr(harness_observation_module.os, "scandir", CountingScandir)
+
+        snapshot = snapshot_workspace(workspace, max_entries=3)
+
+        assert snapshot is not None
+        assert snapshot.truncated is True
+        assert len(snapshot.fingerprints) == 3
+        assert enumerated == 3
+
+    def test_depth_budget_marks_snapshot_truncated(self, tmp_path: Path, monkeypatch) -> None:
+        nested = tmp_path / "one" / "two"
+        nested.mkdir(parents=True)
+        (nested / "source.py").write_text("source", encoding="utf-8")
+        monkeypatch.setattr(harness_observation_module, "DEFAULT_MAX_DEPTH", 1)
+
+        snapshot = snapshot_workspace(tmp_path)
+
+        assert snapshot is not None
+        assert snapshot.truncated is True
+
+    def test_unreadable_directory_marks_snapshot_truncated(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        def unreadable(_path):
+            raise PermissionError("denied")
+
+        monkeypatch.setattr(harness_observation_module.os, "scandir", unreadable)
+
+        snapshot = snapshot_workspace(tmp_path)
+
+        assert snapshot is not None
+        assert snapshot.truncated is True
 
     def test_truncated_pre_snapshot_withholds_paths_it_never_saw(self, tmp_path: Path) -> None:
         """Budget shift must not turn an unseen stale file into positive evidence.

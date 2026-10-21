@@ -22,6 +22,7 @@ from ouroboros.cli.commands.codex import (
     _MCP_PROTOCOL_VERSION,
     _check_auto_dispatch_surface,
     _list_stdio_mcp_tool_names,
+    _list_stdio_mcp_tool_names_with_framing,
     _should_retry_stdio_mcp_framing,
     app,
 )
@@ -1009,7 +1010,6 @@ class TestCodexDoctor:
             ('cwd = "."\n', "cwd"),
             ('env_vars = ["PATH"]\n', "env_vars"),
             ('experimental_environment = "remote"\n', "experimental_environment"),
-            ("startup_timeout_sec = 0.25\n", "startup_timeout_sec"),
             ("startup_timeout_ms = 250\n", "startup_timeout_ms"),
             ("tool_timeout_sec = 0.001\n", "tool_timeout_sec"),
         ],
@@ -1017,7 +1017,6 @@ class TestCodexDoctor:
             "working-directory",
             "ambient-environment",
             "experimental-execution-environment",
-            "startup-timeout-seconds",
             "startup-timeout-milliseconds",
             "tool-timeout-seconds",
         ],
@@ -1053,6 +1052,73 @@ class TestCodexDoctor:
             for failure in failures
         )
         live_probe.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "timeout_config",
+        [
+            "startup_timeout_sec = 0\n",
+            "startup_timeout_sec = -1\n",
+            "startup_timeout_sec = inf\n",
+            "startup_timeout_sec = nan\n",
+            'startup_timeout_sec = "180"\n',
+            "startup_timeout_sec = true\n",
+        ],
+        ids=["zero", "negative", "infinity", "nan", "string", "boolean"],
+    )
+    def test_check_auto_dispatch_surface_rejects_invalid_startup_timeout_before_probe(
+        self,
+        tmp_path: Path,
+        timeout_config: str,
+    ) -> None:
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        (codex_dir / "config.toml").write_text(
+            _CANONICAL_CODEX_MCP_ENTRY.replace(
+                "[mcp_servers.ouroboros]\n",
+                "[mcp_servers.ouroboros]\n" + timeout_config,
+                1,
+            ),
+            encoding="utf-8",
+        )
+        live_probe = AsyncMock(return_value=_REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST)
+
+        with patch("ouroboros.cli.commands.codex._list_stdio_mcp_tool_names", live_probe):
+            failures = _check_auto_dispatch_surface(codex_dir, live_mcp=True)
+
+        assert any(
+            "startup_timeout_sec must be a finite positive number" in item for item in failures
+        )
+        live_probe.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("timeout_config", "expected_timeout"),
+        [("", 30.0), ("startup_timeout_sec = 180\n", 180.0)],
+        ids=["default", "configured"],
+    )
+    def test_check_auto_dispatch_surface_passes_startup_timeout_to_live_probe(
+        self,
+        tmp_path: Path,
+        timeout_config: str,
+        expected_timeout: float,
+    ) -> None:
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        (codex_dir / "config.toml").write_text(
+            _CANONICAL_CODEX_MCP_ENTRY.replace(
+                "[mcp_servers.ouroboros]\n",
+                "[mcp_servers.ouroboros]\n" + timeout_config,
+                1,
+            ),
+            encoding="utf-8",
+        )
+        live_probe = AsyncMock(return_value=_REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST)
+
+        with patch("ouroboros.cli.commands.codex._list_stdio_mcp_tool_names", live_probe):
+            assert _check_auto_dispatch_surface(codex_dir, live_mcp=True) == []
+
+        live_probe.assert_awaited_once()
+        assert live_probe.await_args is not None
+        assert live_probe.await_args.args[-1] == expected_timeout
 
     def test_check_auto_dispatch_surface_rejects_custom_command_mcp_entry(
         self,
@@ -1639,6 +1705,7 @@ class TestCodexDoctor:
                 "codex",
             ),
             {},
+            30.0,
         )
 
     def test_check_auto_dispatch_surface_live_mcp_verifies_required_tools(
@@ -1681,6 +1748,7 @@ class TestCodexDoctor:
                 "OUROBOROS_AGENT_RUNTIME": "codex",
                 "OUROBOROS_LLM_BACKEND": "codex",
             },
+            30.0,
         )
 
     @pytest.mark.parametrize("live_mcp", [False, True], ids=["static", "live"])
@@ -1891,6 +1959,39 @@ class TestCodexDoctor:
         )
 
         assert tool_names >= _REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST
+
+    def test_list_stdio_mcp_tool_names_uses_startup_timeout_for_initialize_response(
+        self,
+    ) -> None:
+        timeouts: list[tuple[int, float]] = []
+
+        async def read_response(
+            _proc: asyncio.subprocess.Process,
+            *,
+            request_id: int,
+            timeout: float,
+            stderr_buffer: bytearray,
+            framing: str,
+        ) -> dict[str, object]:
+            del stderr_buffer, framing
+            timeouts.append((request_id, timeout))
+            if request_id == 1:
+                return {"id": 1, "result": {"capabilities": {}}}
+            return {"id": 2, "result": {"tools": [{"name": "example"}]}}
+
+        with patch("ouroboros.cli.commands.codex._read_stdio_mcp_response", new=read_response):
+            tool_names = asyncio.run(
+                _list_stdio_mcp_tool_names_with_framing(
+                    sys.executable,
+                    ("-c", "import time; time.sleep(60)"),
+                    {},
+                    framing="jsonl",
+                    startup_timeout=12.5,
+                )
+            )
+
+        assert tool_names == frozenset({"example"})
+        assert timeouts == [(1, 12.5), (2, 30.0)]
 
     @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group contract")
     @pytest.mark.parametrize(
@@ -2341,6 +2442,7 @@ class TestCodexDoctor:
                 "OUROBOROS_AGENT_RUNTIME": "codex",
                 "OUROBOROS_LLM_BACKEND": "codex",
             },
+            30.0,
         )
 
     def test_check_auto_dispatch_surface_live_mcp_reports_missing_auto_tool(

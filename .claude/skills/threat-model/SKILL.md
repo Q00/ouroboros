@@ -139,6 +139,12 @@ in this directory. **Read `schema.md` immediately before you write the file**,
 not at routing time; in interview mode the gap between routing and emit can be
 many turns, and an early read will be evicted before it's used.
 
+Ouroboros adaptation: when scanning `src/ouroboros`, publish to
+`docs/security/THREAT_MODEL.md`. For every mode, stage the content in a new
+operator-controlled payload file under cwd and publish with
+`python3 .claude/skills/_lib/checkpoint.py append <output-file> --replace --from <payload-file>`.
+Do not use Write directly on the final report, and stop if the helper refuses.
+
 After writing the file, print to the user:
 
 1. The path to `THREAT_MODEL.md`.

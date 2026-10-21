@@ -14,6 +14,7 @@ allowed-tools:
   - Glob
   - Grep
   - Write
+  - Bash(python3 .claude/skills/_lib/checkpoint.py:*)
   - Task
   - Bash(rg:*)
   - Bash(grep:*)
@@ -223,7 +224,11 @@ confidence < 0.4, for the summary line.
 
 Write **both** files to `<target-dir>/` (Ouroboros adaptation: when the
 target is `src/ouroboros`, write them to `docs/security/` instead so scanner
-output never lands inside the shipped package):
+output never lands inside the shipped package). Stage each report in a new
+operator-controlled payload file under cwd, then publish through
+`python3 .claude/skills/_lib/checkpoint.py append <output-file> --replace --from <payload-file>`.
+Do not use Write directly on the final report. Stop if the helper refuses a path.
+The two report formats are:
 
 **`VULN-FINDINGS.json`** — the `/triage` ingest shape:
 

@@ -41,14 +41,19 @@ Simplifications, stated so nobody mistakes this for dataflow analysis:
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from functools import cache
+import importlib.util
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
 import ouroboros
-from ouroboros.config.untrusted_env import is_untrusted_env_denied_key
+from ouroboros.config.untrusted_env import UNTRUSTED_ENV_DENYLIST, is_untrusted_env_denied_key
 from ouroboros.orchestrator import verify_shell
 from ouroboros.runtime import child_env
 
@@ -94,6 +99,95 @@ def _enclosing_function(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> ast.A
     return None
 
 
+def _qualified_definition(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str:
+    parts = []
+    current = node
+    while current is not None:
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            parts.append(current.name)
+        current = parents.get(current)
+    return ".".join(reversed(parts))
+
+
+def _binding_scope(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> ast.AST | None:
+    current = parents.get(node)
+    while current is not None:
+        if isinstance(current, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return current
+        current = parents.get(current)
+    return None
+
+
+@cache
+def _local_nodes(scope: ast.AST) -> tuple[ast.AST, ...]:
+    result = []
+    pending = list(ast.iter_child_nodes(scope))
+    while pending:
+        item = pending.pop()
+        result.append(item)
+        if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            pending.extend(ast.iter_child_nodes(item))
+    return tuple(result)
+
+
+def _resolve_symbol(
+    dotted: str, node: ast.AST, parents: dict[ast.AST, ast.AST], module: str, depth: int = 0
+) -> str:
+    if depth > 8:
+        return "<unresolved>"
+    first, _, tail = dotted.partition(".")
+    scope = _binding_scope(node, parents)
+    if first in {"self", "cls"}:
+        current = scope
+        while current is not None:
+            if isinstance(current, ast.ClassDef):
+                return f"{module}.{_qualified_definition(current, parents)}.{tail}"
+            current = _binding_scope(current, parents)
+        return "<unresolved>"
+    while scope is not None:
+        matches = []
+        for item in _local_nodes(scope):
+            if isinstance(item, (ast.Import, ast.ImportFrom)):
+                for alias in item.names:
+                    local = alias.asname or alias.name.split(".")[0]
+                    if local != first:
+                        continue
+                    if isinstance(item, ast.Import):
+                        target = alias.name if alias.asname else local
+                    else:
+                        prefix = item.module or ""
+                        if item.level:
+                            prefix = ".".join(module.split(".")[: -item.level] + [prefix])
+                        target = f"{prefix}.{alias.name}"
+                    matches.append((item.lineno, target))
+            elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                if item.name == first:
+                    matches.append(
+                        (item.lineno, f"{module}.{_qualified_definition(item, parents)}")
+                    )
+            elif isinstance(item, (ast.Assign, ast.AnnAssign)) and item.lineno < node.lineno:
+                targets = item.targets if isinstance(item, ast.Assign) else [item.target]
+                if any(isinstance(target, ast.Name) and target.id == first for target in targets):
+                    value = _dotted(item.value) if item.value is not None else None
+                    resolved = (
+                        _resolve_symbol(value, item, parents, module, depth + 1)
+                        if value
+                        else "<unresolved>"
+                    )
+                    matches.append((item.lineno, resolved))
+        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            args = scope.args
+            parameters = [*args.posonlyargs, *args.args, *args.kwonlyargs]
+            parameters += [arg for arg in (args.vararg, args.kwarg) if arg is not None]
+            if any(arg.arg == first for arg in parameters):
+                matches.append((-1, "<parameter>"))
+        if matches:
+            target = max(matches)[1]
+            return target + (f".{tail}" if tail else "")
+        scope = _binding_scope(scope, parents)
+    return dotted if first == "dict" else f"<unresolved>.{dotted}"
+
+
 # ---------------------------------------------------------------------------
 # Invariant 1 — every spawn site names its environment builder or is allowlisted
 # ---------------------------------------------------------------------------
@@ -127,32 +221,44 @@ SPAWN_CALLEES: dict[str, int | None] = {
 }
 
 #: Reviewed helpers whose *return value* may be passed as a child environment.
-#: Matched on the final attribute of the call (``self._build_child_env()`` →
-#: ``_build_child_env``). Adding a name here is a security review, not a fix:
+#: Matched by source-qualified definition, including its enclosing class.
+#: Adding a name here is a security review, not a fix:
 #: the helper must start from a copy and pop / filter keys, never hand back
 #: ``os.environ`` itself. :func:`test_named_env_builders_exist` keeps the roster
 #: honest.
 NAMED_ENV_BUILDERS: frozenset[str] = frozenset(
     {
-        # The shared recursion-guard chokepoint (runtime/child_env.py).
-        "build_child_env",
-        # Per-backend wrappers over build_child_env (codex/copilot/kiro cli_policy).
-        "build_codex_child_env",
-        "build_copilot_child_env",
-        "build_kiro_child_env",
-        # Per-backend methods. Some route to build_child_env, some are
-        # ``os.environ.copy()`` + pop (goose, omp, pi, dsh, ourocode) — named
-        # chokepoints, not loader-key sanitizers; see the module docstring.
-        "_build_child_env",
-        "_build_env",
-        "_child_env",
-        "_build_cli_child_env",
-        "_build_env_for_instance",
-        # The AC verify gate: strips loader / shell-startup keys.
-        "sanitized_verify_environment",
-        # git helpers: non-interactive prompts / GIT_* stripped respectively.
-        "git_noninteractive_env",
-        "_git_environment",
+        "ouroboros.cli.commands.plugin_cache.git_noninteractive_env",
+        "ouroboros.codex.cli_policy.build_codex_child_env",
+        "ouroboros.copilot.cli_policy.build_copilot_child_env",
+        "ouroboros.core.project_identity._git_environment",
+        "ouroboros.kiro.cli_policy.build_kiro_child_env",
+        "ouroboros.orchestrator.claude_worker_runtime.ClaudeWorkerTransport._child_env",
+        "ouroboros.orchestrator.codex_cli_runtime.CodexCliRuntime._build_child_env",
+        "ouroboros.orchestrator.copilot_cli_runtime.CopilotCliRuntime._build_child_env",
+        "ouroboros.orchestrator.gemini_cli_runtime.GeminiCLIRuntime._build_child_env",
+        "ouroboros.orchestrator.goose_runtime.GooseCliRuntime._build_child_env",
+        "ouroboros.orchestrator.grok_cli_runtime.GrokCliRuntime._build_child_env",
+        "ouroboros.orchestrator.hermes_runtime.HermesCliRuntime._build_child_env",
+        "ouroboros.orchestrator.kiro_adapter.KiroAgentAdapter._build_child_env",
+        "ouroboros.orchestrator.omp_runtime.OmpRuntime._build_child_env",
+        "ouroboros.orchestrator.opencode_runtime.OpenCodeRuntime._build_child_env",
+        "ouroboros.orchestrator.pi_runtime.PiRuntime._build_child_env",
+        "ouroboros.orchestrator.verify_shell.sanitized_verify_environment",
+        "ouroboros.orchestrator.zcode_cli_runtime.ZcodeCLIRuntime._build_child_env",
+        "ouroboros.providers.claude_code_adapter.ClaudeCodeAdapter._build_cli_child_env",
+        "ouroboros.providers.codex_cli_adapter.CodexCliLLMAdapter._build_child_env",
+        "ouroboros.providers.copilot_cli_adapter.CopilotCliLLMAdapter._build_child_env",
+        "ouroboros.providers.dsh_acp_client.DshAcpClient._build_env",
+        "ouroboros.providers.gemini_cli_adapter.GeminiCLIAdapter._build_env",
+        "ouroboros.providers.goose_cli_adapter.GooseCliLLMAdapter._build_child_env",
+        "ouroboros.providers.goose_cli_adapter.GooseCliLLMAdapter._build_env_for_instance",
+        "ouroboros.providers.hermes_cli_adapter.HermesCliLLMAdapter._build_env",
+        "ouroboros.providers.kiro_adapter.KiroCodeAdapter._build_child_env",
+        "ouroboros.providers.opencode_adapter.OpenCodeLLMAdapter._build_child_env",
+        "ouroboros.providers.ourocode_acp_client.OurocodeAcpClient._build_env",
+        "ouroboros.providers.zcode_cli_adapter.ZcodeCliLLMAdapter._build_child_env",
+        "ouroboros.runtime.child_env.build_child_env",
     }
 )
 
@@ -166,20 +272,21 @@ class SpawnSite:
     function: str
     callee: str
     env_source: str
+    column: int = 0
 
     @property
-    def key(self) -> tuple[str, str, str]:
-        return (self.file, self.function, self.callee)
+    def key(self) -> tuple[str, str, str, int, int]:
+        return (self.file, self.function, self.callee, self.line, self.column)
 
     @property
     def builder(self) -> str:
-        return self.env_source.rsplit(".", 1)[-1]
+        return self.env_source
 
     @property
     def uses_named_builder(self) -> bool:
         if self.env_source.startswith("either(") and self.env_source.endswith(")"):
             alternatives = self.env_source[len("either(") : -1].split("|")
-            return all(alt.rsplit(".", 1)[-1] in NAMED_ENV_BUILDERS for alt in alternatives)
+            return all(alt in NAMED_ENV_BUILDERS for alt in alternatives)
         return self.builder in NAMED_ENV_BUILDERS
 
 
@@ -192,7 +299,7 @@ def _last_assignment_before(name: str, function: ast.AST | None, line: int) -> a
     if function is None:
         return None
     candidate: ast.AST | None = None
-    for node in ast.walk(function):
+    for node in _local_nodes(function):
         if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.lineno >= line:
             continue
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
@@ -214,7 +321,11 @@ def _last_assignment_before(name: str, function: ast.AST | None, line: int) -> a
 
 
 def _describe_env_expr(
-    expr: ast.AST | str | None, function: ast.AST | None, line: int, depth: int = 0
+    expr: ast.AST | str | None,
+    function: ast.AST | None,
+    line: int,
+    depth: int = 0,
+    resolve: Callable[[str, ast.AST], str] | None = None,
 ) -> str:
     if expr is None:
         return "inherit"
@@ -222,8 +333,10 @@ def _describe_env_expr(
         return expr
     if isinstance(expr, ast.Call):
         callee = _dotted(expr.func) or "<call>"
+        if resolve is not None:
+            callee = resolve(callee, expr)
         if callee == "dict" and expr.args and not expr.keywords:
-            inner = _describe_env_expr(expr.args[0], function, line, depth + 1)
+            inner = _describe_env_expr(expr.args[0], function, line, depth + 1, resolve)
             return f"dict({inner})"
         return callee
     if isinstance(expr, ast.Name):
@@ -232,11 +345,11 @@ def _describe_env_expr(
         resolved = _last_assignment_before(expr.id, function, line)
         if resolved is None:
             return "unresolved"
-        return _describe_env_expr(resolved, function, line, depth + 1)
+        return _describe_env_expr(resolved, function, line, depth + 1, resolve)
     if isinstance(expr, ast.Dict):
         if any(key is None for key in expr.keys):
             spread = [
-                _describe_env_expr(value, function, line, depth + 1)
+                _describe_env_expr(value, function, line, depth + 1, resolve)
                 for key, value in zip(expr.keys, expr.values, strict=True)
                 if key is None
             ]
@@ -245,8 +358,8 @@ def _describe_env_expr(
     if isinstance(expr, ast.DictComp):
         return "dict-comprehension"
     if isinstance(expr, ast.IfExp):
-        body = _describe_env_expr(expr.body, function, line, depth + 1)
-        orelse = _describe_env_expr(expr.orelse, function, line, depth + 1)
+        body = _describe_env_expr(expr.body, function, line, depth + 1, resolve)
+        orelse = _describe_env_expr(expr.orelse, function, line, depth + 1, resolve)
         return body if body == orelse else f"either({body}|{orelse})"
     if isinstance(expr, ast.Attribute):
         return _dotted(expr) or "unresolved"
@@ -260,10 +373,30 @@ def _discover_spawn_sites(root: Path) -> tuple[SpawnSite, ...]:
             continue
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
         parents = _parents(tree)
+        spawn_names = {"subprocess", "asyncio", "os"}
+        for imported in ast.walk(tree):
+            if isinstance(imported, ast.Import):
+                spawn_names.update(
+                    alias.asname or alias.name
+                    for alias in imported.names
+                    if alias.name in {"subprocess", "asyncio", "os"}
+                )
+            elif isinstance(imported, ast.ImportFrom) and imported.module in {
+                "subprocess",
+                "asyncio",
+                "os",
+            }:
+                spawn_names.update(alias.asname or alias.name for alias in imported.names)
+        module = ".".join(source.relative_to(root).with_suffix("").parts)
+        if root == _PACKAGE_ROOT:
+            module = f"ouroboros.{module}"
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
-            callee = _dotted(node.func)
+            dotted = _dotted(node.func)
+            if not dotted or dotted.split(".")[0] not in spawn_names:
+                continue
+            callee = _resolve_symbol(dotted, node, parents, module) if dotted else None
             if callee not in SPAWN_CALLEES:
                 continue
             function = _enclosing_function(node, parents)
@@ -276,7 +409,12 @@ def _discover_spawn_sites(root: Path) -> tuple[SpawnSite, ...]:
                 env_expr = node.args[positional_index]
             elif any(kw.arg is None for kw in node.keywords):
                 env_expr = "opaque-kwargs"
-            env_source = _describe_env_expr(env_expr, function, node.lineno)
+            env_source = _describe_env_expr(
+                env_expr,
+                function,
+                node.lineno,
+                resolve=lambda name, expr: _resolve_symbol(name, expr, parents, module),
+            )
             if root == _PACKAGE_ROOT:
                 file = _rel(source)
             else:
@@ -285,17 +423,18 @@ def _discover_spawn_sites(root: Path) -> tuple[SpawnSite, ...]:
                 SpawnSite(
                     file=file,
                     line=node.lineno,
-                    function=getattr(function, "name", "<module>"),
+                    function=_qualified_definition(function, parents) if function else "<module>",
                     callee=callee,
                     env_source=env_source,
+                    column=node.col_offset,
                 )
             )
     return tuple(sites)
 
 
 #: Spawn sites that do NOT pass a named-builder environment, each with the
-#: reason a reviewer accepted it. Keyed by (file, enclosing function, callee)
-#: so an unrelated edit that shifts line numbers does not churn this table.
+#: reason a reviewer accepted it. File, qualified scope, callee, line and column
+#: identify one call; source movement intentionally requires revalidation.
 #: An entry that no longer matches any site fails
 #: :func:`test_spawn_site_allowlist_has_no_stale_entries`.
 #:
@@ -303,197 +442,431 @@ def _discover_spawn_sites(root: Path) -> tuple[SpawnSite, ...]:
 #: "os.environ.copy" / "merge(os.environ)" = copy plus edits;
 #: "parameter" = env passed in by the caller. A justification must name why
 #: inheriting is acceptable so the allowlist never silently absorbs a finding.
-SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str], str] = {
-    # -- Python interpreters running our own modules ------------------------
-    ("src/ouroboros/mcp/detached_jobs.py", "_spawn_worker", "subprocess.Popen"): (
-        "os.environ.copy()+marker via **kwargs; fixed `sys.executable -m` argv. "
-        "PYTHON* keys are denied from the untrusted .env by the loader."
-    ),
-    ("src/ouroboros/dashboard_web/daemon.py", "_spawn_detached", "subprocess.Popen"): (
-        "implicit inherit; fixed `sys.executable -m` argv, detached daemon. PYTHON* keys are "
-        "denied from the untrusted .env by the loader."
-    ),
+SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
     (
-        "src/ouroboros/providers/litellm_adapter.py",
-        "_run_isolated_completion",
-        "asyncio.create_subprocess_exec",
-    ): "explicit two-key literal env (PYTHONIOENCODING/PYTHONUTF8) and `-I`; reference pattern.",
-    # -- mechanical evaluation of repo-declared commands ---------------------
-    ("src/ouroboros/evaluation/mechanical.py", "run_command", "asyncio.create_subprocess_exec"): (
-        "os.environ.copy() minus _OUROBOROS_NESTED; runs .ouroboros/mechanical.toml "
-        "commands; the repo already controls the command text, so env from the same repo adds no "
-        "capability. Not routed through sanitized_verify_environment."
-    ),
-    # -- verify gate plumbing (env supplied by the three sanitized callers) --
+        "src/ouroboros/auto/checkpoint_commits.py",
+        "_staged_changes",
+        "subprocess.run",
+        154,
+        13,
+    ): "implicit inherit; `git diff --cached`. GIT_* is denied from the untrusted .env by the loader.",
     (
-        "src/ouroboros/orchestrator/verify_command_runner.py",
-        "_run_process",
+        "src/ouroboros/auto/checkpoint_commits.py",
+        "_git",
+        "subprocess.run",
+        173,
+        13,
+    ): "implicit inherit; `git add/commit`. GIT_* is denied from the untrusted .env by the loader.",
+    (
+        "src/ouroboros/auto/investigation_workspace.py",
+        "_git",
+        "subprocess.run",
+        41,
+        11,
+    ): "Fixed git workspace snapshot commands; inherits operator environment after project .env loader denial of GIT_* and PATH.",
+    (
+        "src/ouroboros/auto/requester.py",
+        "CommandRequester.ask",
         "asyncio.create_subprocess_exec",
-    ): (
-        "parameter passthrough `dict(env)`; every caller passes "
-        "sanitized_verify_environment() (verify_shell, leaf_dispatcher, parallel_executor)."
-    ),
-    # -- login-shell env import ---------------------------------------------
-    ("src/ouroboros/cli/commands/mcp.py", "_ensure_shell_env", "subprocess.run"): (
-        "implicit inherit; spawns `$SHELL -l -c` to dump the login environment. "
-        "SHELL and ZDOTDIR are denied from the untrusted .env (PR #2404), so argv[0] and the "
-        "zsh startup file come from the real environment."
-    ),
-    # -- launchers / relaunches ---------------------------------------------
-    ("src/ouroboros/config_tui/launcher.py", "_relaunch_with_tui_profile", "os.execvpe"): (
-        "os.environ.copy()+bootstrap marker; `uvx --isolated` relaunch of ourselves. "
-        "XDG_DATA_HOME (uv resolution) is an open question in THREAT_MODEL.md."
-    ),
-    ("src/ouroboros/cli/commands/tui.py", "open_command", "subprocess.Popen"): (
-        "implicit inherit; opens a terminal emulator with a shlex-quoted argv built "
-        "from operator flags."
-    ),
-    ("src/ouroboros/cli/commands/tui.py", "_run_slt_backend", "subprocess.call"): (
-        "implicit inherit (Windows); argv[0] resolved by shutil.which on the denied PATH."
-    ),
-    ("src/ouroboros/cli/commands/tui.py", "_run_slt_backend", "os.execv"): (
-        "implicit inherit (POSIX exec of the Rust TUI); same resolution as above."
-    ),
-    ("src/ouroboros/cli/commands/update.py", "_run_step", "subprocess.run"): (
-        "{**os.environ, UV_TOOL_DIR|PIPX_HOME}; uv/pipx self-update. PIP_/PIPX_/UV_ "
-        "prefixes are denied from the untrusted .env."
-    ),
-    ("src/ouroboros/cli/commands/update.py", "_installed_version", "subprocess.run"): (
-        "implicit inherit; `<console> --version` probe of our own install."
-    ),
-    # -- codex doctor / MCP roster probes (roster root CODEX_HOME is denied) --
+        127,
+        28,
+    ): "Requester argv is explicitly operator-selected; OUROBOROS_AUTO_REQUESTER_COMMAND is denied from project .env; no shell.",
+    (
+        "src/ouroboros/auto/seed_preflight_repair.py",
+        "_git_listed_files",
+        "subprocess.run",
+        108,
+        20,
+    ): "Fixed git ls-files roster; GIT_* and PATH denied from project .env.",
+    (
+        "src/ouroboros/backends/model_catalog.py",
+        "refresh_models",
+        "subprocess.run",
+        320,
+        21,
+    ): "implicit inherit; `<cli> <list-args>` model listing with table-driven argv.",
+    (
+        "src/ouroboros/bigbang/brownfield.py",
+        "_origin_remote_url",
+        "subprocess.run",
+        102,
+        17,
+    ): "implicit inherit; `git -C <path> remote get-url origin`.",
+    (
+        "src/ouroboros/bigbang/brownfield.py",
+        "_is_git_worktree",
+        "subprocess.run",
+        140,
+        17,
+    ): "implicit inherit; `git -C <path> rev-parse HEAD`.",
+    (
+        "src/ouroboros/boundary/_pinned_exec.py",
+        "main",
+        "os.execve",
+        76,
+        4,
+    ): "Descriptor/hash-pinned interpreter launcher; passes controller-supplied environment to the same verified interpreter, with explicit POSIX fallback.",
+    (
+        "src/ouroboros/boundary/_pinned_exec.py",
+        "main",
+        "os.execve",
+        74,
+        8,
+    ): "Descriptor/hash-pinned interpreter launcher; passes controller-supplied environment to the same verified interpreter, with explicit POSIX fallback.",
     (
         "src/ouroboros/cli/commands/codex.py",
         "_list_stdio_mcp_tool_names_with_framing",
         "asyncio.create_subprocess_exec",
+        962,
+        17,
     ): "os.environ.copy()+server env from $CODEX_HOME/config.toml (denied root); doctor probe.",
-    ("src/ouroboros/cli/windows_codex_mcp.py", "_launcher_is_usable", "subprocess.run"): (
-        "implicit inherit; `<launcher> --help` probe with a code-owned argv."
-    ),
-    ("src/ouroboros/cli/commands/setup.py", "_codex_release_mcp_launcher", "subprocess.run"): (
-        "implicit inherit; `ouroboros mcp serve --help` probe of our own console script."
-    ),
-    # -- vendor CLI `--version` / config probes (argv code-owned, PATH denied) --
-    ("src/ouroboros/backends/model_catalog.py", "refresh_models", "subprocess.run"): (
-        "implicit inherit; `<cli> <list-args>` model listing with table-driven argv."
-    ),
-    ("src/ouroboros/cli/omp_config.py", "configure_omp_tool_call_timeout", "subprocess.run"): (
-        "implicit inherit; `omp config get|set <literal>` (two spawns in one function)."
-    ),
-    ("src/ouroboros/cli/opencode_config.py", "_debug_paths_config_dir", "subprocess.run"): (
-        "implicit inherit; `opencode debug paths` probe. APPDATA is OS-populated on Windows, so "
-        "the loader never overrides it."
-    ),
-    ("src/ouroboros/copilot/model_discovery.py", "_resolve_token", "subprocess.run"): (
-        "implicit inherit; `gh auth token`."
-    ),
+    (
+        "src/ouroboros/cli/commands/mcp.py",
+        "_ps_value",
+        "subprocess.run",
+        457,
+        17,
+    ): "implicit inherit; `ps -p <pid> -o <literal column>=` (start time / ppid).",
+    (
+        "src/ouroboros/cli/commands/mcp.py",
+        "_ensure_shell_env",
+        "subprocess.run",
+        397,
+        21,
+    ): "implicit inherit; spawns `$SHELL -l -c` to dump the login environment. SHELL and ZDOTDIR are denied from the untrusted .env (PR #2404), so argv[0] and the zsh startup file come from the real environment.",
+    (
+        "src/ouroboros/cli/commands/mcp_doctor.py",
+        "_pid_is_alive",
+        "subprocess.run",
+        697,
+        25,
+    ): "implicit inherit; Windows `tasklist /FI` liveness probe.",
+    (
+        "src/ouroboros/cli/commands/tui.py",
+        "open_command",
+        "subprocess.Popen",
+        136,
+        8,
+    ): "implicit inherit; opens a terminal emulator with a shlex-quoted argv built from operator flags.",
+    (
+        "src/ouroboros/cli/commands/tui.py",
+        "_run_slt_backend",
+        "os.execv",
+        332,
+        8,
+    ): "implicit inherit (POSIX exec of the Rust TUI); same resolution as above.",
+    (
+        "src/ouroboros/cli/commands/tui.py",
+        "_run_slt_backend",
+        "subprocess.call",
+        330,
+        17,
+    ): "implicit inherit (Windows); argv[0] resolved by shutil.which on the denied PATH.",
+    (
+        "src/ouroboros/cli/commands/update.py",
+        "_run_step",
+        "subprocess.run",
+        464,
+        17,
+    ): "{**os.environ, UV_TOOL_DIR|PIPX_HOME}; uv/pipx self-update. PIP_/PIPX_/UV_ prefixes are denied from the untrusted .env.",
+    (
+        "src/ouroboros/cli/commands/update.py",
+        "_installed_version",
+        "subprocess.run",
+        714,
+        17,
+    ): "implicit inherit; `<console> --version` probe of our own install.",
+    (
+        "src/ouroboros/cli/omp_config.py",
+        "configure_omp_tool_call_timeout",
+        "subprocess.run",
+        23,
+        18,
+    ): "implicit inherit; `omp config get|set <literal>` (two spawns in one function).",
+    (
+        "src/ouroboros/cli/omp_config.py",
+        "configure_omp_tool_call_timeout",
+        "subprocess.run",
+        42,
+        17,
+    ): "implicit inherit; `omp config get|set <literal>` (two spawns in one function).",
+    (
+        "src/ouroboros/cli/opencode_config.py",
+        "_debug_paths_config_dir",
+        "subprocess.run",
+        65,
+        17,
+    ): "implicit inherit; `opencode debug paths` probe. APPDATA is OS-populated on Windows, so the loader never overrides it.",
+    (
+        "src/ouroboros/cli/windows_codex_mcp.py",
+        "_launcher_is_usable",
+        "subprocess.run",
+        35,
+        17,
+    ): "implicit inherit; `<launcher> --help` probe with a code-owned argv.",
+    (
+        "src/ouroboros/config_tui/launcher.py",
+        "_relaunch_with_tui_profile",
+        "os.execvpe",
+        70,
+        4,
+    ): "os.environ.copy()+bootstrap marker; `uvx --isolated` relaunch of ourselves. XDG_DATA_HOME (uv resolution) is an open question in THREAT_MODEL.md.",
+    (
+        "src/ouroboros/copilot/model_discovery.py",
+        "_resolve_token",
+        "subprocess.run",
+        140,
+        20,
+    ): "implicit inherit; `gh auth token`.",
+    (
+        "src/ouroboros/core/git_workflow.py",
+        "is_on_protected_branch",
+        "subprocess.run",
+        153,
+        17,
+    ): "implicit inherit; `git rev-parse --abbrev-ref HEAD`.",
+    (
+        "src/ouroboros/core/pm_snapshot.py",
+        "_run_git",
+        "subprocess.run",
+        63,
+        17,
+    ): "implicit inherit; read-only git snapshot commands.",
+    (
+        "src/ouroboros/core/worktree.py",
+        "_run_git_process",
+        "subprocess.run",
+        133,
+        15,
+    ): "implicit inherit; `git worktree add/remove/status`. GIT_* is denied from the untrusted .env by the loader.",
+    (
+        "src/ouroboros/core/worktree.py",
+        "_run_git_bytes",
+        "subprocess.run",
+        162,
+        17,
+    ): "implicit inherit; git plumbing with bytes output. GIT_* is denied from the untrusted .env by the loader.",
+    (
+        "src/ouroboros/dashboard_web/daemon.py",
+        "_spawn_detached",
+        "subprocess.Popen",
+        175,
+        4,
+    ): "implicit inherit; fixed `sys.executable -m` argv, detached daemon. PYTHON* keys are denied from the untrusted .env by the loader.",
+    (
+        "src/ouroboros/evaluation/mechanical.py",
+        "run_command",
+        "asyncio.create_subprocess_exec",
+        130,
+        24,
+    ): "os.environ.copy() minus _OUROBOROS_NESTED; runs .ouroboros/mechanical.toml commands; the repo already controls the command text, so env from the same repo adds no capability. Not routed through sanitized_verify_environment.",
+    (
+        "src/ouroboros/evolution/frugality.py",
+        "_git",
+        "subprocess.run",
+        320,
+        16,
+    ): "implicit inherit; `git -C <path> status --porcelain`.",
+    (
+        "src/ouroboros/mcp/detached_jobs.py",
+        "_spawn_worker",
+        "subprocess.Popen",
+        298,
+        14,
+    ): "os.environ.copy()+marker via **kwargs; fixed `sys.executable -m` argv. PYTHON* keys are denied from the untrusted .env by the loader.",
+    (
+        "src/ouroboros/orchestrator/attempt_evidence.py",
+        "_git_bytes",
+        "subprocess.run",
+        161,
+        20,
+    ): "Fixed git metadata commands for workspace evidence; GIT_* and PATH denied from project .env; no shell.",
     (
         "src/ouroboros/orchestrator/cli_version_attestation.py",
         "probe_cli_executable_version_attestation",
         "subprocess.run",
+        253,
+        17,
     ): "implicit inherit; `<attested-path> --version` after filesystem identity check.",
     (
-        "src/ouroboros/orchestrator/pi_runtime.py",
-        "_probe_pi_native_param_flags",
+        "src/ouroboros/orchestrator/context_pack.py",
+        "_git_head",
         "subprocess.run",
-    ): ("implicit inherit; `<pi> --help` one-shot capability probe."),
-    ("src/ouroboros/providers/codex_cli_adapter.py", "_codex_version", "subprocess.run"): (
-        "implicit inherit; `<codex> --version` diagnostic."
-    ),
-    (
-        "src/ouroboros/orchestrator/runtime_evidence.py",
-        "run",
-        "subprocess.run",
-    ): "implicit inherit; HeadlessRunProbe command from trusted config, not the repo.",
-    # -- process-table / system probes (fixed argv, output never a verdict) --
-    ("src/ouroboros/cli/commands/mcp.py", "_ps_value", "subprocess.run"): (
-        "implicit inherit; `ps -p <pid> -o <literal column>=` (start time / ppid)."
-    ),
-    ("src/ouroboros/cli/commands/mcp_doctor.py", "_pid_is_alive", "subprocess.run"): (
-        "implicit inherit; Windows `tasklist /FI` liveness probe."
-    ),
-    ("src/ouroboros/orchestrator/heartbeat.py", "_get_process_start_time", "subprocess.run"): (
-        "implicit inherit; `ps -p <pid> -o lstart=`."
-    ),
+        445,
+        17,
+    ): "implicit inherit; `git rev-parse HEAD`.",
     (
         "src/ouroboros/orchestrator/evidence/system.py",
         "_get_available_memory_gb",
         "subprocess.run",
-    ): ("implicit inherit; `vm_stat`."),
+        18,
+        21,
+    ): "implicit inherit; `vm_stat`.",
     (
-        "src/ouroboros/orchestrator/opencode_runtime.py",
-        "_cleanup_windows_child_processes",
+        "src/ouroboros/orchestrator/heartbeat.py",
+        "_get_process_start_time",
         "subprocess.run",
-    ): ("implicit inherit; Windows `wmic process ... delete` cleanup of our own child."),
-    # -- git (implicit inherit; GIT_* denial is the sibling PR:
-    ("src/ouroboros/auto/checkpoint_commits.py", "_staged_changes", "subprocess.run"): (
-        "implicit inherit; `git diff --cached`. GIT_* is denied from the untrusted .env by the loader."
-    ),
-    ("src/ouroboros/auto/checkpoint_commits.py", "_git", "subprocess.run"): (
-        "implicit inherit; `git add/commit`. GIT_* is denied from the untrusted .env by the loader."
-    ),
-    ("src/ouroboros/bigbang/brownfield.py", "_origin_remote_url", "subprocess.run"): (
-        "implicit inherit; `git -C <path> remote get-url origin`."
-    ),
-    ("src/ouroboros/bigbang/brownfield.py", "_is_git_worktree", "subprocess.run"): (
-        "implicit inherit; `git -C <path> rev-parse HEAD`."
-    ),
-    ("src/ouroboros/core/git_workflow.py", "is_on_protected_branch", "subprocess.run"): (
-        "implicit inherit; `git rev-parse --abbrev-ref HEAD`."
-    ),
-    ("src/ouroboros/core/pm_snapshot.py", "_run_git", "subprocess.run"): (
-        "implicit inherit; read-only git snapshot commands."
-    ),
-    ("src/ouroboros/core/worktree.py", "_run_git_process", "subprocess.run"): (
-        "implicit inherit; `git worktree add/remove/status`. GIT_* is denied from the untrusted .env by the loader."
-    ),
-    ("src/ouroboros/core/worktree.py", "_run_git_bytes", "subprocess.run"): (
-        "implicit inherit; git plumbing with bytes output. GIT_* is denied from the untrusted .env by the loader."
-    ),
-    ("src/ouroboros/evolution/frugality.py", "_git", "subprocess.run"): (
-        "implicit inherit; `git -C <path> status --porcelain`."
-    ),
-    ("src/ouroboros/orchestrator/context_pack.py", "_git_head", "subprocess.run"): (
-        "implicit inherit; `git rev-parse HEAD`."
-    ),
-    ("src/ouroboros/orchestrator/n_version_tournament.py", "_git", "subprocess.run"): (
-        "implicit inherit; tournament worktree git helper."
-    ),
+        129,
+        21,
+    ): "implicit inherit; `ps -p <pid> -o lstart=`.",
+    (
+        "src/ouroboros/orchestrator/n_version_tournament.py",
+        "RunWorktreeManager._git",
+        "subprocess.run",
+        146,
+        15,
+    ): "implicit inherit; tournament worktree git helper.",
     (
         "src/ouroboros/orchestrator/n_version_tournament.py",
         "export_worktree_diff",
         "subprocess.run",
+        247,
+        17,
+    ): "implicit inherit; `git diff --binary HEAD` / `git ls-files` / `git diff --no-index`.",
+    (
+        "src/ouroboros/orchestrator/n_version_tournament.py",
+        "export_worktree_diff",
+        "subprocess.run",
+        264,
+        27,
     ): "implicit inherit; `git diff --binary HEAD` / `git ls-files` / `git diff --no-index`.",
     (
         "src/ouroboros/orchestrator/n_version_tournament.py",
         "apply_diff_to_workspace",
         "subprocess.run",
-    ): ("implicit inherit; `git apply` of a tournament winner."),
+        350,
+        8,
+    ): "implicit inherit; `git apply` of a tournament winner.",
+    (
+        "src/ouroboros/orchestrator/n_version_tournament.py",
+        "export_worktree_diff",
+        "subprocess.run",
+        285,
+        31,
+    ): "implicit inherit; `git diff --binary HEAD` / `git ls-files` / `git diff --no-index`.",
+    (
+        "src/ouroboros/orchestrator/opencode_runtime.py",
+        "OpenCodeRuntime._cleanup_windows_child_processes",
+        "subprocess.run",
+        642,
+        21,
+    ): "implicit inherit; Windows `wmic process ... delete` cleanup of our own child.",
+    (
+        "src/ouroboros/orchestrator/pi_runtime.py",
+        "_probe_pi_native_param_flags",
+        "subprocess.run",
+        81,
+        17,
+    ): "implicit inherit; `<pi> --help` one-shot capability probe.",
+    (
+        "src/ouroboros/orchestrator/runtime_evidence.py",
+        "HeadlessRunProbe.run",
+        "subprocess.run",
+        224,
+        24,
+    ): "implicit inherit; HeadlessRunProbe command from trusted config, not the repo.",
+    (
+        "src/ouroboros/orchestrator/verify_command_runner.py",
+        "_run_process",
+        "asyncio.create_subprocess_exec",
+        222,
+        21,
+    ): "parameter passthrough `dict(env)`; every caller passes sanitized_verify_environment() (verify_shell, leaf_dispatcher, parallel_executor).",
     (
         "src/ouroboros/orchestrator/workspace_evidence_paths.py",
         "load_tracked_workspace_paths",
         "subprocess.run",
+        13,
+        18,
     ): "implicit inherit; `git ls-files`.",
     (
         "src/ouroboros/orchestrator/workspace_evidence_paths.py",
         "load_ignored_workspace_paths",
         "subprocess.run",
+        38,
+        18,
     ): "implicit inherit; `git ls-files --ignored`.",
     (
-        "src/ouroboros/tui/screens/lineage_detail.py",
-        "_perform_rewind",
+        "src/ouroboros/providers/codex_cli_adapter.py",
+        "CodexCliLLMAdapter._codex_version",
+        "subprocess.run",
+        736,
+        21,
+    ): "implicit inherit; `<codex> --version` diagnostic.",
+    (
+        "src/ouroboros/providers/codex_cli_adapter.py",
+        "CodexCliLLMAdapter._complete_once",
         "asyncio.create_subprocess_exec",
+        1066,
+        28,
+    ): "Reviewed polymorphic dispatch: GooseCliLLMAdapter._build_env_for_instance when present, otherwise backend _build_child_env; no untrusted helper-name selection.",
+    (
+        "src/ouroboros/providers/litellm_adapter.py",
+        "LiteLLMAdapter._run_isolated_completion",
+        "asyncio.create_subprocess_exec",
+        988,
+        28,
+    ): "explicit two-key literal env (PYTHONIOENCODING/PYTHONUTF8) and `-I`; reference pattern.",
+    (
+        "src/ouroboros/runtime/_confine_exec.py",
+        "main",
+        "os.execvpe",
+        797,
+        8,
+    ): "Controller-serialized command environment is decoded only before executing the command after filesystem/network confinement.",
+    (
+        "src/ouroboros/runtime/exec_sandbox.py",
+        "_probe_matrix",
+        "subprocess.run",
+        690,
+        17,
+    ): "Sandbox capability probe uses fixed _bootstrap_environment (os.defpath plus serialized command environment), not inherited loaders.",
+    (
+        "src/ouroboros/runtime/exec_sandbox.py",
+        "_unshare_prefix",
+        "subprocess.run",
+        814,
+        17,
+    ): "Sandbox capability probe uses fixed _bootstrap_environment (os.defpath plus serialized command environment), not inherited loaders.",
+    (
+        "src/ouroboros/runtime/exec_sandbox.py",
+        "_private_mounts_unshare",
+        "subprocess.run",
+        882,
+        17,
+    ): "Sandbox capability probe uses fixed _bootstrap_environment (os.defpath plus serialized command environment), not inherited loaders.",
+    (
+        "src/ouroboros/tui/screens/lineage_detail.py",
+        "LineageDetailScreen._perform_rewind",
+        "asyncio.create_subprocess_exec",
+        547,
+        25,
+    ): "implicit inherit; `git status/rev-parse/checkout <tag>` from the TUI rewind flow.",
+    (
+        "src/ouroboros/tui/screens/lineage_detail.py",
+        "LineageDetailScreen._perform_rewind",
+        "asyncio.create_subprocess_exec",
+        569,
+        25,
+    ): "implicit inherit; `git status/rev-parse/checkout <tag>` from the TUI rewind flow.",
+    (
+        "src/ouroboros/tui/screens/lineage_detail.py",
+        "LineageDetailScreen._perform_rewind",
+        "asyncio.create_subprocess_exec",
+        592,
+        25,
     ): "implicit inherit; `git status/rev-parse/checkout <tag>` from the TUI rewind flow.",
 }
 
 
+@cache
 def _spawn_sites() -> tuple[SpawnSite, ...]:
     return _discover_spawn_sites(_PACKAGE_ROOT)
 
 
 def test_spawn_site_discovery_is_non_vacuous() -> None:
     """The enumerator must keep finding the sites the invariant exists for."""
-    keys = {site.key for site in _spawn_sites()}
+    keys = {site.key[:3] for site in _spawn_sites()}
     assert ("src/ouroboros/mcp/detached_jobs.py", "_spawn_worker", "subprocess.Popen") in keys
     assert (
         "src/ouroboros/orchestrator/verify_shell.py",
@@ -532,7 +905,7 @@ def _discover_bare_imports(root: Path) -> list[tuple[str, int, str]]:
             if not isinstance(node, ast.ImportFrom) or node.module not in _QUALIFIED_ONLY_IMPORTS:
                 continue
             for alias in node.names:
-                if alias.name in _QUALIFIED_ONLY_IMPORTS[node.module]:
+                if alias.name == "*" or alias.name in _QUALIFIED_ONLY_IMPORTS[node.module]:
                     file = (
                         _rel(source)
                         if root == _PACKAGE_ROOT
@@ -601,9 +974,11 @@ def test_named_env_builders_exist() -> None:
     defined: set[str] = set()
     for source in _iter_package_sources():
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        parents = _parents(tree)
+        module = "ouroboros." + ".".join(source.relative_to(_PACKAGE_ROOT).with_suffix("").parts)
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                defined.add(node.name)
+                defined.add(f"{module}.{_qualified_definition(node, parents)}")
     missing = sorted(NAMED_ENV_BUILDERS - defined)
     assert not missing, f"NAMED_ENV_BUILDERS names nothing defined in src: {missing}"
     assert callable(child_env.build_child_env)
@@ -614,10 +989,12 @@ def test_named_env_builders_never_return_os_environ_itself() -> None:
     """A builder must copy: handing back ``os.environ`` would let a child mutate the parent."""
     for source in _iter_package_sources():
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        parents = _parents(tree)
+        module = "ouroboros." + ".".join(source.relative_to(_PACKAGE_ROOT).with_suffix("").parts)
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            if node.name not in NAMED_ENV_BUILDERS:
+            if f"{module}.{_qualified_definition(node, parents)}" not in NAMED_ENV_BUILDERS:
                 continue
             for ret in ast.walk(node):
                 if isinstance(ret, ast.Return) and ret.value is not None:
@@ -651,7 +1028,7 @@ def test_named_env_builders_never_return_os_environ_itself() -> None:
             "def f():\n"
             "    env = build_child_env(depth_error_factory=RuntimeError)\n"
             "    subprocess.run(['x'], env=env)\n",
-            "build_child_env",
+            "ouroboros.runtime.child_env.build_child_env",
         ),
         (
             "import subprocess\ndef f(env):\n    subprocess.run(['x'], env=dict(env))\n",
@@ -702,6 +1079,7 @@ def test_spawn_site_discovery_finds_new_modules(tmp_path: Path) -> None:
         function="go",
         callee="asyncio.create_subprocess_exec",
         env_source="inherit",
+        column=17,
     )
     assert not site.uses_named_builder
 
@@ -783,6 +1161,75 @@ LOADER_KEY_CATALOG_DENIED: tuple[str, ...] = (
     "OUROBOROS_BACKEND_LIMITS",
     "OUROBOROS_MCP_AUTH_TOKEN",
     "OUROBOROS_IO_JOURNAL_PREVIEWS",
+    "BASH_COMPAT",
+    "BASH_XTRACEFD",
+    "CI",
+    "COPILOT_CUSTOM_INSTRUCTIONS_DIRS",
+    "DO_NOT_TRACK",
+    "GITHUB_ACTIONS",
+    "GJC_CODING_AGENT_DIR",
+    "GJC_CONFIG_DIR",
+    "LDR_PRELOAD",
+    "LIBPATH",
+    "OUROBOROS_AGENT_PERMISSION_MODE",
+    "OUROBOROS_AGENT_REASONING_EFFORT",
+    "OUROBOROS_AGENT_RUNTIME",
+    "OUROBOROS_ANTIGRAVITY_CLI_PATH",
+    "OUROBOROS_ASSERTION_EXTRACTION_MODEL",
+    "OUROBOROS_AUTO_INVESTIGATOR_CALL_TIMEOUT_SECONDS",
+    "OUROBOROS_AUTO_INVESTIGATOR_MAX_CALLS",
+    "OUROBOROS_AUTO_REQUESTER_COMMAND",
+    "OUROBOROS_AUTO_REQUESTER_TIMEOUT_SECONDS",
+    "OUROBOROS_CHECK_PACKAGE",
+    "OUROBOROS_CLARIFICATION_MODEL",
+    "OUROBOROS_CODEX_CLI_PATH",
+    "OUROBOROS_CONSENSUS_ADVOCATE_MODEL",
+    "OUROBOROS_CONSENSUS_DEVIL_MODEL",
+    "OUROBOROS_CONSENSUS_JUDGE_MODEL",
+    "OUROBOROS_CONSENSUS_MODELS",
+    "OUROBOROS_CONTEXT_COMPRESSION_MODEL",
+    "OUROBOROS_COPILOT_CLI_PATH",
+    "OUROBOROS_CROSS_HARNESS_REDISPATCH",
+    "OUROBOROS_DEPENDENCY_ANALYSIS_MODEL",
+    "OUROBOROS_DETECTOR_MODEL",
+    "OUROBOROS_DSH_CLI_PATH",
+    "OUROBOROS_DSH_CONFIG_PATH",
+    "OUROBOROS_EVOLVE_STAGE1",
+    "OUROBOROS_EXECUTION_MODEL",
+    "OUROBOROS_EXEC_SANDBOX",
+    "OUROBOROS_FIRST_COMMAND_SURFACE",
+    "OUROBOROS_GEMINI_CLI_PATH",
+    "OUROBOROS_GJC_CLI_PATH",
+    "OUROBOROS_GOOSE_CLI_PATH",
+    "OUROBOROS_GROK_CLI_PATH",
+    "OUROBOROS_HERMES_CLI_PATH",
+    "OUROBOROS_KIRO_CLI_PATH",
+    "OUROBOROS_LLM_BACKEND",
+    "OUROBOROS_LLM_PERMISSION_MODE",
+    "OUROBOROS_MODEL",
+    "OUROBOROS_MODEL_TIER_ROUTING",
+    "OUROBOROS_OMP_CLI_PATH",
+    "OUROBOROS_ONTOLOGY_ANALYSIS_MODEL",
+    "OUROBOROS_OPENCODE_CLI_PATH",
+    "OUROBOROS_OPENCODE_PERMISSION_MODE",
+    "OUROBOROS_OUROCODE_CLI_PATH",
+    "OUROBOROS_PIN_MODELS",
+    "OUROBOROS_PI_CLI_PATH",
+    "OUROBOROS_POSTHOG_API_KEY",
+    "OUROBOROS_POSTHOG_HOST",
+    "OUROBOROS_QA_MODEL",
+    "OUROBOROS_REFLECT_MODEL",
+    "OUROBOROS_RUNTIME",
+    "OUROBOROS_RUNTIME_PROFILE",
+    "OUROBOROS_SEMANTIC_MODEL",
+    "OUROBOROS_SHADOW_REPLAY",
+    "OUROBOROS_TELEMETRY",
+    "OUROBOROS_VALIDATION_MODEL",
+    "OUROBOROS_WONDER_MODEL",
+    "OUROBOROS_ZCODE_CLI_PATH",
+    "PI_CODING_AGENT_DIR",
+    "PI_CONFIG_DIR",
+    "SHLIB_PATH",
 )
 
 
@@ -795,3 +1242,263 @@ def test_loader_and_executable_selector_catalog_is_denied(key: str) -> None:
 def test_loader_catalog_denial_is_case_insensitive(key: str) -> None:
     """The loader upper-cases before matching; a lowercase spelling must not slip through."""
     assert is_untrusted_env_denied_key(key.lower())
+
+
+def _discover_routing_keys(root: Path) -> set[str]:
+    return {
+        node.value
+        for source in root.rglob("*.py")
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and node.value.isidentifier()
+        and node.value.isupper()
+        and node.value.endswith("_CLI_PATH")
+    }
+
+
+def _catalog_gaps(
+    catalog: set[str],
+    explicit_policy: set[str],
+    routing: set[str],
+    denies: Callable[[str], bool],
+) -> tuple[set[str], set[str]]:
+    return (explicit_policy | routing) - catalog, {
+        key for key in catalog | routing if not denies(key)
+    }
+
+
+def test_catalog_reconciles_policy_and_source_in_both_directions() -> None:
+    gaps = _catalog_gaps(
+        set(LOADER_KEY_CATALOG_DENIED),
+        set(UNTRUSTED_ENV_DENYLIST),
+        _discover_routing_keys(_PACKAGE_ROOT),
+        is_untrusted_env_denied_key,
+    )
+    assert gaps == (set(), set()), f"missing catalog entries / missing denials: {gaps}"
+
+
+def test_uncatalogued_selector_fails_even_with_reviewed_builder(tmp_path: Path) -> None:
+    (tmp_path / "future.py").write_text(
+        "import os, subprocess\nfrom ouroboros.runtime.child_env import build_child_env\n"
+        "subprocess.run([os.getenv('FIFTH_CLI_PATH')], env=build_child_env())\n"
+    )
+    (site,) = _discover_spawn_sites(tmp_path)
+    assert site.uses_named_builder
+    discovered = _discover_routing_keys(tmp_path)
+    assert discovered == {"FIFTH_CLI_PATH"}
+    assert _catalog_gaps(set(), set(), discovered, lambda _key: False) == (
+        {"FIFTH_CLI_PATH"},
+        {"FIFTH_CLI_PATH"},
+    )
+
+
+def test_catalog_and_policy_cannot_drift_independently() -> None:
+    assert _catalog_gaps(set(), {"SELECTOR"}, set(), lambda _key: True) == ({"SELECTOR"}, set())
+    assert _catalog_gaps({"SELECTOR"}, set(), set(), lambda _key: False) == (set(), {"SELECTOR"})
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import subprocess as sp\nsp.run(['x'])\n",
+        "import asyncio as aio\nasync def f():\n await aio.create_subprocess_exec('x')\n",
+        "from subprocess import run as launch\nlaunch(['x'])\n",
+        "import os as operating\noperating.execvp('x', ['x'])\n",
+    ],
+)
+def test_spawn_discovery_resolves_import_aliases(tmp_path: Path, source: str) -> None:
+    (tmp_path / "runner.py").write_text(source)
+    (site,) = _discover_spawn_sites(tmp_path)
+    assert site.callee in SPAWN_CALLEES
+    assert not site.uses_named_builder
+
+
+def test_spawn_identities_do_not_share_an_allowance(tmp_path: Path) -> None:
+    (tmp_path / "runner.py").write_text(
+        "import subprocess\ndef f():\n subprocess.run(['one']); subprocess.run(['two'])\n"
+        "class A:\n def f(self):\n  subprocess.run(['three'])\n"
+        "class B:\n def f(self):\n  subprocess.run(['four'])\n"
+    )
+    sites = _discover_spawn_sites(tmp_path)
+    assert len(sites) == 4
+    approved = {sites[0].key: "reviewed first call only"}
+    assert len({site.key for site in sites}) == 4
+    assert sum(site.key in approved for site in sites) == 1
+
+
+def test_local_builder_name_cannot_impersonate_reviewed_helper(tmp_path: Path) -> None:
+    (tmp_path / "runner.py").write_text(
+        "import subprocess, os\ndef build_child_env():\n return os.environ\n"
+        "subprocess.run(['x'], env=build_child_env())\n"
+    )
+    (site,) = _discover_spawn_sites(tmp_path)
+    assert not site.uses_named_builder
+
+
+def test_nested_assignment_cannot_supply_outer_environment(tmp_path: Path) -> None:
+    (tmp_path / "runner.py").write_text(
+        "import subprocess, os\nfrom ouroboros.runtime.child_env import build_child_env\n"
+        "def run():\n env = os.environ\n def nested():\n  env = build_child_env()\n"
+        " subprocess.run(['x'], env=env)\n"
+    )
+    (site,) = _discover_spawn_sites(tmp_path)
+    assert not site.uses_named_builder
+
+
+def test_wildcard_import_is_not_an_undiscovered_spawn_escape(tmp_path: Path) -> None:
+    (tmp_path / "runner.py").write_text("from subprocess import *\nrun(['x'])\n")
+    assert _discover_bare_imports(tmp_path) == [("runner.py", 1, "from subprocess import *")]
+
+
+def _checkpoint_helper() -> Path:
+    return _PACKAGE_ROOT.parent.parent / ".claude/skills/_lib/checkpoint.py"
+
+
+_REQUIRES_NOFOLLOW = pytest.mark.skipif(
+    not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd,
+    reason="Checkpoint publication requires POSIX no-follow directory descriptors",
+)
+
+
+@_REQUIRES_NOFOLLOW
+@pytest.mark.parametrize("name", ["progress.json.tmp", "progress.json"])
+def test_checkpoint_done_does_not_write_through_symlink(tmp_path: Path, name: str) -> None:
+    root = tmp_path / "repo"
+    state = root / ".triage-state"
+    state.mkdir(parents=True)
+    outside = tmp_path / "outside.json"
+    outside.write_text("sentinel")
+    (state / name).symlink_to(outside)
+    result = subprocess.run(
+        [sys.executable, str(_checkpoint_helper()), "done", str(state), "6"],
+        cwd=root,
+        env={**os.environ, "CHECKPOINT_ROOT": str(root)},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert outside.read_text() == "sentinel", result.stderr
+    assert not (state / "progress.json").is_symlink() or result.returncode != 0
+
+
+@_REQUIRES_NOFOLLOW
+def test_checkpoint_publish_holds_parent_authority(tmp_path: Path, monkeypatch) -> None:
+    spec = importlib.util.spec_from_file_location("checkpoint_audit", _checkpoint_helper())
+    assert spec and spec.loader
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    root = tmp_path / "repo"
+    state = root / ".triage-state"
+    state.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "progress.json").write_text("sentinel")
+    (outside / "progress.json.tmp").write_text("attacker replacement")
+    monkeypatch.setattr(helper, "_ROOT", root)
+    replace = os.replace
+
+    def swap_parent(src, dst, **kwargs):
+        state.rename(root / "held-state")
+        state.symlink_to(outside, target_is_directory=True)
+        return replace(src, dst, **kwargs)
+
+    monkeypatch.setattr(helper.os, "replace", swap_parent)
+    with pytest.raises(OSError):
+        helper._atomic_write(state / "progress.json", '{"status":"complete"}')
+    assert (outside / "progress.json").read_text() == "sentinel"
+
+
+def test_security_reports_are_ignored_at_actual_output_paths() -> None:
+    root = _PACKAGE_ROOT.parent.parent
+    paths = ["TRIAGE.json", "TRIAGE.md", "docs/security/TRIAGE.json", "docs/security/TRIAGE.md"]
+    result = subprocess.run(
+        ["git", "check-ignore", "--no-index", *paths],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert set(result.stdout.splitlines()) == set(paths)
+
+
+@_REQUIRES_NOFOLLOW
+@pytest.mark.parametrize(
+    "operation", ["save", "shard", "done", "load", "append", "reset", "rundir"]
+)
+def test_checkpoint_commands_refuse_symlink_parent(tmp_path: Path, operation: str) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "progress.json"
+    sentinel.write_text('{"status":"running"}')
+    (outside / "report.md").write_text("sentinel")
+    (root / ".triage-state").symlink_to(outside, target_is_directory=True)
+    (root / "payload.json").write_text('{"finding":"synthetic"}')
+    options = {
+        "save": [".triage-state", "1", "--from", "payload.json"],
+        "shard": [".triage-state", "case", "--from", "payload.json"],
+        "done": [".triage-state", "6"],
+        "load": [".triage-state"],
+        "append": [".triage-state/report.md", "--from", "payload.json"],
+        "reset": [".triage-state"],
+        "rundir": [".triage-state", "--state", ".scan-state", "--fresh"],
+    }
+    result = subprocess.run(
+        [sys.executable, str(_checkpoint_helper()), operation, *options[operation]],
+        cwd=root,
+        env={**os.environ, "CHECKPOINT_ROOT": str(root)},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 2, (result.stdout, result.stderr)
+    assert sentinel.read_text() == '{"status":"running"}'
+    assert (outside / "report.md").read_text() == "sentinel"
+    assert sorted(p.name for p in outside.iterdir()) == ["progress.json", "report.md"]
+
+
+@_REQUIRES_NOFOLLOW
+def test_checkpoint_public_lifecycle_and_report_publication(tmp_path: Path) -> None:
+    (tmp_path / "payload.json").write_text('{"finding":"synthetic"}')
+    (tmp_path / "chunk.txt").write_text("synthetic section")
+
+    def invoke(*args: str) -> str:
+        result = subprocess.run(
+            [sys.executable, str(_checkpoint_helper()), *args],
+            cwd=tmp_path,
+            env={**os.environ, "CHECKPOINT_ROOT": str(tmp_path)},
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, (args, result.stdout, result.stderr)
+        return result.stdout
+
+    invoke("save", ".triage-state", "1", "--from", "payload.json")
+    invoke("shard", ".triage-state", "finding-1", "--from", "payload.json")
+    assert '"finding-1"' in invoke("load", ".triage-state")
+    invoke("append", "docs/security/TRIAGE.md", "--replace", "--from", "chunk.txt")
+    invoke("append", "docs/security/TRIAGE.md", "--from", "chunk.txt")
+    assert (tmp_path / "docs/security/TRIAGE.md").read_text() == "synthetic section\n" * 2
+    invoke("append", "docs/security/TRIAGE.md", "--replace", "--from", "chunk.txt")
+    assert (tmp_path / "docs/security/TRIAGE.md").read_text() == "synthetic section\n"
+    invoke("done", ".triage-state", "6")
+    assert '"status": "complete"' in invoke("load", ".triage-state")
+    first = invoke("rundir", "results", "--state", ".scan-state", "--scope", ".").strip()
+    assert invoke("rundir", "results", "--state", ".scan-state", "--scope", ".").strip() == first
+    assert invoke("rundir", "results", "--state", ".scan-state", "--fresh").strip() != first
+    invoke("reset", ".triage-state")
+    assert not (tmp_path / ".triage-state").exists()
+
+
+def test_checkpoint_fails_closed_without_nofollow_support(tmp_path: Path, monkeypatch) -> None:
+    spec = importlib.util.spec_from_file_location("checkpoint_unsupported", _checkpoint_helper())
+    assert spec and spec.loader
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    monkeypatch.setattr(helper, "_ROOT", tmp_path)
+    monkeypatch.delattr(helper.os, "O_NOFOLLOW", raising=False)
+    assert helper.main(["done", str(tmp_path / ".triage-state"), "1"]) == 2
+    assert not (tmp_path / ".triage-state").exists()

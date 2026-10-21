@@ -27,6 +27,7 @@ from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.cli.formatters.prompting import multiline_prompt_async
 from ouroboros.cli.logging_setup import configure_cli_logging
+from ouroboros.cli.model_options import ModelOption, PinModelsOption, model_options
 from ouroboros.config import get_clarification_model, get_llm_backend
 from ouroboros.core.owner_only import secure_directory, write_owner_only
 from ouroboros.core.types import Result
@@ -94,14 +95,8 @@ def pm_command(
             help="Output directory for the generated PM document (default: .ouroboros/).",
         ),
     ] = None,
-    model: Annotated[
-        str | None,
-        typer.Option(
-            "--model",
-            "-m",
-            help="LLM model to use for the PM interview.",
-        ),
-    ] = None,
+    model: ModelOption = None,
+    pin_models: PinModelsOption = None,
     debug: Annotated[
         bool,
         typer.Option(
@@ -140,29 +135,30 @@ def pm_command(
         print_info("Starting new PM interview session...")
 
     try:
-        resolved_backend = resolve_llm_backend(get_llm_backend())
-        resolved_model = model or get_clarification_model(resolved_backend)
-        permission_mode = resolve_llm_permission_mode(
-            backend=resolved_backend,
-            use_case="interview",
-        )
-
-        console.print(f"  Model: [dim]{resolved_model}[/]\n")
-        if permission_mode == "bypassPermissions":
-            print_warning(
-                "Interview backend "
-                f"'{resolved_backend}' uses bypassPermissions for question generation."
-            )
-
-        asyncio.run(
-            _run_pm_interview(
-                resume_id=resume,
-                model=resolved_model,
+        with model_options(model, pin_models):
+            resolved_backend = resolve_llm_backend(get_llm_backend())
+            resolved_model = get_clarification_model(resolved_backend)
+            permission_mode = resolve_llm_permission_mode(
                 backend=resolved_backend,
-                debug=debug,
-                output_dir=output,
+                use_case="interview",
             )
-        )
+
+            console.print(f"  Model: [dim]{resolved_model}[/]\n")
+            if permission_mode == "bypassPermissions":
+                print_warning(
+                    "Interview backend "
+                    f"'{resolved_backend}' uses bypassPermissions for question generation."
+                )
+
+            asyncio.run(
+                _run_pm_interview(
+                    resume_id=resume,
+                    model=resolved_model,
+                    backend=resolved_backend,
+                    debug=debug,
+                    output_dir=output,
+                )
+            )
     except ValueError as exc:
         print_error(str(exc))
         raise typer.Exit(code=1) from exc

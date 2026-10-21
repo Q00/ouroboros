@@ -11,6 +11,7 @@ import pytest
 from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
 from ouroboros.config.models import RuntimeControlsConfig
 from ouroboros.core.errors import ConfigError
+from ouroboros.core.seed import Seed
 from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.tools.authoring_handlers import _is_interview_completion_signal
@@ -328,6 +329,7 @@ class TestExecuteSeedHandler:
             captured_runtime_kwargs.update(kwargs)
             return SimpleNamespace(runtime_backend="pi")
 
+        monkeypatch.setenv("OUROBOROS_PIN_MODELS", "1")
         monkeypatch.setenv("OUROBOROS_EXECUTION_MODEL", "openai-codex/gpt-5.4-mini")
         monkeypatch.setattr(
             "ouroboros.mcp.tools.execution_handlers.SessionRepository",
@@ -2171,6 +2173,14 @@ class TestEntryToolRoutingContracts:
             async def initialize(self) -> None:
                 return None
 
+            # The resume reads the run's check package mode from the journal
+            # before the receipt; this run has none (it was off).
+            async def replay(self, *_args: object, **_kwargs: object) -> list[object]:
+                return []
+
+            async def query_events(self, *_args: object, **_kwargs: object) -> list[object]:
+                return []
+
         class FakeJobManager:
             async def allocate_job_id(self):
                 return "job_resume_preferences"
@@ -2238,7 +2248,7 @@ class TestEntryToolRoutingContracts:
         assert result.value.meta["execution_id"] == "exec_resume_preferences"
         assert result.value.meta["efficiency_mode"] == "quality_first"
         assert result.value.meta["frugality_assurance"] == "off"
-        assert "Efficiency Mode: quality_first" in result.value.text_content
+        assert "Efficiency Mode: quality_first\n" in result.value.text_content
         assert "Frugality Assurance: off" in result.value.text_content
 
     async def test_start_execute_seed_plugin_marks_delegation_unverified(
@@ -2661,6 +2671,17 @@ class TestLateralThinkHandler:
 class TestMeasureDriftHandler:
     """Test MeasureDriftHandler class."""
 
+    @pytest.fixture(autouse=True)
+    def use_lexical_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from ouroboros.observability.drift import _calculate_lexical_goal_drift
+
+        async def lexical_fallback(current_output: str, seed: Seed, **_kwargs: object) -> float:
+            return _calculate_lexical_goal_drift(current_output, seed)
+
+        monkeypatch.setattr(
+            "ouroboros.observability.drift.calculate_goal_drift_async", lexical_fallback
+        )
+
     def test_definition_name(self) -> None:
         """MeasureDriftHandler has correct name."""
         handler = MeasureDriftHandler()
@@ -2852,6 +2873,7 @@ class TestEvaluateHandlerCodeChanges:
             passed=passed,
             message="tests passed" if passed else "tests failed",
             details=details,
+            executed=True,
         )
         return MechanicalResult(passed=passed, checks=(check,), coverage_score=None)
 
