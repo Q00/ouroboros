@@ -49,6 +49,8 @@ from pathlib import Path
 import re
 import sys
 from threading import RLock
+import traceback
+from types import TracebackType
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -204,7 +206,7 @@ _EXCEPTION_SECRET_ASSIGNMENT = re.compile(
 
 
 def _sanitize_exception_text(text: str) -> str:
-    """Mask credentials in traceback text without discarding diagnostics."""
+    """Retain existing redaction for caller-supplied string arguments only."""
 
     def replace_quoted(match: re.Match[str]) -> str:
         key_quote, key, value_quote = match.group(1), match.group(2), match.group(3)
@@ -212,6 +214,10 @@ def _sanitize_exception_text(text: str) -> str:
 
     text = _EXCEPTION_SECRET_QUOTED_ASSIGNMENT.sub(replace_quoted, text)
     text = _EXCEPTION_SECRET_ASSIGNMENT.sub(r"\1=<REDACTED>", text)
+    return _mask_exception_tokens(text)
+
+
+def _mask_exception_tokens(text: str) -> str:
     token_pattern = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{7,}")
 
     def replace(match: re.Match[str]) -> str:
@@ -231,21 +237,72 @@ def _sanitize_exception_text(text: str) -> str:
     return token_pattern.sub(replace, text)
 
 
+def _format_exception_safely(
+    exception: BaseException, tb: TracebackType | None, seen: set[int]
+) -> str:
+    if id(exception) in seen:
+        return "<exception cycle>\n"
+    seen.add(id(exception))
+    parts: list[str] = []
+    cause = exception.__cause__
+    context = exception.__context__
+    if cause is not None:
+        parts.append(_format_exception_safely(cause, cause.__traceback__, seen))
+        parts.append("\nThe above exception was the direct cause of the following exception:\n\n")
+    elif context is not None and not exception.__suppress_context__:
+        parts.append(_format_exception_safely(context, context.__traceback__, seen))
+        parts.append("\nDuring handling of the above exception, another exception occurred:\n\n")
+    if tb is not None:
+        parts.append("Traceback (most recent call last):\n")
+        # Source lines can contain literal credentials; retain frame locations only.
+        frames = [
+            traceback.FrameSummary(frame.f_code.co_filename, lineno, frame.f_code.co_name, line="")
+            for frame, lineno in traceback.walk_tb(tb)
+        ]
+        parts.extend(traceback.StackSummary.from_list(frames).format())
+    safe_arguments = []
+    for argument in BaseException.args.__get__(exception):
+        match argument:
+            case str():
+                safe_arguments.append(_sanitize_exception_text(str.__str__(argument)))
+            case _:
+                safe_arguments.append(sanitize_for_logging({"argument": argument})["argument"])
+    message = str(BaseException(*safe_arguments))
+    exception_type = type(exception)
+    name = exception_type.__qualname__
+    if exception_type.__module__ not in ("builtins", "__main__"):
+        name = f"{exception_type.__module__}.{name}"
+    parts.append(f"{name}: {message}\n" if message else f"{name}\n")
+    if isinstance(exception, BaseExceptionGroup):
+        for child in exception.exceptions:
+            parts.append(_format_exception_safely(child, child.__traceback__, seen))
+    notes = sanitize_for_logging({"notes": getattr(exception, "__notes__", ())})["notes"]
+    for note in notes:
+        parts.append(f"{note}\n")
+    return _mask_exception_tokens("".join(parts))
+
+
 def _format_exc_info_safely(
     _logger: Any,
     _method_name: str,
     event_dict: dict[str, Any],
 ) -> dict[str, Any]:
-    """Render reserved ``exc_info`` data, then sanitize its text output."""
+    """Sanitize structured exception arguments before rendering either sink."""
+    exc_info = event_dict.pop("exc_info", None)
     try:
-        event_dict = structlog.processors.format_exc_info(_logger, _method_name, event_dict)
+        if not exc_info:
+            return event_dict
+        match exc_info:
+            case BaseException() as exception:
+                tb = exception.__traceback__
+            case (_, BaseException() as exception, tb):
+                pass
+            case _:
+                _, exception, tb = sys.exc_info()
+        if exception is not None:
+            event_dict["exception"] = _format_exception_safely(exception, tb, set()).rstrip()
     except Exception:
-        event_dict.pop("exc_info", None)
         event_dict["exception"] = "<REDACTED>"
-        return event_dict
-    exception = event_dict.get("exception")
-    if isinstance(exception, str):
-        event_dict["exception"] = _sanitize_exception_text(exception)
     return event_dict
 
 
@@ -258,8 +315,8 @@ def _mask_sensitive_data(
 
     ``event`` is structlog's structured event value. String event identifiers
     remain exact unless their content is credential-shaped. Reserved
-    ``exc_info`` is retained for the exception formatter and sanitized after
-    rendering by ``_format_exc_info_safely``.
+    ``exc_info`` is retained for ``_format_exc_info_safely``, which sanitizes
+    structured arguments before rendering.
     """
     marker = object()
     callsite = dict.pop(event_dict, _CALLSITE_EVENT_KEY, marker)
