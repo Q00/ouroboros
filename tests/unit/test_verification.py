@@ -72,14 +72,16 @@ class TestVerificationModels:
         model: type[SpecAssertion] | type[ACVerificationReport],
         invalid_index: object,
     ) -> None:
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError) as exc_info:
             model.model_validate(
                 {
                     "ac_index": invalid_index,
                     "ac_text": "Create config",
+                    "tier": "t2_structural",
                     "results": [],
                 }
             )
+        assert {error["loc"] for error in exc_info.value.errors()} == {("ac_index",)}
 
     def test_zero_index_remains_valid_for_assertion_and_report(self) -> None:
         assertion = SpecAssertion.model_validate(
