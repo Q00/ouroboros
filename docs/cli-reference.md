@@ -495,7 +495,7 @@ ouroboros init list [OPTIONS]
 For projects with recognized manifests, use one LLM call to propose lint, build,
 test, and static-analysis commands and persist validated commands to
 `.ouroboros/mechanical.toml`. Without manifests, a discoverable standard-library
-`unittest.TestCase` suite can use deterministic discovery without an LLM call;
+`unittest.TestCase` suite under `tests/` can use deterministic discovery without an LLM call;
 an empty project produces no configuration. If the file already exists, the
 command leaves it unchanged unless `--force` is passed. This command
 authors the deterministic Stage 1 configuration; it does not detect installed
