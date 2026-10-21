@@ -392,7 +392,7 @@ uv run ouroboros run workflow --runtime codex --resume <session_id> ~/.ouroboros
 > `ouroboros auto`는 실행 중에 readiness를 다시 보긴 하지만 **조건부이고, 억제되는 두 경우의 결과가 정반대입니다** ([`auto/grading.py:225-226`](../../src/ouroboros/auto/grading.py)):
 >
 > - **ledger 닫힘**(`closure_mode`가 `ledger_only`·`safe_default`이고 degraded가 아닐 때): **ledger의 구조적 완결성이 수용 신호이고 LLM이 매긴 점수는 설계상 낡은 값**이라, 0.2를 크게 웃도는 Seed도 A 등급을 받고 **실행됩니다.** 나머지 채점 축은 그대로 적용됩니다.
-> - **degraded Seed**: 블로커가 억제되는 건 **부분 산출물을 내보내기 위해서일 뿐입니다.** 블로커가 없는 degraded Seed는 **등급이나 `may_run`과 무관하게** 곧바로 partial-product 종단(`AutoPhase.COMPLETE`)으로 갑니다([`auto/pipeline.py:1286`](../../src/ouroboros/auto/pipeline.py)). **RUN에는 절대 도달하지 않습니다.** 남아 있는 블로커는 하드 안전 블로커라 그대로 실행을 종료시킵니다.
+> - **degraded Seed**: 블로커가 억제되는 건 **부분 산출물을 내보내기 위해서일 뿐입니다.** 블로커가 없는 degraded Seed는 **등급이나 `may_run`과 무관하게** 곧바로 partial-product 종단으로 갑니다([`auto/pipeline.py`](../../src/ouroboros/auto/pipeline.py)). **RUN에는 절대 도달하지 않으며**, 세션은 `degraded_seed_not_executed` 사유로 `AutoPhase.BLOCKED`에서 멈춥니다. `COMPLETE`가 아닙니다. 남아 있는 블로커는 하드 안전 블로커라 그대로 실행을 종료시킵니다.
 >
 > 실무적으로: 손으로 쓴 seed에 높은 `ambiguity_score`를 박아도 `ouroboros run workflow`가 막지는 않습니다. 이 값은 **강제 차단 장치가 아니라 출처 기록(provenance)**입니다.
 
