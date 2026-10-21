@@ -26,9 +26,6 @@ import tomllib
 from typing import Annotated, Literal
 import urllib.request
 
-from packaging.markers import InvalidMarker, Marker, UndefinedComparison, UndefinedEnvironmentName
-from packaging.specifiers import InvalidSpecifier, SpecifierSet
-from packaging.version import InvalidVersion
 import typer
 
 from ouroboros import __version__
@@ -441,6 +438,23 @@ def _check_uv_target(identity: InstallationIdentity, target: str) -> None:
     """Reject a known-ineligible target without relaxing the operator's constraint."""
     if identity.manager != "uv":
         return
+    if not identity.version_specifier and not identity.requirement_marker:
+        return
+    try:
+        from packaging.markers import (
+            InvalidMarker,
+            Marker,
+            UndefinedComparison,
+            UndefinedEnvironmentName,
+        )
+        from packaging.specifiers import InvalidSpecifier, SpecifierSet
+        from packaging.version import InvalidVersion
+    except ImportError as exc:
+        raise InstallationIdentityError(
+            "this installation lacks packaging, which is required to validate its uv "
+            "root constraint; restore packaging in this tool environment using the original "
+            "manager and installation options, then retry. No constraint was relaxed"
+        ) from exc
     try:
         specifier = SpecifierSet(identity.version_specifier)
         if identity.requirement_marker and not Marker(identity.requirement_marker).evaluate():

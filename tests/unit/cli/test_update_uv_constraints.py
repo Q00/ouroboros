@@ -7,6 +7,9 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
+import sys
+import textwrap
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -21,6 +24,27 @@ from ouroboros.cli.commands.update import (
 )
 
 runner = CliRunner()
+
+
+def test_legacy_updater_imports_without_packaging() -> None:
+    script = textwrap.dedent(
+        """
+        import builtins
+        original_import = builtins.__import__
+        def without_packaging(name, *args, **kwargs):
+            if name == "packaging" or name.startswith("packaging."):
+                raise ModuleNotFoundError("No module named 'packaging'", name="packaging")
+            return original_import(name, *args, **kwargs)
+        builtins.__import__ = without_packaging
+        from ouroboros.cli.commands.update import _compare_versions, _is_prerelease
+        assert _compare_versions("0.55.4", "0.55.6") == -1
+        assert _is_prerelease("0.56.0rc1")
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def _uv_identity(
@@ -211,6 +235,34 @@ def test_check_still_reports_versions_without_installation_probe() -> None:
     assert "Update available" in result.output
     detect.assert_not_called()
     step.assert_not_called()
+
+
+@pytest.mark.parametrize("specifier", [None, "==0.55.4"])
+def test_missing_packaging_keeps_unconstrained_updates_and_protects_pins(
+    tmp_path: Path, specifier: str | None
+) -> None:
+    identity, receipt = _uv_identity(tmp_path, specifier)
+    original = receipt.read_bytes()
+    with (
+        patch.dict(sys.modules, {"packaging.markers": None}),
+        patch("ouroboros.cli.commands.update.__version__", "0.55.4"),
+        patch("ouroboros.cli.commands.update._latest_pypi_version", return_value="0.55.6"),
+        patch("ouroboros.cli.commands.update._detect_installation_identity", return_value=identity),
+        patch("ouroboros.cli.commands.update._run_step", return_value=True) as step,
+        patch("ouroboros.cli.commands.update._installed_version", return_value="0.55.6"),
+        patch("ouroboros.cli.commands.update.typer.confirm") as confirm,
+    ):
+        result = runner.invoke(app, ["--yes", "--runtime", "none"])
+
+    assert receipt.read_bytes() == original
+    confirm.assert_not_called()
+    if specifier:
+        assert result.exit_code == 1
+        assert "lacks packaging" in _plain(result.output)
+        step.assert_not_called()
+    else:
+        assert result.exit_code == 0
+        step.assert_called_once()
 
 
 def test_zero_exit_without_version_upgrade_does_not_report_success(tmp_path: Path) -> None:
