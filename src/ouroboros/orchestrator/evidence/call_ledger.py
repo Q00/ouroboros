@@ -183,6 +183,17 @@ def _recorded_result(
     records = _correlated_records(messages, index)
     if records is None:
         return CallResult.UNKNOWN, ResultSource.NONE, None
+    explicit_failure = False
+    for record in records:
+        containers = [record.data]
+        tool_result = record.data.get("tool_result")
+        if isinstance(tool_result, dict):
+            containers.append(tool_result)
+        bits = [container["is_error"] for container in containers if "is_error" in container]
+        if any(bit is True for bit in bits):
+            explicit_failure = True
+        if any(not isinstance(bit, bool) for bit in bits):
+            return CallResult.UNKNOWN, ResultSource.NONE, None
     statuses: list[int] = []
     for record in records:
         found, malformed = _recorded_exit_statuses(record)
@@ -192,8 +203,12 @@ def _recorded_result(
     if statuses:
         nonzero = [status for status in statuses if status != 0]
         status = nonzero[0] if nonzero else 0
+        if status == 0 and explicit_failure:
+            return CallResult.FAILED, ResultSource.IS_ERROR, None
         result = CallResult.PASSED if status == 0 else CallResult.FAILED
         return result, ResultSource.EXIT_STATUS, status
+    if explicit_failure:
+        return CallResult.FAILED, ResultSource.IS_ERROR, None
     if not is_error_is_exit_verdict:
         return CallResult.UNKNOWN, ResultSource.NONE, None
     bits = [

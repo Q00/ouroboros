@@ -34,6 +34,7 @@ import shlex
 
 from ouroboros.config.models import EvidenceCallOrderingWeights
 from ouroboros.orchestrator.adapter import AgentMessage
+from ouroboros.orchestrator.decomposition_policy import redact_and_truncate_text
 from ouroboros.orchestrator.evidence.call_ledger import (
     CallResult,
     RecordedCall,
@@ -289,7 +290,10 @@ def render_call_list(ordered: Sequence[RecordedCall], *, limit: int = MAX_LISTED
     """The numbered list the evidence turn shows: number, recorded command, recorded result."""
     rows = []
     for call in ordered[:limit]:
-        command = call.command or "(no recorded command)"
+        peeled = _peel_shell_wrappers(call.command)
+        redacted = redact_and_truncate_text(peeled, max_chars=4000)
+        command = redacted if redacted != peeled else call.command
+        command = command or "(no recorded command)"
         rows.append(f"[{call.number}] {call.result_label()} :: {command}")
     return "\n".join(rows)
 

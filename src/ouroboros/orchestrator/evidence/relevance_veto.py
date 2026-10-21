@@ -20,6 +20,7 @@ from typing import Any, Protocol
 
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.evidence.call_ledger import RecordedCall
+from ouroboros.orchestrator.evidence.call_ordering import render_call_list
 from ouroboros.orchestrator.evidence.cited_evidence import RelevanceDecision
 from ouroboros.orchestrator.evidence_schema import EvidenceError, extract_evidence
 
@@ -88,9 +89,7 @@ class LLMRelevanceJudge:
     async def __call__(self, *, criterion: str, calls: Sequence[RecordedCall]) -> Mapping[int, str]:
         from ouroboros.providers.base import CompletionConfig, Message, MessageRole
 
-        rows = "\n".join(
-            f"[{call.number}] {call.result_label()} :: {call.command}" for call in calls
-        )
+        rows = render_call_list(calls, limit=len(calls))
         response = await self._llm().complete(
             [
                 Message(
