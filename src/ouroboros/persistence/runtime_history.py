@@ -18,7 +18,7 @@ async def read_runtime_history(
     if max_row_id is None:
         max_row_id = await store.get_current_rowid()
     while True:
-        if session_id:
+        if session_id is not None:
             page, next_cursor = await store.query_session_related_events_after(
                 session_id=session_id,
                 execution_id=execution_id,

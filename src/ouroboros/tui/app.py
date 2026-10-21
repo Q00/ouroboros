@@ -27,6 +27,7 @@ from textual.notifications import SeverityLevel
 
 from ouroboros.core.ac_runtime_projection import ACRuntimeProjection, fold_ac_runtime
 from ouroboros.dashboard.board import ProviderLedger, fold_provider_event
+from ouroboros.persistence.runtime_history import read_runtime_history
 from ouroboros.tui.events import (
     ACModelRouted,
     ACTokenAttribution,
@@ -482,7 +483,7 @@ class OuroborosTUI(App[None]):
     async def _subscribe_to_events(self, context: _EventSubscriptionContext) -> None:
         """Subscribe to EventStore for live updates.
 
-        Uses incremental fetching via query_session_related_events_after() to
+        Uses bounded delivery-order fetching via read_runtime_history() to
         avoid replaying the full event history on every poll cycle, keeping each
         poll at O(new_events) instead of O(total_events).
 
@@ -504,14 +505,15 @@ class OuroborosTUI(App[None]):
                 (
                     new_events,
                     last_row_id,
-                ) = await self._event_store.query_session_related_events_after(
+                ) = await read_runtime_history(
+                    self._event_store,
                     session_id=context.session_id,
                     execution_id=context.execution_id,
-                    last_row_id=last_row_id,
+                    after_cursor=last_row_id,
                 )
 
                 if new_events:
-                    for event in sorted(new_events, key=lambda item: (item.timestamp, item.id)):
+                    for event in new_events:
                         if not self._is_subscription_active(context):
                             break
                         self._process_subscription_event(event)

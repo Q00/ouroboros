@@ -492,6 +492,7 @@ async def _query_linked_stream_events(
                     last_row_id=cursor,
                     limit=page_limit,
                     max_row_id=max_row_id,
+                    session_start_by_rowid=True,
                 )
             )
         if snapshot.links.lineage_id:

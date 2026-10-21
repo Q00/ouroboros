@@ -983,11 +983,18 @@ class TestOuroborosTUIEventSubscription:
             def __init__(self) -> None:
                 self.calls: list[tuple[str, str | None, int]] = []
 
+            async def get_current_rowid(self) -> int:
+                return 0
+
             async def query_session_related_events_after(
                 self,
                 session_id: str,
                 execution_id: str | None = None,
                 last_row_id: int = 0,
+                *,
+                limit: int | None = None,
+                max_row_id: int | None = None,
+                session_start_by_rowid: bool = False,
             ) -> tuple[list[BaseEvent], int]:
                 self.calls.append((session_id, execution_id, last_row_id))
                 return [], last_row_id
