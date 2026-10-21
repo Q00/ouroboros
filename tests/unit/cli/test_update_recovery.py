@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import errno
 from io import BytesIO, StringIO, TextIOWrapper
 import json
 import os
@@ -415,7 +416,11 @@ def test_copyable_command_round_trips_real_shell_and_restores_environment(
     result = _run_recovery_shell(shell_script, env)
 
     assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
-    original = {"args": [], "value": prior_value, "present": prior_value is not None}
+    original: dict[str, list[str] | str | bool | None] = {
+        "args": [],
+        "value": prior_value,
+        "present": prior_value is not None,
+    }
     assert json.loads(before.read_text(encoding="utf-8")) == original
     assert json.loads(during.read_text(encoding="utf-8")) == {
         "args": args,
@@ -572,18 +577,26 @@ def test_printed_posix_byte_path_and_environment_survive_utf8_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    executable = tmp_path / os.fsdecode(b"recorder-" + suffix)
-    executable.write_text(
-        '#!/bin/sh\nprintf \'%s\\0\' "$0" "$@" "$OUROBOROS_CODEX_CLI_PATH"\nexit 7\n',
-        encoding="ascii",
-    )
+    byte_path = tmp_path / os.fsdecode(b"recorder-" + suffix)
+    executable = byte_path
+    recorder = '#!/bin/sh\nprintf \'%s\\0\' "$0" "$@" "$OUROBOROS_CODEX_CLI_PATH"\nexit 7\n'
+    try:
+        executable.write_text(recorder, encoding="ascii")
+    except OSError as error:
+        if error.errno != errno.EILSEQ:
+            raise
+        # Some filesystems reject undecodable names. Keep those bytes in argv
+        # and the environment while using a runnable recorder on that filesystem.
+        executable = tmp_path / "recorder"
+        executable.write_text(recorder, encoding="ascii")
     executable.chmod(0o700)
     monkeypatch.setenv(ENV_KEY, str(executable))
     selected, env_key = update._runtime_executable_identity("codex", None)
     assert selected == str(executable)
     assert env_key == ENV_KEY
-    command = [selected, "plugin", "marketplace", "upgrade", "ouroboros"]
-    expected = b"\0".join(os.fsencode(value) for value in [*command, selected]) + b"\0"
+    command = [selected, "plugin", "marketplace", "upgrade", "ouroboros", str(byte_path)]
+    monkeypatch.setenv(ENV_KEY, str(byte_path))
+    expected = b"\0".join(os.fsencode(value) for value in [*command, str(byte_path)]) + b"\0"
     original = subprocess.run(command, capture_output=True, timeout=5)
     assert original.returncode == 7
     assert original.stdout == expected
@@ -593,7 +606,9 @@ def test_printed_posix_byte_path_and_environment_survive_utf8_output(
     buffer = BytesIO()
     stream = TextIOWrapper(buffer, encoding="utf-8", errors="strict")
     monkeypatch.setattr(update, "console", Console(file=stream, width=200, color_system=None))
-    update._print_step_recovery(command, {ENV_KEY: selected}, [command] if follow_up else None)
+    update._print_step_recovery(
+        command, {ENV_KEY: str(byte_path)}, [command] if follow_up else None
+    )
     stream.flush()
     output = buffer.getvalue().decode("utf-8").split("use the same environment):\n", 1)[1]
     monkeypatch.setenv(ENV_KEY, "prior value")
