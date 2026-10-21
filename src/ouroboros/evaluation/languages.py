@@ -685,6 +685,7 @@ class _Scope:
     active: bool = True
     expect_module: bool = False
     positionals: list[str] = field(default_factory=list)
+    excluded_tasks: list[str] = field(default_factory=list)
 
 
 def non_verifying_reason(
@@ -742,12 +743,27 @@ def non_verifying_reason(
             for candidate in candidates:
                 if candidate in _FORWARDED_FLAGS:
                     return f"forwarded: {candidate}"
-        previous = token
         if value_next:
             # The value of the option before it: ``pytest -k npm -v`` filters on
             # the string "npm" and does not run npm.
+            for scope in scopes:
+                if (
+                    scope.active
+                    and scope.spec is _GRADLE_SPEC
+                    and previous in {"-x", "--exclude-task"}
+                ):
+                    scope.excluded_tasks.append(token)
             value_next = False
+            previous = token
             continue
+        previous = token
+        for scope in scopes:
+            if scope.active and scope.spec is _GRADLE_SPEC:
+                option, separator, value = token.partition("=")
+                if separator and option in {"-x", "--exclude-task"}:
+                    scope.excluded_tasks.append(value)
+                elif token.startswith("-x") and token != "-x":
+                    scope.excluded_tasks.append(token[2:])
         value_next = any(
             scope.active and scope.spec.normalize(token) in scope.spec.takes_value
             for scope in scopes
@@ -792,6 +808,16 @@ def non_verifying_reason(
 def _positional_reason(scope: _Scope, parts: Sequence[str]) -> str | None:
     """Informational subcommands, and options valid only under one subcommand."""
     leading = scope.positionals[:2]
+    for excluded in scope.excluded_tasks:
+        for task in scope.positionals:
+            if task.lstrip(":") in scope.spec.subcommands:
+                continue
+            if (
+                task.lstrip(":") == excluded.lstrip(":")
+                or (":" not in excluded and excluded == task.rsplit(":", 1)[-1])
+                or (":" not in task and task == excluded.rsplit(":", 1)[-1])
+            ):
+                return f"{scope.tool}: excluded checking task {task} (-x {excluded})"
     if scope.spec.task_list:
         # ``gradle clean test`` runs the tests; ``gradle clean tasks`` runs none.
         tasks = scope.positionals

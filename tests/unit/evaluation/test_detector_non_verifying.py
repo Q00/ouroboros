@@ -244,6 +244,9 @@ ACCEPTED: list[tuple[str, str]] = [
     ("test", "pytest -m slow -q"),
     # Task runners run every positional: a reporting task beside a check is a check.
     ("test", "gradle clean test"),
+    ("test", "gradle test -x checkstyleMain"),
+    ("test", "gradle test --exclude-task=checkstyleMain"),
+    ("test", "gradle clean test -x clean"),
     ("build", "gradle build -x test"),
 ]
 
@@ -308,6 +311,103 @@ def test_maven_false_does_not_hide_non_verifying_properties(
     assert not toml_path(root).exists()
     config = build_mechanical_config(root, overrides={"test": command})
     assert config.test_command is None
+
+
+@pytest.mark.parametrize(
+    "option",
+    ["-x test", "-x=test", "-xtest", "--exclude-task test", "--exclude-task=test", "-x :test"],
+)
+def test_detector_refuses_excluded_gradle_test(tmp_path: Path, option: str) -> None:
+    # Given a supported Java project and an excluded test task.
+    root = _project(tmp_path)
+
+    # When the detector proposes that command.
+    ok, _ = _detect(root, {"test": f"gradle test {option}"})
+
+    # Then the command cannot become persisted verification evidence.
+    assert ok is False
+    assert not toml_path(root).exists()
+
+
+@pytest.mark.parametrize("source", ["toml", "override"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gradle test -x test",
+        "gradle test -x=test",
+        "gradle test -xtest",
+        "gradle test --exclude-task test",
+        "gradle test --exclude-task=test",
+        "gradle clean test -x :test",
+        "gradle :test -x test",
+        "gradle :app:test -x :app:test",
+        "gradle :app:test --exclude-task=app:test",
+        "gradle app:test -x :app:test",
+        "gradle :app:test -x test",
+        "gradle -x test test",
+        "gradle test -x checkstyleMain -x test",
+        "./gradlew test --exclude-task=test",
+        "gradlew.bat test -x test",
+    ],
+)
+@pytest.mark.asyncio
+async def test_excluded_gradle_task_cannot_approve_stage1(
+    tmp_path: Path, command: str, source: str
+) -> None:
+    # Given the command through either persisted configuration or caller overrides.
+    root = _project(tmp_path)
+    if source == "toml":
+        toml_path(root).parent.mkdir()
+        toml_path(root).write_text(f"test = {json.dumps(command)}\n")
+        config = build_mechanical_config(root)
+    else:
+        config = build_mechanical_config(root, overrides={"test": command})
+    pipeline = EvaluationPipeline(
+        llm_adapter=None,
+        config=PipelineConfig(stage2_enabled=False, stage3_enabled=False, mechanical=config),
+    )
+
+    # When Stage 1 evaluates the available verification evidence.
+    result = (
+        await pipeline.evaluate(
+            EvaluationContext(
+                execution_id="e", seed_id="s", current_ac="feature works", artifact="x"
+            )
+        )
+    ).value
+
+    # Then the excluded task is never executed or credited as a successful check.
+    assert config.test_command is None
+    assert result.stage1_result is not None
+    assert result.stage1_result.disposition is MechanicalDisposition.NO_EVIDENCE
+    assert result.stage1_result.executed_checks == ()
+    assert result.final_approved is False
+    assert result.acceptance_state.value == "unverified"
+
+
+@pytest.mark.parametrize(
+    ("key", "command"),
+    [
+        ("test", "gradle test -x checkstyleMain"),
+        ("test", "gradle test --exclude-task=checkstyleMain"),
+        ("test", "gradle :app:test -x :other:test"),
+        ("test", "gradle :app:test -x :test"),
+        ("test", "gradle clean test -x clean"),
+        ("test", "gradle test -P label=-xtest"),
+        ("test", "gradle test -P -xtest"),
+        ("build", "gradle build -x test"),
+        ("build", "gradle assemble --exclude-task=test"),
+    ],
+)
+def test_gradle_preserves_non_excluded_checks(tmp_path: Path, key: str, command: str) -> None:
+    # Given a task with only unrelated exclusions or a legitimate build-only command.
+    root = _project(tmp_path)
+
+    # When the shared command gate reads the caller override.
+    config = build_mechanical_config(root, overrides={key: command})
+
+    # Then the requested check remains available unchanged.
+    assert getattr(config, f"{key}_command") == tuple(shlex.split(command))
 
 
 def test_refused_command_leaves_siblings_intact(tmp_path: Path) -> None:
