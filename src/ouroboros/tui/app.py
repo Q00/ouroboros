@@ -25,6 +25,7 @@ from textual.app import App
 from textual.binding import Binding
 from textual.notifications import SeverityLevel
 
+from ouroboros.core.ac_runtime_projection import ACRuntimeProjection, fold_ac_runtime
 from ouroboros.dashboard.board import ProviderLedger, fold_provider_event
 from ouroboros.tui.events import (
     ACModelRouted,
@@ -456,7 +457,20 @@ class OuroborosTUI(App[None]):
         handful of times per run — never on node/status/tool chatter.
         """
         data = event.data if isinstance(event.data, dict) else {}
-        if not fold_provider_event(event.type, data, ledger=self._provider_ledger):
+        previous_runtime = getattr(
+            self,
+            "_ac_runtime",
+            ACRuntimeProjection(
+                execution_id=self._state.execution_id, session_id=self._state.session_id
+            ),
+        )
+        self._ac_runtime = fold_ac_runtime(
+            previous_runtime, event.type, data, aggregate_id=event.aggregate_id
+        )
+        if (
+            not fold_provider_event(event.type, data, ledger=self._provider_ledger)
+            and previous_runtime == self._ac_runtime
+        ):
             return
 
         self._state.board_providers[:] = self._provider_ledger.providers()
@@ -641,6 +655,7 @@ class OuroborosTUI(App[None]):
         # Wipe folded provider identity for the next run. The ledger wraps the
         # state's provider_by_node dict, so resetting it clears both.
         self._provider_ledger.reset()
+        self._ac_runtime = ACRuntimeProjection(execution_id=execution_id, session_id=session_id)
         self._state.board_providers.clear()
         # Wipe frugality telemetry so the next run starts from zero.
         self._state.tier_by_node.clear()
@@ -1363,9 +1378,25 @@ class OuroborosTUI(App[None]):
     def _notify_ac_tree_updated(self) -> None:
         """Notify dashboard that AC tree has been updated."""
         self._apply_provider_tags()
+        projection = getattr(self, "_ac_runtime", ACRuntimeProjection())
+        root_id = self._state.ac_tree.get("root_id", "root")
+        for node_id, node in self._state.ac_tree.get("nodes", {}).items():
+            if node_id == root_id:
+                continue
+            index = node.get("index")
+            root_index = index - 1 if isinstance(index, int) and index > 0 else None
+            runtime = projection.for_node(
+                node_id, root_index, child=node.get("parent_id") not in {None, root_id}
+            )
+            node["runtime"] = runtime.to_data()
+            node["status"] = runtime.display_status(node.get("status", "pending"))
         dashboard = self._get_dashboard_screen()
         if dashboard is not None and hasattr(dashboard, "_tree") and dashboard._tree is not None:
             dashboard._tree.update_tree(self._state.ac_tree)
+            panel = getattr(dashboard, "_detail_panel", None)
+            if panel is not None and panel.selected_node is not None:
+                selected_id = panel.selected_node.get("id")
+                panel.selected_node = self._state.ac_tree.get("nodes", {}).get(selected_id)
 
     async def on_unmount(self) -> None:
         if self._subscription_task is not None:
