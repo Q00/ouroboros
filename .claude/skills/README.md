@@ -16,11 +16,23 @@ random temporary files before atomic publication. It uses only the standard
 library so scanning a repository does not import or execute its target package.
 It fails closed on platforms without directory-descriptor/no-follow support.
 Final report publication uses the same helper via `append --replace --from`.
-The existing Write-tool payload staging step must use a new operator-controlled
-file; the helper cannot secure a separate agent tool's write to a pre-planted path.
+Every Write-tool payload follows the trusted staging contract below; the helper
+cannot secure a separate agent tool's write to a pre-planted path.
 
 Harness maintainer ownership remains a Q00 decision. These local safety repairs
 do not claim approval to expand the harness or change its advisory verdict role.
 
 Ouroboros-specific inputs: `.claude/scan-extras.txt` (`/vuln-scan --extra`) and
 `.claude/fp-rules.txt` (`/triage --fp-rules`). See `docs/security/README.md`.
+
+## Trusted payload staging
+
+In every skill example, `<payload-file>` is a placeholder for a new regular file
+for that individual chunk, under a fresh operator-controlled staging directory
+inside `CHECKPOINT_ROOT` (cwd by default). Its parent directories must be trusted
+and unavailable for modification by the scanned target. Never choose a
+repository-supplied checkpoint directory, reuse a fixed payload path, or follow
+a symlink. If these staging conditions cannot be established, stop before using
+Write. Substitute the chosen path in both the Write destination and the paired
+`--from` argument; do not execute the placeholder literally. The helper secures
+its own reads and publication, not the separate Write operation.

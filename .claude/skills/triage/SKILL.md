@@ -83,6 +83,10 @@ directly. Never pass payload via heredoc or stdin; target-derived strings
 could collide with the heredoc delimiter and break out to shell. The
 Write→`--from` pattern keeps repo-derived bytes out of Bash argv.
 
+Every `<payload-file>` below means a fresh file for that chunk, selected under
+the [trusted payload staging contract](../README.md#trusted-payload-staging).
+Never stage with Write in a checkpoint directory or at a reused fixed path.
+
 State files in `./.triage-state/`:
 - `progress.json` — **single source of truth** for resume position:
   `{"status": "running"|"complete", "phase_done": N, "shards_done": [...]}`.
@@ -90,8 +94,6 @@ State files in `./.triage-state/`:
   shard files (stale files from a prior run must not be trusted).
 - `phaseN.json` — data payload for phase N (schemas at the tail of each phase
   section below).
-- `_chunk.tmp` — transient payload buffer; overwritten before every
-  `save`/`shard`/`append` call.
 
 **Start of run — resume check.** Bash:
 `python3 .claude/skills/_lib/checkpoint.py load ./.triage-state`
@@ -108,9 +110,9 @@ State files in `./.triage-state/`:
   and **skip directly to Phase N+1**.
 
 **End of every phase N.** Two tool calls:
-1. Write tool → `./.triage-state/_chunk.tmp` containing the phase's output
+1. Write tool → `<payload-file>` containing the phase's output
    JSON (schema at the tail of each phase section).
-2. Bash → `python3 .claude/skills/_lib/checkpoint.py save ./.triage-state <N> <name> --from ./.triage-state/_chunk.tmp`
+2. Bash → `python3 .claude/skills/_lib/checkpoint.py save ./.triage-state <N> <name> --from <payload-file>`
 
 **End of run.** After writing `TRIAGE.json` and `TRIAGE.md`, Bash:
 `python3 .claude/skills/_lib/checkpoint.py done ./.triage-state 6`
@@ -189,14 +191,14 @@ When `--auto` is set, do not call AskUserQuestion. Use:
 - Scoring: derived HIGH/MEDIUM/LOW.
 - Noise tolerance: precision.
 
-**Checkpoint:** Write tool → `./.triage-state/_chunk.tmp`:
+**Checkpoint:** Write tool → `<payload-file>`:
 
 ```json
 {"phase": 0, "context": {mode, environment, threat_model, scoring, noise_tolerance, votes_per_finding, repo, findings_path}}
 ```
 
 Then Bash:
-`python3 .claude/skills/_lib/checkpoint.py save ./.triage-state 0 interview --from ./.triage-state/_chunk.tmp`
+`python3 .claude/skills/_lib/checkpoint.py save ./.triage-state 0 interview --from <payload-file>`
 On resume past Phase 0, the interview is **not** re-asked; `context` is
 restored from this file.
 
@@ -287,14 +289,14 @@ resolve, **stop**: tell the user verification needs source access and the
 cited files aren't reachable, and suggest a `--repo` value based on the
 longest common suffix you can see.
 
-**Checkpoint:** Write tool → `./.triage-state/_chunk.tmp`:
+**Checkpoint:** Write tool → `<payload-file>`:
 
 ```json
 {"phase": 1, "context": {...}, "findings": [ {normalized finding dicts with id/source/file/line/category/...} ], "path_resolution": "<which of a/b/c worked>"}
 ```
 
 Then Bash:
-`python3 .claude/skills/_lib/checkpoint.py save ./.triage-state 1 ingest --from ./.triage-state/_chunk.tmp`
+`python3 .claude/skills/_lib/checkpoint.py save ./.triage-state 1 ingest --from <payload-file>`
 
 ---
 
@@ -360,14 +362,14 @@ canonical's `absorbed`, and drop them from the working set.
 
 Carry forward `candidates[]` = the surviving canonicals.
 
-**Checkpoint:** Write tool → `./.triage-state/_chunk.tmp`:
+**Checkpoint:** Write tool → `<payload-file>`:
 
 ```json
 {"phase": 2, "context": {...}, "findings": [ {all findings; duplicates carry verdict/duplicate_of} ], "candidates": ["f001", "f003", "..."]}
 ```
 
 Then Bash:
-`python3 .claude/skills/_lib/checkpoint.py save ./.triage-state 2 dedup --from ./.triage-state/_chunk.tmp`
+`python3 .claude/skills/_lib/checkpoint.py save ./.triage-state 2 dedup --from <payload-file>`
 
 ---
 
@@ -640,22 +642,22 @@ Build:
 
 Build `confirmed[]` = candidates with `verdict == true_positive`.
 
-**Checkpoint:** Write tool → `./.triage-state/_chunk.tmp`:
+**Checkpoint:** Write tool → `<payload-file>`:
 
 ```json
 {"phase": 3, "context": {...}, "findings": [ {all findings with verdict/vote_breakdown/confidence/refute_reasons/first_links/rationale/exclusion_rule} ], "confirmed": ["f001", "..."]}
 ```
 
 Then Bash:
-`python3 .claude/skills/_lib/checkpoint.py save ./.triage-state 3 verify --from ./.triage-state/_chunk.tmp`
+`python3 .claude/skills/_lib/checkpoint.py save ./.triage-state 3 verify --from <payload-file>`
 
 This is the most expensive checkpoint. When `len(candidates) * votes` exceeds
 ~40 and verifier spawns are sharded into sequential batches, additionally
 checkpoint **per candidate** as its votes are tallied:
 
-1. Write tool → `./.triage-state/_chunk.tmp` = that finding's post-tally dict.
+1. Write tool → `<payload-file>` = that finding's post-tally dict.
 2. Bash:
-   `python3 .claude/skills/_lib/checkpoint.py shard ./.triage-state <id> --from ./.triage-state/_chunk.tmp`
+   `python3 .claude/skills/_lib/checkpoint.py shard ./.triage-state <id> --from <payload-file>`
 
 On resume at `phase_done == 2`, the Phase-3 entry point reads
 `progress.json:shards_done` (default `[]` — do **not** glob shard files on
@@ -771,14 +773,14 @@ For findings that did NOT reach Phase 4 (`false_positive`, `duplicate`,
 unlocatable): set `severity: null`, `verify_verdict: null`,
 `severity_alignment: null`, `preconditions: []`.
 
-**Checkpoint:** Write tool → `./.triage-state/_chunk.tmp`:
+**Checkpoint:** Write tool → `<payload-file>`:
 
 ```json
 {"phase": 4, "context": {...}, "findings": [ {all findings with severity/severity_label/preconditions/access_level/threat_match/severity_alignment/verify_verdict} ]}
 ```
 
 Then Bash:
-`python3 .claude/skills/_lib/checkpoint.py save ./.triage-state 4 rank --from ./.triage-state/_chunk.tmp`
+`python3 .claude/skills/_lib/checkpoint.py save ./.triage-state 4 rank --from <payload-file>`
 
 ---
 
@@ -803,14 +805,14 @@ username is less useful than `"component: auth/; no CODEOWNERS entry; top
 committer jsmith (14/20 recent commits)"`. For non-true-positive findings,
 set `owner_hint: null`.
 
-**Checkpoint:** Write tool → `./.triage-state/_chunk.tmp`:
+**Checkpoint:** Write tool → `<payload-file>`:
 
 ```json
 {"phase": 5, "context": {...}, "findings": [ {all findings with owner_hint} ]}
 ```
 
 Then Bash:
-`python3 .claude/skills/_lib/checkpoint.py save ./.triage-state 5 route --from ./.triage-state/_chunk.tmp`
+`python3 .claude/skills/_lib/checkpoint.py save ./.triage-state 5 route --from <payload-file>`
 
 ---
 
@@ -907,7 +909,7 @@ Context: {mode}; environment = {environment}; scoring = {scoring}; {votes}-vote 
 ```
 
 **Step 2 — per finding.** For each true_positive in severity order:
-1. Write tool → `./.triage-state/_chunk.tmp` containing ONE finding's section:
+1. Write tool → `<payload-file>` containing ONE finding's section:
 
 ```
 ### [{severity}] {title}  ({id})
@@ -923,11 +925,11 @@ Context: {mode}; environment = {environment}; scoring = {scoring}; {votes}-vote 
 ```
 
 2. Bash:
-   `python3 .claude/skills/_lib/checkpoint.py append docs/security/TRIAGE.md --from ./.triage-state/_chunk.tmp`
+   `python3 .claude/skills/_lib/checkpoint.py append docs/security/TRIAGE.md --from <payload-file>`
 
 Repeat for each true_positive.
 
-**Step 3 — footer.** Write tool → `./.triage-state/_chunk.tmp` containing the
+**Step 3 — footer.** Write tool → `<payload-file>` containing the
 Dropped table, then `checkpoint.py append` it the same way:
 
 ```

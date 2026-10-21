@@ -141,7 +141,8 @@ many turns, and an early read will be evicted before it's used.
 
 Ouroboros adaptation: when scanning `src/ouroboros`, publish to
 `docs/security/THREAT_MODEL.md`. For every mode, stage the content in a new
-operator-controlled payload file under cwd and publish with
+operator-controlled payload file under the
+[trusted payload staging contract](../README.md#trusted-payload-staging) and publish with
 `python3 .claude/skills/_lib/checkpoint.py append <output-file> --replace --from <payload-file>`.
 Do not use Write directly on the final report, and stop if the helper refuses.
 

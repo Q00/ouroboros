@@ -59,14 +59,16 @@ directly. Never pass payload via heredoc or stdin; target-derived strings
 could collide with the heredoc delimiter and break out to shell. The
 Write→`--from` pattern keeps repo-derived bytes out of Bash argv.
 
+Every `<payload-file>` below means a fresh file for that chunk, selected under
+the [trusted payload staging contract](../README.md#trusted-payload-staging).
+Never stage with Write in a checkpoint directory or at a reused fixed path.
+
 State files in `./.threat-model-state/`:
 - `progress.json` — **single source of truth** for resume position:
   `{"status": "running"|"complete", "stage_done": N}`. Resume decisions read
   ONLY this file.
 - `stageN.json` — data payload for stage N (schemas at the tail of each stage
   below).
-- `_chunk.tmp` — transient payload buffer; overwritten before every
-  `save`/`append` call.
 
 **Start of run — resume check.** Bash:
 `python3 .claude/skills/_lib/checkpoint.py load ./.threat-model-state`
@@ -82,9 +84,9 @@ State files in `./.threat-model-state/`:
   Stage N+1**.
 
 **End of every stage N.** Two tool calls:
-1. Write tool → `./.threat-model-state/_chunk.tmp` containing the
+1. Write tool → `<payload-file>` containing the
    stage's output JSON.
-2. Bash → `python3 .claude/skills/_lib/checkpoint.py save ./.threat-model-state <N> <name> --key stage --from ./.threat-model-state/_chunk.tmp`
+2. Bash → `python3 .claude/skills/_lib/checkpoint.py save ./.threat-model-state <N> <name> --key stage --from <payload-file>`
 
 **End of run.** After writing `<target-dir>/THREAT_MODEL.md`, Bash:
 `python3 .claude/skills/_lib/checkpoint.py done ./.threat-model-state 5 --key stage`
@@ -129,7 +131,7 @@ language/framework the target actually uses.
 | Supply chain | dependency lockfiles; vendored libs; `curl \| sh` in build scripts |
 | Infra / IAM | terraform `google_*_iam_*`/`aws_iam_*`; k8s `serviceAccountName`/WIF annotations; BigQuery dataset/table `access{}` blocks; secrets mounts |
 
-**Checkpoint:** Write tool → `./.threat-model-state/_chunk.tmp`:
+**Checkpoint:** Write tool → `<payload-file>`:
 
 ```json
 {
@@ -147,7 +149,7 @@ language/framework the target actually uses.
 ```
 
 Then Bash:
-`python3 .claude/skills/_lib/checkpoint.py save ./.threat-model-state 1 swarm --key stage --from ./.threat-model-state/_chunk.tmp`
+`python3 .claude/skills/_lib/checkpoint.py save ./.threat-model-state 1 swarm --key stage --from <payload-file>`
 
 This is the most expensive checkpoint — the swarm is the majority of the
 mode's token spend. Agents that were skipped (no `--vulns`, no GitHub remote,
@@ -186,7 +188,7 @@ entry point"). If a vuln's entry point isn't in section 3, the Surface mapper mi
 one; add it now. Hold this table in your working notes; it does **not** go
 into `THREAT_MODEL.md` verbatim. It becomes the `evidence` column in Stage 3.
 
-**Checkpoint:** Write tool → `./.threat-model-state/_chunk.tmp`:
+**Checkpoint:** Write tool → `<payload-file>`:
 
 ```json
 {
@@ -199,7 +201,7 @@ into `THREAT_MODEL.md` verbatim. It becomes the `evidence` column in Stage 3.
 ```
 
 Then Bash:
-`python3 .claude/skills/_lib/checkpoint.py save ./.threat-model-state 2 synthesize --key stage --from ./.threat-model-state/_chunk.tmp`
+`python3 .claude/skills/_lib/checkpoint.py save ./.threat-model-state 2 synthesize --key stage --from <payload-file>`
 
 ---
 
@@ -265,7 +267,7 @@ For each cluster, assign:
 
 Write each cluster as a section 4 row.
 
-**Checkpoint:** Write tool → `./.threat-model-state/_chunk.tmp`:
+**Checkpoint:** Write tool → `<payload-file>`:
 
 ```json
 {
@@ -280,7 +282,7 @@ Write each cluster as a section 4 row.
 ```
 
 Then Bash:
-`python3 .claude/skills/_lib/checkpoint.py save ./.threat-model-state 3 generalize --key stage --from ./.threat-model-state/_chunk.tmp`
+`python3 .claude/skills/_lib/checkpoint.py save ./.threat-model-state 3 generalize --key stage --from <payload-file>`
 
 ---
 
@@ -329,7 +331,7 @@ Populate `## 5. Deprioritized` with STRIDE categories you considered and
 ruled out, with the reason ("Repudiation: not applicable, no multi-user
 actions").
 
-**Checkpoint:** Write tool → `./.threat-model-state/_chunk.tmp`:
+**Checkpoint:** Write tool → `<payload-file>`:
 
 ```json
 {
@@ -345,7 +347,7 @@ actions").
 ```
 
 Then Bash:
-`python3 .claude/skills/_lib/checkpoint.py save ./.threat-model-state 4 gap-fill --key stage --from ./.threat-model-state/_chunk.tmp`
+`python3 .claude/skills/_lib/checkpoint.py save ./.threat-model-state 4 gap-fill --key stage --from <payload-file>`
 
 ---
 
@@ -389,10 +391,10 @@ For the Ouroboros target, the final path is `docs/security/THREAT_MODEL.md`.
 2. For each remaining section (`## 2. Assets`, `## 3. Entry points`,
    `## 4. Threats`, `## 5. Deprioritized`, `## 6. Open questions`,
    `## 7. Provenance`, `## 8. Recommended mitigations`):
-   - Write tool → `./.threat-model-state/_chunk.tmp` containing that ONE
+   - Write tool → `<payload-file>` containing that ONE
      section's markdown.
    - Bash:
-     `python3 .claude/skills/_lib/checkpoint.py append ./.threat-model-state/THREAT_MODEL.md --from ./.threat-model-state/_chunk.tmp`
+     `python3 .claude/skills/_lib/checkpoint.py append ./.threat-model-state/THREAT_MODEL.md --from <payload-file>`
 3. Run `python3 .claude/skills/_lib/checkpoint.py append <output-file> --replace --from ./.threat-model-state/THREAT_MODEL.md`.
    Use the final output path from the shared output contract; stop on refusal.
 
