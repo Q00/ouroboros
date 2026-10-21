@@ -62,6 +62,8 @@ _AC_STATE_EVENT_TYPES = frozenset(
         "execution.subtask.updated",
         "execution.session.started",
         "execution.ac.completed",
+        "execution.verify.failed",
+        "execution.ac.acceptance_finalized",
         "workflow.progress.updated",
     }
 )
@@ -163,6 +165,9 @@ def _advances_ac_state(event: dict[str, Any]) -> bool:
     workflow row must not supersede an earlier running acknowledgement merely
     because it shares the same event type as full AC snapshots.
     """
+    if event["event_type"] == "execution.verify.failed":
+        payload = event.get("payload")
+        return isinstance(payload, dict) and payload.get("final_workspace_revalidation") is True
     if event["event_type"] != "workflow.progress.updated":
         return event["event_type"] in _AC_STATE_EVENT_TYPES
     payload = event.get("payload")
