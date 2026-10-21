@@ -5140,6 +5140,9 @@ class ParallelACExecutor:
                         digest.update(b"\0")
                         digest.update(str(stat.st_mode).encode("ascii"))
                         digest.update(b"\0")
+                        digest.update(
+                            f"{stat.st_ino}:{stat.st_mtime_ns}:{stat.st_ctime_ns}\0".encode("ascii")
+                        )
                         with path.open("rb") as handle:
                             while chunk := handle.read(1024 * 1024):
                                 digest.update(chunk)
