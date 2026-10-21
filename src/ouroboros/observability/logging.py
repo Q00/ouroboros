@@ -200,11 +200,11 @@ def _setup_file_handler(config: LoggingConfig) -> TimedRotatingFileHandler | Non
 _EXCEPTION_QUOTED_FIELD = re.compile(r"""(?=((["'])((?:\\.|(?!\2)[^\\])*)\2[ \t]*:[ \t]*))""")
 _EXCEPTION_SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b(password|passwd|api[-_]?key|access[-_]?token|client[-_]?secret|"
-    r"authorization|credential|secret|token)\b\s*[:=]\s*([^\s,;]+)"
+    r"authorization|credential|secret|token)\b\s*[:=]\s*"
 )
 
 
-def _exception_scalar_end(text: str, start: int) -> int:
+def _exception_scalar_end(text: str, start: int, *, stop_at_whitespace: bool = False) -> int:
     """Find a scalar's textual boundary without decoding or evaluating its contents."""
     quote: str | None = None
     escaped = False
@@ -219,7 +219,7 @@ def _exception_scalar_end(text: str, start: int) -> int:
                 quote = None
         elif character in ("'", '"'):
             quote = character
-        elif character in ",;}])\r\n":
+        elif character in ",;}])\r\n" or (stop_at_whitespace and character.isspace()):
             return index
     return len(text)
 
@@ -239,8 +239,16 @@ def _sanitize_exception_text(text: str) -> str:
         consumed = _exception_scalar_end(text, value_start)
     parts.append(text[consumed:])
     text = "".join(parts)
-    text = _EXCEPTION_SECRET_ASSIGNMENT.sub(r"\1=<REDACTED>", text)
-    return _mask_exception_tokens(text)
+    parts = []
+    consumed = 0
+    for match in _EXCEPTION_SECRET_ASSIGNMENT.finditer(text):
+        if match.start() < consumed:
+            continue
+        parts.append(text[consumed : match.start()])
+        parts.append(f"{match.group(1)}=<REDACTED>")
+        consumed = _exception_scalar_end(text, match.end(), stop_at_whitespace=True)
+    parts.append(text[consumed:])
+    return _mask_exception_tokens("".join(parts))
 
 
 def _mask_exception_tokens(text: str) -> str:

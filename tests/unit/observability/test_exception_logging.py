@@ -313,6 +313,60 @@ def test_preformatted_scalars_remain_masked_in_nested_exceptions(
 
 
 @pytest.mark.parametrize("mode", [LogMode.PROD, LogMode.DEV])
+@pytest.mark.parametrize("source", ["argument", "note"])
+@pytest.mark.parametrize("field", ["password", "detail"])
+@pytest.mark.parametrize("separator", ["=", ": "])
+@pytest.mark.parametrize(
+    ("literal", "boundary", "secret_tail"),
+    [
+        ('"correct horse battery staple"', " ", "staple"),
+        ("'correct horse battery staple'", ", ", "staple"),
+        ('"correct, horse; battery } ] staple"', "; ", "staple"),
+        ('"correct \\"horse battery staple"', " ", "staple"),
+        ("'correct \\'horse battery staple'", " ", "staple"),
+        ('"correct \\\\horse battery staple"', " ", "staple"),
+        ("b'correct horse battery staple'", " ", "staple"),
+        ("plainsecretabc", " ", "plainsecretabc"),
+        ("plainsecretabc", ", ", "plainsecretabc"),
+        ("plainsecretabc", "; ", "plainsecretabc"),
+        ("plainsecretabc", "\t", "plainsecretabc"),
+    ],
+)
+def test_assignment_scalar_boundaries_preserve_safe_diagnostics_in_public_sinks(
+    mode: LogMode,
+    source: str,
+    field: str,
+    separator: str,
+    literal: str,
+    boundary: str,
+    secret_tail: str,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    # Given: assignment values contain whitespace, quoted delimiters, or escapes.
+    configure_logging(LoggingConfig(mode=mode, log_dir=tmp_path))
+    message = f"{field}{separator}{literal}{boundary}attempt=7 retry remains available"
+    error = ValueError(message if source == "argument" else "operation failed")
+    if source == "note":
+        error.add_note(f"upstream failed with {message}")
+
+    # When: the public logger renders the argument or note through both sinks.
+    try:
+        raise error
+    except ValueError:
+        get_logger().exception("assignment.exception")
+
+    # Then: sensitive scalar tails disappear while safe fields and diagnostics survive.
+    console = capsys.readouterr().err
+    (tmp_path / "console.log").write_text(console, encoding="utf-8")
+    for output in (console, (tmp_path / "ouroboros.log").read_text(encoding="utf-8")):
+        assert (secret_tail in output) is (field == "detail")
+        assert "attempt=7 retry remains available" in output
+        assert "ValueError" in output
+        assert "test_assignment_scalar_boundaries" in output
+
+
+@pytest.mark.parametrize("mode", [LogMode.PROD, LogMode.DEV])
 @pytest.mark.parametrize("sink", ["console", "file"])
 @pytest.mark.parametrize("source", ["key", "note", "text_key", "note_key"])
 def test_exception_keys_and_notes_cannot_bypass_redaction(
