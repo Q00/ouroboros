@@ -17,7 +17,6 @@ from ouroboros.core.seed import AcceptanceCriterionSpec
 from ouroboros.orchestrator.evidence.shell_parsing import (
     _is_env_assignment,
     _shell_command_body_from_argv,
-    _single_command_after_safe_shell_preamble,
 )
 
 _IGNORED_MANIFEST_DIRECTORIES = frozenset(
@@ -92,11 +91,23 @@ def _strip_cwd_environment_prefix(parts: list[str]) -> list[str]:
     return parts[index:]
 
 
-def _verify_command_executable(command: str) -> str:
+def _single_cwd_command_parts(command: str) -> list[str]:
+    if any(char in command for char in "\n\r$`"):
+        return []
     try:
-        parts = _strip_cwd_environment_prefix(shlex.split(command))
+        lexer = shlex.shlex(command, posix=True, punctuation_chars="();<>|&")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        parts = list(lexer)
     except ValueError:
-        return ""
+        return []
+    if any(part and set(part) <= set("();<>|&") for part in parts):
+        return []
+    return parts
+
+
+def _verify_command_executable(command: str) -> str:
+    parts = _strip_cwd_environment_prefix(_single_cwd_command_parts(command))
     if parts and Path(parts[0]).name in {"command", "exec"}:
         parts = parts[1:]
         if parts and parts[0] == "--":
@@ -104,17 +115,7 @@ def _verify_command_executable(command: str) -> str:
         parts = _strip_cwd_environment_prefix(parts)
     shell_body = _shell_command_body_from_argv(tuple(parts))
     if shell_body is not None:
-        try:
-            if "cd" in shlex.split(shell_body):
-                return ""
-        except ValueError:
-            return ""
-    inner_command = _single_command_after_safe_shell_preamble(shlex.join(parts))
-    if inner_command is not None:
-        try:
-            parts = _strip_cwd_environment_prefix(shlex.split(inner_command))
-        except ValueError:
-            return ""
+        parts = _strip_cwd_environment_prefix(_single_cwd_command_parts(shell_body))
         if parts and Path(parts[0]).name in {"command", "exec"}:
             parts = parts[1:]
             if parts and parts[0] == "--":

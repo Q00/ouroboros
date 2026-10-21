@@ -290,6 +290,77 @@ async def test_shell_cwd_preamble_remains_root_relative(tmp_path: Path) -> None:
     assert outcome.passed is True
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command, verify_cwd, passed",
+    [
+        ("npm --version && cd app && npm test", None, True),
+        ("npm --version && cd app && npm test", ".", True),
+        ("npm --version && cd app && npm test", "app", False),
+        ("npm test", None, True),
+        ("npm test", ".", False),
+    ],
+)
+async def test_complete_command_controls_node_cwd_inference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    verify_cwd: str | None,
+    passed: bool,
+) -> None:
+    import os
+
+    workspace = tmp_path / "work"
+    (workspace / "app").mkdir(parents=True)
+    (workspace / "app" / "package.json").write_text("{}")
+    runner = tmp_path / "npm"
+    runner.write_text(
+        '#!/bin/sh\nif [ "$1" = --version ]; then printf "1.0\\n"; else test -f package.json; fi\n'
+    )
+    runner.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    spec = AcceptanceCriterionSpec(
+        description="nested manifest exists", verify_command=command, verify_cwd=verify_cwd
+    )
+    outcome = await _make_executor(working_directory=str(workspace))._run_ac_verify_gate(
+        spec=spec, cwd=str(workspace)
+    )
+    assert outcome.passed is passed
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "npm test;cd app",
+        "npm test&&cd app",
+        "npm test || cd app",
+        "npm test | cat",
+        "npm test & wait",
+        "npm test\ncd app",
+        "npm test $(cd app && pwd)",
+        "npm test `pwd`",
+        "npm test > result.txt",
+        "(npm test)",
+        "env CI=1 sh -c 'npm --version && cd app && npm test'",
+        "sh -c 'set -e && npm test'",
+    ],
+)
+def test_compound_or_unknown_shell_forms_do_not_infer_cwd(tmp_path: Path, command: str) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "package.json").write_text("{}")
+    spec = AcceptanceCriterionSpec(description="tests pass", verify_command=command)
+    assert _resolve_verify_command_cwd(str(tmp_path), spec) == (str(tmp_path), None)
+
+
+def test_quoted_operator_inside_runner_argument_still_infers_cwd(tmp_path: Path) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "package.json").write_text("{}")
+    spec = AcceptanceCriterionSpec(
+        description="tests pass", verify_command="npm test -- 'suite&&name'"
+    )
+    assert _resolve_verify_command_cwd(str(tmp_path), spec) == (str(tmp_path / "app"), None)
+
+
 @pytest.mark.parametrize("prefix", ["env --chdir app", "env -C app", "env --unknown"])
 def test_cwd_changing_or_unknown_env_options_prevent_inference(tmp_path: Path, prefix: str) -> None:
     (tmp_path / "app").mkdir()
