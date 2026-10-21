@@ -20,6 +20,11 @@ from tests.unit.orchestrator.evidence.test_cited_evidence import FABRICATION, co
         'PASSWORD="sentinel_private_value" pytest -q',
         "PASSWORD='sentinel_private_value with spaces' pytest -q",
         "curl -H 'Authorization: Bearer sentinel_private_value' https://example.test",
+        "curl --user alice:sentinel_private_value https://example.test",
+        'curl --password "sentinel_private_value with spaces" https://example.test',
+        "curl --password=sentinel_private_value https://example.test",
+        "curl -ualice:sentinel_private_value https://example.test",
+        "curl --proxy-user alice:sentinel_private_value https://example.test",
     ],
 )
 async def test_model_prompts_do_not_export_command_secrets(tmp_path: Path, command: str) -> None:

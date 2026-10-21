@@ -33,6 +33,7 @@ from pathlib import PurePosixPath
 import shlex
 
 from ouroboros.config.models import EvidenceCallOrderingWeights
+from ouroboros.core.security import is_sensitive_field
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.decomposition_policy import redact_and_truncate_text
 from ouroboros.orchestrator.evidence.call_ledger import (
@@ -293,6 +294,21 @@ def render_call_list(ordered: Sequence[RecordedCall], *, limit: int = MAX_LISTED
         peeled = _peel_shell_wrappers(call.command)
         redacted = redact_and_truncate_text(peeled, max_chars=4000)
         command = redacted if redacted != peeled else call.command
+        try:
+            tokens = shlex.split(peeled)
+        except ValueError:
+            command = "[command omitted: malformed shell quoting]"
+        else:
+            if any(
+                token.startswith("-")
+                and (
+                    is_sensitive_field(token.partition("=")[0].replace("-", "_"))
+                    or token.partition("=")[0] in {"--user", "--proxy-user"}
+                    or token.startswith(("-u", "-U"))
+                )
+                for token in tokens
+            ):
+                command = "[command omitted: sensitive arguments]"
         command = command or "(no recorded command)"
         rows.append(f"[{call.number}] {call.result_label()} :: {command}")
     return "\n".join(rows)
