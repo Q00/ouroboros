@@ -884,7 +884,9 @@ def prepare_fanout_results(
         key for key in record.expected_keys if key in declared and key not in provided
     )
 
-    contract_violations = _contract_violations(record, provided)
+    provided, decoding_violations = _decode_contracted_result_strings(record, provided)
+    contract_violations = dict(decoding_violations)
+    contract_violations.update(_contract_violations(record, provided))
     for key in contract_violations:
         provided.pop(key, None)
 
@@ -950,6 +952,7 @@ def synthesize_fanout_results(prepared: PreparedFanoutSynthesis) -> dict[str, An
     provided = prepared.provided
     completion_report = prepared.completion_report
     if record.kind == FANOUT_KIND_LATERAL_PERSONA_PANEL:
+        from ouroboros.mcp.tools.citation_check import audit_citations
         from ouroboros.mcp.tools.subagent import (
             continue_interview_after_lateral_persona_synthesis,
         )
@@ -961,7 +964,19 @@ def synthesize_fanout_results(prepared: PreparedFanoutSynthesis) -> dict[str, An
             _fanout_identity_synthesis,
             _fanout_identity_continuation,
         )
-        return {
+        # Deep-tier citation gate (grounded-lateral RFC D4): audit the URLs
+        # personas cited in their fenced evidence blocks. Withhold-only — a
+        # panel with no evidence blocks touches no network and gains no key,
+        # and an unreachable citation is marked for the synthesizer to demote,
+        # never a synthesis failure.
+        try:
+            audit = audit_citations(
+                output if isinstance(output, str) else json.dumps(output, default=str)
+                for output in provided.values()
+            )
+        except Exception:
+            audit = None
+        response = {
             "status": "complete",
             "fanout_id": fanout_id,
             "kind": record.kind,
@@ -969,6 +984,9 @@ def synthesize_fanout_results(prepared: PreparedFanoutSynthesis) -> dict[str, An
             "result": outcome,
             **completion_report,
         }
+        if audit is not None:
+            response["citation_audit"] = audit
+        return response
 
     if record.kind == FANOUT_KIND_CODE_INVESTIGATION:
         from ouroboros.mcp.tools.subagent import synthesize_code_investigation_when_complete
@@ -1085,6 +1103,48 @@ def _contract_violations(
         if errors:
             violations[lane_id] = errors
     return violations
+
+
+def _decode_contracted_result_strings(
+    record: FanoutRecord,
+    provided: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, list[str]]]:
+    """Decode JSON object strings before validating contracted lane outputs.
+
+    Only lanes whose answer contract is declared receive this interpretation;
+    uncontracted advisory text remains ordinary text. Invalid contracted values
+    are removed from the candidate mapping and reported without echoing their
+    contents, so no later validator can mistake an unparsed string for a checked
+    object.
+    """
+    normalized = dict(provided)
+    violations: dict[str, list[str]] = {}
+    if record.kind != FANOUT_KIND_QUESTION_ADVISORY:
+        return normalized, violations
+
+    contracts = _canonical_lane_contracts(
+        str(record.synthesizer_input.get("tool_name") or "ouroboros_interview")
+    )
+    for lane_id, output in provided.items():
+        if lane_id not in contracts or not isinstance(output, str):
+            continue
+        try:
+            decoded = json.loads(output, parse_constant=_reject_non_json_constant)
+        except (json.JSONDecodeError, ValueError, RecursionError):
+            normalized.pop(lane_id, None)
+            violations[lane_id] = ["output is not valid JSON"]
+            continue
+        if not isinstance(decoded, Mapping):
+            normalized.pop(lane_id, None)
+            violations[lane_id] = ["output is not a JSON object"]
+            continue
+        normalized[lane_id] = dict(decoded)
+    return normalized, violations
+
+
+def _reject_non_json_constant(value: str) -> Any:
+    """Reject Python's non-standard NaN/Infinity extensions to JSON."""
+    raise ValueError(f"{value} is not a JSON constant")
 
 
 def _aggregate_violations(output: Any) -> list[str]:

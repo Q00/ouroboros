@@ -247,6 +247,8 @@ class TestRestoreTaskWorkspace:
                 return caller_repo
             if resolved == foreign_worktree.resolve():
                 return foreign_repo
+            if resolved == source_dir.resolve():
+                return caller_repo
             raise AssertionError(f"unexpected path: {path}")
 
         with (
@@ -282,9 +284,15 @@ class TestRestoreTaskWorkspace:
         source_dir.mkdir(parents=True)
         prepared_workspace = _workspace(tmp_path)
 
+        def fake_common_repo_root(path: Path) -> Path:
+            return caller_repo if path.resolve() == source_dir.resolve() else foreign_repo
+
         with (
             patch("ouroboros.core.worktree._worktree_root", return_value=worktree_root),
-            patch("ouroboros.core.worktree._resolve_common_repo_root", return_value=foreign_repo),
+            patch(
+                "ouroboros.core.worktree._resolve_common_repo_root",
+                side_effect=fake_common_repo_root,
+            ),
             patch("ouroboros.core.worktree._resolve_repo_root", return_value=caller_repo),
             patch(
                 "ouroboros.core.worktree.prepare_task_workspace",

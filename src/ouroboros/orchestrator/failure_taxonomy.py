@@ -52,6 +52,22 @@ class FailureClass(StrEnum):
             worker failure: a gaming leaf leaves plausible-looking messages,
             not none. Kept distinct from EVIDENCE_MISSING so an infrastructure
             fault is never reported — or counted — as a worker rejection.
+        SCRIPT_ABSENT_FROM_ARTIFACT: Every claim the transcript does not
+            otherwise prove is a run it recorded with exit 0 of a workspace
+            script that is no longer in the workspace (a scratch script the
+            worker ran and deleted). The run cannot be replayed, so the
+            criterion has no evidence; it is not fabrication and not a
+            worker rejection.
+        NO_CALL_EVIDENCE: The worker cited transcript calls by number and none
+            of them qualifies as evidence (``evidence.call_citation``): the
+            calls exist and the transcript recorded them, but none is a
+            replayed, passing base-tree test that runs the changed code. The
+            criterion has no evidence; it is not fabrication.
+        CITED_CALL_FAILED: The worker cited a transcript call the transcript
+            recorded as passing, and the controller's replay of that call on
+            the final artifact failed. The controller executed the check and
+            saw it fail: an executed failure, not missing evidence, and not
+            fabrication. Retryable with the failed call named.
     """
 
     EVIDENCE_MISSING = "EVIDENCE_MISSING"
@@ -61,6 +77,9 @@ class FailureClass(StrEnum):
     STALL = "STALL"
     BLOCKED = "BLOCKED"
     TRANSCRIPT_MISSING_INFRASTRUCTURE = "TRANSCRIPT_MISSING_INFRASTRUCTURE"
+    SCRIPT_ABSENT_FROM_ARTIFACT = "SCRIPT_ABSENT_FROM_ARTIFACT"
+    NO_CALL_EVIDENCE = "NO_CALL_EVIDENCE"
+    CITED_CALL_FAILED = "CITED_CALL_FAILED"
 
 
 _HARD_PRECONDITION_VALUE_KEY_TOKENS = frozenset(
@@ -263,6 +282,28 @@ _POLICY_TABLE: dict[FailureClass, RecoveryPolicy] = {
         rationale=(
             "The harness lost the transcript after the leaf completed. Preserve "
             "the work as unverified instead of repeating provider effects."
+        ),
+    ),
+    FailureClass.SCRIPT_ABSENT_FROM_ARTIFACT: RecoveryPolicy(
+        action=RecoveryAction.CONTINUE,
+        rationale=(
+            "The transcript recorded the claimed run, but its script is gone "
+            "from the workspace, so it cannot be replayed. Preserve the work as "
+            "unverified instead of repeating it."
+        ),
+    ),
+    FailureClass.NO_CALL_EVIDENCE: RecoveryPolicy(
+        action=RecoveryAction.CONTINUE,
+        rationale=(
+            "The cited transcript calls are real but none qualifies as evidence. "
+            "Preserve the work as unverified instead of repeating it."
+        ),
+    ),
+    FailureClass.CITED_CALL_FAILED: RecoveryPolicy(
+        action=RecoveryAction.RETRY,
+        rationale=(
+            "The controller replayed a cited call on the artifact and it failed; "
+            "retry with the failed call named so the worker fixes the work."
         ),
     ),
 }

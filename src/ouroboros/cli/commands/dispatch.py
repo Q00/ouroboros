@@ -21,6 +21,12 @@ from ouroboros.router import InvalidSkill, NotHandled, ResolveRequest, resolve_s
 _UNSUPPORTED_DISPATCH_EXIT_CODE = 78
 _AUTO_MONITOR_DEFAULT_TIMEOUT_SECONDS = 6 * 60 * 60
 _AUTO_MONITOR_WAIT_SECONDS = 120
+# Background start tools whose receipt the foreground dispatch keeps observing
+# until the job is terminal; the value labels the job in monitor output.
+_MONITORED_START_TOOLS = {
+    "ouroboros_start_auto": "auto",
+    "ouroboros_start_execute_seed": "run",
+}
 
 
 def _join_prompt(prompt_parts: list[str]) -> str:
@@ -87,13 +93,14 @@ def _coerce_cursor(value: object) -> int:
     return 0
 
 
-async def _monitor_auto_job(
+async def _monitor_background_job(
     job_id: str,
     *,
+    label: str,
     cursor: int = 0,
     max_seconds: int | None = None,
 ) -> int:
-    """Own the foreground UX for ``ooo auto`` background jobs."""
+    """Own the foreground UX for ``ooo auto`` and ``ooo run`` background jobs."""
     wait_handler = JobWaitHandler()
     result_handler = JobResultHandler()
     deadline = time.monotonic() + (
@@ -105,13 +112,13 @@ async def _monitor_auto_job(
         )
     )
 
-    console.print(f"Monitoring auto job: {job_id}")
+    console.print(f"Monitoring {label} job: {job_id}")
     last_printed = ""
     while True:
         remaining = max(0, int(deadline - time.monotonic()))
         if remaining <= 0:
             print_error(
-                f"Auto job monitor timed out before terminal status: {job_id}. "
+                f"{label.capitalize()} job monitor timed out before terminal status: {job_id}. "
                 f"Resume with `ouroboros job wait {job_id}`."
             )
             return 1
@@ -186,12 +193,13 @@ async def _dispatch_prompt(
                 exit_code = 1
     if (
         exit_code == 0
-        and resolved.mcp_tool == "ouroboros_start_auto"
+        and resolved.mcp_tool in _MONITORED_START_TOOLS
         and result_message is not None
         and isinstance(result_message.data.get("job_id"), str)
     ):
-        exit_code = await _monitor_auto_job(
+        exit_code = await _monitor_background_job(
             result_message.data["job_id"],
+            label=_MONITORED_START_TOOLS[resolved.mcp_tool],
             cursor=_coerce_cursor(result_message.data.get("cursor")),
         )
     return exit_code

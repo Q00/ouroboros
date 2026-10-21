@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 
 from ouroboros.orchestrator.adapter import ParamSupport, RuntimeHandle
+from ouroboros.orchestrator.codex_cli_runtime import _CodexItemCorrelationScope
 from ouroboros.orchestrator.goose_runtime import GooseCliRuntime
 
 
@@ -456,3 +457,69 @@ def test_goose_session_id_extraction_ignores_generic_tool_and_message_ids() -> N
     )
     assert runtime._extract_event_session_id({"type": "tool.call", "name": "Bash"}) is None
     assert runtime._extract_event_session_id({"type": "message", "id": "msg-1"}) is None
+
+
+def test_goose_executable_drift_retires_resume_and_pre_drift_session_name(
+    tmp_path: Path,
+) -> None:
+    """A Goose thread created under the old binary is never resumed after drift.
+
+    Goose overrides both ``_resolve_resume_session_id`` and ``_build_command``;
+    each must consume the shared drift epoch, or a handle created at epoch 0
+    still yields ``--resume old-session`` once the executable moves.
+    """
+    cli = tmp_path / "goose"
+    cli.write_text("#!/bin/sh\necho goose 1.0\n", encoding="utf-8")
+    cli.chmod(0o755)
+    runtime = GooseCliRuntime(cli_path=cli, cwd=str(tmp_path), permission_mode="auto")
+    seeded = RuntimeHandle(backend="goose", metadata={"session_attempt_id": "exec_1_ac_1"})
+    first = runtime._build_command("/tmp/out.txt", runtime_handle=seeded)
+    first_name = first[first.index("-n") + 1]
+    handle = runtime._convert_event(
+        {"type": "message", "message": {"content": [{"type": "text", "text": "Done"}]}},
+        seeded,
+    )[0].resume_handle
+    assert handle is not None
+    assert handle.native_session_id == first_name
+    assert runtime._resolve_resume_session_id(handle) == first_name
+
+    assert runtime._drift.epoch == 0
+    cli.write_text("#!/bin/sh\necho goose 2.0\n", encoding="utf-8")
+    cli.chmod(0o755)
+
+    # Reviewer probe: the id was resolved before the drift was observed, and
+    # the observation happens inside this very ``_build_command`` call.
+    command = runtime._build_command(
+        "/tmp/out.txt", resume_session_id=first_name, runtime_handle=handle
+    )
+
+    assert runtime._drift.epoch == 1
+    assert "--resume" not in command
+    assert runtime._resolve_resume_session_id(handle) is None
+    # Goose resolves --resume by name and ``run -n`` creates a second session
+    # under an existing name, so the post-drift thread gets a new, still
+    # deterministic name; event normalization recovers the same name from the
+    # admitted epoch, so the next turn resumes the new thread, not the old one.
+    new_name = command[command.index("-n") + 1]
+    assert new_name != first_name
+    scope = _CodexItemCorrelationScope()
+    scope.admitted_drift_epoch = runtime._drift.epoch
+    recovered = runtime._convert_event(
+        {"type": "message", "message": {"content": [{"type": "text", "text": "Done"}]}},
+        handle,
+        item_scope=scope,
+    )[0].resume_handle
+    assert recovered is not None
+    assert recovered.native_session_id == new_name
+    assert recovered.metadata["ouroboros_runtime_drift_epoch"] == 1
+    assert runtime._resolve_resume_session_id(recovered) == new_name
+
+    # A handle stamped after the drift resumes normally on the new binary.
+    fresh = runtime._build_runtime_handle("goose-new", handle)
+    assert fresh is not None
+    assert runtime._resolve_resume_session_id(fresh) == "goose-new"
+    resumed = runtime._build_command(
+        "/tmp/out.txt", resume_session_id="goose-new", runtime_handle=fresh
+    )
+    assert "--resume" in resumed
+    assert runtime._drift.epoch == 1

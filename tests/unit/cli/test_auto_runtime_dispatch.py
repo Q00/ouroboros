@@ -86,8 +86,10 @@ def test_run_auto_keeps_authoring_in_process_for_non_opencode_runtimes(
     start_kwargs = handlers["start_execute"].call_args.kwargs
 
     assert interview_kwargs == {"agent_runtime_backend": runtime, "opencode_mode": None}
-    assert generate_kwargs == {"agent_runtime_backend": runtime, "opencode_mode": None}
-    assert execute_kwargs == {"agent_runtime_backend": runtime, "opencode_mode": None}
+    assert generate_kwargs["agent_runtime_backend"] == runtime
+    assert generate_kwargs["opencode_mode"] is None
+    assert execute_kwargs["agent_runtime_backend"] == runtime
+    assert execute_kwargs["opencode_mode"] is None
     assert start_kwargs.get("agent_runtime_backend") == runtime
     assert start_kwargs.get("opencode_mode") is None
 
@@ -140,6 +142,94 @@ def test_run_auto_wires_answer_refiner_factory_result_into_driver() -> None:
 
     pipeline = captured["pipeline"]
     assert pipeline.interview_driver.answer_refiner is sentinel_refiner
+
+
+def test_run_auto_wires_repo_investigator_into_driver() -> None:
+    """The CLI ``_run_auto`` passes ``build_repo_investigator()``'s result, built
+    for the interview stage runtime, into the driver.
+
+    The suite-wide conftest guard stubs ``build_repo_investigator`` to ``None``;
+    this re-patches it so the guard cannot mask a dropped hand-off.
+    """
+    sentinel_investigator = object()
+    build = MagicMock(return_value=sentinel_investigator)
+    handlers = _capture_handler_construction()
+    captured: dict[str, object] = {}
+
+    async def _capture_run(self, state):  # noqa: ANN001
+        captured["pipeline"] = self
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id=state.auto_session_id,
+            phase="complete",
+            grade="A",
+        )
+
+    with (
+        patch("ouroboros.cli.commands.auto.build_repo_investigator", build),
+        patch("ouroboros.cli.commands.auto.InterviewHandler", handlers["interview"]),
+        patch("ouroboros.cli.commands.auto.GenerateSeedHandler", handlers["generate"]),
+        patch("ouroboros.cli.commands.auto.ExecuteSeedHandler", handlers["execute"]),
+        patch("ouroboros.cli.commands.auto.StartExecuteSeedHandler", handlers["start_execute"]),
+        patch("ouroboros.cli.commands.auto.AutoPipeline.run", new=_capture_run),
+    ):
+        asyncio.run(
+            _run_auto(
+                goal="wire the repo investigator",
+                resume=None,
+                runtime="claude",
+                max_interview_rounds=2,
+                max_repair_rounds=1,
+                skip_run=True,
+            )
+        )
+
+    pipeline = captured["pipeline"]
+    assert pipeline.interview_driver.investigator is sentinel_investigator
+    assert build.call_args.args[0] == "claude"
+
+
+@pytest.mark.parametrize(("runtime", "expected"), [("codex", "codex"), ("gemini", "gemini")])
+def test_run_auto_gives_every_runtime_an_investigator(runtime: str, expected: str | None) -> None:
+    """The real ``build_repo_investigator`` on the CLI path: Codex (read-only
+    sandbox) and Gemini (no read-only mode; it reads a throwaway copy) both get
+    an investigator for the interview stage runtime."""
+    from ouroboros.auto.investigator import build_repo_investigator
+
+    handlers = _capture_handler_construction()
+    captured: dict[str, object] = {}
+
+    async def _capture_run(self, state):  # noqa: ANN001
+        captured["pipeline"] = self
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id=state.auto_session_id,
+            phase="complete",
+            grade="A",
+        )
+
+    with (
+        patch("ouroboros.cli.commands.auto.build_repo_investigator", build_repo_investigator),
+        patch("ouroboros.cli.commands.auto.InterviewHandler", handlers["interview"]),
+        patch("ouroboros.cli.commands.auto.GenerateSeedHandler", handlers["generate"]),
+        patch("ouroboros.cli.commands.auto.ExecuteSeedHandler", handlers["execute"]),
+        patch("ouroboros.cli.commands.auto.StartExecuteSeedHandler", handlers["start_execute"]),
+        patch("ouroboros.cli.commands.auto.AutoPipeline.run", new=_capture_run),
+    ):
+        asyncio.run(
+            _run_auto(
+                goal="wire the repo investigator",
+                resume=None,
+                runtime=runtime,
+                max_interview_rounds=2,
+                max_repair_rounds=1,
+                skip_run=True,
+            )
+        )
+
+    pipeline = captured["pipeline"]
+    investigator = pipeline.interview_driver.investigator
+    assert (investigator.runtime_backend if investigator else None) == expected
 
 
 def test_run_auto_demotes_persisted_opencode_plugin_to_subprocess(tmp_path) -> None:

@@ -8,7 +8,16 @@ from unittest.mock import patch
 
 import pytest
 
-from ouroboros.providers.base import CompletionConfig, Message, MessageRole
+from ouroboros.config.model_selection import resolve_role_model
+from ouroboros.config.models import OuroborosConfig
+from ouroboros.providers.base import (
+    CompletionConfig,
+    CompletionResponse,
+    LLMAdapter,
+    Message,
+    MessageRole,
+)
+from ouroboros.providers.factory import create_llm_adapter
 from ouroboros.providers.gemini_cli_adapter import GeminiCLIAdapter
 
 # ---------------------------------------------------------------------------
@@ -81,6 +90,24 @@ _TOOL_USE_EVENT = {
 _ERROR_EVENT = {"type": "error", "message": "Some warning"}
 
 
+async def _complete_with_command(
+    adapter: LLMAdapter,
+    config: CompletionConfig,
+    *,
+    observed_model: str | None = "cli-selected-model",
+) -> tuple[list[str], CompletionResponse]:
+    """Capture the actual spawn boundary, leaving adapter resolution intact."""
+    events = [_RESULT_EVENT]
+    if observed_model is not None:
+        events.insert(0, {**_INIT_EVENT, "model": observed_model})
+    process = _FakeProcess(stdout=_make_stream(events))
+    with patch("asyncio.create_subprocess_exec", return_value=process) as spawn:
+        result = await adapter.complete([Message(role=MessageRole.USER, content="Probe")], config)
+    assert result.is_ok
+    spawn.assert_awaited_once()
+    return list(spawn.call_args.args), result.value
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -108,9 +135,9 @@ class TestGeminiCLIAdapterInit:
         adapter = GeminiCLIAdapter()
         assert adapter._cli_path == fake_bin.resolve()
 
-    def test_default_model_is_set(self) -> None:
+    def test_default_model_is_cli_owned_sentinel(self) -> None:
         adapter = GeminiCLIAdapter(cli_path="gemini")
-        assert adapter._model == "gemini-2.5-flash"
+        assert adapter._model == "default"
 
     def test_custom_model_is_stored(self) -> None:
         adapter = GeminiCLIAdapter(cli_path="gemini", model="gemini-3-flash-preview")
@@ -498,6 +525,107 @@ class TestCompleteIntegration:
 
         assert not result.is_ok
         assert "not found" in result.error.message.lower()
+
+
+class TestCompletionModelSelection:
+    """Automatic selection must survive the public completion path."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("choice", [None, "auto"])
+    async def test_factory_auto_leaves_model_to_cli(self, choice: str | None) -> None:
+        config = OuroborosConfig()
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+            patch("ouroboros.providers.profiles.load_config", return_value=config),
+        ):
+            resolved = resolve_role_model("qa", backend="gemini", invocation_model=choice)
+            assert (resolved.model, resolved.source) == ("default", "auto")
+            adapter = create_llm_adapter(backend="gemini", cli_path="gemini", max_retries=1)
+            command, response = await _complete_with_command(
+                adapter, CompletionConfig(model=resolved.model, role="qa")
+            )
+
+        assert "--model" not in command
+        assert response.model == "cli-selected-model"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("model", ["", "default"])
+    async def test_unselected_completion_does_not_invent_response_model(self, model: str) -> None:
+        command, response = await _complete_with_command(
+            GeminiCLIAdapter(cli_path="gemini", max_retries=1),
+            CompletionConfig(model=model),
+            observed_model=None,
+        )
+
+        assert "--model" not in command
+        assert response.model == "default"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("model", "expected"),
+        [
+            ("flash", "flash"),
+            ("pro", "pro"),
+            ("auto", "auto"),
+            ("gemini-2.5-flash", "gemini-2.5-flash"),
+            ("google/gemini-2.5-pro", "gemini-2.5-pro"),
+            ("gemini/custom-model", "custom-model"),
+        ],
+    )
+    async def test_explicit_request_keeps_alias_or_id(self, model: str, expected: str) -> None:
+        config = OuroborosConfig(
+            llm_profiles={"qa-profile": {"model": "profile-model"}},
+            llm_role_profiles={"qa": "qa-profile"},
+        )
+        with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            command, _ = await _complete_with_command(
+                GeminiCLIAdapter(cli_path="gemini", model="constructor-model", max_retries=1),
+                CompletionConfig(model=model, role="qa", model_is_explicit=True),
+            )
+
+        assert command[command.index("--model") + 1] == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("model", ["auto", "gemini-2.5-flash", "custom-model"])
+    async def test_constructor_pin_applies_to_default_request(self, model: str) -> None:
+        command, _ = await _complete_with_command(
+            GeminiCLIAdapter(cli_path="gemini", model=model, max_retries=1),
+            CompletionConfig(model="default"),
+        )
+
+        assert command[command.index("--model") + 1] == model
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("provider_model", [None, "auto", "gemini-2.5-pro"])
+    async def test_profile_pin_keeps_existing_precedence(self, provider_model: str | None) -> None:
+        profile = {"model": "profile-model"}
+        if provider_model is not None:
+            profile["providers"] = {"gemini": {"model": provider_model}}
+        config = OuroborosConfig(
+            llm_profiles={"qa-profile": profile},
+            llm_role_profiles={"qa": "qa-profile"},
+        )
+        with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            command, _ = await _complete_with_command(
+                GeminiCLIAdapter(cli_path="gemini", model="constructor-model", max_retries=1),
+                CompletionConfig(model="default", role="qa"),
+            )
+
+        assert command[command.index("--model") + 1] == (provider_model or "profile-model")
+
+    @pytest.mark.asyncio
+    async def test_explicit_profile_still_overrides_explicit_request(self) -> None:
+        config = OuroborosConfig(llm_profiles={"chosen": {"model": "profile-model"}})
+        with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            command, _ = await _complete_with_command(
+                GeminiCLIAdapter(cli_path="gemini", max_retries=1),
+                CompletionConfig(
+                    model="request-model", role="qa", profile="chosen", model_is_explicit=True
+                ),
+            )
+
+        assert command[command.index("--model") + 1] == "profile-model"
 
 
 class TestRecursionGuard:

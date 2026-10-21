@@ -171,8 +171,10 @@ class ProfileBackedStrategy:
             f"You are executing acceptance criteria under the "
             f"{self.profile.profile!r} profile.\n"
             f"Decomposition axis: {self.profile.axis}.\n"
-            f"Smallest acceptable unit: {self.profile.min_unit}.\n"
-            f"The verifier will focus on: {self.profile.verifier_focus.strip()}"
+            f"The verifier will focus on: {self.profile.verifier_focus.strip()}\n"
+            "Do not substitute a narrower, safer, or smaller solution than the goal "
+            "asks for. Before you finish, audit that the change covers every case "
+            "the goal names."
         )
         # Domain guidance preserves the behavior the legacy strategies
         # carried — e.g. research's "cite sources, save as markdown",
@@ -231,9 +233,9 @@ class ProfileBackedStrategy:
             "verification', or a command you intended but did not run. If the "
             "required command has not run successfully, run it before emitting "
             "the evidence record.\n"
-            "Do not declare DONE in prose — the harness adjudicates via "
-            "an external verifier pass. Emit the single evidence record, "
-            "then stop."
+            "Do not declare DONE in prose; the harness adjudicates via "
+            "an external verifier pass. The single evidence record is the "
+            "last part of your response."
         )
         return f"{anchor}\n\n{guidance}\n\n{contract}"
 

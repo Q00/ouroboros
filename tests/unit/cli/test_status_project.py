@@ -22,6 +22,10 @@ _PROJECT_RECORD = {
     "workspace_path": "packages/app",
     "run_count": 0,
     "runs": [],
+    "gated_seed_count": 0,
+    "forced_seed_count": 0,
+    "unknown_seed_count": 0,
+    "override_rate": None,
 }
 
 

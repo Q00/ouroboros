@@ -41,14 +41,18 @@ def _make_context(*, execution_id: str = "test-exec") -> EvaluationContext:
 def _passing_stage1() -> MechanicalResult:
     return MechanicalResult(
         passed=True,
-        checks=(CheckResult(check_type=CheckType.LINT, passed=True, message="ok"),),
+        checks=(CheckResult(check_type=CheckType.LINT, passed=True, message="ok", executed=True),),
     )
 
 
 def _failing_stage1() -> MechanicalResult:
     return MechanicalResult(
         passed=False,
-        checks=(CheckResult(check_type=CheckType.LINT, passed=False, message="lint failed"),),
+        checks=(
+            CheckResult(
+                check_type=CheckType.LINT, passed=False, message="lint failed", executed=True
+            ),
+        ),
     )
 
 

@@ -56,6 +56,7 @@ def create_session_started_event(
     seed_goal: str,
     *,
     project_identity: ProjectIdentity | None = None,
+    gate_forced: bool | None = None,
 ) -> BaseEvent:
     """Create session started event.
 
@@ -64,6 +65,8 @@ def create_session_started_event(
         execution_id: Associated workflow execution ID.
         seed_id: ID of the seed being executed.
         seed_goal: Goal from the seed specification.
+        gate_forced: Whether the Seed bypassed the ambiguity gate. ``None``
+            preserves the legacy event shape when the decision is unknown.
         project_identity: Canonical Project Map V1 anchor, mandatory for
             runner-owned new sessions. Historical and contract-free low-level
             events may omit it.
@@ -79,6 +82,8 @@ def create_session_started_event(
     }
     if project_identity is not None:
         data.update(project_identity.to_event_data())
+    if gate_forced is not None:
+        data["gate_forced"] = gate_forced
     return BaseEvent(
         type="orchestrator.session.started",
         aggregate_type="session",

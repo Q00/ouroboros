@@ -28,6 +28,7 @@ from ouroboros.bigbang.interview import (
     InterviewState,
     InterviewStatus,
 )
+from ouroboros.bigbang.pm_interview import DECIDE_LATER_PLACEHOLDER, DEFERRED_PLACEHOLDER
 from ouroboros.config.loader import get_clarification_model
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
@@ -391,6 +392,104 @@ class TestAmbiguityScorerScore:
         ambiguity = result.value
         # Expected: 1 - (0.9 * 0.4 + 0.8 * 0.3 + 0.7 * 0.3) = 1 - 0.81 = 0.19
         assert abs(ambiguity.overall_score - 0.19) < 0.01
+
+    @pytest.mark.parametrize("per_dimension", [False, True])
+    @pytest.mark.parametrize("is_brownfield", [False, True])
+    @pytest.mark.parametrize(
+        "response",
+        [
+            None,
+            "",
+            "   ",
+            DECIDE_LATER_PLACEHOLDER,
+            DEFERRED_PLACEHOLDER,
+            "Answered",
+        ],
+    )
+    @pytest.mark.parametrize("clarity", [1.0, 0.5])
+    async def test_score_floors_unanswered_non_initial_rounds(
+        self,
+        per_dimension: bool,
+        is_brownfield: bool,
+        response: str | None,
+        clarity: float,
+    ) -> None:
+        """Both scoring paths floor genuine missing answers without changing components."""
+        import json
+
+        state = create_interview_state_with_rounds(rounds=2)
+        state.rounds[-1].user_response = response
+        if per_dimension:
+            payloads = [json.dumps({"clarity_score": clarity, "justification": "Clear."})] * (
+                4 if is_brownfield else 3
+            )
+        else:
+            payload = json.loads(
+                create_valid_scoring_response(
+                    goal_score=clarity,
+                    constraint_score=clarity,
+                    success_score=clarity,
+                )
+            )
+            if is_brownfield:
+                payload.update(
+                    context_clarity_score=clarity,
+                    context_clarity_justification="Clear context.",
+                )
+            payloads = [json.dumps(payload)]
+
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(content=payload)) for payload in payloads
+            ]
+        )
+        scorer = AmbiguityScorer(llm_adapter=mock_adapter, per_dimension=per_dimension)
+
+        result = await scorer.score(state, is_brownfield=is_brownfield)
+
+        assert result.is_ok
+        score = result.value
+        expected = 0.21 if response is None or not response.strip() else 0.0
+        assert score.overall_score == max(expected, 1.0 - clarity)
+        assert all(component.clarity_score == clarity for component in score.breakdown.components)
+        if response is None or not response.strip():
+            assert score.is_ready_for_seed is False
+
+    @pytest.mark.parametrize("per_dimension", [False, True])
+    async def test_initial_summary_round_is_exempt_from_missing_response_floor(
+        self,
+        per_dimension: bool,
+    ) -> None:
+        """An unanswered initial context summary does not activate the floor."""
+        import json
+
+        state = create_interview_state_with_rounds(rounds=1)
+        state.rounds.insert(
+            0,
+            InterviewRound(
+                round_number=1,
+                question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                user_response=None,
+            ),
+        )
+        payloads = (
+            [json.dumps({"clarity_score": 1.0, "justification": "Clear."})] * 3
+            if per_dimension
+            else [create_valid_scoring_response(1.0, constraint_score=1.0, success_score=1.0)]
+        )
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(content=payload)) for payload in payloads
+            ]
+        )
+        scorer = AmbiguityScorer(llm_adapter=mock_adapter, per_dimension=per_dimension)
+
+        result = await scorer.score(state)
+
+        assert result.is_ok
+        assert result.value.overall_score == 0.0
 
     async def test_score_provider_error_retries_then_fails(self) -> None:
         """score retries on provider errors and returns error after max retries."""

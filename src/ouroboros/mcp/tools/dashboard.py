@@ -11,18 +11,35 @@ Three display modes:
 
 from __future__ import annotations
 
-from ouroboros.core.lineage import ACResult, OntologyLineage
+from ouroboros.core.acceptance import AcceptanceState
+from ouroboros.core.lineage import ACAuthorityState, ACResult, OntologyLineage
+
+# Unverified is not a rejection: no executed verification minted a verdict.
+_GENERATION_LABELS: dict[AcceptanceState, str] = {
+    AcceptanceState.APPROVED: "APPROVED",
+    AcceptanceState.REJECTED: "REJECTED",
+    AcceptanceState.UNVERIFIED: "NOT APPROVED (unverified)",
+}
+
+# An unresolved AC has no authoritative verdict; it is marked apart from a fail.
+_AC_MARKS: dict[ACAuthorityState, str] = {
+    ACAuthorityState.PASS: "P",
+    ACAuthorityState.FAIL: "F",
+    ACAuthorityState.UNRESOLVED: "U",
+}
+
+_ACHistory = list[tuple[int, ACAuthorityState]]
 
 
 def _extract_ac_history(
     lineage: OntologyLineage,
-) -> dict[int, list[tuple[int, bool | None]]]:
-    """Extract per-AC pass/fail history across all generations.
+) -> dict[int, _ACHistory]:
+    """Extract per-AC authority-state history across all generations.
 
     Returns:
-        Dict mapping ac_index → list of (generation_number, passed_or_None).
+        Dict mapping ac_index to a list of (generation_number, authority_state).
     """
-    history: dict[int, list[tuple[int, bool | None]]] = {}
+    history: dict[int, _ACHistory] = {}
 
     for gen in lineage.generations:
         es = gen.evaluation_summary
@@ -32,40 +49,41 @@ def _extract_ac_history(
         for ac in es.ac_results:
             if ac.ac_index not in history:
                 history[ac.ac_index] = []
-            history[ac.ac_index].append((gen.generation_number, ac.authoritative_pass))
+            history[ac.ac_index].append((gen.generation_number, ac.authority_state))
 
     return history
 
 
-def _trend_dots(results: list[tuple[int, bool | None]], max_dots: int = 5) -> str:
-    """Render pass/fail trend as P/F letters.
+def _trend_dots(results: _ACHistory, max_dots: int = 5) -> str:
+    """Render the authority-state trend as P/F/U letters.
 
-    Returns e.g. "PPPFP (4/5)" where P = pass, F = fail.
+    Returns e.g. "PPUFP (3/5)" where P = pass, F = fail, U = unresolved.
     """
     recent = results[-max_dots:]
-    dots = ""
-    for _, passed in recent:
-        dots += "P" if passed else "F"
+    dots = "".join(_AC_MARKS[state] for _, state in recent)
 
-    passed_count = sum(1 for _, p in recent if p)
+    passed_count = sum(1 for _, state in recent if state is ACAuthorityState.PASS)
     return f"{dots} ({passed_count}/{len(recent)})"
 
 
-def _classify_ac(results: list[tuple[int, bool | None]]) -> str:
-    """Classify AC stability: stable, flaky, failing, new."""
+def _classify_ac(results: _ACHistory) -> str:
+    """Classify AC stability: stable, failing, unresolved, flaky, new.
+
+    ``failing`` needs every recent verdict to be an authoritative fail, and
+    ``unresolved`` means no recent generation produced an authoritative verdict.
+    """
     if not results:
         return "new"
 
-    recent = results[-3:]  # Last 3 generations
-    all_pass = all(p for _, p in recent)
-    all_fail = all(not p for _, p in recent)
+    recent_states = {state for _, state in results[-3:]}  # Last 3 generations
 
-    if all_pass and len(results) >= 2:
+    if recent_states == {ACAuthorityState.PASS} and len(results) >= 2:
         return "stable"
-    elif all_fail:
+    if recent_states == {ACAuthorityState.FAIL}:
         return "failing"
-    else:
-        return "flaky"
+    if recent_states == {ACAuthorityState.UNRESOLVED}:
+        return "unresolved"
+    return "flaky"
 
 
 def format_summary(lineage: OntologyLineage) -> str:
@@ -87,10 +105,10 @@ def format_summary(lineage: OntologyLineage) -> str:
 
     if es:
         score_str = f"{es.score:.2f}" if es.score is not None else "N/A"
-        status = "APPROVED" if es.final_approved else "REJECTED"
-        lines.append(f"### Gen {latest_gen.generation_number} — Score: {score_str} | {status}")
+        status = _GENERATION_LABELS[es.acceptance_state]
+        lines.append(f"### Gen {latest_gen.generation_number} | Score: {score_str} | {status}")
     else:
-        lines.append(f"### Gen {latest_gen.generation_number} — No evaluation")
+        lines.append(f"### Gen {latest_gen.generation_number} | No evaluation")
 
     if not es or not es.ac_results:
         lines.append("")
@@ -99,14 +117,14 @@ def format_summary(lineage: OntologyLineage) -> str:
 
     lines.append("")
 
-    # Classify and sort: failing → flaky → stable
-    ac_data: list[tuple[ACResult, str, list[tuple[int, bool | None]]]] = []
+    # Classify and sort: failing, flaky, unresolved, new, stable
+    ac_data: list[tuple[ACResult, str, _ACHistory]] = []
     for ac in es.ac_results:
         ac_history = history.get(ac.ac_index, [])
         classification = _classify_ac(ac_history)
         ac_data.append((ac, classification, ac_history))
 
-    order = {"failing": 0, "flaky": 1, "new": 2, "stable": 3}
+    order = {"failing": 0, "flaky": 1, "unresolved": 2, "new": 3, "stable": 4}
     ac_data.sort(key=lambda x: (order.get(x[1], 99), x[0].ac_index))
 
     # Render table
@@ -167,7 +185,7 @@ def format_full(lineage: OntologyLineage) -> str:
         row = f"AC {ac_idx + 1:<4}"
         for g in gen_numbers:
             if g in results_by_gen:
-                status = "[P]" if results_by_gen[g] else "[F]"
+                status = f"[{_AC_MARKS[results_by_gen[g]]}]"
             else:
                 status = "[ ]"
             row += f"  {status:<5}"
@@ -176,6 +194,8 @@ def format_full(lineage: OntologyLineage) -> str:
         row += f"  {classification}"
         lines.append(row)
 
+    lines.append("")
+    lines.append("P = pass, F = fail, U = unresolved (no authoritative verdict), [ ] = no data")
     return "\n".join(lines)
 
 
@@ -212,7 +232,7 @@ def format_single_ac(
         lines.append("")
 
     classification = _classify_ac(ac_history)
-    passed_total = sum(1 for _, p in ac_history if p)
+    passed_total = sum(1 for _, state in ac_history if state is ACAuthorityState.PASS)
     lines.append(
         f"**Classification**: {classification} | **Pass rate**: {passed_total}/{len(ac_history)}"
     )
@@ -222,8 +242,8 @@ def format_single_ac(
     lines.append("| Generation | Status | Evidence |")
     lines.append("|------------|--------|----------|")
 
-    for gen_num, passed in ac_history:
-        status = "PASS" if passed else "FAIL"
+    for gen_num, state in ac_history:
+        status = state.upper()
         evidence = ""
         for gen in lineage.generations:
             if gen.generation_number == gen_num and gen.evaluation_summary:

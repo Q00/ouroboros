@@ -37,11 +37,24 @@ class TestProtocolConformance:
 
 
 class TestSystemPromptFragment:
-    def test_mentions_profile_axis_and_min_unit(self, profile: ExecutionProfile) -> None:
+    def test_mentions_profile_axis_without_smallest_unit_framing(
+        self, profile: ExecutionProfile
+    ) -> None:
         fragment = ProfileBackedStrategy(profile).get_system_prompt_fragment()
         assert profile.profile in fragment
         assert profile.axis in fragment
-        assert profile.min_unit in fragment
+        # The worker is not told to aim for the smallest unit, nor to stop
+        # as soon as it has emitted the record.
+        assert "Smallest acceptable unit" not in fragment
+        assert "then stop" not in fragment
+
+    def test_fragment_forbids_narrowing_the_goal(self, profile: ExecutionProfile) -> None:
+        fragment = ProfileBackedStrategy(profile).get_system_prompt_fragment()
+        assert (
+            "Do not substitute a narrower, safer, or smaller solution than the goal asks for."
+            in fragment
+        )
+        assert "audit that the change covers every case the goal names" in fragment
 
     def test_surfaces_verifier_focus(self, profile: ExecutionProfile) -> None:
         fragment = ProfileBackedStrategy(profile).get_system_prompt_fragment()

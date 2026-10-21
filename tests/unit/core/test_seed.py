@@ -5,7 +5,10 @@ Tests the immutable Seed schema and related types.
 
 from datetime import UTC, datetime
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 from pydantic import ValidationError as PydanticValidationError
 import pytest
@@ -74,6 +77,20 @@ class TestSeedMetadata:
         metadata = SeedMetadata(ambiguity_score=0.18)
 
         assert metadata.ambiguity_score == 0.18
+
+    def test_metadata_gate_forced_defaults_to_unknown(self) -> None:
+        """Seeds without gate provenance remain explicitly unknown."""
+        metadata = SeedMetadata(ambiguity_score=0.18)
+
+        assert metadata.gate_forced is None
+        assert "gate_forced" not in metadata.model_dump(mode="json")
+
+    @pytest.mark.parametrize("gate_forced", [True, False])
+    def test_metadata_serializes_gate_forced(self, gate_forced: bool) -> None:
+        """Known gate decisions survive Seed metadata serialization."""
+        metadata = SeedMetadata(ambiguity_score=0.18, gate_forced=gate_forced)
+
+        assert metadata.model_dump(mode="json")["gate_forced"] is gate_forced
 
     def test_metadata_optional_interview_id(self) -> None:
         """SeedMetadata interview_id is optional."""
@@ -616,6 +633,59 @@ class TestSeed:
             "logs/task.log",
             "./Build Outputs",
         )
+
+    def test_set_expected_artifacts_materialize_one_semantic_key_across_hash_seeds(self) -> None:
+        """Unordered artifacts normalize before Seed materializes their identity."""
+        source_root = Path(__file__).parents[3] / "src"
+        expected_artifacts = (
+            "artifacts/alpha.txt",
+            "artifacts/beta.txt",
+            "artifacts/delta.txt",
+            "artifacts/epsilon.txt",
+            "artifacts/gamma.txt",
+            "artifacts/zeta.txt",
+        )
+        script = """
+import json
+from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
+
+seed = Seed(
+    goal="Deterministic key test",
+    acceptance_criteria=({"description": "Produce all artifacts", "expected_artifacts": {
+        "artifacts/alpha.txt", "artifacts/beta.txt", "artifacts/gamma.txt",
+        "artifacts/delta.txt", "artifacts/epsilon.txt", "artifacts/zeta.txt",
+    }},),
+    ontology_schema=OntologySchema(name="T", description="T"),
+    metadata=SeedMetadata(ambiguity_score=0.15),
+)
+criterion = seed.acceptance_criteria[0]
+print(json.dumps({"expected_artifacts": criterion.expected_artifacts, "semantic_ac_key": criterion.semantic_ac_key}))
+"""
+        outputs = []
+        for hash_seed in ("1", "2"):
+            result = subprocess.run(
+                [sys.executable, "-c", script],
+                check=True,
+                capture_output=True,
+                cwd=source_root.parent,
+                env={**os.environ, "PYTHONHASHSEED": hash_seed, "PYTHONPATH": str(source_root)},
+                text=True,
+            )
+            outputs.append(json.loads(result.stdout))
+
+        assert len({output["semantic_ac_key"] for output in outputs}) == 1
+        assert {tuple(output["expected_artifacts"]) for output in outputs} == {expected_artifacts}
+
+    def test_expected_artifacts_preserve_list_and_tuple_order(self) -> None:
+        expected_artifacts = ("artifacts/zeta.txt", "artifacts/alpha.txt")
+
+        for artifacts in (list(expected_artifacts), expected_artifacts):
+            criterion = AcceptanceCriterionSpec(
+                description="Preserve caller order",
+                expected_artifacts=artifacts,
+            )
+
+            assert criterion.expected_artifacts == expected_artifacts
 
     def test_success_contract_accepts_exact_capsule_artifact_limit(self) -> None:
         spec = AcceptanceCriterionSpec(
@@ -1266,82 +1336,6 @@ class TestSeedImmutabilityComprehensive:
         assert isinstance(seed.constraints, tuple)
         assert not hasattr(seed.constraints, "append")
         assert not hasattr(seed.constraints, "extend")
-
-
-class TestAcceptanceCriterionVerifyCwd:
-    """verify_cwd: the workspace-relative directory verify_command runs in."""
-
-    def test_verify_cwd_accepted_with_verify_command(self) -> None:
-        spec = AcceptanceCriterionSpec(
-            description="tests pass",
-            verify_command="npx playwright test",
-            verify_cwd="app",
-        )
-        assert spec.verify_cwd == "app"
-        value = spec.to_seed_value()
-        assert isinstance(value, dict)
-        assert value["verify_cwd"] == "app"
-
-    def test_verify_cwd_requires_verify_command(self) -> None:
-        with pytest.raises(PydanticValidationError, match="verify_cwd requires verify_command"):
-            AcceptanceCriterionSpec(description="tests pass", verify_cwd="app")
-
-    def test_verify_cwd_rejects_workspace_escape(self) -> None:
-        with pytest.raises(PydanticValidationError, match="portable workspace-relative"):
-            AcceptanceCriterionSpec(
-                description="tests pass",
-                verify_command="npm test",
-                verify_cwd="../outside",
-            )
-
-    def test_verify_cwd_rejects_absolute_path(self) -> None:
-        with pytest.raises(PydanticValidationError, match="portable workspace-relative"):
-            AcceptanceCriterionSpec(
-                description="tests pass",
-                verify_command="npm test",
-                verify_cwd="/etc",
-            )
-
-    def test_blank_verify_cwd_normalizes_to_none(self) -> None:
-        spec = AcceptanceCriterionSpec(
-            description="tests pass",
-            verify_command="npm test",
-            verify_cwd="  ",
-        )
-        assert spec.verify_cwd is None
-
-    def test_verify_cwd_round_trips_through_seed_value(self) -> None:
-        spec = AcceptanceCriterionSpec(
-            description="tests pass",
-            verify_command="npm test",
-            verify_cwd="app",
-        )
-        rebuilt = AcceptanceCriterionSpec.model_validate(spec.to_seed_value())
-        assert rebuilt == spec
-
-    def test_verify_cwd_changes_semantic_identity(self) -> None:
-        app = AcceptanceCriterionSpec(
-            description="tests pass",
-            verify_command="npm test",
-            verify_cwd="app",
-        )
-        site = app.model_copy(update={"verify_cwd": "site", "semantic_ac_key": None})
-
-        assert derive_semantic_ac_key(app) != derive_semantic_ac_key(site)
-
-    def test_verify_replay_safe_round_trips_and_changes_identity(self) -> None:
-        unsafe = AcceptanceCriterionSpec(description="tests pass", verify_command="npm test")
-        safe = unsafe.model_copy(update={"verify_replay_safe": True, "semantic_ac_key": None})
-
-        assert derive_semantic_ac_key(unsafe) != derive_semantic_ac_key(safe)
-        assert AcceptanceCriterionSpec.model_validate(safe.to_seed_value()) == safe
-
-    def test_verify_replay_safe_requires_verify_command(self) -> None:
-        with pytest.raises(
-            PydanticValidationError,
-            match="verify_replay_safe requires verify_command",
-        ):
-            AcceptanceCriterionSpec(description="tests pass", verify_replay_safe=True)
 
 
 class TestAcceptanceCriterionDescriptionRequired:

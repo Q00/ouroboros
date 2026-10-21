@@ -9,8 +9,9 @@ when ``seed.metadata.degraded`` is True, the pipeline must
    ``seed.metadata.unresolved_slots``),
 2. still terminate as BLOCKED for safety blockers
    (``missing_goal`` / ``seed_goal_mismatch`` / ``high_risk_assumptions``),
-3. emit ``auto.product.partial_emitted`` and transition to
-   ``AutoPhase.COMPLETE`` when no blockers remain, and
+3. emit ``auto.product.partial_emitted`` when no blockers remain and stop
+   ``BLOCKED`` with ``degraded_seed_not_executed``: the degraded Seed is
+   never executed, so the session never reports complete, and
 4. surface ``partial_product`` / ``partial_product_reason`` /
    ``partial_unresolved_slots`` on ``AutoPipelineResult`` so MCP/CLI
    consumers can render the next-step hints without having to parse the
@@ -25,6 +26,10 @@ from typing import Any
 
 import pytest
 
+from ouroboros.auto.grade_gate_terminals import (
+    DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE,
+    DEGRADED_SEED_SAFETY_BLOCKERS_STOP_REASON_CODE,
+)
 from ouroboros.auto.grading import GradeGate
 from ouroboros.auto.ledger import (
     LedgerEntry,
@@ -270,7 +275,11 @@ class TestSeedReviewerPropagatesDegraded:
 
 @pytest.mark.asyncio
 async def test_deadline_path_reaches_partial_product_terminal(tmp_path) -> None:
-    """End-to-end: deadline → degraded seed → COMPLETE + partial_product=True."""
+    """End-to-end: deadline, degraded seed, partial product, never COMPLETE.
+
+    The degraded Seed is emitted for the user but not executed, so reporting
+    complete would claim a product nobody ran (matplotlib-26113).
+    """
     event_store = _RecordingEventStore()
     driver = _DeadlineDriver(event_store=event_store)
     state = _build_deadline_state(tmp_path)
@@ -279,11 +288,12 @@ async def test_deadline_path_reaches_partial_product_terminal(tmp_path) -> None:
     result = await pipeline.run(state)
     await asyncio.sleep(0)  # flush the fire-and-forget event-append tasks
 
-    # 1. Terminal must be COMPLETE, not BLOCKED.
-    assert state.phase == AutoPhase.COMPLETE
-    assert result.status == "complete"
-    assert result.blocker is None
-    assert result.stop_reason_code is None
+    # 1. Terminal is a typed BLOCKED stop, never COMPLETE without execution.
+    assert state.phase == AutoPhase.BLOCKED
+    assert result.status == "blocked"
+    assert result.blocker is not None
+    assert result.stop_reason_code == DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE
+    assert result.artifact_state != "complete_unverified"
 
     # 2. Partial-product fields populated on the result envelope.
     assert result.partial_product is True
@@ -344,6 +354,18 @@ async def test_degraded_seed_with_safety_blocker_still_terminates(tmp_path) -> N
     # The safety blocker terminates — we must NOT see a partial product
     # terminal here, even though the Seed is degraded.
     assert result.partial_product is False
+    # The terminal is machine-readable, not just prose: a consumer routing on
+    # ``stop_reason_code`` has to be able to tell this safety stop from the
+    # partial-product success terminal above, which carries ``None``. Dropping
+    # ``error_code=`` at the ``mark_blocked`` call site is a silent regression
+    # to ``None`` that every other assertion in this test survives.
+    assert result.stop_reason_code == DEGRADED_SEED_SAFETY_BLOCKERS_STOP_REASON_CODE
+    assert state.last_error_code == DEGRADED_SEED_SAFETY_BLOCKERS_STOP_REASON_CODE
+    assert result.blocker is not None
+    # And it survives the round trip: an operator resuming this session reads
+    # the persisted record, not the in-memory object the pipeline mutated.
+    reloaded = AutoStore(tmp_path).load(state.auto_session_id)
+    assert reloaded.last_error_code == DEGRADED_SEED_SAFETY_BLOCKERS_STOP_REASON_CODE
     # ``auto.product.partial_emitted`` MUST NOT be emitted when the pipeline
     # blocks on a safety marker.
     partial_events = [

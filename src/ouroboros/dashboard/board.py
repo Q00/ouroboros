@@ -276,26 +276,6 @@ def _card(cards: dict[str, dict[str, Any]], node_id: str) -> dict[str, Any]:
     return cards.setdefault(node_id, {"id": node_id, "status": "pending"})
 
 
-def _card_for_ac_index(cards: dict[str, dict[str, Any]], ac_index: Any) -> dict[str, Any] | None:
-    """Resolve a card from the orchestrator's 0-based ``ac_index``.
-
-    Final-acceptance events (``execution.verify.failed``,
-    ``execution.ac.acceptance_finalized``) identify the AC by the 0-based
-    orchestrator index instead of a ``node_id``, while cards carry the 1-based
-    display index under ``ac_index``. Root cards (no ``parent_id``) win over
-    decomposed children that share the same root index.
-    """
-    if isinstance(ac_index, bool) or not isinstance(ac_index, int):
-        return None
-    matches = [card for card in cards.values() if card.get("ac_index") == ac_index + 1]
-    if not matches:
-        return None
-    for card in matches:
-        if not card.get("parent_id"):
-            return card
-    return matches[0]
-
-
 def _upsert_ac_card(
     cards: dict[str, dict[str, Any]],
     terminal: set[str],
@@ -335,6 +315,78 @@ def _upsert_ac_card(
     card["parent_id"] = item.get("parent_node_id") or card.get("parent_id")
 
 
+_INTERVIEW_EVENTS = frozenset(
+    {
+        "interview.started",
+        "interview.response.recorded",
+        "interview.completed",
+        "interview.failed",
+        "interview.question_generation.parent_handoff",
+        "interview.response.emitted",
+        "interview.lateral_review.recommended",
+    }
+)
+
+
+def project_interview(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Project recognized interview lifecycle events into a read-only summary."""
+    projection: dict[str, Any] | None = None
+    for event in events:
+        event_type = event.get("event_type")
+        payload = event.get("payload")
+        interview_id = event.get("aggregate_id")
+        if (
+            event_type not in _INTERVIEW_EVENTS
+            or not isinstance(payload, dict)
+            or not isinstance(interview_id, str)
+            or not interview_id
+        ):
+            continue
+        if projection is None:
+            projection = {
+                "interview_id": interview_id,
+                "status": "started",
+                "round": None,
+                "total_rounds": None,
+                "last_event": event_type,
+            }
+        projection["interview_id"] = interview_id
+        projection["last_event"] = event_type
+        # Failure details describe only the current failed lifecycle state. A
+        # resumed interview may later become active or complete, in which case
+        # carrying these fields forward would show contradictory dashboard data.
+        projection.pop("error", None)
+        projection.pop("phase", None)
+        # A completion total belongs to the completed state only. Interviews
+        # can reopen after completion, so every recognized transition must
+        # retire it before a new completed event supplies a fresh total.
+        projection["total_rounds"] = None
+        if event_type == "interview.started":
+            projection["status"] = "started"
+        elif event_type in {
+            "interview.response.recorded",
+            "interview.question_generation.parent_handoff",
+            "interview.response.emitted",
+            "interview.lateral_review.recommended",
+        }:
+            projection["status"] = "active"
+            round_number = payload.get("round_number")
+            if isinstance(round_number, int) and not isinstance(round_number, bool):
+                projection["round"] = round_number
+        elif event_type == "interview.completed":
+            projection["status"] = "completed"
+            total_rounds = payload.get("total_rounds")
+            if isinstance(total_rounds, int) and not isinstance(total_rounds, bool):
+                projection["total_rounds"] = total_rounds
+        elif event_type == "interview.failed":
+            projection["status"] = "failed"
+            for key in ("error", "phase"):
+                value = payload.get(key)
+                if isinstance(value, str) and value:
+                    projection[key] = value[:500]
+    return projection
+
+
 def reduce_board(
     events: list[dict[str, Any]],
     *,
@@ -365,6 +417,7 @@ def reduce_board(
         "total_tokens": 0.0,
         "frugality": None,
         "frugality_retrospective": None,
+        "interview": project_interview(events),
     }
 
     for ev in events:
@@ -416,30 +469,6 @@ def reduce_board(
                     terminal,
                     node_id,
                     "completed" if payload.get("success") else "failed",
-                    authoritative=True,
-                )
-
-        elif event_type == "execution.verify.failed":
-            # The final workspace revalidation can overturn an AC that already
-            # reached DONE via ac.completed. Without this branch the board and
-            # the CLI verdict diverge (cards stay DONE while the run fails).
-            # Mid-run per-attempt gate failures are followed by a retry and are
-            # not folded here; only the terminal revalidation flip is.
-            if payload.get("final_workspace_revalidation"):
-                card = _card_for_ac_index(cards, payload.get("ac_index"))
-                if card is not None:
-                    _apply_status(card, terminal, card["id"], "failed", authoritative=True)
-
-        elif event_type == "execution.ac.acceptance_finalized":
-            # Terminal acceptance verdict — the durable source of truth the CLI
-            # summary renders from. It always wins over earlier ac.completed.
-            card = _card_for_ac_index(cards, payload.get("root_ac_index"))
-            if card is not None and isinstance(payload.get("accepted"), bool):
-                _apply_status(
-                    card,
-                    terminal,
-                    card["id"],
-                    "completed" if payload["accepted"] else "failed",
                     authoritative=True,
                 )
 
@@ -543,5 +572,6 @@ __all__ = [
     "ProviderLedger",
     "fold_provider_event",
     "fold_telemetry_event",
+    "project_interview",
     "reduce_board",
 ]

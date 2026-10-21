@@ -76,6 +76,8 @@ If you encounter Windows-specific issues, please [open an issue](https://github.
 
 The minimum required version is **Python >= 3.12** as specified in `pyproject.toml`. Source checkouts default to **stable Python 3.14** through `.python-version`; that default does not narrow the supported runtime range to 3.14-only.
 
+Ouroboros itself runs on Python 3.12 or newer. The projects it checks may use Python 3.5 or newer, since the check harness runs inside the project's own interpreter.
+
 ## Python Profile Matrix
 
 | Profile | Supported Python | Python 3.14 behavior |
@@ -96,7 +98,7 @@ The package profile is a process contract, not a dependency-pin workaround:
 |-------|-------------------|----------------|-----------------------|
 | `[claude]` | Default in-process Claude Agent SDK runtime | Exact SDK/Anthropic pins and MCP 1.x graph | **No** — separate process/environment |
 | `[claude-cli]` | Claude CLI subprocess for completions and agent workers | None | Yes |
-| `[mcp]` | MCP 2 server/client process | `mcp==2.0.0` | Yes, with CLI profiles |
+| `[mcp]` | MCP 2 server/client process | `mcp==2.2.0` | Yes, with CLI profiles |
 | `[claude-sdk]` | Explicit alias for the Claude Agent SDK runtime | Same exact SDK/Anthropic pins and MCP 1.x graph | **No** — separate process/environment |
 | `[all]` | MCP 1.x application bundle | Includes `[claude]`; excludes MCP 2 | **No** — run `[mcp]` separately |
 

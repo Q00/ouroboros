@@ -10,6 +10,7 @@ from typing import Any
 
 import litellm
 
+from ouroboros.providers.anthropic_models import is_claude_5_5
 from ouroboros.providers.base import CompletionConfig
 from ouroboros.providers.litellm_adapter import (
     _HTTPX_DEPENDENCY_VERSION,
@@ -52,6 +53,41 @@ _REQUIRED_COMPLETION_KWARGS = frozenset(
     }
 )
 _PAYLOAD_KEYS = frozenset({"client_type", "completion_kwargs", "config", "protocol"})
+
+
+def _valid_completion_kwargs(kwargs: dict[str, Any], config: CompletionConfig) -> bool:
+    """Accept only the model-specific fields emitted by the sealed builder."""
+    allowed = _COMPLETION_KWARGS
+    required = _REQUIRED_COMPLETION_KWARGS
+    native: dict[str, object] = {}
+    if is_claude_5_5(config.model):
+        allowed = allowed - {"temperature", "top_p", "reasoning_effort"}
+        required = required - {"temperature"}
+        effort = config.reasoning_effort
+        if effort is not None and not isinstance(effort, str):
+            return False
+        if config.model.lower().startswith("openrouter/"):
+            if effort:
+                if effort not in ("low", "medium", "high", "xhigh", "max"):
+                    return False
+                native = {"extra_body": {"reasoning": {"effort": effort}}}
+        elif effort in ("low", "medium", "high"):
+            native = {
+                "thinking": {"type": "adaptive"},
+                "output_config": {"effort": effort},
+                "allowed_openai_params": ["thinking"],
+            }
+        elif effort:
+            # Keep LiteLLM's existing capability validation for raw effort
+            # values outside the application's native Anthropic profile set.
+            native = {"reasoning_effort": effort}
+        allowed = allowed | frozenset(native)
+        required = required | frozenset(native)
+    return (
+        required.issubset(kwargs)
+        and set(kwargs).issubset(allowed)
+        and all(kwargs.get(key) == value for key, value in native.items())
+    )
 
 
 def _proof_report(
@@ -108,8 +144,6 @@ def _validated_payload(raw: object) -> tuple[dict[str, Any], CompletionConfig, s
     client_type = raw.get("client_type")
     if (
         not isinstance(kwargs, dict)
-        or not _REQUIRED_COMPLETION_KWARGS.issubset(kwargs)
-        or not set(kwargs).issubset(_COMPLETION_KWARGS)
         or not isinstance(config_raw, dict)
         or not isinstance(client_type, str)
         or kwargs.get("max_retries") != _PROOF_LITELLM_MAX_RETRIES
@@ -123,7 +157,11 @@ def _validated_payload(raw: object) -> tuple[dict[str, Any], CompletionConfig, s
         config = CompletionConfig(**config_raw)
     except (TypeError, ValueError):
         return None
-    if kwargs.get("model") != config.model:
+    if (
+        not isinstance(config.model, str)
+        or kwargs.get("model") != config.model
+        or not _valid_completion_kwargs(kwargs, config)
+    ):
         return None
     return kwargs, config, client_type
 

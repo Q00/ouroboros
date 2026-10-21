@@ -2793,6 +2793,55 @@ class TestMCPServerAdapterTools:
         # not an invented "unknown" value.
         assert capture.call_args.kwargs["error_type"] is None
 
+    @pytest.mark.parametrize(
+        ("meta", "expected_origin"),
+        [
+            ({"seed_id": "seed_x", "interview_id": "iv_1"}, "interview"),
+            (
+                {"seed_id": "seed_x", "source": "session_context", "status": "seed_generated"},
+                "session_context",
+            ),
+            (
+                {"source": "session_context", "status": "gap_questions_required"},
+                "session_context_gap",
+            ),
+            (None, "interview"),
+        ],
+    )
+    async def test_call_tool_stamps_generate_seed_origin_from_closed_meta_fields(
+        self, meta: dict[str, object] | None, expected_origin: str
+    ) -> None:
+        """Which entrance a seed took is read from two closed meta fields only."""
+        adapter = MCPServerAdapter()
+        handler = MockToolHandler("ouroboros_generate_seed")
+        handler.handle_mock.return_value = Result.ok(
+            MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text="Seed"),),
+                is_error=False,
+                meta=meta,
+            )
+        )
+        adapter.register_tool(handler)
+
+        with patch("ouroboros.mcp.telemetry_boundary.usage_telemetry.capture_tool_call") as capture:
+            result = await adapter.call_tool("ouroboros_generate_seed", {"input": "safe"})
+
+        assert result.is_ok
+        capture.assert_called_once()
+        assert capture.call_args.kwargs["origin"] == expected_origin
+
+    async def test_call_tool_origin_is_none_for_other_tools_and_errors(self) -> None:
+        adapter = MCPServerAdapter()
+        adapter.register_tool(MockToolHandler("ouroboros_success_probe"))
+
+        with patch("ouroboros.mcp.telemetry_boundary.usage_telemetry.capture_tool_call") as capture:
+            await adapter.call_tool("ouroboros_success_probe", {"input": "safe"})
+        assert capture.call_args.kwargs["origin"] is None
+
+        with patch("ouroboros.mcp.telemetry_boundary.usage_telemetry.capture_tool_call") as capture:
+            await adapter.call_tool("ouroboros_unknown_tool", {})
+        assert capture.call_args.kwargs.get("origin") is None
+
     async def test_call_tool_normal_success_still_counts_as_ok(self) -> None:
         """No-regression companion to the logical-error test above."""
         adapter = MCPServerAdapter()

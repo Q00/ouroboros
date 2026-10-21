@@ -1850,6 +1850,8 @@ def build_lateral_multi_subagent(
     problem_context: str,
     current_approach: str,
     failed_attempts: tuple[str, ...] = (),
+    mode: str = "unstuck",
+    research: bool = False,
 ) -> list[SubagentPayload]:
     """Build N subagent payloads — one per lateral-thinking persona.
 
@@ -1863,6 +1865,11 @@ def build_lateral_multi_subagent(
         problem_context: Description of the stuck situation.
         current_approach: What has been tried and isn't working.
         failed_attempts: Previous failed approaches shared across all panes.
+        mode: ``"unstuck"`` (default) or ``"decision"`` — selects the persona
+              task block (see lateral_decision.py, grounded-lateral RFC D2).
+        research: Deep tier opt-in (RFC D3/D4): personas ground claims in web
+              evidence when their runtime has web tools, else degrade to
+              opinion-only — never an error.
 
     Returns:
         List of SubagentPayload, one per unique persona.
@@ -1870,6 +1877,7 @@ def build_lateral_multi_subagent(
     Raises:
         ValueError: If personas empty, unknown, or required fields missing.
     """
+    from ouroboros.mcp.tools import lateral_decision as _ld
     from ouroboros.resilience.lateral import LateralThinker, ThinkingPersona
 
     if not personas:
@@ -1927,26 +1935,18 @@ def build_lateral_multi_subagent(
             continue
 
         lateral = result.unwrap()
-        # Wrap the persona prompt with an explicit instruction for the
-        # subagent to produce a concrete alternative plan, not just restate.
-        prompt = (
-            f"{lateral.prompt}\n\n"
-            "---\n\n"
-            "## Task for you (subagent)\n"
-            f"You are thinking as the **{persona.value}** persona. Apply the "
-            "instructions above to this specific problem. Produce:\n"
-            "1. A concrete alternative plan (3-5 bullet steps).\n"
-            "2. The single biggest assumption you challenge.\n"
-            "3. A one-line verdict: would this plan work? why/why not?\n\n"
-            "Keep it tight. Your output will be compared with 4 other personas "
-            "thinking in parallel. Be distinctive — lean hard into your persona."
-        )
+        # Mode/evidence prompt blocks live in lateral_decision.py (#1797).
+        task_block = _ld.build_lateral_task_block(persona.value, mode)
+        research_block = _ld.build_lateral_research_block(research)
+        prompt = f"{lateral.prompt}\n\n---\n\n{task_block}{research_block}"
 
         context = {
             "persona": persona.value,
             "problem_context": problem_context,
             "current_approach": current_approach,
             "failed_attempts": list(failed_attempts),
+            "mode": mode,
+            **({"research": True} if research else {}),
         }
 
         payloads.append(
@@ -2468,172 +2468,3 @@ def stamp_fanout_meta(
         meta[_fanout_meta_key(prefix, "execution_preference")] = "parallel"
         meta[_fanout_meta_key(prefix, "fallback_strategy")] = "sequential"
         meta[_fanout_meta_key(prefix, "host_capability")] = "undeclared"
-
-
-# ---------------------------------------------------------------------------
-# Seed-closer tri-panel (K3)
-# ---------------------------------------------------------------------------
-#
-# The single-pass Seed-ready Acceptance Guard (skills/interview/SKILL.md step 8)
-# becomes a 3-lane fan-out: a ``closer`` lane whose verdict GATES closure, plus
-# ``contrarian`` and ``gap_hunter`` lanes whose HIGH-severity findings append as
-# blocking follow-up questions. Correlation is by ``context.lane_id``.
-
-SEED_CLOSER_TRIPANEL_LANES: tuple[tuple[str, str, str], ...] = (
-    (
-        "closer",
-        "seed-closer",
-        "Apply the canonical Seed Closer closure gate. Return a closure verdict "
-        "and the single highest-impact follow-up question if a material decision "
-        "remains unresolved.",
-    ),
-    (
-        "contrarian",
-        "contrarian",
-        "Challenge the interview's conclusions. Surface hidden assumptions, "
-        "overloaded terms, and decisions the interview may have skipped. Rate the "
-        "severity of the most material gap you find.",
-    ),
-    (
-        "gap_hunter",
-        "researcher",
-        "Hunt for missing requirements, unlisted constraints, unhandled edge "
-        "cases, and unverifiable acceptance criteria. Rate the severity of the "
-        "most material gap you find.",
-    ),
-)
-
-_SEED_CLOSER_HIGH_SEVERITY = "high"
-
-
-def build_seed_closer_tripanel_fanout(
-    *,
-    session_id: str,
-    seed_context: str,
-    ambiguity_score: float | None = None,
-) -> tuple[list[SubagentPayload], str]:
-    """Build the 3-lane Seed-closer acceptance fan-out (K3).
-
-    Lanes: ``closer`` (gates), ``contrarian`` + ``gap_hunter`` (advisory,
-    HIGH-severity findings become blocking questions). Each payload carries
-    ``context.lane_id`` for correlation; the returned key is ``context.lane_id``.
-
-    Returns:
-        ``(payloads, correlation_key)`` — payloads in lane order.
-    """
-    if not session_id:
-        raise ValueError("session_id must not be empty")
-    if not seed_context:
-        raise ValueError("seed_context must not be empty")
-
-    closer_summary = _load_seed_closer_summary()
-    ambiguity_line = (
-        f"- Current ambiguity score: {ambiguity_score}\n" if ambiguity_score is not None else ""
-    )
-
-    requests: list[dict[str, Any]] = []
-    for lane_id, agent, lane_task in SEED_CLOSER_TRIPANEL_LANES:
-        if lane_id == "closer":
-            output_shape = (
-                '{"lane_id": "closer", "verdict": "seed_ready" | "not_ready", '
-                '"reason": "string", "blocking_question": "string | null"}'
-            )
-            gate_note = (
-                "\n## Closure Gate Summary\n"
-                f"{closer_summary}\n"
-                "Do NOT treat ambiguity <= 0.2 as sufficient for closure."
-            )
-        else:
-            output_shape = (
-                f'{{"lane_id": "{lane_id}", "severity": "high" | "medium" | "low", '
-                '"finding": "string", "question": "string | null"}'
-            )
-            gate_note = (
-                "\n## Severity Rule\n"
-                'Rate "high" ONLY when the gap would materially change the '
-                "implementation if left unresolved."
-            )
-        prompt = f"""## Task
-You are the Ouroboros seed-closer tri-panel **{lane_id}** lane.
-{lane_task}
-
-## Session
-- session_id: {session_id}
-{ambiguity_line}
-## Seed / Interview Context
----
-{seed_context}
----
-{gate_note}
-
-## Output
-Return ONLY valid JSON, no other text:
-{output_shape}"""
-        requests.append(
-            {
-                "tool_name": "ouroboros_interview",
-                "title": f"Seed closer: {lane_id}",
-                "prompt": prompt,
-                "agent": agent,
-                "context": {"session_id": session_id, "lane_id": lane_id},
-            }
-        )
-
-    return build_fanout_subagents(requests, "context.lane_id"), "context.lane_id"
-
-
-def synthesize_seed_closer_tripanel(
-    lane_outputs: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Synthesize the 3 Seed-closer lanes into a deterministic closure decision.
-
-    The ``closer`` verdict gates: if it is not ``seed_ready`` the seed is
-    blocked. Additionally, any HIGH-severity ``contrarian`` / ``gap_hunter``
-    finding blocks and its question is appended to ``blocking_questions``. This
-    is pure and deterministic — no LLM judge — so ``seed_ready`` is testable.
-
-    Args:
-        lane_outputs: Mapping of ``lane_id`` -> that lane's JSON output.
-
-    Returns:
-        ``{"seed_ready", "closer_verdict", "blocking_questions",
-        "high_severity_lanes", "missing_lanes"}``.
-    """
-    expected = [lane_id for lane_id, _agent, _task in SEED_CLOSER_TRIPANEL_LANES]
-    missing = [lane_id for lane_id in expected if lane_id not in lane_outputs]
-
-    closer = lane_outputs.get("closer")
-    closer_verdict = ""
-    if isinstance(closer, Mapping):
-        closer_verdict = str(closer.get("verdict") or "").strip()
-
-    blocking_questions: list[str] = []
-    high_severity_lanes: list[str] = []
-
-    # Closer gate: a non-"seed_ready" verdict blocks with its follow-up.
-    if closer_verdict != "seed_ready":
-        if isinstance(closer, Mapping):
-            question = closer.get("blocking_question") or closer.get("reason")
-            if question:
-                blocking_questions.append(str(question))
-
-    # Advisory lanes: HIGH-severity findings block and append their questions.
-    for lane_id in ("contrarian", "gap_hunter"):
-        output = lane_outputs.get(lane_id)
-        if not isinstance(output, Mapping):
-            continue
-        severity = str(output.get("severity") or "").strip().lower()
-        if severity == _SEED_CLOSER_HIGH_SEVERITY:
-            high_severity_lanes.append(lane_id)
-            question = output.get("question") or output.get("finding")
-            if question:
-                blocking_questions.append(str(question))
-
-    seed_ready = not missing and closer_verdict == "seed_ready" and not high_severity_lanes
-    return {
-        "seed_ready": seed_ready,
-        "closer_verdict": closer_verdict,
-        "blocking_questions": blocking_questions,
-        "high_severity_lanes": high_severity_lanes,
-        "missing_lanes": missing,
-    }

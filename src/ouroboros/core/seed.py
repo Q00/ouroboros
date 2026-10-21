@@ -208,8 +208,6 @@ def parse_expected_artifact_list(value: str) -> tuple[str, ...]:
 def validate_ac_success_contract_values(
     *,
     verify_command: str | None,
-    verify_cwd: str | None,
-    verify_replay_safe: bool,
     expected_artifacts: tuple[str, ...],
     output_assertion: str | None,
 ) -> None:
@@ -222,10 +220,6 @@ def validate_ac_success_contract_values(
     """
     if verify_command is not None and not isinstance(verify_command, str):
         raise ValueError("success contract verify command is invalid")
-    if verify_cwd is not None and not isinstance(verify_cwd, str):
-        raise ValueError("success contract verify cwd is invalid")
-    if not isinstance(verify_replay_safe, bool):
-        raise ValueError("success contract replay safety is invalid")
     if output_assertion is not None and not isinstance(output_assertion, str):
         raise ValueError("success contract output assertion is invalid")
     try:
@@ -237,7 +231,7 @@ def validate_ac_success_contract_values(
             f"success contract artifact limit exceeded ({MAX_AC_SUCCESS_CONTRACT_ARTIFACTS})"
         )
 
-    contract_chars = len(verify_command or "") + len(verify_cwd or "") + len(output_assertion or "")
+    contract_chars = len(verify_command or "") + len(output_assertion or "")
     for path in expected_artifacts:
         try:
             encoded_path = (
@@ -257,6 +251,36 @@ def validate_ac_success_contract_values(
         raise ValueError(
             f"success contract character budget exceeded ({MAX_AC_SUCCESS_CONTRACT_CHARS})"
         )
+
+
+class RequesterAnswer(BaseModel, frozen=True):
+    """A question the requester answered, quoted verbatim.
+
+    Attributes:
+        question: The interview question the requester was asked.
+        answer: The requester's answer, word for word.
+    """
+
+    question: str
+    answer: str = Field(..., min_length=1)
+
+
+class RepoFact(BaseModel, frozen=True):
+    """A question ``ooo auto`` answered by reading the repository, quoted verbatim.
+
+    Every evidence span was checked against the workspace: the file is inside
+    it and the quote occurs in the cited lines. A repo fact describes the code
+    as it is; it is not a requirement.
+
+    Attributes:
+        question: The interview question.
+        answer: The answer read from the code, word for word.
+        evidence: Checked spans, each ``path:start-end: quote``.
+    """
+
+    question: str
+    answer: str = Field(..., min_length=1)
+    evidence: tuple[str, ...] = ()
 
 
 class ExitCondition(BaseModel, frozen=True):
@@ -390,6 +414,9 @@ class SeedMetadata(BaseModel, frozen=True):
         version: Schema version for forward compatibility.
         created_at: When this seed was generated.
         ambiguity_score: The ambiguity score at generation time.
+        gate_forced: Whether Gen-1 generation bypassed the ambiguity gate with
+            ``force=True``. ``None`` means the historical or non-Gen-1 path
+            did not record a gate decision.
         interview_id: Reference to the source interview.
         generation_mode: Provenance label for how the Seed was synthesized.
             ``"normal"`` is the legacy ledger-complete path; degraded recovery
@@ -425,6 +452,7 @@ class SeedMetadata(BaseModel, frozen=True):
     version: str = Field(default="1.0.0")
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     ambiguity_score: float = Field(default=0.15, ge=0.0, le=1.0)
+    gate_forced: bool | None = Field(default=None)
     interview_id: str | None = Field(default=None)
     parent_seed_id: str | None = Field(default=None)
     generation_mode: str = Field(default=_DEFAULT_GENERATION_MODE, min_length=1)
@@ -469,13 +497,14 @@ class SeedMetadata(BaseModel, frozen=True):
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        """Serialize additively: omit ``decision_provenance`` when empty.
+        """Serialize additively: omit unset provenance fields.
 
-        Keeps legacy Seed JSON byte-identical after a round-trip (the histogram
-        is only present for ledger-synthesized seeds) while still emitting it
-        whenever an auto ledger populated it.
+        Keeps legacy Seed JSON byte-identical after a round-trip while still
+        emitting gate and ledger provenance whenever it is known.
         """
         data = handler(self)
+        if self.gate_forced is None:
+            data.pop("gate_forced", None)
         if not self.decision_provenance:
             data.pop("decision_provenance", None)
         return data
@@ -539,22 +568,6 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
     description: str = Field(..., min_length=1)
     semantic_ac_key: str | None = Field(default=None, pattern=r"^ac_[a-f0-9]{16}$")
     verify_command: str | None = Field(default=None)
-    verify_cwd: str | None = Field(
-        default=None,
-        description=(
-            "Workspace-relative directory verify_command runs in (e.g. 'app' "
-            "for a project whose test config lives in a subdirectory). The "
-            "verify gate resolves it under the run workspace and rejects any "
-            "path that escapes it. Default: the workspace root."
-        ),
-    )
-    verify_replay_safe: bool = Field(
-        default=False,
-        description=(
-            "Whether verify_command is safe to execute again against a settled workspace "
-            "after a prior successful run. Set only for side-effect-free or idempotent commands."
-        ),
-    )
     expected_artifacts: tuple[str, ...] = Field(
         default_factory=tuple,
         description=(
@@ -631,7 +644,7 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
             return stripped
         return value
 
-    @field_validator("verify_command", "verify_cwd", mode="before")
+    @field_validator("verify_command", mode="before")
     @classmethod
     def _strip_optional_text(cls, value: Any) -> Any:
         if isinstance(value, str):
@@ -663,7 +676,7 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
         if isinstance(value, list | tuple | set):
             if any(not isinstance(item, str) for item in value):
                 raise ValueError("expected_artifacts entries must be strings")
-            artifacts = tuple(value)
+            artifacts = tuple(sorted(value)) if isinstance(value, set) else tuple(value)
             if any(
                 not artifact
                 or any(ord(character) < 32 or ord(character) == 127 for character in artifact)
@@ -681,16 +694,6 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
             raise ValueError("verify_exemption_reason is mutually exclusive with verify_command")
         if self.output_assertion and not self.verify_command:
             raise ValueError("output_assertion requires verify_command")
-        if self.verify_replay_safe and not self.verify_command:
-            raise ValueError("verify_replay_safe requires verify_command")
-        if self.verify_cwd:
-            if not self.verify_command:
-                raise ValueError("verify_cwd requires verify_command")
-            cwd_error = expected_artifact_path_error(self.verify_cwd)
-            if cwd_error is not None:
-                raise ValueError(
-                    f"verify_cwd must be a portable workspace-relative path: {cwd_error}"
-                )
         invalid_artifacts = tuple(
             (artifact, error)
             for artifact in self.expected_artifacts
@@ -703,8 +706,6 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
             )
         validate_ac_success_contract_values(
             verify_command=self.verify_command,
-            verify_cwd=self.verify_cwd,
-            verify_replay_safe=self.verify_replay_safe,
             expected_artifacts=self.expected_artifacts,
             output_assertion=self.output_assertion,
         )
@@ -739,10 +740,6 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
             data["semantic_ac_key"] = self.semantic_ac_key
         if self.verify_command:
             data["verify_command"] = self.verify_command
-        if self.verify_cwd:
-            data["verify_cwd"] = self.verify_cwd
-        if self.verify_replay_safe:
-            data["verify_replay_safe"] = True
         if self.expected_artifacts:
             data["expected_artifacts"] = list(self.expected_artifacts)
         if self.output_assertion:
@@ -775,10 +772,6 @@ def derive_semantic_ac_key(criterion: AcceptanceCriterionInput) -> str:
             "expected_artifacts": list(criterion.expected_artifacts),
             "output_assertion": criterion.output_assertion,
         }
-        if criterion.verify_cwd is not None:
-            payload["verify_cwd"] = criterion.verify_cwd
-        if criterion.verify_replay_safe:
-            payload["verify_replay_safe"] = True
     else:
         payload = {"description": str(criterion).strip()}
     encoded = json.dumps(
@@ -817,6 +810,15 @@ class Seed(BaseModel, frozen=True):
         goal: The primary objective of the workflow.
         constraints: Hard constraints that must be satisfied.
         acceptance_criteria: Specific criteria for success.
+        assumptions: Unconfirmed guesses made on the requester's behalf. They
+            never bind: the worker sees them as assumptions it may override when
+            the task or the code says otherwise.
+        requester_answers: Questions the requester answered, with the answer
+            quoted verbatim. Confirmed facts the worker must follow, never
+            rewritten into constraints or criteria.
+        repo_facts: Questions auto answered from the repository, with the
+            answer and its checked evidence quoted verbatim. They describe the
+            current code and are never rewritten into constraints or criteria.
         ontology_schema: Conceptual lens for workflow coherence.
         evaluation_principles: Principles for evaluating outputs.
         exit_conditions: Conditions for terminating the workflow.
@@ -882,6 +884,27 @@ class Seed(BaseModel, frozen=True):
     acceptance_criteria: tuple[AcceptanceCriterionSpec, ...] = Field(
         default_factory=tuple,
         description="Specific criteria for success evaluation",
+    )
+    assumptions: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Non-binding assumptions nobody confirmed; the worker may override them "
+            "when the task or the code says otherwise"
+        ),
+    )
+    requester_answers: tuple[RequesterAnswer, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Questions the requester answered, with the answer quoted verbatim; "
+            "confirmed facts the worker must follow"
+        ),
+    )
+    repo_facts: tuple[RepoFact, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Questions answered from the repository, with the answer and its checked "
+            "evidence quoted verbatim; they describe the current code, not requirements"
+        ),
     )
 
     # Conceptual lens
@@ -1049,7 +1072,16 @@ class Seed(BaseModel, frozen=True):
             Dictionary representation of the seed.
         """
         extra = self.model_extra or {}
-        data = self.model_dump(mode="json", by_alias=True, exclude=set(extra))
+        excluded = set(extra)
+        # Omit an empty assumptions list so a Seed without assumptions keeps
+        # serializing exactly as it did before the field existed.
+        if not self.assumptions:
+            excluded.add("assumptions")
+        if not self.requester_answers:
+            excluded.add("requester_answers")
+        if not self.repo_facts:
+            excluded.add("repo_facts")
+        data = self.model_dump(mode="json", by_alias=True, exclude=excluded)
         data.update({key: _thaw_seed_extra_value(value) for key, value in extra.items()})
         return data
 

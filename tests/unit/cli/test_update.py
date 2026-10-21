@@ -1088,6 +1088,7 @@ class TestUpdateFlow:
             "copilot",
             "goose",
             "pi",
+            "omp",
             "gjc",
             "antigravity",
             "grok",

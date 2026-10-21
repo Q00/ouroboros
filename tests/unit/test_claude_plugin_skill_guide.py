@@ -19,8 +19,15 @@ def test_claude_plugin_interview_skill_includes_lateral_review_dispatch() -> Non
 
     assert "question_advisory_subagents` is present you MUST process every" in skill_text
     assert 'dispatch_mode="host_decides"' in skill_text
-    assert "Task/Agent" in skill_text
-    assert "one native" in skill_text
+    # Parallel fan-out is named by capability; each runtime's guide maps it.
+    assert "one child per payload through the active runtime's `orchestrate_subagents`" in (
+        skill_text
+    )
+    assert "single fan-out turn" in skill_text
+    assert "Task/Agent" not in skill_text
+    assert "native subagent" not in skill_text
+    assert "Task/Agent" in render_backend_skill_capability_guide("claude")
+    assert "one Codex subagent per payload" in render_backend_skill_capability_guide("codex")
     assert "dispatch_subagents_if_supported" in skill_text
     assert "process_payloads_sequentially" in skill_text
     assert "host action selects the execution strategy" in skill_text
@@ -48,3 +55,19 @@ def test_claude_plugin_unstuck_skill_includes_host_capability_contract() -> None
     assert "result_correlation_key" in skill_text
     assert 'legacy_dispatch_mode="inline_fallback"' in skill_text
     assert 'Debate response (`dispatch_mode = "inline_fallback"`)' not in skill_text
+
+
+def test_interview_skill_pins_seed_ready_guard_lane_output_shapes() -> None:
+    skill_text = (Path("skills") / "interview" / "SKILL.md").read_text(encoding="utf-8")
+    step8 = skill_text.split("8. **Seed-ready Acceptance Guard.**", 1)[1].split(
+        "9. **Restate gate**", 1
+    )[0]
+
+    assert (
+        '{"lane_id": "closer", "verdict": "seed_ready" | "not_ready", "reason": "...", '
+        '"blocking_question": "..." | null}'
+    ) in step8
+    assert (
+        '{"lane_id": "<lane>", "severity": "high" | "medium" | "low", "finding": "...", '
+        '"question": "..." | null}'
+    ) in step8

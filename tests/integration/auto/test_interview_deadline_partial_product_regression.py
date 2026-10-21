@@ -17,10 +17,11 @@ Coverage:
        ``auto.product.partial_emitted`` (PR-C) to the EventStore,
      - surface the PR-C ``partial_product*`` fields on the result envelope.
 
-2. **Partial product fixture.** A successful deadline run reaches
-   ``AutoPhase.COMPLETE`` with ``partial_product=True``, the recovery
-   reason mirrored from the Seed, and unresolved slots carried forward
-   verbatim as next-step hints.
+2. **Partial product fixture.** A deadline run emits the degraded Seed
+   with ``partial_product=True``, the recovery reason mirrored from the
+   Seed, and unresolved slots carried forward verbatim as next-step hints.
+   The Seed was never executed, so the session stops ``BLOCKED`` with
+   ``degraded_seed_not_executed`` instead of reporting complete.
 
 3. **Raw evidence file.** The integration test writes a JSON evidence
    blob to the pytest tmp path so reviewers can audit the full
@@ -40,6 +41,7 @@ from typing import Any
 
 import pytest
 
+from ouroboros.auto.grade_gate_terminals import DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE
 from ouroboros.auto.pipeline import AutoPipeline
 from ouroboros.auto.state import (
     AutoPhase,
@@ -164,10 +166,12 @@ async def test_r4_equivalent_interview_deadline_regression(tmp_path: Path) -> No
     assert result.stop_reason_code != "interview_phase_deadline"
     assert state.last_error_code != "interview_phase_deadline"
 
-    # ----- PR-C terminal: the pipeline must reach COMPLETE with partial_product.
-    assert state.phase == AutoPhase.COMPLETE
-    assert result.status == "complete"
-    assert result.blocker is None
+    # ----- PR-C terminal: the partial product is emitted but never executed,
+    # so the session stops BLOCKED with a typed code, never COMPLETE.
+    assert state.phase == AutoPhase.BLOCKED
+    assert result.status == "blocked"
+    assert result.stop_reason_code == DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE
+    assert result.blocker is not None
     assert result.partial_product is True
     assert result.partial_product_reason == "interview_phase_deadline"
     assert result.partial_unresolved_slots, (
@@ -256,7 +260,7 @@ async def test_interview_deadline_regression_without_event_store(tmp_path: Path)
 
     result = await pipeline.run(state)
 
-    assert state.phase == AutoPhase.COMPLETE
+    assert state.phase == AutoPhase.BLOCKED
     assert result.partial_product is True
     assert result.partial_product_reason == "interview_phase_deadline"
     assert result.partial_unresolved_slots
@@ -331,7 +335,7 @@ async def test_deadline_event_ordering_holds_when_first_append_is_slow(
     # Functional surface unchanged.
     assert result.partial_product is True
     assert result.partial_product_reason == "interview_phase_deadline"
-    assert state.phase == AutoPhase.COMPLETE
+    assert state.phase == AutoPhase.BLOCKED
 
     # Ordering contract: deadline event MUST precede partial-emitted
     # event in the persisted stream, even though its append was slower.

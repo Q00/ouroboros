@@ -1621,13 +1621,151 @@ class TestLLMHelperLookups:
         )
 
         with (
-            patch.dict(os.environ, {}, clear=True),
+            patch.dict(os.environ, {"OUROBOROS_PIN_MODELS": "1"}, clear=True),
             patch("ouroboros.config.loader.load_config", return_value=config),
         ):
             assert get_llm_model_for_role("seed_generation") == "interview-model"
             assert get_llm_model_for_role("qa") == "evaluate-model"
             assert get_llm_model_for_role("dependency_analysis") == "evaluate-model"
             assert get_llm_model_for_role("wonder") == "reflect-model"
+
+    def test_get_llm_model_for_role_execute_stage_uses_execution_pin(self) -> None:
+        """EXECUTE-stage roles honor execution.default_model over the evaluate model (#2300)."""
+        config = OuroborosConfig(
+            execution=ExecutionConfig(default_model="gpt-5-codex"),
+            evaluation=EvaluationConfig(semantic_model="claude-fable-5"),
+        )
+
+        with (
+            patch.dict(os.environ, {"OUROBOROS_PIN_MODELS": "1"}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert get_llm_model_for_role("decomposition") == "gpt-5-codex"
+            assert get_llm_model_for_role("atomicity") == "gpt-5-codex"
+            assert get_llm_model_for_role("agent_runtime_implementation") == "gpt-5-codex"
+            # Evaluate-stage roles keep their own stage model.
+            assert get_llm_model_for_role("qa") == "claude-fable-5"
+            # The pin also applies when the caller pre-resolves the backend.
+            assert get_llm_model_for_role("decomposition", backend="codex") == "gpt-5-codex"
+
+    def test_get_llm_model_for_role_execute_stage_env_pin_wins(self) -> None:
+        """OUROBOROS_EXECUTION_MODEL outranks the config file pin."""
+        config = OuroborosConfig(
+            execution=ExecutionConfig(default_model="config-exec-model"),
+            evaluation=EvaluationConfig(semantic_model="claude-fable-5"),
+        )
+
+        with (
+            patch.dict(
+                os.environ,
+                {"OUROBOROS_EXECUTION_MODEL": "env-exec-model", "OUROBOROS_PIN_MODELS": "1"},
+                clear=True,
+            ),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert get_llm_model_for_role("decomposition") == "env-exec-model"
+
+    def test_get_llm_model_for_role_execute_stage_uses_backend_default_without_pin(self) -> None:
+        """Without an execution pin, EXECUTE-stage roles use their backend default."""
+        config = OuroborosConfig(
+            evaluation=EvaluationConfig(semantic_model="claude-fable-5"),
+            orchestrator=OrchestratorConfig(
+                runtime_profile=RuntimeProfileConfig(
+                    stages={"execute": "codex", "evaluate": "claude_code"}
+                )
+            ),
+        )
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert get_llm_model_for_role("decomposition") == "default"
+            assert get_llm_model_for_role("atomicity") == "default"
+
+        litellm_config = OuroborosConfig(
+            orchestrator=OrchestratorConfig(
+                runtime_profile=RuntimeProfileConfig(stages={"execute": "antigravity"})
+            ),
+            llm=LLMConfig(backend="litellm"),
+            evaluation=EvaluationConfig(semantic_model="openrouter/anthropic/claude-sonnet-4"),
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=litellm_config),
+        ):
+            assert get_llm_backend_for_role("decomposition") == "litellm"
+            assert get_llm_model_for_role("decomposition") == "openrouter/anthropic/claude-sonnet-4"
+
+        for alias in ("openai", "openrouter"):
+            with (
+                patch.dict(os.environ, {"OUROBOROS_LLM_BACKEND": alias}, clear=True),
+                patch("ouroboros.config.loader.load_config", return_value=litellm_config),
+            ):
+                assert get_llm_backend_for_role("decomposition") == alias
+                assert get_llm_model_for_role("decomposition") == (
+                    "openrouter/anthropic/claude-sonnet-4"
+                )
+
+    def test_get_llm_model_for_role_execute_stage_honors_automatic_sentinel(self) -> None:
+        """The UI's ``default``/``current`` sentinel lets the Execute runtime pick."""
+        config = OuroborosConfig(
+            execution=ExecutionConfig(default_model="default"),
+            evaluation=EvaluationConfig(semantic_model="claude-fable-5"),
+            orchestrator=OrchestratorConfig(
+                runtime_profile=RuntimeProfileConfig(
+                    stages={"execute": "codex", "evaluate": "claude_code"}
+                )
+            ),
+        )
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert get_llm_backend_for_role("decomposition") == "codex"
+            assert get_llm_model_for_role("decomposition") == "default"
+
+        with (
+            patch.dict(os.environ, {"OUROBOROS_EXECUTION_MODEL": " current "}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert get_llm_model_for_role("decomposition") == "default"
+
+        assert config.orchestrator.runtime_profile is not None
+        # Automatic selection: Claude receives the standard-tier alias, every
+        # backend that picks its own model receives the sentinel.
+        for backend, expected in (
+            ("gemini", "default"),
+            ("gemini_cli", "default"),
+            ("goose", "default"),
+            ("goose_cli", "default"),
+            ("claude_code", "sonnet"),
+        ):
+            config.orchestrator.runtime_profile.stages["execute"] = backend
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch("ouroboros.config.loader.load_config", return_value=config),
+            ):
+                for role in ("decomposition", "atomicity", "agent_runtime_implementation"):
+                    assert get_llm_backend_for_role(role) == backend
+                    assert get_llm_model_for_role(role) == expected
+
+    def test_get_llm_model_for_role_execute_stage_explicit_model_beats_pin(self) -> None:
+        """A caller-supplied explicit_model remains the highest-precedence override."""
+        config = OuroborosConfig(
+            execution=ExecutionConfig(default_model="gpt-5-codex"),
+            evaluation=EvaluationConfig(semantic_model="claude-fable-5"),
+        )
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert (
+                get_llm_model_for_role("decomposition", explicit_model="explicit-model")
+                == "explicit-model"
+            )
 
     def test_get_llm_permission_mode_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Environment variable overrides config for llm permission mode."""
@@ -1676,13 +1814,14 @@ class TestLLMHelperLookups:
 
     def test_get_clarification_model_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Environment variable overrides config for clarification model."""
+        monkeypatch.setenv("OUROBOROS_PIN_MODELS", "1")
         monkeypatch.setenv("OUROBOROS_CLARIFICATION_MODEL", "gpt-5")
         assert get_clarification_model() == "gpt-5"
 
     def test_get_clarification_model_falls_back_to_config(self) -> None:
         """Config is used when env override is absent."""
         with (
-            patch.dict(os.environ, {}, clear=True),
+            patch.dict(os.environ, {"OUROBOROS_PIN_MODELS": "1"}, clear=True),
             patch(
                 "ouroboros.config.loader.load_config",
                 return_value=OuroborosConfig(
@@ -1817,6 +1956,88 @@ class TestLLMHelperLookups:
             assert get_semantic_model(backend="pi") == "default"
             assert get_assertion_extraction_model(backend="pi") == "default"
 
+    def test_omp_backend_uses_default_model_sentinel(self) -> None:
+        """Backend-aware defaults avoid cross-provider model names for OMP."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                side_effect=ConfigError("missing config"),
+            ),
+        ):
+            assert get_clarification_model(backend="omp") == "default"
+            assert get_wonder_model(backend="omp") == "default"
+            assert get_reflect_model(backend="omp") == "default"
+            assert get_semantic_model(backend="omp") == "default"
+            assert get_assertion_extraction_model(backend="omp") == "default"
+
+    def test_omp_backend_normalizes_config_default_models_to_default_sentinel(self) -> None:
+        """Existing default configs should remain usable after switching to OMP."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(),
+            ),
+        ):
+            assert get_clarification_model(backend="omp") == "default"
+            assert get_qa_model(backend="omp") == "default"
+            assert get_wonder_model(backend="omp") == "default"
+            assert get_reflect_model(backend="omp") == "default"
+            assert get_semantic_model(backend="omp") == "default"
+            assert get_assertion_extraction_model(backend="omp") == "default"
+
+    def test_resolve_omp_cli_path_skips_stale_candidate_for_path(self) -> None:
+        """PR #2299 round 5: the canonical resolver owns validated omp precedence."""
+        from ouroboros.config._omp_cli import resolve_omp_cli_path
+
+        def fake_which(name: str) -> str | None:
+            return "/usr/bin/omp" if name == "omp" else None
+
+        with (
+            patch.dict(os.environ, {"OUROBOROS_OMP_CLI_PATH": "/missing/env/omp"}),
+            patch("ouroboros.config._omp_cli.load_config", side_effect=ConfigError("no config")),
+            patch("shutil.which", side_effect=fake_which),
+        ):
+            assert resolve_omp_cli_path() == "/usr/bin/omp"
+
+        def fake_which_configured(name: str) -> str | None:
+            return "/opt/omp/bin/omp" if name == "/opt/omp/bin/omp" else None
+
+        with (
+            patch.dict(os.environ, {"OUROBOROS_OMP_CLI_PATH": "/opt/omp/bin/omp"}),
+            patch("shutil.which", side_effect=fake_which_configured),
+        ):
+            assert resolve_omp_cli_path() == "/opt/omp/bin/omp"
+
+    def test_resolve_omp_cli_path_falls_back_from_stale_env_to_configured(self) -> None:
+        """PR #2299 round 6: a stale env candidate must not mask a runnable configured CLI."""
+        from ouroboros.config._omp_cli import resolve_omp_cli_path
+        from ouroboros.config.models import OrchestratorConfig, OuroborosConfig
+
+        config = OuroborosConfig(orchestrator=OrchestratorConfig(omp_cli_path="/opt/omp/bin/omp"))
+
+        def fake_which(name: str) -> str | None:
+            return "/opt/omp/bin/omp" if name == "/opt/omp/bin/omp" else None
+
+        with (
+            patch.dict(os.environ, {"OUROBOROS_OMP_CLI_PATH": "/missing/env/omp"}),
+            patch("ouroboros.config._omp_cli.load_config", return_value=config),
+            patch("shutil.which", side_effect=fake_which),
+        ):
+            assert resolve_omp_cli_path() == "/opt/omp/bin/omp"
+
+        # Both higher-priority sources stale: fall through to PATH.
+        def fake_which_path(name: str) -> str | None:
+            return "/usr/bin/omp" if name == "omp" else None
+
+        with (
+            patch.dict(os.environ, {"OUROBOROS_OMP_CLI_PATH": "/missing/env/omp"}),
+            patch("ouroboros.config._omp_cli.load_config", return_value=config),
+            patch("shutil.which", side_effect=fake_which_path),
+        ):
+            assert resolve_omp_cli_path() == "/usr/bin/omp"
+
     def test_gjc_backend_uses_default_model_sentinel(self) -> None:
         """Backend-aware defaults avoid cross-provider model names for GJC."""
         with (
@@ -1882,7 +2103,7 @@ class TestLLMHelperLookups:
         )
 
         with (
-            patch.dict(os.environ, {}, clear=True),
+            patch.dict(os.environ, {"OUROBOROS_PIN_MODELS": "1"}, clear=True),
             patch(
                 "ouroboros.config.loader.load_config",
                 return_value=custom_config,
@@ -1906,7 +2127,7 @@ class TestLLMHelperLookups:
         )
 
         with (
-            patch.dict(os.environ, {}, clear=True),
+            patch.dict(os.environ, {"OUROBOROS_PIN_MODELS": "1"}, clear=True),
             patch("ouroboros.config.loader.load_config", return_value=explicit_opus_config),
         ):
             assert get_qa_model(backend=backend) == DEFAULT_OPUS_MODEL
@@ -1972,7 +2193,7 @@ class TestLLMHelperLookups:
             ),
         )
         with (
-            patch.dict(os.environ, {}, clear=True),
+            patch.dict(os.environ, {"OUROBOROS_PIN_MODELS": "1"}, clear=True),
             patch("ouroboros.config.loader.load_config", return_value=legacy_config),
         ):
             assert get_qa_model(backend=backend) == DEFAULT_SONNET_MODEL
@@ -1993,7 +2214,7 @@ class TestLLMHelperLookups:
             llm=LLMConfig(qa_model="my-proxy/claude-custom-build"),
         )
         with (
-            patch.dict(os.environ, {}, clear=True),
+            patch.dict(os.environ, {"OUROBOROS_PIN_MODELS": "1"}, clear=True),
             patch("ouroboros.config.loader.load_config", return_value=custom_config),
         ):
             assert get_qa_model(backend="claude") == "my-proxy/claude-custom-build"
@@ -2070,7 +2291,7 @@ class TestLLMHelperLookups:
             ),
         )
         with (
-            patch.dict(os.environ, {}, clear=True),
+            patch.dict(os.environ, {"OUROBOROS_PIN_MODELS": "1"}, clear=True),
             patch("ouroboros.config.loader.load_config", return_value=legacy_config),
         ):
             assert get_consensus_models(backend=backend) == (
@@ -2080,17 +2301,25 @@ class TestLLMHelperLookups:
             )
 
     def test_consensus_roster_preserved_for_claude_backend(self) -> None:
-        """Claude can run shipped OpenRouter ids, so the roster must NOT be
-        sentinel-normalized. Guards against over-broadening the CLI-backend
-        normalization set."""
-        config = OuroborosConfig()
+        """Claude can run shipped OpenRouter ids, so a pinned shipped roster must
+        NOT be sentinel-normalized. Guards against over-broadening the
+        CLI-backend normalization set."""
+        config = OuroborosConfig(
+            consensus=ConsensusConfig(
+                models=(
+                    "openrouter/openai/gpt-4o",
+                    DEFAULT_CONSENSUS_OPUS_MODEL,
+                    "openrouter/google/gemini-2.5-pro",
+                ),
+            ),
+        )
         with (
-            patch.dict(os.environ, {}, clear=True),
+            patch.dict(os.environ, {"OUROBOROS_PIN_MODELS": "1"}, clear=True),
             patch("ouroboros.config.loader.load_config", return_value=config),
         ):
             assert get_consensus_models(backend="claude") == (
                 "openrouter/openai/gpt-4o",
-                "openrouter/anthropic/claude-opus-5",
+                DEFAULT_CONSENSUS_OPUS_MODEL,
                 "openrouter/google/gemini-2.5-pro",
             )
 
@@ -2102,20 +2331,21 @@ class TestLLMHelperLookups:
             clarification=ClarificationConfig(default_model="claude-opus-4-1-20250805"),
         )
         with (
-            patch.dict(os.environ, {}, clear=True),
+            patch.dict(os.environ, {"OUROBOROS_PIN_MODELS": "1"}, clear=True),
             patch("ouroboros.config.loader.load_config", return_value=explicit_config),
         ):
             assert get_clarification_model(backend="codex") == "claude-opus-4-1-20250805"
 
     def test_get_qa_model_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Environment variable overrides config for QA model."""
+        monkeypatch.setenv("OUROBOROS_PIN_MODELS", "1")
         monkeypatch.setenv("OUROBOROS_QA_MODEL", "gpt-5-nano")
         assert get_qa_model() == "gpt-5-nano"
 
     def test_get_qa_model_falls_back_to_config(self) -> None:
         """Config is used when env override is absent."""
         with (
-            patch.dict(os.environ, {}, clear=True),
+            patch.dict(os.environ, {"OUROBOROS_PIN_MODELS": "1"}, clear=True),
             patch(
                 "ouroboros.config.loader.load_config",
                 return_value=OuroborosConfig(
@@ -2129,13 +2359,14 @@ class TestLLMHelperLookups:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Environment variable overrides config for dependency analysis model."""
+        monkeypatch.setenv("OUROBOROS_PIN_MODELS", "1")
         monkeypatch.setenv("OUROBOROS_DEPENDENCY_ANALYSIS_MODEL", "gpt-5-coder")
         assert get_dependency_analysis_model() == "gpt-5-coder"
 
     def test_get_dependency_analysis_model_falls_back_to_config(self) -> None:
         """Config is used when env override is absent."""
         with (
-            patch.dict(os.environ, {}, clear=True),
+            patch.dict(os.environ, {"OUROBOROS_PIN_MODELS": "1"}, clear=True),
             patch(
                 "ouroboros.config.loader.load_config",
                 return_value=OuroborosConfig(
@@ -2146,9 +2377,9 @@ class TestLLMHelperLookups:
             assert get_dependency_analysis_model() == "gpt-5-coder"
 
     def test_dependency_and_ontology_getters_default_to_sonnet_not_opus(self) -> None:
-        """The runtime getters — not just the Pydantic field default — must
-        resolve to Sonnet for the flipped meta-tasks, including the
-        config-absent (ConfigError) path that CI / fresh installs hit."""
+        """The runtime getters must resolve the flipped meta-tasks to the
+        standard (Sonnet) tier, including the config-absent (ConfigError) path
+        that CI / fresh installs hit."""
         with (
             patch.dict(os.environ, {}, clear=True),
             patch(
@@ -2156,9 +2387,10 @@ class TestLLMHelperLookups:
                 side_effect=ConfigError("no config"),
             ),
         ):
-            assert get_dependency_analysis_model() == DEFAULT_SONNET_MODEL
-            assert get_ontology_analysis_model() == DEFAULT_SONNET_MODEL
-            assert get_dependency_analysis_model() != DEFAULT_OPUS_MODEL
+            assert get_dependency_analysis_model() == "sonnet"
+            assert get_ontology_analysis_model() == "sonnet"
+            assert get_dependency_analysis_model() != "opus"
+            assert get_dependency_analysis_model(backend="litellm") == DEFAULT_OPUS_MODEL
 
     @pytest.mark.parametrize("backend", ["copilot", "gjc", "pi"])
     def test_dependency_pre_flip_opus_value_still_normalizes_for_non_claude(
@@ -2184,13 +2416,14 @@ class TestLLMHelperLookups:
 
     def test_get_semantic_model_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Environment variable overrides config for semantic evaluation model."""
+        monkeypatch.setenv("OUROBOROS_PIN_MODELS", "1")
         monkeypatch.setenv("OUROBOROS_SEMANTIC_MODEL", "gpt-5")
         assert get_semantic_model() == "gpt-5"
 
     def test_get_semantic_model_falls_back_to_config(self) -> None:
         """Config is used when env override is absent."""
         with (
-            patch.dict(os.environ, {}, clear=True),
+            patch.dict(os.environ, {"OUROBOROS_PIN_MODELS": "1"}, clear=True),
             patch(
                 "ouroboros.config.loader.load_config",
                 return_value=OuroborosConfig(
@@ -2203,7 +2436,7 @@ class TestLLMHelperLookups:
     def test_extended_model_helpers_fall_back_to_config(self) -> None:
         """Additional helper lookups use the configured section defaults."""
         with (
-            patch.dict(os.environ, {}, clear=True),
+            patch.dict(os.environ, {"OUROBOROS_PIN_MODELS": "1"}, clear=True),
             patch(
                 "ouroboros.config.loader.load_config",
                 return_value=OuroborosConfig(
@@ -2236,6 +2469,7 @@ class TestLLMHelperLookups:
 
     def test_consensus_model_list_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Consensus roster can be overridden from a comma-separated env var."""
+        monkeypatch.setenv("OUROBOROS_PIN_MODELS", "1")
         monkeypatch.setenv("OUROBOROS_CONSENSUS_MODELS", "gpt-5-a, gpt-5-b ,gpt-5-c")
         assert get_consensus_models() == ("gpt-5-a", "gpt-5-b", "gpt-5-c")
 
@@ -2479,11 +2713,43 @@ def test_cross_harness_ignores_legacy_generated_true_config() -> None:
 
 
 class TestGetExecutionModel:
-    """Execute model pins come from env first, then the persisted settings UI value."""
+    """Execute model pins come from env first, then the persisted settings UI value.
+
+    Pins apply only with ``models.pin`` on; automatic selection never pins.
+    """
+
+    def test_persisted_execute_values_do_not_pin_without_models_pin(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ouroboros.config.loader import get_execution_model
+
+        monkeypatch.delenv("OUROBOROS_PIN_MODELS", raising=False)
+        monkeypatch.setenv("OUROBOROS_EXECUTION_MODEL", "env-model")
+        with patch(
+            "ouroboros.config.loader.load_config",
+            return_value=OuroborosConfig(execution=ExecutionConfig(default_model="saved-model")),
+        ):
+            assert get_execution_model() is None
+
+    @pytest.mark.parametrize(
+        ("backend", "expected"),
+        [("claude", "opus"), ("codex", "gpt-6-astra"), ("litellm", DEFAULT_OPUS_MODEL)],
+    )
+    def test_global_model_choice_pins_execute(
+        self, monkeypatch: pytest.MonkeyPatch, backend: str, expected: str | None
+    ) -> None:
+        from ouroboros.config.loader import get_execution_model
+
+        monkeypatch.delenv("OUROBOROS_PIN_MODELS", raising=False)
+        monkeypatch.delenv("OUROBOROS_EXECUTION_MODEL", raising=False)
+        monkeypatch.setenv("OUROBOROS_MODEL", "frontier")
+        with patch("ouroboros.config.loader.load_config", return_value=OuroborosConfig()):
+            assert get_execution_model(backend) == expected
 
     def test_env_model_overrides_persisted_pin(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from ouroboros.config.loader import get_execution_model
 
+        monkeypatch.setenv("OUROBOROS_PIN_MODELS", "1")
         monkeypatch.setenv("OUROBOROS_EXECUTION_MODEL", "env-model")
         with patch(
             "ouroboros.config.loader.load_config",
@@ -2497,6 +2763,7 @@ class TestGetExecutionModel:
     ) -> None:
         from ouroboros.config.loader import get_execution_model
 
+        monkeypatch.setenv("OUROBOROS_PIN_MODELS", "1")
         monkeypatch.setenv("OUROBOROS_EXECUTION_MODEL", value)
         with patch(
             "ouroboros.config.loader.load_config",
@@ -2509,6 +2776,7 @@ class TestGetExecutionModel:
     ) -> None:
         from ouroboros.config.loader import get_execution_model
 
+        monkeypatch.setenv("OUROBOROS_PIN_MODELS", "1")
         monkeypatch.delenv("OUROBOROS_EXECUTION_MODEL", raising=False)
         with patch(
             "ouroboros.config.loader.load_config",
@@ -2522,12 +2790,40 @@ class TestGetExecutionModel:
     ) -> None:
         from ouroboros.config.loader import get_execution_model
 
+        monkeypatch.setenv("OUROBOROS_PIN_MODELS", "1")
         monkeypatch.delenv("OUROBOROS_EXECUTION_MODEL", raising=False)
         with patch(
             "ouroboros.config.loader.load_config",
             return_value=OuroborosConfig(execution=ExecutionConfig(default_model=value)),
         ):
             assert get_execution_model() is None
+
+    @pytest.mark.parametrize("backend", ("litellm", "copilot"))
+    def test_explicit_backend_configured_execute_model_is_a_pin(
+        self, monkeypatch: pytest.MonkeyPatch, backend: str
+    ) -> None:
+        from ouroboros.config.loader import get_execution_model
+
+        monkeypatch.delenv("OUROBOROS_PIN_MODELS", raising=False)
+        monkeypatch.delenv("OUROBOROS_EXECUTION_MODEL", raising=False)
+        with patch(
+            "ouroboros.config.loader.load_config",
+            return_value=OuroborosConfig(execution=ExecutionConfig(default_model="saved-model")),
+        ):
+            assert get_execution_model(backend) == "saved-model"
+            assert get_execution_model("claude") is None
+            assert get_execution_model() is None
+
+    @pytest.mark.parametrize("backend", ("litellm", "copilot"))
+    def test_explicit_backend_fallback_is_not_a_pin(
+        self, monkeypatch: pytest.MonkeyPatch, backend: str
+    ) -> None:
+        from ouroboros.config.loader import get_execution_model
+
+        monkeypatch.delenv("OUROBOROS_PIN_MODELS", raising=False)
+        monkeypatch.delenv("OUROBOROS_EXECUTION_MODEL", raising=False)
+        with patch("ouroboros.config.loader.load_config", return_value=OuroborosConfig()):
+            assert get_execution_model(backend) is None
 
 
 class TestConfigEncodingLocaleIndependence:
@@ -2634,9 +2930,11 @@ class TestDefaultExecutionEfficiencyMode:
         ):
             assert default_execution_efficiency_mode() == expected
 
-    def test_unreadable_config_preserves_the_ask_contract(self) -> None:
-        with patch(
-            "ouroboros.config.loader.load_config",
-            side_effect=ConfigError("unreadable"),
-        ):
-            assert default_execution_efficiency_mode() is None
+    @pytest.mark.parametrize("error", [ConfigError("unreadable"), IsADirectoryError("config.yaml")])
+    def test_missing_or_unreadable_config_takes_the_quality_first_default(
+        self, error: Exception
+    ) -> None:
+        # A user with no config, or one the filesystem cannot read, must not
+        # stall on a policy question.
+        with patch("ouroboros.config.loader.load_config", side_effect=error):
+            assert default_execution_efficiency_mode() == "quality_first"
