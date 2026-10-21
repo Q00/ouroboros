@@ -200,6 +200,119 @@ def test_nested_preformatted_field_is_not_hidden_by_safe_outer_field(
 
 
 @pytest.mark.parametrize("mode", [LogMode.PROD, LogMode.DEV])
+@pytest.mark.parametrize("source", ["argument", "note"])
+def test_preformatted_numeric_and_byte_credentials_are_redacted(
+    mode: LogMode, source: str, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    configure_logging(LoggingConfig(mode=mode, log_dir=tmp_path))
+    message = str({"api_key": 1234567890123456, "password": b"plainsecretabc", "attempt": 7})
+    error = ValueError(message if source == "argument" else "operation failed")
+    if source == "note":
+        error.add_note(message)
+    error.add_note("retry remains available")
+    try:
+        raise error
+    except ValueError:
+        get_logger().exception("scalar.exception")
+
+    console = capsys.readouterr().err
+    (tmp_path / "console.log").write_text(console, encoding="utf-8")
+    for output in (console, (tmp_path / "ouroboros.log").read_text(encoding="utf-8")):
+        assert "1234567890123456" not in output
+        assert "plainsecretabc" not in output
+        assert "attempt" in output
+        assert "retry remains available" in output
+        assert "ValueError" in output
+
+
+@pytest.mark.parametrize("mode", [LogMode.PROD, LogMode.DEV])
+@pytest.mark.parametrize("source", ["argument", "note"])
+@pytest.mark.parametrize("field", ["credentials", "detail"])
+@pytest.mark.parametrize(
+    ("literal", "value"),
+    [
+        ("'plainsecretabc'", "plainsecretabc"),
+        ('"plainsecretabc"', "plainsecretabc"),
+        ("1234567890123456", "1234567890123456"),
+        ("-1234567890123456", "1234567890123456"),
+        ("+123456.789e-10", "123456.789e-10"),
+        ("- 1234567890123456", "1234567890123456"),
+        ("123456.789.123", "123456.789.123"),
+        ("0xABCDEF123456", "ABCDEF123456"),
+        ("b'plainsecretabc'", "plainsecretabc"),
+        ('b"plainsecretabc"', "plainsecretabc"),
+        ("b'plainsecretabc with spaces'", "plainsecretabc"),
+        ("b 'plainsecretabc with spaces'", "plainsecretabc"),
+        ("b'plainsecretabc,;:}[]'", "plainsecretabc"),
+        ("b'plainsecretabc\\'suffix'", "plainsecretabc"),
+        ('b"plainsecretabc\\"suffix"', "plainsecretabc"),
+        ("b'plainsecretabc\\\\suffix'", "plainsecretabc"),
+        ("b'plainsecretabc", "plainsecretabc"),
+        ("'plainsecretabc", "plainsecretabc"),
+    ],
+)
+def test_preformatted_scalar_boundary_masks_only_sensitive_fields(
+    mode: LogMode,
+    source: str,
+    field: str,
+    literal: str,
+    value: str,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    configure_logging(LoggingConfig(mode=mode, log_dir=tmp_path))
+    message = f"{{'{field}': {literal}}}"
+    error = ValueError(message if source == "argument" else "operation failed")
+    if source == "note":
+        error.add_note(message)
+    error.add_note("retry remains available")
+    try:
+        raise error
+    except ValueError:
+        get_logger().exception("scalar.boundary")
+
+    for output in (
+        capsys.readouterr().err,
+        (tmp_path / "ouroboros.log").read_text(encoding="utf-8"),
+    ):
+        assert (value in output) is (field == "detail")
+        assert "retry remains available" in output
+        assert "ValueError" in output
+
+
+@pytest.mark.parametrize("mode", [LogMode.PROD, LogMode.DEV])
+@pytest.mark.parametrize("relation", ["cause", "context", "group"])
+def test_preformatted_scalars_remain_masked_in_nested_exceptions(
+    mode: LogMode, relation: str, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    configure_logging(LoggingConfig(mode=mode, log_dir=tmp_path))
+    message = str({"api_key": 1234567890123456, "password": b"plainsecretabc", "attempt": 7})
+    try:
+        try:
+            raise ValueError(message)
+        except ValueError as cause:
+            match relation:
+                case "cause":
+                    raise RuntimeError("retry remains available") from cause
+                case "context":
+                    raise RuntimeError("retry remains available")
+                case "group":
+                    raise ExceptionGroup("retry remains available", [cause]) from None
+    except (RuntimeError, ExceptionGroup):
+        get_logger().exception("nested.scalar")
+
+    for output in (
+        capsys.readouterr().err,
+        (tmp_path / "ouroboros.log").read_text(encoding="utf-8"),
+    ):
+        assert "1234567890123456" not in output
+        assert "plainsecretabc" not in output
+        assert "attempt" in output
+        assert "ValueError" in output
+        assert "retry remains available" in output
+
+
+@pytest.mark.parametrize("mode", [LogMode.PROD, LogMode.DEV])
 @pytest.mark.parametrize("sink", ["console", "file"])
 @pytest.mark.parametrize("source", ["key", "note", "text_key", "note_key"])
 def test_exception_keys_and_notes_cannot_bypass_redaction(

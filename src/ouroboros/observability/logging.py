@@ -197,13 +197,31 @@ def _setup_file_handler(config: LoggingConfig) -> TimedRotatingFileHandler | Non
     return handler
 
 
-_EXCEPTION_SECRET_QUOTED_ASSIGNMENT = re.compile(
-    r"""(?=((["'])((?:\\.|(?!\2).)*)\2\s*:\s*(["'])(?:\\.|(?!\4).)*\4))"""
-)
+_EXCEPTION_QUOTED_FIELD = re.compile(r"""(?=((["'])((?:\\.|(?!\2)[^\\])*)\2[ \t]*:[ \t]*))""")
 _EXCEPTION_SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b(password|passwd|api[-_]?key|access[-_]?token|client[-_]?secret|"
     r"authorization|credential|secret|token)\b\s*[:=]\s*([^\s,;]+)"
 )
+
+
+def _exception_scalar_end(text: str, start: int) -> int:
+    """Find a scalar's textual boundary without decoding or evaluating its contents."""
+    quote: str | None = None
+    escaped = False
+    for index in range(start, len(text)):
+        character = text[index]
+        if escaped:
+            escaped = False
+        elif quote is not None:
+            if character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+        elif character in ("'", '"'):
+            quote = character
+        elif character in ",;}])\r\n":
+            return index
+    return len(text)
 
 
 def _sanitize_exception_text(text: str) -> str:
@@ -211,14 +229,14 @@ def _sanitize_exception_text(text: str) -> str:
 
     parts: list[str] = []
     consumed = 0
-    for match in _EXCEPTION_SECRET_QUOTED_ASSIGNMENT.finditer(text):
-        start, end = match.span(1)
-        key_quote, key, value_quote = match.group(2), match.group(3), match.group(4)
+    for match in _EXCEPTION_QUOTED_FIELD.finditer(text):
+        start, value_start = match.span(1)
+        key_quote, key = match.group(2), match.group(3)
         if start < consumed or not is_sensitive_field(key):
             continue
         parts.append(text[consumed:start])
-        parts.append(f"{key_quote}{key}{key_quote}: {value_quote}<REDACTED>{value_quote}")
-        consumed = end
+        parts.append(f"{key_quote}{key}{key_quote}: '<REDACTED>'")
+        consumed = _exception_scalar_end(text, value_start)
     parts.append(text[consumed:])
     text = "".join(parts)
     text = _EXCEPTION_SECRET_ASSIGNMENT.sub(r"\1=<REDACTED>", text)
