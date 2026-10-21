@@ -2,18 +2,80 @@
 
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
-from typing import Final
+from typing import Final, assert_never
 
 import pytest
+import yaml
+from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 
 from ouroboros.config._model_defaults import DEFAULT_CONSENSUS_OPUS_MODEL, DEFAULT_OPUS_MODEL
 from tests.unit.config.model_document_contract import model_default_errors
 
 ROOT: Final = Path(__file__).resolve().parents[3]
 TEST: Final = Path(__file__).relative_to(ROOT)
+DIRECT_TARGETS: Final = (
+    ("### Portable Task Profiles", "llm_profiles.deep.providers.claude_code.model"),
+    ("## `economics`", "economics.tiers.frontier.models.anthropic.model"),
+    ("### Full Config Skeleton", "economics.tiers.frontier.models.anthropic.model"),
+    ("### Full Config Skeleton", "clarification.default_model"),
+    ("### Full Config Skeleton", "resilience.wonder_model"),
+    ("### Full Config Skeleton", "resilience.reflect_model"),
+    ("### Full Config Skeleton", "evaluation.semantic_model"),
+)
+PROVIDER_TARGETS: Final = (
+    ("### Portable Task Profiles", "llm_profiles.deep.providers.litellm.model"),
+    ("## `consensus`", "models"),
+    ("## `consensus`", "advocate_model"),
+    ("### Full Config Skeleton", "consensus.models.1"),
+    ("### Full Config Skeleton", "consensus.advocate_model"),
+)
+
+
+def _replace_target(markdown: str, section: str, path: str, old: str, new: str) -> str:
+    """Mutate one named claim using YAML source marks, independent of other occurrences."""
+    heading = re.search(rf"(?m)^{re.escape(section)}$", markdown)
+    assert heading is not None
+    following = markdown[heading.end() :]
+    boundary = re.search(r"(?m)^#{2,3} ", following)
+    body = following[: boundary.start()] if boundary else following
+    if section == "## `consensus`":
+        row = next(line for line in body.splitlines() if line.startswith(f"| `{path}` |"))
+        assert row.count(old) == 1
+        changed = body.replace(row, row.replace(old, new))
+    else:
+        block = re.search(r"(?ms)^```yaml\n(.*?)^```", body)
+        assert block is not None
+        node = yaml.compose(block[1], Loader=yaml.SafeLoader)
+        for segment in path.split("."):
+            match node:
+                case SequenceNode(value=items) if segment.isdecimal():
+                    candidates = [items[int(segment)]]
+                case SequenceNode(value=items):
+                    candidates = [
+                        child
+                        for child in items
+                        if isinstance(child, MappingNode)
+                        and any(
+                            key.value == "provider" and value.value == segment
+                            for key, value in child.value
+                        )
+                    ]
+                case MappingNode(value=entries):
+                    candidates = [value for key, value in entries if key.value == segment]
+                case Node() | None:
+                    pytest.fail(f"Missing mutation target: {section} {path} at {segment}")
+                case unreachable:
+                    assert_never(unreachable)
+            assert len(candidates) == 1, (section, path, segment)
+            node = candidates[0]
+        assert isinstance(node, ScalarNode) and node.value == old
+        start, end = block.start(1) + node.start_mark.index, block.start(1) + node.end_mark.index
+        changed = body[:start] + new + body[end:]
+    return markdown[: heading.end()] + changed + following[len(body) :]
 
 
 @pytest.fixture
@@ -30,33 +92,35 @@ def test_reference_matches_source_model_defaults(reference: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("identity", "replacement", "occurrence", "location"),
+    ("section", "path", "identity", "replacement"),
     [
-        (DEFAULT_OPUS_MODEL, DEFAULT_CONSENSUS_OPUS_MODEL, 0, "claude_code.model"),
-        (DEFAULT_OPUS_MODEL, DEFAULT_CONSENSUS_OPUS_MODEL, 1, "anthropic.model"),
-        (DEFAULT_OPUS_MODEL, DEFAULT_CONSENSUS_OPUS_MODEL, 2, "anthropic.model"),
-        (DEFAULT_OPUS_MODEL, DEFAULT_CONSENSUS_OPUS_MODEL, 3, "clarification.default_model"),
-        (DEFAULT_OPUS_MODEL, DEFAULT_CONSENSUS_OPUS_MODEL, 4, "resilience.wonder_model"),
-        (DEFAULT_OPUS_MODEL, DEFAULT_CONSENSUS_OPUS_MODEL, 5, "resilience.reflect_model"),
-        (DEFAULT_OPUS_MODEL, DEFAULT_CONSENSUS_OPUS_MODEL, 6, "evaluation.semantic_model"),
-        (DEFAULT_CONSENSUS_OPUS_MODEL, DEFAULT_OPUS_MODEL, 0, "litellm.model"),
-        (DEFAULT_CONSENSUS_OPUS_MODEL, DEFAULT_OPUS_MODEL, 1, "consensus.models table"),
-        (DEFAULT_CONSENSUS_OPUS_MODEL, DEFAULT_OPUS_MODEL, 2, "consensus.advocate_model table"),
-        (DEFAULT_CONSENSUS_OPUS_MODEL, DEFAULT_OPUS_MODEL, 3, "consensus.models"),
-        (DEFAULT_CONSENSUS_OPUS_MODEL, DEFAULT_OPUS_MODEL, 4, "consensus.advocate_model"),
+        (section, path, DEFAULT_OPUS_MODEL, DEFAULT_CONSENSUS_OPUS_MODEL)
+        for section, path in DIRECT_TARGETS
+    ]
+    + [
+        (section, path, DEFAULT_CONSENSUS_OPUS_MODEL, DEFAULT_OPUS_MODEL)
+        for section, path in PROVIDER_TARGETS
     ],
 )
+@pytest.mark.parametrize("unrelated_example", [False, True])
 def test_each_model_identity_rejects_the_other_provider(
-    reference: str, identity: str, replacement: str, occurrence: int, location: str
+    reference: str,
+    section: str,
+    path: str,
+    identity: str,
+    replacement: str,
+    unrelated_example: bool,
 ) -> None:
-    # Given one direct or provider-form occurrence changed independently of all others.
-    pieces = reference.split(identity)
-    assert len(pieces) == (8 if identity == DEFAULT_OPUS_MODEL else 6)
-    changed = identity.join(pieces[: occurrence + 1])
-    changed += replacement + identity.join(pieces[occurrence + 1 :])
+    # Given named targets, optionally surrounded by an unrelated example with the same identities.
+    document = reference
+    if unrelated_example:
+        document += "\n### Unrelated example\n```yaml\n"
+        document += f"direct: {DEFAULT_OPUS_MODEL}\nprovider: {DEFAULT_CONSENSUS_OPUS_MODEL}\n```\n"
+    changed = _replace_target(document, section, path, identity, replacement)
     # When the document is checked against the actual source identities.
     errors = model_default_errors(changed)
     # Then precisely the corrupted location fails, despite correct identifiers elsewhere.
+    location = path.removesuffix(".1")
     assert len(errors) == 1 and "MODEL_DEFAULT:" in errors[0] and location in errors[0], errors
 
 
