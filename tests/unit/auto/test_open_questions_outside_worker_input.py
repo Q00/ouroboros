@@ -218,8 +218,18 @@ def test_pipeline_result_reads_open_questions_from_the_seed(tmp_path) -> None:
 
     ledger = _ledger()
     state = AutoPipelineState(goal=GOAL, cwd=str(tmp_path))
-    state.seed_artifact = synthesize_seed_from_ledger(ledger).to_dict()
+    pipeline = AutoPipeline(_Unused(), None)  # type: ignore[arg-type]
+    generated = Seed.from_dict(
+        {
+            "goal": GOAL,
+            "acceptance_criteria": ["The packer aligns top and bottom as documented."],
+            "ontology_schema": {"name": "Fix", "description": "d"},
+            "metadata": {"ambiguity_score": 0.1},
+        }
+    )
 
-    result = AutoPipeline(_Unused(), None)._result(state, ledger)  # type: ignore[arg-type]
+    # The real recording path: ledger carryover, acceptance normalization, artifact.
+    pipeline._record_generated_seed(state, ledger, generated)
+    result = pipeline._result(state, ledger)
 
     assert result.open_questions == (NOT_FOUND_QUESTION, UNANSWERED_QUESTION)
