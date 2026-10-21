@@ -587,3 +587,42 @@ class TestUnparsedCoverageIsNotEvidence:
         assert "coverage_unparsed" not in coverage.details
         assert result.stage1_result.disposition is disposition
         assert result.final_approved is approved
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("output", ["no report", "Coverage: 70% required", "Coverage: unknown"])
+@pytest.mark.parametrize("return_code", [0, 1])
+@pytest.mark.parametrize("failing_test", [False, True])
+async def test_disabled_coverage_threshold_preserves_exit_status(
+    output: str, return_code: int, failing_test: bool
+) -> None:
+    config = MechanicalConfig(
+        coverage_threshold=0.0,
+        coverage_command=(
+            sys.executable,
+            "-c",
+            f"import sys; print({output!r}); sys.exit({return_code})",
+        ),
+        test_command=(sys.executable, "-c", "assert False, 'feature missing'")
+        if failing_test
+        else None,
+    )
+    result = await _evaluate_stage1_only(config)
+    stage1 = result.stage1_result
+    coverage = next(c for c in stage1.checks if c.check_type is CheckType.COVERAGE)
+    assert coverage.executed is True
+    assert coverage.passed is (return_code == 0)
+    assert coverage.details["return_code"] == return_code
+    assert "coverage_score" not in coverage.details
+    assert stage1.coverage_score is None
+    approved = return_code == 0 and not failing_test
+    assert stage1.disposition is (
+        MechanicalDisposition.EXECUTED_PASS if approved else MechanicalDisposition.EXECUTED_FAIL
+    )
+    assert result.final_approved is approved
+    assert result.acceptance_state is (
+        AcceptanceState.APPROVED if approved else AcceptanceState.REJECTED
+    )
+    completed = next(e for e in result.events if e.type == "evaluation.stage1.completed")
+    assert completed.data["passed"] is approved
+    assert completed.data["coverage_score"] is None

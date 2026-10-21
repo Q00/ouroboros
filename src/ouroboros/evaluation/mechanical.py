@@ -382,7 +382,7 @@ class MechanicalVerifier:
         # Extract coverage if this was a coverage check
         if check_type == CheckType.COVERAGE and passed:
             coverage = parse_coverage_from_output(cmd_result.stdout)
-            if coverage is None:
+            if coverage is None and self.config.coverage_threshold != 0.0:
                 # The exit code says the command ran, not that coverage met the
                 # threshold. Without a figure the threshold is undecided: not a
                 # pass, and not an executed failure that would claim a measurement.
@@ -397,7 +397,8 @@ class MechanicalVerifier:
                     details={**details, "coverage_unparsed": True},
                     executed=False,
                 )
-            details["coverage_score"] = coverage
+            if coverage is not None:
+                details["coverage_score"] = coverage
 
         message = (
             f"Check {check_type.value} passed"
