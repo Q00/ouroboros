@@ -341,6 +341,16 @@ class TestExtractEvidence:
         with pytest.raises(EvidenceError):
             extract_evidence(text)
 
+    @pytest.mark.parametrize("fence_tag", ["json", ""])
+    @pytest.mark.parametrize("terminal_payload", ["[undefined]", "{undefined}", "[NaN,]"])
+    def test_malformed_terminal_fence_never_promotes_stale_evidence(
+        self, fence_tag: str, terminal_payload: str
+    ) -> None:
+        text = f'```{fence_tag}\n{{"files_touched": ["stale.py"]}}\n{terminal_payload}\n```'
+
+        with pytest.raises(EvidenceError):
+            extract_evidence(text)
+
     def test_valid_inline_evidence_label_is_recovered(self) -> None:
         record = extract_evidence('Actual evidence: {"files_touched": ["actual.py"]}')
 
