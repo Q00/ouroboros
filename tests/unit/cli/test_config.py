@@ -469,7 +469,7 @@ class TestConfigShowModels:
         assert "ignored (pin off):" in text
         assert (
             "evaluation.semantic_model: claude-opus-4-6, set models.pin: true to use "
-            "(pin runs claude-opus-5)"
+            "(pin runs claude-opus-5-5)"
         ) in text
         assert "resilience.reflect_model: my-research-model, set models.pin: true to use" in text
 

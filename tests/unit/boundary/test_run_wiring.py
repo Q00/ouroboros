@@ -11,6 +11,7 @@ import pytest
 
 from ouroboros.boundary.acceptance import PackageCriterionStatus, reconcile_acceptance
 from ouroboros.boundary.admission import admit_check_package
+from ouroboros.boundary.base_regression import BASE_REGRESSION_DEFAULT, WORKER_TEST_GATE_DEFAULT
 from ouroboros.boundary.binding import CHECK_DIR
 from ouroboros.boundary.events import (
     ACTOR_STARTED,
@@ -567,7 +568,11 @@ async def test_the_final_verification_runs_under_the_recorded_run_contract(
         settings=CheckPackageSettings(enabled=True, check_timeout_seconds=37),
         store_dir=tmp_path / "store",
     )
-    assert state.contract == RunContract(check_timeout_seconds=37)
+    assert state.contract == RunContract(
+        check_timeout_seconds=37,
+        base_regression=BASE_REGRESSION_DEFAULT,
+        worker_test_gate=WORKER_TEST_GATE_DEFAULT,
+    )
     assert await BoundaryLedger(store).run_contract("exec_contract") == state.contract
     seen: list[float] = []
     verify = run_wiring.verify_with_bindings
@@ -612,7 +617,9 @@ async def test_late_binding_uses_the_recorded_run_contract(
     )
     assert state.admission is not None and state.admission.check_tiers["oracle_2"] == "U"
     assert await BoundaryLedger(store).run_contract("exec_late_contract") == RunContract(
-        check_timeout_seconds=37
+        check_timeout_seconds=37,
+        base_regression=BASE_REGRESSION_DEFAULT,
+        worker_test_gate=WORKER_TEST_GATE_DEFAULT,
     )
     seen: dict[str, list[int]] = {"binding": [], "candidate": []}
     admit, verify = binding_flow.admit_binding, binding_flow.verify_candidate

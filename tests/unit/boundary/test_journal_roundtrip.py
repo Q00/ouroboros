@@ -42,7 +42,7 @@ from ouroboros.boundary.ledger import (
 )
 from ouroboros.boundary.oracle_build import package_from_reply
 from ouroboros.boundary.package import seal_package, seed_criterion_keys
-from ouroboros.boundary.per_check import HELD_OUT_NOT_DISCRIMINATING
+from ouroboros.boundary.per_check import HELD_OUT_NOT_DISCRIMINATING, INDETERMINATE_ON_BASE
 from ouroboros.boundary.run_wiring import (
     BoundaryRunState,
     CheckPackageSettings,
@@ -395,9 +395,10 @@ async def test_f_a_non_discriminating_oracle_is_excluded_and_verifies_nothing(
     assert first["reason"] == f"uncovered:{HELD_OUT_NOT_DISCRIMINATING}"
 
 
-# A replacement script check for criterion 1 that exits without its signature:
-# indeterminate on the base, so the replacement version is not admitted.
-UNSIGNED = {
+# A replacement script check for criterion 1 that changes a file every
+# checkout has: a protected-byte mutation leaves the whole replacement version
+# unadmitted (a failure of no single check, so nothing is excluded).
+MUTATING_REPLACEMENT = {
     "checks": [
         {
             **SCRIPT_CHECK,
@@ -408,13 +409,18 @@ UNSIGNED = {
             "assertions": [{"criterion": 1, "locator": "main assertion"}],
         }
     ],
-    "files": [{"path": f"{CHECK_DIR}/repro_1.py", "content": "import sys\nsys.exit(1)\n"}],
+    "files": [
+        {
+            "path": f"{CHECK_DIR}/repro_1.py",
+            "content": "import sys\nopen('data.txt', 'a').write('touched')\nsys.exit(1)\n",
+        }
+    ],
 }
 
 
 @pytest.mark.parametrize(
     ("replacement", "outcome"),
-    [({}, "construction_failed"), (UNSIGNED, "not_admitted")],
+    [({}, "construction_failed"), (MUTATING_REPLACEMENT, "not_admitted")],
     ids=["call_failed", "not_admitted"],
 )
 async def test_f_an_unadmitted_replacement_leaves_a_run_the_journal_recovers(
@@ -441,6 +447,66 @@ async def test_f_an_unadmitted_replacement_leaves_a_run_the_journal_recovers(
         f"{EXECUTION_ID}/check_package/v3", seed_digest="0" * 64, input_digest="0" * 64, reason="x"
     )
     assert isinstance(await _projection(ledger), RecoveryUndecidable)
+
+
+# A reproduction script for criterion 2 that fails before its own assertion
+# (no failure signature), as ``script_2_1`` did in the v0.55.4 dev run
+# (django__django-14580): undecided on the base, excluded on its own.
+_UNSIGNED_PATH = f"{CHECK_DIR}/repro_2.py"
+UNSIGNED_REPRO_2 = {
+    **SCRIPT_CHECK,
+    "check_id": "repro_2",
+    "role": "reproduction",
+    "argv": ["python3", _UNSIGNED_PATH],
+    "failure_signature": "OUROBOROS_CHECK_FAILED:repro_2",
+}
+UNSIGNED_FILE = {
+    "path": _UNSIGNED_PATH,
+    "content": "raise RuntimeError('raised before the guarded assertion')\n",
+}
+
+
+def _undecided_reply() -> dict[str, Any]:
+    return {
+        "oracles": [DISCRIMINATING_REPRO_1, GOOD_PRESERVE_3],
+        "checks": [UNSIGNED_REPRO_2],
+        "files": [UNSIGNED_FILE],
+    }
+
+
+async def test_f_an_undecided_check_is_excluded_and_its_criterion_goes_to_the_verifier(
+    store: EventStore, repo: Path, tmp_path: Path
+) -> None:
+    """One valid reproduction and one undecided check: the package is admitted with the valid one."""
+    seed, state, authority = await _prepare(store, repo, tmp_path, _Constructor(_undecided_reply()))
+    assert state.admitted and state.boundary_id == V1
+    assert state.admission is not None
+    (undecided,) = state.admission.excluded_checks or {}
+    assert state.admission.excluded_checks == {undecided: INDETERMINATE_ON_BASE}
+    (repo / "mathutils.py").write_text(FIXED)
+    await _run(seed, authority, gate=False)
+    versions = await _journal(store, state)
+    decision = _decision(authority, versions, state)
+    assert _statuses(decision) == ["pass", "uncovered", "unverified"]
+    second = decision[seed_criterion_keys(seed)[1]]
+    assert second["reason"] == f"uncovered:{INDETERMINATE_ON_BASE}"
+
+
+async def test_f_the_replacement_call_covers_the_criterion_of_an_undecided_check(
+    store: EventStore, repo: Path, tmp_path: Path
+) -> None:
+    replacement = {"checks": [SCRIPT_CHECK], "files": [SCRIPT_FILE]}
+    constructor = _Constructor(_undecided_reply(), replacement=replacement)
+    seed, state, authority = await _prepare(store, repo, tmp_path, constructor)
+    assert state.replacement_outcome == "admitted"
+    assert state.boundary_id == V2 and state.versions == (V1, V2)
+    assert state.admission is not None and not state.admission.excluded_checks
+    (repo / "mathutils.py").write_text(FIXED)
+    await _run(seed, authority, gate=False)
+    versions = await _journal(store, state)
+    decision = _decision(authority, versions, state)
+    assert _statuses(decision)[0] == "pass"
+    assert decision[seed_criterion_keys(seed)[1]]["package_status"] != "uncovered"
 
 
 async def _projection(ledger: BoundaryLedger) -> Any:

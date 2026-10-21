@@ -53,6 +53,7 @@ from ouroboros.boundary.package import (
     sha256_bytes,
 )
 from ouroboros.boundary.reference_check import OracleReference, references_from_reply
+from ouroboros.boundary.target_commands import declared_test_command
 from ouroboros.boundary.tree import copy_checkout, tree_digest
 from ouroboros.core.seed import AcceptanceCriterionSpec, Seed
 
@@ -80,6 +81,10 @@ class ConstructionOutcome:
     constructor always sets it, and an oracle without a usable reference is
     then uncovered (``reference_unavailable``).
     """
+    test_command: str | None = None
+    """The repository's test command template the reply declared, if any
+    (``target_commands.declared_test_command``); data the regression check
+    admits before it uses it, never part of the package."""
 
 
 def load_constructor_system_prompt() -> str:
@@ -398,7 +403,8 @@ class CheckConstructor:
         if len(reply) > self._max_output_chars:
             return failed("constructor_reply_too_large")
         try:
-            parsed = normalize_reply(extract_json_object(reply))
+            raw = extract_json_object(reply)
+            parsed = normalize_reply(raw)
             if only is not None:
                 parsed = restrict_reply_to(parsed, only)
             package = package_from_reply(
@@ -423,6 +429,7 @@ class CheckConstructor:
             input_digest,
             generator,
             references=references_from_reply(parsed),
+            test_command=declared_test_command(raw),
         )
 
     async def _construct_incremental(
@@ -514,4 +521,5 @@ class CheckConstructor:
             input_digest,
             generator,
             references=references_from_reply(merged),
+            test_command=next((piece.test_command for piece in pieces if piece.test_command), None),
         )

@@ -45,8 +45,12 @@ One oracle check runs as follows:
    bound script or module: before every case the controller proves its
    files are regular files of the checkout (``_cli_target_files``), and the
    harness ``cli`` role runs the bytes of exactly those files, found again
-   by identity in the target process, never a pathname opened anew. When
-   the case is over, the controller kills the
+   by identity in the target process, never a pathname opened anew. A CLI
+   case's ``files`` are written by the controller into a fresh directory in
+   the check's scratch directory (never the checkout copy), created without
+   following a link, and that directory becomes the command's working
+   directory just before the target runs. When the case is over, the
+   controller kills the
    target's whole process group (on Linux also every process still in its
    session), closes its own ends of the pipes, and waits, bounded, for the
    group to be empty. One absolute deadline, taken before anything starts,
@@ -111,6 +115,7 @@ from pathlib import Path
 import secrets
 import signal
 import sys
+import tempfile
 import time
 from typing import Any
 
@@ -125,6 +130,13 @@ from ouroboros.boundary.check_env import (
     check_scratch,
     default_interpreter,
     spawn_check_process,
+)
+from ouroboros.boundary.footprint import (
+    ORACLE_PLAN,
+    OracleFootprint,
+    oracle_program,
+    read_entered,
+    write_plan,
 )
 from ouroboros.boundary.oracle import (
     ORACLE_DATA_PATH,
@@ -659,7 +671,12 @@ def _cli_target_files(cwd: Path, symbol: str) -> _NotProven | tuple[tuple[str, R
 
 
 def _cli_launch(
-    python: str, harness: str, nonce: str, symbol: str, proven: Sequence[tuple[str, RegularFile]]
+    python: str,
+    harness: str,
+    nonce: str,
+    symbol: str,
+    proven: Sequence[tuple[str, RegularFile]],
+    workdir: str = "",
 ) -> list[str]:
     """The argv of the harness ``cli`` role running ``symbol`` from the ``proven`` files."""
     kind, name = ("module", symbol[3:]) if symbol.startswith("-m ") else ("script", symbol)
@@ -683,9 +700,41 @@ def _cli_launch(
         nonce,
         kind,
         name,
+        workdir,
         str(len(proven)),
         *identities,
     ]
+
+
+def write_case_files(parent: Path, files: Mapping[str, str]) -> Path:
+    """A fresh directory in ``parent`` holding ``files``, created without following a link.
+
+    ``parent`` is the check's scratch directory, which target processes can
+    write: every directory is created and opened by name from the one before
+    it with ``O_NOFOLLOW``, and every file is created exclusively, so a link
+    planted there cannot redirect a write of the controller's. Paths are
+    already validated (``call_grammar.check_case_files``).
+    """
+    root = Path(tempfile.mkdtemp(prefix="case-", dir=parent))
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    for relative, text in files.items():
+        *directories, name = relative.split("/")
+        held = [os.open(root, directory_flags)]
+        try:
+            for part in directories:
+                try:
+                    os.mkdir(part, 0o700, dir_fd=held[-1])
+                except FileExistsError:
+                    pass
+                held.append(os.open(part, directory_flags, dir_fd=held[-1]))
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(name, flags, 0o600, dir_fd=held[-1])
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(text)
+        finally:
+            for descriptor in reversed(held):
+                os.close(descriptor)
+    return root
 
 
 async def _feed(process: asyncio.subprocess.Process, data: bytes) -> None:
@@ -796,13 +845,20 @@ async def _observe(
     *,
     on_base: bool,
     reference_run: bool = False,
+    scratch: Path | None = None,
+    program: str | None = None,
 ) -> tuple[str, str, dict[str, dict[str, Any]], bool]:
     """Run ``cases`` by ``deadline``; return ``(resolve, detail, observations, timed_out)``.
 
     Each case gets an equal share of the time left before ``deadline``
     (event loop time). Raises ``_Unavailable`` when the entry point refuses
-    a process. ``reference_run`` (the reference check) makes no setup call
-    and sends every symbol reference as its dotted path.
+    a process. ``reference_run`` (the reference check) makes no setup call,
+    sends every symbol reference as its dotted path, and calls the reference
+    with the declared params: it never builds ``inputs`` or a ``receiver``
+    and applies no projection. A CLI case's files (case data, like its
+    arguments) are written in ``scratch`` for the target and the reference
+    alike. ``program`` replaces the harness text a Python target runs (the
+    footprint recorder wrapping it).
     """
     arg_map = dict(binding.arg_map)
     setup = [] if reference_run else [call.model_dump(mode="json") for call in oracle.setup]
@@ -824,7 +880,10 @@ async def _observe(
             else:
                 nonce = secrets.token_hex(16)
                 tail = argv[4:] if binding.symbol.startswith("-m ") else argv[3:]
-                launch = _cli_launch(python, harness, nonce, binding.symbol, proven)
+                workdir = ""
+                if case.files and scratch is not None:
+                    workdir = str(write_case_files(scratch, case.files))
+                launch = _cli_launch(python, harness, nonce, binding.symbol, proven, workdir)
                 outcome = await _cli_case(
                     _prepared(prepare, [*launch, *tail]),
                     case.stdin or "",
@@ -833,27 +892,41 @@ async def _observe(
                     nonce,
                 )
         else:
-            inputs, init = case.args, case.init
+            kind = oracle.call_kind.value
+            extra: dict[str, Any] = {}
             if reference_run:
-                inputs, init = (
-                    harness_module.named_inputs(inputs),
-                    harness_module.named_inputs(init),
+                # The reference takes the declared params as JSON data.
+                names, values = list(oracle.params), harness_module.named_inputs(case.args)
+                init = harness_module.named_inputs(case.init)
+                if oracle.receiver is not None:
+                    kind = CallKind.FUNCTION.value
+            else:
+                names, values = harness_module.call_inputs(
+                    {"params": oracle.params, "inputs": oracle.inputs}, case.args
                 )
-            args, kwargs = harness_module.split_args(list(oracle.params), arg_map, inputs)
+                init = case.init
+                extra = oracle.call_frame(case)
+            args, kwargs = harness_module.split_args(names, arg_map, values)
             nonce = secrets.token_hex(16)
             argv = [
                 python,
                 "-I",
                 "-B",
                 "-c",
-                harness,
+                program or harness,
                 "target",
                 nonce,
-                oracle.call_kind.value,
+                kind,
                 binding.symbol,
                 json.dumps(setup),
             ]
-            call = {"case_id": case.case_id, "args": args, "kwargs": kwargs, "init": init}
+            call = {
+                "case_id": case.case_id,
+                "args": args,
+                "kwargs": kwargs,
+                "init": init,
+                **extra,
+            }
             outcome = await _python_case(_prepared(prepare, argv), nonce, call, case_deadline)
         entry = dict(outcome.entry or {})
         if on_base:
@@ -953,6 +1026,7 @@ async def run_oracle_check(
     writable_root: Path | None = None,
     include_held_out: bool = True,
     reference_run: bool = False,
+    footprint: OracleFootprint | None = None,
 ) -> OracleRun:
     """Run one oracle check on the checkout copy at ``cwd`` (see the module docstring).
 
@@ -967,6 +1041,13 @@ async def run_oracle_check(
     ``reference_run`` is the reference check's run (``reference_check.py``):
     the reference has no project, so no setup call is made and each symbol
     reference in a case's inputs reaches it as its dotted path.
+    ``footprint`` (``boundary/footprint.py``): a Python target also records
+    which of its watched functions the case entered, in this check's scratch
+    directory (the plan, watched keys included, reaches it as a file there,
+    never in argv); the controller reads it into ``footprint.entered`` for
+    this check. When the recorder cannot be set up the target runs without
+    it and the check is ``unrecorded``. It is an observation only and never
+    part of the verdict.
 
     Never raises: an unexpected controller error is an indeterminate check,
     never a verdict and never a reason to fall back to another verifier.
@@ -996,6 +1077,25 @@ async def run_oracle_check(
         # Parsed before any target starts; held in memory only.
         oracle_data = _selected_data(json.loads(data_text), oracle.check_id, cases)
         with check_scratch(scratch_parent) as scratch:
+            record = scratch / f"footprint-{secrets.token_hex(8)}.jsonl"
+            program: str | None = None
+            if (
+                footprint is not None
+                and footprint.watched
+                and oracle.call_kind is not CallKind.CLI
+                and not reference_run
+            ):
+                plan = {
+                    "root": str(writable_root or cwd),
+                    "record": str(record),
+                    "watched": sorted([list(key) for key in footprint.watched]),
+                }
+                if write_plan(scratch / ORACLE_PLAN, plan):
+                    program = oracle_program(harness)
+                else:
+                    # Run the oracle exactly as without a recorder, and let
+                    # its footprint exempt nothing.
+                    footprint.unrecorded.add(oracle.check_id)
 
             def prepare(argv: Sequence[str]) -> CheckCommand | CheckUnavailable:
                 return check_command(
@@ -1018,7 +1118,13 @@ async def run_oracle_check(
                 deadline,
                 on_base=on_base,
                 reference_run=reference_run,
+                scratch=scratch,
+                program=program,
             )
+            if program is not None and footprint is not None:
+                footprint.entered.setdefault(oracle.check_id, set()).update(
+                    read_entered(record, footprint.watched)
+                )
         result: dict[str, Any] | None = None
         if _decided(resolve, on_base=on_base):
             result = harness_module.compare(

@@ -224,6 +224,16 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # turn off the verification layer that judges its own changes, nor
         # decide whether model-written checks execute.
         "OUROBOROS_CHECK_PACKAGE",
+        # ``ooo auto`` requester command (auto/requester.py): the value names a
+        # program auto runs for each routed interview question, the same
+        # executable-selection class as the CLI paths above. The timeout is
+        # kept beside it so a cloned repo cannot shape how long it runs.
+        "OUROBOROS_AUTO_REQUESTER_COMMAND",
+        "OUROBOROS_AUTO_REQUESTER_TIMEOUT_SECONDS",
+        # ``ooo auto`` investigator call cap and hang guard (auto/investigator.py): 0 turns
+        # off the repository reading, so a cloned repo must not set it.
+        "OUROBOROS_AUTO_INVESTIGATOR_MAX_CALLS",
+        "OUROBOROS_AUTO_INVESTIGATOR_CALL_TIMEOUT_SECONDS",
         "DO_NOT_TRACK",
         "CI",
         "GITHUB_ACTIONS",

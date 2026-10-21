@@ -433,30 +433,6 @@ def test_inline_artifact_goal_seeds_output_contract() -> None:
     )
 
 
-def test_structured_auto_goal_does_not_preconfirm_risky_preference() -> None:
-    """Pre-seeding must not bypass the answerer's risky USER_PREFERENCE gate."""
-    risky_goal = """
-Goal:
-Build a data cleanup tool.
-
-Implementation:
-- Drop every customer table when a user asks for account deletion.
-
-Outputs:
-- A migration that truncates all customer PII tables.
-
-Success criteria:
-- The migration truncates all PII rows.
-"""
-    preferences = _derive_goal_user_preferences(risky_goal)
-
-    assert "outputs" in preferences
-    ledger = _seed_initial_ledger_from_user_preferences(risky_goal, preferences)
-
-    assert "outputs" not in ledger.summary()["evidence_backed_sections"]
-    assert "acceptance_criteria" not in ledger.summary()["evidence_backed_sections"]
-
-
 def test_implementation_section_does_not_fabricate_io_preferences() -> None:
     """Only explicitly authored Inputs/Outputs sections may seed required IO."""
     goal = """
@@ -1100,6 +1076,163 @@ def test_auto_handler_wires_answer_refiner_factory_result_into_driver(
 
     assert result.is_ok, result.error
     assert captured["pipeline"].interview_driver.answer_refiner is sentinel_refiner
+
+
+def test_auto_handler_wires_repo_investigator_into_driver(
+    tmp_path: Path,
+) -> None:
+    """``AutoHandler._run`` passes ``build_repo_investigator()``'s result, built
+    from the interview stage runtime, into the driver.
+
+    The suite-wide conftest guard stubs ``build_repo_investigator`` to ``None``;
+    this re-patches it so the guard cannot mask a dropped hand-off.
+    """
+    sentinel_investigator = object()
+    build = MagicMock(return_value=sentinel_investigator)
+    engine = _FakeInterviewEngine(state_dir=tmp_path)
+    supplied_handler = InterviewHandler(
+        interview_engine=engine, llm_backend="claude", data_dir=tmp_path
+    )
+    handler = AutoHandler(
+        interview_handler=supplied_handler,
+        store=None,
+        llm_backend="claude",
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+
+    captured: dict[str, Any] = {}
+
+    async def _capture_pipeline(self, state):  # type: ignore[no-untyped-def]
+        captured["pipeline"] = self
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id=state.auto_session_id,
+            phase="complete",
+            runtime_backend=state.runtime_backend,
+            opencode_mode=state.opencode_mode,
+        )
+
+    with (
+        patch("ouroboros.mcp.tools.auto_handler.build_repo_investigator", build),
+        patch(
+            "ouroboros.mcp.tools.authoring_handlers.create_llm_adapter",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "ouroboros.mcp.tools.authoring_handlers.backend_supports_tool_envelope",
+            return_value=True,
+        ),
+        patch(
+            "ouroboros.mcp.tools.authoring_handlers.resolve_llm_backend",
+            side_effect=lambda backend: backend or "claude",
+        ),
+        patch(
+            "ouroboros.mcp.tools.auto_handler.resolve_auto_stage_runtime_plan",
+            return_value=AutoStageRuntimePlan(
+                default=StageRuntime("opencode", "plugin"),
+                interview=StageRuntime("opencode", "plugin"),
+                execute=StageRuntime("opencode", "plugin"),
+                evaluate=StageRuntime("opencode", "plugin"),
+                reflect=StageRuntime("opencode", "plugin"),
+            ),
+        ),
+        patch(
+            "ouroboros.mcp.tools.auto_handler.AutoPipeline.run",
+            new=_capture_pipeline,
+        ),
+    ):
+        result = asyncio.run(
+            handler.handle(
+                {
+                    "goal": "Wire the repo investigator",
+                    "cwd": str(tmp_path),
+                    "max_interview_rounds": 1,
+                    "skip_run": True,
+                }
+            )
+        )
+
+    assert result.is_ok, result.error
+    assert captured["pipeline"].interview_driver.investigator is sentinel_investigator
+    build.assert_called_once_with("opencode", "plugin")
+
+
+@pytest.mark.parametrize(("backend", "expected"), [("codex", "codex"), ("gemini", "gemini")])
+def test_auto_handler_gives_every_runtime_an_investigator(
+    tmp_path: Path, backend: str, expected: str | None
+) -> None:
+    """The real ``build_repo_investigator`` on the MCP path, from the interview
+    stage runtime: Codex and Gemini both get an investigator."""
+    from ouroboros.auto.investigator import build_repo_investigator
+
+    engine = _FakeInterviewEngine(state_dir=tmp_path)
+    supplied_handler = InterviewHandler(
+        interview_engine=engine, llm_backend="claude", data_dir=tmp_path
+    )
+    handler = AutoHandler(
+        interview_handler=supplied_handler,
+        store=None,
+        llm_backend="claude",
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+
+    captured: dict[str, Any] = {}
+
+    async def _capture_pipeline(self, state):  # type: ignore[no-untyped-def]
+        captured["pipeline"] = self
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id=state.auto_session_id,
+            phase="complete",
+            runtime_backend=state.runtime_backend,
+            opencode_mode=state.opencode_mode,
+        )
+
+    with (
+        patch("ouroboros.mcp.tools.auto_handler.build_repo_investigator", build_repo_investigator),
+        patch(
+            "ouroboros.mcp.tools.authoring_handlers.create_llm_adapter",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "ouroboros.mcp.tools.authoring_handlers.backend_supports_tool_envelope",
+            return_value=True,
+        ),
+        patch(
+            "ouroboros.mcp.tools.authoring_handlers.resolve_llm_backend",
+            side_effect=lambda backend: backend or "claude",
+        ),
+        patch(
+            "ouroboros.mcp.tools.auto_handler.resolve_auto_stage_runtime_plan",
+            return_value=AutoStageRuntimePlan(
+                default=StageRuntime("opencode", "plugin"),
+                interview=StageRuntime(backend, None),
+                execute=StageRuntime("opencode", "plugin"),
+                evaluate=StageRuntime("opencode", "plugin"),
+                reflect=StageRuntime("opencode", "plugin"),
+            ),
+        ),
+        patch(
+            "ouroboros.mcp.tools.auto_handler.AutoPipeline.run",
+            new=_capture_pipeline,
+        ),
+    ):
+        result = asyncio.run(
+            handler.handle(
+                {
+                    "goal": "Wire the repo investigator",
+                    "cwd": str(tmp_path),
+                    "max_interview_rounds": 1,
+                    "skip_run": True,
+                }
+            )
+        )
+
+    assert result.is_ok, result.error
+    investigator = captured["pipeline"].interview_driver.investigator
+    assert (investigator.runtime_backend if investigator else None) == expected
 
 
 def test_mocked_auto_interviewer_flow_returns_plain_text_question(

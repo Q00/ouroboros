@@ -14,6 +14,8 @@ Covers:
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from ouroboros.core.seed import (
@@ -81,6 +83,19 @@ def sample_seed() -> Seed:
         ),
         metadata=SeedMetadata(ambiguity_score=0.15),
     )
+
+
+@pytest.fixture(autouse=True)
+def disable_unconfigured_provider_for_legacy_drift_tests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep pre-existing lexical tests independent from local provider setup."""
+    import ouroboros.observability.drift as drift_module
+
+    def unavailable() -> object:
+        raise RuntimeError("provider is intentionally unavailable in unit tests")
+
+    monkeypatch.setattr(drift_module, "_default_semantic_adapter_factory", unavailable)
 
 
 @pytest.fixture
@@ -163,6 +178,209 @@ class TestGoalDriftCalculation:
         )
 
         assert 0.0 <= result <= 1.0
+
+    @pytest.mark.asyncio
+    async def test_async_fallback_uses_semantic_goal_alignment(
+        self, sample_seed: Seed, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ouroboros.core.types import Result
+        import ouroboros.evolution.provider_usage as provider_usage
+        from ouroboros.observability.drift import calculate_goal_drift_async
+
+        seen: list[tuple[str, str, int]] = []
+
+        async def complete(adapter: object, messages: object, config: object) -> object:
+            content = messages[1].content  # type: ignore[index,attr-defined]
+            import json
+
+            parsed = json.loads(content)
+            goal = parsed["goal"]
+            artifact = parsed["execution_summary"]
+            seen.append((goal, artifact, threading.get_ident()))
+            alignment = 0.92 if "Count valid" in artifact else 0.08
+            assert messages[0].role.value == "system"  # type: ignore[index,attr-defined]
+            assert "Do not judge implementation quality" in messages[0].content  # type: ignore[index,attr-defined]
+            assert config.role == "semantic_evaluation"  # type: ignore[attr-defined]
+            assert config.response_format["type"] == "json_schema"  # type: ignore[attr-defined]
+            assert config.response_format["json_schema"]["required"] == [  # type: ignore[attr-defined,index]
+                "goal_alignment",
+                "reasoning",
+            ]
+            return Result.ok(
+                type(
+                    "Response",
+                    (),
+                    {"content": f'{{"goal_alignment": {alignment}, "reasoning": "test"}}'},
+                )()
+            )
+
+        monkeypatch.setattr(provider_usage, "tracked_complete", complete)
+        adapter_threads: list[int] = []
+
+        def adapter_factory() -> object:
+            adapter_threads.append(threading.get_ident())
+            return object()
+
+        seed = sample_seed.model_copy(
+            update={"goal": "CSV에서 유효 행과 무효 행을 세고 평균 금액을 JSON으로 출력한다"}
+        )
+        equivalent = await calculate_goal_drift_async(
+            "Count valid and invalid CSV rows, calculate the average amount, and output JSON",
+            seed,
+            adapter_factory=adapter_factory,  # type: ignore[arg-type]
+        )
+        unrelated = await calculate_goal_drift_async(
+            "Deploy the weather dashboard for mountain forecasts",
+            seed,
+            adapter_factory=adapter_factory,  # type: ignore[arg-type]
+        )
+        identifier_only = await calculate_goal_drift_async(
+            "CSV JSON task_id seed_id output API",
+            seed,
+            adapter_factory=adapter_factory,  # type: ignore[arg-type]
+        )
+
+        assert equivalent < 0.1
+        assert unrelated > 0.9
+        assert identifier_only > 0.9
+        assert seen[0][:2] == (
+            seed.goal,
+            "Count valid and invalid CSV rows, calculate the average amount, and output JSON",
+        )
+        assert all(
+            factory_thread == evaluator_thread
+            for factory_thread, evaluator_thread in zip(
+                adapter_threads, (item[2] for item in seen), strict=True
+            )
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("sync_call", [False, True])
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            '{"goal_alignment": 1.0}',
+            '{"goal_alignment": 1.0, "reasoning": null}',
+            '{"goal_alignment": 1.0, "reasoning": 42}',
+            '{"goal_alignment": 1.0, "reasoning": "ok", "unexpected": true}',
+        ],
+    )
+    async def test_schema_invalid_response_retains_lexical_fallback(
+        self, sample_seed: Seed, monkeypatch: pytest.MonkeyPatch, payload: str, sync_call: bool
+    ) -> None:
+        from ouroboros.core.types import Result
+        import ouroboros.evolution.provider_usage as provider_usage
+        from ouroboros.observability.drift import (
+            _calculate_lexical_goal_drift,
+            calculate_goal_drift,
+            calculate_goal_drift_async,
+        )
+
+        async def complete(_adapter: object, _messages: object, _config: object) -> object:
+            return Result.ok(type("Response", (), {"content": payload})())
+
+        monkeypatch.setattr(provider_usage, "tracked_complete", complete)
+        seed = sample_seed.model_copy(update={"goal": "CSV의 평균 금액을 계산한다"})
+        output = "Deploy a mountain weather dashboard"
+        if sync_call:
+            drift = calculate_goal_drift(output, seed, adapter_factory=lambda: object())
+        else:
+            drift = await calculate_goal_drift_async(output, seed, adapter_factory=lambda: object())
+        assert drift == _calculate_lexical_goal_drift(output, seed) == 1.0
+
+    @pytest.mark.asyncio
+    async def test_sync_bridge_inside_event_loop_creates_adapter_in_worker(
+        self, sample_seed: Seed, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ouroboros.core.types import Result
+        import ouroboros.evolution.provider_usage as provider_usage
+        from ouroboros.observability.drift import calculate_goal_drift
+
+        caller_thread = threading.get_ident()
+        factory_threads: list[int] = []
+
+        async def complete(_adapter: object, _messages: object, _config: object) -> object:
+            return Result.ok(
+                type(
+                    "Response",
+                    (),
+                    {"content": '{"goal_alignment": 0.9, "reasoning": "worker result"}'},
+                )()
+            )
+
+        monkeypatch.setattr(provider_usage, "tracked_complete", complete)
+        result = calculate_goal_drift(
+            "A complete output",
+            sample_seed,
+            adapter_factory=lambda: factory_threads.append(threading.get_ident()) or object(),  # type: ignore[arg-type]
+        )
+
+        assert result == pytest.approx(0.1)
+        assert factory_threads and factory_threads[0] != caller_thread
+
+    @pytest.mark.asyncio
+    async def test_semantic_timeout_falls_back_to_lexical(
+        self, sample_seed: Seed, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import asyncio
+
+        import ouroboros.evolution.provider_usage as provider_usage
+        from ouroboros.observability.drift import (
+            _calculate_lexical_goal_drift,
+            calculate_goal_drift_async,
+        )
+
+        async def slow_complete(_adapter: object, _messages: object, _config: object) -> object:
+            await asyncio.sleep(0.05)
+            raise AssertionError("timeout should cancel evaluation")
+
+        monkeypatch.setattr(provider_usage, "tracked_complete", slow_complete)
+        output = "The delivery is complete"
+        result = await calculate_goal_drift_async(
+            output,
+            sample_seed,
+            adapter_factory=lambda: object(),  # type: ignore[arg-type]
+            timeout=0.001,
+        )
+
+        assert result == _calculate_lexical_goal_drift(output, sample_seed)
+
+    @pytest.mark.asyncio
+    async def test_provider_failure_keeps_lexical_drift_and_logs_cause(
+        self, sample_seed: Seed, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import ouroboros.observability.drift as drift_module
+        from ouroboros.observability.drift import (
+            _calculate_lexical_goal_drift,
+            calculate_goal_drift_async,
+        )
+
+        def unavailable() -> object:
+            raise RuntimeError("test provider unavailable")
+
+        async def fail_complete(_adapter: object, _messages: object, _config: object) -> object:
+            from ouroboros.core.types import Result
+
+            return Result.err(RuntimeError("test completion failed"))
+
+        warnings: list[str] = []
+        monkeypatch.setattr(
+            drift_module.log,
+            "warning",
+            lambda event, **fields: warnings.append(f"{event} {fields}"),
+        )
+        import ouroboros.evolution.provider_usage as provider_usage
+
+        monkeypatch.setattr(provider_usage, "tracked_complete", fail_complete)
+        output = "A totally unrelated delivery"
+        drift = await calculate_goal_drift_async(
+            output,
+            sample_seed,
+            adapter_factory=lambda: object(),  # type: ignore[arg-type]
+        )
+
+        assert drift == _calculate_lexical_goal_drift(output, sample_seed)
+        assert any("test completion failed" in warning for warning in warnings)
 
 
 # =============================================================================

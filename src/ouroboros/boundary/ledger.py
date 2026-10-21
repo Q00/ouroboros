@@ -14,7 +14,7 @@ time to the event about to be appended and at replay time by
    the frozen manifest must be one the product writes (``frozen_manifest``)
    and an ``admitted`` receipt one admission can write
    (``admitted_exclusions``: a tier and one result per check, exclusions only
-   for a role violation on the base);
+   for a role violation or a per-check indeterminate result on the base);
 3. ``record_actor_started`` refuses to start a worker until every boundary it
    binds is sealed (and, with a package, admitted) and not superseded, and
    every later version of its run was abandoned in its favor, and
@@ -114,6 +114,7 @@ from ouroboros.boundary.events import (
     acceptance_resumed_event,
     actor_started_event,
     admission_completed_event,
+    artifact_claims_refusal,
     binding_recorded_event,
     boundary_version_id,
     candidate_verified_event,
@@ -140,11 +141,11 @@ from ouroboros.boundary.package import (
 from ouroboros.boundary.per_check import (
     ALL_CHECKS_EXCLUDED,
     EXCLUDED_STATUS_HINT,
-    EXCLUSION_REASONS,
     HELD_OUT_NOT_DISCRIMINATING,
     ROLE_EXCLUSION_REASONS,
     base_failing_held_out,
     criteria_without_admitted_check,
+    exclusion_reason,
     held_out_all_passed,
 )
 from ouroboros.boundary.receipts import (
@@ -394,9 +395,9 @@ def admitted_exclusions(manifest: FrozenManifest, data: Mapping[str, Any]) -> fr
     ``U`` for an oracle check, ``S`` for a script check, ``C`` for either when
     excluded); one result per check with the manifest's role; every
     excluded check (tier ``C``) exactly an ``excluded_checks`` entry,
-    ``violated`` for a base reason its role allows and carrying the
-    exclusion reason that base reason maps to (``per_check.EXCLUSION_REASONS``;
-    ``held_out_not_discriminating`` only for a reproduction oracle whose base
+    carrying the exclusion reason its recorded status and base reason give
+    (``per_check.exclusion_reason``), one its role allows
+    (``held_out_not_discriminating`` only for a reproduction oracle whose base
     run passed every held-out case); every other check ``expected``; and at
     least one check not excluded.
     """
@@ -431,10 +432,9 @@ def admitted_exclusions(manifest: FrozenManifest, data: Mapping[str, Any]) -> fr
         if item.get("role") != check.role.value:
             raise BoundaryOrderError("an admission result names another role")
         if check.check_id in excluded:
-            reason = EXCLUSION_REASONS.get(str(item.get("reason")))
+            reason = exclusion_reason(str(item.get("status")), str(item.get("reason")))
             if (
-                item.get("status") != "violated"
-                or reason not in ROLE_EXCLUSION_REASONS[check.role]
+                reason not in ROLE_EXCLUSION_REASONS[check.role]
                 or recorded[check.check_id] != reason
                 or (
                     reason == HELD_OUT_NOT_DISCRIMINATING
@@ -1050,10 +1050,11 @@ def _require_derived_receipt(
     undecided check as ``<reason>:<check id>``; the verdict is undecided on a
     precondition or a mutation, else rejected (fail) on a violated check,
     else undecided on an undecided one, else admitted (pass). On the base,
-    ``per_check.per_check_admission`` then admits a rejected package whose
-    every unmet check was violated for an exclusion reason, excluding those
-    checks (tier ``C``, ``excluded_checks``), or, when that would exclude
-    every check, keeps it rejected and adds ``all_checks_excluded``. Each
+    ``per_check.per_check_admission`` then admits a rejected or undecided
+    package (no precondition, no mutation) whose every unmet check has an
+    exclusion reason (``per_check.exclusion_reason``), excluding those checks
+    (tier ``C``, ``excluded_checks``), or, when that would exclude every
+    check, keeps its verdict and adds ``all_checks_excluded``. Each
     check's tier is its base tier (``_base_tier``) and ``check_tiers`` maps
     every check to it, ``C`` for an excluded one.
     """
@@ -1086,10 +1087,10 @@ def _require_derived_receipt(
         verdict = good
     excluded: dict[str, str] = {}
     derived_all = False
-    if on_base and verdict == bad:
+    if on_base and verdict != good and not (body[:split] or mutation):
         unmet = [c for c in checks if c.status is not CheckStatus.EXPECTED]
-        mapped = {c.check_id: EXCLUSION_REASONS.get(c.reason) for c in unmet}
-        if all(c.status is CheckStatus.VIOLATED for c in unmet) and None not in mapped.values():
+        mapped = {c.check_id: exclusion_reason(c.status, c.reason) for c in unmet}
+        if None not in mapped.values():
             if len(unmet) == len(checks):
                 derived_all = True
             else:
@@ -1222,6 +1223,8 @@ def _require_supported_statuses(
         if keys[item.root_ac_index] != item.criterion_key:
             raise BoundaryOrderError("a decision's root index names another criterion")
         supported, declared = _supported(state, item.criterion_key, lost)
+        if item.artifact_check is not None and supported in ("unverified", "uncovered"):
+            supported = "fail"  # an executed artifact check failed what the package left undecided
         if item.package_status not in _SUPPORTED_STATUSES[supported] or (
             item.package_status == "pass" and item.declared_binding_pass != declared
         ):
@@ -1359,7 +1362,7 @@ def _require_unverified_decision(state: VersionState, record: ReconciledRecord) 
 
     Allowed only when the final bindings left no check runnable, or when the
     decision says the package could not decide (``undecided_reason``) after
-    the worker started; either way no criterion is a pass or a fail.
+    the worker started; either way no criterion is a pass or a package fail.
     """
     if state.final_bindings and not state.runnable:
         allowed = _UNRUN_STATUSES
@@ -1367,7 +1370,7 @@ def _require_unverified_decision(state: VersionState, record: ReconciledRecord) 
         allowed = _UNDECIDED_STATUSES
     else:
         raise BoundaryOrderError("acceptance must cite a verification of the frozen package")
-    statuses = {item.package_status for item in record.criteria}
+    statuses = {item.package_status for item in record.criteria if item.artifact_check is None}
     if not statuses <= allowed:
         raise BoundaryOrderError(
             "a decision recorded without a candidate verification claims a verified status"
@@ -1702,11 +1705,19 @@ class BoundaryLedger:
         a decision the package could not make (``undecided_reason``, every
         covered criterion indeterminate). Without a package (``package_id`` is ``None``) the boundary
         must be sealed as ``construction_failed`` and a worker must have
-        started on it.
+        started on it. An artifact check's fail stands only with its evidence,
+        admissible under the run's frozen contract (``artifact_claims_refusal``).
         """
         event = acceptance_reconciled_event(
             boundary_id, package_id=package_id, reconciliation=reconciliation
         )
+        state, run = await self._state(boundary_id), parse_boundary_version(boundary_id)
+        contract = await self.run_contract(run[0]) if run else None
+        verified = state.verifications[-1].artifact_tree_digest if state.verifications else None
+        if refusal := artifact_claims_refusal(
+            reconciliation, contract, packaged=state.frozen, candidate_tree_digest=verified
+        ):
+            raise BoundaryOrderError(refusal)
         return await self._append(boundary_id, event)
 
     async def record_reference_checked(

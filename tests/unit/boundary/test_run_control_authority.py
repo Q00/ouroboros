@@ -157,9 +157,10 @@ async def test_a_constructor_outage_leaves_the_legacy_verifier_deciding(
     legacy: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Constructor outage: zero checks admitted. Nothing is installed on the
-    # runner, so the executor and the terminal status are the legacy ones;
-    # the run exits 0 only when the legacy verifier passed it.
+    # Constructor outage: zero checks admitted. With the artifact checks off
+    # nothing is installed on the runner, so the executor and the terminal
+    # status are the legacy ones; the run exits 0 only when the legacy
+    # verifier passed it.
     from types import SimpleNamespace
 
     monkeypatch.setattr(
@@ -171,6 +172,8 @@ async def test_a_constructor_outage_leaves_the_legacy_verifier_deciding(
         CheckPackageSettings(
             enabled=True,
             max_construction_attempts=2,
+            base_regression="off",
+            worker_test_gate="off",
         )
     )
     lines = await run.prepare(

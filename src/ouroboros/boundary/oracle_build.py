@@ -24,6 +24,15 @@ from ouroboros.boundary.binding import (
     is_dotted_symbol,
     parse_binding,
 )
+from ouroboros.boundary.call_grammar import (
+    CALL_INVALID,
+    GrammarError,
+    check_case_files,
+    check_reads,
+    check_template,
+    has_built_value,
+    is_receiver,
+)
 from ouroboros.boundary.harness import symbol_refs
 from ouroboros.boundary.oracle import (
     OracleCase,
@@ -66,6 +75,9 @@ def build_oracle_spec(
     cases: Sequence[Mapping[str, Any]],
     target_named_in_criterion: bool = False,
     setup: Sequence[Mapping[str, Any]] = (),
+    inputs: Mapping[str, Any] | None = None,
+    receiver: Any = None,
+    project: Sequence[Mapping[str, Any]] = (),
 ) -> OracleSpec:
     """Validate one criterion's oracle data and freeze it.
 
@@ -76,7 +88,9 @@ def build_oracle_spec(
     so no identifier the caller chose is frozen. ``target_named_in_criterion``
     is frozen too; the tier itself comes from the admission base run
     (``OracleSpec.base_run_tier``). ``setup`` is the oracle's declared setup
-    calls (``{"symbol", "args", "kwargs"}``), frozen in order.
+    calls (``{"symbol", "args", "kwargs"}``), frozen in order. ``inputs``,
+    ``receiver`` and ``project`` are the oracle's built call
+    (``boundary/call_grammar.py``), frozen as given.
     """
     keys = seed_criterion_keys(seed)
     if not 0 <= criterion_index < len(keys):
@@ -92,7 +106,7 @@ def build_oracle_spec(
         binding = parse_binding(
             {k: v for k, v in default_binding.items() if k not in {"criterion", "criterion_key"}},
             criterion_key=key,
-            params=tuple(params),
+            params=tuple(inputs) if inputs is not None else tuple(params),
             call_kind=kind,
         )
         parsed = tuple(
@@ -114,6 +128,9 @@ def build_oracle_spec(
             cases=parsed,
             target_named_in_criterion=target_named_in_criterion,
             setup=calls,
+            inputs=None if inputs is None else dict(inputs),
+            receiver=receiver,
+            project=tuple(dict(read) for read in project),
         )
     except (ValidationError, ValueError) as exc:
         raise CheckPackageError(f"{check_id}: oracle does not match the schema: {exc}") from exc
@@ -200,6 +217,13 @@ class ReplyFailure(StrEnum):
     """A ``{"$symbol": ...}`` input does not name a dotted import path."""
     SETUP_INVALID = "setup_invalid"
     """An oracle's ``setup`` is not a list of ``{"symbol", "args", "kwargs"}`` calls."""
+    CALL_INVALID = "call_invalid"
+    """An oracle's ``inputs`` or ``receiver`` breaks the built-call grammar
+    (``boundary/call_grammar.py``), or case data holds a ``$call`` or ``$param``."""
+    PROJECT_INVALID = "project_invalid"
+    """An oracle's ``project`` is not a list of reads."""
+    CASE_FILES_INVALID = "case_files_invalid"
+    """A case's ``files`` is not a map of plain relative paths to text."""
     ORACLE_INVALID = "oracle_invalid"
     FILE_INVALID = "file_invalid"
     ARGV_INVALID = "argv_invalid"
@@ -287,6 +311,35 @@ def _check_case(case: object) -> None:
         _refs_valid([dict(case.get("args") or {}), dict(case.get("init") or {})]),
         ReplyFailure.SYMBOL_REF_INVALID,
     )
+    _require(
+        not has_built_value([dict(case.get("args") or {}), dict(case.get("init") or {})]),
+        ReplyFailure.CALL_INVALID,
+    )
+    if case.get("files") is not None:
+        try:
+            check_case_files(case.get("files"))
+        except GrammarError as exc:
+            raise ReplyError(ReplyFailure.CASE_FILES_INVALID) from exc
+
+
+def _check_built_call(entry: Mapping[str, Any]) -> None:
+    """The oracle's ``inputs``, ``receiver`` and ``project``, when given, fit the grammar."""
+    params = entry.get("params", [])
+    inputs, receiver = entry.get("inputs"), entry.get("receiver")
+    try:
+        if inputs is not None:
+            if not isinstance(inputs, Mapping):
+                raise GrammarError(CALL_INVALID)
+            for template in inputs.values():
+                check_template(template, params)
+        if receiver is not None:
+            if not is_receiver(receiver):
+                raise GrammarError(CALL_INVALID)
+            check_template(receiver, params)
+        if entry.get("project") is not None:
+            check_reads(entry.get("project"), params)
+    except GrammarError as exc:
+        raise ReplyError(ReplyFailure(exc.code)) from exc
 
 
 def _check_setup(setup: object) -> None:
@@ -321,6 +374,7 @@ def _check_oracle(entry: Mapping[str, Any]) -> None:
         ReplyFailure.TARGET_NAMED_NOT_BOOLEAN,
     )
     _check_setup(entry.get("setup", []))
+    _check_built_call(entry)
     cases = entry.get("cases")
     if not isinstance(cases, list) or not cases:
         raise ReplyError(ReplyFailure.CASE_SHAPE)
@@ -453,6 +507,9 @@ def _oracle_from_entry(
             cases=list(raw["cases"]),
             target_named_in_criterion=raw["target_named_in_criterion"],
             setup=list(raw.get("setup") or ()),
+            inputs=raw.get("inputs"),
+            receiver=raw.get("receiver"),
+            project=list(raw.get("project") or ()),
         )
     except CheckPackageError as exc:
         raise ReplyError(

@@ -359,7 +359,10 @@ async def test_a_target_declared_named_in_the_criterion_is_tier_a_when_the_base_
     package = package_from_reply(reply, _seed(), input_digest="1" * 64, generator="t")
     assert package.oracles[0].target_named_in_criterion
     admission = await admit_check_package(seal_package(package), base)
-    assert admission.check_tiers == {"oracle_1": "A", "script_1_1": "S"}
+    # The base tier each check's own run gave (an undecided script check is
+    # then excluded on its own, tier ``C`` in ``check_tiers``).
+    assert {c.check_id: c.tier for c in admission.checks} == {"oracle_1": "A", "script_1_1": "S"}
+    assert admission.check_tiers is not None and admission.check_tiers["oracle_1"] == "A"
 
 
 async def test_a_target_not_named_and_absent_from_the_base_is_not_tier_a(base: Path) -> None:
@@ -367,7 +370,8 @@ async def test_a_target_not_named_and_absent_from_the_base_is_not_tier_a(base: P
 
     package = package_from_reply(_feature_reply(), _seed(), input_digest="1" * 64, generator="t")
     admission = await admit_check_package(seal_package(package), base)
-    assert admission.check_tiers == {"oracle_1": "U", "script_1_1": "S"}
+    assert {c.check_id: c.tier for c in admission.checks} == {"oracle_1": "U", "script_1_1": "S"}
+    assert admission.check_tiers is not None and admission.check_tiers["oracle_1"] == "U"
 
 
 @pytest.mark.parametrize(

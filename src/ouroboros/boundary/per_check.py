@@ -12,11 +12,19 @@ package:
 - a preservation check that fails on the base does not describe behavior the
   base already has (``preservation_fails_on_base``).
 
+A check whose base run decided nothing about that one check is excluded the
+same way (``indeterminate_on_base``): it ended without its failure signature
+(a reproduction that failed before its intended assertion, an oracle that
+never observed its target), timed out, could not launch, or flooded its
+output (``PER_CHECK_INDETERMINATE``). Such a check shows nothing, so it can
+neither admit nor refuse the other checks; its criterion loses that check.
+
 Under this rule each such check is excluded on its own and the rest of the
-package is admitted. Anything else leaves the package unadmitted: a setup,
-import or other indeterminate failure, a protected-byte mutation, a
-precondition failure (prose-only or unsafe checks, path collisions) or a
-package whose every check would be excluded is not admitted.
+package is admitted. Anything else leaves the package unadmitted: a failure of
+the environment every check shares (the pinned interpreter or the sandbox
+unavailable), a protected-byte or base-checkout mutation, a precondition
+failure (prose-only or unsafe checks, path collisions) or a package whose
+every check would be excluded is not admitted.
 
 An excluded check stays in the frozen package and
 is marked tier ``C`` ("rejected at admission") in the admission's
@@ -51,23 +59,49 @@ REPRO_PASSES_ON_BASE = "repro_passes_on_base"
 HELD_OUT_NOT_DISCRIMINATING = "held_out_not_discriminating"
 PRESERVATION_FAILS_ON_BASE = "preservation_fails_on_base"
 NO_ADMITTED_REPRODUCTION_CHECK = "no_admitted_reproduction_check"
+INDETERMINATE_ON_BASE = "indeterminate_on_base"
 ALL_CHECKS_EXCLUDED = "all_checks_excluded"
 EXCLUDED_STATUS_HINT = "excluded"
 
-# Base classification reason (``admission._classify``) to exclusion reason:
-# each exclusion records what the base run showed.
+# Base classification reason (``admission._classify``) of a violated check to
+# exclusion reason: each exclusion records what the base run showed.
 EXCLUSION_REASONS: dict[str, str] = {
     "reproduction_passed_on_base": REPRO_PASSES_ON_BASE,
     HELD_OUT_NOT_DISCRIMINATING: HELD_OUT_NOT_DISCRIMINATING,
     "preservation_failed": PRESERVATION_FAILS_ON_BASE,
 }
 
+PER_CHECK_INDETERMINATE: frozenset[str] = frozenset(
+    {"failure_signature_absent", "timeout", "launch_failed", "output_oversized"}
+)
+"""Base classification reasons (``admission._classify``) of an indeterminate
+check that are about that one check, never about the environment every check
+shares; each is excluded as ``indeterminate_on_base`` (the check's own result
+keeps its base reason)."""
+
 ROLE_EXCLUSION_REASONS: Mapping[CheckRole, frozenset[str]] = {
-    CheckRole.REPRODUCTION: frozenset({REPRO_PASSES_ON_BASE, HELD_OUT_NOT_DISCRIMINATING}),
-    CheckRole.PRESERVATION: frozenset({PRESERVATION_FAILS_ON_BASE}),
+    CheckRole.REPRODUCTION: frozenset(
+        {REPRO_PASSES_ON_BASE, HELD_OUT_NOT_DISCRIMINATING, INDETERMINATE_ON_BASE}
+    ),
+    CheckRole.PRESERVATION: frozenset({PRESERVATION_FAILS_ON_BASE, INDETERMINATE_ON_BASE}),
 }
 """The exclusion reasons a check of each role can have
 (``held_out_not_discriminating`` only for a reproduction oracle)."""
+
+
+def exclusion_reason(status: CheckStatus | str, reason: str) -> str | None:
+    """The exclusion reason of a base result that did not meet its role, or ``None``.
+
+    The one rule, for ``per_check_admission`` and the journal's replay alike:
+    a violated check for one of ``EXCLUSION_REASONS``, or an indeterminate
+    one for one of ``PER_CHECK_INDETERMINATE``. ``None`` means the result is
+    not about that one check and leaves the package unadmitted.
+    """
+    if status == CheckStatus.VIOLATED:
+        return EXCLUSION_REASONS.get(reason)
+    if status == CheckStatus.INDETERMINATE and reason in PER_CHECK_INDETERMINATE:
+        return INDETERMINATE_ON_BASE
+    return None
 
 
 class HeldOutCase(Protocol):
@@ -133,14 +167,15 @@ def base_failing_held_out(
 def per_check_admission(admission: AdmissionResult) -> AdmissionResult:
     """``admission`` with the per-check rule applied (unchanged when it does not apply).
 
-    Applies only to a ``rejected`` admission whose checks all ran, with no
-    protected-byte mutation and an unchanged base, where every check that did
-    not meet its contract was violated for one of ``EXCLUSION_REASONS``. The
-    result is ``admitted`` with those checks in ``excluded_checks`` and tier
-    ``C`` in ``check_tiers``. When every check would be excluded the verdict
-    stays ``rejected`` and ``all_checks_excluded`` is added to the reasons.
+    Applies only to a ``rejected`` or ``indeterminate`` admission whose checks
+    all ran (no precondition failed), with no protected-byte mutation and an
+    unchanged base, where every check that did not meet its contract has an
+    ``exclusion_reason``. The result is ``admitted`` with those checks in
+    ``excluded_checks`` and tier ``C`` in ``check_tiers``. When every check
+    would be excluded the verdict stays as it was and ``all_checks_excluded``
+    is added to the reasons.
     """
-    if admission.verdict is not PackageVerdict.REJECTED or not admission.checks:
+    if admission.verdict is PackageVerdict.ADMITTED or not admission.checks:
         return admission
     if admission.protected_bytes_mutated or (
         admission.base_tree_digest != admission.base_tree_digest_after
@@ -150,9 +185,9 @@ def per_check_admission(admission: AdmissionResult) -> AdmissionResult:
     for check in admission.checks:
         if check.status is CheckStatus.EXPECTED:
             continue
-        reason = EXCLUSION_REASONS.get(check.reason)
-        if check.status is not CheckStatus.VIOLATED or reason is None:
-            # Setup, import or other failures of the package itself: not admitted.
+        reason = exclusion_reason(check.status, check.reason)
+        if reason is None:
+            # A failure of the environment every check shares: not admitted.
             return admission
         excluded[check.check_id] = reason
     if not excluded:
@@ -242,8 +277,10 @@ __all__ = [
     "EXCLUDED_STATUS_HINT",
     "EXCLUSION_REASONS",
     "HELD_OUT_NOT_DISCRIMINATING",
+    "INDETERMINATE_ON_BASE",
     "LinkedChecks",
     "NO_ADMITTED_REPRODUCTION_CHECK",
+    "PER_CHECK_INDETERMINATE",
     "PRESERVATION_FAILS_ON_BASE",
     "REPRO_PASSES_ON_BASE",
     "ROLE_EXCLUSION_REASONS",
@@ -253,6 +290,7 @@ __all__ = [
     "base_failing_held_out",
     "criteria_without_admitted_check",
     "excluded_check_ids",
+    "exclusion_reason",
     "held_out_all_passed",
     "per_check_admission",
 ]

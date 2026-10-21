@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field, field_validator
 import yaml
 
 from ouroboros.config._model_defaults import (
+    CODEX_TIER_MODELS,
     DEFAULT_HAIKU_MODEL,
     DEFAULT_OPUS_MODEL,
     DEFAULT_SONNET_MODEL,
@@ -280,13 +281,23 @@ class ExecutionConfig(BaseModel, frozen=True):
             (stack, verify commands, layout) to run worker system prompts.
         project_guidance: Allowlist of project guidance ids to resolve from
             fixed project-local paths under ``.ouroboros/guidance/<id>/GUIDANCE.md``.
+        transcript_verifier: How the per-criterion evidence verifier of the
+            fat-harness path (typed evidence plus the transcript verifier,
+            ``orchestrator/evidence/verification.py``) acts. ``record`` (the
+            default) runs it and records what it would have decided on the
+            criterion's typed-evidence event, but a rejection fails no
+            criterion and triggers no retry. ``decide`` lets a rejection fail
+            the attempt and drive retries. A failing ``verify_command`` of the
+            Seed (``run_verify_commands``) decides in both modes. Sealed in a
+            run's execution semantics, so a resume uses the run's own mode.
         default_policy: Persistent default execution policy for FRESH runs
-            (#1733). ``ask`` (the default) preserves the host's interactive
-            prompt exactly; ``efficient`` resolves to adaptive/observe and
-            ``quality_first`` to quality_first/off without asking. Explicit
-            invocation arguments always win, resumed sessions keep their
-            persisted immutable contract, and strict frugality assurance
-            never derives from this setting.
+            (#1733). ``quality_first`` (the default) resolves to
+            quality_first/off without asking, so a request routed to
+            Ouroboros starts at once; ``efficient`` resolves to
+            adaptive/observe; ``ask`` opts back into the host's interactive
+            prompt. Explicit invocation arguments always win, resumed
+            sessions keep their persisted immutable contract, and strict
+            frugality assurance never derives from this setting.
     """
 
     max_iterations_per_ac: int = Field(default=10, ge=1)
@@ -305,7 +316,8 @@ class ExecutionConfig(BaseModel, frozen=True):
     decomposition_mode: Literal["bounce_only", "off"] = "bounce_only"
     context_pack: bool = True
     project_guidance: tuple[str, ...] = ()
-    default_policy: Literal["ask", "efficient", "quality_first"] = "ask"
+    default_policy: Literal["ask", "efficient", "quality_first"] = "quality_first"
+    transcript_verifier: Literal["decide", "record"] = "record"
 
     @field_validator("decomposition_mode", mode="before")
     @classmethod
@@ -823,14 +835,18 @@ class SeedConfig(BaseModel, frozen=True):
 
 
 class BoundaryConfig(BaseModel, frozen=True):
-    """Pre-dispatch check package for ``ooo run`` (on by default).
+    """Pre-dispatch check package for ``ooo run`` (record only by default).
 
     Attributes:
-        check_package: ``on`` makes a new ``ooo run`` construct a check package
-            from the Seed's acceptance criteria before the worker starts, admit
-            it on the base checkout, and verify the finished workspace against
-            it. ``off`` leaves the run path unchanged. Unset (default) means
-            ``on`` (``ouroboros.boundary.switch``).
+        check_package: ``record`` makes a new ``ooo run`` construct a check
+            package from the Seed's acceptance criteria before the worker
+            starts, admit it on the base checkout, verify the finished
+            workspace against it, and record what it would have decided; it
+            does not change any criterion or the run's outcome, and it sends
+            the worker no repair turn. ``decide`` (or its older spelling
+            ``on``) lets the package decide the criteria it covers and drive
+            repairs. ``off`` leaves the run path unchanged. Unset (default)
+            means ``record`` (``ouroboros.boundary.switch``).
         constructor_timeout_seconds: Wall-clock budget of one read-only
             constructor model call.
         check_timeout_seconds: Per-check command timeout during admission and
@@ -838,12 +854,29 @@ class BoundaryConfig(BaseModel, frozen=True):
         max_construction_attempts: Package versions tried before the worker
             starts. A version that is not admitted is superseded by the next
             one; 1 means no regeneration.
+        base_regression: How the base regression check acts
+            (``ouroboros.boundary.base_regression``): ``decide`` runs the base
+            tree's own tests that pair with or import the changed modules on
+            the base and on the finished workspace and, with an admitted
+            package, fails the criteria the package left unverified or
+            uncovered (without one it only sends the worker one repair turn
+            and records the regression); ``record`` runs it and records what
+            it would have decided; ``off`` does not run it. ``decide`` takes
+            effect only while the check package itself decides
+            (``check_package: decide``); under a recording check package it
+            records too. Unset means ``BASE_REGRESSION_DEFAULT`` there
+            (``record``); a YAML boolean means ``decide`` or ``off``.
+        worker_test_gate: How the worker-test gate (the test files the worker
+            added, run by the controller) acts, with the same three modes.
+            Unset means ``WORKER_TEST_GATE_DEFAULT`` (``record``).
     """
 
-    check_package: Literal["off", "on"] | None = None
+    check_package: Literal["off", "on", "decide", "record"] | None = None
     constructor_timeout_seconds: int = Field(default=600, ge=30, le=3600)
     check_timeout_seconds: int = Field(default=120, ge=5, le=1800)
     max_construction_attempts: int = Field(default=2, ge=1, le=5)
+    base_regression: Literal["decide", "record", "off"] | None = None
+    worker_test_gate: Literal["decide", "record", "off"] | None = None
 
     @field_validator("check_package", mode="before")
     @classmethod
@@ -851,6 +884,14 @@ class BoundaryConfig(BaseModel, frozen=True):
         # YAML 1.1 reads a bare ``on`` / ``off`` as a boolean.
         if isinstance(value, bool):
             return "on" if value else "off"
+        return value
+
+    @field_validator("base_regression", "worker_test_gate", mode="before")
+    @classmethod
+    def _yaml_booleans_as_modes(cls, value: Any) -> Any:
+        # A bare ``on`` / ``off`` (a YAML boolean) is ``decide`` / ``off``.
+        if isinstance(value, bool):
+            return "decide" if value else "off"
         return value
 
 
@@ -917,7 +958,7 @@ def get_default_config() -> OuroborosConfig:
                     cost_factor=1,
                     intelligence_range=(9, 11),
                     models=[
-                        ModelConfig(provider="openai", model="gpt-5.1-codex-mini"),
+                        ModelConfig(provider="openai", model=CODEX_TIER_MODELS["frugal"]),
                         ModelConfig(provider="google", model="gemini-2.0-flash"),
                         ModelConfig(provider="anthropic", model=DEFAULT_HAIKU_MODEL),
                     ],
@@ -927,7 +968,7 @@ def get_default_config() -> OuroborosConfig:
                     cost_factor=10,
                     intelligence_range=(14, 16),
                     models=[
-                        ModelConfig(provider="openai", model="gpt-5-codex"),
+                        ModelConfig(provider="openai", model=CODEX_TIER_MODELS["standard"]),
                         ModelConfig(provider="anthropic", model=DEFAULT_SONNET_MODEL),
                         ModelConfig(provider="google", model="gemini-2.5-pro"),
                     ],
@@ -937,7 +978,7 @@ def get_default_config() -> OuroborosConfig:
                     cost_factor=30,
                     intelligence_range=(18, 20),
                     models=[
-                        ModelConfig(provider="openai", model="gpt-5.2"),
+                        ModelConfig(provider="openai", model=CODEX_TIER_MODELS["frontier"]),
                         ModelConfig(provider="anthropic", model=DEFAULT_OPUS_MODEL),
                     ],
                     use_cases=["consensus", "lateral_thinking", "big_bang"],

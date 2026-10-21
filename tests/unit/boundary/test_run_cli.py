@@ -167,6 +167,7 @@ async def test_cli_flag_off_adds_no_model_call_and_no_event(
         "legacy_verdict": "accept",
         "reconciliation": "none",
         "legacy_failure_class": "accepted",
+        "check_package_mode": "off",
     }
     await store.close()
 
@@ -215,6 +216,8 @@ async def test_cli_flag_on_admits_before_dispatch_and_verifies_after(
         # The legacy double gives no verifier verdict: neither verifier has
         # evidence, so the criterion stays unverified and coverage is low.
         "verification_coverage": "low",
+        # ``--check-package`` is the explicit decide mode.
+        "check_package_mode": "decide",
     }
     await store.close()
 
@@ -222,7 +225,7 @@ async def test_cli_flag_on_admits_before_dispatch_and_verifies_after(
 async def test_cli_without_any_setting_runs_the_check_package(
     tmp_path: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """On by default: no flag, no variable, no config, telemetry off."""
+    """Record by default: no flag, no variable, no config, telemetry off."""
     from ouroboros.config.models import BoundaryConfig
 
     monkeypatch.setenv("OUROBOROS_TELEMETRY", "0")
@@ -241,6 +244,50 @@ async def test_cli_without_any_setting_runs_the_check_package(
     assert runner.acceptance_authority is not None
     meta = await _check_package_meta(seen)
     assert meta["check_package"] == "on"
+    assert meta["check_package_mode"] == "record"
+    await store.close()
+
+
+async def test_cli_default_records_a_failing_candidate_without_failing_the_run(
+    tmp_path: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Record mode (the default): the package's fail is journaled; the run is the legacy run.
+
+    The same candidate fails the run under ``--check-package`` (explicit
+    decide, the next test). Here the package runs and records its fail, the
+    worker gets no repair turn, the run exits 0, and the journaled decision is
+    not read as a decision by formal evaluation.
+    """
+    from ouroboros.boundary.decision import recorded_criterion_decisions
+    from ouroboros.config.models import BoundaryConfig
+
+    monkeypatch.setenv("OUROBOROS_TELEMETRY", "0")
+    seen: dict[str, Any] = {}
+    with patch("ouroboros.boundary.switch._load_boundary_config", return_value=BoundaryConfig()):
+        store, runner, _seen = await _run_cli(
+            tmp_path,
+            repo,
+            check_package=None,
+            constructor_cls=_constructor_factory(BUGFIX_SCRIPT, []),
+            worker_edit=None,
+            monkeypatch=monkeypatch,
+            seen=seen,
+        )
+    (result,) = seen["parallel_result"].results
+    assert result.success is True and result.outcome.value == "succeeded"
+    assert result.check_package is None
+    assert seen["telemetry"]["terminal_status"] == "completed"
+    authority = runner.acceptance_authority
+    assert authority.records_only
+    assert authority.gate.log == [] and authority.gate.artifact_repairs == 0
+    assert authority.outcome.reconciliation.run_accepted is False
+    meta = await _check_package_meta(seen)
+    assert meta["check_package_mode"] == "record"
+    assert meta["package_verdict"] == "fail"
+    assert meta["legacy_verdict"] == "accept"
+    execution_id = seen["kwargs"]["execution_id"]
+    assert ACCEPTANCE_RECONCILED in await _types(store, f"{execution_id}/check_package/v1")
+    assert await recorded_criterion_decisions(store, execution_id, seen["kwargs"]["seed"]) == ()
     await store.close()
 
 

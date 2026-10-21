@@ -73,9 +73,13 @@ async def test_a_script_check_is_tier_s_whatever_it_imports(
     assert "S" in set(result.check_tiers.values())
 
 
-async def test_reproduction_failing_for_wrong_reason_is_indeterminate(
+async def test_reproduction_failing_for_wrong_reason_is_excluded_on_its_own(
     tmp_path: Path, seed, base_checkout
 ) -> None:
+    # v0.55.4 dev run (django__django-14580): one reproduction reached its
+    # failing assertion, another ended without its signature, and the whole
+    # package was refused. The undecided check shows nothing; it is excluded
+    # on its own and the check that met its role is admitted.
     import_error = "import not_a_real_module_xyz\n"
     package = build_package(seed, repro_script=import_error)
     result = await admit_check_package(package, base_checkout, work_dir=tmp_path / "w")
@@ -84,7 +88,26 @@ async def test_reproduction_failing_for_wrong_reason_is_indeterminate(
     assert repro.status is CheckStatus.INDETERMINATE
     assert repro.reason == "failure_signature_absent"
     assert repro.return_code not in (0, None)
+    assert result.verdict is PackageVerdict.ADMITTED
+    assert result.excluded_checks == {"script_1_1": "indeterminate_on_base"}
+    assert result.check_tiers == {"script_1_1": "C", "script_2_1": "S"}
+    assert _by_id(result)["script_2_1"].status is CheckStatus.EXPECTED
+    assert "failure_signature_absent:script_1_1" in result.reasons
+
+
+async def test_every_check_indeterminate_is_no_admission(
+    tmp_path: Path, seed, base_checkout
+) -> None:
+    package = build_package(
+        seed, repro_script="raise SystemExit(2)\n", preserve_script="import time\ntime.sleep(30)\n"
+    )
+    result = await admit_check_package(
+        package, base_checkout, work_dir=tmp_path / "w", timeout_seconds=1
+    )
+
     assert result.verdict is PackageVerdict.INDETERMINATE
+    assert result.reasons[-1] == "all_checks_excluded"
+    assert result.excluded_checks is None
 
 
 async def test_reproduction_passing_on_base_is_excluded_on_its_own(
@@ -176,7 +199,10 @@ async def test_timeout_is_indeterminate(tmp_path: Path, seed, base_checkout) -> 
     zero = _by_id(result)["script_2_1"]
     assert zero.timed_out
     assert zero.reason == "timeout"
-    assert result.verdict is PackageVerdict.INDETERMINATE
+    assert zero.status is CheckStatus.INDETERMINATE
+    # A timeout decides nothing about the other check: excluded on its own.
+    assert result.verdict is PackageVerdict.ADMITTED
+    assert result.excluded_checks == {"script_2_1": "indeterminate_on_base"}
 
 
 async def test_launch_failure_is_indeterminate(tmp_path: Path, seed, base_checkout) -> None:
@@ -184,7 +210,9 @@ async def test_launch_failure_is_indeterminate(tmp_path: Path, seed, base_checko
     result = await admit_check_package(package, base_checkout, work_dir=tmp_path / "w")
 
     assert _by_id(result)["script_1_1"].reason == "launch_failed"
-    assert result.verdict is PackageVerdict.INDETERMINATE
+    assert _by_id(result)["script_1_1"].status is CheckStatus.INDETERMINATE
+    assert result.verdict is PackageVerdict.ADMITTED
+    assert result.excluded_checks == {"script_1_1": "indeterminate_on_base"}
 
 
 async def test_package_path_collision_runs_nothing(tmp_path: Path, seed, base_checkout) -> None:

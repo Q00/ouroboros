@@ -34,6 +34,7 @@ from ouroboros.config import (
     get_codex_cli_path,
     get_opencode_cli_path,
 )
+from ouroboros.mcp.registry_paths import owned_mcp_pid_registry_dir
 from ouroboros.orchestrator.heartbeat import (
     current_process_identity,
     is_process_identity_alive,
@@ -57,8 +58,8 @@ from ouroboros.package_profiles import (
 # target a healthy server owned by a live session. Each instance owns exactly
 # one record keyed by its pid, stamped with the process start time so a
 # recycled pid is never mistaken for a live server.
-_PID_DIR = Path.home() / ".ouroboros"
-_PID_REGISTRY_DIR = _PID_DIR / "mcp-servers"
+_PID_REGISTRY_DIR = owned_mcp_pid_registry_dir()
+_PID_DIR = _PID_REGISTRY_DIR.parent
 # Single-slot file written by pre-registry versions; swept when stale.
 _LEGACY_PID_FILE = _PID_DIR / "mcp-server.pid"
 

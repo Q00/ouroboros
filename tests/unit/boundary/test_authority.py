@@ -24,11 +24,13 @@ from ouroboros.boundary.authority import (
     existing_outcomes_from_results,
 )
 from ouroboros.boundary.constructor import ALL_CRITERIA_UNCOVERED, ConstructionOutcome
+from ouroboros.boundary.decision import recorded_criterion_decisions
 from ouroboros.boundary.events import (
     ACCEPTANCE_RECONCILED,
     BOUNDARY_AGGREGATE_TYPE,
     RunContract,
 )
+from ouroboros.boundary.ledger import BoundaryLedger
 from ouroboros.boundary.package import seed_criterion_keys, seed_digest
 from ouroboros.boundary.run_wiring import CheckPackageSettings, prepare_check_package
 from ouroboros.orchestrator.parallel_executor_models import (
@@ -204,9 +206,11 @@ def repo(tmp_path: Path) -> Path:
     return root
 
 
-async def _authority(store: EventStore, repo: Path, tmp_path: Path) -> tuple[Any, Any]:
+async def _authority(
+    store: EventStore, repo: Path, tmp_path: Path, *, mode: str = "decide"
+) -> tuple[Any, Any]:
     seed = _seed("add(2, 3) returns 5")
-    settings = CheckPackageSettings(enabled=True)
+    settings = CheckPackageSettings(enabled=True, mode=mode)  # type: ignore[arg-type]
     state = await prepare_check_package(
         seed,
         event_store=store,
@@ -276,6 +280,78 @@ async def test_authority_error_keeps_the_legacy_result(
     assert authority.outcome.error == "RuntimeError"
 
 
+async def test_record_mode_journals_the_rejection_and_keeps_the_legacy_result(
+    store: EventStore, repo: Path, tmp_path: Path
+) -> None:
+    """Record mode: the same wrong candidate the decide test rejects is journaled, not failed."""
+    seed, authority = await _authority(store, repo, tmp_path, mode="record")
+    assert authority.records_only
+    executor = SimpleNamespace(_ac_retry_attempts=2)
+    authority.install(executor)
+    # No gate: no repair turn, no per-attempt check run, no interfaces in the prompt.
+    assert not hasattr(executor, "check_package_gate")
+    assert not hasattr(executor, "check_package_interfaces")
+    assert authority.installed is False
+    attempt = _result(0, ACExecutionOutcome.SUCCEEDED)
+    assert (
+        await authority.gate(seed=seed, ac_index=0, result=attempt, execution_id="exec_auth")
+        is attempt
+    )
+    assert authority.gate.log == []
+    legacy = _parallel(ACExecutionOutcome.SUCCEEDED)
+    assert await authority(seed=seed, execution_id="exec_auth", parallel_result=legacy) is legacy
+    # What it would have decided is kept: on the outcome and in the journal.
+    assert authority.outcome.verdict.verdict == "fail"
+    assert authority.outcome.reconciliation.run_accepted is False
+    assert authority.outcome.legacy_run_accepted is True
+    events = await store.replay(BOUNDARY_AGGREGATE_TYPE, "exec_auth/check_package/v1")
+    assert events[-1].type == ACCEPTANCE_RECONCILED
+    contract = await BoundaryLedger(store).run_contract("exec_auth")
+    assert contract is not None and contract.check_package == "record"
+    # Formal evaluation does not read a recording run's journal as a decision.
+    assert await recorded_criterion_decisions(store, "exec_auth", seed) == ()
+
+
+async def test_decide_mode_decision_is_the_one_evaluation_reads(
+    store: EventStore, repo: Path, tmp_path: Path
+) -> None:
+    seed, authority = await _authority(store, repo, tmp_path, mode="decide")
+    await authority(
+        seed=seed, execution_id="exec_auth", parallel_result=_parallel(ACExecutionOutcome.SUCCEEDED)
+    )
+    contract = await BoundaryLedger(store).run_contract("exec_auth")
+    assert contract is not None and contract.check_package == "decide"
+    (decision,) = await recorded_criterion_decisions(store, "exec_auth", seed)
+    assert decision.accepted is False
+
+
+@pytest.mark.parametrize("mode", ["decide", "record"])
+async def test_record_mode_never_fails_a_result_on_the_fail_closed_paths(
+    store: EventStore,
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    """An authority error, or another run's result: decide fails covered criteria, record never."""
+    seed, authority = await _authority(store, repo, tmp_path, mode=mode)
+
+    async def broken(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr("ouroboros.boundary.authority.verify_check_package", broken)
+    legacy = _parallel(ACExecutionOutcome.SUCCEEDED)
+    # Another run's result first: it does not use this run's one decision.
+    foreign = await authority(seed=seed, execution_id="another_run", parallel_result=legacy)
+    assert authority.outcome is None
+    decided = await authority(seed=seed, execution_id="exec_auth", parallel_result=legacy)
+    assert authority.outcome.error == "RuntimeError"
+    if mode == "record":
+        assert decided is legacy and foreign is legacy
+    else:
+        assert decided.all_succeeded is False and foreign.all_succeeded is False
+
+
 def _event(index: Any, failure_class: Any, session_id: str = "s") -> SimpleNamespace:
     return SimpleNamespace(
         data={"root_ac_index": index, "last_failure_class": failure_class, "session_id": session_id}
@@ -310,7 +386,13 @@ async def test_with_no_admitted_package_the_legacy_verifier_decides_every_criter
     store = EventStore("sqlite+aiosqlite:///:memory:")
     await store.initialize()
     try:
-        settings = CheckPackageSettings(enabled=True, max_construction_attempts=3)
+        # The artifact checks off: their repair turn would install the gate.
+        settings = CheckPackageSettings(
+            enabled=True,
+            max_construction_attempts=3,
+            base_regression="off",
+            worker_test_gate="off",
+        )
         state = await prepare_check_package(
             seed,
             event_store=store,
