@@ -131,7 +131,7 @@ def test_preformatted_exception_text_retains_existing_redaction(
 
 @pytest.mark.parametrize("mode", [LogMode.PROD, LogMode.DEV])
 @pytest.mark.parametrize("sink", ["console", "file"])
-@pytest.mark.parametrize("source", ["key", "note"])
+@pytest.mark.parametrize("source", ["key", "note", "text_key", "note_key"])
 def test_exception_keys_and_notes_cannot_bypass_redaction(
     mode: LogMode,
     sink: str,
@@ -140,14 +140,16 @@ def test_exception_keys_and_notes_cannot_bypass_redaction(
     tmp_path: Path,
 ) -> None:
     configure_logging(LoggingConfig(mode=mode, log_dir=tmp_path))
-    credential = "sk-live-abc123def456ghi789" if source == "key" else "plainsecretabc"
+    credential = "plainsecretabc" if source == "note" else "sk-live-abc123def456ghi789"
     payload = {"api_key": "privatevalue", "password": "privatevalue", "attempt": 7}
     if source == "key":
         payload[f"api_key_{credential}"] = 123
-    error = ValueError(payload)
+    error = ValueError(str({credential: "paired-value"}) if source == "text_key" else payload)
     error.add_note("retry remains available")
     if source == "note":
         error.add_note(str({"api_key": credential, "detail": "upstream unavailable"}))
+    if source == "note_key":
+        error.add_note(str({credential: "paired-value"}))
     try:
         raise error
     except ValueError:
@@ -159,9 +161,10 @@ def test_exception_keys_and_notes_cannot_bypass_redaction(
     output = console if sink == "console" else persistent
     assert credential not in output
     assert "privatevalue" not in output
-    assert "api_key" in output
-    assert "password" in output
-    assert "attempt" in output
+    if source != "text_key":
+        assert "api_key" in output
+        assert "password" in output
+        assert "attempt" in output
     assert "ValueError" in output
     assert "retry remains available" in output
     assert "test_exception_keys_and_notes_cannot_bypass_redaction" in output

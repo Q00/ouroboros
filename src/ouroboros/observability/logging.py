@@ -58,6 +58,7 @@ import structlog
 
 from ouroboros.core.security import (
     is_credential_shaped,
+    is_opaque_credential_shaped,
     is_safe_structured_event_identifier,
     mask_sensitive_value,
     sanitize_for_logging,
@@ -222,6 +223,8 @@ def _mask_exception_tokens(text: str) -> str:
 
     def replace(match: re.Match[str]) -> str:
         token = match.group(0)
+        if is_opaque_credential_shaped(token):
+            return mask_sensitive_value(token)
         if (
             match.start() > 0
             and text[match.start() - 1] in ("'", '"')
