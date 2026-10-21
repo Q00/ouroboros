@@ -12,6 +12,7 @@ now with a dedicated ``*_transient_exhausted`` error code.
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -25,6 +26,7 @@ from ouroboros.auto.interview_driver import (
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 import ouroboros.auto.pipeline as pipeline_module
 from ouroboros.auto.pipeline import AutoPipeline
+import ouroboros.auto.state as state_module
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 from ouroboros.core.seed import (
     EvaluationPrinciple,
@@ -35,8 +37,6 @@ from ouroboros.core.seed import (
     SeedMetadata,
 )
 from ouroboros.events.base import BaseEvent
-
-pytestmark = pytest.mark.usefixtures("_legacy_unsafe_bank")
 
 
 @pytest.fixture(autouse=True)
@@ -247,6 +247,20 @@ async def test_seed_qa_retry_backoff_cannot_outlive_pipeline_deadline(
 ) -> None:
     monkeypatch.setattr(pipeline_module, "_TRANSIENT_RETRY_BACKOFF_SECONDS", (0.08,))
     calls = 0
+    clock_now = [time.monotonic()]
+    clock = SimpleNamespace(monotonic=lambda: clock_now[0], time=time.time)
+    # Keep deadline calculation and expiry checks on one controlled clock;
+    # leave asyncio's event-loop clock and this test module's clock untouched.
+    monkeypatch.setattr(pipeline_module, "time", clock)
+    monkeypatch.setattr(state_module, "time", clock)
+    sleep_requests: list[tuple[float, float]] = []
+
+    async def expire_deadline_after_sleep(delay: float) -> None:
+        remaining = state.deadline_at - clock.monotonic()
+        sleep_requests.append((delay, remaining))
+        clock_now[0] = state.deadline_at + 0.001
+
+    monkeypatch.setattr(pipeline_module.asyncio, "sleep", expire_deadline_after_sleep)
 
     async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
         nonlocal calls
@@ -254,7 +268,7 @@ async def test_seed_qa_retry_backoff_cannot_outlive_pipeline_deadline(
         raise RuntimeError("upstream QA judge unavailable")
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
-    state.deadline_at = time.monotonic() + 0.03
+    state.deadline_at = clock.monotonic() + 0.03
     state.deadline_at_epoch = time.time() + 0.03
     ledger = SeedDraftLedger.from_goal(state.goal)
     _fill_ready(ledger)
@@ -265,10 +279,13 @@ async def test_seed_qa_retry_backoff_cannot_outlive_pipeline_deadline(
         seed_qa_evaluator=seed_qa,
     )
 
-    started = time.monotonic()
     result, _, _ = await pipeline._run_seed_qa_gate(state, ledger, _build_seed(), review=None)
 
-    assert time.monotonic() - started < 0.08
+    assert len(sleep_requests) == 1
+    requested_sleep, remaining = sleep_requests[0]
+    assert 0 < remaining < 0.08
+    assert requested_sleep == remaining
+    assert clock.monotonic() > state.deadline_at
     assert calls == 1
     assert result is not None
     assert result.status == "blocked"

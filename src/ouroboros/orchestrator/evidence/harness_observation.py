@@ -68,6 +68,7 @@ _IGNORED_DIRECTORY_NAMES = frozenset(
 # Snapshot budget. Past either bound the observation is marked truncated and
 # proves nothing about paths that were not fingerprinted.
 DEFAULT_MAX_ENTRIES = 50_000
+DEFAULT_MAX_DEPTH = 64
 DEFAULT_TIME_BUDGET_SECONDS = 5.0
 
 
@@ -198,29 +199,67 @@ def snapshot_workspace(
         return None
 
     fingerprints: dict[str, tuple[int, int]] = {}
-    truncated = False
+    truncated = max_entries <= 0 or time_budget_seconds <= 0
     deadline = time.monotonic() + max(time_budget_seconds, 0.0)
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        dirnames[:] = sorted(name for name in dirnames if name not in _IGNORED_DIRECTORY_NAMES)
-        if time.monotonic() > deadline:
+    visited_entries = 0
+    pending_directories = [(root, 0)] if not truncated else []
+    while pending_directories:
+        if time.monotonic() >= deadline:
             truncated = True
             break
-        for filename in filenames:
-            if len(fingerprints) >= max_entries or time.monotonic() > deadline:
+        directory, depth = pending_directories.pop()
+        entries = []
+        try:
+            with os.scandir(directory) as iterator:
+                entry_iterator = iter(iterator)
+                while visited_entries < max_entries:
+                    if time.monotonic() >= deadline:
+                        truncated = True
+                        break
+                    try:
+                        entry = next(entry_iterator)
+                    except StopIteration:
+                        break
+                    visited_entries += 1
+                    entries.append(entry)
+                    if visited_entries >= max_entries:
+                        # Do not fetch one more entry to prove overflow. Reaching
+                        # the cap is uncertain even when this was the last item.
+                        truncated = True
+                        break
+        except OSError:
+            truncated = True
+            break
+
+        child_directories: list[Path] = []
+        for entry in sorted(entries, key=lambda item: item.name):
+            if time.monotonic() >= deadline:
                 truncated = True
                 break
-            full = os.path.join(dirpath, filename)
+            full = Path(entry.path)
             try:
-                stat_result = os.lstat(full)
+                is_directory = entry.is_dir(follow_symlinks=False)
+                if is_directory:
+                    if entry.name in _IGNORED_DIRECTORY_NAMES:
+                        continue
+                    if depth >= DEFAULT_MAX_DEPTH:
+                        truncated = True
+                        break
+                    child_directories.append(full)
+                    continue
+                stat_result = entry.stat(follow_symlinks=False)
             except OSError:
-                continue
+                truncated = True
+                break
             if not stat.S_ISREG(stat_result.st_mode):
                 # Symlinks and special files are not deliverables the leaf wrote.
                 continue
-            relative = os.path.relpath(full, root).replace(os.sep, "/")
+            relative = full.relative_to(root).as_posix()
             fingerprints[relative.lower()] = (stat_result.st_size, stat_result.st_mtime_ns)
+
         if truncated:
             break
+        pending_directories.extend((path, depth + 1) for path in reversed(child_directories))
     return WorkspaceSnapshot(root=str(root), fingerprints=fingerprints, truncated=truncated)
 
 

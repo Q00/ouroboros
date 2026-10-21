@@ -187,17 +187,35 @@ class TestMapToCopilotModel:
                 == "claude-opus-4.6"
             )
 
-    def test_current_default_maps_to_exact_catalog_id(self) -> None:
+    def test_prior_default_maps_to_exact_catalog_id(self) -> None:
         pool = [md.CopilotModel(id="claude-opus-5", family="claude-opus-5")]
 
-        assert md.map_to_copilot_model(DEFAULT_OPUS_MODEL, available=pool) == "claude-opus-5"
+        assert md.map_to_copilot_model("claude-opus-5", available=pool) == "claude-opus-5"
         assert (
-            md.map_to_copilot_model(DEFAULT_CONSENSUS_OPUS_MODEL, available=pool) == "claude-opus-5"
+            md.map_to_copilot_model("openrouter/anthropic/claude-opus-5", available=pool)
+            == "claude-opus-5"
         )
 
-    def test_current_default_maps_from_bundled_catalog_when_discovery_fails(self) -> None:
+    def test_current_api_pin_requires_its_own_copilot_catalog_entry(self) -> None:
+        old_pool = [md.CopilotModel(id="claude-opus-5")]
+        assert md.map_to_copilot_model(DEFAULT_OPUS_MODEL, available=old_pool) == DEFAULT_OPUS_MODEL
+        assert (
+            md.map_to_copilot_model(DEFAULT_CONSENSUS_OPUS_MODEL, available=old_pool)
+            == DEFAULT_CONSENSUS_OPUS_MODEL
+        )
+        current_pool = [md.CopilotModel(id="claude-opus-5.5")]
+        assert (
+            md.map_to_copilot_model(DEFAULT_OPUS_MODEL, available=current_pool) == "claude-opus-5.5"
+        )
+        assert (
+            md.map_to_copilot_model(DEFAULT_CONSENSUS_OPUS_MODEL, available=current_pool)
+            == "claude-opus-5.5"
+        )
+
+    def test_prior_default_maps_from_bundled_catalog_when_discovery_fails(self) -> None:
         with patch.object(md, "_resolve_token", return_value=None):
-            assert md.map_to_copilot_model(DEFAULT_OPUS_MODEL) == "claude-opus-5"
+            assert md.map_to_copilot_model("claude-opus-5") == "claude-opus-5"
+            assert md.map_to_copilot_model(DEFAULT_OPUS_MODEL) == DEFAULT_OPUS_MODEL
             assert md.used_fallback() is True
 
     def test_future_anthropic_version_uses_catalog_driven_candidate(self) -> None:

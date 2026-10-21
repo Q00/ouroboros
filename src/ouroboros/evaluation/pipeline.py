@@ -133,6 +133,15 @@ class EvaluationPipeline:
         Returns:
             Result containing EvaluationResult or error
         """
+        if context.artifact_bundle is not None and not context.artifact_bundle.scan_complete:
+            return Result.err(
+                ValidationError(
+                    "Artifact collection is incomplete; evaluation refused to avoid judging a partial workspace scan.",
+                    field="artifact_bundle",
+                    details={"scan_error": context.artifact_bundle.scan_error},
+                )
+            )
+
         events: list[BaseEvent] = []
         stage2_result = None
         stage3_result = None

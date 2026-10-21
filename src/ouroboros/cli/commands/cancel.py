@@ -384,11 +384,12 @@ def _display_active_sessions(sessions: list) -> None:
     print_table(table)
 
 
-async def _interactive_cancel(reason: str) -> None:
+async def _interactive_cancel(reason: str, *, list_only: bool = False) -> None:
     """Interactive mode: list active executions and prompt user to pick one.
 
     Args:
         reason: Reason for cancellation.
+        list_only: Print the list and return without prompting.
     """
     event_store = await _get_event_store()
 
@@ -401,6 +402,10 @@ async def _interactive_cancel(reason: str) -> None:
 
         _display_active_sessions(active_sessions)
         console.print()
+
+        if list_only:
+            print_info("Cancel one with: ouroboros cancel execution <session_id>")
+            return
 
         # Prompt user to pick a session number
         choice = typer.prompt(
@@ -462,6 +467,14 @@ def cancel_execution(
         str,
         typer.Option("--reason", "-r", help="Reason for cancellation."),
     ] = "Cancelled by user via CLI",
+    list_only: Annotated[
+        bool,
+        typer.Option(
+            "--list",
+            "-l",
+            help="List active executions and exit without prompting or cancelling.",
+        ),
+    ] = False,
 ) -> None:
     """Cancel a stuck or orphaned execution.
 
@@ -477,6 +490,9 @@ def cancel_execution(
         # Interactive mode - list and pick
         ouroboros cancel execution
 
+        # List active executions without prompting (scripts, agents)
+        ouroboros cancel execution --list
+
         # Cancel a specific execution
         ouroboros cancel execution orch_abc123def456
 
@@ -490,9 +506,13 @@ def cancel_execution(
         print_error("Cannot specify both an execution ID and --all. Choose one.")
         raise typer.Exit(1)
 
+    if list_only and (execution_id or all_):
+        print_error("--list cannot be combined with an execution ID or --all.")
+        raise typer.Exit(1)
+
     if not execution_id and not all_:
         # Interactive mode: list active executions and prompt user to pick one
-        asyncio.run(_interactive_cancel(reason))
+        asyncio.run(_interactive_cancel(reason, list_only=list_only))
         return
 
     asyncio.run(_cancel_execution_async(execution_id, all_, reason))

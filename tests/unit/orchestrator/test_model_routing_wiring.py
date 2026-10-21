@@ -1208,8 +1208,8 @@ class TestRunnerRouterConstruction:
         )
         assert runner._configured_route_economics == _economics()
 
-    def test_auto_routes_sentinel_backend_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A backend that picks its own model receives the sentinel for every tier."""
+    def test_auto_preserves_gemini_cli_tier_aliases(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Gemini tier routing preserves CLI flash/pro aliases without model pinning."""
         monkeypatch.delenv("OUROBOROS_MODEL_TIER_ROUTING", raising=False)
         monkeypatch.delenv("OUROBOROS_EXECUTION_MODEL", raising=False)
         monkeypatch.delenv("OUROBOROS_PIN_MODELS", raising=False)
@@ -1220,8 +1220,8 @@ class TestRunnerRouterConstruction:
         assert runner._model_router is not None
         # The shipped ladder has google entries for frugal and standard only.
         assert dict(runner._model_router.tier_models) == {
-            "frugal": "default",
-            "standard": "default",
+            "frugal": "flash",
+            "standard": "pro",
         }
 
     def test_runner_passes_runtime_backend_to_execution_pin(

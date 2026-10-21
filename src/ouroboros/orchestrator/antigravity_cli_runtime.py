@@ -8,18 +8,16 @@ runtime's text-stream handling.
 
 The ``agy`` headless contract differs from the Gemini CLI:
 
-- ``agy -p <prompt>`` runs a single prompt non-interactively and prints the
-  response to stdout. There is **no** ``--output-format`` flag, so ``agy``
-  emits plain text rather than ``stream-json`` events. The inherited
-  :class:`~ouroboros.providers.gemini_event_normalizer.GeminiEventNormalizer`
-  treats each plain line as a ``text`` event, so the assistant response is
-  surfaced as normal assistant messages.
+- ``agy -p <prompt> --output-format stream-json`` emits nested native
+  events, including tool calls and terminal response text. The Antigravity
+  normalizer preserves tool names, inputs, errors, and conversation identifiers.
+  Plain-text fallback remains available for wrapped output.
 - Permissions are all-or-nothing: ``--dangerously-skip-permissions``
-  auto-approves every tool request. ``agy`` has no granular ``auto_edit``
-  equivalent, so the non-blocking Ouroboros modes (``acceptEdits`` /
-  ``bypassPermissions``) both map to that single skip flag — a headless
-  subprocess must never surface an interactive approval prompt or it would
-  wedge indefinitely.
+  auto-approves every tool request. The existing runtime mapping is full bypass,
+  so the non-blocking Ouroboros modes (``acceptEdits`` /
+  ``bypassPermissions``) both map to that single skip flag. Native headless
+  policy can soft-deny tools instead of prompting; preserving bypass here is
+  compatibility with the established mapping, not an edit-only guarantee.
 - ``--model`` selects the session model. ``agy`` owns its own model catalog
   (``agy models``), so Antigravity is a sentinel-model backend: the orchestrator
   defers to the CLI's configured default and only forwards ``--model`` when an
@@ -39,6 +37,12 @@ Custom CLI Path:
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import aclosing
+from dataclasses import replace
+from pathlib import Path
+from typing import Any, cast
+
 import structlog
 
 from ouroboros.orchestrator.adapter import (
@@ -48,20 +52,47 @@ from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
 )
 from ouroboros.orchestrator.gemini_cli_runtime import GeminiCLIRuntime
+from ouroboros.providers.antigravity_event_normalizer import (
+    AntigravityEventNormalizer,
+    is_legacy_gemini_event,
+    is_recognized_gemini_event_type,
+)
 
 log = structlog.get_logger(__name__)
 
 # ``agy`` exposes ``--dangerously-skip-permissions`` (auto-approve every tool
-# request) but no granular accept-edits-only mode. Map the non-blocking
+# request). Preserve the legacy full-bypass mapping for the non-blocking
 # Ouroboros permission vocabulary onto that single flag; ``"default"``
-# (interactive) is normalized to ``acceptEdits`` because the headless runtime
-# (``agy -p``) cannot honour an approval prompt without deadlocking.
+# is normalized to ``acceptEdits`` for compatibility. Native headless policy
+# can soft-deny approval-required calls; the legacy mapping instead bypasses all.
 _AGY_PERMISSION_MODES = frozenset({"acceptEdits", "bypassPermissions"})
 _AGY_DEFAULT_PERMISSION_MODE = "acceptEdits"
+_AGY_REASONING_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
 # The sentinel ``"default"`` is the orchestrator-wide model placeholder for
 # CLI-owned model selection; ``agy`` does not understand it as a ``--model``
 # value, so it is never forwarded on the command line.
 _SENTINEL_MODEL = "default"
+
+
+class _ResumeUnavailable(ValueError):
+    """An explicit conversation cannot be safely resumed after runtime drift."""
+
+
+class _ConversationMismatch(ValueError):
+    def __init__(self, requested: str, observed: str) -> None:
+        super().__init__("Antigravity returned a different conversation than requested.")
+        self.requested = requested
+        self.observed = observed
+
+
+class _WorkspaceMismatchError(RuntimeError):
+    """A native init contradicts the requested workspace."""
+
+    def __init__(self, requested: str, effective: str, handle: RuntimeHandle | None) -> None:
+        super().__init__(
+            f"Antigravity workspace mismatch: requested {requested}, reported {effective}"
+        )
+        self.handle = handle
 
 
 class AntigravityCLIRuntime(GeminiCLIRuntime):
@@ -72,9 +103,8 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
     process model:
 
     - ``agy -p`` headless invocation with ``--dangerously-skip-permissions``
-    - Plain-text stdout (no ``stream-json``) normalized via the inherited
-      :class:`GeminiEventNormalizer`
-    - No session resumption (stateless execution model)
+    - Structured stdout normalized by :class:`AntigravityEventNormalizer`
+    - Targeted native conversation resumption with ``--conversation``
     """
 
     _runtime_handle_backend = "antigravity_cli"
@@ -89,7 +119,192 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
     # requests, matching the Hermes runtime's convention.
     _default_llm_backend = "claude_code"
     _tempfile_prefix = "ouroboros-antigravity-"
-    _max_resume_retries = 0  # agy print mode does not support targeted resume
+    _max_resume_retries = 0  # Never retry a failed resume as a fresh conversation.
+
+    def _extract_event_session_id(self, event: dict[str, Any]) -> str | None:
+        """Trust canonical native identity; preserve legacy Gemini extraction."""
+        if not is_recognized_gemini_event_type(event.get("type")):
+            return None
+        raw = event.get("raw")
+        if not isinstance(raw, dict) or is_legacy_gemini_event(raw):
+            return super()._extract_event_session_id(event)
+        if event.get("type") not in {"init", "message", "tool_use", "tool_result", "result"}:
+            return None
+        metadata = event.get("metadata")
+        session_id = metadata.get("session_id") if isinstance(metadata, dict) else None
+        return session_id.strip() if isinstance(session_id, str) and session_id.strip() else None
+
+    def _parse_json_event(self, line: str) -> dict[str, Any] | None:
+        if not line.strip():
+            return None
+        event = AntigravityEventNormalizer().normalize_line(line)
+        if event.get("type") == "text":
+            log.warning(
+                "antigravity_cli_runtime.unstructured_output",
+                limitation="Tool usage is unknown for plain-text output; zero observed calls is not evidence of no tool use.",
+            )
+        return event
+
+    def _convert_event(
+        self, event: dict[str, Any], current_handle: RuntimeHandle | None, *, item_scope: Any = None
+    ) -> list[AgentMessage]:
+        messages = super()._convert_event(event, current_handle, item_scope=item_scope)
+        metadata = event.get("metadata", {})
+        if event.get("type") == "result" and event.get("is_error"):
+            return [
+                AgentMessage(
+                    type="result",
+                    content=event.get("content", ""),
+                    data={"subtype": "error", "terminal": True, "metadata": metadata},
+                    resume_handle=current_handle,
+                )
+            ]
+        if metadata.get("text_delta"):
+            messages = [replace(m, data={**m.data, "text_delta": True}) for m in messages]
+        return messages
+
+    async def _execute_task_impl(
+        self,
+        prompt: str,
+        tools: list[str] | None = None,
+        system_prompt: str | None = None,
+        resume_handle: RuntimeHandle | None = None,
+        resume_session_id: str | None = None,
+        reasoning_effort: str | None = None,
+        model: str | None = None,
+        _resume_depth: int = 0,
+    ) -> AsyncIterator[AgentMessage]:
+        """Reject a resumed stream that reports another native conversation."""
+        requested_handle = resume_handle or self._build_runtime_handle(resume_session_id)
+        stream = super()._execute_task_impl(
+            prompt=prompt,
+            tools=tools,
+            system_prompt=system_prompt,
+            resume_handle=resume_handle,
+            resume_session_id=resume_session_id,
+            reasoning_effort=reasoning_effort,
+            model=model,
+            _resume_depth=_resume_depth,
+        )
+        verified = False
+        warned = False
+        current_handle = requested_handle
+
+        def unverified_message() -> AgentMessage:
+            return AgentMessage(
+                type="system",
+                content="Antigravity did not report an absolute working directory; the effective workspace is unverified. Filesystem access is not confined.",
+                data={
+                    "subtype": "workspace.unverified",
+                    "requested_cwd": str(Path(self._cwd or ".").resolve()),
+                },
+                resume_handle=current_handle,
+            )
+
+        try:
+            async with aclosing(cast(AsyncGenerator[AgentMessage, None], stream)):
+                async for message in stream:
+                    if message.resume_handle is not None:
+                        current_handle = message.resume_handle
+                    verified = verified or message.data.get("subtype") == "workspace.binding"
+                    if message.is_final and not verified and not warned:
+                        yield unverified_message()
+                        warned = True
+                    yield message
+        except _ResumeUnavailable as error:
+            yield AgentMessage(
+                type="result",
+                content=str(error),
+                data={"subtype": "error", "terminal": True, "error_type": "ResumeUnavailable"},
+                resume_handle=requested_handle,
+            )
+            return
+        except _ConversationMismatch as error:
+            yield AgentMessage(
+                type="result",
+                content=str(error),
+                data={
+                    "subtype": "error",
+                    "terminal": True,
+                    "error_type": "ConversationMismatch",
+                    "requested_session_id": error.requested,
+                    "observed_session_id": error.observed,
+                },
+                resume_handle=requested_handle,
+            )
+            return
+        except _WorkspaceMismatchError as error:
+            yield AgentMessage(
+                type="result",
+                content=str(error),
+                data={"subtype": "error", "terminal": True, "error_type": "WorkspaceMismatchError"},
+                resume_handle=error.handle,
+            )
+            return
+        if not verified and not warned:
+            yield unverified_message()
+
+    def _resolve_resume_session_id(self, current_handle: RuntimeHandle | None) -> str | None:
+        session_id = super()._resolve_resume_session_id(current_handle)
+        if current_handle and current_handle.native_session_id and session_id is None:
+            raise _ResumeUnavailable(
+                "Cannot resume the requested Antigravity conversation after runtime inputs changed."
+            )
+        return session_id
+
+    def _prepare_runtime_event(
+        self,
+        event: dict[str, Any],
+        *,
+        previous_handle: RuntimeHandle | None,
+        current_handle: RuntimeHandle | None,
+        session_rebound: bool,
+    ) -> dict[str, Any]:
+        requested = previous_handle.native_session_id if previous_handle else None
+        observed = self._extract_event_session_id(event)
+        if requested and observed and requested != observed:
+            raise _ConversationMismatch(requested, observed)
+        return super()._prepare_runtime_event(
+            event,
+            previous_handle=previous_handle,
+            current_handle=current_handle,
+            session_rebound=session_rebound,
+        )
+
+    def _compose_prompt(
+        self, prompt: str, system_prompt: str | None, tools: list[str] | None
+    ) -> str:
+        requested = str(Path(self._cwd or ".").resolve())
+        workspace = (
+            f"Requested working directory: {requested}\n"
+            "Perform this task in that directory. This request does not confine filesystem access."
+        )
+        return super()._compose_prompt(f"{workspace}\n\n{prompt}", system_prompt, tools)
+
+    async def _handle_runtime_event(
+        self, event: dict[str, Any], current_handle: RuntimeHandle | None, process: Any
+    ) -> tuple[AgentMessage, ...]:
+        if event.get("type") != "init":
+            return await super()._handle_runtime_event(event, current_handle, process)
+        effective = event.get("metadata", {}).get("cwd")
+        if not isinstance(effective, str) or not effective or not Path(effective).is_absolute():
+            return ()
+        requested = str(Path(self._cwd or ".").resolve())
+        effective = str(Path(effective).resolve())
+        if effective != requested:
+            raise _WorkspaceMismatchError(requested, effective, current_handle)
+        return (
+            AgentMessage(
+                type="system",
+                content=f"Antigravity reported working directory: {effective}. Filesystem access is not confined.",
+                data={
+                    "subtype": "workspace.binding",
+                    "requested_cwd": requested,
+                    "effective_cwd": effective,
+                },
+                resume_handle=current_handle,
+            ),
+        )
 
     # -- Permission mode overrides -----------------------------------------
 
@@ -100,9 +315,9 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
         to :data:`_AGY_DEFAULT_PERMISSION_MODE` (``acceptEdits``). Both
         recognized non-blocking modes (``acceptEdits`` and
         ``bypassPermissions``) map to ``--dangerously-skip-permissions`` in
-        :meth:`_build_command` because ``agy`` has no granular auto-edit mode
-        and the headless ``agy -p`` invocation must never block on an approval
-        prompt. Anything else raises ``ValueError`` rather than silently
+        :meth:`_build_command`, preserving the existing full-bypass contract.
+        Native accept-edits is not equivalent: headless policy can soft-deny
+        calls requiring approval. Anything else raises ``ValueError`` rather than silently
         falling back, so a typo on a permission boundary cannot escalate the
         runtime.
         """
@@ -117,9 +332,9 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
                 requested="default",
                 resolved=_AGY_DEFAULT_PERMISSION_MODE,
                 reason=(
-                    "Antigravity runtime is headless (agy -p); the interactive "
-                    "'default' approval mode would block, so it is normalized to "
-                    "the safe non-blocking equivalent."
+                    "Antigravity runtime preserves its established permission mapping: "
+                    "'default' is normalized to "
+                    "the legacy full-bypass mode; this is not edit-only permission."
                 ),
             )
             return _AGY_DEFAULT_PERMISSION_MODE
@@ -138,9 +353,7 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
         resume_session_id: str | None = None,
         prompt: str | None = None,
         runtime_handle: RuntimeHandle | None = None,
-        # Accepted to honor the shared CodexCliRuntime contract, but ignored:
-        # `agy` exposes no per-invocation effort flag (capabilities declares
-        # reasoning_effort_support=IGNORED, so it is surfaced as advised).
+        # Native effort is accepted only from the advertised CLI vocabulary.
         reasoning_effort: str | None = None,
     ) -> list[str]:
         """Build the Antigravity CLI command for non-interactive execution.
@@ -148,20 +361,29 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
         Headless contract:
         - ``-p`` (alias ``--print`` / ``--prompt``) carries the request and
           prints the response to stdout.
-        - ``--dangerously-skip-permissions`` auto-approves tool requests so the
-          subprocess never blocks. Both ``acceptEdits`` and
-          ``bypassPermissions`` resolve here — ``agy`` has no narrower mode.
+        - ``--dangerously-skip-permissions`` auto-approves all tool requests.
+          Both ``acceptEdits`` and
+          ``bypassPermissions`` preserve the existing full-bypass mapping.
         - ``--model`` is forwarded only for an explicit, non-sentinel id;
           ``agy`` otherwise uses its own configured default.
         """
-        del output_last_message_path, resume_session_id, runtime_handle, reasoning_effort
+        del output_last_message_path
 
         command = [
             self._cli_path,
             "-p",
             prompt or "",
             "--dangerously-skip-permissions",
+            "--output-format",
+            "stream-json",
         ]
+        if reasoning_effort is not None:
+            if reasoning_effort not in _AGY_REASONING_EFFORT_LEVELS:
+                raise ValueError(f"Unsupported Antigravity reasoning effort: {reasoning_effort!r}")
+            command.extend(["--effort", reasoning_effort])
+        session_id = resume_session_id or self._resolve_resume_session_id(runtime_handle)
+        if session_id:
+            command.extend(["--conversation", session_id])
         normalized_model = self._normalize_model(self._model)
         if normalized_model and normalized_model != _SENTINEL_MODEL:
             command.extend(["--model", normalized_model])
@@ -183,15 +405,13 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
     # -- Final-message accumulation ----------------------------------------
 
     def _update_last_content(self, last_content: str, message: AgentMessage) -> str:
-        """Accumulate plain-text lines into the final message.
-
-        ``agy -p`` prints the full response as plain-text lines (no token
-        deltas, no terminal JSON payload), so each stdout line is surfaced as a
-        separate assistant message. The base "keep the latest message" fallback
-        would therefore truncate a multi-line answer to its last line. Join the
-        non-empty assistant lines with newlines so the orchestrator's
-        ``final_message`` reconstructs the complete response.
-        """
+        """Reconstruct assistant deltas or legacy text, excluding tool output."""
+        if message.tool_name or message.type != "assistant" or message.data.get("thinking"):
+            return last_content
+        if message.data.get("terminal"):
+            return message.content
+        if message.data.get("text_delta"):
+            return last_content + message.content
         if not message.content:
             return last_content
         return f"{last_content}\n{message.content}" if last_content else message.content
@@ -200,16 +420,18 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
     def capabilities(self) -> RuntimeCapabilities:
         """Declare the Antigravity CLI runtime feature contract.
 
-        ``agy -p`` prints plain text (no ``stream-json``), so structured event
-        output is unavailable and the native CLI exposes no targeted session
-        resume; recovery happens at the Ouroboros checkpoint/lineage layer.
+        ``agy -p --output-format stream-json`` exposes structured tool events.
+        Targeted resume uses the native ``--conversation`` option. Unsupported
+        CLI versions fail explicitly and are never retried as fresh sessions.
         Tool restrictions and the system prompt are composed into the user
         message by the inherited prompt builder rather than enforced natively.
         """
         return RuntimeCapabilities(
             skill_dispatch=True,
-            targeted_resume=False,
-            structured_output=False,
+            targeted_resume=True,
+            structured_output=True,
+            reasoning_effort_support=ParamSupport.NATIVE,
+            enforceable_reasoning_efforts=_AGY_REASONING_EFFORT_LEVELS,
             system_prompt_support=ParamSupport.TRANSLATED,
             tool_restriction_support=ParamSupport.TRANSLATED,
             empty_tool_restriction_support=ParamSupport.IGNORED,

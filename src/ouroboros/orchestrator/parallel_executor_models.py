@@ -161,6 +161,11 @@ class ACExecutionResult:
     # The legacy verifier's rejection that the check package made advisory;
     # it decides the criteria no admitted check covers.
     legacy_rejection: str | None = None
+    # What the evidence verifier would have rejected when it only records
+    # (``execution.transcript_verifier: record``). Data only: it fails no
+    # criterion, routes no retry or redispatch, and no gate reads it as a
+    # rejection (``governing_verifier_verdict``).
+    recorded_rejection: str | None = None
 
     def __post_init__(self) -> None:
         """Normalize outcome so callers do not infer from error strings."""
@@ -615,9 +620,13 @@ def governing_verifier_verdict(result: ACExecutionResult) -> Any:
     rejection as an advisory annotation (``legacy_rejection``): its verdict
     routes nothing, unless the gate handed the criterion back to the legacy
     verifier (``legacy_owned``). Otherwise the verdict is
-    ``atomic_verifier_verdict`` as before.
+    ``atomic_verifier_verdict`` as before. A verdict the verifier only
+    recorded (``recorded_rejection``, record mode) routes nothing.
     """
     if result.legacy_rejection and not legacy_owned(result):
+        return None
+    if result.recorded_rejection:
+        # A verdict the verifier only recorded routes nothing either.
         return None
     return result.atomic_verifier_verdict
 

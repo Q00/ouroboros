@@ -24,11 +24,13 @@ This module therefore separates three things:
     replay. Anything less is no evidence.
 ``decide_citations``
     The criterion outcome. It can accept only on a qualified call. A cited
-    call whose replay failed is an executed failure and never accepts. With
-    no qualified call the outcome is ``no_evidence`` (the criterion stays
-    undecided); it is never fabrication and never a rejection: a citation
-    that does not qualify says nothing about the work, only that the worker
-    pointed at a call the controller cannot use.
+    call whose replay failed is an ``executed_failure``: the controller ran
+    the check on the frozen artifact and saw it fail, so it never accepts
+    and is never folded into no evidence. Otherwise, with no qualified call
+    the outcome is ``no_evidence`` (the criterion stays undecided); it is
+    never fabrication and never a rejection: a citation that does not
+    qualify says nothing about the work, only that the worker pointed at a
+    call the controller cannot use.
 
 Nothing here reads criterion text, and no model output can grant: the worker
 supplies call numbers, the controller supplies everything else.
@@ -138,6 +140,7 @@ class CallState(StrEnum):
 class CitationDecision(StrEnum):
     ACCEPT = "accept"
     NO_EVIDENCE = "no_evidence"
+    EXECUTED_FAILURE = "executed_failure"
 
 
 @dataclass(frozen=True, slots=True)
@@ -417,8 +420,10 @@ def decide_citations(
     """Decide one criterion from the call numbers the worker cited for it.
 
     Accept only when a cited call qualifies and no cited call failed its
-    replay. A failed replay leaves the criterion without evidence; it never
-    accepts. A number that is not in the table is ignored and reported.
+    replay. A failed replay is an executed failure (``EXECUTED_FAILURE``),
+    even when another cited call qualified; it never accepts and is never
+    reported as no evidence. A number that is not in the table is ignored
+    and reported.
     """
     by_number = {call.number: call for call in calls}
     reasons: list[str] = []
@@ -441,7 +446,9 @@ def decide_citations(
         else:
             reasons.append(f"call {number}: {reason}")
             failed = failed or state is CallState.EXECUTED_FAILURE
-    if qualified and not failed:
+    if failed:
+        return CitationVerdict(CitationDecision.EXECUTED_FAILURE, (), tuple(reasons))
+    if qualified:
         return CitationVerdict(CitationDecision.ACCEPT, tuple(qualified), tuple(reasons))
     if not reasons:
         reasons.append("no call cited")

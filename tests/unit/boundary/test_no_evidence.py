@@ -35,6 +35,7 @@ from ouroboros.orchestrator.parallel_executor_models import (
     ACExecutionResult,
     ParallelExecutionResult,
 )
+from ouroboros.orchestrator.verifier import VerifierVerdict
 
 from .calc_fixtures import _seed
 
@@ -121,6 +122,45 @@ def test_no_reason_when_the_legacy_verifier_had_evidence_or_rejected() -> None:
     assert rejected.no_evidence is False and rejected.no_evidence_reason is None
 
 
+def test_a_failed_cited_call_is_a_legacy_rejection_never_no_evidence() -> None:
+    verdict = VerifierVerdict(
+        passed=False,
+        reasons=("cited_call_failed: call 1: replay_failed",),
+        failure_class=FailureClass.CITED_CALL_FAILED.value,
+    )
+    # With the gate the executor keeps the rejection advisory on a successful result.
+    gated = existing_outcomes_from_results(
+        SimpleNamespace(
+            results=(
+                _legacy_result(
+                    atomic_verifier_verdict=verdict,
+                    legacy_rejection="Fat-harness verifier failed (cited_call_failed).",
+                ),
+            )
+        ),
+        gated=True,
+    )[0]
+    assert gated.outcome == "failed" and gated.no_evidence is False
+    assert gated.failure_class == FailureClass.CITED_CALL_FAILED.value
+    reconciliation = reconcile_acceptance(
+        ("c0",), {}, {0: gated}, existing_run_accepted=True, legacy_decides_unverified=True
+    )
+    assert reconciliation.run_accepted is False
+    # Without the gate the executor fails the result itself.
+    ungated = existing_outcomes_from_results(
+        SimpleNamespace(
+            results=(
+                _legacy_result(
+                    outcome=SimpleNamespace(value="failed"),
+                    success=False,
+                    atomic_verifier_verdict=verdict,
+                ),
+            )
+        )
+    )[0]
+    assert ungated.outcome == "failed" and ungated.no_evidence is False
+
+
 def _outcome(
     verdicts: dict[str, Any], legacy: dict[int, ExistingOutcome], *, package_id: str | None
 ) -> AuthorityOutcome:
@@ -198,6 +238,7 @@ def test_a_reconciliation_with_no_evidence_criteria_emits_exactly_one_event(
     assert props["verification_coverage"] == "low"
     assert props["surface"] == "cli_run"
     assert props["check_package"] == "on"
+    assert props["check_package_mode"] == "decide"
     assert props["check_package_status"] == "admitted"
     assert props["runtime_backend"] == "codex"
     assert set(props) <= telemetry._ACCEPTANCE_NO_EVIDENCE_KEYS
@@ -295,3 +336,24 @@ async def test_an_unadmitted_run_names_no_admitted_package(
     assert props["pair_no_admitted_package__no_verifier_verdict"] == 1
     assert props["surface"] == "evolve"
     assert props["check_package_status"] == "construction_failed"
+
+
+def test_a_record_mode_run_names_its_mode_and_an_off_run_names_off(
+    captured: list[tuple[str, dict[str, Any]]],
+) -> None:
+    outcome = _outcome(
+        {"a": PackageCriterionStatus.UNCOVERED},
+        {0: _accepted(0, LegacyNoEvidenceReason.NO_VERIFIER_VERDICT)},
+        package_id="pkg_1",
+    )
+    run = _run(outcome)
+    run.settings = CheckPackageSettings(enabled=True, mode="record")
+    run.finish("completed", surface="cli_run")
+    assert captured[-1][1]["check_package_mode"] == "record"
+    assert captured[-1][1]["check_package"] == "on"
+
+    off = CheckPackageRun(CheckPackageSettings(enabled=False))
+    off._outcome = lambda: outcome  # type: ignore[method-assign]
+    off.finish("completed", surface="cli_run")
+    assert captured[-1][1]["check_package"] == "off"
+    assert captured[-1][1]["check_package_mode"] == "off"

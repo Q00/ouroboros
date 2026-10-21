@@ -277,7 +277,9 @@ class TestCodexSetup:
   -p, --profile <CONFIG_PROFILE_V2>
           Layer $CODEX_HOME/<name>.config.toml on top of the base user config
 """
-        completed = subprocess.CompletedProcess(["codex", "--help"], 0, stdout=help_text, stderr="")
+        completed = subprocess.CompletedProcess(
+            ["codex", "--help"], 0, stdout=help_text.encode("utf-8"), stderr=b""
+        )
 
         with patch("ouroboros.cli.commands.setup.subprocess.run", return_value=completed):
             assert _codex_uses_profile_v2("/usr/local/bin/codex") is True
@@ -291,7 +293,9 @@ class TestCodexSetup:
       --profile-v2 <CONFIG_PROFILE_V2>
           Layer $CODEX_HOME/<name>.config.toml on top of the base user config
 """
-        completed = subprocess.CompletedProcess(["codex", "--help"], 0, stdout=help_text, stderr="")
+        completed = subprocess.CompletedProcess(
+            ["codex", "--help"], 0, stdout=help_text.encode("utf-8"), stderr=b""
+        )
 
         with patch("ouroboros.cli.commands.setup.subprocess.run", return_value=completed):
             assert _codex_uses_profile_v2("/Applications/Codex.app/codex") is False
@@ -309,7 +313,7 @@ class TestCodexSetup:
     ) -> None:
         """Help failures are unknown and must not be reported as legacy evidence."""
 
-        def failing_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        def failing_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
             raise failure
 
         assert codex_uses_profile_v2("/configured/codex", run_command=failing_run) is None
@@ -339,9 +343,43 @@ class TestCodexSetup:
         assert "tool_timeout_sec" not in contents
         assert 'command = "/usr/local/bin/uvx"' in contents
         assert (
-            'args = ["--isolated", "--python", ">=3.12", "--from", "ouroboros-ai[mcp]", '
+            'args = ["--isolated", "--python", ">=3.12", "--from", "ouroboros-ai[mcp]==0.38.2", '
             '"ouroboros", "mcp", "serve"]' in contents
         )
+
+    def test_register_codex_mcp_server_refreshes_generated_release_pin(
+        self, tmp_path: Path
+    ) -> None:
+        """A subsequent setup updates its own release pin and stays idempotent."""
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._is_source_tree_ouroboros_build", return_value=False
+            ),
+            patch("ouroboros.cli.commands.setup.shutil.which", return_value="/usr/local/bin/uvx"),
+            patch(
+                "ouroboros.cli.commands.setup.importlib_metadata.version", return_value="0.51.15"
+            ),
+        ):
+            assert setup_cmd._register_codex_mcp_server()
+        config = tmp_path / ".codex" / "config.toml"
+        assert "ouroboros-ai[mcp]==0.51.15" in config.read_text()
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._is_source_tree_ouroboros_build", return_value=False
+            ),
+            patch("ouroboros.cli.commands.setup.shutil.which", return_value="/usr/local/bin/uvx"),
+            patch(
+                "ouroboros.cli.commands.setup.importlib_metadata.version", return_value="0.51.16"
+            ),
+        ):
+            assert setup_cmd._register_codex_mcp_server()
+            updated = config.read_text()
+            assert "ouroboros-ai[mcp]==0.51.16" in updated
+            assert "ouroboros-ai[mcp]==0.51.15" not in updated
+            assert setup_cmd._register_codex_mcp_server()
+            assert config.read_text() == updated
 
     def test_register_codex_mcp_server_uses_direct_executable_for_dev_build(
         self, tmp_path: Path
@@ -598,6 +636,7 @@ class TestCodexSetup:
                 "ouroboros.cli.commands.setup.importlib_metadata.version",
                 return_value="0.51.4",
             ),
+            patch("ouroboros.cli.commands.setup.shutil.which", return_value="/usr/local/bin/uvx"),
             patch(
                 "ouroboros.cli.commands.setup._command_matches_path_program",
                 return_value=True,
@@ -607,7 +646,7 @@ class TestCodexSetup:
 
         contents = codex_config.read_text(encoding="utf-8")
         assert "/home/operator/.local/bin/ouroboros" not in contents
-        assert "ouroboros-ai[mcp]" in contents
+        assert "ouroboros-ai[mcp]==0.51.4" in contents
 
     def test_register_codex_mcp_server_preserves_path_direct_with_mismatched_env(
         self, tmp_path: Path
@@ -3470,7 +3509,8 @@ class TestCodexSetup:
             *,
             _seen: frozenset[Path] = frozenset(),
         ) -> setup_cmd._PathSnapshot:
-            if path.name == "auto" and path.is_dir() and not path.is_relative_to(tmp_path):
+            # The new generation is snapshotted from the staged tree.
+            if path.name.startswith(".ouroboros-auto.") and path.name.endswith(".tmp"):
                 raise OSError("synthetic packaged skill snapshot failure")
             return original_snapshot(path, _seen=_seen)
 
@@ -11698,19 +11738,19 @@ class TestCopilotSetup:
             ResolveRequest(prompt=f"ooo {completed_value}", cwd=session_cwd)
         )
         assert isinstance(resolved, Resolved)
-        assert resolved.mcp_tool == "ouroboros_execute_seed"
+        assert resolved.mcp_tool == "ouroboros_start_execute_seed"
         assert resolved.mcp_args["seed_path"] == absolute_path
 
         with patch("pathlib.Path.home", return_value=tmp_path):
             loaded = await ExecuteSeedHandler._resolve_seed_content(
                 arguments={"seed_path": absolute_path},
                 resolved_cwd=session_cwd,
-                tool_name="ouroboros_execute_seed",
+                tool_name="ouroboros_start_execute_seed",
             )
             bare_name = await ExecuteSeedHandler._resolve_seed_content(
                 arguments={"seed_path": "demo.yaml"},
                 resolved_cwd=session_cwd,
-                tool_name="ouroboros_execute_seed",
+                tool_name="ouroboros_start_execute_seed",
             )
 
         assert loaded.is_ok
@@ -11764,7 +11804,7 @@ class TestCopilotSetup:
             f"Pi full-prefix replacement produced undispatchable command: "
             f"{dispatched_text!r} -> {resolved!r}"
         )
-        assert resolved.mcp_tool == "ouroboros_execute_seed"
+        assert resolved.mcp_tool == "ouroboros_start_execute_seed"
         assert resolved.mcp_args["seed_path"] == absolute_path
 
         # --- Verify the OLD (broken) behavior would fail ---
@@ -11806,7 +11846,7 @@ class TestCopilotSetup:
             f"Quoted-path completion produced undispatchable command: "
             f"{dispatched_text!r} -> {resolved!r}"
         )
-        assert resolved.mcp_tool == "ouroboros_execute_seed"
+        assert resolved.mcp_tool == "ouroboros_start_execute_seed"
         assert resolved.mcp_args["seed_path"] == absolute_path
 
 

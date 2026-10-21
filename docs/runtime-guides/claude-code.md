@@ -11,6 +11,11 @@ Ouroboros can use **Claude Code** as a runtime backend, leveraging your **Claude
 
 > For installation and first-run onboarding, see [Getting Started](../getting-started.md).
 
+The `ooo` skill remains available for onboarding discovery. The one-shot
+`setup`, `tutorial`, and `welcome` skills disable automatic model invocation in
+Claude Code; invoke `/ouroboros:setup`, `/ouroboros:tutorial`, or
+`/ouroboros:welcome` explicitly to run their existing flows.
+
 > **Command context guide:** This page contains commands for two different contexts:
 > - **Terminal** -- commands you run in your regular shell (bash, zsh, etc.)
 > - **Inside Claude Code session** -- `ooo` skill commands that only work inside an active Claude Code session (start one with `claude`)

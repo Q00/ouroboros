@@ -725,9 +725,10 @@ async def _run_orchestrator(
         project_dir: Optional explicit project directory for seed path resolution.
         project_fallback_dir: Directory to stand in for the Seed file's folder
             when the Seed itself does not say where it belongs.
-        check_package: ``--check-package`` / ``--no-check-package``; ``None``
-            defers to ``OUROBOROS_CHECK_PACKAGE``, then ``boundary.check_package``,
-            then the default, which is on (``ouroboros.boundary.switch``).
+        check_package: ``--check-package`` (``decide``) / ``--no-check-package``
+            (``off``); ``None`` defers to ``OUROBOROS_CHECK_PACKAGE``, then
+            ``boundary.check_package``, then the default, which is ``record``
+            (``ouroboros.boundary.switch``).
         auto_evaluate: Override ``execution.auto_evaluate`` for this run.
         auto_evolve: Override ``execution.auto_evolve`` for this run.
     """
@@ -1083,13 +1084,14 @@ async def _prepare_check_package_boundary(
     runtime_backend: str,
     execution_model: str | None,
 ) -> Any:
-    """Resolve the check-package switch and, when on, prepare the package before dispatch.
+    """Resolve the check-package switch and, unless off, prepare the package before dispatch.
 
     Returns the run's ``CheckPackageRun``. With the switch ``off`` nothing here
-    calls a model, writes an event, or changes the runner. With it ``on`` the
+    calls a model, writes an event, or changes the runner. Otherwise the
     package is frozen and admitted before the worker starts, and the runner
-    gets the acceptance authority that decides covered criteria before the
-    terminal status is persisted.
+    gets the acceptance authority, which in ``decide`` mode decides covered
+    criteria before the terminal status is persisted and in ``record`` mode
+    (the default) only records what it would have decided.
     """
     from ouroboros.boundary.ledger import BoundaryOrderError
     from ouroboros.boundary.run_control import CheckPackageRun
@@ -1231,9 +1233,12 @@ def workflow(
             "--check-package/--no-check-package",
             help=(
                 "Before the worker starts, build executable checks from the acceptance "
-                "criteria, admit them on the current tree, and let them decide the "
-                "criteria they cover. On by default; --no-check-package opts out (or "
-                "OUROBOROS_CHECK_PACKAGE=off, or boundary.check_package: off in config). "
+                "criteria and admit them on the current tree. By default they only "
+                "record what they would have decided on the finished work (record mode); "
+                "--check-package lets them decide the criteria they cover (or "
+                "OUROBOROS_CHECK_PACKAGE=decide, or boundary.check_package: decide in "
+                "config); --no-check-package turns them off (or OUROBOROS_CHECK_PACKAGE=off, "
+                "or boundary.check_package: off). "
                 "The checks are model-written Python scripts. They run on throwaway "
                 "copies of the project with the project's interpreter, a per-check "
                 "timeout, and an allowlisted environment, confined by the execution "

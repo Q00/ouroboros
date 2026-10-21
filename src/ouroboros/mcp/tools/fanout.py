@@ -884,7 +884,9 @@ def prepare_fanout_results(
         key for key in record.expected_keys if key in declared and key not in provided
     )
 
-    contract_violations = _contract_violations(record, provided)
+    provided, decoding_violations = _decode_contracted_result_strings(record, provided)
+    contract_violations = dict(decoding_violations)
+    contract_violations.update(_contract_violations(record, provided))
     for key in contract_violations:
         provided.pop(key, None)
 
@@ -1101,6 +1103,48 @@ def _contract_violations(
         if errors:
             violations[lane_id] = errors
     return violations
+
+
+def _decode_contracted_result_strings(
+    record: FanoutRecord,
+    provided: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, list[str]]]:
+    """Decode JSON object strings before validating contracted lane outputs.
+
+    Only lanes whose answer contract is declared receive this interpretation;
+    uncontracted advisory text remains ordinary text. Invalid contracted values
+    are removed from the candidate mapping and reported without echoing their
+    contents, so no later validator can mistake an unparsed string for a checked
+    object.
+    """
+    normalized = dict(provided)
+    violations: dict[str, list[str]] = {}
+    if record.kind != FANOUT_KIND_QUESTION_ADVISORY:
+        return normalized, violations
+
+    contracts = _canonical_lane_contracts(
+        str(record.synthesizer_input.get("tool_name") or "ouroboros_interview")
+    )
+    for lane_id, output in provided.items():
+        if lane_id not in contracts or not isinstance(output, str):
+            continue
+        try:
+            decoded = json.loads(output, parse_constant=_reject_non_json_constant)
+        except (json.JSONDecodeError, ValueError, RecursionError):
+            normalized.pop(lane_id, None)
+            violations[lane_id] = ["output is not valid JSON"]
+            continue
+        if not isinstance(decoded, Mapping):
+            normalized.pop(lane_id, None)
+            violations[lane_id] = ["output is not a JSON object"]
+            continue
+        normalized[lane_id] = dict(decoded)
+    return normalized, violations
+
+
+def _reject_non_json_constant(value: str) -> Any:
+    """Reject Python's non-standard NaN/Infinity extensions to JSON."""
+    raise ValueError(f"{value} is not a JSON constant")
 
 
 def _aggregate_violations(output: Any) -> list[str]:

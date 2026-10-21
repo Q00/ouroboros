@@ -1080,6 +1080,62 @@ def test_v7_sandbox_migration_rejects_unsealed_semantics(
         _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
 
+@pytest.mark.parametrize("mode", ["decide", "record"])
+def test_execution_semantics_seal_the_transcript_verifier_mode(mode: str) -> None:
+    runner = _runner()
+    runner._transcript_verifier = mode
+    assert runner._execution_semantics_contract()["transcript_verifier"] == mode
+
+
+@pytest.mark.parametrize(("sealed", "live"), [("record", "decide"), ("decide", "record")])
+def test_resume_keeps_the_run_own_transcript_verifier_mode(sealed: str, live: str) -> None:
+    """A resume takes the sealed mode, never the live config: acceptance does not change mid-run."""
+    original = _runner()
+    original._transcript_verifier = sealed
+    persisted = original._build_execution_contract(project_identity=original._project_identity())
+
+    resumed = _runner()
+    resumed._transcript_verifier = live
+    resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+    assert resumed._transcript_verifier == sealed
+    assert resumed._execution_contract["execution_semantics"]["transcript_verifier"] == sealed
+
+
+@pytest.mark.parametrize("live", ["decide", "record"])
+def test_v8_execution_semantics_migrate_to_the_deciding_verifier(live: str) -> None:
+    """A run sealed before the setting existed decided; it resumes deciding."""
+    original = _runner()
+    persisted = copy.deepcopy(
+        original._build_execution_contract(project_identity=original._project_identity())
+    )
+    semantics = persisted["execution_semantics"]
+    semantics["version"] = 8
+    del semantics["transcript_verifier"]
+    persisted["frugality_proof"]["execution_semantics_fingerprint"] = (
+        OrchestratorRunner._execution_semantics_fingerprint(semantics)
+    )
+
+    resumed = _runner()
+    resumed._transcript_verifier = live
+    resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+    migrated = resumed._execution_contract["execution_semantics"]
+    assert migrated["version"] == CURRENT_EXECUTION_SEMANTICS_VERSION
+    assert migrated["transcript_verifier"] == "decide"
+    assert resumed._transcript_verifier == "decide"
+
+
+def test_v8_transcript_verifier_migration_rejects_unsealed_semantics() -> None:
+    original = _runner()
+    persisted = copy.deepcopy(
+        original._build_execution_contract(project_identity=original._project_identity())
+    )
+    persisted["execution_semantics"]["version"] = 8
+    del persisted["execution_semantics"]["transcript_verifier"]
+
+    with pytest.raises(OrchestratorError, match="invalid pre-transcript-verifier contract"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
 def test_resume_rejects_changed_verify_shell_authority() -> None:
     original = _runner()
     original._verify_shell_identity = {
@@ -1853,10 +1909,10 @@ def test_auto_contract_resumes_on_the_same_aliases(
     assert resumed._adapter._model == "sonnet"
 
 
-def test_auto_sentinel_ladder_keeps_an_enabled_route_contract(
+def test_auto_gemini_ladder_keeps_native_alias_route_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Tiers that share the ``default`` sentinel still form a Route B registry."""
+    """Gemini CLI aliases survive the persisted Route B contract and resume."""
     monkeypatch.delenv("OUROBOROS_PIN_MODELS", raising=False)
 
     def _gemini_runner() -> OrchestratorRunner:
@@ -1871,10 +1927,10 @@ def test_auto_sentinel_ladder_keeps_an_enabled_route_contract(
     )
     routing = persisted["model_routing"]
     assert routing["enabled"] is True
-    assert routing["resolved_models"]["tiers"] == {"frugal": "default", "standard": "default"}
+    assert routing["resolved_models"]["tiers"] == {"frugal": "flash", "standard": "pro"}
     projection = routing["route_compat"]["projection"]
     assert projection is not None
-    assert [c["model"] for c in projection["registry"]["candidates"]] == ["default", "default"]
+    assert [c["model"] for c in projection["registry"]["candidates"]] == ["flash", "pro"]
 
     resumed = _gemini_runner()
     changed = resumed._restore_execution_contract(
@@ -1884,6 +1940,8 @@ def test_auto_sentinel_ladder_keeps_an_enabled_route_contract(
 
     assert changed is False
     assert resumed._execution_contract == persisted
+    assert resumed._model_router is not None
+    assert dict(resumed._model_router.tier_models) == {"frugal": "flash", "standard": "pro"}
 
 
 def test_resume_rejects_resolved_tier_the_config_cannot_produce() -> None:

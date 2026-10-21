@@ -1162,3 +1162,93 @@ def test_run_auto_wires_the_run_successor_stack(tmp_path) -> None:
     # generation with "EvolutionaryLoop not configured", so a non-null handler
     # is not evidence that the chain completes.
     assert start_ralph._evolve_handler.evolutionary_loop is not None
+
+
+class _CapturingAutoPipeline:
+    """Record the run starter the CLI hands to the pipeline, then stop."""
+
+    captured: dict[str, object] = {}
+
+    def __init__(self, *_args, **kwargs) -> None:
+        type(self).captured["run_starter"] = kwargs["run_starter"]
+
+    async def run(self, state):
+        type(self).captured["cwd"] = state.cwd
+        return AutoPipelineResult(
+            status="blocked",
+            auto_session_id=state.auto_session_id,
+            phase=str(state.phase.value),
+        )
+
+
+def _git_checkout(path) -> None:
+    import subprocess
+
+    (path / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+
+
+@pytest.mark.parametrize("worktree_policy", ["current", "none"])
+def test_cli_auto_run_handoff_uses_caller_checkout_for_current_policy(
+    tmp_path, monkeypatch, worktree_policy: str
+) -> None:
+    """``--worktree-policy current/none`` runs the Seed in the caller's checkout.
+
+    The execution job must not create a managed task worktree of its own: the
+    auto session's policy is the only isolation authority.
+    """
+    _git_checkout(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _CapturingAutoPipeline.captured = {}
+
+    with (
+        patch("ouroboros.cli.commands.auto._safe_default_cwd", return_value=tmp_path),
+        patch("ouroboros.cli.commands.auto.AutoPipeline", _CapturingAutoPipeline),
+    ):
+        asyncio.run(
+            _run_auto(
+                goal="build a CLI",
+                resume=None,
+                runtime=None,
+                max_interview_rounds=1,
+                max_repair_rounds=1,
+                skip_run=False,
+                worktree_policy=worktree_policy,
+            )
+        )
+
+    run_starter = _CapturingAutoPipeline.captured["run_starter"]
+    assert run_starter.use_worktree is False
+    assert run_starter.cwd == str(tmp_path)
+    assert _CapturingAutoPipeline.captured["cwd"] == str(tmp_path)
+
+
+def test_cli_auto_run_handoff_reuses_the_auto_worktree(tmp_path) -> None:
+    """The default coding path makes one worktree (auto's), never a second one."""
+    workspace = _managed_workspace(tmp_path)
+    _CapturingAutoPipeline.captured = {}
+
+    def fake_ensure(state):
+        state.cwd = workspace.effective_cwd
+        return workspace
+
+    with (
+        patch("ouroboros.cli.commands.auto._safe_default_cwd", return_value=tmp_path),
+        patch("ouroboros.cli.commands.auto.ensure_auto_worktree", side_effect=fake_ensure),
+        patch("ouroboros.cli.commands.auto.release_auto_worktree"),
+        patch("ouroboros.cli.commands.auto.AutoPipeline", _CapturingAutoPipeline),
+    ):
+        asyncio.run(
+            _run_auto(
+                goal="build a CLI",
+                resume=None,
+                runtime=None,
+                max_interview_rounds=1,
+                max_repair_rounds=1,
+                skip_run=False,
+            )
+        )
+
+    run_starter = _CapturingAutoPipeline.captured["run_starter"]
+    assert run_starter.use_worktree is False
+    assert run_starter.cwd == workspace.effective_cwd

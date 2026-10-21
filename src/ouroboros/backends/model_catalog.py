@@ -34,6 +34,7 @@ from ouroboros.backends.capabilities import (
 )
 from ouroboros.codex.home import resolve_codex_home
 from ouroboros.config._model_defaults import (
+    CODEX_TIER_MODELS,
     DEFAULT_HAIKU_MODEL,
     DEFAULT_OPUS_MODEL,
     DEFAULT_SONNET_MODEL,
@@ -108,11 +109,12 @@ class BackendModelCatalog:
         return self.models[0] if self.models else DEFAULT_MODEL_SENTINEL
 
 
-# Hand-curated additions per backend, appended after the default entry. Keep entries verifiable: the codex ids below were confirmed
-# against a live `opencode models` listing of the OpenAI catalog.
+# Native catalog additions, appended after the CLI-owned default. The Codex
+# candidates come from its official model guide, not another CLI's catalog;
+# account/provider availability is still determined by the target runtime.
 _EXTRA_KNOWN_MODELS: dict[str, tuple[str, ...]] = {
     "claude": (DEFAULT_HAIKU_MODEL,),
-    "codex": ("gpt-5-codex", "gpt-5", "gpt-5-mini"),
+    "codex": tuple(CODEX_TIER_MODELS.values()),
     # Grok Build model slugs, after the CLI-owned "default" sentinel. Verified
     # against a live `grok models` listing (grok-build, grok-composer-2.5-fast).
     "grok": ("grok-build", "grok-composer-2.5-fast"),
