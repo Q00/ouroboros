@@ -5048,14 +5048,6 @@ class ParallelACExecutor:
 
     @staticmethod
     def _coordinator_review_may_mutate_workspace(review: Any) -> bool:
-        """Return whether a coordinator review could have changed the workspace.
-
-        Coordinator sessions are allowed to use ``Edit`` and ``Bash``.  The
-        structured review summary is not treated as proof of a mutation: a
-        model can report a proposed fix without applying one.  The caller also
-        compares workspace digests around the review, so direct writes remain
-        observable even when a runtime omits tool messages.
-        """
         if review is None:
             return False
         for message in getattr(review, "messages", ()) or ():
@@ -5141,6 +5133,9 @@ class ParallelACExecutor:
                         digest.update(b"\0")
                         digest.update(str(stat.st_mode).encode("ascii"))
                         digest.update(b"\0")
+                        digest.update(
+                            f"{stat.st_ino}:{stat.st_mtime_ns}:{stat.st_ctime_ns}\0".encode("ascii")
+                        )
                         with path.open("rb") as handle:
                             while chunk := handle.read(1024 * 1024):
                                 digest.update(chunk)

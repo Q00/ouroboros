@@ -2541,8 +2541,9 @@ async def test_final_settlement_replays_stale_command_against_final_workspace(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ["new_file", "same_content", "preserved_mtime"])
 async def test_settlement_replay_mutation_invalidates_every_provisional_success(
-    tmp_path: Any,
+    tmp_path: Any, mutation: str
 ) -> None:
     """A replay that mutates the workspace poisons the whole success set.
 
@@ -2553,12 +2554,20 @@ async def test_settlement_replay_mutation_invalidates_every_provisional_success(
     individual failure for the replayed AC.
     """
     counter = tmp_path.parent / f"settle-mutating-replay-{tmp_path.name}.txt"
+    mutations = {
+        "new_file": "Path('replay-side-effect.txt').write_text('mutated')",
+        "same_content": "(lambda p: p.write_text(p.read_text()))(Path('sibling.txt'))",
+        "preserved_mtime": (
+            "(__import__('shutil').copy2('sibling.txt', counter.with_suffix('.copy')), "
+            "__import__('shutil').copy2(counter.with_suffix('.copy'), 'sibling.txt'))"
+        ),
+    }
     command = (
         'python3 -c "from pathlib import Path; '
         f"counter=Path({str(counter)!r}); "
         "n=int(counter.read_text()) if counter.exists() else 0; "
         "counter.write_text(str(n+1)); "
-        "n and Path('replay-side-effect.txt').write_text('mutated'); "
+        f"n and ({mutations[mutation]}); "
         'raise SystemExit(0)"'
     )
     executor = _make_executor(working_directory=str(tmp_path))
