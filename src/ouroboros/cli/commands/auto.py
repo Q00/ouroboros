@@ -1465,6 +1465,10 @@ def _print_result(
     if result.seed_path:
         console.print(f"Seed: {result.seed_path}")
     console.print(f"Seed origin: {result.seed_origin}")
+    if result.open_questions:
+        console.print("Open questions (kept in the Seed, not given to the worker):")
+        for item in result.open_questions:
+            console.print(f"  - {_rich_escape(item)}")
     if result.job_id or result.execution_id or result.run_session_id:
         console.print("Execution started:")
         console.print(f"  Job ID: {result.job_id}")

@@ -370,9 +370,8 @@ class AutoPipelineResult:
     last_lateral_approach_summary: str | None = None
     last_lateral_text: str | None = None
     assumptions: tuple[str, ...] = ()
-    # PR-C2 / #1157: auditable companion to ``assumptions`` that carries the
-    # ledger source (``assumption`` / ``inference`` / ``conservative_default``)
-    # and confidence per entry. Additive — ``assumptions`` is unchanged.
+    open_questions: tuple[str, ...] = ()  # the Seed's, verbatim; never in worker input
+    # PR-C2 / #1157: ``assumptions`` with ledger source and confidence per entry.
     assumption_sources: tuple[AssumptionRecord, ...] = ()
     non_goals: tuple[str, ...] = ()
     defaulted_sections: tuple[str, ...] = ()
@@ -2526,6 +2525,7 @@ class AutoPipeline:
             last_lateral_approach_summary=state.last_lateral_approach_summary,
             last_lateral_text=state.last_lateral_text,
             assumptions=tuple(ledger.assumptions()),
+            open_questions=tuple(seed_artifact.get("open_questions", ())),
             assumption_sources=tuple(ledger.assumption_sources()),
             non_goals=tuple(ledger.non_goals()),
             defaulted_sections=tuple(ledger.summary().get("defaulted_sections", ())),
