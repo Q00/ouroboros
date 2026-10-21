@@ -45,6 +45,9 @@ shell interpreter.
 ## Arguments
 
 - `<target-dir>` (required) — directory to scan. Relative or absolute.
+  This is a read target, not the report destination. Run from the harness
+  checkout root with `CHECKPOINT_ROOT` unset or equal to that root; keep that
+  working directory and publication root even for an external target.
 - `--focus <area>` — scan only this focus area (repeatable). Skips recon.
 - `--single` — no subagent fan-out; one sequential pass. Use on tiny targets
   or when debugging the prompt.
@@ -222,12 +225,17 @@ confidence < 0.4, for the summary line.
 
 ## Step 4 — Write output
 
-Write **both** files to `<target-dir>/` (Ouroboros adaptation: when the
-target is `src/ouroboros`, write them to `docs/security/` instead so scanner
-output never lands inside the shipped package). Stage each report in a new
+Write **both** files to `docs/security/` under the harness checkout root for
+every target, including nested and external absolute targets (Ouroboros
+adaptation). These paths are covered by the harness checkout's `.gitignore`;
+never derive the output path from the scanned target. Stage each report in a new
 operator-controlled payload file under the
 [trusted payload staging contract](../README.md#trusted-payload-staging), then publish through
-`python3 .claude/skills/_lib/checkpoint.py append <output-file> --replace --from <payload-file>`.
+`python3 .claude/skills/_lib/checkpoint.py append docs/security/VULN-FINDINGS.json --replace --from "<payload-file>"`
+and
+`python3 .claude/skills/_lib/checkpoint.py append docs/security/VULN-FINDINGS.md --replace --from "<payload-file>"`.
+Use a separate payload for each format. If the working directory or publication
+root cannot be established as the harness checkout root, stop before writing.
 Do not use Write directly on the final report. Stop if the helper refuses a path.
 The two report formats are:
 
@@ -271,7 +279,7 @@ Tell the user:
 1. Counts: N findings (H/M/L split, X low-confidence), across K focus
    areas, from M source files.
 2. Top 3 by confidence, one line each.
-3. Next step: `> /triage <target-dir>/VULN-FINDINGS.json --repo <target-dir>`
+3. Next step: `> /triage docs/security/VULN-FINDINGS.json --repo <target-dir>`
 4. Remind: these are **static candidates**, not verified. `/triage` is the
    verification step in this repository (Ouroboros adaptation).
 
@@ -283,7 +291,8 @@ Tell the user:
 - **Don't fabricate line numbers.** Every `file:line` you emit must be
   something you Read or Grep'd. If unsure of the exact line, cite the
   function and say so in the description.
-- **Stay in `<target-dir>`.** Don't follow symlinks or `..` out of it.
+- **Keep source inspection in `<target-dir>`.** Don't follow symlinks or `..`
+  out of it. Checkpoints and reports use the separate harness publication root.
 - Findings are candidates for `/triage`, not final verdicts. **This skill
   never drops a finding** — Step 3b only ranks. `/triage` does the rigorous
   N-vote verification and is where false positives actually get removed.

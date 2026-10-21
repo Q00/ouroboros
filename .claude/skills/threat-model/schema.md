@@ -5,7 +5,8 @@
 > with `cat .claude/skills/threat-model/schema.md` via Bash.
 
 Both `/threat-model interview` and `/threat-model bootstrap` write
-this file to `<target-dir>/THREAT_MODEL.md`. The format is markdown so humans
+this file to the harness checkout's `docs/security/THREAT_MODEL.md`, regardless
+of the read target. The format is markdown so humans
 can read and edit it, but the section headings, table columns, and enum values
 below are a contract: keep the headings and column order exactly as shown so
 downstream tooling can parse them with regex.

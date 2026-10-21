@@ -49,7 +49,7 @@ threat's likelihood score.
 
 This skill performs **static analysis only**. It reads source, git history,
 and any vulnerability reports the user supplies, and writes a single output
-file (`<target-dir>/THREAT_MODEL.md`). It does not build, execute, fuzz, or
+file (`docs/security/THREAT_MODEL.md`). It does not build, execute, fuzz, or
 modify the target, and does not make network requests against the target's
 infrastructure.
 
@@ -119,12 +119,12 @@ instead of describing the system from scratch.
    rather start cold?" Only proceed if they opt in; otherwise fall back to
    `interview.md`.
 2. Read `bootstrap.md` and follow it end-to-end. Write
-   `<target-dir>/THREAT_MODEL.md`.
+   `docs/security/THREAT_MODEL.md`.
 3. Immediately continue into interview mode: read `interview.md` and follow
-   it with `--seed <target-dir>/THREAT_MODEL.md` in effect. The section 6 open
+   it with `--seed docs/security/THREAT_MODEL.md` in effect. The section 6 open
    questions from bootstrap become your Q1-Q4 prompts; the owner confirms,
    corrects, and adds rather than starting from nothing.
-4. Overwrite `<target-dir>/THREAT_MODEL.md` with the refined model. Set
+4. Overwrite `docs/security/THREAT_MODEL.md` with the refined model. Set
    provenance `mode: bootstrap-then-interview`.
 
 The same flow is available manually: run `bootstrap` first, then
@@ -134,16 +134,19 @@ The same flow is available manually: run `bootstrap` first, then
 
 ## Step 2 — Shared output contract
 
-All modes MUST emit `<target-dir>/THREAT_MODEL.md` conforming to `schema.md`
+All modes MUST emit `docs/security/THREAT_MODEL.md` conforming to `schema.md`
 in this directory. **Read `schema.md` immediately before you write the file**,
 not at routing time; in interview mode the gap between routing and emit can be
 many turns, and an early read will be evicted before it's used.
 
-Ouroboros adaptation: when scanning `src/ouroboros`, publish to
-`docs/security/THREAT_MODEL.md`. For every mode, stage the content in a new
+Ouroboros adaptation: every target uses the harness checkout's
+`docs/security/THREAT_MODEL.md`. Run from that checkout root with
+`CHECKPOINT_ROOT` unset or equal to it; never change the publication root to
+match the read target. This owner-facing model is intentionally tracked, unlike
+ignored scan and triage findings. For every mode, stage the content in a new
 operator-controlled payload file under the
 [trusted payload staging contract](../README.md#trusted-payload-staging) and publish with
-`python3 .claude/skills/_lib/checkpoint.py append <output-file> --replace --from <payload-file>`.
+`python3 .claude/skills/_lib/checkpoint.py append docs/security/THREAT_MODEL.md --replace --from "<payload-file>"`.
 Do not use Write directly on the final report, and stop if the helper refuses.
 
 After writing the file, print to the user:

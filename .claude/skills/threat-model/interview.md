@@ -180,10 +180,9 @@ Goal: validate before writing.
 
 ## Emit
 
-Publish `<target-dir>/THREAT_MODEL.md` per `schema.md` through the shared
+Publish `docs/security/THREAT_MODEL.md` per `schema.md` through the shared
 `checkpoint.py append --replace --from` output contract and
-[trusted payload staging contract](../README.md#trusted-payload-staging). For the Ouroboros
-target, use `docs/security/THREAT_MODEL.md`. Set `## 7. Provenance`:
+[trusted payload staging contract](../README.md#trusted-payload-staging). All targets use the harness checkout's output path. Set `## 7. Provenance`:
 
 ```
 - mode: interview

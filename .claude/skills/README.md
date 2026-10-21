@@ -9,8 +9,11 @@ skills do write local checkpoints and reports. The Docker/ASAN execution pipelin
 Initial edits adapted path/target defaults and are marked "Ouroboros adaptation"
 in-file: `vuln-pipeline` pointers replaced with "/triage is the verification
 step", default target `src/ouroboros`, threat model read from
-`docs/security/THREAT_MODEL.md`, scanner output written under `docs/security/`
-(never inside the shipped package). Local hardening also binds checkpoint reads,
+`docs/security/THREAT_MODEL.md`, scanner output written under the harness
+checkout's `docs/security/` for all targets, including external absolute paths
+(never deriving the output path from the scanned target). Run from that checkout root, with
+`CHECKPOINT_ROOT` unset or equal to it. Target selection grants read scope only;
+it never changes the working directory or publication root. Local hardening binds checkpoint reads,
 writes, append and reset to no-follow directory descriptors, and creates exclusive
 random temporary files before atomic publication. It uses only the standard
 library so scanning a repository does not import or execute its target package.

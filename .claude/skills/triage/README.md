@@ -31,7 +31,12 @@ cp -r .claude/skills/triage ~/.claude/skills/
 
 ## Usage
 
-From a Claude Code session in the target repo:
+From a Claude Code session in the harness checkout root (keep
+`CHECKPOINT_ROOT` unset or equal to that root). Use `--repo <target-dir>` for
+source inspection in another repository; keep reports in this checkout:
+
+A user-scoped skill copy does not install the shared helper or change this
+working-directory requirement.
 
 ```
 /triage path/to/findings.json
@@ -60,12 +65,12 @@ Common invocations:
 
 ## Output
 
-- `./TRIAGE.json` — every input finding, annotated with `verdict`,
+- `docs/security/TRIAGE.json` — every input finding, annotated with `verdict`,
   `verify_verdict`, recomputed `severity`, `severity_alignment` vs. the
   scanner's claim, `preconditions`, `vote_breakdown`, `rationale` citing
   file:line evidence, `owner_hint`, and `duplicate_of` where applicable.
   Sorted by what to act on first.
-- `./TRIAGE.md` — reviewer-facing report: an "Act on these" section with
+- `docs/security/TRIAGE.md` — reviewer-facing report: an "Act on these" section with
   one entry per confirmed finding, then a "Dropped" table explaining every
   rejection.
 

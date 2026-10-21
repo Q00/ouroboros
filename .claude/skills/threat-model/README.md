@@ -44,6 +44,11 @@ cp -r .claude/skills/threat-model ~/.claude/skills/
 
 ## Usage
 
+Run from the harness checkout root, with `CHECKPOINT_ROOT` unset or equal to
+that root. A user-scoped skill copy does not install the shared helper or
+change this working-directory requirement. Relative and absolute targets are
+read scopes; reports remain in this checkout's `docs/security/`.
+
 ### Bootstrap (derive from target, git history, advisories)
 
 Use when no application owner is available. Point it at a checkout and,
@@ -113,7 +118,8 @@ is scratch; add it to `.gitignore`.
 
 ## Output
 
-`<target-dir>/THREAT_MODEL.md` with seven sections: system context, assets,
+`docs/security/THREAT_MODEL.md` in the harness checkout for every target,
+with seven sections: system context, assets,
 entry points & trust boundaries, threats (the table), deprioritized, open
 questions, provenance. See `schema.md` for the full contract; a worked
 example lives at `docs/security/THREAT_MODEL.md` (Ouroboros adaptation:

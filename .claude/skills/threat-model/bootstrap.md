@@ -88,7 +88,7 @@ State files in `./.threat-model-state/`:
    stage's output JSON.
 2. Bash → `python3 .claude/skills/_lib/checkpoint.py save ./.threat-model-state <N> <name> --key stage --from <payload-file>`
 
-**End of run.** After writing `<target-dir>/THREAT_MODEL.md`, Bash:
+**End of run.** After writing `docs/security/THREAT_MODEL.md`, Bash:
 `python3 .claude/skills/_lib/checkpoint.py done ./.threat-model-state 5 --key stage`
 
 ---
@@ -370,7 +370,7 @@ Populate `## 6. Open questions` with everything the code couldn't tell you:
   upstream of this?")
 - Risk appetite ("Is DoS acceptable for this use case?")
 
-These seed a later `/threat-model interview --seed THREAT_MODEL.md`
+These seed a later `/threat-model interview --seed docs/security/THREAT_MODEL.md`
 pass.
 
 Populate `## 8. Recommended mitigations` from the Stage-3c working notes: one
@@ -383,7 +383,8 @@ class-level control exists.
 Assemble the file **incrementally** in `./.threat-model-state/THREAT_MODEL.md`
 (one chunk per `## N.` section; a stalled chunk loses that section, not the
 file), then publish the assembled result through the same confined helper.
-For the Ouroboros target, the final path is `docs/security/THREAT_MODEL.md`.
+For every target, the final path is the harness checkout's
+`docs/security/THREAT_MODEL.md`, as defined in the shared output contract.
 
 1. Stage the title and `## 1. Context` section in a new operator-controlled
    payload file under cwd, then run
@@ -395,7 +396,7 @@ For the Ouroboros target, the final path is `docs/security/THREAT_MODEL.md`.
      section's markdown.
    - Bash:
      `python3 .claude/skills/_lib/checkpoint.py append ./.threat-model-state/THREAT_MODEL.md --from <payload-file>`
-3. Run `python3 .claude/skills/_lib/checkpoint.py append <output-file> --replace --from ./.threat-model-state/THREAT_MODEL.md`.
+3. Run `python3 .claude/skills/_lib/checkpoint.py append docs/security/THREAT_MODEL.md --replace --from ./.threat-model-state/THREAT_MODEL.md`.
    Use the final output path from the shared output contract; stop on refusal.
 
 Set `## 7. Provenance`:
