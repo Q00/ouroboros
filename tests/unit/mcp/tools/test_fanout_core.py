@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from ouroboros.backends.capabilities import SubagentDispatchMode
+from ouroboros.mcp.server.adapter import MCPServerAdapter
 from ouroboros.mcp.tools import fanout as fanout_module
 from ouroboros.mcp.tools.authoring_handlers import (
     InterviewHandler,
@@ -66,6 +67,51 @@ def _bounded_submit(
 # --------------------------------------------------------------------------- #
 # build_fanout_subagents
 # --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_plugin_decision_can_submit_after_registry_reentry(tmp_path: Path) -> None:
+    registry_path = tmp_path / "fanouts"
+    producer = LateralThinkHandler(
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+        fanout_registry=FanoutRegistry(registry_path),
+    )
+    server = MCPServerAdapter()
+    server.register_tool(producer)
+    emitted = await server.call_tool(
+        "ouroboros_lateral_think",
+        {
+            "problem_context": "Choose a storage model",
+            "current_approach": "Use existing storage",
+            "mode": "decision",
+            "session_id": "s4",
+        },
+    )
+    assert emitted.is_ok
+    meta = emitted.unwrap().meta
+    children = meta["_subagents"]
+    submit, _memory = _bounded_submit(FanoutRegistry(registry_path), tmp_path)
+    reopened_server = MCPServerAdapter()
+    reopened_server.register_tool(submit)
+
+    result = await reopened_server.call_tool(
+        "ouroboros_submit_fanout_results",
+        {
+            "session_id": "s4",
+            "fanout_id": meta["fanout_id"],
+            "correlation_key": meta["result_correlation_key"],
+            "results": [
+                {"key": child["context"]["persona"], "content": "Use the existing storage."}
+                for child in children
+            ],
+        },
+    )
+
+    assert result.is_ok
+    assert result.unwrap().meta["contract_id"]
+    assert meta["dispatch_mode"] == "plugin"
+    assert "host_action" not in meta
 
 
 def test_build_fanout_subagents_builds_one_payload_per_request() -> None:
