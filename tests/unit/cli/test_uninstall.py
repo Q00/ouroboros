@@ -11,6 +11,7 @@ import textwrap
 import tomllib
 from unittest.mock import patch
 
+import pytest
 from typer.testing import CliRunner
 
 from ouroboros.cli.commands.uninstall import (
@@ -978,7 +979,10 @@ class TestConfigEncodingLocaleIndependence:
         assert result is False
         assert claude_md.read_bytes() == original
 
-    def test_dry_run_scan_tolerates_undecodable_claude_md(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("arguments", [["--dry-run"], ["--yes"], []])
+    def test_scan_warns_for_undecodable_claude_md(
+        self, tmp_path: Path, arguments: list[str]
+    ) -> None:
         """The pre-flight target scan must not abort on a CLAUDE.md it cannot decode."""
         (tmp_path / "CLAUDE.md").write_bytes(
             b"# \xff\xfe broken\n\n<!-- ooo:START -->\n<!-- ooo:END -->\n"
@@ -988,8 +992,11 @@ class TestConfigEncodingLocaleIndependence:
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("pathlib.Path.cwd", return_value=tmp_path),
         ):
-            result = runner.invoke(app, ["--dry-run"])
+            result = runner.invoke(app, arguments)
 
         assert result.exit_code == 0
         assert "UnicodeDecodeError" not in repr(result.exception)
         assert "Could not read" in result.output, result.output
+        assert (tmp_path / "CLAUDE.md").read_bytes() == (
+            b"# \xff\xfe broken\n\n<!-- ooo:START -->\n<!-- ooo:END -->\n"
+        )

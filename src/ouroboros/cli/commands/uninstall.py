@@ -482,11 +482,7 @@ def uninstall(
         if claude_md.exists() and "<!-- ooo:START -->" in claude_md.read_text(encoding="utf-8"):
             targets.append(f"CLAUDE.md integration block ({claude_md})")
     except UnicodeDecodeError:
-        # _remove_claude_md_block prints this warning when it skips the file, but
-        # --dry-run returns right after the scan, so the helper never runs there
-        # and the user would only see "Nothing to remove".
-        if dry_run:
-            print_warning(f"Could not read {claude_md} — skipping.")
+        print_warning(f"Could not read {claude_md} — skipping.")
     except OSError:
         pass
 
