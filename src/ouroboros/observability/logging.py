@@ -60,6 +60,7 @@ from ouroboros.core.security import (
     is_credential_shaped,
     is_opaque_credential_shaped,
     is_safe_structured_event_identifier,
+    is_sensitive_field,
     mask_sensitive_value,
     sanitize_for_logging,
 )
@@ -197,8 +198,7 @@ def _setup_file_handler(config: LoggingConfig) -> TimedRotatingFileHandler | Non
 
 
 _EXCEPTION_SECRET_QUOTED_ASSIGNMENT = re.compile(
-    r"""(?i)(["'])(password|passwd|api[-_]?key|access[-_]?token|client[-_]?secret|"""
-    r"""authorization|credential|secret|token)\1\s*:\s*(["'])(?:\\.|(?!\3).)*\3"""
+    r"""(?=((["'])((?:\\.|(?!\2).)*)\2\s*:\s*(["'])(?:\\.|(?!\4).)*\4))"""
 )
 _EXCEPTION_SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b(password|passwd|api[-_]?key|access[-_]?token|client[-_]?secret|"
@@ -209,11 +209,18 @@ _EXCEPTION_SECRET_ASSIGNMENT = re.compile(
 def _sanitize_exception_text(text: str) -> str:
     """Redact caller-supplied string arguments and exception notes."""
 
-    def replace_quoted(match: re.Match[str]) -> str:
-        key_quote, key, value_quote = match.group(1), match.group(2), match.group(3)
-        return f"{key_quote}{key}{key_quote}: {value_quote}<REDACTED>{value_quote}"
-
-    text = _EXCEPTION_SECRET_QUOTED_ASSIGNMENT.sub(replace_quoted, text)
+    parts: list[str] = []
+    consumed = 0
+    for match in _EXCEPTION_SECRET_QUOTED_ASSIGNMENT.finditer(text):
+        start, end = match.span(1)
+        key_quote, key, value_quote = match.group(2), match.group(3), match.group(4)
+        if start < consumed or not is_sensitive_field(key):
+            continue
+        parts.append(text[consumed:start])
+        parts.append(f"{key_quote}{key}{key_quote}: {value_quote}<REDACTED>{value_quote}")
+        consumed = end
+    parts.append(text[consumed:])
+    text = "".join(parts)
     text = _EXCEPTION_SECRET_ASSIGNMENT.sub(r"\1=<REDACTED>", text)
     return _mask_exception_tokens(text)
 

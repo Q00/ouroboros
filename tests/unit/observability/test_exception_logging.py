@@ -130,6 +130,76 @@ def test_preformatted_exception_text_retains_existing_redaction(
 
 
 @pytest.mark.parametrize("mode", [LogMode.PROD, LogMode.DEV])
+@pytest.mark.parametrize("source", ["argument", "note"])
+@pytest.mark.parametrize("encoding", ["repr", "json"])
+@pytest.mark.parametrize(
+    ("field", "sensitive"),
+    [
+        ("private_key", True),
+        ("refresh_token", True),
+        ("credentials", True),
+        ("X-PRIVATE-KEY", True),
+        ("upstream_auth", True),
+        ("bearer", True),
+        ("detail", False),
+    ],
+)
+def test_preformatted_fields_preserve_canonical_redaction_in_public_sinks(
+    mode: LogMode,
+    source: str,
+    encoding: str,
+    field: str,
+    sensitive: bool,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    # Given: the same ordinary-looking value is sensitive only under its field name.
+    configure_logging(LoggingConfig(mode=mode, log_dir=tmp_path))
+    payload = {field: "plainsecretabc", "diagnostic": "retry remains available"}
+    message = repr(payload) if encoding == "repr" else json.dumps(payload)
+    error = ValueError(message if source == "argument" else "operation failed")
+    error.add_note("retry remains available")
+    if source == "note":
+        error.add_note(message)
+
+    # When: the public logger renders the preformatted argument or note.
+    try:
+        raise error
+    except ValueError:
+        get_logger().exception("canonical.exception")
+
+    # Then: both real sinks mask sensitive fields and preserve safe diagnostics.
+    for output in (
+        capsys.readouterr().err,
+        (tmp_path / "ouroboros.log").read_text(encoding="utf-8"),
+    ):
+        assert ("plainsecretabc" not in output) is sensitive
+        assert "retry remains available" in output
+        assert "ValueError" in output
+        assert "test_preformatted_fields_preserve_canonical_redaction_in_public_sinks" in output
+
+
+@pytest.mark.parametrize("mode", [LogMode.PROD, LogMode.DEV])
+def test_nested_preformatted_field_is_not_hidden_by_safe_outer_field(
+    mode: LogMode, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    configure_logging(LoggingConfig(mode=mode, log_dir=tmp_path))
+    nested = str({"api_key": "plainsecretabc", "diagnostic": "retry remains available"})
+    try:
+        raise ValueError(str({"detail": nested}))
+    except ValueError:
+        get_logger().exception("nested.preformatted")
+
+    for output in (
+        capsys.readouterr().err,
+        (tmp_path / "ouroboros.log").read_text(encoding="utf-8"),
+    ):
+        assert "plainsecretabc" not in output
+        assert "retry remains available" in output
+        assert "ValueError" in output
+
+
+@pytest.mark.parametrize("mode", [LogMode.PROD, LogMode.DEV])
 @pytest.mark.parametrize("sink", ["console", "file"])
 @pytest.mark.parametrize("source", ["key", "note", "text_key", "note_key"])
 def test_exception_keys_and_notes_cannot_bypass_redaction(
