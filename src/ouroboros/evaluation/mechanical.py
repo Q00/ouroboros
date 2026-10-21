@@ -199,9 +199,11 @@ def parse_coverage_from_output(output: str) -> float | None:
     # cannot read (decimals, branch columns) makes the report ambiguous, so no
     # other row or "Coverage:" line may stand in for it.
     total_rows = [row for row in output.splitlines() if re.match(r"[ \t]*TOTAL\b", row)]
-    # A malformed prefix is still a candidate measurement: do not let another
-    # readable row hide it. Only alt_pattern decides whether it is supported.
-    coverage_rows = [row for row in output.splitlines() if re.match(r"[ \t]*Coverage[ \t]*:", row)]
+    # A numeric, punctuation-led or empty Coverage body is a measurement candidate,
+    # even with missing/malformed separators, numbers or units. Alphabetic prose
+    # remains nonmeasurement; only alt_pattern can grant a supported reading.
+    candidate_pattern = r"[ \t]*Coverage[ \t]*(?:$|\d|[^\w\s]|(?i:nan|inf(?:inity)?|percent)\b)"
+    coverage_rows = [row for row in output.splitlines() if re.match(candidate_pattern, row)]
     matches = [re.fullmatch(pattern, row) for row in total_rows]
     matches += [re.fullmatch(alt_pattern, row) for row in coverage_rows]
     if not all(matches):

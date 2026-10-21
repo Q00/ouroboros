@@ -496,6 +496,40 @@ _UNPARSED_COVERAGE_OUTPUTS = {
     "spaces before coverage colon": "TOTAL 100 20 80%\nCoverage  : 15%",
     "coverage prefix whitespace with CRLF": "TOTAL 100 20 80%\r\n\tCoverage \t: 15%\r\n",
     "spaced coverage colon with unknown value": "TOTAL 100 20 80%\nCoverage : unknown",
+    "requirement label alone": "Coverage requirement: 70%",
+    "requirement prose alone": "Coverage must reach 70%",
+    **{
+        name: f"TOTAL 100 20 80%\n{row}"
+        for name, row in {
+            "missing colon": "Coverage 15%",
+            "missing colon and whitespace": "Coverage15%",
+            "missing colon with CRLF": "\tCoverage\t15%\r",
+            "equals separator": "Coverage = 15%",
+            "semicolon separator": "Coverage; 15%",
+            "pipe separator": "Coverage | 15%",
+            "unrecognized punctuation separator": "Coverage ! 15%",
+            "duplicated separator": "Coverage:: 15%",
+            "missing numeric value": "Coverage %",
+            "missing entire measurement": "Coverage",
+            "missing numeric value after colon": "Coverage: %",
+            "negative numeric value": "Coverage -15%",
+            "explicit positive sign": "Coverage +15%",
+            "separated sign": "Coverage + 15%",
+            "duplicated sign": "Coverage --15%",
+            "missing integral part": "Coverage .15%",
+            "missing fractional part": "Coverage 15.%",
+            "duplicated decimal point": "Coverage 1..5%",
+            "comma decimal": "Coverage 15,0%",
+            "exponential value": "Coverage 1e1%",
+            "nonfinite value": "Coverage NaN%",
+            "infinite value": "Coverage inf%",
+            "missing percent unit": "Coverage 15",
+            "malformed percent unit": "Coverage 15pct",
+            "repeated percent unit": "Coverage 15%%",
+            "unit without value": "Coverage percent",
+            "numeric requirement suffix": "Coverage 15% required",
+        }.items()
+    },
 }
 
 
@@ -590,6 +624,14 @@ class TestUnparsedCoverageIsNotEvidence:
                 True,
                 MechanicalDisposition.EXECUTED_PASS,
             ),
+            (
+                "Coverage requirement: 70%\nTOTAL 100 20 80%",
+                True,
+                MechanicalDisposition.EXECUTED_PASS,
+            ),
+            ("Coverage must reach 70%\nCoverage: 80%", True, MechanicalDisposition.EXECUTED_PASS),
+            ("Coverage report follows\nCoverage: 80%", True, MechanicalDisposition.EXECUTED_PASS),
+            ("CoverageThreshold=70%\nCoverage: 80%", True, MechanicalDisposition.EXECUTED_PASS),
         ],
         ids=[
             "pytest-cov-below",
@@ -599,6 +641,10 @@ class TestUnparsedCoverageIsNotEvidence:
             "agreeing",
             "whitespace-after-colon",
             "requirement-beside-measurement",
+            "requirement-label-beside-measurement",
+            "requirement-prose-beside-measurement",
+            "report-prose-beside-measurement",
+            "different-identifier-beside-measurement",
         ],
     )
     async def test_readable_coverage_still_decides(
@@ -626,6 +672,10 @@ class TestUnparsedCoverageIsNotEvidence:
         "Coverage: 70% required",
         "Coverage: unknown",
         "TOTAL 100 20 80%\nCoverage : unknown",
+        "TOTAL 100 20 80%\nCoverage 15%",
+        "TOTAL 100 20 80%\nCoverage = 15%",
+        "TOTAL 100 20 80%\nCoverage .15%",
+        "TOTAL 100 20 80%\nCoverage 15pct",
     ],
 )
 @pytest.mark.parametrize("return_code", [0, 1])
