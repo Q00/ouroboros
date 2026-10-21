@@ -286,6 +286,60 @@ def test_measured_structured_shell_exit_takes_precedence_over_output_text(code: 
     assert message.data["is_error"] is (code != 0)
 
 
+@pytest.mark.parametrize("tool_name", ["bash", "custom-executor"])
+@pytest.mark.parametrize("name_in_meta", [False, True])
+def test_execute_failure_preserves_explicit_tool_name(tool_name: str, name_in_meta: bool) -> None:
+    name_fields = {"_meta": {"toolName": tool_name}} if name_in_meta else {"toolName": tool_name}
+    frame = update(
+        "tool_call",
+        toolCallId="shell",
+        kind="execute",
+        status="completed",
+        rawOutput={"contents": [{"type": "shell_exit", "shellId": "0", "exitCode": 1}]},
+        **name_fields,
+    )
+
+    message = CopilotAcpEventTranslator("session-1").translate(frame)[-1]
+
+    assert message.tool_name == tool_name
+    assert message.data["exit_code"] == 1
+    assert message.data["is_error"] is True
+    assert message.data["tool_result"]["isError"] is True
+
+
+def test_read_tool_named_bash_does_not_interpret_shell_footer() -> None:
+    text = "<shellId: 0 completed with exit code 1>"
+    frame = update(
+        "tool_call",
+        toolCallId="file",
+        kind="read",
+        toolName="Bash",
+        status="completed",
+        rawOutput={"content": text},
+    )
+
+    message = CopilotAcpEventTranslator("session-1").translate(frame)[-1]
+
+    assert message.content == text
+    assert "exit_code" not in message.data
+    assert message.data["is_error"] is False
+
+
+def test_bash_name_without_kind_retains_shell_footer_fallback() -> None:
+    frame = update(
+        "tool_call",
+        toolCallId="shell",
+        toolName="Bash",
+        status="completed",
+        rawOutput={"content": "<shellId: 0 completed with exit code 1>"},
+    )
+
+    message = CopilotAcpEventTranslator("session-1").translate(frame)[-1]
+
+    assert message.data["exit_code"] == 1
+    assert message.data["is_error"] is True
+
+
 def test_measured_native_task_is_named_without_guessing_missing_hierarchy() -> None:
     message = CopilotAcpEventTranslator("session-1").translate(
         update(

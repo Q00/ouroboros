@@ -334,7 +334,9 @@ class CopilotAcpEventTranslator:
         is_error = status == "failed"
         if isinstance(output, Mapping):
             is_error |= output.get("isError") is True or output.get("success") is False
-        codes = _exit_codes(output, is_shell=tool_name == "Bash")
+        kind = state.get("kind")
+        is_shell = kind == "execute" or (kind is None and tool_name == "Bash")
+        codes = _exit_codes(output, is_shell=is_shell)
         if codes:
             data["exit_code"] = next((code for code in codes if code != 0), codes[0])
             is_error |= any(code != 0 for code in codes)
