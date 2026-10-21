@@ -83,13 +83,13 @@ llm_profiles:
       codex:
         reasoning_effort: high
       claude_code:
-        model: claude-opus-5
+        model: claude-opus-5-5
       gemini:
         model: gemini-2.5-pro
       opencode:
         model: openai/gpt-5.4
       litellm:
-        model: openrouter/anthropic/claude-opus-5
+        model: openrouter/anthropic/claude-opus-5.5
 
   frontier:
     max_turns: 8
@@ -242,15 +242,17 @@ not raw Anthropic model IDs. The supported selectors are `claude`, `claude_api`,
 
 Most users need no model setting at all, and one switch when they do.
 
-- **Default: `auto`.** Every role runs the latest model of its tier (frugal,
-  standard, frontier) on the backend you use. A new model release needs no
-  config change.
+- **Default: `auto`.** Claude roles use the tier's current CLI alias; runtimes
+  such as Codex, Gemini, and Antigravity keep the CLI's selected model. Automatic
+  role selection and the execution-time per-AC tier router are separate (see
+  [`economics`](#economics)).
 - **One switch for every role.** `ouroboros config set models.default frontier`
   (or `frugal`, `standard`, a model id, or back to `auto`). For a single
   command, pass `--model` to `ouroboros run`, `ouroboros interview`, or
   `ouroboros pm`, for example `ouroboros run seed.yaml --model frontier`. Tier
-  names work on every backend; Claude aliases such as `opus` mean something
-  only on Claude backends.
+  names resolve through the active backend's native economics ladder. An
+  unknown or unconfigured model namespace keeps `default`; it does not imply
+  three distinct models. Claude aliases such as `opus` apply to Claude backends.
 - **See what runs.** `ouroboros config show` prints a models table (role,
   tier, backend, resolved model, source) under a `models: auto (pin off)`,
   `models: pinned`, or `models: <value> for every role (<source>)` header, and
@@ -271,9 +273,9 @@ that catalog.
 
 ## `models`
 
-How every role's model is chosen. The default, `auto`, runs each role on the
-latest model of its tier for the active backend, so a new model release needs
-no config change.
+How every role's model is chosen. The default, `auto`, keeps Claude's tier
+aliases and other runtimes' CLI-owned defaults. An explicit tier name selects
+the active backend's configured/native ladder.
 
 ```yaml
 models:
@@ -300,8 +302,11 @@ a model depends on the backend:
 | `copilot` | The configured model string (from Copilot's own model catalog), used as-is. With nothing configured, Copilot's default model. |
 | Every other backend (Codex, OpenCode, Gemini, Goose, Kiro, Hermes, Pi, OMP, gjc, Antigravity, Grok, Zcode, ourocode, dsh, host) | `default`: the CLI's own configured model. |
 
-A model passed for one invocation (for example an explicit MCP model argument,
-or `--model` on `ouroboros run`, `interview`, and `pm`) always applies.
+An explicit model selection takes precedence over adaptive tier routing.
+Native runtime support still determines whether a model can be changed per call;
+see [runtime parameter handling](runtime-capability-matrix.md#parameter-handling-negotiation).
+Plain automatic Codex execution stays on Codex's selected model unless a tier
+or routing policy is explicitly requested.
 
 ---
 
@@ -327,6 +332,8 @@ Provider-specific fields use the same keys plus `profile`. `profile` is currentl
 
 Codex agent-runtime tasks also use these mappings. Runtime handles with `session_role: implementation`, `coordinator`, `interview`, or `evaluation` resolve through `agent_runtime_<session_role>`; tasks without a role fall back to `agent_runtime`. Explicit runtime models still win and are passed with `--model` instead of `--profile`.
 
+Anthropic API Claude Haiku/Sonnet/Opus 5.5 omit `temperature` and `top_p` at dispatch, including explicit overrides: these models reject non-default sampling. Their direct adapter steers JSON with a system instruction instead of assistant prefill and returns the complete response unchanged; LiteLLM Anthropic uses the same steering to avoid its bundled model map's forced-tool fallback. The supported Anthropic profile effort values `low`, `medium`, and `high` use adaptive thinking with `output_config.effort`, including when LiteLLM uses its bundled map. OpenRouter 5.5 calls also omit sampling and preserve `reasoning.effort`. Existing concrete older/custom models keep their prior request handling. This does not expand the effort enum: `xhigh` provider profiles remain Codex-only, and raw LiteLLM requests outside the supported Anthropic effort set retain LiteLLM's capability validation.
+
 ---
 
 ## `economics`
@@ -344,11 +351,11 @@ economics:
       intelligence_range: [9, 11]
       models:
         - provider: openai
-          model: gpt-5.1-codex-mini
+          model: gpt-6-luna
         - provider: google
           model: gemini-2.0-flash
         - provider: anthropic
-          model: claude-haiku-4-5
+          model: claude-haiku-5-5
       use_cases:
         - routine_coding
         - log_analysis
@@ -358,9 +365,9 @@ economics:
       intelligence_range: [14, 16]
       models:
         - provider: openai
-          model: gpt-5-codex
+          model: gpt-6.1-sol
         - provider: anthropic
-          model: claude-sonnet-4-6
+          model: claude-sonnet-5-5
         - provider: google
           model: gemini-2.5-pro
       use_cases:
@@ -372,9 +379,9 @@ economics:
       intelligence_range: [18, 20]
       models:
         - provider: openai
-          model: gpt-5.2
+          model: gpt-6-astra
         - provider: anthropic
-          model: claude-opus-5
+          model: claude-opus-5-5
       use_cases:
         - consensus
         - lateral_thinking
@@ -386,7 +393,7 @@ economics:
 | `default_tier` | `"frugal"` \| `"standard"` \| `"frontier"` | `"frugal"` | The starting tier used when no task-specific override applies. |
 | `escalation_threshold` | `int >= 1` | `2` | The retry attempt at which tier escalation begins. From this attempt onward the tier climbs one notch per retry (progressive), capped at the frontier tier. Top-level and untrusted decomposed work start at the base tier. Only a decomposed child with explicit trust authorization starts one tier lower, so that trusted-child ladder may require one additional retry to reach the same frontier ceiling. Current live decomposition supplies no such trust authorization. |
 | `downgrade_success_streak` | `int >= 1` | `5` | Number of consecutive successes at the current tier before downgrading to the previous tier. |
-| `tiers` | `dict[str, TierConfig]` | (see above) | Tier definitions keyed by name. Model-tier routing keeps each tier's shape and cost, but the model ids listed here apply only with [`models.pin: true`](#models) or on backends that keep configured model ids (`litellm`, `copilot`); otherwise each tier runs the latest model of that tier (Claude: `haiku`/`sonnet`/`opus`; runtimes that choose their own model: `default`). A resumed run replays the models it started on. |
+| `tiers` | `dict[str, TierConfig]` | (see above) | Tier definitions keyed by name. Explicit tier selection and enabled per-AC routing use the active runtime's native model entries. Unpinned Claude vendor defaults use `haiku`/`sonnet`/`opus` aliases; explicit runtime-specific economics entries remain literal. A resumed run replays its resolved model ladder. |
 
 **`TierConfig` fields:**
 
@@ -401,8 +408,70 @@ economics:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `provider` | `string` | Provider name (`openai`, `anthropic`, `google`, `openrouter`). |
-| `model` | `string` | Model identifier. Provider formats differ: Anthropic uses `claude-opus-5`, while OpenRouter uses `openrouter/anthropic/claude-opus-5`. |
+| `provider` | `string` | Model namespace: a supported runtime name such as `codex` or `gemini`, or a vendor fallback (`anthropic`, `openai`, `google`) for its single-provider runtime. |
+| `model` | `string` | Identifier accepted by that runtime/provider. Runtime-specific custom IDs are preserved intact. |
+
+### Native runtime ladders
+
+For each tier, the existing Claude, Codex and Gemini routing backends prefer
+the exact runtime property, then its shared model family, then the vendor
+fallback: `codex_mcp` / `codex_cli` → `codex` → `openai`, `claude_mcp` /
+`claude_code` → `claude` → `anthropic`, and `gemini_cli` → `gemini` → `google`.
+These are `provider` namespace keys; lookup priority does not add per-call
+model-override support. Other runtime extensions are tracked separately in #2658.
+
+```yaml
+economics:
+  tiers:
+    frugal:
+      cost_factor: 1
+      models:
+        - {provider: codex, model: my-proxy/small-model}
+        - {provider: gemini, model: flash}
+    standard:
+      cost_factor: 10
+      models:
+        - {provider: codex, model: my-proxy/standard-model}
+        - {provider: gemini, model: pro}
+    frontier:
+      cost_factor: 30
+      models:
+        - {provider: codex, model: my-proxy/large-model}
+```
+
+Use IDs accepted by your configured CLI/provider. The shipped Codex candidates
+are `gpt-6-luna`, `gpt-6.1-sol`, and `gpt-6-astra`, based on the
+[official model guide](https://developers.openai.com/codex/models/) checked
+2026-10-18. Availability depends on plan, client, workspace and rollout. A
+catalog from another CLI does not prove an ID is supported in Codex.
+
+The Google API entries above remain API IDs. Only Gemini CLI translates the
+historically shipped `gemini-2.0-flash` / `gemini-2.5-pro` defaults to the native
+`flash` / `pro` aliases documented in its [model guide](https://geminicli.com/docs/cli/model/).
+Aliases follow the CLI's permitted current models; Gemini 3 preview access
+remains account-dependent. Use `provider: gemini` for an explicit native pin.
+Custom runtime-specific and cross-provider IDs stay literal.
+
+Explicit non-Claude tier choices (`models.default: frontier` or
+`--model frontier`) use the configured ladder even with `models.pin` off.
+Claude role-level tier choices retain their existing `haiku` / `sonnet` /
+`opus` aliases; the per-AC economics router is a separate resolution path. Missing rungs select the
+nearest higher configured tier, then a lower tier only when no higher rung
+exists. An absent model namespace returns `default`; unresolved
+`default`/`auto`/`current` decisions are advisory, never proof of model enforcement.
+Actual per-call support remains the runtime capability's contract.
+
+Plain automatic Codex execution continues using Codex's selected model. Set
+`OUROBOROS_MODEL_TIER_ROUTING=1` to opt into its adaptive concrete ladder.
+Explicit model pins take precedence, and `0` / `off` / `false` disables routing.
+The router and Route B share model resolution. Same-runtime resume replays its
+validated frozen ladder, including a historical shipped pin in the same
+provider and tier; it never silently substitutes a newer model. If the runtime
+no longer serves that ID, its error remains visible. Sessions from before shared
+MCP family lookup retain their validated prior runtime/vendor ladder as a whole,
+including known historical IDs in the same provider and tier; mixing rungs from
+the prior and current namespace resolutions is rejected. Cross-runtime redispatch
+does not forward the original harness's model IDs.
 
 ---
 
@@ -803,8 +872,8 @@ consensus:
 | `min_models` | `int >= 2` | `3` | **Currently inert.** After reviewer-independence filtering, simple consensus separately requires at least two successfully collected votes; this top-level field is not wired to that rule. |
 | `threshold` | `float [0.0, 1.0]` | `0.67` | **Currently inert.** Runtime simple consensus compares approvals divided by successful post-filter votes with direct-Python `ConsensusConfig.majority_threshold` (default `0.66`); this top-level field is not copied into it. |
 | `diversity_required` | `bool` | `true` | **Currently inert.** The field exists on `ConsensusConfig` and in the schema, but nothing reads it. Provider diversity depends on actual adapter routing; neither this flag nor differently named roster entries attest it. See [Evaluation Pipeline Guide](./guides/evaluation-pipeline.md#stage-3-consensus-multi-model-or-single-model-fallback). |
-| `models` | `list[string]` | `["auto"]` | Model roster for Stage 3 simple voting. `auto` repeats the consensus role's model three times; on `litellm` it keeps the shipped OpenRouter roster (`openrouter/openai/gpt-4o`, `openrouter/anthropic/claude-opus-5`, `openrouter/google/gemini-2.5-pro`). With `llm.backend: litellm`, use `provider/model` or `openrouter/provider/model`. With `llm.backend: codex`, use Codex/OpenAI model IDs such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_MODELS` (comma-separated). |
-| `advocate_model` | `string` | `"auto"` (`litellm`: `"openrouter/anthropic/claude-opus-5"`) | Model that argues in favor of the proposed solution in deliberative consensus. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_ADVOCATE_MODEL`. |
+| `models` | `list[string]` | `["auto"]` | Model roster for Stage 3 simple voting. `auto` repeats the consensus role's model three times; on `litellm` it keeps the shipped OpenRouter roster (`openrouter/openai/gpt-4o`, `openrouter/anthropic/claude-opus-5.5`, `openrouter/google/gemini-2.5-pro`). With `llm.backend: litellm`, use `provider/model` or `openrouter/provider/model`. With `llm.backend: codex`, use Codex/OpenAI model IDs such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_MODELS` (comma-separated). |
+| `advocate_model` | `string` | `"auto"` (`litellm`: `"openrouter/anthropic/claude-opus-5.5"`) | Model that argues in favor of the proposed solution in deliberative consensus. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_ADVOCATE_MODEL`. |
 | `devil_model` | `string` | `"auto"` (`litellm`: `"openrouter/openai/gpt-4o"`) | Model that argues against (devil's advocate) in deliberative consensus. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_DEVIL_MODEL`. |
 | `judge_model` | `string` | `"auto"` (`litellm`: `"openrouter/google/gemini-2.5-pro"`) | Model that renders a final verdict after deliberation. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_JUDGE_MODEL`. |
 
@@ -949,7 +1018,7 @@ All environment variables have higher priority than the corresponding `config.ya
 | `OUROBOROS_AGENT_PERMISSION_MODE` | `orchestrator.permission_mode` | Stored permission preference; runner-driven seed execution forces the native `bypassPermissions` equivalent for fresh and resumed dispatches on approval-aware backends. Pi and GJC have no separate approval flag. |
 | `OUROBOROS_OPENCODE_PERMISSION_MODE` | `orchestrator.opencode_permission_mode` | Stored OpenCode preference. Seed execution still forces `bypassPermissions`, translated to `--dangerously-skip-permissions`. |
 | `OUROBOROS_EXEC_SANDBOX` | `execution.exec_sandbox` | Execution sandbox for controller-run commands; on by default. `off` (or `0`, `false`, `no`) is **unsafe**: verifier replay then runs unconfined, able to write outside its workspace copy and to use the network. Honored only from trusted sources (process environment, `~/.ouroboros/.env`); a project `.env` cannot set it. |
-| `OUROBOROS_MODEL_TIER_ROUTING` | _(routing kill switch)_ | Model-tier routing is enabled by default. Set to `0`, `off`, or `false` (case- and whitespace-insensitive) to disable routing and emit no routing events. |
+| `OUROBOROS_MODEL_TIER_ROUTING` | _(routing policy)_ | Routing is enabled by default where a native ladder is configured, except plain automatic Codex selection. Set `1` to opt Codex into its ladder; `0`, `off`, or `false` (case- and whitespace-insensitive) disables adaptive routing and its events. |
 | `OUROBOROS_SHADOW_REPLAY` | _(experiment arm)_ | Default OFF. Only `1`, `true`, or `on` arms the opt-in shadow-baseline harness. Current live decompositions lack deterministic MECE attestation and are skipped before baseline model dispatch; bundled runtimes also lack the complete filesystem/external-effect isolation attestation, so production emits no shadow baseline today. |
 | `OUROBOROS_MAX_PARALLEL_WORKERS` | `orchestrator.max_parallel_workers` | Requested maximum concurrent Acceptance Criteria workers for parallel execution. Must be a positive integer. |
 | `OUROBOROS_MAX_CONCURRENCY` | _(initial fan-out estimate)_ | Overrides the backend-aware starting window. The legacy name is retained for compatibility; the value is no longer a permanent cap in runner-owned execution. Live 429/success feedback may shrink or grow the window, never above `OUROBOROS_MAX_PARALLEL_WORKERS`. Must be a positive integer; blank/invalid values are ignored. |
@@ -1191,8 +1260,9 @@ an exact Copilot ID, then removes the known `openrouter/anthropic/` prefix or
 applies an explicit alias, and finally converts only the trailing Anthropic
 version separator (`claude-opus-4-8` → `claude-opus-4.8`). Every derived value
 must exist in the discovered or bundled Copilot catalog before it is returned.
-The current direct and OpenRouter Opus defaults therefore resolve to
-`claude-opus-5`; unknown IDs remain unchanged so Copilot emits its normal
+The prior direct and OpenRouter Opus 5 pins resolve to `claude-opus-5`
+when that ID is present. Current API pins require their own exact Copilot
+catalog candidate; unknown IDs remain unchanged so Copilot emits its normal
 unavailable-model error instead of silently choosing another model. See the
 [Copilot CLI runtime guide](runtime-guides/copilot.md) for full details.
 
@@ -1244,9 +1314,9 @@ llm:
   backend: claude_code
   permission_mode: default
   opencode_permission_mode: acceptEdits
-  qa_model: claude-sonnet-4-6
-  dependency_analysis_model: claude-sonnet-4-6
-  ontology_analysis_model: claude-sonnet-4-6
+  qa_model: claude-sonnet-5-5
+  dependency_analysis_model: claude-sonnet-5-5
+  ontology_analysis_model: claude-sonnet-5-5
   context_compression_model: gpt-4
 
 economics:
@@ -1259,20 +1329,20 @@ economics:
       intelligence_range: [9, 11]
       models:
         - provider: openai
-          model: gpt-5.1-codex-mini
+          model: gpt-6-luna
         - provider: google
           model: gemini-2.0-flash
         - provider: anthropic
-          model: claude-haiku-4-5
+          model: claude-haiku-5-5
       use_cases: [routine_coding, log_analysis, stage1_fix]
     standard:
       cost_factor: 10
       intelligence_range: [14, 16]
       models:
         - provider: openai
-          model: gpt-5-codex
+          model: gpt-6.1-sol
         - provider: anthropic
-          model: claude-sonnet-4-6
+          model: claude-sonnet-5-5
         - provider: google
           model: gemini-2.5-pro
       use_cases: [logic_design, stage2_evaluation, refactoring]
@@ -1281,16 +1351,16 @@ economics:
       intelligence_range: [18, 20]
       models:
         - provider: openai
-          model: gpt-5.2
+          model: gpt-6-astra
         - provider: anthropic
-          model: claude-opus-5
+          model: claude-opus-5-5
       use_cases: [consensus, lateral_thinking, big_bang]
 
 clarification:
   ambiguity_threshold: 0.2
   max_interview_rounds: 10
   model_tier: standard
-  default_model: claude-opus-5
+  default_model: claude-opus-5-5
 
 execution:
   max_iterations_per_ac: 10
@@ -1301,8 +1371,8 @@ resilience:
   lateral_thinking_enabled: true
   lateral_model_tier: frontier
   lateral_temperature: 0.8
-  wonder_model: claude-opus-5
-  reflect_model: claude-opus-5
+  wonder_model: claude-opus-5-5
+  reflect_model: claude-opus-5-5
 
 evaluation:
   stage1_enabled: true         # Currently inert in config.yaml
@@ -1310,8 +1380,8 @@ evaluation:
   stage3_enabled: true         # Currently inert in config.yaml
   satisfaction_threshold: 0.8  # Currently inert; score gate is hardcoded to 0.8
   uncertainty_threshold: 0.3   # Currently inert in config.yaml
-  semantic_model: claude-opus-5
-  assertion_extraction_model: claude-sonnet-4-6
+  semantic_model: claude-opus-5-5
+  assertion_extraction_model: claude-sonnet-5-5
 
 consensus:
   min_models: 3               # Inert; runtime needs 2 successful post-filter votes
@@ -1319,9 +1389,9 @@ consensus:
   diversity_required: true    # Currently inert
   models:
     - openrouter/openai/gpt-4o
-    - openrouter/anthropic/claude-opus-5
+    - openrouter/anthropic/claude-opus-5.5
     - openrouter/google/gemini-2.5-pro
-  advocate_model: openrouter/anthropic/claude-opus-5
+  advocate_model: openrouter/anthropic/claude-opus-5.5
   devil_model: openrouter/openai/gpt-4o
   judge_model: openrouter/google/gemini-2.5-pro
 

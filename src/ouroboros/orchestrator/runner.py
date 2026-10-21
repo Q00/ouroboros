@@ -217,6 +217,7 @@ from ouroboros.orchestrator.session import (
     _optional_create_session_kwargs,
     runtime_resume_identity_from_payload,
 )
+from ouroboros.orchestrator.verify_base_signal import VerifyBaseSignal
 from ouroboros.orchestrator.verify_shell import (
     capture_verify_shell_identity,
     resolve_verify_shell,
@@ -1012,6 +1013,9 @@ class OrchestratorRunner:
         # Optional acceptance authority (ouroboros.boundary.authority), set after
         # construction; see its call site in _execute_parallel.
         self.acceptance_authority: Any | None = None
+        # Set by the check package when it was attempted but not prepared, so
+        # the base snapshot the verify gate reads is missing, not just off.
+        self.check_package_unprepared = False
         self._session_signal_hub = session_signal_hub
         self._execution_preferences_override_explicit = (
             efficiency_mode is not None or frugality_assurance is not None
@@ -1214,6 +1218,7 @@ class OrchestratorRunner:
         self._model_router = replace(
             self._model_router,
             child_tier=self._model_router.base_tier,
+            child_model_lowering_enabled=False,
         )
 
     def _authoritative_model_router(
@@ -1235,7 +1240,11 @@ class OrchestratorRunner:
             base_tier_override=requested_model_tier,
         )
         if router is not None and not preferences.child_model_lowering_enabled:
-            router = replace(router, child_tier=router.base_tier)
+            router = replace(
+                router,
+                child_tier=router.base_tier,
+                child_model_lowering_enabled=False,
+            )
         return router
 
     def _resolved_shadow_replay_enabled(self) -> bool:
@@ -6549,7 +6558,10 @@ class OrchestratorRunner:
                 },
             )
 
-        from ouroboros.orchestrator.model_routing import deserialize_model_router
+        from ouroboros.orchestrator.model_routing import (
+            deserialize_model_router,
+            is_legacy_quality_first_router,
+        )
 
         recognized, restored_router = deserialize_model_router(raw_routing)
         if not recognized:
@@ -6576,6 +6588,16 @@ class OrchestratorRunner:
                 details={
                     "persisted_runtime_backend": restored_router.runtime_backend,
                     "execution_runtime_backend": persisted_runtime_backend,
+                },
+            )
+        if is_legacy_quality_first_router(
+            raw_routing, persisted_preferences.efficiency_mode.value, restored_router
+        ):
+            raise OrchestratorError(
+                message="Cannot resume a legacy quality-first routing contract",
+                details={
+                    "reason": "The saved child-routing behavior differs from the corrected quality-first policy",
+                    "hint": "Start a successor or new run under the corrected policy.",
                 },
             )
         if migrate_v2_contract or migrate_v3_contract:
@@ -10391,6 +10413,13 @@ class OrchestratorRunner:
         if (install := getattr(self.acceptance_authority, "install", None)) is not None:
             # Check package on: it drives repairs; the legacy verifier is advisory.
             install(parallel_executor)
+        # The check package's base snapshot lets the verify gate tell a failing
+        # command that carries no signal (it fails on the base too) from a real
+        # rejection. It is read in every mode, record included.
+        parallel_executor._verify_base_signal = VerifyBaseSignal.for_run(
+            self.acceptance_authority,
+            check_package_unprepared=getattr(self, "check_package_unprepared", False),
+        )
 
         raw_published_pause_owner = tracker.progress.get("pause_owner")
         if (

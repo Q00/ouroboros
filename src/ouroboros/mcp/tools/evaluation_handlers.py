@@ -404,7 +404,7 @@ class MeasureDriftHandler:
         try:
             # Calculate drift using real DriftMeasurement
             measurement = DriftMeasurement()
-            metrics = measurement.measure(
+            metrics = await measurement.measure_async(
                 current_output=current_output,
                 constraint_violations=[str(v) for v in constraint_violations_raw],
                 current_concepts=[str(c) for c in current_concepts_raw],
@@ -797,20 +797,27 @@ class EvaluateHandler:
             # Collect file-based artifacts for richer semantic evaluation.
             # working_dir is used as the project root for artifact resolution.
             #
-            # Write the artifact text to a file in working_dir so the
-            # ArtifactCollector can pick it up naturally during its scan
-            # instead of inlining the full text (potentially 50KB+) into
-            # the evaluation prompt.
-            from ouroboros.evaluation.artifact_collector import ArtifactCollector
+            # The artifact text (potentially 50KB+) is kept as a file under the
+            # data dir, never in working_dir, and joins the collected files so
+            # the prompt does not inline it.
+            from ouroboros.core.owner_only import write_owner_only
+            from ouroboros.evaluation.artifact_collector import (
+                ArtifactCollector,
+                eval_artifact_path,
+                with_artifact_file,
+            )
 
-            artifact_file = working_dir / ".ouroboros_eval_artifact.md"
+            artifact_file = eval_artifact_path(working_dir)
             try:
-                artifact_file.write_text(artifact, encoding="utf-8")
+                artifact_file.parent.mkdir(parents=True, exist_ok=True)
+                write_owner_only(artifact_file, artifact)
             except OSError:
                 pass  # Non-critical — evaluator falls back to text_summary
 
             try:
-                artifact_bundle = ArtifactCollector().collect(artifact, str(working_dir))
+                artifact_bundle = with_artifact_file(
+                    ArtifactCollector().collect(artifact, str(working_dir)), artifact_file, artifact
+                )
             except Exception as exc:
                 log.warning(
                     "mcp.tool.evaluate.artifact_collection_failed",

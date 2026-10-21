@@ -27,10 +27,7 @@ from ouroboros.auto.adapters import (
     load_seed,
     save_seed,
 )
-from ouroboros.auto.answerer import (
-    AutoAnswerContext,
-    risky_user_preference_blocker_for,
-)
+from ouroboros.auto.answerer import AutoAnswerContext
 from ouroboros.auto.domain_profile import DEFAULT_REGISTRY
 from ouroboros.auto.execution_acceptance import (
     has_auto_wrapper_context,
@@ -39,6 +36,7 @@ from ouroboros.auto.execution_acceptance import (
 )
 from ouroboros.auto.handoff_contract import RUN_HANDOFF_STARTED_STATUS
 from ouroboros.auto.interview_driver import AutoInterviewDriver
+from ouroboros.auto.investigator import build_repo_investigator
 from ouroboros.auto.ledger import (
     REQUIRED_SECTIONS,
     LedgerEntry,
@@ -563,6 +561,10 @@ class AutoHandler:
             # AI answer refiner: concrete goal-specific answers so interview
             # ambiguity converges. Best-effort; None falls back to deterministic.
             answer_refiner=build_answer_refiner(),
+            # The self-answer reads the repository first (auto/investigator.py).
+            investigator=build_repo_investigator(
+                runtime_plan.interview.runtime_backend, runtime_plan.interview.opencode_mode
+            ),
             event_store=runtime_event_store,
         )
         # RFC #809 Phase 2.1 — wire Seed QA on every MCP auto surface before
@@ -1907,8 +1909,6 @@ def _seed_initial_ledger_from_user_preferences(
         value = user_preferences.get(section)
         if not value:
             continue
-        if _user_preference_would_bypass_risky_gate(goal, value):
-            continue
         ledger.add_entry(
             section,
             LedgerEntry(
@@ -1955,20 +1955,6 @@ def _reseed_preference_ledger(
                 continue
             refreshed.add_entry(section_name, entry)
     return refreshed
-
-
-def _user_preference_would_bypass_risky_gate(goal: str, value: str) -> bool:
-    """Return True when pre-confirming a preference would skip answerer safety.
-
-    Normal user_preferences only become confirmed ledger entries through
-    ``AutoAnswerer._maybe_apply_user_preference()``, which runs the risky
-    fallback gate against both the current question and the converged goal.
-    Preallocating a ledger for structured MCP prompts must honor that same
-    policy: unsafe preference text may remain in ``state.user_preferences`` so
-    the interview answerer can surface the blocker at the right question, but
-    it must not be persisted as already-confirmed ledger evidence.
-    """
-    return risky_user_preference_blocker_for(question=value, goal_text=goal) is not None
 
 
 def _derive_goal_user_preferences(goal: str) -> dict[str, str]:

@@ -61,10 +61,10 @@ client spawns the binary for you), install the local package with its isolated
 MCP 2 dependency profile:
 
 ```bash
-uv tool install --force --with 'mcp==2.0.0' --from . ouroboros-ai --python '>=3.12'
+uv tool install --force --with 'mcp==2.2.0' --from . ouroboros-ai --python '>=3.12'
 ```
 
-The exact `--with 'mcp==2.0.0'` pin supplies the separate MCP 2 SDK without
+The exact `--with 'mcp==2.2.0'` pin supplies the separate MCP 2 SDK without
 bypassing the repository's reviewed version. Keep it synchronized with the
 `mcp` optional dependency and `mcp-test` group in `pyproject.toml`. Do not add
 the MCP 1.x `[claude]`, `[claude-sdk]`, or `[all]` profiles to this
@@ -90,7 +90,7 @@ uv run --directory /path/to/your/clone --group mcp-test \
   ouroboros mcp serve --runtime claude-cli --llm-backend claude_code
 ```
 
-This executes the local package and supplies `mcp==2.0.0`. Do not combine this
+This executes the local package and supplies `mcp==2.2.0`. Do not combine this
 profile with the MCP 1.x `[claude]`, `[claude-sdk]`, or `[all]` profiles. The
 command is implemented by `serve()` in
 [`src/ouroboros/cli/commands/mcp.py`](../../src/ouroboros/cli/commands/mcp.py).

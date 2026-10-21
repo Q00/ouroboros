@@ -2308,7 +2308,7 @@ class TestLLMHelperLookups:
             consensus=ConsensusConfig(
                 models=(
                     "openrouter/openai/gpt-4o",
-                    "openrouter/anthropic/claude-opus-5",
+                    DEFAULT_CONSENSUS_OPUS_MODEL,
                     "openrouter/google/gemini-2.5-pro",
                 ),
             ),
@@ -2319,7 +2319,7 @@ class TestLLMHelperLookups:
         ):
             assert get_consensus_models(backend="claude") == (
                 "openrouter/openai/gpt-4o",
-                "openrouter/anthropic/claude-opus-5",
+                DEFAULT_CONSENSUS_OPUS_MODEL,
                 "openrouter/google/gemini-2.5-pro",
             )
 
@@ -2732,7 +2732,8 @@ class TestGetExecutionModel:
             assert get_execution_model() is None
 
     @pytest.mark.parametrize(
-        ("backend", "expected"), [("claude", "opus"), ("codex", None), ("litellm", "claude-opus-5")]
+        ("backend", "expected"),
+        [("claude", "opus"), ("codex", "gpt-6-astra"), ("litellm", DEFAULT_OPUS_MODEL)],
     )
     def test_global_model_choice_pins_execute(
         self, monkeypatch: pytest.MonkeyPatch, backend: str, expected: str | None

@@ -296,6 +296,9 @@ class CheckPackageRun:
             raise
         except Exception as exc:  # noqa: BLE001 - a preparation fault must not fail the run
             self.preparation_error = type(exc).__name__
+            # The base snapshot this run should have is missing: the verify
+            # gate cannot tell a signal-free command from a real failure.
+            runner.check_package_unprepared = True
             log.warning(
                 "boundary.run_control.prepare_failed",
                 execution_id=execution_id,
