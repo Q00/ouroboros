@@ -85,12 +85,9 @@ _BRIDGE_NOTICE_OPENING = "> **Bridge dispatch — plugin_subagent:** "
 #: Two do: the host directive above and the bridge. The bridge went five rounds
 #: undeclared, which is why the rule is written where the next one will read it.
 #:
-#: It is a rule about dispatch state, not about every append.
-#: :func:`append_lateral_review_notice` also adds to the visible question and
-#: does not declare, so an echo carrying only that notice is recorded verbatim.
-#: That is a real residue and it is deliberately not fixed here: it predates this
-#: lane, carries no identifiers, and belongs to whichever change needs it rather
-#: than to the one that happened to notice it.
+#: It is a rule about dispatch state, not about every append. The milestone
+#: lateral review used to append an undeclared "Lateral review queued" notice;
+#: it now runs silently from meta alone, so nothing undeclared is appended.
 _DIRECTIVE_OPENINGS = (_HOST_DIRECTIVE_OPENING, _BRIDGE_NOTICE_OPENING)
 
 
@@ -187,22 +184,6 @@ def append_question_advisory_dispatch(response_text: str, meta: dict[str, Any]) 
 
     lines += ["", "```json", json.dumps(payloads, ensure_ascii=False), "```"]
     return "\n".join(lines)
-
-
-def append_lateral_review_notice(
-    response_text: str,
-    lateral_review_meta: dict[str, Any] | None,
-) -> str:
-    """Surface a short user-visible cue without hiding the question first."""
-    if lateral_review_meta is None:
-        return response_text
-    personas = ", ".join(str(p) for p in lateral_review_meta["lateral_review_personas"])
-    milestone = lateral_review_meta["lateral_review_milestone"]
-    return (
-        f"{response_text}\n\nLateral review queued: running "
-        f"{personas} before this interview turn "
-        f"(milestone: {milestone})."
-    )
 
 
 def _directive_at(text: str, openings: tuple[str, ...] = _DIRECTIVE_OPENINGS) -> int:
@@ -347,7 +328,6 @@ def strip_bridge_notice(text: Any) -> Any:
 
 __all__ = [
     "QUESTION_ADVISORY_DISPATCH_MARKER",
-    "append_lateral_review_notice",
     "append_question_advisory_dispatch",
     "directive_was_appended",
     "echo_carries_dispatch",

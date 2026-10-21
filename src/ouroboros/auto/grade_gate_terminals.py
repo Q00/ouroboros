@@ -11,8 +11,7 @@ Seed still carries hard safety blockers" (resolve the markers).
 
 Module-level consts, so every call site emits the same string and the alphabet
 of valid codes stays discoverable by reading a module surface -- the same
-convention as the interview layer's ``UNSTUCK_EXHAUSTED_STOP_REASON_CODE`` and
-the runtime's ``watchdog_wall_clock_exceeded``.
+convention as the runtime's ``watchdog_wall_clock_exceeded``.
 
 The gate's own verdict lives here beside them rather than in ``pipeline``,
 because a code that is decided in one module and named in another is a code
@@ -30,6 +29,9 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 SEED_GRADE_BELOW_REQUIRED_STOP_REASON_CODE = "seed_grade_below_required"
 SEED_REVIEW_WITHHELD_RUN_STOP_REASON_CODE = "seed_review_withheld_run"
 DEGRADED_SEED_SAFETY_BLOCKERS_STOP_REASON_CODE = "degraded_seed_safety_blockers"
+# A degraded (deadline-recovery) Seed is emitted for the user but never
+# executed, so the session stops here instead of reporting complete.
+DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE = "degraded_seed_not_executed"
 
 _GRADE_RANK = {"A": 0, "B": 1, "C": 2}
 
@@ -55,6 +57,27 @@ def degraded_seed_safety_blocker(review: SeedReview) -> tuple[str, str] | None:
         "Degraded seed retains hard safety blockers; "
         f"unsafe/destructive markers must be resolved before run: {codes}",
         DEGRADED_SEED_SAFETY_BLOCKERS_STOP_REASON_CODE,
+    )
+
+
+def degraded_seed_not_executed_blocker(unresolved_slots: int) -> tuple[str, str]:
+    """Return ``(blocker, stop_reason_code)`` for the partial-product stop.
+
+    The degraded Seed is emitted for the user but never executed, so the
+    session must not report complete.
+    """
+    return (
+        "Degraded seed emitted as a partial product and not executed; "
+        f"{unresolved_slots} unresolved slot(s) need an answer before a run",
+        DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE,
+    )
+
+
+def is_degraded_seed_not_executed_stop(state: AutoPipelineState) -> bool:
+    """Whether ``state`` stopped at the partial-product terminal."""
+    return (
+        state.phase.value == "blocked"
+        and state.last_error_code == DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE
     )
 
 

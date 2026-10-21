@@ -361,6 +361,7 @@ _AC_VERIFY_CAUSES = frozenset(
         "exit_nonzero",
         "output_assertion_unmatched",
         "workspace_mutated",
+        "no_evidence",
     }
 )
 _UNKNOWN_VERIFY_CAUSE = "unknown"

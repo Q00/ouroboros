@@ -324,7 +324,7 @@ async def test_explicit_stage_agent_not_affected_by_global_change(app_env) -> No
         model_select = pilot.app.query_one(f"#stage-model-{stage}", Select)
         assert model_select.value == "default"
         values = {value for _, value in model_select._options}
-        assert "gpt-5" in values
+        assert "gpt-6.1-sol" in values
         assert "claude-opus-4-8" not in values  # stale global catalog was not applied
 
 
@@ -720,13 +720,13 @@ async def test_execute_backend_change_preserves_replacement_execute_model(
         await pilot.pause()
         pilot.app.query_one(
             f"#stage-model-{Stage.EXECUTE.value}", Select
-        ).value = "claude-sonnet-4-6"
+        ).value = "claude-sonnet-5-5"
         await pilot.pause()
         pilot.app.action_save()
         await pilot.pause()
 
     assert captured["orchestrator.runtime_profile.stages.execute"] == "claude"
-    assert captured["execution.default_model"] == "claude-sonnet-4-6"
+    assert captured["execution.default_model"] == "claude-sonnet-5-5"
 
 
 @pytest.mark.asyncio
@@ -747,7 +747,7 @@ async def test_execute_backend_change_clears_pin_instead_of_persisting_automatic
         pilot.app.query_one(f"#stage-runtime-{Stage.EXECUTE.value}", Select).value = "claude"
         await pilot.pause()
         displayed = pilot.app.query_one(f"#stage-model-{Stage.EXECUTE.value}", Select).value
-        assert displayed == "claude-opus-5"
+        assert displayed == "claude-opus-5-5"
         # Textual may deliver the automatic model selection after the
         # programmatic guard was consumed under full-suite timing. Saving must
         # still treat this backend-switch default as automatic, not a user pin.

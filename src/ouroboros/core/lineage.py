@@ -207,6 +207,15 @@ class EvaluationSummary(BaseModel, frozen=True):
         default=None,
         description="Measures goal/constraint/ontology divergence from the seed intent (0.0-1.0). Distinct from reward_hacking_risk.",
     )
+    goal_alignment: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Semantic alignment with the original goal (0.0-1.0). Preserved separately "
+            "from drift_score, which is the aggregate divergence signal."
+        ),
+    )
     reward_hacking_risk: float | None = Field(
         default=None,
         description="Suspicion that the artifact is optimized for evaluator, rubric, or test approval rather than solving the real task (0.0-1.0). Distinct from drift_score.",

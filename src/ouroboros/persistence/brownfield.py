@@ -6,17 +6,22 @@ with aiosqlite backend. Follows the same patterns as EventStore.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import delete, literal_column, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from ouroboros.core.errors import PersistenceError
 from ouroboros.persistence.event_store import sqlite_database_url
-from ouroboros.persistence.schema import brownfield_repos_table, metadata
+from ouroboros.persistence.schema import (
+    brownfield_repo_index_table,
+    brownfield_repos_table,
+    metadata,
+)
 
 
 @dataclass(frozen=True)
@@ -670,6 +675,11 @@ class BrownfieldStore:
         try:
             async with engine.begin() as conn:
                 result = await conn.execute(delete(t).where(t.c.path == path))
+                await conn.execute(
+                    delete(brownfield_repo_index_table).where(
+                        brownfield_repo_index_table.c.path == path
+                    )
+                )
                 return result.rowcount > 0
         except Exception as e:
             raise PersistenceError(
@@ -696,12 +706,74 @@ class BrownfieldStore:
         try:
             async with engine.begin() as conn:
                 result = await conn.execute(delete(t))
+                await conn.execute(delete(brownfield_repo_index_table))
                 return result.rowcount
         except Exception as e:
             raise PersistenceError(
                 f"Failed to clear brownfield repos: {e}",
                 operation="delete",
                 table="brownfield_repos",
+            ) from e
+
+    async def get_index_entries(self) -> dict[str, tuple[str, str]]:
+        """Return stored search documents as ``{path: (doc_text, fingerprint)}``.
+
+        Raises:
+            PersistenceError: If the query fails.
+        """
+        engine = self._ensure_initialized("get_index_entries")
+        ix = brownfield_repo_index_table
+
+        try:
+            async with engine.begin() as conn:
+                result = await conn.execute(select(ix.c.path, ix.c.doc_text, ix.c.fingerprint))
+                return {row.path: (row.doc_text or "", row.fingerprint or "") for row in result}
+        except Exception as e:
+            raise PersistenceError(
+                f"Failed to read brownfield index: {e}",
+                operation="select",
+                table="brownfield_repo_index",
+            ) from e
+
+    async def upsert_index_entries(self, entries: Mapping[str, tuple[str, str]]) -> int:
+        """Store search documents given as ``{path: (doc_text, fingerprint)}``.
+
+        Returns:
+            Number of entries written.
+
+        Raises:
+            PersistenceError: If the operation fails.
+        """
+        if not entries:
+            return 0
+
+        engine = self._ensure_initialized("upsert_index_entries")
+        ix = brownfield_repo_index_table
+        now = datetime.now(UTC)
+
+        try:
+            async with engine.begin() as conn:
+                for path, (doc_text, fingerprint) in entries.items():
+                    stmt = sqlite_insert(ix).values(
+                        path=path, doc_text=doc_text, fingerprint=fingerprint, indexed_at=now
+                    )
+                    await conn.execute(
+                        stmt.on_conflict_do_update(
+                            index_elements=[ix.c.path],
+                            set_={
+                                "doc_text": stmt.excluded.doc_text,
+                                "fingerprint": stmt.excluded.fingerprint,
+                                "indexed_at": stmt.excluded.indexed_at,
+                            },
+                        )
+                    )
+            return len(entries)
+        except Exception as e:
+            raise PersistenceError(
+                f"Failed to write brownfield index: {e}",
+                operation="upsert",
+                table="brownfield_repo_index",
+                details={"count": len(entries)},
             ) from e
 
     async def close(self) -> None:

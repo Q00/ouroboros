@@ -2308,7 +2308,7 @@ class TestLLMHelperLookups:
             consensus=ConsensusConfig(
                 models=(
                     "openrouter/openai/gpt-4o",
-                    "openrouter/anthropic/claude-opus-5",
+                    DEFAULT_CONSENSUS_OPUS_MODEL,
                     "openrouter/google/gemini-2.5-pro",
                 ),
             ),
@@ -2319,7 +2319,7 @@ class TestLLMHelperLookups:
         ):
             assert get_consensus_models(backend="claude") == (
                 "openrouter/openai/gpt-4o",
-                "openrouter/anthropic/claude-opus-5",
+                DEFAULT_CONSENSUS_OPUS_MODEL,
                 "openrouter/google/gemini-2.5-pro",
             )
 
@@ -2732,7 +2732,8 @@ class TestGetExecutionModel:
             assert get_execution_model() is None
 
     @pytest.mark.parametrize(
-        ("backend", "expected"), [("claude", "opus"), ("codex", None), ("litellm", "claude-opus-5")]
+        ("backend", "expected"),
+        [("claude", "opus"), ("codex", "gpt-6-astra"), ("litellm", DEFAULT_OPUS_MODEL)],
     )
     def test_global_model_choice_pins_execute(
         self, monkeypatch: pytest.MonkeyPatch, backend: str, expected: str | None
@@ -2929,9 +2930,11 @@ class TestDefaultExecutionEfficiencyMode:
         ):
             assert default_execution_efficiency_mode() == expected
 
-    def test_unreadable_config_preserves_the_ask_contract(self) -> None:
-        with patch(
-            "ouroboros.config.loader.load_config",
-            side_effect=ConfigError("unreadable"),
-        ):
-            assert default_execution_efficiency_mode() is None
+    @pytest.mark.parametrize("error", [ConfigError("unreadable"), IsADirectoryError("config.yaml")])
+    def test_missing_or_unreadable_config_takes_the_quality_first_default(
+        self, error: Exception
+    ) -> None:
+        # A user with no config, or one the filesystem cannot read, must not
+        # stall on a policy question.
+        with patch("ouroboros.config.loader.load_config", side_effect=error):
+            assert default_execution_efficiency_mode() == "quality_first"

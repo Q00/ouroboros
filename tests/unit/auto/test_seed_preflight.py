@@ -167,6 +167,32 @@ def test_command_bound_variables_are_not_flagged(tmp_path: Path) -> None:
     assert all(finding.code != "unbound_env_var" for finding in report.findings)
 
 
+@pytest.mark.parametrize(
+    "verify_command",
+    [
+        'for t in $(ls tests); do python -m pytest -q "$t"; done',
+        'for t in "$@"; do python -m pytest -q "$t"; done',
+        "for t; do python -m pytest -q $t; done",
+        "for t do python -m pytest -q $t; done",
+        "bash -c 'for t in $(ls tests); do python -m pytest -q \"$t\"; done'",
+    ],
+)
+def test_for_loop_variable_is_bound_whatever_its_items(tmp_path: Path, verify_command: str) -> None:
+    """A loop body only runs with its variable assigned (pytest-6197's ``$t``)."""
+    seed = _seed(
+        acceptance_criteria=(
+            AcceptanceCriterionSpec(
+                description="Every collected test module passes",
+                verify_command=verify_command,
+            ),
+        )
+    )
+
+    report = run_seed_preflight(seed, workspace_root=tmp_path)
+
+    assert all(finding.code != "unbound_env_var" for finding in report.findings)
+
+
 def test_verify_script_reference_is_advisory_not_blocking(tmp_path: Path) -> None:
     seed = _seed(
         acceptance_criteria=(
@@ -1102,6 +1128,46 @@ def test_conditional_assignments_are_not_guaranteed_bindings(tmp_path: Path, com
 
     assert report.passed is False
     assert runtime.returncode != 0
+
+
+@pytest.mark.parametrize(
+    ("command", "runtime_passed"),
+    (
+        # pytest-6197: the reproduction captures its output after ``&&``.
+        (
+            't=$(mktemp -d) && output=$(cd "$t" && echo ok) && printf "%s\\n" "$output"',
+            True,
+        ),
+        ('true && FOO=bar && test -n "$FOO"', True),
+        ('true && FOO=bar && echo "$FOO" | grep -q bar', True),
+        # The AND-list ends at ``||`` and ``;``: the assignment may not have run.
+        ('false && FOO=bar || test -n "$FOO"', False),
+        ('false && FOO=bar; test -n "$FOO"', False),
+    ),
+)
+def test_assignment_after_and_binds_the_rest_of_its_and_list(
+    tmp_path: Path, command: str, runtime_passed: bool
+) -> None:
+    environment = os.environ.copy()
+    environment.pop("FOO", None)
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="AND-list binding", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+    runtime = subprocess.run(
+        ["sh", "-uc", command],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        check=False,
+    )
+
+    assert report.passed is runtime_passed
+    assert (runtime.returncode == 0) is runtime_passed
 
 
 def test_empty_environment_shell_initializes_path(tmp_path: Path) -> None:

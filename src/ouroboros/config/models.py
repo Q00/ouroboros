@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field, field_validator
 import yaml
 
 from ouroboros.config._model_defaults import (
+    CODEX_TIER_MODELS,
     DEFAULT_HAIKU_MODEL,
     DEFAULT_OPUS_MODEL,
     DEFAULT_SONNET_MODEL,
@@ -290,12 +291,13 @@ class ExecutionConfig(BaseModel, frozen=True):
             Seed (``run_verify_commands``) decides in both modes. Sealed in a
             run's execution semantics, so a resume uses the run's own mode.
         default_policy: Persistent default execution policy for FRESH runs
-            (#1733). ``ask`` (the default) preserves the host's interactive
-            prompt exactly; ``efficient`` resolves to adaptive/observe and
-            ``quality_first`` to quality_first/off without asking. Explicit
-            invocation arguments always win, resumed sessions keep their
-            persisted immutable contract, and strict frugality assurance
-            never derives from this setting.
+            (#1733). ``quality_first`` (the default) resolves to
+            quality_first/off without asking, so a request routed to
+            Ouroboros starts at once; ``efficient`` resolves to
+            adaptive/observe; ``ask`` opts back into the host's interactive
+            prompt. Explicit invocation arguments always win, resumed
+            sessions keep their persisted immutable contract, and strict
+            frugality assurance never derives from this setting.
     """
 
     max_iterations_per_ac: int = Field(default=10, ge=1)
@@ -314,7 +316,7 @@ class ExecutionConfig(BaseModel, frozen=True):
     decomposition_mode: Literal["bounce_only", "off"] = "bounce_only"
     context_pack: bool = True
     project_guidance: tuple[str, ...] = ()
-    default_policy: Literal["ask", "efficient", "quality_first"] = "ask"
+    default_policy: Literal["ask", "efficient", "quality_first"] = "quality_first"
     transcript_verifier: Literal["decide", "record"] = "record"
 
     @field_validator("decomposition_mode", mode="before")
@@ -956,7 +958,7 @@ def get_default_config() -> OuroborosConfig:
                     cost_factor=1,
                     intelligence_range=(9, 11),
                     models=[
-                        ModelConfig(provider="openai", model="gpt-5.1-codex-mini"),
+                        ModelConfig(provider="openai", model=CODEX_TIER_MODELS["frugal"]),
                         ModelConfig(provider="google", model="gemini-2.0-flash"),
                         ModelConfig(provider="anthropic", model=DEFAULT_HAIKU_MODEL),
                     ],
@@ -966,7 +968,7 @@ def get_default_config() -> OuroborosConfig:
                     cost_factor=10,
                     intelligence_range=(14, 16),
                     models=[
-                        ModelConfig(provider="openai", model="gpt-5-codex"),
+                        ModelConfig(provider="openai", model=CODEX_TIER_MODELS["standard"]),
                         ModelConfig(provider="anthropic", model=DEFAULT_SONNET_MODEL),
                         ModelConfig(provider="google", model="gemini-2.5-pro"),
                     ],
@@ -976,7 +978,7 @@ def get_default_config() -> OuroborosConfig:
                     cost_factor=30,
                     intelligence_range=(18, 20),
                     models=[
-                        ModelConfig(provider="openai", model="gpt-5.2"),
+                        ModelConfig(provider="openai", model=CODEX_TIER_MODELS["frontier"]),
                         ModelConfig(provider="anthropic", model=DEFAULT_OPUS_MODEL),
                     ],
                     use_cases=["consensus", "lateral_thinking", "big_bang"],

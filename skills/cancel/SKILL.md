@@ -6,110 +6,41 @@ aliases: [kill, abort]
 
 # /ouroboros:cancel
 
-Cancel stuck or orphaned executions by session ID, cancel all running sessions, or interactively pick from active executions.
-
-## Usage
+Cancel stuck or orphaned executions and background jobs through the Ouroboros MCP tools, which work on hosts without shell access.
 
 ```
-/ouroboros:cancel                          # Interactive: list active, pick one
-/ouroboros:cancel <execution_id>           # Cancel specific execution
-/ouroboros:cancel --all                    # Cancel all running executions
+/ouroboros:cancel                 # list this project's active executions, ask which to cancel
+/ouroboros:cancel <id>            # cancel one execution (orch_... or execution id) or job (job_...)
+/ouroboros:cancel --all           # cancel every running or paused execution of this project
 ```
-
-**Trigger keywords:** "cancel execution", "kill session", "stop running", "abort execution"
-
-## How It Works
-
-This skill interacts **directly with the event store** (not via MCP tool) to emit cancellation events. It uses the CLI command under the hood.
-
-Three modes:
-
-1. **Bare (no args)**: Lists all active (running/paused) executions in a numbered table and prompts you to pick one to cancel
-2. **Explicit (`execution_id`)**: Cancels the specified execution immediately
-3. **`--all` flag**: Cancels every running or paused execution at once
 
 ## Instructions
 
-When the user invokes this skill:
+### Loading MCP tools (deferred-schema guard)
 
-1. Determine which mode to use:
-   - If the user provided an execution/session ID: **Explicit mode**
-   - If the user says "cancel all" or "cancel everything": **--all mode**
-   - If no ID given and not "all": **Bare mode** (interactive listing)
+Ouroboros tools may be deferred, and a schema loaded on one turn can unload by the next. Immediately before each `ouroboros_*` call, load it with the active runtime's tool-discovery capability: `"+ouroboros project status"` for `ouroboros_project_status`; `"+ouroboros cancel"` for `ouroboros_cancel_execution` and `ouroboros_cancel_job`. A call whose schema is not loaded fails with "Invalid tool parameters". If the tool is already callable, discovery is a no-op and an empty result is expected. Use the fallback only when the tool is genuinely absent.
 
-2. Run the appropriate CLI command using Bash:
+### Listing active executions
 
-   **Bare mode** (interactive):
-   ```bash
-   ouroboros cancel execution
-   ```
-   This will list active executions and prompt for selection.
+Call `ouroboros_project_status` with `project_dir` set to the absolute path of the current project. Active executions are the runs whose `status` is `running` or `paused`; show each one's `session_id`, `started_at`, and `seed_goal`. If the call fails because the project has more runs than `limit`, retry once with `limit` set to the reported run count. The listing covers only runs attributed to this project. Background jobs have no listing tool, so also offer any `job_...` id returned by a start tool earlier in this conversation.
 
-   **Explicit mode** (specific execution):
-   ```bash
-   ouroboros cancel execution <execution_id>
-   ```
+### Steps
 
-   **Cancel all mode**:
-   ```bash
-   ouroboros cancel execution --all
-   ```
+- **No ID, not "all"**: list as above, ask which to cancel with the active runtime's `ask_user` capability, then cancel the chosen ids as below. If nothing is active, say so (and, when `run_shell` is available, mention `ouroboros cancel execution --list` for executions outside this project). If the user declines, cancel nothing.
+- **ID given**: an id starting with `job_` is a background job: call `ouroboros_cancel_job` with `job_id`. Any other id (an `orch_...` session id or an execution id) is an execution: call `ouroboros_cancel_execution` with `execution_id` and, if the user gave one, `reason`.
+- **"cancel all" / "cancel everything"**: there is no bulk cancel tool. List as above and call `ouroboros_cancel_execution` once per running or paused run. Say this covered this project's runs only; for every execution on the machine, `ouroboros cancel execution --all` needs `run_shell`.
 
-   **With custom reason**:
-   ```bash
-   ouroboros cancel execution <execution_id> --reason "Stuck for 2 hours"
-   ```
+### Reporting outcomes
 
-3. Present results to the user:
-   - Show which executions were cancelled
-   - If bare mode, show the list and selection prompt
-   - If no active executions, inform the user
+- `ouroboros_cancel_execution`: `new_status` `cancelled` means it is cancelled. `cancellation_requested` means the live worker was asked to stop and will record the cancellation itself; suggest `ooo status` to confirm. An "already in terminal state" error means there was nothing to cancel; skip it with a warning. "Execution not found" means the id is wrong. "Held by another live owner" means only the process that owns it can cancel it; relay that verbatim. "Failed to persist cancellation" is retriable; retry once.
+- `ouroboros_cancel_job`: `status` `cancel_requested` means the job and its linked execution were asked to stop; `cancelled` means done. Any other terminal status (`completed`, `failed`, `interrupted`) means the job had already finished and nothing was cancelled. "Job not found" means the id is wrong.
 
-4. End with a next-step suggestion:
-   - After cancellation: `◆ Cancelled — use ooo status to verify, or ooo run to start fresh`
-   - No active sessions: `◆ No active executions — use ooo run to start a new one`
+Relay any other error verbatim. Then suggest `ooo status` to verify or `ooo run` to start fresh.
 
-## State Transitions
+## Fallback (no MCP server)
 
-Only sessions in `running` or `paused` status can be cancelled. Sessions that are already `completed`, `failed`, or `cancelled` are skipped with a warning.
-
-## Fallback (No Database)
-
-If the configured runtime EventStore does not exist:
-
-```
-No Ouroboros database found at the configured runtime path.
-Run an execution first with: /ouroboros:ouroboros-run
-```
-
-## Example
-
-```
-User: cancel that stuck execution
-
-> ouroboros cancel execution
-
-Active Executions
-┌───┬──────────────────┬──────────────┬─────────┬─────────┬──────────────┐
-│ # │ Session ID       │ Execution ID │ Seed ID │ Status  │ Started      │
-├───┼──────────────────┼──────────────┼─────────┼─────────┼──────────────┤
-│ 1 │ sess-abc-123     │ exec-001     │ seed-42 │ running │ 2024-01-15   │
-│ 2 │ sess-def-456     │ exec-002     │ seed-99 │ paused  │ 2024-01-14   │
-└───┴──────────────────┴──────────────┴─────────┴─────────┴──────────────┘
-
-Enter number to cancel (1-2), or 'q' to quit: 1
-Cancel session sess-abc-123 (running)? [y/N]: y
-✓ Cancelled execution: sess-abc-123
-
-◆ Cancelled — use `ooo status` to verify, or `ooo run` to start fresh
-```
+When the cancel tools are genuinely absent and the active runtime has `run_shell`, use the CLI, which writes cancellation events straight to the event store: `ouroboros cancel execution --list` (prints active executions without prompting; then ask with `ask_user`), `ouroboros cancel execution <session_id>`, or `ouroboros cancel execution --all`. Add `--reason "<text>"` to record why, and report what it printed (`Cancelled execution: <id>`, `Cancellation requested for execution: <id>`, or `No active executions found.`) with any warning verbatim. Without `run_shell`, tell the user cancellation needs the Ouroboros MCP server (`ooo setup`) or a shell.
 
 ## RFC #1392 State Breadcrumb Footer
 
-Your final response MUST end with exactly one breadcrumb footer line:
-
-```
-◆ <current state> → next: <recommended action>
-```
-
-Derive `<current state>` from live session state via `ouroboros_session_status` when that MCP projection is available; otherwise derive it from this skill's actual outcome. Never use a linear `Step N of M` footer because Ouroboros is an evolutionary loop. When the next action is genuinely a choice, list 2-3 honest options in the `next:` clause. The breadcrumb line must be the last line of the response.
+End the final response with exactly one line `◆ <current state> → next: <recommended action>`. Derive the state from live session state via `ouroboros_session_status` when available, otherwise from this skill's actual outcome. Never use a linear `Step N of M` footer; when the next step is a real choice, list 2-3 options.

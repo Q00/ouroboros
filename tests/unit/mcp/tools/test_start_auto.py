@@ -28,6 +28,7 @@ from ouroboros.auto.state import (
     AutoStore,
     AutoWorktreePolicy,
 )
+from ouroboros.config import policy_notice
 from ouroboros.core.types import Result
 from ouroboros.core.worktree import TaskWorkspace
 from ouroboros.mcp.errors import MCPToolError
@@ -164,8 +165,11 @@ def _assert_detached_start_text_has_guidance_with_handles(
     *,
     job_id: str,
     auto_session_id: str,
+    efficiency_requested: bool = False,
 ) -> None:
     text = result.text_content
+    # A start that took the shipped default policy names it and the change command.
+    notice = "" if efficiency_requested else policy_notice({})
     observer = extract_job_observer_inline_handoff(
         text,
         expected_job_id=job_id,
@@ -180,7 +184,7 @@ def _assert_detached_start_text_has_guidance_with_handles(
         f"auto_session_id: {auto_session_id}\n"
         f"Runtime Backend: {result.meta['runtime_backend']}\n"
         f"LLM Backend: {result.meta['llm_backend']}\n"
-        f"Efficiency Mode: {result.meta['efficiency_mode']}\n"
+        f"Efficiency Mode: {result.meta['efficiency_mode']}{notice}\n"
         f"Frugality Assurance: {result.meta['frugality_assurance']}\n\n"
         "The exact active model and first parallel level will be reported "
         "from run configuration and execution plan events.\n"
@@ -528,8 +532,8 @@ class TestBackgroundJobPath:
         assert result.value.meta["dispatch_mode"] == "job"
         assert result.value.meta["runtime_backend"]
         assert result.value.meta["llm_backend"]
-        assert result.value.meta["efficiency_mode"] == "adaptive"
-        assert result.value.meta["frugality_assurance"] == "observe"
+        assert result.value.meta["efficiency_mode"] == "quality_first"
+        assert result.value.meta["frugality_assurance"] == "off"
         assert result.value.meta["status_tool"] == "ouroboros_job_status"
         assert result.value.meta["wait_tool"] == "ouroboros_job_wait"
         assert result.value.meta["result_tool"] == "ouroboros_job_result"
@@ -779,8 +783,8 @@ class TestBackgroundJobPath:
                 "dispatch_mode": "job",
                 "runtime_backend": "claude",
                 "llm_backend": "claude_code",
-                "efficiency_mode": "adaptive",
-                "frugality_assurance": "observe",
+                "efficiency_mode": "quality_first",
+                "frugality_assurance": "off",
                 "status_tool": "ouroboros_job_status",
                 "wait_tool": "ouroboros_job_wait",
                 "result_tool": "ouroboros_job_result",
@@ -1634,8 +1638,8 @@ class TestBackgroundJobPath:
         assert meta["dispatch_mode"] == "plugin"
         assert meta["runtime_backend"] == "opencode"
         assert meta["llm_backend"]
-        assert meta["efficiency_mode"] == "adaptive"
-        assert meta["frugality_assurance"] == "observe"
+        assert meta["efficiency_mode"] == "quality_first"
+        assert meta["frugality_assurance"] == "off"
         assert isinstance(meta["auto_session_id"], str)
         assert store.path_for(meta["auto_session_id"]).exists()
         assert meta["_subagent"]["tool_name"] == "ouroboros_start_auto"
@@ -1645,8 +1649,8 @@ class TestBackgroundJobPath:
         assert body["auto_session_id"] == meta["auto_session_id"]
         assert body["runtime_backend"] == "opencode"
         assert body["llm_backend"] == meta["llm_backend"]
-        assert body["efficiency_mode"] == "adaptive"
-        assert body["frugality_assurance"] == "observe"
+        assert body["efficiency_mode"] == "quality_first"
+        assert body["frugality_assurance"] == "off"
         job_manager.start_job.assert_not_called()
         fake_inner_auto.handle.assert_not_called()
 
@@ -3060,3 +3064,74 @@ class TestAutoRunSuccessorWiring:
 
         assert rebuilt is not original
         assert rebuilt._execute_handler.host_dispatch_bridge is bridge
+
+
+class _CapturingAutoPipeline:
+    """Record the run starter the MCP handler hands to the pipeline, then stop."""
+
+    captured: dict[str, object] = {}
+
+    def __init__(self, *_args, **kwargs) -> None:
+        type(self).captured["run_starter"] = kwargs["run_starter"]
+
+    async def run(self, state):
+        return AutoPipelineResult(
+            status="blocked",
+            auto_session_id=state.auto_session_id,
+            phase=str(state.phase.value),
+        )
+
+
+@pytest.mark.parametrize("worktree_policy", ["current", "none"])
+@pytest.mark.asyncio
+async def test_mcp_auto_run_handoff_uses_caller_checkout_for_current_policy(
+    event_store, tmp_path, monkeypatch, worktree_policy: str
+) -> None:
+    """``worktree_policy=current/none`` runs the Seed in the caller's checkout.
+
+    The execution job must not create a managed task worktree of its own: the
+    auto session's policy is the only isolation authority.
+    """
+    import subprocess
+
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _CapturingAutoPipeline.captured = {}
+
+    with patch("ouroboros.mcp.tools.auto_handler.AutoPipeline", _CapturingAutoPipeline):
+        await AutoHandler(store=AutoStore(tmp_path / "store"), event_store=event_store)._run(
+            {"goal": "build a CLI", "cwd": str(tmp_path), "worktree_policy": worktree_policy}
+        )
+
+    run_starter = _CapturingAutoPipeline.captured["run_starter"]
+    assert run_starter.use_worktree is False
+    assert run_starter.cwd == str(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_mcp_auto_run_handoff_reuses_the_auto_worktree(
+    event_store, tmp_path, monkeypatch
+) -> None:
+    """The default coding path makes one worktree (auto's), never a second one."""
+    workspace = _managed_workspace(tmp_path)
+    _CapturingAutoPipeline.captured = {}
+
+    def fake_ensure(state):
+        state.cwd = workspace.effective_cwd
+        return workspace
+
+    monkeypatch.setattr("ouroboros.mcp.tools.auto_handler.ensure_auto_worktree", fake_ensure)
+    monkeypatch.setattr(
+        "ouroboros.mcp.tools.auto_handler.release_auto_worktree",
+        lambda _candidate, *, cleanup: None,  # noqa: ARG005
+    )
+
+    with patch("ouroboros.mcp.tools.auto_handler.AutoPipeline", _CapturingAutoPipeline):
+        await AutoHandler(store=AutoStore(tmp_path / "store"), event_store=event_store)._run(
+            {"goal": "build a CLI", "cwd": str(tmp_path)}
+        )
+
+    run_starter = _CapturingAutoPipeline.captured["run_starter"]
+    assert run_starter.use_worktree is False
+    assert run_starter.cwd == workspace.effective_cwd

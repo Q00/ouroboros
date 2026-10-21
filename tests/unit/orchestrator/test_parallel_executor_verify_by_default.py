@@ -860,6 +860,9 @@ async def test_batch_emits_outer_outcome_marker_after_verify_failure(tmp_path: A
         "outcome": "failed",
         "is_decomposed": True,
         "is_decomposed_child": True,
+        "verify_passed": False,
+        "verify_cause": "exit_nonzero",
+        "verify_no_signal": False,
     }
 
 

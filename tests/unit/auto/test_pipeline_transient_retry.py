@@ -38,8 +38,6 @@ from ouroboros.core.seed import (
 )
 from ouroboros.events.base import BaseEvent
 
-pytestmark = pytest.mark.usefixtures("_legacy_unsafe_bank")
-
 
 @pytest.fixture(autouse=True)
 def _zero_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
