@@ -218,6 +218,9 @@ def _capacity_feedback_messages(result: ACExecutionResult) -> tuple[AgentMessage
     return tuple(messages)
 
 
+capacity_feedback_messages = _capacity_feedback_messages
+
+
 def _utc_now() -> datetime:
     # Kept behind a tiny seam so classification remains deterministic in tests
     # that exercise absolute retry timestamps through the shared parser.
@@ -463,6 +466,7 @@ __all__ = [
     "ConcurrencyObservation",
     "MAX_ADAPTIVE_CONCURRENCY_COOLDOWN_SECONDS",
     "adaptive_concurrency_policy",
+    "capacity_feedback_messages",
     "classify_backend_pressure",
     "has_usage_limit_pause",
     "observe_ac_result",
