@@ -21,6 +21,7 @@ import structlog
 
 from ouroboros.backends import backend_supports_tool_envelope
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
+from ouroboros.core.json_utils import _extract_fenced_json_payload
 from ouroboros.core.types import Result
 from ouroboros.evaluation.json_utils import extract_json_payload
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
@@ -336,13 +337,14 @@ def _parse_qa_response(
             return Result.err(f"Invalid JSON in QA response: {e}")
         if not isinstance(data, dict):
             return Result.err("QA response JSON must be an object, got " + type(data).__name__)
-        if not _JSON_FENCE_RE.search(response_text) and _carries_json_object(
-            response_text.replace(json_str, "", 1)
+        if _carries_json_object(response_text.replace(json_str, "", 1)) and (
+            _extract_fenced_json_payload(response_text)[1] is None
         ):
             # The extractor counts only *valid* objects, so a malformed second
             # verdict (``{"score": 0.1, "verdict": "fail",}``) beside a passing
-            # one leaves the passing one "unique". Any other object start
-            # outside the payload is a competing answer, not prose.
+            # one leaves the passing one "unique". Only a supported answer
+            # fence can outrank surrounding objects; reuse the extractor's
+            # boundary rules rather than recognizing only labeled fences.
             return Result.err("QA response contains JSON but no single unambiguous verdict object")
     elif _carries_json_object(response_text):
         # The model answered in JSON, but not with one authoritative object

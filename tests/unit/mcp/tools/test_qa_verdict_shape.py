@@ -288,3 +288,35 @@ async def test_single_object_beside_prose_still_parses() -> None:
 
     assert result.is_ok
     assert result.value.meta["passed"] is True
+
+
+@pytest.mark.parametrize("info", ["", "json"])
+@pytest.mark.parametrize("marker", ["```", "~~~"])
+@pytest.mark.parametrize("context_first", [False, True])
+async def test_supported_answer_fence_remains_authoritative_beside_context(
+    info: str, marker: str, context_first: bool
+) -> None:
+    answer = f'{marker}{info}\n{{"score":0.95,"verdict":"pass"}}\n{marker}'
+    context = 'Context: {"criterion":"CLI"}'
+    body = f"{context}\n{answer}" if context_first else f"{answer}\n{context}"
+
+    result = await _handler(body).handle(dict(_ARGS))
+
+    assert result.is_ok
+    assert result.value.meta["score"] == 0.95
+    assert result.value.meta["passed"] is True
+
+
+@pytest.mark.parametrize("info", ["", "json"])
+@pytest.mark.parametrize("correction_first", [False, True])
+async def test_malformed_competing_answer_fence_is_rejected(
+    info: str, correction_first: bool
+) -> None:
+    answer = f'```{info}\n{{"score":0.95,"verdict":"pass"}}\n```'
+    correction = f'```{info}\n{{verdict:"fail", score:0.1}}\n```'
+    body = f"{correction}\n{answer}" if correction_first else f"{answer}\n{correction}"
+
+    result = await _handler(body).handle(dict(_ARGS))
+
+    assert result.is_err
+    assert "no single unambiguous verdict object" in str(result.error)
