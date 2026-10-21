@@ -234,6 +234,14 @@ async def test_prose_without_json_still_uses_the_fallback() -> None:
 # The extractor counts only *valid* objects, so a malformed second verdict left
 # the passing one "unique" and it was read as the answer.
 _COMPETING_MALFORMED: dict[str, str] = {
+    "unquoted-correction": (
+        '{"score":0.95,"verdict":"pass"}\nCorrection: {verdict:"fail", score:0.1}'
+    ),
+    "single-quoted-correction": (
+        '{"score":0.95,"verdict":"pass"}\nCorrection: {\'verdict\':\'fail\'}'
+    ),
+    "unquoted-before-pass": ('{verdict:"fail", score:0.1}\n{"score":0.95,"verdict":"pass"}'),
+    "numeric-key-correction": ('{"score":0.95,"verdict":"pass"}\nCorrection: {1:"fail"}'),
     "valid-pass-then-malformed-fail": (
         '{"score": 0.95, "verdict": "pass"}\nCorrection: {"score": 0.1, "verdict": "fail",}'
     ),

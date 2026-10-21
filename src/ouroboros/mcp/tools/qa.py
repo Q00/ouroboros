@@ -305,7 +305,9 @@ def _parse_non_json_qa_response(response_text: str) -> dict[str, Any] | None:
 _JSON_FENCE_RE = re.compile(r"(?im)^[ \t>]*(?:`{3,}|~{3,})[ \t]*json\b")
 # An object opening on a key, or an array opening on a JSON value. Prose
 # brackets such as ``[see AC 2]`` start with neither.
-_JSON_OPENER_RE = re.compile(r'\{\s*"|\[\s*(?:["{\[]|-?\d|true\b|false\b|null\b)')
+_JSON_OPENER_RE = re.compile(
+    r"\{\s*(?:[\"']|[^{}\s:]+\s*:)|\[\s*(?:[\"{\[]|-?\d|true\b|false\b|null\b)"
+)
 
 
 def _carries_json_object(text: str) -> bool:
