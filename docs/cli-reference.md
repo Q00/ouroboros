@@ -492,9 +492,12 @@ ouroboros init list [OPTIONS]
 
 ## `ouroboros detect`
 
-Inspect a project with one LLM call and write validated lint, build, test, and
-static-analysis commands to `.ouroboros/mechanical.toml`. If that file already
-exists, the command leaves it unchanged unless `--force` is passed. This command
+For projects with recognized manifests, use one LLM call to propose lint, build,
+test, and static-analysis commands and persist validated commands to
+`.ouroboros/mechanical.toml`. Without manifests, a discoverable standard-library
+`unittest.TestCase` suite can use deterministic discovery without an LLM call;
+an empty project produces no configuration. If the file already exists, the
+command leaves it unchanged unless `--force` is passed. This command
 authors the deterministic Stage 1 configuration; it does not detect installed
 runtime backends.
 
@@ -505,7 +508,7 @@ ouroboros detect [OPTIONS] [PATH]
 | Option | Description |
 |--------|-------------|
 | `-f, --force` | Re-detect and overwrite an existing `.ouroboros/mechanical.toml` |
-| `--backend TEXT` | Override the LLM backend used for the single inspection call (`claude`, `codex`, `gemini`, `opencode`, or `litellm`) |
+| `--backend TEXT` | Override the LLM backend for manifest-backed inspection (`claude`, `codex`, `gemini`, `opencode`, or `litellm`) |
 
 ## `ouroboros harness`
 
