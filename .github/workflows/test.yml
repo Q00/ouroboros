@@ -137,7 +137,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v7.0.1
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           version: "latest"
           enable-cache: true
