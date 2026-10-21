@@ -25,6 +25,7 @@ async def read_runtime_history(
                 last_row_id=cursor,
                 limit=1000,
                 max_row_id=max_row_id,
+                session_start_by_rowid=True,
             )
         elif execution_id:
             page, next_cursor = await store.get_events_after(
