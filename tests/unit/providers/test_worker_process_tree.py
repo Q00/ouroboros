@@ -360,6 +360,35 @@ async def test_lock_opened_after_tree_exit_is_put_back(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_lock_held_through_a_hard_link_is_put_back(tmp_path: Path) -> None:
+    """A holder is matched by the open file, not by the path it was opened through."""
+    lock = tmp_path / "index.lock"
+    lock.write_text("")
+    alias = tmp_path / "alias"
+    os.link(lock, alias)
+    observation = _observe(lock)
+    ready = tmp_path / "holder.ready"
+    holder = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        "import sys, time\n"
+        "fh = open(sys.argv[1], 'rb')\n"
+        "open(sys.argv[2], 'w').close()\n"
+        "time.sleep(60)\n",
+        str(alias),
+        str(ready),
+    )
+    try:
+        await _wait_for_file(ready)
+        outcome = worker_process_tree._claim_verify_remove(lock, observation)
+        assert outcome == ("left", "held_by_live_process")
+        assert lock.stat().st_ino == observation.inode
+    finally:
+        holder.kill()
+        await holder.wait()
+
+
+@pytest.mark.asyncio
 async def test_unavailable_process_scan_reports_unconfirmed_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

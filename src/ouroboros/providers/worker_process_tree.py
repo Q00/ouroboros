@@ -185,15 +185,18 @@ def git_index_lock_path(workspace: str | None) -> Path | None:
     return None
 
 
-def _proc_fd_holds(pid: int, target: str) -> bool:
+def _proc_fd_holds(pid: int, identity: tuple[int, int]) -> bool:
     fd_dir = _PROC_ROOT / str(pid) / "fd"
     try:
         fds = list(os.scandir(fd_dir))
     except OSError:
         return False
     for fd in fds:
+        # stat() follows the fd to the open file itself, so a hard link or a
+        # renamed path still matches by device and inode.
         with contextlib.suppress(OSError):
-            if os.readlink(fd.path) == target:
+            stat = os.stat(fd.path)
+            if (stat.st_dev, stat.st_ino) == identity:
                 return True
     return False
 
@@ -206,12 +209,14 @@ def _lock_holders(path: Path, pids: Iterable[int] | None) -> set[int] | None:
     """
     target = os.path.realpath(path)
     if _proc_available():
-        if pids is None:
-            try:
+        try:
+            stat = os.stat(target)
+            if pids is None:
                 pids = [int(entry.name) for entry in os.scandir(_PROC_ROOT) if entry.name.isdigit()]
-            except OSError:
-                return None
-        return {pid for pid in pids if _proc_fd_holds(pid, target)}
+        except OSError:
+            return None
+        identity = (stat.st_dev, stat.st_ino)
+        return {pid for pid in pids if _proc_fd_holds(pid, identity)}
     lsof = shutil.which("lsof")
     if lsof is None:
         return None
