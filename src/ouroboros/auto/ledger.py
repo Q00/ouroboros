@@ -94,6 +94,10 @@ REQUESTER_KEY_SUFFIX = ".requester"
 # settles its section but reaches the worker only as ``Seed.repo_facts``.
 REPO_FACT_KEY_INFIX = ".repo_fact."
 
+# Key of the ledger entry holding the user's request verbatim, written once by
+# ``SeedDraftLedger.from_goal``. It is the goal the worker sees (``Seed.sourced_scope``).
+USER_GOAL_KEY = "goal.primary"
+
 
 REQUIRED_SECTIONS = (
     "goal",
@@ -442,7 +446,7 @@ class SeedDraftLedger:
         ledger.add_entry(
             "goal",
             LedgerEntry(
-                key="goal.primary",
+                key=USER_GOAL_KEY,
                 value=clean_goal,
                 source=LedgerSource.USER_GOAL,
                 confidence=0.95 if clean_goal else 0.0,

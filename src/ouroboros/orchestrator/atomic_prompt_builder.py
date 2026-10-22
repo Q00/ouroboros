@@ -15,8 +15,11 @@ from dataclasses import dataclass
 import os
 from typing import TYPE_CHECKING, Any
 
-from ouroboros.core.seed import AcceptanceCriterionSpec
-from ouroboros.core.seed_contract_prompt import render_auto_recursion_guard
+from ouroboros.core.seed import AcceptanceCriterionSpec, SourcedScope
+from ouroboros.core.seed_contract_prompt import (
+    render_auto_recursion_guard,
+    render_sourced_objective,
+)
 from ouroboros.orchestrator.ac_execution_capsule import ACExecutionCapsule
 from ouroboros.orchestrator.evidence.ac_classification import (
     _effective_evidence_schema_for_ac,
@@ -53,6 +56,17 @@ def _build_success_contract_block(spec: AcceptanceCriterionSpec | None) -> str:
         "from the AC requirements and provide truthful evidence."
     )
     return "\n".join(lines)
+
+
+# Executor attribute holding the run Seed's ``sourced_scope``. The runner sets it
+# (``install_sourced_scope``) the way the check package sets its hooks, and a
+# derived executor inherits it (``inherit_check_package_hooks``).
+SOURCED_SCOPE_ATTR = "sourced_scope"
+
+
+def install_sourced_scope(executor: object, scope: SourcedScope | None) -> None:
+    """Record the run Seed's sourced scope on ``executor`` for its leaf prompts."""
+    setattr(executor, SOURCED_SCOPE_ATTR, scope)
 
 
 @dataclass(frozen=True)
@@ -100,6 +114,17 @@ class AtomicPromptBuilder:
             seed_goal = capsule.seed_goal
             retry_attempt = capsule.retry_attempt
 
+        # A Seed with ``sourced_scope`` gives the worker only content with a
+        # known source: the user's goal verbatim and the binding criteria (or the
+        # request itself). The criterion text below is the Seed's own, kept for
+        # the evidence schema so the worker's fields match the verifier's.
+        task_text = ac_content
+        scope = getattr(executor, SOURCED_SCOPE_ATTR, None)
+        if isinstance(scope, SourcedScope):
+            task_text = render_sourced_objective(scope)
+            seed_goal = scope.goal
+            sibling_acs = None  # siblings would list model-written criteria
+
         # Build prompt
         if node_identity is not None:
             label = (
@@ -117,7 +142,7 @@ class AtomicPromptBuilder:
 
         task_section, context_governance_audit = executor._build_atomic_dispatch_context(
             ac_index=ac_index,
-            ac_content=ac_content,
+            ac_content=task_text,
             label=label,
             level_contexts=level_contexts,
             sibling_acs=sibling_acs,
