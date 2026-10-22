@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from ouroboros.providers import worker_process_tree
 from ouroboros.providers.codex_cli_stream import terminate_runtime_process
 from ouroboros.providers.worker_process_tree import (
     capture_worker_tree,
@@ -300,6 +301,78 @@ async def test_unverified_process_group_is_never_adopted_or_signalled() -> None:
     finally:
         bystander.kill()
         await bystander.wait()
+
+
+@pytest.mark.asyncio
+async def test_lock_replaced_during_holder_check_is_left_intact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A new lock that takes the name after the checks is never deleted."""
+    process, child_pid, workspace = await _spawn_worker(tmp_path, hold_lock=True, ignore_term=True)
+    lock = workspace / ".git" / "index.lock"
+    real_holders = worker_process_tree._lock_holders
+    replaced: dict[str, int] = {}
+
+    def _replace_then_report(path: Path, pids: Any) -> set[int] | None:
+        if pids is None and not replaced:
+            lock.unlink()
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            replaced["inode"] = lock.stat().st_ino
+            return set()
+        return real_holders(path, pids)
+
+    monkeypatch.setattr(worker_process_tree, "_lock_holders", _replace_then_report)
+    logger = _Recorder()
+    try:
+        await terminate_runtime_process(
+            process,
+            shutdown_timeout=0.5,
+            logger=logger,
+            log_namespace="test_runtime",
+            workspace=str(workspace),
+        )
+        assert not _alive(child_pid)
+        assert lock.exists()
+        assert lock.stat().st_ino == replaced["inode"]
+        assert logger.events[-1] == (
+            "test_runtime.stale_git_index_lock_left",
+            {"path": str(lock), "reason": "lock_replaced"},
+        )
+        assert sorted(p.name for p in lock.parent.iterdir()) == ["index.lock"]
+    finally:
+        await _cleanup(child_pid)
+
+
+@pytest.mark.asyncio
+async def test_unavailable_process_scan_reports_unconfirmed_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without a readable process table the helper never claims the tree exited."""
+    process, child_pid, workspace = await _spawn_worker(tmp_path, hold_lock=True, ignore_term=False)
+    lock = workspace / ".git" / "index.lock"
+    monkeypatch.setattr(worker_process_tree, "_scan_processes", lambda: None)
+    logger = _Recorder()
+    try:
+        confirmed = await terminate_runtime_process(
+            process,
+            shutdown_timeout=0.5,
+            logger=logger,
+            log_namespace="test_runtime",
+            workspace=str(workspace),
+        )
+        assert confirmed is False
+        assert (
+            "test_runtime.worker_tree_exit_unconfirmed",
+            {"pids": [], "reason": "process_scan_unavailable"},
+        ) in logger.events
+        assert lock.exists()
+        assert logger.events[-1] == (
+            "test_runtime.stale_git_index_lock_left",
+            {"path": str(lock), "reason": "not_held_by_worker"},
+        )
+    finally:
+        await _cleanup(child_pid)
 
 
 def test_git_index_lock_path_follows_worktree_gitdir_file(tmp_path: Path) -> None:

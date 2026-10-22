@@ -62,6 +62,7 @@ class WorkerTree:
     pgid: int | None = None
     workspace: str | None = None
     lock: _LockObservation | None = None
+    scan_failed: bool = False
 
 
 def _proc_available() -> bool:
@@ -262,6 +263,8 @@ def _capture(
     if process_group_id is not None and process_group_id != os.getpgrp():
         tree.pgid = process_group_id
     snapshot = _scan_processes() if (leader_pid is not None or tree.pgid is not None) else None
+    # On POSIX a live leader whose tree cannot be read leaves the exit unknown.
+    tree.scan_failed = snapshot is None and leader_pid is not None and os.name == "posix"
     if snapshot is not None:
         leader = snapshot.get(leader_pid) if leader_pid is not None else None
         # Only a direct child of this process is a worker we own. This keeps a
@@ -339,6 +342,8 @@ async def signal_worker_tree(tree: WorkerTree, sig: int, *, exclude_leader_group
 
 async def wait_for_worker_tree_exit(tree: WorkerTree, *, timeout: float) -> set[int] | None:
     """Wait until no member is alive; return the survivors, or ``None`` if unknown."""
+    if tree.scan_failed:
+        return None
     if not tree.members and tree.pgid is None:
         return set()
     loop = asyncio.get_running_loop()
@@ -378,13 +383,45 @@ def _release_lock(tree: WorkerTree, tree_exited: bool) -> tuple[str, str] | None
         return "left", "holder_check_unavailable"
     if holders:
         return "left", "held_by_live_process"
+    return _claim_and_remove(path, observation)
+
+
+def _claim_and_remove(path: Path, observation: _LockObservation) -> tuple[str, str] | None:
+    """Move the lock aside atomically, verify it is the observed file, then delete it.
+
+    Git creates a lock with ``O_EXCL`` and never adopts an existing file, so a
+    replacement lock is always a new inode. The rename takes whatever holds the
+    name in one step; only the observed inode is deleted. Anything else goes
+    back under its name, or stays under the claimed name if the name was taken
+    again meanwhile.
+    """
+    claimed = path.with_name(f"{path.name}.ouroboros-stale-{os.getpid()}-{os.urandom(4).hex()}")
     try:
-        path.unlink()
+        os.rename(path, claimed)
     except FileNotFoundError:
         return None
     except OSError:
-        return "left", "unlink_failed"
-    return "removed", "worker_tree_exited"
+        return "left", "claim_failed"
+    try:
+        stat = os.lstat(claimed)
+        same = (stat.st_dev, stat.st_ino, stat.st_mtime_ns) == (
+            observation.device,
+            observation.inode,
+            observation.mtime_ns,
+        )
+    except OSError:
+        same = False
+    if same:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(claimed)
+        return "removed", "worker_tree_exited"
+    try:
+        os.link(claimed, path)
+    except OSError:
+        return "left", f"lock_replaced_kept_at:{claimed.name}"
+    with contextlib.suppress(OSError):
+        os.unlink(claimed)
+    return "left", "lock_replaced"
 
 
 async def release_stale_git_index_lock(
@@ -442,8 +479,12 @@ async def finish_worker_tree(
         with contextlib.suppress(asyncio.CancelledError):
             survivors = await wait_for_worker_tree_exit(tree, timeout=shutdown_timeout)
     tree_exited = survivors is not None and not survivors
-    if survivors and logger is not None:
-        logger.warning(f"{log_namespace}.worker_tree_exit_unconfirmed", pids=sorted(survivors))
+    if not tree_exited and logger is not None:
+        logger.warning(
+            f"{log_namespace}.worker_tree_exit_unconfirmed",
+            pids=sorted(survivors or ()),
+            reason="process_scan_unavailable" if survivors is None else "survivors",
+        )
     await release_stale_git_index_lock(
         tree, tree_exited=tree_exited, logger=logger, log_namespace=log_namespace
     )
