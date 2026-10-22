@@ -29,6 +29,7 @@ from ouroboros.auto.grade_gate_terminals import (
     SEED_GRADE_BELOW_REQUIRED_STOP_REASON_CODE,
     SEED_REVIEW_WITHHELD_RUN_STOP_REASON_CODE,
     degraded_seed_not_executed_blocker,
+    degraded_seed_runs_as_stated,
     degraded_seed_safety_blocker,
     grade_meets_required,
     is_degraded_seed_not_executed_stop,
@@ -1146,23 +1147,13 @@ class AutoPipeline:
                     return self._result(state, ledger, review=review, blocker=state.last_error)
             self._save(state)
 
-            # #1257 PR-C — degraded seed reaches partial product terminal.
-            #
-            # When ``seed.metadata.degraded`` is True, the Seed was synthesized
-            # under deadline pressure by ``partial_seed_from_evidence`` (PR-A
-            # substrate, routed by PR-B). PR-C's contract:
-            #
-            # * any remaining ``review.grade_result.blockers`` are safety
-            #   blockers (``missing_goal`` / ``seed_goal_mismatch`` /
-            #   ``high_risk_assumptions``) — those still terminate the run.
-            # * with no blockers, the partial product surfaces immediately as
-            #   ``AutoPhase.COMPLETE`` via :meth:`_emit_partial_product_terminal`
-            #   regardless of grade or ``may_run``: a deadline-recovery Seed is
-            #   a typed alternative-success terminal, not a runnable Seed.
-            #
-            # Normal (non-degraded) Seeds skip this branch and fall through to
-            # the existing grade-gate / may_run checks unchanged.
-            if bool(getattr(seed.metadata, "degraded", False)):
+            # #1257 PR-C: a degraded (deadline-recovery) Seed without the
+            # user's goal on record stops, on a safety blocker or as a partial
+            # product that was not executed. With it, the Seed runs like any
+            # auto Seed (:func:`degraded_seed_runs_as_stated`) and the gates
+            # keep only the safety bar. Normal Seeds take the grade gate.
+            runs_degraded = degraded_seed_runs_as_stated(seed)
+            if bool(getattr(seed.metadata, "degraded", False)) and not runs_degraded:
                 if terminal := degraded_seed_safety_blocker(review):
                     blocker, code = terminal
                     state.mark_blocked(blocker, tool_name="grade_gate", error_code=code)
@@ -1171,12 +1162,18 @@ class AutoPipeline:
                 return await self._emit_partial_product_terminal(state, ledger, seed, review)
 
             if terminal := seed_review_gate_blocker(
-                state, review, skip_run=self.skip_run or state.skip_run
+                state, review, skip_run=self.skip_run or state.skip_run, runs_degraded=runs_degraded
             ):
                 blocker, code = terminal
                 state.mark_blocked(blocker, tool_name="grade_gate", error_code=code)
                 self._save(state)
                 return self._result(state, ledger, review=review, blocker=blocker)
+            if runs_degraded:
+                state.mark_progress(
+                    "Degraded seed runs on the request as stated; "
+                    f"{len(seed.metadata.unresolved_slots)} unresolved slot(s) stay open",
+                    tool_name="grade_gate",
+                )
 
             repaired = await repair_seed_preflight_in_auto(
                 seed,
@@ -1758,14 +1755,11 @@ class AutoPipeline:
              ``reason="interview_phase_deadline"`` so unresolved sections
              become next-step hints on the degraded Seed (PR-A).
         3. Persist the Seed via :meth:`_record_generated_seed`, mark
-           ``interview_completed = True``, and transition to ``REVIEW`` so
-           the rest of the pipeline can surface a typed partial product
-           via :meth:`_emit_partial_product_terminal`. PR-C teaches the
-           grade gate to respect ``metadata.degraded`` so a deadline Seed
-           is routed to the partial-product terminal (not auto-RUN) and is
-           not re-blocked solely on high-ambiguity grounds. Hard safety
-           blockers (``missing_goal`` / ``seed_goal_mismatch`` /
-           ``high_risk_assumptions``) still terminate.
+           ``interview_completed = True``, and transition to ``REVIEW``. A
+           Seed with the user's goal on record runs on that goal; one without
+           it stops as a typed partial product
+           (:meth:`_emit_partial_product_terminal`). Hard safety blockers
+           still terminate either way.
 
         The global ``pipeline_timeout_seconds`` deadline is unaffected:
         callers gate on :meth:`_enforce_deadline` *before* invoking this
@@ -1782,15 +1776,10 @@ class AutoPipeline:
         )
 
         if ledger_ready:
-            # #1302 ambiguity-before-execution: a per-phase interview deadline
-            # cut the Socratic loop short before the backend could confirm low
-            # ambiguity (<= 0.20). A structurally complete ledger is NOT a
-            # substitute for that confirmation, so this Seed must NOT auto-RUN.
-            # Synthesize the full ledger content but stamp it as a degraded
-            # deadline-recovery terminal (``recovery_reason`` set), so REVIEW
-            # routes it to :meth:`_emit_partial_product_terminal` exactly like
-            # the incomplete-ledger branch below instead of proceeding through
-            # the grade / Seed QA / RUN gates on unconfirmed-ambiguity evidence.
+            # #1302: the deadline cut the loop short before the backend could
+            # confirm low ambiguity (<= 0.20), so this Seed is stamped degraded
+            # (``recovery_reason`` set) and REVIEW treats it exactly like the
+            # incomplete-ledger branch below.
             seed = synthesize_seed_from_ledger(
                 ledger,
                 interview_id=state.interview_session_id,
@@ -1851,15 +1840,12 @@ class AutoPipeline:
         seed: Seed,
         review: SeedReview,
     ) -> AutoPipelineResult:
-        """Short-circuit a degraded Seed to ``AutoPhase.COMPLETE`` (#1257 PR-C).
+        """Stop a degraded Seed without a sourced goal before RUN (#1257 PR-C).
 
-        Mirrors the existing ``skip_run`` short-circuit but for the
-        deadline-recovery path: PR-A's ``partial_seed_from_evidence`` Seed
-        carries unresolved sections that downstream consumers should treat
-        as next-step requirements rather than runtime arguments. We
-        therefore stop *before* RUN/RALPH_HANDOFF and emit
-        ``auto.product.partial_emitted`` so post-hoc evidence inspection
-        can see the typed terminal.
+        With no ``sourced_scope`` there is no user goal on record to run, so
+        the Seed's unresolved sections stay next-step requirements. We stop
+        *before* RUN/RALPH_HANDOFF and emit ``auto.product.partial_emitted``
+        so post-hoc evidence inspection can see the typed terminal.
 
         The event aggregate type is ``auto_session`` (same as the PR-B
         ``runtime.deadline.interview.fired`` event) so a single
@@ -2091,7 +2077,10 @@ class AutoPipeline:
             state.last_qa_suggestions = _safe_seed_qa_evidence(qa_result.suggestions)
             if qa_result.passed:
                 review_gate = seed_review_gate_blocker(
-                    state, current_review, skip_run=self.skip_run or state.skip_run
+                    state,
+                    current_review,
+                    skip_run=self.skip_run or state.skip_run,
+                    runs_degraded=degraded_seed_runs_as_stated(current_seed),
                 )
                 if review_gate is not None:
                     review_blocker, review_code = review_gate
@@ -2204,7 +2193,10 @@ class AutoPipeline:
 
         # Gates first, event second — see the module docstring for why.
         review_gate = seed_review_gate_blocker(
-            state, review, skip_run=self.skip_run or state.skip_run
+            state,
+            review,
+            skip_run=self.skip_run or state.skip_run,
+            runs_degraded=degraded_seed_runs_as_stated(seed),
         )
         if review_gate is not None:
             review_blocker, review_code = review_gate

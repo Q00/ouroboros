@@ -14,16 +14,14 @@ product can still surface downstream. These tests pin:
    a per-phase interview deadline never obtained backend-confirmed low
    ambiguity, so even a structurally complete ledger is stamped
    ``degraded`` with ``recovery_reason="interview_phase_deadline"`` and
-   the new :data:`DEADLINE_LEDGER_SEED_GENERATION_MODE` so it cannot
-   auto-RUN on unconfirmed-ambiguity evidence.
+   the new :data:`DEADLINE_LEDGER_SEED_GENERATION_MODE`.
 4. The pipeline does not re-mark ``interview_phase_deadline`` BLOCKED
    on the deadline path.
-5. The complete-ledger deadline path never reaches RUN / Seed QA even
-   when both are wired (#1302 ambiguity-before-execution gate).
+5. A complete-ledger deadline Seed with the user's goal on record
+   (``sourced_scope``) runs through Seed QA and RUN like any auto Seed.
 
-PR-C tightens the grade-gate side so degraded seeds reach the
-partial-product terminal; #1302 extends that to the complete-ledger
-deadline closure.
+PR-C tightens the grade-gate side for degraded seeds; #1302 extends the
+degraded stamp to the complete-ledger deadline closure.
 """
 
 from __future__ import annotations
@@ -34,7 +32,7 @@ from typing import Any
 
 import pytest
 
-from ouroboros.auto.grade_gate_terminals import DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE
+from ouroboros.auto.adapters import EvaluateResult
 from ouroboros.auto.ledger import (
     LedgerEntry,
     LedgerSource,
@@ -215,8 +213,7 @@ async def test_deadline_with_complete_ledger_routes_through_degraded_recovery(tm
     assert payload["open_gaps"] == []
 
     # But the persisted Seed metadata is now a degraded deadline-recovery
-    # terminal: full ledger content, no unresolved slots, flagged degraded so
-    # the gates route it away from RUN.
+    # Seed: full ledger content, no unresolved slots, flagged degraded.
     assert state.seed_artifact is not None
     metadata = state.seed_artifact["metadata"]
     assert metadata["generation_mode"] == DEADLINE_LEDGER_SEED_GENERATION_MODE
@@ -228,22 +225,24 @@ async def test_deadline_with_complete_ledger_routes_through_degraded_recovery(tm
 
 
 @pytest.mark.asyncio
-async def test_complete_ledger_deadline_cannot_reach_run_or_seed_qa(tmp_path) -> None:
-    """#1302 gate: a complete-ledger interview deadline must not auto-RUN.
+async def test_complete_ledger_deadline_runs_after_seed_qa_on_the_sourced_goal(tmp_path) -> None:
+    """A complete-ledger deadline Seed with the user's goal on record runs.
 
-    Regression for the ouroboros-agent[bot] blocker (``req_1780365047_26``):
-    the complete-ledger deadline fallback promoted a structurally complete
-    ledger to a normal runnable Seed and could reach RUN even though no
-    backend-confirmed ``ambiguity_score <= 0.20`` existed. With both a
-    ``run_starter`` and a ``seed_qa_evaluator`` wired, the pipeline must end at
-    the typed partial-product terminal and invoke NEITHER.
+    The backend never confirmed low ambiguity (#1302), so the Seed stays
+    degraded. With ``sourced_scope`` the worker is told only the user's goal,
+    so the Seed takes the same Seed QA and RUN gates as any auto Seed instead
+    of stopping unexecuted.
     """
+    qa_calls: list[str] = []
+    run_seeds: list[Any] = []
 
-    async def _forbidden_run_starter(_seed, **_kwargs):
-        raise AssertionError("RUN must not start on a complete-ledger deadline closure")
+    async def _passing_seed_qa(seed, _ledger):
+        qa_calls.append(seed.metadata.seed_id)
+        return EvaluateResult(passed=True, score=0.91, verdict="pass")
 
-    async def _forbidden_seed_qa(_seed, _ledger):
-        raise AssertionError("Seed QA must not run on a complete-ledger deadline closure")
+    async def _run_starter(seed, **_kwargs):
+        run_seeds.append(seed)
+        return {"job_id": "job_1", "execution_id": "exec_1", "session_id": "session_1"}
 
     event_store = _RecordingEventStore()
     state = _build_deadline_state(tmp_path, goal="Build a CLI")
@@ -252,27 +251,25 @@ async def test_complete_ledger_deadline_cannot_reach_run_or_seed_qa(tmp_path) ->
         driver,
         _no_seed_generator,
         store=AutoStore(tmp_path),
-        run_starter=_forbidden_run_starter,
-        seed_qa_evaluator=_forbidden_seed_qa,
+        run_starter=_run_starter,
+        seed_qa_evaluator=_passing_seed_qa,
     )
 
     result = await pipeline.run(state)
-    await asyncio.sleep(0)
 
-    # Terminal is the typed partial-product stop: never RUN, never COMPLETE.
-    assert state.phase == AutoPhase.BLOCKED
-    assert result.stop_reason_code == DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE
-    assert result.partial_product is True
+    assert len(qa_calls) == 1
+    assert len(run_seeds) == 1
+    assert run_seeds[0].metadata.degraded is True
+    assert run_seeds[0].sourced_scope.goal == "Build a CLI"
+    assert state.phase == AutoPhase.COMPLETE
+    assert result.stop_reason_code is None
+    assert result.partial_product is False
     assert result.partial_product_reason == "interview_phase_deadline"
-    # Complete ledger ⇒ no unresolved slots carried forward.
+    # Complete ledger: no unresolved slots carried forward.
     assert result.partial_unresolved_slots == ()
-    # The partial-product terminal fired (and neither sentinel raised, proving
-    # RUN / Seed QA were never reached).
-    partial_events = [
+    assert not [
         event for event in event_store.appended if event.type == "auto.product.partial_emitted"
     ]
-    assert len(partial_events) == 1
-    assert partial_events[0].data["recovery_reason"] == "interview_phase_deadline"
 
 
 @pytest.mark.asyncio
