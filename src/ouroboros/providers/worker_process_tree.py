@@ -97,11 +97,14 @@ def _scan_proc() -> dict[int, _ProcessRecord] | None:
             continue
         try:
             raw = Path(entry.path, "stat").read_text(encoding="utf-8", errors="replace")
+        except (FileNotFoundError, ProcessLookupError):
+            continue  # exited during the scan
         except OSError:
-            continue
+            return None  # a live process that cannot be observed: unknown
         record = _parse_proc_stat(int(entry.name), raw)
-        if record is not None:
-            records[record.pid] = record
+        if record is None:
+            return None
+        records[record.pid] = record
     return records
 
 
@@ -144,6 +147,16 @@ def _scan_processes() -> dict[int, _ProcessRecord] | None:
     if _proc_available():
         return _scan_proc()
     return _scan_ps()
+
+
+def _pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
 
 
 def _descendants(snapshot: dict[int, _ProcessRecord], root_pid: int) -> dict[int, str]:
@@ -197,10 +210,14 @@ def _proc_fd_holds(pid: int, identity: tuple[int, int]) -> bool | None:
     for fd in fds:
         # stat() follows the fd to the open file itself, so a hard link or a
         # renamed path still matches by device and inode.
-        with contextlib.suppress(OSError):
+        try:
             stat = os.stat(fd.path)
-            if (stat.st_dev, stat.st_ino) == identity:
-                return True
+        except (FileNotFoundError, ProcessLookupError):
+            continue  # descriptor closed or process exited during the check
+        except OSError:
+            return None
+        if (stat.st_dev, stat.st_ino) == identity:
+            return True
     return False
 
 
@@ -284,6 +301,8 @@ def _capture(
     tree.scan_failed = snapshot is None and leader_pid is not None and os.name == "posix"
     if snapshot is not None:
         leader = snapshot.get(leader_pid) if leader_pid is not None else None
+        if leader_pid is not None and leader is None and _pid_exists(leader_pid):
+            tree.scan_failed = True  # a live leader missing from the table: unknown
         # Only a direct child of this process is a worker we own. This keeps a
         # stale or fake pid from pulling unrelated processes into the tree.
         if leader is not None and leader.ppid == os.getpid():

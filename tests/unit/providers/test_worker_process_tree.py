@@ -472,6 +472,54 @@ def test_incomplete_holder_view_leaves_the_lock(tmp_path: Path) -> None:
     assert sorted(p.name for p in tmp_path.iterdir()) == ["index.lock"]
 
 
+@pytest.mark.asyncio
+async def test_live_leader_missing_from_scan_reports_unconfirmed_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A partial process table that omits the live worker never confirms exit."""
+    process, child_pid, _ = await _spawn_worker(tmp_path, hold_lock=False, ignore_term=False)
+    real_scan = worker_process_tree._scan_processes
+
+    def _partial() -> Any:
+        snapshot = real_scan()
+        if snapshot is not None:
+            snapshot.pop(process.pid, None)
+        return snapshot
+
+    monkeypatch.setattr(worker_process_tree, "_scan_processes", _partial)
+    logger = _Recorder()
+    try:
+        confirmed = await terminate_runtime_process(
+            process, shutdown_timeout=0.5, logger=logger, log_namespace="test_runtime"
+        )
+        assert confirmed is False
+        assert (
+            "test_runtime.worker_tree_exit_unconfirmed",
+            {"pids": [], "reason": "process_scan_unavailable"},
+        ) in logger.events
+    finally:
+        await _cleanup(child_pid)
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="Linux /proc descriptor check")
+def test_uninspectable_descriptor_is_unknown_not_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A descriptor that cannot be stat'ed makes the holder answer unknown."""
+    lock = tmp_path / "index.lock"
+    lock.write_text("")
+    stat = lock.stat()
+    real_stat = os.stat
+
+    def _denied(path: Any, *args: Any, **kwargs: Any) -> Any:
+        if str(path).startswith(f"/proc/{os.getpid()}/fd/"):
+            raise PermissionError(path)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(worker_process_tree.os, "stat", _denied)
+    assert worker_process_tree._proc_fd_holds(os.getpid(), (stat.st_dev, stat.st_ino)) is None
+
+
 def test_git_index_lock_path_follows_worktree_gitdir_file(tmp_path: Path) -> None:
     """A linked worktree's ``.git`` file points at its own index lock."""
     git_dir = tmp_path / "main" / ".git" / "worktrees" / "wt"
