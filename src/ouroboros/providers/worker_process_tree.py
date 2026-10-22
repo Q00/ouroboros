@@ -204,7 +204,7 @@ def _proc_fd_holds(pid: int, identity: tuple[int, int]) -> bool | None:
     try:
         fds = list(os.scandir(fd_dir))
     except (FileNotFoundError, ProcessLookupError):
-        return False
+        return None if _pid_exists(pid) else False
     except OSError:
         return None
     for fd in fds:
@@ -345,6 +345,8 @@ def _live_members(tree: WorkerTree) -> tuple[dict[int, _ProcessRecord], set[int]
     live: set[int] = set()
     for pid, start in tree.members.items():
         record = snapshot.get(pid)
+        if record is None and _pid_exists(pid):
+            return None  # a live member missing from the table: unknown
         if record is not None and record.start == start and not record.zombie:
             live.add(pid)
     if tree.pgid is not None:

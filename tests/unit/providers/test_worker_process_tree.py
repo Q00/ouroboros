@@ -520,6 +520,45 @@ def test_uninspectable_descriptor_is_unknown_not_absent(
     assert worker_process_tree._proc_fd_holds(os.getpid(), (stat.st_dev, stat.st_ino)) is None
 
 
+@pytest.mark.asyncio
+async def test_live_member_missing_from_later_scan_is_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A recorded member that a later scan omits while it lives is never counted gone."""
+    process, child_pid, _ = await _spawn_worker(tmp_path, hold_lock=False, ignore_term=False)
+    try:
+        tree = await capture_worker_tree(process)
+        assert child_pid in tree.members
+        real_scan = worker_process_tree._scan_processes
+
+        def _partial() -> Any:
+            snapshot = real_scan()
+            if snapshot is not None:
+                snapshot.pop(child_pid, None)
+            return snapshot
+
+        monkeypatch.setattr(worker_process_tree, "_scan_processes", _partial)
+        assert await worker_process_tree.wait_for_worker_tree_exit(tree, timeout=0.1) is None
+    finally:
+        process.kill()
+        await process.wait()
+        await _cleanup(child_pid)
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="Linux /proc descriptor check")
+def test_hidden_fd_directory_of_live_process_is_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A live process whose fd directory is missing is unknown, not a non-holder."""
+    real_scandir = os.scandir
+
+    def _hidden(path: Any) -> Any:
+        if str(path) == f"/proc/{os.getpid()}/fd":
+            raise FileNotFoundError(path)
+        return real_scandir(path)
+
+    monkeypatch.setattr(worker_process_tree.os, "scandir", _hidden)
+    assert worker_process_tree._proc_fd_holds(os.getpid(), (0, 0)) is None
+
+
 def test_git_index_lock_path_follows_worktree_gitdir_file(tmp_path: Path) -> None:
     """A linked worktree's ``.git`` file points at its own index lock."""
     git_dir = tmp_path / "main" / ".git" / "worktrees" / "wt"
