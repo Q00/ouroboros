@@ -31,6 +31,7 @@ from ouroboros.core.seed import Seed, SourcedScope
 from ouroboros.core.seed_contract import GOAL_OBJECTIVE_CRITERION, SeedContract
 from ouroboros.core.seed_contract_prompt import render_seed_contract_for_execution
 from ouroboros.orchestrator.atomic_prompt_builder import (
+    SEED_CRITERIA_ATTR,
     SOURCED_SCOPE_ATTR,
     AtomicPromptBuilder,
     install_sourced_scope,
@@ -330,12 +331,13 @@ def test_scope_is_decided_by_provenance_not_text() -> None:
 def test_derived_executor_inherits_the_sourced_scope() -> None:
     scope = SourcedScope(goal=USER_GOAL)
     parent = SimpleNamespace()
-    install_sourced_scope(parent, scope)
+    install_sourced_scope(parent, scope, (GENERIC_AC,))
     child = SimpleNamespace()
 
     inherit_check_package_hooks(parent, child)
 
     assert getattr(child, SOURCED_SCOPE_ATTR) == scope
+    assert getattr(child, SEED_CRITERIA_ATTR) == (GENERIC_AC,)
 
 
 @pytest.mark.parametrize("governed", [False, True])
