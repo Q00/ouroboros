@@ -27,6 +27,7 @@ import subprocess
 from typing import Any, Protocol
 
 _POLL_INTERVAL_SECONDS = 0.05
+_FREEZE_ROUNDS = 10
 _SCAN_TIMEOUT_SECONDS = 5.0
 _PROC_ROOT = Path("/proc")
 
@@ -290,6 +291,35 @@ def _observe_lock(workspace: str | None, members: dict[int, str]) -> _LockObserv
     )
 
 
+def _freeze(tree: WorkerTree) -> dict[int, _ProcessRecord] | None:
+    """Stop every member, rescan, and repeat until no new descendant appears.
+
+    A stopped process cannot fork, so the fixed point is the whole tree,
+    including a descendant that an earlier scan missed. The caller sends
+    SIGTERM and then SIGCONT to every member. Returns the last snapshot, or
+    ``None`` (and marks the tree unknown) when a scan fails or the tree keeps
+    growing.
+    """
+    for _ in range(_FREEZE_ROUNDS):
+        for pid in tree.members:
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGSTOP)
+        snapshot = _scan_processes()
+        if snapshot is None:
+            tree.scan_failed = True
+            return None
+        grown = False
+        for pid in list(tree.members):
+            for child, start in _descendants(snapshot, pid).items():
+                if child not in tree.members:
+                    tree.members[child] = start
+                    grown = True
+        if not grown:
+            return snapshot
+    tree.scan_failed = True
+    return None
+
+
 def _capture(
     leader_pid: int | None,
     process_group_id: int | None,
@@ -309,10 +339,11 @@ def _capture(
         # stale or fake pid from pulling unrelated processes into the tree.
         if leader is not None and leader.ppid == os.getpid():
             tree.members = _descendants(snapshot, leader.pid)
-            if tree.pgid is not None:
-                for record in snapshot.values():
-                    if record.pgid == tree.pgid and not record.zombie:
-                        tree.members.setdefault(record.pid, record.start)
+            snapshot = _freeze(tree)
+        if snapshot is not None and tree.members and tree.pgid is not None:
+            for record in snapshot.values():
+                if record.pgid == tree.pgid and not record.zombie:
+                    tree.members.setdefault(record.pid, record.start)
         tree.members.pop(os.getpid(), None)
     if not tree.members:
         # Without a verified live leader the group id is unproven: leave the
@@ -371,6 +402,19 @@ def _signal(tree: WorkerTree, sig: int, *, exclude_leader_group: bool) -> None:
             continue
         with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
             os.kill(pid, sig)
+
+
+def terminate_frozen_tree(tree: WorkerTree) -> None:
+    """Send SIGTERM, then SIGCONT, to every member that :func:`_freeze` stopped.
+
+    Signals go to the recorded pids without a new scan: a stopped process can
+    only leave by SIGKILL, so its pid cannot have been reused meanwhile.
+    """
+    for sig in (signal.SIGTERM, signal.SIGCONT):
+        for pid in tree.members:
+            if pid != os.getpid():
+                with contextlib.suppress(OSError):
+                    os.kill(pid, sig)
 
 
 async def signal_worker_tree(tree: WorkerTree, sig: int, *, exclude_leader_group: bool) -> None:
@@ -551,5 +595,6 @@ __all__ = [
     "git_index_lock_path",
     "release_stale_git_index_lock",
     "signal_worker_tree",
+    "terminate_frozen_tree",
     "wait_for_worker_tree_exit",
 ]

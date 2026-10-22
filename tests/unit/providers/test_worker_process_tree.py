@@ -576,6 +576,31 @@ def test_unreadable_stat_of_live_process_makes_scan_unknown(
     assert worker_process_tree._scan_proc() is None
 
 
+@pytest.mark.asyncio
+async def test_descendant_missed_by_first_scan_is_still_stopped_and_awaited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The freeze rescans until the tree is complete, so a missed child is found."""
+    process, child_pid, _ = await _spawn_worker(tmp_path, hold_lock=False, ignore_term=True)
+    real_scan = worker_process_tree._scan_processes
+    calls = {"n": 0}
+
+    def _first_misses_child() -> Any:
+        calls["n"] += 1
+        snapshot = real_scan()
+        if snapshot is not None and calls["n"] == 1:
+            snapshot.pop(child_pid, None)
+        return snapshot
+
+    monkeypatch.setattr(worker_process_tree, "_scan_processes", _first_misses_child)
+    try:
+        confirmed = await terminate_runtime_process(process, shutdown_timeout=0.5)
+        assert confirmed is True
+        assert not _alive(child_pid)
+    finally:
+        await _cleanup(child_pid)
+
+
 def test_git_index_lock_path_follows_worktree_gitdir_file(tmp_path: Path) -> None:
     """A linked worktree's ``.git`` file points at its own index lock."""
     git_dir = tmp_path / "main" / ".git" / "worktrees" / "wt"

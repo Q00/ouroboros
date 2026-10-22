@@ -25,6 +25,7 @@ from ouroboros.providers.worker_process_tree import (
     capture_worker_tree,
     finish_worker_tree,
     signal_worker_tree,
+    terminate_frozen_tree,
 )
 
 _MAX_STREAM_LINE_BUFFER_BYTES = 50 * 1024 * 1024
@@ -283,8 +284,9 @@ async def terminate_runtime_process(
 
     The worker's descendants are recorded before any signal, because tool
     commands can run in their own sessions where a process group signal does
-    not reach them. Each descendant outside the worker's group gets SIGTERM
-    together with the worker. After the worker is handled the helper waits for
+    not reach them. The tree is stopped and rescanned until no new descendant
+    appears, then every member gets SIGTERM and SIGCONT together with the
+    worker. After the worker is handled the helper waits for
     every recorded descendant within the same ``shutdown_timeout`` window, then
     sends SIGKILL to survivors and waits once more. With ``workspace`` set, a
     stale ``.git/index.lock`` that the tree held is removed after the tree
@@ -293,9 +295,11 @@ async def terminate_runtime_process(
     Returns ``True`` when the whole tree is confirmed gone.
     """
     pgid = _resolve_process_group_id(process, terminate_process_group, process_group_id)
+    # Capture stops every member and the next call resumes them with SIGTERM
+    # pending; neither awaits, so no cancellation can land in between.
     tree = await capture_worker_tree(process, process_group_id=pgid, workspace=workspace)
+    terminate_frozen_tree(tree)
     started_at = asyncio.get_running_loop().time()
-    await signal_worker_tree(tree, signal.SIGTERM, exclude_leader_group=True)
     cancelled: asyncio.CancelledError | None = None
     try:
         await _terminate_runtime_leader(
