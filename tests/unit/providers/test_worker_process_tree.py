@@ -559,6 +559,23 @@ def test_hidden_fd_directory_of_live_process_is_unknown(monkeypatch: pytest.Monk
     assert worker_process_tree._proc_fd_holds(os.getpid(), (0, 0)) is None
 
 
+@pytest.mark.skipif(not Path("/proc/self/stat").is_file(), reason="Linux /proc scan")
+def test_unreadable_stat_of_live_process_makes_scan_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live process whose stat file is missing is not read as an exit."""
+    target = f"/proc/{os.getpid()}/stat"
+    real_read_text = Path.read_text
+
+    def _missing(self: Path, *args: Any, **kwargs: Any) -> str:
+        if str(self) == target:
+            raise FileNotFoundError(target)
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _missing)
+    assert worker_process_tree._scan_proc() is None
+
+
 def test_git_index_lock_path_follows_worktree_gitdir_file(tmp_path: Path) -> None:
     """A linked worktree's ``.git`` file points at its own index lock."""
     git_dir = tmp_path / "main" / ".git" / "worktrees" / "wt"

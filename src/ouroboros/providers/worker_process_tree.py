@@ -98,6 +98,8 @@ def _scan_proc() -> dict[int, _ProcessRecord] | None:
         try:
             raw = Path(entry.path, "stat").read_text(encoding="utf-8", errors="replace")
         except (FileNotFoundError, ProcessLookupError):
+            if _pid_exists(int(entry.name)):
+                return None  # still alive but unreadable: unknown
             continue  # exited during the scan
         except OSError:
             return None  # a live process that cannot be observed: unknown
