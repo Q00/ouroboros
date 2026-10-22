@@ -1263,7 +1263,11 @@ class AutoPipeline:
                 )
                 self._save(state)
                 return self._result(state, ledger, review=review)
-            if not grade_meets_required(state.last_grade, state.required_grade):
+            # A degraded Seed that runs keeps only the safety bar here as well.
+            runs_degraded = degraded_seed_runs_as_stated(seed)
+            if not runs_degraded and not grade_meets_required(
+                state.last_grade, state.required_grade
+            ):
                 state.mark_blocked(
                     f"Cannot start execution without a persisted grade meeting {state.required_grade}",
                     tool_name="grade_gate",
@@ -1307,7 +1311,11 @@ class AutoPipeline:
                 state.findings = [asdict(finding) for finding in review.findings]
                 self._maybe_emit_grade(state)
                 self._save(state)
-            if not review.may_run:
+            if runs_degraded and (terminal := degraded_seed_safety_blocker(review)):
+                state.mark_blocked(terminal[0], tool_name="grade_gate", error_code=terminal[1])
+                self._save(state)
+                return self._result(state, ledger, review=review, blocker=state.last_error)
+            if not runs_degraded and not review.may_run:
                 state.mark_blocked(
                     "Seed review did not clear the Seed for execution",
                     tool_name="grade_gate",

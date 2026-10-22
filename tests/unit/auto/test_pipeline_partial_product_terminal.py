@@ -467,6 +467,65 @@ async def test_deadline_seed_with_sourced_goal_passes_seed_qa_to_run(tmp_path) -
     assert result.stop_reason_code is None
 
 
+def _run_resume_state(tmp_path, ledger: SeedDraftLedger) -> AutoPipelineState:
+    """A session persisted in RUN with a degraded sourced Seed and no run handle."""
+    seed = with_ledger_carryover(
+        partial_seed_from_evidence(ledger, reason="interview_phase_deadline"), ledger
+    )
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.seed_artifact = seed.to_dict()
+    state.ledger = ledger.to_dict()
+    state.interview_completed = True
+    state.last_grade = "B"
+    for phase in (AutoPhase.INTERVIEW, AutoPhase.SEED_GENERATION, AutoPhase.REVIEW):
+        state.transition(phase, phase.value)
+    state.transition(AutoPhase.RUN, "run prepared")
+    return state
+
+
+@pytest.mark.asyncio
+async def test_run_resume_starts_a_degraded_seed_with_sourced_goal(tmp_path) -> None:
+    """A resumed RUN applies the same policy: the persisted grade B does not stop it."""
+    state = _run_resume_state(tmp_path, SeedDraftLedger.from_goal("Build a CLI"))
+    run_starter = _RecordingRunStarter()
+    pipeline = AutoPipeline(
+        _DeadlineDriver(), _no_seed_generator, store=AutoStore(tmp_path), run_starter=run_starter
+    )
+
+    result = await pipeline.run(state)
+
+    assert len(run_starter.seeds) == 1
+    assert result.status == "complete"
+    assert result.stop_reason_code is None
+
+
+@pytest.mark.asyncio
+async def test_run_resume_keeps_the_safety_bar_for_a_degraded_seed(tmp_path) -> None:
+    ledger = SeedDraftLedger.from_goal("Build a CLI")
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="constraints.human_required",
+            value="Human must confirm the production credential rotation.",
+            source=LedgerSource.BLOCKER,
+            confidence=0.0,
+            status=LedgerStatus.BLOCKED,
+        ),
+    )
+    state = _run_resume_state(tmp_path, ledger)
+    pipeline = AutoPipeline(
+        _DeadlineDriver(),
+        _no_seed_generator,
+        store=AutoStore(tmp_path),
+        run_starter=_forbidden_run_starter,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert result.stop_reason_code == DEGRADED_SEED_SAFETY_BLOCKERS_STOP_REASON_CODE
+
+
 @pytest.mark.asyncio
 async def test_deadline_seed_without_sourced_goal_stops_as_partial_product(tmp_path) -> None:
     """Without the user's goal on record, the degraded Seed is not executed.
