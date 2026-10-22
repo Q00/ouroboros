@@ -283,6 +283,29 @@ class RepoFact(BaseModel, frozen=True):
     evidence: tuple[str, ...] = ()
 
 
+class SourcedScope(BaseModel, frozen=True):
+    """The Seed content with a known source, recorded where the Seed is made.
+
+    ``ooo auto`` stamps it from ledger provenance: the goal entry the user
+    wrote and the constraints and criteria whose entries bind
+    (``LedgerEntry.binds_seed``). When a Seed carries it, the worker's
+    execution prompt renders only this record, ``requester_answers`` and
+    ``repo_facts``. The model-written fields (``goal`` as rewritten,
+    ``constraints``, ``acceptance_criteria``, ``assumptions``, the ontology,
+    the evaluation principles and the exit conditions) stay in the Seed for
+    the record and for verification, but are not worker instructions.
+
+    Attributes:
+        goal: The user's request, verbatim.
+        constraints: Constraints and non-goals that bind by ledger provenance, verbatim.
+        acceptance_criteria: Acceptance criteria that bind by ledger provenance, verbatim.
+    """
+
+    goal: str = Field(..., min_length=1)
+    constraints: tuple[str, ...] = ()
+    acceptance_criteria: tuple[str, ...] = ()
+
+
 class ExitCondition(BaseModel, frozen=True):
     """Defines when the workflow should terminate.
 
@@ -819,6 +842,16 @@ class Seed(BaseModel, frozen=True):
         repo_facts: Questions auto answered from the repository, with the
             answer and its checked evidence quoted verbatim. They describe the
             current code and are never rewritten into constraints or criteria.
+        open_questions: Interview questions nobody answered, verbatim and in
+            ledger order. They stay in the Seed file and the auto result so
+            the self-interview is visible, but no execution prompt renders them:
+            a worker shown a question with its candidate answers builds the fix
+            around one of them.
+        sourced_scope: The goal, constraints and criteria with a known source,
+            stamped by ``ooo auto`` from ledger provenance (see
+            :class:`SourcedScope`). When set, only it, ``requester_answers`` and
+            ``repo_facts`` reach the worker's execution prompt. ``None`` keeps
+            the historical rendering of every field.
         ontology_schema: Conceptual lens for workflow coherence.
         evaluation_principles: Principles for evaluating outputs.
         exit_conditions: Conditions for terminating the workflow.
@@ -904,6 +937,21 @@ class Seed(BaseModel, frozen=True):
         description=(
             "Questions answered from the repository, with the answer and its checked "
             "evidence quoted verbatim; they describe the current code, not requirements"
+        ),
+    )
+    open_questions: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Interview questions nobody answered, verbatim and in order; kept for the "
+            "record and never rendered into the worker's execution input"
+        ),
+    )
+    sourced_scope: SourcedScope | None = Field(
+        default=None,
+        description=(
+            "The goal, constraints and criteria with a known source; when set, the "
+            "worker's execution prompt renders only these plus requester answers and "
+            "repo facts. None (every Seed not made by ooo auto) renders the Seed as before"
         ),
     )
 
@@ -1081,6 +1129,10 @@ class Seed(BaseModel, frozen=True):
             excluded.add("requester_answers")
         if not self.repo_facts:
             excluded.add("repo_facts")
+        if not self.open_questions:
+            excluded.add("open_questions")
+        if self.sourced_scope is None:
+            excluded.add("sourced_scope")
         data = self.model_dump(mode="json", by_alias=True, exclude=excluded)
         data.update({key: _thaw_seed_extra_value(value) for key, value in extra.items()})
         return data
