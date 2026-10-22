@@ -21,6 +21,11 @@ import signal
 from typing import Any, Protocol
 
 from ouroboros.core.errors import ProviderError
+from ouroboros.providers.worker_process_tree import (
+    capture_worker_tree,
+    finish_worker_tree,
+    signal_worker_tree,
+)
 
 _MAX_STREAM_LINE_BUFFER_BYTES = 50 * 1024 * 1024
 _MAX_STREAM_CAPTURE_BYTES = 50 * 1024 * 1024
@@ -264,6 +269,66 @@ async def iter_runtime_stream_lines(
 
 
 async def terminate_runtime_process(
+    process: Any,
+    *,
+    shutdown_timeout: float = 5.0,
+    logger: _StructLogger | None = None,
+    log_namespace: str | None = None,
+    close_stdin: Callable[[Any], Awaitable[None]] | None = None,
+    terminate_process_group: bool = False,
+    process_group_id: int | None = None,
+    workspace: str | None = None,
+) -> bool:
+    """Shut down a runtime subprocess and wait for its whole process tree.
+
+    The worker's descendants are recorded before any signal, because tool
+    commands can run in their own sessions where a process group signal does
+    not reach them. Each descendant outside the worker's group gets SIGTERM
+    together with the worker. After the worker is handled the helper waits for
+    every recorded descendant within the same ``shutdown_timeout`` window, then
+    sends SIGKILL to survivors and waits once more. With ``workspace`` set, a
+    stale ``.git/index.lock`` that the tree held is removed after the tree
+    exits; any other lock is left in place with a structured warning.
+
+    Returns ``True`` when the whole tree is confirmed gone.
+    """
+    pgid = _resolve_process_group_id(process, terminate_process_group, process_group_id)
+    tree = await capture_worker_tree(process, process_group_id=pgid, workspace=workspace)
+    started_at = asyncio.get_running_loop().time()
+    await signal_worker_tree(tree, signal.SIGTERM, exclude_leader_group=True)
+    await _terminate_runtime_leader(
+        process,
+        shutdown_timeout=shutdown_timeout,
+        logger=logger,
+        log_namespace=log_namespace,
+        close_stdin=close_stdin,
+        terminate_process_group=terminate_process_group,
+        process_group_id=pgid,
+    )
+    return await finish_worker_tree(
+        tree,
+        started_at=started_at,
+        shutdown_timeout=shutdown_timeout,
+        logger=logger,
+        log_namespace=log_namespace,
+    )
+
+
+def _resolve_process_group_id(
+    process: Any,
+    terminate_process_group: bool,
+    process_group_id: int | None,
+) -> int | None:
+    if not terminate_process_group or process_group_id is not None:
+        return process_group_id if terminate_process_group else None
+    pid = getattr(process, "pid", None)
+    if isinstance(pid, int):
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            return os.getpgid(pid)
+    return None
+
+
+async def _terminate_runtime_leader(
     process: Any,
     *,
     shutdown_timeout: float = 5.0,
