@@ -657,6 +657,32 @@ def test_lock_is_not_claimed_without_hard_links(
     assert sorted(p.name for p in tmp_path.iterdir()) == ["index.lock"]
 
 
+@pytest.mark.asyncio
+async def test_sigkill_reaches_recorded_member_when_scan_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A later unreadable table does not stop SIGKILL to a verified member."""
+    process, child_pid, _ = await _spawn_worker(tmp_path, hold_lock=False, ignore_term=True)
+    try:
+        tree = await capture_worker_tree(process)
+        worker_process_tree.terminate_frozen_tree(tree)
+        assert child_pid in tree.members
+        monkeypatch.setattr(worker_process_tree, "_scan_processes", lambda: None)
+        await worker_process_tree.signal_worker_tree(
+            tree, signal.SIGKILL, exclude_leader_group=False
+        )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 3
+        while _alive(child_pid) and loop.time() < deadline:
+            await asyncio.sleep(0.05)
+        assert not _alive(child_pid)
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+        await _cleanup(child_pid)
+
+
 def test_git_index_lock_path_follows_worktree_gitdir_file(tmp_path: Path) -> None:
     """A linked worktree's ``.git`` file points at its own index lock."""
     git_dir = tmp_path / "main" / ".git" / "worktrees" / "wt"

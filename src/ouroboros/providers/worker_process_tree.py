@@ -412,9 +412,39 @@ def _live_members_locked(
     return snapshot, live
 
 
+def _same_process(pid: int, start: str) -> bool:
+    """Return True only when *pid* is provably the process recorded with *start*."""
+    if _proc_available():
+        try:
+            raw = (_PROC_ROOT / str(pid) / "stat").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        record = _parse_proc_stat(pid, raw)
+        return record is not None and record.start == start
+    try:
+        completed = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=_SCAN_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0 and completed.stdout.strip() == start
+
+
 def _signal(tree: WorkerTree, sig: int, *, exclude_leader_group: bool) -> None:
     observed = _live_members(tree)
     if observed is None:
+        # The whole table is unreadable: still reach every recorded member
+        # whose own entry proves it is the same process.
+        with tree.guard:
+            members = dict(tree.members)
+        for pid, start in members.items():
+            if pid != os.getpid() and _same_process(pid, start):
+                with contextlib.suppress(OSError):
+                    os.kill(pid, sig)
         return
     snapshot, live = observed
     for pid in live:
