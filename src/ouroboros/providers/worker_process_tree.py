@@ -495,6 +495,13 @@ def _release_lock(tree: WorkerTree, tree_exited: bool) -> tuple[str, str] | None
         observation.mtime_ns,
     ):
         return "left", "lock_replaced"
+    # Checking holders on the name first means the claim below only has to
+    # put a file back when a holder appears in the moment between the two.
+    holders = _lock_holders(path, None)
+    if holders is None:
+        return "left", "holder_check_unavailable"
+    if holders:
+        return "left", "held_by_live_process"
     return _claim_verify_remove(path, observation)
 
 
@@ -502,8 +509,17 @@ def _put_back(claimed: Path, path: Path) -> str | None:
     """Return the claimed file to its name; report where it stays if the name is taken."""
     try:
         os.link(claimed, path)
-    except OSError:
+    except FileExistsError:
         return claimed.name
+    except OSError:
+        # No hard links on this filesystem: rename back unless the name is taken.
+        if path.exists():
+            return claimed.name
+        try:
+            os.rename(claimed, path)
+        except OSError:
+            return claimed.name
+        return None
     with contextlib.suppress(OSError):
         os.unlink(claimed)
     return None

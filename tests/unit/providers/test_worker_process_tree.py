@@ -634,6 +634,29 @@ async def test_child_forked_by_live_member_during_wait_is_adopted(tmp_path: Path
             await _cleanup(late_pid)
 
 
+def test_held_lock_goes_back_by_rename_without_hard_links(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Where link() is unsupported, a held lock is still restored under its name."""
+    import errno
+
+    lock = tmp_path / "index.lock"
+    lock.write_text("")
+    observation = _observe(lock)
+
+    def _no_link(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError(errno.EOPNOTSUPP, "hard links unsupported")
+
+    monkeypatch.setattr(worker_process_tree.os, "link", _no_link)
+    monkeypatch.setattr(worker_process_tree, "_lock_holders", lambda _path, _pids: {1})
+
+    outcome = worker_process_tree._claim_verify_remove(lock, observation)
+
+    assert outcome == ("left", "held_by_live_process")
+    assert lock.stat().st_ino == observation.inode
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["index.lock"]
+
+
 def test_git_index_lock_path_follows_worktree_gitdir_file(tmp_path: Path) -> None:
     """A linked worktree's ``.git`` file points at its own index lock."""
     git_dir = tmp_path / "main" / ".git" / "worktrees" / "wt"
