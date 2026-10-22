@@ -15,6 +15,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 import yaml
 
 from ouroboros.auto.ledger import (
@@ -34,6 +35,8 @@ from ouroboros.orchestrator.atomic_prompt_builder import (
     AtomicPromptBuilder,
     install_sourced_scope,
 )
+from ouroboros.orchestrator.evidence.formatting import _build_governed_parent_summary
+from ouroboros.orchestrator.level_context import ACContextSummary, LevelContext
 from ouroboros.orchestrator.parallel_executor_models import inherit_check_package_hooks
 from ouroboros.orchestrator.runner import build_system_prompt, build_task_prompt
 
@@ -134,21 +137,37 @@ def _generated_seed() -> Seed:
 
 
 class _Executor:
-    """The executor surface ``AtomicPromptBuilder`` reads, with the legacy task section."""
+    """The executor surface ``AtomicPromptBuilder`` reads.
+
+    ``governed=False`` returns the legacy task section, so the builder appends
+    the previous-level context itself; ``governed=True`` renders that context
+    inside the task section, as the context governor does.
+    """
 
     _execution_profile = None
     _fat_harness_mode = False
 
-    def __init__(self, cwd: str) -> None:
+    def __init__(self, cwd: str, *, governed: bool = False) -> None:
         self._task_cwd = cwd
         self._adapter = SimpleNamespace(working_directory=cwd)
+        self._governed = governed
 
-    def _build_atomic_dispatch_context(self, **kwargs: Any) -> tuple[str, None]:
-        return f"## Your Task ({kwargs['label']})\n{kwargs['ac_content']}", None
+    def _build_atomic_dispatch_context(self, **kwargs: Any) -> tuple[str, dict[str, Any] | None]:
+        task = f"## Your Task ({kwargs['label']})\n{kwargs['ac_content']}"
+        if not self._governed:
+            return task, None
+        parent = _build_governed_parent_summary(kwargs["level_contexts"])
+        return f"{task}\n## Parent context\n{parent}", {"context_governed": True}
 
 
-def _leaf_prompt(seed: Seed, cwd: str) -> str:
-    executor = _Executor(cwd)
+def _leaf_prompt(
+    seed: Seed,
+    cwd: str,
+    *,
+    level_contexts: list[LevelContext] | None = None,
+    governed: bool = False,
+) -> str:
+    executor = _Executor(cwd, governed=governed)
     install_sourced_scope(executor, seed.sourced_scope)
     return (
         AtomicPromptBuilder(executor)  # type: ignore[arg-type]
@@ -160,7 +179,7 @@ def _leaf_prompt(seed: Seed, cwd: str) -> str:
             parent_ac_index=None,
             sub_ac_index=None,
             node_identity=None,
-            level_contexts=None,
+            level_contexts=level_contexts,
             sibling_acs=[(0, "this criterion"), (1, "a sibling criterion the model wrote")],
             retry_attempt=0,
             retry_prompt_extra="",
@@ -317,3 +336,36 @@ def test_derived_executor_inherits_the_sourced_scope() -> None:
     inherit_check_package_hooks(parent, child)
 
     assert getattr(child, SOURCED_SCOPE_ATTR) == scope
+
+
+@pytest.mark.parametrize("governed", [False, True])
+def test_previous_level_context_shows_the_objective_not_the_seed_criterion(
+    tmp_path, governed: bool
+) -> None:
+    """A later leaf's previous-work context keeps the work summary, not the criterion text."""
+    previous = [
+        LevelContext(
+            level_number=0,
+            completed_acs=(
+                ACContextSummary(
+                    ac_index=0,
+                    ac_content="Earlier criterion the model wrote",
+                    success=True,
+                    files_modified=("sessions/base.py",),
+                    key_output="Changed the encoder.",
+                ),
+            ),
+        )
+    ]
+    sourced = with_ledger_carryover(_generated_seed(), _ledger())
+    prompt = _leaf_prompt(sourced, str(tmp_path), level_contexts=previous, governed=governed)
+
+    assert "Earlier criterion the model wrote" not in prompt
+    assert "sessions/base.py" in prompt
+    assert "Changed the encoder." in prompt
+    assert f"AC 1: {GOAL_OBJECTIVE_CRITERION}" in prompt
+
+    legacy = _leaf_prompt(
+        _generated_seed(), str(tmp_path), level_contexts=previous, governed=governed
+    )
+    assert "Earlier criterion the model wrote" in legacy

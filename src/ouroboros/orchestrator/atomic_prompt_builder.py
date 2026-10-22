@@ -11,7 +11,7 @@ it used to build inline.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import os
 from typing import TYPE_CHECKING, Any
 
@@ -124,6 +124,19 @@ class AtomicPromptBuilder:
             task_text = render_sourced_objective(scope)
             seed_goal = scope.goal
             sibling_acs = None  # siblings would list model-written criteria
+            if level_contexts:
+                # Earlier levels' summaries name their criterion; keep the work
+                # summary and show the sourced objective in its place.
+                level_contexts = [
+                    replace(
+                        context,
+                        completed_acs=tuple(
+                            replace(summary, ac_content=task_text)
+                            for summary in context.completed_acs
+                        ),
+                    )
+                    for context in level_contexts
+                ]
 
         # Build prompt
         if node_identity is not None:
