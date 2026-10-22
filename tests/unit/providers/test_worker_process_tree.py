@@ -634,10 +634,10 @@ async def test_child_forked_by_live_member_during_wait_is_adopted(tmp_path: Path
             await _cleanup(late_pid)
 
 
-def test_held_lock_goes_back_by_rename_without_hard_links(
+def test_lock_is_not_claimed_without_hard_links(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Where link() is unsupported, a held lock is still restored under its name."""
+    """Where link() is unsupported, the lock is never moved, so it never goes missing."""
     import errno
 
     lock = tmp_path / "index.lock"
@@ -648,11 +648,11 @@ def test_held_lock_goes_back_by_rename_without_hard_links(
         raise OSError(errno.EOPNOTSUPP, "hard links unsupported")
 
     monkeypatch.setattr(worker_process_tree.os, "link", _no_link)
-    monkeypatch.setattr(worker_process_tree, "_lock_holders", lambda _path, _pids: {1})
+    monkeypatch.setattr(worker_process_tree, "_lock_holders", lambda _path, _pids: set())
 
     outcome = worker_process_tree._claim_verify_remove(lock, observation)
 
-    assert outcome == ("left", "held_by_live_process")
+    assert outcome == ("left", "hard_links_unavailable")
     assert lock.stat().st_ino == observation.inode
     assert sorted(p.name for p in tmp_path.iterdir()) == ["index.lock"]
 

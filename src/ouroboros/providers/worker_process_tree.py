@@ -509,17 +509,8 @@ def _put_back(claimed: Path, path: Path) -> str | None:
     """Return the claimed file to its name; report where it stays if the name is taken."""
     try:
         os.link(claimed, path)
-    except FileExistsError:
-        return claimed.name
     except OSError:
-        # No hard links on this filesystem: rename back unless the name is taken.
-        if path.exists():
-            return claimed.name
-        try:
-            os.rename(claimed, path)
-        except OSError:
-            return claimed.name
-        return None
+        return claimed.name
     with contextlib.suppress(OSError):
         os.unlink(claimed)
     return None
@@ -536,6 +527,16 @@ def _claim_verify_remove(path: Path, observation: _LockObservation) -> tuple[str
     stays under the claimed name (reported) when the name was taken meanwhile.
     """
     claimed = path.with_name(f"{path.name}.ouroboros-stale-{os.getpid()}-{os.urandom(4).hex()}")
+    # Putting a file back must never replace another lock, which only link()
+    # guarantees. Without hard links on this filesystem, do not claim at all.
+    try:
+        os.link(path, claimed)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return "left", "hard_links_unavailable"
+    with contextlib.suppress(OSError):
+        os.unlink(claimed)
     try:
         os.rename(path, claimed)
     except FileNotFoundError:
