@@ -11,6 +11,7 @@ from ouroboros.auto.grading import deterministic_floor
 from ouroboros.auto.ledger import (
     REPO_FACT_KEY_INFIX,
     REQUESTER_KEY_SUFFIX,
+    USER_GOAL_KEY,
     LedgerEntry,
     LedgerStatus,
     SeedDraftLedger,
@@ -26,6 +27,7 @@ from ouroboros.core.seed import (
     RequesterAnswer,
     Seed,
     SeedMetadata,
+    SourcedScope,
 )
 
 _INACTIVE_STATUSES: frozenset[LedgerStatus] = frozenset(
@@ -596,16 +598,54 @@ def ledger_repo_facts(ledger: SeedDraftLedger) -> tuple[RepoFact, ...]:
     return tuple(facts.values())
 
 
+def ledger_sourced_scope(ledger: SeedDraftLedger) -> SourcedScope | None:
+    """The goal, constraints and criteria whose source the ledger records.
+
+    The goal is the user's request verbatim (the ``USER_GOAL_KEY`` entry). The
+    constraints, non-goals and criteria are the entries that bind
+    (``LedgerEntry.binds_seed``), split the same way a ledger-synthesized Seed
+    splits them. The decision is by entry provenance only; nothing reads the
+    text. Without an active binding user goal there is no record (``None``),
+    and the Seed renders as before.
+    """
+    goal_entries = [
+        entry
+        for entry in _active_entries(ledger, "goal")
+        if entry.key == USER_GOAL_KEY and entry.binds_seed
+    ]
+    if not goal_entries:
+        return None
+    constraints = _lines_from_section(ledger, "constraints", binding=True)
+    non_goals = _lines_from_section(ledger, "non_goals", binding=True)
+    return SourcedScope(
+        goal=goal_entries[-1].value.strip(),
+        constraints=(*constraints, *[f"Non-goal: {item}" for item in non_goals]),
+        acceptance_criteria=_lines_from_section(
+            ledger, "acceptance_criteria", split_clauses=False, binding=True
+        ),
+    )
+
+
 def with_ledger_carryover(seed: Seed, ledger: SeedDraftLedger) -> Seed:
-    """Carry the ledger's assumptions, requester answers, repo facts and open questions."""
+    """Carry the ledger's assumptions, requester answers, repo facts, open questions and sourced scope.
+
+    The sourced scope (``Seed.sourced_scope``) is what the worker is told; the
+    Seed's own goal, constraints, criteria, assumptions, ontology, principles
+    and exit conditions are written by the Seed generator from the whole
+    interview, unanswered questions included, so they stay in the Seed for the
+    record and for verification only.
+    """
     seed = with_requester_answers(with_ledger_assumptions(seed, ledger), ledger)
     merged = tuple(dict.fromkeys((*seed.repo_facts, *ledger_repo_facts(ledger))))
     if merged != seed.repo_facts:
         seed = seed.model_copy(update={"repo_facts": merged})
     questions = tuple(dict.fromkeys((*seed.open_questions, *ledger_open_questions(ledger))))
-    if questions == seed.open_questions:
+    if questions != seed.open_questions:
+        seed = seed.model_copy(update={"open_questions": questions})
+    scope = ledger_sourced_scope(ledger)
+    if scope is None or scope == seed.sourced_scope:
         return seed
-    return seed.model_copy(update={"open_questions": questions})
+    return seed.model_copy(update={"sourced_scope": scope})
 
 
 def _lines_from_section(
