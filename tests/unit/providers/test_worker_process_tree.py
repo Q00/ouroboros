@@ -6,6 +6,7 @@ import asyncio
 import os
 from pathlib import Path
 import signal
+import subprocess
 import sys
 import textwrap
 from typing import Any
@@ -109,6 +110,39 @@ async def _spawn_worker(
     return process, child_pid, workspace
 
 
+def _own_pids() -> list[int]:
+    if Path("/proc/self/stat").is_file():
+        pids = []
+        for entry in os.scandir("/proc"):
+            if entry.name.isdigit():
+                try:
+                    if os.stat(entry.path).st_uid == os.getuid():
+                        pids.append(int(entry.name))
+                except OSError:
+                    continue
+        return pids
+    out = subprocess.run(
+        ["ps", "-U", str(os.getuid()), "-o", "pid="], capture_output=True, text=True, check=True
+    ).stdout
+    return [int(token) for token in out.split()]
+
+
+@pytest.fixture
+def own_process_view(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Treat this user's processes as the whole table, as for root in a container.
+
+    A non-root CI user cannot read other users' open files, so the real
+    all-process holder check fails closed there. These tests exercise the
+    removal and holder decisions over the processes they control.
+    """
+    real = worker_process_tree._lock_holders
+
+    def _view(path: Path, pids: Any) -> set[int] | None:
+        return real(path, _own_pids() if pids is None else pids)
+
+    monkeypatch.setattr(worker_process_tree, "_lock_holders", _view)
+
+
 async def _cleanup(pid: int) -> None:
     if _alive(pid):
         os.kill(pid, signal.SIGKILL)
@@ -151,6 +185,7 @@ async def test_terminate_escalates_to_sigkill_for_descendant_ignoring_sigterm(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("own_process_view")
 async def test_stale_lock_held_by_killed_descendant_is_removed(tmp_path: Path) -> None:
     """The worker's own lock, left by a SIGKILLed git-like child, is released."""
     process, child_pid, workspace = await _spawn_worker(tmp_path, hold_lock=True, ignore_term=True)
@@ -203,6 +238,7 @@ async def test_lock_not_held_by_worker_is_left_with_warning(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("own_process_view")
 async def test_lock_also_held_by_unrelated_process_is_left(tmp_path: Path) -> None:
     """After the tree exits, a lock some other live process holds stays in place."""
     process, child_pid, workspace = await _spawn_worker(tmp_path, hold_lock=True, ignore_term=True)
@@ -242,6 +278,7 @@ async def test_lock_also_held_by_unrelated_process_is_left(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("own_process_view")
 async def test_second_cancel_during_termination_still_waits_for_tree(tmp_path: Path) -> None:
     """A cancel that lands while the worker is being stopped kills and awaits the tree."""
     process, child_pid, workspace = await _spawn_worker(
@@ -332,6 +369,7 @@ def test_replaced_lock_is_put_back_untouched(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("own_process_view")
 async def test_lock_opened_after_tree_exit_is_put_back(tmp_path: Path) -> None:
     """Holders are checked on the claimed file, so a late opener keeps its lock."""
     lock = tmp_path / "index.lock"
@@ -360,6 +398,7 @@ async def test_lock_opened_after_tree_exit_is_put_back(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("own_process_view")
 async def test_lock_held_through_a_hard_link_is_put_back(tmp_path: Path) -> None:
     """A holder is matched by the open file, not by the path it was opened through."""
     lock = tmp_path / "index.lock"
@@ -417,6 +456,20 @@ async def test_unavailable_process_scan_reports_unconfirmed_exit(
         )
     finally:
         await _cleanup(child_pid)
+
+
+@pytest.mark.skipif(os.name == "posix" and os.geteuid() == 0, reason="root sees every process")
+def test_incomplete_holder_view_leaves_the_lock(tmp_path: Path) -> None:
+    """When some processes cannot be inspected, the lock is never removed."""
+    lock = tmp_path / "index.lock"
+    lock.write_text("")
+    observation = _observe(lock)
+
+    outcome = worker_process_tree._claim_verify_remove(lock, observation)
+
+    assert outcome == ("left", "holder_check_unavailable")
+    assert lock.stat().st_ino == observation.inode
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["index.lock"]
 
 
 def test_git_index_lock_path_follows_worktree_gitdir_file(tmp_path: Path) -> None:

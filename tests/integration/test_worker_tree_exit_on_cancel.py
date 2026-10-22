@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
+import subprocess
 import sys
 import textwrap
 
@@ -21,6 +22,7 @@ from ouroboros.mcp.job_manager import JobManager
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.persistence.event_store import EventStore
+from ouroboros.providers import worker_process_tree
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX process tree semantics")
 
@@ -65,6 +67,23 @@ def _alive(pid: int) -> bool:
     return True
 
 
+def _own_pids() -> list[int]:
+    if Path("/proc/self/stat").is_file():
+        pids = []
+        for entry in os.scandir("/proc"):
+            if entry.name.isdigit():
+                try:
+                    if os.stat(entry.path).st_uid == os.getuid():
+                        pids.append(int(entry.name))
+                except OSError:
+                    continue
+        return pids
+    out = subprocess.run(
+        ["ps", "-U", str(os.getuid()), "-o", "pid="], capture_output=True, text=True, check=True
+    ).stdout
+    return [int(token) for token in out.split()]
+
+
 @pytest.mark.asyncio
 async def test_cancelled_codex_job_turns_terminal_only_after_tool_command_exits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -78,6 +97,15 @@ async def test_cancelled_codex_job_turns_terminal_only_after_tool_command_exits(
     cli.chmod(0o755)
     monkeypatch.setenv("FAKE_TOOL_PID_FILE", str(pid_file))
     monkeypatch.setenv("FAKE_TOOL_LOCK_PATH", str(lock))
+    # A non-root CI user cannot read other users' open files, so the real
+    # all-process holder check fails closed. Use this user's processes as the
+    # whole table, as root in a container (the A59 setting) would see it.
+    real_holders = worker_process_tree._lock_holders
+    monkeypatch.setattr(
+        worker_process_tree,
+        "_lock_holders",
+        lambda path, pids: real_holders(path, _own_pids() if pids is None else pids),
+    )
 
     runtime = CodexCliRuntime(cli_path=str(cli), cwd=str(workspace))
     runtime._process_shutdown_timeout_seconds = 0.5

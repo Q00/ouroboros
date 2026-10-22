@@ -185,12 +185,15 @@ def git_index_lock_path(workspace: str | None) -> Path | None:
     return None
 
 
-def _proc_fd_holds(pid: int, identity: tuple[int, int]) -> bool:
+def _proc_fd_holds(pid: int, identity: tuple[int, int]) -> bool | None:
+    """Return whether *pid* holds the file open, or ``None`` if it cannot be inspected."""
     fd_dir = _PROC_ROOT / str(pid) / "fd"
     try:
         fds = list(os.scandir(fd_dir))
-    except OSError:
+    except (FileNotFoundError, ProcessLookupError):
         return False
+    except OSError:
+        return None
     for fd in fds:
         # stat() follows the fd to the open file itself, so a hard link or a
         # renamed path still matches by device and inode.
@@ -204,10 +207,13 @@ def _proc_fd_holds(pid: int, identity: tuple[int, int]) -> bool:
 def _lock_holders(path: Path, pids: Iterable[int] | None) -> set[int] | None:
     """Return the pids that hold *path* open, or ``None`` when that cannot be checked.
 
-    With ``pids`` set, only those processes are inspected. Processes whose open
-    files are not readable by this user are not reported.
+    With ``pids`` set, only those processes are inspected, and one that cannot
+    be inspected is not reported. With ``pids`` unset the answer must cover
+    every process: one unreadable process, or a non-root ``lsof`` view, makes
+    the result ``None`` so that callers fail closed.
     """
     target = os.path.realpath(path)
+    complete = pids is None
     if _proc_available():
         try:
             stat = os.stat(target)
@@ -216,7 +222,16 @@ def _lock_holders(path: Path, pids: Iterable[int] | None) -> set[int] | None:
         except OSError:
             return None
         identity = (stat.st_dev, stat.st_ino)
-        return {pid for pid in pids if _proc_fd_holds(pid, identity)}
+        holders: set[int] = set()
+        for pid in pids:
+            held = _proc_fd_holds(pid, identity)
+            if held is None and complete:
+                return None
+            if held:
+                holders.add(pid)
+        return holders
+    if complete and os.geteuid() != 0:
+        return None
     lsof = shutil.which("lsof")
     if lsof is None:
         return None
@@ -231,14 +246,11 @@ def _lock_holders(path: Path, pids: Iterable[int] | None) -> set[int] | None:
     except (OSError, subprocess.SubprocessError):
         return None
     if completed.returncode == 1 and not completed.stdout.strip():
-        holders: set[int] = set()
-    elif completed.returncode == 0:
-        holders = {int(token) for token in completed.stdout.split() if token.isdigit()}
-    else:
+        return set()
+    if completed.returncode != 0:
         return None
-    if pids is not None:
-        holders &= set(pids)
-    return holders
+    found = {int(token) for token in completed.stdout.split() if token.isdigit()}
+    return found if pids is None else found & set(pids)
 
 
 def _observe_lock(workspace: str | None, members: dict[int, str]) -> _LockObservation | None:
