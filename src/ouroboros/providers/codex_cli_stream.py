@@ -296,22 +296,32 @@ async def terminate_runtime_process(
     tree = await capture_worker_tree(process, process_group_id=pgid, workspace=workspace)
     started_at = asyncio.get_running_loop().time()
     await signal_worker_tree(tree, signal.SIGTERM, exclude_leader_group=True)
-    await _terminate_runtime_leader(
-        process,
-        shutdown_timeout=shutdown_timeout,
-        logger=logger,
-        log_namespace=log_namespace,
-        close_stdin=close_stdin,
-        terminate_process_group=terminate_process_group,
-        process_group_id=pgid,
-    )
-    return await finish_worker_tree(
+    cancelled: asyncio.CancelledError | None = None
+    try:
+        await _terminate_runtime_leader(
+            process,
+            shutdown_timeout=shutdown_timeout,
+            logger=logger,
+            log_namespace=log_namespace,
+            close_stdin=close_stdin,
+            terminate_process_group=terminate_process_group,
+            process_group_id=pgid,
+        )
+    except asyncio.CancelledError as exc:
+        # A second cancel (for example the job task cancelling its runner
+        # again) must not skip the tree wait: kill everything, wait, re-raise.
+        cancelled = exc
+        await signal_worker_tree(tree, signal.SIGKILL, exclude_leader_group=False)
+    tree_exited = await finish_worker_tree(
         tree,
         started_at=started_at,
         shutdown_timeout=shutdown_timeout,
         logger=logger,
         log_namespace=log_namespace,
     )
+    if cancelled is not None:
+        raise cancelled
+    return tree_exited
 
 
 def _resolve_process_group_id(

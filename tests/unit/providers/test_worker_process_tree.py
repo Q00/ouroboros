@@ -22,8 +22,10 @@ pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX process tree s
 # SIGTERM, so only SIGKILL stops it.
 _WORKER = textwrap.dedent(
     """
-    import os, subprocess, sys, time
-    pid_file, workspace, hold_lock, ignore_term = sys.argv[1:5]
+    import os, signal, subprocess, sys, time
+    pid_file, workspace, hold_lock, ignore_term, leader_ignores_term = sys.argv[1:6]
+    if leader_ignores_term == "1":
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
     child = (
         "import os, signal, sys, time\\n"
         "pid_file, workspace, hold_lock, ignore_term = sys.argv[1:5]\\n"
@@ -82,7 +84,7 @@ async def _wait_for_file(path: Path, timeout: float = 10.0) -> str:
 
 
 async def _spawn_worker(
-    tmp_path: Path, *, hold_lock: bool, ignore_term: bool
+    tmp_path: Path, *, hold_lock: bool, ignore_term: bool, leader_ignores_term: bool = False
 ) -> tuple[asyncio.subprocess.Process, int, Path]:
     workspace = tmp_path / "repo"
     (workspace / ".git").mkdir(parents=True)
@@ -95,6 +97,7 @@ async def _spawn_worker(
         str(workspace),
         "1" if hold_lock else "0",
         "1" if ignore_term else "0",
+        "1" if leader_ignores_term else "0",
         start_new_session=True,
     )
     child_pid = int(await _wait_for_file(pid_file))
@@ -230,6 +233,31 @@ async def test_lock_also_held_by_unrelated_process_is_left(tmp_path: Path) -> No
     finally:
         holder.kill()
         await holder.wait()
+        await _cleanup(child_pid)
+
+
+@pytest.mark.asyncio
+async def test_second_cancel_during_termination_still_waits_for_tree(tmp_path: Path) -> None:
+    """A cancel that lands while the worker is being stopped kills and awaits the tree."""
+    process, child_pid, workspace = await _spawn_worker(
+        tmp_path, hold_lock=True, ignore_term=True, leader_ignores_term=True
+    )
+    lock = workspace / ".git" / "index.lock"
+    try:
+        task = asyncio.create_task(
+            terminate_runtime_process(process, shutdown_timeout=5.0, workspace=str(workspace))
+        )
+        await asyncio.sleep(0.3)
+        assert not task.done()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not _alive(child_pid)
+        assert not lock.exists()
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
         await _cleanup(child_pid)
 
 

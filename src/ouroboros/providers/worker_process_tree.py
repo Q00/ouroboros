@@ -421,6 +421,8 @@ async def finish_worker_tree(
     Returns ``True`` only when every member is confirmed gone.
     """
     loop = asyncio.get_running_loop()
+    cancelled: asyncio.CancelledError | None = None
+    survivors: set[int] | None = None
     try:
         survivors = await wait_for_worker_tree_exit(
             tree, timeout=started_at + shutdown_timeout - loop.time()
@@ -428,17 +430,21 @@ async def finish_worker_tree(
         if survivors:
             await signal_worker_tree(tree, signal.SIGKILL, exclude_leader_group=False)
             survivors = await wait_for_worker_tree_exit(tree, timeout=shutdown_timeout)
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as exc:
+        # Cancelled mid-wait: kill what is left, wait once more, and still
+        # report and release the lock before the cancellation propagates.
+        cancelled = exc
         await signal_worker_tree(tree, signal.SIGKILL, exclude_leader_group=False)
         with contextlib.suppress(asyncio.CancelledError):
-            await wait_for_worker_tree_exit(tree, timeout=shutdown_timeout)
-        raise
+            survivors = await wait_for_worker_tree_exit(tree, timeout=shutdown_timeout)
     tree_exited = survivors is not None and not survivors
     if survivors and logger is not None:
         logger.warning(f"{log_namespace}.worker_tree_exit_unconfirmed", pids=sorted(survivors))
     await release_stale_git_index_lock(
         tree, tree_exited=tree_exited, logger=logger, log_namespace=log_namespace
     )
+    if cancelled is not None:
+        raise cancelled
     return tree_exited
 
 
