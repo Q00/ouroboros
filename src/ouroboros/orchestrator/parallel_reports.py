@@ -127,6 +127,9 @@ def render_parallel_completion_message(
         if result.outcome == ACExecutionOutcome.SATISFIED_EXTERNALLY:
             status = "COMPLETED"
             suffix = " (externally satisfied)"
+        elif result.outcome == ACExecutionOutcome.SETTLED_FROM_SHARED_ATTEMPT:
+            status = "COMPLETED"
+            suffix = " (judged from the one shared worker attempt)"
         elif result.outcome == ACExecutionOutcome.BLOCKED:
             status = "BLOCKED"
             suffix = f" — {result.error}" if result.error else ""

@@ -71,7 +71,7 @@ from ouroboros.core.project_identity import (
 from ouroboros.core.project_identity import (
     ProjectIdentityUnavailableError as ProjectIdentityUnavailableError,
 )
-from ouroboros.core.seed import AcceptanceCriterionSpec, ac_text
+from ouroboros.core.seed import AcceptanceCriterionSpec, ac_text, ac_texts
 from ouroboros.core.seed_contract import SeedContract
 from ouroboros.core.seed_contract_prompt import (
     _render_conductor_directive,
@@ -119,6 +119,7 @@ from ouroboros.orchestrator.events import (
     create_tool_called_event,
     create_workflow_progress_event,
 )
+from ouroboros.orchestrator.evidence.common import _SUCCESSFUL_ATTEMPT_OUTCOMES
 from ouroboros.orchestrator.execution_authority import (
     ProcessLocalCancellationDisposition,
     _authenticate_process_local_prepared_contract,
@@ -218,6 +219,7 @@ from ouroboros.orchestrator.session import (
     _optional_create_session_kwargs,
     runtime_resume_identity_from_payload,
 )
+from ouroboros.orchestrator.shared_attempt import shared_attempt_graph
 from ouroboros.orchestrator.verify_base_signal import VerifyBaseSignal
 from ouroboros.orchestrator.verify_shell import (
     capture_verify_shell_identity,
@@ -10250,6 +10252,8 @@ class OrchestratorRunner:
         # replay has validated its judgment/observation chain.
         if resume_execution_plan is not None:
             execution_plan = resume_execution_plan
+        elif (shared_graph := shared_attempt_graph(seed)) is not None:
+            dependency_graph = shared_graph  # one worker attempt; see ``shared_attempt``
         elif force_sequential_levels:
             self._console.print("\n[cyan]Preparing sequential AC execution plan...[/cyan]")
             dependency_graph = DependencyGraph(
@@ -10381,7 +10385,9 @@ class OrchestratorRunner:
             expected_runtime_effect_capabilities=execution_semantics["runtime_effect_capabilities"],
             usage_limit_pause_seconds=execution_semantics["usage_limit_pause_seconds"],
         )
-        install_sourced_scope(parallel_executor, seed.sourced_scope)  # leaf prompts render only it
+        install_sourced_scope(
+            parallel_executor, seed.sourced_scope, ac_texts(seed.acceptance_criteria)
+        )
         if (install := getattr(self.acceptance_authority, "install", None)) is not None:
             # Check package on: it drives repairs; the legacy verifier is advisory.
             install(parallel_executor)
@@ -10815,7 +10821,7 @@ class OrchestratorRunner:
                 and (
                     root_ac_index in accepted_root_indices
                     if accepted_root_indices is not None
-                    else result is not None and outcome in {"succeeded", "satisfied_externally"}
+                    else result is not None and outcome in _SUCCESSFUL_ATTEMPT_OUTCOMES
                 )
             )
             disposition = (
@@ -10824,9 +10830,7 @@ class OrchestratorRunner:
                 else (
                     "cancelled"
                     if terminal_status == SessionStatus.CANCELLED.value
-                    else (
-                        "rejected" if outcome in {"succeeded", "satisfied_externally"} else outcome
-                    )
+                    else ("rejected" if outcome in _SUCCESSFUL_ATTEMPT_OUTCOMES else outcome)
                 )
             )
             finalizations.append(

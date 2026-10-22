@@ -55,6 +55,7 @@ from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     InvestmentSpec,
     ac_text,
+    ac_texts,
     derive_semantic_ac_key,
 )
 from ouroboros.core.session_signal import SessionSignalMode
@@ -213,6 +214,7 @@ from ouroboros.orchestrator.evidence.claims import (  # noqa: F401
 )
 from ouroboros.orchestrator.evidence.common import (  # noqa: F401
     _MAX_LEAF_RESULT_CHARS,
+    _SUCCESSFUL_ATTEMPT_OUTCOMES,
     _flatten_evidence_values,
     _normalize_command,
     _normalize_exact_command,
@@ -422,6 +424,11 @@ from ouroboros.orchestrator.session_signal_followup import (
     claim_follow_up_delivery,
 )
 from ouroboros.orchestrator.shadow_replay import isolated_workspace, run_shadow_replay
+from ouroboros.orchestrator.shared_attempt import (
+    SHARED_ATTEMPT_ROOT,
+    settle_from_shared_attempt,
+    shares_one_attempt,
+)
 from ouroboros.orchestrator.synapse import (
     SessionSignalTarget,
     render_after_turn_signal_prompt,
@@ -3784,6 +3791,12 @@ class ParallelACExecutor:
         total_levels = execution_plan.total_stages
         total_acs = len(seed.acceptance_criteria)
         external_completed = externally_satisfied_acs or {}
+        # Criteria judged from root 0's one worker attempt (``shared_attempt``).
+        shared_criteria = (
+            set(range(SHARED_ATTEMPT_ROOT + 1, total_acs))
+            if shares_one_attempt(seed.sourced_scope, ac_texts(seed.acceptance_criteria))
+            else set()
+        )
         execution_counters = {
             "messages_count": 0,
             "tool_calls_count": 0,
@@ -3921,6 +3934,7 @@ class ParallelACExecutor:
                                     in {
                                         "succeeded",
                                         "satisfied_externally",
+                                        "settled_from_shared_attempt",
                                         "failed",
                                         "blocked",
                                         "invalid",
@@ -3933,7 +3947,7 @@ class ParallelACExecutor:
                                         else "failed"
                                     )
                                 )
-                                is_completed = outcome in {"succeeded", "satisfied_externally"}
+                                is_completed = outcome in _SUCCESSFUL_ATTEMPT_OUTCOMES
                                 is_skipped = status == "skipped"
                                 raw_result_retry_attempt = (
                                     raw_result_retry_attempts.get(str(ac_idx))
@@ -4109,6 +4123,7 @@ class ParallelACExecutor:
                 executable: list[int] = []
                 blocked: list[int] = []
                 externally_satisfied: list[int] = []
+                shared: list[int] = []
                 stage_ac_results: list[ACExecutionResult] = []
 
                 for ac_idx in level:
@@ -4125,8 +4140,13 @@ class ParallelACExecutor:
                         blocked.append(ac_idx)
                     elif ac_idx in external_completed:
                         externally_satisfied.append(ac_idx)
+                    elif ac_idx in shared_criteria:
+                        shared.append(ac_idx)
                     else:
                         executable.append(ac_idx)
+                if SHARED_ATTEMPT_ROOT not in executable:
+                    executable.extend(shared)  # no attempt in this stage to judge them from
+                    shared.clear()
 
                 level_success = 0
                 level_failed = 0
@@ -4425,6 +4445,38 @@ class ParallelACExecutor:
                     # this incomplete stage as completed.  Durable route events
                     # below are the replay authority for the interrupted round.
                     break
+
+                source = next(
+                    (r for r in stage_ac_results if r.ac_index == SHARED_ATTEMPT_ROOT), None
+                )
+                for ac_idx in shared:
+                    ac_result = await settle_from_shared_attempt(
+                        self,
+                        seed=seed,
+                        ac_index=ac_idx,
+                        source=source,
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
+                    await self._emit_ac_attempt_judged(
+                        result=ac_result,
+                        root_ac_index=ac_idx,
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
+                    if ac_result.success:
+                        level_success += 1
+                        ac_statuses[ac_idx] = "completed"
+                        completed_count += 1
+                    elif ac_result.is_blocked:
+                        blocked_indices.add(ac_idx)
+                        ac_statuses[ac_idx] = "skipped"
+                    else:
+                        failed_indices.add(ac_idx)
+                        level_failed += 1
+                        ac_statuses[ac_idx] = "failed"
+                    all_results.append(ac_result)
+                    stage_ac_results.append(ac_result)
 
                 flip_gated_out = await self._compute_sibling_flip_gated_out(
                     seed=seed,
@@ -4785,6 +4837,7 @@ class ParallelACExecutor:
                     in {
                         ACExecutionOutcome.SUCCEEDED,
                         ACExecutionOutcome.SATISFIED_EXTERNALLY,
+                        ACExecutionOutcome.SETTLED_FROM_SHARED_ATTEMPT,
                     }
                     else result
                     for result in all_results
@@ -4887,7 +4940,12 @@ class ParallelACExecutor:
         # Aggregate results - sort by AC index for consistent ordering
         sorted_results = sorted(all_results, key=lambda r: r.ac_index)
         total_duration = (datetime.now(UTC) - start_time).total_seconds()
-        success_count = sum(1 for r in sorted_results if r.outcome == ACExecutionOutcome.SUCCEEDED)
+        success_count = sum(
+            1
+            for r in sorted_results
+            if r.outcome
+            in {ACExecutionOutcome.SUCCEEDED, ACExecutionOutcome.SETTLED_FROM_SHARED_ATTEMPT}
+        )
         externally_satisfied_count = sum(
             1 for r in sorted_results if r.outcome == ACExecutionOutcome.SATISFIED_EXTERNALLY
         )
@@ -5061,6 +5119,7 @@ class ParallelACExecutor:
             if not result.success or result.outcome not in {
                 ACExecutionOutcome.SUCCEEDED,
                 ACExecutionOutcome.SATISFIED_EXTERNALLY,
+                ACExecutionOutcome.SETTLED_FROM_SHARED_ATTEMPT,
             }:
                 revalidated.append(result)
                 continue
