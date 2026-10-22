@@ -10,7 +10,8 @@ top-level layout before it touches a file.
 
 Design constraints (non-negotiable):
 
-* Deterministic facts only: manifest-parsed tech stack + versions,
+* Deterministic facts only: one line per manifest file found, naming the
+  file and the fields it declares (never a language or framework claim),
   ``.ouroboros/mechanical.toml`` verify commands (reused from the evaluation
   detector), and a compact directory tree. No prose, no LLM-generated
   guidance (ETH Zurich 2026 evidence: LLM-authored context files reduce
@@ -23,6 +24,8 @@ Design constraints (non-negotiable):
 
 from __future__ import annotations
 
+import ast
+import configparser
 from dataclasses import dataclass, replace
 import json
 from pathlib import Path
@@ -47,6 +50,8 @@ _CACHE_RELATIVE_PATH = Path(WORKSPACE_STATE_DIR) / "context_pack.json"
 # mechanical.toml) without committing must invalidate the cache.
 _FINGERPRINT_SOURCES: tuple[str, ...] = (
     "pyproject.toml",
+    "setup.cfg",
+    "setup.py",
     "package.json",
     "go.mod",
     "Cargo.toml",
@@ -126,7 +131,8 @@ class ContextPack:
     """Deterministic, parsed facts about a repository.
 
     Attributes:
-        stack: Rendered tech-stack lines (e.g. ``"Python (pyproject): ouroboros 0.44.0"``).
+        stack: Rendered manifest lines, one per manifest file found (e.g.
+            ``"pyproject.toml: name ouroboros, version 0.44.0"``).
         verify_commands: Rendered ``kind: command`` verify lines from
             ``.ouroboros/mechanical.toml`` (e.g. ``"test: uv run pytest"``).
         repo_map: Compact top-2-level directory tree lines.
@@ -249,7 +255,7 @@ def _render(
 ) -> str:
     parts: list[str] = ["## Project Context (auto-detected facts)"]
     if stack:
-        parts.append("Stack:\n" + "\n".join(f"- {line}" for line in stack))
+        parts.append("Manifests:\n" + "\n".join(f"- {line}" for line in stack))
     if verify_commands:
         parts.append("Verify commands:\n" + "\n".join(f"- {line}" for line in verify_commands))
     if repo_map:
@@ -280,13 +286,31 @@ def _scan(root: Path, head: str | None) -> ContextPack | None:
 
 
 def _detect_stack(root: Path) -> tuple[str, ...]:
-    """Parse manifests for tech stack + versions. Parsing only, no execution."""
+    """Parse manifests for their declared fields. Parsing only, no execution.
+
+    Every manifest present yields its own line, so a repository with several
+    manifests (e.g. a Python package with an auxiliary ``package.json``) is
+    described by all of them and none is presented as the project's language.
+    """
     lines: list[str] = []
     lines.extend(_python_stack(root))
+    lines.extend(_setup_cfg_stack(root))
+    lines.extend(_setup_py_stack(root))
     lines.extend(_node_stack(root))
     lines.extend(_go_stack(root))
     lines.extend(_rust_stack(root))
     return tuple(lines)
+
+
+def _manifest_line(filename: str, fields: list[tuple[str, str]]) -> str:
+    """Render ``filename: key value, ...`` from the fields it declares.
+
+    Keys are the manifest's own field names and values are copied verbatim, so
+    each line states only what the file says. A manifest that declares none
+    of the fields renders as its bare filename rather than a placeholder.
+    """
+    declared = ", ".join(f"{key} {value}" for key, value in fields if value)
+    return f"{filename}: {declared}" if declared else filename
 
 
 def _python_stack(root: Path) -> list[str]:
@@ -306,12 +330,64 @@ def _python_stack(root: Path) -> list[str]:
         name = str(project.get("name") or "").strip()
         version = str(project.get("version") or "").strip()
         requires_python = str(project.get("requires-python") or "").strip()
-    label = "Python (pyproject)"
-    detail = " ".join(part for part in (name, version) if part) or "project"
-    line = f"{label}: {detail}"
-    if requires_python:
-        line += f" (requires-python {requires_python})"
-    return [line]
+    return [
+        _manifest_line(
+            "pyproject.toml",
+            [("name", name), ("version", version), ("requires-python", requires_python)],
+        )
+    ]
+
+
+def _setup_cfg_stack(root: Path) -> list[str]:
+    path = root / "setup.cfg"
+    if not path.is_file():
+        return []
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        parser.read_string(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, configparser.Error):
+        return []
+    # ``version`` is left out: setuptools allows it to be a directive (e.g.
+    # ``attr: pkg.__version__``) whose value is only known by executing code.
+    name = parser.get("metadata", "name", fallback="").strip()
+    python_requires = parser.get("options", "python_requires", fallback="").strip()
+    return [_manifest_line("setup.cfg", [("name", name), ("python_requires", python_requires)])]
+
+
+def _setup_py_stack(root: Path) -> list[str]:
+    path = root / "setup.py"
+    if not path.is_file():
+        return []
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, SyntaxError, ValueError):
+        return ["setup.py"]
+    # Only string literals passed straight to the first ``setup(...)`` call are
+    # reported; anything computed (e.g. ``version=pkg.__version__``) needs
+    # execution and is left out.
+    literals: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        func_name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
+        if func_name != "setup":
+            continue
+        for keyword in node.keywords:
+            value = keyword.value
+            if keyword.arg and isinstance(value, ast.Constant) and isinstance(value.value, str):
+                literals[keyword.arg] = value.value.strip()
+        break
+    return [
+        _manifest_line(
+            "setup.py",
+            [
+                ("name", literals.get("name", "")),
+                ("version", literals.get("version", "")),
+                ("python_requires", literals.get("python_requires", "")),
+            ],
+        )
+    ]
 
 
 def _node_stack(root: Path) -> list[str]:
@@ -326,12 +402,16 @@ def _node_stack(root: Path) -> list[str]:
         return []
     name = str(data.get("name") or "").strip()
     version = str(data.get("version") or "").strip()
-    detail = " ".join(part for part in (name, version) if part) or "project"
     engines = data.get("engines")
-    line = f"Node (package.json): {detail}"
+    node_engine = ""
     if isinstance(engines, dict) and engines.get("node"):
-        line += f" (node {str(engines['node']).strip()})"
-    return [line]
+        node_engine = str(engines["node"]).strip()
+    return [
+        _manifest_line(
+            "package.json",
+            [("name", name), ("version", version), ("engines.node", node_engine)],
+        )
+    ]
 
 
 def _go_stack(root: Path) -> list[str]:
@@ -350,11 +430,7 @@ def _go_stack(root: Path) -> list[str]:
             module = line[len("module ") :].strip()
         elif line.startswith("go ") and not go_version:
             go_version = line[len("go ") :].strip()
-    detail = module or "module"
-    result = f"Go (go.mod): {detail}"
-    if go_version:
-        result += f" (go {go_version})"
-    return [result]
+    return [_manifest_line("go.mod", [("module", module), ("go", go_version)])]
 
 
 def _rust_stack(root: Path) -> list[str]:
@@ -374,11 +450,9 @@ def _rust_stack(root: Path) -> list[str]:
         name = str(package.get("name") or "").strip()
         version = str(package.get("version") or "").strip()
         edition = str(package.get("edition") or "").strip()
-    detail = " ".join(part for part in (name, version) if part) or "crate"
-    line = f"Rust (Cargo.toml): {detail}"
-    if edition:
-        line += f" (edition {edition})"
-    return [line]
+    return [
+        _manifest_line("Cargo.toml", [("name", name), ("version", version), ("edition", edition)])
+    ]
 
 
 def _build_repo_map(root: Path) -> tuple[str, ...]:
