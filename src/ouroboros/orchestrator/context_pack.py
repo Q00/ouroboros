@@ -362,22 +362,16 @@ def _setup_py_stack(root: Path) -> list[str]:
         tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
     except (OSError, SyntaxError, ValueError):
         return ["setup.py"]
-    # Only string literals passed straight to the first ``setup(...)`` call are
-    # reported; anything computed (e.g. ``version=pkg.__version__``) needs
-    # execution and is left out.
+    # Only string literals passed straight to the setuptools ``setup(...)``
+    # call are reported; anything computed (e.g. ``version=pkg.__version__``)
+    # needs execution and is left out.
+    call = _setuptools_setup_call(tree)
     literals: dict[str, str] = {}
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        func_name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
-        if func_name != "setup":
-            continue
-        for keyword in node.keywords:
+    if call is not None:
+        for keyword in call.keywords:
             value = keyword.value
             if keyword.arg and isinstance(value, ast.Constant) and isinstance(value.value, str):
                 literals[keyword.arg] = value.value.strip()
-        break
     return [
         _manifest_line(
             "setup.py",
@@ -388,6 +382,70 @@ def _setup_py_stack(root: Path) -> list[str]:
             ],
         )
     ]
+
+
+# Modules whose ``setup`` function is the package declaration in a setup.py.
+_SETUP_MODULES: frozenset[str] = frozenset({"setuptools", "distutils.core"})
+
+
+def _setuptools_setup_call(tree: ast.Module) -> ast.Call | None:
+    """Return the single call that resolves to ``setuptools.setup``, or ``None``.
+
+    A call counts only when its target is bound by an import from
+    :data:`_SETUP_MODULES` (``from setuptools import setup [as x]`` or
+    ``import setuptools [as x]``). If any such bound name is also rebound
+    elsewhere in the file (a ``def``, a class, an assignment, another import),
+    or more than one call resolves, the call cannot be identified without
+    executing the file and ``None`` is returned.
+    """
+    setup_names: set[str] = set()
+    module_aliases: set[str] = set()
+    other_bindings: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                bound = alias.asname or alias.name
+                if node.module in _SETUP_MODULES and alias.name == "setup":
+                    setup_names.add(bound)
+                else:
+                    other_bindings.add(bound)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in _SETUP_MODULES:
+                    module_aliases.add(alias.asname or alias.name)
+                else:
+                    other_bindings.add(alias.asname or alias.name.partition(".")[0])
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            other_bindings.add(node.name)
+        elif isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            other_bindings.add(node.id)
+        elif isinstance(node, ast.arg):
+            other_bindings.add(node.arg)
+    bound_roots = setup_names | {alias.partition(".")[0] for alias in module_aliases}
+    if bound_roots & other_bindings:
+        return None
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _resolves_to_setup(node.func, setup_names, module_aliases)
+    ]
+    return calls[0] if len(calls) == 1 else None
+
+
+def _resolves_to_setup(func: ast.expr, setup_names: set[str], module_aliases: set[str]) -> bool:
+    if isinstance(func, ast.Name):
+        return func.id in setup_names
+    if not isinstance(func, ast.Attribute) or func.attr != "setup":
+        return False
+    parts: list[str] = []
+    target: ast.expr = func.value
+    while isinstance(target, ast.Attribute):
+        parts.append(target.attr)
+        target = target.value
+    if not isinstance(target, ast.Name):
+        return False
+    parts.append(target.id)
+    return ".".join(reversed(parts)) in module_aliases
 
 
 def _node_stack(root: Path) -> list[str]:
