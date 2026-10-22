@@ -26,6 +26,7 @@ from ouroboros.providers.worker_process_tree import (
     finish_worker_tree,
     signal_worker_tree,
     terminate_frozen_tree,
+    watch_worker_tree,
 )
 
 _MAX_STREAM_LINE_BUFFER_BYTES = 50 * 1024 * 1024
@@ -301,6 +302,7 @@ async def terminate_runtime_process(
     terminate_frozen_tree(tree)
     started_at = asyncio.get_running_loop().time()
     cancelled: asyncio.CancelledError | None = None
+    watcher = asyncio.create_task(watch_worker_tree(tree))
     try:
         await _terminate_runtime_leader(
             process,
@@ -316,6 +318,10 @@ async def terminate_runtime_process(
         # again) must not skip the tree wait: kill everything, wait, re-raise.
         cancelled = exc
         await signal_worker_tree(tree, signal.SIGKILL, exclude_leader_group=False)
+    finally:
+        # Not awaited, so a cancellation of this task is never swallowed here;
+        # the tree's guard serializes any scan still running in its thread.
+        watcher.cancel()
     tree_exited = await finish_worker_tree(
         tree,
         started_at=started_at,

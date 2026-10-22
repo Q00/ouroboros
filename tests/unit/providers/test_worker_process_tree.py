@@ -601,6 +601,39 @@ async def test_descendant_missed_by_first_scan_is_still_stopped_and_awaited(
         await _cleanup(child_pid)
 
 
+@pytest.mark.asyncio
+async def test_child_forked_by_live_member_during_wait_is_adopted(tmp_path: Path) -> None:
+    """A member that forks from its SIGTERM handler and stays alive is followed."""
+    pid_file = tmp_path / "late.pid"
+    code = (
+        "import os, signal, subprocess, sys, time\n"
+        "def on_term(*_):\n"
+        "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "    p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],"
+        " start_new_session=True)\n"
+        "    open(sys.argv[1], 'w').write(str(p.pid))\n"
+        "signal.signal(signal.SIGTERM, on_term)\n"
+        "while True:\n"
+        "    time.sleep(0.05)\n"
+    )
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", code, str(pid_file), start_new_session=True
+    )
+    await asyncio.sleep(0.5)
+    late_pid: int | None = None
+    try:
+        confirmed = await terminate_runtime_process(process, shutdown_timeout=1.0)
+        late_pid = int(pid_file.read_text())
+        assert confirmed is True
+        assert not _alive(late_pid)
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+        if late_pid is not None:
+            await _cleanup(late_pid)
+
+
 def test_git_index_lock_path_follows_worktree_gitdir_file(tmp_path: Path) -> None:
     """A linked worktree's ``.git`` file points at its own index lock."""
     git_dir = tmp_path / "main" / ".git" / "worktrees" / "wt"

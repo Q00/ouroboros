@@ -6,6 +6,9 @@ and a cancelled worker can leave a ``git add`` running in the workspace after
 the caller has returned, with ``.git/index.lock`` still present.
 
 This module records the worker's descendants while the worker is still alive.
+A process that detaches itself after termination begins (a new session whose
+parent then exits before the next scan) is outside what a process table scan
+can follow; containing that needs a cgroup or a child subreaper.
 Termination then waits for every recorded process to exit, and escalates from
 SIGTERM to SIGKILL when one does not. It removes ``.git/index.lock`` only when
 a member of that tree held the lock open, the tree has exited, the lock file is
@@ -24,6 +27,7 @@ from pathlib import Path
 import shutil
 import signal
 import subprocess
+import threading
 from typing import Any, Protocol
 
 _POLL_INTERVAL_SECONDS = 0.05
@@ -64,6 +68,7 @@ class WorkerTree:
     workspace: str | None = None
     lock: _LockObservation | None = None
     scan_failed: bool = False
+    guard: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
 
 def _proc_available() -> bool:
@@ -372,6 +377,13 @@ async def capture_worker_tree(
 
 
 def _live_members(tree: WorkerTree) -> tuple[dict[int, _ProcessRecord], set[int]] | None:
+    with tree.guard:
+        return _live_members_locked(tree)
+
+
+def _live_members_locked(
+    tree: WorkerTree,
+) -> tuple[dict[int, _ProcessRecord], set[int]] | None:
     snapshot = _scan_processes()
     if snapshot is None:
         return None
@@ -382,6 +394,14 @@ def _live_members(tree: WorkerTree) -> tuple[dict[int, _ProcessRecord], set[int]
             return None  # a live member missing from the table: unknown
         if record is not None and record.start == start and not record.zombie:
             live.add(pid)
+    # A live member can still fork (for example from its SIGTERM handler);
+    # adopt such children while their parent is alive.
+    for pid in list(live):
+        for child, child_start in _descendants(snapshot, pid).items():
+            record = snapshot[child]
+            if child not in tree.members and not record.zombie:
+                tree.members[child] = child_start
+                live.add(child)
     if tree.pgid is not None:
         live.update(
             record.pid
@@ -422,6 +442,19 @@ async def signal_worker_tree(tree: WorkerTree, sig: int, *, exclude_leader_group
     if not tree.members and tree.pgid is None:
         return
     _signal(tree, sig, exclude_leader_group=exclude_leader_group)
+
+
+async def watch_worker_tree(tree: WorkerTree) -> None:
+    """Poll the tree until cancelled, adopting children that live members fork.
+
+    Runs while the worker itself is being stopped, so a child that a member
+    forks from its SIGTERM handler is recorded before that member exits.
+    """
+    if not tree.members:
+        return
+    while True:
+        await asyncio.to_thread(_live_members, tree)
+        await asyncio.sleep(_POLL_INTERVAL_SECONDS)
 
 
 async def wait_for_worker_tree_exit(tree: WorkerTree, *, timeout: float) -> set[int] | None:
@@ -596,5 +629,6 @@ __all__ = [
     "release_stale_git_index_lock",
     "signal_worker_tree",
     "terminate_frozen_tree",
+    "watch_worker_tree",
     "wait_for_worker_tree_exit",
 ]
