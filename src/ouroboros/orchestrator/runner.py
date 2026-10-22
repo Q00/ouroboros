@@ -72,7 +72,7 @@ from ouroboros.core.project_identity import (
 from ouroboros.core.project_identity import (
     ProjectIdentityUnavailableError as ProjectIdentityUnavailableError,
 )
-from ouroboros.core.seed import AcceptanceCriterionSpec, ac_text, ac_texts
+from ouroboros.core.seed import AcceptanceCriterionSpec, ac_text
 from ouroboros.core.seed_contract import SeedContract
 from ouroboros.core.seed_contract_prompt import (
     render_auto_recursion_guard,
@@ -90,6 +90,7 @@ from ouroboros.orchestrator.adapter import (
     resolve_worker_cwd,
 )
 from ouroboros.orchestrator.adaptive_concurrency import adaptive_concurrency_policy
+from ouroboros.orchestrator.atomic_prompt_builder import install_sourced_scope
 from ouroboros.orchestrator.backend_limits import (
     BackendConcurrencyLimits,
     plan_fan_out_concurrency,
@@ -737,13 +738,14 @@ def build_task_prompt(
     if strategy is None:
         strategy = get_strategy(seed.task_type)
 
-    ac_list = "\n".join(f"{i + 1}. {ac}" for i, ac in enumerate(ac_texts(seed.acceptance_criteria)))
+    contract = SeedContract.from_seed(seed)  # only sourced content when ``sourced_scope`` is set
+    ac_list = "\n".join(f"{i + 1}. {ac}" for i, ac in enumerate(contract.acceptance_criteria))
     suffix = strategy.get_task_prompt_suffix()
 
     return f"""Execute the following task according to the acceptance criteria:
 
 ## Goal
-{seed.goal}
+{contract.goal}
 
 ## Acceptance Criteria
 {ac_list}
@@ -10410,6 +10412,7 @@ class OrchestratorRunner:
             expected_runtime_effect_capabilities=execution_semantics["runtime_effect_capabilities"],
             usage_limit_pause_seconds=execution_semantics["usage_limit_pause_seconds"],
         )
+        install_sourced_scope(parallel_executor, seed.sourced_scope)  # leaf prompts render only it
         if (install := getattr(self.acceptance_authority, "install", None)) is not None:
             # Check package on: it drives repairs; the legacy verifier is advisory.
             install(parallel_executor)

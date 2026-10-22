@@ -637,8 +637,12 @@ def inherit_check_package_hooks(parent: object, child: object) -> None:
     A derived executor (the cross-harness alternate) runs the same criterion
     under the same acceptance authority: the same per-attempt gate, the same
     advisory legacy verdict, and the same entry-point interfaces in its prompt.
+    It also renders the same worker prompt, so it inherits the run Seed's
+    sourced scope (``atomic_prompt_builder.SOURCED_SCOPE_ATTR``).
     """
-    for name in _CHECK_PACKAGE_HOOKS:
+    from ouroboros.orchestrator.atomic_prompt_builder import SOURCED_SCOPE_ATTR
+
+    for name in (*_CHECK_PACKAGE_HOOKS, SOURCED_SCOPE_ATTR):
         value = getattr(parent, name, None)
         if value is not None:
             setattr(child, name, value)

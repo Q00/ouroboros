@@ -382,8 +382,12 @@ def test_pipeline_persists_ledger_drafts_as_assumptions_on_the_generated_seed(
     assert DEFAULTED_CONSTRAINT in persisted.assumptions
     assert UNSPECIFIED_DRAFT_CRITERION in persisted.assumptions
     assert DEFAULTED_CONSTRAINT not in persisted.constraints
+    # The assumptions stay in the Seed for the record; the recorded auto Seed
+    # carries a sourced scope, so its worker prompt renders none of them.
+    assert persisted.sourced_scope is not None
     prompt = render_seed_contract_for_execution(SeedContract.from_seed(persisted))
-    assert DEFAULTED_CONSTRAINT in prompt.split("## Assumptions (non-binding)", 1)[1]
+    assert "## Assumptions (non-binding)" not in prompt
+    assert DEFAULTED_CONSTRAINT not in prompt
 
 
 def test_interview_with_only_assumption_answers_is_ready_for_seed_generation() -> None:
