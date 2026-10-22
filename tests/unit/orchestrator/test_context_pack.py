@@ -460,51 +460,16 @@ class TestManifestFacts:
 
     def test_pure_python_setup_py_repo(self, tmp_path: Path) -> None:
         (tmp_path / "setup.py").write_text(
-            "import pkg\n"
-            "from setuptools import setup\n\n"
-            "setup(name='pkg', version=pkg.__version__, python_requires='>=3.8')\n",
+            "from setuptools import setup\n\nsetup(name='pkg', python_requires='>=3.8')\n",
             encoding="utf-8",
         )
 
         pack = build_context_pack(tmp_path)
 
         assert pack is not None
-        # The computed version needs execution, so only literals are reported.
-        assert pack.stack == ("setup.py: name pkg, python_requires >=3.8",)
-
-    @pytest.mark.parametrize(
-        "source,expected",
-        [
-            # An unrelated method named ``setup`` is not the package declaration.
-            (
-                "import helper\nfrom setuptools import setup\n\n"
-                "helper.setup(name='helper')\nsetup(name='real', version='1.0')\n",
-                "setup.py: name real, version 1.0",
-            ),
-            # Module-qualified call through ``import setuptools [as x]``.
-            (
-                "import setuptools as st\n\nst.setup(name='real', python_requires='>=3.9')\n",
-                "setup.py: name real, python_requires >=3.9",
-            ),
-            # A local ``setup`` shadows the import: identity is unknown.
-            (
-                "def setup(**kwargs):\n    pass\n\nsetup(name='decoy', version='9.9')\n"
-                "from setuptools import setup\nsetup(name='real', version='1.0')\n",
-                "setup.py",
-            ),
-            # ``setup`` never imported from setuptools: not reported.
-            ("def setup(**kwargs):\n    pass\n\nsetup(name='decoy')\n", "setup.py"),
-        ],
-    )
-    def test_setup_py_fields_come_only_from_the_setuptools_call(
-        self, tmp_path: Path, source: str, expected: str
-    ) -> None:
-        (tmp_path / "setup.py").write_text(source, encoding="utf-8")
-
-        pack = build_context_pack(tmp_path)
-
-        assert pack is not None
-        assert pack.stack == (expected,)
+        # setup.py is code: its values are only known by running it, so only
+        # the file's presence is reported, never a name read from the source.
+        assert pack.stack == ("setup.py",)
 
     def test_setup_cfg_change_invalidates_cache(self, tmp_path: Path) -> None:
         subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
