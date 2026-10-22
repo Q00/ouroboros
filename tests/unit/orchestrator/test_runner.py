@@ -7317,8 +7317,8 @@ class TestOrchestratorRunner:
             result = await runner.resume_session("sess_resume_context", sample_seed)
 
         assert result.is_ok
-        assert "resume-app 1.0.0" in captured["system_prompt"]
-        assert "resume-app 9.9.9" not in captured["system_prompt"]
+        assert "name resume-app, version 1.0.0" in captured["system_prompt"]
+        assert "name resume-app, version 9.9.9" not in captured["system_prompt"]
 
     def test_deserialize_runtime_handle_supports_legacy_progress(
         self,
