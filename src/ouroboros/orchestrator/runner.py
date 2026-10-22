@@ -47,7 +47,6 @@ from ouroboros.config import (
     get_usage_limit_pause_seconds,
 )
 from ouroboros.config.exec_sandbox import exec_sandbox_enabled
-from ouroboros.core.conductor import ConductorDirective
 from ouroboros.core.errors import ConfigError, OuroborosError, PersistenceError
 from ouroboros.core.execution_preferences import (
     ResolvedExecutionPreferences,
@@ -75,6 +74,7 @@ from ouroboros.core.project_identity import (
 from ouroboros.core.seed import AcceptanceCriterionSpec, ac_text
 from ouroboros.core.seed_contract import SeedContract
 from ouroboros.core.seed_contract_prompt import (
+    _render_conductor_directive,
     render_auto_recursion_guard,
     render_seed_contract_for_execution,
 )
@@ -613,37 +613,6 @@ def build_system_prompt(
     if context_pack_fragment:
         prompt = f"{prompt}\n\n{context_pack_fragment}"
     return prompt
-
-
-def _render_conductor_directive(seed: Seed) -> str:
-    """Render audited successor-only context without rewriting the Seed contract."""
-    raw_directive = (seed.model_extra or {}).get("conductor_directive")
-    if raw_directive is None:
-        return ""
-    if not isinstance(raw_directive, dict):
-        raise ValueError("Seed conductor_directive must be a structured object")
-    directive = ConductorDirective.from_mapping(raw_directive)
-    reasons = (
-        "\n".join(f"- {reason}" for reason in directive.rejected_reasons)
-        if directive.rejected_reasons
-        else "None recorded."
-    )
-    return f"""## Active Conductor Successor Directive
-This is bounded additive context for a successor execution. The Seed above remains
-the source of truth. Do not weaken or silently replace its approved direction.
-
-Instruction: {directive.instruction}
-Rejected evidence reasons:
-{reasons}
-
-Preservation contract:
-- goal: {str(directive.preserve_goal).lower()}
-- acceptance criteria: {str(directive.preserve_acceptance_criteria).lower()}
-- constraints: {str(directive.preserve_constraints).lower()}
-- non-goals: {str(directive.preserve_non_goals).lower()}
-
-Re-check the affected implementation and verification evidence, then report the
-specific correction made for this directive."""
 
 
 def _resolve_context_pack_root(

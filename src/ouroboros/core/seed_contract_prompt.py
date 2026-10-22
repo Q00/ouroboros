@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from ouroboros.core.seed import SourcedScope
+from ouroboros.core.conductor import ConductorDirective
+from ouroboros.core.seed import Seed, SourcedScope
 from ouroboros.core.seed_contract import GOAL_OBJECTIVE_CRITERION, OntologyLens, SeedContract
 
 AUTO_RECURSION_GUARD = """## Auto Recursion Guard
@@ -255,6 +256,37 @@ def render_sourced_objective(scope: SourcedScope) -> str:
     if len(criteria) == 1:
         return criteria[0]
     return "\n".join(f"{index}. {criterion}" for index, criterion in enumerate(criteria, 1))
+
+
+def _render_conductor_directive(seed: Seed) -> str:
+    """Render audited successor-only context without rewriting the Seed contract."""
+    raw_directive = (seed.model_extra or {}).get("conductor_directive")
+    if raw_directive is None:
+        return ""
+    if not isinstance(raw_directive, dict):
+        raise ValueError("Seed conductor_directive must be a structured object")
+    directive = ConductorDirective.from_mapping(raw_directive)
+    reasons = (
+        "\n".join(f"- {reason}" for reason in directive.rejected_reasons)
+        if directive.rejected_reasons
+        else "None recorded."
+    )
+    return f"""## Active Conductor Successor Directive
+This is bounded additive context for a successor execution. The Seed above remains
+the source of truth. Do not weaken or silently replace its approved direction.
+
+Instruction: {directive.instruction}
+Rejected evidence reasons:
+{reasons}
+
+Preservation contract:
+- goal: {str(directive.preserve_goal).lower()}
+- acceptance criteria: {str(directive.preserve_acceptance_criteria).lower()}
+- constraints: {str(directive.preserve_constraints).lower()}
+- non-goals: {str(directive.preserve_non_goals).lower()}
+
+Re-check the affected implementation and verification evidence, then report the
+specific correction made for this directive."""
 
 
 __all__ = [
