@@ -378,22 +378,29 @@ def _release_lock(tree: WorkerTree, tree_exited: bool) -> tuple[str, str] | None
         observation.mtime_ns,
     ):
         return "left", "lock_replaced"
-    holders = _lock_holders(path, None)
-    if holders is None:
-        return "left", "holder_check_unavailable"
-    if holders:
-        return "left", "held_by_live_process"
-    return _claim_and_remove(path, observation)
+    return _claim_verify_remove(path, observation)
 
 
-def _claim_and_remove(path: Path, observation: _LockObservation) -> tuple[str, str] | None:
-    """Move the lock aside atomically, verify it is the observed file, then delete it.
+def _put_back(claimed: Path, path: Path) -> str | None:
+    """Return the claimed file to its name; report where it stays if the name is taken."""
+    try:
+        os.link(claimed, path)
+    except OSError:
+        return claimed.name
+    with contextlib.suppress(OSError):
+        os.unlink(claimed)
+    return None
 
-    Git creates a lock with ``O_EXCL`` and never adopts an existing file, so a
-    replacement lock is always a new inode. The rename takes whatever holds the
-    name in one step; only the observed inode is deleted. Anything else goes
-    back under its name, or stays under the claimed name if the name was taken
-    again meanwhile.
+
+def _claim_verify_remove(path: Path, observation: _LockObservation) -> tuple[str, str] | None:
+    """Claim the lock name first, then verify the claimed file, then delete it.
+
+    The rename moves whatever holds the name to a private path in one step, so
+    the identity and holder checks below apply to the exact file that would be
+    deleted, and no later process can reach it by the lock name. Git creates a
+    lock with ``O_EXCL`` and never adopts an existing file, so a replacement is
+    always a new inode. Any file that fails a check goes back under its name, or
+    stays under the claimed name (reported) when the name was taken meanwhile.
     """
     claimed = path.with_name(f"{path.name}.ouroboros-stale-{os.getpid()}-{os.urandom(4).hex()}")
     try:
@@ -411,17 +418,21 @@ def _claim_and_remove(path: Path, observation: _LockObservation) -> tuple[str, s
         )
     except OSError:
         same = False
-    if same:
+    reason: str | None = None
+    if not same:
+        reason = "lock_replaced"
+    else:
+        holders = _lock_holders(claimed, None)
+        if holders is None:
+            reason = "holder_check_unavailable"
+        elif holders:
+            reason = "held_by_live_process"
+    if reason is None:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(claimed)
         return "removed", "worker_tree_exited"
-    try:
-        os.link(claimed, path)
-    except OSError:
-        return "left", f"lock_replaced_kept_at:{claimed.name}"
-    with contextlib.suppress(OSError):
-        os.unlink(claimed)
-    return "left", "lock_replaced"
+    kept_at = _put_back(claimed, path)
+    return "left", reason if kept_at is None else f"{reason}_kept_at:{kept_at}"
 
 
 async def release_stale_git_index_lock(

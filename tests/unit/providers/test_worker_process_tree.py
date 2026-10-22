@@ -303,45 +303,60 @@ async def test_unverified_process_group_is_never_adopted_or_signalled() -> None:
         await bystander.wait()
 
 
+def _observe(path: Path) -> Any:
+    stat = path.stat()
+    return worker_process_tree._LockObservation(
+        path=path,
+        device=stat.st_dev,
+        inode=stat.st_ino,
+        mtime_ns=stat.st_mtime_ns,
+        held_by_tree=True,
+    )
+
+
+def test_replaced_lock_is_put_back_untouched(tmp_path: Path) -> None:
+    """A different file at the lock name goes back under the name, unchanged."""
+    lock = tmp_path / "index.lock"
+    lock.write_text("old")
+    observation = _observe(lock)
+    lock.unlink()
+    fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    os.close(fd)
+    replacement_inode = lock.stat().st_ino
+
+    outcome = worker_process_tree._claim_verify_remove(lock, observation)
+
+    assert outcome == ("left", "lock_replaced")
+    assert lock.stat().st_ino == replacement_inode
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["index.lock"]
+
+
 @pytest.mark.asyncio
-async def test_lock_replaced_during_holder_check_is_left_intact(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A new lock that takes the name after the checks is never deleted."""
-    process, child_pid, workspace = await _spawn_worker(tmp_path, hold_lock=True, ignore_term=True)
-    lock = workspace / ".git" / "index.lock"
-    real_holders = worker_process_tree._lock_holders
-    replaced: dict[str, int] = {}
-
-    def _replace_then_report(path: Path, pids: Any) -> set[int] | None:
-        if pids is None and not replaced:
-            lock.unlink()
-            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.close(fd)
-            replaced["inode"] = lock.stat().st_ino
-            return set()
-        return real_holders(path, pids)
-
-    monkeypatch.setattr(worker_process_tree, "_lock_holders", _replace_then_report)
-    logger = _Recorder()
+async def test_lock_opened_after_tree_exit_is_put_back(tmp_path: Path) -> None:
+    """Holders are checked on the claimed file, so a late opener keeps its lock."""
+    lock = tmp_path / "index.lock"
+    lock.write_text("")
+    observation = _observe(lock)
+    ready = tmp_path / "holder.ready"
+    holder = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        "import sys, time\n"
+        "fh = open(sys.argv[1], 'rb')\n"
+        "open(sys.argv[2], 'w').close()\n"
+        "time.sleep(60)\n",
+        str(lock),
+        str(ready),
+    )
     try:
-        await terminate_runtime_process(
-            process,
-            shutdown_timeout=0.5,
-            logger=logger,
-            log_namespace="test_runtime",
-            workspace=str(workspace),
-        )
-        assert not _alive(child_pid)
-        assert lock.exists()
-        assert lock.stat().st_ino == replaced["inode"]
-        assert logger.events[-1] == (
-            "test_runtime.stale_git_index_lock_left",
-            {"path": str(lock), "reason": "lock_replaced"},
-        )
-        assert sorted(p.name for p in lock.parent.iterdir()) == ["index.lock"]
+        await _wait_for_file(ready)
+        outcome = worker_process_tree._claim_verify_remove(lock, observation)
+        assert outcome == ("left", "held_by_live_process")
+        assert lock.stat().st_ino == observation.inode
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["holder.ready", "index.lock"]
     finally:
-        await _cleanup(child_pid)
+        holder.kill()
+        await holder.wait()
 
 
 @pytest.mark.asyncio
