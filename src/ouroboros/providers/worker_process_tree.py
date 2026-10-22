@@ -268,11 +268,15 @@ def _capture(
         # stale or fake pid from pulling unrelated processes into the tree.
         if leader is not None and leader.ppid == os.getpid():
             tree.members = _descendants(snapshot, leader.pid)
-        if tree.pgid is not None:
-            for record in snapshot.values():
-                if record.pgid == tree.pgid and not record.zombie:
-                    tree.members.setdefault(record.pid, record.start)
+            if tree.pgid is not None:
+                for record in snapshot.values():
+                    if record.pgid == tree.pgid and not record.zombie:
+                        tree.members.setdefault(record.pid, record.start)
         tree.members.pop(os.getpid(), None)
+    if not tree.members:
+        # Without a verified live leader the group id is unproven: leave the
+        # group to the existing killpg handling and do not track it here.
+        tree.pgid = None
     tree.lock = _observe_lock(workspace, tree.members)
     return tree
 

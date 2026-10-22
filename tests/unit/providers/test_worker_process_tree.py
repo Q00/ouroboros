@@ -13,7 +13,11 @@ from typing import Any
 import pytest
 
 from ouroboros.providers.codex_cli_stream import terminate_runtime_process
-from ouroboros.providers.worker_process_tree import capture_worker_tree, git_index_lock_path
+from ouroboros.providers.worker_process_tree import (
+    capture_worker_tree,
+    finish_worker_tree,
+    git_index_lock_path,
+)
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX process tree semantics")
 
@@ -271,6 +275,31 @@ async def test_pid_that_is_not_our_child_is_never_adopted() -> None:
 
     tree = await capture_worker_tree(_Foreign())
     assert tree.members == {}
+
+
+@pytest.mark.asyncio
+async def test_unverified_process_group_is_never_adopted_or_signalled() -> None:
+    """An exited or fake leader must not turn a group id into kill targets."""
+    bystander = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", "import time; time.sleep(60)", start_new_session=True
+    )
+
+    class _Exited:
+        pid = os.getppid()
+        returncode = 0
+
+    try:
+        pgid = os.getpgid(bystander.pid)
+        tree = await capture_worker_tree(_Exited(), process_group_id=pgid)
+        assert tree.members == {}
+        assert tree.pgid is None
+        assert await finish_worker_tree(
+            tree, started_at=0.0, shutdown_timeout=0.1, logger=None, log_namespace=None
+        )
+        assert _alive(bystander.pid)
+    finally:
+        bystander.kill()
+        await bystander.wait()
 
 
 def test_git_index_lock_path_follows_worktree_gitdir_file(tmp_path: Path) -> None:

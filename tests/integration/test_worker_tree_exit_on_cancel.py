@@ -30,11 +30,16 @@ pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX process tree s
 _FAKE_CODEX = textwrap.dedent(
     """
     import json, os, subprocess, sys, time
+    if "exec" not in sys.argv[1:]:
+        # Version probes run from the caller's directory; never start the tool.
+        print("codex-cli 0.0.0-test")
+        sys.exit(0)
     pid_file = os.environ["FAKE_TOOL_PID_FILE"]
+    lock_path = os.environ["FAKE_TOOL_LOCK_PATH"]
     tool = (
         "import os, signal, sys, time\\n"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\\n"
-        "fd = os.open(os.path.join('.git', 'index.lock'), os.O_CREAT | os.O_EXCL | os.O_WRONLY)\\n"
+        "fd = os.open(sys.argv[2], os.O_CREAT | os.O_EXCL | os.O_WRONLY)\\n"
         "with open(sys.argv[1] + '.tmp', 'w') as fh:\\n"
         "    fh.write(str(os.getpid()))\\n"
         "os.replace(sys.argv[1] + '.tmp', sys.argv[1])\\n"
@@ -42,7 +47,7 @@ _FAKE_CODEX = textwrap.dedent(
         "    time.sleep(0.05)\\n"
     )
     print(json.dumps({"type": "thread.started", "thread_id": "fake-thread"}), flush=True)
-    subprocess.Popen([sys.executable, "-c", tool, pid_file], start_new_session=True)
+    subprocess.Popen([sys.executable, "-c", tool, pid_file, lock_path], start_new_session=True)
     while True:
         time.sleep(0.05)
     """
@@ -72,6 +77,7 @@ async def test_cancelled_codex_job_turns_terminal_only_after_tool_command_exits(
     cli.write_text(f"#!{sys.executable}\n{_FAKE_CODEX}", encoding="utf-8")
     cli.chmod(0o755)
     monkeypatch.setenv("FAKE_TOOL_PID_FILE", str(pid_file))
+    monkeypatch.setenv("FAKE_TOOL_LOCK_PATH", str(lock))
 
     runtime = CodexCliRuntime(cli_path=str(cli), cwd=str(workspace))
     runtime._process_shutdown_timeout_seconds = 0.5
