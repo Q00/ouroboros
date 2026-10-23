@@ -8,9 +8,14 @@ so compatibility and replay claims cannot drift apart.
 
 from __future__ import annotations
 
-from typing import cast
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, cast
 
 from ouroboros.orchestrator.decomposition_policy import MAX_CHILDREN, MIN_CHILDREN
+
+if TYPE_CHECKING:
+    from ouroboros.core.seed import Seed
+    from ouroboros.orchestrator.session import SessionTracker
 
 DEFAULT_MAX_DECOMPOSITION_DEPTH = 2
 MAX_DURABLE_DECOMPOSITION_DEPTH = 4
@@ -55,3 +60,20 @@ def has_durable_decomposition_replay(depth: int) -> bool:
     """Return whether Routing D can own crash replay for this live depth."""
 
     return 0 <= depth <= MAX_DURABLE_DECOMPOSITION_DEPTH
+
+
+def seed_allows_decomposition(seed: Seed, resumed: SessionTracker | None) -> bool:
+    """Whether a run of ``seed`` may split a criterion into model-proposed sub-ACs.
+
+    A Seed with ``sourced_scope`` (every ``ooo auto`` Seed) gives its worker
+    only content with a known source; split children would be model-written,
+    so it runs without decomposition. Other Seeds keep it. A resumed session
+    keeps the setting its execution contract recorded, so a run started before
+    this rule resumes as it started.
+    """
+    contract = resumed.progress.get("execution_contract") if resumed is not None else None
+    semantics = contract.get("execution_semantics") if isinstance(contract, Mapping) else None
+    persisted = semantics.get("enable_decomposition") if isinstance(semantics, Mapping) else None
+    if isinstance(persisted, bool):
+        return persisted
+    return seed.sourced_scope is None
