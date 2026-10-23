@@ -208,6 +208,48 @@ async def _cleanup(pid: int) -> None:
 
 
 @pytest.mark.asyncio
+async def test_cleanup_handles_process_exit_after_alive_probe() -> None:
+    with (
+        patch(f"{__name__}._alive", return_value=True),
+        patch.object(os, "kill", side_effect=ProcessLookupError) as kill,
+    ):
+        await _cleanup(123)
+        kill.assert_called_once_with(123, signal.SIGKILL)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_kills_live_process_once() -> None:
+    with (
+        patch(f"{__name__}._alive", return_value=True),
+        patch.object(os, "kill") as kill,
+    ):
+        await _cleanup(123)
+        kill.assert_called_once_with(123, signal.SIGKILL)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_does_not_kill_dead_process() -> None:
+    with (
+        patch(f"{__name__}._alive", return_value=False),
+        patch.object(os, "kill") as kill,
+    ):
+        await _cleanup(123)
+        kill.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [PermissionError, OSError, FileNotFoundError])
+async def test_cleanup_preserves_unexpected_kill_errors(error: type[OSError]) -> None:
+    with (
+        patch(f"{__name__}._alive", return_value=True),
+        patch.object(os, "kill", side_effect=error) as kill,
+    ):
+        with pytest.raises(error):
+            await _cleanup(123)
+        kill.assert_called_once_with(123, signal.SIGKILL)
+
+
+@pytest.mark.asyncio
 async def test_terminate_waits_for_descendant_in_its_own_session(tmp_path: Path) -> None:
     """A tool command outside the worker's group is stopped before the helper returns."""
     process, child_pid, _ = await _spawn_worker(tmp_path, hold_lock=False, ignore_term=False)
