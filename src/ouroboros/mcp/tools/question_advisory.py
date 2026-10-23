@@ -40,7 +40,11 @@ from ouroboros.mcp.tools.advisory_prompts import (
     _data_context_lane_task,
 )
 from ouroboros.mcp.tools.fanout import FanoutRegistry, stamp_question_advisory_fanout
-from ouroboros.mcp.tools.recent_findings import recent_findings_by_lane
+from ouroboros.mcp.tools.recent_findings import (
+    interview_baseline_by_lane,
+    recent_findings_by_lane,
+    with_interview_baseline,
+)
 from ouroboros.mcp.tools.subagent import (
     _INTERVIEW_ADVISORY_MAX_JSON_CHARS,
     _INTERVIEW_ADVISORY_MAX_QUESTION_CHARS,
@@ -489,7 +493,7 @@ def build_question_advisory_subagents(request: Mapping[str, Any]) -> list[Subage
 
         # Built per lane: a lane is offered only what its own lane published
         # (RFC Q00/ouroboros#2167), so this differs between lanes and is absent
-        # for the four that read nothing.
+        # for the lanes that read nothing.
         recent_findings = _recent_findings_section(
             request,
             lane_id,
@@ -648,6 +652,16 @@ def attach_question_advisory(
     """
     if not question:
         return
+    declared_lanes = _declared_lanes(_tool_advisory_catalog(tool_name))
+    recent_findings = recent_findings_by_lane(findings_store, lanes=declared_lanes)
+    if phase is not None and phase != "start":
+        # A later turn starts from what this session's start turn already
+        # found; the lanes still run and investigate what it did not cover.
+        recent_findings = with_interview_baseline(
+            recent_findings,
+            interview_baseline_by_lane(findings_store, session_id=session_id),
+            lanes=declared_lanes,
+        )
     request = build_question_advisory_request(
         tool_name=tool_name,
         session_id=session_id,
@@ -658,10 +672,7 @@ def attach_question_advisory(
         code_investigation_request=code_investigation_request,
         repository_roster=repository_roster,
         last_question=last_question,
-        recent_findings=recent_findings_by_lane(
-            findings_store,
-            lanes=_declared_lanes(_tool_advisory_catalog(tool_name)),
-        ),
+        recent_findings=recent_findings,
     )
     try:
         payloads = build_question_advisory_subagents(request)
@@ -712,6 +723,9 @@ def attach_question_advisory(
             if repository_roster is not None
             else None
         ),
+        # Recorded so the published snapshot can be found again as this
+        # session's start turn; without it every provenance phase is empty.
+        phase=phase,
     )
     record_subagent_dispatch_emitted(
         fanout_kind="question_advisory",

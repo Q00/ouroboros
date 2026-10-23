@@ -51,4 +51,5 @@ def test_a_generated_narrowing_answer_never_binds() -> None:
     bound = [*seed.constraints, *(str(item) for item in seed.acceptance_criteria)]
     bound += [field.description for field in seed.ontology_schema.fields]
     assert not any("review only" in text for text in bound)
-    assert f"Open question: {question}" in seed.assumptions
+    assert seed.open_questions == (question,)
+    assert not any(question in text for text in seed.assumptions)
