@@ -2368,6 +2368,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 "__getattribute__",
                 (_AbstractValue(string_value=node.attr, string_values=frozenset({node.attr})),),
             )
+            # A possible config root must survive a joined foreign object shape.
+            if node.attr in TRACKED_SECTIONS and _CONFIG_ROOT in owner.origins:
+                return _origin_value(node.attr)
             attribute = self._named_value(owner.attributes, node.attr)
             class_attribute = _join_values(
                 *(
@@ -2599,8 +2602,6 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     classes=resolved_classes,
                     callables=tuple(callable_targets),
                 )
-            if node.attr in TRACKED_SECTIONS and _CONFIG_ROOT in owner.origins:
-                return _origin_value(node.attr)
             if node.attr == "TYPE_CHECKING" and _TYPING_MODULE in owner.origins:
                 return _type_checking_value()
             if _looks_like_config_name(node.attr) and (
@@ -2841,15 +2842,18 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             if partial_values:
                 return _join_values(*partial_values)
             callable_name = _callable_name(node.func)
-            if callable_name is not None and _CONFIG_FACTORY.search(callable_name):
-                if isinstance(node.func, ast.Name):
-                    return _origin_value(_CONFIG_ROOT)
-                if isinstance(node.func, ast.Attribute) and (
+            named_config_factory = bool(
+                callable_name is not None and _CONFIG_FACTORY.search(callable_name)
+            )
+            factory_convention = named_config_factory and (
+                isinstance(node.func, ast.Name)
+                or isinstance(node.func, ast.Attribute)
+                and (
                     _CONFIG_ROOT in self._expression_value(node.func.value).origins
                     or isinstance(node.func.value, ast.Name)
                     and node.func.value.id in {"self", "cls"}
-                ):
-                    return _origin_value(_CONFIG_ROOT)
+                )
+            )
             if _GETATTR_BUILTIN in function_value.origins and len(node.args) >= 2:
                 field_name = self._expression_value(node.args[1]).string_value
                 if (
@@ -2881,6 +2885,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 self._record_call_arguments(function, scoped)
                 if (
                     syntactic_config_reader
+                    or named_config_factory
                     or self._call_has_relevant_provenance(node, function, bound_receiver)
                     or self._has_transitive_callable_relevance(function)
                     or self._may_return_callable(function, bound_receiver, scoped)
@@ -2899,8 +2904,14 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     )
             if values:
                 value = _join_values(*values)
+                # A resolved callable owns its proven return provenance. Keep
+                # the name convention only when its result remains unknown.
+                if factory_convention and (value == _UNKNOWN_VALUE or value.unknown_alternative):
+                    value = _join_values(value, _origin_value(_CONFIG_ROOT))
                 self._expression_cache[id(node)] = value
                 return value
+            if factory_convention and not function_value.classes:
+                return _origin_value(_CONFIG_ROOT)
             constructor_classes = self._expression_value(node.func).classes
             if constructor_classes or callable_name is not None and callable_name[:1].isupper():
                 items: list[_AbstractValue] = []

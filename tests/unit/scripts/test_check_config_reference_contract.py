@@ -7767,3 +7767,130 @@ def test_callable_container_arguments_survive_return_gate(
     reads = contract.runtime_reads(tmp_path, frozenset({field}))
 
     assert reads == (frozenset({field}) if argument == "settings" else frozenset())
+
+
+@pytest.mark.parametrize(
+    "factory_name",
+    [
+        "build_report",
+        "build_config",
+        "create_settings",
+        "get_configuration",
+        "load_config",
+        "read_settings",
+        "resolve_config",
+    ],
+)
+@pytest.mark.parametrize("returned", ["Report()", "settings"])
+@pytest.mark.parametrize("route", ["immediate", "assigned", "imported"])
+def test_resolved_factory_return_provenance_precedes_name_convention(
+    contract, tmp_path: Path, factory_name: str, returned: str, route: str
+) -> None:
+    source = (
+        "class EvaluationReport:\n    stage1_enabled = True\n"
+        "class Report:\n    evaluation = EvaluationReport()\n"
+        f"def {factory_name}():\n    return {returned}\n"
+    )
+    call = f"{factory_name}()"
+    if route == "imported":
+        (tmp_path / "factory.py").write_text(source)
+        source = f"from factory import {factory_name}\n"
+    if route == "assigned":
+        source += f"loaded = {call}\n"
+        call = "loaded"
+    (tmp_path / "consumer.py").write_text(source + f"result = {call}.evaluation.stage1_enabled\n")
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    expected = returned == "settings"
+    assert reads == (frozenset({field}) if expected else frozenset())
+    assert not reads.unresolved_semantics
+    assert bool(_audit_as_documented_inert(contract, field, reads).violations) == expected
+
+
+@pytest.mark.parametrize("resolved", [False, True])
+def test_unknown_config_factory_keeps_name_convention(
+    contract, tmp_path: Path, resolved: bool
+) -> None:
+    (tmp_path / "consumer.py").write_text(
+        ("def load_config():\n    return unknown_result\n" if resolved else "")
+        + "result = load_config().evaluation.stage1_enabled\n"
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    assert reads == frozenset({field})
+
+
+@pytest.mark.parametrize("argument", ["Report()", "settings"])
+def test_factory_name_keeps_returned_callable_instead_of_root(
+    contract, tmp_path: Path, argument: str
+) -> None:
+    (tmp_path / "consumer.py").write_text(
+        "class EvaluationReport:\n    stage1_enabled = True\n"
+        "class Report:\n    evaluation = EvaluationReport()\n"
+        "def reader(config):\n    return config.evaluation.stage1_enabled\n"
+        "def load_config():\n    return reader\n"
+        f"callback = load_config()\ncallback({argument})\n"
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    assert reads == (frozenset({field}) if argument == "settings" else frozenset())
+
+
+@pytest.mark.parametrize("alternative", ["settings", "unknown_result"])
+def test_named_factory_keeps_possible_config_return_alternative(
+    contract, tmp_path: Path, alternative: str
+) -> None:
+    (tmp_path / "consumer.py").write_text(
+        "class EvaluationReport:\n    stage1_enabled = True\n"
+        "class Report:\n    evaluation = EvaluationReport()\n"
+        f"def load_config():\n    return Report() if unknown else {alternative}\n"
+        "result = load_config().evaluation.stage1_enabled\n"
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    assert reads == frozenset({field})
+
+
+def test_resolved_self_factory_uses_foreign_return_before_name_convention(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "consumer.py").write_text(
+        "class EvaluationReport:\n    stage1_enabled = True\n"
+        "class Report:\n    evaluation = EvaluationReport()\n"
+        "class Provider:\n"
+        "    def load_config(self):\n        return Report()\n"
+        "    def read(self):\n        return self.load_config().evaluation.stage1_enabled\n"
+        "Provider().read()\n"
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    assert reads == frozenset()
+    assert not reads.unresolved_semantics
+
+
+@pytest.mark.parametrize("argument", ["Report()", "settings"])
+def test_uncertain_factory_result_keeps_known_callable_alternative(
+    contract, tmp_path: Path, argument: str
+) -> None:
+    (tmp_path / "consumer.py").write_text(
+        "class EvaluationReport:\n    stage1_enabled = True\n"
+        "class Report:\n    evaluation = EvaluationReport()\n"
+        "def reader(config):\n    return config.evaluation.stage1_enabled\n"
+        "def load_config():\n    return reader if unknown else unknown_result\n"
+        f"load_config()({argument})\n"
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    assert reads == (frozenset({field}) if argument == "settings" else frozenset())
