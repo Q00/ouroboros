@@ -9,8 +9,10 @@ from ouroboros.core.ac_runtime_projection import (
     project_ac_runtime,
 )
 from ouroboros.dashboard.board import reduce_board
+from ouroboros.dashboard_web.reader import EventTail
 from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.tools.ac_tree_hud_handler import (
+    ACTreeHUDHandler,
     _compose_progress_data,
     _extract_tree_snapshot,
     _has_tree_change_event,
@@ -287,3 +289,143 @@ def test_consumer_agreement_on_completed_but_rejected_root():
     assert relay["evidence"]["runtime"] == expected
     assert app.state.ac_tree["nodes"]["ac_1"]["runtime"] == expected
     assert _has_tree_change_event([events[-1]])
+
+
+@pytest.mark.parametrize(
+    "finalizations,expected_acceptance,expected_status",
+    [
+        ([{}], "accepted", "completed"),
+        ([{}, {}], "accepted", "completed"),
+        (
+            [{"accepted": False, "disposition": "rejected", "terminal_status": "failed"}],
+            "rejected",
+            "failed",
+        ),
+        (
+            [{}, {"accepted": False, "disposition": "rejected", "terminal_status": "failed"}],
+            "conflict",
+            "failed",
+        ),
+        ([{"acceptance_generation_id": "stale"}], "unfinalized", "failed"),
+        ([{"accepted": "true"}], "unfinalized", "failed"),
+        ([{"session_id": "foreign"}], "unfinalized", "failed"),
+        ([{"execution_id": "foreign"}], "unfinalized", "failed"),
+        ([], "unfinalized", "failed"),
+    ],
+    ids=[
+        "accepted",
+        "duplicate",
+        "rejected",
+        "conflict",
+        "stale",
+        "invalid",
+        "foreign-session",
+        "foreign-execution",
+        "missing",
+    ],
+)
+def test_final_receipt_precedence_agrees_across_consumers(
+    finalizations, expected_acceptance, expected_status
+):
+    events = [
+        *history(),
+        event("execution.verify.failed", ac_index=0, final_workspace_revalidation=True),
+        *(receipt(True, **changes) for changes in finalizations),
+    ]
+    runtime = project(events).for_node("ac_1")
+    assert runtime.acceptance == expected_acceptance
+    assert runtime.display_status() == expected_status
+    board = reduce_board(
+        [{"event_type": e.type, "aggregate_id": e.aggregate_id, "payload": e.data} for e in events],
+        execution_id="e1",
+    )
+    card = next(card for card in board["columns"][expected_status] if card["id"] == "ac_1")
+    hud_node = _extract_tree_snapshot(_compose_progress_data(events[0].data, events))["nodes"][
+        "ac_1"
+    ]
+    app = OuroborosTUI()
+    app.set_execution("e1", "s1")
+    app.update_ac_tree(
+        {
+            "root_id": "root",
+            "nodes": {
+                "root": {"children_ids": ["ac_1"]},
+                "ac_1": {"index": 1, "status": "completed", "parent_id": "root"},
+            },
+        }
+    )
+    for item in events:
+        app._process_subscription_event(item)
+    tui_node = app.state.ac_tree["nodes"]["ac_1"]
+    for consumer in [card, hud_node, tui_node]:
+        assert consumer["status"] == expected_status
+        assert consumer["runtime"]["acceptance"] == expected_acceptance
+    assert project(events).for_node("child").display_status() == "completed"
+
+
+@pytest.mark.asyncio
+async def test_sqlite_accepted_finalization_overrides_earlier_final_workspace_failure(tmp_path):
+    db = tmp_path / "terminal-override.db"
+    store = EventStore(f"sqlite+aiosqlite:///{db}")
+    await store.initialize()
+    try:
+        await store.append(
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id="s1",
+                data={"execution_id": "e1", "acceptance_root_indices": [0]},
+            )
+        )
+        for item in history()[:2]:
+            await store.append(item)
+        await store.append(
+            event(
+                "execution.verify.failed",
+                ac_index=0,
+                final_workspace_revalidation=True,
+            )
+        )
+        tail = EventTail(db, "e1")
+        before = reduce_board(tail.fetch_all(), execution_id="e1")
+        assert "ac_1" in [card["id"] for card in before["columns"]["failed"]]
+        await store.append(
+            BaseEvent(
+                type="orchestrator.session.completed",
+                aggregate_type="session",
+                aggregate_id="s1",
+                data={"execution_id": "e1", "acceptance_finalizations": [receipt(True).data]},
+            )
+        )
+        rows = EventTail(db, "e1").fetch_all()
+        kinds = [row["event_type"] for row in rows]
+        assert kinds.index("execution.verify.failed") < kinds.index(
+            "execution.ac.acceptance_finalized"
+        )
+        board = reduce_board(rows, execution_id="e1")
+        card = next(card for card in board["columns"]["completed"] if card["id"] == "ac_1")
+        assert card["runtime"]["acceptance"] == "accepted"
+        assert "ac_1" not in [card["id"] for card in board["columns"]["failed"]]
+        handler = ACTreeHUDHandler(event_store=store)
+        result = await handler.handle({"session_id": "s1", "cursor": 0, "view": "tree"})
+        assert result.is_ok
+        assert "● AC 1: Ship" in result.value.text_content
+        assert "✗ AC 1" not in result.value.text_content
+        delivered, _ = await read_runtime_history(store, execution_id="e1", session_id="s1")
+        app = OuroborosTUI()
+        app.set_execution("e1", "s1")
+        app.update_ac_tree(
+            {
+                "root_id": "root",
+                "nodes": {
+                    "root": {"children_ids": ["ac_1"]},
+                    "ac_1": {"index": 1, "status": "completed", "parent_id": "root"},
+                },
+            }
+        )
+        for item in delivered:
+            app._process_subscription_event(item)
+        assert app.state.ac_tree["nodes"]["ac_1"]["status"] == "completed"
+        assert app.state.ac_tree["nodes"]["ac_1"]["runtime"]["acceptance"] == "accepted"
+    finally:
+        await store.close()

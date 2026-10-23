@@ -64,10 +64,12 @@ class ACRuntime:
 
     def display_status(self, fallback: str = "pending") -> str:
         """Keep existing board columns while exposing independent dimensions."""
-        if self.acceptance in {"rejected", "conflict"} or self.final_workspace_failed:
+        if self.acceptance in {"rejected", "conflict"}:
             return "failed"
         if self.acceptance == "accepted":
             return "completed"
+        if self.final_workspace_failed:
+            return "failed"
         return self.lifecycle if self.lifecycle != "unknown" else fallback
 
 
