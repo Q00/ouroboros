@@ -164,6 +164,7 @@ class _UnresolvedCallable:
     decorator_name: str
     module_name: str
     line: int
+    kind: str = "decorator"
 
 
 def _is_generator_function(node: _FunctionNode) -> bool:
@@ -811,6 +812,7 @@ class _SourceIndex:
         self._owners: dict[int, _IndexedModule] = {}
         self._paths: dict[Path, _IndexedModule] = {}
         self._reexports: dict[tuple[str, str], tuple[_IndexedModule, str]] = {}
+        self._cyclic_functions: dict[tuple[str, str], _FunctionSet] = {}
         self._class_bases: dict[int, tuple[ast.ClassDef, ...]] = {}
         self._data_states: dict[str, dict[str, _AbstractValue]] = {}
         self._data_states_in_progress: set[str] = set()
@@ -889,6 +891,7 @@ class _SourceIndex:
         module.functions.pop(name, None)
         module.classes.pop(name, None)
         self._reexports.pop((module.name, name), None)
+        self._cyclic_functions.pop((module.name, name), None)
 
     def star_export_names(
         self, module: _IndexedModule, seen: frozenset[str] = frozenset()
@@ -944,6 +947,7 @@ class _SourceIndex:
                         dynamic_all = True
                     else:
                         declared = frozenset(value)
+                        dynamic_all = False
             # Mutation/conditional construction cannot safely narrow export candidates.
             if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 for candidate in ast.walk(statement):
@@ -1001,9 +1005,14 @@ class _SourceIndex:
                 target = self.resolve_module(statement.module, module, statement.level)
                 for alias in self.import_aliases(statement, target):
                     bound = alias.asname or alias.name
+                    previous_functions = module.functions.get(bound, frozenset())
                     self._clear_export(module, bound)
                     if target is not None:
-                        self._reexports[(module.name, bound)] = (target, alias.name)
+                        key = (module.name, bound)
+                        self._reexports[key] = (target, alias.name)
+                        # Only a cycle can recover the binding present before this import.
+                        # A later resolved foreign definition still replaces it normally.
+                        self._cyclic_functions[key] = previous_functions
             elif isinstance(statement, ast.Import):
                 for alias in statement.names:
                     self._clear_export(module, alias.asname or alias.name.partition(".")[0])
@@ -1015,6 +1024,21 @@ class _SourceIndex:
                     for name in self._assigned_names(target):
                         self._clear_export(module, name)
 
+    def cyclic_functions(self, module: _IndexedModule, name: str) -> _FunctionSet:
+        """Recover prior direct bindings only from a closed reexport cycle."""
+        path: list[tuple[str, str]] = []
+        key = (module.name, name)
+        while key not in path:
+            path.append(key)
+            edge = self._reexports.get(key)
+            if edge is None:
+                return frozenset()
+            target, target_name = edge
+            key = (target.name, target_name)
+        return frozenset().union(
+            *(self._cyclic_functions.get(member, frozenset()) for member in path[path.index(key) :])
+        )
+
     def resolve_functions(
         self,
         module: _IndexedModule,
@@ -1023,7 +1047,8 @@ class _SourceIndex:
     ) -> _FunctionSet:
         key = (module.name, name)
         if key in seen:
-            return frozenset()
+            candidates = self.cyclic_functions(module, name)
+            return candidates if len(candidates) == 1 else frozenset()
         direct = module.functions.get(name)
         if direct is not None:
             return direct
@@ -1665,6 +1690,16 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         }
         for target in unresolved:
             scoped = self._bound_call_arguments(call, target.function)
+            if target.kind == "cyclic import":
+                if self._source_index.syntactic_config_reader(target.function) and any(
+                    _contained_origins(value) & (TRACKED_SECTIONS | {_CONFIG_ROOT})
+                    for value in scoped.values()
+                ):
+                    self.unresolved_semantics.add(
+                        f"{target.module_name}:{target.line}: unresolved cyclic import "
+                        f"{target.decorator_name!r}"
+                    )
+                continue
             for candidate in ast.walk(target.function):
                 if not isinstance(candidate, ast.Attribute) or not isinstance(
                     candidate.value, ast.Name
@@ -5175,6 +5210,24 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 imported_value = (
                     self._imported_data_value(module, alias.name) if module is not None else None
                 )
+                if module is not None and not functions:
+                    candidates = self._source_index.cyclic_functions(module, alias.name)
+                    if candidates:
+                        imported_value = _join_values(
+                            imported_value or _UNKNOWN_VALUE,
+                            _AbstractValue(
+                                unresolved_callables=tuple(
+                                    _UnresolvedCallable(
+                                        function,
+                                        alias.name,
+                                        module.name,
+                                        getattr(node, "lineno", 0),
+                                        "cyclic import",
+                                    )
+                                    for function in candidates
+                                )
+                            ),
+                        )
                 self._functions[-1][bound] = functions
                 self._states[-1][bound] = (
                     _type_checking_value()

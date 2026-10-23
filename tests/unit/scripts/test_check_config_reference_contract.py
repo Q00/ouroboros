@@ -8040,3 +8040,93 @@ def test_star_export_selection_respects_private_and_empty_all(
     tree = ast.parse(exports + "\ndef _reader(): pass\ndef public(): pass\n")
     index = contract._SourceIndex(tmp_path, {source: tree})
     assert index.star_export_names(index._paths[source]) == frozenset(expected)
+
+
+@pytest.mark.parametrize("reset", ["[]", '["public"]', '("public",)', "unknown_names"])
+def test_runtime_scan_final_star_selector_reset_preserves_foreign_binding(
+    contract,
+    tmp_path: Path,
+    reset: str,
+) -> None:
+    (tmp_path / "source.py").write_text(
+        '__all__ = []\n__all__.append("_reader")\n'
+        f"__all__ = {reset}\n"
+        "def _reader(config):\n    return config.evaluation.stage1_enabled\n"
+        "def public():\n    return 0\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "consumer.py").write_text(
+        'def _reader(value):\n    return "foreign"\nfrom source import *\n_reader(settings)\n',
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+    # Dynamic selectors still retain possible private exports conservatively.
+    if reset == "unknown_names":
+        assert field in reads
+    else:
+        assert not reads
+        assert not reads.unresolved_semantics
+        assert not _audit_as_documented_inert(contract, field, reads).violations
+
+
+@pytest.mark.parametrize(
+    "imported",
+    [
+        "from bridge import *",
+        "from bridge import _reader",
+        "from source import _reader",
+    ],
+)
+@pytest.mark.parametrize("later_foreign", [False, True])
+def test_runtime_scan_cyclic_star_binding_preserves_resolved_origin(
+    contract,
+    tmp_path: Path,
+    imported: str,
+    later_foreign: bool,
+) -> None:
+    (tmp_path / "source.py").write_text(
+        '__all__ = ["_reader"]\n'
+        "def _reader(config):\n    return config.evaluation.stage1_enabled\n"
+        "from bridge import *\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "bridge.py").write_text(
+        'from source import *\n__all__ = ["_reader"]\n'
+        + ('def _reader(value):\n    return "foreign"\n' if later_foreign else ""),
+        encoding="utf-8",
+    )
+    (tmp_path / "consumer.py").write_text(imported + "\n_reader(settings)\n", encoding="utf-8")
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+    assert bool(field in reads) is not later_foreign
+    assert not reads.unresolved_semantics
+    assert bool(_audit_as_documented_inert(contract, field, reads).violations) is not later_foreign
+
+
+@pytest.mark.parametrize("argument", ["settings", "Report()"])
+def test_runtime_scan_ambiguous_star_cycle_fails_closed_only_for_config_arguments(
+    contract,
+    tmp_path: Path,
+    argument: str,
+) -> None:
+    (tmp_path / "source.py").write_text(
+        '__all__ = ["_reader"]\ndef _reader(config):\n'
+        "    return config.evaluation.stage1_enabled\nfrom bridge import *\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "bridge.py").write_text(
+        '__all__ = ["_reader"]\ndef _reader(value):\n    return "foreign"\nfrom source import *\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "consumer.py").write_text(
+        f"from bridge import *\nclass Report:\n    pass\n_reader({argument})\n",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+    assert not reads
+    assert bool(reads.unresolved_semantics) is (argument == "settings")
+    assert bool(_audit_as_documented_inert(contract, field, reads).violations) is (
+        argument == "settings"
+    )
