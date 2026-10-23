@@ -1377,7 +1377,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self.reads: set[ConfigField] = set()
         self.unresolved_semantics: set[str] = set()
 
-    def _syntactically_mentions_tracked_config(self, node: ast.AST) -> bool:
+    def _syntactically_mentions_tracked_config(
+        self, node: ast.AST, bound_arguments: dict[str, _AbstractValue] | None = None
+    ) -> bool:
         """Recognize only tracked-field reads with proven config provenance."""
 
         field_names = {
@@ -1390,6 +1392,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             for function in nodes
             if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
         }
+
+        if bound_arguments is not None:
+            scoped_by_function[id(node)] = bound_arguments
 
         def expression_origins(
             expression: ast.AST, scoped: dict[str, _AbstractValue]
@@ -1462,9 +1467,13 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         )
         return methods | imported
 
-    def _has_transitive_callable_relevance(self, node: ast.AST) -> bool:
+    def _has_transitive_callable_relevance(
+        self, node: ast.AST, bound_arguments: dict[str, _AbstractValue] | None = None
+    ) -> bool:
         """Follow only proven callable bindings to config-relevant local code."""
 
+        if bound_arguments is not None:
+            return self._has_bound_callable_relevance(node, bound_arguments)
         pending: list[ast.AST] = [node]
         visited: set[int] = set()
         root_class = node if isinstance(node, ast.ClassDef) else None
@@ -1485,6 +1494,64 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                         child, containing_class, self._source_index.owner(candidate)
                     )
                 )
+        return False
+
+    def _has_bound_callable_relevance(
+        self, node: ast.AST, bound_arguments: dict[str, _AbstractValue]
+    ) -> bool:
+        """Carry actual arguments through candidate edges without recording execution."""
+
+        pending = [(node, bound_arguments)]
+        visited = set()
+        while pending:
+            candidate, scoped = pending.pop()
+            # Recursive forwarding can wrap values indefinitely. Relevance needs
+            # the finite provenance/callable state, not freshly allocated shapes.
+            key = (
+                id(candidate),
+                tuple(
+                    (
+                        name,
+                        _contained_origins(value),
+                        value.callables,
+                        value.classes,
+                        value.instance_classes,
+                        value.modules,
+                    )
+                    for name, value in sorted(scoped.items())
+                ),
+            )
+            if key in visited:
+                continue
+            visited.add(key)
+            owner = self._source_index.owner(candidate) or self._module
+            probe = _RuntimeReadVisitor(self._fields, self._source_index, owner)
+            # Candidate traversal must neither add proven reads nor contaminate
+            # the shared observations used by actual function execution.
+            probe._observed_call_arguments = {}
+            self._source_index.resolve_data_value(owner, "", self._fields)
+            probe._states = [{**self._source_index._data_states.get(owner.name, {}), **scoped}]
+            statements = (
+                candidate.body
+                if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef))
+                else ()
+            )
+            probe._functions = [probe._declared_functions(statements)]
+            if probe._syntactically_mentions_tracked_config(candidate, scoped):
+                return True
+            for child in self._source_index.syntax_nodes(candidate):
+                if not isinstance(child, ast.Call):
+                    continue
+                for target in probe._relevance_call_targets(child, None):
+                    receiver = next(
+                        (
+                            value
+                            for function, value in probe._call_targets(child.func)
+                            if function is target
+                        ),
+                        None,
+                    )
+                    pending.append((target, probe._bound_call_arguments(child, target, receiver)))
         return False
 
     def _may_return_callable(
@@ -1691,7 +1758,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         for target in unresolved:
             scoped = self._bound_call_arguments(call, target.function)
             if target.kind == "cyclic import":
-                if self._has_transitive_callable_relevance(target.function) and any(
+                if self._has_transitive_callable_relevance(target.function, scoped) and any(
                     _contained_origins(value) & (TRACKED_SECTIONS | {_CONFIG_ROOT})
                     for value in scoped.values()
                 ):

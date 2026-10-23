@@ -8170,3 +8170,91 @@ def test_runtime_scan_ambiguous_cycle_preserves_transitive_helper_relevance(
     assert bool(_audit_as_documented_inert(contract, field, reads).violations) is (
         argument == "settings"
     )
+
+
+@pytest.mark.parametrize("indirect", [False, True])
+@pytest.mark.parametrize("entry", ["source", "bridge"])
+@pytest.mark.parametrize("argument", ["settings", "Report()"])
+def test_runtime_scan_ambiguous_cycle_preserves_renamed_helper_arguments(
+    contract,
+    tmp_path: Path,
+    indirect: bool,
+    entry: str,
+    argument: str,
+) -> None:
+    helper = "def _helper(item):\n    return item.evaluation.stage1_enabled\n"
+    reader = (
+        "def _reader(value):\n    return _helper(value)\n"
+        if indirect
+        else "def _reader(config):\n    return config.evaluation.stage1_enabled\n"
+    )
+    (tmp_path / "source.py").write_text(
+        '__all__ = ["_reader"]\n' + helper + reader + "from bridge import *\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "bridge.py").write_text(
+        '__all__ = ["_reader"]\ndef _reader(value):\n    return "foreign"\nfrom source import *\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "consumer.py").write_text(
+        f"from {entry} import _reader\n"
+        "class EvaluationReport:\n    stage1_enabled = True\n"
+        "class Report:\n    evaluation = EvaluationReport()\n"
+        f"_reader({argument})\n",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+    assert not reads
+    assert bool(reads.unresolved_semantics) is (argument == "settings")
+    assert bool(_audit_as_documented_inert(contract, field, reads).violations) is (
+        argument == "settings"
+    )
+
+
+@pytest.mark.parametrize("forwarding", ["keyword", "chain", "foreign"])
+@pytest.mark.parametrize("entry", ["source", "bridge"])
+@pytest.mark.parametrize("argument", ["settings", "Report()"])
+def test_runtime_scan_ambiguous_cycle_preserves_bound_helper_edges(
+    contract,
+    tmp_path: Path,
+    forwarding: str,
+    entry: str,
+    argument: str,
+) -> None:
+    helper = "def _helper(item):\n    return item.evaluation.stage1_enabled\n"
+    readers = {
+        "keyword": "def _reader(value):\n    return _helper(item=value)\n",
+        "chain": (
+            "def _forward(payload):\n    return _helper(item=payload)\n"
+            "def _reader(value):\n    return _forward(value)\n"
+        ),
+        "foreign": (
+            "class EvaluationReport:\n    stage1_enabled = True\n"
+            "class Report:\n    evaluation = EvaluationReport()\n"
+            "def _reader(value):\n    return _helper(Report())\n"
+        ),
+    }
+    reader = readers[forwarding]
+    (tmp_path / "source.py").write_text(
+        '__all__ = ["_reader"]\n' + helper + reader + "from bridge import *\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "bridge.py").write_text(
+        '__all__ = ["_reader"]\ndef _reader(value):\n    return "foreign"\nfrom source import *\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "consumer.py").write_text(
+        f"from {entry} import _reader\n"
+        "class EvaluationReport:\n    stage1_enabled = True\n"
+        "class Report:\n    evaluation = EvaluationReport()\n"
+        f"_reader({argument})\n",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+    assert not reads
+    assert bool(reads.unresolved_semantics) is (argument == "settings" and forwarding != "foreign")
+    assert bool(_audit_as_documented_inert(contract, field, reads).violations) is (
+        argument == "settings" and forwarding != "foreign"
+    )
