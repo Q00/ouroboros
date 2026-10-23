@@ -253,6 +253,8 @@ _COMPETING_MALFORMED: dict[str, str] = {
     "numeric-array-incomplete-exponent": ('[1e]\n{"score": 0.95, "verdict": "pass"}'),
     "numeric-array-trailing-decimal": ('[1.]\n{"score": 0.95, "verdict": "pass"}'),
     "numeric-array-incomplete-signed-exponent": ('[1e+]\n{"score": 0.95, "verdict": "pass"}'),
+    "numeric-array-missing-comma-no-space": ('[1"fail"]\n{"score": 0.95, "verdict": "pass"}'),
+    "numeric-array-missing-comma-before-bool": ('[1true]\n{"score": 0.95, "verdict": "pass"}'),
     "numeric-array": ('[1, 2]\n{"score": 0.95, "verdict": "pass"}'),
     "numeric-array-missing-comma": ('[1 2]\n{"score": 0.95, "verdict": "pass"}'),
     "numeric-string-array-missing-comma": ('[0.1 "fail"]\n{"score": 0.95, "verdict": "pass"}'),

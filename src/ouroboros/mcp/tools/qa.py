@@ -313,7 +313,7 @@ _JSON_FENCE_RE = re.compile(r"(?im)^[ \t>]*(?:`{3,}|~{3,})[ \t]*json\b")
 _JSON_OPENER_RE = re.compile(
     r"\{\s*(?:[\"']|[^{}\s:]+\s*:)|\[\s*(?:[\"{\[]|true\b|false\b|null\b|"
     r"-?\d+(?:\.\d*)?(?:[eE][+-]?\d*)?"
-    r"(?=\s*(?:[,\]]|$)|\s+(?:[\"{\[]|-?\d|true\b|false\b|null\b)))"
+    r"(?=\s*(?:[,\]]|$|[\"{\[]|true\b|false\b|null\b)|\s+-?\d))"
 )
 
 
