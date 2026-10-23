@@ -221,7 +221,8 @@ def _remove_opencode_mcp(dry_run: bool) -> bool:
         return False
 
     try:
-        data = json.loads(_strip_jsonc(config_path.read_text()))
+        original_text = config_path.read_text(encoding="utf-8")
+        data = json.loads(_strip_jsonc(original_text))
     except (json.JSONDecodeError, OSError):
         print_warning(f"{config_path} is malformed — skipping.")
         return False
@@ -235,16 +236,9 @@ def _remove_opencode_mcp(dry_run: bool) -> bool:
 
     del mcp["ouroboros"]
 
-    # Warn if we're about to overwrite a .jsonc file that contained comments.
-    if config_path.suffix == ".jsonc":
-        try:
-            original_text = config_path.read_text(encoding="utf-8")
-        except OSError:
-            original_text = ""
-        if "//" in original_text or "/*" in original_text:
-            print_warning(
-                f"Note: JSONC comments in {config_path} were removed during config update."
-            )
+    from ouroboros.cli.commands.setup import _warn_if_opencode_jsonc_comments_removed
+
+    _warn_if_opencode_jsonc_comments_removed(config_path, original_text)
 
     try:
         config_path.write_text(json.dumps(data, indent=2) + "\n")
@@ -349,6 +343,11 @@ def _remove_opencode_bridge_plugin(dry_run: bool) -> bool:
                         print_info(f"[dry-run] Would remove bridge plugin from {config_path}")
                         return True
                     data["plugin"] = kept
+                    from ouroboros.cli.commands.setup import (
+                        _warn_if_opencode_jsonc_comments_removed,
+                    )
+
+                    _warn_if_opencode_jsonc_comments_removed(config_path, raw)
                     with config_path.open("w") as f:
                         json.dump(data, f, indent=2)
                         f.write("\n")

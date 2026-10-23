@@ -10,9 +10,11 @@ The driver knows which kind each answer is when it creates it, so it declares
 that with the answer as a structured ``answer_provenance`` argument. The
 interview records it on the round (``bigbang/answer_provenance.py``) and Seed
 extraction withholds the answer. Nothing downstream reads the ``[from-auto]``
-text prefix to decide. The guesses still reach the worker: the auto pipeline
-carries the unconfirmed ledger drafts into ``Seed.assumptions``
-(``auto/ledger_seed.py``).
+text prefix to decide. A guess no interview question produced still reaches
+the worker: the auto pipeline carries it into ``Seed.assumptions``
+(``auto/ledger_seed.py``). A drafted answer to an interview question is kept
+only as its question in ``Seed.open_questions``, which no execution prompt
+renders.
 
 A requester answer is a confirmed fact, but it is declared ``"requester"``:
 extraction withholds it too, and the auto pipeline carries it to the worker

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from ouroboros.core.seed_contract import OntologyLens, SeedContract
+from ouroboros.core.conductor import ConductorDirective
+from ouroboros.core.seed import Seed, SourcedScope
+from ouroboros.core.seed_contract import GOAL_OBJECTIVE_CRITERION, OntologyLens, SeedContract
 
 AUTO_RECURSION_GUARD = """## Auto Recursion Guard
 Do not invoke `ooo auto`, `ouroboros_auto`, `ouroboros_start_auto`, or any MCP auto
@@ -77,11 +79,10 @@ def render_assumptions_section(contract: SeedContract) -> str:
         return ""
     assumptions_text = "\n".join(f"- {assumption}" for assumption in contract.assumptions)
     return f"""## Assumptions (non-binding)
-Nobody confirmed these. They are guesses and open questions on the requester's behalf,
+Nobody confirmed these. They are guesses on the requester's behalf,
 not requirements. An assumption is a default only where the code itself settles nothing;
 follow the issue and the code over any assumption, and override the assumption when they
 say otherwise.
-An open question has no answer yet: decide it from the goal, the issue, and the code.
 {assumptions_text}"""
 
 
@@ -219,6 +220,11 @@ def render_seed_contract_for_execution(contract: SeedContract) -> str:
     if repo_facts:
         sections.extend(["", repo_facts])
 
+    if contract.sourced_only:
+        # Only content with a known source reaches the worker; the Seed's
+        # model-written sections stay in the Seed (``Seed.sourced_scope``).
+        return "\n".join(sections)
+
     assumptions = render_assumptions_section(contract)
     if assumptions:
         sections.extend(["", assumptions])
@@ -240,6 +246,49 @@ def render_seed_contract_for_execution(contract: SeedContract) -> str:
     return "\n".join(sections)
 
 
+def render_sourced_objective(scope: SourcedScope) -> str:
+    """The worker's task text for a Seed with ``sourced_scope``.
+
+    The binding criteria verbatim, or, when none binds, the request itself
+    (:data:`GOAL_OBJECTIVE_CRITERION`), never a model-written criterion.
+    """
+    criteria = scope.acceptance_criteria or (GOAL_OBJECTIVE_CRITERION,)
+    if len(criteria) == 1:
+        return criteria[0]
+    return "\n".join(f"{index}. {criterion}" for index, criterion in enumerate(criteria, 1))
+
+
+def _render_conductor_directive(seed: Seed) -> str:
+    """Render audited successor-only context without rewriting the Seed contract."""
+    raw_directive = (seed.model_extra or {}).get("conductor_directive")
+    if raw_directive is None:
+        return ""
+    if not isinstance(raw_directive, dict):
+        raise ValueError("Seed conductor_directive must be a structured object")
+    directive = ConductorDirective.from_mapping(raw_directive)
+    reasons = (
+        "\n".join(f"- {reason}" for reason in directive.rejected_reasons)
+        if directive.rejected_reasons
+        else "None recorded."
+    )
+    return f"""## Active Conductor Successor Directive
+This is bounded additive context for a successor execution. The Seed above remains
+the source of truth. Do not weaken or silently replace its approved direction.
+
+Instruction: {directive.instruction}
+Rejected evidence reasons:
+{reasons}
+
+Preservation contract:
+- goal: {str(directive.preserve_goal).lower()}
+- acceptance criteria: {str(directive.preserve_acceptance_criteria).lower()}
+- constraints: {str(directive.preserve_constraints).lower()}
+- non-goals: {str(directive.preserve_non_goals).lower()}
+
+Re-check the affected implementation and verification evidence, then report the
+specific correction made for this directive."""
+
+
 __all__ = [
     "AUTO_RECURSION_GUARD",
     "render_assumptions_section",
@@ -253,4 +302,5 @@ __all__ = [
     "render_repo_facts_section",
     "render_requester_answers_section",
     "render_seed_contract_for_execution",
+    "render_sourced_objective",
 ]
