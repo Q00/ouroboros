@@ -36,6 +36,8 @@ PICKER_RELEVANT_EVENT_TYPES: tuple[str, ...] = (
     "execution.subtask.updated",
     "execution.session.started",
     "execution.ac.completed",
+    "execution.verify.failed",
+    "execution.ac.acceptance_finalized",
     "execution.tool.started",
     "execution.coordinator.tool.started",
     "orchestrator.tool.called",
