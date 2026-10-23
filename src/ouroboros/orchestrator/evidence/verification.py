@@ -10,6 +10,7 @@ from typing import Any
 from ouroboros.harness.deliver_gate import (
     _event_has_conflicting_tool_call_ids,
     _event_matches_accepted_attempt,
+    _event_tool_call_aliases,
     _event_tool_call_id,
     load_ac_evidence_manifest,
 )
@@ -492,9 +493,7 @@ async def invalid_wrapper_receipt_verdict(
     scoped = tuple(
         event
         for event in events
-        if event_counts[event.id] == 1
-        and not _event_has_conflicting_tool_call_ids(event)
-        and _event_matches_accepted_attempt(
+        if _event_matches_accepted_attempt(
             event,
             scope_id=identity.ac_id,
             execution_id=execution_id,
@@ -532,18 +531,24 @@ async def invalid_wrapper_receipt_verdict(
         same_call_starts = [
             event
             for event in scoped
-            if event.type == "execution.tool.started" and _event_tool_call_id(event) == call_id
+            if event.type == "execution.tool.started"
+            and call_id in _event_tool_call_aliases(event)[0]
         ]
         completions = [
             event
             for event in scoped
             if event.type in {"execution.tool.completed", "execution.tool.failed"}
-            and event.data.get("tool_name") == "Bash"
-            and _event_tool_call_id(event) == call_id
+            and call_id in _event_tool_call_aliases(event)[0]
         ]
         if (
             len(same_call_starts) != 1
             or len(completions) != 1
+            or any(
+                event_counts[event.id] != 1
+                or _event_has_conflicting_tool_call_ids(event)
+                or event.data.get("tool_name") != "Bash"
+                for event in (*same_call_starts, *completions)
+            )
             or completions[0].timestamp < start.timestamp
         ):
             related = False

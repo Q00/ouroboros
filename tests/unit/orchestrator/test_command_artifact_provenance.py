@@ -157,6 +157,8 @@ async def test_wrapper_receipt_proves_inner_test_through_journal(tmp_path: Path)
         "earlier_retry",
         "foreign_session",
         "foreign_tool_completion",
+        "duplicate_foreign_tool",
+        "conflicting_alias_completion",
     ],
 )
 async def test_wrapper_receipt_real_dispatch_capture_to_verifier(tmp_path: Path, case: str) -> None:
@@ -252,6 +254,18 @@ async def test_wrapper_receipt_real_dispatch_capture_to_verifier(tmp_path: Path,
                 store.events[index] = completion.model_copy(
                     update={"data": {**completion.data, field: value}}
                 )
+            if case in {"duplicate_foreign_tool", "conflicting_alias_completion"}:
+                completion = next(
+                    event for event in store.events if event.type == "execution.tool.completed"
+                )
+                extra = (
+                    {**completion.data, "tool_name": "Write"}
+                    if case == "duplicate_foreign_tool"
+                    else {**completion.data, "call_id": "contradictory-call-id"}
+                )
+                store.events.append(
+                    completion.model_copy(update={"id": "extra-completion", "data": extra})
+                )
             claim = {
                 "receipt_path": "receipt.json",
                 "outer_command": outer_command,
@@ -331,6 +345,8 @@ async def test_wrapper_receipt_real_dispatch_capture_to_verifier(tmp_path: Path,
             "earlier_retry",
             "foreign_session",
             "foreign_tool_completion",
+            "duplicate_foreign_tool",
+            "conflicting_alias_completion",
         }
         expected_class = "FABRICATION_SUSPECTED" if fabricated else "EVIDENCE_FORM_MISMATCH"
         assert result.atomic_verifier_verdict.failure_class == expected_class
