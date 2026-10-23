@@ -33,6 +33,9 @@ class ACExecutionOutcome(str, Enum):  # noqa: UP042
 
     SUCCEEDED = "succeeded"
     SATISFIED_EXTERNALLY = "satisfied_externally"
+    # Judged on its own criterion from the one worker attempt that executed a
+    # Seed whose criteria have no known source (``shared_attempt``).
+    SETTLED_FROM_SHARED_ATTEMPT = "settled_from_shared_attempt"
     FAILED = "failed"
     BLOCKED = "blocked"
     INVALID = "invalid"
@@ -292,6 +295,7 @@ class ParallelExecutionStageResult:
             in {
                 ACExecutionOutcome.SUCCEEDED,
                 ACExecutionOutcome.SATISFIED_EXTERNALLY,
+                ACExecutionOutcome.SETTLED_FROM_SHARED_ATTEMPT,
             }
         )
 
@@ -450,7 +454,11 @@ def checkpoint_outcome(result: ACExecutionResult) -> str:
         outcome = result.outcome.value
     else:
         outcome = "succeeded" if result.success else "failed"
-    if outcome in ("succeeded", "satisfied_externally") and _legacy_rejected(result):
+    if outcome in (
+        "succeeded",
+        "satisfied_externally",
+        "settled_from_shared_attempt",
+    ) and _legacy_rejected(result):
         return "failed"
     return outcome
 
@@ -637,8 +645,13 @@ def inherit_check_package_hooks(parent: object, child: object) -> None:
     A derived executor (the cross-harness alternate) runs the same criterion
     under the same acceptance authority: the same per-attempt gate, the same
     advisory legacy verdict, and the same entry-point interfaces in its prompt.
+    It also renders the same worker prompt, so it inherits the run Seed's
+    sourced scope and criteria (``atomic_prompt_builder.SOURCED_SCOPE_ATTR``,
+    ``SEED_CRITERIA_ATTR``).
     """
-    for name in _CHECK_PACKAGE_HOOKS:
+    from ouroboros.orchestrator.atomic_prompt_builder import SEED_CRITERIA_ATTR, SOURCED_SCOPE_ATTR
+
+    for name in (*_CHECK_PACKAGE_HOOKS, SOURCED_SCOPE_ATTR, SEED_CRITERIA_ATTR):
         value = getattr(parent, name, None)
         if value is not None:
             setattr(child, name, value)
