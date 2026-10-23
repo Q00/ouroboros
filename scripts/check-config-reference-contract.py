@@ -803,7 +803,7 @@ class _IndexedModule:
 
 
 class _SourceIndex:
-    """Resolve only explicit imports and class receivers inside the scanned tree."""
+    """Resolve local import/export bindings and class receivers inside the scanned tree."""
 
     def __init__(self, source_root: Path, trees: Mapping[Path, ast.Module]) -> None:
         self._root_name = source_root.name
@@ -817,6 +817,7 @@ class _SourceIndex:
         self.observed_call_arguments: dict[int, dict[str, _AbstractValue]] = {}
         self._syntax_nodes: dict[int, tuple[ast.AST, ...]] = {}
         self._syntactic_config_readers: dict[int, bool] = {}
+        self._star_exports: dict[str, frozenset[str]] = {}
         for path, tree in trees.items():
             relative = path.relative_to(source_root).with_suffix("")
             parts = list(relative.parts)
@@ -889,6 +890,101 @@ class _SourceIndex:
         module.classes.pop(name, None)
         self._reexports.pop((module.name, name), None)
 
+    def star_export_names(
+        self, module: _IndexedModule, seen: frozenset[str] = frozenset()
+    ) -> frozenset[str]:
+        """Select literal __all__, or conservatively bound names for dynamic exports."""
+        if module.name in seen:
+            return frozenset()
+        if not seen and module.name in self._star_exports:
+            return self._star_exports[module.name]
+        names: set[str] = set()
+        declared: frozenset[str] | None = None
+        has_all = False
+        dynamic_all = False
+        for statement in module.tree.body:
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names.add(statement.name)
+            elif isinstance(statement, ast.Import):
+                names.update(
+                    alias.asname or alias.name.partition(".")[0] for alias in statement.names
+                )
+            elif isinstance(statement, ast.ImportFrom):
+                target = self.resolve_module(statement.module, module, statement.level)
+                for alias in statement.names:
+                    if alias.name == "*" and target is not None:
+                        names.update(self.star_export_names(target, seen | {module.name}))
+                    elif alias.name != "*":
+                        names.add(alias.asname or alias.name)
+                        if (alias.asname or alias.name) == "__all__":
+                            has_all = dynamic_all = True
+            elif isinstance(statement, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                targets = (
+                    statement.targets if isinstance(statement, ast.Assign) else (statement.target,)
+                )
+                assigned = frozenset().union(*(self._assigned_names(target) for target in targets))
+                names.update(assigned)
+                if "__all__" not in assigned and any(
+                    isinstance(candidate, ast.Name) and candidate.id == "__all__"
+                    for target in targets
+                    for candidate in ast.walk(target)
+                ):
+                    has_all = dynamic_all = True
+                if "__all__" in assigned:
+                    has_all = True
+                    try:
+                        value = ast.literal_eval(statement.value)
+                    except (ValueError, TypeError, SyntaxError):
+                        value = None
+                    if (
+                        isinstance(statement, ast.AugAssign)
+                        or not isinstance(value, (list, tuple))
+                        or not all(isinstance(name, str) for name in value)
+                    ):
+                        dynamic_all = True
+                    else:
+                        declared = frozenset(value)
+            # Mutation/conditional construction cannot safely narrow export candidates.
+            if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                for candidate in ast.walk(statement):
+                    if (
+                        isinstance(candidate, ast.Attribute)
+                        and isinstance(candidate.value, ast.Name)
+                        and candidate.value.id == "__all__"
+                    ):
+                        has_all = dynamic_all = True
+                    if (
+                        not isinstance(statement, (ast.Assign, ast.AnnAssign, ast.AugAssign))
+                        and isinstance(candidate, ast.Name)
+                        and candidate.id == "__all__"
+                        and isinstance(candidate.ctx, ast.Store)
+                    ):
+                        has_all = dynamic_all = True
+        result = (
+            (frozenset(names) if dynamic_all else declared or frozenset())
+            if has_all
+            else frozenset(name for name in names if not name.startswith("_"))
+        )
+        if not seen:
+            self._star_exports[module.name] = result
+        return result
+
+    def import_aliases(
+        self, node: ast.ImportFrom, module: _IndexedModule | None
+    ) -> tuple[ast.alias, ...]:
+        """Use the same star expansion for export, class and runtime bindings."""
+        return tuple(
+            expanded
+            for alias in node.names
+            for expanded in (
+                tuple(ast.alias(name=name) for name in sorted(self.star_export_names(module)))
+                if alias.name == "*" and module is not None
+                else (alias,)
+                if alias.name != "*"
+                else ()
+            )
+        )
+
     def _index_exports(self, module: _IndexedModule) -> None:
         """Index final explicit module bindings without suffix/name guessing."""
 
@@ -903,9 +999,7 @@ class _SourceIndex:
                 module.classes[statement.name] = frozenset({statement})
             elif isinstance(statement, ast.ImportFrom):
                 target = self.resolve_module(statement.module, module, statement.level)
-                for alias in statement.names:
-                    if alias.name == "*":
-                        continue
+                for alias in self.import_aliases(statement, target):
                     bound = alias.asname or alias.name
                     self._clear_export(module, bound)
                     if target is not None:
@@ -1034,9 +1128,7 @@ class _SourceIndex:
                         module_bindings[bound] = imported
             elif isinstance(statement, ast.ImportFrom):
                 imported = self.resolve_module(statement.module, module, statement.level)
-                for alias in statement.names:
-                    if alias.name == "*":
-                        continue
+                for alias in self.import_aliases(statement, imported):
                     bound = alias.asname or alias.name
                     module_bindings.pop(bound, None)
                     class_bindings[bound] = (
@@ -5062,9 +5154,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
 
     def _bind_import_from(self, node: ast.ImportFrom, *, runtime: bool) -> None:
         module = self._source_index.resolve_module(node.module, self._module, node.level)
-        for alias in node.names:
-            if alias.name == "*":
-                continue
+        for alias in self._source_index.import_aliases(node, module):
             bound = alias.asname or alias.name
             self._annotations[-1][bound] = self._imported_annotation(node.module, alias.name)
             if runtime:

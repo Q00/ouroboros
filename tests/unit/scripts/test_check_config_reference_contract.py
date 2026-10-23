@@ -7894,3 +7894,149 @@ def test_uncertain_factory_result_keeps_known_callable_alternative(
     reads = contract.runtime_reads(tmp_path, frozenset({field}))
 
     assert reads == (frozenset({field}) if argument == "settings" else frozenset())
+
+
+@pytest.mark.parametrize(
+    ("exports", "bridge", "imported", "argument", "expected"),
+    [
+        ('__all__ = ["_reader"]', "", "*", "settings", True),
+        ('__all__ = ("_reader",)', "", "*", "settings", True),
+        ('__all__: list[str] = ["_reader"]', "", "*", "settings", True),
+        ('__all__ = ["_reader"]', "", "_reader", "settings", True),
+        ('__all__ = ["_reader"]', "", "*", "Report()", False),
+        ("", "", "*", "None", False),
+        ("__all__ = []", "", "*", "None", False),
+        (
+            '__all__ = ["_reader"]',
+            'from source import *\n__all__ = ["_reader"]',
+            "*",
+            "settings",
+            True,
+        ),
+        (
+            '__all__ = ["_reader"]',
+            "from source import _reader as callback",
+            "callback",
+            "settings",
+            True,
+        ),
+        (
+            '__all__ = ["_reader"]',
+            "from source import *\ncallback = _reader",
+            "callback",
+            "settings",
+            True,
+        ),
+        ("__all__ = names", "", "*", "settings", True),
+        ('__all__ = []\n__all__.append("_reader")', "", "*", "settings", True),
+        ('__all__ = ["ignored"]\n__all__[0] = "_reader"', "", "*", "settings", True),
+        ("__all__ = unknown", "", "*", "Report()", False),
+    ],
+)
+def test_runtime_scan_preserves_local_star_export_provenance(
+    contract,
+    tmp_path: Path,
+    exports: str,
+    bridge: str,
+    imported: str,
+    argument: str,
+    expected: bool,
+) -> None:
+    (tmp_path / "source.py").write_text(
+        exports + "\ndef _reader(config):\n    return config.evaluation.stage1_enabled\n",
+        encoding="utf-8",
+    )
+    target = "source"
+    if bridge:
+        (tmp_path / "bridge.py").write_text(bridge + "\n", encoding="utf-8")
+        target = "bridge"
+    callback = "callback" if imported == "callback" else "_reader"
+    invocation = "" if argument == "None" else f"result = {callback}({argument})\n"
+    (tmp_path / "consumer.py").write_text(
+        f"from {target} import {imported}\n"
+        "class EvaluationReport:\n    stage1_enabled = True\n"
+        "class Report:\n    evaluation = EvaluationReport()\n" + invocation,
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+    assert bool(field in reads) is expected
+    assert not reads.unresolved_semantics
+    assert bool(_audit_as_documented_inert(contract, field, reads).violations) is expected
+
+
+@pytest.mark.parametrize(
+    "bridge",
+    ["from source import _reader, __all__", "from source import *\nfrom source import __all__"],
+)
+def test_runtime_scan_preserves_imported_export_selector(
+    contract, tmp_path: Path, bridge: str
+) -> None:
+    (tmp_path / "source.py").write_text(
+        '__all__ = ["_reader"]\ndef _reader(config):\n    return config.evaluation.stage1_enabled\n'
+    )
+    (tmp_path / "bridge.py").write_text(bridge + "\n")
+    (tmp_path / "consumer.py").write_text("from bridge import *\n_reader(settings)\n")
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+    assert field in reads
+    assert _audit_as_documented_inert(contract, field, reads).violations
+
+
+def test_runtime_scan_preserves_star_imported_class_receiver(contract, tmp_path: Path) -> None:
+    (tmp_path / "source.py").write_text(
+        '__all__ = ["_Base"]\nclass _Base:\n'
+        "    def read(self, config):\n        return config.evaluation.stage1_enabled\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "consumer.py").write_text(
+        "from source import *\nclass Reader(_Base):\n    pass\nReader().read(settings)\n",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+    assert field in reads
+    assert _audit_as_documented_inert(contract, field, reads).violations
+
+
+def test_runtime_scan_bounds_star_reexport_cycles(contract, tmp_path: Path) -> None:
+    (tmp_path / "source.py").write_text(
+        'from bridge import *\n__all__ = ["_reader"]\n'
+        "def _reader(config):\n    return config.evaluation.stage1_enabled\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "bridge.py").write_text(
+        'from source import *\n__all__ = ["_reader"]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "consumer.py").write_text(
+        "from bridge import *\n_reader(settings)\n",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+    assert field in reads
+    assert not reads.unresolved_semantics
+
+
+@pytest.mark.parametrize(
+    ("exports", "expected"),
+    [
+        ('__all__ = ["_reader"]', {"_reader"}),
+        ("__all__ = []", set()),
+        ("", {"public"}),
+        ("__all__ = unknown", {"_reader", "public", "__all__"}),
+    ],
+)
+def test_star_export_selection_respects_private_and_empty_all(
+    contract,
+    tmp_path: Path,
+    exports: str,
+    expected: set[str],
+) -> None:
+    import ast
+
+    source = tmp_path / "source.py"
+    tree = ast.parse(exports + "\ndef _reader(): pass\ndef public(): pass\n")
+    index = contract._SourceIndex(tmp_path, {source: tree})
+    assert index.star_export_names(index._paths[source]) == frozenset(expected)
