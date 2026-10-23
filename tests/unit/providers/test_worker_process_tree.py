@@ -75,8 +75,58 @@ def _alive(pid: int) -> bool:
         return False
     stat = Path(f"/proc/{pid}/stat")
     if stat.exists():
-        return stat.read_text().rpartition(")")[2].split()[0] not in {"Z", "X"}
+        try:
+            state = stat.read_text()
+        except FileNotFoundError:
+            # The process can exit between the existence check and this read.
+            return False
+        return state.rpartition(")")[2].split()[0] not in {"Z", "X"}
     return True
+
+
+@pytest.mark.parametrize(("state", "expected"), [("S", True), ("Z", False), ("X", False)])
+def test_alive_observation_preserves_proc_states(monkeypatch, state, expected):
+    monkeypatch.setattr(os, "kill", lambda *_args: None)
+    monkeypatch.setattr(Path, "exists", lambda _path: True)
+    monkeypatch.setattr(Path, "read_text", lambda _path: f"123 (worker) {state} 1")
+    assert _alive(123) is expected
+
+
+def test_alive_observation_handles_proc_disappearance(monkeypatch):
+    monkeypatch.setattr(os, "kill", lambda *_args: None)
+    monkeypatch.setattr(Path, "exists", lambda _path: True)
+
+    def disappeared(_path):
+        raise FileNotFoundError("process exited after exists")
+
+    monkeypatch.setattr(Path, "read_text", disappeared)
+    assert not _alive(123)
+
+
+def test_alive_observation_preserves_missing_proc_fallback(monkeypatch):
+    monkeypatch.setattr(os, "kill", lambda *_args: None)
+    monkeypatch.setattr(Path, "exists", lambda _path: False)
+    assert _alive(123)
+
+
+def test_alive_observation_preserves_dead_process(monkeypatch):
+    def dead(*_args):
+        raise ProcessLookupError
+
+    monkeypatch.setattr(os, "kill", dead)
+    assert not _alive(123)
+
+
+@pytest.mark.parametrize("stage", ["kill", "read"])
+def test_alive_observation_preserves_permission_errors(monkeypatch, stage):
+    def denied(*_args):
+        raise PermissionError("unknown process state")
+
+    monkeypatch.setattr(os, "kill", denied if stage == "kill" else lambda *_args: None)
+    monkeypatch.setattr(Path, "exists", lambda _path: True)
+    monkeypatch.setattr(Path, "read_text", denied)
+    with pytest.raises(PermissionError):
+        _alive(123)
 
 
 async def _wait_for_file(path: Path, timeout: float = 10.0) -> str:
