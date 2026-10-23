@@ -10,6 +10,7 @@ import subprocess
 import sys
 import textwrap
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -77,6 +78,59 @@ def _alive(pid: int) -> bool:
     if stat.exists():
         return stat.read_text().rpartition(")")[2].split()[0] not in {"Z", "X"}
     return True
+
+
+@pytest.mark.parametrize("error", [FileNotFoundError, ProcessLookupError])
+def test_alive_handles_process_exit_during_stat_read(error: type[OSError]) -> None:
+    """A process can disappear after both kill(0) and stat.exists() succeed."""
+    with (
+        patch.object(os, "kill"),
+        patch.object(Path, "exists", return_value=True),
+        patch.object(Path, "read_text", side_effect=error),
+    ):
+        assert not _alive(123)
+
+
+@pytest.mark.parametrize(("state", "expected"), [("S", True), ("Z", False), ("X", False)])
+def test_alive_checks_process_state(state: str, expected: bool) -> None:
+    with (
+        patch.object(os, "kill"),
+        patch.object(Path, "exists", return_value=True),
+        patch.object(Path, "read_text", return_value=f"123 (worker) {state} 1"),
+    ):
+        assert _alive(123) is expected
+
+
+def test_alive_without_proc_uses_kill_probe() -> None:
+    """POSIX platforms without /proc retain the successful kill(0) result."""
+    with (
+        patch.object(os, "kill") as kill,
+        patch.object(Path, "exists", return_value=False),
+        patch.object(Path, "read_text") as read_text,
+    ):
+        assert _alive(123)
+        kill.assert_called_once_with(123, 0)
+        read_text.assert_not_called()
+
+
+def test_alive_returns_false_when_kill_probe_finds_no_process() -> None:
+    with (
+        patch.object(os, "kill", side_effect=ProcessLookupError),
+        patch.object(Path, "exists") as exists,
+    ):
+        assert not _alive(123)
+        exists.assert_not_called()
+
+
+@pytest.mark.parametrize("error", [PermissionError, OSError])
+def test_alive_preserves_unexpected_stat_errors(error: type[OSError]) -> None:
+    with (
+        patch.object(os, "kill"),
+        patch.object(Path, "exists", return_value=True),
+        patch.object(Path, "read_text", side_effect=error),
+        pytest.raises(error),
+    ):
+        _alive(123)
 
 
 async def _wait_for_file(path: Path, timeout: float = 10.0) -> str:
