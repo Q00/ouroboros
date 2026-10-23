@@ -230,6 +230,52 @@ def render(config):
     assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
 
 
+@pytest.mark.parametrize("reader_name", ["a_reader", "z_reader"])
+@pytest.mark.parametrize("wrapper_first", [False, True])
+@pytest.mark.parametrize("private", [False, True])
+@pytest.mark.parametrize(
+    ("arguments", "expected_read"),
+    [
+        (("Report()",), False),
+        (("settings",), True),
+        (("unknown",), True),
+        (("Report()", "settings"), True),
+        (("settings", "Report()"), True),
+        (("Report()", "unknown"), True),
+        (("unknown", "Report()"), True),
+    ],
+)
+def test_imported_wrapper_keeps_all_call_alternatives(
+    contract,
+    tmp_path: Path,
+    reader_name: str,
+    wrapper_first: bool,
+    private: bool,
+    arguments: tuple[str, ...],
+    expected_read: bool,
+) -> None:
+    wrapper = "_wrapper" if private else "wrapper"
+    wrapper_source = f"def {wrapper}(value):\n    return render(value)\n"
+    render_source = "def render(config):\n    return config.evaluation.stage1_enabled\n"
+    (tmp_path / f"{reader_name}.py").write_text(
+        wrapper_source + render_source if wrapper_first else render_source + wrapper_source,
+        encoding="utf-8",
+    )
+    (tmp_path / "consumer.py").write_text(
+        f"from {reader_name} import {wrapper}\n"
+        "class EvaluationReport:\n    stage1_enabled = True\n"
+        "class Report:\n    evaluation = EvaluationReport()\n"
+        + "\n".join(f"{wrapper}({argument})" for argument in arguments),
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    assert reads == (frozenset({field}) if expected_read else frozenset())
+    assert not reads.unresolved_semantics
+    assert bool(_audit_as_documented_inert(contract, field, reads).violations) == expected_read
+
+
 def test_runtime_scan_honors_global_and_nonlocal_binding_updates(contract, tmp_path: Path) -> None:
     (tmp_path / "scope_updates.py").write_text(
         """

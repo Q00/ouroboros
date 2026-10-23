@@ -1283,10 +1283,20 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self,
         call: ast.Call,
         containing_class: ast.ClassDef | None,
+        owner: _IndexedModule | None = None,
     ) -> _FunctionSet:
-        """Resolve only call targets proven by the current binding and receiver."""
+        """Resolve only call targets proven by their defining binding and receiver."""
+
+        def binding(name: str) -> _AbstractValue:
+            if owner is None or owner is self._module:
+                return self._name_value(name)
+            return (
+                self._source_index.resolve_data_value(owner, name, self._fields) or _UNKNOWN_VALUE
+            )
 
         if isinstance(call.func, ast.Name):
+            if owner is not None and owner is not self._module:
+                return frozenset(target.function for target in binding(call.func.id).callables)
             return frozenset(function for function, _receiver in self._call_targets(call.func))
         if not isinstance(call.func, ast.Attribute):
             return frozenset()
@@ -1297,11 +1307,11 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         if isinstance(receiver, ast.Name) and receiver.id in {"self", "cls"}:
             classes = frozenset({containing_class}) if containing_class is not None else frozenset()
         elif isinstance(receiver, ast.Name):
-            value = self._name_value(receiver.id)
+            value = binding(receiver.id)
             classes = value.instance_classes | value.classes
             modules = value.modules
         elif isinstance(receiver, ast.Call) and isinstance(receiver.func, ast.Name):
-            value = self._name_value(receiver.func.id)
+            value = binding(receiver.func.id)
             classes = value.classes
 
         methods = self._source_index.methods(classes, call.func.attr)
@@ -1331,7 +1341,11 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             for child in ast.walk(candidate):
                 if not isinstance(child, ast.Call):
                     continue
-                pending.extend(self._relevance_call_targets(child, containing_class))
+                pending.extend(
+                    self._relevance_call_targets(
+                        child, containing_class, self._source_index.owner(candidate)
+                    )
+                )
         return False
 
     @staticmethod
