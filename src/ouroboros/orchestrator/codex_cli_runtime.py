@@ -2230,6 +2230,7 @@ class CodexCliRuntime:
             close_stdin=self._close_process_stdin,
             terminate_process_group=self._use_process_group,
             process_group_id=process_group_id,
+            workspace=self._cwd,
         )
 
     async def _close_process_stdin(self, process: Any) -> None:

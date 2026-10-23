@@ -577,7 +577,7 @@ def test_v9_inputs_freeze_context_profile_parent_lineage_pause_and_runtime_capab
     }
     assert semantics["usage_limit_pause_seconds"] == 18000
     assert semantics["runtime_effect_capabilities"]["version"] == 2
-    assert "frozen-app 1.0.0" in inputs["context_pack_fragment"]
+    assert "name frozen-app, version 1.0.0" in inputs["context_pack_fragment"]
     persisted_profile = runner._execution_profile_snapshot(contract, require_bound=True)
     persisted_handle = runner._execution_inherited_runtime_handle_snapshot(
         contract,
@@ -608,9 +608,9 @@ def test_v9_inputs_freeze_context_profile_parent_lineage_pause_and_runtime_capab
         context_pack_enabled=True,
     )
 
-    assert "frozen-app 1.0.0" in frozen_prompt
-    assert "frozen-app 9.9.9" not in frozen_prompt
-    assert "frozen-app 9.9.9" in current_prompt
+    assert "name frozen-app, version 1.0.0" in frozen_prompt
+    assert "name frozen-app, version 9.9.9" not in frozen_prompt
+    assert "name frozen-app, version 9.9.9" in current_prompt
 
 
 def test_execution_inputs_reject_noncanonical_parent_handle_before_publication() -> None:
@@ -4414,3 +4414,273 @@ async def test_prepare_session_persists_same_execution_contract_in_start_and_pro
     assert persisted["frugality_proof"]["project_root"] == str(Path("/tmp/project").resolve())
     assert len(persisted["frugality_proof"]["routing_fingerprint"]) == 64
     assert len(persisted["frugality_proof"]["seed_fingerprint"]) == 64
+
+
+def _phase2_final_state(runner):
+    return runner._execution_contract, runner._model_router, runner._requested_model_tier
+
+
+def _phase2_assert_final_state(runner, previous):
+    assert all(
+        current is old for current, old in zip(_phase2_final_state(runner), previous, strict=True)
+    )
+
+
+def test_phase2_verify_shell_mutation_survives_proof_rejection() -> None:
+    original = _runner()
+    persisted = original._build_execution_contract(project_identity=original._project_identity())
+    semantics = persisted["execution_semantics"]
+    semantics["version"] = 4
+    del semantics["verify_shell_identity"]
+    persisted["frugality_proof"]["execution_semantics_fingerprint"] = (
+        OrchestratorRunner._execution_semantics_fingerprint(semantics)
+    )
+    persisted["frugality_proof"]["protocol_version"] = -1
+    resumed = _runner()
+    resumed._verify_shell_identity = {"path": "/old", "realpath": "/old", "sha256": "0" * 64}
+    previous = _phase2_final_state(resumed)
+    with pytest.raises(OrchestratorError) as caught:
+        resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+    assert caught.value.message == "Cannot resume with an invalid execution contract"
+    assert caught.value.details == {"invalid": "proof identity"}
+    assert resumed._verify_shell_identity is None
+    _phase2_assert_final_state(resumed, previous)
+
+
+def test_phase2_economics_assignment_precedes_router_failure(monkeypatch) -> None:
+    original = _runner()
+    persisted = original._build_execution_contract(project_identity=original._project_identity())
+    resumed = _runner()
+    previous = _phase2_final_state(resumed)
+    preferences = resumed._execution_preferences
+    economics = _frontier_custom_economics()
+    sentinel = RuntimeError("phase2 router boundary")
+    monkeypatch.setattr(
+        "ouroboros.orchestrator.resolved_models.replay_route_economics",
+        lambda *_a, **_kw: economics,
+    )
+
+    def fail(*args, **kwargs):
+        assert resumed._route_economics is economics
+        raise sentinel
+
+    monkeypatch.setattr(resumed, "_authoritative_model_router", fail)
+    with pytest.raises(RuntimeError) as caught:
+        resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+    assert caught.value is sentinel
+    assert resumed._route_economics is economics
+    assert resumed._execution_preferences is preferences
+    _phase2_assert_final_state(resumed, previous)
+
+
+def test_phase2_preferences_mutations_precede_semantics_failure(monkeypatch) -> None:
+    original = _runner()
+    original._transcript_verifier = "record"
+    persisted = original._build_execution_contract(project_identity=original._project_identity())
+    resumed = _runner()
+    previous = _phase2_final_state(resumed)
+    resumed._transcript_verifier = "decide"
+    resumed._shadow_replay_enabled = False
+    old_preferences = resumed._execution_preferences
+    current_semantics = dict(persisted["execution_semantics"], max_decomposition_depth=991)
+
+    def shadow():
+        assert resumed._execution_preferences is not old_preferences
+        assert (
+            resumed._execution_preferences.to_contract_data() == persisted["execution_preferences"]
+        )
+        return True
+
+    def semantics():
+        assert (
+            resumed._execution_preferences.to_contract_data() == persisted["execution_preferences"]
+        )
+        assert resumed._shadow_replay_enabled is True
+        assert resumed._transcript_verifier == "record"
+        return current_semantics
+
+    monkeypatch.setattr(resumed, "_resolved_shadow_replay_enabled", shadow)
+    monkeypatch.setattr(resumed, "_execution_semantics_contract", semantics)
+    with pytest.raises(OrchestratorError) as caught:
+        resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+    assert caught.value.message == "Cannot resume with changed execution semantics"
+    assert caught.value.details == {
+        "persisted_execution_semantics": persisted["execution_semantics"],
+        "current_execution_semantics": current_semantics,
+        "resume_blocked": "execution_semantics_drift",
+        "retryable": True,
+        "hint": "Restore the original verification, retry, decomposition, and executor settings or start a new session.",
+    }
+    assert resumed._execution_preferences.to_contract_data() == persisted["execution_preferences"]
+    assert resumed._shadow_replay_enabled is True
+    assert resumed._transcript_verifier == "record"
+    _phase2_assert_final_state(resumed, previous)
+
+
+def test_phase2_restore_uses_current_build_wrapper(monkeypatch) -> None:
+    original = _runner()
+    seed = _seed()
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=seed
+    )
+    resumed = _runner(base_model_tier="frontier")
+    assert resumed._model_routing_override_explicit
+    replacement = {"phase2": "replacement"}
+    calls = []
+
+    def build(**kwargs):
+        calls.append(kwargs)
+        return replacement
+
+    monkeypatch.setattr(resumed, "_build_execution_contract", build)
+    assert resumed._restore_execution_contract(
+        {EXECUTION_CONTRACT_PROGRESS_KEY: persisted}, seed=seed
+    )
+    assert calls == [
+        {
+            "seed": seed,
+            "seed_fingerprint": persisted["frugality_proof"]["seed_fingerprint"],
+            "authority_generation": None,
+            "execution_inputs_contract": persisted["execution_inputs"],
+            "project_identity": resumed._project_identity(),
+            "runtime_handle": None,
+        }
+    ]
+    assert resumed._execution_contract is replacement
+    assert replacement["foundation_a_authority"] == persisted["foundation_a_authority"]
+
+
+@pytest.mark.parametrize(
+    "name,signature",
+    [
+        ("_routing_fingerprint", "(routing_contract: 'Mapping[str, Any]') -> 'str'"),
+        ("_execution_semantics_fingerprint", "(semantics_contract: 'Mapping[str, Any]') -> 'str'"),
+        ("_execution_inputs_fingerprint", "(inputs_contract: 'Mapping[str, Any]') -> 'str'"),
+        (
+            "_normalize_execution_inputs_contract",
+            "(value: 'object', *, require_bound: 'bool') -> 'dict[str, object] | None'",
+        ),
+        ("_seed_semantics_fingerprint", "(seed: 'Seed') -> 'str'"),
+        ("_valid_permission_mode_contract", "(value: 'object') -> 'bool'"),
+        ("_guidance_contract", "(bundle: 'ExecutionGuidanceBundle') -> 'dict[str, Any]'"),
+    ],
+)
+def test_phase2_static_compatibility(name, signature):
+    import hashlib
+    import inspect
+
+    assert isinstance(inspect.getattr_static(OrchestratorRunner, name), staticmethod)
+    method = getattr(OrchestratorRunner, name)
+    assert str(inspect.signature(method, follow_wrapped=False)) == signature
+    if name in {
+        "_routing_fingerprint",
+        "_execution_semantics_fingerprint",
+        "_execution_inputs_fingerprint",
+    }:
+        assert method({"a": 1}) == hashlib.sha256(b'{"a":1}').hexdigest()
+    elif name == "_normalize_execution_inputs_contract":
+        original = _runner()
+        inputs = original._build_execution_inputs_contract(_seed())
+        assert method(inputs, require_bound=True) == inputs
+        with pytest.raises(TypeError):
+            method(inputs)
+    elif name == "_seed_semantics_fingerprint":
+        assert method(_seed()) == method(_seed())
+        assert method(_seed()) != method(_seed(goal="Different goal"))
+    elif name == "_valid_permission_mode_contract":
+        assert method({"observed": True, "mode": "acceptEdits"}) is True
+        assert method({"observed": False, "mode": "acceptEdits"}) is False
+    else:
+        bundle = _runner()._ensure_new_run_guidance()
+        assert method(bundle) == {
+            "mode": "disabled",
+            "provenance_scope": "ouroboros_declared_guidance_only",
+            **bundle.to_metadata(),
+        }
+
+
+def test_phase2_old_schema_imports():
+    from ouroboros.orchestrator import runner as module
+
+    assert module.EXECUTION_CONTRACT_VERSION == 9
+    assert module.EXECUTION_CONTRACT_PROGRESS_KEY == "execution_contract"
+    assert module.FRUGALITY_PROOF_PROTOCOL_VERSION == 1
+    assert list(range(2, 9)) == [
+        module.PRE_ROUTE_ADMISSION_EXECUTION_CONTRACT_VERSION,
+        module.PRE_REQUESTED_TIER_EXECUTION_CONTRACT_VERSION,
+        module.PRE_EXECUTION_SEMANTICS_EXECUTION_CONTRACT_VERSION,
+        module.PRE_EXECUTION_INPUTS_EXECUTION_CONTRACT_VERSION,
+        module.PRE_RESOLVED_EFFECT_INPUTS_EXECUTION_CONTRACT_VERSION,
+        module.PRE_DURABLE_PAUSE_POLICY_EXECUTION_CONTRACT_VERSION,
+        module.PRE_RUNTIME_EFFECT_CAPABILITIES_EXECUTION_CONTRACT_VERSION,
+    ]
+    assert [
+        module._MAX_EXECUTION_STRATEGY_TOOLS,
+        module._MAX_EXECUTION_STRATEGY_TEXT_CHARS,
+        module._MAX_EXECUTION_TOOL_CATALOG_CHARS,
+        module._MAX_EXECUTION_ALLOWED_TOOLS,
+        module._MAX_EXECUTION_CONTEXT_FRAGMENT_CHARS,
+        module._MAX_EXECUTION_PROFILE_CHARS,
+        module._MAX_EXECUTION_RUNTIME_HANDLE_CHARS,
+    ] == [256, 100_000, 1_000_000, 1024, 100_000, 100_000, 1_000_000]
+    assert module._mapping_has_exact_keys({"a": 1}, frozenset({"a"}))
+    strategy = module._PersistedExecutionStrategy(("Read",), "system", "task", ())
+    assert strategy.get_tools() == ["Read"]
+    assert strategy.get_system_prompt_fragment() == "system"
+    assert strategy.get_task_prompt_suffix() == "task"
+    assert strategy.get_activity_map() == {}
+    original = _runner()
+    contract = original._build_execution_contract(project_identity=original._project_identity())
+    assert module._require_exact_execution_contract_v9(contract) is contract
+    assert frozenset(contract) == module.EXECUTION_CONTRACT_V9_TOP_LEVEL_KEYS
+    with pytest.raises(OrchestratorError) as caught:
+        module._require_exact_execution_contract_v9(None)
+    assert type(caught.value) is OrchestratorError
+    assert caught.value.message == "Cannot resume with an invalid execution contract"
+    assert caught.value.details == {"contract_version": None}
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "pre_adaptive_execution_semantics_rejection",
+        "migrated_pre_verify_shell_execution_semantics",
+        "migrated_pre_exec_sandbox_execution_semantics",
+        "migrated_pre_transcript_verifier_execution_semantics",
+        "_require_exact_execution_contract_v9",
+    ],
+)
+def test_phase2_module_seams_remain_late_bound(name, monkeypatch):
+    from ouroboros.orchestrator import runner as module
+
+    original = _runner()
+    contract = original._build_execution_contract(project_identity=original._project_identity())
+    resumed = _runner()
+    sentinel = RuntimeError(name)
+
+    def fail(*args, **kwargs):
+        raise sentinel
+
+    monkeypatch.setattr(module, name, fail)
+    with pytest.raises(RuntimeError) as caught:
+        resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: contract})
+    assert caught.value is sentinel
+
+
+def test_phase2_uuid_and_scanner_seams_remain_late_bound(monkeypatch):
+    from uuid import UUID
+
+    from ouroboros.orchestrator import runner as module
+
+    original = _runner()
+    fixed = UUID("12345678-1234-1234-1234-123456789abc")
+    monkeypatch.setattr(module, "uuid4", lambda: fixed)
+    contract = original._build_execution_contract(project_identity=original._project_identity())
+    assert contract["foundation_a_authority"]["correlation_id"] == fixed.hex
+    monkeypatch.setattr(module, "_mapping_has_exact_keys", lambda *_args: False)
+    assert (
+        OrchestratorRunner._normalize_execution_inputs_contract(
+            contract["execution_inputs"], require_bound=True
+        )
+        is None
+    )
