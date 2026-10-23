@@ -1371,7 +1371,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         return False
 
     def _may_return_callable(
-        self, function: _FunctionNode, bound_receiver: _AbstractValue | None = None
+        self,
+        function: _FunctionNode,
+        bound_receiver: _AbstractValue | None = None,
+        bound_arguments: dict[str, _AbstractValue] | None = None,
     ) -> bool:
         """Keep proven callable-returning helpers inside the execution gate.
 
@@ -1387,6 +1390,38 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             visited.add(id(candidate))
             owner = self._source_index.owner(candidate)
             nodes = self._source_index.syntax_nodes(candidate)
+
+            def binding(name: str) -> _AbstractValue:
+                if (
+                    candidate is function
+                    and bound_arguments is not None
+                    and name in bound_arguments
+                ):
+                    return bound_arguments[name]
+                if owner is None or owner is self._module:
+                    return self._name_value(name)
+                return (
+                    self._source_index.resolve_data_value(owner, name, self._fields)
+                    or _UNKNOWN_VALUE
+                )
+
+            def contains_callable(value: _AbstractValue) -> bool:
+                values = [value]
+                seen: set[int] = set()
+                while values:
+                    value = values.pop()
+                    if id(value) in seen:
+                        continue
+                    seen.add(id(value))
+                    if value.callables or value.unresolved_callables or value.classes:
+                        return True
+                    if self._source_index.methods(value.instance_classes, "__call__"):
+                        return True
+                    values.extend(value.items or ())
+                    values.extend(item for _, item in value.entries or ())
+                    values.extend(item for _, item in value.attributes or ())
+                return False
+
             local_callables = {
                 child.name
                 for child in nodes
@@ -1431,14 +1466,45 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     expressions.extend((expression.body, expression.orelse))
                     continue
                 if isinstance(expression, ast.Name):
+                    if contains_callable(binding(expression.id)):
+                        return True
                     if expression.id in local_callables:
                         return True
                     expressions.extend(assignments.get(expression.id, ()))
+                if isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name):
+                    receiver = binding(expression.value.id)
+                    for module_name in receiver.modules:
+                        module = self._source_index.resolve_module(
+                            module_name, owner or self._module
+                        )
+                        if module is not None and contains_callable(
+                            self._source_index.resolve_data_value(
+                                module, expression.attr, self._fields
+                            )
+                            or _UNKNOWN_VALUE
+                        ):
+                            return True
+                    if contains_callable(
+                        self._named_value(receiver.attributes, expression.attr) or _UNKNOWN_VALUE
+                    ):
+                        return True
                 if isinstance(expression, (ast.Name, ast.Attribute)):
                     if targets(ast.Call(func=expression, args=[], keywords=[])):
                         return True
                 elif isinstance(expression, ast.Call):
                     pending.extend(targets(expression))
+                    expressions.extend(expression.args)
+                    expressions.extend(keyword.value for keyword in expression.keywords)
+                else:
+                    # Composite expressions may carry callable values through
+                    # containers, indexing, short-circuiting or named bindings.
+                    # Select the helper without reimplementing their semantics;
+                    # execution below still decides the reachable return value.
+                    expressions.extend(
+                        child
+                        for child in ast.iter_child_nodes(expression)
+                        if isinstance(child, ast.expr)
+                    )
         return False
 
     @staticmethod
@@ -2817,7 +2883,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     syntactic_config_reader
                     or self._call_has_relevant_provenance(node, function, bound_receiver)
                     or self._has_transitive_callable_relevance(function)
-                    or self._may_return_callable(function, bound_receiver)
+                    or self._may_return_callable(function, bound_receiver, scoped)
                 ):
                     values.append(
                         self._local_call_value(
