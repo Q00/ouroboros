@@ -56,6 +56,101 @@ def test_current_repository_passes_standalone_contract() -> None:
     assert "Config reference contract OK" in result.stdout
 
 
+@pytest.mark.parametrize(
+    ("parameter", "calls"),
+    [
+        ("config", "render(Report())"),
+        ("config", "render(config=Report())"),
+        ("config: Report", "render(Report())"),
+        ("value", "render(Report())"),
+        ("config", "alias = render; alias(Report())"),
+        ("config", "list(map(render, [Report()]))"),
+        ("config", "from functools import partial\npartial(render, Report())()"),
+    ],
+)
+def test_public_foreign_calls_do_not_establish_config_dispositions(
+    contract, tmp_path: Path, parameter: str, calls: str
+) -> None:
+    source = f"""
+class EvaluationReport:
+    stage1_enabled = True
+class Report:
+    evaluation = EvaluationReport()
+def render({parameter}):
+    return {parameter.split(":")[0]}.evaluation.stage1_enabled
+{calls}
+"""
+    (tmp_path / "foreign.py").write_text(source, encoding="utf-8")
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    assert reads == frozenset()
+    assert not reads.unresolved_semantics
+    assert not _audit_as_documented_inert(contract, field, reads).violations
+    report = contract.audit_contract(
+        fields=frozenset({field}),
+        reads=reads,
+        rows={field: contract.ReferenceRow("true", "Domain description.")},
+        markers={},
+        allowlist={},
+        documented_defaults={},
+    )
+    assert report.violations
+
+
+@pytest.mark.parametrize(
+    "calls",
+    [
+        "",  # Exported, uncalled config parameters retain the existing convention.
+        "render(settings)",
+        "render(Report()); render(settings)",
+        "render(settings); render(Report())",
+        "render(Report()); render(unknown)",
+        "render(unknown); render(Report())",
+        "render(Report() if unknown else missing)",
+        "candidate = Report() if unknown else missing; render(candidate)",
+        "render(Report() if unknown else settings)",
+        "render(Report()); list(map(render, [settings]))",
+    ],
+)
+def test_public_call_rescan_preserves_config_and_unknown_alternatives(
+    contract, tmp_path: Path, calls: str
+) -> None:
+    (tmp_path / "config_or_unknown.py").write_text(
+        f"""
+class EvaluationReport:
+    stage1_enabled = True
+class Report:
+    evaluation = EvaluationReport()
+def render(config):
+    return config.evaluation.stage1_enabled
+{calls}
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    assert reads == frozenset({field})
+    assert _audit_as_documented_inert(contract, field, reads).violations
+
+
+def test_public_foreign_call_preserves_proven_config_default(contract, tmp_path: Path) -> None:
+    (tmp_path / "config_default.py").write_text(
+        """
+class Report:
+    evaluation = None
+def render(config=settings):
+    return config.evaluation.stage1_enabled
+render(Report())
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
 def test_runtime_scan_honors_global_and_nonlocal_binding_updates(contract, tmp_path: Path) -> None:
     (tmp_path / "scope_updates.py").write_text(
         """

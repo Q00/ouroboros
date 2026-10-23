@@ -214,6 +214,7 @@ class _AbstractValue:
     serialized_sections: frozenset[str] = frozenset()
     accessed_attributes: frozenset[str] = frozenset()
     unresolved_callables: tuple[_UnresolvedCallable, ...] = ()
+    unknown_alternative: bool = False
 
 
 @dataclass(frozen=True)
@@ -658,6 +659,7 @@ def _conservative_value(value: _AbstractValue) -> _AbstractValue:
         accessed_attributes=value.accessed_attributes,
         string_values=value.string_values,
         unresolved_callables=value.unresolved_callables,
+        unknown_alternative=value.unknown_alternative,
     )
 
 
@@ -736,6 +738,9 @@ def _join_values(*values: _AbstractValue, _depth: int = 0) -> _AbstractValue:
 
     return _AbstractValue(
         origins=origins,
+        unknown_alternative=any(
+            value == _UNKNOWN_VALUE or value.unknown_alternative for value in values
+        ),
         items=items,
         entries=join_entries(value.entries for value in values),
         attributes=join_named(value.attributes for value in values),
@@ -1211,6 +1216,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._nonlocal_names: list[set[str]] = [set()]
         self._active_calls: set[int] = set()
         self._call_executions: dict[int, list[_FunctionExecution]] = {}
+        self._observed_call_arguments: dict[int, dict[str, _AbstractValue]] = {}
         self._expression_cache: dict[int, _AbstractValue] = {}
         self._flow_abrupts: list[list[_AbruptPath]] = [[]]
         self._path_reachable = True
@@ -5281,9 +5287,41 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
 
     def _scoped_function_arguments(self, node: _FunctionNode) -> dict[str, _AbstractValue]:
         scoped = self._scoped_arguments(node.args)
+        # Calls already carry actual provenance. A public-definition rescan must
+        # not replace a known foreign argument with the config-name convention.
+        observed = self._observed_call_arguments.get(id(node), {})
+        scoped.update(observed)
         for name, value in self._default_argument_values(node).items():
-            scoped[name] = _join_values(scoped[name], value)
+            scoped[name] = (
+                _origin_value(_CONFIG_ROOT)
+                if name in observed and _CONFIG_ROOT in value.origins
+                else _join_values(scoped[name], value)
+            )
         return scoped
+
+    def _record_call_arguments(
+        self, node: _FunctionNode, scoped: dict[str, _AbstractValue]
+    ) -> None:
+        observed = self._observed_call_arguments.setdefault(id(node), {})
+        for argument in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
+            if argument.annotation is not None or not _looks_like_config_name(argument.arg):
+                continue
+            value = scoped[argument.arg]
+            # Unknown calls do not prove foreign provenance: retain the exported
+            # config convention for that alternative, even after a foreign call.
+            if value == _UNKNOWN_VALUE or value.unknown_alternative:
+                value = _join_values(value, self._argument_value(argument))
+            previous = observed.get(argument.arg)
+            if _CONFIG_ROOT in value.origins or (
+                previous is not None and _CONFIG_ROOT in previous.origins
+            ):
+                # Foreign object shape must not shadow the possible root's
+                # section attributes when the alternatives are joined.
+                observed[argument.arg] = _origin_value(_CONFIG_ROOT)
+            else:
+                observed[argument.arg] = (
+                    value if previous is None else _join_values(previous, value)
+                )
 
     @staticmethod
     def _declared_functions(
@@ -5503,6 +5541,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         bound_receiver: _AbstractValue | None = None,
     ) -> _AbstractValue:
         scoped = self._bound_call_arguments(call, function, bound_receiver)
+        self._record_call_arguments(function, scoped)
         if _is_generator_function(function):
             self._deferred_generators[id(call)] = _DeferredGenerator(function, scoped)
             return _AbstractValue(identity=frozenset({id(call)}))
@@ -5541,12 +5580,11 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         function_id = id(function)
         if function_id in self._active_calls:
             return _FunctionExecution((_UNKNOWN_VALUE,), False)
+        scoped = self._bound_direct_arguments(function, values)
+        self._record_call_arguments(function, scoped)
         self._active_calls.add(function_id)
         try:
-            execution = self._visit_function_body(
-                function,
-                self._bound_direct_arguments(function, values),
-            )
+            execution = self._visit_function_body(function, scoped)
         finally:
             self._active_calls.remove(function_id)
         return execution
@@ -5588,6 +5626,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 ),
             ):
                 scoped[name] = value
+            self._record_call_arguments(target.function, scoped)
             self._active_calls.add(function_id)
             try:
                 execution = self._visit_function_body(target.function, scoped)
