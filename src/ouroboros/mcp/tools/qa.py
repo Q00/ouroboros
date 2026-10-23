@@ -79,7 +79,6 @@ QA_VERDICT_SCHEMA: dict[str, object] = {
 }
 
 VALID_ARTIFACT_TYPES = ("code", "api_response", "document", "screenshot", "test_output", "custom")
-VALID_VERDICTS = ("pass", "revise", "fail")
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,15 +303,13 @@ def _parse_qa_response(
     if not isinstance(score, (int, float)) or score < 0.0 or score > 1.0:
         return Result.err(f"score must be a float between 0.0 and 1.0, got: {score}")
 
-    verdict = data.get("verdict", "").lower().strip()
-    if verdict not in VALID_VERDICTS:
-        # Derive verdict from score if LLM didn't produce a valid one
-        if score >= pass_threshold:
-            verdict = "pass"
-        elif score >= FAIL_THRESHOLD:
-            verdict = "revise"
-        else:
-            verdict = "fail"
+    # Score is authoritative for both the displayed verdict and loop outcome.
+    if score >= pass_threshold:
+        verdict = "pass"
+    elif score >= FAIL_THRESHOLD:
+        verdict = "revise"
+    else:
+        verdict = "fail"
 
     dimensions = data.get("dimensions", {})
     if not isinstance(dimensions, dict):
