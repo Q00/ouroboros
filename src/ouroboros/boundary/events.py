@@ -250,7 +250,9 @@ _NOT_PACKAGE_DECIDED = frozenset({"unverified", "uncovered"})
 LEGACY_RULE_SCHEMA = "ouroboros.acceptance_reconciliation.v3"
 """The decision schema of the product (``legacy_decides_unverified``): the only one journaled."""
 LOW_COVERAGE_SHARE = 0.5
-_EXISTING_PASS_OUTCOMES = frozenset({"succeeded", "satisfied_externally"})
+_EXISTING_PASS_OUTCOMES = frozenset(
+    {"succeeded", "satisfied_externally", "settled_from_shared_attempt"}
+)
 
 
 def artifact_verdict_of(statuses: Iterable[str]) -> str:

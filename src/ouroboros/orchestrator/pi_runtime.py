@@ -19,6 +19,8 @@ import shutil
 import subprocess
 from typing import Any
 
+import anyio
+
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.session_signal import SessionSignalCapabilities
 from ouroboros.core.types import Result
@@ -452,6 +454,7 @@ class PiRuntime:
             shutdown_timeout=self._process_shutdown_timeout_seconds,
             logger=log,
             log_namespace=self._log_namespace,
+            workspace=self._cwd,
         )
 
     # -- RuntimeHandle management ------------------------------------------
@@ -684,11 +687,6 @@ class PiRuntime:
                 resume_handle=current_handle,
             )
             return
-        except asyncio.CancelledError:
-            if process is not None:
-                await self._terminate_process(process)
-                process_terminated = True
-            raise
         else:
             returncode = await process.wait()
             process_finished = True
@@ -729,17 +727,19 @@ class PiRuntime:
                     resume_handle=current_handle,
                 )
         finally:
-            if process is not None:
-                if (
-                    not process_finished
-                    and not process_terminated
-                    and getattr(process, "returncode", None) is None
-                ):
-                    await self._terminate_process(process)
-            if stderr_task is not None and not stderr_task.done():
-                stderr_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await stderr_task
+            with anyio.CancelScope(shield=True):
+                if process is not None:
+                    if (
+                        not process_finished
+                        and not process_terminated
+                        and getattr(process, "returncode", None) is None
+                    ):
+                        await self._terminate_process(process)
+                if stderr_task is not None and not stderr_task.done():
+                    stderr_task.cancel()
+                    with anyio.move_on_after(self._process_shutdown_timeout_seconds):
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await stderr_task
 
     async def execute_task_to_result(
         self,

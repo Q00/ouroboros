@@ -286,7 +286,8 @@ async def ask_requester(
     A draft kept because the requester gave no answer has its ledger entries
     marked ``requester_unanswered``: the requester already said the issue does
     not settle the question, so the worker sees neither the draft nor the
-    question (``ledger_seed.ledger_assumptions``).
+    question, which is kept in ``Seed.open_questions``
+    (``ledger_seed.ledger_open_questions``).
     """
     requester = driver.requester
     if (

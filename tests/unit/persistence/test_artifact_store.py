@@ -502,3 +502,65 @@ def test_envelope_read_never_materializes_the_body_column(
     # proves nothing: an explicit fetch under the same denial has to fail.
     with pytest.raises(ArtifactStoreError):
         store.fetch_if_exists("CONTRACT1")
+
+
+def _publish(store: ArtifactStore) -> None:
+    store.put_for_contract(
+        contract_id="contract-confined",
+        body={"kind": "question_advisory"},
+        runtime_id="test-runtime",
+        duration_ms=1,
+        events_emitted_count=0,
+    )
+
+
+@pytest.mark.parametrize("linked", [".ouroboros", ".ouroboros/artifacts"])
+def test_project_store_refuses_a_directory_link_that_leaves_the_project(
+    tmp_path: Path, linked: str
+) -> None:
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    project.mkdir()
+    outside.mkdir()
+    link = project / linked
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(outside, target_is_directory=True)
+    store = ArtifactStore.for_project(project)
+
+    with pytest.raises(ArtifactStoreError) as raised:
+        store.initialize()
+    with pytest.raises(ArtifactStoreError):
+        _publish(store)
+
+    assert "outside the project" in str(raised.value)
+    assert list(outside.iterdir()) == []
+
+
+def test_project_store_refuses_a_database_file_link_that_leaves_the_project(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    (project / ".ouroboros" / "artifacts").mkdir(parents=True)
+    outside.mkdir()
+    (project / ".ouroboros" / "artifacts" / "artifacts.db").symlink_to(outside / "artifacts.db")
+    store = ArtifactStore.for_project(project)
+
+    with pytest.raises(ArtifactStoreError):
+        _publish(store)
+
+    assert list(outside.iterdir()) == []
+
+
+def test_project_store_follows_links_that_stay_inside_the_project(tmp_path: Path) -> None:
+    real_project = tmp_path / "real-project"
+    (real_project / "state").mkdir(parents=True)
+    (real_project / ".ouroboros").symlink_to(real_project / "state", target_is_directory=True)
+    linked_project = tmp_path / "linked-project"
+    linked_project.symlink_to(real_project, target_is_directory=True)
+    store = ArtifactStore.for_project(linked_project)
+
+    _publish(store)
+
+    assert (real_project / "state" / "artifacts" / "artifacts.db").is_file()
+    assert store.fetch("contract-confined").body == {"kind": "question_advisory"}
