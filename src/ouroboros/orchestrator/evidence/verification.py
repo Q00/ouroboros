@@ -11,8 +11,9 @@ from ouroboros.harness.deliver_gate import (
     _event_has_conflicting_tool_call_ids,
     _event_matches_accepted_attempt,
     _event_tool_call_id,
+    load_ac_evidence_manifest,
 )
-from ouroboros.harness.wrapper_receipt import trusted_wrapper_invocation
+from ouroboros.harness.wrapper_receipt import matching_wrapper_receipts, trusted_wrapper_invocation
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.evidence.ac_classification import _effective_evidence_schema_for_ac
 from ouroboros.orchestrator.evidence.call_citation import (
@@ -41,6 +42,7 @@ from ouroboros.orchestrator.evidence.observed_runs import (
     SCRIPT_ABSENT_FROM_ARTIFACT,
     observed_zero_exit_run,
 )
+from ouroboros.orchestrator.evidence.shell_parsing import _looks_like_test_command
 from ouroboros.orchestrator.evidence.test_detection import (
     _functional_command_supports_test_claim,
     _runtime_messages_have_completed_command_for_test_claim,
@@ -78,6 +80,7 @@ def _verify_atomic_evidence_against_runtime_messages(
     has_expected_artifacts: bool = False,
     verify_gate_active: bool = False,
     verified_wrapper_commands: frozenset[str] = frozenset(),
+    related_wrapper_commands: frozenset[str] = frozenset(),
 ) -> VerifierVerdict:
     """Verify leaf evidence is backed by runtime transcript events.
 
@@ -138,6 +141,7 @@ def _verify_atomic_evidence_against_runtime_messages(
     masked_command_mismatch = False
     completed_command_mismatch = False
     absent_script_mismatch = False
+    wrapper_form_mismatch = False
     backed_commands = tuple(
         command
         for command in _flatten_evidence_values(typed_evidence.get("commands_run"))
@@ -170,6 +174,11 @@ def _verify_atomic_evidence_against_runtime_messages(
             continue
         field_messages = _runtime_support_messages_for_field(field_name, support_messages)
         for value in values:
+            if field_name in {"commands_run", "tests_passed"} and value in related_wrapper_commands:
+                wrapper_form_mismatch = True
+                evidence_form_mismatches.append(f"{field_name}: {value}")
+                unsupported.append(f"{field_name}: {value}")
+                continue
             if field_name == "commands_run":
                 if _runtime_messages_support_command_claim(value, field_messages):
                     continue
@@ -296,6 +305,11 @@ def _verify_atomic_evidence_against_runtime_messages(
         reason_prefix = "unsupported evidence claims"
         if failure_class == "EVIDENCE_FORM_MISMATCH":
             details = []
+            if wrapper_form_mismatch:
+                details.append(
+                    "related wrapper runtime cannot prove the claim; rerun failed commands "
+                    "and retry with a contract-compliant receipt and command-bound stdout/stderr references"
+                )
             if masked_command_mismatch:
                 details.append(
                     "unprotected output-filter pipeline cannot prove a clean command claim"
@@ -524,6 +538,7 @@ async def invalid_wrapper_receipt_verdict(
             event
             for event in scoped
             if event.type in {"execution.tool.completed", "execution.tool.failed"}
+            and event.data.get("tool_name") == "Bash"
             and _event_tool_call_id(event) == call_id
         ]
         if (
@@ -546,3 +561,59 @@ async def invalid_wrapper_receipt_verdict(
         reasons=(reason,),
         failure_class="EVIDENCE_FORM_MISMATCH" if related else "FABRICATION_SUSPECTED",
     )
+
+
+async def observe_wrapper_receipts(
+    event_store: Any,
+    identity: ACRuntimeIdentity,
+    data: Mapping[str, object],
+    task_cwd: str | None,
+) -> tuple[frozenset[str], VerifierVerdict | None, frozenset[str]]:
+    """Keep receipt authority and related-work rejection classification separate."""
+    if "wrapper_receipts" not in data:
+        return frozenset(), None, frozenset()
+    verified: frozenset[str] = frozenset()
+    try:
+        manifest = await load_ac_evidence_manifest(
+            event_store,
+            ac_id=identity.ac_id,
+            execution_id=identity.execution_id or "",
+            admit_accepted_tool_starts=True,
+            accepted_retry_attempt=identity.retry_attempt,
+            accepted_session_attempt_id=identity.session_attempt_id,
+        )
+        matches = matching_wrapper_receipts(
+            manifest,
+            claims=data["wrapper_receipts"],
+            execution_id=identity.execution_id or "",
+            task_cwd=task_cwd,
+        )
+        verified = frozenset(filter(_looks_like_test_command, matches or ()))
+    except (OSError, RuntimeError, ValueError):
+        pass
+    raw_tests = data.get("tests_passed")
+    values = (raw_tests,) if isinstance(raw_tests, str) else raw_tests
+    tests = (
+        frozenset(item.strip() for item in values if isinstance(item, str) and item.strip())
+        if isinstance(values, (list, tuple))
+        else frozenset()
+    )
+    if verified and tests == verified:
+        return verified, None, frozenset()
+    failure = await invalid_wrapper_receipt_verdict(
+        event_store,
+        identity,
+        claims=data["wrapper_receipts"],
+        claimed_tests=tests,
+        task_cwd=task_cwd,
+    )
+    related = frozenset()
+    claims = data["wrapper_receipts"]
+    if failure.failure_class == "EVIDENCE_FORM_MISMATCH" and isinstance(claims, (list, tuple)):
+        related = frozenset(
+            command
+            for claim in claims
+            if isinstance(claim, Mapping)
+            for command in (claim["outer_command"], claim["inner_command"])
+        )
+    return verified, failure, related

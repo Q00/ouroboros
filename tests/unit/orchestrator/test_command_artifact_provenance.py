@@ -144,6 +144,8 @@ async def test_wrapper_receipt_proves_inner_test_through_journal(tmp_path: Path)
         "absent_runtime",
         "unrelated_test",
         "mixed_test",
+        "unrelated_command",
+        "unrelated_file",
         "path_escape",
         "missing",
         "malformed",
@@ -154,6 +156,7 @@ async def test_wrapper_receipt_proves_inner_test_through_journal(tmp_path: Path)
         "source_substitution",
         "earlier_retry",
         "foreign_session",
+        "foreign_tool_completion",
     ],
 )
 async def test_wrapper_receipt_real_dispatch_capture_to_verifier(tmp_path: Path, case: str) -> None:
@@ -213,7 +216,7 @@ async def test_wrapper_receipt_real_dispatch_capture_to_verifier(tmp_path: Path,
             assert (completed.returncode == 0) is (case not in {"stale", "inner_failed"})
             if case == "missing":
                 (tmp_path / "receipt.json").unlink()
-            elif case == "malformed":
+            elif case in {"malformed", "unrelated_command", "unrelated_file"}:
                 (tmp_path / "receipt.json").write_text("{bad json", encoding="utf-8")
             yield AgentMessage(
                 type="assistant",
@@ -229,15 +232,23 @@ async def test_wrapper_receipt_real_dispatch_capture_to_verifier(tmp_path: Path,
                     },
                 },
             )
-            if case in {"earlier_retry", "foreign_session"}:
+            if case in {"earlier_retry", "foreign_session", "foreign_tool_completion"}:
                 index = next(
                     index
                     for index, event in enumerate(store.events)
                     if event.type == "execution.tool.completed"
                 )
                 completion = store.events[index]
-                field = "retry_attempt" if case == "earlier_retry" else "session_attempt_id"
-                value = 0 if case == "earlier_retry" else "foreign-session"
+                field = {
+                    "earlier_retry": "retry_attempt",
+                    "foreign_session": "session_attempt_id",
+                    "foreign_tool_completion": "tool_name",
+                }[case]
+                value = {
+                    "earlier_retry": 0,
+                    "foreign_session": "foreign-session",
+                    "foreign_tool_completion": "Write",
+                }[case]
                 store.events[index] = completion.model_copy(
                     update={"data": {**completion.data, field: value}}
                 )
@@ -255,10 +266,14 @@ async def test_wrapper_receipt_real_dispatch_capture_to_verifier(tmp_path: Path,
             elif case == "mixed_test":
                 tests_passed.append("pytest never_executed.py")
             evidence = {
-                "commands_run": [outer_command],
+                "commands_run": ["pytest never_executed.py"]
+                if case == "unrelated_command"
+                else [outer_command],
                 "tests_passed": tests_passed,
                 "wrapper_receipts": claims,
             }
+            if case == "unrelated_file":
+                evidence["files_touched"] = ["never_created.py"]
             yield AgentMessage(
                 type="result",
                 content="```json\n" + json.dumps(evidence) + "\n```",
@@ -274,13 +289,21 @@ async def test_wrapper_receipt_real_dispatch_capture_to_verifier(tmp_path: Path,
         task_cwd=str(tmp_path),
         run_verify_commands=False,
         execution_profile=load_profile("code").model_copy(
-            update={"evidence_schema": EvidenceSchema(required=("commands_run", "tests_passed"))}
+            update={
+                "evidence_schema": EvidenceSchema(
+                    required=("commands_run", "tests_passed", "files_touched")
+                    if case == "unrelated_file"
+                    else ("commands_run", "tests_passed")
+                )
+            }
         ),
         fat_harness_mode=True,
     )
     result = await executor._execute_atomic_ac(
         ac_index=0,
-        ac_content="Run inner test",
+        ac_content="Update implementation and run inner test"
+        if case == "unrelated_file"
+        else "Run inner test",
         session_id="sess_1",
         execution_id="exec_1",
         tools=["Bash"],
@@ -301,16 +324,16 @@ async def test_wrapper_receipt_real_dispatch_capture_to_verifier(tmp_path: Path,
             "absent_runtime",
             "unrelated_test",
             "mixed_test",
+            "unrelated_command",
+            "unrelated_file",
             "fake_json",
             "source_substitution",
             "earlier_retry",
             "foreign_session",
+            "foreign_tool_completion",
         }
         expected_class = "FABRICATION_SUSPECTED" if fabricated else "EVIDENCE_FORM_MISMATCH"
         assert result.atomic_verifier_verdict.failure_class == expected_class
-        assert result.atomic_verifier_verdict.reasons[0].startswith(
-            "wrapper_receipts: no accepted command-bound receipt"
-        )
         assert (
             "retry with a contract-compliant receipt" in result.atomic_verifier_verdict.reasons[0]
         ) is (not fabricated)
