@@ -204,7 +204,11 @@ def own_process_view(monkeypatch: pytest.MonkeyPatch) -> None:
 
 async def _cleanup(pid: int) -> None:
     if _alive(pid):
-        os.kill(pid, signal.SIGKILL)
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            # The process can exit after the liveness probe succeeds.
+            return
 
 
 @pytest.mark.asyncio
