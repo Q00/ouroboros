@@ -576,7 +576,7 @@ def test_v9_inputs_freeze_context_profile_parent_lineage_pause_and_runtime_capab
     }
     assert semantics["usage_limit_pause_seconds"] == 18000
     assert semantics["runtime_effect_capabilities"]["version"] == 2
-    assert "frozen-app 1.0.0" in inputs["context_pack_fragment"]
+    assert "name frozen-app, version 1.0.0" in inputs["context_pack_fragment"]
     persisted_profile = runner._execution_profile_snapshot(contract, require_bound=True)
     persisted_handle = runner._execution_inherited_runtime_handle_snapshot(
         contract,
@@ -607,9 +607,9 @@ def test_v9_inputs_freeze_context_profile_parent_lineage_pause_and_runtime_capab
         context_pack_enabled=True,
     )
 
-    assert "frozen-app 1.0.0" in frozen_prompt
-    assert "frozen-app 9.9.9" not in frozen_prompt
-    assert "frozen-app 9.9.9" in current_prompt
+    assert "name frozen-app, version 1.0.0" in frozen_prompt
+    assert "name frozen-app, version 9.9.9" not in frozen_prompt
+    assert "name frozen-app, version 9.9.9" in current_prompt
 
 
 def test_execution_inputs_reject_noncanonical_parent_handle_before_publication() -> None:

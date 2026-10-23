@@ -9,7 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from ouroboros.auto.execution_acceptance import normalize_execution_acceptance
-from ouroboros.auto.grade_gate_terminals import seed_review_gate_blocker
+from ouroboros.auto.grade_gate_terminals import (
+    degraded_seed_runs_as_stated,
+    seed_review_gate_blocker,
+)
 from ouroboros.auto.grading import GradeGate
 from ouroboros.auto.ledger import SeedDraftLedger
 from ouroboros.auto.seed_preflight import run_seed_preflight
@@ -149,7 +152,12 @@ async def repair_seed_preflight_in_auto(
         "from the workspace listing",
         tool_name="seed_preflight",
     )
-    if terminal := seed_review_gate_blocker(state, repaired_review, skip_run=skip_run):
+    if terminal := seed_review_gate_blocker(
+        state,
+        repaired_review,
+        skip_run=skip_run,
+        runs_degraded=degraded_seed_runs_as_stated(repaired_seed),
+    ):
         blocker, code = terminal
         state.mark_blocked(blocker, tool_name="grade_gate", error_code=code)
         return AutoPreflightRepair(repaired_seed, repaired_review, True, blocker)

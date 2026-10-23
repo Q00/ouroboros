@@ -115,9 +115,8 @@ _SESSION_TERMINAL_EVENT_TYPES = frozenset(
 _AC_ACCEPTANCE_FINALIZED_EVENT_TYPE = "execution.ac.acceptance_finalized"
 _ACCEPTANCE_ROOT_INDICES_KEY = "acceptance_root_indices"
 _AC_ACCEPTANCE_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
-_AC_ACCEPTANCE_OUTCOMES = frozenset(
-    {"succeeded", "satisfied_externally", "failed", "blocked", "invalid", "cancelled"}
-)
+_AC_PASS_OUTCOMES = frozenset({"succeeded", "satisfied_externally", "settled_from_shared_attempt"})
+_AC_ACCEPTANCE_OUTCOMES = _AC_PASS_OUTCOMES | {"failed", "blocked", "invalid", "cancelled"}
 
 
 _AC_ACCEPTANCE_DISPOSITIONS = frozenset(
@@ -283,7 +282,7 @@ def _acceptance_key_fields(event: BaseEvent) -> tuple[str, int]:
             operation="append_ac_acceptance_finalized_if_absent",
             details={"event_type": event.type, "event_id": event.id},
         )
-    if accepted and outcome not in {"succeeded", "satisfied_externally"}:
+    if accepted and outcome not in _AC_PASS_OUTCOMES:
         raise PersistenceError(
             "Accepted final acceptance requires a successful outcome.",
             operation="append_ac_acceptance_finalized_if_absent",
@@ -301,7 +300,7 @@ def _acceptance_key_fields(event: BaseEvent) -> tuple[str, int]:
         else (
             "cancelled"
             if terminal_status == "cancelled"
-            else ("rejected" if outcome in {"succeeded", "satisfied_externally"} else outcome)
+            else ("rejected" if outcome in _AC_PASS_OUTCOMES else outcome)
         )
     )
     if disposition != expected_disposition:

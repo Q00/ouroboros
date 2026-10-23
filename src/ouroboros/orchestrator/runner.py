@@ -48,7 +48,7 @@ from ouroboros.config import (
 )
 from ouroboros.config.exec_sandbox import exec_sandbox_enabled
 from ouroboros.config.models import EconomicsConfig
-from ouroboros.core.conductor import ConductorDirective
+from ouroboros.core.conductor import ConductorDirective as ConductorDirective
 from ouroboros.core.errors import ConfigError, OuroborosError, PersistenceError
 from ouroboros.core.execution_preferences import (
     ResolvedExecutionPreferences,
@@ -78,6 +78,7 @@ from ouroboros.core.project_identity import (
 from ouroboros.core.seed import AcceptanceCriterionSpec, ac_text, ac_texts
 from ouroboros.core.seed_contract import SeedContract
 from ouroboros.core.seed_contract_prompt import (
+    _render_conductor_directive,
     render_auto_recursion_guard,
     render_seed_contract_for_execution,
 )
@@ -93,6 +94,7 @@ from ouroboros.orchestrator.adapter import (
     resolve_worker_cwd,
 )
 from ouroboros.orchestrator.adaptive_concurrency import adaptive_concurrency_policy
+from ouroboros.orchestrator.atomic_prompt_builder import install_sourced_scope
 from ouroboros.orchestrator.backend_limits import (
     BackendConcurrencyLimits,
     plan_fan_out_concurrency,
@@ -121,6 +123,7 @@ from ouroboros.orchestrator.events import (
     create_tool_called_event,
     create_workflow_progress_event,
 )
+from ouroboros.orchestrator.evidence.common import _SUCCESSFUL_ATTEMPT_OUTCOMES
 from ouroboros.orchestrator.execution_authority import (
     ProcessLocalCancellationDisposition,
     _authenticate_process_local_prepared_contract,
@@ -296,6 +299,7 @@ from ouroboros.orchestrator.session import (
 from ouroboros.orchestrator.session import (
     SESSION_START_IDENTITY_PROGRESS_KEY as SESSION_START_IDENTITY_PROGRESS_KEY,
 )
+from ouroboros.orchestrator.shared_attempt import shared_attempt_graph
 from ouroboros.orchestrator.verify_base_signal import VerifyBaseSignal
 from ouroboros.orchestrator.verify_shell import (
     capture_verify_shell_identity,
@@ -642,37 +646,6 @@ def build_system_prompt(
     return prompt
 
 
-def _render_conductor_directive(seed: Seed) -> str:
-    """Render audited successor-only context without rewriting the Seed contract."""
-    raw_directive = (seed.model_extra or {}).get("conductor_directive")
-    if raw_directive is None:
-        return ""
-    if not isinstance(raw_directive, dict):
-        raise ValueError("Seed conductor_directive must be a structured object")
-    directive = ConductorDirective.from_mapping(raw_directive)
-    reasons = (
-        "\n".join(f"- {reason}" for reason in directive.rejected_reasons)
-        if directive.rejected_reasons
-        else "None recorded."
-    )
-    return f"""## Active Conductor Successor Directive
-This is bounded additive context for a successor execution. The Seed above remains
-the source of truth. Do not weaken or silently replace its approved direction.
-
-Instruction: {directive.instruction}
-Rejected evidence reasons:
-{reasons}
-
-Preservation contract:
-- goal: {str(directive.preserve_goal).lower()}
-- acceptance criteria: {str(directive.preserve_acceptance_criteria).lower()}
-- constraints: {str(directive.preserve_constraints).lower()}
-- non-goals: {str(directive.preserve_non_goals).lower()}
-
-Re-check the affected implementation and verification evidence, then report the
-specific correction made for this directive."""
-
-
 def _resolve_context_pack_root(
     seed: Seed,
     repo_root: str | Path | None,
@@ -765,13 +738,14 @@ def build_task_prompt(
     if strategy is None:
         strategy = get_strategy(seed.task_type)
 
-    ac_list = "\n".join(f"{i + 1}. {ac}" for i, ac in enumerate(ac_texts(seed.acceptance_criteria)))
+    contract = SeedContract.from_seed(seed)  # only sourced content when ``sourced_scope`` is set
+    ac_list = "\n".join(f"{i + 1}. {ac}" for i, ac in enumerate(contract.acceptance_criteria))
     suffix = strategy.get_task_prompt_suffix()
 
     return f"""Execute the following task according to the acceptance criteria:
 
 ## Goal
-{seed.goal}
+{contract.goal}
 
 ## Acceptance Criteria
 {ac_list}
@@ -9148,6 +9122,8 @@ class OrchestratorRunner:
         # replay has validated its judgment/observation chain.
         if resume_execution_plan is not None:
             execution_plan = resume_execution_plan
+        elif (shared_graph := shared_attempt_graph(seed)) is not None:
+            dependency_graph = shared_graph  # one worker attempt; see ``shared_attempt``
         elif force_sequential_levels:
             self._console.print("\n[cyan]Preparing sequential AC execution plan...[/cyan]")
             dependency_graph = DependencyGraph(
@@ -9278,6 +9254,9 @@ class OrchestratorRunner:
             resolved_self_governs_rate_limit=execution_semantics["backend_self_governs_rate_limit"],
             expected_runtime_effect_capabilities=execution_semantics["runtime_effect_capabilities"],
             usage_limit_pause_seconds=execution_semantics["usage_limit_pause_seconds"],
+        )
+        install_sourced_scope(
+            parallel_executor, seed.sourced_scope, ac_texts(seed.acceptance_criteria)
         )
         if (install := getattr(self.acceptance_authority, "install", None)) is not None:
             # Check package on: it drives repairs; the legacy verifier is advisory.
@@ -9712,7 +9691,7 @@ class OrchestratorRunner:
                 and (
                     root_ac_index in accepted_root_indices
                     if accepted_root_indices is not None
-                    else result is not None and outcome in {"succeeded", "satisfied_externally"}
+                    else result is not None and outcome in _SUCCESSFUL_ATTEMPT_OUTCOMES
                 )
             )
             disposition = (
@@ -9721,9 +9700,7 @@ class OrchestratorRunner:
                 else (
                     "cancelled"
                     if terminal_status == SessionStatus.CANCELLED.value
-                    else (
-                        "rejected" if outcome in {"succeeded", "satisfied_externally"} else outcome
-                    )
+                    else ("rejected" if outcome in _SUCCESSFUL_ATTEMPT_OUTCOMES else outcome)
                 )
             )
             finalizations.append(

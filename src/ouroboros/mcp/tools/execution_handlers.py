@@ -89,6 +89,7 @@ from ouroboros.orchestrator.adapter import (
     DELEGATED_PARENT_TRANSCRIPT_PATH_ARG,
     RuntimeHandle,
 )
+from ouroboros.orchestrator.decomposition_limits import seed_allows_decomposition
 from ouroboros.orchestrator.execution_authority import (
     _has_live_process_local_authority_registration,
     _register_process_local_authority_terminal_finalizer,
@@ -1637,7 +1638,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                         mcp_manager=self.mcp_manager,
                         mcp_tool_prefix=self.mcp_tool_prefix,
                         debug=False,
-                        enable_decomposition=True,
+                        enable_decomposition=seed_allows_decomposition(seed, tracker),
                         inherited_runtime_handle=inherited_runtime_handle,
                         inherited_tools=inherited_effective_tools,
                         task_workspace=workspace,
