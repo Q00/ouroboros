@@ -142,6 +142,8 @@ async def test_wrapper_receipt_proves_inner_test_through_journal(tmp_path: Path)
     [
         "valid",
         "absent_runtime",
+        "unrelated_test",
+        "mixed_test",
         "path_escape",
         "missing",
         "malformed",
@@ -247,9 +249,14 @@ async def test_wrapper_receipt_real_dispatch_capture_to_verifier(tmp_path: Path,
             if case == "path_escape":
                 claim["receipt_path"] = "../receipt.json"
             claims = [claim, claim] if case == "duplicate" else [claim]
+            tests_passed = [_WRAPPER_INNER]
+            if case == "unrelated_test":
+                tests_passed = ["pytest never_executed.py"]
+            elif case == "mixed_test":
+                tests_passed.append("pytest never_executed.py")
             evidence = {
                 "commands_run": [outer_command],
-                "tests_passed": [_WRAPPER_INNER],
+                "tests_passed": tests_passed,
                 "wrapper_receipts": claims,
             }
             yield AgentMessage(
@@ -292,6 +299,8 @@ async def test_wrapper_receipt_real_dispatch_capture_to_verifier(tmp_path: Path,
     else:
         fabricated = case in {
             "absent_runtime",
+            "unrelated_test",
+            "mixed_test",
             "fake_json",
             "source_substitution",
             "earlier_retry",

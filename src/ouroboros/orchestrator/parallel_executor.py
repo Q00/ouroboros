@@ -9153,6 +9153,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     self._event_store,
                     runtime_identity,
                     claims=typed_data["wrapper_receipts"],
+                    claimed_tests=claimed_tests,
                     task_cwd=receipt_cwd,
                 )
             verify_gate_replaces_all_evidence = bool(

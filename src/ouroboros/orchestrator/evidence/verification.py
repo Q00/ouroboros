@@ -459,6 +459,7 @@ async def invalid_wrapper_receipt_verdict(
     identity: ACRuntimeIdentity,
     *,
     claims: object,
+    claimed_tests: frozenset[str],
     task_cwd: str | None,
 ) -> VerifierVerdict:
     """Classify rejected proof from scoped runtime work, including failed runs.
@@ -487,6 +488,7 @@ async def invalid_wrapper_receipt_verdict(
             session_attempt_id=identity.session_attempt_id,
         )
     )
+    linked_tests: set[str] = set()
     for claim in claims if isinstance(claims, (list, tuple)) else ():
         if not isinstance(claim, Mapping):
             related = False
@@ -510,6 +512,7 @@ async def invalid_wrapper_receipt_verdict(
         if len(starts) != 1 or _event_tool_call_id(starts[0]) is None:
             related = False
             break
+        linked_tests.add(parsed[3])
         start = starts[0]
         call_id = _event_tool_call_id(start)
         same_call_starts = [
@@ -530,6 +533,7 @@ async def invalid_wrapper_receipt_verdict(
         ):
             related = False
             break
+    related = related and bool(claimed_tests) and claimed_tests == linked_tests
     reason = "wrapper_receipts: no accepted command-bound receipt"
     if related:
         reason += (
