@@ -207,7 +207,10 @@ def _is_finite_number(value: object) -> bool:
     """True for a finite int/float; a JSON boolean is not a number here."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
-    return math.isfinite(value)
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 _LINE_DECORATION_RE = re.compile(r"^\s*(?:[-*]\s+|\d+[.)]\s+)")

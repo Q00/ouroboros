@@ -330,3 +330,11 @@ async def test_malformed_competing_answer_fence_is_rejected(
 
     assert result.is_err
     assert "no single unambiguous verdict object" in str(result.error)
+
+
+async def test_out_of_range_large_integer_score_is_a_parse_error() -> None:
+    result = await _handler(json.dumps({"score": 10**1000, "verdict": "pass"})).handle(dict(_ARGS))
+
+    assert result.is_err
+    assert "Failed to parse QA verdict" in str(result.error)
+    assert "score must be a float between 0.0 and 1.0" in str(result.error)
