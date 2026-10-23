@@ -276,6 +276,20 @@ def _card(cards: dict[str, dict[str, Any]], node_id: str) -> dict[str, Any]:
     return cards.setdefault(node_id, {"id": node_id, "status": "pending"})
 
 
+def _card_for_ac_index(cards: dict[str, dict[str, Any]], ac_index: Any) -> dict[str, Any] | None:
+    """Resolve a zero-based terminal AC index to its one-based root card."""
+    if isinstance(ac_index, bool) or not isinstance(ac_index, int) or ac_index < 0:
+        return None
+    return next(
+        (
+            card
+            for card in cards.values()
+            if card.get("ac_index") == ac_index + 1 and not card.get("parent_id")
+        ),
+        None,
+    )
+
+
 def _upsert_ac_card(
     cards: dict[str, dict[str, Any]],
     terminal: set[str],
@@ -469,6 +483,24 @@ def reduce_board(
                     terminal,
                     node_id,
                     "completed" if payload.get("success") else "failed",
+                    authoritative=True,
+                )
+
+        elif event_type == "execution.verify.failed":
+            # Attempt failures can retry; only settled-workspace failures overturn Done.
+            if payload.get("final_workspace_revalidation") is True:
+                card = _card_for_ac_index(cards, payload.get("ac_index"))
+                if card is not None:
+                    _apply_status(card, terminal, card["id"], "failed", authoritative=True)
+
+        elif event_type == "execution.ac.acceptance_finalized":
+            card = _card_for_ac_index(cards, payload.get("root_ac_index"))
+            if card is not None and isinstance(payload.get("accepted"), bool):
+                _apply_status(
+                    card,
+                    terminal,
+                    card["id"],
+                    "completed" if payload["accepted"] else "failed",
                     authoritative=True,
                 )
 
