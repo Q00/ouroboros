@@ -71,6 +71,83 @@ def test_decomposed_children_fold_into_their_root() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("outcome", "expected_passed"),
+    [
+        ("succeeded", 2),
+        ("satisfied_externally", 2),
+        ("settled_from_shared_attempt", 2),
+        ("failed", 1),
+    ],
+)
+@pytest.mark.parametrize(
+    "status", [SessionStatus.COMPLETED, SessionStatus.FAILED, SessionStatus.CANCELLED]
+)
+async def test_terminal_tally_uses_validated_durable_executor_judgments(
+    tmp_path, outcome: str, expected_passed: int, status: SessionStatus
+) -> None:
+    from ouroboros.orchestrator.evidence.common import validate_attempt_judgment_payload
+    from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
+    from ouroboros.orchestrator.parallel_executor_models import (
+        ACExecutionOutcome,
+        ACExecutionResult,
+    )
+    from ouroboros.persistence.event_store import EventStore
+
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'judgments.db'}")
+    await store.initialize()
+    executor = object.__new__(ParallelACExecutor)
+    executor._event_store = store
+    executor._task_cwd = str(tmp_path)
+    try:
+        for root, result_outcome, retry in [
+            (0, ACExecutionOutcome.SUCCEEDED, 0),
+            (0, ACExecutionOutcome.FAILED, 1),
+            (1, ACExecutionOutcome.FAILED, 0),
+            (1, ACExecutionOutcome(outcome), 1),
+        ]:
+            await executor._emit_ac_attempt_judged(
+                result=ACExecutionResult(
+                    ac_index=root,
+                    ac_content="/Users/private/project must never enter the tally",
+                    success=result_outcome != ACExecutionOutcome.FAILED,
+                    outcome=result_outcome,
+                    retry_attempt=retry,
+                ),
+                root_ac_index=root,
+                session_id=SESSION,
+                execution_id=EXECUTION,
+            )
+        events = await store.query_events(
+            aggregate_id=EXECUTION, event_type="execution.ac.attempt_judged"
+        )
+        assert len(events) == 4
+        judgments = [
+            validate_attempt_judgment_payload(
+                event.data,
+                event_type=event.type,
+                aggregate_id=event.aggregate_id,
+                expected_execution_id=EXECUTION,
+                expected_session_id=SESSION,
+            )
+            for event in events
+        ]
+        assert sum(judgment.success for judgment in judgments) == expected_passed
+        expected = {"ac_passed": expected_passed, "ac_total": 2}
+        assert (
+            await derive_run_ac_tally(store, session_id=SESSION, execution_id=EXECUTION) == expected
+        )
+        meta = await derive_terminal_run_meta(
+            store,
+            session_id=SESSION,
+            execution_id=EXECUTION,
+            session_status=status,
+        )
+        assert {key: meta[key] for key in expected} == expected
+    finally:
+        await store.close()
+
+
 def test_other_sessions_and_malformed_rows_are_ignored() -> None:
     events = [
         _judged(0, "succeeded", session="orch_other"),
@@ -111,6 +188,25 @@ def test_malformed_or_spoofed_judgments_are_ignored() -> None:
 
     assert tally_judged_acs(
         [malformed, _judged(1, "failed")],
+        session_id=SESSION,
+        execution_id=EXECUTION,
+    ) == {"ac_passed": 0, "ac_total": 1}
+
+
+@pytest.mark.parametrize(
+    ("outcome", "success"),
+    [
+        ("settled_from_shared_attempt", False),
+        ("unknown", True),
+        ("failed", True),
+        ("cancelled", True),
+    ],
+)
+def test_tally_uses_success_only_after_common_judgment_validation(
+    outcome: str, success: bool
+) -> None:
+    assert tally_judged_acs(
+        [_judged(0, outcome, success=success), _judged(1, "failed")],
         session_id=SESSION,
         execution_id=EXECUTION,
     ) == {"ac_passed": 0, "ac_total": 1}

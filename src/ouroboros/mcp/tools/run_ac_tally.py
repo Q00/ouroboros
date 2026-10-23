@@ -26,7 +26,6 @@ log = structlog.get_logger(__name__)
 AC_PASSED_KEY = "ac_passed"
 AC_TOTAL_KEY = "ac_total"
 _JUDGED_EVENT_TYPE = "execution.ac.attempt_judged"
-_ACCEPTED_OUTCOMES = frozenset({"succeeded", "satisfied_externally"})
 _JUDGED_EVENT_PAGE_SIZE = 5000
 _CANCEL_TALLY_TIMEOUT_SECONDS = 1.0
 _CANCEL_JOB_PAGE_SIZE = 500
@@ -35,8 +34,8 @@ _CANCEL_JOB_PAGE_SIZE = 500
 def tally_judged_acs(events: Any, *, session_id: str, execution_id: str) -> dict[str, int]:
     """Fold judged attempts into ``{"ac_passed": n, "ac_total": m}``.
 
-    A root AC counts as passed when any of its attempts was accepted
-    (``succeeded`` or ``satisfied_externally``); every judged root AC counts
+    A root AC counts as passed when any of its validated judgments succeeded;
+    every judged root AC counts
     toward the total. Returns ``{}`` when the session judged nothing, so a
     run rejected before launch never claims ``0/0``.
     """
@@ -55,7 +54,7 @@ def tally_judged_acs(events: Any, *, session_id: str, execution_id: str) -> dict
             )
         except ValueError:
             continue
-        accepted = judgment.outcome in _ACCEPTED_OUTCOMES
+        accepted = judgment.success
         passed_by_root[judgment.root_ac_index] = (
             passed_by_root.get(judgment.root_ac_index, False) or accepted
         )
