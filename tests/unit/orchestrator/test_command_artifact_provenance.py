@@ -25,7 +25,7 @@ from ouroboros.events.base import BaseEvent
 import ouroboros.harness.deliver_gate as deliver_gate_module
 from ouroboros.harness.deliver_gate import load_ac_evidence_manifest
 from ouroboros.harness.journal import EvidenceManifest
-from ouroboros.harness.wrapper_receipt import _RUNNER_SOURCE, matching_wrapper_receipts
+from ouroboros.harness.wrapper_receipt import _RUNNER_PROGRAM, matching_wrapper_receipts
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.orchestrator.evidence.verification import (
@@ -42,7 +42,7 @@ _WRAPPER_OUTER = shlex.join(
         sys.executable,
         "-I",
         "-c",
-        _RUNNER_SOURCE,
+        _RUNNER_PROGRAM,
         "--receipt",
         "receipt.json",
         "--stdout",
@@ -78,6 +78,7 @@ def _wrapper_receipt_case(tmp_path: Path, **changes: object):
 
 @pytest.mark.asyncio
 async def test_wrapper_receipt_proves_inner_test_through_journal(tmp_path: Path) -> None:
+    assert "\n" not in _WRAPPER_OUTER
     events, claim = _wrapper_receipt_case(tmp_path)
     manifest = await load_ac_evidence_manifest(
         _EventStore(events),
@@ -106,6 +107,7 @@ async def test_wrapper_receipt_proves_inner_test_through_journal(tmp_path: Path)
         receipt_mode=True,
     )
     assert facts is not None
+    assert facts[0].evidence_handle == manifest.entries[0].handle
     assert facts[1].evidence_handle == manifest.entries[0].handle
     verifier = _verify_atomic_evidence_against_runtime_messages(
         messages=(
@@ -159,7 +161,7 @@ async def test_wrapper_receipt_real_dispatch_capture_to_verifier(tmp_path: Path,
     outer_command = fake_command if case == "fake_json" else _WRAPPER_OUTER
     if case == "source_substitution":
         parts = shlex.split(outer_command)
-        parts[3] += "\n# substituted source\n"
+        parts[3] += ";pass"
         outer_command = shlex.join(parts)
 
     class StubRuntime:

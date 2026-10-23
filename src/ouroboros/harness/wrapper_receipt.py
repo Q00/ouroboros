@@ -30,6 +30,7 @@ _RECEIPT_KEYS = frozenset(
 _CLAIM_KEYS = frozenset({"receipt_path", "outer_command", "inner_command"})
 _MAX_RECEIPT_BYTES = 16384
 _RUNNER_SOURCE = Path(wrapper_runner.__file__).read_text(encoding="utf-8")
+_RUNNER_PROGRAM = f"exec({_RUNNER_SOURCE!r})"
 
 
 def trusted_wrapper_invocation(
@@ -46,7 +47,7 @@ def trusted_wrapper_invocation(
         return None
     if (
         len(parts) < 12
-        or parts[:4] != [sys.executable, "-I", "-c", _RUNNER_SOURCE]
+        or parts[:4] != [sys.executable, "-I", "-c", _RUNNER_PROGRAM]
         or parts[4] != "--receipt"
         or parts[6] != "--stdout"
         or parts[8] != "--stderr"
