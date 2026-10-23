@@ -25,6 +25,7 @@ from ouroboros.core.seed import (
     OntologySchema,
     Seed,
     SeedMetadata,
+    SourcedScope,
 )
 from ouroboros.events.base import BaseEvent
 from ouroboros.harness.journal import EvidenceEntry, EvidenceKind, EvidenceManifest
@@ -43,6 +44,7 @@ from ouroboros.orchestrator.adaptive_concurrency import (
     ConcurrencyObservation,
     observe_provider_messages,
 )
+from ouroboros.orchestrator.atomic_prompt_builder import install_sourced_scope
 from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict, LevelCoordinator
 from ouroboros.orchestrator.coordinator_quota import consume_published_coordinator_pause
 from ouroboros.orchestrator.decomposition_limits import MAX_DECOMPOSITION_DEPTH
@@ -104,6 +106,7 @@ from ouroboros.orchestrator.parallel_executor import (
     render_parallel_verification_report,
 )
 from ouroboros.orchestrator.profile_loader import EvidenceSchema, load_profile
+from ouroboros.orchestrator.profile_strategy import COMPLETION_CHECK
 from ouroboros.orchestrator.recoverable_failure import UsageLimitPauseConsequence
 from ouroboros.orchestrator.verifier import VerifierStatus, VerifierVerdict
 from ouroboros.persistence.checkpoint import CheckpointStore
@@ -8181,11 +8184,17 @@ class TestParallelACExecutor:
         assert "files_touched, commands_run, tests_passed" in runtime.last_prompt
         assert "do not emit a generic command_result wrapper" in runtime.last_prompt
         assert "Do not prefix it with [TASK_COMPLETE]" in runtime.last_prompt
-        assert "You are responsible only for the current acceptance criterion" in (
+        # A single-criterion run has no sibling work to fence off (#2754).
+        assert "You are responsible only for the current acceptance criterion" not in (
             runtime.last_prompt
         )
-        assert "Do not implement, test, document, or pre-create work" in runtime.last_prompt
-        assert "sibling or future ACs" in runtime.last_prompt
+        assert "Do not implement, test, document, or pre-create work" not in runtime.last_prompt
+        assert "sibling or future ACs" not in runtime.last_prompt
+        assert COMPLETION_CHECK in runtime.last_prompt
+        assert runtime.last_prompt.index(COMPLETION_CHECK) < runtime.last_prompt.index(
+            "emit exactly ONE fenced JSON evidence record"
+        )
+        assert "Use Glob" not in runtime.last_prompt
         assert (
             "Do not substitute a narrower, safer, or smaller solution than the goal asks for. "
             "Before you finish, audit that the change covers every case the goal names."
@@ -8204,6 +8213,69 @@ class TestParallelACExecutor:
         assert "ouroboros_auto" in runtime.last_prompt
         assert "nested auto session" in runtime.last_prompt
         assert "explicitly state: [TASK_COMPLETE]" not in runtime.last_prompt
+
+    async def _fat_harness_scope_prompt(
+        self,
+        *,
+        criteria: tuple[str, ...],
+        scope: SourcedScope | None = None,
+    ) -> str:
+        """Return the atomic prompt for AC 1 with the run's criteria installed."""
+        event_store, _ = _make_replaying_event_store()
+        runtime = _FinalMessageRuntime(
+            "```json\n"
+            '{"files_touched":["src/app.py"],"commands_run":["pytest"],"tests_passed":["pytest"]}'
+            "\n```",
+            native_session_id="opencode-session-scope",
+        )
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+        install_sourced_scope(executor, scope, criteria)
+        await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content=criteria[0],
+            session_id="orch_123",
+            tools=["Read", "Edit", "Bash"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+        assert runtime.last_prompt is not None
+        return runtime.last_prompt
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_prompt_keeps_sibling_scope_when_siblings_exist(self) -> None:
+        """A multi-criterion run keeps the sibling boundary; one criterion omits it."""
+        multi = await self._fat_harness_scope_prompt(criteria=("Implement AC 1", "Implement AC 2"))
+        single = await self._fat_harness_scope_prompt(criteria=("Implement AC 1",))
+
+        sentence = "You are responsible only for the current acceptance criterion"
+        assert sentence in multi
+        assert "sibling or future ACs" in multi
+        assert sentence not in single
+        assert "sibling or future ACs" not in single
+        assert COMPLETION_CHECK in multi
+        assert COMPLETION_CHECK in single
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_prompt_omits_sibling_scope_for_sourced_objective(self) -> None:
+        """One attempt that runs the whole sourced request has no sibling criteria."""
+        prompt = await self._fat_harness_scope_prompt(
+            criteria=("Implement AC 1", "Implement AC 2"),
+            scope=SourcedScope(goal="Fix the request as the user wrote it."),
+        )
+
+        assert "You are responsible only for the current acceptance criterion" not in prompt
+        assert "sibling or future ACs" not in prompt
+        assert COMPLETION_CHECK in prompt
 
     @pytest.mark.asyncio
     async def test_fat_harness_docs_only_ac_uses_docs_evidence_contract(self, tmp_path) -> None:

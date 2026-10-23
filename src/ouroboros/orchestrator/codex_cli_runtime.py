@@ -38,6 +38,8 @@ from ouroboros.core.text import truncate_with_ellipsis
 from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
+    _CODEX_BACKENDS,
+    DEFAULT_TOOLS,
     FULL_CAPABILITIES,
     AgentMessage,
     ParamSupport,
@@ -1601,7 +1603,16 @@ class CodexCliRuntime:
 
         if tools is not None:
             guidance = "Do not use any tools for this task. Respond using reasoning only."
-            if tools:
+            if tools and self._runtime_handle_backend in _CODEX_BACKENDS:
+                # Codex has its own shell and patch tools, not the Claude tool
+                # names (Read, Edit, Glob, Grep, ...) in the orchestrator's
+                # envelope; list only the tools left after dropping those.
+                codex_tools = [tool for tool in tools if tool not in DEFAULT_TOOLS]
+                guidance = "Use your own shell and file tools to solve the task."
+                if codex_tools:
+                    tool_list = "\n".join(f"- {tool}" for tool in codex_tools)
+                    guidance += f" You may also use the following tools:\n{tool_list}"
+            elif tools:
                 tool_list = "\n".join(f"- {tool}" for tool in tools)
                 guidance = f"Prefer to solve the task using the following tool set when possible:\n{tool_list}"
             parts.append(f"<tooling-guidance>\n{guidance}\n</tooling-guidance>")

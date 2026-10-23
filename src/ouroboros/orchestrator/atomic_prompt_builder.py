@@ -27,6 +27,7 @@ from ouroboros.orchestrator.evidence.ac_classification import (
     _is_validation_only_ac,
 )
 from ouroboros.orchestrator.level_context import LevelContext, build_context_prompt
+from ouroboros.orchestrator.profile_strategy import COMPLETION_CHECK
 from ouroboros.orchestrator.shared_attempt import shares_one_attempt, sourced_criteria_aligned
 
 if TYPE_CHECKING:
@@ -133,6 +134,9 @@ class AtomicPromptBuilder:
             sourced_criteria_aligned(scope, criteria)
             and root_index is not None
             and 0 <= root_index < len(criteria)
+        )
+        sourced_objective = isinstance(scope, SourcedScope) and not (
+            aligned and root_index is not None
         )
         if isinstance(scope, SourcedScope):
             # Binding criteria that are the Seed's own, position for position:
@@ -319,13 +323,24 @@ class AtomicPromptBuilder:
                     "for this current AC. Read-only inspection or running tests does not "
                     "count as files_touched.\n"
                 )
-            completion_instruction = (
-                "## Current AC Scope Contract\n"
+            # The sibling boundary applies only when other criteria exist: a
+            # multi-criterion Seed, a decomposed sub-AC, or a parallel batch. A
+            # single-criterion run or a sourced objective has no sibling work.
+            has_sibling_criteria = not sourced_objective and (
+                len(criteria) > 1 or is_sub_ac or bool(sibling_acs and len(sibling_acs) > 1)
+            )
+            sibling_scope_note = (
                 "You are responsible only for the current acceptance criterion in "
                 "this dispatch. Do not implement, test, document, or pre-create work "
                 "that belongs only to sibling or future ACs. If another AC mentions "
                 "related files, future functions, tests, or docs, treat that work as "
                 "out of scope unless the current AC explicitly requires it.\n"
+                if has_sibling_criteria
+                else ""
+            )
+            completion_instruction = (
+                "## Current AC Scope Contract\n"
+                f"{sibling_scope_note}"
                 "Do not substitute a narrower, safer, or smaller solution than the "
                 "goal asks for. Before you finish, audit that the change covers every "
                 "case the goal names.\n"
@@ -344,6 +359,7 @@ class AtomicPromptBuilder:
                 f"{doc_only_note}{validation_only_note}\n"
                 "Use the available tools to accomplish this task. Report progress through "
                 "tool-visible work, not a prose-only completion claim.\n"
+                f"{COMPLETION_CHECK}\n"
                 "When complete, emit exactly ONE fenced JSON evidence record as the "
                 "final response. Populate the active profile fields "
                 f"directly ({required_fields}); do not emit a generic command_result "
@@ -371,7 +387,7 @@ class AtomicPromptBuilder:
 Files present:
 {file_listing}
 
-**Important**: Use Glob to discover files. Never guess absolute paths.
+**Important**: Use the runtime's file-search tools to discover files. Never guess absolute paths.
 
 ## Goal Context
 {seed_goal}
