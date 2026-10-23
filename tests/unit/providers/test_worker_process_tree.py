@@ -76,7 +76,12 @@ def _alive(pid: int) -> bool:
         return False
     stat = Path(f"/proc/{pid}/stat")
     if stat.exists():
-        return stat.read_text().rpartition(")")[2].split()[0] not in {"Z", "X"}
+        try:
+            contents = stat.read_text()
+        except (FileNotFoundError, ProcessLookupError):
+            # The process can exit after both earlier existence checks.
+            return False
+        return contents.rpartition(")")[2].split()[0] not in {"Z", "X"}
     return True
 
 
