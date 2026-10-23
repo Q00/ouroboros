@@ -700,6 +700,7 @@ class OpenCodeRuntime:
             shutdown_timeout=self._process_shutdown_timeout_seconds,
             logger=log,
             log_namespace=self._log_namespace,
+            workspace=self._cwd,
         )
 
     # -- Event conversion --------------------------------------------------
