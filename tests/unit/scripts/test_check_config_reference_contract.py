@@ -151,6 +151,85 @@ render(Report())
     assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
 
 
+@pytest.mark.parametrize("wrapper_name", ["wrapper", "_wrapper"])
+def test_public_foreign_call_provenance_survives_wrapper(
+    contract, tmp_path: Path, wrapper_name: str
+) -> None:
+    (tmp_path / "wrapper.py").write_text(
+        f"""
+class EvaluationReport:
+    stage1_enabled = True
+class Report:
+    evaluation = EvaluationReport()
+def render(config):
+    return config.evaluation.stage1_enabled
+def {wrapper_name}(value):
+    return render(value)
+{wrapper_name}(Report())
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+    assert reads == frozenset()
+    assert not reads.unresolved_semantics
+    assert not _audit_as_documented_inert(contract, field, reads).violations
+
+
+@pytest.mark.parametrize("reader_name", ["a_reader", "z_reader"])
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("argument", ["Report()", "settings", "unknown"])
+def test_public_call_provenance_survives_module_scan_order(
+    contract, tmp_path: Path, reader_name: str, argument: str, wrapped: bool
+) -> None:
+    (tmp_path / f"{reader_name}.py").write_text(
+        ("def wrapper(value):\n    return render(value)\n" if wrapped else "")
+        + "def render(config):\n    return config.evaluation.stage1_enabled\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "consumer.py").write_text(
+        f"""
+from {reader_name} import {"wrapper as render" if wrapped else "render"}
+class EvaluationReport:
+    stage1_enabled = True
+class Report:
+    evaluation = EvaluationReport()
+render({argument})
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+    assert reads == (frozenset() if argument == "Report()" else frozenset({field}))
+    assert not reads.unresolved_semantics
+
+
+@pytest.mark.parametrize("alternative", ["unknown", "settings"])
+@pytest.mark.parametrize("foreign_first", [False, True])
+def test_wrapper_rescan_preserves_uncertain_calls_independent_of_definition_order(
+    contract, tmp_path: Path, alternative: str, foreign_first: bool
+) -> None:
+    calls = ["wrapper(Report())", f"wrapper({alternative})"]
+    if not foreign_first:
+        calls.reverse()
+    (tmp_path / "wrapper_alternatives.py").write_text(
+        """
+class EvaluationReport:
+    stage1_enabled = True
+class Report:
+    evaluation = EvaluationReport()
+def wrapper(value):
+    return render(value)
+def render(config):
+    return config.evaluation.stage1_enabled
+"""
+        + "\n".join(calls),
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
 def test_runtime_scan_honors_global_and_nonlocal_binding_updates(contract, tmp_path: Path) -> None:
     (tmp_path / "scope_updates.py").write_text(
         """

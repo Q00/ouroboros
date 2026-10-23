@@ -814,6 +814,7 @@ class _SourceIndex:
         self._class_bases: dict[int, tuple[ast.ClassDef, ...]] = {}
         self._data_states: dict[str, dict[str, _AbstractValue]] = {}
         self._data_states_in_progress: set[str] = set()
+        self.observed_call_arguments: dict[int, dict[str, _AbstractValue]] = {}
         for path, tree in trees.items():
             relative = path.relative_to(source_root).with_suffix("")
             parts = list(relative.parts)
@@ -1216,7 +1217,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._nonlocal_names: list[set[str]] = [set()]
         self._active_calls: set[int] = set()
         self._call_executions: dict[int, list[_FunctionExecution]] = {}
-        self._observed_call_arguments: dict[int, dict[str, _AbstractValue]] = {}
+        self._observed_call_arguments = source_index.observed_call_arguments
         self._expression_cache: dict[int, _AbstractValue] = {}
         self._flow_abrupts: list[list[_AbruptPath]] = [[]]
         self._path_reachable = True
@@ -1246,7 +1247,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             for section in TRACKED_SECTIONS
         }
         scoped_by_function = {
-            id(function): self._scoped_function_arguments(function)
+            id(function): self._scoped_function_arguments(function, include_calls=False)
             for function in ast.walk(node)
             if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
         }
@@ -1658,6 +1659,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         if any(
             _contained_origins(value) & tracked
             or value.callables
+            or value.instance_classes
             or any(identity in self._deferred_generators for identity in value.identity)
             for value in values
         ):
@@ -2705,8 +2707,13 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     and candidate.attr in TRACKED_SECTIONS
                     for candidate in ast.walk(function)
                 )
-                if syntactic_config_reader or self._call_has_relevant_provenance(
-                    node, function, bound_receiver
+                self._record_call_arguments(
+                    function, self._bound_call_arguments(node, function, bound_receiver)
+                )
+                if (
+                    syntactic_config_reader
+                    or self._call_has_relevant_provenance(node, function, bound_receiver)
+                    or self._has_transitive_callable_relevance(function)
                 ):
                     values.append(self._local_call_value(node, function, bound_receiver))
                     continue
@@ -5285,11 +5292,13 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         finally:
             self._expression_cache = previous_cache
 
-    def _scoped_function_arguments(self, node: _FunctionNode) -> dict[str, _AbstractValue]:
+    def _scoped_function_arguments(
+        self, node: _FunctionNode, *, include_calls: bool = True
+    ) -> dict[str, _AbstractValue]:
         scoped = self._scoped_arguments(node.args)
         # Calls already carry actual provenance. A public-definition rescan must
         # not replace a known foreign argument with the config-name convention.
-        observed = self._observed_call_arguments.get(id(node), {})
+        observed = self._observed_call_arguments.get(id(node), {}) if include_calls else {}
         scoped.update(observed)
         for name, value in self._default_argument_values(node).items():
             scoped[name] = (
@@ -5304,8 +5313,6 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     ) -> None:
         observed = self._observed_call_arguments.setdefault(id(node), {})
         for argument in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
-            if argument.annotation is not None or not _looks_like_config_name(argument.arg):
-                continue
             value = scoped[argument.arg]
             # Unknown calls do not prove foreign provenance: retain the exported
             # config convention for that alternative, even after a foreign call.
@@ -5466,6 +5473,12 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         generator_consumer_mode: str = "full",
         generator_identity: int | None = None,
     ) -> _FunctionExecution:
+        owner = self._source_index.owner(node) or self._module
+        if owner is not self._module:
+            # An imported callable resolves globals in its defining module, not
+            # in the consumer that may bind the same name to a different value.
+            self._source_index.resolve_data_value(owner, "", self._fields)
+            scoped = {**self._source_index._data_states.get(owner.name, {}), **scoped}
         scoped = {**self._closure_bindings.get(id(node), {}), **scoped}
         self._states.append(scoped)
         self._annotations.append({})
@@ -5861,8 +5874,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             if not self._path_reachable:
                 break
             self.visit(statement)
+
+    def _visit_exported_definitions(self) -> None:
         self._visit_reachable_values(
-            value for name, value in self._states[-1].items() if not name.startswith("_")
+            value for name, value in self._states[0].items() if not name.startswith("_")
         )
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
@@ -6007,9 +6022,16 @@ def runtime_reads(source_root: Path, fields: frozenset[ConfigField]) -> frozense
     }
     source_index = _SourceIndex(source_root, trees)
     unresolved_semantics: set[str] = set()
+    visitors: list[_RuntimeReadVisitor] = []
     for path, tree in trees.items():
         visitor = _RuntimeReadVisitor(fields, source_index, source_index.module_for_path(path))
         visitor.visit(tree)
+        visitors.append(visitor)
+    # Resolve actual calls across every module before applying exported-definition
+    # conventions, so module order cannot turn known foreign arguments into roots.
+    for visitor in visitors:
+        visitor._visit_exported_definitions()
+    for visitor in visitors:
         reads.update(visitor.reads)
         unresolved_semantics.update(visitor.unresolved_semantics)
     return _RuntimeReads(reads, unresolved_semantics)
