@@ -117,9 +117,6 @@ from ouroboros.orchestrator.cancellation import (
     get_pending_cancellations as get_pending_cancellations,
 )
 from ouroboros.orchestrator.cancellation import (
-    is_cancellation_requested as is_cancellation_requested,
-)
-from ouroboros.orchestrator.cancellation import (
     request_cancellation as request_cancellation,
 )
 from ouroboros.orchestrator.capabilities import (
@@ -165,6 +162,7 @@ from ouroboros.orchestrator.execution_authority import (
     collect_cancellation_acceptance_plan,
     collect_terminal_acceptance_plan,
     constructor_model_contract,
+    request_process_local_cancellation,
     runtime_effect_capabilities_contract,
     runtime_execution_identity_contract,
     runtime_execution_proves_effective_model,
@@ -469,6 +467,20 @@ class ExecutionCancelledError(OuroborosError):
 # =============================================================================
 # In-memory Cancellation Registry
 # =============================================================================
+
+
+async def is_cancellation_requested(session_id: str) -> bool:
+    """Check whether cancellation has been requested for a session.
+
+    Args:
+        session_id: Session to check.
+
+    Returns:
+        True if cancellation was requested.
+    """
+    # Keep the runner's historical global lookup patchable by callers.
+    return await get_cancellation_request(session_id) is not None
+
 
 # =============================================================================
 # Prompt Building
@@ -1108,6 +1120,18 @@ class OrchestratorRunner:
                 ),
                 get_cancellation_request=lambda session_id: get_cancellation_request(session_id),
                 is_cancellation_requested=lambda session_id: is_cancellation_requested(session_id),
+                request_process_local_cancellation=lambda *args, **kwargs: (
+                    request_process_local_cancellation(*args, **kwargs)
+                ),
+                collect_cancellation_acceptance_plan=lambda **kwargs: (
+                    collect_cancellation_acceptance_plan(**kwargs)
+                ),
+                await_process_local_cleanup=lambda awaitable: _await_process_local_cleanup(
+                    awaitable
+                ),
+                create_execution_terminal_event=lambda **kwargs: create_execution_terminal_event(
+                    **kwargs
+                ),
                 cancel_session_directly=lambda **kwargs: self._cancel_session_directly(**kwargs),
                 check_cancellation=lambda session_id: self._check_cancellation(session_id),
                 handle_cancellation=lambda **kwargs: self._handle_cancellation(**kwargs),

@@ -14,12 +14,8 @@ from rich.text import Text
 
 from ouroboros.core.errors import PersistenceError
 from ouroboros.core.types import Result
-from ouroboros.orchestrator.events import create_execution_terminal_event
 from ouroboros.orchestrator.execution_authority import (
     ProcessLocalCancellationDisposition,
-    _await_process_local_cleanup,
-    collect_cancellation_acceptance_plan,
-    request_process_local_cancellation,
 )
 from ouroboros.orchestrator.session import (
     ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY,
@@ -127,6 +123,10 @@ class CancellationDependencies:
     request_cancellation: Callable[..., Awaitable[None]]
     get_cancellation_request: Callable[[str], Awaitable[CancellationRequest | None]]
     is_cancellation_requested: Callable[[str], Awaitable[bool]]
+    request_process_local_cancellation: Callable[..., Awaitable[Any]]
+    collect_cancellation_acceptance_plan: Callable[..., Awaitable[Any]]
+    await_process_local_cleanup: Callable[..., Awaitable[Any]]
+    create_execution_terminal_event: Callable[..., Any]
     cancel_session_directly: Callable[..., Awaitable[Result[dict[str, Any], OrchestratorError]]]
     check_cancellation: Callable[[str], Awaitable[bool]]
     handle_cancellation: Callable[
@@ -285,7 +285,7 @@ class CancellationLifecycle:
                 }
             )
 
-        process_local = await request_process_local_cancellation(
+        process_local = await self._deps.request_process_local_cancellation(
             tracker,
             self._deps.session_repo(),
             reason=reason,
@@ -354,7 +354,7 @@ class CancellationLifecycle:
             tuple(raw_root_indices) if isinstance(raw_root_indices, (list, tuple)) else None
         )
         try:
-            acceptance_finalizations = await collect_cancellation_acceptance_plan(
+            acceptance_finalizations = await self._deps.collect_cancellation_acceptance_plan(
                 session_id=session_id,
                 execution_id=execution_id,
                 event_store=self._deps.event_store(),
@@ -689,7 +689,7 @@ class CancellationLifecycle:
                 try:
                     if not execution_terminal_events:
                         await self._deps.event_store().append(
-                            create_execution_terminal_event(
+                            self._deps.create_execution_terminal_event(
                                 execution_id=execution_id,
                                 session_id=session_id,
                                 status=terminal_status.value,
@@ -710,7 +710,7 @@ class CancellationLifecycle:
                         execution_id=execution_id,
                     )
 
-            await _await_process_local_cleanup(_reconcile_existing_terminal_owner())
+            await self._deps.await_process_local_cleanup(_reconcile_existing_terminal_owner())
             await self._deps.report_frugality_retrospective(
                 execution_id=execution_id,
                 session_id=session_id,
@@ -733,11 +733,13 @@ class CancellationLifecycle:
         # cancellation cannot commit a durable winner and then lose its final
         # acceptance records to interruption.
         try:
-            cancellation_acceptance_finalizations = await collect_cancellation_acceptance_plan(
-                session_id=session_id,
-                execution_id=execution_id,
-                event_store=self._deps.event_store(),
-                expected_root_indices=expected_root_indices,
+            cancellation_acceptance_finalizations = (
+                await self._deps.collect_cancellation_acceptance_plan(
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    event_store=self._deps.event_store(),
+                    expected_root_indices=expected_root_indices,
+                )
             )
         except Exception as exc:
             return self._deps.cancellation_persistence_pending_result(
@@ -843,7 +845,7 @@ class CancellationLifecycle:
         async def _reconcile_cancelled_owner() -> None:
             try:
                 await self._deps.event_store().append(
-                    create_execution_terminal_event(
+                    self._deps.create_execution_terminal_event(
                         execution_id=execution_id,
                         session_id=session_id,
                         status="cancelled",
@@ -857,7 +859,7 @@ class CancellationLifecycle:
                     execution_id=execution_id,
                 )
 
-        await _await_process_local_cleanup(_reconcile_cancelled_owner())
+        await self._deps.await_process_local_cleanup(_reconcile_cancelled_owner())
         await self._deps.report_frugality_retrospective(
             execution_id=execution_id,
             session_id=session_id,
