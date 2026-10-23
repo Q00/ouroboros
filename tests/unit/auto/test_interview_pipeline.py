@@ -6416,9 +6416,10 @@ async def test_convergence_contract_authority_question_is_never_self_authorized(
 ) -> None:
     """A question about an action on the user's environment does not stop the
     run on its wording, and auto never authorizes it: without a requester the
-    draft is a non-binding guess that reaches the worker as the open question;
-    with one, the question goes to the requester (the human authority)."""
-    from ouroboros.auto.ledger_seed import ledger_assumptions
+    draft is a non-binding guess kept as the open question; with one, the
+    question goes to the requester (the human authority), and an empty reply
+    keeps it as an open question too."""
+    from ouroboros.auto.ledger_seed import ledger_open_questions
     from ouroboros.auto.requester import RequesterQuestion, RequesterReply
 
     question = "Which production access token should auto configure?"
@@ -6462,8 +6463,7 @@ async def test_convergence_contract_authority_question_is_never_self_authorized(
     )
     if with_requester:
         assert [request.question for request in asked] == [question]
-    else:
-        assert f"Open question: {question}" in ledger_assumptions(ledger)
+    assert ledger_open_questions(ledger) == (question,)
 
 
 @pytest.mark.asyncio

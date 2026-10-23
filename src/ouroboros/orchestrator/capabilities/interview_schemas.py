@@ -1079,7 +1079,7 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                             },
                         },
                     }
-                    for lane in ("code_context", "data_context")
+                    for lane in ("code_context", "web_context", "data_context")
                 },
                 "description": (
                     "Where this project's recent findings are, keyed by the lane "
@@ -1093,7 +1093,9 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                     "into every lane of the turn, which outgrew what a host "
                     "accepts inline and cost the turn its fan-out. A lane with "
                     "none is absent, as is the whole field when the project has "
-                    "published nothing recent."
+                    "published nothing recent. web_context entries come only "
+                    "from this session's own start turn, never from the "
+                    "cross-session window."
                 ),
             },
             "last_question": {

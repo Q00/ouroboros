@@ -138,3 +138,55 @@ async def test_refreshed_history_does_not_authorize_consistent_tampering(
         runner(factory(), config)._restore_execution_contract(
             {EXECUTION_CONTRACT_PROGRESS_KEY: persisted}, seed=seed()
         )
+
+
+@pytest.mark.asyncio
+async def test_phase2_constructor_replay_survives_runtime_rejection(cli, tmp_path, monkeypatch):
+    historical = HISTORY[1]
+    config = get_default_config()
+    config = config.model_copy(
+        update={
+            "economics": config.economics.model_copy(
+                update={
+                    "tiers": {
+                        name: tier.model_copy(
+                            update={
+                                "models": [
+                                    ModelConfig(provider="anthropic", model=historical[name])
+                                ]
+                            }
+                        )
+                        for name, tier in config.economics.tiers.items()
+                    }
+                }
+            ),
+            "models": config.models.model_copy(update={"pin": True}),
+        }
+    )
+    old_runtime = build_claude_worker_runtime(
+        cli_path=cli, cwd=tmp_path, model=historical["standard"]
+    )
+    with monkeypatch.context() as old_release:
+        old_release.setattr(model_routing, "normalize_tier_model", lambda model, **_kw: model)
+        persisted = await prepared_contract(runner(old_runtime, config))
+    live = build_claude_worker_runtime(cli_path=cli, cwd=tmp_path, model="sonnet")
+    resumed = runner(live, config)
+    previous = resumed._execution_contract, resumed._model_router, resumed._requested_model_tier
+    current = {"phase2": "different runtime identity"}
+    monkeypatch.setattr(
+        resumed, "_runtime_execution_identity_contract", lambda _handle=None: current
+    )
+    with pytest.raises(OrchestratorError) as caught:
+        resumed._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted}, seed=seed()
+        )
+    assert caught.value.message == "Cannot resume with a different runtime execution profile"
+    assert caught.value.details == {
+        "persisted_runtime_execution": persisted["model_routing"]["runtime_execution"],
+        "current_runtime_execution": current,
+        "hint": "Restore the original runtime/model profile, or start a new session for an intentional execution-profile change.",
+    }
+    assert live._model == historical["standard"]
+    assert resumed._execution_contract is previous[0]
+    assert resumed._model_router is previous[1]
+    assert resumed._requested_model_tier is previous[2]
