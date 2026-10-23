@@ -82,6 +82,7 @@ from ouroboros.harness.deliver_gate import (
 )
 from ouroboros.harness.journal import EvidenceEntry, EvidenceManifest
 from ouroboros.harness.traceguard_validator import validate_evidence_claims
+from ouroboros.harness.wrapper_receipt import matching_wrapper_receipts
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator import (
     adaptive_concurrency,
@@ -1453,6 +1454,8 @@ def _standard_deliver_facts(
     *,
     task_cwd: str | None,
     verifier_passed: bool,
+    wrapper_receipts: Mapping[str, EvidenceEntry] | None = None,
+    receipt_mode: bool = False,
 ) -> list[DeliverEvidenceFact] | None:
     """Bind default-profile evidence to exact accepted-leaf tool journal rows.
 
@@ -1489,19 +1492,28 @@ def _standard_deliver_facts(
                 match_value = normalized
                 eligible = bool(normalized) and "\n" not in normalized and "\r" not in normalized
             if field == "tests_passed":
-                eligible = eligible and verifier_passed and normalized in commands
+                eligible = (
+                    eligible
+                    and verifier_passed
+                    and (
+                        normalized in (wrapper_receipts or {})
+                        if receipt_mode
+                        else normalized in commands
+                    )
+                )
 
             dedupe_key = (field, match_value)
             if dedupe_key in seen:
                 continue
             seen.add(dedupe_key)
-            matches = (
-                _matching_journal_entries(
+            if eligible and field == "tests_passed" and normalized in (wrapper_receipts or {}):
+                matches = (wrapper_receipts[normalized],)
+            elif eligible:
+                matches = _matching_journal_entries(
                     manifest, field=field, value=match_value, task_cwd=task_cwd
                 )
-                if eligible
-                else ()
-            )
+            else:
+                matches = ()
             if len(matches) == 1:
                 handle = matches[0].handle
             elif len(matches) > 1:
@@ -9095,6 +9107,31 @@ Respond with either ATOMIC or the structured JSON object only.
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
             )
+            receipt_claimed = bool(
+                typed_evidence is not None and "wrapper_receipts" in typed_evidence.data
+            )
+            verified_wrapper_commands: frozenset[str] = frozenset()
+            if receipt_claimed and typed_evidence is not None:
+                try:
+                    receipt_manifest = await load_ac_evidence_manifest(
+                        self._event_store,
+                        ac_id=runtime_identity.ac_id,
+                        execution_id=execution_id,
+                        admit_accepted_tool_starts=True,
+                        accepted_retry_attempt=runtime_identity.retry_attempt,
+                        accepted_session_attempt_id=runtime_identity.session_attempt_id,
+                    )
+                    receipt_matches = matching_wrapper_receipts(
+                        receipt_manifest,
+                        claims=typed_evidence.data["wrapper_receipts"],
+                        execution_id=execution_id,
+                        task_cwd=self._task_cwd
+                        or getattr(self._adapter, "working_directory", None),
+                    )
+                    if receipt_matches is not None:
+                        verified_wrapper_commands = frozenset(receipt_matches)
+                except (OSError, RuntimeError, ValueError):
+                    pass
             verifier_verdict = _invoke_execution_authority_entry(
                 self,
                 _FOUNDATION_A_ENTRY_RUN_ATOMIC_VERIFIER_PASS,
@@ -9107,7 +9144,19 @@ Respond with either ATOMIC or the structured JSON object only.
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
+                verified_wrapper_commands=verified_wrapper_commands,
             )
+            if receipt_claimed and (
+                not verified_wrapper_commands
+                or typed_evidence is None
+                or frozenset(_string_evidence_values(typed_evidence.get("tests_passed")))
+                != verified_wrapper_commands
+            ):
+                verifier_verdict = VerifierVerdict(
+                    passed=False,
+                    reasons=("wrapper_receipts: no accepted command-bound receipt",),
+                    failure_class="FABRICATION_SUSPECTED",
+                )
             verify_gate_replaces_all_evidence = bool(
                 verify_gate_outcome is not None
                 and self._execution_profile is not None
@@ -9582,6 +9631,18 @@ Respond with either ATOMIC or the structured JSON object only.
                 manifest,
                 task_cwd=self._task_cwd or getattr(self._adapter, "working_directory", None),
                 verifier_passed=verifier_verdict.passed,
+                wrapper_receipts=(
+                    matching_wrapper_receipts(
+                        manifest,
+                        claims=typed_data["wrapper_receipts"],
+                        execution_id=execution_id,
+                        task_cwd=self._task_cwd
+                        or getattr(self._adapter, "working_directory", None),
+                    )
+                    if "wrapper_receipts" in typed_data
+                    else None
+                ),
+                receipt_mode="wrapper_receipts" in typed_data,
             )
             facts = standard_facts if standard_facts is not None else explicit_facts
             if not facts:
@@ -12723,6 +12784,7 @@ Respond with either ATOMIC or the structured JSON object only.
         verify_gate_active: bool = False,
         force_runtime_transcript: bool = False,
         task_cwd_override: str | None = None,
+        verified_wrapper_commands: frozenset[str] = frozenset(),
     ) -> VerifierVerdict | None:
         """Run the separate verifier pass once typed evidence is schema-valid."""
         if (
@@ -12779,6 +12841,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     has_success_contract=has_success_contract,
                     has_expected_artifacts=has_expected_artifacts,
                     verify_gate_active=verify_gate_active,
+                    verified_wrapper_commands=verified_wrapper_commands,
                 )
             )
         except VerifierContractError:

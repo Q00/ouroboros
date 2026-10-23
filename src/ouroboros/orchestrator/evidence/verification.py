@@ -67,6 +67,7 @@ def _verify_atomic_evidence_against_runtime_messages(
     has_success_contract: bool = False,
     has_expected_artifacts: bool = False,
     verify_gate_active: bool = False,
+    verified_wrapper_commands: frozenset[str] = frozenset(),
 ) -> VerifierVerdict:
     """Verify leaf evidence is backed by runtime transcript events.
 
@@ -213,6 +214,8 @@ def _verify_atomic_evidence_against_runtime_messages(
                 unsupported.append(f"{field_name}: {value}")
                 continue
             if field_name == "tests_passed":
+                if value in verified_wrapper_commands:
+                    continue
                 if _runtime_messages_support_test_claim(
                     value=value,
                     backed_commands=backed_commands,

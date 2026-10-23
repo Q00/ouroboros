@@ -7,6 +7,7 @@ import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 import inspect
+import json
 import os
 from pathlib import Path
 import stat
@@ -22,11 +23,202 @@ from ouroboros.events.base import BaseEvent
 import ouroboros.harness.deliver_gate as deliver_gate_module
 from ouroboros.harness.deliver_gate import load_ac_evidence_manifest
 from ouroboros.harness.journal import EvidenceManifest
+from ouroboros.harness.wrapper_receipt import matching_wrapper_receipts
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+from ouroboros.orchestrator.evidence.verification import (
+    _verify_atomic_evidence_against_runtime_messages,
+)
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord
 from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
 from ouroboros.orchestrator.parallel_executor import ParallelACExecutor, _standard_deliver_facts
+from ouroboros.orchestrator.profile_loader import EvidenceSchema, load_profile
+
+_WRAPPER_OUTER = "printf accepted > claimed.txt"
+_WRAPPER_INNER = "pytest tests/unit"
+
+
+def _wrapper_receipt_case(tmp_path: Path, **changes: object):
+    receipt_path = tmp_path / "receipt.json"
+    stdout_path = tmp_path / "stdout.txt"
+    stderr_path = tmp_path / "stderr.txt"
+    stdout_path.write_text("1 passed", encoding="utf-8")
+    stderr_path.write_text("", encoding="utf-8")
+    receipt: dict[str, object] = {
+        "schema_version": 1,
+        "kind": "ouroboros.test-wrapper-receipt",
+        "execution_id": "exec_1",
+        "ac_id": "ac_1",
+        "retry_attempt": 1,
+        "session_attempt_id": "ac_1_attempt_2",
+        "command_call_id": "wrapper",
+        "completion_event_id": "complete-wrapper",
+        "outer_command": _WRAPPER_OUTER,
+        "inner_command": _WRAPPER_INNER,
+        "outer_exit_status": 0,
+        "inner_exit_status": 0,
+        "stdout_ref": "stdout.txt",
+        "stderr_ref": "stderr.txt",
+        "test_result": "passed",
+    }
+    receipt.update(changes)
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    effects = [
+        _effect(path, relative_path=path.name) for path in (receipt_path, stdout_path, stderr_path)
+    ]
+    claim = {
+        "receipt_path": "receipt.json",
+        "outer_command": _WRAPPER_OUTER,
+        "inner_command": _WRAPPER_INNER,
+    }
+    return _command_events(call_id="wrapper", effects=effects), claim
+
+
+@pytest.mark.asyncio
+async def test_wrapper_receipt_proves_inner_test_through_journal(tmp_path: Path) -> None:
+    events, claim = _wrapper_receipt_case(tmp_path)
+    manifest = await load_ac_evidence_manifest(
+        _EventStore(events),
+        ac_id="ac_1",
+        execution_id="exec_1",
+        admit_accepted_tool_starts=True,
+        accepted_retry_attempt=1,
+        accepted_session_attempt_id="ac_1_attempt_2",
+    )
+    matches = matching_wrapper_receipts(
+        manifest, claims=[claim], execution_id="exec_1", task_cwd=str(tmp_path)
+    )
+    assert matches is not None and _WRAPPER_INNER in matches
+    facts = _standard_deliver_facts(
+        EvidenceRecord(
+            data={
+                "commands_run": [_WRAPPER_OUTER],
+                "tests_passed": [_WRAPPER_INNER],
+                "wrapper_receipts": [claim],
+            }
+        ),
+        manifest,
+        task_cwd=str(tmp_path),
+        verifier_passed=True,
+        wrapper_receipts=matches,
+        receipt_mode=True,
+    )
+    assert facts is not None
+    assert facts[1].evidence_handle == manifest.entries[0].handle
+    verifier = _verify_atomic_evidence_against_runtime_messages(
+        messages=(
+            AgentMessage(
+                type="tool",
+                content="wrapper started",
+                tool_name="Bash",
+                data={"tool_call_id": "wrapper", "tool_input": {"command": _WRAPPER_OUTER}},
+            ),
+            AgentMessage(
+                type="tool_result",
+                content="wrapper completed",
+                data={"tool_call_id": "wrapper", "exit_code": 0, "is_error": False},
+            ),
+            AgentMessage(type="result", content="done"),
+        ),
+        typed_evidence=EvidenceRecord(data={"tests_passed": [_WRAPPER_INNER]}),
+        ac_content="Verify the implementation",
+        execution_profile=load_profile("code").model_copy(
+            update={"evidence_schema": EvidenceSchema(required=("tests_passed",))}
+        ),
+        task_cwd=str(tmp_path),
+        adapter_working_directory=None,
+        verified_wrapper_commands=frozenset(matches),
+    )
+    assert verifier.passed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("change", "value"),
+    [
+        ("schema_version", 2),
+        ("inner_exit_status", 1),
+        ("outer_exit_status", 1),
+        ("inner_command", "pytest other"),
+        ("command_call_id", "foreign"),
+        ("completion_event_id", "old-completion"),
+        ("session_attempt_id", "another-session"),
+        ("retry_attempt", 0),
+        ("stdout_ref", "../escape.txt"),
+        ("test_result", "failed"),
+    ],
+)
+async def test_wrapper_receipt_rejects_invalid_identity_or_status(
+    tmp_path: Path, change: str, value: object
+) -> None:
+    events, claim = _wrapper_receipt_case(tmp_path, **{change: value})
+    manifest = await load_ac_evidence_manifest(
+        _EventStore(events),
+        ac_id="ac_1",
+        execution_id="exec_1",
+        admit_accepted_tool_starts=True,
+        accepted_retry_attempt=1,
+        accepted_session_attempt_id="ac_1_attempt_2",
+    )
+    assert (
+        matching_wrapper_receipts(
+            manifest, claims=[claim], execution_id="exec_1", task_cwd=str(tmp_path)
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    ["missing", "stale", "duplicate", "path_escape", "earlier_retry", "foreign_session"],
+)
+async def test_wrapper_receipt_rejects_unattributed_or_foreign_file(
+    tmp_path: Path, case: str
+) -> None:
+    events, claim = _wrapper_receipt_case(tmp_path)
+    if case in {"missing", "stale"}:
+        if case == "missing":
+            (tmp_path / "receipt.json").unlink()
+        effects = list(events[1].data["filesystem_effects"])
+        events[1] = events[1].model_copy(
+            update={
+                "data": {
+                    **events[1].data,
+                    "filesystem_effects": [
+                        effect
+                        for effect in effects
+                        if effect["workspace_relative_path"] != "receipt.json"
+                    ],
+                }
+            }
+        )
+    elif case == "duplicate":
+        events.extend(
+            _command_events(call_id="wrapper", effects=events[1].data["filesystem_effects"])
+        )
+    elif case == "path_escape":
+        claim["receipt_path"] = "../receipt.json"
+    elif case in {"earlier_retry", "foreign_session"}:
+        data = dict(events[1].data)
+        data["retry_attempt" if case == "earlier_retry" else "session_attempt_id"] = (
+            0 if case == "earlier_retry" else "other-session"
+        )
+        events[1] = events[1].model_copy(update={"data": data})
+    manifest = await load_ac_evidence_manifest(
+        _EventStore(events),
+        ac_id="ac_1",
+        execution_id="exec_1",
+        admit_accepted_tool_starts=True,
+        accepted_retry_attempt=1,
+        accepted_session_attempt_id="ac_1_attempt_2",
+    )
+    assert (
+        matching_wrapper_receipts(
+            manifest, claims=[claim], execution_id="exec_1", task_cwd=str(tmp_path)
+        )
+        is None
+    )
 
 
 class _EventStore:
