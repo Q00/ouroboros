@@ -124,6 +124,7 @@ class ArtifactStore:
         artifact_root: Path,
         *,
         max_artifact_bytes: int = MAX_DISPOSABLE_ARTIFACT_BYTES,
+        confinement_root: Path | None = None,
     ) -> None:
         if not 0 < max_artifact_bytes <= MAX_DISPOSABLE_ARTIFACT_BYTES:
             raise ValueError(
@@ -132,6 +133,9 @@ class ArtifactStore:
         self.root = Path(os.path.abspath(artifact_root.expanduser()))
         self.max_artifact_bytes = max_artifact_bytes
         self._database_path = self.root / _DATABASE_FILENAME
+        self._confinement_root = (
+            Path(os.path.realpath(confinement_root)) if confinement_root is not None else None
+        )
 
     @classmethod
     def for_project(
@@ -141,13 +145,16 @@ class ArtifactStore:
         max_artifact_bytes: int = MAX_DISPOSABLE_ARTIFACT_BYTES,
     ) -> ArtifactStore:
         """Build the RFC-standard store below one project root."""
+        project_root = project_dir.expanduser().resolve()
         return cls(
-            project_dir.expanduser().resolve() / ".ouroboros" / "artifacts",
+            project_root / ".ouroboros" / "artifacts",
             max_artifact_bytes=max_artifact_bytes,
+            confinement_root=project_root,
         )
 
     def initialize(self) -> None:
         """Create the database and its one table idempotently."""
+        self._require_confined()
         self.root.mkdir(parents=True, exist_ok=True)
         try:
             with closing(self._connect_for_write()) as connection, connection:
@@ -525,8 +532,29 @@ class ArtifactStore:
             removed_bytes=removed_bytes,
         )
 
+    def _require_confined(self) -> None:
+        """Refuse a write whose files would resolve outside the project.
+
+        A link on the way -- ``.ouroboros``, ``artifacts`` or the database
+        itself -- that resolves inside the project is followed as usual; one
+        that leaves it is refused before anything is created.  SQLite already
+        refuses to open a linked ``-wal`` or ``-shm``.  This is checked when a
+        write starts, not held through it: a link swapped in between check and
+        open is not covered.
+        """
+        if self._confinement_root is None:
+            return
+        for path in (self.root, self._database_path):
+            if not Path(os.path.realpath(path)).is_relative_to(self._confinement_root):
+                raise ArtifactStoreError(
+                    "Artifact store path resolves outside the project directory",
+                    operation="write",
+                    details={"path": str(path), "project_dir": str(self._confinement_root)},
+                )
+
     def _connect_for_write(self) -> sqlite3.Connection:
         """Open one fresh writer configured for WAL and a busy timeout."""
+        self._require_confined()
         connection = sqlite3.connect(self._database_path)
         try:
             configure_writable_sqlite_connection(connection)
