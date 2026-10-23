@@ -1506,7 +1506,7 @@ def _standard_deliver_facts(
             if dedupe_key in seen:
                 continue
             seen.add(dedupe_key)
-            if eligible and field == "tests_passed" and normalized in (wrapper_receipts or {}):
+            if eligible and field == "tests_passed" and wrapper_receipts is not None:
                 matches = (wrapper_receipts[normalized],)
             elif eligible:
                 matches = _matching_journal_entries(
@@ -9098,7 +9098,6 @@ Respond with either ATOMIC or the structured JSON object only.
                     spec=ac_spec,
                     cwd=cwd,
                 )
-
             typed_evidence, typed_validation, typed_error = self._observe_atomic_typed_evidence(
                 ac_content=ac_content,
                 final_message=final_message,
@@ -9107,11 +9106,10 @@ Respond with either ATOMIC or the structured JSON object only.
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
             )
-            receipt_claimed = bool(
-                typed_evidence is not None and "wrapper_receipts" in typed_evidence.data
-            )
+            typed_data = typed_evidence.data if typed_evidence is not None else {}
+            receipt_claimed = "wrapper_receipts" in typed_data
             verified_wrapper_commands: frozenset[str] = frozenset()
-            if receipt_claimed and typed_evidence is not None:
+            if receipt_claimed:
                 try:
                     receipt_manifest = await load_ac_evidence_manifest(
                         self._event_store,
@@ -9123,13 +9121,14 @@ Respond with either ATOMIC or the structured JSON object only.
                     )
                     receipt_matches = matching_wrapper_receipts(
                         receipt_manifest,
-                        claims=typed_evidence.data["wrapper_receipts"],
+                        claims=typed_data["wrapper_receipts"],
                         execution_id=execution_id,
                         task_cwd=self._task_cwd
                         or getattr(self._adapter, "working_directory", None),
                     )
-                    if receipt_matches is not None:
-                        verified_wrapper_commands = frozenset(receipt_matches)
+                    verified_wrapper_commands = frozenset(
+                        filter(_looks_like_test_command, receipt_matches or ())
+                    )
                 except (OSError, RuntimeError, ValueError):
                     pass
             verifier_verdict = _invoke_execution_authority_entry(
@@ -9148,8 +9147,7 @@ Respond with either ATOMIC or the structured JSON object only.
             )
             if receipt_claimed and (
                 not verified_wrapper_commands
-                or typed_evidence is None
-                or frozenset(_string_evidence_values(typed_evidence.get("tests_passed")))
+                or frozenset(_string_evidence_values(typed_data.get("tests_passed")))
                 != verified_wrapper_commands
             ):
                 verifier_verdict = VerifierVerdict(
