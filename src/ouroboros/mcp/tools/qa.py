@@ -312,7 +312,7 @@ _JSON_FENCE_RE = re.compile(r"(?im)^[ \t>]*(?:`{3,}|~{3,})[ \t]*json\b")
 # so prose brackets such as ``[3 of 3 ACs]`` and ``[2026-10-23]`` stay prose.
 _JSON_OPENER_RE = re.compile(
     r"\{\s*(?:[\"']|[^{}\s:]+\s*:)|\[\s*(?:[\"{\[]|true\b|false\b|null\b|"
-    r"-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?"
+    r"-?\d+(?:\.\d*)?(?:[eE][+-]?\d*)?"
     r"(?=\s*(?:[,\]]|$)|\s+(?:[\"{\[]|-?\d|true\b|false\b|null\b)))"
 )
 
