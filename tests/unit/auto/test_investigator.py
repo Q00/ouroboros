@@ -57,6 +57,7 @@ from ouroboros.auto.investigator import (
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.ledger_seed import (
     ledger_assumptions,
+    ledger_open_questions,
     partial_seed_from_evidence,
     synthesize_seed_from_ledger,
     with_ledger_carryover,
@@ -343,7 +344,7 @@ async def test_found_answer_is_a_confirmed_checked_repo_fact(workspace: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_not_found_renders_only_the_open_question(workspace: Path) -> None:
+async def test_not_found_keeps_only_the_open_question(workspace: Path) -> None:
     investigator, _calls, _ = _investigator(lambda _p: _not_found_reply())
 
     _state, ledger, sent, _ = await _run(workspace, investigator=investigator)
@@ -357,7 +358,8 @@ async def test_not_found_renders_only_the_open_question(workspace: Path) -> None
     assert all(entry.status == LedgerStatus.DEFAULTED for entry in open_entries)
     assert all(entry.question == QUESTION for entry in open_entries)
     lines = ledger_assumptions(ledger)
-    assert f"Open question: {QUESTION}" in lines
+    assert ledger_open_questions(ledger) == (QUESTION,)
+    assert not any(QUESTION in line for line in lines)
     assert not any(NOT_SETTLED_VALUE in line or GUESS in line for line in lines)
     assert not any(GUESS in entry.value for entry in open_entries)
 
@@ -492,7 +494,8 @@ async def test_without_requester_the_interview_closes_at_the_call_cap(workspace:
     seed = synthesize_seed_from_ledger(ledger)
     assert not seed.metadata.degraded
     lines = ledger_assumptions(ledger)
-    assert sum(line.startswith("Open question: ") for line in lines) == 3
+    assert len(ledger_open_questions(ledger)) == 3
+    assert seed.open_questions == ledger_open_questions(ledger)
     assert not any(GUESS in line or NOT_SETTLED_VALUE in line for line in lines)
 
 
@@ -540,7 +543,7 @@ async def test_cap_closure_keeps_found_answers_and_open_questions(workspace: Pat
     assert result.status == "seed_ready" and state.interview_closure_mode == "ledger_only"
     seed = synthesize_seed_from_ledger(ledger)
     assert [fact.answer for fact in seed.repo_facts] == [FOUND_ANSWER]
-    assert any(line.startswith("Open question: ") for line in ledger_assumptions(ledger))
+    assert seed.open_questions
 
 
 @pytest.mark.asyncio
@@ -1311,7 +1314,7 @@ async def test_backend_done_with_only_open_questions_closes_without_requester(
         assert result.status == "seed_ready"
         assert state.interview_closure_mode == "ledger_only"
         assert len(sent) == 1
-        assert f"Open question: {QUESTION}" in ledger_assumptions(ledger)
+        assert ledger_open_questions(ledger) == (QUESTION,)
 
 
 # -- the model declares the question kind; only current behavior can be found --
@@ -1349,7 +1352,7 @@ def test_current_behavior_reply_is_found(workspace: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_intended_behavior_answer_reaches_the_worker_as_an_open_question(
+async def test_intended_behavior_answer_is_kept_as_an_open_question(
     workspace: Path,
 ) -> None:
     """Study shape (django-13925): "should W042 remain?" answered from current
@@ -1363,7 +1366,7 @@ async def test_intended_behavior_answer_reaches_the_worker_as_an_open_question(
     assert sent[0].startswith(f"[from-auto][assumption] {NOT_SETTLED_REPLY}")
     assert "src/cli.py:7-8" in sent[0]
     assert FOUND_ANSWER not in sent[0]
-    assert f"Open question: {QUESTION}" in ledger_assumptions(ledger)
+    assert ledger_open_questions(ledger) == (QUESTION,)
 
 
 def test_prompt_tells_the_investigator_the_code_may_be_the_defect() -> None:
