@@ -190,18 +190,34 @@ def parse_coverage_from_output(output: str) -> float | None:
     import re
 
     # Pattern matches lines like "TOTAL   1234   123  90%"
-    pattern = r"TOTAL\s+\d+\s+\d+\s+(\d+)%"
-    match = re.search(pattern, output)
-    if match:
-        return float(match.group(1)) / 100.0
+    pattern = r"[ \t]*TOTAL[ \t]+\d+[ \t]+\d+[ \t]+(\d+)%[ \t]*"
+    # Alternative pattern: a line that starts with "Coverage: XX%". Anchored so
+    # a requirement such as "Required Coverage: 70%" is not read as a result.
+    alt_pattern = r"[ \t]*Coverage:[ \t]*(\d+(?:\.\d+)?)%[ \t]*"
 
-    # Alternative pattern: "Coverage: XX%"
-    alt_pattern = r"Coverage:\s*(\d+(?:\.\d+)?)%"
-    alt_match = re.search(alt_pattern, output)
-    if alt_match:
-        return float(alt_match.group(1)) / 100.0
-
-    return None
+    # Every TOTAL row is a figure from the report. One in a shape the pattern
+    # cannot read (decimals, branch columns) makes the report ambiguous, so no
+    # other row or "Coverage:" line may stand in for it.
+    total_rows = [row for row in output.splitlines() if re.match(r"[ \t]*TOTAL\b", row)]
+    # A numeric, punctuation-led or empty Coverage body is a measurement candidate,
+    # even with missing/malformed separators, numbers or units. Alphabetic prose
+    # remains nonmeasurement; only alt_pattern can grant a supported reading.
+    candidate_pattern = r"[ \t]*Coverage[ \t]*(?:$|\d|[^\w\s]|(?i:nan|inf(?:inity)?|percent)\b)"
+    coverage_rows = [row for row in output.splitlines() if re.match(candidate_pattern, row)]
+    matches = [re.fullmatch(pattern, row) for row in total_rows]
+    matches += [re.fullmatch(alt_pattern, row) for row in coverage_rows]
+    if not all(matches):
+        return None
+    readings = [match.group(1) for match in matches if match]
+    values = {float(reading) for reading in readings}
+    # More than one distinct figure, or a figure no tool can report, is not a
+    # measurement: return None so the threshold stays undecided.
+    if len(values) != 1:
+        return None
+    (value,) = values
+    if value > 100.0:
+        return None
+    return value / 100.0
 
 
 class MechanicalVerifier:
@@ -370,6 +386,21 @@ class MechanicalVerifier:
         # Extract coverage if this was a coverage check
         if check_type == CheckType.COVERAGE and passed:
             coverage = parse_coverage_from_output(cmd_result.stdout)
+            if coverage is None and self.config.coverage_threshold != 0.0:
+                # The exit code says the command ran, not that coverage met the
+                # threshold. Without a figure the threshold is undecided: not a
+                # pass, and not an executed failure that would claim a measurement.
+                return CheckResult(
+                    check_type=check_type,
+                    passed=False,
+                    message=(
+                        "Coverage command exited 0 but no coverage figure could be read "
+                        f"from its output; threshold {self.config.coverage_threshold:.1%} "
+                        "not verified"
+                    ),
+                    details={**details, "coverage_unparsed": True},
+                    executed=False,
+                )
             if coverage is not None:
                 details["coverage_score"] = coverage
 

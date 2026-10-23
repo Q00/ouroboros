@@ -2661,7 +2661,10 @@ async def test_settlement_replay_mutation_invalidates_every_provisional_success(
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_restores_verify_evidence_and_result_retry_identity(tmp_path: Any) -> None:
+@pytest.mark.parametrize("change", [None, "command", "artifact", "assertion", "goal", "legacy"])
+async def test_checkpoint_restores_verify_evidence_and_result_retry_identity(
+    tmp_path: Any, change: str | None
+) -> None:
     from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 
     seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command="exit 0"))
@@ -2702,13 +2705,27 @@ async def test_checkpoint_restores_verify_evidence_and_result_retry_identity(tmp
     assert checkpoint.state["verify_gate_outcomes"]["0"]["workspace_digest"] == (
         gate.workspace_digest
     )
+    if change == "legacy":
+        checkpoint.state.pop("contract_fingerprint", None)
+    elif change == "goal":
+        seed = seed.model_copy(update={"goal": "different required behavior"})
+    elif change is not None:
+        updates = {
+            "command": {"verify_command": "exit 7"},
+            "artifact": {"expected_artifacts": ("missing.txt",)},
+            "assertion": {"output_assertion": "missing output"},
+        }
+        spec = seed.acceptance_criteria[0].model_copy(update=updates[change])
+        seed = seed.model_copy(update={"acceptance_criteria": (spec,)})
 
     restore_store = MagicMock()
     restore_store.load.return_value = type("LoadResult", (), {"is_ok": True, "value": checkpoint})()
     restore_store.save.return_value = type("SaveResult", (), {"is_ok": True})()
     restored = _make_executor(working_directory=str(tmp_path))
     restored._checkpoint_store = restore_store
-    restored._execute_ac_batch = AsyncMock()
+    restored._execute_ac_batch = AsyncMock(
+        return_value=[ACExecutionResult(ac_index=0, ac_content="ac", success=False)]
+    )
 
     recovered = await restored.execute_parallel(
         seed=seed,
@@ -2720,10 +2737,14 @@ async def test_checkpoint_restores_verify_evidence_and_result_retry_identity(tmp
         system_prompt="system",
     )
 
-    assert recovered.results[0].success is True
-    assert recovered.results[0].retry_attempt == 3
-    assert isinstance(recovered.results[0].verify_gate_outcome, _VerifyGateOutcome)
-    restored._execute_ac_batch.assert_not_awaited()
+    if change is None:
+        assert recovered.results[0].success is True
+        assert recovered.results[0].retry_attempt == 3
+        assert isinstance(recovered.results[0].verify_gate_outcome, _VerifyGateOutcome)
+        restored._execute_ac_batch.assert_not_awaited()
+    else:
+        assert recovered.results[0].success is False
+        restored._execute_ac_batch.assert_awaited_once()
 
 
 def test_workspace_digest_includes_empty_directories(tmp_path: Any) -> None:
