@@ -206,6 +206,13 @@ def failure_class_for_result(result: ACExecutionResult) -> str | None:
     return None
 
 
+def _has_terminal_hermes_configuration_error(result: ACExecutionResult) -> bool:
+    for message in reversed(result.messages):
+        if message.is_final:
+            return message.is_error and message.data.get("error_type") == "HermesConfigurationError"
+    return False
+
+
 def is_retryable_failure(result: ACExecutionResult | BaseException) -> bool:
     """Return whether a batch result is a runnable non-stall AC failure."""
 
@@ -215,6 +222,7 @@ def is_retryable_failure(result: ACExecutionResult | BaseException) -> bool:
         and not result.is_blocked
         and not result.is_invalid
         and result.error != _STALL_SENTINEL
+        and not _has_terminal_hermes_configuration_error(result)
     )
 
 

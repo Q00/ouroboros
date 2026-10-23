@@ -529,18 +529,22 @@ class InputValidator:
         path_traversal_patterns = ["../", "..\\"]
         shell_metacharacters = [";", "|", "&&", "||"]
 
-        def _collect_strings(obj: Any, prefix: str = "") -> list[tuple[str, str]]:
+        def _collect_strings(
+            obj: Any,
+            prefix: str = "",
+            path: tuple[str | int, ...] = (),
+        ) -> list[tuple[str, str, tuple[str | int, ...]]]:
             """Recursively collect all string values with their key paths."""
-            pairs: list[tuple[str, str]] = []
+            pairs: list[tuple[str, str, tuple[str | int, ...]]] = []
             if isinstance(obj, str):
-                pairs.append((prefix, obj))
+                pairs.append((prefix, obj, path))
             elif isinstance(obj, dict):
                 for k, v in obj.items():
                     child_key = f"{prefix}.{k}" if prefix else k
-                    pairs.extend(_collect_strings(v, child_key))
+                    pairs.extend(_collect_strings(v, child_key, (*path, str(k))))
             elif isinstance(obj, (list, tuple)):
                 for i, v in enumerate(obj):
-                    pairs.extend(_collect_strings(v, f"{prefix}[{i}]"))
+                    pairs.extend(_collect_strings(v, f"{prefix}[{i}]", (*path, i)))
             return pairs
 
         def _is_freetext(key: str) -> bool:
@@ -558,7 +562,25 @@ class InputValidator:
                 )
             )
 
-        for key, value in _collect_strings(arguments):
+        def _is_tool_prose(path: tuple[str | int, ...]) -> bool:
+            """Exempt only the two tools' prose leaves, not their containers.
+
+            These values become lateral prompts or reference context. Structured
+            paths distinguish list indices from lookalike dictionary keys while
+            keeping reference IDs, URLs, and other siblings subject to scanning.
+            """
+            if tool_name == "ouroboros_lateral_think":
+                return len(path) == 2 and path[0] == "failed_attempts" and isinstance(path[1], int)
+            if tool_name == "ouroboros_interview":
+                return (
+                    len(path) == 3
+                    and path[0] == "references"
+                    and isinstance(path[1], int)
+                    and path[2] == "excerpt"
+                )
+            return False
+
+        for key, value, path in _collect_strings(arguments):
             # The lexical scan below asks whether a value could be executed or
             # could steer something that executes. For a freetext field the
             # answer is no by construction: it is recorded and rendered back to
@@ -585,7 +607,7 @@ class InputValidator:
             # its own contract instead — a pattern on the schema, checked at
             # re-entry, where a value that must be structured can be required to
             # be structured.
-            if _is_freetext(key):
+            if _is_freetext(key) or _is_tool_prose(path):
                 continue
             for pattern in dangerous_patterns:
                 if pattern in value:
