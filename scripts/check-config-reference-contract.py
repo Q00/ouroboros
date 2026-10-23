@@ -1691,7 +1691,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         for target in unresolved:
             scoped = self._bound_call_arguments(call, target.function)
             if target.kind == "cyclic import":
-                if self._source_index.syntactic_config_reader(target.function) and any(
+                if self._has_transitive_callable_relevance(target.function) and any(
                     _contained_origins(value) & (TRACKED_SECTIONS | {_CONFIG_ROOT})
                     for value in scoped.values()
                 ):
