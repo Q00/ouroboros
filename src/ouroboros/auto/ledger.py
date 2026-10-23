@@ -94,6 +94,10 @@ REQUESTER_KEY_SUFFIX = ".requester"
 # settles its section but reaches the worker only as ``Seed.repo_facts``.
 REPO_FACT_KEY_INFIX = ".repo_fact."
 
+# Key of the ledger entry holding the user's request verbatim, written once by
+# ``SeedDraftLedger.from_goal``. It is the goal the worker sees (``Seed.sourced_scope``).
+USER_GOAL_KEY = "goal.primary"
+
 
 REQUIRED_SECTIONS = (
     "goal",
@@ -214,13 +218,15 @@ class LedgerEntry:
     provenance: DecisionProvenance | str | None = None
     # The interviewer's question this entry answers, when it came from one.
     # Empty for entries no interview question produced (templated fills,
-    # gap reopening, legacy sessions). An entry that does not bind is shown
-    # to the worker as this open question, never as its drafted value.
+    # gap reopening, legacy sessions). An entry that does not bind is kept as
+    # this open question (``Seed.open_questions``), never as its drafted value,
+    # and neither reaches the worker.
     question: str = ""
     # True for auto's draft kept because the requester was asked this question
     # and gave no answer (``auto/requester.py``). The requester already said the
     # issue does not settle it, so the worker sees neither the draft nor the
-    # question. Omitted from ``to_dict`` when False.
+    # question; the question is kept in ``Seed.open_questions``. Omitted from
+    # ``to_dict`` when False.
     requester_unanswered: bool = False
 
     def __post_init__(self) -> None:
@@ -440,7 +446,7 @@ class SeedDraftLedger:
         ledger.add_entry(
             "goal",
             LedgerEntry(
-                key="goal.primary",
+                key=USER_GOAL_KEY,
                 value=clean_goal,
                 source=LedgerSource.USER_GOAL,
                 confidence=0.95 if clean_goal else 0.0,
