@@ -319,7 +319,7 @@ Values above `4` remain executable on the legacy path, but cannot authorize
 Routing D route switching or its crash-resumable parallel owner. Reducing the
 value to `4` or less opts a fresh run into that stronger durable boundary.
 
-Malformed wrapper receipts remain rejected. A current-attempt Bash start/completion pair for the exact trusted wrapper and inner command changes the rejection to `EVIDENCE_FORM_MISMATCH` with guidance to retry using a contract-compliant receipt; a failed command also counts as related work, and classification grants no artifact authority. Missing or untrusted runtime support retains `FABRICATION_SUSPECTED`.
+Malformed wrapper receipts remain rejected. A current-attempt Bash start/completion pair for the exact trusted wrapper and inner command changes the rejection to `EVIDENCE_FORM_MISMATCH` with guidance to retry using a contract-compliant receipt; a failed command also counts as related work, and classification grants no artifact authority. Missing or untrusted runtime support retains `FABRICATION_SUSPECTED`. The trusted runner opens all three output parent chains before the inner command starts, then publishes exclusively through held no-follow directory capabilities with inode and parent postvalidation. Its isolated bootstrap freezes the directory helper together with the runner; the task cannot supply that helper. The inner command keeps its existing execution contract.
 
 For the current recursive execution flow, see [parallel_executor.py](../src/ouroboros/orchestrator/parallel_executor.py) and [runner.py](../src/ouroboros/orchestrator/runner.py).
 

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import base64
 from collections.abc import Mapping
 import json
 from pathlib import Path
 import shlex
 import sys
+import zlib
 
+from ouroboros.core import filesystem_capability
 from ouroboros.harness import wrapper_runner
 from ouroboros.harness.deliver_gate import (
     _is_canonical_command_artifact_path,
@@ -30,7 +33,16 @@ _RECEIPT_KEYS = frozenset(
 _CLAIM_KEYS = frozenset({"receipt_path", "outer_command", "inner_command"})
 _MAX_RECEIPT_BYTES = 16384
 _RUNNER_SOURCE = Path(wrapper_runner.__file__).read_text(encoding="utf-8")
-_RUNNER_PROGRAM = f"exec({_RUNNER_SOURCE!r})"
+_CAPABILITY_SOURCE = Path(filesystem_capability.__file__).read_text(encoding="utf-8")
+_FROZEN_CAPABILITY = base64.b64encode(zlib.compress(_CAPABILITY_SOURCE.encode("utf-8"))).decode(
+    "ascii"
+)
+_RUNNER_PROGRAM = (
+    "import base64,zlib;"
+    f"exec(zlib.decompress(base64.b64decode({_FROZEN_CAPABILITY!r})));"
+    "_WRAPPER_DIRECTORY_OPENER=open_nofollow_directory_chain;"
+    f"exec({_RUNNER_SOURCE!r})"
+)
 
 
 def trusted_wrapper_invocation(
