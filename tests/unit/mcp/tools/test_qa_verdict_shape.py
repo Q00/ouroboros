@@ -249,6 +249,9 @@ _COMPETING_MALFORMED: dict[str, str] = {
         '{"score": 0.1, "verdict": "fail",}\n{"score": 0.95, "verdict": "pass"}'
     ),
     "valid-pass-then-malformed-array": ('{"score":0.95,"verdict":"pass"}\nCorrection: ["fail",]'),
+    "numeric-array": ('[1, 2]\n{"score": 0.95, "verdict": "pass"}'),
+    "numeric-array-missing-comma": ('[1 2]\n{"score": 0.95, "verdict": "pass"}'),
+    "numeric-string-array-missing-comma": ('[0.1 "fail"]\n{"score": 0.95, "verdict": "pass"}'),
     "malformed-array-then-valid-pass": ('[0.1, "fail",]\n{"score": 0.95, "verdict": "pass"}'),
 }
 
@@ -272,8 +275,15 @@ async def test_fenced_array_is_a_parse_error() -> None:
     assert "must be an object" in str(result.error)
 
 
-async def test_prose_brackets_beside_single_object_still_parse() -> None:
-    body = 'All ACs met [see AC 2].\n{"score": 0.9, "verdict": "pass", "reasoning": "ok"}'
+@pytest.mark.parametrize(
+    "prose", ["All ACs met [see AC 2].", "All 3 ACs met [3 of 3 ACs].", "Reviewed [2026-10-23]."]
+)
+@pytest.mark.parametrize("prose_first", [False, True])
+async def test_prose_brackets_beside_single_object_still_parse(
+    prose: str, prose_first: bool
+) -> None:
+    answer = '{"score": 0.9, "verdict": "pass", "reasoning": "ok"}'
+    body = f"{prose}\n{answer}" if prose_first else f"{answer}\n{prose}"
 
     result = await _handler(body).handle(dict(_ARGS))
 
