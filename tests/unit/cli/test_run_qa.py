@@ -16,6 +16,7 @@ from ouroboros.cli.commands.run import (
     _resolve_fat_harness_mode,
     _resolve_max_decomposition_depth,
     _resolve_max_parallel_workers,
+    _resolve_resume_checkpoint_store_enabled,
     _resolve_resume_fat_harness_mode,
     _run_orchestrator,
 )
@@ -412,6 +413,24 @@ def test_resolve_resume_fat_harness_mode_migrates_missing_contract_to_default_ru
     assert _resolve_resume_fat_harness_mode(legacy_seed, {}) is False
 
 
+@pytest.mark.parametrize(
+    ("persisted", "expected"),
+    [(False, False), (True, True), (0, True), ("false", True), (None, True)],
+)
+def test_resume_checkpoint_mode_only_accepts_a_persisted_boolean(
+    persisted: object, expected: bool
+) -> None:
+    progress = {
+        "execution_contract": {"execution_semantics": {"checkpoint_store_enabled": persisted}}
+    }
+
+    assert _resolve_resume_checkpoint_store_enabled(progress) is expected
+
+
+def test_resume_without_a_contract_keeps_default_mode_for_runner_validation() -> None:
+    assert _resolve_resume_checkpoint_store_enabled({}) is True
+
+
 def test_resolve_max_decomposition_depth_defaults_to_two(monkeypatch: pytest.MonkeyPatch) -> None:
     """The workflow depth cap should default to 2 when nothing overrides it."""
     monkeypatch.delenv("OUROBOROS_MAX_DECOMPOSITION_DEPTH", raising=False)
@@ -738,6 +757,9 @@ async def test_run_orchestrator_resume_uses_persisted_fat_harness_contract(
         "test-seed-cli-qa",  # VALID_SEED_DATA's seed_id
         session_id="sess-resume",
     )
+    tracker.progress["execution_contract"] = {
+        "execution_semantics": {"checkpoint_store_enabled": False}
+    }
     fake_exec = SimpleNamespace(
         success=True,
         session_id="sess-resume",
@@ -770,6 +792,7 @@ async def test_run_orchestrator_resume_uses_persisted_fat_harness_contract(
         await _run_orchestrator(seed_file, resume_session="sess-resume", no_qa=True)
 
     assert mock_runner_cls.call_args.kwargs["fat_harness_mode"] is False
+    assert mock_runner_cls.call_args.kwargs["checkpoint_store"] is None
     mock_runner.resume_session.assert_awaited_once()
 
 

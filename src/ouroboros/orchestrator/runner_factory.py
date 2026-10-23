@@ -38,6 +38,7 @@ def build_orchestrator_runner(
     inherited_runtime_handle: RuntimeHandle | None,
     inherited_tools: list[str] | None,
     session_signal_hub: SessionSignalHub | None,
+    checkpoint_store_enabled: bool = True,
 ) -> OrchestratorRunner:
     """Use common store and defaults while retaining named entry-specific inputs.
 
@@ -45,8 +46,10 @@ def build_orchestrator_runner(
     A missing depth or worker limit always has the same meaning, independent
     of which entry point starts the run.
     """
-    checkpoint_store = CheckpointStore()
-    checkpoint_store.initialize()
+    checkpoint_store = None
+    if checkpoint_store_enabled:
+        checkpoint_store = CheckpointStore()
+        checkpoint_store.initialize()
     return OrchestratorRunner(
         adapter=adapter,
         event_store=event_store,

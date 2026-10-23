@@ -5,6 +5,7 @@ Supports both standard workflow execution and agent-runtime orchestrator mode.
 """
 
 import asyncio
+from collections.abc import Mapping
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
@@ -531,6 +532,18 @@ def _resolve_resume_fat_harness_mode(
     )
 
 
+def _resolve_resume_checkpoint_store_enabled(progress: Mapping[str, Any]) -> bool:
+    """Carry a persisted checkpoint mode into runner assembly on resume.
+
+    Only an actual boolean can select the old no-store mode. The runner still
+    validates the full durable contract and its proof before resuming.
+    """
+    contract = progress.get("execution_contract")
+    semantics = contract.get("execution_semantics") if isinstance(contract, Mapping) else None
+    mode = semantics.get("checkpoint_store_enabled") if isinstance(semantics, Mapping) else None
+    return mode if type(mode) is bool else True
+
+
 def _resolve_max_parallel_workers() -> int:
     """Resolve the parallel worker cap from environment, config, then default."""
     env_value = os.environ.get("OUROBOROS_MAX_PARALLEL_WORKERS", "").strip()
@@ -805,6 +818,7 @@ async def _run_orchestrator(
     workspace: TaskWorkspace | None = None
     execution_id: str | None = None
     session_id_for_run: str | None = None
+    checkpoint_store_enabled = True
 
     try:
         if resume_session:
@@ -825,6 +839,9 @@ async def _run_orchestrator(
             resolved_fat_harness_mode = _resolve_resume_fat_harness_mode(
                 seed_data,
                 reconstructed.value.progress,
+            )
+            checkpoint_store_enabled = _resolve_resume_checkpoint_store_enabled(
+                reconstructed.value.progress
             )
         else:
             session_id_for_run = f"orch_{uuid4().hex[:12]}"
@@ -887,6 +904,7 @@ async def _run_orchestrator(
         inherited_runtime_handle=None,
         inherited_tools=None,
         session_signal_hub=None,
+        checkpoint_store_enabled=checkpoint_store_enabled,
     )
 
     # The URL is emitted before execution starts so it can be opened while the
