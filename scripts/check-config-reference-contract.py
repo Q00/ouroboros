@@ -815,6 +815,8 @@ class _SourceIndex:
         self._data_states: dict[str, dict[str, _AbstractValue]] = {}
         self._data_states_in_progress: set[str] = set()
         self.observed_call_arguments: dict[int, dict[str, _AbstractValue]] = {}
+        self._syntax_nodes: dict[int, tuple[ast.AST, ...]] = {}
+        self._syntactic_config_readers: dict[int, bool] = {}
         for path, tree in trees.items():
             relative = path.relative_to(source_root).with_suffix("")
             parts = list(relative.parts)
@@ -850,6 +852,25 @@ class _SourceIndex:
             self._index_exports(indexed)
         for indexed in self._paths.values():
             self._index_class_bases(indexed)
+
+    def syntax_nodes(self, node: ast.AST) -> tuple[ast.AST, ...]:
+        """Cache immutable AST structure without caching binding-dependent facts."""
+        key = id(node)
+        if key not in self._syntax_nodes:
+            self._syntax_nodes[key] = tuple(ast.walk(node))
+        return self._syntax_nodes[key]
+
+    def syntactic_config_reader(self, node: _FunctionNode) -> bool:
+        key = id(node)
+        if key not in self._syntactic_config_readers:
+            self._syntactic_config_readers[key] = any(
+                isinstance(candidate, ast.Name)
+                and _looks_like_config_name(candidate.id)
+                or isinstance(candidate, ast.Attribute)
+                and candidate.attr in TRACKED_SECTIONS
+                for candidate in self.syntax_nodes(node)
+            )
+        return self._syntactic_config_readers[key]
 
     @staticmethod
     def _assigned_names(target: ast.AST) -> frozenset[str]:
@@ -1246,9 +1267,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             section: frozenset(field.name for field in self._fields if field.section == section)
             for section in TRACKED_SECTIONS
         }
+        nodes = self._source_index.syntax_nodes(node)
         scoped_by_function = {
             id(function): self._scoped_function_arguments(function, include_calls=False)
-            for function in ast.walk(node)
+            for function in nodes
             if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
         }
 
@@ -1264,11 +1286,11 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return frozenset({expression.attr})
             return frozenset()
 
-        for function in ast.walk(node):
+        for function in nodes:
             if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
                 continue
             scoped = scoped_by_function[id(function)]
-            for candidate in ast.walk(function):
+            for candidate in self._source_index.syntax_nodes(function):
                 if not isinstance(candidate, ast.Attribute):
                     continue
                 owner_origins = expression_origins(candidate.value, scoped)
@@ -1338,7 +1360,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return True
 
             containing_class = candidate if isinstance(candidate, ast.ClassDef) else root_class
-            for child in ast.walk(candidate):
+            for child in self._source_index.syntax_nodes(candidate):
                 if not isinstance(child, ast.Call):
                     continue
                 pending.extend(
@@ -2714,25 +2736,26 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _origin_value(*model_copy_sections)
             values: list[_AbstractValue] = []
             for function, bound_receiver in self._call_targets(node.func):
-                syntactic_config_reader = any(
-                    isinstance(candidate, ast.Name)
-                    and _looks_like_config_name(candidate.id)
-                    or isinstance(candidate, ast.Attribute)
-                    and candidate.attr in TRACKED_SECTIONS
-                    for candidate in ast.walk(function)
-                )
-                self._record_call_arguments(
-                    function, self._bound_call_arguments(node, function, bound_receiver)
-                )
+                syntactic_config_reader = self._source_index.syntactic_config_reader(function)
+                scoped = self._bound_call_arguments(node, function, bound_receiver)
+                self._record_call_arguments(function, scoped)
                 if (
                     syntactic_config_reader
                     or self._call_has_relevant_provenance(node, function, bound_receiver)
                     or self._has_transitive_callable_relevance(function)
                 ):
-                    values.append(self._local_call_value(node, function, bound_receiver))
+                    values.append(
+                        self._local_call_value(
+                            node, function, bound_receiver, bound_arguments=scoped
+                        )
+                    )
                     continue
                 if self._function_is_syntactically_nonreturning(function):
-                    values.append(self._local_call_value(node, function, bound_receiver))
+                    values.append(
+                        self._local_call_value(
+                            node, function, bound_receiver, bound_arguments=scoped
+                        )
+                    )
             if values:
                 value = _join_values(*values)
                 self._expression_cache[id(node)] = value
@@ -5566,9 +5589,13 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         call: ast.Call,
         function: _FunctionNode,
         bound_receiver: _AbstractValue | None = None,
+        *,
+        bound_arguments: dict[str, _AbstractValue] | None = None,
     ) -> _AbstractValue:
-        scoped = self._bound_call_arguments(call, function, bound_receiver)
-        self._record_call_arguments(function, scoped)
+        scoped = bound_arguments
+        if scoped is None:
+            scoped = self._bound_call_arguments(call, function, bound_receiver)
+            self._record_call_arguments(function, scoped)
         if _is_generator_function(function):
             self._deferred_generators[id(call)] = _DeferredGenerator(function, scoped)
             return _AbstractValue(identity=frozenset({id(call)}))
