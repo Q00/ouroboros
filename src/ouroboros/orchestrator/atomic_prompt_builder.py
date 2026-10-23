@@ -27,7 +27,11 @@ from ouroboros.orchestrator.evidence.ac_classification import (
     _is_validation_only_ac,
 )
 from ouroboros.orchestrator.level_context import LevelContext, build_context_prompt
-from ouroboros.orchestrator.profile_strategy import COMPLETION_CHECK
+from ouroboros.orchestrator.profile_strategy import (
+    CURRENT_AC_REQUIREMENTS,
+    WHOLE_REQUEST_REQUIREMENTS,
+    render_completion_check,
+)
 from ouroboros.orchestrator.shared_attempt import shares_one_attempt, sourced_criteria_aligned
 
 if TYPE_CHECKING:
@@ -338,6 +342,9 @@ class AtomicPromptBuilder:
                 if has_sibling_criteria
                 else ""
             )
+            completion_check = render_completion_check(
+                CURRENT_AC_REQUIREMENTS if has_sibling_criteria else WHOLE_REQUEST_REQUIREMENTS
+            )
             completion_instruction = (
                 "## Current AC Scope Contract\n"
                 f"{sibling_scope_note}"
@@ -359,7 +366,7 @@ class AtomicPromptBuilder:
                 f"{doc_only_note}{validation_only_note}\n"
                 "Use the available tools to accomplish this task. Report progress through "
                 "tool-visible work, not a prose-only completion claim.\n"
-                f"{COMPLETION_CHECK}\n"
+                f"{completion_check}\n"
                 "When complete, emit exactly ONE fenced JSON evidence record as the "
                 "final response. Populate the active profile fields "
                 f"directly ({required_fields}); do not emit a generic command_result "

@@ -123,20 +123,37 @@ _DEFAULT_GUIDANCE_TEMPLATE: str = (
     "thoroughly and surface blockers explicitly."
 )
 
-# Completion check the worker runs before it emits the evidence record. It is
-# shared by the system-prompt POST contract below and the atomic leaf prompt
-# (``atomic_prompt_builder``) so both stop rules ask for the same check.
-COMPLETION_CHECK: str = (
-    "Completion check (before the evidence record):\n"
-    "1. Restate each explicit requirement of the goal and of the binding "
-    "acceptance criteria you are responsible for.\n"
-    "2. For each requirement, identify concrete evidence at the requirement's "
-    "full scope (the general behavior it describes, not one narrow instance), "
-    "and run or inspect that evidence in this session.\n"
-    "3. If the evidence for any requirement is missing, indirect, or narrower "
-    "than the requirement, keep working on it and repeat this check.\n"
-    "Emit the evidence record only after every requirement passes this check."
+# Completion check the worker runs before it emits the evidence record. The
+# system-prompt POST contract below and the atomic leaf prompt
+# (``atomic_prompt_builder``) render it with the requirements the dispatch owns,
+# so a criterion-owned leaf never verifies a sibling criterion's work.
+WHOLE_REQUEST_REQUIREMENTS = "the goal and of the binding acceptance criteria"
+CURRENT_AC_REQUIREMENTS = (
+    "the current acceptance criterion (the goal only as far as this criterion "
+    "covers it; work that belongs to sibling criteria is not yours)"
 )
+DISPATCH_REQUIREMENTS = (
+    "the work this dispatch owns: the goal and the binding acceptance criteria "
+    "when the task is the whole request, otherwise only the current acceptance "
+    "criterion"
+)
+
+
+def render_completion_check(requirements: str) -> str:
+    """Render the completion check for the requirements a dispatch owns."""
+    return (
+        "Completion check (before the evidence record):\n"
+        f"1. Restate each explicit requirement of {requirements}.\n"
+        "2. For each requirement, identify concrete evidence at the requirement's "
+        "full scope (the general behavior it describes, not one narrow instance), "
+        "and run or inspect that evidence in this session.\n"
+        "3. If the evidence for any requirement is missing, indirect, or narrower "
+        "than the requirement, keep working on it and repeat this check.\n"
+        "Emit the evidence record only after every requirement passes this check."
+    )
+
+
+COMPLETION_CHECK: str = render_completion_check(DISPATCH_REQUIREMENTS)
 
 
 @dataclass(frozen=True)
@@ -295,5 +312,8 @@ class ProfileBackedStrategy:
 
 __all__ = [
     "COMPLETION_CHECK",
+    "CURRENT_AC_REQUIREMENTS",
+    "WHOLE_REQUEST_REQUIREMENTS",
     "ProfileBackedStrategy",
+    "render_completion_check",
 ]

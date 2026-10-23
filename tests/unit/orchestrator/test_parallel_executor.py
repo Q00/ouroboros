@@ -106,7 +106,11 @@ from ouroboros.orchestrator.parallel_executor import (
     render_parallel_verification_report,
 )
 from ouroboros.orchestrator.profile_loader import EvidenceSchema, load_profile
-from ouroboros.orchestrator.profile_strategy import COMPLETION_CHECK
+from ouroboros.orchestrator.profile_strategy import (
+    CURRENT_AC_REQUIREMENTS,
+    WHOLE_REQUEST_REQUIREMENTS,
+    render_completion_check,
+)
 from ouroboros.orchestrator.recoverable_failure import UsageLimitPauseConsequence
 from ouroboros.orchestrator.verifier import VerifierStatus, VerifierVerdict
 from ouroboros.persistence.checkpoint import CheckpointStore
@@ -8190,8 +8194,9 @@ class TestParallelACExecutor:
         )
         assert "Do not implement, test, document, or pre-create work" not in runtime.last_prompt
         assert "sibling or future ACs" not in runtime.last_prompt
-        assert COMPLETION_CHECK in runtime.last_prompt
-        assert runtime.last_prompt.index(COMPLETION_CHECK) < runtime.last_prompt.index(
+        whole_request_check = render_completion_check(WHOLE_REQUEST_REQUIREMENTS)
+        assert whole_request_check in runtime.last_prompt
+        assert runtime.last_prompt.index(whole_request_check) < runtime.last_prompt.index(
             "emit exactly ONE fenced JSON evidence record"
         )
         assert "Use Glob" not in runtime.last_prompt
@@ -8219,6 +8224,7 @@ class TestParallelACExecutor:
         *,
         criteria: tuple[str, ...],
         scope: SourcedScope | None = None,
+        seed_goal: str = "Ship the feature",
     ) -> str:
         """Return the atomic prompt for AC 1 with the run's criteria installed."""
         event_store, _ = _make_replaying_event_store()
@@ -8244,7 +8250,7 @@ class TestParallelACExecutor:
             tools=["Read", "Edit", "Bash"],
             tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
             system_prompt="system",
-            seed_goal="Ship the feature",
+            seed_goal=seed_goal,
             depth=0,
             start_time=datetime.now(UTC),
         )
@@ -8262,8 +8268,21 @@ class TestParallelACExecutor:
         assert "sibling or future ACs" in multi
         assert sentence not in single
         assert "sibling or future ACs" not in single
-        assert COMPLETION_CHECK in multi
-        assert COMPLETION_CHECK in single
+        assert render_completion_check(CURRENT_AC_REQUIREMENTS) in multi
+        assert render_completion_check(WHOLE_REQUEST_REQUIREMENTS) in single
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_completion_check_stays_in_the_leaf_scope(self) -> None:
+        """A criterion-owned leaf never verifies the requirement a sibling owns."""
+        prompt = await self._fat_harness_scope_prompt(
+            criteria=("Implement A", "Implement B"),
+            seed_goal="Implement A and B",
+        )
+
+        assert "sibling or future ACs" in prompt
+        assert render_completion_check(CURRENT_AC_REQUIREMENTS) in prompt
+        assert render_completion_check(WHOLE_REQUEST_REQUIREMENTS) not in prompt
+        assert "Restate each explicit requirement of the goal" not in prompt
 
     @pytest.mark.asyncio
     async def test_fat_harness_prompt_omits_sibling_scope_for_sourced_objective(self) -> None:
@@ -8275,7 +8294,7 @@ class TestParallelACExecutor:
 
         assert "You are responsible only for the current acceptance criterion" not in prompt
         assert "sibling or future ACs" not in prompt
-        assert COMPLETION_CHECK in prompt
+        assert render_completion_check(WHOLE_REQUEST_REQUIREMENTS) in prompt
 
     @pytest.mark.asyncio
     async def test_fat_harness_docs_only_ac_uses_docs_evidence_contract(self, tmp_path) -> None:
