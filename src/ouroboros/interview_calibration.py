@@ -18,8 +18,8 @@ class InterviewCalibration(BaseModel):
     evidence: str = Field(min_length=1, max_length=2000)
     unknown_terms: tuple[str, ...] = Field(default_factory=tuple, max_length=12)
 
-    def prompt_guidance(self) -> str:
-        """Return compact instructions suitable for the question-generation prompt."""
+    def wording_guidance(self) -> str:
+        """Return the selected wording rule for both prompts and user notices."""
         if self.level == "foundational":
             wording = (
                 "Use plain language, define necessary domain terms before using them, "
@@ -32,6 +32,11 @@ class InterviewCalibration(BaseModel):
             )
         else:
             wording = "Use concise, precise domain terminology and skip basic definitions."
+        return wording
+
+    def prompt_guidance(self) -> str:
+        """Return compact instructions suitable for the question-generation prompt."""
+        wording = self.wording_guidance()
         unknown = ", ".join(self.unknown_terms) or "none explicitly extracted"
         return (
             "Session-local interview language calibration (do not reduce rigor):\n"
@@ -39,6 +44,23 @@ class InterviewCalibration(BaseModel):
             f"- Explicitly unfamiliar terms: {unknown}\n"
             f"- Wording rule: {wording}"
         )
+
+
+def _has_affirmative_marker(evidence: str, marker: str) -> bool:
+    """Ignore a positive marker directly governed by a short English negation.
+
+    This is a bounded check of the existing lexical evidence, not a general
+    language parser. A later clause can still contain affirmative evidence.
+    """
+    for match in re.finditer(re.escape(marker), evidence):
+        prefix = re.split(r"[.!?;,:]|\b(?:but|however|yet)\b", evidence[: match.start()])[-1]
+        if not re.search(
+            r"\b(?:not|no|never|cannot|can't|don't|doesn't|didn't|haven't|hasn't|"
+            r"hadn't|isn't|aren't|wasn't|weren't|couldn't)(?:\s+\w+){0,3}\s*$",
+            prefix,
+        ):
+            return True
+    return False
 
 
 def infer_interview_calibration(evidence: str) -> InterviewCalibration:
@@ -51,6 +73,7 @@ def infer_interview_calibration(evidence: str) -> InterviewCalibration:
         "not familiar",
         "unfamiliar",
         "cannot explain",
+        "can not explain",
         "can't explain",
         "잘 모르",
         "모르겠",
@@ -69,8 +92,8 @@ def infer_interview_calibration(evidence: str) -> InterviewCalibration:
     fluent_markers = ("expert", "deeply", "teach", "전문", "깊이", "설명할 수")
 
     has_unknown = any(marker in lowered for marker in unknown_markers)
-    has_working = any(marker in lowered for marker in working_markers)
-    has_fluent = any(marker in lowered for marker in fluent_markers)
+    has_working = any(_has_affirmative_marker(lowered, marker) for marker in working_markers)
+    has_fluent = any(_has_affirmative_marker(lowered, marker) for marker in fluent_markers)
     # The idk command itself supplies the unknown marker for a bare term/list.
     # Keep self-reported prose out of this shorthand path.
     bare_terms = (

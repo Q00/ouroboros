@@ -87,7 +87,7 @@ async def handle_interview_calibration_turn(
         f"- Level: {calibration.level.title()} (confidence: {calibration.confidence})",
         f"- Evidence: {calibration.evidence}",
         f"- Unknown terms to define before use: {unknown_terms}",
-        "- Adaptation: define terms first and add at most one neutral example.",
+        f"- Adaptation: {calibration.wording_guidance()}",
     ]
     if pending_question is not None:
         if rephrased_question is not None:
