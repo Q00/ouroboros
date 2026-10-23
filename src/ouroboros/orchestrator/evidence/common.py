@@ -11,9 +11,19 @@ _MAX_LEAF_RESULT_CHARS = 1200
 _ATTEMPT_JUDGED_EVENT = "execution.ac.attempt_judged"
 _HISTORICAL_ATTEMPT_JUDGED_EVENT = "execution.ac.outcome_finalized"
 _ATTEMPT_OUTCOMES = frozenset(
-    {"succeeded", "satisfied_externally", "failed", "blocked", "invalid", "cancelled"}
+    {
+        "succeeded",
+        "satisfied_externally",
+        "settled_from_shared_attempt",
+        "failed",
+        "blocked",
+        "invalid",
+        "cancelled",
+    }
 )
-_SUCCESSFUL_ATTEMPT_OUTCOMES = frozenset({"succeeded", "satisfied_externally"})
+_SUCCESSFUL_ATTEMPT_OUTCOMES = frozenset(
+    {"succeeded", "satisfied_externally", "settled_from_shared_attempt"}
+)
 
 
 @dataclass(frozen=True, slots=True)
