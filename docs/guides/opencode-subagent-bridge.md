@@ -30,6 +30,14 @@ Tools that dispatch via the plugin when `runtime_backend=opencode` and
 | `ouroboros_start_evolve_step` | `_subagent` | evolution (background job) |
 | `ouroboros_evaluate` | `_subagent` | evaluator |
 
+`ouroboros_evolve_step` and `ouroboros_start_evolve_step` require in-process
+evolution for non-default checkpoint and recovery options: `commit_policy`,
+`auto_session_id`, `execution_id`, `checkpoint_commits`,
+`checkpoint_attempted_ac_ids`, and `recover_expired_claim`. Plugin mode returns
+a tool error naming the unsupported options before accepting work. Leave these
+options unset to delegate an ordinary generation, or use an in-process runtime
+to apply checkpoint metadata and recover an expired claim.
+
 For each payload the bridge **fire-and-forget** dispatches:
 
 1. Parses the envelope in the `tool.execute.after` hook.

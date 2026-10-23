@@ -644,3 +644,25 @@ async def test_guided_resume_rejects_missing_guidance_before_provider_call(
         call.args[0].type != "orchestrator.guidance.injected"
         for call in event_store.append.await_args_list
     )
+
+
+def test_phase2_guidance_mutation_survives_proof_rejection(tmp_path: Path) -> None:
+    _write_guidance(tmp_path, "team", "Use the project conventions.\n")
+    original, _ = _runner(tmp_path, ("team",))
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
+    persisted["frugality_proof"]["protocol_version"] = -1
+    resumed, _ = _runner(tmp_path)
+    previous = resumed._execution_contract, resumed._model_router, resumed._requested_model_tier
+    with pytest.raises(OrchestratorError) as caught:
+        resumed._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted}, seed=_seed()
+        )
+    assert caught.value.message == "Cannot resume with an invalid execution contract"
+    assert caught.value.details == {"invalid": "proof identity"}
+    assert resumed._execution_guidance is not None
+    assert [ref.guidance_id for ref in resumed._execution_guidance.refs] == ["team"]
+    assert resumed._execution_contract is previous[0]
+    assert resumed._model_router is previous[1]
+    assert resumed._requested_model_tier is previous[2]

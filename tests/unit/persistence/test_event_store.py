@@ -1018,6 +1018,35 @@ class TestEventStoreAppend:
         replayed = await event_store.replay("execution", payload["execution_id"])
         assert [item.type for item in replayed] == ["execution.ac.acceptance_finalized"]
 
+    async def test_a_criterion_settled_from_a_shared_attempt_is_accepted(
+        self, event_store: EventStore
+    ) -> None:
+        """A criterion judged from the one shared worker attempt is a successful outcome."""
+        payload = self._acceptance_event(
+            execution_id="exec-acceptance-settled",
+            session_id="sess-acceptance-settled",
+            acceptance_generation_id=acceptance_generation_id_for_session(
+                "sess-acceptance-settled", "exec-acceptance-settled"
+            ),
+            outcome="settled_from_shared_attempt",
+        ).data
+        terminal = BaseEvent(
+            type="orchestrator.session.completed",
+            aggregate_type="session",
+            aggregate_id="sess-acceptance-settled",
+            data={"acceptance_finalizations": [payload]},
+        )
+
+        await self._seed_session_start(
+            event_store,
+            session_id="sess-acceptance-settled",
+            execution_id="exec-acceptance-settled",
+        )
+        assert await event_store.append(terminal) is True
+
+        replayed = await event_store.replay("execution", payload["execution_id"])
+        assert [item.data["outcome"] for item in replayed] == ["settled_from_shared_attempt"]
+
     async def test_conflicting_final_acceptance_fails_closed(self, event_store: EventStore) -> None:
         payload = self._acceptance_event(
             execution_id="exec-acceptance-conflict",

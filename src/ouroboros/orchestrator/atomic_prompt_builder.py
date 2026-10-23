@@ -11,12 +11,15 @@ it used to build inline.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import os
 from typing import TYPE_CHECKING, Any
 
-from ouroboros.core.seed import AcceptanceCriterionSpec
-from ouroboros.core.seed_contract_prompt import render_auto_recursion_guard
+from ouroboros.core.seed import AcceptanceCriterionSpec, SourcedScope
+from ouroboros.core.seed_contract_prompt import (
+    render_auto_recursion_guard,
+    render_sourced_objective,
+)
 from ouroboros.orchestrator.ac_execution_capsule import ACExecutionCapsule
 from ouroboros.orchestrator.evidence.ac_classification import (
     _effective_evidence_schema_for_ac,
@@ -24,6 +27,7 @@ from ouroboros.orchestrator.evidence.ac_classification import (
     _is_validation_only_ac,
 )
 from ouroboros.orchestrator.level_context import LevelContext, build_context_prompt
+from ouroboros.orchestrator.shared_attempt import shares_one_attempt, sourced_criteria_aligned
 
 if TYPE_CHECKING:
     from ouroboros.orchestrator.evidence.runtime_metadata import _SiblingACRef
@@ -53,6 +57,22 @@ def _build_success_contract_block(spec: AcceptanceCriterionSpec | None) -> str:
         "from the AC requirements and provide truthful evidence."
     )
     return "\n".join(lines)
+
+
+# Executor attributes holding the run Seed's ``sourced_scope`` and its own
+# criteria texts. The runner sets them (``install_sourced_scope``) the way the
+# check package sets its hooks, and a derived executor inherits them
+# (``inherit_check_package_hooks``).
+SOURCED_SCOPE_ATTR = "sourced_scope"
+SEED_CRITERIA_ATTR = "seed_criteria"
+
+
+def install_sourced_scope(
+    executor: object, scope: SourcedScope | None, criteria: tuple[str, ...] = ()
+) -> None:
+    """Record the run Seed's sourced scope and criteria on ``executor`` for its leaf prompts."""
+    setattr(executor, SOURCED_SCOPE_ATTR, scope)
+    setattr(executor, SEED_CRITERIA_ATTR, criteria)
 
 
 @dataclass(frozen=True)
@@ -100,6 +120,47 @@ class AtomicPromptBuilder:
             seed_goal = capsule.seed_goal
             retry_attempt = capsule.retry_attempt
 
+        # A Seed with ``sourced_scope`` gives the worker only content with a
+        # known source: the user's goal verbatim and the binding criteria (or the
+        # request itself). The criterion text below is the Seed's own, kept for
+        # the evidence schema so the worker's fields match the verifier's.
+        task_text = ac_content
+        scope = getattr(executor, SOURCED_SCOPE_ATTR, None)
+        criteria: tuple[str, ...] = getattr(executor, SEED_CRITERIA_ATTR, ())
+        schema_criteria = (ac_content,)
+        root_index = parent_ac_index if is_sub_ac else ac_index
+        aligned = (
+            sourced_criteria_aligned(scope, criteria)
+            and root_index is not None
+            and 0 <= root_index < len(criteria)
+        )
+        if isinstance(scope, SourcedScope):
+            # Binding criteria that are the Seed's own, position for position:
+            # each leaf sees only its own. Otherwise one leaf runs the request
+            # (``shared_attempt``) and asks for every criterion's evidence fields.
+            task_text = (
+                scope.acceptance_criteria[root_index]
+                if aligned and root_index is not None
+                else render_sourced_objective(scope)
+            )
+            if shares_one_attempt(scope, criteria):
+                schema_criteria = criteria
+            seed_goal = scope.goal
+            sibling_acs = None  # siblings would list model-written criteria
+            if level_contexts and not aligned:
+                # Earlier levels' summaries name their criterion; keep the work
+                # summary and show the sourced objective in its place.
+                level_contexts = [
+                    replace(
+                        context,
+                        completed_acs=tuple(
+                            replace(summary, ac_content=task_text)
+                            for summary in context.completed_acs
+                        ),
+                    )
+                    for context in level_contexts
+                ]
+
         # Build prompt
         if node_identity is not None:
             label = (
@@ -117,7 +178,7 @@ class AtomicPromptBuilder:
 
         task_section, context_governance_audit = executor._build_atomic_dispatch_context(
             ac_index=ac_index,
-            ac_content=ac_content,
+            ac_content=task_text,
             label=label,
             level_contexts=level_contexts,
             sibling_acs=sibling_acs,
@@ -220,16 +281,26 @@ class AtomicPromptBuilder:
             # will actually run; with run_verify_commands off the worker's
             # displayed required-fields must still list them.
             verify_gate_active = executor._run_verify_commands
-            effective_schema = _effective_evidence_schema_for_ac(
-                executor._execution_profile,
-                ac_content,
-                has_success_contract=has_success_contract,
-                has_expected_artifacts=has_expected_artifacts,
-                verify_gate_active=verify_gate_active,
+            # Each criterion judged from this attempt checks its own fields: ask
+            # for every field one of them requires, in the profile's order.
+            required = {
+                field
+                for text in schema_criteria
+                for field in _effective_evidence_schema_for_ac(
+                    executor._execution_profile,
+                    text,
+                    has_success_contract=has_success_contract,
+                    has_expected_artifacts=has_expected_artifacts,
+                    verify_gate_active=verify_gate_active,
+                ).required
+            }
+            required_fields = ", ".join(
+                field
+                for field in executor._execution_profile.evidence_schema.required
+                if field in required
             )
-            required_fields = ", ".join(effective_schema.required)
             doc_only_note = ""
-            if _is_documentation_only_ac(ac_content):
+            if all(_is_documentation_only_ac(text) for text in schema_criteria):
                 doc_only_note = (
                     "This is a documentation-only current AC: verify the requested docs "
                     "with current-session README/docs evidence such as Edit plus a direct "
@@ -240,7 +311,7 @@ class AtomicPromptBuilder:
                     "do not list individual test names or prior test IDs.\n"
                 )
             validation_only_note = ""
-            if _is_validation_only_ac(ac_content):
+            if all(_is_validation_only_ac(text) for text in schema_criteria):
                 validation_only_note = (
                     "This is a validation-only current AC: prove it with commands_run "
                     "and tests_passed from this runtime session. Do not include "
