@@ -11,6 +11,7 @@ from ouroboros.auto.grading import deterministic_floor
 from ouroboros.auto.ledger import (
     REPO_FACT_KEY_INFIX,
     REQUESTER_KEY_SUFFIX,
+    USER_GOAL_KEY,
     LedgerEntry,
     LedgerStatus,
     SeedDraftLedger,
@@ -26,6 +27,7 @@ from ouroboros.core.seed import (
     RequesterAnswer,
     Seed,
     SeedMetadata,
+    SourcedScope,
 )
 
 _INACTIVE_STATUSES: frozenset[LedgerStatus] = frozenset(
@@ -199,6 +201,7 @@ def synthesize_seed_from_ledger(
         assumptions=ledger_assumptions(ledger),
         requester_answers=ledger_requester_answers(ledger),
         repo_facts=ledger_repo_facts(ledger),
+        open_questions=ledger_open_questions(ledger),
         ontology_schema=OntologySchema(
             name=_ontology_name(goal),
             description="Auto-synthesized ontology from the completed Seed Draft Ledger.",
@@ -384,6 +387,7 @@ def partial_seed_from_evidence(
         assumptions=ledger_assumptions(ledger),
         requester_answers=ledger_requester_answers(ledger),
         repo_facts=ledger_repo_facts(ledger),
+        open_questions=ledger_open_questions(ledger),
         ontology_schema=ontology_schema,
         evaluation_principles=(
             EvaluationPrinciple(
@@ -484,37 +488,23 @@ def ledger_assumptions(ledger: SeedDraftLedger) -> tuple[str, ...]:
     """Return the ledger's unconfirmed requirement drafts as Seed assumptions.
 
     These are the active entries of every section but the goal that do not
-    bind (see
-    :attr:`LedgerEntry.binds_seed`): auto's conservative defaults and
-    assumptions, including a draft kept because the requester gave no answer.
-    An entry that answers an interviewer question (``LedgerEntry.question``)
-    is carried as that open question only: its drafted answer is a guess, and
-    a worker shown it implements it as the scope. An entry no question
-    produced keeps its value. The worker sees them as assumptions it may
-    override. The generic safe-default closure block is interview
-    bookkeeping, not a statement about the task, so it is left out.
+    bind (see :attr:`LedgerEntry.binds_seed`) and that no interviewer question
+    produced: auto's conservative defaults and assumptions. The worker sees
+    them as assumptions it may override. The generic safe-default closure
+    block is interview bookkeeping, not a statement about the task, so it is
+    left out.
 
-    A draft kept because the requester was asked and gave no answer
-    (``LedgerEntry.requester_unanswered``) renders nothing at all, not even its
-    question: the requester already said the issue does not settle it, so the
-    worker decides from the goal, the issue and the code. A requester's answer
-    renders in ``Seed.requester_answers`` instead (``ledger_requester_answers``).
+    An entry that answers an interviewer question (``LedgerEntry.question``)
+    renders nothing here, neither its drafted answer nor its question: the
+    question goes to ``Seed.open_questions`` (``ledger_open_questions``), which
+    no execution prompt renders. A requester's answer renders in
+    ``Seed.requester_answers`` instead (``ledger_requester_answers``).
     """
     lines: list[str] = []
     for section_name in _ASSUMPTION_SECTIONS:
         prefix = _ASSUMPTION_PREFIXES.get(
             section_name, f"{section_name.replace('_', ' ').capitalize()}: "
         )
-        open_questions = tuple(
-            dict.fromkeys(
-                entry.question.strip()
-                for entry in _active_entries(ledger, section_name)
-                if not entry.binds_seed
-                and entry.question.strip()
-                and not entry.requester_unanswered
-            )
-        )
-        lines.extend(f"Open question: {question}" for question in open_questions)
         values = _lines_from_section(
             ledger,
             section_name,
@@ -525,6 +515,30 @@ def ledger_assumptions(ledger: SeedDraftLedger) -> tuple[str, ...]:
         )
         lines.extend(f"{prefix}{value}" for value in values)
     return tuple(dict.fromkeys(lines))
+
+
+def ledger_open_questions(ledger: SeedDraftLedger) -> tuple[str, ...]:
+    """Every interviewer question nobody answered, verbatim and in ledger order.
+
+    The split is by entry provenance, never by text: an active entry that does
+    not bind and carries the interviewer's question (``LedgerEntry.question``,
+    stamped where the entry is created) holds a draft nobody confirmed. That
+    covers the investigator's not-found entries (``.investigated.<round>``),
+    auto's own drafted answers, and drafts kept because the requester gave no
+    answer (``LedgerEntry.requester_unanswered``). Requester answers and
+    checked repository facts are answers, so they are never open questions.
+    """
+    questions: list[str] = []
+    for section_name in _ASSUMPTION_SECTIONS:
+        questions.extend(
+            entry.question.strip()
+            for entry in _active_entries(ledger, section_name)
+            if not entry.binds_seed
+            and entry.question.strip()
+            and not _is_requester_answer(entry)
+            and not _is_repo_fact(entry)
+        )
+    return tuple(dict.fromkeys(questions))
 
 
 def with_ledger_assumptions(seed: Seed, ledger: SeedDraftLedger) -> Seed:
@@ -584,13 +598,54 @@ def ledger_repo_facts(ledger: SeedDraftLedger) -> tuple[RepoFact, ...]:
     return tuple(facts.values())
 
 
+def ledger_sourced_scope(ledger: SeedDraftLedger) -> SourcedScope | None:
+    """The goal, constraints and criteria whose source the ledger records.
+
+    The goal is the user's request verbatim (the ``USER_GOAL_KEY`` entry). The
+    constraints, non-goals and criteria are the entries that bind
+    (``LedgerEntry.binds_seed``), split the same way a ledger-synthesized Seed
+    splits them. The decision is by entry provenance only; nothing reads the
+    text. Without an active binding user goal there is no record (``None``),
+    and the Seed renders as before.
+    """
+    goal_entries = [
+        entry
+        for entry in _active_entries(ledger, "goal")
+        if entry.key == USER_GOAL_KEY and entry.binds_seed
+    ]
+    if not goal_entries:
+        return None
+    constraints = _lines_from_section(ledger, "constraints", binding=True)
+    non_goals = _lines_from_section(ledger, "non_goals", binding=True)
+    return SourcedScope(
+        goal=goal_entries[-1].value.strip(),
+        constraints=(*constraints, *[f"Non-goal: {item}" for item in non_goals]),
+        acceptance_criteria=_lines_from_section(
+            ledger, "acceptance_criteria", split_clauses=False, binding=True
+        ),
+    )
+
+
 def with_ledger_carryover(seed: Seed, ledger: SeedDraftLedger) -> Seed:
-    """Carry the ledger's assumptions, requester answers and repo facts into ``seed``."""
+    """Carry the ledger's assumptions, requester answers, repo facts, open questions and sourced scope.
+
+    The sourced scope (``Seed.sourced_scope``) is what the worker is told; the
+    Seed's own goal, constraints, criteria, assumptions, ontology, principles
+    and exit conditions are written by the Seed generator from the whole
+    interview, unanswered questions included, so they stay in the Seed for the
+    record and for verification only.
+    """
     seed = with_requester_answers(with_ledger_assumptions(seed, ledger), ledger)
     merged = tuple(dict.fromkeys((*seed.repo_facts, *ledger_repo_facts(ledger))))
-    if merged == seed.repo_facts:
+    if merged != seed.repo_facts:
+        seed = seed.model_copy(update={"repo_facts": merged})
+    questions = tuple(dict.fromkeys((*seed.open_questions, *ledger_open_questions(ledger))))
+    if questions != seed.open_questions:
+        seed = seed.model_copy(update={"open_questions": questions})
+    scope = ledger_sourced_scope(ledger)
+    if scope is None or scope == seed.sourced_scope:
         return seed
-    return seed.model_copy(update={"repo_facts": merged})
+    return seed.model_copy(update={"sourced_scope": scope})
 
 
 def _lines_from_section(

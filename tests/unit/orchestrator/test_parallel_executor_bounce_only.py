@@ -33,6 +33,7 @@ from ouroboros.orchestrator.parallel_executor import (
     ACExecutionResult,
     ParallelACExecutor,
 )
+from ouroboros.orchestrator.parallel_executor_models import checkpoint_contract_fingerprint
 from ouroboros.orchestrator.verifier import RetryAdmission, VerifierVerdict
 from ouroboros.persistence.checkpoint import CheckpointData
 from tests.unit.orchestrator.parallel_executor_test_support import ProcessLocalTestExecutor
@@ -921,6 +922,9 @@ async def test_checkpoint_malformed_decomposition_decisions_fail_before_executio
     )
     executor._run_batch_with_verify_and_retry = AsyncMock()
 
+    checkpoint.state["contract_fingerprint"] = checkpoint_contract_fingerprint(
+        seed, executor._execution_authority_policy()
+    )
     with pytest.raises(RuntimeError, match="checkpoint decomposition"):
         await executor.execute_parallel(
             seed,
@@ -972,6 +976,9 @@ async def test_valid_cache_only_checkpoint_fails_before_execution() -> None:
     )
     executor._run_batch_with_verify_and_retry = AsyncMock()
 
+    checkpoint.state["contract_fingerprint"] = checkpoint_contract_fingerprint(
+        seed, executor._execution_authority_policy()
+    )
     with pytest.raises(RuntimeError, match="checkpoint.*finalized-event authority"):
         await executor.execute_parallel(
             seed,

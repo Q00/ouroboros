@@ -85,7 +85,9 @@ class TestScanner:
         _write_fixture_repo(tmp_path)
         pack = build_context_pack(tmp_path)
         assert pack is not None
-        assert any("fixture-app 1.2.3" in line for line in pack.stack)
+        assert (
+            "pyproject.toml: name fixture-app, version 1.2.3, requires-python >=3.12" in pack.stack
+        )
         assert any(line.startswith("test:") and "pytest" in line for line in pack.verify_commands)
         rendered = render_context_pack(pack)
         assert "## Project Context (auto-detected facts)" in rendered
@@ -122,14 +124,14 @@ class TestBudget:
     def test_render_truncates_repo_map_first(self) -> None:
         huge_map = tuple(f"  dir_{i}_{'x' * 80}/" for i in range(500))
         pack = ContextPack(
-            stack=("Python (pyproject): fixture-app 1.2.3",),
+            stack=("pyproject.toml: name fixture-app, version 1.2.3",),
             verify_commands=("test: uv run pytest",),
             repo_map=huge_map,
         )
         rendered = render_context_pack(pack)
         assert len(rendered) <= MAX_PACK_CHARS
         # Stack + verify facts survive truncation.
-        assert "fixture-app 1.2.3" in rendered
+        assert "name fixture-app, version 1.2.3" in rendered
         assert "uv run pytest" in rendered
 
 
@@ -198,7 +200,7 @@ class TestCache:
         self._init_git(tmp_path)
         first = build_context_pack(tmp_path)
         assert first is not None
-        assert any("fixture-app 1.2.3" in line for line in first.stack)
+        assert any("name fixture-app, version 1.2.3" in line for line in first.stack)
 
         # Same HEAD, new working-tree manifest content → fresh pack, not cache.
         (tmp_path / "pyproject.toml").write_text(
@@ -207,7 +209,7 @@ class TestCache:
         )
         fresh = build_context_pack(tmp_path)
         assert fresh is not None
-        assert any("fixture-app 9.9.9" in line for line in fresh.stack)
+        assert any("name fixture-app, version 9.9.9" in line for line in fresh.stack)
         assert not any("1.2.3" in line for line in fresh.stack)
 
     def test_non_git_dir_scans_without_cache(self, tmp_path: Path) -> None:
@@ -358,11 +360,20 @@ class TestSystemPromptInjection:
 @pytest.mark.parametrize(
     "manifest,content,needle",
     [
-        ("go.mod", "module example.com/app\n\ngo 1.22\n", "example.com/app"),
+        (
+            "go.mod",
+            "module example.com/app\n\ngo 1.22\n",
+            "go.mod: module example.com/app, go 1.22",
+        ),
         (
             "package.json",
             '{"name": "web", "version": "0.1.0"}',
-            "web 0.1.0",
+            "package.json: name web, version 0.1.0",
+        ),
+        (
+            "Cargo.toml",
+            '[package]\nname = "tool"\nversion = "0.2.0"\nedition = "2021"\n',
+            "Cargo.toml: name tool, version 0.2.0, edition 2021",
         ),
     ],
 )
@@ -370,4 +381,122 @@ def test_other_language_stacks(tmp_path: Path, manifest: str, content: str, need
     (tmp_path / manifest).write_text(content, encoding="utf-8")
     pack = build_context_pack(tmp_path)
     assert pack is not None
-    assert any(needle in line for line in pack.stack)
+    assert pack.stack == (needle,)
+
+
+# A Python package whose root also carries an auxiliary ``package.json`` named
+# like the project (Django's layout: setup.cfg metadata, a bare setup.py, and a
+# package.json used only for JS linting and tests of the admin static files).
+_DJANGO_LIKE_SETUP_CFG = """\
+[metadata]
+name = Django
+version = attr: django.__version__
+
+[options]
+python_requires = >=3.6
+"""
+
+_DJANGO_LIKE_SETUP_PY = """\
+from setuptools import setup
+
+setup()
+"""
+
+_DJANGO_LIKE_PACKAGE_JSON = """\
+{
+  "name": "Django",
+  "private": true,
+  "scripts": {"test": "grunt test --verbose"},
+  "devDependencies": {"eslint": "^6.8.0", "grunt": "^1.0.1"}
+}
+"""
+
+
+class TestManifestFacts:
+    def test_python_repo_with_auxiliary_package_json_lists_every_manifest(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "setup.cfg").write_text(_DJANGO_LIKE_SETUP_CFG, encoding="utf-8")
+        (tmp_path / "setup.py").write_text(_DJANGO_LIKE_SETUP_PY, encoding="utf-8")
+        (tmp_path / "package.json").write_text(_DJANGO_LIKE_PACKAGE_JSON, encoding="utf-8")
+
+        pack = build_context_pack(tmp_path)
+
+        assert pack is not None
+        assert pack.stack == (
+            "setup.cfg: name Django, python_requires >=3.6",
+            "setup.py",
+            "package.json: name Django",
+        )
+        rendered = render_context_pack(pack)
+        assert "Manifests:\n- setup.cfg: name Django, python_requires >=3.6" in rendered
+        # No line claims a language or framework for the repository.
+        assert "Node" not in rendered
+        assert "Stack:" not in rendered
+
+    def test_pyproject_without_project_table_is_not_given_a_placeholder_name(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "pyproject.toml").write_text(
+            "[build-system]\nrequires = ['setuptools>=40.8.0']\n", encoding="utf-8"
+        )
+        (tmp_path / "package.json").write_text(_DJANGO_LIKE_PACKAGE_JSON, encoding="utf-8")
+
+        pack = build_context_pack(tmp_path)
+
+        assert pack is not None
+        assert pack.stack == ("pyproject.toml", "package.json: name Django")
+
+    def test_pure_node_repo(self, tmp_path: Path) -> None:
+        (tmp_path / "package.json").write_text(
+            '{"name": "web", "version": "0.1.0", "engines": {"node": ">=18"}}',
+            encoding="utf-8",
+        )
+
+        pack = build_context_pack(tmp_path)
+
+        assert pack is not None
+        assert pack.stack == ("package.json: name web, version 0.1.0, engines.node >=18",)
+
+    def test_pure_python_setup_py_repo(self, tmp_path: Path) -> None:
+        (tmp_path / "setup.py").write_text(
+            "from setuptools import setup\n\nsetup(name='pkg', python_requires='>=3.8')\n",
+            encoding="utf-8",
+        )
+
+        pack = build_context_pack(tmp_path)
+
+        assert pack is not None
+        # setup.py is code: its values are only known by running it, so only
+        # the file's presence is reported, never a name read from the source.
+        assert pack.stack == ("setup.py",)
+
+    def test_setup_cfg_change_invalidates_cache(self, tmp_path: Path) -> None:
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+            cwd=tmp_path,
+            check=True,
+        )
+        (tmp_path / "setup.cfg").write_text(_DJANGO_LIKE_SETUP_CFG, encoding="utf-8")
+        first = build_context_pack(tmp_path)
+        assert first is not None
+
+        (tmp_path / "setup.cfg").write_text(
+            _DJANGO_LIKE_SETUP_CFG.replace("name = Django", "name = Renamed"), encoding="utf-8"
+        )
+        second = build_context_pack(tmp_path)
+
+        assert second is not None
+        assert second.stack == ("setup.cfg: name Renamed, python_requires >=3.6",)
