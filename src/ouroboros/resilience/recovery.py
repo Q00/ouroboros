@@ -184,7 +184,9 @@ If you notice that the run is stalled, repeating the same failed edit, or making
 no acceptance-criterion progress, switch strategy before continuing:
 - spinning: stop retrying the same fix; isolate or bypass the blocker.
 - no_drift: gather the missing fact or inspect the source of truth.
-- diminishing_returns: simplify the task and remove unnecessary moving parts.
+- diminishing_returns: change the approach, not the requested scope; remove
+  moving parts you added that the goal does not need, and keep every requested
+  behavior.
 - oscillation: choose one architecture and make the smallest coherent step.
 
 When you switch strategy, state the detected pattern and the new concrete next
