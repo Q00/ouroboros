@@ -829,7 +829,7 @@ def test_the_record_never_holds_what_a_child_said(tmp_path: Any) -> None:
     """Results are submitted, judged, and returned — never accumulated on disk.
 
     The fan-out record is request-side only: which lanes were asked, which of
-    them gate completion, how to correlate them. That is what keeps it off the
+    them gate completion, how to correlate them, and which turn asked. That is what keeps it off the
     two egress paths a Seed travels, and it is why the record needs no
     sanitizer — there is nothing child-authored in it to sanitize.
     """
@@ -855,7 +855,7 @@ def test_the_record_never_holds_what_a_child_said(tmp_path: Any) -> None:
     assert "advice" not in on_disk
     record = registry.load(fanout_id)
     assert record is not None
-    assert set(record.synthesizer_input) == {"lane_ids"}
+    assert record.synthesizer_input == {"lane_ids": lane_ids, "phase": "answer"}
 
 
 # --------------------------------------------------------------------------- #
