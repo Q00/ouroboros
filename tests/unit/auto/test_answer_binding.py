@@ -27,6 +27,7 @@ from ouroboros.auto.ledger import (
 )
 from ouroboros.auto.ledger_seed import (
     ledger_assumptions,
+    ledger_open_questions,
     synthesize_seed_from_ledger,
     with_ledger_assumptions,
 )
@@ -381,8 +382,12 @@ def test_pipeline_persists_ledger_drafts_as_assumptions_on_the_generated_seed(
     assert DEFAULTED_CONSTRAINT in persisted.assumptions
     assert UNSPECIFIED_DRAFT_CRITERION in persisted.assumptions
     assert DEFAULTED_CONSTRAINT not in persisted.constraints
+    # The assumptions stay in the Seed for the record; the recorded auto Seed
+    # carries a sourced scope, so its worker prompt renders none of them.
+    assert persisted.sourced_scope is not None
     prompt = render_seed_contract_for_execution(SeedContract.from_seed(persisted))
-    assert DEFAULTED_CONSTRAINT in prompt.split("## Assumptions (non-binding)", 1)[1]
+    assert "## Assumptions (non-binding)" not in prompt
+    assert DEFAULTED_CONSTRAINT not in prompt
 
 
 def test_interview_with_only_assumption_answers_is_ready_for_seed_generation() -> None:
@@ -548,7 +553,7 @@ def test_worker_system_prompt_carries_assumptions_outside_the_per_ac_fence() -> 
     assert "responsible only for the current acceptance criterion" not in prompt
 
 
-# -- an unconfirmed answer reaches the worker as its open question only --------
+# -- an unconfirmed answer is kept as its open question, outside worker input --
 
 SCOPE_QUESTION = "Should DateField and TimeField arithmetic be covered too?"
 
@@ -569,16 +574,17 @@ def _ledger_with_asked_draft() -> SeedDraftLedger:
     return ledger
 
 
-def test_unconfirmed_answer_to_an_asked_question_renders_only_the_question() -> None:
+def test_unconfirmed_answer_to_an_asked_question_is_kept_only_as_an_open_question() -> None:
     seed = synthesize_seed_from_ledger(_ledger_with_asked_draft())
 
-    assert f"Open question: {SCOPE_QUESTION}" in seed.assumptions
+    assert seed.open_questions == (SCOPE_QUESTION,)
+    assert all(SCOPE_QUESTION not in item for item in seed.assumptions)
     assert all("Only DateTimeField subtraction" not in item for item in seed.assumptions)
     # An entry no interview question produced keeps its value.
     assert UNSPECIFIED_DRAFT_CRITERION in seed.assumptions
     prompt = render_seed_contract_for_execution(SeedContract.from_seed(seed))
     assert "Only DateTimeField subtraction" not in prompt
-    assert SCOPE_QUESTION in prompt
+    assert SCOPE_QUESTION not in prompt
 
 
 def test_a_binding_answer_is_never_reduced_to_its_question() -> None:
@@ -643,11 +649,12 @@ async def test_draft_kept_after_unanswered_requester_carries_its_question(
     assert all(not entry.binds_seed for entry in asked)
     assert all(entry.requester_unanswered for entry in asked)
     # The requester said the issue does not settle it: neither the question
-    # nor the draft reaches the worker.
+    # nor the draft reaches the worker; the question is kept as an open question.
     rendered = ledger_assumptions(result.ledger)
     assert all(FIRST_QUESTION not in line for line in rendered)
     for entry in asked:
         assert all(entry.value.strip() not in line for line in rendered)
+    assert ledger_open_questions(result.ledger) == (FIRST_QUESTION,)
 
 
 def test_assumptions_block_puts_the_issue_and_code_over_any_assumption() -> None:

@@ -1579,6 +1579,8 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
         "efficiency_mode": result.efficiency_mode,
         "frugality_assurance": result.frugality_assurance,
     }
+    if result.open_questions:
+        meta["open_questions"] = list(result.open_questions)
     if result.artifact_state is not None:
         meta["artifact_state"] = result.artifact_state
     if handoff_only:
@@ -2384,6 +2386,9 @@ def _format_result(result: AutoPipelineResult) -> str:
     if result.seed_path:
         lines.append(f"Seed: {result.seed_path}")
     lines.append(f"Seed origin: {result.seed_origin}")
+    if result.open_questions:
+        lines.append("Open questions (kept in the Seed, not given to the worker):")
+        lines.extend(f"- {item}" for item in result.open_questions)
     if result.job_id or result.execution_id or result.run_session_id:
         lines.extend(
             [

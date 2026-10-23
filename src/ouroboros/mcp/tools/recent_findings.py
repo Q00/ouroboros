@@ -268,8 +268,36 @@ def recent_findings_by_lane(
     return by_lane
 
 
+def with_interview_baseline(
+    by_lane: dict[str, list[dict]],
+    baseline: dict[str, dict],
+    *,
+    lanes: Collection[str],
+) -> dict[str, list[dict]]:
+    """Add this interview's start snapshot to what each declared lane is offered.
+
+    The cross-session window keeps ``web_context`` out by decision (RFC
+    Q00/ouroboros#2153), so the session's own start turn is the only way a
+    later web lane learns what was already checked. A ``code_context`` entry
+    is usually in the window already and is not offered twice. The entry is
+    kept even when the window is full: it is the one finding known to be this
+    session's, and the oldest window entry is the one dropped for it.
+    """
+    for lane_id, entry in baseline.items():
+        if lane_id not in lanes:
+            continue
+        found = by_lane.setdefault(lane_id, [])
+        if any(existing.get("contract_id") == entry["contract_id"] for existing in found):
+            continue
+        if len(found) >= _RECENT_FINDINGS_MAX_ENTRIES:
+            found.pop()
+        found.append(entry)
+    return by_lane
+
+
 __all__ = [
     "RECENT_FINDINGS_WINDOW",
     "interview_baseline_by_lane",
     "recent_findings_by_lane",
+    "with_interview_baseline",
 ]
