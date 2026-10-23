@@ -7544,3 +7544,152 @@ def render(report):
 
     assert reads == frozenset()
     assert not any("unresolved decorator" in violation for violation in report.violations)
+
+
+@pytest.mark.parametrize("parameter", ["value", "config"])
+@pytest.mark.parametrize("argument", ["Report()", "settings"])
+@pytest.mark.parametrize(
+    "shape",
+    ["immediate", "assigned", "nested", "alias", "import_factory", "import_reader", "depth"],
+)
+def test_returned_callable_preserves_actual_argument_provenance(
+    contract, tmp_path: Path, parameter: str, argument: str, shape: str
+) -> None:
+    reader = f"def reader({parameter}):\n    return {parameter}.evaluation.stage1_enabled\n"
+    factory = "def get():\n    return reader\n"
+    prefix = (
+        "class EvaluationReport:\n    stage1_enabled = True\n"
+        "class Report:\n    evaluation = EvaluationReport()\n"
+    )
+    call = f"get()({argument})\n"
+    if shape == "assigned":
+        call = f"callback = get()\ncallback({argument})\n"
+    elif shape == "nested":
+        factory = "def get():\n" + "".join("    " + line for line in reader.splitlines(True))
+        factory += "    return reader\n"
+        reader = ""
+    elif shape == "alias":
+        factory = "def get():\n    callback = reader\n    return callback\n"
+    elif shape == "import_factory":
+        (tmp_path / "a_reader.py").write_text(reader + factory)
+        reader, factory = "from a_reader import get\n", ""
+    elif shape == "import_reader":
+        (tmp_path / "z_reader.py").write_text(reader)
+        reader = "from z_reader import reader\n"
+    elif shape == "depth":
+        factory = "def factory0():\n    return reader\n"
+        for depth in range(1, 13):
+            factory += f"def factory{depth}():\n    return factory{depth - 1}()\n"
+        factory += "def get():\n    return factory12()\n"
+    (tmp_path / "consumer.py").write_text(prefix + reader + factory + call)
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    assert reads == (frozenset() if argument == "Report()" else frozenset({field}))
+    assert not reads.unresolved_semantics
+    report = _audit_as_documented_inert(contract, field, reads)
+    assert bool(report.violations) == (argument != "Report()")
+
+
+@pytest.mark.parametrize("reader_module", ["a_reader", "z_reader"])
+@pytest.mark.parametrize("reverse_calls", [False, True])
+@pytest.mark.parametrize("other", ["settings", "unavailable"])
+@pytest.mark.parametrize("assigned", [False, True])
+def test_imported_returned_callable_keeps_mixed_argument_alternatives(
+    contract, tmp_path: Path, reader_module: str, reverse_calls: bool, other: str, assigned: bool
+) -> None:
+    (tmp_path / f"{reader_module}.py").write_text(
+        "def reader(config):\n    return config.evaluation.stage1_enabled\n"
+        "def get():\n    return reader\n"
+    )
+    calls = ["callback(Report())\n", f"callback({other})\n"]
+    if reverse_calls:
+        calls.reverse()
+    (tmp_path / "consumer.py").write_text(
+        f"from {reader_module} import get\n"
+        "class EvaluationReport:\n    stage1_enabled = True\n"
+        "class Report:\n    evaluation = EvaluationReport()\n"
+        + ("callback = get()\n" if assigned else "")
+        + "".join(calls).replace("callback(", "callback(" if assigned else "get()(")
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    assert reads == frozenset({field})
+    assert _audit_as_documented_inert(contract, field, reads).violations
+
+
+@pytest.mark.parametrize("condition", ["unknown", "True", "False"])
+def test_returned_callable_join_uses_reachable_binding(
+    contract, tmp_path: Path, condition: str
+) -> None:
+    (tmp_path / "consumer.py").write_text(
+        "def reader(value):\n    return value.evaluation.stage1_enabled\n"
+        "def ignore(value):\n    return False\n"
+        "def get():\n"
+        f"    return reader if {condition} else ignore\n"
+        "get()(settings)\n"
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    assert reads == (frozenset() if condition == "False" else frozenset({field}))
+
+
+@pytest.mark.parametrize("argument", ["Report()", "settings"])
+def test_bound_method_factory_preserves_returned_callable(
+    contract, tmp_path: Path, argument: str
+) -> None:
+    (tmp_path / "consumer.py").write_text(
+        "class EvaluationReport:\n    stage1_enabled = True\n"
+        "class Report:\n    evaluation = EvaluationReport()\n"
+        "class Reader:\n"
+        "    def read(self, value):\n        return value.evaluation.stage1_enabled\n"
+        "    def get(self):\n        return self.read\n"
+        f"Reader().get()({argument})\n"
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    assert reads == (frozenset() if argument == "Report()" else frozenset({field}))
+
+
+@pytest.mark.parametrize("module_name", ["a_reader", "z_reader"])
+@pytest.mark.parametrize("argument", ["Report()", "settings"])
+@pytest.mark.parametrize("receiver", ["Reader", "OtherReader"])
+@pytest.mark.parametrize("assigned", [False, True])
+def test_imported_bound_callable_keeps_receiver_and_defining_module(
+    contract, tmp_path: Path, module_name: str, argument: str, receiver: str, assigned: bool
+) -> None:
+    (tmp_path / f"{module_name}.py").write_text(
+        "def _read(value):\n    return value.evaluation.stage1_enabled\n"
+        "class Reader:\n"
+        "    def _read(self, config):\n        return _read(config)\n"
+        "    def get(self):\n        return self._read\n"
+        "class OtherReader:\n"
+        "    def _read(self, value):\n        return True\n"
+        "    def get(self):\n        return self._read\n"
+    )
+    (tmp_path / "consumer.py").write_text(
+        f"from {module_name} import Reader, OtherReader\n"
+        "def _read(value):\n    return None\n"
+        "class EvaluationReport:\n    stage1_enabled = True\n"
+        "class Report:\n    evaluation = EvaluationReport()\n"
+        + (
+            f"callback = {receiver}().get()\ncallback({argument})\n"
+            if assigned
+            else f"{receiver}().get()({argument})\n"
+        )
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    expected = receiver == "Reader" and argument == "settings"
+    assert reads == (frozenset({field}) if expected else frozenset())
+    assert not reads.unresolved_semantics
+    assert bool(_audit_as_documented_inert(contract, field, reads).violations) == expected

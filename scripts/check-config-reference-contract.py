@@ -1370,6 +1370,77 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 )
         return False
 
+    def _may_return_callable(
+        self, function: _FunctionNode, bound_receiver: _AbstractValue | None = None
+    ) -> bool:
+        """Keep proven callable-returning helpers inside the execution gate.
+
+        This selects execution only: the ordinary body evaluator still decides
+        which bindings and return alternatives actually reach the caller.
+        """
+        pending = [function]
+        visited: set[int] = set()
+        while pending:
+            candidate = pending.pop()
+            if id(candidate) in visited:
+                continue
+            visited.add(id(candidate))
+            owner = self._source_index.owner(candidate)
+            nodes = self._source_index.syntax_nodes(candidate)
+            local_callables = {
+                child.name
+                for child in nodes
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and child is not candidate
+            }
+            assignments: dict[str, list[ast.AST]] = {}
+            for child in nodes:
+                if isinstance(child, (ast.Assign, ast.AnnAssign)) and child.value is not None:
+                    targets = child.targets if isinstance(child, ast.Assign) else [child.target]
+                    for target in targets:
+                        if isinstance(target, ast.Name):
+                            assignments.setdefault(target.id, []).append(child.value)
+            expressions = [
+                child.value for child in nodes if isinstance(child, ast.Return) and child.value
+            ]
+            if isinstance(candidate, ast.Lambda):
+                expressions.append(candidate.body)
+            containing_classes = (
+                bound_receiver.instance_classes | bound_receiver.classes
+                if bound_receiver is not None
+                else frozenset()
+            )
+
+            def targets(call: ast.Call) -> _FunctionSet:
+                return frozenset().union(
+                    *(
+                        self._relevance_call_targets(call, containing_class, owner)
+                        for containing_class in (tuple(containing_classes) or (None,))
+                    )
+                )
+
+            seen_expressions: set[int] = set()
+            while expressions:
+                expression = expressions.pop()
+                if id(expression) in seen_expressions:
+                    continue
+                seen_expressions.add(id(expression))
+                if isinstance(expression, ast.Lambda):
+                    return True
+                if isinstance(expression, ast.IfExp):
+                    expressions.extend((expression.body, expression.orelse))
+                    continue
+                if isinstance(expression, ast.Name):
+                    if expression.id in local_callables:
+                        return True
+                    expressions.extend(assignments.get(expression.id, ()))
+                if isinstance(expression, (ast.Name, ast.Attribute)):
+                    if targets(ast.Call(func=expression, args=[], keywords=[])):
+                        return True
+                elif isinstance(expression, ast.Call):
+                    pending.extend(targets(expression))
+        return False
+
     @staticmethod
     def _decorator_name(decorator: ast.expr) -> str | None:
         target = decorator.func if isinstance(decorator, ast.Call) else decorator
@@ -1973,6 +2044,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         }:
             return None
         owner = self._expression_value(node.func.value)
+        # A proven user method owns this call, even when named like dict.get.
+        if self._source_index.methods(owner.classes | owner.instance_classes, method):
+            return None
         values = self._mapping_values(owner)
         if method == "copy":
             return _AbstractValue(
@@ -2420,7 +2494,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 is not None
                 for function in self._source_index.resolve_functions(module, node.attr)
             )
-            methods = self._source_index.methods(owner.classes, node.attr)
+            methods = self._source_index.methods(owner.classes | owner.instance_classes, node.attr)
             if resolved_modules or resolved_classes or imported_functions or methods:
                 method_targets: list[_CallableTarget] = []
                 receiver = self._descriptor_receiver(owner)
@@ -2743,6 +2817,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     syntactic_config_reader
                     or self._call_has_relevant_provenance(node, function, bound_receiver)
                     or self._has_transitive_callable_relevance(function)
+                    or self._may_return_callable(function, bound_receiver)
                 ):
                     values.append(
                         self._local_call_value(
@@ -5894,7 +5969,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 visited.add(function_id)
                 scoped = self._scoped_function_arguments(target.function)
                 if target.receiver is not None:
-                    scoped.update(self._bound_direct_arguments(target.function, (target.receiver,)))
+                    positional = (*target.function.args.posonlyargs, *target.function.args.args)
+                    if positional:
+                        # Binding self must not replace observed foreign arguments.
+                        scoped[positional[0].arg] = target.receiver
                 self._visit_function_body(target.function, scoped)
             for class_node in value.classes:
                 class_id = id(class_node)
