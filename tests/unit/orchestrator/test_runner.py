@@ -7317,8 +7317,8 @@ class TestOrchestratorRunner:
             result = await runner.resume_session("sess_resume_context", sample_seed)
 
         assert result.is_ok
-        assert "resume-app 1.0.0" in captured["system_prompt"]
-        assert "resume-app 9.9.9" not in captured["system_prompt"]
+        assert "name resume-app, version 1.0.0" in captured["system_prompt"]
+        assert "name resume-app, version 9.9.9" not in captured["system_prompt"]
 
     def test_deserialize_runtime_handle_supports_legacy_progress(
         self,
@@ -8454,6 +8454,49 @@ class TestOrchestratorRunner:
         assert execution_plan.get_dependencies(0) == ()
         assert execution_plan.get_dependencies(1) == (0,)
         assert execution_plan.get_dependencies(2) == (0, 1)
+
+    @pytest.mark.asyncio
+    async def test_a_shared_attempt_seed_runs_one_stage_without_dependency_analysis(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+    ) -> None:
+        """A Seed whose criteria have no known source plans one stage (``shared_attempt``)."""
+        from ouroboros.core.seed import SourcedScope
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        seed = sample_seed.model_copy(update={"sourced_scope": SourcedScope(goal="The request.")})
+        tracker = SessionTracker.create("exec_parallel", seed.metadata.seed_id)
+        parallel_result = ParallelExecutionResult(
+            results=(), success_count=0, failure_count=0, total_messages=0
+        )
+
+        with (
+            patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+            patch.object(
+                runner._session_repo,
+                "mark_completed",
+                AsyncMock(return_value=Result.ok(None)),
+            ),
+            patch(
+                "ouroboros.orchestrator.parallel_executor.ParallelACExecutor.execute_parallel",
+                AsyncMock(return_value=parallel_result),
+            ) as execute,
+            patch.object(runner, "_build_dependency_analyzer") as analyzer_factory,
+        ):
+            await runner._execute_parallel(
+                seed=seed,
+                exec_id="exec_parallel",
+                tracker=tracker,
+                merged_tools=["Read"],
+                tool_catalog=assemble_session_tool_catalog(["Read"]),
+                system_prompt="system",
+                start_time=tracker.start_time,
+            )
+
+        analyzer_factory.assert_not_called()
+        execution_plan = execute.await_args.kwargs["execution_plan"]
+        assert execution_plan.execution_levels == ((0, 1, 2),)
 
     @pytest.mark.asyncio
     async def test_execute_parallel_builds_dependency_analyzer_with_llm_adapter(
