@@ -734,12 +734,12 @@ async def _run_orchestrator(
     """
     from ouroboros.core.seed import Seed
     from ouroboros.orchestrator import (
-        OrchestratorRunner,
         create_agent_runtime,
         create_agent_runtime_async,
         preflight_agent_runtime,
         resolve_agent_runtime_backend,
     )
+    from ouroboros.orchestrator.runner_factory import build_orchestrator_runner
     from ouroboros.orchestrator.session import SessionRepository
     from ouroboros.persistence.event_store import EventStore
 
@@ -869,17 +869,24 @@ async def _run_orchestrator(
     if runtime_blocker is not None:
         print_error(f"Runtime '{resolved_runtime_backend}' cannot execute: {runtime_blocker}")
         raise typer.Exit(1)
-    runner = OrchestratorRunner(
-        adapter,
-        event_store,
-        console,
+    runner = build_orchestrator_runner(
+        adapter=adapter,
+        event_store=event_store,
+        console=console,
         mcp_manager=mcp_manager,
         mcp_tool_prefix=mcp_tool_prefix,
         debug=debug,
         task_workspace=workspace,
+        enable_decomposition=True,
         max_decomposition_depth=resolved_max_decomposition_depth,
         max_parallel_workers=resolved_max_parallel_workers,
         fat_harness_mode=resolved_fat_harness_mode,
+        base_model_tier=None,
+        efficiency_mode=None,
+        frugality_assurance=None,
+        inherited_runtime_handle=None,
+        inherited_tools=None,
+        session_signal_hub=None,
     )
 
     # The URL is emitted before execution starts so it can be opened while the
