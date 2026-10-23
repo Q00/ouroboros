@@ -612,7 +612,7 @@ async def observe_wrapper_receipts(
         claimed_tests=tests,
         task_cwd=task_cwd,
     )
-    related = frozenset()
+    related: frozenset[str] = frozenset()
     claims = data["wrapper_receipts"]
     if failure.failure_class == "EVIDENCE_FORM_MISMATCH" and isinstance(claims, (list, tuple)):
         related = frozenset(
