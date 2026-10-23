@@ -2,8 +2,17 @@
 
 from __future__ import annotations
 
+from collections import Counter
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
+from ouroboros.harness.deliver_gate import (
+    _event_has_conflicting_tool_call_ids,
+    _event_matches_accepted_attempt,
+    _event_tool_call_id,
+)
+from ouroboros.harness.wrapper_receipt import trusted_wrapper_invocation
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.evidence.ac_classification import _effective_evidence_schema_for_ac
 from ouroboros.orchestrator.evidence.call_citation import (
@@ -39,6 +48,7 @@ from ouroboros.orchestrator.evidence.test_detection import (
     _runtime_messages_support_test_claim,
 )
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord
+from ouroboros.orchestrator.execution_runtime_scope import ACRuntimeIdentity
 from ouroboros.orchestrator.failure_taxonomy import FailureClass
 from ouroboros.orchestrator.profile_loader import ExecutionProfile
 from ouroboros.orchestrator.verifier import VerifierVerdict
@@ -442,3 +452,93 @@ def _claimed_file_exists_in_workspace(value: str, *, task_cwd: str | None) -> bo
         return (Path(task_cwd).resolve() / relative).is_file()
     except (OSError, RuntimeError, ValueError):
         return False
+
+
+async def invalid_wrapper_receipt_verdict(
+    event_store: Any,
+    identity: ACRuntimeIdentity,
+    *,
+    claims: object,
+    task_cwd: str | None,
+) -> VerifierVerdict:
+    """Classify rejected proof from scoped runtime work, including failed runs.
+
+    This never admits evidence: successful receipt/artifact validation remains
+    separate. A unique trusted-wrapper start and ID-correlated completion in
+    the current execution/AC/retry/session show related work even on failure.
+    """
+    related = isinstance(claims, (list, tuple)) and bool(claims)
+    execution_id = identity.execution_id or ""
+    try:
+        events = tuple(await event_store.query_execution_related_events(execution_id, limit=None))
+    except (OSError, RuntimeError, ValueError):
+        events = ()
+    event_counts = Counter(event.id for event in events)
+    scoped = tuple(
+        event
+        for event in events
+        if event_counts[event.id] == 1
+        and not _event_has_conflicting_tool_call_ids(event)
+        and _event_matches_accepted_attempt(
+            event,
+            scope_id=identity.ac_id,
+            execution_id=execution_id,
+            retry_attempt=identity.retry_attempt,
+            session_attempt_id=identity.session_attempt_id,
+        )
+    )
+    for claim in claims if isinstance(claims, (list, tuple)) else ():
+        if not isinstance(claim, Mapping):
+            related = False
+            break
+        outer = claim.get("outer_command")
+        try:
+            parsed = trusted_wrapper_invocation(outer, task_cwd) if isinstance(outer, str) else None
+        except (OSError, RuntimeError, ValueError):
+            parsed = None
+        if parsed is None or parsed[3] != claim.get("inner_command"):
+            related = False
+            break
+        starts = [
+            event
+            for event in scoped
+            if event.type == "execution.tool.started"
+            and event.data.get("tool_name") == "Bash"
+            and isinstance(event.data.get("tool_input"), Mapping)
+            and event.data["tool_input"].get("command") == outer
+        ]
+        if len(starts) != 1 or _event_tool_call_id(starts[0]) is None:
+            related = False
+            break
+        start = starts[0]
+        call_id = _event_tool_call_id(start)
+        same_call_starts = [
+            event
+            for event in scoped
+            if event.type == "execution.tool.started" and _event_tool_call_id(event) == call_id
+        ]
+        completions = [
+            event
+            for event in scoped
+            if event.type in {"execution.tool.completed", "execution.tool.failed"}
+            and _event_tool_call_id(event) == call_id
+        ]
+        if (
+            len(same_call_starts) != 1
+            or len(completions) != 1
+            or completions[0].timestamp < start.timestamp
+        ):
+            related = False
+            break
+    reason = "wrapper_receipts: no accepted command-bound receipt"
+    if related:
+        reason += (
+            "; related runtime work cannot prove tests_passed; rerun failed commands "
+            "and retry with a "
+            "contract-compliant receipt and command-bound stdout/stderr references"
+        )
+    return VerifierVerdict(
+        passed=False,
+        reasons=(reason,),
+        failure_class="EVIDENCE_FORM_MISMATCH" if related else "FABRICATION_SUSPECTED",
+    )

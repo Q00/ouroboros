@@ -306,6 +306,7 @@ from ouroboros.orchestrator.evidence.typed_evidence import (  # noqa: F401
 )
 from ouroboros.orchestrator.evidence.verification import (
     _verify_atomic_evidence_against_runtime_messages,
+    invalid_wrapper_receipt_verdict,
 )
 from ouroboros.orchestrator.evidence_schema import (
     EvidenceError,
@@ -9107,9 +9108,9 @@ Respond with either ATOMIC or the structured JSON object only.
                 verify_gate_active=verify_gate_active,
             )
             typed_data = typed_evidence.data if typed_evidence is not None else {}
-            receipt_claimed = "wrapper_receipts" in typed_data
             verified_wrapper_commands: frozenset[str] = frozenset()
-            if receipt_claimed:
+            receipt_cwd = self._task_cwd or getattr(self._adapter, "working_directory", None)
+            if "wrapper_receipts" in typed_data:
                 try:
                     receipt_manifest = await load_ac_evidence_manifest(
                         self._event_store,
@@ -9123,8 +9124,7 @@ Respond with either ATOMIC or the structured JSON object only.
                         receipt_manifest,
                         claims=typed_data["wrapper_receipts"],
                         execution_id=execution_id,
-                        task_cwd=self._task_cwd
-                        or getattr(self._adapter, "working_directory", None),
+                        task_cwd=receipt_cwd,
                     )
                     verified_wrapper_commands = frozenset(
                         filter(_looks_like_test_command, receipt_matches or ())
@@ -9145,15 +9145,15 @@ Respond with either ATOMIC or the structured JSON object only.
                 verify_gate_active=verify_gate_active,
                 verified_wrapper_commands=verified_wrapper_commands,
             )
-            if receipt_claimed and (
-                not verified_wrapper_commands
-                or frozenset(_string_evidence_values(typed_data.get("tests_passed")))
-                != verified_wrapper_commands
+            claimed_tests = frozenset(_string_evidence_values(typed_data.get("tests_passed")))
+            if "wrapper_receipts" in typed_data and (
+                not verified_wrapper_commands or claimed_tests != verified_wrapper_commands
             ):
-                verifier_verdict = VerifierVerdict(
-                    passed=False,
-                    reasons=("wrapper_receipts: no accepted command-bound receipt",),
-                    failure_class="FABRICATION_SUSPECTED",
+                verifier_verdict = await invalid_wrapper_receipt_verdict(
+                    self._event_store,
+                    runtime_identity,
+                    claims=typed_data["wrapper_receipts"],
+                    task_cwd=receipt_cwd,
                 )
             verify_gate_replaces_all_evidence = bool(
                 verify_gate_outcome is not None

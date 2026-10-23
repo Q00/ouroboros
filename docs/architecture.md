@@ -319,6 +319,8 @@ Values above `4` remain executable on the legacy path, but cannot authorize
 Routing D route switching or its crash-resumable parallel owner. Reducing the
 value to `4` or less opts a fresh run into that stronger durable boundary.
 
+Malformed wrapper receipts remain rejected. A current-attempt Bash start/completion pair for the exact trusted wrapper and inner command changes the rejection to `EVIDENCE_FORM_MISMATCH` with guidance to retry using a contract-compliant receipt; a failed command also counts as related work, and classification grants no artifact authority. Missing or untrusted runtime support retains `FABRICATION_SUSPECTED`.
+
 For the current recursive execution flow, see [parallel_executor.py](../src/ouroboros/orchestrator/parallel_executor.py) and [runner.py](../src/ouroboros/orchestrator/runner.py).
 
 ### Phase 3: Resilience

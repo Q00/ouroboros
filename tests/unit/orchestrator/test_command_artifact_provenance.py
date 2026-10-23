@@ -141,6 +141,7 @@ async def test_wrapper_receipt_proves_inner_test_through_journal(tmp_path: Path)
     "case",
     [
         "valid",
+        "absent_runtime",
         "path_escape",
         "missing",
         "malformed",
@@ -170,6 +171,27 @@ async def test_wrapper_receipt_real_dispatch_capture_to_verifier(tmp_path: Path,
         working_directory = str(tmp_path)
 
         async def execute_task(self, **_kwargs: Any):
+            if case == "absent_runtime":
+                yield AgentMessage(
+                    type="result",
+                    content="```json\n"
+                    + json.dumps(
+                        {
+                            "commands_run": [outer_command],
+                            "tests_passed": [_WRAPPER_INNER],
+                            "wrapper_receipts": [
+                                {
+                                    "receipt_path": "receipt.json",
+                                    "outer_command": outer_command,
+                                    "inner_command": _WRAPPER_INNER,
+                                }
+                            ],
+                        }
+                    )
+                    + "\n```",
+                    data={"subtype": "success"},
+                )
+                return
             yield AgentMessage(
                 type="assistant",
                 content="run wrapper",
@@ -265,10 +287,27 @@ async def test_wrapper_receipt_real_dispatch_capture_to_verifier(tmp_path: Path,
     assert result.success is (case == "valid")
     assert result.atomic_verifier_verdict is not None
     assert result.atomic_verifier_verdict.passed is (case == "valid")
-    if case != "valid":
-        assert result.atomic_verifier_verdict.reasons == (
-            "wrapper_receipts: no accepted command-bound receipt",
+    if case == "valid":
+        assert result.atomic_verifier_verdict.failure_class is None
+    else:
+        fabricated = case in {
+            "absent_runtime",
+            "fake_json",
+            "source_substitution",
+            "earlier_retry",
+            "foreign_session",
+        }
+        expected_class = "FABRICATION_SUSPECTED" if fabricated else "EVIDENCE_FORM_MISMATCH"
+        assert result.atomic_verifier_verdict.failure_class == expected_class
+        assert result.atomic_verifier_verdict.reasons[0].startswith(
+            "wrapper_receipts: no accepted command-bound receipt"
         )
+        assert (
+            "retry with a contract-compliant receipt" in result.atomic_verifier_verdict.reasons[0]
+        ) is (not fabricated)
+    if case == "absent_runtime":
+        assert not any(event.type.startswith("execution.tool.") for event in store.events)
+        return
     start = next(event for event in store.events if event.type == "execution.tool.started")
     completion = next(event for event in store.events if event.type == "execution.tool.completed")
     assert ("filesystem_effects" in completion.data) is (case != "source_substitution")
