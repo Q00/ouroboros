@@ -50,13 +50,15 @@ def _has_affirmative_marker(evidence: str, marker: str) -> bool:
     """Ignore a positive marker directly governed by a short English negation.
 
     This is a bounded check of the existing lexical evidence, not a general
-    language parser. A later clause can still contain affirmative evidence.
+    language parser. Qualifier tokens start with a word character and
+    may contain non-whitespace punctuation other than clause delimiters.
+    A later clause can still contain affirmative evidence.
     """
     for match in re.finditer(re.escape(marker), evidence):
         prefix = re.split(r"[.!?;,:]|\b(?:but|however|yet)\b", evidence[: match.start()])[-1]
         if not re.search(
             r"\b(?:not|no|never|cannot|can't|don't|doesn't|didn't|haven't|hasn't|"
-            r"hadn't|isn't|aren't|wasn't|weren't|couldn't)(?:\s+\w+){0,3}\s*$",
+            r"hadn't|isn't|aren't|wasn't|weren't|couldn't)(?:\s+\w[^\s.!?;,:]*){0,3}\s*$",
             prefix,
         ):
             return True
