@@ -223,6 +223,7 @@ class TestExtractEvidence:
         [
             "[AC_COMPLETE: 1]",
             "[done]",
+            "[broken]",
             "[status: done]",
             "[ac_complete: 1]",
             "See [issue #1] for context.",
@@ -345,6 +346,9 @@ class TestExtractEvidence:
     @pytest.mark.parametrize(
         "terminal_payload",
         [
+            "[broken,]",
+            "[broken,",
+            "[one, two,]",
             "[undefined]",
             "{undefined}",
             "[NaN,]",
@@ -377,6 +381,7 @@ class TestExtractEvidence:
             "{undefined_name}",
             "[one, two]",
             "[1word, two]",
+            "{broken,}",
         ],
     )
     def test_brackets_in_fenced_trailing_prose_do_not_displace_evidence(
@@ -387,6 +392,39 @@ class TestExtractEvidence:
         record = extract_evidence(text)
 
         assert record.data == {"files_touched": ["ok.py"]}
+
+    @pytest.mark.parametrize("fence_tag", ["json", ""])
+    @pytest.mark.parametrize(
+        "terminal_payload",
+        [
+            "[broken,",
+            "[one, two,]",
+            "[broken, 1]",
+            "[1, broken]",
+            '["x", broken]',
+            '[{"x": 1}, broken]',
+        ],
+    )
+    def test_terminal_array_separator_cannot_promote_stale_evidence(
+        self, fence_tag: str, terminal_payload: str
+    ) -> None:
+        text = f'```{fence_tag}\n{{"files_touched": ["stale.py"]}}\n{terminal_payload}\n```'
+
+        with pytest.raises(EvidenceError):
+            extract_evidence(text)
+
+    @pytest.mark.parametrize("fence_tag", ["json", ""])
+    @pytest.mark.parametrize(
+        "terminal_payload",
+        ["{broken: 1}", '{"x": broken}', '{broken, "x": 1}'],
+    )
+    def test_terminal_malformed_object_shapes_remain_authoritative(
+        self, fence_tag: str, terminal_payload: str
+    ) -> None:
+        text = f'```{fence_tag}\n{{"files_touched": ["stale.py"]}}\n{terminal_payload}\n```'
+
+        with pytest.raises(EvidenceError):
+            extract_evidence(text)
 
     @pytest.mark.parametrize("fence_tag", ["json", ""])
     @pytest.mark.parametrize(

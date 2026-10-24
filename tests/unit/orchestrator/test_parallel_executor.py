@@ -9315,7 +9315,10 @@ class TestParallelACExecutor:
         assert evidence_event.data["verifier_ran"] is False
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("tail", ["[undefined]", "{undefined}", "[NaN,]"])
+    @pytest.mark.parametrize(
+        "tail",
+        ["[undefined]", "{undefined}", "[NaN,]", "[broken,]", "[broken,", "[one, two,]"],
+    )
     @pytest.mark.parametrize("tag", ["json", ""])
     async def test_terminal_malformed_fence_does_not_publish_stale_evidence(
         self, tmp_path, tail: str, tag: str

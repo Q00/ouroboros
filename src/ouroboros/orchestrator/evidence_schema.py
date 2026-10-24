@@ -404,18 +404,21 @@ def _looks_like_json_container(text: str, opener_pos: int, *, limit: int | None 
     )
 
 
-def _split_outer_components(text: str, opener_pos: int, limit: int) -> tuple[list[str], bool]:
-    """Split a container at outer commas and report outer-level colons.
+def _split_outer_components(text: str, opener_pos: int, limit: int) -> tuple[list[str], bool, bool]:
+    """Split a container and retain its outer-level separator shape.
 
     Quoted strings and nested containers are opaque. The scan is bounded by
     the enclosing evidence fence so malformed input cannot borrow delimiters
-    from later prose or a subsequent fence.
+    from later prose or a subsequent fence. The final flag records whether an
+    outer comma leaves an empty terminal component, including an unclosed
+    container ending at the fence boundary.
     """
     opener = text[opener_pos]
     stack = [opener]
     component_start = opener_pos + 1
     components: list[str] = []
     has_outer_colon = False
+    has_trailing_comma = False
     quote_char: str | None = None
     escape_next = False
 
@@ -430,8 +433,12 @@ def _split_outer_components(text: str, opener_pos: int, limit: int) -> tuple[lis
                 quote_char = None
             continue
         if char in ('"', "'"):
+            if len(stack) == 1:
+                has_trailing_comma = False
             quote_char = char
         elif char in "[{":
+            if len(stack) == 1:
+                has_trailing_comma = False
             stack.append(char)
         elif char in "]}":
             expected = "]" if stack[-1] == "[" else "}"
@@ -440,15 +447,19 @@ def _split_outer_components(text: str, opener_pos: int, limit: int) -> tuple[lis
             stack.pop()
             if not stack:
                 components.append(text[component_start:index])
-                return components, has_outer_colon
+                return components, has_outer_colon, has_trailing_comma
         elif len(stack) == 1 and char == ",":
             components.append(text[component_start:index])
             component_start = index + 1
+            has_trailing_comma = True
         elif len(stack) == 1 and char == ":":
             has_outer_colon = True
+            has_trailing_comma = False
+        elif len(stack) == 1 and not char.isspace():
+            has_trailing_comma = False
 
     components.append(text[component_start:limit])
-    return components, has_outer_colon
+    return components, has_outer_colon, has_trailing_comma
 
 
 def _complete_json_value(value: str) -> bool:
@@ -493,8 +504,14 @@ def _has_structural_container_intent(text: str, opener_pos: int, limit: int) -> 
     otherwise a malformed terminal singleton after prose can be skipped in
     favor of stale evidence.
     """
-    components, has_outer_colon = _split_outer_components(text, opener_pos, limit)
+    components, has_outer_colon, has_trailing_comma = _split_outer_components(
+        text, opener_pos, limit
+    )
     opener = text[opener_pos]
+    if opener == "[" and has_trailing_comma:
+        # A dangling array separator is an unmistakable structural boundary,
+        # even if the preceding component is an otherwise prose-like name.
+        return True
     closer = "]" if opener == "[" else "}"
     component_signal = False
     for component in components:
