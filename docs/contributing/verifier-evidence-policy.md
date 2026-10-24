@@ -149,12 +149,15 @@ command text a second way. The rules:
   Assignments the command itself makes are kept
   (recorded in `env_delta`); they disable target linkage instead (below).
   `.git` and caches are not copied; `.venv`, `venv`, `node_modules`, `.tox`
-  and `.nox` are linked, not copied. A workspace over 50,000 files or 1 GiB is
-  not replayed. Absolute workspace paths in the command point at the copy.
+  and `.nox` are linked, not copied. On native Windows, creating these links
+  or preserving workspace symlinks requires symlink permission (Developer
+  Mode or the appropriate privilege); if copying fails, replay is unavailable.
+  A workspace over 50,000 files or 1 GiB is not replayed. Absolute workspace paths in the command point at the copy.
 - **Sandbox.** The command can write only beneath the copy and its per-run
-  temp directory (plus `/dev/null` and a few other character devices); the
-  live workspace, `HOME`, the system temp directory and every other path are
-  read-only to it. Reading and executing are not restricted. On macOS this is
+  temp directory (plus `/dev/null` and a few other character devices on
+  POSIX; Windows AppContainers cannot open `NUL`); the live workspace, `HOME`,
+  the system temp directory and every other path are read-only to it.
+  Reading and executing are not restricted on macOS and Linux. On macOS this is
   `sandbox-exec` with a generated profile that denies `file-write*` outside
   those roots; on Linux it is Landlock (ABI 3, Linux 6.2, or newer; below
   it truncation cannot be denied), applied in the child before it execs the
@@ -164,8 +167,17 @@ command text a second way. The rules:
   inode-flag ioctls, io_uring). The filter cannot see paths, so on Linux a
   replay cannot change metadata inside its copy either (`touch` on an
   existing file, `shutil.copy2`, cargo's fingerprint timestamps); such a
-  replay fails, which fails closed. The launchers start with a fixed bootstrap environment; the
-  command's environment, including its own assignments such as
+  replay fails, which fails closed. On native Windows, a fresh AppContainer
+  per command grants modify access only to the writable roots, with a
+  kill-on-close Job Object for the process tree. Reads require AppContainer
+  access: the controller's interpreter and linked dependency trees receive
+  persistent read/execute grants for the Ouroboros read capability; other
+  reads can fail closed. Batch files (`.cmd`, `.bat`, including `npm.cmd`)
+  are refused with `windows_batch_file`: the command is not run and its
+  outcome is indeterminate. See the Windows contract in
+  [`runtime/exec_sandbox.py`](../../src/ouroboros/runtime/exec_sandbox.py)
+  for grant lifecycle and cleanup. The launchers start with a fixed bootstrap
+  environment; the command's environment, including its own assignments such as
   `LD_PRELOAD=...`, takes effect only when the command itself is exec'd
   inside the sandbox. The sandbox policy is sealed in the run's
   execution-semantics contract, so a resume with the switch changed is
@@ -178,17 +190,18 @@ command text a second way. The rules:
   outside left unchanged, or the backend is reported unavailable. Reading
   stays allowed, so the access time the kernel records for a permitted read
   can change (under `sandbox-exec` too); only a `noatime` mount stops that.
-  The replayed command gets `/dev/null` as stdin, never the controller's
+  The replayed command gets null stdin (`/dev/null` on POSIX), never the controller's
   own (under an MCP host, its JSON-RPC stream); the process runner does
   this for verify commands as well. Where no backend works
-  (Windows, a kernel without Landlock ABI 3, an already-sandboxed macOS
-  process),
+  (a kernel without Landlock ABI 3, an already-sandboxed macOS process,
+  or a Windows host where the AppContainer probe fails),
   nothing is replayed, the claims keep the transcript-only rules, and the
   observation records `replay_skipped: sandbox_unavailable`. Under Landlock
   the command also cannot read `/proc/<pid>/environ`, `mem` or `maps` of the
   controller or any other process outside its domain (Landlock denies
-  ptrace-mode access across the domain boundary). `sandbox-exec` cannot deny
-  the macOS equivalent (`KERN_PROCARGS2`), so on macOS a replayed command can
+  ptrace-mode access across the domain boundary). On Windows, AppContainer
+  also prevents reading other processes' environments outside its container.
+  `sandbox-exec` cannot deny the macOS equivalent (`KERN_PROCARGS2`), so on macOS a replayed command can
   read the environment of the user's other processes; the replayed command
   is one the worker already ran with the same access. Effects the command
   asks another, unconfined process to perform over IPC (a user service
@@ -198,9 +211,11 @@ command text a second way. The rules:
   on macOS (loopback allowed), by an unprivileged network namespace on Linux
   (with its loopback interface brought up, so loopback stays available),
   or not at all when the Linux process already has only a loopback interface
-  (a container started with `--network none`). Unix-domain sockets stay
-  available. Where none of these works, nothing is replayed and the
-  observation records `replay_skipped: network_isolation_unavailable`.
+  (a container started with `--network none`). On Windows the AppContainer
+  receives no network capability; loopback reaches only the command's own
+  processes inside that container, never a host service outside it.
+  Unix-domain sockets stay available. Where none of these works, nothing is
+  replayed and the observation records `replay_skipped: network_isolation_unavailable`.
 - **Live paths.** The copy reaches live paths through its links: the linked
   dependency trees and the targets of copied symlinks. They are outside the
   writable roots, so the sandbox denies writes to them. With the sandbox

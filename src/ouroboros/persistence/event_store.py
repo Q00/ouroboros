@@ -18,9 +18,10 @@ import sqlite3
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, unquote
 
-from sqlalchemy import and_, case, event, func, or_, select, text
+from sqlalchemy import and_, case, event, func, literal_column, or_, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.sql.elements import ColumnClause
 
 if TYPE_CHECKING:
     from ouroboros.orchestrator.workflow_lifecycle import WorkflowLifecycleEvent
@@ -2675,20 +2676,14 @@ class EventStore:
         *,
         limit: int | None = None,
         max_row_id: int | None = None,
+        session_start_by_rowid: bool = False,
     ) -> tuple[list[BaseEvent], int]:
         """Incrementally query events across a session and related execution scopes.
 
-        This is the multi-aggregate equivalent of ``get_events_after``. It uses
-        the same exact session/execution payload predicates as
-        ``query_session_related_events`` while advancing a single rowid cursor.
-
-        When ``limit`` is set the page is ordered by ``rowid`` and capped, so a
-        stale or first-time poll over a long-running session cannot load an
-        unbounded result set and the returned ``max(rowid)`` is a true boundary
-        a follow-up poll resumes from without skipping rows appended out of
-        timestamp order. ``max_row_id`` bounds the read to ``rowid <= max_row_id``
-        for callers that have already chosen a global page boundary. ``None``
-        for both keeps the unbounded timestamp-ordered fetch.
+        ``limit`` selects bounded rowid-ordered pages; ``max_row_id`` freezes
+        their inclusive upper boundary. Unbounded reads retain timestamp order.
+        ``session_start_by_rowid`` admits rows persisted
+        since session start even when producer clocks precede its timestamp.
         """
         if self._engine is None:
             raise PersistenceError(
@@ -2699,7 +2694,9 @@ class EventStore:
         resolved_execution_id = execution_id or await self._resolve_execution_id_for_session(
             session_id,
         )
-        session_started_at = await self._resolve_session_started_at(session_id)
+        session_started_at = await self._resolve_session_started_at(
+            session_id, by_rowid=session_start_by_rowid
+        )
         conditions = _session_related_event_conditions(session_id, resolved_execution_id)
         if not conditions:
             # Fail closed (see query_session_related_events): ``or_()`` over an empty
@@ -2709,7 +2706,7 @@ class EventStore:
 
         try:
             async with self._engine.begin() as conn:
-                rowid_col = text("rowid")
+                rowid_col: ColumnClause[int] = literal_column("rowid")
                 query = (
                     select(events_table, rowid_col)
                     .where(or_(*conditions))
@@ -2718,7 +2715,8 @@ class EventStore:
                 if max_row_id is not None:
                     query = query.where(text("rowid <= :max_id").bindparams(max_id=max_row_id))
                 if session_started_at is not None:
-                    query = query.where(events_table.c.timestamp >= session_started_at)
+                    boundary = rowid_col if session_start_by_rowid else events_table.c.timestamp
+                    query = query.where(boundary >= session_started_at)
 
                 if event_type:
                     query = query.where(events_table.c.event_type == event_type)
@@ -2830,8 +2828,10 @@ class EventStore:
                 )
             )
 
-    async def _resolve_session_started_at(self, session_id: str) -> Any | None:
-        """Return the persisted start timestamp for a session, if available."""
+    async def _resolve_session_started_at(
+        self, session_id: str, *, by_rowid: bool = False
+    ) -> Any | None:
+        """Return the persisted session-start timestamp or delivery position."""
         if self._engine is None:
             raise PersistenceError(
                 "EventStore not initialized. Call initialize() first.",
@@ -2839,17 +2839,17 @@ class EventStore:
             )
 
         async with self._engine.begin() as conn:
+            boundary = literal_column("rowid") if by_rowid else events_table.c.timestamp
             query = (
-                select(events_table.c.timestamp)
+                select(boundary)
                 .where(events_table.c.aggregate_type == "session")
                 .where(events_table.c.aggregate_id == session_id)
                 .where(events_table.c.event_type == "orchestrator.session.started")
-                .order_by(events_table.c.timestamp.asc())
+                .order_by(boundary.asc())
                 .limit(1)
             )
             result = await conn.execute(query)
-            row = result.first()
-            return row[0] if row is not None else None
+            return result.scalar_one_or_none()
 
     async def get_all_lineages(self) -> list[BaseEvent]:
         """Get all lineage creation events.

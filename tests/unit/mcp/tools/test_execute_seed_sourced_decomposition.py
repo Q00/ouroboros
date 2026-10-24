@@ -138,7 +138,7 @@ async def test_handler_builds_the_runner_without_decomposition_for_a_sourced_see
 
     prefix = "ouroboros.mcp.tools.execution_handlers"
     monkeypatch.setattr(f"{prefix}.SessionRepository", FakeSessionRepository)
-    monkeypatch.setattr(f"{prefix}.OrchestratorRunner", FakeRunner)
+    monkeypatch.setattr("ouroboros.orchestrator.runner_factory.OrchestratorRunner", FakeRunner)
     monkeypatch.setattr(
         f"{prefix}.create_agent_runtime", lambda **_kwargs: SimpleNamespace(runtime_backend="test")
     )
