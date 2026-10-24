@@ -49,7 +49,8 @@ _FENCE_LINE_RE = re.compile(
 )
 _EXPR_RE = re.compile(r"^\s*(?P<field>[A-Za-z_][A-Za-z0-9_]*)\s*==\s*(?P<lit>.+?)\s*$")
 _DECODER = json.JSONDecoder()
-_NUMERIC_LOOKING_LEXEME_RE = re.compile(r"[+-]?[0-9]+(?:\.[0-9]*)?(?:[eE][+-]*[0-9.eE+-]*)?\Z")
+_NUMERIC_LOOKING_LEXEME_RE = re.compile(r"[+-]?[0-9][0-9.eE+-]*\Z")
+_NUMERIC_MANTISSA_LEXEME_RE = re.compile(r"[+-]?[0-9]+(?:\.[0-9]*)?\Z")
 
 
 class EvidenceError(ValueError):
@@ -483,16 +484,20 @@ def _complete_json_value(value: str) -> bool:
 def _is_malformed_numeric_lexeme(value: str) -> bool:
     """Recognize numeric-only tokens that are not complete JSON numbers.
 
-    Intent is broader than the JSON number grammar: leading-zero forms,
-    repeated exponent markers, and repeated exponent signs remain numeric-
-    looking malformed tokens. A single pre-exponent decimal point keeps
-    dotted references with multiple periods on the prose path; dates also
-    remain prose because their signs are not in number-shaped positions.
+    Intent is broader than the JSON number grammar. An explicit exponent
+    marker keeps a numeric-only token structural even when its mantissa or
+    exponent is malformed. Without an exponent, the token must still look like
+    a single mantissa; this leaves dates and dotted references on the prose
+    path while catching leading-zero and unfinished decimal forms.
     """
     candidate = value.strip()
     if not _NUMERIC_LOOKING_LEXEME_RE.fullmatch(candidate):
         return False
-    return not _complete_json_value(candidate)
+    if _complete_json_value(candidate):
+        return False
+    if "e" in candidate.lower():
+        return True
+    return bool(_NUMERIC_MANTISSA_LEXEME_RE.fullmatch(candidate))
 
 
 def _has_nonstructural_json_prefix_suffix(value: str) -> bool:
