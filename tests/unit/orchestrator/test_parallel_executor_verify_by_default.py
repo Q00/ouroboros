@@ -21,7 +21,7 @@ from ouroboros.core.seed import (
     SeedMetadata,
 )
 from ouroboros.harness.journal import EvidenceEntry, EvidenceKind, EvidenceManifest
-from ouroboros.orchestrator.adapter import ParamSupport, RuntimeCapabilities
+from ouroboros.orchestrator.adapter import AgentMessage, ParamSupport, RuntimeCapabilities
 from ouroboros.orchestrator.decomposition_policy import (
     DecompositionChild,
     DecompositionDecisionRecord,
@@ -87,6 +87,65 @@ def _seed_with_specs(*specs: AcceptanceCriterionSpec | str) -> Seed:
         ontology_schema=OntologySchema(name="n", description="d"),
         metadata=SeedMetadata(ambiguity_score=0.05),
     )
+
+
+@pytest.mark.parametrize(
+    ("error_type", "expected_retry"),
+    [("HermesConfigurationError", False), ("RuntimeExecutionError", True)],
+)
+def test_hermes_missing_profile_credentials_are_not_retried(
+    error_type: str, expected_retry: bool
+) -> None:
+    failure = (
+        "Hermes execution failed:\nHermes isn't configured yet -- no API keys or providers found."
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content="Run the worker",
+        success=False,
+        final_message=failure,
+        messages=(
+            AgentMessage(
+                type="result",
+                content=failure,
+                data={"subtype": "error", "error_type": error_type},
+            ),
+        ),
+        outcome=ACExecutionOutcome.FAILED,
+    )
+
+    assert is_retryable_failure(result) is expected_retry
+
+
+@pytest.mark.parametrize("failure", ["permission denied", "missing required tool", "HTTP 429"])
+def test_unrelated_classified_failures_keep_existing_retry_admission(failure: str) -> None:
+    result = ACExecutionResult(
+        ac_index=0, ac_content="Run the worker", success=False, final_message=failure
+    )
+
+    assert is_retryable_failure(result) is True
+
+
+def test_stale_hermes_configuration_error_does_not_suppress_later_failure_retry() -> None:
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content="Run the worker",
+        success=False,
+        messages=(
+            AgentMessage(
+                type="result",
+                content="Hermes isn't configured yet -- no API keys or providers found.",
+                data={"subtype": "error", "error_type": "HermesConfigurationError"},
+            ),
+            AgentMessage(
+                type="result",
+                content="Transient worker failure",
+                data={"subtype": "error", "error_type": "RuntimeExecutionError"},
+            ),
+        ),
+    )
+
+    assert is_retryable_failure(result) is True
 
 
 # ---------------------------------------------------------------------------
