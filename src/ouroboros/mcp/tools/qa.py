@@ -311,8 +311,8 @@ _JSON_FENCE_RE = re.compile(r"(?im)^[ \t>]*(?:`{3,}|~{3,})[ \t]*json\b")
 # values need an array delimiter or a second value (possibly a missing comma),
 # so prose brackets such as ``[3 of 3 ACs]`` and ``[2026-10-23]`` stay prose.
 _JSON_OPENER_RE = re.compile(
-    r"\{\s*(?:[\"']|[^{}\s:]+\s*:)|\[\s*(?:[\"{\[]|true\b|false\b|null\b|"
-    r"-?\d+(?:\.\d*)?(?:[eE][+-]?\d*)?"
+    r"\{\s*(?:[\"']|[^{}:]*:)|\[\s*(?:[\"{\[]|true\b|false\b|null\b|"
+    r"-?\d+(?:\.\d*)?(?:[eE][+-]?\d*)*"
     r"(?=\s*(?:[,\]]|$|[\"{\[]|true\b|false\b|null\b)|\s+-?\d))"
 )
 
@@ -325,6 +325,14 @@ _NUMERIC_PROSE_LIST_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A standalone, explicitly labeled numeric correction is an attempted array,
+# even when its number token is malformed. The same token in version/date
+# prose is not enough to establish a competing answer.
+_EXPLICIT_NUMERIC_CORRECTION_RE = re.compile(
+    r"^[ \t]*Correction[ \t]*:[ \t]*\[[ \t]*[-+]?\d[\deE+., \t\[\]-]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
 
 def _carries_json_object(text: str) -> bool:
     """True when the text holds a JSON fence or a JSON object or array opener.
@@ -332,7 +340,7 @@ def _carries_json_object(text: str) -> bool:
     The plain-text fallback exists for providers that ignore the JSON
     instruction entirely; text that attempted JSON is not that case.
     """
-    if _JSON_FENCE_RE.search(text):
+    if _JSON_FENCE_RE.search(text) or _EXPLICIT_NUMERIC_CORRECTION_RE.search(text):
         return True
     return any(
         _NUMERIC_PROSE_LIST_RE.match(text, match.start()) is None

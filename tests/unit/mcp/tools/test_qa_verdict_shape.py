@@ -409,3 +409,85 @@ async def test_array_corrections_are_not_hidden_by_numeric_prose_exception(
 
     assert result.is_err
     assert "Failed to parse QA verdict" in str(result.error)
+
+
+@pytest.mark.parametrize(
+    "correction",
+    [
+        'Correction: {ver dict:"fail"}',
+        'Correction: {ver\tdict:"fail"}',
+        'Correction: {:"fail"}',
+        "Correction: [1.2.3]",
+        "Correction: [1e2e3]",
+        "[1e2e3]",
+        "[1e2e]",
+        "[-1e+2E-3]",
+        "Correction: [1.2.3",
+        "Correction: [1.2.3]]",
+    ],
+)
+@pytest.mark.parametrize("correction_first", [False, True])
+@pytest.mark.parametrize("answer_format", ["json", "plain"])
+async def test_malformed_explicit_correction_cannot_preserve_pass(
+    correction: str, correction_first: bool, answer_format: str
+) -> None:
+    answer = (
+        '{"score":0.95,"verdict":"pass"}'
+        if answer_format == "json"
+        else "Score: 0.95\nVerdict: pass"
+    )
+    body = f"{correction}\n{answer}" if correction_first else f"{answer}\n{correction}"
+
+    result = await _handler(body).handle(dict(_ARGS))
+
+    assert result.is_err
+    assert "Failed to parse QA verdict" in str(result.error)
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "Version [1.2.3].",
+        "[1.2.3]",
+        "[1e2 edition]",
+        "Correction: Version [1.2.3].",
+        "Correction: [1.2.3] is the version.",
+        "Correction: [3 of 3 ACs] are met.",
+        "Correction: [3, 4, and 5] are met.",
+        "Correction: [3, 4, and 5]",
+        "Reviewed [2026-10-23].",
+        "Reviewed [23.10.2026].",
+    ],
+)
+@pytest.mark.parametrize("prose_first", [False, True])
+@pytest.mark.parametrize("answer_format", ["json", "plain"])
+async def test_correction_context_does_not_reclassify_ordinary_numeric_prose(
+    prose: str, prose_first: bool, answer_format: str
+) -> None:
+    answer = (
+        '{"score":0.95,"verdict":"pass"}'
+        if answer_format == "json"
+        else "Score: 0.95\nVerdict: pass"
+    )
+    body = f"{prose}\n{answer}" if prose_first else f"{answer}\n{prose}"
+
+    result = await _handler(body).handle(dict(_ARGS))
+
+    assert result.is_ok
+    assert result.value.meta["passed"] is True
+
+
+@pytest.mark.parametrize("marker", ["```", "~~~"])
+@pytest.mark.parametrize("info", ["", "json"])
+@pytest.mark.parametrize("context_first", [False, True])
+async def test_answer_fence_retains_authority_over_explicit_numeric_context(
+    marker: str, info: str, context_first: bool
+) -> None:
+    answer = f'{marker}{info}\n{{"score":0.95,"verdict":"pass"}}\n{marker}'
+    context = 'Correction: [1.2.3]\nContext: {ver dict:"metadata"}'
+    body = f"{context}\n{answer}" if context_first else f"{answer}\n{context}"
+
+    result = await _handler(body).handle(dict(_ARGS))
+
+    assert result.is_ok
+    assert result.value.meta["passed"] is True
