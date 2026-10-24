@@ -342,7 +342,18 @@ class TestExtractEvidence:
             extract_evidence(text)
 
     @pytest.mark.parametrize("fence_tag", ["json", ""])
-    @pytest.mark.parametrize("terminal_payload", ["[undefined]", "{undefined}", "[NaN,]"])
+    @pytest.mark.parametrize(
+        "terminal_payload",
+        [
+            "[undefined]",
+            "{undefined}",
+            "[NaN,]",
+            "[undefined, 1]",
+            '{undefined, "x": 1}',
+            "[undefined, undefined]",
+            "{undefined, undefined}",
+        ],
+    )
     @pytest.mark.parametrize("separator", ["\n", " ", ""])
     def test_malformed_terminal_fence_never_promotes_stale_evidence(
         self, fence_tag: str, terminal_payload: str, separator: str
@@ -364,6 +375,8 @@ class TestExtractEvidence:
             "[undefined_name]",
             "[NaN_report]",
             "{undefined_name}",
+            "[one, two]",
+            "[1word, two]",
         ],
     )
     def test_brackets_in_fenced_trailing_prose_do_not_displace_evidence(
@@ -374,6 +387,22 @@ class TestExtractEvidence:
         record = extract_evidence(text)
 
         assert record.data == {"files_touched": ["ok.py"]}
+
+    @pytest.mark.parametrize("fence_tag", ["json", ""])
+    @pytest.mark.parametrize(
+        "terminal_payload",
+        ["[undefined, 1]", '{undefined, "x": 1}'],
+    )
+    def test_inline_multicomponent_malformed_fence_is_authoritative(
+        self, fence_tag: str, terminal_payload: str
+    ) -> None:
+        text = (
+            f'```{fence_tag}\n{{"files_touched": ["stale.py"]}} '
+            f"trailing note {terminal_payload}\n```"
+        )
+
+        with pytest.raises(EvidenceError):
+            extract_evidence(text)
 
     def test_valid_inline_evidence_label_is_recovered(self) -> None:
         record = extract_evidence('Actual evidence: {"files_touched": ["actual.py"]}')

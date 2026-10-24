@@ -9360,6 +9360,52 @@ class TestParallelACExecutor:
         assert event.data["enforced"] is False
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("tail", ["[undefined, 1]", '{undefined, "x": 1}'])
+    @pytest.mark.parametrize("tag", ["json", ""])
+    async def test_multicomponent_terminal_fence_does_not_publish_stale_evidence(
+        self, tmp_path, tail: str, tag: str
+    ) -> None:
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                f'```{tag}\n{{"files_touched":["stale.py"],'
+                f'"commands_run":[],"tests_passed":[]}}\n{tail}\n```',
+                native_session_id="multicomponent-terminal-malformed-evidence",
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+            task_cwd=str(tmp_path),
+        )
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement the feature",
+            session_id="multicomponent-terminal-evidence-session",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is True
+        assert result.typed_evidence is None
+        assert result.typed_evidence_validation is None
+        assert result.typed_evidence_error
+        assert result.atomic_verifier_verdict is not None
+        assert result.atomic_verifier_verdict.status is VerifierStatus.UNAVAILABLE
+        event = next(e for e in appended_events if e.type == "execution.ac.typed_evidence.observed")
+        assert event.data["typed_evidence_present"] is False
+        assert event.data["typed_evidence_valid"] is False
+        assert event.data["typed_evidence_error"] == result.typed_evidence_error
+        assert event.data["verifier_status"] == VerifierStatus.UNAVAILABLE.value
+        assert event.data["enforced"] is False
+
+    @pytest.mark.asyncio
     async def test_contract_ac_with_artifacts_keeps_transcript_obligations(
         self,
         tmp_path,

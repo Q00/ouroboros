@@ -129,8 +129,8 @@ class EvidenceRecord:
         return self.data.get(name, default)
 
 
-def _top_level_fence_body_starts(text: str) -> Iterator[tuple[str, int, int]]:
-    """Yield ``(info, body_start, fence_end)`` for top-level Markdown fences."""
+def _top_level_fence_body_starts(text: str) -> Iterator[tuple[str, int, int, int]]:
+    """Yield ``(info, body_start, body_end, fence_end)`` for top-level fences."""
     search_pos = 0
     while True:
         opener = _FENCE_LINE_RE.search(text, search_pos)
@@ -148,8 +148,9 @@ def _top_level_fence_body_starts(text: str) -> Iterator[tuple[str, int, int]]:
             rf"^[ \t]{{0,3}}{marker}{{{fence_len},}}[ \t]*\r?$", re.MULTILINE
         )
         closer = closing_fence_re.search(text, body_start)
+        body_end = len(text) if closer is None else closer.start()
         fence_end = len(text) if closer is None else closer.end()
-        yield info, body_start, fence_end
+        yield info, body_start, body_end, fence_end
 
         if closer is None:
             return
@@ -173,24 +174,24 @@ def _find_body_start(text: str) -> tuple[int, bool]:
     the same rule before the initial ``raw_decode`` prevents a valid stale
     object from bypassing recovery's terminal-authority checks.
     """
-    supported_fences: list[tuple[int, int]] = []
-    for info, body_start, fence_end in _top_level_fence_body_starts(text):
+    supported_fences: list[tuple[int, int, int]] = []
+    for info, body_start, body_end, fence_end in _top_level_fence_body_starts(text):
         tag = info.split(maxsplit=1)[0:1]
         if not tag or tag[0] == "json":
-            supported_fences.append((body_start, fence_end))
+            supported_fences.append((body_start, body_end, fence_end))
 
     recovery_text = _mask_markdown_examples(text)
     top_level_values = _collect_top_level_values(recovery_text)
 
     if supported_fences:
-        body_start, fence_end = supported_fences[-1]
+        body_start, body_end, fence_end = supported_fences[-1]
         fenced_values = [
-            candidate for candidate in top_level_values if body_start <= candidate[0] < fence_end
+            candidate for candidate in top_level_values if body_start <= candidate[0] < body_end
         ]
         fenced_start = fenced_values[-1][0] if fenced_values else body_start
         fenced_end = fenced_values[-1][1] if fenced_values else body_start
 
-        for pos in range(fenced_end, fence_end):
+        for pos in range(fenced_end, body_end):
             if recovery_text[pos] not in "{[":
                 continue
             try:
@@ -198,7 +199,11 @@ def _find_body_start(text: str) -> tuple[int, bool]:
             except json.JSONDecodeError:
                 gap = recovery_text[fenced_end:pos]
                 adjacent_to_value = "\n" not in gap and "\r" not in gap and not gap.strip()
-                if adjacent_to_value or _looks_like_json_container(recovery_text, pos):
+                if (
+                    adjacent_to_value
+                    or _looks_like_json_container(recovery_text, pos, limit=body_end)
+                    or _has_structural_container_intent(recovery_text, pos, body_end)
+                ):
                     fenced_start = pos
 
         later_values = [candidate for candidate in top_level_values if candidate[0] >= fence_end]
@@ -296,7 +301,7 @@ def _mask_markdown_examples(text: str) -> str:
     return text if masked is None else "".join(masked)
 
 
-def _malformed_boundary_end(text: str, opener_pos: int) -> int:
+def _malformed_boundary_end(text: str, opener_pos: int, *, limit: int | None = None) -> int:
     """Find the textual extent of a malformed JSON opener via bracket matching.
 
     When ``{`` or ``[`` at *opener_pos* fails to parse as valid JSON, this
@@ -314,7 +319,8 @@ def _malformed_boundary_end(text: str, opener_pos: int) -> int:
     quote_char: str | None = None
     escape_next = False
 
-    for i in range(opener_pos, len(text)):
+    boundary = len(text) if limit is None else min(limit, len(text))
+    for i in range(opener_pos, boundary):
         ch = text[i]
         if quote_char is not None:
             if escape_next:
@@ -335,7 +341,7 @@ def _malformed_boundary_end(text: str, opener_pos: int) -> int:
             depth -= 1
             if depth == 0:
                 return i + 1
-    return len(text)
+    return boundary
 
 
 _INLINE_EVIDENCE_LABEL_RE = re.compile(
@@ -360,7 +366,7 @@ def _inline_evidence_value_start(line: str) -> int | None:
     return match.end() if match is not None else None
 
 
-def _looks_like_json_container(text: str, opener_pos: int) -> bool:
+def _looks_like_json_container(text: str, opener_pos: int, *, limit: int | None = None) -> bool:
     """Return whether a failed evidence opener is a JSON payload attempt.
 
     Recovery fails closed for line-level containers and containers introduced
@@ -373,17 +379,19 @@ def _looks_like_json_container(text: str, opener_pos: int) -> bool:
     if _INLINE_EVIDENCE_LABEL_RE.search(text[line_start:opener_pos]) is not None:
         return True
 
-    boundary_end = _malformed_boundary_end(text, opener_pos)
-    if text[opener_pos] == "{" and boundary_end == len(text):
+    boundary_end = _malformed_boundary_end(text, opener_pos, limit=limit)
+    boundary = len(text) if limit is None else min(limit, len(text))
+    if text[opener_pos] == "{" and boundary_end == boundary:
         return True
     candidate = text[opener_pos + 1 : boundary_end - 1].lstrip()
     if not candidate:
         return True
 
     if text[opener_pos] == "[":
+        numeric_atom = re.fullmatch(r"-?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?\s*,?", candidate)
         return bool(
             candidate[0] in '{["'
-            or re.match(r"-?\d", candidate)
+            or numeric_atom
             or re.match(r"(?:true|false|null)(?:\s*[,\]])", candidate)
             or re.fullmatch(r"(?:undefined|NaN)\s*,?", candidate)
         )
@@ -394,6 +402,130 @@ def _looks_like_json_container(text: str, opener_pos: int) -> bool:
         re.match(r"[A-Za-z_][A-Za-z0-9_]*\s*:", candidate) is not None
         or re.fullmatch(r"(?:undefined|NaN)\s*,?", candidate) is not None
     )
+
+
+def _split_outer_components(text: str, opener_pos: int, limit: int) -> tuple[list[str], bool]:
+    """Split a container at outer commas and report outer-level colons.
+
+    Quoted strings and nested containers are opaque. The scan is bounded by
+    the enclosing evidence fence so malformed input cannot borrow delimiters
+    from later prose or a subsequent fence.
+    """
+    opener = text[opener_pos]
+    stack = [opener]
+    component_start = opener_pos + 1
+    components: list[str] = []
+    has_outer_colon = False
+    quote_char: str | None = None
+    escape_next = False
+
+    for index in range(opener_pos + 1, limit):
+        char = text[index]
+        if quote_char is not None:
+            if escape_next:
+                escape_next = False
+            elif char == "\\":
+                escape_next = True
+            elif char == quote_char:
+                quote_char = None
+            continue
+        if char in ('"', "'"):
+            quote_char = char
+        elif char in "[{":
+            stack.append(char)
+        elif char in "]}":
+            expected = "]" if stack[-1] == "[" else "}"
+            if char != expected:
+                continue
+            stack.pop()
+            if not stack:
+                components.append(text[component_start:index])
+                return components, has_outer_colon
+        elif len(stack) == 1 and char == ",":
+            components.append(text[component_start:index])
+            component_start = index + 1
+        elif len(stack) == 1 and char == ":":
+            has_outer_colon = True
+
+    components.append(text[component_start:limit])
+    return components, has_outer_colon
+
+
+def _complete_json_value(value: str) -> bool:
+    """Return whether *value* is exactly one JSON value, not a prefix."""
+    start = _skip_json_whitespace(value, 0)
+    if start == len(value):
+        return False
+    try:
+        _, end_offset = _DECODER.raw_decode(value[start:])
+    except json.JSONDecodeError:
+        return False
+    return not value[start + end_offset :].strip()
+
+
+def _complete_json_member(member: str) -> bool:
+    """Return whether *member* is one complete JSON object member."""
+    start = _skip_json_whitespace(member, 0)
+    try:
+        key, key_end = _DECODER.raw_decode(member[start:])
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(key, str):
+        return False
+    colon = _skip_json_whitespace(member, start + key_end)
+    if colon == len(member) or member[colon] != ":":
+        return False
+    value_start = _skip_json_whitespace(member, colon + 1)
+    try:
+        _, value_end = _DECODER.raw_decode(member[value_start:])
+    except json.JSONDecodeError:
+        return False
+    return not member[value_start + value_end :].strip()
+
+
+def _has_structural_container_intent(text: str, opener_pos: int, limit: int) -> bool:
+    """Recognize multi-component JSON-shaped attempts without new token names.
+
+    A component is strong evidence only when it is a complete JSON value or
+    the existing malformed-singleton classifier accepts it. Object members
+    also expose their outer key/value separator. Arbitrary bare identifiers
+    alone therefore remain prose.
+    """
+    components, has_outer_colon = _split_outer_components(text, opener_pos, limit)
+    if len(components) < 2:
+        return False
+
+    opener = text[opener_pos]
+    closer = "]" if opener == "[" else "}"
+    component_signal = False
+    for component in components:
+        stripped = component.strip()
+        if not stripped:
+            continue
+        if _complete_json_value(stripped):
+            component_signal = True
+            continue
+        if opener == "{" and _complete_json_member(stripped):
+            component_signal = True
+            continue
+
+        # raw_decode accepts prefixes such as ``1`` in ``1word`` and ``"x"``
+        # in ``"x"word``. Do not let the legacy classifier promote either
+        # prefix to a complete component.
+        try:
+            _, prefix_end = _DECODER.raw_decode(stripped)
+        except json.JSONDecodeError:
+            prefix_end = 0
+        if prefix_end and stripped[prefix_end:].strip():
+            continue
+
+        wrapped = f"{opener}{stripped}{closer}"
+        if _looks_like_json_container(wrapped, 0):
+            component_signal = True
+
+    if opener == "{":
+        return has_outer_colon or component_signal
+    return component_signal
 
 
 def _collect_top_level_values(text: str) -> list[tuple[int, int, Any]]:
@@ -497,7 +629,7 @@ def _has_json_attempt(text: str) -> bool:
     JSON delimiters at all.
     """
     # Check for fenced blocks that could be JSON evidence (json-tagged or untagged)
-    for info, body_start, _ in _top_level_fence_body_starts(text):
+    for info, body_start, _, _ in _top_level_fence_body_starts(text):
         body = text[body_start:].strip()
         if not body:
             continue
