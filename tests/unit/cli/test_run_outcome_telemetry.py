@@ -271,7 +271,7 @@ async def test_run_orchestrator_records_and_flushes_non_success_outcomes(
     with (
         patch("ouroboros.cli.commands.run._load_seed_from_yaml", return_value=VALID_SEED_DATA),
         patch("ouroboros.orchestrator.create_agent_runtime"),
-        patch("ouroboros.orchestrator.OrchestratorRunner", return_value=mock_runner),
+        patch("ouroboros.orchestrator.runner_factory.OrchestratorRunner", return_value=mock_runner),
         patch("ouroboros.persistence.event_store.EventStore") as mock_event_store_cls,
         patch("ouroboros.telemetry.capture_job_outcome") as capture,
         patch("ouroboros.telemetry.flush") as flush,

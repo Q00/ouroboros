@@ -1623,7 +1623,7 @@ def create_ouroboros_server(
     from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
     from ouroboros.mcp.tools.synapse_handler import SynapseSignalHandler, SynapseTargetsHandler
     from ouroboros.orchestrator import create_agent_runtime, resolve_agent_runtime_backend
-    from ouroboros.orchestrator.runner import OrchestratorRunner
+    from ouroboros.orchestrator.runner_factory import build_orchestrator_runner
     from ouroboros.orchestrator.runtime_factory import create_agent_runtime_async
     from ouroboros.orchestrator.synapse import (
         EventStoreSessionSignalTargetResolver,
@@ -1896,14 +1896,23 @@ def create_ouroboros_server(
             if mcp_bridge is not None and hasattr(mcp_bridge, "tool_prefix")
             else ""
         )
-        evolution_runner = OrchestratorRunner(
+        evolution_runner = build_orchestrator_runner(
             adapter=runner_adapter,
             event_store=event_store,
             console=Console(stderr=True),
             mcp_manager=_evo_mcp_manager,
             mcp_tool_prefix=_evo_mcp_prefix,
             debug=False,
+            task_workspace=None,
             enable_decomposition=True,
+            max_decomposition_depth=None,
+            max_parallel_workers=None,
+            fat_harness_mode=False,
+            base_model_tier=None,
+            efficiency_mode=None,
+            frugality_assurance=None,
+            inherited_runtime_handle=None,
+            inherited_tools=None,
             session_signal_hub=session_signal_hub,
         )
         return await generation_packages.execute(
