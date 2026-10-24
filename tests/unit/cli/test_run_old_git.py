@@ -47,7 +47,7 @@ async def test_run_refuses_task_worktree_on_old_git(tmp_path: Path) -> None:
     with (
         patch("ouroboros.cli.commands.run._load_seed_from_yaml", return_value=SEED_DATA),
         patch("ouroboros.orchestrator.create_agent_runtime", runtime_factory),
-        patch("ouroboros.orchestrator.OrchestratorRunner", runner_cls),
+        patch("ouroboros.orchestrator.runner_factory.OrchestratorRunner", runner_cls),
         patch("ouroboros.persistence.event_store.EventStore") as event_store_cls,
         patch("ouroboros.core.project_identity._run_git_command", side_effect=fake_git),
         patch("ouroboros.core.worktree._worktree_root", return_value=root),

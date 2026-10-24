@@ -1518,6 +1518,29 @@ class TestOpenCodeRuntimeExecuteTask:
         assert any(h.native_session_id == "sess-tracked-123" for h in handles)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "minimax/MiniMax-M3.1-Flash",
+            "minimax-cn/MiniMax-M3.1-Flash",
+            "minimax/MiniMax-M3",
+            "openrouter/minimax/minimax-m3.1-flash:free",
+            "opencode/minimax-m3.1-flash-free",
+            "minimax/MiniMax-M2.7",
+            "custom/MiniMax-M2.7",
+        ],
+    )
+    async def test_minimax_model_ids_reach_cli_unchanged(self, model: str) -> None:
+        """Discovery curation never rewrites an explicit request at dispatch."""
+        process = _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
+        runtime = OpenCodeRuntime(cli_path="opencode", cwd="/tmp", model=model)
+        with patch("asyncio.create_subprocess_exec", return_value=process) as mock_exec:
+            messages = [message async for message in runtime.execute_task("Hello")]
+        assert messages
+        argv = mock_exec.call_args.args
+        assert argv[argv.index("--model") + 1] == model
+
+    @pytest.mark.asyncio
     async def test_execute_task_cli_not_found(self) -> None:
         """FileNotFoundError yields a result error message."""
         runtime = OpenCodeRuntime(cli_path="/nonexistent/opencode", cwd="/tmp")
