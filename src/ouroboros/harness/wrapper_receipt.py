@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import ast
 import base64
 from collections.abc import Mapping
+import inspect
 import json
 from pathlib import Path
 import shlex
@@ -17,6 +19,7 @@ from ouroboros.harness.deliver_gate import (
     _journal_command_artifact,
 )
 from ouroboros.harness.journal import EvidenceEntry, EvidenceManifest
+from ouroboros.orchestrator import verify_shell
 
 _RECEIPT_KEYS = frozenset(
     {
@@ -37,10 +40,33 @@ _CAPABILITY_SOURCE = Path(filesystem_capability.__file__).read_text(encoding="ut
 _FROZEN_CAPABILITY = base64.b64encode(zlib.compress(_CAPABILITY_SOURCE.encode("utf-8"))).decode(
     "ascii"
 )
+_FROZEN_VERIFY_FUNCTION = ast.parse(
+    inspect.getsource(verify_shell.sanitized_verify_environment)
+).body[0]
+if not isinstance(_FROZEN_VERIFY_FUNCTION, ast.FunctionDef):
+    raise TypeError("verify environment builder source must be a function")
+if (
+    _FROZEN_VERIFY_FUNCTION.body
+    and isinstance(_FROZEN_VERIFY_FUNCTION.body[0], ast.Expr)
+    and isinstance(_FROZEN_VERIFY_FUNCTION.body[0].value, ast.Constant)
+    and isinstance(_FROZEN_VERIFY_FUNCTION.body[0].value.value, str)
+):
+    _FROZEN_VERIFY_FUNCTION.body.pop(0)
+_FROZEN_VERIFY_ENVIRONMENT = (
+    "from __future__ import annotations\n"
+    "from collections.abc import Mapping\n"
+    "import os\n"
+    "from types import SimpleNamespace\n"
+    f"VERIFY_ENV_STRIPPED_KEYS = {verify_shell.VERIFY_ENV_STRIPPED_KEYS!r}\n"
+    f"VERIFY_ENV_STRIPPED_PREFIXES = {verify_shell.VERIFY_ENV_STRIPPED_PREFIXES!r}\n"
+    f"{ast.unparse(_FROZEN_VERIFY_FUNCTION)}\n"
+    "_WRAPPER_VERIFY_SHELL = SimpleNamespace(sanitized_verify_environment=sanitized_verify_environment)\n"
+)
 _RUNNER_PROGRAM = (
     "import base64,zlib;"
     f"exec(zlib.decompress(base64.b64decode({_FROZEN_CAPABILITY!r})));"
     "_WRAPPER_DIRECTORY_OPENER=open_nofollow_directory_chain;"
+    f"exec({_FROZEN_VERIFY_ENVIRONMENT!r});"
     f"exec({_RUNNER_SOURCE!r})"
 )
 

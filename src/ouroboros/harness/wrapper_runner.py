@@ -18,6 +18,9 @@ if "_WRAPPER_DIRECTORY_OPENER" not in globals():
         open_nofollow_directory_chain as _WRAPPER_DIRECTORY_OPENER,
     )
 
+if "_WRAPPER_VERIFY_SHELL" not in globals():
+    from ouroboros.orchestrator import verify_shell as _WRAPPER_VERIFY_SHELL
+
 
 def _output_parent(path: str) -> NoFollowDirectoryChain:
     target = Path(path)
@@ -52,7 +55,12 @@ def main(argv: list[str] | None = None) -> int:
             stack.callback(parent.close)
             parents[path] = parent
         try:
-            completed = subprocess.run(command, capture_output=True, check=False)
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                check=False,
+                env=_WRAPPER_VERIFY_SHELL.sanitized_verify_environment(),
+            )
             inner_status = completed.returncode
             stdout = completed.stdout
             stderr = completed.stderr

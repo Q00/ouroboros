@@ -1,5 +1,7 @@
 """The frozen trusted wrapper owns only contained, exclusive output writes."""
 
+import json
+import os
 from pathlib import Path
 import shlex
 import subprocess
@@ -141,3 +143,147 @@ def test_wrapper_cleans_output_if_parent_moves_during_inner(tmp_path: Path, monk
     assert sorted(path.relative_to(external).as_posix() for path in external.rglob("*")) == [
         "moved"
     ]
+
+
+def _pytest_wrapper_argv(paths: tuple[str, str, str], test_path: Path) -> list[str]:
+    return [
+        sys.executable,
+        "-I",
+        "-c",
+        _RUNNER_PROGRAM,
+        "--receipt",
+        paths[0],
+        "--stdout",
+        paths[1],
+        "--stderr",
+        paths[2],
+        "--",
+        sys.executable,
+        "-m",
+        "pytest",
+        "-q",
+        str(test_path),
+    ]
+
+
+def _make_pytest_contract(tmp_path: Path, *, failing: bool) -> tuple[Path, Path]:
+    test_path = tmp_path / "test_contract.py"
+    marker = tmp_path / "test-body-ran"
+    assertion = "assert False, 'expected inner failure'" if failing else "assert True"
+    expected_path = os.environ.get("PATH", "")
+    test_path.write_text(
+        "import os\n"
+        "from pathlib import Path\n\n"
+        "def test_contract():\n"
+        f"    assert os.environ.get('PATH') == {expected_path!r}\n"
+        f"    Path({str(marker)!r}).write_text('ran')\n"
+        f"    {assertion}\n",
+        encoding="utf-8",
+    )
+    return test_path, marker
+
+
+def _run_wrapper(
+    *, frozen: bool, tmp_path: Path, monkeypatch, test_path: Path, addopts: str | None
+) -> tuple[int, bytes, bytes]:
+    paths = ("receipt.json", "stdout.txt", "stderr.txt")
+    env = dict(os.environ)
+    env.pop("PYTEST_ADDOPTS", None)
+    if addopts is not None:
+        env["PYTEST_ADDOPTS"] = addopts
+    if frozen:
+        completed = subprocess.run(
+            _pytest_wrapper_argv(paths, test_path),
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            check=False,
+        )
+        return (
+            completed.returncode,
+            (tmp_path / paths[1]).read_bytes(),
+            (tmp_path / paths[2]).read_bytes(),
+        )
+    monkeypatch.chdir(tmp_path)
+    if addopts is not None:
+        monkeypatch.setenv("PYTEST_ADDOPTS", addopts)
+    else:
+        monkeypatch.delenv("PYTEST_ADDOPTS", raising=False)
+    return (
+        wrapper_runner.main(
+            [
+                "--receipt",
+                paths[0],
+                "--stdout",
+                paths[1],
+                "--stderr",
+                paths[2],
+                "--",
+                sys.executable,
+                "-m",
+                "pytest",
+                "-q",
+                str(test_path),
+            ]
+        ),
+        (tmp_path / paths[1]).read_bytes(),
+        (tmp_path / paths[2]).read_bytes(),
+    )
+
+
+@pytest.mark.parametrize("frozen", [False, True], ids=["package", "frozen-runner"])
+def test_wrapper_passes_normal_inner_test(frozen: bool, tmp_path: Path, monkeypatch) -> None:
+    test_path, marker = _make_pytest_contract(tmp_path, failing=False)
+    status, stdout, _ = _run_wrapper(
+        frozen=frozen,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        test_path=test_path,
+        addopts=None,
+    )
+
+    assert status == 0
+    assert marker.read_text(encoding="utf-8") == "ran"
+    assert b"1 passed" in stdout
+    receipt = json.loads((tmp_path / "receipt.json").read_text(encoding="utf-8"))
+    assert receipt["test_result"] == "passed"
+
+
+@pytest.mark.parametrize("frozen", [False, True], ids=["package", "frozen-runner"])
+def test_wrapper_runs_inner_tests_when_collect_only_is_inherited(
+    frozen: bool, tmp_path: Path, monkeypatch
+) -> None:
+    test_path, marker = _make_pytest_contract(tmp_path, failing=False)
+    status, stdout, _ = _run_wrapper(
+        frozen=frozen,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        test_path=test_path,
+        addopts="--collect-only",
+    )
+
+    assert status == 0
+    assert marker.read_text(encoding="utf-8") == "ran"
+    assert b"1 passed" in stdout
+    receipt = json.loads((tmp_path / "receipt.json").read_text(encoding="utf-8"))
+    assert receipt["test_result"] == "passed"
+    assert receipt["inner_exit_status"] == 0
+
+
+@pytest.mark.parametrize("frozen", [False, True], ids=["package", "frozen-runner"])
+def test_wrapper_records_real_inner_test_failure(frozen: bool, tmp_path: Path, monkeypatch) -> None:
+    test_path, marker = _make_pytest_contract(tmp_path, failing=True)
+    status, stdout, _ = _run_wrapper(
+        frozen=frozen,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        test_path=test_path,
+        addopts=None,
+    )
+
+    assert status != 0
+    assert marker.read_text(encoding="utf-8") == "ran"
+    assert b"1 failed" in stdout
+    receipt = json.loads((tmp_path / "receipt.json").read_text(encoding="utf-8"))
+    assert receipt["test_result"] == "failed"
+    assert receipt["inner_exit_status"] == status
