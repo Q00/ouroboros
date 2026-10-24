@@ -348,7 +348,7 @@ def _orchestrator_patches(
     return [
         patch("ouroboros.cli.commands.run._load_seed_from_yaml", return_value=VALID_SEED_DATA),
         patch("ouroboros.orchestrator.create_agent_runtime"),
-        patch("ouroboros.orchestrator.OrchestratorRunner", return_value=mock_runner),
+        patch("ouroboros.orchestrator.runner_factory.OrchestratorRunner", return_value=mock_runner),
         patch("ouroboros.persistence.event_store.EventStore"),
         patch("ouroboros.orchestrator.session.SessionRepository"),
         patch("ouroboros.cli.commands.run.maybe_restore_task_workspace", return_value=workspace),

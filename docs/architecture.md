@@ -100,6 +100,11 @@ for the canonical meanings of `AgentRuntimeContext`, `ControlPlane`,
 - 5 optimized indexes for performance
 
 ### 5. Orchestration Layer
+
+CLI workflow runs, MCP seed execution, and evolution generations assemble
+`OrchestratorRunner` through `orchestrator/runner_factory.py`. The builder
+initializes the checkpoint store and applies common depth and worker defaults;
+each entry point supplies its resolved request, workspace, and host context.
 **5-phase pipeline ensuring comprehensive execution**
 - Phase 0: Big Bang (Interview → Seed)
 - Phase 1: PAL Router (Cost optimization)

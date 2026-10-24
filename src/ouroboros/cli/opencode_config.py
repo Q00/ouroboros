@@ -10,10 +10,36 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
 import yaml
+
+
+def plugin_version_error(cli_path: str) -> str | None:
+    try:
+        result = subprocess.run(
+            [cli_path, "--version"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    version = re.fullmatch(
+        r"(?:opencode\s+)?v?(\d+)\.\d+\.\d+(?:[-+][\w.-]+)?", result.stdout.strip()
+    )
+    if version is None or int(version.group(1)) < 2:
+        return None
+    return (
+        "OpenCode 2.x and later plugin mode is not supported by this bridge. "
+        "Use 'ouroboros setup --runtime opencode --opencode-mode subprocess'. "
+        "The V2 plugin API requires a separate bridge migration (issue #2529)."
+    )
 
 
 def _expand_config_dir(raw: str) -> Path:

@@ -141,7 +141,7 @@ def _patch_execute_path(
         monkeypatch.setenv("OUROBOROS_CHECK_PACKAGE", switch)
     prefix = "ouroboros.mcp.tools.execution_handlers"
     monkeypatch.setattr(f"{prefix}.SessionRepository", FakeSessionRepository)
-    monkeypatch.setattr(f"{prefix}.OrchestratorRunner", FakeRunner)
+    monkeypatch.setattr("ouroboros.orchestrator.runner_factory.OrchestratorRunner", FakeRunner)
     monkeypatch.setattr(
         f"{prefix}.create_agent_runtime", lambda **_kwargs: SimpleNamespace(runtime_backend="codex")
     )
@@ -356,7 +356,7 @@ async def test_the_public_background_receipt_reports_the_check_package_as_pendin
 
     monkeypatch.setenv("OUROBOROS_CHECK_PACKAGE", switch)
     prefix = "ouroboros.mcp.tools.execution_handlers"
-    monkeypatch.setattr(f"{prefix}.OrchestratorRunner", FakeRunner)
+    monkeypatch.setattr("ouroboros.orchestrator.runner_factory.OrchestratorRunner", FakeRunner)
     monkeypatch.setattr(
         f"{prefix}.create_agent_runtime", lambda **_kwargs: SimpleNamespace(runtime_backend="codex")
     )

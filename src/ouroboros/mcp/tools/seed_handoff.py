@@ -13,6 +13,9 @@ import yaml
 from ouroboros.orchestrator.contract_redaction import redact_hidden_contract_values
 
 _HIDDEN_WORKER_KEYS = frozenset({"verify_command", "output_assertion"})
+# Top-level Seed fields kept for the record but never shown to a worker: an
+# unanswered interview question read as part of the spec steers the fix.
+_WORKER_OMITTED_SEED_KEYS = frozenset({"open_questions"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,7 +101,10 @@ def project_worker_safe_seed(seed_content: str) -> WorkerSafeSeedProjection:
             "# Seed omitted: expected a YAML mapping.\n", valid_mapping=False
         )
     hidden_values: list[str] = []
-    projected = _worker_safe_value(parsed, hidden_values)
+    projected = _worker_safe_value(
+        {key: value for key, value in parsed.items() if key not in _WORKER_OMITTED_SEED_KEYS},
+        hidden_values,
+    )
     hidden = tuple(hidden_values)
     projected = _redact_worker_value(projected, hidden)
     if projected == parsed:

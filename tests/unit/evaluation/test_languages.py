@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 
 from ouroboros.evaluation.languages import (
+    _ALLOWED_EXECUTABLES,
+    _MODE_SPECS,
     _parse_command,
     build_mechanical_config,
 )
@@ -253,3 +255,13 @@ class TestBuildMechanicalConfigFromToml:
 
         assert config.lint_command is None
         assert config.test_command is None
+
+
+class TestNonVerifyingModeCoverage:
+    """Every allowlisted executable carries a reviewed non-verifying-mode entry."""
+
+    def test_every_allowlisted_executable_has_a_mode_entry(self) -> None:
+        # Adding an executable to the allowlist without deciding which of its
+        # argv shapes cannot fail (version / help / list / dry-run / exit-zero
+        # / executor overrides) re-opens #2450's hole for that tool.
+        assert set(_MODE_SPECS) == set(_ALLOWED_EXECUTABLES)

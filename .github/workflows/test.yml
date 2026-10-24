@@ -43,8 +43,8 @@ jobs:
 
           assert claude_agent_sdk is not None
           assert mcp is not None
-          assert version("claude-agent-sdk") == "0.2.158"
-          assert version("anthropic") == "1.8.0"
+          assert version("claude-agent-sdk") == "0.2.165"
+          assert version("anthropic") == "1.13.0"
           assert version("mcp").split(".", maxsplit=1)[0] == "1"
           PY
           uv pip check
@@ -112,7 +112,13 @@ jobs:
           if [[ "${{ github.event_name }}" != "pull_request" && "${{ matrix.python-version }}" == "3.12" ]]; then
             COV_ARGS="--cov=src/ouroboros --cov-report=xml"
           fi
-          uv run --python "${{ matrix.python-version }}" --no-sync pytest tests/ -n 4 --dist worksteal --durations=25 -m "not performance" $COV_ARGS -q
+          MARKER_EXPR="not performance"
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            # Artifact-building tests are covered on pushes; keep PR feedback
+            # focused on fast correctness checks.
+            MARKER_EXPR="not performance and not slow"
+          fi
+          uv run --python "${{ matrix.python-version }}" --no-sync pytest tests/ -n 4 --dist loadgroup --durations=25 -m "$MARKER_EXPR" $COV_ARGS -q
 
       - name: Upload coverage artifact
         if: github.event_name != 'pull_request' && matrix.python-version == '3.12'
@@ -207,6 +213,48 @@ jobs:
 
       - name: Run native Windows plugin hook tests
         run: uv run --python 3.12 --no-sync pytest tests/unit/scripts/test_windows_plugin_hooks.py -n 0 -q
+
+      - name: Verify documented Windows HTTP listener inspection
+        shell: pwsh
+        env:
+          OOO_WINDOWS_HTTP_EVIDENCE: ${{ runner.temp }}/windows-http-snippet
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:OOO_WINDOWS_HTTP_EVIDENCE | Out-Null
+          $junit = Join-Path $env:OOO_WINDOWS_HTTP_EVIDENCE 'results.xml'
+          uv run --python 3.12 --no-sync pytest tests/integration/docs/test_windows_http_snippet.py -n 0 -rs -q --junitxml $junit
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          [xml]$report = Get-Content $junit
+          $nativeCases = @($report.testsuites.testsuite.testcase | Where-Object {
+            $_.name -match '^test_native_windows_http_snippet\['
+          })
+          $mutantCases = @($report.testsuites.testsuite.testcase | Where-Object {
+            $_.name -match '^test_native_windows_http_snippet_rejects_missing_process_query\['
+          })
+          if ($nativeCases.Count -ne 6 -or $mutantCases.Count -ne 2) {
+            throw 'Expected six native docs cases and two negative mutant cases.'
+          }
+          foreach ($case in ($nativeCases + $mutantCases)) {
+            if ($null -ne $case.SelectSingleNode('skipped|failure|error')) {
+              throw 'Every native docs and mutant case must run and pass without skipping.'
+            }
+          }
+          foreach ($shell in @('powershell', 'pwsh')) {
+            foreach ($scenario in @('0', '1', '2', 'missing-process-query')) {
+              $path = Join-Path $env:OOO_WINDOWS_HTTP_EVIDENCE "$shell-$scenario.json"
+              $record = Get-Content -Raw $path | ConvertFrom-Json
+              $expected = if ($scenario -eq 'missing-process-query') { 'mutant_rejected' } else { 'passed' }
+              if ($record.oracle -ne $expected) { throw "Missing verified observation: $path" }
+            }
+          }
+
+      - name: Upload native Windows HTTP snippet evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-http-snippet-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-http-snippet
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Run the runtime sandbox tests
         env:
