@@ -412,7 +412,8 @@ def _split_outer_components(
     Quoted strings and nested containers are opaque. The scan is bounded by
     the enclosing evidence fence so malformed input cannot borrow delimiters
     from later prose or a subsequent fence. The flags report whether the
-    container has an outer colon or comma.
+    container has an outer colon or comma, and whether the last outer comma
+    still leaves a dangling terminal separator.
     """
     opener = text[opener_pos]
     stack = [opener]
@@ -420,6 +421,7 @@ def _split_outer_components(
     components: list[str] = []
     has_outer_colon = False
     has_outer_comma = False
+    has_trailing_comma = False
     quote_char: str | None = None
     escape_next = False
 
@@ -434,8 +436,12 @@ def _split_outer_components(
                 quote_char = None
             continue
         if char in ('"', "'"):
+            if len(stack) == 1:
+                has_trailing_comma = False
             quote_char = char
         elif char in "[{":
+            if len(stack) == 1:
+                has_trailing_comma = False
             stack.append(char)
         elif char in "]}":
             expected = "]" if stack[-1] == "[" else "}"
@@ -444,16 +450,20 @@ def _split_outer_components(
             stack.pop()
             if not stack:
                 components.append(text[component_start:index])
-                return components, has_outer_colon, has_outer_comma
+                return components, has_outer_colon, has_outer_comma, has_trailing_comma
         elif len(stack) == 1 and char == ",":
             components.append(text[component_start:index])
             component_start = index + 1
             has_outer_comma = True
+            has_trailing_comma = True
         elif len(stack) == 1 and char == ":":
             has_outer_colon = True
+            has_trailing_comma = False
+        elif len(stack) == 1 and not char.isspace():
+            has_trailing_comma = False
 
     components.append(text[component_start:limit])
-    return components, has_outer_colon, has_outer_comma
+    return components, has_outer_colon, has_outer_comma, has_trailing_comma
 
 
 def _complete_json_value(value: str) -> bool:
@@ -498,9 +508,15 @@ def _has_structural_container_intent(text: str, opener_pos: int, limit: int) -> 
     otherwise a malformed terminal singleton after prose can be skipped in
     favor of stale evidence.
     """
-    components, has_outer_colon, has_outer_comma = _split_outer_components(text, opener_pos, limit)
+    components, has_outer_colon, has_outer_comma, has_trailing_comma = _split_outer_components(
+        text, opener_pos, limit
+    )
     opener = text[opener_pos]
-    if opener == "[" and has_outer_comma and any(not component.strip() for component in components):
+    if (
+        opener == "["
+        and has_outer_comma
+        and (has_trailing_comma or any(not component.strip() for component in components))
+    ):
         # Any empty outer slot is an unmistakable structural boundary, even
         # when the non-empty components are prose-like names. Requiring an
         # outer comma keeps a valid empty array (``[]``) classified normally.
