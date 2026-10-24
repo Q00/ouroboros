@@ -138,9 +138,10 @@ MAX_REPLY_CHARS = 100_000
 _PRIOR_FINDINGS_IN_PROMPT = 6
 _LOG_TEXT_LIMIT = 200
 
-# Fixed ledger value of a not-found entry. The entry renders as its open
-# question only (``ledger_seed.ledger_assumptions``); the value keeps the entry
-# active and states the fact without guessing.
+# Fixed ledger value of a not-found entry. The entry is kept as its open
+# question only (``ledger_seed.ledger_open_questions``), which no execution
+# prompt renders; the value keeps the entry active and states the fact without
+# guessing.
 NOT_SETTLED_VALUE = "The repository code does not settle this interview question."
 NOT_SETTLED_REPLY = "The repository code does not settle this question."
 # Added to the not-found reply when no requester is wired: nobody else can
@@ -612,10 +613,10 @@ def not_found_answer(
     No model answer text is kept. Each entry is a non-binding assumption
     (``DEFAULTED``) that carries the question, keyed ``.investigated.<round>``.
     ``DEFAULTED`` counts as resolved for the ledger, so the section is closed
-    for interview readiness and Seed completeness, and the worker sees the
-    question as an ``Open question:`` line. ``open_for_implementer`` (no
-    requester) also tells the interviewer that the question stays open for the
-    implementer.
+    for interview readiness and Seed completeness, and the question is kept in
+    ``Seed.open_questions``, which no execution prompt renders.
+    ``open_for_implementer`` (no requester) also tells the interviewer that the
+    question stays open for the implementer.
     """
     labels = [span.label for span in result.checked]
     updates = [

@@ -28,7 +28,11 @@ from typing import Any
 import uuid
 
 from ouroboros.orchestrator.copilot_cli_runtime import CopilotCliRuntime
-from ouroboros.orchestrator.evidence.common import validate_attempt_judgment_payload
+from ouroboros.orchestrator.evidence.common import (
+    _ATTEMPT_OUTCOMES,
+    _SUCCESSFUL_ATTEMPT_OUTCOMES,
+    validate_attempt_judgment_payload,
+)
 from ouroboros.orchestrator.runtime_param_negotiation import runtime_capabilities_for
 from ouroboros.orchestrator.verifier import Verifier, structural_atomic_verifier
 from ouroboros.orchestrator.zcode_cli_runtime import ZcodeCLIRuntime
@@ -1176,14 +1180,7 @@ async def collect_terminal_acceptance_plan(
         if candidate == latest_by_root[root]:
             selected_by_root.setdefault(root, []).append(item)
 
-    canonical_outcomes = {
-        "succeeded",
-        "satisfied_externally",
-        "failed",
-        "blocked",
-        "invalid",
-        "cancelled",
-    }
+    canonical_outcomes = set(_ATTEMPT_OUTCOMES)
     if fallback_outcome is None:
         fallback_outcome = {
             "completed": "failed",
@@ -1281,17 +1278,14 @@ async def collect_terminal_acceptance_plan(
                     },
                 )
             outcome = next(iter(normalized_outcomes))
-        accepted = terminal_status == "completed" and outcome in {
-            "succeeded",
-            "satisfied_externally",
-        }
+        accepted = terminal_status == "completed" and outcome in _SUCCESSFUL_ATTEMPT_OUTCOMES
         disposition = (
             "accepted"
             if accepted
             else (
                 "cancelled"
                 if terminal_status == "cancelled"
-                else ("rejected" if outcome in {"succeeded", "satisfied_externally"} else outcome)
+                else ("rejected" if outcome in _SUCCESSFUL_ATTEMPT_OUTCOMES else outcome)
             )
         )
         plan.append(
