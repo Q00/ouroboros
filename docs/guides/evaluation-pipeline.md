@@ -81,7 +81,7 @@ The mechanical verifier runs zero-cost automated shell commands and checks the e
 | **Command timeout** | `Check <type> timed out after Ns` | Command exceeded `timeout_seconds` (default 300 s); increase timeout or fix slow tests |
 | **Non-zero exit code** | `Check <type> failed (exit code N)` | Tool found real errors; inspect `stdout_preview`/`stderr_preview` in the event payload |
 | **Coverage below threshold** | `Coverage X.X% below threshold Y.Y%` | Test suite does not meet the minimum coverage requirement; add tests or lower `coverage_threshold` |
-| **Coverage not parseable** | Coverage check passes but no `coverage_score` in events | Output did not match the expected pattern (`TOTAL ... XX%`); ensure `pytest-cov` or compatible tool is used |
+| **Coverage not parseable** | With an enabled threshold, acceptance is unverified and `coverage_score` is `None` | Output is unsupported, malformed, or conflicting; supply a supported measurement row. At `coverage_threshold=0.0`, only command execution is checked |
 | **OS error** | `Check <type> failed` with "OS error" | Permissions problem or missing working directory; verify `working_dir` config |
 
 ### Where Stage 1 Commands Come From
@@ -110,7 +110,7 @@ It returns `False` for the failures it handles: no manifests, a provider error s
 
 > **Deprecated:** `detect_language()` no longer detects anything. It is a compatibility shim that reads `.ouroboros/mechanical.toml` and emits a `DeprecationWarning`; call `ensure_mechanical_toml()` plus `build_mechanical_config()` instead.
 
-> **Go coverage note:** The `go test -cover` output format (`ok  ./... coverage: XX.X% of statements`) is not matched by the coverage parser (which expects `TOTAL ... XX%` or `Coverage: XX%`). For Go projects, `coverage_score` will always be `None` in the event payload and the coverage **threshold check is skipped even if coverage is low**. Use the `.ouroboros/mechanical.toml` override to supply a custom coverage command if you need threshold enforcement on Go projects.
+> **Go coverage note:** The `go test -cover` output format (`ok  ./... coverage: XX.X% of statements`) is not matched by the coverage parser (which expects `TOTAL ... XX%` or `Coverage: XX%`). This output leaves `coverage_score` as `None` and an enabled threshold **unverified**, so acceptance is withheld. Use the `.ouroboros/mechanical.toml` override to supply a custom coverage command producing a supported measurement row. Setting `coverage_threshold=0.0` disables the threshold; it does not create a measured score.
 
 ### Project-Level Command Overrides
 
@@ -555,7 +555,7 @@ In deliberative consensus, the Judge can return `conditional`. This means the Ju
 
 ### Coverage Score Parsing
 
-Stage 1 parses coverage from `pytest-cov` output by looking for the pattern `TOTAL  N  N  XX%` or `Coverage: XX%`. If your coverage tool outputs a different format, the `coverage_score` will be `None` and the coverage check will pass even if coverage is zero. Configure a compatible coverage command or check the event payload's `coverage_score` field to verify parsing worked.
+Stage 1 parses complete measurement rows in the form `TOTAL  N  N  XX%` or `Coverage: XX%`. Requirements such as `Coverage: 70% required`, malformed rows, conflicting measurements, and unsupported formats do not establish coverage. With an enabled threshold, a successful command without a readable measurement leaves `coverage_score` as `None` and acceptance unverified. A measured value below the threshold is an executed failure. At `coverage_threshold=0.0`, the threshold is disabled: a successful command can pass without a score, but a nonzero exit or another failed check still rejects the artifact. Configure a compatible coverage command and inspect the event payload's `coverage_score` to confirm a measurement was recorded.
 
 ### Parallel Consensus Failure Tolerance
 

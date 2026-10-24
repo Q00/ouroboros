@@ -368,6 +368,7 @@ from ouroboros.orchestrator.parallel_executor_models import (
     ParallelExecutionStageResult,
     StageExecutionOutcome,
     check_package_record,
+    checkpoint_contract_fingerprint,
     checkpoint_outcome,
     governing_verifier_verdict,
     inherit_check_package_hooks,
@@ -3823,6 +3824,9 @@ class ParallelACExecutor:
             session_id=session_id,
         )
 
+        contract_fingerprint = checkpoint_contract_fingerprint(
+            seed, self._execution_authority_policy()
+        )
         if self._checkpoint_store:
             try:
                 seed_id = getattr(seed, "id", session_id)
@@ -3841,6 +3845,7 @@ class ParallelACExecutor:
                         and checkpoint_state.get("session_id") == session_id
                         and checkpoint_state.get("execution_id") == execution_id
                         and checkpoint_state.get("workspace_identity") == current_workspace_identity
+                        and checkpoint_state.get("contract_fingerprint") == contract_fingerprint
                     )
                     if checkpoint_matches_invocation:
                         coordinator_mutated_workspace = bool(
@@ -4719,6 +4724,7 @@ class ParallelACExecutor:
                             state={
                                 "session_id": session_id,
                                 "execution_id": execution_id,
+                                "contract_fingerprint": contract_fingerprint,
                                 "workspace_identity": canonical_workspace_authority(
                                     self._task_cwd
                                     or getattr(self._adapter, "working_directory", None)
@@ -4867,6 +4873,7 @@ class ParallelACExecutor:
                         state={
                             "session_id": session_id,
                             "execution_id": execution_id,
+                            "contract_fingerprint": contract_fingerprint,
                             "workspace_identity": canonical_workspace_authority(
                                 self._task_cwd
                                 or getattr(self._adapter, "working_directory", None)
@@ -4986,14 +4993,6 @@ class ParallelACExecutor:
 
     @staticmethod
     def _coordinator_review_may_mutate_workspace(review: Any) -> bool:
-        """Return whether a coordinator review could have changed the workspace.
-
-        Coordinator sessions are allowed to use ``Edit`` and ``Bash``.  The
-        structured review summary is not treated as proof of a mutation: a
-        model can report a proposed fix without applying one.  The caller also
-        compares workspace digests around the review, so direct writes remain
-        observable even when a runtime omits tool messages.
-        """
         if review is None:
             return False
         for message in getattr(review, "messages", ()) or ():

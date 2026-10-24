@@ -93,7 +93,7 @@ APPROVED          REJECTED
 | **命令超时** | `Check <type> timed out after Ns` | 命令超过 `timeout_seconds`（默认 300 秒）；调大超时或修掉慢测试 |
 | **退出码非 0** | `Check <type> failed (exit code N)` | 工具发现了真实错误；查看事件负载里的 `stdout_preview` / `stderr_preview` |
 | **覆盖率低于阈值** | `Coverage X.X% below threshold Y.Y%` | 测试套件没达到最低覆盖率要求；补测试或调低 `coverage_threshold` |
-| **覆盖率无法解析** | coverage 检查通过，但事件里没有 `coverage_score` | 输出不匹配预期格式（`TOTAL ... XX%`）；确认使用的是 `pytest-cov` 或兼容工具 |
+| **覆盖率无法解析** | 启用阈值时，验收状态为未验证，`coverage_score` 为 `None` | 输出格式不受支持、损坏或相互冲突；请提供支持的测量行。`coverage_threshold=0.0` 时只检查命令执行结果 |
 | **OS 错误** | `Check <type> failed`，附带 "OS error" | 权限问题或工作目录不存在；检查 `working_dir` 配置 |
 
 ### Stage 1 的命令从哪来
@@ -122,7 +122,7 @@ ouroboros detect --backend codex   # 为这次 detect 调用指定 LLM 后端
 
 > **已废弃：** `detect_language()` 现在什么也检测不了。它只是一个兼容垫片，读取 `.ouroboros/mechanical.toml` 并发出 `DeprecationWarning`；请改用 `ensure_mechanical_toml()` 加 `build_mechanical_config()`。
 
-> **Go 覆盖率注意：** `go test -cover` 的输出格式（`ok  ./... coverage: XX.X% of statements`）不被覆盖率解析器匹配（它期望 `TOTAL ... XX%` 或 `Coverage: XX%`）。因此在 Go 项目里，事件负载中的 `coverage_score` 永远是 `None`，**即使覆盖率很低，阈值检查也会被跳过**。如果 Go 项目需要强制阈值，请用 `.ouroboros/mechanical.toml` 覆写一条自定义的 coverage 命令。
+> **Go 覆盖率注意：** `go test -cover` 的输出格式（`ok  ./... coverage: XX.X% of statements`）不被覆盖率解析器匹配（它期望 `TOTAL ... XX%` 或 `Coverage: XX%`）。这类输出会让 `coverage_score` 保持 `None`，已启用的阈值处于**未验证**状态，因此不能通过验收。请用 `.ouroboros/mechanical.toml` 覆写一条能输出受支持测量行的 coverage 命令。`coverage_threshold=0.0` 会关闭阈值，但不会产生测量分数。
 
 ### 项目级命令覆写
 
@@ -513,7 +513,7 @@ AC 树里的每一条 AC 都被**独立**评估。`EvaluationContext` 只携带�
 
 ### 覆盖率分数的解析
 
-Stage 1 从 `pytest-cov` 的输出里按 `TOTAL  N  N  XX%` 或 `Coverage: XX%` 的模式解析覆盖率。如果你的覆盖率工具输出的是别的格式，`coverage_score` 会是 `None`，并且**即使覆盖率是零，coverage 检查也会通过**。请配置一个格式兼容的覆盖率命令，或者查事件负载里的 `coverage_score` 字段来确认解析是否成功。
+Stage 1 解析 `TOTAL  N  N  XX%` 或 `Coverage: XX%` 形式的完整测量行。`Coverage: 70% required` 之类的要求、损坏的行、相互冲突的测量值和不受支持的格式都不能证明覆盖率。启用阈值时，命令即使成功退出，若没有可读取的测量值，`coverage_score` 仍为 `None`，验收状态为未验证。实际测量值低于阈值则属于执行失败。`coverage_threshold=0.0` 会关闭阈值：命令成功时可以在没有分数的情况下通过，但非零退出码或其他检查失败仍会拒绝产物。请配置格式兼容的 coverage 命令，并查看事件负载中的 `coverage_score` 来确认测量值已记录。
 
 ### 并行共识的失败容忍
 

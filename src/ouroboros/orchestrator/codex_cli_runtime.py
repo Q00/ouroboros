@@ -38,6 +38,7 @@ from ouroboros.core.text import truncate_with_ellipsis
 from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
+    _CODEX_BACKENDS,
     FULL_CAPABILITIES,
     AgentMessage,
     ParamSupport,
@@ -72,6 +73,7 @@ from ouroboros.orchestrator.frugality_runtime_attestation import (
 )
 from ouroboros.orchestrator.runtime_drift import DRIFT_EPOCH_UNKNOWN, RuntimeDriftLedger
 from ouroboros.orchestrator.skill_tool_mapping import discover_skill_tool_mappings
+from ouroboros.orchestrator.tooling_guidance import render_tooling_guidance
 from ouroboros.providers.base import CompletionConfig
 from ouroboros.providers.codex_cli_stream import (
     iter_runtime_stream_lines,
@@ -1600,11 +1602,9 @@ class CodexCliRuntime:
             )
 
         if tools is not None:
-            guidance = "Do not use any tools for this task. Respond using reasoning only."
-            if tools:
-                tool_list = "\n".join(f"- {tool}" for tool in tools)
-                guidance = f"Prefer to solve the task using the following tool set when possible:\n{tool_list}"
-            parts.append(f"<tooling-guidance>\n{guidance}\n</tooling-guidance>")
+            # Codex has its own shell and patch tools, not the Claude tool names.
+            codex = self._runtime_handle_backend in _CODEX_BACKENDS
+            parts.append(render_tooling_guidance(tools, claude_tool_names=not codex))
 
         parts.append(prompt)
         return "\n\n".join(part for part in parts if part.strip())

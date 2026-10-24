@@ -155,6 +155,9 @@ Setup also creates artifacts outside `~/.codex/`: `ensure_config_dir()` creates 
 
 `~/.codex/config.toml` is not where Ouroboros stage model pins belong. Use the settings UI or the equivalent `~/.ouroboros/config.yaml` values; keep user-managed native Codex profiles when you need an explicit `--profile`. If you manage a long-running URL-based Ouroboros MCP server, keep that URL entry in `~/.codex/config.toml`; setup preserves it by default. Use `--mcp-mode stdio` only on supported hosts when you intentionally want a managed command-spawned server. Native Windows refuses that crash-prone topology and offers explicit operator-owned `--mcp-mode http` instead.
 
+For an unexpected console during HTTP server startup, see
+[Blank PowerShell or Windows Terminal window](#blank-powershell-or-windows-terminal-window).
+
 ### Worker subprocess isolation (Agent OS `runtime_profile`)
 
 Interactive `codex` sessions and Ouroboros-managed worker subprocesses sometimes want different defaults — for example a different model, sandbox, or notify hook. Set the orchestrator-level runtime profile to `worker` to opt every Ouroboros-spawned `codex exec` invocation into the managed `~/.codex/ouroboros-worker.config.toml` profile:
@@ -407,6 +410,51 @@ uv run ouroboros run workflow --runtime codex --resume <session_id> ~/.ouroboros
 > `ouroboros run workflow`. The field is provenance, not an enforcement gate.
 
 ## Troubleshooting
+
+### Blank PowerShell or Windows Terminal window
+
+An empty window alone does not show whether HTTP MCP startup failed. First note
+when it appears: a window opened by your startup script or scheduled task before
+the server accepts a job is a different launch path from a detached worker
+started by MCP ([the worker-console fix, #2523](https://github.com/Q00/ouroboros/pull/2523)).
+
+Inspect your launcher's executable and arguments. With Windows Terminal as the
+default terminal, `powershell.exe -WindowStyle Hidden` can still leave a visible
+window ([Windows Terminal #12464](https://github.com/microsoft/terminal/issues/12464)).
+Ouroboros setup does not create or repair these user-managed startup scripts or
+scheduled tasks; the [HTTP setup behavior](#command-surface) leaves server
+startup to you.
+
+Before starting another server, inspect the configured endpoint's listener from
+PowerShell. This read-only example uses the default port; change `$mcpPort` if
+your URL uses another port:
+
+```powershell
+$mcpPort = 8765
+$listeners = @(Get-NetTCPConnection -State Listen |
+    Where-Object LocalPort -eq $mcpPort)
+if ($listeners.Count -eq 0) {
+    "No TCP listener found on port $mcpPort."
+}
+$listeners | Select-Object LocalAddress, LocalPort, OwningProcess
+$listeners | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object {
+    Get-CimInstance Win32_Process -Filter "ProcessId = $_" |
+        Select-Object ProcessId, ParentProcessId, ExecutablePath, CommandLine
+}
+```
+
+Compare the process's command line with your server launcher. A listening port
+does not prove a working MCP connection: also confirm that a tool call through
+your MCP client succeeds. If the launcher redirects stdout/stderr, inspect its
+configured output files for startup errors; an empty console may simply have no
+output to display.
+
+If no server is already using the endpoint, run the command printed by HTTP
+setup in a foreground terminal and keep its output visible while diagnosing.
+Restart an identified server through the launcher you use to manage it. Do not
+terminate an entire process tree just to hide a window: durable background jobs
+can outlive the MCP server. Use the job cancellation controls when you intend to
+stop that work.
 
 ### Codex CLI not found
 

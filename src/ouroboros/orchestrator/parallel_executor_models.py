@@ -14,8 +14,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from enum import Enum
 import hashlib
+import json
 from typing import TYPE_CHECKING, Any
 
+from ouroboros.core.seed import Seed
 from ouroboros.orchestrator.decomposition_policy import DecompositionDecisionRecord
 from ouroboros.orchestrator.recoverable_failure import UsageLimitPauseConsequence
 
@@ -438,6 +440,12 @@ def collect_decomposition_depth_warning_paths(
             )
         )
     return paths
+
+
+def checkpoint_contract_fingerprint(seed: Seed, policy: dict[str, object]) -> str:
+    payload = {"version": 1, "seed": seed.to_dict(), "policy": policy}
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def checkpoint_outcome(result: ACExecutionResult) -> str:
