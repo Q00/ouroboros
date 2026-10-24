@@ -1015,6 +1015,13 @@ class SpecVerifier:
 
     def _verify_one(self, assertion: SpecAssertion) -> SpecVerificationResult:
         """Verify one assertion, including tiers this scanner deliberately skips."""
+        if assertion.evidence_scope == "execution":
+            return SpecVerificationResult(
+                assertion=assertion,
+                outcome=VerificationOutcome.SKIPPED,
+                detail="Execution observation requires test execution or semantic analysis; "
+                "source scanning cannot establish a run's result",
+            )
         if assertion.tier == VerificationTier.T1_CONSTANT:
             return self._verify_constant(assertion)
         if assertion.tier == VerificationTier.T2_STRUCTURAL:

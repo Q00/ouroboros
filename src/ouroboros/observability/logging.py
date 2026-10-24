@@ -46,17 +46,23 @@ import logging
 from logging.handlers import TimedRotatingFileHandler
 import os
 from pathlib import Path
+import re
 import sys
 from threading import RLock
+import traceback
+from types import TracebackType
 from typing import Any
 
 from pydantic import BaseModel, Field
 import structlog
 
 from ouroboros.core.security import (
+    is_credential_shaped,
+    is_opaque_credential_shaped,
+    is_safe_structured_event_identifier,
     is_sensitive_field,
-    is_sensitive_value,
-    mask_api_key,
+    mask_sensitive_value,
+    sanitize_for_logging,
 )
 
 
@@ -191,66 +197,206 @@ def _setup_file_handler(config: LoggingConfig) -> TimedRotatingFileHandler | Non
     return handler
 
 
+_EXCEPTION_QUOTED_FIELD = re.compile(r"""(?=((["'])((?:\\.|(?!\2)[^\\])*)\2[ \t]*:[ \t]*))""")
+_EXCEPTION_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)\b(password|passwd|api[-_]?key|access[-_]?token|client[-_]?secret|"
+    r"authorization|credential|secret|token)\b\s*[:=]\s*"
+)
+
+
+def _exception_scalar_end(text: str, start: int, *, stop_at_whitespace: bool = False) -> int:
+    """Find a scalar's textual boundary without decoding or evaluating its contents."""
+    quote: str | None = None
+    escaped = False
+    for index in range(start, len(text)):
+        character = text[index]
+        if escaped:
+            escaped = False
+        elif quote is not None:
+            if character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+        elif character in ("'", '"'):
+            quote = character
+        elif character in ",;}])\r\n" or (stop_at_whitespace and character.isspace()):
+            return index
+    return len(text)
+
+
+def _sanitize_exception_text(text: str) -> str:
+    """Redact caller-supplied string arguments and exception notes."""
+
+    parts: list[str] = []
+    consumed = 0
+    for match in _EXCEPTION_QUOTED_FIELD.finditer(text):
+        start, value_start = match.span(1)
+        key_quote, key = match.group(2), match.group(3)
+        if start < consumed or not is_sensitive_field(key):
+            continue
+        parts.append(text[consumed:start])
+        parts.append(f"{key_quote}{key}{key_quote}: '<REDACTED>'")
+        consumed = _exception_scalar_end(text, value_start)
+    parts.append(text[consumed:])
+    text = "".join(parts)
+    parts = []
+    consumed = 0
+    for match in _EXCEPTION_SECRET_ASSIGNMENT.finditer(text):
+        if match.start() < consumed:
+            continue
+        parts.append(text[consumed : match.start()])
+        parts.append(f"{match.group(1)}=<REDACTED>")
+        consumed = _exception_scalar_end(text, match.end(), stop_at_whitespace=True)
+    parts.append(text[consumed:])
+    return _mask_exception_tokens("".join(parts))
+
+
+def _mask_exception_tokens(text: str) -> str:
+    token_pattern = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{7,}")
+
+    def replace(match: re.Match[str]) -> str:
+        token = match.group(0)
+        if is_opaque_credential_shaped(token):
+            return mask_sensitive_value(token)
+        if (
+            match.start() > 0
+            and text[match.start() - 1] in ("'", '"')
+            and match.end() + 1 < len(text)
+            and text[match.end()] == text[match.start() - 1]
+            and text[match.end() + 1] == ":"
+        ):
+            return token
+        if is_credential_shaped(token):
+            return mask_sensitive_value(token)
+        return token
+
+    return token_pattern.sub(replace, text)
+
+
+def _format_exception_safely(
+    exception: BaseException, tb: TracebackType | None, seen: set[int]
+) -> str:
+    if id(exception) in seen:
+        return "<exception cycle>\n"
+    seen.add(id(exception))
+    parts: list[str] = []
+    cause = exception.__cause__
+    context = exception.__context__
+    if cause is not None:
+        parts.append(_format_exception_safely(cause, cause.__traceback__, seen))
+        parts.append("\nThe above exception was the direct cause of the following exception:\n\n")
+    elif context is not None and not exception.__suppress_context__:
+        parts.append(_format_exception_safely(context, context.__traceback__, seen))
+        parts.append("\nDuring handling of the above exception, another exception occurred:\n\n")
+    if tb is not None:
+        parts.append("Traceback (most recent call last):\n")
+        # Source lines can contain literal credentials; retain frame locations only.
+        frames = [
+            traceback.FrameSummary(frame.f_code.co_filename, lineno, frame.f_code.co_name, line="")
+            for frame, lineno in traceback.walk_tb(tb)
+        ]
+        parts.extend(traceback.StackSummary.from_list(frames).format())
+    safe_arguments = []
+    for argument in BaseException.args.__get__(exception):
+        match argument:
+            case str():
+                safe_arguments.append(_sanitize_exception_text(str.__str__(argument)))
+            case _:
+                safe_arguments.append(sanitize_for_logging({"argument": argument})["argument"])
+    message = str(BaseException(*safe_arguments))
+    exception_type = type(exception)
+    name = exception_type.__qualname__
+    if exception_type.__module__ not in ("builtins", "__main__"):
+        name = f"{exception_type.__module__}.{name}"
+    parts.append(f"{name}: {message}\n" if message else f"{name}\n")
+    if isinstance(exception, BaseExceptionGroup):
+        for child in exception.exceptions:
+            parts.append(_format_exception_safely(child, child.__traceback__, seen))
+    notes = sanitize_for_logging({"notes": getattr(exception, "__notes__", ())})["notes"]
+    for note in notes:
+        if isinstance(note, str):
+            note = _sanitize_exception_text(note)
+        parts.append(f"{note}\n")
+    return _mask_exception_tokens("".join(parts))
+
+
+def _format_exc_info_safely(
+    _logger: Any,
+    _method_name: str,
+    event_dict: dict[str, Any],
+) -> dict[str, Any]:
+    """Sanitize structured exception arguments before rendering either sink."""
+    exc_info = event_dict.pop("exc_info", None)
+    try:
+        if not exc_info:
+            return event_dict
+        match exc_info:
+            case BaseException() as exception:
+                tb = exception.__traceback__
+            case (_, BaseException() as exception, tb):
+                pass
+            case _:
+                _, exception, tb = sys.exc_info()
+        if exception is not None:
+            event_dict["exception"] = _format_exception_safely(exception, tb, set()).rstrip()
+    except Exception:
+        event_dict["exception"] = "<REDACTED>"
+    return event_dict
+
+
 def _mask_sensitive_data(
     _logger: Any,
     _method_name: str,
     event_dict: dict[str, Any],
 ) -> dict[str, Any]:
-    """Structlog processor that masks sensitive data in log entries.
+    """Return a renderer-safe event dictionary with nested secrets masked.
 
-    Automatically detects and masks API keys, tokens, and other sensitive
-    values to prevent accidental exposure in logs.
-
-    Args:
-        _logger: The logger instance (unused).
-        _method_name: The log method name (unused).
-        event_dict: The event dictionary to process.
-
-    Returns:
-        Event dictionary with sensitive values masked.
+    ``event`` is structlog's structured event value. String event identifiers
+    remain exact unless their content is credential-shaped. Reserved
+    ``exc_info`` is retained for ``_format_exc_info_safely``, which sanitizes
+    structured arguments before rendering.
     """
-    for key, value in list(event_dict.items()):
-        # Skip standard structlog keys
-        if key in ("event", "level", "timestamp", "filename", "lineno"):
-            continue
+    marker = object()
+    callsite = dict.pop(event_dict, _CALLSITE_EVENT_KEY, marker)
+    event = dict.pop(event_dict, "event", marker)
+    exc_info = dict.pop(event_dict, "exc_info", marker)
+    sanitized = sanitize_for_logging(event_dict)
 
-        # Check if field name indicates sensitivity
-        if is_sensitive_field(key):
-            event_dict[key] = "<REDACTED>"
-            continue
-
-        # Check if value looks sensitive
-        if isinstance(value, str) and is_sensitive_value(value):
-            event_dict[key] = mask_api_key(value)
-            continue
-
-        # Recursively handle nested dicts
-        if isinstance(value, dict):
-            event_dict[key] = _mask_dict_sensitive_data(value)
-
-    return event_dict
-
-
-def _mask_dict_sensitive_data(data: dict[str, Any]) -> dict[str, Any]:
-    """Recursively mask sensitive data in a dictionary.
-
-    Args:
-        data: Dictionary to process.
-
-    Returns:
-        Dictionary with sensitive values masked.
-    """
-    result = {}
-    for key, value in data.items():
-        if is_sensitive_field(key):
-            result[key] = "<REDACTED>"
-        elif isinstance(value, str) and is_sensitive_value(value):
-            result[key] = mask_api_key(value)
-        elif isinstance(value, dict):
-            result[key] = _mask_dict_sensitive_data(value)
+    if event is not marker:
+        if isinstance(event, str):
+            try:
+                normalized_event = str.__str__(event)
+            except Exception:
+                normalized_event = "<REDACTED>"
+            sanitized["event"] = (
+                normalized_event
+                if is_safe_structured_event_identifier(normalized_event)
+                else mask_sensitive_value(normalized_event)
+                if is_credential_shaped(normalized_event)
+                else normalized_event
+            )
         else:
-            result[key] = value
-    return result
+            sanitized_event = sanitize_for_logging({"value": event})
+            sanitized["event"] = sanitized_event.get("value", "<REDACTED>")
+    if exc_info is not marker:
+        sanitized["exc_info"] = exc_info
+    if callsite is not marker:
+        sanitized[_CALLSITE_EVENT_KEY] = callsite
+    return sanitized
+
+
+def _mask_dict_sensitive_data(data: dict[Any, Any]) -> dict[Any, Any]:
+    """Recursively sanitize a mapping through the shared logging boundary."""
+    return sanitize_for_logging(data)
+
+
+def _mask_sequence_sensitive_data(
+    data: list[Any] | tuple[Any, ...],
+) -> list[Any] | tuple[Any, ...]:
+    """Sanitize a sequence through the shared renderer boundary."""
+    sanitized = sanitize_for_logging({"value": data})["value"]
+    assert isinstance(sanitized, (list, tuple))
+    return sanitized
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,6 +460,9 @@ def _get_shared_processors() -> list[Any]:
         structlog.processors.StackInfoRenderer(),
         # Add caller info (file, line, function) - useful for debugging
         _ApplicationCallsiteParameterAdder(),
+        # Preserve saved/implicit exception diagnostics, then mask secrets in
+        # the generated traceback before any console or file renderer sees it.
+        _format_exc_info_safely,
     ]
 
 
@@ -330,13 +479,14 @@ def _get_console_processors(mode: LogMode) -> list[Any]:
 
     # Add final renderer based on mode
     if mode == LogMode.DEV:
-        # Human-readable console output for development.
-        # ConsoleRenderer handles exc_info itself and warns if format_exc_info
-        # is also present in the processor chain.
-        processors.append(structlog.dev.ConsoleRenderer(colors=True))
+        # Exception data is rendered and sanitized before this final renderer.
+        processors.append(
+            structlog.dev.ConsoleRenderer(
+                colors=True,
+                exception_formatter=structlog.dev.plain_traceback,
+            )
+        )
     else:
-        # JSON output for production
-        processors.append(structlog.processors.format_exc_info)
         processors.append(structlog.processors.JSONRenderer())
 
     return processors
@@ -351,9 +501,6 @@ def _get_file_processors() -> list[Any]:
         List of structlog processors for file logging.
     """
     processors = _get_shared_processors()
-
-    # Format exceptions for file
-    processors.append(structlog.processors.format_exc_info)
 
     # Always use JSON for file output (for log aggregation tools)
     processors.append(structlog.processors.JSONRenderer())

@@ -155,7 +155,7 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
-_ACCEPTED_OUTCOMES = frozenset({"succeeded", "satisfied_externally"})
+_ACCEPTED_OUTCOMES = frozenset({"succeeded", "satisfied_externally", "settled_from_shared_attempt"})
 PACKAGE_REJECTION_ERROR = "check_package: the finished workspace fails the frozen check package"
 PACKAGE_INDETERMINATE_ERROR = (
     "check_package: the frozen check package could not decide this criterion"
@@ -433,6 +433,7 @@ def apply_reconciliation(parallel_result: Any, reconciliation: AcceptanceReconci
         elif not decision.accepted and previous in (
             ACExecutionOutcome.SUCCEEDED,
             ACExecutionOutcome.SATISFIED_EXTERNALLY,
+            ACExecutionOutcome.SETTLED_FROM_SHARED_ATTEMPT,
         ):
             if decision.legacy_decided:
                 error = legacy_decided_error(result, decision.reason)
@@ -457,7 +458,7 @@ def apply_reconciliation(parallel_result: Any, reconciliation: AcceptanceReconci
                 )
             )
             failure_delta += 1
-            if previous is ACExecutionOutcome.SUCCEEDED:
+            if previous is not ACExecutionOutcome.SATISFIED_EXTERNALLY:
                 success_delta -= 1
             else:
                 external_delta -= 1

@@ -1071,6 +1071,24 @@ ouroboros update --runtime none -y
 5. Re-runs `ouroboros setup --runtime <rt> --non-interactive` for a single selected
    runtime, or `ouroboros setup refresh` for `--runtime all`
 
+For a uv installation, the updater first checks the active root package's
+recorded version constraint against the selected PyPI target. A conflicting
+pin, bound, or exclusion exits with code 1 before confirmation or package
+mutation, including with `--dry-run`. The diagnostic identifies the constraint,
+target and receipt, and explains how to deliberately revise the original install
+command while preserving its uv root, executable directory, Python, extras,
+additional requirements and index/options. It never removes the constraint or
+rewrites the receipt. Compatible ranges and wildcards retain the normal upgrade
+path; additional packages' constraints are left to uv. `--check` remains a
+version-only query and does not inspect the installation receipt. Package upgrade
+success is reported only after the installed version has been verified.
+
+Older environments without `packaging` can still start the updater, check
+versions, and upgrade unconstrained uv installations. If their receipt contains
+a root constraint or marker, validation stops before mutation with a diagnostic
+to restore `packaging` using the original manager and installation options.
+The updater does not guess whether that constraint permits the target.
+
 With `--runtime auto` (the default), an existing configured backend is preserved. Only an unconfigured installation probes for the `claude` CLI first and then `codex`; when neither is found the runtime refresh is skipped with a notice and the package upgrade still completes. Existing OpenCode integrations also preserve their mutually exclusive `plugin` or `subprocess` mode. Runtime executable selection preserves the supported environment override before the persisted `orchestrator.*_cli_path`, then PATH; the exact validated executable is reused for plugin and setup refresh so a stale PATH binary cannot replace it. Runtime setup and the post-update version check always use the console script inside the same proven package environment, including `.exe`/`PATHEXT` launcher resolution on native Windows.
 
 With `--runtime all`, the updater refreshes the Claude plugin, the Codex
@@ -1079,6 +1097,27 @@ Ouroboros marketplace, and all previously installed runtime artifacts through
 backend. Claude can apply the new plugin with `/reload-plugins` or a restart;
 active Codex sessions must restart because Codex does not currently retain an
 in-use plugin generation during marketplace cache rotation.
+
+When Codex is selected (`--runtime codex`, `auto` resolving to Codex, or `all`),
+the updater also reports the installed `ouroboros@ouroboros` plugin version.
+This read-only check runs after runtime refresh and on `--check` or an already
+current package. It queries the same configured Codex executable with
+`plugin list --marketplace ouroboros --json`, rather than inferring an installed
+version from available releases or cached directories. After an upgrade, the
+comparison uses the newly verified package version.
+
+A different plugin version produces a warning with both versions. Inspect the
+marketplace ref before deciding whether to update that integration: a pinned
+release may intentionally differ, and refreshing the same pinned ref will not
+advance it. The diagnostic never changes refs or configuration, and does not
+certify the version loaded by an already-running Codex session or MCP server.
+An unavailable CLI, unsupported command, five-second timeout, or unreadable
+inventory is reported as **unknown**, separately from **not installed**.
+Inventory with more than 64 nested object/array containers (including the root)
+is also **unknown**, consistently across supported Python versions.
+These advisory results do not change the update command's exit status.
+An editable package reporting `0.0.0` is shown without inferring version drift.
+Other selected runtimes, `--runtime none`, and `--dry-run` skip this query.
 
 > **Installation identity:** the updater does not guess from global tool lists,
 > PATH order, directory names, or the selected runtime. If the receipt is

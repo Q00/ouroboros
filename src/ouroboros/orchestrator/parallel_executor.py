@@ -55,6 +55,7 @@ from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     InvestmentSpec,
     ac_text,
+    ac_texts,
     derive_semantic_ac_key,
 )
 from ouroboros.core.session_signal import SessionSignalMode
@@ -213,6 +214,7 @@ from ouroboros.orchestrator.evidence.claims import (  # noqa: F401
 )
 from ouroboros.orchestrator.evidence.common import (  # noqa: F401
     _MAX_LEAF_RESULT_CHARS,
+    _SUCCESSFUL_ATTEMPT_OUTCOMES,
     _flatten_evidence_values,
     _normalize_command,
     _normalize_exact_command,
@@ -366,13 +368,17 @@ from ouroboros.orchestrator.parallel_executor_models import (
     ParallelExecutionStageResult,
     StageExecutionOutcome,
     check_package_record,
+    checkpoint_contract_fingerprint,
     checkpoint_outcome,
-    collect_decomposition_depth_warning_paths,
     governing_verifier_verdict,
     inherit_check_package_hooks,
     package_settlement_view,
     restore_check_package_record,
     settle_package_results,
+)
+from ouroboros.orchestrator.parallel_reports import (  # noqa: F401  (re-exported)
+    render_parallel_completion_message,
+    render_parallel_verification_report,
 )
 from ouroboros.orchestrator.profile_loader import ExecutionProfile, SuggestedModelTier
 from ouroboros.orchestrator.rate_limit import (
@@ -419,6 +425,11 @@ from ouroboros.orchestrator.session_signal_followup import (
     claim_follow_up_delivery,
 )
 from ouroboros.orchestrator.shadow_replay import isolated_workspace, run_shadow_replay
+from ouroboros.orchestrator.shared_attempt import (
+    SHARED_ATTEMPT_ROOT,
+    settle_from_shared_attempt,
+    shares_one_attempt,
+)
 from ouroboros.orchestrator.synapse import (
     SessionSignalTarget,
     render_after_turn_signal_prompt,
@@ -447,7 +458,6 @@ from ouroboros.orchestrator.verify_gate_outcome import (
 )
 from ouroboros.orchestrator.verify_quarantine import (
     quarantine_unverifiable_result,
-    render_unverifiable_summary,
 )
 from ouroboros.orchestrator.verify_shell import (
     capture_verify_shell_identity,
@@ -2529,128 +2539,6 @@ def _deserialize_composite_completion_result(
     )
 
 
-def render_parallel_verification_report(
-    parallel_result: ParallelExecutionResult,
-    total_acceptance_criteria: int,
-    *,
-    max_decomposition_depth: int = DEFAULT_MAX_DECOMPOSITION_DEPTH,
-) -> str:
-    """Build the canonical QA artifact for parallel execution results."""
-    total_satisfied = parallel_result.success_count + parallel_result.externally_satisfied_count
-    lines = [
-        "Parallel Execution Verification Report",
-        f"Success: {total_satisfied}/{total_acceptance_criteria}",
-    ]
-    if parallel_result.externally_satisfied_count > 0:
-        lines.append(f"Externally Satisfied: {parallel_result.externally_satisfied_count}")
-    if parallel_result.failure_count > 0:
-        lines.append(f"Failed: {parallel_result.failure_count}")
-    if parallel_result.blocked_count > 0:
-        lines.append(f"Blocked: {parallel_result.blocked_count}")
-    if parallel_result.invalid_count > 0:
-        lines.append(f"Invalid: {parallel_result.invalid_count}")
-    unverifiable_indices = [
-        result.ac_index + 1
-        for result in parallel_result.results
-        if (
-            isinstance(result.verify_gate_outcome, _VerifyGateOutcome)
-            and result.verify_gate_outcome.environment_unverifiable
-            and result.success  # a no-evidence attempt is quarantined but BLOCKED
-        )
-        or (
-            result.atomic_verifier_verdict is not None
-            and result.atomic_verifier_verdict.status is VerifierStatus.UNAVAILABLE
-        )
-    ]
-    if unverifiable_indices:
-        lines.append(render_unverifiable_summary(unverifiable_indices))
-
-    warning_paths: list[str] = []
-    for user_facing_idx, result in enumerate(parallel_result.results, start=1):
-        warning_paths.extend(
-            collect_decomposition_depth_warning_paths(
-                result,
-                index_path=(user_facing_idx,),
-            )
-        )
-
-    if warning_paths:
-        feedback_metadata = {
-            "feedback_metadata": [
-                {
-                    "code": "decomposition_depth_warning",
-                    "severity": "warning",
-                    "message": (
-                        "Recursive decomposition reached the soft depth safety net; "
-                        "affected leaves were forced to atomic execution."
-                    ),
-                    "source": "parallel_executor",
-                    "details": {
-                        "max_depth": max_decomposition_depth,
-                        "affected_count": len(warning_paths),
-                        "affected_ac_paths": warning_paths,
-                    },
-                }
-            ]
-        }
-        lines.append("")
-        lines.append("## Feedback Metadata")
-        lines.append(f"Feedback Metadata JSON: {json.dumps(feedback_metadata, sort_keys=True)}")
-
-    lines.append("")
-    lines.append("## Task Results")
-    for result in parallel_result.results:
-        lines.append("")
-        lines.extend(
-            _render_ac_section(
-                result,
-                index_path=(result.ac_index + 1,),
-                heading_level=3,
-            )
-        )
-    return "\n".join(lines)
-
-
-def render_parallel_completion_message(
-    parallel_result: ParallelExecutionResult,
-    total_acceptance_criteria: int,
-) -> str:
-    """Build a concise operator-facing completion summary."""
-    total_satisfied = parallel_result.success_count + parallel_result.externally_satisfied_count
-    lines = [
-        "Parallel Execution Complete",
-        f"Success: {total_satisfied}/{total_acceptance_criteria}",
-    ]
-    if parallel_result.externally_satisfied_count > 0:
-        lines.append(f"Externally Satisfied: {parallel_result.externally_satisfied_count}")
-    if parallel_result.failure_count > 0:
-        lines.append(f"Failed: {parallel_result.failure_count}")
-    if parallel_result.blocked_count > 0:
-        lines.append(f"Blocked: {parallel_result.blocked_count}")
-    if parallel_result.invalid_count > 0:
-        lines.append(f"Invalid: {parallel_result.invalid_count}")
-
-    lines.append("")
-    lines.append("Task Status:")
-    for result in parallel_result.results:
-        if result.outcome == ACExecutionOutcome.SATISFIED_EXTERNALLY:
-            status = "COMPLETED"
-            suffix = " (externally satisfied)"
-        elif result.outcome == ACExecutionOutcome.BLOCKED:
-            status = "BLOCKED"
-            suffix = f" — {result.error}" if result.error else ""
-        elif result.outcome == ACExecutionOutcome.INVALID:
-            status = "INVALID"
-            suffix = f" — {result.error}" if result.error else ""
-        else:
-            status = "COMPLETED" if result.success else "FAILED"
-            suffix = f" ({len(result.sub_results)} subtasks)" if result.is_decomposed else ""
-            if not result.success and result.error:
-                suffix += f" — {result.error}"
-        lines.append(f"- Task {result.ac_index + 1}: [{status}] {result.ac_content}{suffix}")
-    return "\n".join(lines)
-
-
 # =============================================================================
 # Parallel Executor
 # =============================================================================
@@ -3904,6 +3792,12 @@ class ParallelACExecutor:
         total_levels = execution_plan.total_stages
         total_acs = len(seed.acceptance_criteria)
         external_completed = externally_satisfied_acs or {}
+        # Criteria judged from root 0's one worker attempt (``shared_attempt``).
+        shared_criteria = (
+            set(range(SHARED_ATTEMPT_ROOT + 1, total_acs))
+            if shares_one_attempt(seed.sourced_scope, ac_texts(seed.acceptance_criteria))
+            else set()
+        )
         execution_counters = {
             "messages_count": 0,
             "tool_calls_count": 0,
@@ -3930,6 +3824,9 @@ class ParallelACExecutor:
             session_id=session_id,
         )
 
+        contract_fingerprint = checkpoint_contract_fingerprint(
+            seed, self._execution_authority_policy()
+        )
         if self._checkpoint_store:
             try:
                 seed_id = getattr(seed, "id", session_id)
@@ -3948,6 +3845,7 @@ class ParallelACExecutor:
                         and checkpoint_state.get("session_id") == session_id
                         and checkpoint_state.get("execution_id") == execution_id
                         and checkpoint_state.get("workspace_identity") == current_workspace_identity
+                        and checkpoint_state.get("contract_fingerprint") == contract_fingerprint
                     )
                     if checkpoint_matches_invocation:
                         coordinator_mutated_workspace = bool(
@@ -4041,6 +3939,7 @@ class ParallelACExecutor:
                                     in {
                                         "succeeded",
                                         "satisfied_externally",
+                                        "settled_from_shared_attempt",
                                         "failed",
                                         "blocked",
                                         "invalid",
@@ -4053,7 +3952,7 @@ class ParallelACExecutor:
                                         else "failed"
                                     )
                                 )
-                                is_completed = outcome in {"succeeded", "satisfied_externally"}
+                                is_completed = outcome in _SUCCESSFUL_ATTEMPT_OUTCOMES
                                 is_skipped = status == "skipped"
                                 raw_result_retry_attempt = (
                                     raw_result_retry_attempts.get(str(ac_idx))
@@ -4229,6 +4128,7 @@ class ParallelACExecutor:
                 executable: list[int] = []
                 blocked: list[int] = []
                 externally_satisfied: list[int] = []
+                shared: list[int] = []
                 stage_ac_results: list[ACExecutionResult] = []
 
                 for ac_idx in level:
@@ -4245,8 +4145,13 @@ class ParallelACExecutor:
                         blocked.append(ac_idx)
                     elif ac_idx in external_completed:
                         externally_satisfied.append(ac_idx)
+                    elif ac_idx in shared_criteria:
+                        shared.append(ac_idx)
                     else:
                         executable.append(ac_idx)
+                if SHARED_ATTEMPT_ROOT not in executable:
+                    executable.extend(shared)  # no attempt in this stage to judge them from
+                    shared.clear()
 
                 level_success = 0
                 level_failed = 0
@@ -4546,6 +4451,38 @@ class ParallelACExecutor:
                     # below are the replay authority for the interrupted round.
                     break
 
+                source = next(
+                    (r for r in stage_ac_results if r.ac_index == SHARED_ATTEMPT_ROOT), None
+                )
+                for ac_idx in shared:
+                    ac_result = await settle_from_shared_attempt(
+                        self,
+                        seed=seed,
+                        ac_index=ac_idx,
+                        source=source,
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
+                    await self._emit_ac_attempt_judged(
+                        result=ac_result,
+                        root_ac_index=ac_idx,
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
+                    if ac_result.success:
+                        level_success += 1
+                        ac_statuses[ac_idx] = "completed"
+                        completed_count += 1
+                    elif ac_result.is_blocked:
+                        blocked_indices.add(ac_idx)
+                        ac_statuses[ac_idx] = "skipped"
+                    else:
+                        failed_indices.add(ac_idx)
+                        level_failed += 1
+                        ac_statuses[ac_idx] = "failed"
+                    all_results.append(ac_result)
+                    stage_ac_results.append(ac_result)
+
                 flip_gated_out = await self._compute_sibling_flip_gated_out(
                     seed=seed,
                     level_results=stage_ac_results,
@@ -4787,6 +4724,7 @@ class ParallelACExecutor:
                             state={
                                 "session_id": session_id,
                                 "execution_id": execution_id,
+                                "contract_fingerprint": contract_fingerprint,
                                 "workspace_identity": canonical_workspace_authority(
                                     self._task_cwd
                                     or getattr(self._adapter, "working_directory", None)
@@ -4905,6 +4843,7 @@ class ParallelACExecutor:
                     in {
                         ACExecutionOutcome.SUCCEEDED,
                         ACExecutionOutcome.SATISFIED_EXTERNALLY,
+                        ACExecutionOutcome.SETTLED_FROM_SHARED_ATTEMPT,
                     }
                     else result
                     for result in all_results
@@ -4934,6 +4873,7 @@ class ParallelACExecutor:
                         state={
                             "session_id": session_id,
                             "execution_id": execution_id,
+                            "contract_fingerprint": contract_fingerprint,
                             "workspace_identity": canonical_workspace_authority(
                                 self._task_cwd
                                 or getattr(self._adapter, "working_directory", None)
@@ -5007,7 +4947,12 @@ class ParallelACExecutor:
         # Aggregate results - sort by AC index for consistent ordering
         sorted_results = sorted(all_results, key=lambda r: r.ac_index)
         total_duration = (datetime.now(UTC) - start_time).total_seconds()
-        success_count = sum(1 for r in sorted_results if r.outcome == ACExecutionOutcome.SUCCEEDED)
+        success_count = sum(
+            1
+            for r in sorted_results
+            if r.outcome
+            in {ACExecutionOutcome.SUCCEEDED, ACExecutionOutcome.SETTLED_FROM_SHARED_ATTEMPT}
+        )
         externally_satisfied_count = sum(
             1 for r in sorted_results if r.outcome == ACExecutionOutcome.SATISFIED_EXTERNALLY
         )
@@ -5048,14 +4993,6 @@ class ParallelACExecutor:
 
     @staticmethod
     def _coordinator_review_may_mutate_workspace(review: Any) -> bool:
-        """Return whether a coordinator review could have changed the workspace.
-
-        Coordinator sessions are allowed to use ``Edit`` and ``Bash``.  The
-        structured review summary is not treated as proof of a mutation: a
-        model can report a proposed fix without applying one.  The caller also
-        compares workspace digests around the review, so direct writes remain
-        observable even when a runtime omits tool messages.
-        """
         if review is None:
             return False
         for message in getattr(review, "messages", ()) or ():
@@ -5181,6 +5118,7 @@ class ParallelACExecutor:
             if not result.success or result.outcome not in {
                 ACExecutionOutcome.SUCCEEDED,
                 ACExecutionOutcome.SATISFIED_EXTERNALLY,
+                ACExecutionOutcome.SETTLED_FROM_SHARED_ATTEMPT,
             }:
                 revalidated.append(result)
                 continue
