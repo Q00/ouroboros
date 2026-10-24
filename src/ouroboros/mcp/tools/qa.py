@@ -312,12 +312,14 @@ def _parse_non_json_qa_response(response_text: str) -> dict[str, Any] | None:
 
 
 # These are complete prose candidates, not exemptions for opener fragments.
-_PROSE_LIST_NUMBER = r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?"
+_PROSE_LIST_NUMBER = r"-?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?"
 _NUMERIC_PROSE_LIST_RE = re.compile(
     rf"\[\s*{_PROSE_LIST_NUMBER}(?:\s*,\s*{_PROSE_LIST_NUMBER})*"
     rf"(?:\s*,\s*|\s+)(?:and|or)\s+{_PROSE_LIST_NUMBER}\s*\]",
     re.IGNORECASE,
 )
+# Detection only: a whole numeric atom supplies intent, never a decoded value.
+_NUMERIC_ATOM_RE = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d*)*")
 _NUMERIC_REFERENCE_RE = re.compile(r"\d+(?:[-./]\d+){2,}")
 
 
@@ -383,7 +385,8 @@ def _is_attempted_answer(candidate: str, *, explicit: bool) -> bool:
         except json.JSONDecodeError:
             return False
         return end == len(remainder) or not (remainder[end].isalnum() or remainder[end] == "_")
-    if not (contents[0].isdigit() or contents[0] in "+-"):
+    first_atom = re.split(r"[\s,\"'{}\[\]]", contents, maxsplit=1)[0]
+    if not (contents[0].isdigit() or contents[0] in "+-" or _NUMERIC_ATOM_RE.fullmatch(first_atom)):
         return False
     if explicit and all(char.isdigit() or char.isspace() or char in "eE+-.," for char in contents):
         return True

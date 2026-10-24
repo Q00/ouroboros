@@ -686,3 +686,44 @@ async def test_language_prose_does_not_hide_duplicate_answers() -> None:
     result = await _handler(f"{answer}\n[null hypothesis]\n{answer}").handle(dict(_ARGS))
     assert result.is_err
     assert "no single unambiguous verdict object" in str(result.error)
+
+
+@pytest.mark.parametrize(
+    "fragment, expected_pass",
+    [
+        ("[.4,]", False),
+        ("[.4e]", False),
+        ("[.4e+]", False),
+        ("[.4e2e3]", False),
+        ('[.4 "fail"]', False),
+        ("[.4 true]", False),
+        ("[.4, .5]", False),
+        ("[.4 of 4 ACs]", True),
+        ("[.NET 8]", True),
+        ("[... notes]", True),
+        ("[.4.5]", True),
+        ("[.3, .4, and .5]", True),
+        ("[.3 or .5]", True),
+        ("[1.2.3]", True),
+    ],
+)
+@pytest.mark.parametrize("fragment_first", [False, True])
+@pytest.mark.parametrize("answer_format", ["json", "plain"])
+async def test_numeric_atom_boundary_preserves_complete_candidate_relationships(
+    fragment: str, expected_pass: bool, fragment_first: bool, answer_format: str
+) -> None:
+    # [.4,] reproduces the independent contract finding. Other rows exercise
+    # the detection-only design and its whole-candidate prose relationships.
+    answer = (
+        '{"score":0.95,"verdict":"pass"}'
+        if answer_format == "json"
+        else "Score: 0.95\nVerdict: pass"
+    )
+    body = f"{fragment}\n{answer}" if fragment_first else f"{answer}\n{fragment}"
+    result = await _handler(body).handle(dict(_ARGS))
+    if expected_pass:
+        assert result.is_ok
+        assert result.value.meta["passed"] is True
+    else:
+        assert result.is_err
+        assert "no single unambiguous verdict object" in str(result.error)
