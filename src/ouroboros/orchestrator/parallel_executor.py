@@ -91,6 +91,7 @@ from ouroboros.orchestrator import (
 )
 from ouroboros.orchestrator.ac_execution_capsule import (
     UnmaterializableSuccessContractError,
+    bind_capsule_to_resume_authority,
     bind_capsule_to_runtime_handle,
     build_ac_dispatch_authority_scope,
     build_ac_dispatch_request_digest,
@@ -446,6 +447,7 @@ from ouroboros.orchestrator.verifier import (
 )
 from ouroboros.orchestrator.verify_base_signal import VerifyBaseSignal
 from ouroboros.orchestrator.verify_command_runner import run_with_shell
+from ouroboros.orchestrator.verify_cwd import bind_verify_command_cwd
 from ouroboros.orchestrator.verify_gate_outcome import (
     _VERIFY_OUTPUT_TAIL_CHARS,
     _deserialize_verify_gate_outcome,
@@ -5078,6 +5080,9 @@ class ParallelACExecutor:
                         digest.update(b"\0")
                         digest.update(str(stat.st_mode).encode("ascii"))
                         digest.update(b"\0")
+                        digest.update(
+                            f"{stat.st_ino}:{stat.st_mtime_ns}:{stat.st_ctime_ns}\0".encode("ascii")
+                        )
                         with path.open("rb") as handle:
                             while chunk := handle.read(1024 * 1024):
                                 digest.update(chunk)
@@ -8006,11 +8011,13 @@ Respond with either ATOMIC or the structured JSON object only.
                 depth=depth,
                 outcome=ACExecutionOutcome.INVALID,
             )
-        if (
-            expected_resume_capsule_fingerprint is not None
-            and capsule.fingerprint != expected_resume_capsule_fingerprint
-        ):
-            raise RuntimeError("paused AC capsule fingerprint drifted")
+        if expected_resume_capsule_fingerprint is not None:
+            try:
+                capsule = bind_capsule_to_resume_authority(
+                    capsule, expected_resume_capsule_fingerprint
+                )
+            except ValueError as exc:
+                raise RuntimeError("paused AC capsule fingerprint drifted") from exc
 
         # Build prompt (label/indent, governed task section, success contract,
         # retry/parallel-awareness sections, cwd scan, completion contract).
@@ -9664,21 +9671,10 @@ Respond with either ATOMIC or the structured JSON object only.
     async def _run_ac_verify_gate(
         self, *, spec: AcceptanceCriterionSpec, cwd: str
     ) -> _VerifyGateOutcome:
-        """Judge an AC's success contract: expected artifacts + verify command.
-
-        The orchestrator — not the worker — checks the contract so a failing
-        check cannot be self-reported away. All ``expected_artifacts`` must
-        exist under ``cwd`` (checked first — it is cheap — and every missing
-        entry is reported in one failure). ``verify_command``, when set, must
-        then exit 0 and, when ``output_assertion`` is set, print that substring
-        in the combined output.
-        """
+        """Judge root-relative artifacts and a command in its bound verification cwd."""
 
         def workspace_digest() -> str | None:
-            return self._workspace_content_digest(
-                cwd,
-                expected_artifacts=spec.expected_artifacts,
-            )
+            return self._workspace_content_digest(cwd, expected_artifacts=spec.expected_artifacts)
 
         if spec.output_assertion and not spec.verify_command:
             return _VerifyGateOutcome(
@@ -9709,9 +9705,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 workspace_digest=workspace_digest(),
             )
         workspace_before = workspace_digest()
-        # Sibling AC workers share this cwd and keep writing while the command
-        # runs. Sample once, up front: a sibling that finishes mid-command is
-        # still a concurrent writer for the digest window that already opened.
+        # Sample before the command so a sibling finishing mid-run still counts.
         siblings_active = self._sibling_workers_active()
         replay_required = False
 
@@ -9732,11 +9726,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 )
             if workspace_before != workspace_after:
                 if siblings_active:
-                    # A concurrent sibling may own this change; the command's
-                    # own footprint is indistinguishable from it here. Judge
-                    # the exit code now and let final settlement replay the
-                    # command on the quiescent workspace, where a mutation is
-                    # attributable and still rejected.
+                    # Settlement attributes mutation after concurrent writers finish.
                     replay_required = True
                     return None
                 return _VerifyGateOutcome(
@@ -9752,11 +9742,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 )
             return None
 
-        # verify_command is POSIX bash by contract. Resolve a real POSIX
-        # interpreter instead of inheriting the platform shell default, which
-        # is cmd.exe on native Windows and cannot parse that syntax. The
-        # command text itself is never rewritten — the pass/fail signal stays
-        # the exit code of exactly what the seed declared.
+        # Preserve the declared POSIX command even on a non-POSIX host.
         verify_env = project_verify_environment(cwd)
         verify_shell_path = verify_shell_path_from_identity(self._verify_shell_identity)
         if verify_shell_path is None:
@@ -9768,12 +9754,25 @@ Respond with either ATOMIC or the structured JSON object only.
                 environment_unverifiable=True,
                 cause="environment_unverifiable",
             )
-        run = await run_with_shell(
-            (verify_shell_path, "-c", command),
-            cwd=cwd,
-            env=verify_env,
-            timeout_seconds=self._verify_command_timeout_seconds,
-        )
+        bound_cwd = bind_verify_command_cwd(cwd, spec)
+        if bound_cwd.error is not None:
+            return _VerifyGateOutcome(
+                passed=False,
+                reason=bound_cwd.error,
+                output_tail="",
+                workspace_digest=workspace_before,
+                cause="invalid_contract",
+            )
+        try:
+            run = await run_with_shell(
+                (verify_shell_path, "-c", command),
+                cwd=bound_cwd.cwd,
+                env=verify_env,
+                timeout_seconds=self._verify_command_timeout_seconds,
+                cwd_capability=bound_cwd.capability,
+            )
+        finally:
+            bound_cwd.close()
 
         if run.start_error is not None:
             return _VerifyGateOutcome(
@@ -9805,6 +9804,7 @@ Respond with either ATOMIC or the structured JSON object only.
         returncode = run.returncode
         if returncode != 0 and await self._verify_base_signal.fails_on_base(
             command,
+            relative_cwd=bound_cwd.relative_cwd,
             shell_path=verify_shell_path,
             timeout_seconds=self._verify_command_timeout_seconds,
         ):

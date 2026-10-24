@@ -333,6 +333,23 @@ acceptance_criteria:
   - "Create app entry point that integrates auth and logging"
 ```
 
+## Verification Working Directory
+
+Structured criteria can also set `verify_cwd` to a portable workspace-relative
+subdirectory alongside `verify_command`, for example `verify_cwd: app` for a
+test configuration in `app/`. Use `verify_cwd: "."` to select the workspace root
+explicitly and disable inference. Missing, escaping, symlinked, or replaced
+directories cannot supply accepted verification evidence. When cwd is omitted,
+complete recognized `npm`, `npx`, `yarn`, and `pnpm` invocations use the sole
+nested directory with `package.json` if there is no root manifest. Ambiguous
+projects, compound commands, and unsupported shell syntax use the workspace root.
+Commands with their own cwd selectors and `env -S` also retain root execution
+instead of inferring a directory. Secure non-root execution requires
+POSIX no-follow directory capabilities; when unavailable, including native Windows,
+the gate fails closed. Explicit root execution keeps existing platform behavior.
+`expected_artifacts` and workspace mutation checks always stay
+relative to the workspace root. Changing cwd invalidates prior execution evidence.
+
 ## Optional Investment Metadata
 
 Use structured acceptance criteria when the executor needs explicit difficulty
