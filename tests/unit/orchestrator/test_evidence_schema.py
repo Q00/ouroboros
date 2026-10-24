@@ -358,9 +358,13 @@ class TestExtractEvidence:
             '{undefined, "x": 1}',
             "[undefined, undefined]",
             "{undefined, undefined}",
+            "[1e]",
+            "[1E+]",
+            "[1e-]",
+            "[1.]",
         ],
     )
-    @pytest.mark.parametrize("separator", ["\n", " ", ""])
+    @pytest.mark.parametrize("separator", ["\n", "\r\n", "\t", " ", ""])
     def test_malformed_terminal_fence_never_promotes_stale_evidence(
         self, fence_tag: str, terminal_payload: str, separator: str
     ) -> None:
@@ -381,6 +385,9 @@ class TestExtractEvidence:
             "[undefined_name]",
             "[NaN_report]",
             "{undefined_name}",
+            "[1evidence]",
+            "[2026-10-25]",
+            "The date is 2026-10-25 and count is 1evidence.",
             "[one, two]",
             "[1word, two]",
             "{broken,}",
@@ -394,6 +401,12 @@ class TestExtractEvidence:
         record = extract_evidence(text)
 
         assert record.data == {"files_touched": ["ok.py"]}
+
+    def test_quoted_json_prefix_remains_a_malformed_fence(self) -> None:
+        text = '```json\n{"files_touched": ["ok.py"]}\n["report" details]\n```'
+
+        with pytest.raises(EvidenceError):
+            extract_evidence(text)
 
     @pytest.mark.parametrize("fence_tag", ["json", ""])
     @pytest.mark.parametrize(

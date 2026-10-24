@@ -9317,17 +9317,26 @@ class TestParallelACExecutor:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "tail",
-        ["[undefined]", "{undefined}", "[NaN,]", "[broken,]", "[broken,", "[one, two,]"],
+        [
+            "[undefined]",
+            "{undefined}",
+            "[NaN,]",
+            "[broken,]",
+            "[broken,",
+            "[one, two,]",
+            "[1e]",
+        ],
     )
     @pytest.mark.parametrize("tag", ["json", ""])
+    @pytest.mark.parametrize("separator", [" ", "\n"])
     async def test_terminal_malformed_fence_does_not_publish_stale_evidence(
-        self, tmp_path, tail: str, tag: str
+        self, tmp_path, tail: str, tag: str, separator: str
     ) -> None:
         event_store, appended_events = _make_replaying_event_store()
         executor = ParallelACExecutor(
             adapter=_FinalMessageRuntime(
                 f'```{tag}\n{{"files_touched":["stale.py"],'
-                f'"commands_run":[],"tests_passed":[]}} {tail}\n```',
+                f'"commands_run":[],"tests_passed":[]}}{separator}{tail}\n```',
                 native_session_id="terminal-malformed-evidence",
                 cwd=str(tmp_path),
             ),

@@ -49,6 +49,7 @@ _FENCE_LINE_RE = re.compile(
 )
 _EXPR_RE = re.compile(r"^\s*(?P<field>[A-Za-z_][A-Za-z0-9_]*)\s*==\s*(?P<lit>.+?)\s*$")
 _DECODER = json.JSONDecoder()
+_JSON_NUMBER_LEXEME_RE = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]*)?(?:[eE][+-]?[0-9]*)?\Z")
 
 
 class EvidenceError(ValueError):
@@ -392,6 +393,7 @@ def _looks_like_json_container(text: str, opener_pos: int, *, limit: int | None 
         return bool(
             candidate[0] in '{["'
             or numeric_atom
+            or _is_incomplete_json_number(candidate)
             or re.match(r"(?:true|false|null)(?:\s*[,\]])", candidate)
             or re.fullmatch(r"(?:undefined|NaN)\s*,?", candidate)
         )
@@ -478,6 +480,26 @@ def _complete_json_value(value: str) -> bool:
     return not value[start + end_offset :].strip()
 
 
+def _is_incomplete_json_number(value: str) -> bool:
+    """Recognize a number-shaped component whose JSON lexeme is unfinished.
+
+    ``raw_decode`` accepts the integer prefix of tokens such as ``1e`` and
+    ``1.``. Keep those numeric continuations structural while leaving ordinary
+    word, date, and quoted-text suffixes to the prose path.
+    """
+    candidate = value.strip()
+    return bool(_JSON_NUMBER_LEXEME_RE.fullmatch(candidate)) and not _complete_json_value(candidate)
+
+
+def _has_nonstructural_json_prefix_suffix(value: str) -> bool:
+    """Return whether a decoded JSON prefix is followed by ordinary text."""
+    try:
+        _, prefix_end = _DECODER.raw_decode(value)
+    except json.JSONDecodeError:
+        return False
+    return bool(prefix_end and value[prefix_end:].strip() and not _is_incomplete_json_number(value))
+
+
 def _complete_json_member(member: str) -> bool:
     """Return whether *member* is one complete JSON object member."""
     start = _skip_json_whitespace(member, 0)
@@ -537,11 +559,7 @@ def _has_structural_container_intent(text: str, opener_pos: int, limit: int) -> 
         # raw_decode accepts prefixes such as ``1`` in ``1word`` and ``"x"``
         # in ``"x"word``. Do not let the legacy classifier promote either
         # prefix to a complete component.
-        try:
-            _, prefix_end = _DECODER.raw_decode(stripped)
-        except json.JSONDecodeError:
-            prefix_end = 0
-        if prefix_end and stripped[prefix_end:].strip():
+        if _has_nonstructural_json_prefix_suffix(stripped):
             continue
 
         # Keep a trailing boundary beyond the synthetic closer. Without it,
