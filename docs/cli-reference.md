@@ -1089,6 +1089,25 @@ a root constraint or marker, validation stops before mutation with a diagnostic
 to restore `packaging` using the original manager and installation options.
 The updater does not guess whether that constraint permits the target.
 
+If the package upgrade is verified but a required integration refresh fails,
+the command reports a partial update and exits with code `1`. Each failed step
+prints its recovery command, including the selected executable and any explicit
+runtime CLI override. Codex setup retains `--preserve-existing-llm`; OpenCode
+setup retains the selected mode. After resolving the reported cause, run the
+commands in the same environment so settings such as `HOME` and `CODEX_HOME`
+still select the original installation. Windows instructions use PowerShell;
+other platforms use a POSIX shell. Apply any listed follow-up command only after
+the preceding command succeeds. In PowerShell, check `$LASTEXITCODE` for the
+native command's result only after the executable actually starts; the
+environment-restoration block can change `$?`. PowerShell errors while starting
+the executable or preparing the recovery helper are failures even if an earlier
+`$LASTEXITCODE` is still `0`. Resolve those errors before running any follow-up
+command.
+
+Once the package is current, rerunning `ouroboros update` exits as up to date
+without retrying failed integration refreshes. Use the printed recovery commands
+instead. This guidance does not repair a failed package-manager upgrade.
+
 With `--runtime auto` (the default), an existing configured backend is preserved. Only an unconfigured installation probes for the `claude` CLI first and then `codex`; when neither is found the runtime refresh is skipped with a notice and the package upgrade still completes. Existing OpenCode integrations also preserve their mutually exclusive `plugin` or `subprocess` mode. Runtime executable selection preserves the supported environment override before the persisted `orchestrator.*_cli_path`, then PATH; the exact validated executable is reused for plugin and setup refresh so a stale PATH binary cannot replace it. Runtime setup and the post-update version check always use the console script inside the same proven package environment, including `.exe`/`PATHEXT` launcher resolution on native Windows.
 
 With `--runtime all`, the updater refreshes the Claude plugin, the Codex
