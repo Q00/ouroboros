@@ -49,7 +49,7 @@ _FENCE_LINE_RE = re.compile(
 )
 _EXPR_RE = re.compile(r"^\s*(?P<field>[A-Za-z_][A-Za-z0-9_]*)\s*==\s*(?P<lit>.+?)\s*$")
 _DECODER = json.JSONDecoder()
-_JSON_NUMBER_LEXEME_RE = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]*)?(?:[eE][+-]?[0-9]*)?\Z")
+_NUMERIC_LOOKING_LEXEME_RE = re.compile(r"[+-]?[0-9][0-9.eE+-]*\Z")
 
 
 class EvidenceError(ValueError):
@@ -393,7 +393,7 @@ def _looks_like_json_container(text: str, opener_pos: int, *, limit: int | None 
         return bool(
             candidate[0] in '{["'
             or numeric_atom
-            or _is_incomplete_json_number(candidate)
+            or _is_malformed_numeric_lexeme(candidate)
             or re.match(r"(?:true|false|null)(?:\s*[,\]])", candidate)
             or re.fullmatch(r"(?:undefined|NaN)\s*,?", candidate)
         )
@@ -480,15 +480,23 @@ def _complete_json_value(value: str) -> bool:
     return not value[start + end_offset :].strip()
 
 
-def _is_incomplete_json_number(value: str) -> bool:
-    """Recognize a number-shaped component whose JSON lexeme is unfinished.
+def _is_malformed_numeric_lexeme(value: str) -> bool:
+    """Recognize numeric-only tokens that are not complete JSON numbers.
 
-    ``raw_decode`` accepts the integer prefix of tokens such as ``1e`` and
-    ``1.``. Keep those numeric continuations structural while leaving ordinary
-    word, date, and quoted-text suffixes to the prose path.
+    Intent is broader than the JSON number grammar: leading-zero forms and
+    repeated exponent/decimal markers are still numeric-looking malformed
+    tokens. Signs are allowed only at the beginning or immediately after an
+    exponent marker, so date-like prose such as ``2026-10-25`` stays prose.
     """
     candidate = value.strip()
-    return bool(_JSON_NUMBER_LEXEME_RE.fullmatch(candidate)) and not _complete_json_value(candidate)
+    if not _NUMERIC_LOOKING_LEXEME_RE.fullmatch(candidate):
+        return False
+    if any(
+        char in "+-" and index != 0 and candidate[index - 1] not in "eE"
+        for index, char in enumerate(candidate)
+    ):
+        return False
+    return not _complete_json_value(candidate)
 
 
 def _has_nonstructural_json_prefix_suffix(value: str) -> bool:
@@ -497,7 +505,9 @@ def _has_nonstructural_json_prefix_suffix(value: str) -> bool:
         _, prefix_end = _DECODER.raw_decode(value)
     except json.JSONDecodeError:
         return False
-    return bool(prefix_end and value[prefix_end:].strip() and not _is_incomplete_json_number(value))
+    return bool(
+        prefix_end and value[prefix_end:].strip() and not _is_malformed_numeric_lexeme(value)
+    )
 
 
 def _complete_json_member(member: str) -> bool:

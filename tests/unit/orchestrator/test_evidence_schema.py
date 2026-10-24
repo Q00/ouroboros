@@ -362,6 +362,10 @@ class TestExtractEvidence:
             "[1E+]",
             "[1e-]",
             "[1.]",
+            "[00e]",
+            "[01e+]",
+            "[01]",
+            "[+1]",
         ],
     )
     @pytest.mark.parametrize("separator", ["\n", "\r\n", "\t", " ", ""])
