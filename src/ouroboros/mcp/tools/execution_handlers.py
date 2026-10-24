@@ -2429,9 +2429,8 @@ class StartExecuteSeedHandler:
                 "ambiguous natural language with no Seed (use ouroboros_interview or "
                 "ouroboros_start_auto instead). In plugin mode, execution is delegated to an "
                 "OpenCode Task pane and job_id is None; results appear in the Task pane instead "
-                "of being pollable via job_status/job_result. This is the handler for 'ooo run' "
-                "commands; call this MCP tool instead of the shell. Worktree provisioning is "
-                "internal; use_worktree is not a public argument."
+                "of being pollable via job_status/job_result. For 'ooo run', use MCP, not the shell. "
+                "Worktree provisioning is internal; use_worktree is not a public argument."
             ),
             parameters=(
                 *ExecuteSeedHandler().definition.parameters,
