@@ -484,17 +484,16 @@ def _complete_json_member(member: str) -> bool:
 
 
 def _has_structural_container_intent(text: str, opener_pos: int, limit: int) -> bool:
-    """Recognize multi-component JSON-shaped attempts without new token names.
+    """Recognize JSON-shaped attempts without new token names.
 
     A component is strong evidence only when it is a complete JSON value or
     the existing malformed-singleton classifier accepts it. Object members
     also expose their outer key/value separator. Arbitrary bare identifiers
-    alone therefore remain prose.
+    alone therefore remain prose. A one-component container is still checked:
+    otherwise a malformed terminal singleton after prose can be skipped in
+    favor of stale evidence.
     """
     components, has_outer_colon = _split_outer_components(text, opener_pos, limit)
-    if len(components) < 2:
-        return False
-
     opener = text[opener_pos]
     closer = "]" if opener == "[" else "}"
     component_signal = False
@@ -519,7 +518,10 @@ def _has_structural_container_intent(text: str, opener_pos: int, limit: int) -> 
         if prefix_end and stripped[prefix_end:].strip():
             continue
 
-        wrapped = f"{opener}{stripped}{closer}"
+        # Keep a trailing boundary beyond the synthetic closer. Without it,
+        # a complete prose delimiter such as ``{config.host}`` appears to
+        # consume the whole input and is mistaken for an unclosed JSON object.
+        wrapped = f"{opener}{stripped}{closer}\n"
         if _looks_like_json_container(wrapped, 0):
             component_signal = True
 

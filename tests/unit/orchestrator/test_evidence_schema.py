@@ -404,6 +404,37 @@ class TestExtractEvidence:
         with pytest.raises(EvidenceError):
             extract_evidence(text)
 
+    @pytest.mark.parametrize("fence_tag", ["json", ""])
+    @pytest.mark.parametrize("terminal_payload", ["[undefined]", "{undefined}"])
+    def test_inline_singleton_malformed_fence_is_authoritative(
+        self, fence_tag: str, terminal_payload: str
+    ) -> None:
+        text = (
+            f'```{fence_tag}\n{{"files_touched": ["stale.py"]}} '
+            f"trailing note {terminal_payload}\n```"
+        )
+
+        with pytest.raises(EvidenceError):
+            extract_evidence(text)
+
+    @pytest.mark.parametrize(
+        "trailing_prose",
+        [
+            "trailing note [report]",
+            "trailing note {config.host}",
+            "trailing note [done]",
+            "trailing note [AC_COMPLETE: 1]",
+        ],
+    )
+    def test_inline_malformed_fence_classifier_preserves_ordinary_prose(
+        self, trailing_prose: str
+    ) -> None:
+        text = f'```json\n{{"files_touched": ["ok.py"]}} {trailing_prose}\n```'
+
+        record = extract_evidence(text)
+
+        assert record.data == {"files_touched": ["ok.py"]}
+
     def test_valid_inline_evidence_label_is_recovered(self) -> None:
         record = extract_evidence('Actual evidence: {"files_touched": ["actual.py"]}')
 
