@@ -68,8 +68,10 @@ async def handle_interview_calibration_turn(
                 if callable(rephrase_method):
                     try:
                         rephrase_result = await rephrase_method(pending_question, calibration)
-                        if rephrase_result.is_ok and rephrase_result.value.strip():
-                            rephrased_question = rephrase_result.value
+                        if rephrase_result.is_ok and isinstance(rephrase_result.value, str):
+                            candidate_question = rephrase_result.value.strip()
+                            if candidate_question and candidate_question != pending_question.strip():
+                                rephrased_question = candidate_question
                     except Exception as exc:
                         # Rephrasing is optional; retain the calibration and the
                         # original pending question. Cancellation still propagates.

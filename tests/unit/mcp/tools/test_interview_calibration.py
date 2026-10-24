@@ -266,8 +266,13 @@ async def test_ask_next_question_no_calibration_uses_simple_call() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "rephrase_result",
-    [Result.err(Exception("provider error")), Result.ok(""), Result.ok(" \t\n")],
-    ids=["provider-error", "empty", "whitespace"],
+    [
+        Result.err(Exception("provider error")),
+        Result.ok(""),
+        Result.ok(" \t\n"),
+        Result.ok("  What idempotency guarantee is required?  "),
+    ],
+    ids=["provider-error", "empty", "whitespace", "same-question-after-strip"],
 )
 async def test_calibration_turn_rephrase_failure_is_truthful(rephrase_result) -> None:
     """When rephrasing fails, the response must not claim successful adaptation."""
