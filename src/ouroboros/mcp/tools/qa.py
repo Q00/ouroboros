@@ -316,6 +316,15 @@ _JSON_OPENER_RE = re.compile(
     r"(?=\s*(?:[,\]]|$|[\"{\[]|true\b|false\b|null\b)|\s+-?\d))"
 )
 
+# A conjunction makes a numeric reference list prose rather than a JSON array.
+# Match the complete list, not just its opening numeric prefix.
+_PROSE_LIST_NUMBER = r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?"
+_NUMERIC_PROSE_LIST_RE = re.compile(
+    rf"\[\s*{_PROSE_LIST_NUMBER}(?:\s*,\s*{_PROSE_LIST_NUMBER})*"
+    rf"(?:\s*,\s*|\s+)(?:and|or)\s+{_PROSE_LIST_NUMBER}\s*\]",
+    re.IGNORECASE,
+)
+
 
 def _carries_json_object(text: str) -> bool:
     """True when the text holds a JSON fence or a JSON object or array opener.
@@ -323,7 +332,12 @@ def _carries_json_object(text: str) -> bool:
     The plain-text fallback exists for providers that ignore the JSON
     instruction entirely; text that attempted JSON is not that case.
     """
-    return bool(_JSON_FENCE_RE.search(text)) or _JSON_OPENER_RE.search(text) is not None
+    if _JSON_FENCE_RE.search(text):
+        return True
+    return any(
+        _NUMERIC_PROSE_LIST_RE.match(text, match.start()) is None
+        for match in _JSON_OPENER_RE.finditer(text)
+    )
 
 
 def _parse_qa_response(

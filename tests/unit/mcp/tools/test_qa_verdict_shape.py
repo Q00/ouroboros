@@ -344,3 +344,68 @@ async def test_out_of_range_large_integer_score_is_a_parse_error() -> None:
     assert result.is_err
     assert "Failed to parse QA verdict" in str(result.error)
     assert "score must be a float between 0.0 and 1.0" in str(result.error)
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "All criteria [3, 4, and 5] are met.",
+        "All criteria [3, 4 and 5] are met.",
+        "Check criteria [3, 4, or 5].",
+        "All criteria [3,4, and 5] are met.",
+        "All criteria [3, 4, AND 5] are met.",
+        "Scores [0.3, 0.4, and 0.5] were considered.",
+    ],
+)
+@pytest.mark.parametrize("prose_first", [False, True])
+@pytest.mark.parametrize("answer_format", ["json", "plain"])
+async def test_numeric_prose_list_preserves_unique_answer(
+    prose: str, prose_first: bool, answer_format: str
+) -> None:
+    answer = (
+        '{"score":0.95,"verdict":"pass"}'
+        if answer_format == "json"
+        else "Score: 0.95\nVerdict: pass"
+    )
+    body = f"{prose}\n{answer}" if prose_first else f"{answer}\n{prose}"
+
+    result = await _handler(body).handle(dict(_ARGS))
+
+    assert result.is_ok
+    assert result.value.meta["passed"] is True
+    assert result.value.meta["score"] == 0.95
+
+
+@pytest.mark.parametrize(
+    "correction",
+    [
+        "[3, 4, 5]",
+        "[3, 4, 5,]",
+        "[3, 4, and]",
+        "[3, 4, and 5",
+        '[3, 4, "and", 5]',
+        "[3, 4, true]",
+        "[3, 4, null]",
+        "[[3, 4, and 5]]",
+        "[ [3, 4, and 5] ]",
+        '{"correction": [3, 4, and 5]}',
+    ],
+)
+@pytest.mark.parametrize("correction_first", [False, True])
+@pytest.mark.parametrize("answer_format", ["json", "plain"])
+async def test_array_corrections_are_not_hidden_by_numeric_prose_exception(
+    correction: str, correction_first: bool, answer_format: str
+) -> None:
+    answer = (
+        '{"score":0.95,"verdict":"pass"}'
+        if answer_format == "json"
+        else "Score: 0.95\nVerdict: pass"
+    )
+    prose = "All criteria [3, 4, and 5] are met."
+    answer = f"{prose}\n{answer}"
+    body = f"{correction}\n{answer}" if correction_first else f"{answer}\n{correction}"
+
+    result = await _handler(body).handle(dict(_ARGS))
+
+    assert result.is_err
+    assert "Failed to parse QA verdict" in str(result.error)
