@@ -7,6 +7,7 @@ from ouroboros.resilience.recovery import (
     RecoveryActionKind,
     RecoveryPlanner,
     RecoverySnapshot,
+    get_run_recovery_protocol_prompt,
     suggest_lateral_persona_for_pattern,
 )
 from ouroboros.resilience.stagnation import StagnationPattern
@@ -69,3 +70,15 @@ def test_recovery_planner_stagnates_when_all_personas_excluded() -> None:
 
     assert action.kind == RecoveryActionKind.STAGNATED
     assert "No available" in action.reason
+
+
+def test_recovery_protocol_never_asks_to_shrink_the_requested_scope() -> None:
+    prompt = get_run_recovery_protocol_prompt()
+
+    assert "simplify the task" not in prompt
+    assert "- diminishing_returns: change the approach, not the requested scope" in prompt
+    assert "keep every requested" in prompt
+    # The rest of the recovery guidance is kept.
+    assert "- spinning: stop retrying the same fix" in prompt
+    assert "- no_drift: gather the missing fact" in prompt
+    assert "- oscillation: choose one architecture" in prompt

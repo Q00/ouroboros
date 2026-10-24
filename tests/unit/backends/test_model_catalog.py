@@ -7,10 +7,13 @@ import subprocess
 
 import pytest
 
+from ouroboros.backends import llm_backend_choices, runtime_backend_choices
 from ouroboros.backends import model_catalog as mc
-from ouroboros.backends import runtime_backend_choices
-from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL, DEFAULT_SONNET_MODEL
-from ouroboros.config.loader import _default_model_for_backend
+from ouroboros.config._model_defaults import (
+    DEFAULT_HAIKU_MODEL,
+    DEFAULT_OPUS_MODEL,
+    DEFAULT_SONNET_MODEL,
+)
 
 
 @pytest.mark.parametrize("backend", runtime_backend_choices())
@@ -21,23 +24,48 @@ def test_every_runtime_backend_has_catalog_with_models(backend: str) -> None:
     assert catalog.default_model == catalog.models[0]
 
 
-@pytest.mark.parametrize("backend", runtime_backend_choices())
-def test_catalog_default_mirrors_loader_backend_mapping(backend: str) -> None:
-    """The static catalog must not drift from the loader's sentinel mapping."""
-    loader_default = _default_model_for_backend(DEFAULT_OPUS_MODEL, backend=backend)
-    assert mc.get_model_catalog(backend).default_model == loader_default
+@pytest.mark.parametrize("backend", sorted({*runtime_backend_choices(), *llm_backend_choices()}))
+def test_every_backend_declares_model_selection(backend: str) -> None:
+    """Model resolution reads this field; no backend may be left undeclared."""
+    assert mc.get_model_catalog(backend).model_selection in {"alias", "sentinel", "explicit"}
+
+
+def test_model_selection_per_backend() -> None:
+    """Only the Claude CLI family takes tier aliases; only provider-owned ids stay explicit."""
+    selections = {
+        backend: mc.get_model_catalog(backend).model_selection
+        for backend in {*runtime_backend_choices(), *llm_backend_choices()}
+    }
+    assert {name for name, value in selections.items() if value == "alias"} == {
+        "claude",
+        "claude_mcp",
+    }
+    assert {name for name, value in selections.items() if value == "explicit"} == {
+        "litellm",
+        "copilot",
+    }
+
+
+@pytest.mark.parametrize("backend", ["gemini", "goose", "host", "codex_mcp"])
+def test_self_selecting_runtimes_offer_the_sentinel_not_claude_ids(backend: str) -> None:
+    """These CLIs choose their own model; a Claude id would run as ``--model claude-...``."""
+    catalog = mc.get_model_catalog(backend)
+    assert catalog.default_model == mc.DEFAULT_MODEL_SENTINEL
+    assert DEFAULT_OPUS_MODEL not in catalog.models
+    assert mc.uses_default_model_sentinel(backend) is True
 
 
 def test_claude_catalog_lists_shipped_defaults_first() -> None:
     choices = mc.model_choices("claude")
     assert choices[:2] == (DEFAULT_OPUS_MODEL, DEFAULT_SONNET_MODEL)
-    assert "claude-haiku-4-5-20251001" in choices
+    assert DEFAULT_HAIKU_MODEL in choices
+    assert "claude-haiku-4-5-20251001" not in choices
 
 
 def test_codex_catalog_offers_known_models_after_sentinel() -> None:
     choices = mc.model_choices("codex")
     assert choices[0] == mc.DEFAULT_MODEL_SENTINEL
-    assert "gpt-5-codex" in choices
+    assert "gpt-6.1-sol" in choices
 
 
 def test_default_model_sentinel_support_follows_backend_contract() -> None:
@@ -69,6 +97,50 @@ def test_ourocode_catalog_lists_supported_acp_selectors() -> None:
 def test_unknown_backend_raises() -> None:
     with pytest.raises(ValueError, match="No model catalog"):
         mc.get_model_catalog("not-a-backend")
+
+
+@pytest.mark.parametrize(
+    ("prefix", "flash", "m3"),
+    [
+        ("minimax/", "MiniMax-M3.1-Flash", "MiniMax-M3"),
+        ("minimax-cn/", "MiniMax-M3.1-Flash", "MiniMax-M3"),
+        ("openrouter/minimax/", "minimax-m3.1-flash:free", "minimax-m3"),
+        ("opencode/", "minimax-m3.1-flash-free", "minimax-m3"),
+    ],
+)
+def test_recommended_minimax_models_preserve_availability_and_other_routes(prefix, flash, m3):
+    models = (
+        "other/model",
+        prefix + m3,
+        prefix + "MiniMax-M2.7",
+        prefix + "MiniMax-Text-01",
+        prefix + "abab6.5s-chat",
+        prefix + flash,
+        "minimax/speech-02-hd",
+        "opencode/minimax-music-01",
+        "custom/MiniMax-M2.7",
+    )
+    assert mc.recommended_cli_models("opencode", models) == (
+        "other/model",
+        prefix + flash,
+        prefix + m3,
+        "minimax/speech-02-hd",
+        "opencode/minimax-music-01",
+        "custom/MiniMax-M2.7",
+    )
+    assert mc.recommended_cli_models("opencode", (prefix + m3,)) == (prefix + m3,)
+    assert mc.recommended_cli_models("opencode", (prefix + "MiniMax-M2.7",)) == ()
+    assert mc.recommended_cli_models("other", models) == models
+
+
+def test_gateway_flash_ids_are_not_interchangeable():
+    models = (
+        "openrouter/minimax/minimax-m3.1-flash",
+        "opencode/minimax-m3.1-flash",
+        "openrouter/minimax/minimax-m3.1-flash:free",
+        "opencode/minimax-m3.1-flash-free",
+    )
+    assert mc.recommended_cli_models("opencode", models) == models[2:]
 
 
 def test_refresh_models_without_list_args_degrades_to_none() -> None:

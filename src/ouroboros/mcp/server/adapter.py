@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections.abc import Callable, Sequence
+from functools import partial
 import inspect
 import keyword
 import os
@@ -21,8 +22,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import Field
 import structlog
 
-from ouroboros.config._model_defaults import DEFAULT_SONNET_MODEL
-from ouroboros.config.loader import get_execution_model
+from ouroboros.config.loader import resolve_execution_model, resolve_runtime_model
 from ouroboros.core.seed import ac_text, ac_texts
 from ouroboros.core.types import Result
 from ouroboros.events.io import new_call_id
@@ -34,7 +34,9 @@ from ouroboros.mcp.errors import (
 )
 from ouroboros.mcp.host_context import from_sdk_context, subagent_capability_extensions
 from ouroboros.mcp.server.auth import current_auth_context, resolve_network_security
+from ouroboros.mcp.server.evolution_check_package import GenerationCheckPackages
 from ouroboros.mcp.server.evolution_pipeline_evaluation import (
+    evaluate_criteria_with_pipeline,
     evaluate_generation_with_pipeline,
     evolve_stage1_enabled,
 )
@@ -1621,7 +1623,7 @@ def create_ouroboros_server(
     from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
     from ouroboros.mcp.tools.synapse_handler import SynapseSignalHandler, SynapseTargetsHandler
     from ouroboros.orchestrator import create_agent_runtime, resolve_agent_runtime_backend
-    from ouroboros.orchestrator.runner import OrchestratorRunner
+    from ouroboros.orchestrator.runner_factory import build_orchestrator_runner
     from ouroboros.orchestrator.runtime_factory import create_agent_runtime_async
     from ouroboros.orchestrator.synapse import (
         EventStoreSessionSignalTargetResolver,
@@ -1832,10 +1834,8 @@ def create_ouroboros_server(
 
     # Wire real execution/evaluation callables for evolve_step so that
     # generation quality is validated, not only ontology deltas.
-    # Use Sonnet for execution (frugal) — Opus is overkill for code generation.
-    execution_model = get_execution_model()
-    if execution_model is None and execute_runtime_backend == "claude":
-        execution_model = DEFAULT_SONNET_MODEL
+    # Execution runs on the standard tier; Opus is overkill for code generation.
+    execution_model = resolve_execution_model(execute_runtime_backend)
     # Use stderr console: in MCP stdio mode, stdout is the JSON-RPC channel.
     # Any non-protocol output on stdout corrupts the MCP communication.
     # Stage 1 (mechanical lint/build/test) is the only executed evidence on the
@@ -1858,6 +1858,19 @@ def create_ouroboros_server(
             if not evolution_store_initialized:
                 await event_store.initialize()
                 evolution_store_initialized = True
+
+    # Each generation's check package: prepared before its worker, read back
+    # by its evaluator (``evolution_check_package``).
+    generation_packages = GenerationCheckPackages(
+        event_store,
+        evaluate_criteria=partial(
+            evaluate_criteria_with_pipeline,
+            llm_adapter=evolution_evaluation_llm_adapter,
+            semantic_model=evolve_semantic_model,
+            detector_backend=evaluate_llm_backend,
+            stage1_enabled=evolve_stage1,
+        ),
+    )
 
     async def _evolution_executor(
         seed: Any,
@@ -1883,19 +1896,32 @@ def create_ouroboros_server(
             if mcp_bridge is not None and hasattr(mcp_bridge, "tool_prefix")
             else ""
         )
-        evolution_runner = OrchestratorRunner(
+        evolution_runner = build_orchestrator_runner(
             adapter=runner_adapter,
             event_store=event_store,
             console=Console(stderr=True),
             mcp_manager=_evo_mcp_manager,
             mcp_tool_prefix=_evo_mcp_prefix,
             debug=False,
+            task_workspace=None,
             enable_decomposition=True,
+            max_decomposition_depth=None,
+            max_parallel_workers=None,
+            fat_harness_mode=False,
+            base_model_tier=None,
+            efficiency_mode=None,
+            frugality_assurance=None,
+            inherited_runtime_handle=None,
+            inherited_tools=None,
             session_signal_hub=session_signal_hub,
         )
-        return await evolution_runner.execute_seed(
-            seed=seed,
+        return await generation_packages.execute(
+            evolution_runner,
+            seed,
             execution_id=execution_id,
+            worker_dir=Path(task_cwd or effective_cwd),
+            runtime_backend=execute_runtime_backend,
+            model=execution_model,
             parallel=parallel,
             externally_satisfied_acs=externally_satisfied_acs,
         )
@@ -2005,7 +2031,13 @@ def create_ouroboros_server(
 
         return _evaluation_summary_from_spec_verification(mechanical, summary, seed)
 
-    async def _evolution_evaluator(seed: Any, execution_output: str | None) -> EvaluationSummary:
+    async def _evolution_evaluator(
+        seed: Any,
+        execution_output: str | None,
+        *,
+        execution_id: str | None = None,
+        carried_ac_results: dict[int, Any] | None = None,
+    ) -> EvaluationSummary:
         await _ensure_evolution_store_initialized()
 
         artifact = execution_output or ""
@@ -2018,6 +2050,17 @@ def create_ouroboros_server(
                 failure_reason="Empty execution output",
             )
 
+        async def _decide(summary: EvaluationSummary) -> EvaluationSummary:
+            # Package verdicts, carried frozen verdicts, then the per-AC pipeline.
+            return await generation_packages.decide(
+                summary,
+                seed,
+                execution_id,
+                carried=carried_ac_results,
+                artifact=artifact,
+                project_dir=_extract_project_dir(artifact, seed=seed),
+            )
+
         # Use mechanical evaluation from structured AC results.
         # More reliable than LLM-based evaluation in MCP stdio mode.
         mechanical = _evaluate_mechanically(artifact, seed)
@@ -2025,7 +2068,7 @@ def create_ouroboros_server(
             # Run spec verification to catch agent self-report lies
             verified = await _verify_spec_compliance(seed, artifact, mechanical)
             if verified is not None:
-                return verified
+                return await _decide(verified)
             return mechanical
 
         # Fallback when the worker report has no ``### Task N`` markers: the
@@ -2045,7 +2088,7 @@ def create_ouroboros_server(
                 "acceptance criteria is attached as advisory feedback"
             ),
         )
-        return await evaluate_generation_with_pipeline(
+        fallback = await evaluate_generation_with_pipeline(
             seed=seed,
             artifact=artifact,
             project_dir=_extract_project_dir(artifact, seed=seed),
@@ -2054,6 +2097,9 @@ def create_ouroboros_server(
             detector_backend=evaluate_llm_backend,
             stage1_enabled=evolve_stage1,
         )
+        # The fallback has no per-criterion rows: every criterion is resolved,
+        # and a recorded package failure rejects even an approved fallback.
+        return await _decide(fallback)
 
     async def _evolution_validator(seed: Any, execution_output: str | None) -> str:
         """Validate and reconcile code generated by parallel AC execution.
@@ -2099,10 +2145,8 @@ def create_ouroboros_server(
             )
 
         max_attempts = BUILTIN_COLLECTION_ATTEMPT_LIMIT
-        # Use Sonnet for validation fixes — import error resolution doesn't need Opus
-        validation_model = os.environ.get("OUROBOROS_VALIDATION_MODEL") or execution_model
-        if validation_model is None and execute_runtime_backend == "claude":
-            validation_model = DEFAULT_SONNET_MODEL
+        # Validation fixes run on the standard tier; import errors don't need Opus.
+        validation_model = resolve_runtime_model("validation", execute_runtime_backend)
         host_dispatch.reject_host_runtime_for_evolve(execute_runtime_backend, phase="validation")
         validation_adapter = await create_agent_runtime_async(
             create_agent_runtime,

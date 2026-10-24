@@ -28,6 +28,8 @@ from ouroboros.persistence.picker_indexes import (
     PICKER_DIRECT_INDEX_SCOPE_SQL,
     PICKER_DIRECT_SCOPE_SQL,
     PICKER_GAP_INDEX,
+    PICKER_INTERVIEW_ROOT_INDEX,
+    PICKER_INTERVIEW_ROOT_TABLE,
     PICKER_PROGRESS_EVENT_TYPES,
     PICKER_PROGRESS_TABLE,
     PICKER_PROJECTION_EVENT_TYPES,
@@ -60,8 +62,19 @@ _AC_STATE_EVENT_TYPES = frozenset(
         "execution.subtask.updated",
         "execution.session.started",
         "execution.ac.completed",
+        "execution.verify.failed",
+        "execution.ac.acceptance_finalized",
         "workflow.progress.updated",
     }
+)
+_INTERVIEW_EVENT_TYPES = (
+    "interview.started",
+    "interview.response.recorded",
+    "interview.completed",
+    "interview.failed",
+    "interview.question_generation.parent_handoff",
+    "interview.response.emitted",
+    "interview.lateral_review.recommended",
 )
 
 # SQLite evaluates json_extract before Python can apply _decode_payload.  The
@@ -152,6 +165,9 @@ def _advances_ac_state(event: dict[str, Any]) -> bool:
     workflow row must not supersede an earlier running acknowledgement merely
     because it shares the same event type as full AC snapshots.
     """
+    if event["event_type"] == "execution.verify.failed":
+        payload = event.get("payload")
+        return isinstance(payload, dict) and payload.get("final_workspace_revalidation") is True
     if event["event_type"] != "workflow.progress.updated":
         return event["event_type"] in _AC_STATE_EVENT_TYPES
     payload = event.get("payload")
@@ -408,6 +424,39 @@ def _resolve_run_cluster(conn: sqlite3.Connection, run_id: str) -> _ResolvedRunC
     return canonical
 
 
+def _linked_interview_id(cluster: _ResolvedRunCluster) -> str | None:
+    """Validate the optional authoritative interview link for one run.
+
+    Missing keys are the supported legacy shape. A present key is an identity
+    claim, so malformed values or distinct claims fail closed instead of being
+    ignored or inferred from another event namespace.
+    """
+    linked_ids: set[str] = set()
+    for start in cluster.start_rows:
+        payload = _decode_payload(start["payload"])
+        if not isinstance(payload, dict):
+            raise PickerIndexContractError(
+                frozenset(), detail=f"malformed session start payload: {start['rowid']}"
+            )
+        if "interview_id" not in payload:
+            continue
+        interview_id = payload["interview_id"]
+        if (
+            not isinstance(interview_id, str)
+            or not interview_id.strip()
+            or interview_id != interview_id.strip()
+        ):
+            raise PickerIndexContractError(
+                frozenset(), detail=f"invalid interview link: {start['rowid']}"
+            )
+        linked_ids.add(interview_id)
+    if len(linked_ids) > 1:
+        raise PickerIndexContractError(
+            frozenset(), detail=f"conflicting interview links: {sorted(linked_ids)}"
+        )
+    return next(iter(linked_ids), None)
+
+
 class EventTail:
     """Cursor-based read-only tail of one run's events.
 
@@ -422,6 +471,8 @@ class EventTail:
         self._db_path = Path(db_path).expanduser()
         self._run_id = run_id
         self._cursor = 0
+        self._interview_cursors: dict[str, int] = {}
+        self._snapshot_conn: sqlite3.Connection | None = None
 
     @property
     def db_path(self) -> Path:
@@ -429,79 +480,117 @@ class EventTail:
 
     def reset(self) -> None:
         self._cursor = 0
+        self._interview_cursors.clear()
+
+    def _resolve_cluster(self, conn: sqlite3.Connection) -> _ResolvedRunCluster:
+        """Recover the current bounded execution/session cluster for the run."""
+        return _resolve_run_cluster(conn, self._run_id)
 
     def _resolve_ids(self, conn: sqlite3.Connection) -> list[str]:
-        """Recover the current bounded execution/session cluster for the run."""
-        return list(_resolve_run_cluster(conn, self._run_id).selected_ids)
+        """Compatibility view of the execution/session cluster identities."""
+        return list(self._resolve_cluster(conn).selected_ids)
 
     def fetch_new(self, *, limit: int = 5000) -> list[dict[str, Any]]:
         """Return events appended since the last call (advances the cursor)."""
         if not self._db_path.exists():
             return []
+        if self._snapshot_conn is not None:
+            return self._fetch_new(self._snapshot_conn, limit=limit)
         conn = _connect_readonly(self._db_path)
         try:
             conn.execute("BEGIN")
-            matching_contract = matching_picker_contract(conn)
-            missing_contract = frozenset(PICKER_CONTRACT_NAMES) - matching_contract
-            if missing_contract:
-                raise PickerIndexContractError(missing_contract)
-            if (
-                conn.execute(
-                    "SELECT 1 FROM events "
-                    f"INDEXED BY {PICKER_GAP_INDEX} "
-                    f"WHERE {PICKER_PROJECTION_SCOPE_SQL} "
-                    f"AND picker_projection_version IS NOT {PICKER_PROJECTION_VERSION} LIMIT 1"
-                ).fetchone()
-                is not None
-            ):
-                raise PickerIndexContractError(
-                    frozenset(), detail="contains unprojected relevant events"
-                )
-            ids = self._resolve_ids(conn)
-            projection_type_ph = ",".join("?" for _ in PICKER_PROJECTION_EVENT_TYPES)
-            projection_sql = (
-                "SELECT rowid, event_type, payload "
-                "FROM events "
-                "WHERE rowid > ? "
-                f"AND event_type IN ({projection_type_ph}) "
-                "AND aggregate_id = ? "
-                "ORDER BY rowid "
-                "LIMIT ?"
-            )
-            rows_by_rowid: dict[int, sqlite3.Row] = {}
-            for aggregate_id in ids:
-                rows = conn.execute(
-                    projection_sql,
-                    [self._cursor, *PICKER_PROJECTION_EVENT_TYPES, aggregate_id, limit],
-                ).fetchall()
-                for row in rows:
-                    rows_by_rowid[int(row["rowid"])] = row
-            canonical_sql = (
-                "SELECT rowid, event_type, payload "
-                f"FROM events INDEXED BY {DIRECT_EVENT_INDEX} "
-                "WHERE rowid > ? "
-                "AND event_type = ? "
-                f"AND {PICKER_DIRECT_INDEX_SCOPE_SQL} "
-                f"AND {PICKER_DIRECT_SCOPE_SQL} "
-                f"AND {PICKER_CANONICAL_LINK_ID_SQL} = ? "
-                "ORDER BY rowid "
-                "LIMIT ?"
-            )
-            for selected_id in ids:
-                for event_type in PICKER_DIRECT_EVENT_TYPES:
-                    rows = conn.execute(
-                        canonical_sql,
-                        [self._cursor, event_type, selected_id, limit],
-                    ).fetchall()
-                    for row in rows:
-                        rows_by_rowid[int(row["rowid"])] = row
-            rows = sorted(rows_by_rowid.values(), key=lambda row: int(row["rowid"]))[:limit]
+            return self._fetch_new(conn, limit=limit)
         finally:
             conn.close()
 
+    def _fetch_new(self, conn: sqlite3.Connection, *, limit: int = 5000) -> list[dict[str, Any]]:
+        matching_contract = matching_picker_contract(conn)
+        missing_contract = frozenset(PICKER_CONTRACT_NAMES) - matching_contract
+        if missing_contract:
+            raise PickerIndexContractError(missing_contract)
+        if (
+            conn.execute(
+                "SELECT 1 FROM events "
+                f"INDEXED BY {PICKER_GAP_INDEX} "
+                f"WHERE {PICKER_PROJECTION_SCOPE_SQL} "
+                f"AND picker_projection_version IS NOT {PICKER_PROJECTION_VERSION} LIMIT 1"
+            ).fetchone()
+            is not None
+        ):
+            raise PickerIndexContractError(
+                frozenset(), detail="contains unprojected relevant events"
+            )
+        cluster = self._resolve_cluster(conn)
+        ids = list(cluster.selected_ids)
+        interview_id = _linked_interview_id(cluster)
+        projection_type_ph = ",".join("?" for _ in PICKER_PROJECTION_EVENT_TYPES)
+        projection_sql = (
+            "SELECT rowid, aggregate_id, event_type, payload "
+            "FROM events "
+            "WHERE rowid > ? "
+            f"AND event_type IN ({projection_type_ph}) "
+            "AND aggregate_id = ? "
+            "ORDER BY rowid "
+            "LIMIT ?"
+        )
+        rows_by_rowid: dict[int, sqlite3.Row] = {}
+        for aggregate_id in ids:
+            rows = conn.execute(
+                projection_sql,
+                [self._cursor, *PICKER_PROJECTION_EVENT_TYPES, aggregate_id, limit],
+            ).fetchall()
+            for row in rows:
+                rows_by_rowid[int(row["rowid"])] = row
+        canonical_sql = (
+            "SELECT rowid, aggregate_id, event_type, payload "
+            f"FROM events INDEXED BY {DIRECT_EVENT_INDEX} "
+            "WHERE rowid > ? "
+            "AND event_type = ? "
+            f"AND {PICKER_DIRECT_INDEX_SCOPE_SQL} "
+            f"AND {PICKER_DIRECT_SCOPE_SQL} "
+            f"AND {PICKER_CANONICAL_LINK_ID_SQL} = ? "
+            "ORDER BY rowid "
+            "LIMIT ?"
+        )
+        for selected_id in ids:
+            for event_type in PICKER_DIRECT_EVENT_TYPES:
+                rows = conn.execute(
+                    canonical_sql,
+                    [self._cursor, event_type, selected_id, limit],
+                ).fetchall()
+                for row in rows:
+                    rows_by_rowid[int(row["rowid"])] = row
+        if interview_id is not None:
+            interview_cursor = self._interview_cursors.get(interview_id, 0)
+            interview_type_ph = ",".join("?" for _ in _INTERVIEW_EVENT_TYPES)
+            interview_rows = conn.execute(
+                "SELECT rowid, aggregate_id, event_type, payload "
+                "FROM events "
+                "WHERE rowid > ? "
+                "AND aggregate_type = 'interview' "
+                "AND aggregate_id = ? "
+                f"AND event_type IN ({interview_type_ph}) "
+                "ORDER BY rowid "
+                "LIMIT ?",
+                [interview_cursor, interview_id, *_INTERVIEW_EVENT_TYPES, limit],
+            ).fetchall()
+            for row in interview_rows:
+                rows_by_rowid[int(row["rowid"])] = row
+        rows = sorted(rows_by_rowid.values(), key=lambda row: int(row["rowid"]))[:limit]
+
         events: list[dict[str, Any]] = []
         for row in rows:
-            self._cursor = max(self._cursor, int(row["rowid"]))
+            rowid = int(row["rowid"])
+            if (
+                interview_id is not None
+                and row["aggregate_id"] == interview_id
+                and row["event_type"] in _INTERVIEW_EVENT_TYPES
+            ):
+                self._interview_cursors[interview_id] = max(
+                    self._interview_cursors.get(interview_id, 0), rowid
+                )
+            else:
+                self._cursor = max(self._cursor, rowid)
             payload = row["payload"]
             if isinstance(payload, str):
                 try:
@@ -511,11 +600,41 @@ class EventTail:
             events.append(
                 {
                     "rowid": row["rowid"],
+                    "aggregate_id": row["aggregate_id"],
                     "event_type": row["event_type"],
                     "payload": payload,
                 }
             )
         return events
+
+    def fetch_all(self, *, limit: int = 5000) -> list[dict[str, Any]]:
+        """Drain one frozen database snapshot across every owned cursor."""
+        if not self._db_path.exists():
+            return []
+        cursor_before_snapshot = self._cursor
+        interview_cursors_before_snapshot = self._interview_cursors.copy()
+        conn = _connect_readonly(self._db_path)
+        try:
+            conn.execute("BEGIN")
+            conn.execute("SELECT 1 FROM events LIMIT 1").fetchone()
+            self._snapshot_conn = conn
+            events: list[dict[str, Any]] = []
+            while True:
+                cursor_before = self._cursor
+                interview_cursors_before = self._interview_cursors.copy()
+                events.extend(self.fetch_new(limit=limit))
+                if (
+                    self._cursor == cursor_before
+                    and self._interview_cursors == interview_cursors_before
+                ):
+                    return events
+        except BaseException:
+            self._cursor = cursor_before_snapshot
+            self._interview_cursors = interview_cursors_before_snapshot
+            raise
+        finally:
+            self._snapshot_conn = None
+            conn.close()
 
 
 def _fetch_direct_rows(
@@ -601,6 +720,81 @@ def _fetch_latest_progress_rows(
                     )
                 rows_by_rowid[int(row["rowid"])] = row
     return list(rows_by_rowid.values())
+
+
+def list_recent_interviews(db_path: str | Path, *, limit: int = 10) -> list[dict[str, Any]]:
+    """List root metadata only; Interview panels and event streams are separate.
+
+    A maximum of 100 registry entries and two identity pointers per entry are
+    read. No history walk, aggregate scan, or invalid-row replacement occurs.
+    """
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+        raise ValueError("Interview limit must be an integer from 1 to 100")
+    path = Path(db_path).expanduser()
+    if not path.exists():
+        return []
+    conn = _connect_readonly(path)
+    try:
+        conn.execute("BEGIN")
+        missing = frozenset(PICKER_CONTRACT_NAMES) - matching_picker_contract(conn)
+        if missing:
+            raise PickerIndexContractError(missing)
+        if (
+            conn.execute(
+                f"SELECT 1 FROM events INDEXED BY {PICKER_GAP_INDEX} "
+                f"WHERE {PICKER_PROJECTION_SCOPE_SQL} "
+                f"AND picker_projection_version IS NOT {PICKER_PROJECTION_VERSION} LIMIT 1"
+            ).fetchone()
+            is not None
+        ):
+            raise PickerIndexContractError(
+                frozenset(), detail="contains unprojected relevant events"
+            )
+        roots = conn.execute(
+            f"SELECT event_rowid, interview_id FROM {PICKER_INTERVIEW_ROOT_TABLE} "
+            "ORDER BY event_rowid DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        result = []
+        for root in roots:
+            identity = root["interview_id"]
+            pointers = conn.execute(
+                f"SELECT event_rowid FROM {PICKER_INTERVIEW_ROOT_TABLE} "
+                f"INDEXED BY {PICKER_INTERVIEW_ROOT_INDEX} WHERE interview_id = ? LIMIT 2",
+                (identity,),
+            ).fetchall()
+            if len(pointers) != 1:
+                raise PickerIndexContractError(
+                    frozenset(), detail="ambiguous Interview root identity"
+                )
+            event = conn.execute(
+                "SELECT aggregate_type, aggregate_id, event_type, payload FROM events WHERE rowid = ?",
+                (root["event_rowid"],),
+            ).fetchone()
+            payload = _decode_payload(event["payload"]) if event is not None else None
+            if (
+                event is None
+                or event["aggregate_type"] != "interview"
+                or event["event_type"] != "interview.started"
+                or event["aggregate_id"] != identity
+                or not isinstance(identity, str)
+                or not identity.strip(RUNTIME_STATUS_ASCII_WHITESPACE)
+                or not isinstance(payload, dict)
+            ):
+                raise PickerIndexContractError(
+                    frozenset(), detail="Interview root pointer mismatch"
+                )
+            # Only identity metadata is exposed; no interview text is copied.
+            result.append(
+                {
+                    "family": "interview",
+                    "interview_id": identity,
+                    "root_event_rowid": root["event_rowid"],
+                }
+            )
+        return result
+    finally:
+        conn.close()
 
 
 def list_recent_executions(db_path: str | Path, *, limit: int = 10) -> list[dict[str, Any]]:

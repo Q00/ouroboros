@@ -592,6 +592,74 @@ async def test_agent_stop_reason_error_overrides_zero_exit() -> None:
     assert result.resume_handle.native_session_id == "session-1"
 
 
+_EMPTY_ERROR_REASONS = {
+    "error-message-null": {"errorMessage": None},
+    "error-message-empty": {"errorMessage": ""},
+    "error-message-blank": {"errorMessage": "   "},
+    "error-message-missing": {},
+}
+
+
+def _stop_reason_error_without_reason(reason: dict[str, object]) -> _FakeProcess:
+    failed = {"role": "assistant", "content": [], "stopReason": "error", **reason}
+    return _FakeProcess(
+        stdout_lines=[
+            _jsonl_event({"type": "session", "id": "session-1"}),
+            _jsonl_event(
+                {
+                    "type": "message_update",
+                    "assistantMessageEvent": {"type": "text_delta", "delta": "partial answer"},
+                }
+            ),
+            _jsonl_event({"type": "message_end", "message": failed}),
+            _jsonl_event({"type": "agent_end", "messages": [failed]}),
+        ],
+        stderr_lines=[],
+        returncode=0,
+    )
+
+
+@pytest.mark.parametrize(
+    "reason", list(_EMPTY_ERROR_REASONS.values()), ids=list(_EMPTY_ERROR_REASONS)
+)
+@pytest.mark.asyncio
+async def test_agent_stop_reason_error_without_reason_overrides_zero_exit(
+    reason: dict[str, object],
+) -> None:
+    """A ``stopReason: "error"`` message stays a failure however thin it is.
+
+    ``stopReason`` declares the failure; ``errorMessage`` only carries the
+    reason. Reading a missing reason as "no error" reported the task as a
+    success whose final message was the text streamed before the failure.
+    """
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+
+    with patch(
+        "asyncio.create_subprocess_exec", return_value=_stop_reason_error_without_reason(reason)
+    ):
+        messages = [msg async for msg in runtime.execute_task("Do it")]
+
+    result = [m for m in messages if m.type == "result"][-1]
+    assert result.is_error, f"stopReason=error with {reason!r} must not report success"
+    assert result.content == "Unknown error"
+    assert result.data == {
+        "subtype": "error",
+        "returncode": 0,
+        "error_type": "PiError",
+    }
+    assert result.resume_handle is not None
+    assert result.resume_handle.native_session_id == "session-1"
+
+    with patch(
+        "asyncio.create_subprocess_exec", return_value=_stop_reason_error_without_reason(reason)
+    ):
+        task_result = await runtime.execute_task_to_result(prompt="Do it")
+
+    assert task_result.is_err
+    assert task_result.error.message == "Unknown error"
+    assert task_result.error.provider == "pi"
+
+
 @pytest.mark.asyncio
 async def test_execute_task_reports_malformed_json_event() -> None:
     process = _FakeProcess(

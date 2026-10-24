@@ -13,14 +13,15 @@ Coverage:
    deadline against a sleeping driver must:
      - NOT terminate as ``interview_phase_deadline`` BLOCKED,
      - persist a degraded ``Seed`` artifact with the PR-A metadata,
-     - append ``runtime.deadline.interview.fired`` (PR-B) and
-       ``auto.product.partial_emitted`` (PR-C) to the EventStore,
-     - surface the PR-C ``partial_product*`` fields on the result envelope.
+     - append ``runtime.deadline.interview.fired`` (PR-B) to the EventStore,
+     - run the Seed on the user's goal on record (``sourced_scope``) and
+       surface the recovery reason and unresolved slots on the result.
 
-2. **Partial product fixture.** A successful deadline run reaches
-   ``AutoPhase.COMPLETE`` with ``partial_product=True``, the recovery
-   reason mirrored from the Seed, and unresolved slots carried forward
-   verbatim as next-step hints.
+2. **Partial product fixture.** A deadline Seed without the user's goal on
+   record is emitted with ``partial_product=True``, the recovery reason
+   mirrored from the Seed, and unresolved slots carried forward verbatim as
+   next-step hints. It was never executed, so the session stops ``BLOCKED``
+   with ``degraded_seed_not_executed`` instead of reporting complete.
 
 3. **Raw evidence file.** The integration test writes a JSON evidence
    blob to the pytest tmp path so reviewers can audit the full
@@ -40,6 +41,8 @@ from typing import Any
 
 import pytest
 
+from ouroboros.auto.grade_gate_terminals import DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE
+from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.pipeline import AutoPipeline
 from ouroboros.auto.state import (
     AutoPhase,
@@ -80,6 +83,34 @@ class _DeadlineDriver:
     async def run(self, _state, _ledger):  # noqa: ARG002
         await asyncio.sleep(3600)
         raise AssertionError("must be cancelled by per-phase deadline")
+
+
+class _InferredGoalDeadlineDriver(_DeadlineDriver):
+    """Leaves only a model-inferred goal in the ledger, so no goal is on record."""
+
+    async def run(self, _state, ledger: SeedDraftLedger):  # noqa: ARG002
+        ledger.sections["goal"].entries = [
+            LedgerEntry(
+                key="goal.inferred",
+                value="Build a tiny CLI tool.",
+                source=LedgerSource.INFERENCE,
+                confidence=0.6,
+                status=LedgerStatus.CONFIRMED,
+            )
+        ]
+        await asyncio.sleep(3600)
+        raise AssertionError("must be cancelled by per-phase deadline")
+
+
+class _RecordingRunStarter:
+    """Run starter stub that records the Seed it was asked to execute."""
+
+    def __init__(self) -> None:
+        self.seeds: list[Any] = []
+
+    async def __call__(self, seed: Any, **_: Any) -> dict[str, str]:
+        self.seeds.append(seed)
+        return {"job_id": "job_1", "execution_id": "exec_1", "session_id": "session_1"}
 
 
 async def _unused_seed_generator(_session_id: str):  # pragma: no cover - unused
@@ -142,19 +173,22 @@ def _write_evidence_blob(
 
 @pytest.mark.asyncio
 async def test_r4_equivalent_interview_deadline_regression(tmp_path: Path) -> None:
-    """Full regression for #1257: interview deadline → partial product terminal.
+    """Full regression for #1257: interview deadline, degraded Seed, run.
 
-    Binds PR-A's substrate, PR-B's routing, and PR-C's terminal into a
-    single end-to-end contract assertion. Also writes a raw evidence file
-    so future reviewers can audit the closure ladder without re-running
-    the test.
+    Binds PR-A's substrate and PR-B's routing into a single end-to-end
+    contract assertion; the degraded Seed carries the user's goal on record,
+    so it runs on that goal. Also writes a raw evidence file so future
+    reviewers can audit the closure ladder without re-running the test.
     """
     event_store = _RecordingEventStore()
     driver = _DeadlineDriver(event_store=event_store)
     state = AutoPipelineState(goal="Build a tiny CLI tool.", cwd=str(tmp_path))
     _arm_interview_deadline(state)
+    run_starter = _RecordingRunStarter()
 
-    pipeline = AutoPipeline(driver, _unused_seed_generator, store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(
+        driver, _unused_seed_generator, store=AutoStore(tmp_path), run_starter=run_starter
+    )
 
     result = await pipeline.run(state)
     # Flush fire-and-forget event-append tasks.
@@ -164,11 +198,13 @@ async def test_r4_equivalent_interview_deadline_regression(tmp_path: Path) -> No
     assert result.stop_reason_code != "interview_phase_deadline"
     assert state.last_error_code != "interview_phase_deadline"
 
-    # ----- PR-C terminal: the pipeline must reach COMPLETE with partial_product.
+    # ----- The Seed carries the user's goal on record, so it runs on it.
+    assert len(run_starter.seeds) == 1
+    assert run_starter.seeds[0].sourced_scope.goal == "Build a tiny CLI tool."
     assert state.phase == AutoPhase.COMPLETE
     assert result.status == "complete"
-    assert result.blocker is None
-    assert result.partial_product is True
+    assert result.stop_reason_code is None
+    assert result.partial_product is False
     assert result.partial_product_reason == "interview_phase_deadline"
     assert result.partial_unresolved_slots, (
         "unresolved slots must be surfaced verbatim so MCP/CLI consumers "
@@ -203,27 +239,12 @@ async def test_r4_equivalent_interview_deadline_regression(tmp_path: Path) -> No
     assert deadline_payload["ledger_ready"] is False
     assert deadline_payload["open_gaps"], "deadline event must list open gaps"
 
-    # ----- PR-C terminal: auto.product.partial_emitted event landed.
-    partial_events = [
+    assert deadline_payload["open_gaps"] == seed_meta["unresolved_slots"]
+
+    # ----- The partial-product terminal event belongs to Seeds that do not run.
+    assert not [
         event for event in event_store.appended if event.type == "auto.product.partial_emitted"
     ]
-    assert len(partial_events) == 1
-    partial_payload = partial_events[0].data
-    assert partial_payload["auto_session_id"] == state.auto_session_id
-    assert partial_payload["seed_id"] == state.seed_id
-    assert partial_payload["recovery_reason"] == "interview_phase_deadline"
-    assert partial_payload["unresolved_slots"], (
-        "partial-emitted payload must list unresolved slots verbatim"
-    )
-
-    # ----- Event ordering: deadline event MUST precede partial-emitted event.
-    deadline_index = event_store.appended.index(deadline_events[0])
-    partial_index = event_store.appended.index(partial_events[0])
-    assert deadline_index < partial_index, (
-        "runtime.deadline.interview.fired must be emitted before "
-        "auto.product.partial_emitted so post-hoc audit can trace the "
-        "closure ladder in order"
-    )
 
     # ----- Raw evidence file for reviewer audit (PR-D contract).
     evidence_path = _write_evidence_blob(
@@ -235,9 +256,8 @@ async def test_r4_equivalent_interview_deadline_regression(tmp_path: Path) -> No
     assert evidence_path.exists()
     # Sanity-check the round-trip so the file isn't silently corrupted.
     loaded = json.loads(evidence_path.read_text(encoding="utf-8"))
-    assert loaded["result"]["partial_product"] is True
+    assert loaded["result"]["partial_unresolved_slots"] == seed_meta["unresolved_slots"]
     assert any(event["type"] == "runtime.deadline.interview.fired" for event in loaded["events"])
-    assert any(event["type"] == "auto.product.partial_emitted" for event in loaded["events"])
 
 
 @pytest.mark.asyncio
@@ -249,14 +269,15 @@ async def test_interview_deadline_regression_without_event_store(tmp_path: Path)
     the partial product terminal still has to fire and the result envelope
     still has to carry the PR-C surface fields.
     """
-    driver = _DeadlineDriver(event_store=None)
+    driver = _InferredGoalDeadlineDriver(event_store=None)
     state = AutoPipelineState(goal="Build a tiny CLI tool.", cwd=str(tmp_path))
     _arm_interview_deadline(state)
     pipeline = AutoPipeline(driver, _unused_seed_generator, store=AutoStore(tmp_path))
 
     result = await pipeline.run(state)
 
-    assert state.phase == AutoPhase.COMPLETE
+    assert state.phase == AutoPhase.BLOCKED
+    assert result.stop_reason_code == DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE
     assert result.partial_product is True
     assert result.partial_product_reason == "interview_phase_deadline"
     assert result.partial_unresolved_slots
@@ -315,7 +336,7 @@ async def test_deadline_event_ordering_holds_when_first_append_is_slow(
         slow_event_type="runtime.deadline.interview.fired",
         slow_delay_seconds=0.25,
     )
-    driver = _DeadlineDriver(event_store=event_store)
+    driver = _InferredGoalDeadlineDriver(event_store=event_store)
     state = AutoPipelineState(goal="Build a tiny CLI tool.", cwd=str(tmp_path))
     _arm_interview_deadline(state)
     pipeline = AutoPipeline(driver, _unused_seed_generator, store=AutoStore(tmp_path))
@@ -331,7 +352,7 @@ async def test_deadline_event_ordering_holds_when_first_append_is_slow(
     # Functional surface unchanged.
     assert result.partial_product is True
     assert result.partial_product_reason == "interview_phase_deadline"
-    assert state.phase == AutoPhase.COMPLETE
+    assert state.phase == AutoPhase.BLOCKED
 
     # Ordering contract: deadline event MUST precede partial-emitted
     # event in the persisted stream, even though its append was slower.

@@ -288,9 +288,10 @@ closure ladder:
 - the deadline emits `runtime.deadline.interview.fired`,
 - the pipeline synthesizes a `Seed` (complete ledger →
   `synthesize_seed_from_ledger`, incomplete → `partial_seed_from_evidence`),
-- and the partial Seed reaches `AutoPhase.COMPLETE` with
-  `auto.product.partial_emitted` + `partial_product=True` /
-  `partial_unresolved_slots` on the result envelope.
+- and the degraded Seed runs on the user's goal on record (`sourced_scope`)
+  with `partial_unresolved_slots` on the result envelope; without a sourced
+  goal it stops `BLOCKED` (`degraded_seed_not_executed`) with
+  `auto.product.partial_emitted` + `partial_product=True`.
 
 The hermetic regression for that contract lives in
 `tests/integration/auto/test_interview_deadline_partial_product_regression.py`

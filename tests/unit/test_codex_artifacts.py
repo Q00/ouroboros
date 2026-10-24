@@ -935,6 +935,42 @@ class TestInstallCodexSkills:
         assert installed_paths[1].joinpath("notes.txt").read_text(encoding="utf-8") == "copied"
         assert not (tmp_path / ".codex" / "skills" / f"{CODEX_SKILL_NAMESPACE}misc").exists()
 
+    def test_rewrites_sibling_skill_links_to_namespaced_install_dirs(self, tmp_path: Path) -> None:
+        """``../<skill>/`` links must resolve after skills install as ``ouroboros-<skill>``."""
+        source_skills_dir = tmp_path / "packaged-skills"
+        self._write_skill(source_skills_dir, "welcome", body="---\nname: welcome\n---\n")
+        source_link_text = (
+            "Read `../welcome/SKILL.md`, then `../welcome/references/a.md`.\n"
+            "Leave `../unrelated/SKILL.md` and `../welcomes/x.md` alone.\n"
+        )
+        source_skill_md = (
+            self._write_skill(
+                source_skills_dir,
+                "ooo",
+                body=source_link_text,
+                extra_files={"references/more.md": "See ../welcome/SKILL.md\n"},
+            )
+            / "SKILL.md"
+        )
+
+        installed_paths = install_codex_skills(
+            codex_dir=tmp_path / ".codex",
+            skills_dir=source_skills_dir,
+        )
+
+        installed_ooo = next(path for path in installed_paths if path.name.endswith("ooo"))
+        assert installed_ooo.joinpath("SKILL.md").read_text(encoding="utf-8") == (
+            f"Read `../{CODEX_SKILL_NAMESPACE}welcome/SKILL.md`, "
+            f"then `../{CODEX_SKILL_NAMESPACE}welcome/references/a.md`.\n"
+            "Leave `../unrelated/SKILL.md` and `../welcomes/x.md` alone.\n"
+        )
+        assert installed_ooo.joinpath("references/more.md").read_text(encoding="utf-8") == (
+            f"See ../{CODEX_SKILL_NAMESPACE}welcome/SKILL.md\n"
+        )
+        linked = installed_ooo.parent / f"{CODEX_SKILL_NAMESPACE}welcome" / "SKILL.md"
+        assert linked.is_file()
+        assert source_skill_md.read_text(encoding="utf-8") == source_link_text
+
     def test_replaces_existing_skill_directory_with_packaged_content(self, tmp_path: Path) -> None:
         """Setup refresh should remove stale files before copying the packaged skill tree."""
         source_skills_dir = tmp_path / "packaged-skills"
@@ -1051,15 +1087,17 @@ class TestInstallCodexSkills:
     ) -> None:
         """Bookkeeping failure before commit must restore the installed skill."""
         source_skills_dir = tmp_path / "packaged-skills"
-        source_skill = self._write_skill(source_skills_dir, "run", body="fresh skill")
+        self._write_skill(source_skills_dir, "run", body="fresh skill")
         codex_dir = tmp_path / ".codex"
         target_path = codex_dir / "skills" / f"{CODEX_SKILL_NAMESPACE}run"
         target_path.mkdir(parents=True)
         target_path.joinpath("SKILL.md").write_text("installed skill", encoding="utf-8")
 
         def _fail_new_generation(generation: object) -> None:
-            source_path = getattr(generation, "source_path", None)
-            if source_path == source_skill:
+            # The new generation is the staged tree (not the rollback marker).
+            if getattr(generation, "target_path", None) == target_path and not getattr(
+                generation, "missing", False
+            ):
                 raise OSError("synthetic generation snapshot failure")
 
         with pytest.raises(OSError, match="synthetic generation snapshot failure"):

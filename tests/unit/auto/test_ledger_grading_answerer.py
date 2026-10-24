@@ -74,6 +74,22 @@ def _seed(
     )
 
 
+def _assert_never_self_authorizes(answer, question: str) -> None:
+    """The answerer stops nothing on question wording, and nothing it writes binds.
+
+    Auto may not self-authorize actions on the user's environment. That is
+    carried by the binding rule, not by matching words in the question: an
+    auto answer is a guess (``DEFAULTED``, never binding, reaching the worker
+    as an open question) unless it is a caller-supplied repo fact.
+    """
+    assert answer.blocker is None, question
+    assert answer.source != AutoAnswerSource.BLOCKER, question
+    for _section, entry in answer.ledger_updates:
+        if entry.source == LedgerSource.REPO_FACT:
+            continue
+        assert not entry.binds_seed, (question, entry)
+
+
 def test_auto_answerer_uses_supplied_repo_fact_for_runtime_questions() -> None:
     ledger = SeedDraftLedger.from_goal("Update the CLI")
     context = AutoAnswerContext(
@@ -181,20 +197,18 @@ def test_auto_answerer_partial_runtime_facts_do_not_confirm_runtime_context() ->
     assert ledger.sections["runtime_context"].status() == LedgerStatus.DEFAULTED
 
 
-def test_auto_answerer_context_does_not_override_blockers() -> None:
+def test_auto_answerer_answers_deploy_question_from_supplied_repo_fact() -> None:
+    """A deployment question is not stopped by its wording; the only binding
+    content is the caller-supplied repository fact, with its evidence."""
     context = AutoAnswerContext(
         repo_facts={"runtime_context": "Production deployment uses AWS."},
         evidence={"runtime_context": ("docs/deploy.md",)},
     )
+    question = "Which production environment should we deploy to?"
 
-    answer = AutoAnswerer().answer(
-        "Which production environment should we deploy to?",
-        SeedDraftLedger.from_goal("Deploy a service"),
-        context,
-    )
+    answer = AutoAnswerer().answer(question, SeedDraftLedger.from_goal("Deploy a service"), context)
 
-    assert answer.blocker is not None
-    assert answer.source == AutoAnswerSource.BLOCKER
+    _assert_never_self_authorizes(answer, question)
 
 
 def test_ledger_not_ready_until_required_sections_are_resolved() -> None:
@@ -755,40 +769,39 @@ def test_auto_answerer_preserves_passive_product_behavior_variants() -> None:
     assert all("product behavior" in answer.text.lower() for answer in answers)
 
 
-def test_auto_answerer_still_blocks_current_branch_deletion_authority() -> None:
+def test_auto_answerer_does_not_stop_on_branch_deletion_wording() -> None:
+    question = "Should we delete the current branch?"
     answer = AutoAnswerer().answer(
-        "Should we delete the current branch?",
-        SeedDraftLedger.from_goal("Clean up repository branches"),
+        question, SeedDraftLedger.from_goal("Clean up repository branches")
     )
-
-    assert answer.blocker is not None
-    assert answer.source == AutoAnswerSource.BLOCKER
+    _assert_never_self_authorizes(answer, question)
 
 
-def test_auto_answerer_returns_blocker_for_plain_secret_questions() -> None:
-    answer = AutoAnswerer().answer(
-        "Which secret should the workflow use?",
-        SeedDraftLedger.from_goal("Deploy a service"),
-    )
-
-    assert answer.blocker is not None
-    assert answer.source == AutoAnswerSource.BLOCKER
+def test_auto_answerer_does_not_stop_on_secret_wording() -> None:
+    question = "Which secret should the workflow use?"
+    answer = AutoAnswerer().answer(question, SeedDraftLedger.from_goal("Deploy a service"))
+    _assert_never_self_authorizes(answer, question)
 
 
-def test_auto_answerer_returns_blocker_for_credentials() -> None:
+def test_credential_question_stays_an_open_question() -> None:
+    """The question is kept, the guessed draft never binds, nothing is blocked."""
+    from ouroboros.auto.ledger_seed import ledger_assumptions, ledger_open_questions
+
     ledger = SeedDraftLedger.from_goal("Deploy a service")
     answerer = AutoAnswerer()
+    question = "Which production API key should the workflow use?"
 
-    answer = answerer.answer("Which production API key should the workflow use?", ledger)
-    answerer.apply(answer, ledger, question="Which production API key should the workflow use?")
+    answer = answerer.answer(question, ledger)
+    answerer.apply(answer, ledger, question=question, asked=question)
 
-    assert answer.blocker is not None
-    assert answer.source == AutoAnswerSource.BLOCKER
-    assert "constraints" in ledger.open_gaps()
-    assert not ledger.is_seed_ready()
-    assert any(
-        entry.status == LedgerStatus.BLOCKED for entry in ledger.sections["constraints"].entries
+    _assert_never_self_authorizes(answer, question)
+    assert not any(
+        entry.status == LedgerStatus.BLOCKED
+        for section in ledger.sections.values()
+        for entry in section.entries
     )
+    assert ledger_open_questions(ledger) == (question,)
+    assert not any(question in line for line in ledger_assumptions(ledger))
 
 
 def test_auto_answerer_allows_benign_sensitive_domain_vocabulary() -> None:
@@ -813,9 +826,9 @@ def test_auto_answerer_allows_benign_sensitive_domain_vocabulary() -> None:
         assert answer.source != AutoAnswerSource.BLOCKER
 
 
-def test_auto_answerer_blocks_contextual_human_authority_questions() -> None:
+def test_auto_answerer_does_not_stop_on_human_authority_wording() -> None:
     answerer = AutoAnswerer()
-    blocking_questions = (
+    questions = (
         "Which credential value should production use?",
         "Which production credential should the workflow use?",
         "Which payment provider account should we charge?",
@@ -823,12 +836,16 @@ def test_auto_answerer_blocks_contextual_human_authority_questions() -> None:
         "What medical advice should the app recommend?",
         "What API key should the workflow use?",
         "Which password should CI configure?",
+        # Ambig-SWE v0.59.0 questions the keyword rule stopped (django-11179,
+        # django-16819): they ask what the code under change should do.
+        "After a successful delete, should the model's primary key be cleared for every "
+        "instance, including models with no dependencies?",
+        "When reducing index operations, should the optimizer also account for execution "
+        "cost and risks such as table locks or downtime?",
     )
-
-    for question in blocking_questions:
+    for question in questions:
         answer = answerer.answer(question, SeedDraftLedger.from_goal("Deploy a service"))
-        assert answer.blocker is not None
-        assert answer.source == AutoAnswerSource.BLOCKER
+        _assert_never_self_authorizes(answer, question)
 
 
 def test_auto_answerer_allows_implementation_choice_questions() -> None:
@@ -861,57 +878,35 @@ def test_auto_answerer_allows_implementation_choice_questions() -> None:
         assert answer.source != AutoAnswerSource.BLOCKER
 
 
-def test_implementation_choice_guard_does_not_weaken_deployment_blocking() -> None:
-    """The implementation-choice guard must keep genuine deployment / production
-    authority questions blocked (the verb-"live" fix is deliberately narrow)."""
+def test_auto_answerer_does_not_stop_on_deployment_wording() -> None:
     answerer = AutoAnswerer()
-    blocking_questions = (
+    questions = (
         "Which production environment should we deploy the CLI to?",
         "Which production cluster and region should we deploy to?",
         "Should we deploy to production or live?",
-        # The deployment-sense negative check must stay load-bearing: a genuine
-        # deployment question that *also* names a language/runtime (so it matches a
-        # positive implementation-choice pattern) must still block — otherwise the
-        # guard would suppress the deployment authority gate.
         "Which language should we use, and which production cluster should we deploy to?",
         "What runtime and which production environment should we deploy to?",
     )
-    for question in blocking_questions:
+    for question in questions:
         answer = answerer.answer(question, SeedDraftLedger.from_goal("Deploy a service"))
-        assert answer.blocker is not None, f"expected blocker for: {question!r}"
-        assert answer.source == AutoAnswerSource.BLOCKER
+        _assert_never_self_authorizes(answer, question)
 
 
-def test_implementation_choice_guard_defers_to_other_authority_blockers() -> None:
-    """The implementation-choice guard must not short-circuit *any* genuine
-    external-authority blocker when the prompt merely also carries
-    language/runtime/framework wording.
-
-    Regression for the #1295 review blocker: the guard's negative-signal check
-    originally excluded only deployment/credential/payment terms, so a destructive
-    operation phrased as an implementation choice — e.g. "what language should the
-    cleanup script use to remove the database?" — bypassed the destructive-operation
-    blocker and returned a conservative default with no blocker. The guard now
-    defers whenever any external-action signal (destructive / credential / payment /
-    legal / medical) is present, so these still block."""
+def test_auto_answerer_does_not_stop_on_destructive_or_credential_wording() -> None:
     answerer = AutoAnswerer()
-    blocking_questions = (
-        # Destructive operation wrapped in a language/runtime/framework choice.
+    questions = (
         "What language should the cleanup script use to remove the database?",
         "What runtime should the tool use to delete the prod branch?",
         "Which framework should we use to wipe the production database?",
         "Which programming language should the migration use to drop the db?",
-        # Credential authority — singular and plural forms, with CI/workflow/env
-        # context — must all stay blocked even when phrased as a language choice.
         "Which language should we use to enter the production api key value?",
         "Which language should we use to configure API keys value?",
         "Which framework should we use to configure passwords in CI?",
         "What runtime should we use to set the api keys in the workflow?",
     )
-    for question in blocking_questions:
+    for question in questions:
         answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a CLI"))
-        assert answer.blocker is not None, f"expected blocker for: {question!r}"
-        assert answer.source == AutoAnswerSource.BLOCKER
+        _assert_never_self_authorizes(answer, question)
 
 
 def test_blank_goal_remains_open_gap() -> None:
@@ -1432,15 +1427,14 @@ def test_auto_answerer_unknown_multilingual_question_uses_safe_default() -> None
     ]
 
 
-def test_auto_answerer_blocks_production_environment_selection_variants() -> None:
+def test_auto_answerer_does_not_stop_on_production_environment_selection() -> None:
     questions = (
         "Which production environment should we deploy to?",
         "Which AWS account should we deploy production to?",
     )
     for question in questions:
         answer = AutoAnswerer().answer(question, SeedDraftLedger.from_goal("Deploy a service"))
-        assert answer.blocker is not None
-        assert answer.source == AutoAnswerSource.BLOCKER
+        _assert_never_self_authorizes(answer, question)
 
 
 def test_ledger_later_same_key_correction_resolves_conflict() -> None:
@@ -1789,36 +1783,16 @@ def test_auto_answerer_allows_production_credential_product_semantics() -> None:
         assert "product behavior" in answer.text.lower()
 
 
-def test_auto_answerer_still_blocks_real_production_credential_authority() -> None:
+def test_auto_answerer_does_not_stop_on_production_credential_wording() -> None:
     answerer = AutoAnswerer()
     questions = (
         "Which credential value should production use?",
         "Which credentials should CI configure for production?",
         "Use the production credential secret for deployment?",
     )
-
     for question in questions:
         answer = answerer.answer(question, SeedDraftLedger.from_goal("Deploy a service"))
-        assert answer.blocker is not None
-        assert answer.source == AutoAnswerSource.BLOCKER
-
-
-def test_auto_answerer_blocks_regulated_data_questions_instead_of_falling_back() -> None:
-    answerer = AutoAnswerer()
-    questions = (
-        ("What PII should the system collect?", "regulated personal data handling"),
-        (
-            "Which fields are HIPAA regulated and how should we store them?",
-            "regulated data handling",
-        ),
-        ("How should the migration purge tables for old users?", "destructive bulk data operation"),
-    )
-
-    for question, reason in questions:
-        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a regulated data app"))
-        assert answer.source == AutoAnswerSource.BLOCKER, question
-        assert answer.blocker is not None, question
-        assert answer.blocker.reason == reason, question
+        _assert_never_self_authorizes(answer, question)
 
 
 def test_auto_answerer_does_not_block_regulated_topic_when_repo_fact_supplied() -> None:
@@ -1886,53 +1860,41 @@ def test_auto_answerer_does_not_block_meta_questions_that_mention_regulated_topi
         assert answer.source == AutoAnswerSource.CONSERVATIVE_DEFAULT, question
 
 
-def test_auto_answerer_blocks_existing_convention_runtime_fallback_for_regulated_topic() -> None:
-    """Generic 'use the existing repo runtime' fallback must also block for regulated topics.
+def test_auto_answerer_answers_schema_design_question_from_issue_2648() -> None:
+    """A question about how code treats schema operations is a design question.
 
-    ``_runtime_answer`` returns ``AutoAnswerSource.EXISTING_CONVENTION`` when
-    no concrete ``runtime_context`` repo fact is supplied.  The answer text
-    is still a generic template, so a regulated runtime question without
-    grounded facts must be gated like any other fallback path.
+    Before #2648 a keyword match on the question text ("drop" ... "schema")
+    turned this round-2 question into a blocker for a human, and the run shipped
+    an empty patch. The run itself deletes no data, so the answerer must answer.
     """
-    answer = AutoAnswerer().answer(
-        "Which runtime should the HIPAA worker use?",
-        SeedDraftLedger.from_goal("Build a HIPAA worker"),
+    question = (
+        "Should optimization be limited to exact add-then-drop pairs, or also "
+        "simplify other sequences such as drop-then-add or repeated add/drop chains "
+        "when the final schema remains unchanged?"
     )
+    ledger = SeedDraftLedger.from_goal("Reduce AddIndex/RemoveIndex migration operations")
 
-    assert answer.source == AutoAnswerSource.BLOCKER
-    assert answer.blocker is not None
-    assert answer.blocker.reason == "regulated data handling"
+    answer = AutoAnswerer().answer(question, ledger)
+
+    assert answer.blocker is None
+    assert answer.source != AutoAnswerSource.BLOCKER
 
 
-def test_auto_answerer_blocks_destructive_bulk_operations_in_either_order() -> None:
-    """Destructive bulk operations must be blocked regardless of verb/noun order.
-
-    The previous matcher only caught ``verb ... noun`` phrasings such as
-    ``purge tables``, so reversed phrasings ``Which tables should the
-    migration truncate?`` slipped through. Broaden the verb vocabulary
-    (truncate/purge/wipe with their tense variants) and the noun list
-    (tables/schemas/databases/indexes/migrations) and cover both orders.
-    """
-    answerer = AutoAnswerer()
-    blocked_questions = (
-        # verb-then-noun
-        "How should the migration purge tables for old users?",
-        "Should we wipe the user_data schema during the rollout?",
-        "How should the system truncate the audit databases?",
-        "Which tables should the migration drop?",
-        "Should we erase these schemas before re-seeding?",
-        # noun-then-verb (reverse phrasing)
+@pytest.mark.parametrize(
+    "question",
+    [
         "Which tables should the migration truncate?",
-        "Which schemas should the cleanup script purge?",
-        "Which migrations should we wipe before redeploying?",
-        "Which schemas should the data team erase tomorrow?",
-    )
+        "How should the migration purge tables for old users?",
+        "How should the system store PII records?",
+        "Should the platform support HIPAA?",
+    ],
+)
+def test_auto_answerer_does_not_block_on_question_topic(question: str) -> None:
+    """Question wording about data topics is not an action the run executes."""
+    answer = AutoAnswerer().answer(question, SeedDraftLedger.from_goal("Build a records service"))
 
-    for question in blocked_questions:
-        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build cleanup tooling"))
-        assert answer.source == AutoAnswerSource.BLOCKER, question
-        assert answer.blocker is not None, question
-        assert answer.blocker.reason == "destructive bulk data operation", question
+    assert answer.blocker is None, question
+    assert answer.source != AutoAnswerSource.BLOCKER, question
 
 
 def test_auto_answerer_allows_release_plan_drop_question() -> None:
@@ -1976,63 +1938,6 @@ def test_auto_answerer_allows_docs_index_drop_question() -> None:
         answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a docs site"))
         assert answer.blocker is None, question
         assert answer.source != AutoAnswerSource.BLOCKER, question
-
-
-def test_auto_answerer_blocks_destructive_bulk_with_only_documentation_reference() -> None:
-    """Authority/reference-style mentions of documentation must NOT bypass the gate.
-
-    Earlier the non-data qualifier regex matched on bare tokens such as
-    ``documentation`` or ``release plan`` anywhere in the sentence. That allowed
-    real destructive operations to slip past the gate when the question merely
-    *referenced* documentation as an authority (e.g. ``according to the
-    documentation``, ``per the release plan``) rather than describing the
-    documentation as the artefact being modified.
-
-    The qualifier is now phrase-scoped to ``from the …``/``in the …`` so the
-    exemption fires only when the artefact is the explicit object of the
-    drop/wipe — i.e. ``drop X from the docs`` or ``drop X in the roadmap``,
-    not ``drop X according to the docs``.
-
-    Ref: ouroboros-agent[bot] BLOCKING on #738 — ``answerer.py:688``.
-    """
-    answerer = AutoAnswerer()
-    blocked_questions = (
-        "Which tables should we drop according to the documentation before redeploying?",
-        "Which tables should we drop per the release plan?",
-        "Per the documentation, which audit logs should we purge?",
-        "According to the docs, which tables should we drop?",
-        "Following the release plan, which schemas should the data team erase?",
-    )
-
-    for question in blocked_questions:
-        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build cleanup tooling"))
-        assert answer.source == AutoAnswerSource.BLOCKER, question
-        assert answer.blocker is not None, question
-        assert answer.blocker.reason == "destructive bulk data operation", question
-
-
-def test_auto_answerer_blocks_destructive_bulk_with_ambiguous_singular_tokens() -> None:
-    """Standalone ``doc`` and ``plan`` tokens are too ambiguous to exempt.
-
-    ``from the doc`` is rare phrasing (use ``from the docs`` or ``from the
-    documentation``), and bare ``plan`` collides with database-side meanings
-    (query plan, execution plan, db plan). Both have been removed from the
-    non-data qualifier list. Only the unambiguous artefact phrasings
-    (``release plan``, ``docs``, ``documentation``, ``roadmap``, ``backlog``,
-    ``changelog``, ``spec``) exempt the destructive-bulk gate.
-    """
-    answerer = AutoAnswerer()
-    blocked_questions = (
-        "Which tables should we drop from the plan before redeploying?",
-        "Which schemas should we wipe in the plan after migration?",
-        "Which tables should we drop from the doc before the cutover?",
-    )
-
-    for question in blocked_questions:
-        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build cleanup tooling"))
-        assert answer.source == AutoAnswerSource.BLOCKER, question
-        assert answer.blocker is not None, question
-        assert answer.blocker.reason == "destructive bulk data operation", question
 
 
 def test_auto_answerer_allows_in_the_artefact_drop_questions() -> None:
@@ -2115,55 +2020,20 @@ def test_auto_answerer_allows_product_questions_with_adjectival_compliance_verbs
         assert answer.source != AutoAnswerSource.BLOCKER, question
 
 
-def test_auto_answerer_routes_regulated_product_questions_before_io_or_runtime() -> None:
-    """Regulated-product questions must reach ``_product_behavior_answer()`` —
-    but only when the IO/runtime branch would otherwise return a non-grounded
-    fallback.
-
-    The router still checks ``_is_actor_or_io_question`` and
-    ``_is_runtime_context_question`` first so grounded answers (REPO_FACT for
-    runtime, ASSUMPTION-but-confirmed for IO) keep priority. When that route
-    produces a *non-grounded* fallback (``ASSUMPTION``,
-    ``EXISTING_CONVENTION``, ``CONSERVATIVE_DEFAULT``) for a question that
-    ``_is_safe_product_regulated_question`` recognises, the answer is then
-    re-routed through ``_product_behavior_answer()`` so the regulated-feature
-    semantics (regulated noun, subject-specific constraints) are preserved
-    in the ledger instead of being replaced by a generic IO/runtime template.
-
-    Ref: ouroboros-agent[bot] BLOCKING on #738 — ``answerer.py:837``.
-    """
+def test_regulated_noun_questions_get_non_binding_answers() -> None:
+    """A question naming regulated data (GDPR, PII, HIPAA) is routed by its
+    intent like any other; no answer stops the run or binds."""
     answerer = AutoAnswerer()
     ledger = SeedDraftLedger.from_goal("Build a regulated data app")
 
-    cases = [
-        ("What inputs should the GDPR export take?", "gdpr"),
-        ("What outputs should the PII export produce?", "pii"),
-        ("Which runtime should the GDPR export use?", "gdpr"),
-        ("What inputs should the HIPAA audit log download accept?", "hipaa"),
-    ]
-
-    for question, regulated_noun in cases:
+    for question in (
+        "What inputs should the GDPR export take?",
+        "What outputs should the PII export produce?",
+        "Which runtime should the GDPR export use?",
+        "What inputs should the HIPAA audit log download accept?",
+    ):
         answer = answerer.answer(question, ledger)
-
-        # Routed away from blocker
-        assert answer.blocker is None, question
-        assert answer.source != AutoAnswerSource.BLOCKER, question
-
-        # Routed to _product_behavior_answer(), not _io_actor_answer / _runtime_answer
-        update_keys = [u[1].key for u in answer.ledger_updates]
-        assert any("behavior." in k for k in update_keys), (
-            f"Expected behavior.* ledger key for {question!r}, got {update_keys}"
-        )
-        assert not any(k.startswith("io.") or k.startswith("runtime.") for k in update_keys), (
-            f"Question {question!r} fell through to IO/runtime answer "
-            f"(found IO/runtime ledger key in {update_keys})"
-        )
-
-        # Regulated noun preserved in answer text or ledger value
-        combined = answer.text + " ".join(u[1].value for u in answer.ledger_updates)
-        assert regulated_noun in combined.lower(), (
-            f"Regulated noun {regulated_noun!r} not preserved for {question!r}"
-        )
+        _assert_never_self_authorizes(answer, question)
 
 
 def test_auto_answerer_preserves_repo_fact_for_regulated_runtime_question() -> None:
@@ -2208,36 +2078,6 @@ def test_auto_answerer_preserves_repo_fact_for_regulated_runtime_question() -> N
     assert runtime_entries[0].evidence == ["pyproject.toml", "src/ouroboros/cli/main.py"]
 
 
-def test_auto_answerer_blocks_bare_compliance_scope_questions() -> None:
-    """``support|enable|allow + bare regulated noun`` is a compliance-scope
-    decision, not a product-behavior question.
-
-    Prompts that frame the entire regulatory regime as a binary feature flag —
-    "Should the platform support HIPAA?", "Should the app enable GDPR?",
-    "Should the system allow PII?" — are compliance-policy decisions and must
-    remain blocked even though they contain a product-question modal and a
-    product-semantics verb. Concrete-feature variants ("support HIPAA audit
-    logs", "enable GDPR consent banners", "allow GDPR data exports") still
-    pass through.
-
-    Ref: ouroboros-agent[bot] BLOCKING on #738 — ``answerer.py:793``.
-    """
-    answerer = AutoAnswerer()
-    blocked_questions = (
-        ("Should the platform support HIPAA?", "regulated data handling"),
-        ("Should the app enable GDPR?", "regulated data handling"),
-        ("Should the system allow PII?", "regulated personal data handling"),
-        ("Should the service support SOX?", "regulated data handling"),
-        ("Should the platform support PCI-DSS?", "regulated data handling"),
-    )
-
-    for question, reason in blocked_questions:
-        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a regulated data app"))
-        assert answer.source == AutoAnswerSource.BLOCKER, question
-        assert answer.blocker is not None, question
-        assert answer.blocker.reason == reason, question
-
-
 def test_auto_answerer_allows_qualified_compliance_scope_questions() -> None:
     """The bare-scope rejector must not over-block concrete-feature variants.
 
@@ -2259,72 +2099,6 @@ def test_auto_answerer_allows_qualified_compliance_scope_questions() -> None:
         answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a regulated data app"))
         assert answer.blocker is None, question
         assert answer.source != AutoAnswerSource.BLOCKER, question
-
-
-def test_auto_answerer_blocks_mixed_intent_regulated_questions() -> None:
-    """Mixed-intent questions with both product-semantics and active-form
-    compliance verbs must remain blocked.
-
-    Active-form compliance verbs (``store`` / ``stores`` / ``storing``,
-    ``retain`` / ``retains`` / ``retaining``, ``encrypt``, ``handle``, …)
-    indicate that the question is asking the pipeline to decide regulated-data
-    handling, even when it also mentions a product-semantics verb. The
-    allowlist must not unblock those.
-
-    Past-participle forms (``stored``, ``encrypted``) acting as adjectives are
-    a different case and remain allowed (covered by
-    ``test_auto_answerer_allows_product_questions_with_adjectival_compliance_verbs``).
-
-    Ref: ouroboros-agent[bot] BLOCKING on #738 — ``answerer.py:750``.
-    """
-    answerer = AutoAnswerer()
-    blocked_questions = (
-        ("How should the system store and display HIPAA files?", "regulated data handling"),
-        ("Should we retain and export PII records?", "regulated personal data handling"),
-        (
-            "Should the platform encrypt and render GDPR exports?",
-            "regulated data handling",
-        ),
-        (
-            "Can the system share and display SOX audit data with auditors?",
-            "regulated data handling",
-        ),
-        (
-            "Should we collect and show new PII fields on the dashboard?",
-            "regulated personal data handling",
-        ),
-    )
-
-    for question, reason in blocked_questions:
-        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a regulated data app"))
-        assert answer.source == AutoAnswerSource.BLOCKER, question
-        assert answer.blocker is not None, question
-        assert answer.blocker.reason == reason, question
-
-
-def test_auto_answerer_still_blocks_compliance_policy_regulated_questions() -> None:
-    """Compliance-policy questions must still be blocked after the product-semantics allowlist.
-
-    Ensure the new ``_is_safe_product_regulated_question`` allowlist does not
-    swallow questions that genuinely ask the auto pipeline to decide regulated-data
-    handling (storage, retention, collection, encryption policy).
-    """
-    answerer = AutoAnswerer()
-    blocked_questions = (
-        ("What PII should the system collect?", "regulated personal data handling"),
-        (
-            "Which fields are HIPAA regulated and how should we store them?",
-            "regulated data handling",
-        ),
-        ("How should the system handle GDPR data retention?", "regulated data handling"),
-        ("Which runtime should the HIPAA worker use?", "regulated data handling"),
-    )
-
-    for question, reason in blocked_questions:
-        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a regulated data app"))
-        assert answer.source == AutoAnswerSource.BLOCKER, question
-        assert answer.blocker is not None, question
-        assert answer.blocker.reason == reason, question
 
 
 def test_auto_answerer_routes_safe_regulated_product_questions_to_product_behavior_answerer() -> (
@@ -2649,38 +2423,6 @@ def test_auto_answerer_meta_first_person_subject_still_routes_to_verification() 
             if section == "constraints" and entry.key.startswith("constraints.behavior.")
         ]
         assert not behavior_keys, (question, behavior_keys)
-
-
-def test_auto_answerer_blocks_compliance_policy_noun_questions() -> None:
-    """``support|enable|allow + regulated noun + (data) + policy noun`` must
-    remain blocked even when no active-form compliance verb is used.
-
-    Phrasings such as ``Should the app support HIPAA data retention?`` or
-    ``Should the platform enable GDPR data storage?`` skip the
-    ``_COMPLIANCE_POLICY_ACTIVE_VERBS_RE`` check (no active verb), and the
-    original ``_BARE_COMPLIANCE_SCOPE_RE`` only fired when the regulated
-    noun ended the clause.  That left the policy-as-toggle wording
-    incorrectly classified as safe product behaviour.
-
-    Ref: ouroboros-agent[bot] BLOCKING on commit a447fc1 — answerer.py:1561.
-    """
-    answerer = AutoAnswerer()
-    blocked_questions = (
-        ("Should the app support HIPAA data retention?", "regulated data handling"),
-        ("Should the platform enable GDPR data storage?", "regulated data handling"),
-        ("Should the system allow PII encryption?", "regulated personal data handling"),
-        ("Should the service support SOX data governance?", "regulated data handling"),
-        ("Should the platform support GDPR data processing?", "regulated data handling"),
-        ("Should the app enable HIPAA disclosure?", "regulated data handling"),
-        ("Should the system allow PII collection?", "regulated personal data handling"),
-    )
-
-    ledger = SeedDraftLedger.from_goal("Build a regulated data app")
-    for question, reason in blocked_questions:
-        answer = answerer.answer(question, ledger)
-        assert answer.source == AutoAnswerSource.BLOCKER, question
-        assert answer.blocker is not None, question
-        assert answer.blocker.reason == reason, question
 
 
 def test_auto_answerer_allows_qualified_compliance_policy_features() -> None:

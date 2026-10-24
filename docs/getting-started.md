@@ -123,6 +123,11 @@ ouroboros setup --runtime codex
 ouroboros init start "Build a task management CLI"
 ```
 
+For release installs, the setup-managed Codex `uvx` MCP command pins
+`ouroboros-ai[mcp]` to the installed setup version. After upgrading Ouroboros,
+rerun setup to refresh that managed pin. Source/dev installs continue to use
+the current Python environment.
+
 > **Note:** The standalone CLI interview is invoked via `ouroboros init start "your context"` (not `ooo interview`, which is Claude Code-specific). The interview flow is identical across both tools. Power users can also author seed YAML files directly — see the [Seed Authoring Guide](guides/seed-authoring.md).
 
 > **Tip:** `ouroboros run` requires a path to a seed YAML file as a positional argument (e.g., `ouroboros run ~/.ouroboros/seeds/seed_<id>.yaml`).
@@ -268,7 +273,7 @@ installation fails, see
 
 | Path | Requirements |
 |------|-------------|
-| All runner sessions | Git >= 2.36.0 on PATH. Project identity requires the unambiguous `worktree list --porcelain -z` topology grammar even for a non-Git local workspace; an older or unrepresentable Git version is a non-retryable configuration error. |
+| All runner sessions | Git on PATH. Git >= 2.36.0 gives Project Map its full topology identity (the unambiguous `worktree list --porcelain -z` grammar). With older Git, direct runs (`--worktree-policy current` or no managed worktree) still execute and use the conservative current-directory identity; managed task worktrees still require Git >= 2.36.0, and `ooo run` refuses one up front on older Git (set `orchestrator.use_worktrees: false` to run in the checkout). An unrepresentable Git version is a non-retryable configuration error. |
 | Claude Code (`ooo`) | Claude Code with plugin support |
 | Standalone CLI (`ouroboros`) | Python >= 3.12, API key (Anthropic or OpenAI) |
 | Codex CLI backend | Python >= 3.12, `npm install -g @openai/codex`, and a signed-in Codex CLI account with access to a Codex-supported model |
@@ -341,7 +346,7 @@ consensus:
   judge_model: gpt-5.4
 ```
 
-`ouroboros setup --runtime codex` uses `~/.codex/config.toml` only for the Codex MCP/env hookup and installs managed Ouroboros rules/skills into `~/.codex/`. Existing URL/custom Ouroboros MCP entries are preserved by default; run `ouroboros codex refresh` when you only need to refresh `~/.codex/rules/ouroboros*.md` and `~/.codex/skills/ouroboros-*`.
+`ouroboros setup --runtime codex` uses `~/.codex/config.toml` only for the Codex MCP/env hookup and installs managed Ouroboros rules/skills into `~/.codex/`. Setup-managed stdio entries include `startup_timeout_sec = 180` for cold starts. Existing URL/custom Ouroboros MCP entries and user-selected non-default timeouts are preserved by default; run `ouroboros codex refresh` when you only need to refresh `~/.codex/rules/ouroboros*.md` and `~/.codex/skills/ouroboros-*`.
 
 ### Environment Variables
 
@@ -421,7 +426,9 @@ See [TUI Usage Guide](guides/tui-usage.md) for keyboard shortcuts and screen det
 
 ### Step 4: Review
 
-`ooo run` (or `ouroboros run`) prints a session summary with the QA verdict when complete.
+`ooo run` (or `ouroboros run`) prints a session summary with the QA verdict when complete, then
+continues into formal evaluation and, when the evaluation is not approved, a bounded Ralph loop.
+`ouroboros run` waits for both and prints their results; pass `--no-auto-evaluate` to stop after the run.
 
 Useful follow-ups:
 
@@ -572,6 +579,7 @@ ouroboros cancel execution <session_id>
 1. **Validate first** -- `ouroboros run seed.yaml --dry-run` checks YAML and schema before executing
 2. **Monitor with the TUI** -- run `ouroboros monitor` in a separate terminal during long workflows
 3. **Keep QA enabled** -- post-execution QA runs automatically unless you pass `--no-qa`
+4. **Let evaluation run** -- formal evaluation (and Ralph when it is not approved) follows every completed or failed run unless you pass `--no-auto-evaluate` or set `execution.auto_evaluate: false`
 
 ---
 

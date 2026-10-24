@@ -12,14 +12,14 @@ import subprocess
 import sys
 
 import pytest
-from textual.widgets import Input, OptionList, Select, Static
+from textual.widgets import Collapsible, Input, OptionList, Select, Static, Switch
 
-from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL
 from ouroboros.config_tui import persistence
 from ouroboros.config_tui.app import (
     CUSTOM_SENTINEL,
     INHERIT_SENTINEL,
     INSTALL_REQUIRED_SUFFIX,
+    PRESET_MODELS,
     SEARCH_SENTINEL,
     ModelSearchScreen,
     SettingsApp,
@@ -102,7 +102,7 @@ async def test_agent_change_resets_incompatible_stage_model(app_env) -> None:
     async with app.run_test() as pilot:
         stage = Stage.INTERVIEW.value
         model_select = pilot.app.query_one(f"#stage-model-{stage}", Select)
-        assert model_select.value == "claude-opus-5"
+        assert model_select.value == "auto"
 
         pilot.app.query_one(f"#stage-runtime-{stage}", Select).value = "codex"
         await pilot.pause()
@@ -324,7 +324,7 @@ async def test_explicit_stage_agent_not_affected_by_global_change(app_env) -> No
         model_select = pilot.app.query_one(f"#stage-model-{stage}", Select)
         assert model_select.value == "default"
         values = {value for _, value in model_select._options}
-        assert "gpt-5" in values
+        assert "gpt-6.1-sol" in values
         assert "claude-opus-4-8" not in values  # stale global catalog was not applied
 
 
@@ -352,6 +352,55 @@ async def test_dynamic_model_listing_merges_into_select(app_env, monkeypatch) ->
         assert "openai/gpt-5.2-codex" in values  # fetched entries merged
         assert "default" in values  # static catalog kept first
         assert model_select.value == "default"  # selection not displaced
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("extra_count", [0, 300])
+async def test_minimax_discovery_preserves_saved_selection_and_custom_entry(
+    app_env, monkeypatch, extra_count
+) -> None:
+    legacy = "minimax/MiniMax-M2.7"
+    flash = "minimax/MiniMax-M3.1-Flash"
+    m3 = "minimax/MiniMax-M3"
+    app_env["orchestrator"]["runtime_profile"]["stages"] = {"execute": "opencode"}
+    app_env["execution"] = {"default_model": legacy}
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(persistence, "apply_config_values", lambda values: captured.update(values))
+    monkeypatch.setattr(
+        "ouroboros.config_tui.app.installed_backends", lambda: {"opencode": "/bin/opencode"}
+    )
+    listing = (legacy, m3, flash, "custom/MiniMax-M2.7", "minimax/speech-02-hd") + tuple(
+        f"provider/model-{i}" for i in range(extra_count)
+    )
+    monkeypatch.setattr(
+        "ouroboros.config_tui.app.refresh_models",
+        lambda backend: listing if backend == "opencode" else None,
+    )
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        choices = app._all_models("opencode")
+        assert legacy not in choices
+        assert choices.index(flash) < choices.index(m3)
+        assert "custom/MiniMax-M2.7" in choices
+        assert "minimax/speech-02-hd" in choices
+        select = app.query_one(f"#stage-model-{Stage.EXECUTE.value}", Select)
+        assert select.value == legacy
+        assert CUSTOM_SENTINEL in {value for _, value in select._options}
+        if extra_count:
+            select.value = SEARCH_SENTINEL
+            await pilot.pause()
+            app.screen.query_one("#search-input", Input).value = "minimax/MiniMax-M"
+            await pilot.pause()
+            results = app.screen.query_one("#search-results", OptionList)
+            assert results.option_count == 2
+            await pilot.press("escape")
+            await pilot.pause()
+            assert select.value == legacy
+        app.action_save()
+        await pilot.pause()
+    assert "execution.default_model" not in captured
 
 
 @pytest.mark.asyncio
@@ -474,21 +523,59 @@ async def test_default_sentinel_label_shows_configured_model(app_env) -> None:
         assert model_select.value == "default"  # value stays the sentinel
 
 
+def test_model_presets_are_auto_and_the_tiers() -> None:
+    assert PRESET_MODELS == ("auto", "frugal", "standard", "frontier")
+
+
 @pytest.mark.asyncio
-async def test_preset_button_stages_models_for_every_card(app_env) -> None:
-    """One click sets a coherent model tier across all stages, respecting
-    each card's effective backend when the stage has a model selector."""
+async def test_preset_button_stages_models_default_only(app_env, monkeypatch) -> None:
+    """A preset sets the one models.default switch, never per-stage model ids."""
+    applied: dict[str, object] = {}
+    monkeypatch.setattr(persistence, "apply_config_values", lambda values: applied.update(values))
     app = SettingsApp()
     async with app.run_test() as pilot:
-        await pilot.click("#preset-frugal")
+        assert pilot.app.query_one("#models-default", Input).value == "auto"
+        pilot.app.query_one("#preset-frontier").scroll_visible(animate=False)
         await pilot.pause()
-        interview_model = pilot.app.query_one(f"#stage-model-{Stage.INTERVIEW.value}", Select)
-        execute_model = pilot.app.query_one(f"#stage-model-{Stage.EXECUTE.value}", Select)
-        assert interview_model.value == "claude-haiku-4-5-20251001"  # claude frugal
-        assert execute_model.value == "gpt-5-mini"  # execute fixture runs on codex
+        await pilot.click("#preset-frontier")
+        await pilot.pause()
+        assert pilot.app.query_one("#models-default", Input).value == "frontier"
         status = pilot.app.query_one("#status-bar", Static)
-        assert "frugal" in str(status.render())
+        assert "frontier" in str(status.render())
         assert "Save" in str(status.render())  # staged, not saved
+        pilot.app.query_one("#save-button").scroll_visible(animate=False)
+        await pilot.pause()
+        await pilot.click("#save-button")
+        await pilot.pause()
+    assert applied == {"models.default": "frontier"}
+
+
+@pytest.mark.asyncio
+async def test_models_default_accepts_a_free_model_id_and_pin(app_env, monkeypatch) -> None:
+    applied: dict[str, object] = {}
+    monkeypatch.setattr(persistence, "apply_config_values", lambda values: applied.update(values))
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        pilot.app.query_one("#models-default", Input).value = "claude-opus-5"
+        pilot.app.query_one("#models-pin", Switch).value = True
+        await pilot.pause()
+        pilot.app.query_one("#save-button").scroll_visible(animate=False)
+        await pilot.pause()
+        await pilot.click("#save-button")
+        await pilot.pause()
+    assert applied == {"models.default": "claude-opus-5", "models.pin": True}
+
+
+@pytest.mark.asyncio
+async def test_per_stage_model_ids_are_grouped_under_advanced(app_env) -> None:
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        advanced = pilot.app.query_one("#advanced-models", Collapsible)
+        assert advanced.collapsed
+        for stage in STAGE_MODEL_FIELDS:
+            assert advanced.query_one(f"#stage-model-{stage.value}", Select)
+            card = pilot.app.query_one(f"#stage-card-{stage.value}")
+            assert not list(card.query(f"#stage-model-{stage.value}").results(Select))
 
 
 @pytest.mark.asyncio
@@ -682,13 +769,13 @@ async def test_execute_backend_change_preserves_replacement_execute_model(
         await pilot.pause()
         pilot.app.query_one(
             f"#stage-model-{Stage.EXECUTE.value}", Select
-        ).value = "claude-sonnet-4-6"
+        ).value = "claude-sonnet-5-5"
         await pilot.pause()
         pilot.app.action_save()
         await pilot.pause()
 
     assert captured["orchestrator.runtime_profile.stages.execute"] == "claude"
-    assert captured["execution.default_model"] == "claude-sonnet-4-6"
+    assert captured["execution.default_model"] == "claude-sonnet-5-5"
 
 
 @pytest.mark.asyncio
@@ -709,7 +796,7 @@ async def test_execute_backend_change_clears_pin_instead_of_persisting_automatic
         pilot.app.query_one(f"#stage-runtime-{Stage.EXECUTE.value}", Select).value = "claude"
         await pilot.pause()
         displayed = pilot.app.query_one(f"#stage-model-{Stage.EXECUTE.value}", Select).value
-        assert displayed == "claude-opus-5"
+        assert displayed == "claude-opus-5-5"
         # Textual may deliver the automatic model selection after the
         # programmatic guard was consumed under full-suite timing. Saving must
         # still treat this backend-switch default as automatic, not a user pin.
@@ -1033,7 +1120,7 @@ async def test_runtime_only_agent_default_sentinel_uses_completion_backend(
         stage = Stage.INTERVIEW.value
         pilot.app.query_one(f"#stage-runtime-{stage}", Select).value = "antigravity"
         await pilot.pause()
-        assert pilot.app.query_one(f"#stage-model-{stage}", Select).value == DEFAULT_OPUS_MODEL
+        assert pilot.app.query_one(f"#stage-model-{stage}", Select).value == "auto"
 
         pilot.app.action_save()
         await pilot.pause()

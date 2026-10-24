@@ -853,6 +853,93 @@ describe("buildEnvelope — dispatch schema", () => {
 // Runtime function tests (mocked client)
 // ---------------------------------------------------------------------------
 
+describe("bridge nested Ralph pre-call guard", () => {
+  beforeEach(_resetDedupe)
+  afterEach(_resetDedupe)
+
+  const ralphTools = ["ouroboros_ouroboros_ralph", "ouroboros_ouroboros_start_ralph"]
+  const depthInputs = [{}, { delegation_depth: 0 }, { delegation_depth: -1 }, { delegation_depth: 99 }]
+
+  for (const tool of ralphTools) {
+    for (const args of depthInputs) {
+      test(`rejects ${tool} before MCP for a registered child with ${JSON.stringify(args)}`, async () => {
+        // Given a live bridge-owned child and host-supplied identity.
+        markRalphChild("child")
+        const plugin = await OuroborosBridge({ directory: "/tmp/ouroboros-test" })
+        let mcpCalls = 0
+        const invoke = async () => {
+          await plugin["tool.execute.before"]?.({ tool, sessionID: "child", callID: "call" }, { args })
+          mcpCalls++
+        }
+        // When the host awaits the real hook before dispatch.
+        const invocation = invoke()
+        // Then it rejects before reaching MCP, independent of depth arguments.
+        await expect(invocation).rejects.toMatchObject({ name: "NestedRalphError" })
+        expect(mcpCalls).toBe(0)
+      })
+
+      test(`allows top-level ${tool} with ${JSON.stringify(args)}`, async () => {
+        // Given an ordinary host session, including forged depth arguments.
+        const plugin = await OuroborosBridge({ directory: "/tmp/ouroboros-test" })
+        // When its tool invocation crosses the real hook.
+        const invocation = plugin["tool.execute.before"]?.({ tool, sessionID: "parent", callID: "call" }, { args })
+        // Then the host can reach MCP.
+        await expect(Promise.resolve(invocation)).resolves.toBeUndefined()
+      })
+    }
+  }
+
+  for (const tool of ["ouroboros_ouroboros_qa", "other_ouroboros_ralph", "ouroboros_ouroboros_ralph_status", "ouroboros_start_ralph", "execute"]) {
+    test(`allows unrelated ${tool} from a registered child`, async () => {
+      // Given a child invoking a different tool or server.
+      markRalphChild("child")
+      const plugin = await OuroborosBridge({ directory: "/tmp/ouroboros-test" })
+      // When the host awaits the real pre-call hook.
+      const invocation = plugin["tool.execute.before"]?.({ tool, sessionID: "child", callID: "call" }, { args: {} })
+      // Then it resolves, permitting the unrelated invocation.
+      await expect(Promise.resolve(invocation)).resolves.toBeUndefined()
+    })
+  }
+
+  test("rejects nested calls from descendants registered by actual after-hook dispatch", async () => {
+    // Given a bridge client with real after-hook session registration.
+    let created = 0
+    const authority = mockAuthority()
+    const client = { app: authority.app, session: {
+      ...authority.session,
+      _client: mockBase(),
+      create: async () => ({ data: { id: `child_${++created}` } }),
+      prompt: async () => ({ data: { parts: [] } }),
+      abort: async () => ({}),
+      messages: async () => ({ data: [{ info: { id: "msg", role: "assistant" }, parts: [{ type: "tool", callID: "call" }] }] }),
+    } }
+    const plugin = await OuroborosBridge({ client, directory: "/tmp/ouroboros-test" })
+    for (const [sessionID, tool] of [["parent", "ouroboros_start_ralph"], ["child_1", "ouroboros_qa"]]) {
+      await plugin["tool.execute.after"]({ tool: `ouroboros_${tool}`, sessionID, callID: "call" }, {
+        output: JSON.stringify({ _subagent: { tool_name: tool, title: "child", agent: "general", prompt: "work" } }),
+      })
+    }
+    // When the bridge-created grandchild attempts Ralph via its alias.
+    const invocation = plugin["tool.execute.before"]?.({ tool: "ouroboros_ouroboros_start_ralph", sessionID: "child_2", callID: "nested" }, { args: {} })
+    // Then the live ownership propagated to that descendant blocks dispatch.
+    expect(created).toBe(2)
+    await expect(Promise.resolve(invocation)).rejects.toMatchObject({ name: "NestedRalphError" })
+  })
+
+  test("retains after-envelope rejection for the start alias", async () => {
+    // Given a registered child and an alias envelope already returned by MCP.
+    markRalphChild("child")
+    const plugin = await OuroborosBridge({ directory: "/tmp/ouroboros-test" })
+    const output = { output: JSON.stringify({ _subagent: {
+      tool_name: "ouroboros_start_ralph", title: "nested", agent: "general", prompt: "work",
+    } }) }
+    // When the existing after-hook receives that envelope.
+    await plugin["tool.execute.after"]({ tool: "ouroboros_ouroboros_start_ralph", sessionID: "child", callID: "call" }, output)
+    // Then it rejects nesting before requiring a dispatch client.
+    expect(output.output).toContain("nested ouroboros_ralph delegation is not allowed")
+  })
+})
+
 function mockCli(overrides: Partial<{
   create: (...a: unknown[]) => Promise<unknown>
   get: (...a: unknown[]) => Promise<unknown>

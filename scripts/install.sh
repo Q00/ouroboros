@@ -1346,18 +1346,18 @@ if [ "$HAS_UV" = true ]; then
   case "$EXTRAS" in
     "[claude,tui]" | "[claude-sdk,tui]")
       UV_ARGS+=(
-        --with "claude-agent-sdk==0.2.144"
-        --with "anthropic==0.122.0"
+        --with "claude-agent-sdk==0.2.165"
+        --with "anthropic==1.13.0"
         --with "mcp==1.28.1"
       )
       ;;
     "[mcp,tui]")
-      UV_ARGS+=(--with "mcp==2.0.0")
+      UV_ARGS+=(--with "mcp==2.2.0")
       ;;
     "[all]")
       UV_ARGS+=(
-        --with "claude-agent-sdk==0.2.144"
-        --with "anthropic==0.122.0"
+        --with "claude-agent-sdk==0.2.165"
+        --with "anthropic==1.13.0"
         --with "mcp==1.28.1"
         --with "litellm==1.91.0"
       )

@@ -28,8 +28,11 @@ from ouroboros.auto.execution_acceptance import normalize_execution_acceptance
 from ouroboros.auto.grade_gate_terminals import (
     SEED_GRADE_BELOW_REQUIRED_STOP_REASON_CODE,
     SEED_REVIEW_WITHHELD_RUN_STOP_REASON_CODE,
+    degraded_seed_not_executed_blocker,
+    degraded_seed_runs_as_stated,
     degraded_seed_safety_blocker,
     grade_meets_required,
+    is_degraded_seed_not_executed_stop,
     seed_review_gate_blocker,
 )
 from ouroboros.auto.grading import GradeGate, deterministic_floor
@@ -51,8 +54,10 @@ from ouroboros.auto.ledger_seed import (
     brownfield_context_from_cwd,
     partial_seed_from_evidence,
     synthesize_seed_from_ledger,
+    with_ledger_carryover,
 )
 from ouroboros.auto.listeners import RALPH_CANCEL_BLOCKER_REASON
+from ouroboros.auto.phase_clock import wait_for_pausable
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
 from ouroboros.auto.ralph_resume import reconcile_ralph_checkpoint
 from ouroboros.auto.recovery_plan import (
@@ -69,7 +74,7 @@ from ouroboros.auto.retired_phases import (
     mark_retired_complete_product_run,
     mark_retired_phase,
 )
-from ouroboros.auto.seed_preflight_gate import enforce_seed_preflight
+from ouroboros.auto.seed_preflight_gate import enforce_seed_preflight, repair_seed_preflight_in_auto
 from ouroboros.auto.seed_qa_advisory import (
     clear_seed_qa_verdict,
     publish_advisory,
@@ -366,9 +371,8 @@ class AutoPipelineResult:
     last_lateral_approach_summary: str | None = None
     last_lateral_text: str | None = None
     assumptions: tuple[str, ...] = ()
-    # PR-C2 / #1157: auditable companion to ``assumptions`` that carries the
-    # ledger source (``assumption`` / ``inference`` / ``conservative_default``)
-    # and confidence per entry. Additive — ``assumptions`` is unchanged.
+    open_questions: tuple[str, ...] = ()  # the Seed's, verbatim; never in worker input
+    # PR-C2 / #1157: ``assumptions`` with ledger source and confidence per entry.
     assumption_sources: tuple[AssumptionRecord, ...] = ()
     non_goals: tuple[str, ...] = ()
     defaulted_sections: tuple[str, ...] = ()
@@ -752,9 +756,9 @@ class AutoPipeline:
                 interview_timeout = self._deadline_capped_timeout(state, interview_phase_timeout)
                 try:
                     try:
-                        interview = await asyncio.wait_for(
-                            self.interview_driver.run(state, ledger),
-                            timeout=interview_timeout,
+                        # Repository investigation pauses this clock (auto/phase_clock.py).
+                        interview = await wait_for_pausable(
+                            self.interview_driver.run(state, ledger), interview_timeout
                         )
                     except TimeoutError:
                         if self._enforce_deadline(state):
@@ -1143,23 +1147,13 @@ class AutoPipeline:
                     return self._result(state, ledger, review=review, blocker=state.last_error)
             self._save(state)
 
-            # #1257 PR-C — degraded seed reaches partial product terminal.
-            #
-            # When ``seed.metadata.degraded`` is True, the Seed was synthesized
-            # under deadline pressure by ``partial_seed_from_evidence`` (PR-A
-            # substrate, routed by PR-B). PR-C's contract:
-            #
-            # * any remaining ``review.grade_result.blockers`` are safety
-            #   blockers (``missing_goal`` / ``seed_goal_mismatch`` /
-            #   ``high_risk_assumptions``) — those still terminate the run.
-            # * with no blockers, the partial product surfaces immediately as
-            #   ``AutoPhase.COMPLETE`` via :meth:`_emit_partial_product_terminal`
-            #   regardless of grade or ``may_run``: a deadline-recovery Seed is
-            #   a typed alternative-success terminal, not a runnable Seed.
-            #
-            # Normal (non-degraded) Seeds skip this branch and fall through to
-            # the existing grade-gate / may_run checks unchanged.
-            if bool(getattr(seed.metadata, "degraded", False)):
+            # #1257 PR-C: a degraded (deadline-recovery) Seed without the
+            # user's goal on record stops, on a safety blocker or as a partial
+            # product that was not executed. With it, the Seed runs like any
+            # auto Seed (:func:`degraded_seed_runs_as_stated`) and the gates
+            # keep only the safety bar. Normal Seeds take the grade gate.
+            runs_degraded = degraded_seed_runs_as_stated(seed)
+            if bool(getattr(seed.metadata, "degraded", False)) and not runs_degraded:
                 if terminal := degraded_seed_safety_blocker(review):
                     blocker, code = terminal
                     state.mark_blocked(blocker, tool_name="grade_gate", error_code=code)
@@ -1168,13 +1162,36 @@ class AutoPipeline:
                 return await self._emit_partial_product_terminal(state, ledger, seed, review)
 
             if terminal := seed_review_gate_blocker(
-                state, review, skip_run=self.skip_run or state.skip_run
+                state, review, skip_run=self.skip_run or state.skip_run, runs_degraded=runs_degraded
             ):
                 blocker, code = terminal
                 state.mark_blocked(blocker, tool_name="grade_gate", error_code=code)
                 self._save(state)
                 return self._result(state, ledger, review=review, blocker=blocker)
+            if runs_degraded:
+                state.mark_progress(
+                    "Degraded seed runs on the request as stated; "
+                    f"{len(seed.metadata.unresolved_slots)} unresolved slot(s) stay open",
+                    tool_name="grade_gate",
+                )
 
+            repaired = await repair_seed_preflight_in_auto(
+                seed,
+                review,
+                state,
+                ledger,
+                grade_gate=self.grade_gate,
+                seed_saver=self.seed_saver,
+                emit=self._emit_runtime_event,
+                skip_run=self.skip_run or state.skip_run,
+            )
+            seed, review = repaired.seed, repaired.review
+            if repaired.changed:
+                self._maybe_emit_repair(state)
+                self._maybe_emit_grade(state)
+                self._save(state)
+            if repaired.blocker is not None:
+                return self._result(state, ledger, review=review, blocker=repaired.blocker)
             if preflight_blocker := await enforce_seed_preflight(
                 seed, state, self._emit_runtime_event
             ):
@@ -1246,7 +1263,11 @@ class AutoPipeline:
                 )
                 self._save(state)
                 return self._result(state, ledger, review=review)
-            if not grade_meets_required(state.last_grade, state.required_grade):
+            # A degraded Seed that runs keeps only the safety bar here as well.
+            runs_degraded = degraded_seed_runs_as_stated(seed)
+            if not runs_degraded and not grade_meets_required(
+                state.last_grade, state.required_grade
+            ):
                 state.mark_blocked(
                     f"Cannot start execution without a persisted grade meeting {state.required_grade}",
                     tool_name="grade_gate",
@@ -1290,7 +1311,11 @@ class AutoPipeline:
                 state.findings = [asdict(finding) for finding in review.findings]
                 self._maybe_emit_grade(state)
                 self._save(state)
-            if not review.may_run:
+            if runs_degraded and (terminal := degraded_seed_safety_blocker(review)):
+                state.mark_blocked(terminal[0], tool_name="grade_gate", error_code=terminal[1])
+                self._save(state)
+                return self._result(state, ledger, review=review, blocker=state.last_error)
+            if not runs_degraded and not review.may_run:
                 state.mark_blocked(
                     "Seed review did not clear the Seed for execution",
                     tool_name="grade_gate",
@@ -1738,14 +1763,11 @@ class AutoPipeline:
              ``reason="interview_phase_deadline"`` so unresolved sections
              become next-step hints on the degraded Seed (PR-A).
         3. Persist the Seed via :meth:`_record_generated_seed`, mark
-           ``interview_completed = True``, and transition to ``REVIEW`` so
-           the rest of the pipeline can surface a typed partial product
-           via :meth:`_emit_partial_product_terminal`. PR-C teaches the
-           grade gate to respect ``metadata.degraded`` so a deadline Seed
-           is routed to the partial-product terminal (not auto-RUN) and is
-           not re-blocked solely on high-ambiguity grounds. Hard safety
-           blockers (``missing_goal`` / ``seed_goal_mismatch`` /
-           ``high_risk_assumptions``) still terminate.
+           ``interview_completed = True``, and transition to ``REVIEW``. A
+           Seed with the user's goal on record runs on that goal; one without
+           it stops as a typed partial product
+           (:meth:`_emit_partial_product_terminal`). Hard safety blockers
+           still terminate either way.
 
         The global ``pipeline_timeout_seconds`` deadline is unaffected:
         callers gate on :meth:`_enforce_deadline` *before* invoking this
@@ -1762,15 +1784,10 @@ class AutoPipeline:
         )
 
         if ledger_ready:
-            # #1302 ambiguity-before-execution: a per-phase interview deadline
-            # cut the Socratic loop short before the backend could confirm low
-            # ambiguity (<= 0.20). A structurally complete ledger is NOT a
-            # substitute for that confirmation, so this Seed must NOT auto-RUN.
-            # Synthesize the full ledger content but stamp it as a degraded
-            # deadline-recovery terminal (``recovery_reason`` set), so REVIEW
-            # routes it to :meth:`_emit_partial_product_terminal` exactly like
-            # the incomplete-ledger branch below instead of proceeding through
-            # the grade / Seed QA / RUN gates on unconfirmed-ambiguity evidence.
+            # #1302: the deadline cut the loop short before the backend could
+            # confirm low ambiguity (<= 0.20), so this Seed is stamped degraded
+            # (``recovery_reason`` set) and REVIEW treats it exactly like the
+            # incomplete-ledger branch below.
             seed = synthesize_seed_from_ledger(
                 ledger,
                 interview_id=state.interview_session_id,
@@ -1831,15 +1848,12 @@ class AutoPipeline:
         seed: Seed,
         review: SeedReview,
     ) -> AutoPipelineResult:
-        """Short-circuit a degraded Seed to ``AutoPhase.COMPLETE`` (#1257 PR-C).
+        """Stop a degraded Seed without a sourced goal before RUN (#1257 PR-C).
 
-        Mirrors the existing ``skip_run`` short-circuit but for the
-        deadline-recovery path: PR-A's ``partial_seed_from_evidence`` Seed
-        carries unresolved sections that downstream consumers should treat
-        as next-step requirements rather than runtime arguments. We
-        therefore stop *before* RUN/RALPH_HANDOFF and emit
-        ``auto.product.partial_emitted`` so post-hoc evidence inspection
-        can see the typed terminal.
+        With no ``sourced_scope`` there is no user goal on record to run, so
+        the Seed's unresolved sections stay next-step requirements. We stop
+        *before* RUN/RALPH_HANDOFF and emit ``auto.product.partial_emitted``
+        so post-hoc evidence inspection can see the typed terminal.
 
         The event aggregate type is ``auto_session`` (same as the PR-B
         ``runtime.deadline.interview.fired`` event) so a single
@@ -1859,17 +1873,15 @@ class AutoPipeline:
                 "unresolved_slots": list(unresolved_slots),
             },
         )
-        state.transition(
-            AutoPhase.COMPLETE,
-            "degraded seed emitted as partial product with unresolved next steps",
-        )
         state.mark_progress(
             "Partial product emitted from degraded seed; "
             f"{len(unresolved_slots)} unresolved slot(s) carried forward as next steps",
             tool_name="partial_product_terminal",
         )
+        blocker, code = degraded_seed_not_executed_blocker(len(unresolved_slots))
+        state.mark_blocked(blocker, tool_name="partial_product_terminal", error_code=code)
         self._save(state)
-        return self._result(state, ledger, review=review)
+        return self._result(state, ledger, review=review, blocker=blocker)
 
     async def _emit_product_emitted_terminal(
         self,
@@ -2073,7 +2085,10 @@ class AutoPipeline:
             state.last_qa_suggestions = _safe_seed_qa_evidence(qa_result.suggestions)
             if qa_result.passed:
                 review_gate = seed_review_gate_blocker(
-                    state, current_review, skip_run=self.skip_run or state.skip_run
+                    state,
+                    current_review,
+                    skip_run=self.skip_run or state.skip_run,
+                    runs_degraded=degraded_seed_runs_as_stated(current_seed),
                 )
                 if review_gate is not None:
                     review_blocker, review_code = review_gate
@@ -2186,7 +2201,10 @@ class AutoPipeline:
 
         # Gates first, event second — see the module docstring for why.
         review_gate = seed_review_gate_blocker(
-            state, review, skip_run=self.skip_run or state.skip_run
+            state,
+            review,
+            skip_run=self.skip_run or state.skip_run,
+            runs_degraded=degraded_seed_runs_as_stated(seed),
         )
         if review_gate is not None:
             review_blocker, review_code = review_gate
@@ -2368,10 +2386,9 @@ class AutoPipeline:
         floor = deterministic_floor(ledger)
         if floor > seed.metadata.ambiguity_score:
             seed = seed.model_copy(
-                update={
-                    "metadata": seed.metadata.model_copy(update={"ambiguity_score": floor}),
-                }
+                update={"metadata": seed.metadata.model_copy(update={"ambiguity_score": floor})}
             )
+        seed = with_ledger_carryover(seed, ledger)
         seed = normalize_execution_acceptance(seed)
         state.seed_id = seed.metadata.seed_id
         state.seed_artifact = seed.to_dict()
@@ -2453,11 +2470,11 @@ class AutoPipeline:
         )
         partial_product_reason = seed_meta.get("recovery_reason") if seed_degraded else None
         # ``partial_product`` is True only at the typed terminal: a degraded
-        # Seed that reached :meth:`_emit_partial_product_terminal` and is now
-        # at ``AutoPhase.COMPLETE``. A degraded Seed that BLOCKED earlier
-        # (e.g. on a safety blocker) keeps ``partial_product=False`` so the
-        # field cannot be misread as "deadline recovery succeeded".
-        partial_product = seed_degraded and state.phase == AutoPhase.COMPLETE
+        # Seed that reached :meth:`_emit_partial_product_terminal`, which stops
+        # BLOCKED with ``DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE`` because
+        # the Seed was never executed. A degraded Seed that BLOCKED for another
+        # reason (e.g. a safety blocker) keeps ``partial_product=False``.
+        partial_product = seed_degraded and is_degraded_seed_not_executed_stop(state)
         result_status = status_override or state.phase.value
         artifact_state = _artifact_state_for_result(
             status=result_status,
@@ -2508,6 +2525,7 @@ class AutoPipeline:
             last_lateral_approach_summary=state.last_lateral_approach_summary,
             last_lateral_text=state.last_lateral_text,
             assumptions=tuple(ledger.assumptions()),
+            open_questions=tuple(seed_artifact.get("open_questions", ())),
             assumption_sources=tuple(ledger.assumption_sources()),
             non_goals=tuple(ledger.non_goals()),
             defaulted_sections=tuple(ledger.summary().get("defaulted_sections", ())),

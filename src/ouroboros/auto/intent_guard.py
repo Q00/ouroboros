@@ -249,6 +249,8 @@ _HUMAN_ANSWER_SOURCES = {
     "user",
     "user_answer",
     "user_response",
+    # ``ooo auto`` relayed the requester's own answer (requester command).
+    "requester",
 }
 
 _EVIDENCE_ANSWER_SOURCES = {
@@ -524,7 +526,15 @@ def _generated_review_option_conflicts(
     if not _has_artifact_output_terms(contract_text):
         return False
     source = answer_source.strip().casefold()
-    if source in {"user_goal", "user_preference", "repo_fact", "existing_convention"}:
+    # ``requester``: the person who made the request answered this question
+    # (``ooo auto`` requester command), so a narrowed output is their decision.
+    if source in {
+        "user_goal",
+        "user_preference",
+        "repo_fact",
+        "existing_convention",
+        "requester",
+    }:
         return False
     question_has_generated_choice = _contains_scope_reduction_option(question) or (
         "--mode auto" in question.casefold() and "--mode review" in question.casefold()

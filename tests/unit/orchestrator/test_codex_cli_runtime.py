@@ -1637,15 +1637,46 @@ class TestComposePromptDirectiveFencing:
         composed = self._runtime()._compose_prompt("Do the thing", None, ["Read", "Edit"])
         assert "<tooling-guidance>" in composed
         assert "</tooling-guidance>" in composed
+        assert "## Tooling Guidance" not in composed
+
+    def test_codex_guidance_names_no_claude_tools(self) -> None:
+        # Codex has no Read/Edit/Glob/Grep tools; its guidance must not name
+        # them, and an envelope of only those names is not "no tools" (#2754).
+        envelope = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
+        composed = self._runtime()._compose_prompt("Do the thing", None, envelope)
+        guidance = composed.split("<tooling-guidance>", 1)[1].split("</tooling-guidance>", 1)[0]
+        for tool in envelope:
+            assert f"- {tool}" not in guidance
+        assert "Do not use any tools" not in guidance
+        assert "shell and file tools" in guidance
+
+    def test_codex_guidance_keeps_non_claude_tools(self) -> None:
+        composed = self._runtime()._compose_prompt(
+            "Do the thing", None, ["Read", "Grep", "mcp__ouroboros__ouroboros_qa"]
+        )
+        assert "- mcp__ouroboros__ouroboros_qa" in composed
+        assert "- Read" not in composed
+        assert "- Grep" not in composed
+
+    def test_non_codex_subclass_guidance_unchanged(self) -> None:
+        composed = CopilotCliRuntime(cli_path="copilot", cwd="/tmp/project")._compose_prompt(
+            "Do the thing", None, ["Read", "Edit"]
+        )
         assert "- Read" in composed
         assert "- Edit" in composed
-        assert "## Tooling Guidance" not in composed
 
     def test_bare_prompt_passthrough_unchanged(self) -> None:
         # No system instructions and no tools → the task text is returned as-is,
         # with no delimiters added (preserves prior behavior).
         composed = self._runtime()._compose_prompt("Do the thing", None, None)
         assert composed == "Do the thing"
+
+    def test_explicit_empty_tools_preserves_no_tools_guidance(self) -> None:
+        composed = self._runtime()._compose_prompt("Classify this request", None, [])
+        assert "<tooling-guidance>" in composed
+        assert "Do not use any tools" in composed
+        assert composed.endswith("Classify this request")
+        assert composed != self._runtime()._compose_prompt("Classify this request", None, None)
 
     def test_task_text_is_not_wrapped(self) -> None:
         composed = self._runtime()._compose_prompt("Do the thing", "Be terse.", None)

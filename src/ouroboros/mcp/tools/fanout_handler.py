@@ -108,6 +108,10 @@ class SubmitFanoutResultsHandler:
                 "one {key, content} per child output — `key` is the value of the "
                 "correlation field for that child. A child you could not spawn "
                 "at all is exactly {key, undispatched: true}; never invent output. "
+                "If the registered fan-out has a session_id or correlation_key, "
+                "include that exact value; omit either only when the registered "
+                "fan-out has no corresponding binding. Omission never waives a "
+                "registered binding. "
                 "Missing required keys return `status=partial`; retry with EVERY lane. "
                 "Completed advisory fan-outs return a bounded disposable artifact "
                 "envelope for `ouroboros_fetch_artifact`. Host-execution submissions "
@@ -118,7 +122,12 @@ class SubmitFanoutResultsHandler:
                 MCPToolParameter(
                     name="session_id",
                     type=ToolInputType.STRING,
-                    description="Interview/lateral session id the fan-out belongs to.",
+                    description=(
+                        "Interview/lateral session id. Supply the exact session_id "
+                        "stamped in the originating fan-out when one was registered; "
+                        "omit only when that fan-out has no session binding. An "
+                        "omitted value does not bypass a registered binding."
+                    ),
                     required=False,
                 ),
                 MCPToolParameter(
@@ -132,7 +141,10 @@ class SubmitFanoutResultsHandler:
                     type=ToolInputType.STRING,
                     description=(
                         "The result_correlation_key from the originating meta "
-                        "(e.g. 'context.persona' or 'code_facts')."
+                        "(e.g. 'context.persona' or 'code_facts'). Supply the exact "
+                        "registered value when present; omit only when the fan-out "
+                        "has no correlation binding. Omission does not bypass a "
+                        "registered binding."
                     ),
                     required=False,
                 ),

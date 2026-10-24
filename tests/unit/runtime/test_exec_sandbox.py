@@ -1,8 +1,9 @@
 """The execution sandbox for controller-run commands (``runtime/exec_sandbox.py``).
 
 Tests that need the real backend of this host (``sandbox-exec`` on macOS,
-Landlock on Linux) skip with the probe's reason where it is unavailable; the
-refusal path is tested on every host by standing in for the probe.
+Landlock on Linux, an AppContainer on Windows) skip with the probe's reason
+where it is unavailable; the refusal path is tested on every host by standing
+in for the probe. Windows-only behavior is in ``test_exec_sandbox_windows.py``.
 """
 
 from __future__ import annotations
@@ -29,6 +30,10 @@ from ouroboros.runtime.exec_sandbox import (
     build_environment,
     confine,
 )
+
+_WINDOWS = sys.platform == "win32"
+_IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
+_POSIX_ONLY = pytest.mark.skipif(_WINDOWS, reason="POSIX file modes, shells or the POSIX helper")
 
 
 def _require_backend(*, deny_network: bool = False) -> None:
@@ -72,7 +77,9 @@ class TestRealBackend:
             "open('inside.txt', 'w').write('ok')\n"
             "os.mkdir('made'); os.rename('inside.txt', 'made/moved.txt')\n"
             "fd, name = tempfile.mkstemp(); os.write(fd, b'tmp'); os.close(fd)\n"
-            "open(os.devnull, 'w').write('discarded')\n"
+            # An AppContainer cannot open NUL (test_exec_sandbox_windows.py).
+            "if os.name != 'nt':\n"
+            "    open(os.devnull, 'w').write('discarded')\n"
             "try:\n"
             "    open(os.path.join(sys.argv[1], 'escaped.txt'), 'w').write('no')\n"
             "except OSError:\n"
@@ -87,15 +94,20 @@ class TestRealBackend:
             deny_network=False,
         )
         assert isinstance(command, ConfinedCommand)
-        assert command.backend in (SandboxBackend.SANDBOX_EXEC, SandboxBackend.LANDLOCK)
+        assert command.backend in (
+            SandboxBackend.SANDBOX_EXEC,
+            SandboxBackend.LANDLOCK,
+            SandboxBackend.APPCONTAINER,
+        )
 
         result = _run(command)
 
         assert result.returncode == 0, result.stderr
         assert (copy / "made" / "moved.txt").read_text(encoding="utf-8") == "ok"
-        assert len(list(layout["temp"].iterdir())) == 1
+        assert len([path for path in layout["temp"].rglob("*") if path.is_file()]) == 1
         assert not (outside / "escaped.txt").exists()
 
+    @_POSIX_ONLY
     def test_a_shell_script_cannot_write_outside_the_copy(
         self, layout: dict[str, Path], tmp_path: Path
     ) -> None:
@@ -119,6 +131,7 @@ class TestRealBackend:
         assert result.returncode != 0
         assert not target.exists()
 
+    @_POSIX_ONLY
     def test_metadata_outside_cannot_change(self, layout: dict[str, Path]) -> None:
         _require_backend()
         victim = layout["outside"].resolve() / "victim"
@@ -215,7 +228,8 @@ class TestRealBackend:
         assert result.returncode == _confine_exec.EXIT_SANDBOX_FAILED, result.stderr
         assert victim.read_text(encoding="utf-8") == "KEEP"
 
-    @pytest.mark.skipif(os.geteuid() == 0, reason="root reads any directory")
+    @_POSIX_ONLY
+    @pytest.mark.skipif(_IS_ROOT, reason="root reads any directory")
     def test_a_hard_link_in_an_unreadable_subtree_runs_nothing(
         self, layout: dict[str, Path]
     ) -> None:
@@ -260,6 +274,8 @@ class TestRealBackend:
 
     @staticmethod
     def _can_make_device_nodes(directory: Path) -> bool:
+        if not hasattr(os, "mknod"):
+            return False
         try:
             os.mknod(directory / "device-probe", stat.S_IFCHR | 0o600, os.makedev(1, 3))
         except (PermissionError, OSError):
@@ -322,6 +338,7 @@ class TestRealBackend:
         assert refused.reason is SandboxUnavailableReason.ALIASED_WRITABLE_ROOT
         assert result.returncode == _confine_exec.EXIT_SANDBOX_FAILED, result.stderr
 
+    @pytest.mark.skipif(_WINDOWS, reason="a Windows file name cannot hold a quote")
     def test_writable_root_with_quote_and_backslash_in_its_name(self, tmp_path: Path) -> None:
         _require_backend()
         root = tmp_path / 'we"ird\\dir'
@@ -411,13 +428,30 @@ class TestRealBackend:
         result = _run(command)
 
         env = json.loads(result.stdout)
-        # ``__CF_USER_TEXT_ENCODING`` is added by macOS to every process.
+        # ``__CF_USER_TEXT_ENCODING`` is added by macOS to every process, and
+        # ``__PYVENV_LAUNCHER__`` by a Windows virtual environment's launcher.
         env.pop("__CF_USER_TEXT_ENCODING", None)
+        env.pop("__PYVENV_LAUNCHER__", None)
         temp = os.path.realpath(layout["temp"])
-        assert env["TMPDIR"] == env["TMP"] == env["TEMP"] == env["HOME"] == temp
+        # On Windows, process creation moves these into the container's
+        # directories beneath LOCALAPPDATA, which is the temp directory.
+        moved = {"TMP", "TEMP", "LOCALAPPDATA"} if _WINDOWS else set()
+        for name in ("TMPDIR", "TMP", "TEMP", *exec_sandbox._HOME_VARIABLES):
+            if name in moved:
+                assert Path(env[name]).is_relative_to(temp), (name, env[name])
+            else:
+                assert env[name] == temp, name
         assert env["LANG"] == "C.UTF-8" and env["EXTRA"] == "1"
         assert "OUROBOROS_TEST_SECRET" not in env
-        allowed = {*DEFAULT_ENV_PASSTHROUGH, "TMPDIR", "TMP", "TEMP", "HOME", "EXTRA"}
+        allowed = {
+            *DEFAULT_ENV_PASSTHROUGH,
+            "TMPDIR",
+            "TMP",
+            "TEMP",
+            *exec_sandbox._HOME_VARIABLES,
+            "EXTRA",
+            *(("SYSTEMROOT",) if _WINDOWS else ()),
+        }
         assert set(env) <= allowed
 
 
@@ -544,7 +578,7 @@ class TestUnavailable:
         assert isinstance(allowed, ConfinedCommand) and not allowed.network_denied
 
     def test_unsupported_platform_has_no_backend(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(exec_sandbox.sys, "platform", "win32")
+        monkeypatch.setattr(exec_sandbox.sys, "platform", "sunos5")
 
         assert exec_sandbox.filesystem_backend.__wrapped__() is None  # type: ignore[attr-defined]
 
@@ -556,6 +590,348 @@ class TestUnavailable:
 
         assert isinstance(result, SandboxUnavailable)
         assert result.reason is SandboxUnavailableReason.INVALID_WRITABLE_ROOT
+
+
+_SHM_WORKLOAD = """
+import ctypes, multiprocessing, os, sys
+from multiprocessing import shared_memory
+token = sys.argv[1]
+assert not os.path.exists('/dev/shm/' + token + '-host'), 'host /dev/shm is visible'
+lock = multiprocessing.Lock()
+with lock:
+    pass
+value = multiprocessing.Value('i', 7)
+block = shared_memory.SharedMemory(create=True, size=4096)
+block.buf[0] = 1
+block.close()
+block.unlink()
+with open('/dev/shm/' + token, 'w') as handle:
+    handle.write('private')
+libc = ctypes.CDLL(None, use_errno=True)
+assert libc.umount2(b'/dev/shm', 2) != 0, 'the private mount could be detached'
+print(value.value)
+"""
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/dev/shm is Linux only")
+class TestPrivateDevShm:
+    """A confined command gets its own ``/dev/shm``, never the host's."""
+
+    @pytest.mark.parametrize("deny_network", [True, False])
+    def test_multiprocessing_works_and_nothing_reaches_the_host(
+        self, layout: dict[str, Path], deny_network: bool
+    ) -> None:
+        _require_backend(deny_network=deny_network)
+        if exec_sandbox._private_mounts_unshare() is None:
+            pytest.skip("no unprivileged user and mount namespace on this host")
+        host_shm = Path("/dev/shm")
+        token = f"ouroboros-shm-test-{os.getpid()}-{os.urandom(4).hex()}"
+        planted = host_shm / f"{token}-host"
+        planted.write_text("host", encoding="utf-8")
+        try:
+            command = confine(
+                _python(_SHM_WORKLOAD, token),
+                cwd=str(layout["copy"]),
+                writable_roots=(str(layout["copy"]),),
+                temp_dir=str(layout["temp"]),
+                deny_network=deny_network,
+            )
+            assert isinstance(command, ConfinedCommand) and command.private_dev_shm
+
+            result = _run(command)
+
+            assert result.returncode == 0, result.stderr
+            assert result.stdout.strip() == "7"
+            assert not (host_shm / token).exists()
+            assert planted.read_text(encoding="utf-8") == "host"
+        finally:
+            planted.unlink(missing_ok=True)
+
+    def test_without_a_mount_namespace_dev_shm_stays_read_only(
+        self, layout: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _require_backend()
+        monkeypatch.setattr(exec_sandbox, "_private_mounts_unshare", lambda: None)
+        token = f"ouroboros-shm-test-{os.getpid()}-{os.urandom(4).hex()}"
+        code = (
+            "import sys\n"
+            "try:\n"
+            "    open('/dev/shm/' + sys.argv[1], 'w').close()\n"
+            "except OSError:\n"
+            "    sys.exit(0)\n"
+            "sys.exit(9)\n"
+        )
+        command = confine(
+            _python(code, token),
+            cwd=str(layout["copy"]),
+            writable_roots=(str(layout["copy"]),),
+            temp_dir=str(layout["temp"]),
+            deny_network=False,
+        )
+        assert isinstance(command, ConfinedCommand) and not command.private_dev_shm
+
+        result = _run(command)
+
+        assert result.returncode == 0, result.stderr
+        assert not (Path("/dev/shm") / token).exists()
+
+
+def _require_private_mounts(*, deny_network: bool = False) -> None:
+    _require_backend(deny_network=deny_network)
+    if exec_sandbox._private_mounts_unshare() is None:
+        pytest.skip("no unprivileged user and mount namespace on this host")
+
+
+# Run in the copy with ``OUTSIDE`` as argv[1]: each metadata change on a file
+# in the working directory (by relative and by absolute path) must succeed,
+# and the same change on a file outside must fail with EROFS.
+_METADATA_WORKLOAD = """
+import errno, os, sys
+outside = os.path.join(sys.argv[1], 'victim')
+open('inside', 'w').close()
+inside = os.path.abspath('inside')
+
+def setxattr(path):
+    try:
+        os.setxattr(path, 'user.ouroboros_test', b'1')
+    except OSError as exc:
+        if exc.errno not in (errno.ENOTSUP, errno.EOPNOTSUPP):
+            raise
+
+changes = {
+    'chmod': lambda path: os.chmod(path, 0o640),
+    'utime': lambda path: os.utime(path, (1_000_000, 1_000_000)),
+    'setxattr': setxattr,
+}
+for name, change in changes.items():
+    change('inside')
+    change(inside)
+    try:
+        change(outside)
+    except OSError as exc:
+        assert exc.errno == errno.EROFS, (name, exc)
+    else:
+        sys.exit(f'{name} changed a file outside the writable roots')
+fd = os.open(inside, os.O_RDONLY)
+os.fchmod(fd, 0o600)
+os.close(fd)
+"""
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux mount namespaces")
+class TestMetadataInsideRoots:
+    """Mode, timestamps and extended attributes change inside the roots only."""
+
+    def _confine(self, layout: dict[str, Path], argv: tuple[str, ...]) -> ConfinedCommand:
+        command = confine(
+            argv,
+            cwd=str(layout["copy"].resolve()),
+            writable_roots=(str(layout["copy"]),),
+            temp_dir=str(layout["temp"]),
+            deny_network=True,
+        )
+        assert isinstance(command, ConfinedCommand)
+        return command
+
+    def test_metadata_changes_inside_succeed_and_outside_fail(
+        self, layout: dict[str, Path]
+    ) -> None:
+        _require_private_mounts(deny_network=True)
+        outside = layout["outside"].resolve()
+        victim = outside / "victim"
+        victim.write_text("keep", encoding="utf-8")
+        victim.chmod(0o600)
+        os.utime(victim, (2_000_000, 2_000_000))
+        before = os.stat(victim)
+        command = self._confine(layout, _python(_METADATA_WORKLOAD, str(outside)))
+        assert command.metadata_writes_in_roots
+
+        result = _run(command)
+
+        assert result.returncode == 0, result.stderr
+        after = os.stat(victim)
+        assert (after.st_mode, after.st_mtime_ns) == (before.st_mode, before.st_mtime_ns)
+        assert stat.S_IMODE(os.stat(layout["copy"] / "inside").st_mode) == 0o600
+
+    def test_the_command_cannot_make_an_outside_mount_writable_again(
+        self, layout: dict[str, Path]
+    ) -> None:
+        _require_private_mounts(deny_network=True)
+        outside = layout["outside"].resolve()
+        victim = outside / "victim"
+        victim.write_text("keep", encoding="utf-8")
+        victim.chmod(0o600)
+        code = (
+            "import ctypes, errno, os, struct, sys\n"
+            "libc = ctypes.CDLL(None, use_errno=True)\n"
+            "attr = ctypes.create_string_buffer(struct.pack('=QQQQ', 0, 1, 0, 0), 32)\n"
+            "def writable(fd, path, flags):\n"
+            "    return libc.syscall(ctypes.c_long(442), ctypes.c_int(fd), ctypes.c_char_p(path),\n"
+            "                        ctypes.c_uint(flags), attr, ctypes.c_size_t(32)) >= 0\n"
+            "assert not writable(-100, b'/', 0x8000), 'cleared read-only on every mount'\n"
+            "clone = libc.syscall(ctypes.c_long(428), ctypes.c_int(-100),\n"
+            "                     ctypes.c_char_p(sys.argv[1].encode()), ctypes.c_uint(0x80001))\n"
+            "assert clone < 0, 'cloned an outside mount'\n"
+            "os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWNS)\n"
+            "assert not writable(-100, b'/', 0x8000), 'cleared read-only in a new namespace'\n"
+            "try:\n"
+            "    os.chmod(os.path.join(sys.argv[1], 'victim'), 0o644)\n"
+            "except OSError as exc:\n"
+            "    assert exc.errno == errno.EROFS, exc\n"
+            "else:\n"
+            "    sys.exit('changed a file outside the writable roots')\n"
+        )
+
+        result = _run(self._confine(layout, _python(code, str(outside))))
+
+        assert result.returncode == 0, result.stderr
+        assert stat.S_IMODE(os.stat(victim).st_mode) == 0o600
+
+    def test_copytree_keeps_modes_and_times_inside_the_copy(self, layout: dict[str, Path]) -> None:
+        _require_private_mounts(deny_network=True)
+        source = layout["copy"] / "source"
+        (source / "package").mkdir(parents=True)
+        (source / "package" / "module.py").write_text("x = 1\n", encoding="utf-8")
+        (source / "package" / "module.py").chmod(0o750)
+        os.utime(source / "package" / "module.py", (3_000_000, 3_000_000))
+        code = "import shutil; shutil.copytree('source', 'target')"
+
+        result = _run(self._confine(layout, _python(code)))
+
+        assert result.returncode == 0, result.stderr
+        copied = os.stat(layout["copy"] / "target" / "package" / "module.py")
+        assert stat.S_IMODE(copied.st_mode) == 0o750
+        assert copied.st_mtime_ns == 3_000_000 * 10**9
+
+    def test_pytest_writes_its_cache_with_warnings_as_errors(self, layout: dict[str, Path]) -> None:
+        _require_private_mounts(deny_network=True)
+        (layout["copy"] / "test_sample.py").write_text(
+            "def test_passes():\n    assert True\n", encoding="utf-8"
+        )
+        argv = (sys.executable, "-I", "-m", "pytest", "-q", "-W", "error", "-p", "cacheprovider")
+
+        result = _run(self._confine(layout, (*argv, "test_sample.py")))
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (layout["copy"] / ".pytest_cache" / "v").is_dir()
+
+    def test_renaming_from_one_root_into_another_crosses_mounts(
+        self, layout: dict[str, Path]
+    ) -> None:
+        _require_private_mounts(deny_network=True)
+        code = (
+            "import errno, os, shutil, tempfile\n"
+            "fd, name = tempfile.mkstemp(); os.write(fd, b'moved'); os.close(fd)\n"
+            "try:\n"
+            "    os.replace(name, 'replaced')\n"
+            "except OSError as exc:\n"
+            "    assert exc.errno == errno.EXDEV, exc\n"
+            "else:\n"
+            "    raise SystemExit('rename crossed roots')\n"
+            "shutil.move(name, 'moved')\n"
+        )
+
+        result = _run(self._confine(layout, _python(code)))
+
+        assert result.returncode == 0, result.stderr
+        assert (layout["copy"] / "moved").read_text(encoding="utf-8") == "moved"
+
+    def test_without_a_mount_namespace_metadata_is_denied_inside_too(
+        self, layout: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _require_backend()
+        monkeypatch.setattr(exec_sandbox, "_private_mounts_unshare", lambda: None)
+        code = (
+            "import os, sys\n"
+            "open('inside', 'w').close()\n"
+            "try:\n"
+            "    os.chmod('inside', 0o640)\n"
+            "except PermissionError:\n"
+            "    sys.exit(0)\n"
+            "sys.exit(9)\n"
+        )
+        command = confine(
+            _python(code),
+            cwd=str(layout["copy"].resolve()),
+            writable_roots=(str(layout["copy"]),),
+            temp_dir=str(layout["temp"]),
+            deny_network=False,
+        )
+        assert isinstance(command, ConfinedCommand) and not command.metadata_writes_in_roots
+
+        result = _run(command)
+
+        assert result.returncode == 0, result.stderr
+
+
+class TestPrivateDevShmArgv:
+    @pytest.mark.parametrize(
+        ("interfaces", "shm", "expected"),
+        [
+            ([(1, "lo")], None, ("--require-loopback-only",)),
+            (
+                [(1, "lo")],
+                "/usr/bin/unshare",
+                ("/usr/bin/unshare", "--user", "--map-root-user", "--mount", "--"),
+            ),
+            (
+                [(1, "lo"), (2, "eth0")],
+                "/usr/bin/unshare",
+                ("unshare", "--user", "--map-root-user", "--mount", "--net", "--"),
+            ),
+            (
+                [(1, "lo"), (2, "eth0")],
+                None,
+                ("unshare", "--user", "--map-root-user", "--net", "--"),
+            ),
+        ],
+    )
+    def test_the_mount_namespace_is_independent_of_the_network_plan(
+        self,
+        layout: dict[str, Path],
+        monkeypatch: pytest.MonkeyPatch,
+        interfaces: list[tuple[int, str]],
+        shm: str | None,
+        expected: tuple[str, ...],
+    ) -> None:
+        monkeypatch.setattr(exec_sandbox, "filesystem_backend", lambda: SandboxBackend.LANDLOCK)
+        monkeypatch.setattr(exec_sandbox.socket, "if_nameindex", lambda: interfaces)
+        monkeypatch.setattr(
+            exec_sandbox,
+            "_unshare_prefix",
+            lambda: ("unshare", "--user", "--map-root-user", "--net", "--"),
+        )
+        monkeypatch.setattr(exec_sandbox, "_private_mounts_unshare", lambda: shm)
+
+        command = confine(
+            ("true",),
+            cwd=str(layout["copy"]),
+            writable_roots=(str(layout["copy"]),),
+            temp_dir=str(layout["temp"]),
+        )
+
+        assert isinstance(command, ConfinedCommand)
+        assert command.private_dev_shm is (shm is not None)
+        assert command.metadata_writes_in_roots is (shm is not None)
+        assert ("--private-mounts" in command.argv) is (shm is not None)
+        if expected[0] == "--require-loopback-only":
+            assert command.argv[0] == exec_sandbox._interpreter()
+            assert "--user" not in command.argv
+        else:
+            assert command.argv[: len(expected)] == expected
+
+    def test_the_helper_accepts_the_private_mounts_option(self) -> None:
+        parsed = _confine_exec._parse(
+            ["--private-mounts", "--require-loopback-only", "--landlock"]
+            + ["--root", "/r", "1", "2", "--", "true"]
+        )
+
+        assert parsed == (True, False, True, True, [("/r", 1, 2)], ["true"])
+
+    def test_no_private_mounts_off_linux(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(exec_sandbox.sys, "platform", "darwin")
+
+        assert exec_sandbox._private_mounts_unshare.__wrapped__() is None  # type: ignore[attr-defined]
 
 
 class TestNetworkPlan:
@@ -581,6 +957,10 @@ class TestNetworkPlan:
         assert exec_sandbox._network_plan(SandboxBackend.LANDLOCK, True) is plan
         assert exec_sandbox._network_plan(SandboxBackend.LANDLOCK, False) is NetworkPlan.ALLOW
         assert exec_sandbox._network_plan(SandboxBackend.SANDBOX_EXEC, True) is NetworkPlan.PROFILE
+        assert (
+            exec_sandbox._network_plan(SandboxBackend.APPCONTAINER, True)
+            is NetworkPlan.NO_CAPABILITY
+        )
 
     @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux network namespaces")
     def test_network_interface_appearing_after_the_check_runs_nothing(
@@ -652,6 +1032,7 @@ class TestNetworkPlan:
         ), outer.stdout + outer.stderr
         assert not marker.exists()
 
+    @_POSIX_ONLY
     def test_network_final_check_refuses_other_interfaces(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -690,7 +1071,7 @@ class TestLaunchers:
                 os.path.isabs(found) and not found.startswith(str(tmp_path.resolve()))
             )
 
-    @pytest.mark.skipif(os.geteuid() == 0, reason="root owns every file it creates")
+    @pytest.mark.skipif(_IS_ROOT, reason="root owns every file it creates")
     def test_a_user_owned_or_relative_launcher_is_refused(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -760,13 +1141,15 @@ class TestEnvironment:
 
         env = build_environment("/scratch/tmp", source=source, overrides={"X": "1"})
 
+        windows = {"SYSTEMROOT": exec_sandbox._windows_directory()} if _WINDOWS else {}
         assert env == {
             "PATH": "/bin",
             "LANG": "C",
             "TMPDIR": "/scratch/tmp",
             "TMP": "/scratch/tmp",
             "TEMP": "/scratch/tmp",
-            "HOME": "/scratch/tmp",
+            **dict.fromkeys(exec_sandbox._HOME_VARIABLES, "/scratch/tmp"),
+            **windows,
             "X": "1",
         }
 
@@ -921,6 +1304,36 @@ class TestMetadataFilter:
         assert verdict(read) == allow
         assert verdict(read, audit_arch=0x40000003) == eperm  # i386 compat call
 
+    @pytest.mark.parametrize(
+        ("machine", "arch", "fchmod", "utimensat", "fsetxattr", "fchown", "io_uring_setup"),
+        [
+            ("x86_64", 0xC000003E, 91, 280, 190, 93, 425),
+            ("aarch64", 0xC00000B7, 52, 88, 7, 55, 425),
+        ],
+    )
+    def test_read_only_mounts_take_over_mode_times_and_xattrs_only(
+        self,
+        machine: str,
+        arch: int,
+        fchmod: int,
+        utimensat: int,
+        fsetxattr: int,
+        fchown: int,
+        io_uring_setup: int,
+    ) -> None:
+        allow, eperm = 0x7FFF0000, 0x00050001
+        confined = _confine_exec.metadata_filter(machine, mounts_confine=True)
+        everywhere = _confine_exec.metadata_filter(machine)
+
+        def verdict(program: list[tuple[int, int, int, int]], nr: int) -> int:
+            return self._evaluate(program, {0: nr, 4: arch})
+
+        for number in (fchmod, utimensat, fsetxattr, 452, 463, 466):
+            assert verdict(confined, number) == allow
+            assert verdict(everywhere, number) == eperm
+        for number in (fchown, io_uring_setup):
+            assert verdict(confined, number) == eperm
+
     def test_unknown_architecture_is_refused(self) -> None:
         with pytest.raises(_confine_exec.SandboxError):
             _confine_exec.metadata_filter("riscv64")
@@ -949,6 +1362,7 @@ class TestLandlockAccessMask:
             assert not granted & (make_char | make_block)
             assert granted == handled & ~(make_char | make_block)
 
+    @_POSIX_ONLY
     def test_helper_refuses_an_abi_that_cannot_deny_truncation(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -965,6 +1379,7 @@ class TestLandlockAccessMask:
     def test_helper_refuses_without_a_command(self) -> None:
         assert _confine_exec.main(["--root", "/tmp", "1", "2"]) == _confine_exec.EXIT_SANDBOX_FAILED
 
+    @_POSIX_ONLY
     def test_helper_refuses_a_root_that_is_not_the_confined_directory(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -973,3 +1388,42 @@ class TestLandlockAccessMask:
         wrong_inode = ["--root", str(tmp_path), str(status.st_dev), str(status.st_ino + 1)]
 
         assert _confine_exec.main([*wrong_inode, "--", "true"]) == _confine_exec.EXIT_SANDBOX_FAILED
+
+
+class TestPersistentReadScope:
+    """Where the Windows backend may place its persistent read grant (pure path rules)."""
+
+    def test_only_what_a_command_needs_below_the_user_and_system_trees(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        base = tmp_path.resolve()
+        home, system, copy = base / "home", base / "system", base / "scratch" / "copy"
+        venv = home / "project" / ".venv"
+        for path in (venv, system / "sub", copy):
+            path.mkdir(parents=True)
+        monkeypatch.setattr(exec_sandbox.Path, "home", staticmethod(lambda: home))
+        monkeypatch.setattr(exec_sandbox, "_system_anchors", lambda: (str(system),))
+        roots = (str(copy),)
+
+        def allowed(path: Path | str) -> bool:
+            return exec_sandbox._persistent_read_allowed(str(path), roots)
+
+        assert allowed(venv)
+        assert not allowed(home)  # the user's whole profile
+        assert not allowed(base)  # above the profile and the scratch directory
+        assert not allowed(base / "scratch")  # contains a writable root
+        assert not allowed(copy) and not allowed(copy / "linked")  # writable already
+        assert not allowed(system) and not allowed(system / "sub")  # system managed
+        assert not allowed(os.path.abspath(os.sep))  # a volume root
+
+
+def test_the_windows_environment_is_folded_once_last_spelling_wins() -> None:
+    """One fold serves every lookup and the environment block (pure; any host)."""
+    from ouroboros.runtime import _confine_windows
+
+    env = {"LOCALAPPDATA": "C:\\temp", "Path": "C:\\bin", "LocalAppData": "D:\\elsewhere"}
+
+    assert _confine_windows.effective_environment(env) == {
+        "LOCALAPPDATA": "D:\\elsewhere",
+        "PATH": "C:\\bin",
+    }

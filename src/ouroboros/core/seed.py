@@ -253,6 +253,59 @@ def validate_ac_success_contract_values(
         )
 
 
+class RequesterAnswer(BaseModel, frozen=True):
+    """A question the requester answered, quoted verbatim.
+
+    Attributes:
+        question: The interview question the requester was asked.
+        answer: The requester's answer, word for word.
+    """
+
+    question: str
+    answer: str = Field(..., min_length=1)
+
+
+class RepoFact(BaseModel, frozen=True):
+    """A question ``ooo auto`` answered by reading the repository, quoted verbatim.
+
+    Every evidence span was checked against the workspace: the file is inside
+    it and the quote occurs in the cited lines. A repo fact describes the code
+    as it is; it is not a requirement.
+
+    Attributes:
+        question: The interview question.
+        answer: The answer read from the code, word for word.
+        evidence: Checked spans, each ``path:start-end: quote``.
+    """
+
+    question: str
+    answer: str = Field(..., min_length=1)
+    evidence: tuple[str, ...] = ()
+
+
+class SourcedScope(BaseModel, frozen=True):
+    """The Seed content with a known source, recorded where the Seed is made.
+
+    ``ooo auto`` stamps it from ledger provenance: the goal entry the user
+    wrote and the constraints and criteria whose entries bind
+    (``LedgerEntry.binds_seed``). When a Seed carries it, the worker's
+    execution prompt renders only this record, ``requester_answers`` and
+    ``repo_facts``. The model-written fields (``goal`` as rewritten,
+    ``constraints``, ``acceptance_criteria``, ``assumptions``, the ontology,
+    the evaluation principles and the exit conditions) stay in the Seed for
+    the record and for verification, but are not worker instructions.
+
+    Attributes:
+        goal: The user's request, verbatim.
+        constraints: Constraints and non-goals that bind by ledger provenance, verbatim.
+        acceptance_criteria: Acceptance criteria that bind by ledger provenance, verbatim.
+    """
+
+    goal: str = Field(..., min_length=1)
+    constraints: tuple[str, ...] = ()
+    acceptance_criteria: tuple[str, ...] = ()
+
+
 class ExitCondition(BaseModel, frozen=True):
     """Defines when the workflow should terminate.
 
@@ -780,6 +833,25 @@ class Seed(BaseModel, frozen=True):
         goal: The primary objective of the workflow.
         constraints: Hard constraints that must be satisfied.
         acceptance_criteria: Specific criteria for success.
+        assumptions: Unconfirmed guesses made on the requester's behalf. They
+            never bind: the worker sees them as assumptions it may override when
+            the task or the code says otherwise.
+        requester_answers: Questions the requester answered, with the answer
+            quoted verbatim. Confirmed facts the worker must follow, never
+            rewritten into constraints or criteria.
+        repo_facts: Questions auto answered from the repository, with the
+            answer and its checked evidence quoted verbatim. They describe the
+            current code and are never rewritten into constraints or criteria.
+        open_questions: Interview questions nobody answered, verbatim and in
+            ledger order. They stay in the Seed file and the auto result so
+            the self-interview is visible, but no execution prompt renders them:
+            a worker shown a question with its candidate answers builds the fix
+            around one of them.
+        sourced_scope: The goal, constraints and criteria with a known source,
+            stamped by ``ooo auto`` from ledger provenance (see
+            :class:`SourcedScope`). When set, only it, ``requester_answers`` and
+            ``repo_facts`` reach the worker's execution prompt. ``None`` keeps
+            the historical rendering of every field.
         ontology_schema: Conceptual lens for workflow coherence.
         evaluation_principles: Principles for evaluating outputs.
         exit_conditions: Conditions for terminating the workflow.
@@ -845,6 +917,42 @@ class Seed(BaseModel, frozen=True):
     acceptance_criteria: tuple[AcceptanceCriterionSpec, ...] = Field(
         default_factory=tuple,
         description="Specific criteria for success evaluation",
+    )
+    assumptions: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Non-binding assumptions nobody confirmed; the worker may override them "
+            "when the task or the code says otherwise"
+        ),
+    )
+    requester_answers: tuple[RequesterAnswer, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Questions the requester answered, with the answer quoted verbatim; "
+            "confirmed facts the worker must follow"
+        ),
+    )
+    repo_facts: tuple[RepoFact, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Questions answered from the repository, with the answer and its checked "
+            "evidence quoted verbatim; they describe the current code, not requirements"
+        ),
+    )
+    open_questions: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Interview questions nobody answered, verbatim and in order; kept for the "
+            "record and never rendered into the worker's execution input"
+        ),
+    )
+    sourced_scope: SourcedScope | None = Field(
+        default=None,
+        description=(
+            "The goal, constraints and criteria with a known source; when set, the "
+            "worker's execution prompt renders only these plus requester answers and "
+            "repo facts. None (every Seed not made by ooo auto) renders the Seed as before"
+        ),
     )
 
     # Conceptual lens
@@ -1012,7 +1120,20 @@ class Seed(BaseModel, frozen=True):
             Dictionary representation of the seed.
         """
         extra = self.model_extra or {}
-        data = self.model_dump(mode="json", by_alias=True, exclude=set(extra))
+        excluded = set(extra)
+        # Omit an empty assumptions list so a Seed without assumptions keeps
+        # serializing exactly as it did before the field existed.
+        if not self.assumptions:
+            excluded.add("assumptions")
+        if not self.requester_answers:
+            excluded.add("requester_answers")
+        if not self.repo_facts:
+            excluded.add("repo_facts")
+        if not self.open_questions:
+            excluded.add("open_questions")
+        if self.sourced_scope is None:
+            excluded.add("sourced_scope")
+        data = self.model_dump(mode="json", by_alias=True, exclude=excluded)
         data.update({key: _thaw_seed_extra_value(value) for key, value in extra.items()})
         return data
 

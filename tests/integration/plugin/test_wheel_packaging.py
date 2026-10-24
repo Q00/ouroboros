@@ -14,7 +14,6 @@ from email.parser import Parser
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import tomllib
@@ -41,11 +40,7 @@ def _extract_python_resolver(contents: str) -> str:
 
 
 @pytest.mark.slow
-@pytest.mark.skipif(
-    shutil.which("uv") is None,
-    reason="uv not on PATH — wheel build cannot run in this environment.",
-)
-def test_built_wheel_preserves_packaging_contracts(tmp_path: Path) -> None:
+def test_built_wheel_preserves_packaging_contracts(built_wheel: Path, tmp_path: Path) -> None:
     """Build the wheel and verify schema assets plus dependency markers.
 
     A future change that drops the `force-include` for
@@ -54,28 +49,13 @@ def test_built_wheel_preserves_packaging_contracts(tmp_path: Path) -> None:
     `vendored schema directory missing from installed package` for every
     `load_manifest()` call in production.
     """
-    out_dir = tmp_path / "dist"
-    result = subprocess.run(
-        ["uv", "build", "--wheel", "--out-dir", str(out_dir)],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=180,
-        check=False,
-    )
-    assert result.returncode == 0, (
-        f"`uv build --wheel` failed: stdout={result.stdout!r} stderr={result.stderr!r}"
-    )
-
-    wheels = list(out_dir.glob("*.whl"))
-    assert len(wheels) == 1, f"expected exactly one wheel, got {wheels}"
-
+    wheels = [built_wheel]
     expected = {
         f"ouroboros/plugin/schemas/{version}/{asset}"
         for version in SUPPORTED_SCHEMA_VERSIONS
         for asset in ("plugin.schema.json", "audit-event.schema.json")
     }
-    with zipfile.ZipFile(wheels[0]) as archive:
+    with zipfile.ZipFile(built_wheel) as archive:
         names = archive.namelist()
         present = [n for n in names if n.startswith("ouroboros/plugin/schemas/")]
         # Each schema asset must appear exactly once. Hatchling's
@@ -96,6 +76,8 @@ def test_built_wheel_preserves_packaging_contracts(tmp_path: Path) -> None:
             "`pyproject.toml` `force-include` regression. "
             f"Missing: {sorted(missing)}. Wheel ships: {sorted(present_set)}"
         )
+
+        assert "ouroboros/skills/maintain/SKILL.md" not in names
 
         metadata_paths = [name for name in names if name.endswith(".dist-info/METADATA")]
         assert len(metadata_paths) == 1, f"expected one METADATA file, got {metadata_paths}"
@@ -311,33 +293,14 @@ def test_built_wheel_preserves_packaging_contracts(tmp_path: Path) -> None:
 
 
 @pytest.mark.slow
-@pytest.mark.skipif(
-    shutil.which("uv") is None,
-    reason="uv not on PATH — wheel build cannot run in this environment.",
-)
 def test_built_wheel_ships_builtin_interview_adapter_packs_once_and_loadable(
+    built_wheel: Path,
     tmp_path: Path,
 ) -> None:
-    out_dir = tmp_path / "dist"
-    result = subprocess.run(
-        ["uv", "build", "--wheel", "--out-dir", str(out_dir)],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=180,
-        check=False,
-    )
-    assert result.returncode == 0, (
-        f"`uv build --wheel` failed: stdout={result.stdout!r} stderr={result.stderr!r}"
-    )
-
-    wheels = list(out_dir.glob("*.whl"))
-    assert len(wheels) == 1, f"expected exactly one wheel, got {wheels}"
-
     expected = {
         f"ouroboros/interview_adapters/packs/{pack_name}" for pack_name in BUILTIN_GLOSSARY_PACKS
     }
-    with zipfile.ZipFile(wheels[0]) as archive:
+    with zipfile.ZipFile(built_wheel) as archive:
         names = archive.namelist()
         present = [n for n in names if n.startswith("ouroboros/interview_adapters/packs/")]
         for path in present:
@@ -354,33 +317,3 @@ def test_built_wheel_ships_builtin_interview_adapter_packs_once_and_loadable(
             assert loaded["name"] == Path(path).stem
             assert loaded["schema_version"] == 1
             assert loaded["glossary_terms"]
-
-
-@pytest.mark.slow
-@pytest.mark.skipif(shutil.which("uv") is None, reason="uv not on PATH")
-def test_built_wheel_maintain_skill_has_executable_review_contract(tmp_path: Path) -> None:
-    """The installed skill must not depend on checkout-only policy or invalid gh syntax."""
-    out_dir = tmp_path / "dist"
-    result = subprocess.run(
-        ["uv", "build", "--wheel", "--out-dir", str(out_dir)],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=180,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    wheels = list(out_dir.glob("*.whl"))
-    assert len(wheels) == 1
-
-    with zipfile.ZipFile(wheels[0]) as archive:
-        maintain_path = "ouroboros/skills/maintain/SKILL.md"
-        assert archive.namelist().count(maintain_path) == 1
-        maintain = archive.read(maintain_path).decode("utf-8")
-
-    assert "## Review boundary" in maintain
-    assert "For each finding, ask with evidence:" in maintain
-    assert "stop and have a maintainer decide whether this PR expands, splits" in maintain
-    assert "../../CONTRIBUTING.md" not in maintain
-    assert "Include `-R Q00/ouroboros` on repository-aware" in maintain
-    assert "`gh auth status` is host-scoped and does not accept `-R`" in maintain

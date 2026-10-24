@@ -26,9 +26,11 @@ from ouroboros.orchestrator.model_routing import (
     lower_one_notch,
     raise_one_notch,
     resolve_execute_model,
+    serialize_model_router,
     tier_from_model_tier_arg,
     tier_from_profile_hint,
 )
+from ouroboros.orchestrator.resolved_models import resolve_route_economics
 
 
 def _economics(**overrides: object) -> EconomicsConfig:
@@ -144,16 +146,16 @@ class TestBuildModelRouter:
         assert router is not None
         assert router.runtime_backend == "codex_cli"
         assert router.tier_models == {
-            "frugal": "gpt-5.1-codex-mini",
-            "standard": "gpt-5-codex",
-            "frontier": "gpt-5.2",
+            "frugal": "gpt-6-luna",
+            "standard": "gpt-6.1-sol",
+            "frontier": "gpt-6-astra",
         }
 
     def test_codex_mcp_backend_resolves_openai_tier_models(self) -> None:
         economics = get_default_config().economics
         router = build_model_router(economics, runtime_backend="codex_mcp")
         assert router is not None
-        assert router.tier_models["standard"] == "gpt-5-codex"
+        assert router.tier_models["standard"] == "gpt-6.1-sol"
 
     def test_gemini_backend_builds_google_router(self) -> None:
         # Gemini has no frontier google model in the default config, so only the
@@ -163,8 +165,8 @@ class TestBuildModelRouter:
         assert router is not None
         assert router.runtime_backend == "gemini_cli"
         assert router.tier_models == {
-            "frugal": "gemini-2.0-flash",
-            "standard": "gemini-2.5-pro",
+            "frugal": "flash",
+            "standard": "pro",
         }
 
     def test_opencode_backend_is_dormant(self) -> None:
@@ -280,6 +282,21 @@ class TestDeserializeModelRouter:
         assert recognized is False
         assert router is None
 
+    @pytest.mark.parametrize("invalid", [None, 0, 1, "false", []])
+    def test_rejects_non_boolean_child_lowering_policy(self, invalid: object) -> None:
+        recognized, router = deserialize_model_router(
+            self._payload(child_model_lowering_enabled=invalid)
+        )
+        assert recognized is False
+        assert router is None
+
+    def test_missing_child_lowering_bit_keeps_legacy_semantics(self) -> None:
+        recognized, router = deserialize_model_router(self._payload())
+        assert recognized is True
+        assert router is not None
+        assert router.child_model_lowering_enabled is True
+        assert serialize_model_router(router)["router"]["child_model_lowering_enabled"] is True
+
 
 def _legacy_persisted_economics() -> EconomicsConfig:
     """Economics as an OLD release would have persisted it to ~/.ouroboros/config.yaml.
@@ -340,9 +357,9 @@ class TestLegacyTierModelNormalization:
         router = build_model_router(_legacy_persisted_economics(), runtime_backend="codex_cli")
         assert router is not None
         assert router.tier_models == {
-            "frugal": "gpt-5.1-codex-mini",
-            "standard": "gpt-5-codex",
-            "frontier": "gpt-5.2",
+            "frugal": "gpt-6-luna",
+            "standard": "gpt-6.1-sol",
+            "frontier": "gpt-6-astra",
         }
 
     def test_legacy_opus_4_6_normalizes_to_current(self) -> None:
@@ -417,6 +434,61 @@ class TestDecideModel:
         )
         assert d.tier == "frugal"  # standard base dropped one notch
         assert d.model == "haiku-x"
+
+    def test_quality_first_keeps_trusted_child_starting_tier_and_retry_raise(self) -> None:
+        router = ModelRouter(
+            tier_models={"frugal": "haiku-x", "standard": "sonnet-x", "frontier": "opus-x"},
+            runtime_backend="claude",
+            child_tier="standard",
+            base_tier="standard",
+            escalation_retry_threshold=2,
+            child_model_lowering_enabled=False,
+        )
+        initial = decide_model(
+            ParamSupport.NATIVE,
+            router=router,
+            is_decomposed_child=True,
+            decomposition_trustworthy=True,
+        )
+        retry = decide_model(
+            ParamSupport.NATIVE,
+            router=router,
+            is_decomposed_child=True,
+            decomposition_trustworthy=True,
+            retry_attempt=2,
+        )
+        suggested = decide_model(
+            ParamSupport.NATIVE,
+            router=router,
+            is_decomposed_child=True,
+            decomposition_trustworthy=True,
+            suggested_tier="frugal",
+        )
+        assert (initial.tier, initial.model) == ("standard", "sonnet-x")
+        assert (retry.tier, retry.model) == ("frontier", "opus-x")
+        assert (suggested.tier, suggested.model) == ("frugal", "haiku-x")
+
+    def test_equal_child_and_base_tiers_do_not_disable_adaptive_lowering(self) -> None:
+        router = build_model_router(
+            _economics(default_tier="standard"),
+            runtime_backend="claude",
+            base_tier_override="standard",
+        )
+        assert router is not None
+        assert router.child_tier == router.base_tier == "standard"
+        decision = decide_model(
+            ParamSupport.NATIVE,
+            router=router,
+            is_decomposed_child=True,
+            decomposition_trustworthy=True,
+        )
+        assert decision.tier == "frugal"
+
+    def test_explicit_model_pin_still_disables_routing(self) -> None:
+        assert (
+            build_model_router(_economics(), runtime_backend="claude", pinned_model="user-sonnet")
+            is None
+        )
 
     def test_untrusted_decomposed_child_stays_at_base_tier(self) -> None:
         router = build_model_router(_economics(), runtime_backend="claude")
@@ -619,7 +691,7 @@ class TestDecideModel:
         assert router is not None
         d = decide_model(ParamSupport.IGNORED, router=router, is_decomposed_child=False)
         assert d.tier == "standard"
-        assert d.model == "gemini-2.5-pro"
+        assert d.model == "pro"
         assert d.mode == "advised"
         assert d.is_enforced is False
 
@@ -793,3 +865,99 @@ class TestResolveExecuteModel:
         assert decision.mode == "none"
         assert decision.model is None
         assert kwargs == {}
+
+
+class TestResolveRouteEconomics:
+    """Under ``auto`` each tier runs the backend's latest model of that tier."""
+
+    @staticmethod
+    def _router_models(economics: EconomicsConfig, backend: str) -> dict[str, str]:
+        router = build_model_router(economics, runtime_backend=backend)
+        assert router is not None
+        return dict(router.tier_models)
+
+    def test_auto_routes_claude_tiers_to_aliases(self) -> None:
+        resolved = resolve_route_economics(_economics(), runtime_backend="claude", pinned=False)
+
+        assert self._router_models(resolved, "claude") == {
+            "frugal": "haiku",
+            "standard": "sonnet",
+            "frontier": "opus",
+        }
+        # The ladder's shape and costs stay configuration.
+        assert {name: tier.cost_factor for name, tier in resolved.tiers.items()} == {
+            "frugal": 1,
+            "standard": 10,
+            "frontier": 30,
+        }
+
+    @pytest.mark.parametrize("backend", ["codex_cli", "codex_mcp", "gemini_cli"])
+    def test_model_router_keeps_native_ladder_on_sentinel_backends(self, backend: str) -> None:
+        shipped = get_default_config().economics
+        resolved = resolve_route_economics(shipped, runtime_backend=backend, pinned=False)
+
+        models = self._router_models(resolved, backend)
+        assert models
+        assert models == self._router_models(shipped, backend)
+        assert "default" not in models.values()
+
+    def test_auto_keeps_other_providers_entries(self) -> None:
+        shipped = get_default_config().economics
+        resolved = resolve_route_economics(shipped, runtime_backend="claude", pinned=False)
+
+        assert self._router_models(resolved, "codex_cli") == self._router_models(
+            shipped, "codex_cli"
+        )
+
+    def test_pinned_ladder_is_used_verbatim(self) -> None:
+        economics = _economics()
+
+        resolved = resolve_route_economics(economics, runtime_backend="claude", pinned=True)
+
+        assert resolved is economics
+        assert self._router_models(resolved, "claude") == {
+            "frugal": "haiku-x",
+            "standard": "sonnet-x",
+            "frontier": "opus-x",
+        }
+
+    def test_explicit_backend_keeps_configured_ladder(self) -> None:
+        economics = _economics()
+
+        assert (
+            resolve_route_economics(economics, runtime_backend="litellm", pinned=False) is economics
+        )
+
+    def test_unmapped_backend_is_unchanged(self) -> None:
+        economics = _economics()
+
+        assert (
+            resolve_route_economics(economics, runtime_backend="opencode", pinned=False)
+            is economics
+        )
+        assert resolve_route_economics(economics, runtime_backend=None, pinned=False) is economics
+
+
+class TestExplicitNativeLadders:
+    def test_runtime_specific_codex_ladder_precedes_openai_defaults(self) -> None:
+        economics = _economics(
+            tiers={
+                "standard": TierConfig(
+                    cost_factor=10,
+                    models=[
+                        ModelConfig(provider="openai", model="gpt-4o"),
+                        ModelConfig(provider="codex", model="my-custom-proxy"),
+                    ],
+                )
+            }
+        )
+        router = build_model_router(economics, runtime_backend="codex_cli")
+        assert router is not None
+        assert dict(router.tier_models) == {"standard": "my-custom-proxy"}
+
+    @pytest.mark.parametrize("model", ["default", "auto", "current", " default ", "AUTO", ""])
+    def test_unresolved_sentinel_is_advisory_even_with_native_model_flag(self, model: str) -> None:
+        router = ModelRouter({"standard": model}, "codex_cli", "frugal", "standard", 2)
+        decision = decide_model(ParamSupport.NATIVE, router=router, is_decomposed_child=False)
+        assert decision.mode == "advised"
+        assert not decision.is_enforced

@@ -183,6 +183,46 @@ class TestBareMode:
         assert "orch_001" in result.output
 
     @patch("ouroboros.cli.commands.cancel._get_event_store")
+    def test_list_mode_prints_active_sessions_without_prompting(
+        self, mock_get_es: AsyncMock
+    ) -> None:
+        """--list prints the table and exits 0 with no stdin, cancelling nothing."""
+        from ouroboros.events.base import BaseEvent
+
+        mock_es = AsyncMock()
+        mock_get_es.return_value = mock_es
+        mock_es.get_all_sessions = AsyncMock(
+            return_value=[
+                BaseEvent(
+                    type="orchestrator.session.started",
+                    aggregate_type="session",
+                    aggregate_id="orch_001",
+                    data={},
+                ),
+            ]
+        )
+        tracker = _make_tracker(session_id="orch_001", status=SessionStatus.RUNNING)
+
+        with (
+            patch("ouroboros.orchestrator.session.SessionRepository") as MockRepo,
+            patch("ouroboros.cli.commands.cancel.typer.prompt") as prompt,
+        ):
+            MockRepo.return_value.reconstruct_session = AsyncMock(return_value=Result.ok(tracker))
+            result = runner.invoke(app, ["cancel", "execution", "--list"])
+
+        assert result.exit_code == 0
+        assert "orch_001" in result.output
+        assert "ouroboros cancel execution <session_id>" in result.output
+        prompt.assert_not_called()
+        mock_es.append.assert_not_called()
+
+    @pytest.mark.parametrize("extra", [["orch_001"], ["--all"]])
+    def test_list_mode_rejects_cancel_targets(self, extra: list[str]) -> None:
+        result = runner.invoke(app, ["cancel", "execution", "--list", *extra])
+        assert result.exit_code == 1
+        assert "--list cannot be combined" in result.output
+
+    @patch("ouroboros.cli.commands.cancel._get_event_store")
     def test_bare_mode_no_active_sessions(self, mock_get_es: AsyncMock) -> None:
         """Test bare mode when no active sessions exist."""
         mock_es = AsyncMock()

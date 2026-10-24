@@ -8,7 +8,14 @@ from typing import Any
 from uuid import uuid4
 
 from ouroboros.auto.grading import deterministic_floor
-from ouroboros.auto.ledger import LedgerStatus, SeedDraftLedger
+from ouroboros.auto.ledger import (
+    REPO_FACT_KEY_INFIX,
+    REQUESTER_KEY_SUFFIX,
+    USER_GOAL_KEY,
+    LedgerEntry,
+    LedgerStatus,
+    SeedDraftLedger,
+)
 from ouroboros.core.seed import (
     BrownfieldContext,
     ContextReference,
@@ -16,8 +23,11 @@ from ouroboros.core.seed import (
     ExitCondition,
     OntologyField,
     OntologySchema,
+    RepoFact,
+    RequesterAnswer,
     Seed,
     SeedMetadata,
+    SourcedScope,
 )
 
 _INACTIVE_STATUSES: frozenset[LedgerStatus] = frozenset(
@@ -65,6 +75,47 @@ _PARTIAL_DEFAULT_FAILURE_MODES = (
 )
 
 _PARTIAL_PLACEHOLDER_FIELD = "(unresolved at deadline; see unresolved_slots)"
+
+# Criterion used when no confirmed criterion exists. It is the seed repairer's
+# goal-level placeholder, which ``execution_acceptance`` already treats as
+# generic, so it neither narrows the goal nor reads as a specific requirement.
+_GOAL_PROOF_CRITERION = (
+    "A command/API check returns stable observable output or artifacts proving the task goal."
+)
+
+# The constraint used when nothing confirmed one. It restates the binding
+# rule itself rather than guessing a limit on the task, so the Seed keeps a
+# hard constraint without narrowing what the user asked for.
+CONFIRMED_SCOPE_CONSTRAINT = (
+    "Scope comes only from the goal, the requester's answers, and the repository; "
+    "anything listed under Assumptions may be overridden."
+)
+
+# Stand-ins for a ledger section with no binding entry. They describe the
+# section as open instead of repeating a guess the worker would have to keep.
+_UNCONFIRMED_FIELD = "Not confirmed; see Assumptions."
+_UNCONFIRMED_VERIFICATION = "Each acceptance criterion passes its own verification."
+_UNCONFIRMED_FAILURE_MODES = "none confirmed"
+
+# Every ledger section except the goal. Only binding entries fill the Seed's
+# binding fields (constraints, criteria, ontology, principles, exit
+# conditions); the rest are carried as Seed ``assumptions``.
+_ASSUMPTION_SECTIONS = (
+    "constraints",
+    "non_goals",
+    "acceptance_criteria",
+    "actors",
+    "inputs",
+    "outputs",
+    "verification_plan",
+    "failure_modes",
+    "runtime_context",
+)
+_ASSUMPTION_PREFIXES = {
+    "constraints": "",
+    "non_goals": "Non-goal: ",
+    "acceptance_criteria": "",
+}
 
 
 def brownfield_context_from_cwd(cwd: str | Path | None) -> BrownfieldContext:
@@ -128,45 +179,33 @@ def synthesize_seed_from_ledger(
         raise ValueError(msg)
 
     goal = _latest_value(ledger, "goal")
-    constraints = _lines_from_section(ledger, "constraints")
-    non_goals = _lines_from_section(ledger, "non_goals")
+    constraints = _lines_from_section(ledger, "constraints", binding=True)
+    non_goals = _lines_from_section(ledger, "non_goals", binding=True)
     if non_goals:
         constraints = (*constraints, *[f"Non-goal: {item}" for item in non_goals])
+    constraints = constraints or (CONFIRMED_SCOPE_CONSTRAINT,)
 
-    acceptance_criteria = _lines_from_section(ledger, "acceptance_criteria", split_clauses=False)
-    verification_plan = _joined_section(ledger, "verification_plan")
-    failure_modes = _joined_section(ledger, "failure_modes")
+    # With no confirmed criterion, the criterion is proof of the goal itself: a
+    # guessed criterion would narrow it.
+    acceptance_criteria = _lines_from_section(
+        ledger, "acceptance_criteria", split_clauses=False, binding=True
+    ) or (_GOAL_PROOF_CRITERION,)
+    verification_plan = _binding_joined(ledger, "verification_plan") or _UNCONFIRMED_VERIFICATION
+    failure_modes = _binding_joined(ledger, "failure_modes") or _UNCONFIRMED_FAILURE_MODES
 
     return Seed(
         goal=goal,
         brownfield_context=brownfield_context or BrownfieldContext(),
         constraints=constraints,
         acceptance_criteria=acceptance_criteria,
+        assumptions=ledger_assumptions(ledger),
+        requester_answers=ledger_requester_answers(ledger),
+        repo_facts=ledger_repo_facts(ledger),
+        open_questions=ledger_open_questions(ledger),
         ontology_schema=OntologySchema(
             name=_ontology_name(goal),
             description="Auto-synthesized ontology from the completed Seed Draft Ledger.",
-            fields=(
-                OntologyField(
-                    name="actors",
-                    field_type="string",
-                    description=_joined_section(ledger, "actors"),
-                ),
-                OntologyField(
-                    name="inputs",
-                    field_type="string",
-                    description=_joined_section(ledger, "inputs"),
-                ),
-                OntologyField(
-                    name="outputs",
-                    field_type="string",
-                    description=_joined_section(ledger, "outputs"),
-                ),
-                OntologyField(
-                    name="runtime_context",
-                    field_type="string",
-                    description=_joined_section(ledger, "runtime_context"),
-                ),
-            ),
+            fields=_ontology_fields(ledger, placeholder=_UNCONFIRMED_FIELD),
         ),
         evaluation_principles=(
             EvaluationPrinciple(
@@ -299,23 +338,27 @@ def partial_seed_from_evidence(
     unresolved_slots = tuple(ledger.open_gaps())
     degraded = bool(unresolved_slots)
 
-    constraints = list(_lines_from_section(ledger, "constraints"))
-    non_goals = _lines_from_section(ledger, "non_goals")
+    constraints = list(_lines_from_section(ledger, "constraints", binding=True))
+    non_goals = _lines_from_section(ledger, "non_goals", binding=True)
     for item in non_goals:
         constraints.append(f"Non-goal: {item}")
+    if not constraints:
+        constraints.append(CONFIRMED_SCOPE_CONSTRAINT)
     for slot in unresolved_slots:
         constraints.append(
             f"Known unresolved slot ({slot}): treat as next-step requirement, not implicit success."
         )
 
-    acceptance = _lines_from_section(ledger, "acceptance_criteria", split_clauses=False)
+    acceptance = _lines_from_section(
+        ledger, "acceptance_criteria", split_clauses=False, binding=True
+    )
     if not acceptance:
         acceptance = _PARTIAL_DEFAULT_ACCEPTANCE
 
     verification_plan = (
-        _joined_section(ledger, "verification_plan") or _PARTIAL_DEFAULT_VERIFICATION
+        _binding_joined(ledger, "verification_plan") or _PARTIAL_DEFAULT_VERIFICATION
     )
-    failure_modes = _joined_section(ledger, "failure_modes") or _PARTIAL_DEFAULT_FAILURE_MODES
+    failure_modes = _binding_joined(ledger, "failure_modes") or _PARTIAL_DEFAULT_FAILURE_MODES
 
     ontology_schema = OntologySchema(
         name=_ontology_name(goal),
@@ -323,29 +366,7 @@ def partial_seed_from_evidence(
             "Partial ontology synthesized from incomplete Seed Draft Ledger "
             f"under degraded-recovery reason: {reason}."
         ),
-        fields=(
-            OntologyField(
-                name="actors",
-                field_type="string",
-                description=_joined_section(ledger, "actors") or _PARTIAL_PLACEHOLDER_FIELD,
-            ),
-            OntologyField(
-                name="inputs",
-                field_type="string",
-                description=_joined_section(ledger, "inputs") or _PARTIAL_PLACEHOLDER_FIELD,
-            ),
-            OntologyField(
-                name="outputs",
-                field_type="string",
-                description=_joined_section(ledger, "outputs") or _PARTIAL_PLACEHOLDER_FIELD,
-            ),
-            OntologyField(
-                name="runtime_context",
-                field_type="string",
-                description=_joined_section(ledger, "runtime_context")
-                or _PARTIAL_PLACEHOLDER_FIELD,
-            ),
-        ),
+        fields=_ontology_fields(ledger, placeholder=_PARTIAL_PLACEHOLDER_FIELD),
     )
 
     # Degraded seeds carry a deliberately elevated ambiguity floor so that
@@ -363,6 +384,10 @@ def partial_seed_from_evidence(
         goal=goal,
         constraints=tuple(dict.fromkeys(constraints)),
         acceptance_criteria=acceptance,
+        assumptions=ledger_assumptions(ledger),
+        requester_answers=ledger_requester_answers(ledger),
+        repo_facts=ledger_repo_facts(ledger),
+        open_questions=ledger_open_questions(ledger),
         ontology_schema=ontology_schema,
         evaluation_principles=(
             EvaluationPrinciple(
@@ -407,6 +432,50 @@ def partial_seed_from_evidence(
     )
 
 
+def _ontology_fields(ledger: SeedDraftLedger, *, placeholder: str) -> tuple[OntologyField, ...]:
+    """Ontology fields from binding entries; an unconfirmed field is optional."""
+    fields: list[OntologyField] = []
+    for name in ("actors", "inputs", "outputs", "runtime_context"):
+        confirmed = _binding_joined(ledger, name)
+        fields.append(
+            OntologyField(
+                name=name,
+                field_type="string",
+                description=confirmed or placeholder,
+                required=bool(confirmed),
+            )
+        )
+    return tuple(fields)
+
+
+def _binding_joined(ledger: SeedDraftLedger, section_name: str) -> str:
+    return "; ".join(
+        entry.value.strip()
+        for entry in _active_entries(ledger, section_name)
+        if entry.binds_seed and not _is_requester_answer(entry) and not _is_repo_fact(entry)
+    )
+
+
+def _is_requester_answer(entry: LedgerEntry) -> bool:
+    """Whether ``entry`` holds a requester's answer (``requester.requester_answer``).
+
+    Such an entry is a confirmed fact, but it reaches the worker verbatim as a
+    quoted question and answer (``Seed.requester_answers``), never rewritten
+    into a constraint, criterion or ontology field.
+    """
+    return entry.key.endswith(REQUESTER_KEY_SUFFIX)
+
+
+def _is_repo_fact(entry: LedgerEntry) -> bool:
+    """Whether ``entry`` holds a checked repository fact (``auto/investigator.py``).
+
+    It settles its section, but it describes the current code, not a
+    requirement: it reaches the worker verbatim in ``Seed.repo_facts``, never
+    as a constraint, criterion or ontology field.
+    """
+    return REPO_FACT_KEY_INFIX in entry.key
+
+
 def _latest_value(ledger: SeedDraftLedger, section_name: str) -> str:
     values = _active_values(ledger, section_name)
     if not values:
@@ -415,12 +484,178 @@ def _latest_value(ledger: SeedDraftLedger, section_name: str) -> str:
     return values[-1]
 
 
-def _joined_section(ledger: SeedDraftLedger, section_name: str) -> str:
-    return "; ".join(_active_values(ledger, section_name))
+def ledger_assumptions(ledger: SeedDraftLedger) -> tuple[str, ...]:
+    """Return the ledger's unconfirmed requirement drafts as Seed assumptions.
+
+    These are the active entries of every section but the goal that do not
+    bind (see :attr:`LedgerEntry.binds_seed`) and that no interviewer question
+    produced: auto's conservative defaults and assumptions. The worker sees
+    them as assumptions it may override. The generic safe-default closure
+    block is interview bookkeeping, not a statement about the task, so it is
+    left out.
+
+    An entry that answers an interviewer question (``LedgerEntry.question``)
+    renders nothing here, neither its drafted answer nor its question: the
+    question goes to ``Seed.open_questions`` (``ledger_open_questions``), which
+    no execution prompt renders. A requester's answer renders in
+    ``Seed.requester_answers`` instead (``ledger_requester_answers``).
+    """
+    lines: list[str] = []
+    for section_name in _ASSUMPTION_SECTIONS:
+        prefix = _ASSUMPTION_PREFIXES.get(
+            section_name, f"{section_name.replace('_', ' ').capitalize()}: "
+        )
+        values = _lines_from_section(
+            ledger,
+            section_name,
+            split_clauses=False,
+            binding=False,
+            closure=False,
+            asked=False,
+        )
+        lines.extend(f"{prefix}{value}" for value in values)
+    return tuple(dict.fromkeys(lines))
+
+
+def ledger_open_questions(ledger: SeedDraftLedger) -> tuple[str, ...]:
+    """Every interviewer question nobody answered, verbatim and in ledger order.
+
+    The split is by entry provenance, never by text: an active entry that does
+    not bind and carries the interviewer's question (``LedgerEntry.question``,
+    stamped where the entry is created) holds a draft nobody confirmed. That
+    covers the investigator's not-found entries (``.investigated.<round>``),
+    auto's own drafted answers, and drafts kept because the requester gave no
+    answer (``LedgerEntry.requester_unanswered``). Requester answers and
+    checked repository facts are answers, so they are never open questions.
+    """
+    questions: list[str] = []
+    for section_name in _ASSUMPTION_SECTIONS:
+        questions.extend(
+            entry.question.strip()
+            for entry in _active_entries(ledger, section_name)
+            if not entry.binds_seed
+            and entry.question.strip()
+            and not _is_requester_answer(entry)
+            and not _is_repo_fact(entry)
+        )
+    return tuple(dict.fromkeys(questions))
+
+
+def with_ledger_assumptions(seed: Seed, ledger: SeedDraftLedger) -> Seed:
+    """Carry the ledger's unconfirmed drafts into ``seed.assumptions``.
+
+    The interview transcript withholds auto's guessed answers from Seed
+    extraction (``bigbang/answer_provenance.py``), so they cannot become
+    constraints or criteria; this keeps them visible to the worker as
+    non-binding assumptions. Existing assumptions keep their order first.
+    """
+    merged = tuple(dict.fromkeys((*seed.assumptions, *ledger_assumptions(ledger))))
+    if merged == seed.assumptions:
+        return seed
+    return seed.model_copy(update={"assumptions": merged})
+
+
+def ledger_requester_answers(ledger: SeedDraftLedger) -> tuple[RequesterAnswer, ...]:
+    """Every answer the requester gave, with its question, verbatim and in ledger order.
+
+    One answer fills each section its question targeted, so the pairs are
+    de-duplicated. A later answer for the same facet retires the earlier entry
+    in ``add_entry``; both are still the requester's own words, so both are kept.
+    """
+    pairs: dict[tuple[str, str], RequesterAnswer] = {}
+    for section in ledger.sections.values():
+        for entry in section.entries:
+            if not _is_requester_answer(entry) or not entry.value.strip():
+                continue
+            key = (entry.question.strip(), entry.value.strip())
+            pairs.setdefault(key, RequesterAnswer(question=key[0], answer=key[1]))
+    return tuple(pairs.values())
+
+
+def with_requester_answers(seed: Seed, ledger: SeedDraftLedger) -> Seed:
+    """Carry the requester's answers into ``seed.requester_answers``, verbatim."""
+    merged = tuple(dict.fromkeys((*seed.requester_answers, *ledger_requester_answers(ledger))))
+    if merged == seed.requester_answers:
+        return seed
+    return seed.model_copy(update={"requester_answers": merged})
+
+
+def ledger_repo_facts(ledger: SeedDraftLedger) -> tuple[RepoFact, ...]:
+    """Every checked repository fact, with its question and evidence, in ledger order.
+
+    One fact fills each section its question targeted, so facts are
+    de-duplicated by question and answer.
+    """
+    facts: dict[tuple[str, str], RepoFact] = {}
+    for section in ledger.sections.values():
+        for entry in section.entries:
+            if not _is_repo_fact(entry) or not entry.value.strip():
+                continue
+            key = (entry.question.strip(), entry.value.strip())
+            facts.setdefault(
+                key, RepoFact(question=key[0], answer=key[1], evidence=tuple(entry.evidence))
+            )
+    return tuple(facts.values())
+
+
+def ledger_sourced_scope(ledger: SeedDraftLedger) -> SourcedScope | None:
+    """The goal, constraints and criteria whose source the ledger records.
+
+    The goal is the user's request verbatim (the ``USER_GOAL_KEY`` entry). The
+    constraints, non-goals and criteria are the entries that bind
+    (``LedgerEntry.binds_seed``), split the same way a ledger-synthesized Seed
+    splits them. The decision is by entry provenance only; nothing reads the
+    text. Without an active binding user goal there is no record (``None``),
+    and the Seed renders as before.
+    """
+    goal_entries = [
+        entry
+        for entry in _active_entries(ledger, "goal")
+        if entry.key == USER_GOAL_KEY and entry.binds_seed
+    ]
+    if not goal_entries:
+        return None
+    constraints = _lines_from_section(ledger, "constraints", binding=True)
+    non_goals = _lines_from_section(ledger, "non_goals", binding=True)
+    return SourcedScope(
+        goal=goal_entries[-1].value.strip(),
+        constraints=(*constraints, *[f"Non-goal: {item}" for item in non_goals]),
+        acceptance_criteria=_lines_from_section(
+            ledger, "acceptance_criteria", split_clauses=False, binding=True
+        ),
+    )
+
+
+def with_ledger_carryover(seed: Seed, ledger: SeedDraftLedger) -> Seed:
+    """Carry the ledger's assumptions, requester answers, repo facts, open questions and sourced scope.
+
+    The sourced scope (``Seed.sourced_scope``) is what the worker is told; the
+    Seed's own goal, constraints, criteria, assumptions, ontology, principles
+    and exit conditions are written by the Seed generator from the whole
+    interview, unanswered questions included, so they stay in the Seed for the
+    record and for verification only.
+    """
+    seed = with_requester_answers(with_ledger_assumptions(seed, ledger), ledger)
+    merged = tuple(dict.fromkeys((*seed.repo_facts, *ledger_repo_facts(ledger))))
+    if merged != seed.repo_facts:
+        seed = seed.model_copy(update={"repo_facts": merged})
+    questions = tuple(dict.fromkeys((*seed.open_questions, *ledger_open_questions(ledger))))
+    if questions != seed.open_questions:
+        seed = seed.model_copy(update={"open_questions": questions})
+    scope = ledger_sourced_scope(ledger)
+    if scope is None or scope == seed.sourced_scope:
+        return seed
+    return seed.model_copy(update={"sourced_scope": scope})
 
 
 def _lines_from_section(
-    ledger: SeedDraftLedger, section_name: str, *, split_clauses: bool = True
+    ledger: SeedDraftLedger,
+    section_name: str,
+    *,
+    split_clauses: bool = True,
+    binding: bool | None = None,
+    closure: bool = True,
+    asked: bool | None = None,
 ) -> tuple[str, ...]:
     """Split a ledger section's active values into deduplicated lines.
 
@@ -430,10 +665,28 @@ def _lines_from_section(
     being mechanically exploded into many tiny acceptance criteria — each extra
     AC costs a full agent session at execution time, so over-atomization here is
     pure token waste.
+
+    ``binding`` keeps only entries that bind (``True``) or only those that do
+    not (``False``); ``None`` keeps both. ``closure=False`` drops the
+    safe-default closure entry. ``asked`` keeps only entries that answer an
+    interviewer question (``True``) or only those that do not (``False``).
     """
     pattern = r"\r?\n\s*[-*]\s+" if not split_clauses else r"(?:\r?\n\s*[-*]\s+|\s*;\s+)"
     lines: list[str] = []
-    for value in _active_values(ledger, section_name):
+    for entry in _active_entries(ledger, section_name):
+        if binding is not None and entry.binds_seed is not binding:
+            continue
+        if _is_requester_answer(entry):
+            continue  # quoted verbatim in ``Seed.requester_answers`` instead
+        if _is_repo_fact(entry):
+            continue  # quoted verbatim in ``Seed.repo_facts`` instead
+        if binding is False and entry.requester_unanswered:
+            continue
+        if not closure and entry.key == f"{section_name}.safe_default_finalization":
+            continue
+        if asked is not None and bool(entry.question.strip()) is not asked:
+            continue
+        value = entry.value.strip()
         parts = re.split(pattern, value)
         for part in parts:
             cleaned = part.strip(" \t\r\n-*:;.")
@@ -443,11 +696,15 @@ def _lines_from_section(
 
 
 def _active_values(ledger: SeedDraftLedger, section_name: str) -> tuple[str, ...]:
+    return tuple(entry.value.strip() for entry in _active_entries(ledger, section_name))
+
+
+def _active_entries(ledger: SeedDraftLedger, section_name: str) -> tuple[LedgerEntry, ...]:
     section = ledger.sections.get(section_name)
     if section is None:
         return ()
     return tuple(
-        entry.value.strip()
+        entry
         for entry in section.entries
         if entry.status not in _INACTIVE_STATUSES and entry.value.strip()
     )

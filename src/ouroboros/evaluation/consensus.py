@@ -29,6 +29,7 @@ from ouroboros.config import (
     get_consensus_models,
     get_llm_backend_for_role,
 )
+from ouroboros.config.model_selection import backend_model_selection
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.ontology_aspect import AnalysisResult
 from ouroboros.core.types import Result
@@ -50,13 +51,6 @@ from ouroboros.events.evaluation import (
 from ouroboros.evolution.provider_usage import tracked_complete
 from ouroboros.providers.base import CompletionConfig, LLMAdapter, Message, MessageRole
 from ouroboros.strategies.devil_advocate import ConsensusContext, DevilAdvocateStrategy
-
-# Default models for consensus voting (Frontier tier)
-# Can be overridden via ConsensusConfig.models
-DEFAULT_CONSENSUS_MODELS: tuple[str, ...] = get_consensus_models(
-    get_llm_backend_for_role("consensus")
-)
-
 
 # Perspective labels for single-model fallback (same model, different prompts)
 SINGLE_MODEL_PERSPECTIVES: tuple[tuple[str, VoterRole, str], ...] = (
@@ -127,7 +121,10 @@ class ConsensusConfig:
     """Configuration for consensus evaluation.
 
     Attributes:
-        models: Models to use for voting. When omitted, the Evaluate-stage model is used.
+        models: Models to use for voting. When omitted, the consensus roster is
+            resolved for the consensus-role backend when the config is built.
+        backend: Backend the voters run on. Set when the roster is resolved
+            here; ``None`` for a caller-supplied roster.
         temperature: Sampling temperature
         max_tokens: Maximum tokens per response
         majority_threshold: Required majority ratio (default 2/3)
@@ -136,6 +133,7 @@ class ConsensusConfig:
 
     models: tuple[str, ...] | None = None
     models_are_explicit: bool = field(default=False, init=False)
+    backend: str | None = field(default=None, init=False)
     temperature: float = 0.3
     max_tokens: int = 1024
     majority_threshold: float = 0.66  # 2/3 = 0.6666...
@@ -149,6 +147,7 @@ class ConsensusConfig:
             # needs >=2 distinct voters, so collapsing to one model breaks voting
             # (len(votes) < 2) and defeats cross-model diversity.
             backend = get_llm_backend_for_role("consensus")
+            object.__setattr__(self, "backend", backend)
             object.__setattr__(self, "models", get_consensus_models(backend))
 
 
@@ -315,11 +314,21 @@ class ConsensusEvaluator:
     def _should_use_multi_model(self) -> bool:
         """Determine whether to use multi-model or single-model mode.
 
-        Uses multi-model when:
+        Uses single-model perspectives when the roster was resolved for a
+        tier-alias backend (the Claude CLI family) and names one model in every
+        slot, as the automatic roster does: three votes from one model add no
+        diversity, so it comes from the perspective prompts instead. Otherwise
+        uses multi-model when:
         - Models are NOT openrouter/* (custom models, tests), OR
         - OPENROUTER_API_KEY is properly configured
         """
         assert self._config.models is not None
+        if (
+            not self._config.models_are_explicit
+            and len(set(self._config.models)) == 1
+            and backend_model_selection(self._config.backend) == "alias"
+        ):
+            return False
         needs_openrouter = any(m.startswith("openrouter/") for m in self._config.models)
         if not needs_openrouter:
             return True  # Custom models (e.g., tests) — use as-is
@@ -349,6 +358,7 @@ class ConsensusEvaluator:
                 context.executor_backend,
                 models,
                 available_runtime_backends(),
+                voter_backend=self._config.backend,
             )
             reviewer_independence = independence.status
             if independence.filtered_voters:

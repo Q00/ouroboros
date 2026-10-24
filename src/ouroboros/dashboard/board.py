@@ -19,27 +19,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from ouroboros.core.ac_runtime_projection import project_ac_runtime
 from ouroboros.observability.frugality_retrospective import (
     project_frugality_retrospective,
 )
 
-# Status columns, in board order. Node statuses map onto these directly
-# (verified distinct values: pending / executing / completed / failed); synonyms
-# from other emitters are normalized via ``_STATUS_ALIASES``.
 COLUMNS: tuple[str, ...] = ("pending", "executing", "completed", "failed")
-
-_STATUS_ALIASES = {
-    "running": "executing",
-    "active": "executing",
-    "in_progress": "executing",
-    "done": "completed",
-    "success": "completed",
-    "succeeded": "completed",
-    "error": "failed",
-    "errored": "failed",
-    "cancelled": "failed",
-    "canceled": "failed",
-}
 
 _NODE_EVENTS = frozenset(
     {
@@ -61,11 +46,6 @@ _TELEMETRY_EVENTS = frozenset(
         "execution.ac.token_attribution.reported",
     }
 )
-
-
-# Terminal statuses: once an AUTHORITATIVE event sets one, a node is finished
-# and a later coarse snapshot must not drag it backwards.
-_TERMINAL = frozenset({"completed", "failed"})
 
 
 @dataclass
@@ -229,68 +209,16 @@ def fold_telemetry_event(
     return False
 
 
-def _normalize_status(status: object) -> str | None:
-    if not isinstance(status, str) or not status:
-        return None
-    s = status.strip().lower()
-    s = _STATUS_ALIASES.get(s, s)
-    return s if s in COLUMNS else None
-
-
-def _apply_status(
-    card: dict[str, Any],
-    terminal: set[str],
-    node_id: str,
-    status: str | None,
-    *,
-    authoritative: bool,
-) -> None:
-    """Set a card's status with terminal-state precedence.
-
-    ``execution.ac.completed`` / ``execution.node.*`` are AUTHORITATIVE: they
-    reflect the real per-node lifecycle, including genuine re-opens (a retry sends
-    ``executing`` after ``completed``), so they always apply and update the
-    terminal marker. ``workflow.progress.updated``'s AC snapshot is COARSE and
-    lags the per-AC ``ac.completed`` — it must NOT downgrade a node already marked
-    terminal (that caused cards to flicker DONE → IN PROGRESS). It may still
-    upgrade a node TO a terminal state (the only card source for simple runs).
-    """
-    if not status:
-        return
-    if authoritative:
-        card["status"] = status
-        if status in _TERMINAL:
-            terminal.add(node_id)
-        else:
-            terminal.discard(node_id)  # real re-open / retry
-        return
-    # Non-authoritative (snapshot): never drag a finished node backwards.
-    if node_id in terminal and status not in _TERMINAL:
-        return
-    card["status"] = status
-    if status in _TERMINAL:
-        terminal.add(node_id)
-
-
 def _card(cards: dict[str, dict[str, Any]], node_id: str) -> dict[str, Any]:
     return cards.setdefault(node_id, {"id": node_id, "status": "pending"})
 
 
 def _upsert_ac_card(
     cards: dict[str, dict[str, Any]],
-    terminal: set[str],
     item: Any,
     ordinal: int,
 ) -> None:
-    """Upsert a card from one ``acceptance_criteria`` snapshot entry (COARSE source).
-
-    Entries are normally node dicts (``node_id`` / ``content`` / ``status`` …) but
-    may be plain strings in older/simpler payloads — both are supported. The card
-    is keyed by ``node_id`` so it merges with per-worker ``execution.node.*`` /
-    ``execution.session.started`` events for the same node. Status is applied via
-    :func:`_apply_status` as NON-authoritative so a lagging snapshot cannot revert
-    a node already finished by ``ac.completed``.
-    """
+    """Upsert card layout; the shared runtime projection owns state."""
     if isinstance(item, str):
         node_id = f"ac_{ordinal + 1}"
         card = _card(cards, node_id)
@@ -304,15 +232,84 @@ def _upsert_ac_card(
     title = item.get("content") or item.get("label")
     if title:
         card["title"] = title
-    _apply_status(
-        card, terminal, node_id, _normalize_status(item.get("status")), authoritative=False
-    )
     if item.get("depth") is not None:
         card["depth"] = item.get("depth")
     card["ac_index"] = (
         item.get("root_ac_number") or item.get("index") or card.get("ac_index") or ordinal + 1
     )
     card["parent_id"] = item.get("parent_node_id") or card.get("parent_id")
+
+
+_INTERVIEW_EVENTS = frozenset(
+    {
+        "interview.started",
+        "interview.response.recorded",
+        "interview.completed",
+        "interview.failed",
+        "interview.question_generation.parent_handoff",
+        "interview.response.emitted",
+        "interview.lateral_review.recommended",
+    }
+)
+
+
+def project_interview(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Project recognized interview lifecycle events into a read-only summary."""
+    projection: dict[str, Any] | None = None
+    for event in events:
+        event_type = event.get("event_type")
+        payload = event.get("payload")
+        interview_id = event.get("aggregate_id")
+        if (
+            event_type not in _INTERVIEW_EVENTS
+            or not isinstance(payload, dict)
+            or not isinstance(interview_id, str)
+            or not interview_id
+        ):
+            continue
+        if projection is None:
+            projection = {
+                "interview_id": interview_id,
+                "status": "started",
+                "round": None,
+                "total_rounds": None,
+                "last_event": event_type,
+            }
+        projection["interview_id"] = interview_id
+        projection["last_event"] = event_type
+        # Failure details describe only the current failed lifecycle state. A
+        # resumed interview may later become active or complete, in which case
+        # carrying these fields forward would show contradictory dashboard data.
+        projection.pop("error", None)
+        projection.pop("phase", None)
+        # A completion total belongs to the completed state only. Interviews
+        # can reopen after completion, so every recognized transition must
+        # retire it before a new completed event supplies a fresh total.
+        projection["total_rounds"] = None
+        if event_type == "interview.started":
+            projection["status"] = "started"
+        elif event_type in {
+            "interview.response.recorded",
+            "interview.question_generation.parent_handoff",
+            "interview.response.emitted",
+            "interview.lateral_review.recommended",
+        }:
+            projection["status"] = "active"
+            round_number = payload.get("round_number")
+            if isinstance(round_number, int) and not isinstance(round_number, bool):
+                projection["round"] = round_number
+        elif event_type == "interview.completed":
+            projection["status"] = "completed"
+            total_rounds = payload.get("total_rounds")
+            if isinstance(total_rounds, int) and not isinstance(total_rounds, bool):
+                projection["total_rounds"] = total_rounds
+        elif event_type == "interview.failed":
+            projection["status"] = "failed"
+            for key in ("error", "phase"):
+                value = payload.get(key)
+                if isinstance(value, str) and value:
+                    projection[key] = value[:500]
+    return projection
 
 
 def reduce_board(
@@ -332,7 +329,6 @@ def reduce_board(
     ledger = ProviderLedger()
     session_by_node: dict[str, str] = {}
     tool_by_node: dict[str, str] = {}
-    terminal: set[str] = set()  # node_ids finished by an authoritative event
     meta: dict[str, Any] = {
         "execution_id": execution_id,
         "session_id": None,
@@ -345,6 +341,7 @@ def reduce_board(
         "total_tokens": 0.0,
         "frugality": None,
         "frugality_retrospective": None,
+        "interview": project_interview(events),
     }
 
     for ev in events:
@@ -361,13 +358,6 @@ def reduce_board(
             title = payload.get("label") or payload.get("content")
             if title:
                 card["title"] = title
-            _apply_status(
-                card,
-                terminal,
-                node_id,
-                _normalize_status(payload.get("status")),
-                authoritative=True,
-            )
             if payload.get("depth") is not None:
                 card["depth"] = payload.get("depth")
             card["parent_id"] = payload.get("parent_node_id") or card.get("parent_id")
@@ -383,21 +373,11 @@ def reduce_board(
                 if payload.get("session_id"):
                     session_by_node[node_id] = str(payload["session_id"])
                 card.setdefault("title", payload.get("acceptance_criterion") or node_id)
-                # A started session is in flight unless a later status overrides it.
-                if card.get("status") == "pending":
-                    card["status"] = "executing"
 
         elif event_type == "execution.ac.completed":
             node_id = payload.get("node_id")
             if isinstance(node_id, str) and node_id:
-                card = _card(cards, node_id)
-                _apply_status(
-                    card,
-                    terminal,
-                    node_id,
-                    "completed" if payload.get("success") else "failed",
-                    authoritative=True,
-                )
+                _card(cards, node_id)
 
         elif event_type in _TOOL_EVENTS:
             node_id = payload.get("node_id")
@@ -448,7 +428,7 @@ def reduce_board(
             criteria = payload.get("acceptance_criteria")
             if isinstance(criteria, list):
                 for ordinal, item in enumerate(criteria):
-                    _upsert_ac_card(cards, terminal, item, ordinal)
+                    _upsert_ac_card(cards, item, ordinal)
 
         elif event_type == "orchestrator.session.started":
             # Run-level provider — the fallback tag for cards that have no
@@ -463,7 +443,44 @@ def reduce_board(
             if payload.get("goal") and not meta["goal"]:
                 meta["goal"] = payload["goal"]
 
+    selected_execution = execution_id
+    selected_session = None
+    ambiguous_session = False
+    for ev in events:
+        if (
+            ev.get("event_type") == "orchestrator.session.started"
+            and ev.get("aggregate_id") == execution_id
+            and isinstance(ev.get("payload"), dict)
+        ):
+            candidate = ev["payload"].get("execution_id")
+            if isinstance(candidate, str) and candidate:
+                selected_execution = candidate
+                selected_session = execution_id
+    if selected_session is None:
+        sessions = {
+            ev["payload"]["session_id"]
+            for ev in events
+            if ev.get("event_type") == "workflow.progress.updated"
+            and isinstance(ev.get("payload"), dict)
+            and isinstance(ev["payload"].get("session_id"), str)
+        }
+        if len(sessions) == 1:
+            selected_session = next(iter(sessions))
+        ambiguous_session = len(sessions) > 1
+    runtime_projection = project_ac_runtime(
+        (
+            (ev.get("event_type", ""), ev["payload"], ev.get("aggregate_id"))
+            for ev in events
+            if isinstance(ev.get("payload"), dict) and not ambiguous_session
+        ),
+        execution_id=selected_execution,
+        session_id=selected_session,
+    )
+    meta["runtime"] = runtime_projection.run.to_data()
     for node_id, card in cards.items():
+        runtime = runtime_projection.for_node(node_id)
+        card["runtime"] = runtime.to_data()
+        card["status"] = runtime.display_status(card.get("status", "pending"))
         # Per-worker provider (execution.session.started) wins; otherwise fall back
         # to the run-level backend (orchestrator.session.started) so simple runs are
         # still provider-tagged.
@@ -499,5 +516,6 @@ __all__ = [
     "ProviderLedger",
     "fold_provider_event",
     "fold_telemetry_event",
+    "project_interview",
     "reduce_board",
 ]

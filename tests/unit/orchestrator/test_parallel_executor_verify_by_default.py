@@ -21,7 +21,7 @@ from ouroboros.core.seed import (
     SeedMetadata,
 )
 from ouroboros.harness.journal import EvidenceEntry, EvidenceKind, EvidenceManifest
-from ouroboros.orchestrator.adapter import ParamSupport, RuntimeCapabilities
+from ouroboros.orchestrator.adapter import AgentMessage, ParamSupport, RuntimeCapabilities
 from ouroboros.orchestrator.decomposition_policy import (
     DecompositionChild,
     DecompositionDecisionRecord,
@@ -45,6 +45,7 @@ from ouroboros.orchestrator.parallel_executor import (
     render_parallel_completion_message,
     render_parallel_verification_report,
 )
+from ouroboros.orchestrator.parallel_executor_models import governing_verifier_verdict
 from ouroboros.orchestrator.retry_hints import is_retryable_failure
 from ouroboros.orchestrator.verifier import VerifierVerdict
 from ouroboros.orchestrator.verify_shell import verify_shell_path_from_identity
@@ -86,6 +87,65 @@ def _seed_with_specs(*specs: AcceptanceCriterionSpec | str) -> Seed:
         ontology_schema=OntologySchema(name="n", description="d"),
         metadata=SeedMetadata(ambiguity_score=0.05),
     )
+
+
+@pytest.mark.parametrize(
+    ("error_type", "expected_retry"),
+    [("HermesConfigurationError", False), ("RuntimeExecutionError", True)],
+)
+def test_hermes_missing_profile_credentials_are_not_retried(
+    error_type: str, expected_retry: bool
+) -> None:
+    failure = (
+        "Hermes execution failed:\nHermes isn't configured yet -- no API keys or providers found."
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content="Run the worker",
+        success=False,
+        final_message=failure,
+        messages=(
+            AgentMessage(
+                type="result",
+                content=failure,
+                data={"subtype": "error", "error_type": error_type},
+            ),
+        ),
+        outcome=ACExecutionOutcome.FAILED,
+    )
+
+    assert is_retryable_failure(result) is expected_retry
+
+
+@pytest.mark.parametrize("failure", ["permission denied", "missing required tool", "HTTP 429"])
+def test_unrelated_classified_failures_keep_existing_retry_admission(failure: str) -> None:
+    result = ACExecutionResult(
+        ac_index=0, ac_content="Run the worker", success=False, final_message=failure
+    )
+
+    assert is_retryable_failure(result) is True
+
+
+def test_stale_hermes_configuration_error_does_not_suppress_later_failure_retry() -> None:
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content="Run the worker",
+        success=False,
+        messages=(
+            AgentMessage(
+                type="result",
+                content="Hermes isn't configured yet -- no API keys or providers found.",
+                data={"subtype": "error", "error_type": "HermesConfigurationError"},
+            ),
+            AgentMessage(
+                type="result",
+                content="Transient worker failure",
+                data={"subtype": "error", "error_type": "RuntimeExecutionError"},
+            ),
+        ),
+    )
+
+    assert is_retryable_failure(result) is True
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +230,35 @@ async def test_verify_gate_rejects_assertion_only_constructed_contract(tmp_path:
 
     assert outcome.passed is False
     assert outcome.reason == "output_assertion requires verify_command"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX virtualenv layout")
+async def test_verify_gate_resolves_tools_from_the_main_worktree_venv(tmp_path: Any) -> None:
+    """A task worktree lacks the gitignored ``.venv``; the gate uses the main tree's."""
+    main = tmp_path / "project"
+    bin_dir = main / ".venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    (main / ".venv" / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    for name, body in (("python3", ""), ("projtool", "echo PROJECT_VENV_TOOL")):
+        script = bin_dir / name
+        script.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+        script.chmod(0o755)
+    gitdir = main / ".git" / "worktrees" / "orch_1"
+    gitdir.mkdir(parents=True)
+    worktree = tmp_path / "worktrees" / "orch_1"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+    executor = _make_executor(working_directory=str(worktree))
+    spec = AcceptanceCriterionSpec(
+        description="project tool",
+        verify_command="projtool",
+        output_assertion="PROJECT_VENV_TOOL",
+    )
+
+    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(worktree))
+
+    assert outcome.passed is True, outcome.reason
 
 
 @pytest.mark.asyncio
@@ -617,6 +706,33 @@ async def test_apply_verify_gate_flips_success_to_failed(tmp_path: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_failing_verify_command_replaces_a_recorded_only_verifier_rejection(
+    tmp_path: Any,
+) -> None:
+    """A deciding verify gate's verdict routes the failure; a recorded-only one no longer hides it."""
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command="exit 1"))
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content="ac",
+        success=True,
+        atomic_verifier_verdict=VerifierVerdict(
+            passed=False, reasons=("fabrication",), failure_class="FABRICATION_SUSPECTED"
+        ),
+        recorded_rejection="Fat-harness verifier failed (fabrication).",
+    )
+    assert governing_verifier_verdict(result) is None
+
+    gated = await executor._apply_verify_gate(
+        seed=seed, ac_index=0, result=result, session_id="s", execution_id="e"
+    )
+
+    assert gated.success is False and gated.recorded_rejection is None
+    verdict = governing_verifier_verdict(gated)
+    assert verdict is not None and verdict.failure_class == "EVIDENCE_MISSING"
+
+
+@pytest.mark.asyncio
 async def test_apply_verify_gate_reuses_cached_success_outcome(tmp_path: Any) -> None:
     executor = _make_executor(working_directory=str(tmp_path))
     seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command="exit 0"))
@@ -803,6 +919,9 @@ async def test_batch_emits_outer_outcome_marker_after_verify_failure(tmp_path: A
         "outcome": "failed",
         "is_decomposed": True,
         "is_decomposed_child": True,
+        "verify_passed": False,
+        "verify_cause": "exit_nonzero",
+        "verify_no_signal": False,
     }
 
 
@@ -2542,7 +2661,10 @@ async def test_settlement_replay_mutation_invalidates_every_provisional_success(
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_restores_verify_evidence_and_result_retry_identity(tmp_path: Any) -> None:
+@pytest.mark.parametrize("change", [None, "command", "artifact", "assertion", "goal", "legacy"])
+async def test_checkpoint_restores_verify_evidence_and_result_retry_identity(
+    tmp_path: Any, change: str | None
+) -> None:
     from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 
     seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command="exit 0"))
@@ -2583,13 +2705,27 @@ async def test_checkpoint_restores_verify_evidence_and_result_retry_identity(tmp
     assert checkpoint.state["verify_gate_outcomes"]["0"]["workspace_digest"] == (
         gate.workspace_digest
     )
+    if change == "legacy":
+        checkpoint.state.pop("contract_fingerprint", None)
+    elif change == "goal":
+        seed = seed.model_copy(update={"goal": "different required behavior"})
+    elif change is not None:
+        updates = {
+            "command": {"verify_command": "exit 7"},
+            "artifact": {"expected_artifacts": ("missing.txt",)},
+            "assertion": {"output_assertion": "missing output"},
+        }
+        spec = seed.acceptance_criteria[0].model_copy(update=updates[change])
+        seed = seed.model_copy(update={"acceptance_criteria": (spec,)})
 
     restore_store = MagicMock()
     restore_store.load.return_value = type("LoadResult", (), {"is_ok": True, "value": checkpoint})()
     restore_store.save.return_value = type("SaveResult", (), {"is_ok": True})()
     restored = _make_executor(working_directory=str(tmp_path))
     restored._checkpoint_store = restore_store
-    restored._execute_ac_batch = AsyncMock()
+    restored._execute_ac_batch = AsyncMock(
+        return_value=[ACExecutionResult(ac_index=0, ac_content="ac", success=False)]
+    )
 
     recovered = await restored.execute_parallel(
         seed=seed,
@@ -2601,10 +2737,14 @@ async def test_checkpoint_restores_verify_evidence_and_result_retry_identity(tmp
         system_prompt="system",
     )
 
-    assert recovered.results[0].success is True
-    assert recovered.results[0].retry_attempt == 3
-    assert isinstance(recovered.results[0].verify_gate_outcome, _VerifyGateOutcome)
-    restored._execute_ac_batch.assert_not_awaited()
+    if change is None:
+        assert recovered.results[0].success is True
+        assert recovered.results[0].retry_attempt == 3
+        assert isinstance(recovered.results[0].verify_gate_outcome, _VerifyGateOutcome)
+        restored._execute_ac_batch.assert_not_awaited()
+    else:
+        assert recovered.results[0].success is False
+        restored._execute_ac_batch.assert_awaited_once()
 
 
 def test_workspace_digest_includes_empty_directories(tmp_path: Any) -> None:

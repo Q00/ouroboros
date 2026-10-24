@@ -9,8 +9,11 @@ when ``seed.metadata.degraded`` is True, the pipeline must
    ``seed.metadata.unresolved_slots``),
 2. still terminate as BLOCKED for safety blockers
    (``missing_goal`` / ``seed_goal_mismatch`` / ``high_risk_assumptions``),
-3. emit ``auto.product.partial_emitted`` and transition to
-   ``AutoPhase.COMPLETE`` when no blockers remain, and
+3. run the Seed like any auto Seed when it carries the user's goal on record
+   (``sourced_scope``): the worker sees only that goal, and the unresolved
+   slots stay recorded. Without it, emit ``auto.product.partial_emitted``
+   and stop ``BLOCKED`` with ``degraded_seed_not_executed``: that Seed is
+   never executed, so the session never reports complete, and
 4. surface ``partial_product`` / ``partial_product_reason`` /
    ``partial_unresolved_slots`` on ``AutoPipelineResult`` so MCP/CLI
    consumers can render the next-step hints without having to parse the
@@ -25,8 +28,13 @@ from typing import Any
 
 import pytest
 
+from ouroboros.auto.adapters import EvaluateResult
 from ouroboros.auto.grade_gate_terminals import (
+    DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE,
     DEGRADED_SEED_SAFETY_BLOCKERS_STOP_REASON_CODE,
+    SEED_GRADE_BELOW_REQUIRED_STOP_REASON_CODE,
+    degraded_seed_runs_as_stated,
+    seed_review_gate_blocker,
 )
 from ouroboros.auto.grading import GradeGate
 from ouroboros.auto.ledger import (
@@ -35,7 +43,7 @@ from ouroboros.auto.ledger import (
     LedgerStatus,
     SeedDraftLedger,
 )
-from ouroboros.auto.ledger_seed import partial_seed_from_evidence
+from ouroboros.auto.ledger_seed import partial_seed_from_evidence, with_ledger_carryover
 from ouroboros.auto.pipeline import AutoPipeline
 from ouroboros.auto.seed_reviewer import SeedReviewer
 from ouroboros.auto.state import (
@@ -43,7 +51,10 @@ from ouroboros.auto.state import (
     AutoPipelineState,
     AutoStore,
 )
+from ouroboros.core.seed import Seed, ac_texts
+from ouroboros.core.seed_contract import GOAL_OBJECTIVE_CRITERION
 from ouroboros.events.base import BaseEvent
+from ouroboros.orchestrator.runner import build_system_prompt, build_task_prompt
 
 
 class _RecordingEventStore:
@@ -266,27 +277,283 @@ class TestSeedReviewerPropagatesDegraded:
         assert not any(b.code == "high_ambiguity_score" for b in auto.grade_result.blockers)
 
 
+class TestReviewGateForDegradedSeedThatRuns:
+    """The review gate keeps only the safety bar for a degraded Seed that runs."""
+
+    def test_only_a_degraded_seed_with_a_sourced_goal_runs(self) -> None:
+        ledger = SeedDraftLedger.from_goal("Goal only.")
+        partial = partial_seed_from_evidence(ledger, reason="interview_phase_deadline")
+        assert partial.sourced_scope is None
+        assert degraded_seed_runs_as_stated(partial) is False
+
+        sourced = with_ledger_carryover(partial, ledger)
+        assert sourced.sourced_scope is not None
+        assert degraded_seed_runs_as_stated(sourced) is True
+
+        not_degraded = sourced.model_copy(
+            update={"metadata": sourced.metadata.model_copy(update={"degraded": False})}
+        )
+        assert degraded_seed_runs_as_stated(not_degraded) is False
+
+    def test_grade_bar_waived_only_for_a_degraded_seed_that_runs(self) -> None:
+        ledger = SeedDraftLedger.from_goal("Goal only.")
+        seed = with_ledger_carryover(
+            partial_seed_from_evidence(ledger, reason="interview_phase_deadline"), ledger
+        )
+        review = SeedReviewer().review(seed, ledger=ledger)
+        # The unresolved slots are reported as findings, so the grade stays B.
+        assert review.grade_result.grade.value == "B"
+        assert not review.grade_result.blockers
+        state = AutoPipelineState(goal="Goal only.", cwd="/tmp/project")
+
+        normal = seed_review_gate_blocker(state, review, skip_run=False)
+        assert normal is not None
+        assert normal[1] == SEED_GRADE_BELOW_REQUIRED_STOP_REASON_CODE
+        assert seed_review_gate_blocker(state, review, skip_run=False, runs_degraded=True) is None
+
+    def test_safety_blockers_still_stop_a_degraded_seed_that_runs(self) -> None:
+        ledger = SeedDraftLedger.from_goal("Goal only.")
+        ledger.add_entry(
+            "constraints",
+            LedgerEntry(
+                key="constraints.human_required",
+                value="Human must confirm the production credential rotation.",
+                source=LedgerSource.BLOCKER,
+                confidence=0.0,
+                status=LedgerStatus.BLOCKED,
+            ),
+        )
+        seed = with_ledger_carryover(
+            partial_seed_from_evidence(ledger, reason="interview_phase_deadline"), ledger
+        )
+        review = SeedReviewer().review(seed, ledger=ledger)
+        assert any(b.code == "ledger_blocked_gap" for b in review.grade_result.blockers)
+
+        terminal = seed_review_gate_blocker(
+            AutoPipelineState(goal="Goal only.", cwd="/tmp/project"),
+            review,
+            skip_run=False,
+            runs_degraded=True,
+        )
+        assert terminal is not None
+        assert terminal[1] == DEGRADED_SEED_SAFETY_BLOCKERS_STOP_REASON_CODE
+
+
 # ---------------------------------------------------------------------------
 # Pipeline end-to-end — partial product terminal
 # ---------------------------------------------------------------------------
 
 
+class _RecordingRunStarter:
+    """Run starter stub that records the Seed it was asked to execute."""
+
+    def __init__(self) -> None:
+        self.seeds: list[Seed] = []
+
+    async def __call__(self, seed: Seed, **_: Any) -> dict[str, str]:
+        self.seeds.append(seed)
+        return {"job_id": "job_1", "execution_id": "exec_1", "session_id": "session_1"}
+
+
+async def _forbidden_run_starter(_seed: Seed, **_: Any) -> dict[str, str]:
+    raise AssertionError("a degraded Seed that must stop was handed to RUN")
+
+
+class _InferredGoalDriver(_DeadlineDriver):
+    """Leaves the ledger without the user's goal on record before the deadline.
+
+    The goal section holds only a model-inferred entry, so the recorded Seed
+    gets no ``sourced_scope``: there is no sourced goal to run.
+    """
+
+    async def run(self, _state, ledger: SeedDraftLedger):  # noqa: ARG002
+        ledger.sections["goal"].entries = [
+            LedgerEntry(
+                key="goal.inferred",
+                value="Build a CLI",
+                source=LedgerSource.INFERENCE,
+                confidence=0.6,
+                status=LedgerStatus.CONFIRMED,
+            )
+        ]
+        await asyncio.sleep(3600)
+        raise AssertionError("must be cancelled by phase timeout")
+
+
 @pytest.mark.asyncio
-async def test_deadline_path_reaches_partial_product_terminal(tmp_path) -> None:
-    """End-to-end: deadline → degraded seed → COMPLETE + partial_product=True."""
+async def test_deadline_seed_with_sourced_goal_runs_on_the_request_as_stated(tmp_path) -> None:
+    """Nobody answered the open slots: the degraded Seed runs on the user's goal.
+
+    django-15863 (Ambig-SWE, v0.59.4 round 2) stopped here unexecuted while the
+    plain agent given the same issue resolved it. The worker is told only the
+    sourced goal, so the unresolved slots are never turned into answers; they
+    stay in the Seed, the result and the deadline event.
+    """
     event_store = _RecordingEventStore()
     driver = _DeadlineDriver(event_store=event_store)
     state = _build_deadline_state(tmp_path)
-    pipeline = AutoPipeline(driver, _no_seed_generator, store=AutoStore(tmp_path))
+    run_starter = _RecordingRunStarter()
+    pipeline = AutoPipeline(
+        driver, _no_seed_generator, store=AutoStore(tmp_path), run_starter=run_starter
+    )
+
+    result = await pipeline.run(state)
+
+    assert len(run_starter.seeds) == 1
+    assert state.phase == AutoPhase.COMPLETE
+    assert result.status == "complete"
+    assert result.stop_reason_code is None
+    assert result.job_id == "job_1"
+    seed = run_starter.seeds[0]
+    assert seed.metadata.degraded is True
+    assert seed.sourced_scope is not None
+    assert seed.sourced_scope.goal == "Build a CLI"
+    assert seed.metadata.unresolved_slots
+
+    # The unresolved slots stay recorded, never resolved.
+    assert result.partial_product is False
+    assert result.partial_product_reason == "interview_phase_deadline"
+    assert result.partial_unresolved_slots == seed.metadata.unresolved_slots
+    deadline_events = [
+        event for event in event_store.appended if event.type == "runtime.deadline.interview.fired"
+    ]
+    assert len(deadline_events) == 1
+    assert deadline_events[0].data["open_gaps"] == list(seed.metadata.unresolved_slots)
+    assert not [
+        event for event in event_store.appended if event.type == "auto.product.partial_emitted"
+    ]
+
+    # The worker sees the goal as stated, not the smoke criterion or the
+    # unresolved-slot constraints the Seed keeps for the record.
+    task_prompt = build_task_prompt(seed)
+    assert GOAL_OBJECTIVE_CRITERION in task_prompt
+    for prompt in (build_system_prompt(seed), task_prompt):
+        assert "Build a CLI" in prompt
+        for criterion in ac_texts(seed.acceptance_criteria):
+            assert criterion not in prompt
+        for constraint in seed.constraints:
+            assert constraint not in prompt
+
+
+@pytest.mark.asyncio
+async def test_deadline_seed_with_sourced_goal_passes_seed_qa_to_run(tmp_path) -> None:
+    """A passing Seed QA re-checks the review gate; the grade bar stays waived.
+
+    The degraded Seed grades B (its unresolved slots are findings), which
+    would stop a normal Seed at the post-QA gate.
+    """
+    qa_calls: list[str] = []
+
+    async def _passing_seed_qa(seed: Seed, _ledger: SeedDraftLedger) -> EvaluateResult:
+        qa_calls.append(seed.metadata.seed_id)
+        return EvaluateResult(passed=True, score=0.91, verdict="pass")
+
+    run_starter = _RecordingRunStarter()
+    pipeline = AutoPipeline(
+        _DeadlineDriver(),
+        _no_seed_generator,
+        store=AutoStore(tmp_path),
+        run_starter=run_starter,
+        seed_qa_evaluator=_passing_seed_qa,
+    )
+    state = _build_deadline_state(tmp_path)
+
+    result = await pipeline.run(state)
+
+    assert result.grade == "B"
+    assert len(qa_calls) == 1
+    assert len(run_starter.seeds) == 1
+    assert result.status == "complete"
+    assert result.stop_reason_code is None
+
+
+def _run_resume_state(tmp_path, ledger: SeedDraftLedger) -> AutoPipelineState:
+    """A session persisted in RUN with a degraded sourced Seed and no run handle."""
+    seed = with_ledger_carryover(
+        partial_seed_from_evidence(ledger, reason="interview_phase_deadline"), ledger
+    )
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.seed_artifact = seed.to_dict()
+    state.ledger = ledger.to_dict()
+    state.interview_completed = True
+    state.last_grade = "B"
+    for phase in (AutoPhase.INTERVIEW, AutoPhase.SEED_GENERATION, AutoPhase.REVIEW):
+        state.transition(phase, phase.value)
+    state.transition(AutoPhase.RUN, "run prepared")
+    return state
+
+
+@pytest.mark.asyncio
+async def test_run_resume_starts_a_degraded_seed_with_sourced_goal(tmp_path) -> None:
+    """A resumed RUN applies the same policy: the persisted grade B does not stop it."""
+    state = _run_resume_state(tmp_path, SeedDraftLedger.from_goal("Build a CLI"))
+    run_starter = _RecordingRunStarter()
+    pipeline = AutoPipeline(
+        _DeadlineDriver(), _no_seed_generator, store=AutoStore(tmp_path), run_starter=run_starter
+    )
+
+    result = await pipeline.run(state)
+
+    assert len(run_starter.seeds) == 1
+    assert result.status == "complete"
+    assert result.stop_reason_code is None
+
+
+@pytest.mark.asyncio
+async def test_run_resume_keeps_the_safety_bar_for_a_degraded_seed(tmp_path) -> None:
+    ledger = SeedDraftLedger.from_goal("Build a CLI")
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="constraints.human_required",
+            value="Human must confirm the production credential rotation.",
+            source=LedgerSource.BLOCKER,
+            confidence=0.0,
+            status=LedgerStatus.BLOCKED,
+        ),
+    )
+    state = _run_resume_state(tmp_path, ledger)
+    pipeline = AutoPipeline(
+        _DeadlineDriver(),
+        _no_seed_generator,
+        store=AutoStore(tmp_path),
+        run_starter=_forbidden_run_starter,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert result.stop_reason_code == DEGRADED_SEED_SAFETY_BLOCKERS_STOP_REASON_CODE
+
+
+@pytest.mark.asyncio
+async def test_deadline_seed_without_sourced_goal_stops_as_partial_product(tmp_path) -> None:
+    """Without the user's goal on record, the degraded Seed is not executed.
+
+    It stops BLOCKED with ``degraded_seed_not_executed``, never COMPLETE: a
+    session that ran nothing must not claim a product (matplotlib-26113).
+    """
+    event_store = _RecordingEventStore()
+    driver = _InferredGoalDriver(event_store=event_store)
+    state = _build_deadline_state(tmp_path)
+    pipeline = AutoPipeline(
+        driver,
+        _no_seed_generator,
+        store=AutoStore(tmp_path),
+        run_starter=_forbidden_run_starter,
+    )
 
     result = await pipeline.run(state)
     await asyncio.sleep(0)  # flush the fire-and-forget event-append tasks
 
-    # 1. Terminal must be COMPLETE, not BLOCKED.
-    assert state.phase == AutoPhase.COMPLETE
-    assert result.status == "complete"
-    assert result.blocker is None
-    assert result.stop_reason_code is None
+    # 1. Terminal is a typed BLOCKED stop, never COMPLETE without execution.
+    assert state.seed_artifact is not None
+    assert "sourced_scope" not in state.seed_artifact
+    assert state.phase == AutoPhase.BLOCKED
+    assert result.status == "blocked"
+    assert result.blocker is not None
+    assert result.stop_reason_code == DEGRADED_SEED_NOT_EXECUTED_STOP_REASON_CODE
+    assert result.artifact_state != "complete_unverified"
 
     # 2. Partial-product fields populated on the result envelope.
     assert result.partial_product is True
@@ -339,7 +606,12 @@ async def test_degraded_seed_with_safety_blocker_still_terminates(tmp_path) -> N
 
     driver = _UnsafeLedgerDriver(event_store=event_store)
     state = _build_deadline_state(tmp_path)
-    pipeline = AutoPipeline(driver, _no_seed_generator, store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(
+        driver,
+        _no_seed_generator,
+        store=AutoStore(tmp_path),
+        run_starter=_forbidden_run_starter,
+    )
 
     result = await pipeline.run(state)
     await asyncio.sleep(0)
@@ -404,10 +676,21 @@ async def test_deadline_path_with_blocked_ledger_section_terminates_blocked(
 
     driver = _BlockedLedgerDriver(event_store=event_store)
     state = _build_deadline_state(tmp_path)
-    pipeline = AutoPipeline(driver, _no_seed_generator, store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(
+        driver,
+        _no_seed_generator,
+        store=AutoStore(tmp_path),
+        run_starter=_forbidden_run_starter,
+    )
 
     result = await pipeline.run(state)
     await asyncio.sleep(0)
+
+    # The user's goal is on record, so this is the run path: the BLOCKED
+    # section still stops it before RUN with the typed safety code.
+    assert state.seed_artifact is not None
+    assert state.seed_artifact["sourced_scope"]["goal"] == "Build a CLI"
+    assert result.stop_reason_code == DEGRADED_SEED_SAFETY_BLOCKERS_STOP_REASON_CODE
 
     # MUST NOT route to the partial-product success terminal.
     assert result.partial_product is False, (

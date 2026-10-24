@@ -140,6 +140,7 @@ class TestHardPreconditionClassification:
             ("missing required tool terraform", {}),
             ("Missing access to the deployment account", {}),
             ("environment variable is not configured", {}),
+            ("Hermes isn't configured yet -- no API keys or providers found.", {}),
             ("", {"failure_class": "BLOCKED"}),
             ("", {"details": {"status": "FORBIDDEN"}}),
             ("", {"errorType": "PermissionDenied"}),
@@ -167,6 +168,8 @@ class TestHardPreconditionClassification:
             "configuration migration returned a transient network error",
             "tool output was incomplete",
             "processed 401 records successfully",
+            "another agent is not configured for this optional feature",
+            "temporary provider response: no API key or provider found",
         ],
     )
     def test_nearby_non_preconditions_remain_retryable(self, content: str) -> None:
@@ -253,6 +256,9 @@ class TestPolicyTable:
 
     def test_blocked_escalates_to_human(self) -> None:
         assert policy_for(FailureClass.BLOCKED).action == RecoveryAction.ESCALATE_HUMAN
+
+    def test_cited_call_failed_retries(self) -> None:
+        assert policy_for(FailureClass.CITED_CALL_FAILED).action == RecoveryAction.RETRY
 
 
 class TestPolicyForAttempt:

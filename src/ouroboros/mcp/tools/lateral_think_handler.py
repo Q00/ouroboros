@@ -87,12 +87,15 @@ class LateralThinkHandler(BridgeAwareMixin):
         return MCPToolDefinition(
             name="ouroboros_lateral_think",
             description=(
-                "Generate alternative thinking approaches using lateral thinking personas. "
-                "Use when: stuck on a problem, going in circles, the same fix has "
+                "Get unstuck, or decide a hard trade-off, with lateral thinking personas. "
+                "Use when: the user says they are stuck or going in circles "
+                '("I\'ve tried three fixes", "nothing works"), the same fix has '
                 "failed twice, progress has stalled, OR the user faces a "
-                "consequential choice with no clear winner (architecture, library, "
-                "trade-off) — call proactively on these "
-                "signals; do not wait for the user to ask for 'lateral' or 'unstuck'. "
+                "consequential choice with no clear winner (architecture, "
+                "library, trade-off; hard to undo, or the team is split); call "
+                "it proactively on these "
+                "signals, before proposing yet another fix; do not wait for the "
+                "user to ask for 'lateral' or 'unstuck'. "
                 "Result: fresh perspectives from "
                 "different thinking modes: hacker (unconventional workarounds), "
                 "researcher (seeks information), simplifier (reduces complexity), "
@@ -167,6 +170,16 @@ class LateralThinkHandler(BridgeAwareMixin):
                     name="failed_attempts",
                     type=ToolInputType.ARRAY,
                     description="Previous failed approaches to avoid repeating",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="session_id",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Interview/lateral session id the fan-out belongs to. The id is "
+                        "recorded with the fan-out so a later "
+                        "ouroboros_submit_fanout_results from a different session is refused."
+                    ),
                     required=False,
                 ),
                 *_lateral_mode_parameters(),
@@ -330,23 +343,37 @@ class LateralThinkHandler(BridgeAwareMixin):
                 # natural response documents alternative-thinking metadata.
                 # Expose persona_count + dispatch status at top level so callers
                 # can branch on delegation without parsing the envelope.
+                plugin_record = stamp_decision_meta(
+                    {
+                        "status": "delegated_to_subagent",
+                        "dispatch_mode": "plugin",
+                        "persona_count": len(payloads),
+                    },
+                    mode,
+                )
+                stamp_fanout_meta(
+                    plugin_record,
+                    prefix="",
+                    dispatch_mode=dispatch,
+                    payloads=payloads,
+                    correlation_key="context.persona",
+                )
+                stamp_lateral_persona_fanout(
+                    plugin_record,
+                    self.fanout_registry,
+                    session_id=str(arguments.get("session_id") or ""),
+                    payloads=payloads,
+                )
                 record_subagent_dispatch_emitted(
                     fanout_kind="lateral_persona_panel",
                     payload_count=len(payloads),
                     dispatch_mode=dispatch,
                     worker_backend=self.agent_runtime_backend,
-                    fanout_reentry_available=False,
+                    fanout_reentry_available="fanout_id" in plugin_record,
                 )
                 return build_multi_subagent_result(
                     payloads,
-                    response_shape=stamp_decision_meta(
-                        {
-                            "status": "delegated_to_subagent",
-                            "dispatch_mode": "plugin",
-                            "persona_count": len(payloads),
-                        },
-                        mode,
-                    ),
+                    response_shape=plugin_record,
                 )
 
             # --- Inline/sequential fallback: concatenate persona prompts ---

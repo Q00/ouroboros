@@ -26,7 +26,10 @@ from ouroboros.core.seed import AcceptanceCriterionSpec, Seed, ac_text
 from ouroboros.core.types import Result
 from ouroboros.evaluation.models import (
     AcceptanceState,
+    CheckResult,
     MechanicalDisposition,
+    MechanicalResult,
+    aggregate_acceptance_state,
     derive_acceptance_state,
 )
 from ouroboros.mcp.errors import MCPAuthError, MCPServerError, MCPTimeoutError, MCPToolError
@@ -35,6 +38,10 @@ from ouroboros.mcp.telemetry_boundary import (
     record_direct_evaluation_outcome,
 )
 from ouroboros.mcp.tools import background as background_jobs
+from ouroboros.mcp.tools.evaluation_package_evidence import (
+    evidence_for_criteria,
+    recorded_checks_by_position,
+)
 from ouroboros.mcp.tools.evaluation_stage1_report import (
     format_stage1_result,
     serialize_stage1_result,
@@ -397,7 +404,7 @@ class MeasureDriftHandler:
         try:
             # Calculate drift using real DriftMeasurement
             measurement = DriftMeasurement()
-            metrics = measurement.measure(
+            metrics = await measurement.measure_async(
                 current_output=current_output,
                 constraint_violations=[str(v) for v in constraint_violations_raw],
                 current_concepts=[str(c) for c in current_concepts_raw],
@@ -729,6 +736,29 @@ class EvaluateHandler:
             # — None leaves today's behavior untouched.
             executor_backend = await _resolve_executor_backend(store, session_id)
 
+            # The controller already ran the frozen check package for this run;
+            # its recorded per-criterion decision is Stage 1 evidence for that
+            # criterion (evaluation_package_evidence). No decision, no evidence.
+            by_position: tuple[tuple[CheckResult, ...], ...] = ()
+            if seed is not None:
+                if store is None:
+                    store = EventStore()
+                    owns_event_store = True
+                try:
+                    await store.initialize()
+                    by_position = await recorded_checks_by_position(store, session_id, seed)
+                except Exception as exc:  # noqa: BLE001 — a read failure is no evidence
+                    log.warning(
+                        "mcp.tool.evaluate.recorded_decision_unreadable",
+                        session_id=session_id,
+                        error=str(exc),
+                    )
+            recorded_checks = (
+                evidence_for_criteria(acceptance_criteria, seed, by_position)
+                if seed is not None
+                else tuple(() for _ in acceptance_criteria)
+            )
+
             # Derive current_ac from the unified acceptance_criteria tuple.
             # The tuple already incorporates both the plural and singular params,
             # so we only need to index or fall back to a default.
@@ -767,20 +797,27 @@ class EvaluateHandler:
             # Collect file-based artifacts for richer semantic evaluation.
             # working_dir is used as the project root for artifact resolution.
             #
-            # Write the artifact text to a file in working_dir so the
-            # ArtifactCollector can pick it up naturally during its scan
-            # instead of inlining the full text (potentially 50KB+) into
-            # the evaluation prompt.
-            from ouroboros.evaluation.artifact_collector import ArtifactCollector
+            # The artifact text (potentially 50KB+) is kept as a file under the
+            # data dir, never in working_dir, and joins the collected files so
+            # the prompt does not inline it.
+            from ouroboros.core.owner_only import write_owner_only
+            from ouroboros.evaluation.artifact_collector import (
+                ArtifactCollector,
+                eval_artifact_path,
+                with_artifact_file,
+            )
 
-            artifact_file = working_dir / ".ouroboros_eval_artifact.md"
+            artifact_file = eval_artifact_path(working_dir)
             try:
-                artifact_file.write_text(artifact, encoding="utf-8")
+                artifact_file.parent.mkdir(parents=True, exist_ok=True)
+                write_owner_only(artifact_file, artifact)
             except OSError:
                 pass  # Non-critical — evaluator falls back to text_summary
 
             try:
-                artifact_bundle = ArtifactCollector().collect(artifact, str(working_dir))
+                artifact_bundle = with_artifact_file(
+                    ArtifactCollector().collect(artifact, str(working_dir)), artifact_file, artifact
+                )
             except Exception as exc:
                 log.warning(
                     "mcp.tool.evaluate.artifact_collection_failed",
@@ -838,6 +875,7 @@ class EvaluateHandler:
                     executor_backend=executor_backend,
                     ac_spec_map=ac_spec_map,
                     emit_terminal_telemetry=emit_terminal_telemetry,
+                    recorded_checks=recorded_checks,
                 )
 
             context = EvaluationContext(
@@ -852,6 +890,7 @@ class EvaluateHandler:
                 trigger_consensus=trigger_consensus,
                 artifact_bundle=artifact_bundle,
                 executor_backend=executor_backend,
+                recorded_checks=recorded_checks[0] if acceptance_criteria else (),
             )
             result = await pipeline.evaluate(context)
 
@@ -1001,6 +1040,7 @@ class EvaluateHandler:
         executor_backend: str | None = None,
         ac_spec_map: dict[str, AcceptanceCriterionSpec] | None = None,
         emit_terminal_telemetry: bool = True,
+        recorded_checks: tuple[tuple[CheckResult, ...], ...] = (),
     ) -> Result[MCPToolResult, MCPServerError]:
         """Evaluate each AC individually and return an aggregated checklist (#366).
 
@@ -1025,6 +1065,8 @@ class EvaluateHandler:
         )
 
         spec_map = ac_spec_map or {}
+        # Each criterion's own recorded evidence, by position.
+        recorded = recorded_checks or tuple(() for _ in acceptance_criteria)
 
         log.info(
             "mcp.tool.evaluate.multi_ac_started",
@@ -1045,6 +1087,7 @@ class EvaluateHandler:
             trigger_consensus=trigger_consensus,
             artifact_bundle=artifact_bundle,
             executor_backend=executor_backend,
+            recorded_checks=recorded[0],
         )
         first_result = await pipeline.evaluate(first_context)  # type: ignore[attr-defined]
         if first_result.is_err:
@@ -1063,11 +1106,13 @@ class EvaluateHandler:
                 )
             )
 
-        # Extract Stage 1 result to share with remaining ACs.
-        shared_stage1 = first_result.value.stage1_result
+        # Share the project command checks only; each AC adds its own
+        # recorded check package evidence (``recorded_checks``).
+        first_stage1 = first_result.value.stage1_result
+        shared_stage1 = first_stage1.command_checks() if first_stage1 is not None else None
 
         # --- Stage 2+: parallelize remaining ACs (Stage 1 injected) ---
-        async def _run_one(ac_text: str) -> Result[object, object]:
+        async def _run_one(index: int, ac_text: str) -> Result[object, object]:
             context = EvaluationContext(
                 execution_id=session_id,
                 seed_id=seed_id,
@@ -1080,6 +1125,7 @@ class EvaluateHandler:
                 trigger_consensus=trigger_consensus,
                 artifact_bundle=artifact_bundle,
                 executor_backend=executor_backend,
+                recorded_checks=recorded[index],
             )
             return await pipeline.evaluate(  # type: ignore[attr-defined]
                 context,
@@ -1087,7 +1133,7 @@ class EvaluateHandler:
             )
 
         remaining_gathered = await asyncio.gather(
-            *(_run_one(ac) for ac in acceptance_criteria[1:]),
+            *(_run_one(index, ac) for index, ac in enumerate(acceptance_criteria) if index),
             return_exceptions=True,
         )
         gathered = (first_result, *remaining_gathered)
@@ -1149,8 +1195,17 @@ class EvaluateHandler:
         ):
             code_changes = await self._has_code_changes(working_dir)
 
+        # The run's Stage 1: the shared command checks plus every criterion's
+        # recorded check package evidence, decided by the one classifier.
+        run_recorded = tuple(check for checks in recorded for check in checks)
+        run_stage1 = shared_stage1
+        if run_recorded:
+            run_stage1 = (shared_stage1 or MechanicalResult(passed=True, checks=())).with_recorded(
+                run_recorded
+            )
+
         text_parts = [
-            *format_stage1_result(shared_stage1, include_exit_status=True),
+            *format_stage1_result(run_stage1, include_exit_status=True),
             format_checklist(checklist),
         ]
         if code_changes is False:
@@ -1160,11 +1215,15 @@ class EvaluateHandler:
         meta = {
             "session_id": session_id,
             "final_approved": checklist.all_passed,
-            "acceptance_state": derive_acceptance_state(
-                final_approved=checklist.all_passed,
-                stage1_result=shared_stage1,
+            "acceptance_state": aggregate_acceptance_state(
+                [
+                    derive_acceptance_state(
+                        final_approved=r.final_approved, stage1_result=r.stage1_result
+                    )
+                    for r in eval_results
+                ]
             ).value,
-            "executed_evidence": bool(shared_stage1 and shared_stage1.has_executed_evidence),
+            "executed_evidence": bool(run_stage1 and run_stage1.has_executed_evidence),
             "highest_stage": highest_stage,
             "multi_ac": True,
             "ac_count": checklist.total,
@@ -1183,7 +1242,7 @@ class EvaluateHandler:
             ],
             "run_feedback": list(feedback),
             "code_changes_detected": code_changes,
-            "stage1_result": serialize_stage1_result(shared_stage1),
+            "stage1_result": serialize_stage1_result(run_stage1),
         }
 
         log.info(
@@ -1599,6 +1658,9 @@ class StartEvaluateHandler:
         return MCPToolDefinition(
             name="ouroboros_start_evaluate",
             description=(
+                "Verify that finished work meets its acceptance criteria, not just "
+                'that tests pass ("is it actually done?", "check it against '
+                'the spec"). '
                 "Start an evaluation in the background and return a job ID immediately. "
                 "Use this instead of ouroboros_evaluate when the three-stage pipeline "
                 "(mechanical + semantic + optional consensus) is expected to exceed the "

@@ -83,22 +83,23 @@ _PROFILE_ACTIVITY_OVERRIDES: dict[str, dict[str, ActivityType]] = {
 # table is the canonical source for the profile-backed path
 # (bot finding on #891 r4).
 #
-# Each template contains a `{tools}` placeholder that gets filled in
-# with `profile.suggested_tools` at render time, so the prompt and the
-# tool envelope cannot drift when the YAML adds or removes a tool
-# (bot finding on #891 r6).
+# The templates name no tools. The strategy is frozen before the runtime is
+# known, and the profile's tool names (Read, Edit, Glob, Grep, ...) are Claude
+# tool names that other runtimes such as codex do not have. The tool envelope
+# itself still comes from `profile.suggested_tools` (`get_tools`), and each
+# runtime renders its own tool guidance from that envelope.
 _PROFILE_GUIDANCE: dict[str, str] = {
     "code": (
         "## Domain guidelines (code profile)\n"
-        "- Use the available tools ({tools}) to accomplish each AC.\n"
+        "- Use the tools the active runtime provides to accomplish each AC.\n"
         "- Write clean, well-tested code that follows project conventions.\n"
         "- Surface blockers clearly instead of working around unverified "
         "preconditions."
     ),
     "research": (
         "## Domain guidelines (research profile)\n"
-        "- Use the available tools ({tools}) to gather information from "
-        "available sources thoroughly and cross-reference multiple "
+        "- Use the tools the active runtime provides to gather information "
+        "from available sources thoroughly and cross-reference multiple "
         "sources for accuracy.\n"
         "- Synthesize findings into clear, structured markdown documents "
         "saved under docs/ or output/.\n"
@@ -107,8 +108,8 @@ _PROFILE_GUIDANCE: dict[str, str] = {
     ),
     "analysis": (
         "## Domain guidelines (analysis profile)\n"
-        "- Use the available tools ({tools}) to read and understand the "
-        "subject matter thoroughly before concluding.\n"
+        "- Use the tools the active runtime provides to read and understand "
+        "the subject matter thoroughly before concluding.\n"
         "- Apply structured analytical frameworks; consider multiple "
         "perspectives and explicit tradeoffs.\n"
         "- Document the analytical process and present findings with "
@@ -118,9 +119,41 @@ _PROFILE_GUIDANCE: dict[str, str] = {
 }
 _DEFAULT_GUIDANCE_TEMPLATE: str = (
     "## Domain guidelines\n"
-    "- Use the available tools ({tools}) to execute each AC thoroughly "
-    "and surface blockers explicitly."
+    "- Use the tools the active runtime provides to execute each AC "
+    "thoroughly and surface blockers explicitly."
 )
+
+# Completion check the worker runs before it emits the evidence record. The
+# system-prompt POST contract below and the atomic leaf prompt
+# (``atomic_prompt_builder``) render it with the requirements the dispatch owns,
+# so a criterion-owned leaf never verifies a sibling criterion's work.
+WHOLE_REQUEST_REQUIREMENTS = "the goal and of the binding acceptance criteria"
+CURRENT_AC_REQUIREMENTS = (
+    "the current acceptance criterion (the goal only as far as this criterion "
+    "covers it; work that belongs to sibling criteria is not yours)"
+)
+DISPATCH_REQUIREMENTS = (
+    "the work this dispatch owns: the goal and the binding acceptance criteria "
+    "when the task is the whole request, otherwise only the current acceptance "
+    "criterion"
+)
+
+
+def render_completion_check(requirements: str) -> str:
+    """Render the completion check for the requirements a dispatch owns."""
+    return (
+        "Completion check (before the evidence record):\n"
+        f"1. Restate each explicit requirement of {requirements}.\n"
+        "2. For each requirement, identify concrete evidence at the requirement's "
+        "full scope (the general behavior it describes, not one narrow instance), "
+        "and run or inspect that evidence in this session.\n"
+        "3. If the evidence for any requirement is missing, indirect, or narrower "
+        "than the requirement, keep working on it and repeat this check.\n"
+        "Emit the evidence record only after every requirement passes this check."
+    )
+
+
+COMPLETION_CHECK: str = render_completion_check(DISPATCH_REQUIREMENTS)
 
 
 @dataclass(frozen=True)
@@ -171,21 +204,17 @@ class ProfileBackedStrategy:
             f"You are executing acceptance criteria under the "
             f"{self.profile.profile!r} profile.\n"
             f"Decomposition axis: {self.profile.axis}.\n"
-            f"Smallest acceptable unit: {self.profile.min_unit}.\n"
-            f"The verifier will focus on: {self.profile.verifier_focus.strip()}"
+            f"The verifier will focus on: {self.profile.verifier_focus.strip()}\n"
+            "Do not substitute a narrower, safer, or smaller solution than the goal "
+            "asks for. Before you finish, audit that the change covers every case "
+            "the goal names."
         )
         # Domain guidance preserves the behavior the legacy strategies
         # carried — e.g. research's "cite sources, save as markdown",
         # analysis's "structured tradeoff", code's "clean, well-tested".
-        # Tools list is interpolated from profile.suggested_tools so
-        # the prompt and the tool envelope cannot drift when the YAML
-        # adds or removes a tool. Profiles without a registered
-        # guidance block fall back to a minimal generic template.
-        tools_csv = (
-            ", ".join(self.profile.suggested_tools) if self.profile.suggested_tools else "(none)"
-        )
-        guidance_template = _PROFILE_GUIDANCE.get(self.profile.profile, _DEFAULT_GUIDANCE_TEMPLATE)
-        guidance = guidance_template.format(tools=tools_csv)
+        # Profiles without a registered guidance block fall back to a
+        # minimal generic template.
+        guidance = _PROFILE_GUIDANCE.get(self.profile.profile, _DEFAULT_GUIDANCE_TEMPLATE)
         # H2's extract_evidence() consumes exactly ONE fenced JSON
         # object per dispatch. Earlier rounds asked the executor for
         # "one record per AC"; the parser would silently drop every
@@ -209,6 +238,7 @@ class ProfileBackedStrategy:
         # blockers to RETRY, which is suboptimal but safe.
         contract = (
             "[POST — harness-injected; consolidated evidence contract]\n"
+            f"{COMPLETION_CHECK}\n"
             "When you have completed every acceptance criterion above, "
             "emit exactly ONE fenced JSON evidence record at the end "
             "of your response. The record must cover every AC you "
@@ -231,9 +261,9 @@ class ProfileBackedStrategy:
             "verification', or a command you intended but did not run. If the "
             "required command has not run successfully, run it before emitting "
             "the evidence record.\n"
-            "Do not declare DONE in prose — the harness adjudicates via "
-            "an external verifier pass. Emit the single evidence record, "
-            "then stop."
+            "Do not declare DONE in prose; the harness adjudicates via "
+            "an external verifier pass. The single evidence record is the "
+            "last part of your response."
         )
         return f"{anchor}\n\n{guidance}\n\n{contract}"
 
@@ -281,5 +311,9 @@ class ProfileBackedStrategy:
 
 
 __all__ = [
+    "COMPLETION_CHECK",
+    "CURRENT_AC_REQUIREMENTS",
+    "WHOLE_REQUEST_REQUIREMENTS",
     "ProfileBackedStrategy",
+    "render_completion_check",
 ]

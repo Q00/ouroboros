@@ -14,9 +14,14 @@ from ouroboros.core.seed import (
     BrownfieldContext,
     EvaluationPrinciple,
     ExitCondition,
+    RepoFact,
+    RequesterAnswer,
     Seed,
     ac_texts,
 )
+
+GOAL_OBJECTIVE_CRITERION = "Resolve the request as stated in the goal."
+"""The worker's objective when no acceptance criterion has a confirmed source."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,10 +60,38 @@ class SeedContract:
     evaluation_principles: tuple[EvaluationPrinciple, ...]
     exit_conditions: tuple[ExitCondition, ...]
     brownfield_context: BrownfieldContext
+    assumptions: tuple[str, ...] = ()
+    requester_answers: tuple[RequesterAnswer, ...] = ()
+    repo_facts: tuple[RepoFact, ...] = ()
+    # True when the contract holds only content with a known source
+    # (``Seed.sourced_scope``); the renderer then omits every model-written section.
+    sourced_only: bool = False
 
     @classmethod
     def from_seed(cls, seed: Seed) -> SeedContract:
-        """Interpret a Seed as an immutable execution contract."""
+        """Interpret a Seed as an immutable execution contract.
+
+        A Seed with ``sourced_scope`` yields a contract of its sourced content
+        only: the user's goal verbatim, the binding constraints and criteria
+        (or, with no binding criterion, :data:`GOAL_OBJECTIVE_CRITERION`), the
+        requester answers and the repo facts. Every other field stays in the
+        Seed and is left out of the contract.
+        """
+        scope = seed.sourced_scope
+        if scope is not None:
+            return cls(
+                goal=scope.goal,
+                task_type=seed.task_type,
+                acceptance_criteria=scope.acceptance_criteria or (GOAL_OBJECTIVE_CRITERION,),
+                constraints=scope.constraints,
+                ontology_lens=OntologyLens(name="", description="", concepts=()),
+                evaluation_principles=(),
+                exit_conditions=(),
+                brownfield_context=BrownfieldContext(),
+                requester_answers=seed.requester_answers,
+                repo_facts=seed.repo_facts,
+                sourced_only=True,
+            )
         return cls(
             goal=seed.goal,
             task_type=seed.task_type,
@@ -80,10 +113,14 @@ class SeedContract:
             evaluation_principles=seed.evaluation_principles,
             exit_conditions=seed.exit_conditions,
             brownfield_context=seed.brownfield_context,
+            assumptions=seed.assumptions,
+            requester_answers=seed.requester_answers,
+            repo_facts=seed.repo_facts,
         )
 
 
 __all__ = [
+    "GOAL_OBJECTIVE_CRITERION",
     "OntologyConcept",
     "OntologyLens",
     "SeedContract",

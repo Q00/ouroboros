@@ -8,6 +8,9 @@ Table: events
 
 Table: brownfield_repos
     Registered brownfield repositories/worktrees discovered by brownfield scan.
+
+Table: brownfield_repo_index
+    Per-repo lexical search documents for brownfield relevance ranking.
 """
 
 from datetime import UTC, datetime
@@ -219,6 +222,29 @@ brownfield_repos_table = Table(
     # Timestamp when the repo was registered
     Column(
         "registered_at",
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=text("CURRENT_TIMESTAMP"),
+    ),
+)
+
+# Search documents for brownfield repos, built at scan/register time so that
+# ranking a query never touches the filesystem. Kept in its own table instead
+# of new ``brownfield_repos`` columns: ``create_all`` adds a missing table to an
+# existing database, while a missing column would break every existing
+# ``SELECT`` on ``brownfield_repos`` until a migration ran.
+brownfield_repo_index_table = Table(
+    "brownfield_repo_index",
+    metadata,
+    # Same absolute path as ``brownfield_repos.path``
+    Column("path", Text, primary_key=True),
+    # Lexical document (manifest name/description, README head, top-level names)
+    Column("doc_text", Text, nullable=False, server_default=text("''")),
+    # Stat-only fingerprint of the document inputs; unchanged means skip rebuild
+    Column("fingerprint", Text, nullable=False, server_default=text("''")),
+    Column(
+        "indexed_at",
         DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(UTC),

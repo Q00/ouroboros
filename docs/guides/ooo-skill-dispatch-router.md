@@ -45,7 +45,7 @@ Codex CLI, Hermes, and OpenCode remain responsible for:
 - falling through to the normal runtime path for non-dispatch prompts
 
 The MCP server remains unaware of `ooo` syntax and channel identifiers. It only
-exposes ordinary MCP tools such as `ouroboros_execute_seed`,
+exposes ordinary MCP tools such as `ouroboros_start_execute_seed`,
 `ouroboros_pm_interview`, and `ouroboros_evaluate`.
 
 ## Adding Commands
@@ -59,7 +59,7 @@ Example frontmatter:
 ---
 name: ouroboros-run
 description: Execute a Seed specification through the workflow engine
-mcp_tool: ouroboros_execute_seed
+mcp_tool: ouroboros_start_execute_seed
 mcp_args:
   seed_path: "$1"
   cwd: "$CWD"

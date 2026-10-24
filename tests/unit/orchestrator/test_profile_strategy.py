@@ -7,7 +7,7 @@ import pytest
 from ouroboros.core.seed import OntologyField, OntologySchema, Seed, SeedMetadata
 from ouroboros.orchestrator.execution_strategy import ExecutionStrategy
 from ouroboros.orchestrator.profile_loader import ExecutionProfile, load_profile
-from ouroboros.orchestrator.profile_strategy import ProfileBackedStrategy
+from ouroboros.orchestrator.profile_strategy import COMPLETION_CHECK, ProfileBackedStrategy
 from ouroboros.orchestrator.runner import build_system_prompt, build_task_prompt
 from ouroboros.orchestrator.workflow_state import ActivityType
 
@@ -37,11 +37,58 @@ class TestProtocolConformance:
 
 
 class TestSystemPromptFragment:
-    def test_mentions_profile_axis_and_min_unit(self, profile: ExecutionProfile) -> None:
+    def test_mentions_profile_axis_without_smallest_unit_framing(
+        self, profile: ExecutionProfile
+    ) -> None:
         fragment = ProfileBackedStrategy(profile).get_system_prompt_fragment()
         assert profile.profile in fragment
         assert profile.axis in fragment
-        assert profile.min_unit in fragment
+        # The worker is not told to aim for the smallest unit, nor to stop
+        # as soon as it has emitted the record.
+        assert "Smallest acceptable unit" not in fragment
+        assert "then stop" not in fragment
+
+    def test_fragment_forbids_narrowing_the_goal(self, profile: ExecutionProfile) -> None:
+        fragment = ProfileBackedStrategy(profile).get_system_prompt_fragment()
+        assert (
+            "Do not substitute a narrower, safer, or smaller solution than the goal asks for."
+            in fragment
+        )
+        assert "audit that the change covers every case the goal names" in fragment
+
+    def test_completion_check_precedes_the_evidence_record(self, profile: ExecutionProfile) -> None:
+        # The worker checks every requirement at its full scope before it
+        # emits the record, instead of stopping once it can fill one (#2754).
+        fragment = ProfileBackedStrategy(profile).get_system_prompt_fragment()
+        assert COMPLETION_CHECK in fragment
+        assert fragment.index(COMPLETION_CHECK) < fragment.index("emit exactly ONE")
+        assert "Restate each explicit requirement" in COMPLETION_CHECK
+        assert "full scope" in COMPLETION_CHECK
+        assert "missing, indirect, or narrower" in COMPLETION_CHECK
+        assert "keep working" in COMPLETION_CHECK
+
+    def test_fragment_names_no_runtime_specific_tools(self, profile: ExecutionProfile) -> None:
+        # The strategy is frozen before the runtime is known, and codex has no
+        # Read/Edit/Glob/Grep tools; the tool envelope itself is unchanged.
+        fragment = ProfileBackedStrategy(profile).get_system_prompt_fragment()
+        guidance = fragment.split("## Domain guidelines", 1)[1].split("[POST", 1)[0]
+        for tool in ("Read", "Edit", "Glob", "Grep"):
+            assert tool not in guidance
+        assert ProfileBackedStrategy(profile).get_tools() == list(profile.suggested_tools)
+
+    def test_evidence_schema_unchanged(self) -> None:
+        profile = load_profile("code")
+        assert profile.evidence_schema.required == (
+            "files_touched",
+            "commands_run",
+            "tests_passed",
+        )
+        assert profile.evidence_schema.rejected_if == ("tests_passed == []",)
+        fragment = ProfileBackedStrategy(profile).get_system_prompt_fragment()
+        assert "populate its required fields (files_touched, commands_run, tests_passed)" in (
+            fragment
+        )
+        assert "Automatic rejection rules: tests_passed == []." in fragment
 
     def test_surfaces_verifier_focus(self, profile: ExecutionProfile) -> None:
         fragment = ProfileBackedStrategy(profile).get_system_prompt_fragment()

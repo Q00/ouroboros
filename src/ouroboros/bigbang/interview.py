@@ -15,7 +15,11 @@ from typing import Any
 from pydantic import BaseModel, Field, model_validator
 import structlog
 
-from ouroboros.bigbang.answer_provenance import AnswerProvenance, classify_answer_provenance
+from ouroboros.bigbang.answer_provenance import (
+    DECLARED_PROVENANCES,
+    AnswerProvenance,
+    classify_answer_provenance,
+)
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.file_lock import file_lock as _file_lock
@@ -181,8 +185,9 @@ class InterviewRound(BaseModel):
         round_number: 1-based round number (no upper limit - user controls).
         question: The question asked by the system.
         user_response: The user's response (None if not yet answered).
-        provenance: Whether the answer is a decision the caller made or a fact
-            the caller adopted from elsewhere. Consumers read this field rather
+        provenance: Whether the answer is a decision the caller made, a fact
+            the caller adopted from elsewhere, or a guess the caller declared as
+            an assumption (see ``answer_provenance``). Consumers read this field rather
             than re-reading the ``[from-*]`` marker, which is what drifted
             before (#1755).
         timestamp: When this round was created.
@@ -209,8 +214,11 @@ class InterviewRound(BaseModel):
         leave every in-flight interview holding observations that still carry
         requirement authority, so an answer's provenance is settled here too —
         one classifier, still no consumer reading the marker.
+
+        A declared provenance (``"assumption"``, ``"requester"``) is not derived
+        from the answer, so it is kept as recorded rather than re-derived.
         """
-        if self.user_response is not None:
+        if self.user_response is not None and self.provenance not in DECLARED_PROVENANCES:
             answer_for_classification = self.user_response
             # PM interviews before #1823 decorated reframed answers after the
             # provenance marker had already been supplied, producing

@@ -28,8 +28,11 @@ from typing import Literal
 import structlog
 
 from ouroboros.core.json_utils import extract_json_payload
+from ouroboros.core.project_env import project_venv_provides
 from ouroboros.evaluation.command_parsing import split_command
-from ouroboros.evaluation.languages import _ALLOWED_EXECUTABLES
+from ouroboros.evaluation.languages import _ALLOWED_EXECUTABLES, non_verifying_reason
+from ouroboros.evaluation.mechanical_toml_writer import persist_mechanical_toml
+from ouroboros.evaluation.stdlib_unittest_discovery import persist_manifest_free_unittest
 from ouroboros.evolution.provider_usage import tracked_complete
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -129,21 +132,24 @@ def has_mechanical_toml(working_dir: Path) -> bool:
 
 async def ensure_mechanical_toml(
     working_dir: Path,
-    adapter: LLMAdapter,
+    adapter: LLMAdapter | None,
     *,
     model: str | None = None,
     backend: str | None = None,
     force: bool = False,
 ) -> bool:
-    """Write ``.ouroboros/mechanical.toml`` via one AI detect call.
+    """Write ``.ouroboros/mechanical.toml`` from a validated detector result.
 
     Idempotent: when the toml already exists and ``force`` is False, returns
-    True immediately. Otherwise makes one LLM call, validates the proposals,
-    and persists the file. Never raises — returns False on any failure.
+    True immediately. Manifest-backed projects use one LLM call. Projects
+    without manifests may use the narrow standard-library unittest fallback
+    when a real ``TestCase`` suite is discoverable. Every command is validated
+    before persistence. Never raises — returns False on any failure.
 
     Args:
         working_dir: Project root to detect against.
-        adapter: LLM adapter used for the single detect call.
+        adapter: LLM adapter used for manifest-backed detection. It may be
+            ``None`` when only deterministic manifest-free discovery is needed.
         model: Explicit model identifier. When ``None``, resolved via
             ``get_mechanical_detector_model(backend)`` so Codex / OpenCode
             backends receive the ``"default"`` sentinel instead of a Claude
@@ -154,19 +160,25 @@ async def ensure_mechanical_toml(
     Returns:
         True on success (toml exists after the call), False otherwise.
     """
-    model_is_explicit = model is not None
-    if model is None:
-        from ouroboros.config.loader import get_mechanical_detector_model
-
-        model = get_mechanical_detector_model(backend=backend)
     target = toml_path(working_dir)
     if target.is_file() and not force:
         return True
 
     manifests = _collect_manifests(working_dir)
     if not manifests:
-        log.info("detector.skipped", reason="no_manifests", working_dir=str(working_dir))
+        return persist_manifest_free_unittest(
+            working_dir, target, _validate_proposal, _persist_toml, log
+        )
+
+    if adapter is None:
+        log.info("detector.skipped", reason="no_adapter", working_dir=str(working_dir))
         return False
+
+    model_is_explicit = model is not None
+    if model is None:
+        from ouroboros.config.loader import get_mechanical_detector_model
+
+        model = get_mechanical_detector_model(backend=backend)
 
     proposal = await _ask_llm(
         adapter,
@@ -187,31 +199,11 @@ async def ensure_mechanical_toml(
         )
         return False
 
-    # Atomic replace: write the new toml to a sibling file first and
-    # ``os.replace`` it over the existing one. This keeps the prior
-    # known-good file intact if rendering or writing fails on any
-    # transient error — ``ouroboros detect --force`` never destroys the
-    # last working config before a replacement is ready.
-    temp = target.with_name(target.name + ".tmp")
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temp.write_text(_render_toml(validated), encoding="utf-8")
-        os.replace(temp, target)
-    except OSError as exc:
-        log.warning("detector.write_failed", path=str(target), error=str(exc))
-        try:
-            if temp.exists():
-                temp.unlink()
-        except OSError:
-            pass
-        return False
+    return _persist_toml(target, validated)
 
-    log.info(
-        "detector.toml_written",
-        path=str(target),
-        commands={k: getattr(validated, k) for k in _COMMAND_KEYS},
-    )
-    return True
+
+def _persist_toml(target: Path, commands: DetectedCommands) -> bool:
+    return persist_mechanical_toml(target, commands, _render_toml, _COMMAND_KEYS, log)
 
 
 # Glob patterns for manifests whose name varies per project (common in
@@ -430,7 +422,7 @@ def _validate_proposal(
     for key, command in proposal.items():
         if key not in _COMMAND_KEYS:
             continue
-        if _command_is_valid(working_dir, command):
+        if _command_is_valid(working_dir, command, key):
             kept[key] = command
         else:
             log.info(
@@ -494,7 +486,7 @@ def _is_destructive_target(name: str) -> bool:
     return any(token in _DESTRUCTIVE_TARGET_NAMES for token in lowered.replace("_", "-").split("-"))
 
 
-def _command_is_valid(working_dir: Path, command: str) -> bool:
+def _command_is_valid(working_dir: Path, command: str, key: str | None = None) -> bool:
     """Return True iff ``command`` is safely runnable from ``working_dir``.
 
     Checks:
@@ -509,6 +501,8 @@ def _command_is_valid(working_dir: Path, command: str) -> bool:
        manifest, and bare tools (``pytest``, ``eslint`` …) must be
        declared by the repo itself. Host ``PATH`` lookup is intentionally
        not consulted.
+    5. The argv does not select a mode that cannot reflect the project for
+       ``key`` (``pytest --version``, ``make -n test``, ``ruff --exit-zero``).
     """
     if any(token in command for token in _FORBIDDEN_TOKENS):
         return False
@@ -538,6 +532,8 @@ def _command_is_valid(working_dir: Path, command: str) -> bool:
         return False
 
     if not _arguments_stay_within_repo(working_dir, head, parts[1:]):
+        return False
+    if non_verifying_reason(parts, key) is not None:
         return False
 
     return _verify_entry_point(working_dir, head, parts)
@@ -776,7 +772,9 @@ def _verify_entry_point(
 # (install a binary globally, publish to crates.io, add dependencies, modify
 # lockfiles, wipe build artifacts, fetch remote packages) are deliberately
 # omitted so a hallucinated proposal cannot turn Stage 1 into a state-change
-# or a publish attempt.
+# or a publish attempt. Reporting subcommands (``version``, ``env``, ``list``,
+# ``metadata``, ``tree`` …) are omitted too: they exit 0 whatever the code
+# does, so an executed pass from them is not evidence.
 # Maven lifecycle phases / plugin goals that are safe Stage 1 verification
 # steps: they do not mutate the local install repo, deploy artifacts, or
 # bump versions. Everything else (``install``, ``deploy``, ``release:*``,
@@ -793,10 +791,8 @@ _MAVEN_SAFE_GOALS: frozenset[str] = frozenset(
         "spotbugs:check",
         "spotless:check",
         "dependency:analyze",
-        "dependency:tree",
         "javadoc:javadoc",
         "site",
-        "help:help",
     }
 )
 
@@ -828,25 +824,14 @@ _CARGO_BUILTIN_SUBCOMMANDS: frozenset[str] = frozenset(
         "clippy",
         "doc",
         "fmt",  # users typically combine with ``-- --check`` for verification
-        "locate-project",
-        "metadata",
-        "pkgid",
-        "read-manifest",
         "test",
-        "tree",
-        "verify-project",
-        "version",
     }
 )
 
 _GO_BUILTIN_SUBCOMMANDS: frozenset[str] = frozenset(
     {
         "build",
-        "doc",
-        "env",
-        "list",
         "test",
-        "version",
         "vet",
     }
 )
@@ -859,20 +844,15 @@ _ZIG_BUILTIN_SUBCOMMANDS: frozenset[str] = frozenset(
         "build-obj",
         "fmt",  # users typically combine with ``--check`` for verification
         "test",
-        "version",
     }
 )
 
 # ``uv`` subcommands accepted outside of ``uv run``. ``run`` has its own
 # tool-level validation path; everything here must be non-mutating and
 # zero-cost. ``uv sync`` / ``uv lock`` / ``uv pip install`` / ``uv publish``
-# change project or global state and are deliberately excluded.
-_UV_NON_RUN_SUBCOMMANDS: frozenset[str] = frozenset(
-    {
-        "tree",
-        "version",
-    }
-)
+# change project or global state and are deliberately excluded; ``uv tree``
+# and ``uv version`` only report, so they are not evidence either.
+_UV_NON_RUN_SUBCOMMANDS: frozenset[str] = frozenset()
 
 
 def _first_positional(parts: list[str]) -> str | None:
@@ -1853,23 +1833,16 @@ def _requirements_files_declare(working_dir: Path, name: str) -> bool:
 # Python standard-library modules that are safe, zero-cost Stage 1 entries
 # via ``python -m <module>``. This list is intentionally conservative —
 # modules that would start network services or mutate state (``pip``,
-# ``venv``, ``http.server`` …) are excluded. Third-party modules are only
+# ``venv``, ``http.server`` …) are excluded, and so are modules whose exit
+# status cannot reflect the project (``pydoc``, ``timeit``, ``json.tool``,
+# ``tabnanny`` reports findings with exit 0 …). Third-party modules are only
 # accepted when they are declared as a project dependency.
 _PYTHON_STDLIB_RUNNABLE_MODULES: frozenset[str] = frozenset(
     {
         "unittest",
         "doctest",
         "compileall",
-        "pydoc",
-        "json.tool",
-        "pickletools",
-        "timeit",
-        "tabnanny",
         "py_compile",
-        "zipfile",
-        "zipapp",
-        "dis",
-        "ast",
         "cProfile",
     }
 )
@@ -1915,13 +1888,11 @@ def _bare_tool_declared_by_repo(working_dir: Path, tool: str) -> bool:
     """True when a bare tool (pytest, ruff, eslint…) is provisioned by the repo.
 
     Accepts any of:
-      * Project-local bin: ``.venv/bin/<tool>`` or ``node_modules/.bin/<tool>``
+      * Project virtualenv (``core/project_env``, a task worktree's main tree too) or ``node_modules/.bin/<tool>``
       * Python: declared in ``pyproject.toml`` or ``requirements*.txt``
       * Node: declared in ``package.json`` dependencies
     """
-    if (working_dir / ".venv" / "bin" / tool).exists():
-        return True
-    if (working_dir / ".venv" / "Scripts" / f"{tool}.exe").exists():
+    if project_venv_provides(working_dir, tool):
         return True
     if (working_dir / "node_modules" / ".bin" / tool).exists():
         return True
@@ -1962,7 +1933,6 @@ _DOTNET_SAFE_SUBCOMMANDS: frozenset[str] = frozenset(
         "build",
         "test",
         "format",
-        "list",
     }
 )
 
@@ -2068,13 +2038,8 @@ _GRADLE_BUILTIN_TASKS: frozenset[str] = frozenset(
         "build",
         "check",
         "clean",
-        "dependencies",
-        "help",
         "jar",
         "javadoc",
-        "projects",
-        "properties",
-        "tasks",
         "test",
     }
 )
@@ -2299,7 +2264,6 @@ _MIX_BUILTIN_TASKS: frozenset[str] = frozenset(
         "compile",
         "format",
         "test",
-        "help",
         "docs",
     }
 )

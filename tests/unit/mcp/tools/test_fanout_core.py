@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from ouroboros.backends.capabilities import SubagentDispatchMode
+from ouroboros.mcp.server.adapter import MCPServerAdapter
 from ouroboros.mcp.tools import fanout as fanout_module
 from ouroboros.mcp.tools.authoring_handlers import (
     InterviewHandler,
@@ -66,6 +67,51 @@ def _bounded_submit(
 # --------------------------------------------------------------------------- #
 # build_fanout_subagents
 # --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_plugin_decision_can_submit_after_registry_reentry(tmp_path: Path) -> None:
+    registry_path = tmp_path / "fanouts"
+    producer = LateralThinkHandler(
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+        fanout_registry=FanoutRegistry(registry_path),
+    )
+    server = MCPServerAdapter()
+    server.register_tool(producer)
+    emitted = await server.call_tool(
+        "ouroboros_lateral_think",
+        {
+            "problem_context": "Choose a storage model",
+            "current_approach": "Use existing storage",
+            "mode": "decision",
+            "session_id": "s4",
+        },
+    )
+    assert emitted.is_ok
+    meta = emitted.unwrap().meta
+    children = meta["_subagents"]
+    submit, _memory = _bounded_submit(FanoutRegistry(registry_path), tmp_path)
+    reopened_server = MCPServerAdapter()
+    reopened_server.register_tool(submit)
+
+    result = await reopened_server.call_tool(
+        "ouroboros_submit_fanout_results",
+        {
+            "session_id": "s4",
+            "fanout_id": meta["fanout_id"],
+            "correlation_key": meta["result_correlation_key"],
+            "results": [
+                {"key": child["context"]["persona"], "content": "Use the existing storage."}
+                for child in children
+            ],
+        },
+    )
+
+    assert result.is_ok
+    assert result.unwrap().meta["contract_id"]
+    assert meta["dispatch_mode"] == "plugin"
+    assert "host_action" not in meta
 
 
 def test_build_fanout_subagents_builds_one_payload_per_request() -> None:
@@ -547,7 +593,10 @@ def _required_advisory_lanes() -> list[str]:
 
 
 @pytest.mark.asyncio
-async def test_advisory_reentry_follows_stamped_meta_contract(tmp_path: Any) -> None:
+async def test_advisory_reentry_follows_stamped_meta_contract(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Regression (#1578): a host following the STAMPED contract must succeed.
 
     The producer stamped ``question_advisory_result_correlation_key=
@@ -560,6 +609,34 @@ async def test_advisory_reentry_follows_stamped_meta_contract(tmp_path: Any) -> 
     session_id = "sess-advisory-contract"
     fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(registry, session_id)
     outputs = _advisory_lane_outputs(meta, lane_keys)
+    outputs["data_context"] = json.dumps(outputs["data_context"])
+
+    validated_types: dict[str, type[Any]] = {}
+    original_contract = fanout_module._validate_against_contract
+    original_provenance = fanout_module._provenance_violations
+    original_roster = fanout_module._roster_violations
+    original_aggregate = fanout_module._aggregate_violations
+
+    def capture_contract(output: Any, contract: Mapping[str, Any]) -> list[str]:
+        validated_types["contract"] = type(output)
+        return original_contract(output, contract)
+
+    def capture_provenance(record: FanoutRecord, output: Any) -> list[str]:
+        validated_types["provenance"] = type(output)
+        return original_provenance(record, output)
+
+    def capture_roster(record: FanoutRecord, output: Any) -> list[str]:
+        validated_types["roster"] = type(output)
+        return original_roster(record, output)
+
+    def capture_aggregate(output: Any) -> list[str]:
+        validated_types["aggregate"] = type(output)
+        return original_aggregate(output)
+
+    monkeypatch.setattr(fanout_module, "_validate_against_contract", capture_contract)
+    monkeypatch.setattr(fanout_module, "_provenance_violations", capture_provenance)
+    monkeypatch.setattr(fanout_module, "_roster_violations", capture_roster)
+    monkeypatch.setattr(fanout_module, "_aggregate_violations", capture_aggregate)
 
     submit, disposable = _bounded_submit(registry, tmp_path)
     submit_result = await submit.handle(
@@ -584,9 +661,71 @@ async def test_advisory_reentry_follows_stamped_meta_contract(tmp_path: Any) -> 
     assert out["kind"] == FANOUT_KIND_QUESTION_ADVISORY
     assert out["correlation_key"] == correlation_key
     assert out["contract_violations"] == {}
+    assert validated_types == {
+        "contract": dict,
+        "provenance": dict,
+        "roster": dict,
+        "aggregate": dict,
+    }
     aggregated = out["result"]["aggregated_outputs"]
     assert [item["lane_id"] for item in aggregated] == lane_keys
-    assert [item["output"] for item in aggregated] == [outputs[key] for key in lane_keys]
+    assert [item["output"] for item in aggregated] == [
+        json.loads(outputs[key]) if key == "data_context" else outputs[key] for key in lane_keys
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("content", "expected_violation", "forbidden_echo"),
+    [
+        ('{"private_answer":"do-not-echo",', "output is not valid JSON", "do-not-echo"),
+        ('["do-not-echo"]', "output is not a JSON object", "do-not-echo"),
+        ("42", "output is not a JSON object", None),
+        ("null", "output is not a JSON object", None),
+        ('"do-not-echo"', "output is not a JSON object", "do-not-echo"),
+    ],
+)
+async def test_contracted_json_string_rejects_malformed_or_non_object_content(
+    tmp_path: Any,
+    content: str,
+    expected_violation: str,
+    forbidden_echo: str | None,
+) -> None:
+    registry = FanoutRegistry(tmp_path)
+    session_id = "sess-invalid-contracted-json"
+    fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(registry, session_id)
+    outputs = _advisory_lane_outputs(meta, lane_keys)
+    outputs["data_context"] = content
+
+    submit, _disposable = _bounded_submit(registry, tmp_path)
+    result = await submit.handle(
+        {
+            "session_id": session_id,
+            "fanout_id": fanout_id,
+            "correlation_key": correlation_key,
+            "results": [{"key": key, "content": outputs[key]} for key in lane_keys],
+        }
+    )
+
+    assert result.is_ok, result
+    outcome = result.unwrap().meta
+    assert outcome["status"] == "partial"
+    assert expected_violation in outcome["contract_violations"]["data_context"]
+    if forbidden_echo is not None:
+        assert forbidden_echo not in str(outcome)
+
+
+def test_submit_fanout_definition_explains_conditional_bindings() -> None:
+    definition = SubmitFanoutResultsHandler().definition
+    parameters = {parameter.name: parameter for parameter in definition.parameters}
+
+    assert parameters["session_id"].required is False
+    assert parameters["correlation_key"].required is False
+    assert "omit only when" in parameters["session_id"].description
+    assert "registered binding" in parameters["session_id"].description
+    assert "omit only when" in parameters["correlation_key"].description
+    assert "registered binding" in parameters["correlation_key"].description
+    assert "Omission never waives a registered binding" in definition.description
 
 
 @pytest.mark.asyncio

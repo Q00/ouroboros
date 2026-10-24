@@ -131,6 +131,9 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         "GJC_CODING_AGENT_DIR",
         "GJC_CONFIG_DIR",
         "PI_CONFIG_DIR",
+        # Hermes hosting-profile roots select the spawned CLI's configuration.
+        "HERMES_HOME",
+        "HERMES_REAL_HOME",
         # OMP (Oh My Pi) resolves its agent dir — sessions, extensions, and rules
         # loaded into every spawned session — from this var (see `omp --help`).
         # Same spawned-CLI discovery-root class as GJC/PI above: an untrusted
@@ -220,6 +223,20 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # Onboarding attribution is an analytics boundary. A cloned repo must
         # not rewrite the surface label used to compare activation cohorts.
         "OUROBOROS_FIRST_COMMAND_SURFACE",
+        # Check-package switch (boundary/switch.py): a cloned repo must not
+        # turn off the verification layer that judges its own changes, nor
+        # decide whether model-written checks execute.
+        "OUROBOROS_CHECK_PACKAGE",
+        # ``ooo auto`` requester command (auto/requester.py): the value names a
+        # program auto runs for each routed interview question, the same
+        # executable-selection class as the CLI paths above. The timeout is
+        # kept beside it so a cloned repo cannot shape how long it runs.
+        "OUROBOROS_AUTO_REQUESTER_COMMAND",
+        "OUROBOROS_AUTO_REQUESTER_TIMEOUT_SECONDS",
+        # ``ooo auto`` investigator call cap and hang guard (auto/investigator.py): 0 turns
+        # off the repository reading, so a cloned repo must not set it.
+        "OUROBOROS_AUTO_INVESTIGATOR_MAX_CALLS",
+        "OUROBOROS_AUTO_INVESTIGATOR_CALL_TIMEOUT_SECONDS",
         "DO_NOT_TRACK",
         "CI",
         "GITHUB_ACTIONS",
@@ -270,6 +287,26 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # disables tier routing by design, so an untrusted project .env must not
         # be able to force an arbitrary model or bypass the frugality policy.
         "OUROBOROS_EXECUTION_MODEL",
+        # Every other model choice is the same trust class: the global model
+        # and the pin switch that makes persisted ids run, plus each role's
+        # model variable (``config.model_selection.MODEL_ENV_VARS``).
+        "OUROBOROS_MODEL",
+        "OUROBOROS_PIN_MODELS",
+        "OUROBOROS_CLARIFICATION_MODEL",
+        "OUROBOROS_QA_MODEL",
+        "OUROBOROS_DEPENDENCY_ANALYSIS_MODEL",
+        "OUROBOROS_ONTOLOGY_ANALYSIS_MODEL",
+        "OUROBOROS_CONTEXT_COMPRESSION_MODEL",
+        "OUROBOROS_WONDER_MODEL",
+        "OUROBOROS_REFLECT_MODEL",
+        "OUROBOROS_SEMANTIC_MODEL",
+        "OUROBOROS_ASSERTION_EXTRACTION_MODEL",
+        "OUROBOROS_DETECTOR_MODEL",
+        "OUROBOROS_VALIDATION_MODEL",
+        "OUROBOROS_CONSENSUS_MODELS",
+        "OUROBOROS_CONSENSUS_ADVOCATE_MODEL",
+        "OUROBOROS_CONSENSUS_DEVIL_MODEL",
+        "OUROBOROS_CONSENSUS_JUDGE_MODEL",
         # Model-tier experiment controls are the same trust class: a cloned repo
         # must not disable routing or opt the user into shadow replay, which
         # re-executes successful children and can double token spend.

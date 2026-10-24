@@ -501,6 +501,60 @@ async def test_zero_exit_pi_error_event_returns_provider_error() -> None:
     assert result.error.details["session_id"] == "pi-session"
 
 
+_EMPTY_ERROR_REASONS = {
+    "error-message-null": {"errorMessage": None},
+    "error-message-empty": {"errorMessage": ""},
+    "error-message-blank": {"errorMessage": "   "},
+    "error-message-missing": {},
+}
+
+
+@pytest.mark.parametrize(
+    "reason", list(_EMPTY_ERROR_REASONS.values()), ids=list(_EMPTY_ERROR_REASONS)
+)
+@pytest.mark.asyncio
+async def test_zero_exit_pi_error_without_reason_still_fails(reason: dict[str, object]) -> None:
+    """A ``stopReason: "error"`` message stays a failure however thin it is.
+
+    ``stopReason`` declares the failure; ``errorMessage`` only carries the
+    reason. Reading a missing reason as "no error" let a failed run return the
+    text it had streamed before the failure as a successful completion.
+    """
+    adapter = PiLLMAdapter(cli_path="/tmp/pi", cwd="/tmp/project")
+    failed = {"role": "assistant", "content": [], "stopReason": "error", **reason}
+
+    async def fake_create_subprocess_exec(*_command: str, **_kwargs: Any) -> _FakeProcess:
+        return _FakeProcess(
+            stdout=_pi_jsonl(
+                {"type": "session", "id": "pi-session"},
+                {
+                    "type": "message_update",
+                    "assistantMessageEvent": {"type": "text_delta", "delta": "partial answer"},
+                },
+                {"type": "message_end", "message": failed},
+                {"type": "agent_end", "messages": [failed]},
+            ),
+            returncode=0,
+        )
+
+    with patch(
+        "ouroboros.providers.codex_cli_adapter.asyncio.create_subprocess_exec",
+        side_effect=fake_create_subprocess_exec,
+    ):
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="Return a verdict.")],
+            CompletionConfig(model="default"),
+        )
+
+    assert result.is_err, f"stopReason=error with {reason!r} must not report success"
+    assert result.error.provider == "pi"
+    assert result.error.message == "Unknown error"
+    assert "partial answer" not in result.error.message
+    assert result.error.details["event_type"] == "message_end"
+    assert result.error.details["returncode"] == 0
+    assert result.error.details["session_id"] == "pi-session"
+
+
 @pytest.mark.asyncio
 async def test_zero_exit_pi_message_end_error_returns_provider_error() -> None:
     adapter = PiLLMAdapter(cli_path="/tmp/pi", cwd="/tmp/project")

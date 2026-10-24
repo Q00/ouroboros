@@ -36,7 +36,7 @@ For Codex-backed Ouroboros workflows:
 
 - Put persistent Ouroboros role overrides in `~/.ouroboros/config.yaml`.
 - Use `ouroboros config --web` (or `ouroboros config` in a terminal) to select **Use Codex default model** for Codex's current default model, or choose **Enter another model ID…** to pin a model for each pipeline stage, including Execute. `~/.codex/config.toml` is for the Codex MCP registration and any user-managed native profiles.
-- The Codex-aware loader does **not** hardcode a mini model when these keys are left at their shipped defaults. It resolves Codex-backed lookups to Codex's `default` sentinel unless you set an explicit model string.
+- The loader does **not** hardcode a model for Codex. Every model key defaults to `auto`, which resolves Codex-backed lookups to Codex's `default` sentinel. A model string you set takes effect only with [`models.pin: true`](#models).
 - Use `llm_profiles` and `llm_role_profiles` when you want portable task profiles that can map to Codex CLI profiles or to ordinary model settings for other providers.
 
 ### Codex Role Override Map
@@ -49,6 +49,8 @@ For Codex-backed Ouroboros workflows:
 | Semantic evaluation | `evaluation.semantic_model` |
 | Consensus simple voting | `consensus.models` |
 | Consensus deliberative roles | `consensus.advocate_model`, `consensus.devil_model`, `consensus.judge_model` |
+
+`execution.default_model` covers the EXECUTE-stage planning roles (`atomicity`, `decomposition`, `agent_runtime_implementation`) alongside Execute-stage runtime calls. With `models.pin: true`, an explicit model id (or `OUROBOROS_EXECUTION_MODEL`) pins those roles. When it is unset or set to `default`/`current`, CLI backends choose their own default; LiteLLM retains its provider-qualified semantic model because it has no model-free default.
 
 > **Recommended baseline:** use **Use Codex default model**. Setup assigns each Ouroboros role a per-invocation reasoning effort (fast: low, standard: medium, deep: high, frontier: xhigh) without pinning a Codex model, so Codex's current default remains in control.
 
@@ -81,13 +83,13 @@ llm_profiles:
       codex:
         reasoning_effort: high
       claude_code:
-        model: claude-opus-5
+        model: claude-opus-5-5
       gemini:
         model: gemini-2.5-pro
       opencode:
         model: openai/gpt-5.4
       litellm:
-        model: openrouter/anthropic/claude-opus-5
+        model: openrouter/anthropic/claude-opus-5.5
 
   frontier:
     max_turns: 8
@@ -144,6 +146,7 @@ url = "http://127.0.0.1:12000/mcp"
 |---------|-------|---------|
 | `orchestrator` | `OrchestratorConfig` | Runtime backend selection and agent permissions |
 | `llm` | `LLMConfig` | LLM-only flow defaults (model selection, permission mode) |
+| `models` | `ModelsConfig` | Automatic model selection and the explicit pin switch |
 | `economics` | `EconomicsConfig` | PAL Router tier definitions and escalation thresholds |
 | `clarification` | `ClarificationConfig` | Phase 0 — Interview / Big Bang settings |
 | `execution` | `ExecutionConfig` | Phase 2 — Double Diamond execution settings |
@@ -156,6 +159,7 @@ url = "http://127.0.0.1:12000/mcp"
 | `drift` | `DriftConfig` | Drift monitoring thresholds |
 | `runtime_controls` | `RuntimeControlsConfig` | Long-running workflow liveness and progress controls |
 | `logging` | `LoggingConfig` | Log level, path, and verbosity |
+| `boundary` | `BoundaryConfig` | Check package boundary of `ooo run` (on by default) |
 
 ---
 
@@ -208,10 +212,10 @@ llm:
   backend: claude_code
   permission_mode: default
   opencode_permission_mode: acceptEdits
-  qa_model: claude-sonnet-4-6
-  dependency_analysis_model: claude-sonnet-4-6
-  ontology_analysis_model: claude-sonnet-4-6
-  context_compression_model: gpt-4
+  qa_model: auto
+  dependency_analysis_model: auto
+  ontology_analysis_model: auto
+  context_compression_model: auto
 ```
 
 | Option | Type | Default | Description |
@@ -219,15 +223,90 @@ llm:
 | `backend` | `"claude"` \| `"claude_code"` \| `"litellm"` \| `"codex"` \| `"opencode"` \| `"hermes"` \| `"gemini"` \| `"kiro"` \| `"copilot"` \| `"goose"` \| `"pi"` \| `"omp"` \| `"ourocode"` \| `"gjc"` \| `"zcode"` \| `"dsh"` | `"claude_code"` | Default backend for LLM-only flows. Overridable via `OUROBOROS_LLM_BACKEND`. `ourocode` and `dsh` are LLM-only and are not valid for `orchestrator.runtime_backend`. `dsh` additionally requires `orchestrator.dsh_config_path`; see [the DeepSeek Harness guide](guides/deepseek-harness.md). The runtime alias `deepseek_harness` is **not** accepted here — this field is validated against the literals above, so persist `dsh`. |
 | `permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"default"` | Permission mode for non-OpenCode LLM flows. Overridable via `OUROBOROS_LLM_PERMISSION_MODE`. |
 | `opencode_permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"acceptEdits"` | Permission mode for OpenCode-backed LLM flows. Overridable via `OUROBOROS_OPENCODE_PERMISSION_MODE`. |
-| `qa_model` | `string` | `"claude-sonnet-4-6"` | Model used for post-execution QA verdict generation. Overridable via `OUROBOROS_QA_MODEL`. |
-| `dependency_analysis_model` | `string` | `"claude-sonnet-4-6"` | Model used for AC dependency analysis. Overridable via `OUROBOROS_DEPENDENCY_ANALYSIS_MODEL`. |
-| `ontology_analysis_model` | `string` | `"claude-sonnet-4-6"` | Model used for ontological analysis. Overridable via `OUROBOROS_ONTOLOGY_ANALYSIS_MODEL`. |
-| `context_compression_model` | `string` | `"gpt-4"` | Model used for workflow context compression. Overridable via `OUROBOROS_CONTEXT_COMPRESSION_MODEL`. |
+| `qa_model` | `string` | `"auto"` | Model used for post-execution QA verdict generation. Overridable via `OUROBOROS_QA_MODEL`. |
+| `dependency_analysis_model` | `string` | `"auto"` | Model used for AC dependency analysis. Overridable via `OUROBOROS_DEPENDENCY_ANALYSIS_MODEL`. |
+| `ontology_analysis_model` | `string` | `"auto"` | Model used for ontological analysis. Overridable via `OUROBOROS_ONTOLOGY_ANALYSIS_MODEL`. |
+| `context_compression_model` | `string` | `"auto"` | Model used for workflow context compression. Overridable via `OUROBOROS_CONTEXT_COMPRESSION_MODEL`. |
+
+Every model field in `llm`, `clarification`, `resilience`, `evaluation`, and
+`consensus` defaults to `auto` and follows the rules in [`models`](#models).
 
 When `llm.backend` is `ourocode`, model fields are `OUROCODE_MODEL` selectors,
 not raw Anthropic model IDs. The supported selectors are `claude`, `claude_api`,
 `codex`, and `gemini`; `default` and shipped Claude default pins resolve to
 `claude` so journal metadata matches the ACP child process.
+
+---
+
+## Choosing models
+
+Most users need no model setting at all, and one switch when they do.
+
+- **Default: `auto`.** Claude roles use the tier's current CLI alias; runtimes
+  such as Codex, Gemini, and Antigravity keep the CLI's selected model. Automatic
+  role selection and the execution-time per-AC tier router are separate (see
+  [`economics`](#economics)).
+- **One switch for every role.** `ouroboros config set models.default frontier`
+  (or `frugal`, `standard`, a model id, or back to `auto`). For a single
+  command, pass `--model` to `ouroboros run`, `ouroboros interview`, or
+  `ouroboros pm`, for example `ouroboros run seed.yaml --model frontier`. Tier
+  names resolve through the active backend's native economics ladder. An
+  unknown or unconfigured model namespace keeps `default`; it does not imply
+  three distinct models. Claude aliases such as `opus` apply to Claude backends.
+- **See what runs.** `ouroboros config show` prints a models table (role,
+  tier, backend, resolved model, source) under a `models: auto (pin off)`,
+  `models: pinned`, or `models: <value> for every role (<source>)` header, and
+  lists saved per-role ids that are not applied
+  under `ignored (pin off)` with the hint `set models.pin: true to use`.
+  `ouroboros config show --json` carries the same data under `models`.
+- **Pin for research.** `ouroboros config set models.pin true` (or
+  `--pin-models` for one command) runs the per-role ids saved in the role
+  fields below. `litellm` and `copilot` take provider-owned ids, so they use
+  saved ids whether or not pin is on.
+
+A fresh config from `ouroboros setup` or `ouroboros config init` writes
+`models.default: auto` and no per-role model ids. Copilot setup also writes
+the model you pick from Copilot's catalog, because Copilot needs an id from
+that catalog.
+
+---
+
+## `models`
+
+How every role's model is chosen. The default, `auto`, keeps Claude's tier
+aliases and other runtimes' CLI-owned defaults. An explicit tier name selects
+the active backend's configured/native ladder.
+
+```yaml
+models:
+  default: auto   # auto | frugal | standard | frontier | <model id>
+  pin: false      # true = run the model ids persisted in role fields
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `default` | `string` | `"auto"` | `auto` picks each role's own tier. A tier name (`frugal`, `standard`, `frontier`) applies that tier to every role, and a model id applies that model to every role. Overridable via `OUROBOROS_MODEL`. |
+| `pin` | `bool` | `false` | Run the concrete model ids persisted in role fields (`llm.qa_model`, `clarification.default_model`, and the rest) and in the `OUROBOROS_*_MODEL` variables. While off, those ids are ignored with one warning per process, except on `litellm` and `copilot` (see below). Turn on for research or reproducibility. Overridable via `OUROBOROS_PIN_MODELS` (`1`/`0`). |
+
+Each role belongs to one tier: interview, seed, PM, brownfield explore,
+semantic evaluation, Wonder, Reflect, lateral thinking, and the consensus roles
+are **frontier**; Execute, validation, QA, assertion extraction, mechanical
+detection, dependency analysis, ontology analysis, and context compression are
+**standard**; the brownfield repository scan is **frugal**. How a tier becomes
+a model depends on the backend:
+
+| Backend | `auto` resolves to |
+|---------|--------------------|
+| `claude`, `claude_mcp` | The Claude CLI alias for the tier (`haiku`, `sonnet`, `opus`), which the CLI maps to its newest model. |
+| `litellm` (including OpenRouter) | The configured model string, used as-is whether or not `pin` is on. With nothing configured, the shipped Anthropic id for the role. `auto` is never sent to LiteLLM. |
+| `copilot` | The configured model string (from Copilot's own model catalog), used as-is. With nothing configured, Copilot's default model. |
+| Every other backend (Codex, OpenCode, Gemini, Goose, Kiro, Hermes, Pi, OMP, gjc, Antigravity, Grok, Zcode, ourocode, dsh, host) | `default`: the CLI's own configured model. |
+
+An explicit model selection takes precedence over adaptive tier routing.
+Native runtime support still determines whether a model can be changed per call;
+see [runtime parameter handling](runtime-capability-matrix.md#parameter-handling-negotiation).
+Plain automatic Codex execution stays on Codex's selected model unless a tier
+or routing policy is explicitly requested.
 
 ---
 
@@ -253,6 +332,8 @@ Provider-specific fields use the same keys plus `profile`. `profile` is currentl
 
 Codex agent-runtime tasks also use these mappings. Runtime handles with `session_role: implementation`, `coordinator`, `interview`, or `evaluation` resolve through `agent_runtime_<session_role>`; tasks without a role fall back to `agent_runtime`. Explicit runtime models still win and are passed with `--model` instead of `--profile`.
 
+Anthropic API Claude Haiku/Sonnet/Opus 5.5 omit `temperature` and `top_p` at dispatch, including explicit overrides: these models reject non-default sampling. Their direct adapter steers JSON with a system instruction instead of assistant prefill and returns the complete response unchanged; LiteLLM Anthropic uses the same steering to avoid its bundled model map's forced-tool fallback. The supported Anthropic profile effort values `low`, `medium`, and `high` use adaptive thinking with `output_config.effort`, including when LiteLLM uses its bundled map. OpenRouter 5.5 calls also omit sampling and preserve `reasoning.effort`. Existing concrete older/custom models keep their prior request handling. This does not expand the effort enum: `xhigh` provider profiles remain Codex-only, and raw LiteLLM requests outside the supported Anthropic effort set retain LiteLLM's capability validation.
+
 ---
 
 ## `economics`
@@ -270,11 +351,11 @@ economics:
       intelligence_range: [9, 11]
       models:
         - provider: openai
-          model: gpt-5.1-codex-mini
+          model: gpt-6-luna
         - provider: google
           model: gemini-2.0-flash
         - provider: anthropic
-          model: claude-haiku-4-5
+          model: claude-haiku-5-5
       use_cases:
         - routine_coding
         - log_analysis
@@ -284,9 +365,9 @@ economics:
       intelligence_range: [14, 16]
       models:
         - provider: openai
-          model: gpt-5-codex
+          model: gpt-6.1-sol
         - provider: anthropic
-          model: claude-sonnet-4-6
+          model: claude-sonnet-5-5
         - provider: google
           model: gemini-2.5-pro
       use_cases:
@@ -298,9 +379,9 @@ economics:
       intelligence_range: [18, 20]
       models:
         - provider: openai
-          model: gpt-5.2
+          model: gpt-6-astra
         - provider: anthropic
-          model: claude-opus-5
+          model: claude-opus-5-5
       use_cases:
         - consensus
         - lateral_thinking
@@ -312,7 +393,7 @@ economics:
 | `default_tier` | `"frugal"` \| `"standard"` \| `"frontier"` | `"frugal"` | The starting tier used when no task-specific override applies. |
 | `escalation_threshold` | `int >= 1` | `2` | The retry attempt at which tier escalation begins. From this attempt onward the tier climbs one notch per retry (progressive), capped at the frontier tier. Top-level and untrusted decomposed work start at the base tier. Only a decomposed child with explicit trust authorization starts one tier lower, so that trusted-child ladder may require one additional retry to reach the same frontier ceiling. Current live decomposition supplies no such trust authorization. |
 | `downgrade_success_streak` | `int >= 1` | `5` | Number of consecutive successes at the current tier before downgrading to the previous tier. |
-| `tiers` | `dict[str, TierConfig]` | (see above) | Tier definitions keyed by name. |
+| `tiers` | `dict[str, TierConfig]` | (see above) | Tier definitions keyed by name. Explicit tier selection and enabled per-AC routing use the active runtime's native model entries. Unpinned Claude vendor defaults use `haiku`/`sonnet`/`opus` aliases; explicit runtime-specific economics entries remain literal. A resumed run replays its resolved model ladder. |
 
 **`TierConfig` fields:**
 
@@ -327,8 +408,70 @@ economics:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `provider` | `string` | Provider name (`openai`, `anthropic`, `google`, `openrouter`). |
-| `model` | `string` | Model identifier. Provider formats differ: Anthropic uses `claude-opus-5`, while OpenRouter uses `openrouter/anthropic/claude-opus-5`. |
+| `provider` | `string` | Model namespace: a supported runtime name such as `codex` or `gemini`, or a vendor fallback (`anthropic`, `openai`, `google`) for its single-provider runtime. |
+| `model` | `string` | Identifier accepted by that runtime/provider. Runtime-specific custom IDs are preserved intact. |
+
+### Native runtime ladders
+
+For each tier, the existing Claude, Codex and Gemini routing backends prefer
+the exact runtime property, then its shared model family, then the vendor
+fallback: `codex_mcp` / `codex_cli` → `codex` → `openai`, `claude_mcp` /
+`claude_code` → `claude` → `anthropic`, and `gemini_cli` → `gemini` → `google`.
+These are `provider` namespace keys; lookup priority does not add per-call
+model-override support. Other runtime extensions are tracked separately in #2658.
+
+```yaml
+economics:
+  tiers:
+    frugal:
+      cost_factor: 1
+      models:
+        - {provider: codex, model: my-proxy/small-model}
+        - {provider: gemini, model: flash}
+    standard:
+      cost_factor: 10
+      models:
+        - {provider: codex, model: my-proxy/standard-model}
+        - {provider: gemini, model: pro}
+    frontier:
+      cost_factor: 30
+      models:
+        - {provider: codex, model: my-proxy/large-model}
+```
+
+Use IDs accepted by your configured CLI/provider. The shipped Codex candidates
+are `gpt-6-luna`, `gpt-6.1-sol`, and `gpt-6-astra`, based on the
+[official model guide](https://developers.openai.com/codex/models/) checked
+2026-10-18. Availability depends on plan, client, workspace and rollout. A
+catalog from another CLI does not prove an ID is supported in Codex.
+
+The Google API entries above remain API IDs. Only Gemini CLI translates the
+historically shipped `gemini-2.0-flash` / `gemini-2.5-pro` defaults to the native
+`flash` / `pro` aliases documented in its [model guide](https://geminicli.com/docs/cli/model/).
+Aliases follow the CLI's permitted current models; Gemini 3 preview access
+remains account-dependent. Use `provider: gemini` for an explicit native pin.
+Custom runtime-specific and cross-provider IDs stay literal.
+
+Explicit non-Claude tier choices (`models.default: frontier` or
+`--model frontier`) use the configured ladder even with `models.pin` off.
+Claude role-level tier choices retain their existing `haiku` / `sonnet` /
+`opus` aliases; the per-AC economics router is a separate resolution path. Missing rungs select the
+nearest higher configured tier, then a lower tier only when no higher rung
+exists. An absent model namespace returns `default`; unresolved
+`default`/`auto`/`current` decisions are advisory, never proof of model enforcement.
+Actual per-call support remains the runtime capability's contract.
+
+Plain automatic Codex execution continues using Codex's selected model. Set
+`OUROBOROS_MODEL_TIER_ROUTING=1` to opt into its adaptive concrete ladder.
+Explicit model pins take precedence, and `0` / `off` / `false` disables routing.
+The router and Route B share model resolution. Same-runtime resume replays its
+validated frozen ladder, including a historical shipped pin in the same
+provider and tier; it never silently substitutes a newer model. If the runtime
+no longer serves that ID, its error remains visible. Sessions from before shared
+MCP family lookup retain their validated prior runtime/vendor ladder as a whole,
+including known historical IDs in the same provider and tier; mixing rungs from
+the prior and current namespace resolutions is rejected. Cross-runtime redispatch
+does not forward the original harness's model IDs.
 
 ---
 
@@ -341,7 +484,7 @@ clarification:
   ambiguity_threshold: 0.2    # Interview completes when ambiguity score <= this value
   max_interview_rounds: 10    # Hard ceiling on clarification rounds
   model_tier: standard        # "frugal" | "standard" | "frontier"
-  default_model: claude-opus-5
+  default_model: auto
 ```
 
 | Option | Type | Default | Description |
@@ -349,7 +492,7 @@ clarification:
 | `ambiguity_threshold` | `float [0.0, 1.0]` | `0.2` | Maximum ambiguity score to allow seed generation to proceed. Interview loops until the score falls at or below this value. |
 | `max_interview_rounds` | `int >= 1` | `10` | Maximum number of question-answer rounds regardless of ambiguity score. |
 | `model_tier` | `"frugal"` \| `"standard"` \| `"frontier"` | `"standard"` | PAL tier used for the clarification phase. |
-| `default_model` | `string` | `"claude-opus-5"` | Default model for interview and seed generation. Overridable via `OUROBOROS_CLARIFICATION_MODEL`. |
+| `default_model` | `string` | `"auto"` | Default model for interview and seed generation (see [`models`](#models)). Overridable via `OUROBOROS_CLARIFICATION_MODEL`. |
 
 ---
 
@@ -373,15 +516,16 @@ execution:
 |--------|------|---------|-------------|
 | `max_iterations_per_ac` | `int >= 1` | `10` | Maximum number of execution iterations for a single acceptance criterion before the system escalates or declares failure. |
 | `retrospective_interval` | `int >= 1` | `3` | Number of iterations between automatic retrospective evaluations. |
-| `auto_evaluate` | `bool` | `true` | Enqueue formal 3-stage evaluation after a completed background run has a session and artifact. This includes unsuccessful AC execution; handler-level failures without an evaluable run are excluded. |
-| `auto_evolve` | `bool` | `true` | When formal evaluation returns an explicit rejection, seed a generation-1 lineage snapshot and enqueue a bounded Ralph continuation. Per-call `auto_evolve` overrides this setting. |
+| `auto_evaluate` | `bool` | `true` | Enqueue formal 3-stage evaluation after a completed background run has a session and artifact. This includes unsuccessful AC execution; handler-level failures without an evaluable run are excluded. Applies to MCP `ooo run` and to the terminal `ouroboros run`, which waits for the evaluation; `ouroboros run --auto-evaluate/--no-auto-evaluate` overrides it for one run. |
+| `auto_evolve` | `bool` | `true` | When formal evaluation returns an explicit rejection, seed a generation-1 lineage snapshot and enqueue a bounded Ralph continuation. Per-call `auto_evolve` overrides this setting. The terminal `ouroboros run` follows the same rule and waits for the Ralph job; `ouroboros run --auto-evolve/--no-auto-evolve` overrides it for one run. |
 | `auto_evolve_max_generations` | `int` | `3` | Maximum generations for automatically chained Ralph work. Values are clamped to Ralph's supported `1..10` range. |
 | `run_verify_commands` | `bool` | `true` | Check an AC's success contract (expected artifacts and `verify_command`) before accepting it. While on, the evidence verifier may also replay allowlisted commands the worker ran, in a copy of the workspace under the execution sandbox (writes only inside the copy, no network; nothing is replayed where the sandbox is unavailable), to corroborate `tests_passed` and `commands_run` claims the transcript alone cannot prove (see [Verifier Evidence Policy](contributing/verifier-evidence-policy.md#replay-first-corroboration)). Off: nothing is executed by the harness. |
 | `verify_command_timeout_seconds` | `int >= 1` | `600` | Timeout for each `verify_command` run and each replayed command. |
-| `exec_sandbox` | `bool` | `true` | Confine the commands the controller runs on its own authority (verifier replay) with the execution sandbox: writes (content, names and metadata) only beneath the workspace copy and a per-run temp directory, no non-loopback network, an allowlisted environment (`sandbox-exec` on macOS; Landlock plus a seccomp metadata filter on Linux, where metadata inside the copy is read-only too). Where no backend works, nothing is run and the outcome is indeterminate (`sandbox_unavailable`). **Unsafe when `false`:** those commands run unconfined, able to write anywhere the user can and to use the network. `OUROBOROS_EXEC_SANDBOX` overrides it; a project `.env` cannot. The effective value is sealed when a run starts, and resuming it with a different value is refused. |
-| `default_model` | `string \| null` | `null` | Optional Execute-stage model pin. `null`, an empty value, `"default"`, or `"current"` means Ouroboros does not pass a concrete `--model`; the selected runtime keeps its own current/default model. `OUROBOROS_EXECUTION_MODEL` has highest precedence, and a present empty env var explicitly clears the saved pin for that process. |
+| `exec_sandbox` | `bool` | `true` | Confine the commands the controller runs on its own authority (verifier replay) with the execution sandbox: writes (content, names and metadata) only beneath the workspace copy and a per-run temp directory, no non-loopback network, an allowlisted environment (`sandbox-exec` on macOS; Landlock plus read-only mounts and a seccomp metadata filter on Linux, where mode, timestamps and extended attributes inside the copy are read-only too only when no unprivileged mount namespace is available; a per-run AppContainer on Windows, where loopback reaches only the command's own processes, the `NUL` device is unavailable, batch files (`.cmd`, `.bat`) cannot run and are left indeterminate, and reads are limited to what is granted). On Windows the controller's interpreter and the live dependency trees a workspace copy links to are granted read and execute to one Ouroboros capability SID; that grant is persistent, is recorded in `~/.ouroboros/exec-sandbox/read-grants.jsonl`, and is removed with `python -c "from ouroboros.runtime.exec_sandbox import remove_persistent_read_grants as r; print(r())"` (run it while no Ouroboros command is running). Where no backend works, nothing is run and the outcome is indeterminate (`sandbox_unavailable`). **Unsafe when `false`:** those commands run unconfined, able to write anywhere the user can and to use the network. `OUROBOROS_EXEC_SANDBOX` overrides it; a project `.env` cannot. The effective value is sealed when a run starts, and resuming it with a different value is refused. |
+| `default_model` | `string \| null` | `null` | Optional Execute-stage model pin, applied with [`models.pin: true`](#models) (and always on `litellm`/`copilot`). `null`, an empty value, `"auto"`, `"default"`, or `"current"` means automatic selection: Claude runs the standard tier alias (`sonnet`) and other runtimes keep their own current/default model. `OUROBOROS_EXECUTION_MODEL` has highest precedence, and a present empty env var explicitly clears the saved pin for that process. |
 | `project_guidance` | `list[string]` | `[]` | Guidance IDs loaded from `<project-root>/.ouroboros/guidance/<id>/GUIDANCE.md` and appended to execution system prompts. This option is config-only and has no environment-variable override. |
-| `default_policy` | `"ask"` \| `"efficient"` \| `"quality_first"` | `"ask"` | Persistent default execution policy for fresh runs. `ask` preserves the host's interactive efficiency prompt exactly. `efficient` resolves omitted arguments to `adaptive`/`observe` and `quality_first` to `quality_first`/`off` without asking. Explicit invocation arguments always win, resumed sessions keep their persisted immutable contract, and `strict` frugality assurance never derives from this setting. |
+| `transcript_verifier` | `"decide"` \| `"record"` | `"record"` | How the per-criterion evidence verifier of the default (fat-harness) run path acts: the typed evidence check plus the transcript verifier. `record` runs it and writes what it would have decided to the criterion's `execution.ac.typed_evidence.observed` event (`transcript_verifier: record`, `would_have_rejected`), but a rejection fails no criterion and triggers no retry. `decide` lets a rejection fail the attempt and drive retries. A failing `verify_command` (see `run_verify_commands`) decides in both modes. The value is sealed when a run starts; a resumed run keeps it, and a run started before this setting existed resumes with `decide`. |
+| `default_policy` | `"ask"` \| `"efficient"` \| `"quality_first"` | `"quality_first"` | Persistent default execution policy for fresh runs. `quality_first` (the default, also used when no config file exists) resolves omitted arguments to `quality_first`/`off` without asking, and the start receipt tells the user how to switch. `efficient` resolves them to `adaptive`/`observe`. `ask` opts back into the host's interactive efficiency prompt. Change it with `ouroboros config set execution.default_policy efficient` (run `ouroboros config init` first if no config exists). Explicit invocation arguments always win, resumed sessions keep their persisted immutable contract, and `strict` frugality assurance never derives from this setting. |
 
 ### Project Execution Guidance
 
@@ -407,6 +551,245 @@ rejects runs with enabled project guidance.
 
 ---
 
+## `boundary`
+
+The check package boundary of `ooo run` (CLI and `ouroboros_execute_seed`),
+on by default for every run it applies to (a fresh run; a resumed session
+keeps the boundary it started with), in record mode.
+
+Record mode (the default, `check_package: record`). The package is built,
+admitted, and run on the finished workspace exactly as described below, and
+what it would have decided is recorded: in the run's journal
+(`boundary.acceptance.reconciled`, under a run contract that says
+`check_package: record`), in the printed outcome (under a line saying it
+decided nothing), and in the MCP summary (`check_package_mode: record`). It
+decides nothing: no criterion or run outcome changes, the worker gets no
+repair turn and no entry-point request, the existing verifier keeps deciding
+as with the check package off, formal evaluation and evolve do not read the
+journaled decision as a decision, and a resumed run does not run it again.
+The artifact checks below decide nothing under a recording package either,
+whatever their own mode. The rest of this section describes `decide` mode
+(`check_package: decide`, or the older spelling `on`).
+
+Before the worker starts, a read-only
+model call writes executable checks for the acceptance criteria, and each
+check is admitted only if it behaves as declared on the current tree. After the worker stops, the package decides
+the criteria it covers, before the session's terminal status is recorded; the
+existing verifier's verdict is kept as advisory for those criteria and decides
+the others. Edits the worker makes to test configuration inside the workspace
+(for example `pytest.ini`, `conftest.py`, or a test settings module)
+can make the existing verifier accept; the check package's oracle checks are
+unaffected, because they call the implementation through the product harness
+and do not read workspace test configuration (a model-written script check
+that runs the project's test runner would read it).
+
+MCP results: `ouroboros_start_execute_seed` reports the closed-value summary
+(`check_package`, `check_package_status`, `package_verdict`, `legacy_verdict`,
+`reconciliation`, `verification_coverage`, `check_package_mode`) in its job result, with or without
+`auto_evaluate`. The receipts of `ouroboros_start_execute_seed` and of a
+background `ouroboros_execute_seed` call carry `check_package` and
+`check_package_status: pending` (`off` and `not_run` when the check package is
+off; the decision is then the session's terminal status, which the package
+reconciled before it was recorded). A resumed session's receipt reports the
+mode the run started with, read from its journal before the receipt is
+returned; if the journal cannot be read, the resume is refused. An execution
+dispatched to the OpenCode plugin (a child session outside this process) is
+not governed: its result carries `check_package: not_applied` with
+`check_package_reason: plugin_dispatch`.
+
+Before the package is frozen, each oracle's stated expected values are
+compared with a reference implementation the constructor writes in the same
+reply, run in the same isolated target processes: a held-out case that
+disagrees is dropped (`oracle_inconsistent`; an oracle left with no held-out
+case is dropped too, since only a held-out case can verify a pass), and a
+criterion whose reference
+does not reproduce a case the constructor declared as stated in the Seed, or
+has no reference that runs, is reported as unverified
+(`reference_contradicts_stated_case`,
+`reference_unavailable`). This catches a slip in a stated value; it does not
+catch a misreading of the criterion that the cases and the reference share.
+
+Library entry points. An oracle's target is any importable callable of the
+project, including a classmethod. A case input that is an object rather than
+a JSON value is written as `{"$symbol": "package.module.Name"}` (at any depth
+in the arguments or a method's `init`); the harness imports it and passes the
+object. An oracle may declare `setup`, calls of callables defined in the
+project with JSON arguments (for example a library's `configure` function,
+then its plugin loader), which the harness makes before it resolves the
+target. A setup call that fails, or an input that names nothing, leaves the
+base run indeterminate, never a reproduction failure. A returned set
+compares as the list of its items sorted by their JSON text. The reference
+check makes no setup call and gives the reference each object input as its
+dotted path. Command oracles take neither.
+
+Built calls. A case's `args` are the JSON data of the oracle's declared
+`params`, and the reference takes exactly those. An oracle may declare how
+the target's call is built from them: `inputs` (the call's parameters, each
+a template: JSON, `{"$symbol": ...}`, `{"$param": "name"}`, or a call chain
+`{"$call": "pkg.Factory", "args": [...], "kwargs": {...}, "then": [read,
+...]}` that builds an object such as a fitted model), `receiver` (a method
+oracle's instance, built the same way and required to be an instance of the
+bound class), and `project` (reads applied to each returned value before it
+is compared: `{"attr"}`, `{"method", "args", "kwargs", "keep"}`, `{"item"}`,
+`{"each": [...]}`). A case may expect `no_raise`; it can fail a candidate,
+but its pass never verifies a criterion, since a target that returns
+anything passes it. A command case may carry `files`, which the controller
+writes into a fresh directory in the check's scratch directory (never the
+checkout copy) that becomes the command's working directory. An input, a
+receiver or a projection read that fails leaves the base run indeterminate
+and fails the case on a candidate. The reference check never builds
+`inputs` or a `receiver`, applies no projection (the reference returns the
+projected value); a command case's files are case data and are written for
+the reference too. A method oracle with a built receiver
+needs a function reference, otherwise the criterion is
+`reference_unavailable`. Each new field is frozen in `oracle.json` only when
+declared, so an oracle without one freezes the same data as before.
+
+What an oracle observation proves. The candidate's code runs inside each
+target process, so it can write the process's report itself (the frame
+nonce is a parsing convention, not an authority boundary). A report is
+therefore evidence of what the candidate's code computed for the inputs it
+was sent, never proof that the bound function ran: the identity of the bound
+callable is not proven, and a candidate that computes the right outputs
+elsewhere in its code passes. That is why every oracle
+must carry at least one held-out case (a reply without one is refused,
+`oracle_without_held_out_case`) and why only a passing held-out case of a
+reproduction oracle verifies a criterion: its inputs reach the candidate only
+in the final verification, so matching its expected value means computing the
+rule's output for an input the candidate had never seen. A report can only
+make a case pass, never fail one the candidate's code passes, and admission
+runs the base checkout's code, so neither admission nor a failure depends on
+it.
+
+Admission is per check: a reproduction check that already passes on the
+current tree, a preservation check that already fails on it, or a check whose
+own run there decided nothing (it failed before its own assertion, timed out,
+could not start, or flooded its output) is excluded on its own
+(`repro_passes_on_base`, `preservation_fails_on_base`, `indeterminate_on_base`)
+and the rest of the package is admitted. A failure every check shares (the
+pinned interpreter or the sandbox unavailable, a changed file, a failed
+precondition) still leaves the whole package unadmitted. A criterion keeps the package's authority only while
+an admitted check covers it (for a bug-fix criterion, an admitted reproduction
+check). For the criteria left without an admitted check, one more constructor
+call, before the worker starts, asks for replacement checks and says why the
+earlier ones were excluded; the replacements go through the same admission.
+The constructor is asked for a check for every criterion. Whether an
+admitted check covers a criterion is the only thing that decides who judges
+it; nothing classifies criteria by kind, and the reason a criterion was left
+uncovered is descriptive only.
+
+Every criterion the package cannot verify (no admitted check, or no binding)
+is decided by the existing verifier: its rejection fails the
+run (exit 1) and is shown as legacy-decided. That rejection exists only with
+`execution.transcript_verifier: decide`; in its default `record` mode the
+existing verifier records what it would have rejected and the criterion is
+accepted. Only a criterion neither verifier
+had evidence for (for example the existing verifier's transcript was
+unavailable) is accepted as unverified; the run then prints an
+insufficient-verification warning, as it does when half or more of the
+criteria were not decided by the package.
+
+Whether or not a package was admitted, the controller can also run two
+checks of the whole finished workspace: the project's existing test files
+that pair with or import a changed module, restored to their original bytes
+and run on the original tree twice and on the finished workspace once
+(`base_regression`), and each test file the worker added
+(`worker_test_gate`). Each has a mode: `decide`, `record` (run it and record
+what it would have decided, deciding nothing and sending no repair) or
+`off`. In `decide` mode a test that passed on both original runs and fails
+on the finished workspace fails every criterion the package could not
+verify, but only when a package was admitted; without one the worker is
+told once which tests regressed, and a regression left at the end is
+recorded while the criteria stay unverified (a test can legitimately pin
+behaviour the change is meant to alter, and nothing then adjudicates it).
+The existing tests need not be pytest tests. Test files paired with a
+changed Go, JavaScript or TypeScript, Java or Kotlin, or Rust source by name
+(`foo_test.go`, `x.test.ts`, `FooTest.java`, `tests/foo.rs`) are selected
+too, and each selected file is run by a test command: a criterion's
+`verify_command` that names it, the test command the check constructor may
+declare, the worker's own test runs, or a default the repository's files
+imply (Django's `tests/runtests.py`, SymPy's `bin/test`, `manage.py`,
+`package.json`'s `test` script, `go.mod`, `Cargo.toml`). A command is used
+for a file only after it passes twice on the original tree and fails when
+the file is replaced with unparseable bytes, which a command that does not
+really run the file cannot do; its exit status then decides for the whole
+file, or its JUnit report per test when it writes one. A file no command
+passes that check for is not observed.
+
+An added test file whose run fails, in `decide` mode, fails every criterion
+the package could not verify (every criterion, when no package was
+admitted). While the worker runs, the failing test names are sent back as a
+repair. A
+test is set aside when it reached changed functions and an admitted oracle
+check that passed reached every one of them (that oracle decides the
+changed behaviour); nothing is set aside when more than 20 tests broke or
+the change also touched code outside every function. The worker's own
+pytest configuration (conftest files, ini files, addopts) never applies to
+the existing tests' runs, and a test that fails only once is rerun alone
+before it counts. A
+criterion the package verified keeps its verdict, and a check that observed
+nothing (a timeout, no matching test file, a project whose own test runner is
+not pytest) decides nothing.
+
+```yaml
+boundary:
+  check_package: decide           # decide (or on) | record | off; unset = record
+  constructor_timeout_seconds: 600
+  check_timeout_seconds: 120
+  max_construction_attempts: 2
+  base_regression: decide         # decide | record | off; unset = record
+  worker_test_gate: record        # decide | record | off; unset = record
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `check_package` | `"decide"` \| `"on"` \| `"record"` \| `"off"` \| unset | unset (`record`) | `record` runs the check package and records what it would have decided without deciding anything (see above); `decide` lets it decide the criteria it covers; `on` is the older spelling of `decide` and keeps deciding; `off` turns it off for every run. `--check-package` (`decide`) / `--no-check-package` (`off`) and `OUROBOROS_CHECK_PACKAGE` take precedence, in that order. A bare YAML `on`/`off` is accepted. If `config.yaml` cannot be read, the check package is off for runs that set neither the flag nor the variable, since the unreadable file may hold an `off`; with no `config.yaml` at all the default (`record`) applies. The setting does not depend on telemetry. |
+| `constructor_timeout_seconds` | `int` (30..3600) | `600` | Wall-clock budget of one constructor call. |
+| `check_timeout_seconds` | `int` (5..1800) | `120` | Per-check timeout during admission and verification. |
+| `max_construction_attempts` | `int` (1..5) | `2` | Package versions tried before the worker starts; a version that is not admitted is superseded by the next. The one replacement call for criteria left without an admitted check adds a version outside this budget. |
+| `base_regression` | `"decide"` \| `"record"` \| `"off"` \| unset | unset (`record`) | How the existing tests' check acts (see above). `decide` takes effect only while the check package decides; under a recording check package it records. Each test run uses `check_timeout_seconds`. Recorded on the run when it starts; a resumed run does not run it. A bare YAML `on`/`off` reads as `decide`/`off`. |
+| `worker_test_gate` | `"decide"` \| `"record"` \| `"off"` \| unset | unset (`record`) | How the check of the test files the worker added acts, independently of `base_regression`. |
+
+Checks are model-written Python scripts. They run on throwaway copies of the
+project, with the project's virtualenv interpreter when one is found (else
+`python3`), a per-check timeout, and confined by the execution sandbox (see
+`execution.exec_sandbox`): a check can write only beneath its own copy and a
+scratch directory that is removed afterwards, has no non-loopback network, and
+gets an environment built from an allowlist (`PATH`, the locale variables,
+`TZ`, a few Python I/O settings, and on Windows the system variables a process
+needs; `HOME` and the temp directory in the scratch directory; `VIRTUAL_ENV`
+when the interpreter is a virtualenv's). The same applies to the processes
+that run the implementation under an oracle check and to the constructor's
+reference implementation. Where the sandbox cannot confine a check, the check
+is undecided and nothing runs. Reads are not restricted: a check can read
+files you can read, and on macOS (where `sandbox-exec` cannot deny
+`KERN_PROCARGS2`) the arguments and environment of your other processes,
+Ouroboros included; under Landlock on Linux it cannot. Turn the check package
+off where that matters. A project `.env` cannot set
+`OUROBOROS_CHECK_PACKAGE`.
+
+Constructor runtimes: the constructor's model call must keep no session on
+disk (its reply holds the held-out cases), so it runs only on runtimes with a
+no-persistence mode: Claude Code (`--no-session-persistence`, through the Agent
+SDK or the `claude -p` worker of `--runtime claude-cli`) and Codex CLI
+(`codex exec --ephemeral`). With any other runtime the run has no check
+package (`constructor_session_not_ephemeral:<backend>`, before any model call)
+and the existing verifier decides every criterion, deterministically.
+
+A resumed run keeps the mode and the `boundary` settings it started with
+(`check_timeout_seconds` is recorded on the run's
+`boundary.check_package.enabled` journal record): changing the switch or the
+config between the start and the resume changes nothing for that run.
+
+On resume the package decision is recovered from the journal alone. A journal
+the run could not have written (a missing, duplicated or conflicting record,
+or a gap in the package versions) leaves every criterion undecided
+(`boundary_record_missing`) and runs no check. When the same process still
+holds the admitted package, its full decision runs, held-out cases included.
+In another process the held-out cases are gone (they are never written to
+disk), so no check runs: covered criteria are undecided
+(`held_out_unavailable`) and the existing verifier decides the rest.
+
 ## `resilience`
 
 Controls Phase 3 — stagnation detection and lateral thinking.
@@ -417,8 +800,8 @@ resilience:
   lateral_thinking_enabled: true
   lateral_model_tier: frontier   # "frugal" | "standard" | "frontier"
   lateral_temperature: 0.8
-  wonder_model: claude-opus-5
-  reflect_model: claude-opus-5
+  wonder_model: auto
+  reflect_model: auto
 ```
 
 | Option | Type | Default | Description |
@@ -427,8 +810,8 @@ resilience:
 | `lateral_thinking_enabled` | `bool` | `true` | Whether lateral thinking persona rotation is active when stagnation is detected. |
 | `lateral_model_tier` | `"frugal"` \| `"standard"` \| `"frontier"` | `"frontier"` | PAL tier used for lateral thinking calls. Frontier is the default because creative re-framing requires high model capability. |
 | `lateral_temperature` | `float [0.0, 2.0]` | `0.8` | LLM sampling temperature for lateral thinking prompts. Higher values produce more divergent outputs. |
-| `wonder_model` | `string` | `"claude-opus-5"` | Model for the Wonder phase (divergent exploration). Overridable via `OUROBOROS_WONDER_MODEL`. |
-| `reflect_model` | `string` | `"claude-opus-5"` | Model for the Reflect phase (convergent synthesis). Overridable via `OUROBOROS_REFLECT_MODEL`. |
+| `wonder_model` | `string` | `"auto"` | Model for the Wonder phase (divergent exploration). Overridable via `OUROBOROS_WONDER_MODEL`. |
+| `reflect_model` | `string` | `"auto"` | Model for the Reflect phase (convergent synthesis). Overridable via `OUROBOROS_REFLECT_MODEL`. |
 
 ---
 
@@ -443,8 +826,8 @@ evaluation:
   stage3_enabled: true         # Currently inert in config.yaml; see below
   satisfaction_threshold: 0.8  # Currently inert; the pipeline gate is hardcoded to 0.8
   uncertainty_threshold: 0.3   # Currently inert in config.yaml; see below
-  semantic_model: claude-opus-5
-  assertion_extraction_model: claude-sonnet-4-6
+  semantic_model: auto
+  assertion_extraction_model: auto
 ```
 
 | Option | Type | Default | Description |
@@ -454,8 +837,8 @@ evaluation:
 | `stage3_enabled` | `bool` | `true` | **Currently inert in `config.yaml`.** Runtime builders do not copy this field into `PipelineConfig`. |
 | `satisfaction_threshold` | `float [0.0, 1.0]` | `0.8` | **Currently inert.** The field is validated but the pipeline compares Stage 2 scores against a hardcoded `0.8`; changing this value does not change the gate. See [Evaluation Pipeline Guide](./guides/evaluation-pipeline.md#stage-2-semantic-evaluation). |
 | `uncertainty_threshold` | `float [0.0, 1.0]` | `0.3` | **Currently inert in `config.yaml`.** Runtime builders do not copy it into `TriggerConfig`. |
-| `semantic_model` | `string` | `"claude-opus-5"` | Model used for Stage 2 semantic evaluation. Overridable via `OUROBOROS_SEMANTIC_MODEL`. |
-| `assertion_extraction_model` | `string` | `"claude-sonnet-4-6"` | Model used for extracting verification assertions from seed criteria. Overridable via `OUROBOROS_ASSERTION_EXTRACTION_MODEL`. |
+| `semantic_model` | `string` | `"auto"` | Model used for Stage 2 semantic evaluation. Overridable via `OUROBOROS_SEMANTIC_MODEL`. |
+| `assertion_extraction_model` | `string` | `"auto"` | Model used for extracting verification assertions from seed criteria. Overridable via `OUROBOROS_ASSERTION_EXTRACTION_MODEL`. |
 
 > **Configuration boundary:** the top-level `evaluation.stage1_enabled`, `stage2_enabled`, `stage3_enabled`, and `uncertainty_threshold` keys are schema-validated placeholders, not runtime controls. The similarly named direct-Python `PipelineConfig.stage*_enabled` fields and `TriggerConfig.uncertainty_threshold` are separate and active when explicitly supplied to `EvaluationPipeline`; see [Disabling Stages](./guides/evaluation-pipeline.md#disabling-stages) and [Trigger Configuration](./guides/evaluation-pipeline.md#trigger-configuration).
 
@@ -478,13 +861,10 @@ consensus:
   min_models: 3             # Inert — runtime requires 2 successful post-filter votes
   threshold: 0.67           # Inert — runtime ratio threshold defaults to 0.66
   diversity_required: true  # Currently inert — see the field table below
-  models:
-    - openrouter/openai/gpt-4o
-    - openrouter/anthropic/claude-opus-5
-    - openrouter/google/gemini-2.5-pro
-  advocate_model: openrouter/anthropic/claude-opus-5
-  devil_model: openrouter/openai/gpt-4o
-  judge_model: openrouter/google/gemini-2.5-pro
+  models: [auto]
+  advocate_model: auto
+  devil_model: auto
+  judge_model: auto
 ```
 
 | Option | Type | Default | Description |
@@ -492,10 +872,10 @@ consensus:
 | `min_models` | `int >= 2` | `3` | **Currently inert.** After reviewer-independence filtering, simple consensus separately requires at least two successfully collected votes; this top-level field is not wired to that rule. |
 | `threshold` | `float [0.0, 1.0]` | `0.67` | **Currently inert.** Runtime simple consensus compares approvals divided by successful post-filter votes with direct-Python `ConsensusConfig.majority_threshold` (default `0.66`); this top-level field is not copied into it. |
 | `diversity_required` | `bool` | `true` | **Currently inert.** The field exists on `ConsensusConfig` and in the schema, but nothing reads it. Provider diversity depends on actual adapter routing; neither this flag nor differently named roster entries attest it. See [Evaluation Pipeline Guide](./guides/evaluation-pipeline.md#stage-3-consensus-multi-model-or-single-model-fallback). |
-| `models` | `list[string]` | (see above) | Model roster for Stage 3 simple voting. With `llm.backend: litellm`, use `provider/model` or `openrouter/provider/model`. With `llm.backend: codex`, use Codex/OpenAI model IDs such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_MODELS` (comma-separated). |
-| `advocate_model` | `string` | `"openrouter/anthropic/claude-opus-5"` | Model that argues in favor of the proposed solution in deliberative consensus. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_ADVOCATE_MODEL`. |
-| `devil_model` | `string` | `"openrouter/openai/gpt-4o"` | Model that argues against (devil's advocate) in deliberative consensus. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_DEVIL_MODEL`. |
-| `judge_model` | `string` | `"openrouter/google/gemini-2.5-pro"` | Model that renders a final verdict after deliberation. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_JUDGE_MODEL`. |
+| `models` | `list[string]` | `["auto"]` | Model roster for Stage 3 simple voting. `auto` repeats the consensus role's model three times; on `litellm` it keeps the shipped OpenRouter roster (`openrouter/openai/gpt-4o`, `openrouter/anthropic/claude-opus-5.5`, `openrouter/google/gemini-2.5-pro`). With `llm.backend: litellm`, use `provider/model` or `openrouter/provider/model`. With `llm.backend: codex`, use Codex/OpenAI model IDs such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_MODELS` (comma-separated). |
+| `advocate_model` | `string` | `"auto"` (`litellm`: `"openrouter/anthropic/claude-opus-5.5"`) | Model that argues in favor of the proposed solution in deliberative consensus. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_ADVOCATE_MODEL`. |
+| `devil_model` | `string` | `"auto"` (`litellm`: `"openrouter/openai/gpt-4o"`) | Model that argues against (devil's advocate) in deliberative consensus. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_DEVIL_MODEL`. |
+| `judge_model` | `string` | `"auto"` (`litellm`: `"openrouter/google/gemini-2.5-pro"`) | Model that renders a final verdict after deliberation. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_JUDGE_MODEL`. |
 
 > **Configuration boundary:** `consensus.min_models` and `consensus.threshold` are schema-validated placeholders. Runtime simple consensus hardcodes a minimum of two successful post-filter votes and reads the separate direct-Python `ConsensusConfig.majority_threshold`. Changing these YAML keys does not change either rule.
 >
@@ -638,7 +1018,7 @@ All environment variables have higher priority than the corresponding `config.ya
 | `OUROBOROS_AGENT_PERMISSION_MODE` | `orchestrator.permission_mode` | Stored permission preference; runner-driven seed execution forces the native `bypassPermissions` equivalent for fresh and resumed dispatches on approval-aware backends. Pi and GJC have no separate approval flag. |
 | `OUROBOROS_OPENCODE_PERMISSION_MODE` | `orchestrator.opencode_permission_mode` | Stored OpenCode preference. Seed execution still forces `bypassPermissions`, translated to `--dangerously-skip-permissions`. |
 | `OUROBOROS_EXEC_SANDBOX` | `execution.exec_sandbox` | Execution sandbox for controller-run commands; on by default. `off` (or `0`, `false`, `no`) is **unsafe**: verifier replay then runs unconfined, able to write outside its workspace copy and to use the network. Honored only from trusted sources (process environment, `~/.ouroboros/.env`); a project `.env` cannot set it. |
-| `OUROBOROS_MODEL_TIER_ROUTING` | _(routing kill switch)_ | Model-tier routing is enabled by default. Set to `0`, `off`, or `false` (case- and whitespace-insensitive) to disable routing and emit no routing events. |
+| `OUROBOROS_MODEL_TIER_ROUTING` | _(routing policy)_ | Routing is enabled by default where a native ladder is configured, except plain automatic Codex selection. Set `1` to opt Codex into its ladder; `0`, `off`, or `false` (case- and whitespace-insensitive) disables adaptive routing and its events. |
 | `OUROBOROS_SHADOW_REPLAY` | _(experiment arm)_ | Default OFF. Only `1`, `true`, or `on` arms the opt-in shadow-baseline harness. Current live decompositions lack deterministic MECE attestation and are skipped before baseline model dispatch; bundled runtimes also lack the complete filesystem/external-effect isolation attestation, so production emits no shadow baseline today. |
 | `OUROBOROS_MAX_PARALLEL_WORKERS` | `orchestrator.max_parallel_workers` | Requested maximum concurrent Acceptance Criteria workers for parallel execution. Must be a positive integer. |
 | `OUROBOROS_MAX_CONCURRENCY` | _(initial fan-out estimate)_ | Overrides the backend-aware starting window. The legacy name is retained for compatibility; the value is no longer a permanent cap in runner-owned execution. Live 429/success feedback may shrink or grow the window, never above `OUROBOROS_MAX_PARALLEL_WORKERS`. Must be a positive integer; blank/invalid values are ignored. |
@@ -653,6 +1033,9 @@ All environment variables have higher priority than the corresponding `config.ya
 | `OUROBOROS_OUROCODE_CLI_PATH` | `orchestrator.ourocode_cli_path` | Path to the ourocode CLI binary used by the LLM-only `ourocode` backend. |
 | `OUROBOROS_DSH_CLI_PATH` | `orchestrator.dsh_cli_path` | Path to the `dsh-acp-demo` binary used by the LLM-only `dsh` backend. |
 | `OUROBOROS_DSH_CONFIG_PATH` | `orchestrator.dsh_config_path` | Absolute path to the trusted Cordis composition the `dsh` backend loads. Required by that backend. |
+| `OUROBOROS_CHECK_PACKAGE` | `boundary.check_package` | `decide`, `on` (the same as `decide`), `record` or `off` for the `ooo run` check package boundary (`record` by default); overrides config, and is overridden by `--check-package/--no-check-package`. Only those exact values are read: any other set value (an alias such as `1`, `true`, `yes` or `ON`, empty or whitespace) means `off`. Not accepted from a project `.env`. |
+| `OUROBOROS_AUTO_REQUESTER_COMMAND` | *(none)* | Requester command for `ouroboros auto`: asked instead of assuming (see [`auto` requester](cli-reference.md#asking-the-requester-instead-of-assuming)). Overridden by `--requester-command`. Not accepted from a project `.env`. |
+| `OUROBOROS_AUTO_REQUESTER_TIMEOUT_SECONDS` | *(none)* | Seconds to wait for one requester answer (default `300`). Overridden by `--requester-timeout`. Not accepted from a project `.env`. |
 | `OUROBOROS_SKIP_VERSION_CHECK` | *(none)* | Controls the Claude Agent SDK per-call version compatibility check. Defaults to `"1"` (skip the check, saving ~0.3-0.8 s per LLM call). Set to `"0"` to re-enable the check for debugging version-mismatch issues. Maps to `CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK` internally. |
 
 ### LLM Flow
@@ -668,8 +1051,14 @@ All environment variables have higher priority than the corresponding `config.ya
 
 ### Phase Models
 
+Every `OUROBOROS_*_MODEL` variable applies only with `OUROBOROS_PIN_MODELS=1`
+(or `models.pin: true`), except on `litellm` and `copilot`; see [`models`](#models).
+A project `.env` cannot set any of them.
+
 | Variable | Overrides | Description |
 |----------|-----------|-------------|
+| `OUROBOROS_MODEL` | `models.default` | `auto`, a tier name, or a model id for every role. |
+| `OUROBOROS_PIN_MODELS` | `models.pin` | `1` runs persisted model ids; `0` resolves automatically. |
 | `OUROBOROS_CLARIFICATION_MODEL` | `clarification.default_model` | Model for interview and seed generation. |
 | `OUROBOROS_WONDER_MODEL` | `resilience.wonder_model` | Model for the Wonder phase. |
 | `OUROBOROS_REFLECT_MODEL` | `resilience.reflect_model` | Model for the Reflect phase. |
@@ -811,6 +1200,9 @@ orchestrator:
   runtime_backend: codex
   codex_cli_path: /usr/local/bin/codex
 
+models:
+  pin: true             # run the ids below instead of Codex's own default
+
 llm:
   backend: codex
   qa_model: gpt-5.4
@@ -827,7 +1219,7 @@ consensus:
   judge_model: gpt-5.4
 ```
 
-This is the recommended Ouroboros-side pattern for Codex users. Keep `~/.codex/config.toml` limited to the MCP/env block created by setup.
+This is the recommended Ouroboros-side pattern for Codex users who pin models. Without `models.pin: true` these ids are ignored and Codex runs its own default. Keep `~/.codex/config.toml` limited to the MCP/env block created by setup.
 
 ### OpenCode Runtime
 
@@ -868,8 +1260,9 @@ an exact Copilot ID, then removes the known `openrouter/anthropic/` prefix or
 applies an explicit alias, and finally converts only the trailing Anthropic
 version separator (`claude-opus-4-8` → `claude-opus-4.8`). Every derived value
 must exist in the discovered or bundled Copilot catalog before it is returned.
-The current direct and OpenRouter Opus defaults therefore resolve to
-`claude-opus-5`; unknown IDs remain unchanged so Copilot emits its normal
+The prior direct and OpenRouter Opus 5 pins resolve to `claude-opus-5`
+when that ID is present. Current API pins require their own exact Copilot
+catalog candidate; unknown IDs remain unchanged so Copilot emits its normal
 unavailable-model error instead of silently choosing another model. See the
 [Copilot CLI runtime guide](runtime-guides/copilot.md) for full details.
 
@@ -921,9 +1314,9 @@ llm:
   backend: claude_code
   permission_mode: default
   opencode_permission_mode: acceptEdits
-  qa_model: claude-sonnet-4-6
-  dependency_analysis_model: claude-sonnet-4-6
-  ontology_analysis_model: claude-sonnet-4-6
+  qa_model: claude-sonnet-5-5
+  dependency_analysis_model: claude-sonnet-5-5
+  ontology_analysis_model: claude-sonnet-5-5
   context_compression_model: gpt-4
 
 economics:
@@ -936,20 +1329,20 @@ economics:
       intelligence_range: [9, 11]
       models:
         - provider: openai
-          model: gpt-5.1-codex-mini
+          model: gpt-6-luna
         - provider: google
           model: gemini-2.0-flash
         - provider: anthropic
-          model: claude-haiku-4-5
+          model: claude-haiku-5-5
       use_cases: [routine_coding, log_analysis, stage1_fix]
     standard:
       cost_factor: 10
       intelligence_range: [14, 16]
       models:
         - provider: openai
-          model: gpt-5-codex
+          model: gpt-6.1-sol
         - provider: anthropic
-          model: claude-sonnet-4-6
+          model: claude-sonnet-5-5
         - provider: google
           model: gemini-2.5-pro
       use_cases: [logic_design, stage2_evaluation, refactoring]
@@ -958,16 +1351,16 @@ economics:
       intelligence_range: [18, 20]
       models:
         - provider: openai
-          model: gpt-5.2
+          model: gpt-6-astra
         - provider: anthropic
-          model: claude-opus-5
+          model: claude-opus-5-5
       use_cases: [consensus, lateral_thinking, big_bang]
 
 clarification:
   ambiguity_threshold: 0.2
   max_interview_rounds: 10
   model_tier: standard
-  default_model: claude-opus-5
+  default_model: claude-opus-5-5
 
 execution:
   max_iterations_per_ac: 10
@@ -978,8 +1371,8 @@ resilience:
   lateral_thinking_enabled: true
   lateral_model_tier: frontier
   lateral_temperature: 0.8
-  wonder_model: claude-opus-5
-  reflect_model: claude-opus-5
+  wonder_model: claude-opus-5-5
+  reflect_model: claude-opus-5-5
 
 evaluation:
   stage1_enabled: true         # Currently inert in config.yaml
@@ -987,8 +1380,8 @@ evaluation:
   stage3_enabled: true         # Currently inert in config.yaml
   satisfaction_threshold: 0.8  # Currently inert; score gate is hardcoded to 0.8
   uncertainty_threshold: 0.3   # Currently inert in config.yaml
-  semantic_model: claude-opus-5
-  assertion_extraction_model: claude-sonnet-4-6
+  semantic_model: claude-opus-5-5
+  assertion_extraction_model: claude-sonnet-5-5
 
 consensus:
   min_models: 3               # Inert; runtime needs 2 successful post-filter votes
@@ -996,9 +1389,9 @@ consensus:
   diversity_required: true    # Currently inert
   models:
     - openrouter/openai/gpt-4o
-    - openrouter/anthropic/claude-opus-5
+    - openrouter/anthropic/claude-opus-5.5
     - openrouter/google/gemini-2.5-pro
-  advocate_model: openrouter/anthropic/claude-opus-5
+  advocate_model: openrouter/anthropic/claude-opus-5.5
   devil_model: openrouter/openai/gpt-4o
   judge_model: openrouter/google/gemini-2.5-pro
 

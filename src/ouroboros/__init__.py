@@ -31,6 +31,6 @@ def main() -> None:
 
     This function invokes the Typer app from ouroboros.cli.main.
     """
-    from ouroboros.cli.main import app
+    from ouroboros.cli.entrypoint import main as run_cli
 
-    app()
+    run_cli()

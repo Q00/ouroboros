@@ -17,7 +17,7 @@ from ouroboros.orchestrator.skill_tool_mapping import (
 
 _CORE_FRONTMATTER_SKILL_TOOLS = {
     "auto": "ouroboros_start_auto",
-    "run": "ouroboros_execute_seed",
+    "run": "ouroboros_start_execute_seed",
     "ralph": "ouroboros_ralph",
     "status": "ouroboros_session_status",
     "seed": "ouroboros_generate_seed",
@@ -233,11 +233,11 @@ def test_packaged_skill_bodies_expose_tool_specific_context_keys() -> None:
             "current_output",
             "seed_content",
         ),
-        # Corpus guard: brownfield/setup declare ``indices`` only via inline
-        # ``Arguments: { ... }`` maps. If inline-mapping parsing regresses or the
-        # skill format drifts, this fails instead of silently dropping a mutating
+        # Corpus guard: brownfield/setup declare ``indices`` and ``text`` only via
+        # inline ``Arguments: { ... }`` maps. If inline-mapping parsing regresses
+        # or the skill format drifts, this fails instead of silently dropping a
         # tool input from the capability contract.
-        "ouroboros_brownfield": ("indices",),
+        "ouroboros_brownfield": ("indices", "text"),
     }
 
     assert {tool: context_keys_by_tool[tool] for tool in expected_subset} == expected_subset
@@ -298,11 +298,12 @@ def test_merge_skill_context_keys_by_tool_keeps_body_only_tools() -> None:
 def test_discover_skill_context_keys_merges_packaged_frontmatter_and_body_usage() -> None:
     context_keys_by_tool = discover_skill_context_keys()
 
-    assert context_keys_by_tool["ouroboros_execute_seed"] == (
+    # `ooo run` dispatches through the background start tool, so no packaged
+    # skill routes through the blocking ouroboros_execute_seed tool.
+    assert "ouroboros_execute_seed" not in context_keys_by_tool
+    assert context_keys_by_tool["ouroboros_start_execute_seed"] == (
         "seed_path",
         "cwd",
-    )
-    assert context_keys_by_tool["ouroboros_start_execute_seed"] == (
         "seed_content",
         "efficiency_mode",
         "frugality_assurance",

@@ -28,6 +28,7 @@ from ouroboros.auto.domain_profile import DEFAULT_REGISTRY
 from ouroboros.auto.handoff_contract import RUN_HANDOFF_STARTED_STATUS
 from ouroboros.auto.intent_guard import diagnose_auto_pipeline_state
 from ouroboros.auto.interview_driver import AutoInterviewDriver
+from ouroboros.auto.investigator import build_repo_investigator
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
 from ouroboros.auto.policies import apply_domain_policy_defaults
 
@@ -36,6 +37,13 @@ from ouroboros.auto.policies import apply_domain_policy_defaults
 import ouroboros.auto.profiles  # noqa: F401,E402
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
 from ouroboros.auto.provenance import resolve_provenance
+from ouroboros.auto.requester import (
+    DEFAULT_REQUESTER_TIMEOUT_SECONDS,
+    REQUESTER_COMMAND_ENV,
+    REQUESTER_TIMEOUT_ENV,
+    Requester,
+    build_requester,
+)
 from ouroboros.auto.resume_render import render_resume_lines
 from ouroboros.auto.runtime_routing import (
     demote_plugin_opencode_mode,
@@ -286,6 +294,30 @@ def auto_command(
             help="Worktree isolation policy: auto, always, current, or none.",
         ),
     ] = None,
+    requester_command: Annotated[
+        str | None,
+        typer.Option(
+            "--requester-command",
+            help=(
+                "Ask the requester instead of assuming: for each interview question "
+                "auto would answer with a conservative default or an assumption, run "
+                "this command (split like a shell, run without one) with a JSON "
+                "question on stdin and use its stdout answer. Overrides "
+                f"{REQUESTER_COMMAND_ENV}. Off by default."
+            ),
+        ),
+    ] = None,
+    requester_timeout: Annotated[
+        float | None,
+        typer.Option(
+            "--requester-timeout",
+            help=(
+                "Seconds to wait for one requester answer before keeping auto's draft "
+                f"(default {DEFAULT_REQUESTER_TIMEOUT_SECONDS:g}). Overrides "
+                f"{REQUESTER_TIMEOUT_ENV}."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Run an A-grade-gated auto pipeline.
 
@@ -322,6 +354,11 @@ def auto_command(
         )
         raise typer.Exit(1)
     try:
+        requester = build_requester(requester_command, requester_timeout)
+    except ValueError as exc:
+        print_error(f"Invalid requester setting: {exc}")
+        raise typer.Exit(1) from exc
+    try:
         result = asyncio.run(
             _run_auto(
                 goal=goal,
@@ -342,6 +379,7 @@ def auto_command(
                 worktree_policy=worktree_policy,
                 progress_callback=_make_progress_renderer(quiet=quiet),
                 wait=not no_wait,
+                requester=requester,
             )
         )
     except typer.Exit:
@@ -397,6 +435,7 @@ async def _run_auto(
     worktree_policy: str | None = None,
     progress_callback: AutoProgressCallback | None = None,
     wait: bool = True,
+    requester: Requester | None = None,
 ) -> AutoPipelineResult:
     store = AutoStore()
     runtime_override = runtime
@@ -604,6 +643,11 @@ async def _run_auto(
         timeout_seconds=state.phase_timeout_seconds(AutoPhase.INTERVIEW),
         lateral_thinker=lateral_thinker,
         answer_refiner=answer_refiner,
+        requester=requester,
+        # The self-answer reads the repository first (auto/investigator.py).
+        investigator=build_repo_investigator(
+            runtime_plan.interview.runtime_backend, runtime_plan.interview.opencode_mode
+        ),
         event_store=watchdog_event_store,
     )
     # Auto does not have an execution id until interview/Seed handoff finishes.
@@ -622,7 +666,7 @@ async def _run_auto(
         run_starter=HandlerRunStarter(
             start_execute,
             cwd=state.cwd,
-            use_worktree=auto_workspace is None,
+            use_worktree=False,  # auto's worktree policy alone decides isolation
         ),
         store=store,
         repairer=SeedRepairer(max_repair_rounds=max_repair_rounds),
@@ -1421,6 +1465,10 @@ def _print_result(
     if result.seed_path:
         console.print(f"Seed: {result.seed_path}")
     console.print(f"Seed origin: {result.seed_origin}")
+    if result.open_questions:
+        console.print("Open questions (kept in the Seed, not given to the worker):")
+        for item in result.open_questions:
+            console.print(f"  - {_rich_escape(item)}")
     if result.job_id or result.execution_id or result.run_session_id:
         console.print("Execution started:")
         console.print(f"  Job ID: {result.job_id}")

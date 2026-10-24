@@ -11,7 +11,8 @@ from ouroboros.orchestrator.execution_authority import (
     valid_runtime_effect_capabilities_contract,
 )
 
-CURRENT_EXECUTION_SEMANTICS_VERSION = 8
+CURRENT_EXECUTION_SEMANTICS_VERSION = 9
+PRE_TRANSCRIPT_VERIFIER_EXECUTION_SEMANTICS_VERSION = 8
 PRE_EXEC_SANDBOX_EXECUTION_SEMANTICS_VERSION = 7
 PRE_VERIFY_SHELL_EXECUTION_SEMANTICS_VERSION = 4
 PRE_ADAPTIVE_EXECUTION_SEMANTICS_VERSION = 3
@@ -40,6 +41,7 @@ _CURRENT_KEYS = frozenset(
         "effective_parallel_workers",
         "adaptive_concurrency_policy",
         "fat_harness_mode",
+        "transcript_verifier",
         "shadow_replay_enabled",
         "checkpoint_store_enabled",
         "session_signal_hub_enabled",
@@ -65,6 +67,11 @@ _BOOLEAN_KEYS = (
     "context_pack_enabled",
     "backend_self_governs_rate_limit",
 )
+
+
+_TRANSCRIPT_VERIFIER_MODES = ("decide", "record")
+_PRE_TRANSCRIPT_VERIFIER_MODE = "decide"
+"""The mode of every run sealed before the setting existed: the verifier decided."""
 
 
 def _has_exact_keys(value: object, expected: frozenset[str]) -> bool:
@@ -140,7 +147,8 @@ def valid_execution_semantics_contract(value: object) -> bool:
         else max_workers
     )
     return bool(
-        type(timeout) is int
+        value.get("transcript_verifier") in _TRANSCRIPT_VERIFIER_MODES
+        and type(timeout) is int
         and timeout >= 1
         and _valid_verify_shell_identity(verify_shell_identity)
         and type(retries) is int
@@ -195,6 +203,7 @@ def migrated_pre_verify_shell_execution_semantics(
     migrated["version"] = CURRENT_EXECUTION_SEMANTICS_VERSION
     migrated["verify_shell_identity"] = None
     migrated["exec_sandbox_enabled"] = True
+    migrated["transcript_verifier"] = _PRE_TRANSCRIPT_VERIFIER_MODE
     if valid_execution_semantics_contract(
         migrated
     ) or valid_legacy_preflight_execution_semantics_contract(migrated):
@@ -220,6 +229,33 @@ def migrated_pre_exec_sandbox_execution_semantics(
     migrated = dict(value)
     migrated["version"] = CURRENT_EXECUTION_SEMANTICS_VERSION
     migrated["exec_sandbox_enabled"] = True
+    migrated["transcript_verifier"] = _PRE_TRANSCRIPT_VERIFIER_MODE
+    if valid_execution_semantics_contract(
+        migrated
+    ) or valid_legacy_preflight_execution_semantics_contract(migrated):
+        return migrated
+    return None
+
+
+def migrated_pre_transcript_verifier_execution_semantics(
+    value: object,
+) -> dict[str, object] | None:
+    """Migrate the exact v8 shape, which predates the transcript verifier mode.
+
+    A v8 run's verifier decided, so it resumes with ``decide``, whatever
+    ``execution.transcript_verifier`` says now: the runner takes the sealed
+    mode on resume, so the run's remaining criteria are accepted as its
+    earlier ones were.
+    """
+    if (
+        not isinstance(value, Mapping)
+        or value.get("version") != PRE_TRANSCRIPT_VERIFIER_EXECUTION_SEMANTICS_VERSION
+        or "transcript_verifier" in value
+    ):
+        return None
+    migrated = dict(value)
+    migrated["version"] = CURRENT_EXECUTION_SEMANTICS_VERSION
+    migrated["transcript_verifier"] = _PRE_TRANSCRIPT_VERIFIER_MODE
     if valid_execution_semantics_contract(
         migrated
     ) or valid_legacy_preflight_execution_semantics_contract(migrated):
@@ -265,6 +301,7 @@ def pre_adaptive_execution_semantics_rejection(
     )
     candidate["verify_shell_identity"] = None
     candidate["exec_sandbox_enabled"] = True
+    candidate["transcript_verifier"] = _PRE_TRANSCRIPT_VERIFIER_MODE
     if not valid_execution_semantics_contract(candidate):
         return None
     if not isinstance(persisted_fingerprint, str) or persisted_fingerprint != fingerprint(
@@ -289,6 +326,7 @@ __all__ = [
     "CURRENT_EXECUTION_SEMANTICS_VERSION",
     "ExecutionSemanticsRejection",
     "migrated_pre_exec_sandbox_execution_semantics",
+    "migrated_pre_transcript_verifier_execution_semantics",
     "migrated_pre_verify_shell_execution_semantics",
     "pre_adaptive_execution_semantics_rejection",
     "valid_execution_semantics_contract",

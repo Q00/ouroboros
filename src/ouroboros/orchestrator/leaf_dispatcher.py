@@ -66,7 +66,7 @@ from ouroboros.orchestrator.runtime_message_projection import (
     message_tool_name,
     project_runtime_message,
 )
-from ouroboros.orchestrator.verify_shell import sanitized_verify_environment
+from ouroboros.orchestrator.verify_shell import project_verify_environment
 
 if TYPE_CHECKING:
     from ouroboros.orchestrator.execution_runtime_scope import (
@@ -972,7 +972,7 @@ class LeafDispatcher:
         runs = await replay_commands(
             candidates,
             workspace=task_cwd,
-            env=sanitized_verify_environment(),
+            env=project_verify_environment(task_cwd),
             timeout_seconds=float(timeout_seconds),
             sandbox_enabled=sandbox_enabled,
         )

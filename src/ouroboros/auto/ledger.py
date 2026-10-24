@@ -82,6 +82,23 @@ instead of inventing a merge.
 """
 
 
+# Key suffix of a ledger entry written from the requester's own answer (opt-in
+# ``ooo auto`` requester, ``auto/requester.py``). The rest of the key is the
+# facet the interview question targeted, so a later requester answer for the
+# same facet is a correction and supersedes the earlier one in ``add_entry``,
+# as it also supersedes auto's own draft under the bare facet key.
+REQUESTER_KEY_SUFFIX = ".requester"
+
+# Key infix of a ledger entry written from a checked repository fact
+# (``auto/investigator.py``): ``<facet key>.repo_fact.<round>``. Such an entry
+# settles its section but reaches the worker only as ``Seed.repo_facts``.
+REPO_FACT_KEY_INFIX = ".repo_fact."
+
+# Key of the ledger entry holding the user's request verbatim, written once by
+# ``SeedDraftLedger.from_goal``. It is the goal the worker sees (``Seed.sourced_scope``).
+USER_GOAL_KEY = "goal.primary"
+
+
 REQUIRED_SECTIONS = (
     "goal",
     "actors",
@@ -199,6 +216,18 @@ class LedgerEntry:
     # Writer sites whose origin ``source`` cannot express (deadline/timeout
     # backstops, lateral consensus) stamp this explicitly at the decision point.
     provenance: DecisionProvenance | str | None = None
+    # The interviewer's question this entry answers, when it came from one.
+    # Empty for entries no interview question produced (templated fills,
+    # gap reopening, legacy sessions). An entry that does not bind is kept as
+    # this open question (``Seed.open_questions``), never as its drafted value,
+    # and neither reaches the worker.
+    question: str = ""
+    # True for auto's draft kept because the requester was asked this question
+    # and gave no answer (``auto/requester.py``). The requester already said the
+    # issue does not settle it, so the worker sees neither the draft nor the
+    # question; the question is kept in ``Seed.open_questions``. Omitted from
+    # ``to_dict`` when False.
+    requester_unanswered: bool = False
 
     def __post_init__(self) -> None:
         self.source = LedgerSource(str(self.source))
@@ -222,6 +251,23 @@ class LedgerEntry:
         source = self.source if isinstance(self.source, LedgerSource) else LedgerSource(self.source)
         return _PROVENANCE_FROM_SOURCE.get(source, _PROVENANCE_DEFAULT)
 
+    @property
+    def binds_seed(self) -> bool:
+        """Return True when this entry may become a binding Seed requirement.
+
+        Only what the user stated, the requester answered, or the repository
+        shows may bind: an evidence-backed ``source`` with a resolved status
+        other than ``DEFAULTED``. Every auto-generated stand-in is written
+        ``DEFAULTED``, including the templated ``existing_convention`` and
+        ``non_goal`` fallbacks, so a guess carrying a grounded source label
+        still does not bind. Everything else is an assumption.
+        """
+        return (
+            self.source in _EVIDENCE_BACKED_SOURCES
+            and self.status in _RESOLVED_STATUSES
+            and self.status is not LedgerStatus.DEFAULTED
+        )
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible data."""
         data = asdict(self)
@@ -233,6 +279,10 @@ class LedgerEntry:
             data.pop("provenance", None)
         else:
             data["provenance"] = DecisionProvenance(self.provenance).value
+        if not self.question:
+            data.pop("question", None)
+        if not self.requester_unanswered:
+            data.pop("requester_unanswered", None)
         return data
 
     @classmethod
@@ -255,12 +305,18 @@ class LedgerEntry:
         if not isinstance(data.get("rationale", ""), str):
             msg = "ledger entry rationale must be a string"
             raise ValueError(msg)
+        if not isinstance(data.get("question", ""), str):
+            msg = "ledger entry question must be a string"
+            raise ValueError(msg)
         evidence = data.get("evidence", [])
         if not isinstance(evidence, list) or not all(isinstance(item, str) for item in evidence):
             msg = "ledger entry evidence must be a list of strings"
             raise ValueError(msg)
         if "reversible" in data and not isinstance(data["reversible"], bool):
             msg = "ledger entry reversible must be a boolean"
+            raise ValueError(msg)
+        if not isinstance(data.get("requester_unanswered", False), bool):
+            msg = "ledger entry requester_unanswered must be a boolean"
             raise ValueError(msg)
         try:
             confidence = float(data["confidence"])
@@ -390,7 +446,7 @@ class SeedDraftLedger:
         ledger.add_entry(
             "goal",
             LedgerEntry(
-                key="goal.primary",
+                key=USER_GOAL_KEY,
                 value=clean_goal,
                 source=LedgerSource.USER_GOAL,
                 confidence=0.95 if clean_goal else 0.0,
@@ -414,7 +470,11 @@ class SeedDraftLedger:
         instead of keeping the section permanently conflicting.
         """
         section = self.sections.setdefault(section_name, LedgerSection(section_name))
-        same_key_entries = [existing for existing in section.entries if existing.key == entry.key]
+        facet_keys = {entry.key}
+        if entry.key.endswith(REQUESTER_KEY_SUFFIX) and entry.status == LedgerStatus.CONFIRMED:
+            # The requester's answer also retires auto's own draft for the facet.
+            facet_keys.add(entry.key.removesuffix(REQUESTER_KEY_SUFFIX))
+        same_key_entries = [existing for existing in section.entries if existing.key in facet_keys]
         entry_value = _normalize_conflict_value(entry.value)
         matching_prior = [
             existing
@@ -423,7 +483,10 @@ class SeedDraftLedger:
         ]
         if (
             same_key_entries
-            and entry.source in {LedgerSource.USER_GOAL, LedgerSource.NON_GOAL}
+            and (
+                entry.source in {LedgerSource.USER_GOAL, LedgerSource.NON_GOAL}
+                or entry.key.endswith(REQUESTER_KEY_SUFFIX)
+            )
             and entry.status == LedgerStatus.CONFIRMED
         ):
             for existing in same_key_entries:
@@ -451,6 +514,11 @@ class SeedDraftLedger:
                 )
         else:
             for existing in same_key_entries:
+                if existing.status == LedgerStatus.WEAK:
+                    # Already retired (superseded or corrected): it holds no
+                    # authority, so a new value must not tie with it and revive
+                    # it as CONFLICTING. Only active entries can conflict.
+                    continue
                 resolution = resolve_conflict(existing, entry)
                 if resolution is ConflictResolution.BLOCKED:
                     continue

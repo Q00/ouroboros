@@ -38,6 +38,7 @@ from ouroboros.core.text import truncate_with_ellipsis
 from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
+    _CODEX_BACKENDS,
     FULL_CAPABILITIES,
     AgentMessage,
     ParamSupport,
@@ -76,6 +77,7 @@ from ouroboros.orchestrator.interview_session import (
 )
 from ouroboros.orchestrator.runtime_drift import DRIFT_EPOCH_UNKNOWN, RuntimeDriftLedger
 from ouroboros.orchestrator.skill_tool_mapping import discover_skill_tool_mappings
+from ouroboros.orchestrator.tooling_guidance import render_tooling_guidance
 from ouroboros.providers.base import CompletionConfig
 from ouroboros.providers.codex_cli_stream import (
     iter_runtime_stream_lines,
@@ -283,8 +285,8 @@ class CodexCliRuntime:
     _provider_name, _runtime_error_type = "codex_cli", "CodexCliError"
     _log_namespace = "codex_cli_runtime"
     _display_name = "Codex CLI"
-    _default_cli_name = "codex"
-    _default_llm_backend = "codex"
+    _default_cli_name, _default_llm_backend = "codex", "codex"
+    _exec_session_flags: tuple[str, ...] = ()  # ("--ephemeral",): keep no session on disk
     _tempfile_prefix = "ouroboros-codex-"
     _skills_package_uri = "packaged://ouroboros.codex/skills"
     _process_shutdown_timeout_seconds = 5.0
@@ -1598,14 +1600,10 @@ class CodexCliRuntime:
                 "</system-directive>"
             )
 
-        if tools:
-            tool_list = "\n".join(f"- {tool}" for tool in tools)
-            parts.append(
-                "<tooling-guidance>\n"
-                "Prefer to solve the task using the following tool set when possible:\n"
-                f"{tool_list}\n"
-                "</tooling-guidance>"
-            )
+        if tools is not None:
+            # Codex has its own shell and patch tools, not the Claude tool names.
+            codex = self._runtime_handle_backend in _CODEX_BACKENDS
+            parts.append(render_tooling_guidance(tools, claude_tool_names=not codex))
 
         parts.append(prompt)
         return "\n\n".join(part for part in parts if part.strip())
@@ -2046,7 +2044,7 @@ class CodexCliRuntime:
             self._reconcile_profile_resolution_config(runtime_handle)
         self._reconcile_codex_config_files(runtime_handle)
         self._reconcile_cli_executable_identity()
-        command = [self._cli_path, "exec"]
+        command = [self._cli_path, "exec", *self._exec_session_flags]
 
         normalized_model = self._normalize_model(model or self._model)
         runtime_model: str | None = None
@@ -2232,6 +2230,7 @@ class CodexCliRuntime:
             close_stdin=self._close_process_stdin,
             terminate_process_group=self._use_process_group,
             process_group_id=process_group_id,
+            workspace=self._cwd,
         )
 
     async def _close_process_stdin(self, process: Any) -> None:
@@ -3559,6 +3558,7 @@ class CodexCliRuntime:
             key: details[key]
             for key in (
                 "failure_category",
+                "http_status",
                 "model_guidance",
                 "codex_app_version",
                 "codex_cli_version",
