@@ -243,6 +243,7 @@ def _execution_completed_job_event(
     result_text: str,
     *,
     session_id: str | None = None,
+    result_meta: Mapping[str, Any] | None = None,
 ) -> BaseEvent:
     """Build the synthetic/persisted job-completion event for execution recovery."""
     return BaseEvent(
@@ -257,6 +258,7 @@ def _execution_completed_job_event(
             "result_meta": {
                 "completed_from_execution_terminal": True,
                 **_run_only_verification_meta(session_id),
+                **dict(result_meta or {}),
             },
             "is_error": False,
             "timestamp": datetime.now(UTC).isoformat(),
@@ -264,7 +266,9 @@ def _execution_completed_job_event(
     )
 
 
-def _progress_accounting_failed_job_event(job_id: str, blocker: str) -> BaseEvent:
+def _progress_accounting_failed_job_event(
+    job_id: str, blocker: str, result_meta: Mapping[str, Any] | None = None
+) -> BaseEvent:
     """Build the synthetic/persisted job-failure event for execution recovery."""
     return BaseEvent(
         id=f"{_RECOVERED_FAILURE_EVENT_ID_PREFIX}{job_id}",
@@ -277,7 +281,10 @@ def _progress_accounting_failed_job_event(job_id: str, blocker: str) -> BaseEven
                 "message": "Job failed: workflow progress accounting stalled",
                 "error": blocker,
                 "result_text": blocker,
-                "result_meta": {"failed_from_progress_accounting_stall": True},
+                "result_meta": {
+                    "failed_from_progress_accounting_stall": True,
+                    **dict(result_meta or {}),
+                },
                 "is_error": True,
                 "timestamp": datetime.now(UTC).isoformat(),
             }
@@ -1222,6 +1229,7 @@ class JobManager:
         *,
         check_current: bool = True,
         event_id: str | None = None,
+        result_meta: Mapping[str, Any] | None = None,
     ) -> bool:
         """Persist durable job failure derived from terminal execution evidence."""
         if check_current:
@@ -1236,7 +1244,10 @@ class JobManager:
                 "message": "Job failed: workflow progress accounting stalled",
                 "error": blocker,
                 "result_text": blocker,
-                "result_meta": {"failed_from_progress_accounting_stall": True},
+                "result_meta": {
+                    "failed_from_progress_accounting_stall": True,
+                    **dict(result_meta or {}),
+                },
                 "is_error": True,
             },
             event_id=event_id,
@@ -1987,23 +1998,21 @@ class JobManager:
         return await self._reconcile_stranded_started_job_snapshot(snapshot)
 
     async def _derive_linked_run_failure_meta(self, snapshot: JobSnapshot) -> dict[str, Any]:
-        """Name why a recovered ``execute_seed`` job's linked run failed.
-
-        Same closed vocabulary and evidence as the live handler path
-        (``derive_run_failure_meta``); only run jobs carry ``failure_cause``.
-        """
         if snapshot.job_type != "execute_seed":
             return {}
         if not snapshot.links.session_id or not snapshot.links.execution_id:
             return {}
+        from ouroboros.mcp.tools.run_ac_tally import derive_linked_run_ac_tally
         from ouroboros.mcp.tools.run_failure_meta import derive_run_failure_meta
 
-        return await derive_run_failure_meta(
-            self._event_store,
-            session_id=snapshot.links.session_id,
-            execution_id=snapshot.links.execution_id,
-            session_status=SessionStatus.FAILED,
+        ids = {
+            "session_id": snapshot.links.session_id,
+            "execution_id": snapshot.links.execution_id,
+        }
+        failure_meta = await derive_run_failure_meta(
+            self._event_store, session_status=SessionStatus.FAILED, **ids
         )
+        return {**failure_meta, **await derive_linked_run_ac_tally(self._event_store, snapshot)}
 
     async def _recover_linked_execution_terminal_snapshot(
         self,
@@ -2058,15 +2067,21 @@ class JobManager:
             if linked_failure is not None
             else None
         )
+        from ouroboros.mcp.tools.run_ac_tally import derive_linked_run_ac_tally
+
+        recovery_tally = await derive_linked_run_ac_tally(self._event_store, snapshot)
         if getattr(self._event_store, "_read_only", False):
             if completed_result is not None:
                 event = _execution_completed_job_event(
                     snapshot.job_id,
                     completed_result,
                     session_id=snapshot.links.session_id,
+                    result_meta=recovery_tally,
                 )
             elif progress_blocker is not None:
-                event = _progress_accounting_failed_job_event(snapshot.job_id, progress_blocker)
+                event = _progress_accounting_failed_job_event(
+                    snapshot.job_id, progress_blocker, recovery_tally
+                )
             else:
                 event = _linked_execution_failed_job_event(
                     snapshot.job_id, linked_failure or "", linked_failure_meta
@@ -2092,6 +2107,7 @@ class JobManager:
                         snapshot.job_id,
                         completed_result,
                         session_id=snapshot.links.session_id,
+                        result_meta=recovery_tally,
                         check_current=False,
                         event_id=f"{_RECOVERED_COMPLETION_EVENT_ID_PREFIX}{snapshot.job_id}",
                     )
@@ -2101,6 +2117,7 @@ class JobManager:
                         progress_blocker,
                         check_current=False,
                         event_id=f"{_RECOVERED_FAILURE_EVENT_ID_PREFIX}{snapshot.job_id}",
+                        result_meta=recovery_tally,
                     )
                 else:
                     recovered = await self._append_linked_execution_failed_event(
@@ -2914,6 +2931,11 @@ class JobManager:
             if not isinstance(status, str):
                 status = event_type.removeprefix("mcp.job.")
             data = _enrich_terminal_data({**data, "status": status})
+            if event_type == "mcp.job.cancelled":
+                from ouroboros.mcp.tools.run_ac_tally import derive_cancelled_job_ac_tally
+
+                tally = await derive_cancelled_job_ac_tally(self._event_store, job_id)
+                data["result_meta"].update(tally)
         await self._ensure_initialized()
         cursor = await self._event_store.append_with_rowid(
             BaseEvent(
