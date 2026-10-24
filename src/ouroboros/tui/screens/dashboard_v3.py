@@ -285,7 +285,7 @@ class NodeDetailPanel(Static):
     }
     """
 
-    selected_node: reactive[dict[str, Any] | None] = reactive(None)
+    selected_node: reactive[dict[str, Any] | None] = reactive(None, always_update=True)
     thinking_text: reactive[str] = reactive("")
     tool_history: reactive[list[dict[str, Any]]] = reactive([], always_update=True)
 
@@ -310,6 +310,19 @@ class NodeDetailPanel(Static):
             with Horizontal(classes="detail-row"):
                 yield Label("Status:", classes="label")
                 yield Static(status_display, classes="value")
+
+            runtime = node.get("runtime")
+            if isinstance(runtime, dict):
+                yield Static(
+                    Text(
+                        "\n".join(
+                            f"{key}: {value if value is not None else 'unknown'}"
+                            for key, value in runtime.items()
+                            if key != "generation"
+                        )
+                    ),
+                    classes="content-section",
+                )
 
             with Horizontal(classes="detail-row"):
                 yield Label("Depth:", classes="label")

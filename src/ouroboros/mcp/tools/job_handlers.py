@@ -54,6 +54,7 @@ from ouroboros.orchestrator.session import (
     SessionStatus,
 )
 from ouroboros.persistence.event_store import EventStore
+from ouroboros.persistence.runtime_history import read_runtime_history
 
 log = structlog.get_logger(__name__)
 
@@ -491,6 +492,7 @@ async def _query_linked_stream_events(
                     last_row_id=cursor,
                     limit=page_limit,
                     max_row_id=max_row_id,
+                    session_start_by_rowid=True,
                 )
             )
         if snapshot.links.lineage_id:
@@ -546,26 +548,13 @@ async def _query_linked_history_events(
             max_row_id=max_row_id,
         )
     ]
-    if snapshot.links.execution_id:
-        streams.append(
-            await event_store.get_events_after(
-                "execution",
-                snapshot.links.execution_id,
-                after_cursor,
-                limit=None,
-                max_row_id=max_row_id,
-            )
-        )
-    if snapshot.links.session_id:
-        streams.append(
-            await event_store.query_session_related_events_after(
-                session_id=snapshot.links.session_id,
-                execution_id=snapshot.links.execution_id,
-                last_row_id=after_cursor,
-                limit=None,
-                max_row_id=max_row_id,
-            )
-        )
+    runtime_events, _ = await read_runtime_history(
+        event_store,
+        execution_id=snapshot.links.execution_id,
+        session_id=snapshot.links.session_id,
+        after_cursor=after_cursor,
+        max_row_id=max_row_id,
+    )
     if snapshot.links.lineage_id:
         streams.append(
             await event_store.get_events_after(
@@ -580,7 +569,9 @@ async def _query_linked_history_events(
     for events, _cursor in streams:
         for event in events:
             unique[event.id] = event
-    return sorted(unique.values(), key=lambda event: (event.timestamp, event.id))
+    for event in runtime_events:
+        unique.pop(event.id, None)
+    return sorted(unique.values(), key=lambda event: (event.timestamp, event.id)) + runtime_events
 
 
 @dataclass
