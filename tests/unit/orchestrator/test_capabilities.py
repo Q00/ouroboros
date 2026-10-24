@@ -169,8 +169,10 @@ _EXPECTED_OUROBOROS_REQUIRED_CONTEXT_KEYS = {
     "ouroboros_execute_seed": (),
     "ouroboros_generate_seed": ("session_id", "session_context"),
     "ouroboros_interview": (
+        "calibration_input",
         "initial_context",
         "cwd",
+        "interview_calibration",
         "confused_terms",
         "references",
         "session_id",

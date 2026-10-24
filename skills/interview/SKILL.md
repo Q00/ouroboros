@@ -49,6 +49,76 @@ Ouroboros tools may be deferred, and a schema loaded on one turn can unload by t
 
 If `ouroboros_interview` is callable, use Path A. Use Path B only when it is genuinely absent (no Ouroboros MCP server).
 
+## Interview language calibration (`ooo idk`)
+
+`ooo idk <evidence>` calibrates interview wording to the user's familiarity with
+the current topic. Treat only what the user says as evidence: identify terms
+they do not know, concepts they recognize but cannot apply, and experience they
+can describe. Do not quiz by default or infer general ability from an unknown
+term, unfamiliar English, a typo, or a short answer. Ask one brief follow-up
+only when the evidence is too ambiguous to adapt safely. For mixed familiarity,
+use the least-familiar relevant domain as the conservative level; keep the
+calibration topic-specific and provisional. Record confidence as `low`,
+`medium`, or `high` from how direct and specific the evidence is; when evidence
+is mixed, prefer the less aggressive inference. Apply the current level to
+subsequent questions in this interview and revise it when new evidence or a
+later `ooo idk` warrants a change.
+
+Use the returned visible `Interview calibration` block to adapt vocabulary,
+definitions, sentence structure, context, and example depth:
+
+Apply the most recent `Interview calibration` produced by `ooo idk` while
+rephrasing; preserve the original question's decision and do not forward that statement to MCP as the answer.
+
+- **Foundational**: plain language, define necessary terms, and use one neutral
+  concrete example when it helps.
+- **Working**: use standard terms, briefly define new or overloaded ones, and
+  frame questions around practical trade-offs.
+- **Fluent**: use precise terminology and concise trade-off language.
+
+Show the calibration in this compact block so the active conversation can use
+it:
+
+```text
+Interview calibration
+- <domain/concept>: <Foundational|Working|Fluent> (confidence: <low|medium|high>)
+  Evidence: <brief user-stated evidence>
+- Unknown terms to define before use: <terms, or none>
+- Adaptation: <how wording/examples will change>
+```
+
+Tell the user it applies to subsequent `ooo interview` turns in this
+conversation and can be revised with another `ooo idk`.
+
+Examples explain a question without recommending a product or architecture.
+Keep the question's decision, constraints, acceptance meaning, and every
+interview gate intact. If the user later shows different familiarity, update
+the provisional calibration and briefly note a material change.
+
+The calibration may be supplied before the first question. Pass the latest
+`meta.interview_calibration` value unchanged as `interview_calibration` on the
+next `ouroboros_interview` call, including start, answer, and resume calls when
+the value is present. In Path A, the control turn for `ooo idk` supplies
+`calibration_input` and, when a question is pending, its active `session_id`;
+never put calibration text in `answer` or synthesize an interview answer from
+it. While a question is pending, explain or rephrase that same question at the
+calibrated level, then wait for the user's actual answer before advancing. An
+unknown-term statement is not an answer: explain the term, revise the
+provisional level if the evidence warrants it, and ask the unchanged decision
+again.
+
+Calibration belongs only to the active conversation. It is held by the live
+runtime handle and excluded from durable session serialization, so a saved
+session resumed later needs a fresh `ooo idk`; do not infer or claim a saved
+user profile. If a provider error, exception, or empty MCP rephrase leaves
+`meta.question_rephrased=false`, tell the user the original pending question
+remains unchanged and do not advance or send an answer. Cancellation propagates
+after resource cleanup; leave the pending interview unanswered.
+
+In Path B, keep the same calibration in the active conversation and follow the
+same answer-preservation and rephrasing rules locally; there is no MCP metadata
+to relay.
+
 ## Path A: MCP Mode
 
 MCP generates the questions, keeps state, and scores ambiguity; it cannot read code, browse, or call tools. You (the main session) answer what code or research can answer and route to the user only what needs human judgment: goals, acceptance criteria, business logic, preferences. You never decide for the user; auto-confirm is for facts only.
@@ -59,6 +129,7 @@ MCP generates the questions, keeps state, and scores ambiguity; it cannot read c
    Arguments:
      initial_context: <user's topic or idea>
      cwd: <current working directory>
+     interview_calibration: <latest meta.interview_calibration, when present>
      confused_terms: <optional explicit terms the user does not understand>
      references: <optional [{reference_id, label, origin, url?, excerpt?}]>
    ```
@@ -123,6 +194,7 @@ MCP generates the questions, keeps state, and scores ambiguity; it cannot read c
    Arguments:
      session_id: <session ID>
      answer: <prefixed answer>
+     interview_calibration: <latest meta.interview_calibration, when present>
      last_question: <exact question text, required when you rather than MCP asked it (parent handoff, Restate reopen)>
    ```
    MCP sees only the text you send, so never compress reasoning into a label. Free-text answers that carry reasoning, constraints, or scope go as this multi-section payload, after the Refine gate:

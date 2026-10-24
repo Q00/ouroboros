@@ -37,6 +37,7 @@ Each `ooo <name>` is also the skill `/ouroboros:<name>`, except `run`, `status`,
 | `ooo tutorial` | Interactive hands-on learning | none |
 | `ooo help` | This reference | none |
 | `ooo interview` | Socratic interview that exposes hidden assumptions | MCP, in-session fallback |
+| `ooo idk` | Calibrate interview explanations to your topic knowledge | MCP, in-session fallback |
 | `ooo seed` | Freeze interview results into a Seed | MCP, in-session fallback |
 | `ooo auto` | Goal to A-grade Seed, then execute and verify in the background | MCP |
 | `ooo run` | Execute a Seed and verify every acceptance criterion | MCP |
@@ -66,6 +67,7 @@ In Claude Code these phrases route to a command without the `ooo` prefix:
 | Phrase | Command |
 |--------|---------|
 | "interview me", "clarify requirements", "socratic interview" | `ooo interview` |
+| "I don't know this term", "explain at my level" | `ooo idk` |
 | "crystallize", "generate seed", "create seed", "freeze requirements" | `ooo seed` |
 | "ouroboros run", "execute seed", "run seed", "run workflow" | `ooo run` |
 | "evaluate this", "3-stage check", "verify execution" | `ooo evaluate` |
