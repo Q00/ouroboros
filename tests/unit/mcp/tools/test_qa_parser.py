@@ -1,5 +1,7 @@
 """Unit tests for QA response parsing fallbacks."""
 
+import json
+
 from ouroboros.mcp.tools.qa import _parse_qa_response
 
 
@@ -129,3 +131,10 @@ Dimensions:
             "clarity": 0.8,
             "completeness": 0.75,
         }
+
+
+def test_out_of_range_large_integer_score_returns_parse_error() -> None:
+    result = _parse_qa_response(json.dumps({"score": 10**1000, "verdict": "pass"}))
+
+    assert result.is_err
+    assert "score must be a float between 0.0 and 1.0" in result.error
