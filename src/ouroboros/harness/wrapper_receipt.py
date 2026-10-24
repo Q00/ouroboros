@@ -57,7 +57,7 @@ _FROZEN_VERIFY_ENVIRONMENT = (
     "from collections.abc import Mapping\n"
     "import os\n"
     "from types import SimpleNamespace\n"
-    f"VERIFY_ENV_STRIPPED_KEYS = {verify_shell.VERIFY_ENV_STRIPPED_KEYS!r}\n"
+    f"VERIFY_ENV_STRIPPED_KEYS = frozenset({tuple(sorted(verify_shell.VERIFY_ENV_STRIPPED_KEYS))!r})\n"
     f"VERIFY_ENV_STRIPPED_PREFIXES = {verify_shell.VERIFY_ENV_STRIPPED_PREFIXES!r}\n"
     f"{ast.unparse(_FROZEN_VERIFY_FUNCTION)}\n"
     "_WRAPPER_VERIFY_SHELL = SimpleNamespace(sanitized_verify_environment=sanitized_verify_environment)\n"

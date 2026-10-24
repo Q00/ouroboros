@@ -33,6 +33,47 @@ def _argv(*paths: str) -> list[str]:
     ]
 
 
+def test_frozen_wrapper_invocation_is_stable_across_hash_seeds(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[3]
+    producer = (
+        "import json,sys; "
+        "sys.path.insert(0,sys.argv[1]); "
+        "from ouroboros.harness.wrapper_receipt import _RUNNER_PROGRAM; "
+        "print(json.dumps([sys.executable,'-I','-c',_RUNNER_PROGRAM,"
+        "'--receipt','receipt.json','--stdout','stdout.txt','--stderr','stderr.txt',"
+        "'--',sys.executable,'-c',\"from pathlib import Path; "
+        "Path('inner-ran').write_text('yes')\"]))"
+    )
+    producer_env = {**os.environ, "PYTHONHASHSEED": "1"}
+    produced = subprocess.run(
+        [sys.executable, "-c", producer, str(root)],
+        capture_output=True,
+        check=True,
+        env=producer_env,
+        text=True,
+    )
+    argv = json.loads(produced.stdout)
+    consumer = (
+        "import json,shlex,sys; "
+        "sys.path.insert(0,sys.argv[1]); "
+        "from ouroboros.harness.wrapper_receipt import trusted_wrapper_invocation; "
+        "assert trusted_wrapper_invocation(shlex.join(json.loads(sys.argv[2])),sys.argv[3])"
+    )
+    consumer_env = {**os.environ, "PYTHONHASHSEED": "2"}
+    subprocess.run(
+        [sys.executable, "-c", consumer, str(root), json.dumps(argv), str(tmp_path)],
+        capture_output=True,
+        check=True,
+        env=consumer_env,
+        text=True,
+    )
+
+    result = subprocess.run(argv, cwd=tmp_path, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "inner-ran").read_text() == "yes"
+    assert json.loads((tmp_path / "receipt.json").read_text())["test_result"] == "passed"
+
+
 def test_frozen_wrapper_creates_normal_nested_outputs(tmp_path: Path) -> None:
     (tmp_path / "out" / "nested").mkdir(parents=True)
     # The isolated frozen bootstrap must not import task-controlled modules.
