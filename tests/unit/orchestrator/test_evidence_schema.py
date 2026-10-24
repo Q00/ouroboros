@@ -398,6 +398,8 @@ class TestExtractEvidence:
         "terminal_payload",
         [
             "[broken,",
+            "[,one",
+            "[one,,two",
             "[one, two,]",
             "[broken, 1]",
             "[1, broken]",
@@ -409,6 +411,38 @@ class TestExtractEvidence:
         self, fence_tag: str, terminal_payload: str
     ) -> None:
         text = f'```{fence_tag}\n{{"files_touched": ["stale.py"]}}\n{terminal_payload}\n```'
+
+        with pytest.raises(EvidenceError):
+            extract_evidence(text)
+
+    @pytest.mark.parametrize("fence_tag", ["json", ""])
+    @pytest.mark.parametrize(
+        "terminal_payload",
+        [
+            "[,one]",
+            "[ ,one, two]",
+            "[one,,two]",
+            "[one, ,two]",
+            "[one,,two,three]",
+            "[one,\n,two]",
+        ],
+    )
+    @pytest.mark.parametrize(
+        "separator",
+        [
+            "\n",
+            "\n\n",
+            "\nEvidence result follows.\n",
+            "\n  ",
+            "\r\n",
+        ],
+    )
+    def test_empty_outer_array_slots_cannot_promote_stale_evidence(
+        self, fence_tag: str, terminal_payload: str, separator: str
+    ) -> None:
+        text = (
+            f'```{fence_tag}\n{{"files_touched": ["stale.py"]}}{separator}{terminal_payload}\n```'
+        )
 
         with pytest.raises(EvidenceError):
             extract_evidence(text)
