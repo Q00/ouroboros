@@ -5075,9 +5075,10 @@ class ParallelACExecutor:
                             continue
                         digest.update(b"F\0")
                         digest.update(relative.as_posix().encode("utf-8", "surrogateescape"))
-                        digest.update(b"\0")
-                        digest.update(str(stat.st_mode).encode("ascii"))
-                        digest.update(b"\0")
+                        digest.update(f"\0{stat.st_mode}\0".encode("ascii"))
+                        digest.update(
+                            f"{stat.st_ino}:{stat.st_mtime_ns}:{stat.st_ctime_ns}\0".encode("ascii")
+                        )
                         with path.open("rb") as handle:
                             while chunk := handle.read(1024 * 1024):
                                 digest.update(chunk)
