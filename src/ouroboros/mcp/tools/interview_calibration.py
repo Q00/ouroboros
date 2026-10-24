@@ -70,7 +70,10 @@ async def handle_interview_calibration_turn(
                         rephrase_result = await rephrase_method(pending_question, calibration)
                         if rephrase_result.is_ok and isinstance(rephrase_result.value, str):
                             candidate_question = rephrase_result.value.strip()
-                            if candidate_question and candidate_question != pending_question.strip():
+                            if (
+                                candidate_question
+                                and candidate_question != pending_question.strip()
+                            ):
                                 rephrased_question = candidate_question
                     except Exception as exc:
                         # Rephrasing is optional; retain the calibration and the
