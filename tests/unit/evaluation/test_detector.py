@@ -1413,11 +1413,13 @@ class TestPackageManagerStateChanges:
         ok = _run(ensure_mechanical_toml(tmp_path, adapter))
         assert ok is False
 
-    def test_uv_tree_accepted(self, tmp_path: Path) -> None:
+    def test_uv_tree_rejected(self, tmp_path: Path) -> None:
+        """``uv tree`` only prints the dependency graph: exit 0 is not evidence."""
         (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\n')
         adapter = _FakeAdapter(response=json.dumps({"static": "uv tree"}))
         ok = _run(ensure_mechanical_toml(tmp_path, adapter))
-        assert ok is True
+        assert ok is False
+        assert not toml_path(tmp_path).exists()
 
     def test_uv_tree_without_pyproject_rejected(self, tmp_path: Path) -> None:
         """Even read-only ``uv tree`` needs a Python project to act on."""

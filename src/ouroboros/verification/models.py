@@ -10,6 +10,7 @@ Verification tiers classify ACs by how they can be independently verified:
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field, StrictInt, model_validator
 
@@ -41,8 +42,8 @@ class VerificationOutcome(StrEnum):
 class SpecAssertion(BaseModel, frozen=True):
     """A verifiable assertion extracted from an acceptance criterion.
 
-    The extractor converts human-readable ACs into structured assertions
-    that the verifier can check against actual source code.
+    The extractor preserves whether an assertion concerns source code or an
+    execution observation. The source scanner cannot verify the latter.
     """
 
     ac_index: StrictInt = Field(ge=0)
@@ -52,6 +53,7 @@ class SpecAssertion(BaseModel, frozen=True):
     expected_value: str = ""
     file_hint: str = ""
     description: str = ""
+    evidence_scope: Literal["source", "execution"] = "source"
 
 
 class SpecVerificationResult(BaseModel, frozen=True):

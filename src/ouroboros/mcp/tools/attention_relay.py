@@ -5,6 +5,11 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence, Set
 
+from ouroboros.core.ac_runtime_projection import (
+    ACRuntime,
+    ACRuntimeProjection,
+    fold_ac_runtime,
+)
 from ouroboros.events.base import BaseEvent
 
 ATTENTION_SOURCE_EVENT_TYPES = frozenset(
@@ -363,11 +368,13 @@ def _proactive_relays(
     *,
     job_id: str | None,
     session_id: str | None,
+    runtime_states: Mapping[str, tuple[ACRuntime, bool]],
 ) -> list[dict[str, object]]:
     relays: list[dict[str, object]] = []
     last_route_by_ac: dict[str, tuple[object, ...]] = {}
     for event in history:
         data = event.data
+        runtime, runtime_changed = runtime_states[event.id]
         if event.type == "execution.ac.model_routed":
             route_key = str(data.get("semantic_ac_key") or data.get("ac_id") or event.aggregate_id)
             signature = (
@@ -546,7 +553,7 @@ def _proactive_relays(
             observation = (
                 data.get("observation") if isinstance(data.get("observation"), Mapping) else {}
             )
-            if decision.get("action") == "escalate_route":
+            if runtime_changed and runtime.escalation == "escalate_route":
                 relays.append(
                     _progress(
                         event,
@@ -587,11 +594,17 @@ def _proactive_relays(
             # acceptance under this job is a false progress claim.
             if session_id is not None and data.get("session_id") != session_id:
                 continue
+            if not runtime_changed or runtime.acceptance not in {
+                "accepted",
+                "rejected",
+                "conflict",
+            }:
+                continue
             relays.append(
                 _progress(
                     event,
                     kind="progress_advanced",
-                    subtype=("ac_accepted" if data.get("accepted") is True else "ac_rejected"),
+                    subtype=("ac_accepted" if runtime.acceptance == "accepted" else "ac_rejected"),
                     job_id=job_id,
                     evidence={
                         "root_ac_index": data.get("root_ac_index"),
@@ -599,6 +612,7 @@ def _proactive_relays(
                         "accepted": data.get("accepted"),
                         "disposition": data.get("disposition"),
                         "terminal_status": data.get("terminal_status"),
+                        "runtime": runtime.to_data(),
                     },
                 )
             )
@@ -643,7 +657,23 @@ def classify_relay_events(
     # A linked execution aggregate can contain evidence from more than one
     # orchestration session.  Filter before building route/recovery streaks so
     # foreign events cannot create actionable or progress relays for this job.
-    history = _event_order(_history_for_session(history_events, session_id=session_id))
+    delivered = _history_for_session(history_events, session_id=session_id)
+    runtime_states: dict[str, tuple[ACRuntime, bool]] = {}
+    projection = ACRuntimeProjection(session_id=session_id)
+    for event in delivered:
+        previous = projection
+        projection = fold_ac_runtime(
+            projection, event.type, event.data, aggregate_id=event.aggregate_id
+        )
+        index = event.data.get("root_ac_index")
+        runtime_states[event.id] = (
+            projection.for_node(
+                str(event.data.get("node_id") or ""),
+                index if isinstance(index, int) and not isinstance(index, bool) else None,
+            ),
+            previous != projection,
+        )
+    history = _event_order(delivered)
     registered = available_tools or frozenset()
     new_ids = new_event_ids if new_event_ids is not None else {event.id for event in history}
     relays = _proactive_relays(
@@ -651,14 +681,19 @@ def classify_relay_events(
         new_ids,
         job_id=job_id,
         session_id=session_id,
+        runtime_states=runtime_states,
     )
 
     recovery_by_key: dict[str, BaseEvent] = {}
+    runtimes_by_event = {}
     for event in history:
+        runtime, runtime_changed = runtime_states[event.id]
+        runtimes_by_event[event.id] = runtime.to_data()
         if (
             event.type == "execution.ac.route_observed"
             and event.id in new_ids
-            and event.data.get("human_handoff_required") is True
+            and runtime_changed
+            and runtime.blocked is True
         ):
             decision = (
                 event.data.get("decision")
@@ -686,6 +721,7 @@ def classify_relay_events(
                         "failure_class": observation.get("failure_class"),
                         "reason": decision.get("reason"),
                         "attempted_route_ids": decision.get("attempted_route_ids"),
+                        "runtime": runtime.to_data(),
                     },
                     evidence_event_ids=[event.id],
                     available_tools=registered,
@@ -953,6 +989,9 @@ def classify_relay_events(
     deduped: list[dict[str, object]] = []
     seen: set[str] = set()
     for relay in relays:
+        runtime_data = runtimes_by_event.get(str(relay.get("source_event_id")))
+        if runtime_data is not None:
+            relay["runtime"] = runtime_data
         relay_id = str(relay["id"])
         if relay_id in seen:
             continue

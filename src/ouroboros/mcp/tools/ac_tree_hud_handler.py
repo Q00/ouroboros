@@ -13,6 +13,7 @@ from typing import Any
 
 import structlog
 
+from ouroboros.core.ac_runtime_projection import RUNTIME_EVENTS, project_ac_runtime
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError
 from ouroboros.mcp.types import (
@@ -25,6 +26,7 @@ from ouroboros.mcp.types import (
 )
 from ouroboros.orchestrator.session import SessionRepository
 from ouroboros.persistence.event_store import EventStore
+from ouroboros.persistence.runtime_history import read_runtime_history
 
 log = structlog.get_logger(__name__)
 
@@ -349,7 +351,10 @@ def _has_status_change_event(events: list[Any]) -> bool:
 
 def _has_tree_change_event(events: list[Any]) -> bool:
     """Return True when execution events may change the rendered AC tree."""
-    return any(getattr(event, "type", None) in _TREE_CHANGE_EVENT_TYPES for event in events)
+    return any(
+        getattr(event, "type", None) in _TREE_CHANGE_EVENT_TYPES | RUNTIME_EVENTS
+        for event in events
+    )
 
 
 def summarize_subtask_events(execution_events: object) -> dict[str, Any]:
@@ -483,6 +488,8 @@ def _normalize_explicit_tree(value: Mapping[str, Any]) -> dict[str, Any]:
             "children_ids": _coerce_children_ids(raw_node.get("children_ids")),
             "_order": len(nodes),
         }
+        if isinstance(raw_node.get("runtime"), dict):
+            node["runtime"] = raw_node["runtime"]
         node.update(
             _executing_tool_activity_fields(
                 status,
@@ -832,6 +839,21 @@ def _compose_progress_data(
         _extract_tree_snapshot(progress_data),
         execution_events,
     )
+    projection = project_ac_runtime(
+        ((event.type, event.data, event.aggregate_id) for event in execution_events),
+        session_id=progress_data.get("session_id"),
+    )
+    snapshot = composed["ac_tree"]
+    for node_id, node in snapshot.get("nodes", {}).items():
+        if node_id == snapshot.get("root_id"):
+            continue
+        index = node.get("index")
+        root_index = index - 1 if isinstance(index, int) and index > 0 else None
+        runtime = projection.for_node(
+            node_id, root_index, child=node.get("parent_id") not in {None, snapshot.get("root_id")}
+        )
+        node["runtime"] = runtime.to_data()
+        node["status"] = runtime.display_status(node.get("status", "pending"))
     subtask_summary = summarize_subtask_events(execution_events)
     if subtask_summary:
         composed["sub_ac_progress"] = subtask_summary
@@ -1072,6 +1094,12 @@ def _render_tree_lines(
                         inline_activity = current_activity
 
             suffix = f"  [{inline_activity}]" if inline_activity else ""
+            if child.get("runtime"):
+                suffix += " | " + " · ".join(
+                    f"{key}: {value if value is not None else 'unknown'}"
+                    for key, value in child["runtime"].items()
+                    if key != "generation"
+                )
             visible_lines.append(f"{prefix}{branch} {icon} {label}{suffix}")
             rendered_nodes += 1
             remaining_budget -= 1
@@ -1444,21 +1472,13 @@ class ACTreeHUDHandler:
                     )
                 )
 
-            session_events: list[Any] = []
-            session_cursor = cursor
-            if cursor > 0:
-                session_events, session_cursor = await self._event_store.get_events_after(
-                    "session",
-                    session_id,
-                    cursor,
-                )
-            new_events, execution_cursor = await self._event_store.get_events_after(
-                "execution",
-                execution_id,
-                cursor,
+            new_events, new_cursor = await read_runtime_history(
+                self._event_store,
+                execution_id=execution_id,
+                session_id=session_id,
+                after_cursor=cursor,
             )
-            new_cursor = max(session_cursor, execution_cursor)
-            has_status_change_event = _has_status_change_event(session_events)
+            has_status_change_event = _has_status_change_event(new_events)
             has_tree_change_event = _has_tree_change_event(new_events)
 
             if cursor > 0 and not has_status_change_event and not has_tree_change_event:
@@ -1486,7 +1506,12 @@ class ACTreeHUDHandler:
                     )
                 )
 
-            execution_history = await self._event_store.replay("execution", execution_id)
+            execution_history, _ = await read_runtime_history(
+                self._event_store,
+                execution_id=execution_id,
+                session_id=session_id,
+                max_row_id=new_cursor,
+            )
             latest_progress_event = _find_latest_progress_event(execution_history)
             if latest_progress_event is None:
                 return Result.ok(

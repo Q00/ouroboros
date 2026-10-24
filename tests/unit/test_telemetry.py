@@ -1309,34 +1309,67 @@ class TestExitDoesNotBlock:
     """
 
     def test_stalled_transport_does_not_delay_process_exit(self, tmp_path: Path) -> None:
-        # A local socket that accepts a connection but never reads or writes
-        # anything simulates an unreachable/hanging PostHog endpoint without
-        # touching the network. `_post()`'s urlopen() will send the request
-        # (it fits in the OS send buffer) and then block reading a response
-        # until its own HTTP timeout — the fix is that nothing at process
-        # exit waits around for that.
+        # A local socket accepts a real telemetry request but never responds.
+        # The child signals READY after imports, then starts telemetry and
+        # waits on stdin. The parent also waits for actual request bytes before
+        # signaling exit, so the measurement excludes startup and transport
+        # setup while still catching a synchronous send that blocks the child.
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.bind(("127.0.0.1", 0))
         server.listen(1)
         host, port = server.getsockname()[:2]
         stop = threading.Event()
+        request_received = threading.Event()
+        request_bytes = bytearray()
+        server_errors: list[str] = []
 
         def accept_and_stall() -> None:
-            server.settimeout(0.5)
-            while not stop.is_set():
-                try:
-                    conn, _addr = server.accept()
-                except TimeoutError:
-                    continue
-                except OSError:
-                    # Server socket was closed out from under a blocked
-                    # accept() during shutdown -- stop, don't propagate.
-                    break
-                stop.wait()
-                conn.close()
+            server.settimeout(0.2)
+            try:
+                while not stop.is_set():
+                    try:
+                        conn, _addr = server.accept()
+                    except TimeoutError:
+                        continue
+                    with conn:
+                        conn.settimeout(0.2)
+                        while not stop.is_set():
+                            try:
+                                data = conn.recv(65536)
+                            except TimeoutError:
+                                continue
+                            if not data:
+                                return
+                            request_bytes.extend(data)
+                            header_end = request_bytes.find(b"\r\n\r\n")
+                            if header_end < 0:
+                                continue
+                            headers = bytes(request_bytes[:header_end]).split(b"\r\n")
+                            request_line = headers[0]
+                            content_length = next(
+                                int(line.split(b":", 1)[1].strip())
+                                for line in headers[1:]
+                                if line.lower().startswith(b"content-length:")
+                            )
+                            body_start = header_end + 4
+                            if (
+                                request_line.startswith(b"POST /batch/")
+                                and len(request_bytes) - body_start >= content_length
+                            ):
+                                request_received.set()
+                                # Hold the connection open without sending a
+                                # response. The child must still be able to exit.
+                                stop.wait()
+                                return
+            except OSError as exc:
+                if not stop.is_set():
+                    server_errors.append(f"{type(exc).__name__}: {exc}")
+            except (ValueError, StopIteration, IndexError) as exc:
+                server_errors.append(f"invalid HTTP request: {type(exc).__name__}: {exc}")
 
         acceptor = threading.Thread(target=accept_and_stall, daemon=True)
         acceptor.start()
+        child: subprocess.Popen[str] | None = None
         try:
             env = os.environ.copy()
             for key in ("DO_NOT_TRACK", "OUROBOROS_TELEMETRY", "OUROBOROS_POSTHOG_HOST"):
@@ -1347,36 +1380,89 @@ class TestExitDoesNotBlock:
             repo_root = Path(__file__).resolve().parents[2]
             env["PYTHONPATH"] = str(repo_root / "src")
 
-            start = time.monotonic()
-            subprocess.run(
+            ready_file = tmp_path / "telemetry-child-ready"
+            child_code = (
+                "import sys\n"
+                "from pathlib import Path\n"
+                "from ouroboros import telemetry\n"
+                "telemetry._HTTP_TIMEOUT_SECONDS = 30.0\n"
+                "Path(sys.argv[1]).write_text('ready', encoding='utf-8')\n"
+                "telemetry.capture_service_active()\n"
+                "if sys.stdin.readline().strip() != 'exit':\n"
+                "    raise SystemExit('parent exit signal was not received')\n"
+            )
+            child = subprocess.Popen(
                 [
                     sys.executable,
                     "-c",
-                    "from ouroboros import telemetry; telemetry.capture('test_event')",
+                    child_code,
+                    str(ready_file),
                 ],
                 env=env,
                 text=True,
-                capture_output=True,
-                timeout=10,
-                check=True,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
             )
+            handshake_deadline = time.monotonic() + 10.0
+            while time.monotonic() < handshake_deadline:
+                if ready_file.exists() and request_received.is_set():
+                    break
+                if child.poll() is not None:
+                    stderr = child.stderr.read() if child.stderr is not None else ""
+                    raise AssertionError(
+                        f"telemetry child exited before handshake ({child.returncode}): {stderr}"
+                    )
+                time.sleep(0.01)
+
+            assert ready_file.exists(), "telemetry child did not signal startup completion"
+            assert request_received.is_set(), (
+                "local server did not receive a complete telemetry request"
+            )
+            assert time.monotonic() < handshake_deadline, (
+                "telemetry handshake exceeded its 10s setup budget"
+            )
+            assert b"POST /batch/" in request_bytes, (
+                "received bytes were not the PostHog batch request"
+            )
+            assert not server_errors, f"local stalled server failed: {server_errors}"
+
+            assert child.stdin is not None
+            start = time.monotonic()
+            child.stdin.write("exit\n")
+            child.stdin.flush()
+            try:
+                child.wait(timeout=1.2)
+            except subprocess.TimeoutExpired:
+                elapsed = time.monotonic() - start
+                raise AssertionError(
+                    f"child did not exit within 1.2s after request stalled ({elapsed:.2f}s)"
+                ) from None
             elapsed = time.monotonic() - start
+            stderr = child.stderr.read() if child.stderr is not None else ""
+            assert child.returncode == 0, f"telemetry child exited {child.returncode}: {stderr}"
         finally:
-            # Signal and join the acceptor before closing the socket: the
-            # thread wakes on its own (0.5s accept timeout, or the stop
-            # event if it is parked past an accepted connection), so the
-            # socket never needs to be torn out from under a live accept().
             stop.set()
+            if child is not None and child.poll() is None:
+                if child.stdin is not None:
+                    try:
+                        child.stdin.write("exit\n")
+                        child.stdin.flush()
+                    except BrokenPipeError:
+                        pass
+                try:
+                    child.wait(timeout=0.5)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=2)
             acceptor.join(timeout=2)
             server.close()
-
-        # Old (atexit-registered flush) behavior measured ~2s against a
-        # stalled transport. Keep generous headroom for interpreter/import
-        # startup while staying strictly below the old blocking bound.
-        assert elapsed < 1.2, (
-            f"subprocess took {elapsed:.2f}s to exit against a stalled transport "
-            "-- telemetry may be blocking process exit again"
-        )
+            if child is not None:
+                for pipe in (child.stdin, child.stderr):
+                    if pipe is not None and not pipe.closed:
+                        pipe.close()
+        assert not acceptor.is_alive(), "local stalled-server thread did not stop"
+        assert elapsed < 1.2, f"process exit took {elapsed:.3f}s after exit signal"
 
 
 class TestConcurrentIdentityCreation:
