@@ -359,6 +359,11 @@ class TestExtractEvidence:
         [
             "See [report] for details.",
             "Configuration remains at {config.host}.",
+            "[done]",
+            "[AC_COMPLETE: 1]",
+            "[undefined_name]",
+            "[NaN_report]",
+            "{undefined_name}",
         ],
     )
     def test_brackets_in_fenced_trailing_prose_do_not_displace_evidence(

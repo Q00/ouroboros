@@ -196,7 +196,10 @@ def _find_body_start(text: str) -> tuple[int, bool]:
             try:
                 _DECODER.raw_decode(recovery_text[pos:])
             except json.JSONDecodeError:
-                adjacent_to_value = not recovery_text[fenced_end:pos].strip()
+                gap = recovery_text[fenced_end:pos]
+                adjacent_to_value = (
+                    "\n" not in gap and "\r" not in gap and not gap.strip()
+                )
                 if adjacent_to_value or _looks_like_json_container(recovery_text, pos):
                     fenced_start = pos
 
@@ -384,11 +387,15 @@ def _looks_like_json_container(text: str, opener_pos: int) -> bool:
             candidate[0] in '{["'
             or re.match(r"-?\d", candidate)
             or re.match(r"(?:true|false|null)(?:\s*[,\]])", candidate)
+            or re.fullmatch(r"(?:undefined|NaN)\s*,?", candidate)
         )
 
     if candidate[0] in '"}':
         return True
-    return re.match(r"[A-Za-z_][A-Za-z0-9_]*\s*:", candidate) is not None
+    return (
+        re.match(r"[A-Za-z_][A-Za-z0-9_]*\s*:", candidate) is not None
+        or re.fullmatch(r"(?:undefined|NaN)\s*,?", candidate) is not None
+    )
 
 
 def _collect_top_level_values(text: str) -> list[tuple[int, int, Any]]:
