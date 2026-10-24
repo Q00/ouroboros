@@ -65,7 +65,7 @@ async def test_execute_seed_refuses_task_worktree_on_old_git(
         raise AssertionError("no runner may be built when the task worktree is refused")
 
     prefix = "ouroboros.mcp.tools.execution_handlers"
-    monkeypatch.setattr(f"{prefix}.OrchestratorRunner", no_runner)
+    monkeypatch.setattr("ouroboros.orchestrator.runner_factory.OrchestratorRunner", no_runner)
     monkeypatch.setattr(f"{prefix}.create_agent_runtime", no_runner)
     with (
         patch("ouroboros.core.project_identity._run_git_command", side_effect=fake_git),
