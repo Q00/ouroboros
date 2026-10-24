@@ -1377,6 +1377,7 @@ class TestExitDoesNotBlock:
             env["HOME"] = str(tmp_path)
             env["OUROBOROS_POSTHOG_API_KEY"] = "phc_test"
             env["OUROBOROS_POSTHOG_HOST"] = f"http://{host}:{port}"
+            env["NO_PROXY"] = env["no_proxy"] = "127.0.0.1"
             repo_root = Path(__file__).resolve().parents[2]
             env["PYTHONPATH"] = str(repo_root / "src")
 
@@ -1390,6 +1391,8 @@ class TestExitDoesNotBlock:
                 "telemetry.capture_service_active()\n"
                 "if sys.stdin.readline().strip() != 'exit':\n"
                 "    raise SystemExit('parent exit signal was not received')\n"
+                "assert telemetry._worker is not None and telemetry._worker.is_alive()\n"
+                "assert telemetry._queue.unfinished_tasks > 0\n"
             )
             child = subprocess.Popen(
                 [
