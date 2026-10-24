@@ -950,8 +950,7 @@ class TestCreateOuroborosServer:
                 return "evolve execution completed"
 
         store = EventStore("sqlite+aiosqlite:///:memory:")
-        with patch("ouroboros.orchestrator.runner.OrchestratorRunner", CapturingRunner):
-            server = create_ouroboros_server(event_store=store)
+        server = create_ouroboros_server(event_store=store)
 
         try:
             runtime_context = server._runtime_context
@@ -971,10 +970,11 @@ class TestCreateOuroborosServer:
             assert signal.mailbox.delivery_queue is None
 
             assert evolve.evolutionary_loop is not None
-            result = await evolve.evolutionary_loop.executor(
-                MagicMock(),
-                execution_id="evolve:lin_test:generation:1",
-            )
+            with patch("ouroboros.orchestrator.runner_factory.OrchestratorRunner", CapturingRunner):
+                result = await evolve.evolutionary_loop.executor(
+                    MagicMock(),
+                    execution_id="evolve:lin_test:generation:1",
+                )
 
             assert result == "evolve execution completed"
             assert captured_runner_kwargs["session_signal_hub"] is runtime_context.synapse

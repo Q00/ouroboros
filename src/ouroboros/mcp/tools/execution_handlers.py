@@ -104,8 +104,8 @@ from ouroboros.orchestrator.runner import (
     clear_cancellation,
     request_cancellation,
 )
+from ouroboros.orchestrator.runner_factory import build_orchestrator_runner
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus, SessionTracker
-from ouroboros.persistence.checkpoint import CheckpointStore
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers.base import LLMAdapter
 
@@ -1616,9 +1616,6 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                         execution_id=execution_id,
                     )
 
-                    # Create checkpoint store for execution state persistence
-                    checkpoint_store = CheckpointStore()
-                    checkpoint_store.initialize()
                     fat_harness_mode = _fresh_fat_harness_mode(execution_mode)
                     if is_resume:
                         persisted_fat_harness_mode = tracker.progress.get("fat_harness_mode")
@@ -1630,8 +1627,8 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                             # seed opts out with execution_mode='legacy'.
                             fat_harness_mode = _fresh_fat_harness_mode(execution_mode)
 
-                    # Create orchestrator runner
-                    runner = OrchestratorRunner(
+                    # Assemble the same runner and stores as the other entry points.
+                    runner = build_orchestrator_runner(
                         adapter=agent_adapter,
                         event_store=event_store,
                         console=console,
@@ -1642,7 +1639,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                         inherited_runtime_handle=inherited_runtime_handle,
                         inherited_tools=inherited_effective_tools,
                         task_workspace=workspace,
-                        checkpoint_store=checkpoint_store,
+                        max_decomposition_depth=None,
                         max_parallel_workers=max_parallel_workers,
                         fat_harness_mode=fat_harness_mode,
                         # Drive model-tier routing from the MCP model_tier arg
