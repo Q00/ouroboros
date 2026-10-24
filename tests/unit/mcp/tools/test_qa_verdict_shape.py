@@ -591,3 +591,98 @@ async def test_malformed_outer_candidate_does_not_promote_a_nested_pass(
     result = await _handler(body).handle(dict(_ARGS))
     assert result.is_err
     assert "no single unambiguous verdict object" in str(result.error)
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "Note [true story].",
+        "[false alarm]",
+        "[null hypothesis]",
+        "[true statement, confirmed]",
+        "[falsehood]",
+        "[null hypothesis 2]",
+        "[true falsehood]",
+        "[false nullification]",
+        "[null 참인 가설]",
+        "[true story!]",
+        "[false unexpected result]",
+        "[null working hypothesis]",
+    ],
+)
+@pytest.mark.parametrize("prose_first", [False, True])
+@pytest.mark.parametrize("answer_format", ["json", "plain"])
+async def test_literal_spelling_in_language_preserves_unique_answer(
+    prose: str, prose_first: bool, answer_format: str
+) -> None:
+    answer = (
+        '{"score":0.95,"verdict":"pass"}'
+        if answer_format == "json"
+        else "Score: 0.95\nVerdict: pass"
+    )
+    body = f"{prose}\n{answer}" if prose_first else f"{answer}\n{prose}"
+    result = await _handler(body).handle(dict(_ARGS))
+    assert result.is_ok
+    assert result.value.meta["passed"] is True
+
+
+@pytest.mark.parametrize(
+    "correction",
+    [
+        "[true false]",
+        "[false null]",
+        "[null true]",
+        "[true 1]",
+        "[false -0.1]",
+        '[null "fail"]',
+        "[true, story]",
+        "[false,]",
+        "[null: hypothesis]",
+        "[true NaN]",
+        "[false Infinity]",
+        "[null -Infinity]",
+        "[1e]",
+        "[1e+]",
+        "Correction: [true story]",
+        "Correction: [false alarm]",
+        "Correction: [null hypothesis]",
+        "[[true story]]",
+        '{"note": [false alarm]}',
+        '["note", [null hypothesis]]',
+    ],
+)
+@pytest.mark.parametrize("correction_first", [False, True])
+@pytest.mark.parametrize("answer_format", ["json", "plain"])
+async def test_language_distinction_keeps_structured_corrections_rejected(
+    correction: str, correction_first: bool, answer_format: str
+) -> None:
+    answer = (
+        '{"score":0.95,"verdict":"pass"}'
+        if answer_format == "json"
+        else "Score: 0.95\nVerdict: pass"
+    )
+    body = f"{correction}\n{answer}" if correction_first else f"{answer}\n{correction}"
+    result = await _handler(body).handle(dict(_ARGS))
+    assert result.is_err
+    assert "no single unambiguous verdict object" in str(result.error)
+
+
+@pytest.mark.parametrize("marker", ["```", "~~~"])
+@pytest.mark.parametrize("info", ["", "json"])
+@pytest.mark.parametrize("context_first", [False, True])
+async def test_supported_fence_keeps_authority_over_literal_language_context(
+    marker: str, info: str, context_first: bool
+) -> None:
+    answer = f'{marker}{info}\n{{"score":0.95,"verdict":"pass"}}\n{marker}'
+    context = "Note [true story].\nCorrection: [false alarm]"
+    body = f"{context}\n{answer}" if context_first else f"{answer}\n{context}"
+    result = await _handler(body).handle(dict(_ARGS))
+    assert result.is_ok
+    assert result.value.meta["passed"] is True
+
+
+async def test_language_prose_does_not_hide_duplicate_answers() -> None:
+    answer = '{"score":0.95,"verdict":"pass"}'
+    result = await _handler(f"{answer}\n[null hypothesis]\n{answer}").handle(dict(_ARGS))
+    assert result.is_err
+    assert "no single unambiguous verdict object" in str(result.error)

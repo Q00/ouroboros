@@ -361,12 +361,28 @@ def _is_attempted_answer(candidate: str, *, explicit: bool) -> bool:
         return False
     if any(char in contents for char in "{}[]"):
         return True
-    if contents[0] in "\"'" or any(
-        contents.startswith(literal)
-        and (len(contents) == len(literal) or not contents[len(literal)].isalnum())
-        for literal in ("true", "false", "null")
-    ):
+    if contents[0] in "\"'":
         return True
+    for literal in ("true", "false", "null"):
+        if not contents.startswith(literal):
+            continue
+        suffix = contents[len(literal) :]
+        if suffix and suffix[0].isalnum():
+            continue
+        if explicit or not suffix or not suffix[0].isspace():
+            return True
+        remainder = suffix.lstrip()
+        if not remainder or not remainder[0].isalpha():
+            return True
+        # A literal used before language is prose, not a JSON value list.
+        # Another scalar (including NaN/Infinity), a number or quoted value
+        # still establishes attempted array syntax. Decode only for evidence;
+        # never promote or repair any part of this malformed candidate.
+        try:
+            _, end = json.JSONDecoder().raw_decode(remainder)
+        except json.JSONDecodeError:
+            return False
+        return end == len(remainder) or not (remainder[end].isalnum() or remainder[end] == "_")
     if not (contents[0].isdigit() or contents[0] in "+-"):
         return False
     if explicit and all(char.isdigit() or char.isspace() or char in "eE+-.," for char in contents):
