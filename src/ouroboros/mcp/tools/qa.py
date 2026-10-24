@@ -21,7 +21,12 @@ import structlog
 
 from ouroboros.backends import backend_supports_tool_envelope
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
-from ouroboros.core.json_utils import _extract_fenced_json_payload
+from ouroboros.core.json_utils import (
+    _bracket_extract,
+    _extract_fenced_json_payload,
+    _FenceScanState,
+    _non_answer_ranges,
+)
 from ouroboros.core.types import Result
 from ouroboros.evaluation.json_utils import extract_json_payload
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
@@ -306,46 +311,114 @@ def _parse_non_json_qa_response(response_text: str) -> dict[str, Any] | None:
     }
 
 
-_JSON_FENCE_RE = re.compile(r"(?im)^[ \t>]*(?:`{3,}|~{3,})[ \t]*json\b")
-# An object opening on a key, or an array opening on a JSON value. Numeric
-# values need an array delimiter or a second value (possibly a missing comma),
-# so prose brackets such as ``[3 of 3 ACs]`` and ``[2026-10-23]`` stay prose.
-_JSON_OPENER_RE = re.compile(
-    r"\{\s*(?:[\"']|[^{}:]*:)|\[\s*(?:[\"{\[]|true\b|false\b|null\b|"
-    r"-?\d+(?:\.\d*)?(?:[eE][+-]?\d*)*"
-    r"(?=\s*(?:[,\]]|$|[\"{\[]|true\b|false\b|null\b)|\s+-?\d))"
-)
-
-# A conjunction makes a numeric reference list prose rather than a JSON array.
-# Match the complete list, not just its opening numeric prefix.
+# These are complete prose candidates, not exemptions for opener fragments.
 _PROSE_LIST_NUMBER = r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?"
 _NUMERIC_PROSE_LIST_RE = re.compile(
     rf"\[\s*{_PROSE_LIST_NUMBER}(?:\s*,\s*{_PROSE_LIST_NUMBER})*"
     rf"(?:\s*,\s*|\s+)(?:and|or)\s+{_PROSE_LIST_NUMBER}\s*\]",
     re.IGNORECASE,
 )
-
-# A standalone, explicitly labeled numeric correction is an attempted array,
-# even when its number token is malformed. The same token in version/date
-# prose is not enough to establish a competing answer.
-_EXPLICIT_NUMERIC_CORRECTION_RE = re.compile(
-    r"^[ \t]*Correction[ \t]*:[ \t]*\[[ \t]*[-+]?\d[\deE+., \t\[\]-]*$",
-    re.IGNORECASE | re.MULTILINE,
-)
+_NUMERIC_REFERENCE_RE = re.compile(r"\d+(?:[-./]\d+){2,}")
 
 
-def _carries_json_object(text: str) -> bool:
-    """True when the text holds a JSON fence or a JSON object or array opener.
+def _explicit_correction(text: str, start: int, end: int) -> bool:
+    """A standalone labeled candidate declares answer intent, not descriptive prose."""
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    if line_end == -1:
+        line_end = len(text)
+    return text[line_start:start].strip().casefold() == "correction:" and not text[
+        end:line_end
+    ].strip(" ]}.,\t")
 
-    The plain-text fallback exists for providers that ignore the JSON
-    instruction entirely; text that attempted JSON is not that case.
-    """
-    if _JSON_FENCE_RE.search(text) or _EXPLICIT_NUMERIC_CORRECTION_RE.search(text):
+
+def _is_attempted_answer(candidate: str, *, explicit: bool) -> bool:
+    """Classify one opaque boundary; never repair it or inspect nested fragments."""
+    try:
+        json.loads(candidate)
+    except (json.JSONDecodeError, ValueError):
+        pass
+    else:
         return True
-    return any(
-        _NUMERIC_PROSE_LIST_RE.match(text, match.start()) is None
-        for match in _JSON_OPENER_RE.finditer(text)
-    )
+
+    contents = candidate[1:-1].strip()
+    if candidate[0] == "{":
+        if explicit or ":" in contents or contents.startswith(('"', "'")):
+            return True
+        # A known QA field followed by a value is still a QA mapping attempt
+        # when its colon is missing. A field name mentioned in prose is not.
+        fields = contents.split(None, 1)
+        return (
+            len(fields) == 2
+            and fields[0] in cast(dict[str, object], QA_VERDICT_SCHEMA["properties"])
+            and bool(fields[1])
+            and (fields[1][0].isalnum() or fields[1][0] in "\"'[{+-.")
+        )
+
+    if _NUMERIC_PROSE_LIST_RE.fullmatch(candidate):
+        return False
+    if not contents:
+        return False
+    if any(char in contents for char in "{}[]"):
+        return True
+    if contents[0] in "\"'" or any(
+        contents.startswith(literal)
+        and (len(contents) == len(literal) or not contents[len(literal)].isalnum())
+        for literal in ("true", "false", "null")
+    ):
+        return True
+    if not (contents[0].isdigit() or contents[0] in "+-"):
+        return False
+    if explicit and all(char.isdigit() or char.isspace() or char in "eE+-.," for char in contents):
+        return True
+    if _NUMERIC_REFERENCE_RE.fullmatch(contents):
+        return False
+    if any(char in contents for char in ",\"'{}[]"):
+        return True
+    # Numeric-only malformed tokens and adjacent JSON literals are attempted
+    # arrays. Words in count/reference prose ("of", "edition", etc.) are not.
+    numeric = contents
+    for literal in ("true", "false", "null"):
+        numeric = numeric.replace(literal, "")
+    return all(char.isdigit() or char.isspace() or char in "eE+-." for char in numeric)
+
+
+def _carries_json_object(text: str, selected_payload: str | None = None) -> bool:
+    """Find an attempted answer outside the one selected unfenced boundary.
+
+    Reuse the extractor's fence, literal-range and balanced-bracket boundaries.
+    Each outer candidate is opaque, including malformed candidates. Selection
+    consumes exactly one matching span, never every occurrence of its text.
+    """
+    fence_state, _, segments = _extract_fenced_json_payload(text)
+    if fence_state is not _FenceScanState.NO_FENCE:
+        return True
+    selected = False
+    for segment in segments:
+        excluded = _non_answer_ranges(segment)
+        excluded_index = pos = 0
+        while pos < len(segment):
+            starts = [index for char in "{[" if (index := segment.find(char, pos)) != -1]
+            if not starts:
+                break
+            start = min(starts)
+            while excluded_index < len(excluded) and excluded[excluded_index][1] <= start:
+                excluded_index += 1
+            if excluded_index < len(excluded) and excluded[excluded_index][0] <= start:
+                pos = excluded[excluded_index][1]
+                continue
+            candidate = _bracket_extract(segment, start)
+            if candidate is None:
+                return True
+            end = start + len(candidate)
+            if not selected and candidate == selected_payload:
+                selected = True
+            elif _is_attempted_answer(
+                candidate, explicit=_explicit_correction(segment, start, end)
+            ):
+                return True
+            pos = end
+    return False
 
 
 def _parse_qa_response(
@@ -365,8 +438,8 @@ def _parse_qa_response(
             return Result.err(f"Invalid JSON in QA response: {e}")
         if not isinstance(data, dict):
             return Result.err("QA response JSON must be an object, got " + type(data).__name__)
-        if _carries_json_object(response_text.replace(json_str, "", 1)) and (
-            _extract_fenced_json_payload(response_text)[1] is None
+        if _extract_fenced_json_payload(response_text)[1] is None and _carries_json_object(
+            response_text, selected_payload=json_str
         ):
             # The extractor counts only *valid* objects, so a malformed second
             # verdict (``{"score": 0.1, "verdict": "fail",}``) beside a passing

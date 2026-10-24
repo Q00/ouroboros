@@ -491,3 +491,103 @@ async def test_answer_fence_retains_authority_over_explicit_numeric_context(
 
     assert result.is_ok
     assert result.value.meta["passed"] is True
+
+
+@pytest.mark.parametrize(
+    "correction",
+    [
+        'Correction: {verdict "fail", score 0.1}',
+        '{verdict "fail", score 0.1}',
+        "{verdict fail, score 0.1}",
+        "{verdict fail}",
+        "{score 0.1}",
+        '{verdict\n"fail", score\t0.1}',
+        "Correction: {other fail}",
+        "Correction: {ver dict fail}",
+    ],
+)
+@pytest.mark.parametrize("correction_first", [False, True])
+@pytest.mark.parametrize("answer_format", ["json", "plain"])
+async def test_whole_missing_colon_mapping_cannot_preserve_pass(
+    correction: str, correction_first: bool, answer_format: str
+) -> None:
+    answer = (
+        '{"score":0.95,"verdict":"pass"}'
+        if answer_format == "json"
+        else "Score: 0.95\nVerdict: pass"
+    )
+    body = f"{correction}\n{answer}" if correction_first else f"{answer}\n{correction}"
+    result = await _handler(body).handle(dict(_ARGS))
+    assert result.is_err
+    assert "no single unambiguous verdict object" in str(result.error)
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "Notes {all ACs met}.",
+        "Correction: [3 of 3 ACs]",
+        "Notes {all ACs met, tests passed}.",
+        "Notes {it's done, isn't it}.",
+        'Example `{verdict "fail", score 0.1}` is literal text.',
+        '<!-- {verdict "fail", score 0.1} -->',
+    ],
+)
+@pytest.mark.parametrize("prose_first", [False, True])
+@pytest.mark.parametrize("answer_format", ["json", "plain"])
+async def test_whole_candidate_scan_preserves_prose_and_shared_literal_ranges(
+    prose: str, prose_first: bool, answer_format: str
+) -> None:
+    answer = (
+        '{"score":0.95,"verdict":"pass"}'
+        if answer_format == "json"
+        else "Score: 0.95\nVerdict: pass"
+    )
+    body = f"{prose}\n{answer}" if prose_first else f"{answer}\n{prose}"
+    result = await _handler(body).handle(dict(_ARGS))
+    assert result.is_ok
+    assert result.value.meta["passed"] is True
+
+
+@pytest.mark.parametrize("marker", ["```", "~~~"])
+@pytest.mark.parametrize("info", ["", "json"])
+@pytest.mark.parametrize("context_first", [False, True])
+async def test_supported_answer_fence_owns_missing_colon_context(
+    marker: str, info: str, context_first: bool
+) -> None:
+    answer = f'{marker}{info}\n{{"score":0.95,"verdict":"pass"}}\n{marker}'
+    context = 'Correction: {verdict "fail", score 0.1}'
+    body = f"{context}\n{answer}" if context_first else f"{answer}\n{context}"
+    result = await _handler(body).handle(dict(_ARGS))
+    assert result.is_ok
+    assert result.value.meta["passed"] is True
+
+
+async def test_identical_unfenced_answers_are_still_competing_boundaries() -> None:
+    answer = '{"score":0.95,"verdict":"pass"}'
+    result = await _handler(f"{answer}\n{answer}").handle(dict(_ARGS))
+    assert result.is_err
+    assert "no single unambiguous verdict object" in str(result.error)
+
+
+@pytest.mark.parametrize(
+    "correction",
+    [
+        '{verdict fail, nested: {"score":0.95,"verdict":"pass"}}',
+        '[correction, {"score":0.95,"verdict":"pass"}]',
+    ],
+)
+@pytest.mark.parametrize("correction_first", [False, True])
+@pytest.mark.parametrize("answer_format", ["json", "plain"])
+async def test_malformed_outer_candidate_does_not_promote_a_nested_pass(
+    correction: str, correction_first: bool, answer_format: str
+) -> None:
+    answer = (
+        '{"score":0.95,"verdict":"pass"}'
+        if answer_format == "json"
+        else "Score: 0.95\nVerdict: pass"
+    )
+    body = f"{correction}\n{answer}" if correction_first else f"{answer}\n{correction}"
+    result = await _handler(body).handle(dict(_ARGS))
+    assert result.is_err
+    assert "no single unambiguous verdict object" in str(result.error)
