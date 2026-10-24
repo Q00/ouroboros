@@ -197,9 +197,7 @@ def _find_body_start(text: str) -> tuple[int, bool]:
                 _DECODER.raw_decode(recovery_text[pos:])
             except json.JSONDecodeError:
                 gap = recovery_text[fenced_end:pos]
-                adjacent_to_value = (
-                    "\n" not in gap and "\r" not in gap and not gap.strip()
-                )
+                adjacent_to_value = "\n" not in gap and "\r" not in gap and not gap.strip()
                 if adjacent_to_value or _looks_like_json_container(recovery_text, pos):
                     fenced_start = pos
 

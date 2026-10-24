@@ -369,10 +369,7 @@ class TestExtractEvidence:
     def test_brackets_in_fenced_trailing_prose_do_not_displace_evidence(
         self, trailing_prose: str
     ) -> None:
-        text = (
-            '```json\n{"files_touched": ["ok.py"]}\n'
-            f"{trailing_prose}\n```"
-        )
+        text = f'```json\n{{"files_touched": ["ok.py"]}}\n{trailing_prose}\n```'
 
         record = extract_evidence(text)
 
