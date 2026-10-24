@@ -172,6 +172,7 @@ _EXPECTED_OUROBOROS_REQUIRED_CONTEXT_KEYS = {
         "calibration_input",
         "initial_context",
         "cwd",
+        "interview_calibration",
         "confused_terms",
         "references",
         "session_id",

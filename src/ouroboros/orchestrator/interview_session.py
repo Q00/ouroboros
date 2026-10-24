@@ -19,6 +19,19 @@ INTERVIEW_CALIBRATION_METADATA_KEY = "ouroboros_interview_calibration"
 log = get_logger(__name__)
 
 
+def serialize_without_calibration(handle: RuntimeHandle) -> dict[str, Any]:
+    """Return a fresh shallow snapshot without session-local calibration.
+
+    ``to_dict`` owns the snapshot copy; removing calibration from that copy
+    preserves the live handle and its nested metadata values.
+    """
+    serialized = handle.to_dict()
+    metadata = serialized.get("metadata")
+    if isinstance(metadata, dict):
+        metadata.pop(INTERVIEW_CALIBRATION_METADATA_KEY, None)
+    return serialized
+
+
 def interview_transition_digest() -> str:
     """Bind transition code and metadata keys to one portable execution identity."""
     # Reuse the dispatcher serializer for nested code, defaults, and properties.
