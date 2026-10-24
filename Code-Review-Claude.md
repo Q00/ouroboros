@@ -1,5 +1,10 @@
 # Deep Code Review: Hermes Runtime Integration
 
+> Historical review of the April 2026 Hermes changeset, retained for provenance.
+> Findings below describe that snapshot, not current repository policy or status.
+> For current guidance, read [Review Conventions](docs/contributing/review-conventions.md)
+> and the [Review Boundary Contract](CONTRIBUTING.md#review-boundary-contract).
+
 ## Context
 
 This changeset introduces **Hermes CLI** as a fourth runtime option alongside Claude, Codex, and OpenCode. It includes:

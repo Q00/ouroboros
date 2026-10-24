@@ -39,7 +39,7 @@ ouroboros [OPTIONS] COMMAND [ARGS]...
 | Command | Description |
 |---------|-------------|
 | `setup` | Detect runtimes and configure Ouroboros for your environment |
-| `init` | Start interactive interview to refine requirements |
+| `init` / `interview` | Start an interactive interview (`interview` is an alias of `init`) |
 | `auto` | Run bounded goal → A-grade Seed → execution handoff pipeline |
 | `job` | Inspect detached job status, waits, results, and event streams |
 | `run` | Execute Ouroboros workflows |
@@ -56,9 +56,10 @@ ouroboros [OPTIONS] COMMAND [ARGS]...
 | `plugin` | Manage UserLevel plugins (install, list, remove) |
 | `pm` | Product Management interview for requirements gathering |
 | `doctor` | Diagnose configuration and runtime health |
-| `detect` | Detect available runtime backends |
+| `detect` | Inspect a project once with an LLM and write validated Stage 1 commands to `.ouroboros/mechanical.toml` |
 | `artifacts` | Manage and inspect execution artifacts |
-| `harness` | Manage runtime harness configurations |
+| `harness` | Inspect and compare exported auto-interview traces |
+| `resume` | List in-flight sessions from the EventStore and show re-attachment commands |
 | `codex` | Codex-specific setup and configuration |
 | `seed` | Generate or inspect seed specifications |
 | `workflow-ir` | Inspect workflow intermediate representation |
@@ -413,6 +414,10 @@ Start interactive interview to refine requirements (Big Bang phase).
 **Shorthand:** `ouroboros init "context"` is equivalent to `ouroboros init start "context"`.
 When the first argument is not a known subcommand (`start`, `list`), it is treated as the context for `init start`.
 
+The top-level `interview` command is an alias for the same command group, so
+`ouroboros interview start "context"` and `ouroboros interview list` have the
+same behavior as their `init` counterparts.
+
 ### `init start`
 
 Start an interactive interview to transform vague ideas into clear, executable requirements.
@@ -481,6 +486,67 @@ ouroboros init list [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--state-dir DIRECTORY` | Custom directory for interview state files |
+
+---
+
+
+## `ouroboros detect`
+
+For projects with recognized manifests, use one LLM call to propose lint, build,
+test, and static-analysis commands and persist validated commands to
+`.ouroboros/mechanical.toml`. The CLI initializes the selected LLM adapter before
+discovery, even when the project has no manifests. That backend's initialization
+requirements must therefore be satisfied; for example, selecting `litellm`
+requires its optional package and a supported Python version. If initialization fails, the command exits with
+`Could not initialize LLM adapter` before discovery and writes no configuration.
+After successful initialization, a manifest-free, discoverable standard-library
+`unittest.TestCase` suite under `tests/` uses deterministic discovery without an
+LLM call; an empty project produces no configuration. If the file already exists,
+the command leaves it unchanged without initializing an adapter unless `--force`
+is passed. This command
+authors the deterministic Stage 1 configuration; it does not detect installed
+runtime backends.
+
+```bash
+ouroboros detect [OPTIONS] [PATH]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-f, --force` | Re-detect and overwrite an existing `.ouroboros/mechanical.toml` |
+| `--backend TEXT` | Select the LLM adapter initialized before discovery (`claude`, `codex`, `gemini`, `opencode`, or `litellm`); only manifest-backed inspection makes an LLM call |
+
+## `ouroboros harness`
+
+Read and compare auto-interview trace projections. The command lists runs,
+renders summaries and outcomes, searches the five JSONL trace streams, compares
+two runs, or ranks runs by an outcome metric. It does not manage runtime harness
+configuration. When persisted auto state exists without an exported trace, a
+requested run may be projected on demand into `.ouroboros/traces/<run_id>/`.
+
+```bash
+ouroboros harness list
+ouroboros harness show RUN_ID
+ouroboros harness trace RUN_ID --grep PATTERN [--stream NAME]
+ouroboros harness diff RUN_A RUN_B
+ouroboros harness frontier --metric NAME
+```
+
+## `ouroboros resume`
+
+List running or paused sessions directly from the EventStore after an MCP
+disconnect. The command opens the store read-only and shows identifiers and
+commands for inspection, monitoring, and resuming execution; it does not resume
+a session by itself.
+
+```bash
+ouroboros resume [--all] [--list]
+```
+
+By default, the 20 most recent in-flight sessions are shown. Pass `--all` to
+show every in-flight session. After listing sessions, the command prompts for
+a session and prints re-attachment guidance. Pass `--list` (`-l`) to print the
+table and exit without prompting, for example from scripts or agents.
 
 ---
 
