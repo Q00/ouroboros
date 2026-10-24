@@ -22,8 +22,6 @@ the migration plan. This file is the single source of truth for new runtimes
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import replace
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +33,7 @@ from ouroboros.orchestrator.adapter import (
     SkillDispatchHandler,
     worker_cwd_failure_message,
 )
+from ouroboros.orchestrator.interview_session import InterviewSessionTransition
 from ouroboros.router import (
     InvalidInputReason,
     InvalidSkill,
@@ -45,9 +44,6 @@ from ouroboros.router import (
 )
 
 log = get_logger(__name__)
-
-
-_INTERVIEW_SESSION_METADATA_KEY = "ouroboros_interview_session_id"
 
 
 InvalidSkillLogFormatter = Callable[[InvalidSkill], tuple[str, str, str]]
@@ -255,21 +251,8 @@ class SkillInterceptor:
         intercept: Resolved,
         current_handle: RuntimeHandle | None,
     ) -> dict[str, Any]:
-        if intercept.mcp_tool != "ouroboros_interview" or current_handle is None:
-            return dict(intercept.mcp_args)
-
-        session_id = current_handle.metadata.get(_INTERVIEW_SESSION_METADATA_KEY)
-        if not isinstance(session_id, str) or not session_id.strip():
-            return dict(intercept.mcp_args)
-
-        # Resume turn: drop initial_context so InterviewHandler branches on
-        # session_id instead of starting a new interview.
-        arguments: dict[str, Any] = dict(intercept.mcp_args)
-        arguments.pop("initial_context", None)
-        arguments["session_id"] = session_id.strip()
-        if intercept.first_argument is not None:
-            arguments["answer"] = intercept.first_argument
-        return arguments
+        """Build arguments through the shared interview transition contract."""
+        return InterviewSessionTransition(intercept, current_handle).tool_arguments()
 
     def _build_resume_handle(
         self,
@@ -277,32 +260,13 @@ class SkillInterceptor:
         intercept: Resolved,
         tool_result: Any,
     ) -> RuntimeHandle | None:
-        if intercept.mcp_tool != "ouroboros_interview":
-            return current_handle
-
-        session_id = tool_result.meta.get("session_id")
-        if not isinstance(session_id, str) or not session_id.strip():
-            if session_id is not None:
-                log.warning(
-                    f"{self._log_namespace}.resume_handle.invalid_session_id",
-                    session_id_type=type(session_id).__name__,
-                    session_id_value=repr(session_id),
-                )
-            return current_handle
-
-        metadata = dict(current_handle.metadata) if current_handle is not None else {}
-        metadata[_INTERVIEW_SESSION_METADATA_KEY] = session_id.strip()
-        updated_at = datetime.now(UTC).isoformat()
-
-        if current_handle is not None:
-            return replace(current_handle, metadata=metadata, updated_at=updated_at)
-
-        return RuntimeHandle(
+        """Retain session-local interview state through the shared transition."""
+        return InterviewSessionTransition(intercept, current_handle).resume_handle(
+            tool_result.meta,
             backend=self._runtime_handle_backend,
             cwd=self._cwd,
             approval_mode=self._permission_mode,
-            updated_at=updated_at,
-            metadata=metadata,
+            log_namespace=self._log_namespace,
         )
 
     def _build_tool_message(
