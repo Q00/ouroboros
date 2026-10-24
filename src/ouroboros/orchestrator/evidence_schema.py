@@ -196,7 +196,9 @@ def _find_body_start(text: str) -> tuple[int, bool]:
             try:
                 _DECODER.raw_decode(recovery_text[pos:])
             except json.JSONDecodeError:
-                fenced_start = pos
+                adjacent_to_value = not recovery_text[fenced_end:pos].strip()
+                if adjacent_to_value or _looks_like_json_container(recovery_text, pos):
+                    fenced_start = pos
 
         later_values = [candidate for candidate in top_level_values if candidate[0] >= fence_end]
         terminal_start = later_values[-1][0] if later_values else -1

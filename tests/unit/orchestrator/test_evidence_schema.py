@@ -354,6 +354,25 @@ class TestExtractEvidence:
         with pytest.raises(EvidenceError):
             extract_evidence(text)
 
+    @pytest.mark.parametrize(
+        "trailing_prose",
+        [
+            "See [report] for details.",
+            "Configuration remains at {config.host}.",
+        ],
+    )
+    def test_brackets_in_fenced_trailing_prose_do_not_displace_evidence(
+        self, trailing_prose: str
+    ) -> None:
+        text = (
+            '```json\n{"files_touched": ["ok.py"]}\n'
+            f"{trailing_prose}\n```"
+        )
+
+        record = extract_evidence(text)
+
+        assert record.data == {"files_touched": ["ok.py"]}
+
     def test_valid_inline_evidence_label_is_recovered(self) -> None:
         record = extract_evidence('Actual evidence: {"files_touched": ["actual.py"]}')
 
