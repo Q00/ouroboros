@@ -566,14 +566,14 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         "src/ouroboros/cli/commands/update.py",
         "_run_step",
         "subprocess.run",
-        523,
+        660,
         17,
     ): "Operator-triggered install/plugin refresh uses code-owned argv without shell; inherits operator env or merges installer/topology overrides (UV_TOOL_DIR/PIPX_HOME/UV_TOOL_BIN_DIR). Project .env denies PATH and package-manager/config-loader controls; timeout defaults to 600s and errors/nonzero return False.",
     (
         "src/ouroboros/cli/commands/update.py",
         "_installed_version",
         "subprocess.run",
-        774,
+        920,
         17,
     ): "Operator installation identity selects the console path with literal --version, no shell; inherits operator env after project .env executable/loader controls are denied. 30s timeout; spawn/nonzero/parse failure returns None.",
     (
