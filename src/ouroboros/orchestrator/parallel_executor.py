@@ -82,6 +82,7 @@ from ouroboros.harness.deliver_gate import (
 )
 from ouroboros.harness.journal import EvidenceEntry, EvidenceManifest
 from ouroboros.harness.traceguard_validator import validate_evidence_claims
+from ouroboros.harness.wrapper_receipt import matching_wrapper_receipts
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator import (
     adaptive_concurrency,
@@ -305,6 +306,7 @@ from ouroboros.orchestrator.evidence.typed_evidence import (  # noqa: F401
 )
 from ouroboros.orchestrator.evidence.verification import (
     _verify_atomic_evidence_against_runtime_messages,
+    observe_wrapper_receipts,
 )
 from ouroboros.orchestrator.evidence_schema import (
     EvidenceError,
@@ -1453,6 +1455,8 @@ def _standard_deliver_facts(
     *,
     task_cwd: str | None,
     verifier_passed: bool,
+    wrapper_receipts: Mapping[str, EvidenceEntry] | None = None,
+    receipt_mode: bool = False,
 ) -> list[DeliverEvidenceFact] | None:
     """Bind default-profile evidence to exact accepted-leaf tool journal rows.
 
@@ -1489,19 +1493,28 @@ def _standard_deliver_facts(
                 match_value = normalized
                 eligible = bool(normalized) and "\n" not in normalized and "\r" not in normalized
             if field == "tests_passed":
-                eligible = eligible and verifier_passed and normalized in commands
+                eligible = (
+                    eligible
+                    and verifier_passed
+                    and (
+                        normalized in (wrapper_receipts or {})
+                        if receipt_mode
+                        else normalized in commands
+                    )
+                )
 
             dedupe_key = (field, match_value)
             if dedupe_key in seen:
                 continue
             seen.add(dedupe_key)
-            matches = (
-                _matching_journal_entries(
+            if eligible and field == "tests_passed" and wrapper_receipts is not None:
+                matches = (wrapper_receipts[normalized],)
+            elif eligible:
+                matches = _matching_journal_entries(
                     manifest, field=field, value=match_value, task_cwd=task_cwd
                 )
-                if eligible
-                else ()
-            )
+            else:
+                matches = ()
             if len(matches) == 1:
                 handle = matches[0].handle
             elif len(matches) > 1:
@@ -9086,7 +9099,6 @@ Respond with either ATOMIC or the structured JSON object only.
                     spec=ac_spec,
                     cwd=cwd,
                 )
-
             typed_evidence, typed_validation, typed_error = self._observe_atomic_typed_evidence(
                 ac_content=ac_content,
                 final_message=final_message,
@@ -9094,6 +9106,17 @@ Respond with either ATOMIC or the structured JSON object only.
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
+            )
+            typed_data = typed_evidence.data if typed_evidence is not None else {}
+            (
+                verified_wrapper_commands,
+                receipt_failure,
+                related_wrapper_commands,
+            ) = await observe_wrapper_receipts(
+                self._event_store,
+                runtime_identity,
+                typed_data,
+                self._task_cwd or getattr(self._adapter, "working_directory", None),
             )
             verifier_verdict = _invoke_execution_authority_entry(
                 self,
@@ -9107,7 +9130,15 @@ Respond with either ATOMIC or the structured JSON object only.
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
+                verified_wrapper_commands=verified_wrapper_commands,
+                related_wrapper_commands=related_wrapper_commands,
             )
+            if receipt_failure is not None and (
+                verifier_verdict is None
+                or verifier_verdict.passed
+                or receipt_failure.failure_class == "FABRICATION_SUSPECTED"
+            ):
+                verifier_verdict = receipt_failure
             verify_gate_replaces_all_evidence = bool(
                 verify_gate_outcome is not None
                 and self._execution_profile is not None
@@ -9582,6 +9613,18 @@ Respond with either ATOMIC or the structured JSON object only.
                 manifest,
                 task_cwd=self._task_cwd or getattr(self._adapter, "working_directory", None),
                 verifier_passed=verifier_verdict.passed,
+                wrapper_receipts=(
+                    matching_wrapper_receipts(
+                        manifest,
+                        claims=typed_data["wrapper_receipts"],
+                        execution_id=execution_id,
+                        task_cwd=self._task_cwd
+                        or getattr(self._adapter, "working_directory", None),
+                    )
+                    if "wrapper_receipts" in typed_data
+                    else None
+                ),
+                receipt_mode="wrapper_receipts" in typed_data,
             )
             facts = standard_facts if standard_facts is not None else explicit_facts
             if not facts:
@@ -12723,6 +12766,8 @@ Respond with either ATOMIC or the structured JSON object only.
         verify_gate_active: bool = False,
         force_runtime_transcript: bool = False,
         task_cwd_override: str | None = None,
+        verified_wrapper_commands: frozenset[str] = frozenset(),
+        related_wrapper_commands: frozenset[str] = frozenset(),
     ) -> VerifierVerdict | None:
         """Run the separate verifier pass once typed evidence is schema-valid."""
         if (
@@ -12779,6 +12824,8 @@ Respond with either ATOMIC or the structured JSON object only.
                     has_success_contract=has_success_contract,
                     has_expected_artifacts=has_expected_artifacts,
                     verify_gate_active=verify_gate_active,
+                    verified_wrapper_commands=verified_wrapper_commands,
+                    related_wrapper_commands=related_wrapper_commands,
                 )
             )
         except VerifierContractError:

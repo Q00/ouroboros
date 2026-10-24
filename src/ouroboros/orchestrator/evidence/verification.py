@@ -2,8 +2,19 @@
 
 from __future__ import annotations
 
+from collections import Counter
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
+from ouroboros.harness.deliver_gate import (
+    _event_has_conflicting_tool_call_ids,
+    _event_matches_accepted_attempt,
+    _event_tool_call_aliases,
+    _event_tool_call_id,
+    load_ac_evidence_manifest,
+)
+from ouroboros.harness.wrapper_receipt import matching_wrapper_receipts, trusted_wrapper_invocation
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.evidence.ac_classification import _effective_evidence_schema_for_ac
 from ouroboros.orchestrator.evidence.call_citation import (
@@ -32,6 +43,7 @@ from ouroboros.orchestrator.evidence.observed_runs import (
     SCRIPT_ABSENT_FROM_ARTIFACT,
     observed_zero_exit_run,
 )
+from ouroboros.orchestrator.evidence.shell_parsing import _looks_like_test_command
 from ouroboros.orchestrator.evidence.test_detection import (
     _functional_command_supports_test_claim,
     _runtime_messages_have_completed_command_for_test_claim,
@@ -39,6 +51,7 @@ from ouroboros.orchestrator.evidence.test_detection import (
     _runtime_messages_support_test_claim,
 )
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord
+from ouroboros.orchestrator.execution_runtime_scope import ACRuntimeIdentity
 from ouroboros.orchestrator.failure_taxonomy import FailureClass
 from ouroboros.orchestrator.profile_loader import ExecutionProfile
 from ouroboros.orchestrator.verifier import VerifierVerdict
@@ -67,6 +80,8 @@ def _verify_atomic_evidence_against_runtime_messages(
     has_success_contract: bool = False,
     has_expected_artifacts: bool = False,
     verify_gate_active: bool = False,
+    verified_wrapper_commands: frozenset[str] = frozenset(),
+    related_wrapper_commands: frozenset[str] = frozenset(),
 ) -> VerifierVerdict:
     """Verify leaf evidence is backed by runtime transcript events.
 
@@ -127,6 +142,7 @@ def _verify_atomic_evidence_against_runtime_messages(
     masked_command_mismatch = False
     completed_command_mismatch = False
     absent_script_mismatch = False
+    wrapper_form_mismatch = False
     backed_commands = tuple(
         command
         for command in _flatten_evidence_values(typed_evidence.get("commands_run"))
@@ -159,6 +175,11 @@ def _verify_atomic_evidence_against_runtime_messages(
             continue
         field_messages = _runtime_support_messages_for_field(field_name, support_messages)
         for value in values:
+            if field_name in {"commands_run", "tests_passed"} and value in related_wrapper_commands:
+                wrapper_form_mismatch = True
+                evidence_form_mismatches.append(f"{field_name}: {value}")
+                unsupported.append(f"{field_name}: {value}")
+                continue
             if field_name == "commands_run":
                 if _runtime_messages_support_command_claim(value, field_messages):
                     continue
@@ -213,6 +234,8 @@ def _verify_atomic_evidence_against_runtime_messages(
                 unsupported.append(f"{field_name}: {value}")
                 continue
             if field_name == "tests_passed":
+                if value in verified_wrapper_commands:
+                    continue
                 if _runtime_messages_support_test_claim(
                     value=value,
                     backed_commands=backed_commands,
@@ -283,6 +306,11 @@ def _verify_atomic_evidence_against_runtime_messages(
         reason_prefix = "unsupported evidence claims"
         if failure_class == "EVIDENCE_FORM_MISMATCH":
             details = []
+            if wrapper_form_mismatch:
+                details.append(
+                    "related wrapper runtime cannot prove the claim; rerun failed commands "
+                    "and retry with a contract-compliant receipt and command-bound stdout/stderr references"
+                )
             if masked_command_mismatch:
                 details.append(
                     "unprotected output-filter pipeline cannot prove a clean command claim"
@@ -439,3 +467,158 @@ def _claimed_file_exists_in_workspace(value: str, *, task_cwd: str | None) -> bo
         return (Path(task_cwd).resolve() / relative).is_file()
     except (OSError, RuntimeError, ValueError):
         return False
+
+
+async def invalid_wrapper_receipt_verdict(
+    event_store: Any,
+    identity: ACRuntimeIdentity,
+    *,
+    claims: object,
+    claimed_tests: frozenset[str],
+    task_cwd: str | None,
+) -> VerifierVerdict:
+    """Classify rejected proof from scoped runtime work, including failed runs.
+
+    This never admits evidence: successful receipt/artifact validation remains
+    separate. A unique trusted-wrapper start and ID-correlated completion in
+    the current execution/AC/retry/session show related work even on failure.
+    """
+    related = isinstance(claims, (list, tuple)) and bool(claims)
+    execution_id = identity.execution_id or ""
+    try:
+        events = tuple(await event_store.query_execution_related_events(execution_id, limit=None))
+    except (OSError, RuntimeError, ValueError):
+        events = ()
+    event_counts = Counter(event.id for event in events)
+    scoped = tuple(
+        event
+        for event in events
+        if _event_matches_accepted_attempt(
+            event,
+            scope_id=identity.ac_id,
+            execution_id=execution_id,
+            retry_attempt=identity.retry_attempt,
+            session_attempt_id=identity.session_attempt_id,
+        )
+    )
+    linked_tests: set[str] = set()
+    for claim in claims if isinstance(claims, (list, tuple)) else ():
+        if not isinstance(claim, Mapping):
+            related = False
+            break
+        outer = claim.get("outer_command")
+        try:
+            parsed = trusted_wrapper_invocation(outer, task_cwd) if isinstance(outer, str) else None
+        except (OSError, RuntimeError, ValueError):
+            parsed = None
+        if parsed is None or parsed[3] != claim.get("inner_command"):
+            related = False
+            break
+        starts = [
+            event
+            for event in scoped
+            if event.type == "execution.tool.started"
+            and event.data.get("tool_name") == "Bash"
+            and isinstance(event.data.get("tool_input"), Mapping)
+            and event.data["tool_input"].get("command") == outer
+        ]
+        if len(starts) != 1 or _event_tool_call_id(starts[0]) is None:
+            related = False
+            break
+        linked_tests.add(parsed[3])
+        start = starts[0]
+        call_id = _event_tool_call_id(start)
+        same_call_starts = [
+            event
+            for event in scoped
+            if event.type == "execution.tool.started"
+            and call_id in _event_tool_call_aliases(event)[0]
+        ]
+        completions = [
+            event
+            for event in scoped
+            if event.type in {"execution.tool.completed", "execution.tool.failed"}
+            and call_id in _event_tool_call_aliases(event)[0]
+        ]
+        if (
+            len(same_call_starts) != 1
+            or len(completions) != 1
+            or any(
+                event_counts[event.id] != 1
+                or _event_has_conflicting_tool_call_ids(event)
+                or event.data.get("tool_name") != "Bash"
+                for event in (*same_call_starts, *completions)
+            )
+            or completions[0].timestamp < start.timestamp
+        ):
+            related = False
+            break
+    related = related and bool(claimed_tests) and claimed_tests == linked_tests
+    reason = "wrapper_receipts: no accepted command-bound receipt"
+    if related:
+        reason += (
+            "; related runtime work cannot prove tests_passed; rerun failed commands "
+            "and retry with a "
+            "contract-compliant receipt and command-bound stdout/stderr references"
+        )
+    return VerifierVerdict(
+        passed=False,
+        reasons=(reason,),
+        failure_class="EVIDENCE_FORM_MISMATCH" if related else "FABRICATION_SUSPECTED",
+    )
+
+
+async def observe_wrapper_receipts(
+    event_store: Any,
+    identity: ACRuntimeIdentity,
+    data: Mapping[str, object],
+    task_cwd: str | None,
+) -> tuple[frozenset[str], VerifierVerdict | None, frozenset[str]]:
+    """Keep receipt authority and related-work rejection classification separate."""
+    if "wrapper_receipts" not in data:
+        return frozenset(), None, frozenset()
+    verified: frozenset[str] = frozenset()
+    try:
+        manifest = await load_ac_evidence_manifest(
+            event_store,
+            ac_id=identity.ac_id,
+            execution_id=identity.execution_id or "",
+            admit_accepted_tool_starts=True,
+            accepted_retry_attempt=identity.retry_attempt,
+            accepted_session_attempt_id=identity.session_attempt_id,
+        )
+        matches = matching_wrapper_receipts(
+            manifest,
+            claims=data["wrapper_receipts"],
+            execution_id=identity.execution_id or "",
+            task_cwd=task_cwd,
+        )
+        verified = frozenset(filter(_looks_like_test_command, matches or ()))
+    except (OSError, RuntimeError, ValueError):
+        pass
+    raw_tests = data.get("tests_passed")
+    values = (raw_tests,) if isinstance(raw_tests, str) else raw_tests
+    tests = (
+        frozenset(item.strip() for item in values if isinstance(item, str) and item.strip())
+        if isinstance(values, (list, tuple))
+        else frozenset()
+    )
+    if verified and tests == verified:
+        return verified, None, frozenset()
+    failure = await invalid_wrapper_receipt_verdict(
+        event_store,
+        identity,
+        claims=data["wrapper_receipts"],
+        claimed_tests=tests,
+        task_cwd=task_cwd,
+    )
+    related: frozenset[str] = frozenset()
+    claims = data["wrapper_receipts"]
+    if failure.failure_class == "EVIDENCE_FORM_MISMATCH" and isinstance(claims, (list, tuple)):
+        related = frozenset(
+            command
+            for claim in claims
+            if isinstance(claim, Mapping)
+            for command in (claim["outer_command"], claim["inner_command"])
+        )
+    return verified, failure, related
