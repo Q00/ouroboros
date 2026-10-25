@@ -19,7 +19,7 @@ def fake_codex_cli_on_path(tmp_path, monkeypatch):
     """
     bin_dir = tmp_path / ".fake-codex-bin"
     bin_dir.mkdir()
-    for cli_name in ("codex", "copilot", "gemini", "goose", "grok"):
+    for cli_name in ("codex", "copilot", "gemini", "goose", "grok", "harness"):
         cli = bin_dir / cli_name
         cli.write_text(f"#!/bin/sh\necho {cli_name} test\n", encoding="utf-8")
         cli.chmod(0o755)

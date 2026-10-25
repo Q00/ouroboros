@@ -95,6 +95,7 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         "OUROBOROS_GROK_CLI_PATH",
         "OUROBOROS_OUROCODE_CLI_PATH",
         "OUROBOROS_ZCODE_CLI_PATH",
+        "OUROBOROS_MEGACODE_CLI_PATH",
         "OUROBOROS_DSH_CLI_PATH",
         # POSIX shell the orchestrator runs every AC verify_command through.
         # A repo .env pointing this at its own binary would execute arbitrary

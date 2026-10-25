@@ -1351,11 +1351,15 @@ def get_pi_cli_path() -> str | None:
 
 
 def __getattr__(name: str) -> object:
-    """Lazy re-exports for the OMP CLI-path helpers (module-size split)."""
+    """Lazy re-exports for split CLI-path helpers (module-size split)."""
     if name in ("get_omp_cli_path", "resolve_omp_cli_path"):
         from ouroboros.config import _omp_cli
 
         return getattr(_omp_cli, name)
+    if name == "get_megacode_cli_path":
+        from ouroboros.config import _megacode_cli
+
+        return _megacode_cli.get_megacode_cli_path
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

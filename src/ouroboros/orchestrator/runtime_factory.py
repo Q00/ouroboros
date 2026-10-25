@@ -185,6 +185,18 @@ def _create_grok_runtime(request: _AgentRuntimeRequest) -> AgentRuntime:
     )
 
 
+def _create_megacode_runtime(request: _AgentRuntimeRequest) -> AgentRuntime:
+    from ouroboros.config import get_megacode_cli_path
+    from ouroboros.orchestrator.megacode_runtime import MegacodeRuntime
+
+    return MegacodeRuntime(
+        cli_path=request.cli_path or get_megacode_cli_path(),
+        startup_output_timeout_seconds=request.startup_output_timeout_seconds,
+        stdout_idle_timeout_seconds=request.stdout_idle_timeout_seconds,
+        **_runtime_kwargs(request),
+    )
+
+
 def _create_kiro_runtime(request: _AgentRuntimeRequest) -> AgentRuntime:
     from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
 
@@ -287,6 +299,7 @@ _AGENT_RUNTIME_FACTORIES: dict[str, Callable[[_AgentRuntimeRequest], AgentRuntim
     "_create_gemini_runtime": _create_gemini_runtime,
     "_create_antigravity_runtime": _create_antigravity_runtime,
     "_create_grok_runtime": _create_grok_runtime,
+    "_create_megacode_runtime": _create_megacode_runtime,
     "_create_kiro_runtime": _create_kiro_runtime,
     "_create_copilot_runtime": _create_copilot_runtime,
     "_create_goose_runtime": _create_goose_runtime,

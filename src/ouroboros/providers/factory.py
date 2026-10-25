@@ -307,6 +307,22 @@ def _create_dsh_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
     )
 
 
+def _create_megacode_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
+    from ouroboros.config import get_megacode_cli_path
+    from ouroboros.providers.megacode_llm_adapter import MegacodeLLMAdapter
+
+    return MegacodeLLMAdapter(
+        cli_path=request.cli_path or get_megacode_cli_path(),
+        cwd=request.cwd,
+        permission_mode=request.permission_mode,
+        allowed_tools=request.allowed_tools,
+        max_turns=request.max_turns,
+        on_message=request.on_message,
+        timeout=request.timeout,
+        max_retries=request.max_retries,
+    )
+
+
 def _create_zcode_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
     from ouroboros.providers.zcode_cli_adapter import ZcodeCliLLMAdapter
 
@@ -388,6 +404,7 @@ _LLM_ADAPTER_FACTORIES: dict[str, Callable[[_LLMAdapterRequest], LLMAdapter]] = 
     "_create_kiro_adapter": _create_kiro_adapter,
     "_create_litellm_adapter": _create_litellm_adapter,
     "_create_zcode_adapter": _create_zcode_adapter,
+    "_create_megacode_adapter": _create_megacode_adapter,
 }
 
 

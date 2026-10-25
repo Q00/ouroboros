@@ -70,6 +70,7 @@ _DEFAULT_FIRST_MODEL_BACKENDS = frozenset(
         "zcode",
         "gemini",
         "goose",
+        "megacode",
         "host",
     }
 )
@@ -359,6 +360,7 @@ _CLI_PATH_GETTERS: dict[str, str] = {
     # Without this entry, ``detect_backend_cli("zcode")`` ignored the
     # configured path and Zcode was invisible to ``installed_backends()``.
     "zcode": "get_zcode_cli_path",
+    "megacode": "get_megacode_cli_path",
     "dsh": "get_dsh_cli_path",
 }
 
