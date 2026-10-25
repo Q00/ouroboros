@@ -582,7 +582,7 @@ ouroboros run [workflow] [OPTIONS] SEED_FILE
 | `-r, --resume TEXT` | Resume a previous orchestrator session by ID. A run continues only while the process that started it holds its live state (its check package's held-out cases never leave that process); resumed from a new process, the run is recorded as failed and a new attempt starts from the project, while the interrupted attempt's work stays on its task branch |
 | `--mcp-config PATH` | Path to MCP client configuration YAML file |
 | `--mcp-tool-prefix TEXT` | Prefix to add to all MCP tool names (e.g., `mcp_`) |
-| `-s, --sequential` | Execute ACs sequentially instead of in parallel |
+| `-s, --sequential` | Execute ACs sequentially instead of in parallel; the same atomic evidence checks apply, including rejection and retry guidance for malformed receipts backed by a current-attempt trusted-wrapper run |
 | `--max-decomposition-depth INTEGER` | Maximum recursive AC decomposition depth (any non-negative integer; default `2`). Values `0..4` are eligible for Routing D durable replay. Larger legacy values remain executable but do not publish the Routing D parallel resume-owner guarantee. The same contract applies to `OUROBOROS_MAX_DECOMPOSITION_DEPTH` and `seed.orchestrator.max_decomposition_depth` |
 | `-n, --dry-run` | Validate seed without executing. **Currently only takes effect with `--no-orchestrator`.** In default orchestrator mode this flag is accepted but has no effect — the full workflow executes |
 | `--no-qa` | Skip post-execution QA evaluation |
