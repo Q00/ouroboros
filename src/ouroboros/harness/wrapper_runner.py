@@ -45,6 +45,13 @@ def _nonexecuting_pytest_mode(command: list[str], *, check_config: bool = True) 
     executable = Path(command[0]).name
     if executable in {"pytest", "py.test"}:
         options = command[1:]
+    elif executable in {"uv", "uvx"} and any(
+        Path(part).name in {"pytest", "py.test"} for part in command[1:]
+    ):
+        index = next(
+            index for index, part in enumerate(command) if Path(part).name in {"pytest", "py.test"}
+        )
+        options = command[index + 1 :]
     elif "-m" in command and command[command.index("-m") + 1 :][:1] == ["pytest"]:
         options = command[command.index("-m") + 2 :]
     else:
@@ -67,6 +74,10 @@ def _nonexecuting_pytest_mode(command: list[str], *, check_config: bool = True) 
     for index, option in enumerate(options):
         if option == "--":
             break
+        # Argument files can hide options and config paths; do not infer their
+        # execution mode or grant test authority from an opaque option source.
+        if option.startswith("@"):
+            return True
         if option.split("=", 1)[0] in nonexecuting:
             return True
         override = None
@@ -109,7 +120,7 @@ def _nonexecuting_pytest_config(options: list[str]) -> bool:
             explicit_configs.append(option[2:])
     configs.update(Path(value).resolve() for value in explicit_configs)
     for value in [str(Path.cwd()), *options]:
-        path = Path(value)
+        path = Path(value.split("::", 1)[0])
         if not path.exists():
             continue
         path = path.resolve()

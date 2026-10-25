@@ -371,3 +371,43 @@ def test_frozen_wrapper_rejects_nonexecuting_pytest_modes(mode: str, tmp_path: P
     receipt = json.loads((tmp_path / "receipt.json").read_text())
     assert receipt["inner_exit_status"] == 0
     assert receipt["test_result"] == "failed"
+
+
+def test_frozen_wrapper_rejects_collection_from_nodeid_config(tmp_path: Path) -> None:
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    test_path, marker = _make_pytest_contract(sub, failing=False)
+    (sub / "pytest.ini").write_text("[pytest]\naddopts = --collect-only\n")
+    argv = _pytest_wrapper_argv(("receipt.json", "stdout.txt", "stderr.txt"), test_path)
+    argv[-1] += "::test_contract"
+    result = subprocess.run(argv, cwd=tmp_path, capture_output=True, check=False)
+    assert result.returncode != 0
+    assert not marker.exists()
+    receipt = json.loads((tmp_path / "receipt.json").read_text())
+    assert receipt["inner_exit_status"] == 0
+    assert receipt["test_result"] == "failed"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["uv", "run", "pytest", "-o", "addopts=--collect-only", "test_inner.py"],
+        ["uvx", "pytest", "--override-ini=addopts=--co", "test_inner.py"],
+    ],
+)
+def test_wrapper_recognizes_pytest_launcher_nonexecuting_mode(command: list[str]) -> None:
+    assert wrapper_runner._nonexecuting_pytest_mode(command)
+
+
+def test_wrapper_withholds_authority_for_pytest_argument_file(tmp_path: Path) -> None:
+    test_path, marker = _make_pytest_contract(tmp_path, failing=False)
+    arguments = tmp_path / "arguments.txt"
+    arguments.write_text(f"--collect-only\n{test_path}\n")
+    argv = _pytest_wrapper_argv(("receipt.json", "stdout.txt", "stderr.txt"), test_path)
+    argv[-1] = f"@{arguments}"
+    result = subprocess.run(argv, cwd=tmp_path, capture_output=True, check=False)
+    assert result.returncode != 0
+    assert not marker.exists()
+    receipt = json.loads((tmp_path / "receipt.json").read_text())
+    assert receipt["inner_exit_status"] == 0
+    assert receipt["test_result"] == "failed"
