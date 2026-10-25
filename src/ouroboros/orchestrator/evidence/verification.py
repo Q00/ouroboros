@@ -82,6 +82,7 @@ def _verify_atomic_evidence_against_runtime_messages(
     verify_gate_active: bool = False,
     verified_wrapper_commands: frozenset[str] = frozenset(),
     related_wrapper_commands: frozenset[str] = frozenset(),
+    sourced_objective: bool = False,
 ) -> VerifierVerdict:
     """Verify leaf evidence is backed by runtime transcript events.
 
@@ -95,6 +96,7 @@ def _verify_atomic_evidence_against_runtime_messages(
         has_success_contract=has_success_contract,
         has_expected_artifacts=has_expected_artifacts,
         verify_gate_active=verify_gate_active,
+        sourced_objective=sourced_objective,
     )
     # Exclude the leaf's terminal self-report by identity, not by position: a
     # harness observation may legitimately sit after the final result message.

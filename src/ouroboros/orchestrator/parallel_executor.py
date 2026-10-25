@@ -107,6 +107,7 @@ from ouroboros.orchestrator.adapter import (
 from ouroboros.orchestrator.atomic_prompt_builder import (
     AtomicPromptBuilder,
     _build_success_contract_block,  # noqa: F401  (re-exported for tests/back-compat)
+    dispatch_renders_sourced_objective,
 )
 from ouroboros.orchestrator.attempt_evidence import attempt_workspace_evidence, judgment_envelope_ok
 from ouroboros.orchestrator.backend_limits import (
@@ -9091,6 +9092,12 @@ Respond with either ATOMIC or the structured JSON object only.
                 ac_spec.expected_artifacts
             )
             verify_gate_active = self._run_verify_commands
+            # A worker shown the sourced objective owns that objective, not
+            # ac_content: its evidence is checked against the full schema it
+            # was asked for (``dispatch_renders_sourced_objective``).
+            sourced_objective = dispatch_renders_sourced_objective(
+                self, parent_ac_index if is_sub_ac else ac_index
+            )
             verify_gate_outcome: _VerifyGateOutcome | None = None
             if success and verify_gate_active and has_success_contract:
                 cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
@@ -9107,6 +9114,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
+                sourced_objective=sourced_objective,
             )
             typed_data = typed_evidence.data if typed_evidence is not None else {}
             (
@@ -9133,6 +9141,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 verify_gate_active=verify_gate_active,
                 verified_wrapper_commands=verified_wrapper_commands,
                 related_wrapper_commands=related_wrapper_commands,
+                sourced_objective=sourced_objective,
             )
             if receipt_failure is not None and (
                 verifier_verdict is None
@@ -9149,6 +9158,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     has_success_contract=has_success_contract,
                     has_expected_artifacts=has_expected_artifacts,
                     verify_gate_active=verify_gate_active,
+                    sourced_objective=sourced_objective,
                 ).required
             )
             if (
@@ -9251,6 +9261,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
+                sourced_objective=sourced_objective,
             )
             # Frugality-proof grounding axis (seed AC4). Only when the leaf was
             # accepted AND emitted a structured evidence claim (the fat-harness
@@ -9289,6 +9300,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     ac_spec=ac_spec,
                     isolated_cwd=shadow_snapshot_cwd,
                     suggested_tier=suggested_tier,
+                    sourced_objective=sourced_objective,
                 )
             await self._emit_ac_runtime_event(
                 event_type=(
@@ -9318,6 +9330,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     has_success_contract=has_success_contract,
                     has_expected_artifacts=has_expected_artifacts,
                     verify_gate_active=verify_gate_active,
+                    sourced_objective=sourced_objective,
                 )
 
             log.info(
@@ -9675,6 +9688,7 @@ Respond with either ATOMIC or the structured JSON object only.
         has_success_contract: bool = False,
         has_expected_artifacts: bool = False,
         verify_gate_active: bool = False,
+        sourced_objective: bool = False,
     ) -> tuple[EvidenceRecord | None, ValidationResult | None, str | None]:
         """Parse and validate typed evidence at the atomic AC acceptance boundary.
 
@@ -9694,6 +9708,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
+                sourced_objective=sourced_objective,
             )
             validation = validate_evidence(
                 _profile_with_evidence_schema(self._execution_profile, effective_schema),
@@ -12765,6 +12780,7 @@ Respond with either ATOMIC or the structured JSON object only.
         has_success_contract: bool = False,
         has_expected_artifacts: bool = False,
         verify_gate_active: bool = False,
+        sourced_objective: bool = False,
         force_runtime_transcript: bool = False,
         task_cwd_override: str | None = None,
         verified_wrapper_commands: frozenset[str] = frozenset(),
@@ -12790,6 +12806,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
+                sourced_objective=sourced_objective,
             )
             effective_profile = _profile_with_evidence_schema(
                 self._execution_profile, effective_schema
@@ -12801,6 +12818,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
+                sourced_objective=sourced_objective,
             )
             verdict = (
                 verifier(
@@ -12827,6 +12845,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     verify_gate_active=verify_gate_active,
                     verified_wrapper_commands=verified_wrapper_commands,
                     related_wrapper_commands=related_wrapper_commands,
+                    sourced_objective=sourced_objective,
                 )
             )
         except VerifierContractError:
@@ -12847,6 +12866,7 @@ Respond with either ATOMIC or the structured JSON object only.
         has_success_contract: bool = False,
         has_expected_artifacts: bool = False,
         verify_gate_active: bool = False,
+        sourced_objective: bool = False,
         task_cwd_override: str | None = None,
     ) -> VerifierVerdict:
         return self._authority_transcript_verifier(
@@ -12859,6 +12879,7 @@ Respond with either ATOMIC or the structured JSON object only.
             has_success_contract=has_success_contract,
             has_expected_artifacts=has_expected_artifacts,
             verify_gate_active=verify_gate_active,
+            sourced_objective=sourced_objective,
         )
 
     async def _emit_atomic_typed_evidence_event(
@@ -12877,6 +12898,7 @@ Respond with either ATOMIC or the structured JSON object only.
         has_success_contract: bool = False,
         has_expected_artifacts: bool = False,
         verify_gate_active: bool = False,
+        sourced_objective: bool = False,
     ) -> None:
         """Persist typed-evidence metadata for atomic AC completion."""
         if self._execution_profile is None:
@@ -12896,6 +12918,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     has_success_contract=has_success_contract,
                     has_expected_artifacts=has_expected_artifacts,
                     verify_gate_active=verify_gate_active,
+                    sourced_objective=sourced_objective,
                 ).required
             ),
             "observe_only": not self._fat_harness_mode,
@@ -12936,6 +12959,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     has_success_contract=has_success_contract,
                     has_expected_artifacts=has_expected_artifacts,
                     verify_gate_active=verify_gate_active,
+                    sourced_objective=sourced_objective,
                 )
             )
             data["ignored_out_of_scope_evidence"] = _out_of_scope_evidence_values_for_ac(
@@ -12945,6 +12969,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
+                sourced_objective=sourced_objective,
             )
         if typed_validation is not None:
             data["missing_fields"] = list(typed_validation.missing_fields)
