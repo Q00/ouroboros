@@ -363,7 +363,9 @@ def test_wrapper_rejects_collection_from_config(
 @pytest.mark.parametrize("mode", ["--collect-only", "--setup-plan", "--setup-only", "--cache-show"])
 def test_frozen_wrapper_rejects_nonexecuting_pytest_modes(mode: str, tmp_path: Path) -> None:
     test_path, marker = _make_pytest_contract(tmp_path, failing=False)
-    argv = _pytest_wrapper_argv(("receipt.json", "stdout.txt", "stderr.txt"), test_path)
+    argv = _pytest_wrapper_argv(
+        ("receipt.json", "stdout.txt", "stderr.txt"), test_path.relative_to(tmp_path)
+    )
     argv.insert(-1, mode)
     result = subprocess.run(argv, cwd=tmp_path, capture_output=True, check=False)
     assert result.returncode != 0
