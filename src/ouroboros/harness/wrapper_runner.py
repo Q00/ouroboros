@@ -40,6 +40,34 @@ def _new_output(path: str, data: bytes, parent: NoFollowDirectoryChain) -> None:
         raise FileExistsError(path)
 
 
+def _normalize_pytest_options(options: list[str]) -> list[str]:
+    """Expand built-in short flags without reinterpreting option values."""
+    normalized = []
+    arguments = iter(options)
+    for option in arguments:
+        if option == "--":
+            normalized.extend([option, *arguments])
+            break
+        if option != "-" and option.startswith("-") and not option.startswith("--"):
+            remaining = option[1:]
+            while remaining[:1] in {"x", "V", "h", "v", "q", "l", "s"}:
+                normalized.append("-" + remaining[0])
+                remaining = remaining[1:]
+            if not remaining:
+                continue
+            option = "-" + remaining
+            if remaining[0] in {"o", "c"} and len(remaining) > 1:
+                value = remaining[1:]
+                normalized.extend(["-" + remaining[0], value.removeprefix("=")])
+                continue
+        normalized.append(option)
+        if option in {"-k", "-m", "-W", "-c", "-p", "-o", "-r", "--override-ini", "--config-file"}:
+            value = next(arguments, None)
+            if value is not None:
+                normalized.append(value)
+    return normalized
+
+
 def _nonexecuting_pytest_mode(command: list[str], *, check_config: bool = True) -> bool:
     """Reject pytest's reporting/collection modes, including addopts overrides."""
     executable = Path(command[0]).name
@@ -56,6 +84,7 @@ def _nonexecuting_pytest_mode(command: list[str], *, check_config: bool = True) 
         options = command[command.index("-m") + 2 :]
     else:
         return False
+    options = _normalize_pytest_options(options)
     nonexecuting = {
         "--collect-only",
         "--co",
@@ -71,7 +100,8 @@ def _nonexecuting_pytest_mode(command: list[str], *, check_config: bool = True) 
         "--setup-only",
         "--cache-show",
     }
-    for index, option in enumerate(options):
+    arguments = iter(options)
+    for option in arguments:
         if option == "--":
             break
         # Argument files can hide options and config paths; do not infer their
@@ -81,8 +111,11 @@ def _nonexecuting_pytest_mode(command: list[str], *, check_config: bool = True) 
         if option.split("=", 1)[0] in nonexecuting:
             return True
         override = None
-        if option in {"-o", "--override-ini"} and index + 1 < len(options):
-            override = options[index + 1]
+        if option in {"-k", "-m", "-W", "-c", "-p", "-r", "--config-file"}:
+            next(arguments, None)
+            continue
+        if option in {"-o", "--override-ini"}:
+            override = next(arguments, None)
         elif option.startswith("--override-ini="):
             override = option.split("=", 1)[1]
         elif option.startswith("-o"):

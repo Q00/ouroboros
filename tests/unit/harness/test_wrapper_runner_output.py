@@ -413,3 +413,78 @@ def test_wrapper_withholds_authority_for_pytest_argument_file(tmp_path: Path) ->
     receipt = json.loads((tmp_path / "receipt.json").read_text())
     assert receipt["inner_exit_status"] == 0
     assert receipt["test_result"] == "failed"
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["-o", "addopts=--collect-only"],
+        ["-oaddopts=--collect-only"],
+        ["-o=addopts=--collect-only"],
+        ["--override-ini", "addopts=--collect-only"],
+        ["--override-ini=addopts=--collect-only"],
+        ["-qo=addopts=--collect-only"],
+        ["-qqh"],
+    ],
+)
+def test_frozen_wrapper_rejects_nonexecuting_option_spellings(
+    options: list[str], tmp_path: Path
+) -> None:
+    test_path, marker = _make_pytest_contract(tmp_path, failing=False)
+    argv = _pytest_wrapper_argv(("receipt.json", "stdout.txt", "stderr.txt"), test_path)
+    argv[-1:-1] = options
+    result = subprocess.run(argv, cwd=tmp_path, capture_output=True, check=False)
+    receipt = json.loads((tmp_path / "receipt.json").read_text())
+    assert result.returncode == receipt["outer_exit_status"] == 1
+    assert receipt["inner_exit_status"] == 0
+    assert receipt["test_result"] == "failed"
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["-c", "hidden/custom.ini"],
+        ["-chidden/custom.ini"],
+        ["-c=hidden/custom.ini"],
+        ["--config-file", "hidden/custom.ini"],
+        ["--config-file=hidden/custom.ini"],
+        ["-qchidden/custom.ini"],
+    ],
+)
+def test_frozen_wrapper_rejects_nonexecuting_config_spellings(
+    options: list[str], tmp_path: Path
+) -> None:
+    test_path, marker = _make_pytest_contract(tmp_path, failing=False)
+    (tmp_path / "hidden").mkdir()
+    (tmp_path / "hidden/custom.ini").write_text("[pytest]\naddopts = --collect-only\n")
+    argv = _pytest_wrapper_argv(("receipt.json", "stdout.txt", "stderr.txt"), test_path)
+    argv[-1:-1] = options
+    result = subprocess.run(argv, cwd=tmp_path, capture_output=True, check=False)
+    receipt = json.loads((tmp_path / "receipt.json").read_text())
+    assert result.returncode == receipt["outer_exit_status"] == 1
+    assert receipt["inner_exit_status"] == 0
+    assert receipt["test_result"] == "failed"
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["-o=addopts=-q"],
+        ["-qoaddopts=-q"],
+        ["-k", "not -h"],
+        ["-qknot --co"],
+    ],
+)
+def test_frozen_wrapper_preserves_executing_option_values(
+    options: list[str], tmp_path: Path
+) -> None:
+    test_path, marker = _make_pytest_contract(tmp_path, failing=False)
+    argv = _pytest_wrapper_argv(("receipt.json", "stdout.txt", "stderr.txt"), test_path)
+    argv[-1:-1] = options
+    result = subprocess.run(argv, cwd=tmp_path, capture_output=True, check=False)
+    receipt = json.loads((tmp_path / "receipt.json").read_text())
+    assert result.returncode == receipt["inner_exit_status"] == receipt["outer_exit_status"] == 0
+    assert receipt["test_result"] == "passed"
+    assert marker.read_text() == "ran"

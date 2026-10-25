@@ -153,6 +153,8 @@ async def test_wrapper_receipt_proves_inner_test_through_journal(tmp_path: Path)
         "stale",
         "inner_failed",
         "collect_only_override",
+        "collect_only_override_equals",
+        "collect_only_override_cluster",
         "collect_only_config",
         "fake_json",
         "source_substitution",
@@ -170,9 +172,17 @@ async def test_wrapper_receipt_real_dispatch_capture_to_verifier(tmp_path: Path,
     )
     inner_command = _WRAPPER_INNER
     outer = _WRAPPER_OUTER
-    if case == "collect_only_override":
+    if case in {
+        "collect_only_override",
+        "collect_only_override_equals",
+        "collect_only_override_cluster",
+    }:
         parts = shlex.split(outer)
-        parts[-1:-1] = ["-o", "addopts=--collect-only"]
+        parts[-1:-1] = {
+            "collect_only_override": ["-o", "addopts=--collect-only"],
+            "collect_only_override_equals": ["-o=addopts=--collect-only"],
+            "collect_only_override_cluster": ["-qo=addopts=--collect-only"],
+        }[case]
         outer = shlex.join(parts)
         inner_command = shlex.join(parts[11:])
     if case == "collect_only_config":
@@ -229,9 +239,22 @@ async def test_wrapper_receipt_real_dispatch_capture_to_verifier(tmp_path: Path,
             )
             assert (completed.returncode == 0) is (
                 case
-                not in {"stale", "inner_failed", "collect_only_override", "collect_only_config"}
+                not in {
+                    "stale",
+                    "inner_failed",
+                    "collect_only_override",
+                    "collect_only_override_equals",
+                    "collect_only_override_cluster",
+                    "collect_only_config",
+                }
             )
-            if case in {"valid", "collect_only_override", "collect_only_config"}:
+            if case in {
+                "valid",
+                "collect_only_override",
+                "collect_only_override_equals",
+                "collect_only_override_cluster",
+                "collect_only_config",
+            }:
                 assert (tmp_path / "inner-ran").exists() is (case == "valid")
                 receipt = json.loads((tmp_path / "receipt.json").read_text())
                 assert receipt["test_result"] == ("passed" if case == "valid" else "failed")
@@ -397,7 +420,12 @@ async def test_wrapper_receipt_real_dispatch_capture_to_verifier(tmp_path: Path,
     )
     if case == "valid":
         assert matches is not None and inner_command in matches
-    elif case in {"collect_only_override", "collect_only_config"}:
+    elif case in {
+        "collect_only_override",
+        "collect_only_override_equals",
+        "collect_only_override_cluster",
+        "collect_only_config",
+    }:
         assert matches is None
 
 
