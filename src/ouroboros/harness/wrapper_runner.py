@@ -60,6 +60,9 @@ def _nonexecuting_pytest_mode(command: list[str], *, check_config: bool = True) 
         "--funcargs",
         "--fixtures-per-test",
         "--markers",
+        "--setup-plan",
+        "--setup-only",
+        "--cache-show",
     }
     for index, option in enumerate(options):
         if option == "--":
