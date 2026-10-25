@@ -328,3 +328,33 @@ def test_wrapper_records_real_inner_test_failure(frozen: bool, tmp_path: Path, m
     receipt = json.loads((tmp_path / "receipt.json").read_text(encoding="utf-8"))
     assert receipt["test_result"] == "failed"
     assert receipt["inner_exit_status"] == status
+
+
+@pytest.mark.parametrize("frozen", [False, True], ids=["package", "frozen-runner"])
+@pytest.mark.parametrize(
+    "config_name,config",
+    [
+        ("pytest.ini", "[pytest]\naddopts = --co\n"),
+        ("pyproject.toml", '[tool.pytest.ini_options]\naddopts = ["--collect-only"]\n'),
+        ("tox.ini", "[pytest]\naddopts = --collect-only\n"),
+        ("setup.cfg", "[tool:pytest]\naddopts = --collect-only\n"),
+    ],
+)
+def test_wrapper_rejects_collection_from_config(
+    frozen: bool, config_name: str, config: str, tmp_path: Path, monkeypatch
+) -> None:
+    test_path, marker = _make_pytest_contract(tmp_path, failing=False)
+    (tmp_path / config_name).write_text(config)
+    status, _, _ = _run_wrapper(
+        frozen=frozen,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        test_path=test_path,
+        addopts=None,
+    )
+    assert status != 0
+    assert not marker.exists()
+    receipt = json.loads((tmp_path / "receipt.json").read_text())
+    assert receipt["inner_exit_status"] == 0
+    assert receipt["outer_exit_status"] == status
+    assert receipt["test_result"] == "failed"

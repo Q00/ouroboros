@@ -152,6 +152,8 @@ async def test_wrapper_receipt_proves_inner_test_through_journal(tmp_path: Path)
         "duplicate",
         "stale",
         "inner_failed",
+        "collect_only_override",
+        "collect_only_config",
         "fake_json",
         "source_substitution",
         "earlier_retry",
@@ -163,10 +165,20 @@ async def test_wrapper_receipt_proves_inner_test_through_journal(tmp_path: Path)
 )
 async def test_wrapper_receipt_real_dispatch_capture_to_verifier(tmp_path: Path, case: str) -> None:
     (tmp_path / "test_inner.py").write_text(
-        f"def test_inner():\n    assert {case != 'inner_failed'}\n"
+        f"def test_inner():\n    from pathlib import Path\n"
+        f"    Path('inner-ran').write_text('yes')\n    assert {case != 'inner_failed'}\n"
     )
+    inner_command = _WRAPPER_INNER
+    outer = _WRAPPER_OUTER
+    if case == "collect_only_override":
+        parts = shlex.split(outer)
+        parts[-1:-1] = ["-o", "addopts=--collect-only"]
+        outer = shlex.join(parts)
+        inner_command = shlex.join(parts[11:])
+    if case == "collect_only_config":
+        (tmp_path / "pytest.ini").write_text("[pytest]\naddopts = --collect-only\n")
     fake_command = "printf %s 'fake' > receipt.json"
-    outer_command = fake_command if case == "fake_json" else _WRAPPER_OUTER
+    outer_command = fake_command if case == "fake_json" else outer
     if case == "source_substitution":
         parts = shlex.split(outer_command)
         parts[3] += ";pass"
@@ -185,12 +197,12 @@ async def test_wrapper_receipt_real_dispatch_capture_to_verifier(tmp_path: Path,
                     + json.dumps(
                         {
                             "commands_run": [outer_command],
-                            "tests_passed": [_WRAPPER_INNER],
+                            "tests_passed": [inner_command],
                             "wrapper_receipts": [
                                 {
                                     "receipt_path": "receipt.json",
                                     "outer_command": outer_command,
-                                    "inner_command": _WRAPPER_INNER,
+                                    "inner_command": inner_command,
                                 }
                             ],
                         }
@@ -215,7 +227,15 @@ async def test_wrapper_receipt_real_dispatch_capture_to_verifier(tmp_path: Path,
                 text=True,
                 check=False,
             )
-            assert (completed.returncode == 0) is (case not in {"stale", "inner_failed"})
+            assert (completed.returncode == 0) is (
+                case
+                not in {"stale", "inner_failed", "collect_only_override", "collect_only_config"}
+            )
+            if case in {"valid", "collect_only_override", "collect_only_config"}:
+                assert (tmp_path / "inner-ran").exists() is (case == "valid")
+                receipt = json.loads((tmp_path / "receipt.json").read_text())
+                assert receipt["test_result"] == ("passed" if case == "valid" else "failed")
+                assert receipt["inner_exit_status"] == 0
             if case == "missing":
                 (tmp_path / "receipt.json").unlink()
             elif case in {"malformed", "unrelated_command", "unrelated_file"}:
@@ -269,12 +289,12 @@ async def test_wrapper_receipt_real_dispatch_capture_to_verifier(tmp_path: Path,
             claim = {
                 "receipt_path": "receipt.json",
                 "outer_command": outer_command,
-                "inner_command": _WRAPPER_INNER,
+                "inner_command": inner_command,
             }
             if case == "path_escape":
                 claim["receipt_path"] = "../receipt.json"
             claims = [claim, claim] if case == "duplicate" else [claim]
-            tests_passed = [_WRAPPER_INNER]
+            tests_passed = [inner_command]
             if case == "unrelated_test":
                 tests_passed = ["pytest never_executed.py"]
             elif case == "mixed_test":
@@ -369,14 +389,16 @@ async def test_wrapper_receipt_real_dispatch_capture_to_verifier(tmp_path: Path,
     )
     claim = {
         "receipt_path": "receipt.json",
-        "outer_command": _WRAPPER_OUTER,
-        "inner_command": _WRAPPER_INNER,
+        "outer_command": outer_command,
+        "inner_command": inner_command,
     }
     matches = matching_wrapper_receipts(
         manifest, claims=[claim], execution_id="exec_1", task_cwd=str(tmp_path)
     )
     if case == "valid":
-        assert matches is not None and _WRAPPER_INNER in matches
+        assert matches is not None and inner_command in matches
+    elif case in {"collect_only_override", "collect_only_config"}:
+        assert matches is None
 
 
 @pytest.mark.asyncio
