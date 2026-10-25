@@ -67,6 +67,7 @@ def _verify_atomic_evidence_against_runtime_messages(
     has_success_contract: bool = False,
     has_expected_artifacts: bool = False,
     verify_gate_active: bool = False,
+    sourced_objective: bool = False,
 ) -> VerifierVerdict:
     """Verify leaf evidence is backed by runtime transcript events.
 
@@ -80,6 +81,7 @@ def _verify_atomic_evidence_against_runtime_messages(
         has_success_contract=has_success_contract,
         has_expected_artifacts=has_expected_artifacts,
         verify_gate_active=verify_gate_active,
+        sourced_objective=sourced_objective,
     )
     # Exclude the leaf's terminal self-report by identity, not by position: a
     # harness observation may legitimately sit after the final result message.
