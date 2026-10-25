@@ -50,6 +50,7 @@ Respond with a JSON array. Each element:
 {
     "ac_index": 0,
     "tier": "t1_constant",
+    "evidence_scope": "source",
     "pattern": "WARMUP_FRAMES\\s*=\\s*",
     "expected_value": "10",
     "file_hint": "*.py",
@@ -57,6 +58,7 @@ Respond with a JSON array. Each element:
 }
 
 Rules:
+- evidence_scope: "source" for facts about source/configuration; "execution" for observations of a run, test result, measurement, or terminal/report record. A numeric runtime result is execution evidence even when it can be expressed as a regex. Source scanning cannot establish these observations; they require executed checks or semantic analysis. Never classify a required source/configuration value as execution merely because a worker claims it passed.
 - pattern: A regex pattern to search for in source files. For t1, include the variable/constant name. For t2, use file or class name pattern.
 - expected_value: The expected value for t1 (the actual number/string). For t2, the expected name. Empty for t3/t4.
 - file_hint: Glob pattern for files to search (e.g., "*.py", "src/**/*.ts", "config.*"). Empty if unknown.
@@ -271,6 +273,7 @@ class AssertionExtractor:
                             expected_value=text_fields["expected_value"],
                             file_hint=text_fields["file_hint"],
                             description=text_fields["description"],
+                            evidence_scope=item.get("evidence_scope", "source"),
                         )
                     )
                 except ValidationError as e:

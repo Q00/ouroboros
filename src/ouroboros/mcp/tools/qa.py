@@ -12,14 +12,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import math
 import re
-from typing import Any
+from typing import Any, cast
 import uuid
 
 import structlog
 
 from ouroboros.backends import backend_supports_tool_envelope
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
+from ouroboros.core.json_utils import (
+    _bracket_extract,
+    _extract_fenced_json_payload,
+    _FenceScanState,
+    _non_answer_ranges,
+)
 from ouroboros.core.types import Result
 from ouroboros.evaluation.json_utils import extract_json_payload
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
@@ -79,7 +86,6 @@ QA_VERDICT_SCHEMA: dict[str, object] = {
 }
 
 VALID_ARTIFACT_TYPES = ("code", "api_response", "document", "screenshot", "test_output", "custom")
-VALID_VERDICTS = ("pass", "revise", "fail")
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,23 +170,51 @@ def _build_qa_user_prompt(
 Provide your evaluation as a JSON object."""
 
 
-def _unwrap_verdict_data(data: dict[str, Any]) -> dict[str, Any]:
-    """Unwrap nested verdict objects.
+_VERDICT_WRAPPER_KEYS = ("qa_verdict", "verdict", "result", "evaluation")
+_VERDICT_FIELDS = frozenset(cast(dict[str, object], QA_VERDICT_SCHEMA["properties"]))
 
-    LLMs sometimes wrap the verdict in a key like ``{"qa_verdict": {...}}``.
-    This function detects that pattern and returns the inner dict.
+
+def _unwrap_verdict_data(data: dict[str, Any]) -> dict[str, Any]:
+    """Unwrap a pure envelope such as ``{"qa_verdict": {...}}``.
+
+    Only an outer object that is nothing but the envelope is unwrapped: exactly
+    one named wrapper key holds a dict carrying ``score``, no other key is a
+    verdict-schema field, and no other value is an object carrying one. An outer
+    object that carries its own verdict fields (``verdict``, ``reasoning``,
+    ``differences``, ...) *is* the verdict, missing its score — promoting a nested
+    object's score over it would discard the model's own verdict, so it is
+    returned unchanged and fails validation. A second object carrying verdict
+    fields (``{"qa_verdict": {"verdict": "fail"}, "result": {"score": 0.95}}``)
+    is a competing verdict, not envelope metadata, so it blocks unwrapping too.
     """
     if "score" in data:
         return data
-    # Check for single-key wrapper containing the score field
-    for key in ("qa_verdict", "verdict", "result", "evaluation"):
-        if key in data and isinstance(data[key], dict) and "score" in data[key]:
-            return data[key]
-    # Fallback: if there's exactly one dict-valued key containing 'score', use it
-    dict_values = [(k, v) for k, v in data.items() if isinstance(v, dict) and "score" in v]
-    if len(dict_values) == 1:
-        return dict_values[0][1]
-    return data
+    wrappers = [
+        key
+        for key in _VERDICT_WRAPPER_KEYS
+        if isinstance(data.get(key), dict) and "score" in data[key]
+    ]
+    if len(wrappers) != 1:
+        return data
+    for key, value in data.items():
+        if key == wrappers[0]:
+            continue
+        if key in _VERDICT_FIELDS:
+            return data
+        if isinstance(value, dict) and any(field in _VERDICT_FIELDS for field in value):
+            return data
+    inner: dict[str, Any] = data[wrappers[0]]
+    return inner
+
+
+def _is_finite_number(value: object) -> bool:
+    """True for a finite int/float; a JSON boolean is not a number here."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 _LINE_DECORATION_RE = re.compile(r"^\s*(?:[-*]\s+|\d+[.)]\s+)")
@@ -276,6 +310,135 @@ def _parse_non_json_qa_response(response_text: str) -> dict[str, Any] | None:
     }
 
 
+# These are complete prose candidates, not exemptions for opener fragments.
+_PROSE_LIST_NUMBER = r"-?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?"
+_NUMERIC_PROSE_LIST_RE = re.compile(
+    rf"\[\s*{_PROSE_LIST_NUMBER}(?:\s*,\s*{_PROSE_LIST_NUMBER})*"
+    rf"(?:\s*,\s*|\s+)(?:and|or)\s+{_PROSE_LIST_NUMBER}\s*\]",
+    re.IGNORECASE,
+)
+# Detection only: a whole numeric atom supplies intent, never a decoded value.
+_NUMERIC_ATOM_RE = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d*)*")
+_NUMERIC_REFERENCE_RE = re.compile(r"\d+(?:[-./]\d+){2,}")
+
+
+def _explicit_correction(text: str, start: int, end: int) -> bool:
+    """A standalone labeled candidate declares answer intent, not descriptive prose."""
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    if line_end == -1:
+        line_end = len(text)
+    return text[line_start:start].strip().casefold() == "correction:" and not text[
+        end:line_end
+    ].strip(" ]}.,\t")
+
+
+def _is_attempted_answer(candidate: str, *, explicit: bool) -> bool:
+    """Classify one opaque boundary; never repair it or inspect nested fragments."""
+    try:
+        json.loads(candidate)
+    except (json.JSONDecodeError, ValueError):
+        pass
+    else:
+        return True
+
+    contents = candidate[1:-1].strip()
+    if candidate[0] == "{":
+        if explicit or ":" in contents or contents.startswith(('"', "'")):
+            return True
+        # A known QA field followed by a value is still a QA mapping attempt
+        # when its colon is missing. A field name mentioned in prose is not.
+        fields = contents.split(None, 1)
+        return (
+            len(fields) == 2
+            and fields[0] in cast(dict[str, object], QA_VERDICT_SCHEMA["properties"])
+            and bool(fields[1])
+            and (fields[1][0].isalnum() or fields[1][0] in "\"'[{+-.")
+        )
+
+    if _NUMERIC_PROSE_LIST_RE.fullmatch(candidate):
+        return False
+    if not contents:
+        return False
+    if any(char in contents for char in "{}[]"):
+        return True
+    if contents[0] in "\"'":
+        return True
+    for literal in ("true", "false", "null"):
+        if not contents.startswith(literal):
+            continue
+        suffix = contents[len(literal) :]
+        if suffix and suffix[0].isalnum():
+            continue
+        if explicit or not suffix or not suffix[0].isspace():
+            return True
+        remainder = suffix.lstrip()
+        if not remainder or not remainder[0].isalpha():
+            return True
+        # A literal used before language is prose, not a JSON value list.
+        # Another scalar (including NaN/Infinity), a number or quoted value
+        # still establishes attempted array syntax. Decode only for evidence;
+        # never promote or repair any part of this malformed candidate.
+        try:
+            _, end = json.JSONDecoder().raw_decode(remainder)
+        except json.JSONDecodeError:
+            return False
+        return end == len(remainder) or not (remainder[end].isalnum() or remainder[end] == "_")
+    first_atom = re.split(r"[\s,\"'{}\[\]]", contents, maxsplit=1)[0]
+    if not (contents[0].isdigit() or contents[0] in "+-" or _NUMERIC_ATOM_RE.fullmatch(first_atom)):
+        return False
+    if explicit and all(char.isdigit() or char.isspace() or char in "eE+-.," for char in contents):
+        return True
+    if _NUMERIC_REFERENCE_RE.fullmatch(contents):
+        return False
+    if any(char in contents for char in ",\"'{}[]"):
+        return True
+    # Numeric-only malformed tokens and adjacent JSON literals are attempted
+    # arrays. Words in count/reference prose ("of", "edition", etc.) are not.
+    numeric = contents
+    for literal in ("true", "false", "null"):
+        numeric = numeric.replace(literal, "")
+    return all(char.isdigit() or char.isspace() or char in "eE+-." for char in numeric)
+
+
+def _carries_json_object(text: str, selected_payload: str | None = None) -> bool:
+    """Find an attempted answer outside the one selected unfenced boundary.
+
+    Reuse the extractor's fence, literal-range and balanced-bracket boundaries.
+    Each outer candidate is opaque, including malformed candidates. Selection
+    consumes exactly one matching span, never every occurrence of its text.
+    """
+    fence_state, _, segments = _extract_fenced_json_payload(text)
+    if fence_state is not _FenceScanState.NO_FENCE:
+        return True
+    selected = False
+    for segment in segments:
+        excluded = _non_answer_ranges(segment)
+        excluded_index = pos = 0
+        while pos < len(segment):
+            starts = [index for char in "{[" if (index := segment.find(char, pos)) != -1]
+            if not starts:
+                break
+            start = min(starts)
+            while excluded_index < len(excluded) and excluded[excluded_index][1] <= start:
+                excluded_index += 1
+            if excluded_index < len(excluded) and excluded[excluded_index][0] <= start:
+                pos = excluded[excluded_index][1]
+                continue
+            candidate = _bracket_extract(segment, start)
+            if candidate is None:
+                return True
+            end = start + len(candidate)
+            if not selected and candidate == selected_payload:
+                selected = True
+            elif _is_attempted_answer(
+                candidate, explicit=_explicit_correction(segment, start, end)
+            ):
+                return True
+            pos = end
+    return False
+
+
 def _parse_qa_response(
     response_text: str,
     pass_threshold: float = DEFAULT_PASS_THRESHOLD,
@@ -291,6 +454,22 @@ def _parse_qa_response(
             data = json.loads(json_str)
         except json.JSONDecodeError as e:
             return Result.err(f"Invalid JSON in QA response: {e}")
+        if not isinstance(data, dict):
+            return Result.err("QA response JSON must be an object, got " + type(data).__name__)
+        if _extract_fenced_json_payload(response_text)[1] is None and _carries_json_object(
+            response_text, selected_payload=json_str
+        ):
+            # The extractor counts only *valid* objects, so a malformed second
+            # verdict (``{"score": 0.1, "verdict": "fail",}``) beside a passing
+            # one leaves the passing one "unique". Only a supported answer
+            # fence can outrank surrounding objects; reuse the extractor's
+            # boundary rules rather than recognizing only labeled fences.
+            return Result.err("QA response contains JSON but no single unambiguous verdict object")
+    elif _carries_json_object(response_text):
+        # The model answered in JSON, but not with one authoritative object
+        # (competing fences, or several objects). Reading ``Score: 0.95`` out of
+        # the surrounding prose would let an example outrank that answer.
+        return Result.err("QA response contains JSON but no single unambiguous verdict object")
     else:
         data = _parse_non_json_qa_response(response_text)
         if data is None:
@@ -301,18 +480,16 @@ def _parse_qa_response(
 
     # Validate required fields
     score = data.get("score")
-    if not isinstance(score, (int, float)) or score < 0.0 or score > 1.0:
+    if not _is_finite_number(score) or score < 0.0 or score > 1.0:
         return Result.err(f"score must be a float between 0.0 and 1.0, got: {score}")
 
-    verdict = data.get("verdict", "").lower().strip()
-    if verdict not in VALID_VERDICTS:
-        # Derive verdict from score if LLM didn't produce a valid one
-        if score >= pass_threshold:
-            verdict = "pass"
-        elif score >= FAIL_THRESHOLD:
-            verdict = "revise"
-        else:
-            verdict = "fail"
+    # Score is authoritative for both the displayed verdict and loop outcome.
+    if score >= pass_threshold:
+        verdict = "pass"
+    elif score >= FAIL_THRESHOLD:
+        verdict = "revise"
+    else:
+        verdict = "fail"
 
     dimensions = data.get("dimensions", {})
     if not isinstance(dimensions, dict):
@@ -334,7 +511,7 @@ def _parse_qa_response(
         QAVerdict(
             score=float(score),
             verdict=verdict,
-            dimensions={k: float(v) for k, v in dimensions.items() if isinstance(v, (int, float))},
+            dimensions={k: float(v) for k, v in dimensions.items() if _is_finite_number(v)},
             differences=differences,
             suggestions=suggestions,
             reasoning=reasoning,

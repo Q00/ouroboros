@@ -16,6 +16,7 @@ from ouroboros.cli.commands.run import (
     _resolve_fat_harness_mode,
     _resolve_max_decomposition_depth,
     _resolve_max_parallel_workers,
+    _resolve_resume_checkpoint_store_enabled,
     _resolve_resume_fat_harness_mode,
     _run_orchestrator,
 )
@@ -412,6 +413,24 @@ def test_resolve_resume_fat_harness_mode_migrates_missing_contract_to_default_ru
     assert _resolve_resume_fat_harness_mode(legacy_seed, {}) is False
 
 
+@pytest.mark.parametrize(
+    ("persisted", "expected"),
+    [(False, False), (True, True), (0, True), ("false", True), (None, True)],
+)
+def test_resume_checkpoint_mode_only_accepts_a_persisted_boolean(
+    persisted: object, expected: bool
+) -> None:
+    progress = {
+        "execution_contract": {"execution_semantics": {"checkpoint_store_enabled": persisted}}
+    }
+
+    assert _resolve_resume_checkpoint_store_enabled(progress) is expected
+
+
+def test_resume_without_a_contract_keeps_default_mode_for_runner_validation() -> None:
+    assert _resolve_resume_checkpoint_store_enabled({}) is True
+
+
 def test_resolve_max_decomposition_depth_defaults_to_two(monkeypatch: pytest.MonkeyPatch) -> None:
     """The workflow depth cap should default to 2 when nothing overrides it."""
     monkeypatch.delenv("OUROBOROS_MAX_DECOMPOSITION_DEPTH", raising=False)
@@ -603,7 +622,7 @@ async def test_run_orchestrator_passes_artifact_and_reference_to_qa(tmp_path: Pa
     with (
         patch("ouroboros.cli.commands.run._load_seed_from_yaml", return_value=VALID_SEED_DATA),
         patch("ouroboros.orchestrator.create_agent_runtime"),
-        patch("ouroboros.orchestrator.OrchestratorRunner", return_value=mock_runner),
+        patch("ouroboros.orchestrator.runner_factory.OrchestratorRunner", return_value=mock_runner),
         patch("ouroboros.persistence.event_store.EventStore") as mock_event_store_cls,
         patch(
             "ouroboros.cli.commands.run.build_verification_artifacts",
@@ -656,7 +675,7 @@ async def test_run_orchestrator_passes_resolved_execution_caps_to_runner(tmp_pat
         patch("ouroboros.cli.commands.run._load_seed_from_yaml", return_value=seed_data),
         patch("ouroboros.orchestrator.create_agent_runtime"),
         patch(
-            "ouroboros.orchestrator.OrchestratorRunner", return_value=mock_runner
+            "ouroboros.orchestrator.runner_factory.OrchestratorRunner", return_value=mock_runner
         ) as mock_runner_cls,
         patch("ouroboros.cli.commands.run._resolve_max_parallel_workers", return_value=7),
         patch("ouroboros.persistence.event_store.EventStore") as mock_event_store_cls,
@@ -705,7 +724,7 @@ async def test_run_orchestrator_passes_default_runner_mode_to_runner(tmp_path: P
         patch("ouroboros.cli.commands.run._load_seed_from_yaml", return_value=seed_data),
         patch("ouroboros.orchestrator.create_agent_runtime"),
         patch(
-            "ouroboros.orchestrator.OrchestratorRunner", return_value=mock_runner
+            "ouroboros.orchestrator.runner_factory.OrchestratorRunner", return_value=mock_runner
         ) as mock_runner_cls,
         patch("ouroboros.persistence.event_store.EventStore") as mock_event_store_cls,
         patch(
@@ -738,6 +757,9 @@ async def test_run_orchestrator_resume_uses_persisted_fat_harness_contract(
         "test-seed-cli-qa",  # VALID_SEED_DATA's seed_id
         session_id="sess-resume",
     )
+    tracker.progress["execution_contract"] = {
+        "execution_semantics": {"checkpoint_store_enabled": False}
+    }
     fake_exec = SimpleNamespace(
         success=True,
         session_id="sess-resume",
@@ -755,7 +777,7 @@ async def test_run_orchestrator_resume_uses_persisted_fat_harness_contract(
         patch("ouroboros.cli.commands.run._load_seed_from_yaml", return_value=seed_data),
         patch("ouroboros.orchestrator.create_agent_runtime"),
         patch(
-            "ouroboros.orchestrator.OrchestratorRunner", return_value=mock_runner
+            "ouroboros.orchestrator.runner_factory.OrchestratorRunner", return_value=mock_runner
         ) as mock_runner_cls,
         patch("ouroboros.persistence.event_store.EventStore") as mock_event_store_cls,
         patch("ouroboros.orchestrator.session.SessionRepository") as mock_repo_cls,
@@ -770,6 +792,7 @@ async def test_run_orchestrator_resume_uses_persisted_fat_harness_contract(
         await _run_orchestrator(seed_file, resume_session="sess-resume", no_qa=True)
 
     assert mock_runner_cls.call_args.kwargs["fat_harness_mode"] is False
+    assert mock_runner_cls.call_args.kwargs["checkpoint_store"] is None
     mock_runner.resume_session.assert_awaited_once()
 
 
@@ -805,7 +828,7 @@ async def test_a_resume_whose_process_is_gone_starts_a_new_attempt(tmp_path: Pat
     with (
         patch("ouroboros.cli.commands.run._load_seed_from_yaml", return_value=VALID_SEED_DATA),
         patch("ouroboros.orchestrator.create_agent_runtime"),
-        patch("ouroboros.orchestrator.OrchestratorRunner", return_value=mock_runner),
+        patch("ouroboros.orchestrator.runner_factory.OrchestratorRunner", return_value=mock_runner),
         patch("ouroboros.persistence.event_store.EventStore") as mock_event_store_cls,
         patch("ouroboros.orchestrator.session.SessionRepository") as mock_repo_cls,
         patch("ouroboros.cli.commands.run.maybe_restore_task_workspace", return_value=None),
@@ -840,7 +863,7 @@ async def test_any_other_resume_failure_still_exits(tmp_path: Path) -> None:
     with (
         patch("ouroboros.cli.commands.run._load_seed_from_yaml", return_value=VALID_SEED_DATA),
         patch("ouroboros.orchestrator.create_agent_runtime"),
-        patch("ouroboros.orchestrator.OrchestratorRunner", return_value=mock_runner),
+        patch("ouroboros.orchestrator.runner_factory.OrchestratorRunner", return_value=mock_runner),
         patch("ouroboros.persistence.event_store.EventStore") as mock_event_store_cls,
         patch("ouroboros.orchestrator.session.SessionRepository") as mock_repo_cls,
         patch("ouroboros.cli.commands.run.maybe_restore_task_workspace", return_value=None),
@@ -882,7 +905,7 @@ async def test_run_orchestrator_passes_skip_completed_markers_to_runner(tmp_path
     with (
         patch("ouroboros.cli.commands.run._load_seed_from_yaml", return_value=VALID_SEED_DATA),
         patch("ouroboros.orchestrator.create_agent_runtime"),
-        patch("ouroboros.orchestrator.OrchestratorRunner", return_value=mock_runner),
+        patch("ouroboros.orchestrator.runner_factory.OrchestratorRunner", return_value=mock_runner),
         patch("ouroboros.persistence.event_store.EventStore") as mock_event_store_cls,
         patch(
             "ouroboros.cli.commands.run.build_verification_artifacts",
@@ -938,7 +961,7 @@ async def test_run_orchestrator_uses_seed_relative_project_dir_for_runtime_and_q
             return_value=VALID_SEED_DATA_WITH_RELATIVE_PROJECT,
         ),
         patch("ouroboros.orchestrator.create_agent_runtime") as mock_runtime,
-        patch("ouroboros.orchestrator.OrchestratorRunner", return_value=mock_runner),
+        patch("ouroboros.orchestrator.runner_factory.OrchestratorRunner", return_value=mock_runner),
         patch("ouroboros.persistence.event_store.EventStore") as mock_event_store_cls,
         patch(
             "ouroboros.cli.commands.run.build_verification_artifacts",
@@ -989,7 +1012,7 @@ async def test_run_orchestrator_passes_execution_model_to_runtime(
     with (
         patch("ouroboros.cli.commands.run._load_seed_from_yaml", return_value=VALID_SEED_DATA),
         patch("ouroboros.orchestrator.create_agent_runtime") as mock_runtime,
-        patch("ouroboros.orchestrator.OrchestratorRunner", return_value=mock_runner),
+        patch("ouroboros.orchestrator.runner_factory.OrchestratorRunner", return_value=mock_runner),
         patch("ouroboros.persistence.event_store.EventStore") as mock_event_store_cls,
         patch(
             "ouroboros.cli.commands.run.build_verification_artifacts",
@@ -1050,7 +1073,7 @@ async def test_run_orchestrator_falls_back_when_artifact_generation_fails(tmp_pa
     with (
         patch("ouroboros.cli.commands.run._load_seed_from_yaml", return_value=VALID_SEED_DATA),
         patch("ouroboros.orchestrator.create_agent_runtime"),
-        patch("ouroboros.orchestrator.OrchestratorRunner", return_value=mock_runner),
+        patch("ouroboros.orchestrator.runner_factory.OrchestratorRunner", return_value=mock_runner),
         patch("ouroboros.persistence.event_store.EventStore") as mock_event_store_cls,
         patch(
             "ouroboros.cli.commands.run.build_verification_artifacts",

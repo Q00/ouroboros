@@ -14,19 +14,30 @@ text, and it reads structured Markdown table rows plus JSON contract markers.
 That lets the same check catch both directions of drift: a new unwired field,
 and a previously inert field that becomes wired while the reference still says
 it does nothing.
+
+Analysis beyond 64 loop iterations, value depth 32, 131072 units of expanded
+value work, 4096 units of recursive-join/relevance work, 8192 units of
+operation input/traversal, 262144 units of cumulative join-output work, or
+the physical graph limits fails explicitly with exit 2.
+Partial scans never certify docs.
 """
 
 from __future__ import annotations
 
 import ast
 import builtins
+from collections import OrderedDict
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 import json
 import os
 from pathlib import Path
 import re
 import sys
+import time
+from types import SimpleNamespace
+from typing import NamedTuple
 from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -195,6 +206,698 @@ def _is_generator_function(node: _FunctionNode) -> bool:
     return finder.found
 
 
+_MAX_ANALYSIS_ITERATIONS = 64
+_MAX_ABSTRACT_DEPTH = 32
+_MAX_ABSTRACT_WORK = 4096
+_MAX_ABSTRACT_OPERATION_WORK = 8192
+# Expanded equality/hash cost is distinct from the amount of abstract state
+# retained. The production adapter's handler loop can produce a bounded DAG
+# whose repeated expansion is ~96k units while containing only 123 nodes and
+# 1,318 edges. Keep a finite per-value ceiling, and separately cap physical
+# graph size and the traversal needed to inspect it.
+_MAX_ABSTRACT_EXPANDED_VALUE_WORK = 131072
+_MAX_ABSTRACT_GRAPH_NODES = 4096
+_MAX_ABSTRACT_GRAPH_EDGES = 8192
+_MAX_ABSTRACT_GRAPH_METADATA = 32768
+# A join operation may inspect and retain more work than one abstract value.
+# Bound cumulative validation, scans, and construction at twice the per-value
+# expanded-work ceiling; independent traversal and physical-graph limits stay
+# in force as separate guards.
+_MAX_ABSTRACT_JOIN_OUTPUT_WORK = 262144
+
+
+# Keep only a bounded set of standalone validation summaries. Entries hold
+# strong references to every reachable value so ids cannot be reused while
+# cached; the node budget also bounds the retained object graph.
+class _ValidationNodeSummary(NamedTuple):
+    value: object
+    cost: int
+    depth: int
+    outgoing_edges: int
+    metadata_width: int
+
+
+class _ValidationCacheEntry(NamedTuple):
+    root: object
+    nodes: tuple[_ValidationNodeSummary, ...]
+    cost: int
+    depth: int
+    traversal_work: int
+    physical_edges: int
+    metadata_width: int
+    created_at: float
+
+
+_MAX_VALIDATION_CACHE_ENTRIES = 128
+_MAX_VALIDATION_CACHE_NODES = 8192
+_MAX_VALIDATION_CACHE_METADATA = 65536
+_MAX_VALIDATION_CACHE_AGE_SECONDS = 600
+_VALIDATION_CACHE: OrderedDict[int, _ValidationCacheEntry] = OrderedDict()
+_VALIDATION_CACHE_RETAINED_NODES = 0
+_VALIDATION_CACHE_RETAINED_METADATA = 0
+
+
+def _drop_validation_cache_entry(key: int) -> None:
+    global _VALIDATION_CACHE_RETAINED_NODES, _VALIDATION_CACHE_RETAINED_METADATA
+    entry = _VALIDATION_CACHE.pop(key, None)
+    if entry is not None:
+        _VALIDATION_CACHE_RETAINED_NODES -= len(entry.nodes)
+        _VALIDATION_CACHE_RETAINED_METADATA -= entry.metadata_width
+
+
+def _get_validation_cache_entry(key: int) -> tuple | None:
+    entry = _VALIDATION_CACHE.get(key)
+    if entry is None:
+        return None
+    if time.monotonic() - entry.created_at > _MAX_VALIDATION_CACHE_AGE_SECONDS:
+        _drop_validation_cache_entry(key)
+        return None
+    _VALIDATION_CACHE.move_to_end(key)
+    return entry
+
+
+class _AnalysisLimitError(RuntimeError):
+    """The scan cannot safely complete within its supported analysis budget."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        located: bool = False,
+        diagnostics: Mapping[str, str | int] | None = None,
+    ) -> None:
+        if diagnostics is not None:
+            message += " [analysis: " + json.dumps(dict(diagnostics), sort_keys=True) + "]"
+        super().__init__(message)
+        self.located = located
+
+
+def _abstract_children(value: _AbstractValue) -> Iterable[_AbstractValue]:
+    yield from value.items or ()
+    for _, child in value.entries or ():
+        yield child
+    for _, child in value.attributes or ():
+        yield child
+    for target in value.callables:
+        if target.receiver is not None:
+            yield target.receiver
+
+
+def _abstract_overhead(value: _AbstractValue) -> int:
+    # Count collection width even when a callable has no receiver child. AST
+    # nodes and scalar provenance are identity/scalar leaves, never traversed.
+    return (
+        1
+        + len(value.items or ())
+        + 2 * len(value.entries or ())
+        + 2 * len(value.attributes or ())
+        + 2 * len(value.callables)
+        + 6 * len(value.unresolved_callables)
+        + sum(
+            len(group)
+            for group in (
+                value.origins,
+                value.identity,
+                value.string_values,
+                value.classes,
+                value.instance_classes,
+                value.modules,
+                value.serialized_sections,
+                value.accessed_attributes,
+            )
+        )
+    )
+
+
+def _abstract_metadata_width(value: _AbstractValue) -> int:
+    """Count retained scalar metadata, excluding graph nodes and edges."""
+    return sum(
+        len(group)
+        for group in (
+            value.origins,
+            value.identity,
+            value.string_values,
+            value.classes,
+            value.instance_classes,
+            value.modules,
+            value.serialized_sections,
+            value.accessed_attributes,
+        )
+    ) + (
+        len(value.entries or ())
+        + len(value.attributes or ())
+        + 2 * len(value.callables)
+        + 6 * len(value.unresolved_callables)
+        + int(value.literal is not None)
+        + int(value.string_value is not None)
+        + int(value.truth is not None)
+        + int(value.unknown_alternative)
+    )
+
+
+def _abstract_string_item_count(value: _AbstractValue) -> int:
+    return (
+        sum(
+            len(group)
+            for group in (
+                value.origins,
+                value.string_values,
+                value.modules,
+                value.serialized_sections,
+                value.accessed_attributes,
+            )
+        )
+        + len(value.entries or ())
+        + len(value.attributes or ())
+    )
+
+
+def _abstract_string_payload_bytes(value: _AbstractValue) -> int:
+    return (
+        sum(
+            len(item) * 4
+            for group in (
+                value.origins,
+                value.string_values,
+                value.modules,
+                value.serialized_sections,
+                value.accessed_attributes,
+            )
+            for item in group
+            if isinstance(item, str)
+        )
+        + sum(
+            len(name) * 4
+            for group in (value.entries or (), value.attributes or ())
+            for name, _ in group
+        )
+        + (len(value.literal or "") + len(value.string_value or "")) * 4
+    )
+
+
+def _validate_abstract_values(
+    values: Iterable[_AbstractValue],
+    *,
+    aggregate_limit: int | None = None,
+    boundary: str = "value",
+    allow_collection_roots: bool = False,
+    _shared_work: list[int] | None = None,
+    _shared_memo: dict[int, tuple[_AbstractValue, int, int]] | None = None,
+    _unique_node_aggregate: bool = False,
+    _unique_aggregate_limit: int | None = None,
+    _is_root_reference: bool = True,
+    _shared_unique_nodes: set[int] | None = None,
+    _shared_unique_cost: list[int] | None = None,
+    _depth_offset: int = 0,
+    _traversal_limit: int | None = None,
+    _shared_graph_nodes: set[int] | None = None,
+    _shared_graph_edges: list[int] | None = None,
+    _shared_graph_metadata: list[int] | None = None,
+    _shared_root_references: list[int] | None = None,
+    _join_output_work: list[int] | None = None,
+) -> tuple[int, int]:
+    """Bound expanded equality/hash cost without expanding shared DAGs.
+
+    Only integer object identities are hashed. Each repeated child contributes
+    its full cached cost, and each addition fails immediately above the limit.
+    Local strong references prevent identity reuse during this validation.
+    """
+    single_root = values[0] if isinstance(values, tuple) and len(values) == 1 else None
+    cacheable = (
+        single_root is not None
+        and _shared_work is None
+        and _shared_memo is None
+        and _shared_unique_nodes is None
+        and _shared_unique_cost is None
+        and _shared_graph_nodes is None
+        and _shared_graph_edges is None
+        and _shared_graph_metadata is None
+        and _shared_root_references is None
+        and not _unique_node_aggregate
+        and _is_root_reference
+        and _depth_offset == 0
+        and _traversal_limit is None
+        and (not single_root._collection_root or allow_collection_roots)
+    )
+    if aggregate_limit is None:
+        aggregate_limit = _MAX_ABSTRACT_EXPANDED_VALUE_WORK
+    traversal_limit = min(aggregate_limit, _MAX_ABSTRACT_OPERATION_WORK)
+    if _traversal_limit is not None:
+        traversal_limit = min(_traversal_limit, _MAX_ABSTRACT_OPERATION_WORK)
+    work_counter = _shared_work if _shared_work is not None else [0]
+    memo = _shared_memo if _shared_memo is not None else {}
+    unique_nodes = _shared_unique_nodes if _shared_unique_nodes is not None else set()
+    graph_nodes = _shared_graph_nodes if _shared_graph_nodes is not None else set()
+    graph_edges = _shared_graph_edges if _shared_graph_edges is not None else [0]
+    graph_metadata = _shared_graph_metadata if _shared_graph_metadata is not None else [0]
+    root_references = _shared_root_references if _shared_root_references is not None else [0]
+    unique_cost = _shared_unique_cost if _shared_unique_cost is not None else [0]
+    unique_aggregate_limit = (
+        _unique_aggregate_limit if _unique_aggregate_limit is not None else aggregate_limit
+    )
+    binding_reference_limit = min(unique_aggregate_limit, _MAX_ABSTRACT_OPERATION_WORK)
+    gray: set[int] = set()
+    total = 0
+    maximum_depth = 0
+    root_count = 0
+    maximum_root_cost = 0
+    cached_summary = None
+    if cacheable:
+        cached_summary = _get_validation_cache_entry(id(single_root))
+        if cached_summary is not None and cached_summary.root is not single_root:
+            # Defensive identity check; strong references should make this
+            # impossible, but never trust an integer id without object identity.
+            cached_summary = None
+
+    def failure(
+        message: str, cost: int, depth: int, *, root_completed: bool = False
+    ) -> _AnalysisLimitError:
+        return _AnalysisLimitError(
+            message,
+            diagnostics={
+                "function": "_validate_abstract_values",
+                "boundary": boundary,
+                "root_count": root_count,
+                "root_cost": cost if root_completed else -1,
+                "root_cost_lower_bound": cost,
+                "maximum_completed_root_cost": maximum_root_cost,
+                "aggregate_cost": (
+                    unique_cost[0]
+                    if _unique_node_aggregate
+                    else total
+                    if root_completed
+                    else total + cost
+                ),
+                "costs_complete": int(root_completed),
+                "value_limit": _MAX_ABSTRACT_EXPANDED_VALUE_WORK,
+                "aggregate_limit": (
+                    unique_aggregate_limit if _unique_node_aggregate else aggregate_limit
+                ),
+                "depth": depth,
+                "traversal_work": work_counter[0],
+                "traversal_limit": traversal_limit,
+                "physical_nodes": len(graph_nodes),
+                "physical_node_limit": _MAX_ABSTRACT_GRAPH_NODES,
+                "physical_edges": graph_edges[0],
+                "physical_edge_limit": _MAX_ABSTRACT_GRAPH_EDGES,
+                "physical_metadata": graph_metadata[0],
+                "physical_metadata_limit": _MAX_ABSTRACT_GRAPH_METADATA,
+            },
+        )
+
+    def check(cost: int, depth: int) -> None:
+        if cost > _MAX_ABSTRACT_EXPANDED_VALUE_WORK:
+            raise failure(
+                f"abstract value expanded cost exceeds {_MAX_ABSTRACT_EXPANDED_VALUE_WORK}",
+                cost,
+                depth + _depth_offset,
+            )
+        if depth + _depth_offset > _MAX_ABSTRACT_DEPTH:
+            raise failure(
+                f"abstract value depth exceeds {_MAX_ABSTRACT_DEPTH}",
+                cost,
+                depth + _depth_offset,
+            )
+
+    def account_node(node: _AbstractValue) -> None:
+        node_id = id(node)
+        if _join_output_work is not None:
+            cached_validation = memo.get(node_id)
+            cached_cost = (
+                cached_validation[1]
+                if cached_validation is not None and cached_validation[0] is node
+                else None
+            )
+            if cached_cost is None:
+                cached = _get_validation_cache_entry(node_id)
+                cached_cost = (
+                    cached.cost
+                    if cached is not None
+                    and cached.root is node
+                    and (allow_collection_roots or not node._collection_root)
+                    else None
+                )
+            _reserve_join_output(
+                _join_output_work,
+                cached_cost
+                if cached_cost is not None
+                else _abstract_overhead(node) + _abstract_metadata_width(node),
+                "join_input_validation_node",
+            )
+        if node_id in graph_nodes:
+            return
+        graph_nodes.add(node_id)
+        graph_metadata[0] += _abstract_metadata_width(node)
+        if len(graph_nodes) > _MAX_ABSTRACT_GRAPH_NODES:
+            raise failure("abstract graph node limit exceeded", graph_metadata[0], 1)
+        if graph_metadata[0] > _MAX_ABSTRACT_GRAPH_METADATA:
+            raise failure("abstract graph metadata limit exceeded", graph_metadata[0], 1)
+
+    def account_edge() -> None:
+        if _join_output_work is not None:
+            _reserve_join_output(_join_output_work, 1, "join_input_validation_edge")
+        graph_edges[0] += 1
+        if graph_edges[0] > _MAX_ABSTRACT_GRAPH_EDGES:
+            raise failure("abstract graph edge limit exceeded", graph_edges[0], 1)
+
+    def account_unique(node: _AbstractValue) -> None:
+        node_id = id(node)
+        if node_id in unique_nodes:
+            return
+        unique_nodes.add(node_id)
+        unique_cost[0] += _abstract_overhead(node)
+        if unique_cost[0] > unique_aggregate_limit:
+            raise failure(
+                f"abstract aggregate expanded cost exceeds {unique_aggregate_limit}",
+                unique_cost[0],
+                1,
+            )
+
+    def seed_cached_graph(root: _AbstractValue, root_was_accounted: bool) -> None:
+        cached = _get_validation_cache_entry(id(root))
+        if cached is None or cached.root is not root:
+            return
+        if root._collection_root and not allow_collection_roots:
+            return
+        for summary in cached.nodes:
+            cached_node = summary.value
+            node_id = id(cached_node)
+            memo.setdefault(node_id, (cached_node, summary.cost, summary.depth))
+            if _unique_node_aggregate:
+                account_unique(cached_node)
+            was_accounted = node_id in graph_nodes
+            if not was_accounted:
+                graph_nodes.add(node_id)
+                graph_metadata[0] += summary.metadata_width
+                if len(graph_nodes) > _MAX_ABSTRACT_GRAPH_NODES:
+                    raise failure(
+                        "abstract graph node limit exceeded", graph_metadata[0], summary.depth
+                    )
+                if graph_metadata[0] > _MAX_ABSTRACT_GRAPH_METADATA:
+                    raise failure(
+                        "abstract graph metadata limit exceeded", graph_metadata[0], summary.depth
+                    )
+            # The caller has already marked a new root as present. It still
+            # needs the outgoing-edge and traversal charges that graph expansion
+            # would have made. Other present nodes were expanded earlier.
+            if not was_accounted or (cached_node is root and not root_was_accounted):
+                graph_edges[0] += summary.outgoing_edges
+                work_counter[0] += summary.outgoing_edges
+                if graph_edges[0] > _MAX_ABSTRACT_GRAPH_EDGES:
+                    raise failure(
+                        "abstract graph edge limit exceeded", graph_edges[0], summary.depth
+                    )
+                if work_counter[0] > traversal_limit:
+                    raise failure(
+                        f"abstract value traversal exceeds {traversal_limit}",
+                        summary.cost,
+                        summary.depth + _depth_offset,
+                    )
+
+    for root in values:
+        root_count += 1
+        root_previously_accounted = id(root) in graph_nodes
+        if cacheable and cached_summary is not None and root is single_root:
+            cached_nodes = cached_summary.nodes
+            cost = cached_summary.cost
+            depth = cached_summary.depth
+            cached_work = cached_summary.traversal_work
+            cached_edges = cached_summary.physical_edges
+            cached_metadata = cached_summary.metadata_width
+            if _join_output_work is not None:
+                _reserve_join_output(
+                    _join_output_work,
+                    cached_summary.cost,
+                    "join_input_validation_cached_value",
+                )
+            if _is_root_reference:
+                root_references[0] += 1
+                if root_references[0] > binding_reference_limit:
+                    raise failure(
+                        f"abstract root reference work exceeds {binding_reference_limit}",
+                        root_references[0],
+                        1,
+                    )
+            check(cost, depth)
+            if cost > aggregate_limit:
+                raise failure(
+                    f"abstract aggregate expanded cost exceeds {aggregate_limit}",
+                    cost,
+                    depth,
+                )
+            work_counter[0] += cached_work
+            if work_counter[0] > traversal_limit:
+                raise failure(
+                    f"abstract value traversal exceeds {traversal_limit}",
+                    cost,
+                    depth,
+                )
+            graph_nodes.update(id(cached_node[0]) for cached_node in cached_nodes)
+            if len(graph_nodes) > _MAX_ABSTRACT_GRAPH_NODES:
+                raise failure("abstract graph node limit exceeded", len(graph_nodes), depth)
+            graph_edges[0] += cached_edges
+            if graph_edges[0] > _MAX_ABSTRACT_GRAPH_EDGES:
+                raise failure("abstract graph edge limit exceeded", graph_edges[0], depth)
+            graph_metadata[0] += cached_metadata
+            if graph_metadata[0] > _MAX_ABSTRACT_GRAPH_METADATA:
+                raise failure("abstract graph metadata limit exceeded", graph_metadata[0], depth)
+            total += cost
+            maximum_root_cost = max(maximum_root_cost, cost)
+            maximum_depth = max(maximum_depth, depth + _depth_offset)
+            if total > aggregate_limit:
+                raise failure(
+                    f"abstract aggregate expanded cost exceeds {aggregate_limit}",
+                    cost,
+                    depth,
+                    root_completed=True,
+                )
+            continue
+        account_node(root)
+        if _is_root_reference:
+            root_references[0] += 1
+            if root_references[0] > binding_reference_limit:
+                raise failure(
+                    f"abstract root reference work exceeds {binding_reference_limit}",
+                    root_references[0],
+                    1,
+                )
+        if _unique_node_aggregate:
+            account_unique(root)
+        if id(root) not in memo:
+            seed_cached_graph(root, root_previously_accounted)
+        if allow_collection_roots and root._collection_root:
+            # The exception belongs to this root only. Each member remains an
+            # ordinary value, while all edges share one operation traversal.
+            if (
+                root.items is None
+                or root.entries
+                or root.attributes
+                or root.callables
+                or root.unresolved_callables
+            ):
+                raise failure(
+                    "unsupported marked collection root shape",
+                    _abstract_overhead(root),
+                    1,
+                )
+            cached_collection = memo.get(id(root))
+            if cached_collection is not None:
+                _, cost, depth = cached_collection
+                if cost > aggregate_limit:
+                    raise failure(
+                        f"abstract aggregate expanded cost exceeds {aggregate_limit}",
+                        cost,
+                        depth + _depth_offset,
+                    )
+                if depth + _depth_offset > _MAX_ABSTRACT_DEPTH:
+                    raise failure(
+                        f"abstract value depth exceeds {_MAX_ABSTRACT_DEPTH}",
+                        cost,
+                        depth + _depth_offset,
+                    )
+                total += cost
+                maximum_root_cost = max(maximum_root_cost, cost)
+                maximum_depth = max(maximum_depth, depth + _depth_offset)
+                if not _unique_node_aggregate and total > aggregate_limit:
+                    raise failure(
+                        f"abstract aggregate expanded cost exceeds {aggregate_limit}",
+                        cost,
+                        depth + _depth_offset,
+                        root_completed=True,
+                    )
+                continue
+            cost = _abstract_overhead(root)
+            depth = 1
+            if cost > aggregate_limit:
+                raise failure(
+                    f"abstract aggregate expanded cost exceeds {aggregate_limit}",
+                    cost,
+                    depth,
+                )
+            for child in root.items:
+                account_edge()
+                work_counter[0] += 1
+                if work_counter[0] > traversal_limit:
+                    raise failure(
+                        f"abstract value traversal exceeds {traversal_limit}", cost, depth
+                    )
+                child_cost, child_depth = _validate_abstract_values(
+                    (child,),
+                    aggregate_limit=_MAX_ABSTRACT_EXPANDED_VALUE_WORK,
+                    boundary=f"{boundary}.collection_member",
+                    allow_collection_roots=False,
+                    _shared_work=work_counter,
+                    _shared_memo=memo,
+                    _unique_node_aggregate=_unique_node_aggregate,
+                    _unique_aggregate_limit=unique_aggregate_limit,
+                    _is_root_reference=False,
+                    _shared_unique_nodes=unique_nodes,
+                    _shared_unique_cost=unique_cost,
+                    _depth_offset=1,
+                    _traversal_limit=traversal_limit,
+                    _shared_graph_nodes=graph_nodes,
+                    _shared_graph_edges=graph_edges,
+                    _shared_graph_metadata=graph_metadata,
+                    _shared_root_references=root_references,
+                    _join_output_work=_join_output_work,
+                )
+                cost += child_cost
+                depth = max(depth, child_depth)
+                if cost > aggregate_limit:
+                    raise failure(
+                        f"abstract aggregate expanded cost exceeds {aggregate_limit}",
+                        cost,
+                        depth,
+                    )
+            total += cost
+            maximum_root_cost = max(maximum_root_cost, cost)
+            maximum_depth = max(maximum_depth, depth)
+            if not _unique_node_aggregate and total > aggregate_limit:
+                raise failure(
+                    f"abstract aggregate expanded cost exceeds {aggregate_limit}",
+                    cost,
+                    depth,
+                    root_completed=True,
+                )
+            memo[id(root)] = (root, cost, depth)
+            continue
+        if id(root) not in memo:
+            # Frames keep an iterator, so width is never copied into a worklist.
+            stack = [(root, iter(_abstract_children(root)), _abstract_overhead(root), 1)]
+            gray.add(id(root))
+            while stack:
+                node, children, cost, depth = stack[-1]
+                check(cost, max(depth, len(stack)))
+                try:
+                    child = next(children)
+                except StopIteration:
+                    memo[id(node)] = (node, cost, depth)
+                    gray.remove(id(node))
+                    stack.pop()
+                    if stack:
+                        parent, siblings, parent_cost, parent_depth = stack[-1]
+                        parent_cost += cost
+                        parent_depth = max(parent_depth, depth + 1)
+                        check(parent_cost, parent_depth)
+                        stack[-1] = (parent, siblings, parent_cost, parent_depth)
+                    continue
+                account_edge()
+                work_counter[0] += 1
+                if work_counter[0] > traversal_limit:
+                    raise failure(
+                        f"abstract value traversal exceeds {traversal_limit}",
+                        cost,
+                        depth + _depth_offset,
+                    )
+                child_id = id(child)
+                if child_id in gray:
+                    raise failure("cyclic abstract value graph", cost, depth + _depth_offset)
+                cached = memo.get(child_id)
+                if cached is not None:
+                    _, child_cost, child_depth = cached
+                    if _join_output_work is not None:
+                        _reserve_join_output(
+                            _join_output_work,
+                            child_cost,
+                            "join_input_validation_memo_child",
+                        )
+                    cost += child_cost
+                    depth = max(depth, child_depth + 1)
+                    check(cost, depth)
+                    stack[-1] = (node, children, cost, depth)
+                else:
+                    child_previously_accounted = child_id in graph_nodes
+                    account_node(child)
+                    seed_cached_graph(child, child_previously_accounted)
+                    if _unique_node_aggregate:
+                        account_unique(child)
+                    cached = memo.get(child_id)
+                    if cached is not None:
+                        _, child_cost, child_depth = cached
+                        cost += child_cost
+                        depth = max(depth, child_depth + 1)
+                        check(cost, depth)
+                        stack[-1] = (node, children, cost, depth)
+                    else:
+                        gray.add(child_id)
+                        stack.append(
+                            (child, iter(_abstract_children(child)), _abstract_overhead(child), 1)
+                        )
+        _, cost, depth = memo[id(root)]
+        check(cost, depth)
+        total += cost
+        maximum_root_cost = max(maximum_root_cost, cost)
+        maximum_depth = max(maximum_depth, depth + _depth_offset)
+        if not _unique_node_aggregate and total > aggregate_limit:
+            raise failure(
+                f"abstract aggregate expanded cost exceeds {aggregate_limit}",
+                cost,
+                depth,
+                root_completed=True,
+            )
+    if cacheable and single_root is not None and root_count == 1:
+        global _VALIDATION_CACHE_RETAINED_NODES, _VALIDATION_CACHE_RETAINED_METADATA
+        node_summaries = tuple(
+            _ValidationNodeSummary(
+                value,
+                cost,
+                depth,
+                sum(1 for _ in _abstract_children(value)),
+                _abstract_metadata_width(value),
+            )
+            for value, cost, depth in memo.values()
+        )
+        summary_metadata = sum(summary.metadata_width for summary in node_summaries)
+        if (
+            node_summaries
+            and len(node_summaries) <= _MAX_VALIDATION_CACHE_NODES
+            and summary_metadata <= _MAX_VALIDATION_CACHE_METADATA
+        ):
+            _drop_validation_cache_entry(id(single_root))
+            while _VALIDATION_CACHE and (
+                len(_VALIDATION_CACHE) >= _MAX_VALIDATION_CACHE_ENTRIES
+                or _VALIDATION_CACHE_RETAINED_NODES + len(node_summaries)
+                > _MAX_VALIDATION_CACHE_NODES
+                or _VALIDATION_CACHE_RETAINED_METADATA + summary_metadata
+                > _MAX_VALIDATION_CACHE_METADATA
+            ):
+                oldest_key = next(iter(_VALIDATION_CACHE))
+                _drop_validation_cache_entry(oldest_key)
+            _VALIDATION_CACHE[id(single_root)] = _ValidationCacheEntry(
+                single_root,
+                node_summaries,
+                total,
+                maximum_depth,
+                work_counter[0],
+                graph_edges[0],
+                graph_metadata[0],
+                time.monotonic(),
+            )
+            _VALIDATION_CACHE_RETAINED_NODES += len(node_summaries)
+            _VALIDATION_CACHE_RETAINED_METADATA += summary_metadata
+    return total, maximum_depth
+
+
 @dataclass(frozen=True)
 class _AbstractValue:
     """Possible config provenance plus bounded container/object shape."""
@@ -216,6 +919,359 @@ class _AbstractValue:
     accessed_attributes: frozenset[str] = frozenset()
     unresolved_callables: tuple[_UnresolvedCallable, ...] = ()
     unknown_alternative: bool = False
+    _collection_root: bool = dataclass_field(default=False, compare=False, repr=False)
+
+    def __post_init__(self) -> None:
+        _validate_abstract_values(
+            (self,),
+            aggregate_limit=(_MAX_ABSTRACT_EXPANDED_VALUE_WORK),
+            allow_collection_roots=self._collection_root,
+            boundary="literal_collection_root" if self._collection_root else "value",
+        )
+
+
+@dataclass
+class _JoinValidationContext:
+    memo: dict[int, tuple[_AbstractValue, int, int]] = dataclass_field(default_factory=dict)
+    mixed_memo: dict[int, tuple[_AbstractValue, int, int]] = dataclass_field(default_factory=dict)
+    work: list[int] = dataclass_field(default_factory=lambda: [0])
+    join_work: list[int] = dataclass_field(default_factory=lambda: [0])
+    output_work: list[int] = dataclass_field(default_factory=lambda: [0])
+    unique_nodes: set[int] = dataclass_field(default_factory=set)
+    unique_cost: list[int] = dataclass_field(default_factory=lambda: [0])
+    operand_references: list[int] = dataclass_field(default_factory=lambda: [0])
+    identity_scans: list[int] = dataclass_field(default_factory=lambda: [0])
+    graph_nodes: set[int] = dataclass_field(default_factory=set)
+    graph_edges: list[int] = dataclass_field(default_factory=lambda: [0])
+    graph_metadata: list[int] = dataclass_field(default_factory=lambda: [0])
+    validation_token: object = dataclass_field(default_factory=object, repr=False)
+    snapshot_profiles: dict[int, tuple[_AbstractValue, int, int]] | None = None
+    snapshot_nodes: dict[int, _SnapshotNodeProof] | None = None
+    snapshot_factory_edges: int = 0
+    snapshot_factory_metadata: int = 0
+    snapshot_memo_deferred: bool = False
+    state_plan: Mapping[str, _JoinOperandGroup] | None = None
+    annotation_plan: Mapping[str, _JoinOperandGroup] | None = None
+    function_plan_maps: tuple[Mapping[str, _FunctionSet], ...] | None = None
+    function_plan_keys: tuple[tuple[str, ...], ...] | None = None
+    function_plan_names: tuple[str, ...] | None = None
+    result_memo: dict[tuple[tuple[int, ...], int, bool], _JoinResultMemoEntry] = dataclass_field(
+        default_factory=dict
+    )
+    result_graph_nodes: set[int] = dataclass_field(default_factory=set)
+    result_graph_edges: list[int] = dataclass_field(default_factory=lambda: [0])
+    result_graph_metadata: list[int] = dataclass_field(default_factory=lambda: [0])
+
+
+@dataclass(frozen=True)
+class _JoinResultMemoEntry:
+    operands: tuple[_AbstractValue, ...]
+    result: _AbstractValue
+    join_work: int
+    output_work: int
+
+
+@dataclass(frozen=True)
+class _JoinOperandGroup:
+    values: tuple[_AbstractValue, ...]
+    same_identity: bool
+    validation_token: object | None = dataclass_field(default=None, repr=False, compare=False)
+
+
+def _join_result_memo_key(
+    values: tuple[_AbstractValue, ...], depth: int, same_identity: bool
+) -> tuple[tuple[int, ...], int, bool]:
+    return tuple(id(value) for value in values), depth, same_identity
+
+
+def _reserve_join_output(work: list[int], amount: int, boundary: str) -> None:
+    """Reserve conservative join scan/construction work before doing it."""
+    if amount < 0 or work[0] + amount > _MAX_ABSTRACT_JOIN_OUTPUT_WORK:
+        raise _AnalysisLimitError(
+            f"abstract join output work exceeds {_MAX_ABSTRACT_JOIN_OUTPUT_WORK}",
+            diagnostics={
+                "function": "_join_values",
+                "boundary": boundary,
+                "reserved_work": work[0],
+                "requested_work": amount,
+                "work_limit": _MAX_ABSTRACT_JOIN_OUTPUT_WORK,
+            },
+        )
+    work[0] += amount
+
+
+def _reserve_join_result_validation_work(
+    result_fields: Mapping[str, object],
+    output_work: list[int],
+    *,
+    memo_admission: bool,
+) -> int:
+    """Project the prepared result's exact validator cost before construction.
+
+    The projection uses the same validator and child edges as the eventual
+    ``_AbstractValue``. Its scan is separately charged; then reserve the
+    constructor validation and, when admitted, the memo graph validation.
+    """
+    _reserve_join_output(output_work, len(result_fields) + 1, "result_validation_projection_root")
+    prepared = SimpleNamespace(**result_fields, _collection_root=False)
+    projected_cost, _depth = _validate_abstract_values(
+        [prepared],
+        aggregate_limit=_MAX_ABSTRACT_EXPANDED_VALUE_WORK,
+        boundary="join_result_validation_projection",
+        _join_output_work=output_work,
+    )
+    _reserve_join_output(
+        output_work,
+        projected_cost * (2 if memo_admission else 1),
+        "result_validation_walks",
+    )
+    return projected_cost
+
+
+def _join_result_from_scoped_proofs(result_fields, output_work, proof_context, memo_context):
+    """Construct one frozen result from completed scoped child profiles.
+
+    The snapshot entry check already verified immutable field identities.
+    The completed cumulative physical graph proves every descendant bound;
+    each direct root edge still contributes its full expanded cost and depth.
+    """
+    if proof_context is None or proof_context.snapshot_profiles is None:
+        return None
+    profiles = proof_context.snapshot_profiles
+    field_names = tuple(_AbstractValue.__dataclass_fields__)
+    _reserve_join_output(output_work, len(field_names) * 3, "result_proof_fields")
+    if set(result_fields) != set(field_names) - {"_collection_root"}:
+        return None
+    prepared = SimpleNamespace(**result_fields, _collection_root=False)
+    root_overhead, root_metadata = _abstract_overhead(prepared), _abstract_metadata_width(prepared)
+    _reserve_join_output(output_work, root_overhead + root_metadata, "result_proof_root")
+    children = tuple(_abstract_children(prepared))
+    cost, depth = root_overhead, 1
+    for child in children:
+        _reserve_join_output(output_work, 2, "result_proof_child_lookup")
+        profile = profiles.get(id(child))
+        if profile is None or profile[0] is not child or child._collection_root:
+            return None
+        cost += profile[1]
+        depth = max(depth, profile[2] + 1)
+        if cost > _MAX_ABSTRACT_EXPANDED_VALUE_WORK:
+            raise _AnalysisLimitError(
+                f"abstract value expanded cost exceeds {_MAX_ABSTRACT_EXPANDED_VALUE_WORK}"
+            )
+        if depth > _MAX_ABSTRACT_DEPTH:
+            raise _AnalysisLimitError(f"abstract value depth exceeds {_MAX_ABSTRACT_DEPTH}")
+    if cost > _MAX_ABSTRACT_EXPANDED_VALUE_WORK:
+        raise _AnalysisLimitError(
+            f"abstract value expanded cost exceeds {_MAX_ABSTRACT_EXPANDED_VALUE_WORK}"
+        )
+    if depth > _MAX_ABSTRACT_DEPTH:
+        raise _AnalysisLimitError(f"abstract value depth exceeds {_MAX_ABSTRACT_DEPTH}")
+    # Every child graph is a subset of this completed, strongly retained
+    # operation graph. Adding only a fresh root cannot create a cycle. If its
+    # cumulative physical proof would no longer fit, use the legacy constructor
+    # instead; the optional graph is not an additional admission requirement.
+    edges = proof_context.snapshot_factory_edges + len(children)
+    metadata = proof_context.snapshot_factory_metadata + root_metadata
+    if (
+        len(profiles) + 1 > _MAX_ABSTRACT_GRAPH_NODES
+        or edges > _MAX_ABSTRACT_GRAPH_EDGES
+        or edges > _MAX_ABSTRACT_OPERATION_WORK
+        or metadata > _MAX_ABSTRACT_GRAPH_METADATA
+    ):
+        return None
+    _reserve_join_output(output_work, len(field_names) * 4 + 1, "result_proof_materialization")
+    if any(getattr(prepared, name) is not value for name, value in result_fields.items()):
+        raise _AnalysisLimitError("join result fields changed after proof composition")
+    record_width = 3 * len(prepared.callables) + 7 * len(prepared.unresolved_callables)
+    if proof_context.snapshot_nodes is not None:
+        _reserve_join_output(output_work, record_width, "snapshot_result_record_fields")
+    result = object.__new__(_AbstractValue)
+    fields = tuple(getattr(prepared, name) for name in field_names)
+    for name, value in zip(field_names, fields, strict=True):
+        object.__setattr__(result, name, value)
+    if proof_context.snapshot_nodes is not None:
+        records = tuple(
+            (record, tuple(getattr(record, name) for name in type(record).__dataclass_fields__))
+            for group in (result.callables, result.unresolved_callables)
+            for record in group
+        )
+        proof_context.snapshot_nodes[id(result)] = _SnapshotNodeProof(
+            result, cost, depth, root_overhead, root_metadata, children, fields, records
+        )
+    profiles[id(result)] = (result, cost, depth)
+    proof_context.snapshot_factory_edges = edges
+    proof_context.snapshot_factory_metadata = metadata
+    if memo_context is not None:
+        # The memo's reachable graph is a subset of the bounded operation
+        # graph. Materialize its exact flat union only if legacy fallback later
+        # needs these counters, rather than walking every result graph now.
+        memo_context.snapshot_memo_deferred = True
+    return result
+
+
+def _flush_snapshot_memo_graph(context, output_work):
+    if not context.snapshot_memo_deferred:
+        return
+    _reserve_join_output(output_work, len(context.result_memo), "result_proof_memo_roots")
+    pending = [entry.result for entry in context.result_memo.values()]
+    _reserve_join_output(output_work, len(context.result_graph_nodes), "result_proof_memo_existing")
+    seen = set(context.result_graph_nodes)
+    edges, metadata = context.result_graph_edges[0], context.result_graph_metadata[0]
+    while pending:
+        _reserve_join_output(output_work, 2, "result_proof_memo_node")
+        value = pending.pop()
+        if id(value) in seen:
+            continue
+        overhead, width = _abstract_overhead(value), _abstract_metadata_width(value)
+        _reserve_join_output(output_work, overhead + width + 1, "result_proof_memo_walk")
+        children = tuple(_abstract_children(value))
+        seen.add(id(value))
+        edges += len(children)
+        metadata += width
+        if len(seen) > _MAX_ABSTRACT_GRAPH_NODES:
+            raise _AnalysisLimitError("abstract graph node limit exceeded")
+        if edges > _MAX_ABSTRACT_GRAPH_EDGES:
+            raise _AnalysisLimitError("abstract graph edge limit exceeded")
+        if metadata > _MAX_ABSTRACT_GRAPH_METADATA:
+            raise _AnalysisLimitError("abstract graph metadata limit exceeded")
+        pending.extend(children)
+    context.result_graph_nodes.update(seen)
+    context.result_graph_edges[0] = edges
+    context.result_graph_metadata[0] = metadata
+    context.snapshot_memo_deferred = False
+
+
+def _joined_scalar_string(
+    values: tuple[_AbstractValue, ...],
+    field_name: str,
+    output_work: list[int],
+) -> str | None:
+    """Join one scalar string field, reserving each comparison before it runs."""
+    first = getattr(values[0], field_name)
+    if first is not None and type(first) is not str:
+        raise _AnalysisLimitError(
+            f"abstract join received unsupported {field_name} value",
+            diagnostics={"function": "_join_values", "boundary": f"{field_name}_type"},
+        )
+    for value in values:
+        candidate = getattr(value, field_name)
+        if candidate is not None and type(candidate) is not str:
+            raise _AnalysisLimitError(
+                f"abstract join received unsupported {field_name} value",
+                diagnostics={"function": "_join_values", "boundary": f"{field_name}_type"},
+            )
+        comparison_work = 1
+        if first is not candidate and first is not None and candidate is not None:
+            if len(first) == len(candidate):
+                comparison_work += 4 * len(first)
+        _reserve_join_output(output_work, comparison_work, f"{field_name}_comparison")
+        if candidate != first:
+            return None
+    return first
+
+
+def _reserve_join_string_value_work(
+    values: tuple[_AbstractValue, ...], output_work: list[int]
+) -> None:
+    """Reserve scalar string hash and insertion work before set construction."""
+    _reserve_join_output(output_work, len(values), "string_value_candidate_scan")
+    candidates = tuple(value.string_value for value in values)
+    unique_by_identity: dict[int, str] = {}
+    for candidate in candidates:
+        if candidate is not None:
+            if type(candidate) is not str:
+                raise _AnalysisLimitError(
+                    "abstract join received unsupported string_value value",
+                    diagnostics={"function": "_join_values", "boundary": "string_value_type"},
+                )
+            unique_by_identity.setdefault(id(candidate), candidate)
+    _reserve_join_output(
+        output_work,
+        sum(len(candidate) * 4 for candidate in unique_by_identity.values()),
+        "string_value_hash_payload",
+    )
+    # Keep unique_by_identity alive through this loop so identity-based reuse
+    # cannot be confused by object-id recycling.
+    for candidate in unique_by_identity.values():
+        hash(candidate)
+    _reserve_join_output(
+        output_work,
+        sum(candidate is not None for candidate in candidates) * 2,
+        "string_value_set_insertions",
+    )
+
+
+def _plan_cached_string_union(
+    values: tuple[_AbstractValue, ...],
+    covered_scalar_groups: list[frozenset[str] | None],
+    output_work: list[int],
+    string_payload_bound: int,
+) -> dict[int, str] | None:
+    """Plan already-hashed exact strings before the final C-level union.
+
+    CPython exact frozensets retain each exact string's completed hash. Plan
+    integer-hash buckets before reading those cached hashes. Equal strings are
+    compared explicitly under a byte bound, so the constructed frozenset has
+    distinct hashes and cannot repeat an uncharged string-payload comparison.
+    A real unequal hash collision declines to the unchanged full-payload path.
+    """
+    # The caller supplies its completed metadata preflight payload count.
+    # Keep absolute oversized-input rejection on the original pre-hash path.
+    if (
+        sys.implementation.name != "cpython"
+        or string_payload_bound > _MAX_ABSTRACT_JOIN_OUTPUT_WORK
+    ):
+        return None
+    # The caller's per-operand coverage plan reserves these eligibility reads.
+    if any(
+        type(value.string_values) is not frozenset
+        or (value.string_value is not None and covered is None)
+        for value, covered in zip(values, covered_scalar_groups, strict=True)
+    ):
+        return None
+    width = sum(len(value.string_values) for value in values)
+    _reserve_join_output(output_work, width * 3, "string_values_cached_plan")
+    representatives: dict[int, str] = {}
+    for value in values:
+        for candidate in value.string_values:
+            # This repeats the exact-type check before the first hash call,
+            # keeping the helper fail-closed independently of its caller scan.
+            if type(candidate) is not str:
+                return None
+            cached_hash = hash(candidate)
+            previous = representatives.get(cached_hash)
+            if previous is None:
+                representatives[cached_hash] = candidate
+            elif previous is not candidate:
+                if len(previous) != len(candidate):
+                    return None
+                _reserve_join_output(
+                    output_work, len(candidate) * 4, "string_values_cached_equality"
+                )
+                if previous != candidate:
+                    return None
+    return representatives
+
+
+def _reserve_join_retained_string_payload(
+    string_values: frozenset[str],
+    literal: str | None,
+    output_work: list[int],
+) -> None:
+    """Reserve semantic unique text retained by the result before construction."""
+    _reserve_join_output(output_work, len(string_values), "retained_string_values_scan")
+    payload_chars = sum(len(value) for value in string_values)
+    if literal is not None:
+        # The scalar string_value is guaranteed to be present in string_values
+        # by the union below. A literal may add one more distinct text value.
+        _reserve_join_output(
+            output_work,
+            8 * len(literal) + 1,
+            "retained_literal_membership",
+        )
+        if literal not in string_values:
+            payload_chars += len(literal)
+    _reserve_join_output(output_work, payload_chars * 4, "retained_string_payload")
 
 
 @dataclass(frozen=True)
@@ -224,6 +1280,10 @@ class _CallableTarget:
 
     function: _FunctionNode
     receiver: _AbstractValue | None = None
+
+    def __post_init__(self) -> None:
+        if self.receiver is not None:
+            _validate_abstract_values((self.receiver,))
 
 
 @dataclass(frozen=True)
@@ -639,13 +1699,24 @@ def _type_checking_value() -> _AbstractValue:
 
 
 def _contained_origins(value: _AbstractValue) -> frozenset[str]:
-    origins = set(value.origins)
-    for item in value.items or ():
-        origins.update(_contained_origins(item))
-    for _, item in value.entries or ():
-        origins.update(_contained_origins(item))
-    for _, item in value.attributes or ():
-        origins.update(_contained_origins(item))
+    _validate_abstract_values(
+        (value,),
+        aggregate_limit=(_MAX_ABSTRACT_EXPANDED_VALUE_WORK),
+        allow_collection_roots=value._collection_root,
+        boundary="contained_origins",
+    )
+    origins: set[str] = set()
+    pending = [value]
+    seen: set[int] = set()
+    while pending:
+        item = pending.pop()
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        origins.update(item.origins)
+        pending.extend(item.items or ())
+        pending.extend(child for _, child in item.entries or ())
+        pending.extend(child for _, child in item.attributes or ())
     return frozenset(origins)
 
 
@@ -664,24 +1735,256 @@ def _conservative_value(value: _AbstractValue) -> _AbstractValue:
     )
 
 
-def _join_values(*values: _AbstractValue, _depth: int = 0) -> _AbstractValue:
+def _equals_unknown_value(value: _AbstractValue, output_work: list[int]) -> bool:
+    """Mirror dataclass equality against the empty sentinel with bounded work.
+
+    The exact-type check matches the generated dataclass equality guard. Each
+    compared field is charged before reading/comparing it; the operand scan
+    has already charged the reference itself. ``_collection_root`` is excluded
+    because its dataclass field has ``compare=False``.
+    """
+    if type(value) is not _AbstractValue:
+        return False
+    for field_name in (
+        "origins",
+        "items",
+        "entries",
+        "attributes",
+        "identity",
+        "literal",
+        "string_value",
+        "string_values",
+        "truth",
+        "classes",
+        "instance_classes",
+        "modules",
+        "callables",
+        "serialized_sections",
+        "accessed_attributes",
+        "unresolved_callables",
+        "unknown_alternative",
+    ):
+        _reserve_join_output(output_work, 1, "unknown_alternative_field_comparison")
+        if getattr(value, field_name) != getattr(_UNKNOWN_VALUE, field_name):
+            return False
+    return True
+
+
+def _join_values(
+    *values: _AbstractValue,
+    _depth: int = 0,
+    _work: list[int] | None = None,
+    _validation_context: _JoinValidationContext | None = None,
+    _same_identity: bool | None = None,
+    _prevalidated_group: _JoinOperandGroup | None = None,
+    _output_work: list[int] | None = None,
+    _proof_context: _JoinValidationContext | None = None,
+) -> _AbstractValue:
+    if _proof_context is None and _validation_context is not None:
+        _proof_context = _validation_context
+    if len(values) > _MAX_ABSTRACT_OPERATION_WORK:
+        raise _AnalysisLimitError(
+            f"abstract join operand count exceeds {_MAX_ABSTRACT_OPERATION_WORK}",
+            diagnostics={
+                "function": "_join_values",
+                "boundary": "join_fanin",
+                "root_count": len(values),
+            },
+        )
+    if _output_work is None:
+        _output_work = _validation_context.output_work if _validation_context is not None else [0]
+    _reserve_join_output(_output_work, len(values), "operand_scan")
+    same_identity = (
+        _same_identity
+        if _same_identity is not None
+        else bool(values) and all(value is values[0] for value in values)
+    )
+    original_values = tuple(values)
+    if _validation_context is not None and _same_identity is None:
+        _validation_context.identity_scans[0] += len(values)
+        if _validation_context.identity_scans[0] > _MAX_ABSTRACT_OPERATION_WORK:
+            raise _AnalysisLimitError(
+                f"abstract join identity scan exceeds {_MAX_ABSTRACT_OPERATION_WORK}",
+                diagnostics={
+                    "function": "_join_values",
+                    "boundary": "join_identity_scan",
+                    "scan_count": _validation_context.identity_scans[0],
+                },
+            )
+    if _work is None:
+        prevalidated = (
+            _validation_context is not None
+            and _prevalidated_group is not None
+            and _prevalidated_group.validation_token is _validation_context.validation_token
+            and _prevalidated_group.same_identity == same_identity
+            and len(_prevalidated_group.values) == len(values)
+            and all(
+                left is right
+                for left, right in zip(_prevalidated_group.values, values, strict=True)
+            )
+        )
+        if not prevalidated:
+            validation_options = (
+                {
+                    "_shared_memo": (
+                        _validation_context.memo
+                        if same_identity
+                        else _validation_context.mixed_memo
+                    ),
+                    "_shared_work": _validation_context.work,
+                }
+                if _validation_context is not None
+                else {}
+            )
+            if same_identity:
+                _validate_abstract_values(
+                    (values[0],),
+                    aggregate_limit=(_MAX_ABSTRACT_EXPANDED_VALUE_WORK),
+                    allow_collection_roots=values[0]._collection_root,
+                    boundary="join_identity",
+                    _join_output_work=_output_work,
+                    **validation_options,
+                )
+            else:
+                _validate_abstract_values(
+                    values,
+                    aggregate_limit=_MAX_ABSTRACT_EXPANDED_VALUE_WORK,
+                    boundary="join_input",
+                    allow_collection_roots=True,
+                    _join_output_work=_output_work,
+                    **validation_options,
+                )
+        _work = _validation_context.join_work if _validation_context is not None else [0]
+    if _depth > _MAX_ABSTRACT_DEPTH:
+        raise _AnalysisLimitError(f"abstract join depth exceeds {_MAX_ABSTRACT_DEPTH}")
+    start_work = _work[0]
+    start_output_work = _output_work[0]
+    memo_key = (
+        _join_result_memo_key(tuple(values), _depth, same_identity)
+        if _validation_context is not None
+        else None
+    )
+    if memo_key is not None:
+        cached = _validation_context.result_memo.get(memo_key)
+        if (
+            cached is not None
+            and len(cached.operands) == len(values)
+            and all(left is right for left, right in zip(cached.operands, values, strict=True))
+        ):
+            # The original construction charge remains in this operation's
+            # cumulative counter. A hit scans identities (charged at entry);
+            # retained result size is bounded by result_graph_* below.
+            _work[0] += cached.join_work
+            if _work[0] > _MAX_ABSTRACT_WORK:
+                raise _AnalysisLimitError(f"abstract join work exceeds {_MAX_ABSTRACT_WORK}")
+            return cached.result
+    _work[0] += 1
+    if _work[0] > _MAX_ABSTRACT_WORK:
+        raise _AnalysisLimitError(f"abstract join work exceeds {_MAX_ABSTRACT_WORK}")
     if not values:
         return _UNKNOWN_VALUE
-    if all(value is values[0] for value in values):
+    if same_identity:
         return values[0]
     if _depth >= 8 and not any(
         _contained_origins(value) & ({_CONFIG_ROOT} | TRACKED_SECTIONS) for value in values
     ):
+        _reserve_join_output(
+            _output_work,
+            sum(_abstract_overhead(value) for value in values),
+            "conservative_value_copy",
+        )
         values = tuple(_conservative_value(value) for value in values)
+    # The following frozenset unions scan each operand collection and can
+    # retain at most their summed widths. Charge scans, retained entries, and
+    # bounded UTF-8 payload before invoking C-level union loops.
+    covered_scalar_groups: list[frozenset[str] | None]
+    union_bound = 0
+    payload_bound = 0
+    string_values_payload_bound = 0
+    for field_name in (
+        "origins",
+        "identity",
+        "string_values",
+        "classes",
+        "instance_classes",
+        "modules",
+        "serialized_sections",
+        "accessed_attributes",
+    ):
+        width = sum(len(getattr(value, field_name)) for value in values)
+        union_bound += width * 2
+        if field_name in {
+            "origins",
+            "string_values",
+            "modules",
+            "serialized_sections",
+            "accessed_attributes",
+        }:
+            _reserve_join_output(_output_work, width, f"{field_name}_payload_scan")
+            if field_name == "string_values":
+                # Reuse the required item scan to retain exact scalar coverage.
+                # Reserve all per-operand plans before allocation or selection.
+                _reserve_join_output(
+                    _output_work, len(values) * 4, "string_value_coverage_plan"
+                )
+                covered_scalar_groups = [None] * len(values)
+                for value_index, value in enumerate(values):
+                    exact_group = type(value.string_values) is frozenset
+                    scalar = value.string_value
+                    for item in value.string_values:
+                        if type(item) is not str:
+                            raise _AnalysisLimitError(
+                                "abstract join received unsupported string_values item",
+                                diagnostics={
+                                    "function": "_join_values",
+                                    "boundary": "string_values_type",
+                                },
+                            )
+                        payload_bound += len(item) * 4
+                        string_values_payload_bound += len(item) * 4
+                        if exact_group and type(scalar) is str and item is scalar:
+                            covered_scalar_groups[value_index] = value.string_values
+            else:
+                payload_bound += sum(
+                    len(item) * 4
+                    for value in values
+                    for item in getattr(value, field_name)
+                    if isinstance(item, str)
+                )
+    cached_string_representatives = _plan_cached_string_union(
+        values, covered_scalar_groups, _output_work, string_values_payload_bound
+    )
+    if cached_string_representatives is not None:
+        # The explicit cached-hash plan replaces the C union and its payload
+        # comparisons; the original width and retained-text charges remain.
+        payload_bound -= string_values_payload_bound
+    _reserve_join_output(_output_work, union_bound + payload_bound, "metadata_union")
+    normalized_string_values = (
+        frozenset(cached_string_representatives.values())
+        if cached_string_representatives is not None
+        else None
+    )
     origins = frozenset().union(*(value.origins for value in values))
 
     known_items = [value.items for value in values if value.items is not None]
     items: tuple[_AbstractValue, ...] | None = None
     if known_items:
+        _reserve_join_output(
+            _output_work,
+            sum(len(candidate) for candidate in known_items)
+            + len(known_items) * len(known_items[0]),
+            "positional_items",
+        )
         lengths = {len(candidate) for candidate in known_items}
         if len(lengths) == 1:
             items = tuple(
-                _join_values(*position, _depth=_depth + 1)
+                _join_values(
+                    *position,
+                    _depth=_depth + 1,
+                    _work=_work,
+                    _output_work=_output_work,
+                    _proof_context=_proof_context,
+                )
                 for position in zip(*known_items, strict=True)
             )
         else:
@@ -689,20 +1992,42 @@ def _join_values(*values: _AbstractValue, _depth: int = 0) -> _AbstractValue:
                 _join_values(
                     *(item for candidate in known_items for item in candidate),
                     _depth=_depth + 1,
+                    _work=_work,
+                    _output_work=_output_work,
+                    _proof_context=_proof_context,
                 ),
             )
 
     def join_named(
         groups: Iterable[tuple[tuple[str, _AbstractValue], ...] | None],
     ) -> tuple[tuple[str, _AbstractValue], ...] | None:
-        known = [dict(group) for group in groups if group is not None]
+        raw_groups = tuple(groups)
+        _reserve_join_output(
+            _output_work,
+            sum(len(group) for group in raw_groups if group is not None) + len(raw_groups),
+            "named_mapping_copy",
+        )
+        known = [dict(group) for group in raw_groups if group is not None]
         if not known:
             return None
+        _reserve_join_output(
+            _output_work,
+            sum(len(group) for group in known) * 2
+            + sum(len(name) * 4 for group in known for name in group),
+            "named_key_union",
+        )
         names = set().union(*(group.keys() for group in known))
+        _reserve_join_output(_output_work, len(names) * len(known), "named_key_lookup")
         return tuple(
             (
                 name,
-                _join_values(*(group[name] for group in known if name in group), _depth=_depth + 1),
+                _join_values(
+                    *(group[name] for group in known if name in group),
+                    _depth=_depth + 1,
+                    _work=_work,
+                    _output_work=_output_work,
+                    _proof_context=_proof_context,
+                ),
             )
             for name in sorted(names)
         )
@@ -710,11 +2035,30 @@ def _join_values(*values: _AbstractValue, _depth: int = 0) -> _AbstractValue:
     def join_entries(
         groups: Iterable[tuple[tuple[str, _AbstractValue], ...] | None],
     ) -> tuple[tuple[str, _AbstractValue], ...] | None:
-        raw = list(groups)
+        raw = tuple(groups)
+        _reserve_join_output(
+            _output_work,
+            len(raw) + sum(len(group) for group in raw if group is not None),
+            "entry_mapping_copy",
+        )
         if not any(group is not None for group in raw):
             return None
         mappings = [dict(group or ()) for group in raw]
+        key_width = sum(len(mapping) for mapping in mappings)
+        key_payload = sum(
+            len(key) * 4 for mapping in mappings for key in mapping if isinstance(key, str)
+        )
+        _reserve_join_output(
+            _output_work,
+            key_width * 2 + key_payload,
+            "entry_key_union",
+        )
         names = set().union(*(group.keys() for group in mappings))
+        _reserve_join_output(
+            _output_work,
+            len(names) * len(mappings) * 2 + len(names) * 2,
+            "entry_key_lookup_and_candidates",
+        )
         missing = _origin_value(_MAPPING_MISSING)
         joined: list[tuple[str, _AbstractValue]] = []
         for name in sorted(names):
@@ -724,58 +2068,212 @@ def _join_values(*values: _AbstractValue, _depth: int = 0) -> _AbstractValue:
                     possibilities.append(group[name])
                 elif name != _DYNAMIC_KEY and _DYNAMIC_KEY in group:
                     possibilities.append(
-                        _join_values(group[_DYNAMIC_KEY], missing, _depth=_depth + 1)
+                        _join_values(
+                            group[_DYNAMIC_KEY],
+                            missing,
+                            _depth=_depth + 1,
+                            _work=_work,
+                            _output_work=_output_work,
+                            _proof_context=_proof_context,
+                        )
                     )
                 else:
                     possibilities.append(missing)
-            joined.append((name, _join_values(*possibilities, _depth=_depth + 1)))
+            joined.append(
+                (
+                    name,
+                    _join_values(
+                        *possibilities,
+                        _depth=_depth + 1,
+                        _work=_work,
+                        _output_work=_output_work,
+                        _proof_context=_proof_context,
+                    ),
+                )
+            )
         return tuple(joined)
 
     callables: list[_CallableTarget] = []
+    callable_count = sum(len(value.callables) for value in values)
+    _reserve_join_output(_output_work, callable_count * 3, "callable_dedup")
+    callable_seen: set[_CallableTarget] = set()
+    target_ids: set[int] = set()
+    unique_targets: list[_CallableTarget] = []
     for value in values:
         for target in value.callables:
-            if target not in callables:
-                callables.append(target)
+            target_id = id(target)
+            if target_id not in target_ids:
+                target_ids.add(target_id)
+                unique_targets.append(target)
 
-    return _AbstractValue(
-        origins=origins,
-        unknown_alternative=any(
-            value == _UNKNOWN_VALUE or value.unknown_alternative for value in values
-        ),
-        items=items,
-        entries=join_entries(value.entries for value in values),
-        attributes=join_named(value.attributes for value in values),
-        identity=frozenset().union(*(value.identity for value in values)),
-        literal=(
-            values[0].literal
-            if all(value.literal == values[0].literal for value in values)
-            else None
-        ),
-        string_value=(
-            values[0].string_value
-            if all(value.string_value == values[0].string_value for value in values)
-            else None
-        ),
-        string_values=frozenset().union(
-            *(
-                value.string_values
-                | ({value.string_value} if value.string_value is not None else set())
-                for value in values
+    receiver_profiles: list[int] = []
+    uncached_receivers: list[_AbstractValue] = []
+    for target in unique_targets:
+        receiver = target.receiver
+        if receiver is None:
+            receiver_profiles.append(1)
+            continue
+        receiver_cache = _get_validation_cache_entry(id(receiver))
+        if receiver_cache is not None and receiver_cache.root is receiver:
+            _reserve_join_output(
+                _output_work,
+                len(receiver_cache.nodes),
+                "callable_receiver_profile_scan",
             )
-        ),
-        truth=(
+            string_items = sum(
+                _abstract_string_item_count(summary.value)
+                for summary in receiver_cache.nodes
+                if isinstance(summary.value, _AbstractValue)
+            )
+            _reserve_join_output(
+                _output_work,
+                string_items,
+                "callable_receiver_string_scan",
+            )
+            receiver_profiles.append(
+                receiver_cache.cost
+                + sum(
+                    _abstract_string_payload_bytes(summary.value)
+                    for summary in receiver_cache.nodes
+                    if isinstance(summary.value, _AbstractValue)
+                )
+            )
+        else:
+            uncached_receivers.append(receiver)
+    for receiver in uncached_receivers:
+        # Retain the validated identity graph locally: a cache miss still
+        # needs the same string-payload bound before callable hashing.
+        receiver_memo: dict[int, tuple[_AbstractValue, int, int]] = {}
+        receiver_cost, _ = _validate_abstract_values(
+            (receiver,),
+            allow_collection_roots=True,
+            boundary="callable_receiver_profile",
+            _shared_memo=receiver_memo,
+            _join_output_work=_output_work,
+        )
+        _reserve_join_output(_output_work, len(receiver_memo), "callable_receiver_profile_scan")
+        string_items = sum(
+            _abstract_string_item_count(value) for value, _, _ in receiver_memo.values()
+        )
+        _reserve_join_output(_output_work, string_items, "callable_receiver_string_scan")
+        receiver_profiles.append(
+            receiver_cost
+            + sum(_abstract_string_payload_bytes(value) for value, _, _ in receiver_memo.values())
+        )
+    callable_hash_bound = len(unique_targets) * sum(receiver_profiles)
+    _reserve_join_output(_output_work, callable_hash_bound, "callable_hash_and_equality")
+    for target in unique_targets:
+        if target not in callable_seen:
+            callable_seen.add(target)
+            callables.append(target)
+
+    unresolved_count = sum(len(value.unresolved_callables) for value in values)
+    unresolved_payload = sum(
+        len(field) * 4
+        for value in values
+        for target in value.unresolved_callables
+        for field in (target.decorator_name, target.module_name, target.kind)
+    )
+    _reserve_join_output(
+        _output_work,
+        unresolved_count * 2 + unresolved_payload,
+        "unresolved_callable_dedup",
+    )
+
+    # Constructor validation walks the new graph after construction. Reserve
+    # its direct graph and metadata upper bound now, before retaining the result.
+    _reserve_join_output(
+        _output_work,
+        sum(_abstract_overhead(value) for value in values),
+        "result_construction_and_validation",
+    )
+    unknown_alternative = any(
+        _equals_unknown_value(value, _output_work) or value.unknown_alternative for value in values
+    )
+    joined_literal = _joined_scalar_string(values, "literal", _output_work)
+    joined_string_value = _joined_scalar_string(values, "string_value", _output_work)
+    uncovered_scalar_values = tuple(
+        value
+        for value, covered_group in zip(values, covered_scalar_groups, strict=True)
+        if covered_group is None
+    )
+    _reserve_join_string_value_work(uncovered_scalar_values, _output_work)
+    joined_string_values = normalized_string_values
+    if joined_string_values is None:
+        joined_string_values = frozenset().union(
+            *(
+                covered_group
+                if covered_group is not None
+                else value.string_values
+                | ({value.string_value} if value.string_value is not None else set())
+                for value, covered_group in zip(values, covered_scalar_groups, strict=True)
+            )
+        )
+    _reserve_join_retained_string_payload(joined_string_values, joined_literal, _output_work)
+
+    result_fields = {
+        "origins": origins,
+        "unknown_alternative": unknown_alternative,
+        "items": items,
+        "entries": join_entries(value.entries for value in values),
+        "attributes": join_named(value.attributes for value in values),
+        "identity": frozenset().union(*(value.identity for value in values)),
+        "literal": joined_literal,
+        "string_value": joined_string_value,
+        "string_values": joined_string_values,
+        "truth": (
             values[0].truth if all(value.truth == values[0].truth for value in values) else None
         ),
-        classes=frozenset().union(*(value.classes for value in values)),
-        instance_classes=frozenset().union(*(value.instance_classes for value in values)),
-        modules=frozenset().union(*(value.modules for value in values)),
-        callables=tuple(callables),
-        serialized_sections=frozenset().union(*(value.serialized_sections for value in values)),
-        accessed_attributes=frozenset().union(*(value.accessed_attributes for value in values)),
-        unresolved_callables=tuple(
-            target for value in values for target in value.unresolved_callables
+        "classes": frozenset().union(*(value.classes for value in values)),
+        "instance_classes": frozenset().union(*(value.instance_classes for value in values)),
+        "modules": frozenset().union(*(value.modules for value in values)),
+        "callables": tuple(callables),
+        "serialized_sections": frozenset().union(*(value.serialized_sections for value in values)),
+        "accessed_attributes": frozenset().union(*(value.accessed_attributes for value in values)),
+        "unresolved_callables": tuple(
+            dict.fromkeys(target for value in values for target in value.unresolved_callables)
         ),
+    }
+    memo_admission = (
+        memo_key is not None
+        and _validation_context is not None
+        and len(_validation_context.result_memo) < _MAX_ABSTRACT_OPERATION_WORK
     )
+    result = _join_result_from_scoped_proofs(
+        result_fields,
+        _output_work,
+        _proof_context,
+        _validation_context if memo_admission else None,
+    )
+    used_scoped_proof = result is not None
+    if result is None:
+        if _proof_context is not None and _proof_context.snapshot_profiles is not None:
+            _flush_snapshot_memo_graph(_proof_context, _output_work)
+            _proof_context.snapshot_profiles = None
+            _proof_context.snapshot_nodes = None
+        _reserve_join_result_validation_work(
+            result_fields, _output_work, memo_admission=memo_admission
+        )
+        result = _AbstractValue(**result_fields)
+    if memo_key is not None:
+        if len(_validation_context.result_memo) < _MAX_ABSTRACT_OPERATION_WORK:
+            if not used_scoped_proof:
+                _validate_abstract_values(
+                    (result,),
+                    aggregate_limit=_MAX_ABSTRACT_EXPANDED_VALUE_WORK,
+                    allow_collection_roots=True,
+                    boundary="join_result_memo",
+                    _shared_graph_nodes=_validation_context.result_graph_nodes,
+                    _shared_graph_edges=_validation_context.result_graph_edges,
+                    _shared_graph_metadata=_validation_context.result_graph_metadata,
+                )
+            _validation_context.result_memo[memo_key] = _JoinResultMemoEntry(
+                original_values,
+                result,
+                _work[0] - start_work,
+                _output_work[0] - start_output_work,
+            )
+    return result
 
 
 def _key_token(node: ast.AST) -> str:
@@ -785,11 +2283,385 @@ def _key_token(node: ast.AST) -> str:
 _DYNAMIC_KEY = "**"
 _MAPPING_MISSING = "<mapping-missing>"
 _FunctionSet = frozenset[_FunctionNode]
-_BindingSnapshot = tuple[
-    dict[str, _AbstractValue],
-    dict[str, _FunctionSet],
-    dict[str, _AbstractValue],
-]
+
+
+class _SnapshotNodeProof(NamedTuple):
+    value: _AbstractValue
+    cost: int
+    depth: int
+    overhead: int
+    metadata: int
+    children: tuple[_AbstractValue, ...]
+    fields: tuple[object, ...]
+    records: tuple[tuple[object, tuple[object, ...]], ...]
+
+
+class _SnapshotProof(NamedTuple):
+    token: object
+    roots: tuple[tuple[tuple[str, _AbstractValue], ...], ...]
+    nodes: tuple[_SnapshotNodeProof, ...]
+
+
+_SNAPSHOT_PROOF_TOKEN = object()
+_SNAPSHOT_VALUE_FIELDS = tuple(_AbstractValue.__dataclass_fields__)
+
+
+@dataclass(frozen=True, eq=False)
+class _ProvenBindingSnapshot:
+    """Three binding slots plus a bounded, private completed-validation proof."""
+
+    slots: tuple
+    proof: _SnapshotProof
+
+    def __iter__(self):
+        return iter(self.slots)
+
+    def __len__(self):
+        return 3
+
+    def __getitem__(self, key):
+        return self.slots[key]
+
+    def __eq__(self, other):
+        if type(other) is _ProvenBindingSnapshot:
+            other = other.slots
+        if type(other) is tuple:
+            return self.slots == other
+        return NotImplemented
+
+    __hash__ = None
+
+
+def _snapshot_immutable_fields(value: _AbstractValue) -> tuple | None:
+    # frozen=True alone is insufficient: callers can supply lists or bypass
+    # __setattr__. Restrict proof reuse to exact immutable container shapes,
+    # then retain every field identity to detect even forced reassignment.
+    if type(value) is not _AbstractValue:
+        return None
+    for name in (
+        "origins",
+        "identity",
+        "string_values",
+        "classes",
+        "instance_classes",
+        "modules",
+        "serialized_sections",
+        "accessed_attributes",
+    ):
+        group = getattr(value, name)
+        if type(group) is not frozenset:
+            return None
+        if name not in ("classes", "instance_classes"):
+            expected = int if name == "identity" else str
+            if any(type(item) is not expected for item in group):
+                return None
+    if value.items is not None and type(value.items) is not tuple:
+        return None
+    for group in (value.entries, value.attributes):
+        if group is not None and (
+            type(group) is not tuple
+            or any(
+                type(pair) is not tuple or len(pair) != 2 or type(pair[0]) is not str
+                for pair in group
+            )
+        ):
+            return None
+    if any(
+        candidate is not None and type(candidate) is not str
+        for candidate in (value.literal, value.string_value)
+    ):
+        return None
+    if value.truth is not None and type(value.truth) is not bool:
+        return None
+    if type(value.unknown_alternative) is not bool or type(value._collection_root) is not bool:
+        return None
+    records = []
+    for group, expected in (
+        (value.callables, _CallableTarget),
+        (value.unresolved_callables, _UnresolvedCallable),
+    ):
+        if type(group) is not tuple:
+            return None
+        for record in group:
+            if type(record) is not expected:
+                return None
+            if expected is _UnresolvedCallable and (
+                type(record.decorator_name) is not str
+                or type(record.module_name) is not str
+                or type(record.line) is not int
+                or type(record.kind) is not str
+            ):
+                return None
+            members = tuple(getattr(record, name) for name in expected.__dataclass_fields__)
+            records.append((record, members))
+    return tuple(getattr(value, name) for name in _SNAPSHOT_VALUE_FIELDS), tuple(records)
+
+
+def _snapshot_with_proof(slots, profiles, output_work=None):
+    # Building an optional proof may stop before its next scan reservation.
+    # Already admitted bindings remain usable through the legacy path.
+    try:
+        return _build_snapshot_proof(
+            slots, profiles, output_work if output_work is not None else [0]
+        )
+    except _AnalysisLimitError:
+        return slots
+
+
+def _build_snapshot_proof(slots, profiles, output_work):
+    """Publish summaries only from completed profiles; never revalidate values.
+
+    A result without a bounded proof remains a legacy three-slot tuple. The
+    optional proof therefore adds no new admission restriction to join outputs.
+    """
+    if output_work is not None:
+        _reserve_join_output(
+            output_work, 2 * sum(len(slots[slot]) for slot in (0, 2)), "snapshot_proof_roots"
+        )
+    roots = tuple(tuple(slots[slot].items()) for slot in (0, 2))
+    if any(type(name) is not str for group in roots for name, _ in group):
+        return slots
+    pending = [value for group in roots for _, value in group]
+    nodes = {}
+    edges = metadata = 0
+    while pending:
+        if output_work is not None:
+            _reserve_join_output(output_work, 2, "snapshot_proof_build_lookup")
+        value = pending.pop()
+        key = id(value)
+        if key in nodes:
+            continue
+        profile = profiles.get(key)
+        if profile is None or profile[0] is not value:
+            return slots
+        overhead, width = _abstract_overhead(value), _abstract_metadata_width(value)
+        if output_work is not None:
+            _reserve_join_output(
+                output_work,
+                len(_SNAPSHOT_VALUE_FIELDS) * 2 + overhead * 3 + width * 2,
+                "snapshot_proof_build_node",
+            )
+        signature = _snapshot_immutable_fields(value)
+        if signature is None:
+            return slots
+        children = tuple(_abstract_children(value))
+        nodes[key] = _SnapshotNodeProof(
+            value, profile[1], profile[2], overhead, width, children, *signature
+        )
+        edges += len(children)
+        metadata += width
+        if (
+            len(nodes) > _MAX_ABSTRACT_GRAPH_NODES
+            or edges > min(_MAX_ABSTRACT_GRAPH_EDGES, _MAX_ABSTRACT_OPERATION_WORK)
+            or metadata > _MAX_ABSTRACT_GRAPH_METADATA
+        ):
+            return slots
+        pending.extend(children)
+    return _ProvenBindingSnapshot(
+        slots, _SnapshotProof(_SNAPSHOT_PROOF_TOKEN, roots, tuple(nodes.values()))
+    )
+
+
+def _snapshot_from_scoped_nodes(slots, node_proofs, output_work):
+    """Retain the output's reachable completed signatures without rescanning."""
+    if node_proofs is None:
+        return slots
+    try:
+        root_count = sum(len(slots[slot]) for slot in (0, 2))
+        _reserve_join_output(output_work, root_count * 3, "snapshot_output_proof_roots")
+        roots = tuple(tuple(slots[slot].items()) for slot in (0, 2))
+        pending = [value for group in roots for _, value in group]
+        nodes = {}
+        while pending:
+            _reserve_join_output(output_work, 2, "snapshot_output_proof_lookup")
+            value = pending.pop()
+            key = id(value)
+            if key in nodes:
+                continue
+            proof = node_proofs.get(key)
+            if proof is None or proof.value is not value:
+                return slots
+            _reserve_join_output(
+                output_work, len(proof.children) + 2, "snapshot_output_proof_edges"
+            )
+            nodes[key] = proof
+            pending.extend(proof.children)
+        _reserve_join_output(output_work, len(nodes), "snapshot_output_proof_materialization")
+        return _ProvenBindingSnapshot(
+            slots, _SnapshotProof(_SNAPSHOT_PROOF_TOKEN, roots, tuple(nodes.values()))
+        )
+    except _AnalysisLimitError:
+        return slots
+
+
+def _consume_snapshot_proofs(snapshots, plans, context) -> bool:
+    """Replace repeated expanded validation with bounded immutable-proof scans."""
+    eligible = bool(snapshots)
+    nodes = {}
+    seen_proofs = set()
+    for snapshot in snapshots:
+        if type(snapshot) is not _ProvenBindingSnapshot:
+            eligible = False
+            continue
+        proof = snapshot.proof
+        if type(proof) is not _SnapshotProof or proof.token is not _SNAPSHOT_PROOF_TOKEN:
+            eligible = False
+            continue
+        for slot, expected in zip((0, 2), proof.roots, strict=True):
+            state = snapshot[slot]
+            _reserve_join_output(
+                context.output_work, len(expected) * 2 + 1, "snapshot_proof_manifest"
+            )
+            if (
+                type(state) is not dict
+                or len(state) != len(expected)
+                or any(
+                    name is not old_name or value is not old_value
+                    for (name, value), (old_name, old_value) in zip(
+                        state.items(), expected, strict=True
+                    )
+                )
+            ):
+                eligible = False
+        if id(proof) in seen_proofs:
+            continue
+        seen_proofs.add(id(proof))
+        for node in proof.nodes:
+            _reserve_join_output(context.output_work, 3, "snapshot_proof_node_identity")
+            previous = nodes.get(id(node.value))
+            if previous is not None and previous.value is node.value:
+                # The first completed proof has already checked this exact
+                # immutable object's fields in this synchronous join. Keep its
+                # canonical physical summary rather than scanning fields again.
+                if previous.cost != node.cost or previous.depth != node.depth:
+                    raise _AnalysisLimitError("snapshot proof profiles disagree")
+                continue
+            _reserve_join_output(
+                context.output_work,
+                len(_SNAPSHOT_VALUE_FIELDS) * 2 + len(node.records) * 7 + 5,
+                "snapshot_proof_node_check",
+            )
+            if any(
+                getattr(node.value, name) is not expected
+                for name, expected in zip(_SNAPSHOT_VALUE_FIELDS, node.fields, strict=True)
+            ):
+                raise _AnalysisLimitError("snapshot proof value changed after validation")
+            for record, fields in node.records:
+                if any(
+                    getattr(record, name) is not expected
+                    for name, expected in zip(
+                        type(record).__dataclass_fields__, fields, strict=True
+                    )
+                ):
+                    raise _AnalysisLimitError("snapshot proof callable changed after validation")
+            nodes[id(node.value)] = node
+    if not eligible:
+        return False
+    _reserve_join_output(context.output_work, len(nodes) * 2, "snapshot_proof_current_limits")
+    for node in nodes.values():
+        if node.cost > _MAX_ABSTRACT_EXPANDED_VALUE_WORK:
+            raise _AnalysisLimitError(
+                f"abstract value expanded cost exceeds {_MAX_ABSTRACT_EXPANDED_VALUE_WORK}"
+            )
+        if node.depth > _MAX_ABSTRACT_DEPTH:
+            raise _AnalysisLimitError(f"abstract value depth exceeds {_MAX_ABSTRACT_DEPTH}")
+    # Missing bindings introduce one new scalar root. Validate it normally;
+    # unlike snapshot roots it has no completed snapshot proof to reuse.
+    _reserve_join_output(
+        context.output_work, context.operand_references[0], "snapshot_proof_root_membership"
+    )
+    missing = {
+        id(value): value
+        for plan in plans
+        for group in plan.values()
+        for value in group.values
+        if id(value) not in nodes
+    }
+    if missing:
+        if len(missing) != 1 or next(iter(missing.values())) is not _UNKNOWN_VALUE:
+            return False
+        profiles = {}
+        _validate_abstract_values(
+            (_UNKNOWN_VALUE,),
+            allow_collection_roots=True,
+            _shared_memo=profiles,
+            _join_output_work=context.output_work,
+        )
+        extra = _snapshot_with_proof(({"": _UNKNOWN_VALUE}, {}, {}), profiles, context.output_work)
+        if type(extra) is not _ProvenBindingSnapshot:
+            return False
+        for node in extra.proof.nodes:
+            nodes[id(node.value)] = node
+    _reserve_join_output(context.output_work, len(nodes) * 3, "snapshot_proof_graph_totals")
+    edges = sum(len(node.children) for node in nodes.values())
+    metadata = sum(node.metadata for node in nodes.values())
+    if len(nodes) > _MAX_ABSTRACT_GRAPH_NODES:
+        raise _AnalysisLimitError("abstract graph node limit exceeded")
+    if edges > _MAX_ABSTRACT_GRAPH_EDGES:
+        raise _AnalysisLimitError("abstract graph edge limit exceeded")
+    if metadata > _MAX_ABSTRACT_GRAPH_METADATA:
+        raise _AnalysisLimitError("abstract graph metadata limit exceeded")
+    if edges > _MAX_ABSTRACT_OPERATION_WORK:
+        raise _AnalysisLimitError(
+            f"abstract value traversal exceeds {_MAX_ABSTRACT_OPERATION_WORK}"
+        )
+    unique = set()
+    unique_cost = 0
+    for plan in plans:
+        for group in plan.values():
+            checked = group.values[:1] if group.same_identity else group.values
+            _reserve_join_output(context.output_work, len(checked) * 2, "snapshot_proof_group_cost")
+            if (
+                not group.same_identity
+                and sum(nodes[id(value)].cost for value in checked)
+                > _MAX_ABSTRACT_EXPANDED_VALUE_WORK
+            ):
+                raise _AnalysisLimitError(
+                    f"abstract aggregate expanded cost exceeds {_MAX_ABSTRACT_EXPANDED_VALUE_WORK}"
+                )
+            if group.same_identity:
+                pending = list(checked)
+                while pending:
+                    _reserve_join_output(context.output_work, 2, "snapshot_proof_unique_lookup")
+                    node = nodes[id(pending.pop())]
+                    key = id(node.value)
+                    if key in unique:
+                        continue
+                    _reserve_join_output(
+                        context.output_work, len(node.children) + 2, "snapshot_proof_unique_edges"
+                    )
+                    unique.add(key)
+                    unique_cost += node.overhead
+                    if unique_cost > _MAX_ABSTRACT_GRAPH_METADATA:
+                        raise _AnalysisLimitError(
+                            f"abstract aggregate expanded cost exceeds {_MAX_ABSTRACT_GRAPH_METADATA}"
+                        )
+                    pending.extend(node.children)
+    _reserve_join_output(context.output_work, len(nodes) * 5, "snapshot_proof_context_seed")
+    profiles = {key: (node.value, node.cost, node.depth) for key, node in nodes.items()}
+    context.memo.update((key, profiles[key]) for key in unique)
+    context.mixed_memo.update(profiles)
+    context.snapshot_profiles = dict(profiles)
+    context.snapshot_nodes = dict(nodes)
+    context.snapshot_factory_edges = edges
+    context.snapshot_factory_metadata = metadata
+    context.unique_nodes.update(unique)
+    context.unique_cost[0] = unique_cost
+    context.graph_nodes.update(nodes)
+    context.graph_edges[0] = edges
+    context.graph_metadata[0] = metadata
+    context.work[0] = edges
+    return True
+
+
+_BindingSnapshot = (
+    _ProvenBindingSnapshot
+    | tuple[
+        dict[str, _AbstractValue],
+        dict[str, _FunctionSet],
+        dict[str, _AbstractValue],
+    ]
+)
 
 
 @dataclass(frozen=True)
@@ -1377,6 +3249,24 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self.reads: set[ConfigField] = set()
         self.unresolved_semantics: set[str] = set()
 
+    def visit(self, node: ast.AST) -> object:
+        try:
+            return super().visit(node)
+        except _AnalysisLimitError as error:
+            if error.located:
+                raise
+            raise _AnalysisLimitError(
+                f"{self._module.name}:{getattr(node, 'lineno', 0)}: {error}", located=True
+            ) from error
+
+    @staticmethod
+    def _check_loop_iteration(node: ast.For | ast.While, iteration: int) -> None:
+        if iteration > _MAX_ANALYSIS_ITERATIONS:
+            raise _AnalysisLimitError(
+                f"{type(node).__name__} analysis did not converge within "
+                f"{_MAX_ANALYSIS_ITERATIONS} iterations"
+            )
+
     def _syntactically_mentions_tracked_config(
         self, node: ast.AST, bound_arguments: dict[str, _AbstractValue] | None = None
     ) -> bool:
@@ -1503,8 +3393,19 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
 
         pending = [(node, bound_arguments)]
         visited = set()
+        work = 0
         while pending:
+            work += 1
+            if work > _MAX_ABSTRACT_WORK:
+                raise _AnalysisLimitError(
+                    f"bound callable relevance exceeds {_MAX_ABSTRACT_WORK} steps"
+                )
             candidate, scoped = pending.pop()
+            _validate_abstract_values(
+                scoped.values(),
+                aggregate_limit=_MAX_ABSTRACT_EXPANDED_VALUE_WORK,
+                boundary="bound_relevance_key",
+            )
             # Recursive forwarding can wrap values indefinitely. Relevance needs
             # the finite provenance/callable state, not freshly allocated shapes.
             key = (
@@ -1984,15 +3885,32 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     def _is_accessor_callback(value: _AbstractValue) -> bool:
         return bool(value.accessed_attributes or _GETATTR_BUILTIN in value.origins)
 
+    def _record_builtin_accessor_name(
+        self,
+        receiver: _AbstractValue,
+        field_value: _AbstractValue,
+        *,
+        line: int = 0,
+        record_reads: bool = True,
+    ) -> None:
+        sections = receiver.origins & TRACKED_SECTIONS
+        if sections and (field_value == _UNKNOWN_VALUE or field_value.unknown_alternative):
+            self.unresolved_semantics.add(
+                f"{self._module.name}:{line}: unresolved builtin accessor field name"
+            )
+        if record_reads:
+            for field_name in field_value.string_values:
+                for section in sections:
+                    self._record(section, field_name)
+
     def _consume_accessor_callback(
         self, callback: _AbstractValue, arguments: tuple[_AbstractValue, ...]
     ) -> None:
         """Apply modeled builtin/accessor callbacks to their runtime arguments."""
         if _GETATTR_BUILTIN in callback.origins and len(arguments) >= 2:
-            field_name = arguments[1].string_value
-            if field_name is not None:
-                for section in arguments[0].origins & TRACKED_SECTIONS:
-                    self._record(section, field_name)
+            self._record_builtin_accessor_name(arguments[0], arguments[1])
+        elif _HASATTR_BUILTIN in callback.origins and len(arguments) >= 2:
+            self._record_builtin_accessor_name(arguments[0], arguments[1], record_reads=False)
         for field_name in callback.accessed_attributes:
             first = field_name.partition(".")[0]
             for argument in arguments:
@@ -2828,7 +4746,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 if _callable_name(node.func) in {"filter", "map"} and node.args:
                     callback_value = self._expression_value(node.args[0])
                     callbacks = self._call_targets(node.args[0])
-                    if callbacks or self._is_accessor_callback(callback_value):
+                    modeled_callback = callbacks or self._is_accessor_callback(callback_value)
+                    if modeled_callback or _HASATTR_BUILTIN in callback_value.origins:
                         identity = id(node)
                         self._deferred_callable_iterators[identity] = _DeferredCallableIterator(
                             callbacks=tuple(
@@ -2840,6 +4759,13 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                                 self._expression_value(argument) for argument in iterable_arguments
                             ),
                         )
+                        if not modeled_callback:
+                            # Keep the existing unsupported-callback value model. The
+                            # stable identity only defers uncertainty until consumption.
+                            fallback = _join_values(
+                                *(self._expression_value(arg) for arg in iterable_arguments)
+                            )
+                            return replace(fallback, identity=fallback.identity | {identity})
                         return _AbstractValue(identity=frozenset({identity}))
                 return _join_values(
                     *(self._expression_value(argument) for argument in iterable_arguments)
@@ -2880,8 +4806,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     else _UNKNOWN_VALUE
                 )
                 callbacks = self._call_targets(callback_node) if callback_node is not None else ()
+                modeled_callback = callbacks or self._is_accessor_callback(callback_value)
                 if callback_node is not None and (
-                    callbacks or self._is_accessor_callback(callback_value)
+                    modeled_callback or _HASATTR_BUILTIN in callback_value.origins
                 ):
                     identity = id(node)
                     self._deferred_callable_iterators[identity] = _DeferredCallableIterator(
@@ -2892,6 +4819,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                         iterables=(self._expression_value(node.args[0]),),
                         accumulate=True,
                     )
+                    if not modeled_callback:
+                        fallback = self._expression_value(node.args[0])
+                        return replace(fallback, identity=fallback.identity | {identity})
                     return _AbstractValue(identity=frozenset({identity}))
                 return self._expression_value(node.args[0])
             itertools_factory = next(
@@ -2914,7 +4844,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 if callback_node is not None and iterable_node is not None:
                     callback_value = self._expression_value(callback_node)
                     callbacks = self._call_targets(callback_node)
-                    if callbacks or self._is_accessor_callback(callback_value):
+                    modeled_callback = callbacks or self._is_accessor_callback(callback_value)
+                    if modeled_callback or _HASATTR_BUILTIN in callback_value.origins:
                         identity = id(node)
                         self._deferred_callable_iterators[identity] = _DeferredCallableIterator(
                             callbacks=tuple(
@@ -2924,6 +4855,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                             callback_value=callback_value,
                             iterables=(self._expression_value(iterable_node),),
                         )
+                        if not modeled_callback:
+                            fallback = self._expression_value(iterable_node)
+                            return replace(fallback, identity=fallback.identity | {identity})
                         return _AbstractValue(identity=frozenset({identity}))
                 return (
                     self._expression_value(iterable_node)
@@ -3276,6 +5210,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 items=tuple(sequence_items),
                 identity=(frozenset({id(node)}) if isinstance(node, ast.List) else frozenset()),
                 truth=self._static_truth(node),
+                _collection_root=True,
             )
         if isinstance(node, ast.Dict):
             literal_entries: dict[str, _AbstractValue] = {}
@@ -3808,10 +5743,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             for field in self._fields:
                 self._record(field.section, field.name)
         if accessor.origins & {_GETATTR_BUILTIN, _HASATTR_BUILTIN} and len(accessor_arguments) >= 2:
-            field_names = accessor_arguments[1].string_values
-            for field_name in field_names:
-                for section in accessor_arguments[0].origins & TRACKED_SECTIONS:
-                    self._record(section, field_name)
+            self._record_builtin_accessor_name(
+                accessor_arguments[0], accessor_arguments[1], line=node.lineno
+            )
         if _OPERATOR_GETITEM in accessor.origins and len(accessor_arguments) >= 2:
             field_names = accessor_arguments[1].string_values
             for field_name in field_names:
@@ -4001,18 +5935,96 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     @staticmethod
     def _join_states(
         *states: Mapping[str, _AbstractValue],
+        _plan: Mapping[str, _JoinOperandGroup] | None = None,
+        _context: _JoinValidationContext | None = None,
     ) -> dict[str, _AbstractValue]:
-        names = set().union(*(state.keys() for state in states))
+        if _plan is not None and _context is not None and _plan is _context.state_plan:
+            # Preflight already scanned these exact keys and retained this plan.
+            names = _plan
+        else:
+            key_width = sum(len(state) for state in states)
+            if _context is not None:
+                _reserve_join_output(_context.output_work, key_width * 2, "binding_state_key_scan")
+                key_bytes = sum(len(name) * 4 for state in states for name in state)
+                _reserve_join_output(_context.output_work, key_bytes, "binding_state_key_bytes")
+            names = set().union(*(state.keys() for state in states))
+        if _context is not None:
+            _reserve_join_output(
+                _context.output_work,
+                len(names) * (len(states) + 1),
+                "binding_state_output_map",
+            )
         return {
-            name: _join_values(*(state.get(name, _UNKNOWN_VALUE) for state in states))
+            name: _join_values(
+                *(
+                    _plan[name].values
+                    if _plan is not None
+                    else (state.get(name, _UNKNOWN_VALUE) for state in states)
+                ),
+                _validation_context=_context,
+                _same_identity=_plan[name].same_identity if _plan is not None else None,
+                _prevalidated_group=_plan[name] if _plan is not None else None,
+            )
             for name in names
         }
 
     @staticmethod
     def _join_function_bindings(
         *states: Mapping[str, _FunctionSet],
+        _context: _JoinValidationContext | None = None,
     ) -> dict[str, _FunctionSet]:
-        names = set().union(*(state.keys() for state in states))
+        reused_names = None
+        if _context is not None and _context.function_plan_maps is not None:
+            _reserve_join_output(
+                _context.output_work,
+                len(states) + sum(len(keys) * 2 + 1 for keys in _context.function_plan_keys),
+                "binding_function_plan_identity_check",
+            )
+            if len(states) == len(_context.function_plan_maps) and all(
+                state is expected
+                and len(state) == len(keys)
+                and all(name is old for name, old in zip(state, keys, strict=True))
+                for state, expected, keys in zip(
+                    states, _context.function_plan_maps, _context.function_plan_keys, strict=True
+                )
+            ):
+                reused_names = _context.function_plan_names
+        if _context is not None:
+            _reserve_join_output(
+                _context.output_work,
+                len(states),
+                "binding_function_state_scan",
+            )
+            if reused_names is None:
+                entry_count = sum(len(state) for state in states)
+                _reserve_join_output(
+                    _context.output_work,
+                    entry_count * 2,
+                    "binding_function_key_scan",
+                )
+                key_bytes = sum(len(name) * 4 for state in states for name in state)
+                _reserve_join_output(
+                    _context.output_work,
+                    key_bytes,
+                    "binding_function_key_bytes",
+                )
+            function_refs = sum(len(functions) for state in states for functions in state.values())
+            _reserve_join_output(
+                _context.output_work,
+                function_refs * 2,
+                "binding_function_set_union",
+            )
+        names = (
+            reused_names
+            if reused_names is not None
+            else set().union(*(state.keys() for state in states))
+        )
+        if _context is not None:
+            _reserve_join_output(
+                _context.output_work,
+                len(names) * (len(states) + 1),
+                "binding_function_output_map",
+            )
         return {
             name: frozenset().union(*(state.get(name, frozenset()) for state in states))
             for name in names
@@ -4021,19 +6033,64 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     @staticmethod
     def _join_annotation_bindings(
         *states: Mapping[str, _AbstractValue],
+        _plan: Mapping[str, _JoinOperandGroup] | None = None,
+        _context: _JoinValidationContext | None = None,
     ) -> dict[str, _AbstractValue]:
-        names = set().union(*(state.keys() for state in states))
+        if _plan is not None and _context is not None and _plan is _context.annotation_plan:
+            # Preflight already scanned these exact keys and retained this plan.
+            names = _plan
+        else:
+            key_width = sum(len(state) for state in states)
+            if _context is not None:
+                _reserve_join_output(
+                    _context.output_work, key_width * 2, "binding_annotation_key_scan"
+                )
+                key_bytes = sum(len(name) * 4 for state in states for name in state)
+                _reserve_join_output(
+                    _context.output_work, key_bytes, "binding_annotation_key_bytes"
+                )
+            names = set().union(*(state.keys() for state in states))
+        if _context is not None:
+            _reserve_join_output(
+                _context.output_work,
+                len(names) * (len(states) + 1),
+                "binding_annotation_output_map",
+            )
         return {
-            name: _join_values(*(state.get(name, _UNKNOWN_VALUE) for state in states))
+            name: _join_values(
+                *(
+                    _plan[name].values
+                    if _plan is not None
+                    else (state.get(name, _UNKNOWN_VALUE) for state in states)
+                ),
+                _validation_context=_context,
+                _same_identity=_plan[name].same_identity if _plan is not None else None,
+                _prevalidated_group=_plan[name] if _plan is not None else None,
+            )
             for name in names
         }
 
     def _binding_snapshot(self) -> _BindingSnapshot:
-        return (
+        profiles: dict[int, tuple[_AbstractValue, int, int]] = {}
+        _validate_abstract_values(
+            (
+                value
+                for state in (self._states[-1], self._annotations[-1])
+                for value in state.values()
+            ),
+            aggregate_limit=_MAX_ABSTRACT_EXPANDED_VALUE_WORK,
+            boundary="binding_snapshot",
+            allow_collection_roots=True,
+            _unique_node_aggregate=True,
+            _unique_aggregate_limit=_MAX_ABSTRACT_GRAPH_METADATA,
+            _shared_memo=profiles,
+        )
+        slots = (
             dict(self._states[-1]),
             dict(self._functions[-1]),
             dict(self._annotations[-1]),
         )
+        return _snapshot_with_proof(slots, profiles)
 
     def _restore_bindings(self, snapshot: _BindingSnapshot) -> None:
         state, functions, annotations = snapshot
@@ -4042,11 +6099,187 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._annotations[-1] = dict(annotations)
 
     def _join_binding_snapshots(self, *snapshots: _BindingSnapshot) -> _BindingSnapshot:
-        return (
-            self._join_states(*(snapshot[0] for snapshot in snapshots)),
-            self._join_function_bindings(*(snapshot[1] for snapshot in snapshots)),
-            self._join_annotation_bindings(*(snapshot[2] for snapshot in snapshots)),
+        context = _JoinValidationContext()
+        _reserve_join_output(
+            context.output_work,
+            len(snapshots) * 2,
+            "binding_snapshot_operand_scan",
         )
+        minimum_refs = max(
+            (len(snapshot[slot]) for slot in (0, 2) for snapshot in snapshots),
+            default=0,
+        ) * len(snapshots)
+        if 2 * minimum_refs > _MAX_ABSTRACT_OPERATION_WORK:
+            raise _AnalysisLimitError(
+                f"abstract join operand-reference cost exceeds {_MAX_ABSTRACT_OPERATION_WORK}",
+                diagnostics={
+                    "function": "_join_binding_snapshots",
+                    "boundary": "join_operand_reference_lower_bound",
+                    "minimum_operand_references": minimum_refs,
+                    "operand_references": minimum_refs,
+                    "aggregate_limit": _MAX_ABSTRACT_OPERATION_WORK,
+                },
+            )
+        slot_names: list[set[str]] = []
+        projected_refs = 0
+        for slot in (0, 2):
+            _reserve_join_output(
+                context.output_work,
+                len(snapshots),
+                "binding_snapshot_key_count_scan",
+            )
+            key_width = sum(len(snapshot[slot]) for snapshot in snapshots)
+            _reserve_join_output(
+                context.output_work,
+                key_width * 2 + len(snapshots),
+                "binding_snapshot_key_scan",
+            )
+            key_bytes = sum(len(name) * 4 for snapshot in snapshots for name in snapshot[slot])
+            _reserve_join_output(
+                context.output_work,
+                key_bytes,
+                "binding_snapshot_key_bytes",
+            )
+            names = set().union(*(snapshot[slot].keys() for snapshot in snapshots))
+            projected_refs += len(names) * len(snapshots)
+            if 2 * projected_refs > _MAX_ABSTRACT_OPERATION_WORK:
+                raise _AnalysisLimitError(
+                    f"abstract join operand-reference cost exceeds {_MAX_ABSTRACT_OPERATION_WORK}",
+                    diagnostics={
+                        "function": "_join_binding_snapshots",
+                        "boundary": "join_operand_references",
+                        "operand_references": projected_refs,
+                        "aggregate_limit": _MAX_ABSTRACT_OPERATION_WORK,
+                    },
+                )
+            slot_names.append(names)
+        context.identity_scans[0] = projected_refs
+        context.operand_references[0] = projected_refs
+        if projected_refs > _MAX_ABSTRACT_OPERATION_WORK:
+            raise _AnalysisLimitError(
+                f"abstract join identity scan exceeds {_MAX_ABSTRACT_OPERATION_WORK}",
+                diagnostics={
+                    "function": "_join_binding_snapshots",
+                    "boundary": "join_identity_scan",
+                    "scan_count": projected_refs,
+                },
+            )
+        _reserve_join_output(
+            context.output_work,
+            projected_refs * 3 + sum(len(names) for names in slot_names) * 2,
+            "binding_snapshot_plan_allocations",
+        )
+        plans: list[dict[str, _JoinOperandGroup]] = []
+        for slot, names in zip((0, 2), slot_names, strict=True):
+            slot_plan: dict[str, _JoinOperandGroup] = {}
+            for name in names:
+                values_list: list[_AbstractValue] = []
+                first: _AbstractValue | None = None
+                same = True
+                for snapshot in snapshots:
+                    value = snapshot[slot].get(name, _UNKNOWN_VALUE)
+                    values_list.append(value)
+                    if first is None:
+                        first = value
+                    elif value is not first:
+                        same = False
+                values = tuple(values_list)
+                slot_plan[name] = _JoinOperandGroup(values, same)
+            plans.append(slot_plan)
+
+        if not _consume_snapshot_proofs(snapshots, plans, context):
+            for plan in plans:
+                for name, group in tuple(plan.items()):
+                    values = group.values
+                    same = group.same_identity
+                    checked = (values[0],) if same else values
+                    _validate_abstract_values(
+                        checked,
+                        aggregate_limit=_MAX_ABSTRACT_EXPANDED_VALUE_WORK,
+                        boundary="joined_binding_snapshot",
+                        allow_collection_roots=True,
+                        _shared_work=context.work,
+                        _shared_memo=context.memo if same else context.mixed_memo,
+                        _unique_node_aggregate=same,
+                        _unique_aggregate_limit=_MAX_ABSTRACT_GRAPH_METADATA if same else None,
+                        _is_root_reference=False,
+                        _shared_unique_nodes=context.unique_nodes if same else None,
+                        _shared_unique_cost=context.unique_cost if same else None,
+                        _shared_graph_nodes=context.graph_nodes,
+                        _shared_graph_edges=context.graph_edges,
+                        _shared_graph_metadata=context.graph_metadata,
+                        _join_output_work=context.output_work,
+                    )
+                    if (
+                        context.unique_cost[0] > _MAX_ABSTRACT_GRAPH_METADATA
+                        or context.graph_edges[0] > _MAX_ABSTRACT_GRAPH_EDGES
+                        or len(context.graph_nodes) > _MAX_ABSTRACT_GRAPH_NODES
+                        or context.graph_metadata[0] > _MAX_ABSTRACT_GRAPH_METADATA
+                    ):
+                        raise _AnalysisLimitError(
+                            "abstract join graph limit exceeded",
+                            diagnostics={
+                                "function": "_join_binding_snapshots",
+                                "boundary": "joined_binding_snapshot",
+                                "unique_node_cost": context.unique_cost[0],
+                                "operand_references": projected_refs,
+                                "physical_nodes": len(context.graph_nodes),
+                                "physical_edges": context.graph_edges[0],
+                                "metadata_items": context.graph_metadata[0],
+                                "aggregate_limit": _MAX_ABSTRACT_GRAPH_METADATA,
+                            },
+                        )
+                    plan[name] = _JoinOperandGroup(values, same, context.validation_token)
+        else:
+            for plan in plans:
+                for name, group in tuple(plan.items()):
+                    plan[name] = _JoinOperandGroup(
+                        group.values, group.same_identity, context.validation_token
+                    )
+        _reserve_join_output(context.output_work, 2, "binding_snapshot_plan_reuse_handles")
+        context.state_plan, context.annotation_plan = plans
+        # Function maps often have the same admitted key objects as state maps.
+        # Compare integer identities; only complete coverage reuses the plan.
+        shared_function_keys = True
+        for snapshot in snapshots:
+            state, functions, _ = snapshot
+            _reserve_join_output(context.output_work, 2, "binding_function_plan_lengths")
+            if len(state) != len(functions):
+                shared_function_keys = False
+                break
+            _reserve_join_output(
+                context.output_work,
+                (len(state) + len(functions)) * 3,
+                "binding_function_plan_coverage",
+            )
+            if {id(name) for name in state} != {id(name) for name in functions}:
+                shared_function_keys = False
+                break
+        if shared_function_keys:
+            _reserve_join_output(
+                context.output_work,
+                len(snapshots) * 2
+                + sum(len(snapshot[1]) for snapshot in snapshots)
+                + len(plans[0]),
+                "binding_function_plan_handles",
+            )
+            context.function_plan_maps = tuple(snapshot[1] for snapshot in snapshots)
+            context.function_plan_keys = tuple(tuple(snapshot[1]) for snapshot in snapshots)
+            context.function_plan_names = tuple(plans[0])
+        slots = (
+            self._join_states(
+                *(snapshot[0] for snapshot in snapshots), _plan=plans[0], _context=context
+            ),
+            self._join_function_bindings(
+                *(snapshot[1] for snapshot in snapshots), _context=context
+            ),
+            self._join_annotation_bindings(
+                *(snapshot[2] for snapshot in snapshots), _plan=plans[1], _context=context
+            ),
+        )
+        if context.snapshot_profiles is not None:
+            return _snapshot_from_scoped_nodes(slots, context.snapshot_nodes, context.output_work)
+        return slots
 
     def _join_optional_bindings(
         self, snapshots: Iterable[_BindingSnapshot]
@@ -4492,7 +6725,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             self._apply_flow_result(completed)
             return
         header = entry
+        iteration = 0
         while True:
+            iteration += 1
+            self._check_loop_iteration(node, iteration)
             self._restore_bindings(header)
             self._bind_iteration_target(node.target, iterable)
             body_result = self._visit_binding_branch(node.body, self._binding_snapshot())
@@ -4547,7 +6783,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             self._apply_flow_result(completed)
             return
         header = entry
+        iteration = 0
         while True:
+            iteration += 1
+            self._check_loop_iteration(node, iteration)
             self._restore_bindings(header)
             self.visit(node.test)
             self._invoke_truth_protocol(self._expression_value(node.test))
@@ -6011,11 +8250,13 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         results: list[_AbstractValue] = []
         callable_origins = partial.callable_value.origins
         if _GETATTR_BUILTIN in callable_origins and len(values) >= 2:
-            field_name = values[1].string_value
-            if field_name is not None:
-                for section in values[0].origins & TRACKED_SECTIONS:
-                    self._record(section, field_name)
+            self._record_builtin_accessor_name(values[0], values[1], line=call.lineno)
+            if values[1].string_value is not None:
                 return _origin_value(*(values[0].origins & TRACKED_SECTIONS))
+        if _HASATTR_BUILTIN in callable_origins and len(values) >= 2:
+            self._record_builtin_accessor_name(
+                values[0], values[1], line=call.lineno, record_reads=False
+            )
         if _ATTRGETTER_FACTORY in callable_origins and values:
             field_name = values[0].string_value
             if field_name is not None:
@@ -6421,6 +8662,14 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
 def runtime_reads(source_root: Path, fields: frozenset[ConfigField]) -> frozenset[ConfigField]:
     """Return config fields loaded from their named sections in production Python."""
 
+    try:
+        return _runtime_reads(source_root, fields)
+    except RecursionError as error:
+        raise _AnalysisLimitError("runtime scan exceeded Python recursion capacity") from error
+
+
+def _runtime_reads(source_root: Path, fields: frozenset[ConfigField]) -> frozenset[ConfigField]:
+
     reads: set[ConfigField] = set()
     trees = {
         path: ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -6745,7 +8994,7 @@ def audit_repository(repo_root: Path = REPO_ROOT) -> ContractReport:
 def main() -> int:
     try:
         report = audit_repository()
-    except (OSError, SyntaxError, ValueError) as error:
+    except (OSError, SyntaxError, ValueError, _AnalysisLimitError, RecursionError) as error:
         print(f"Config reference contract could not run: {error}", file=sys.stderr)
         return 2
     if report.violations:

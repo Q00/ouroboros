@@ -93,7 +93,7 @@ RESEED_SLACK = 200
 # once it reaches SOFT_CAP; do not add new ones.
 GRANDFATHERED: dict[str, int] = {
     "src/ouroboros/orchestrator/parallel_executor.py": 13158,
-    "src/ouroboros/orchestrator/runner.py": 10987,
+    "src/ouroboros/orchestrator/runner.py": 10429,
     "src/ouroboros/auto/pipeline.py": 3306,
     "src/ouroboros/cli/commands/setup.py": 5225,
     "src/ouroboros/orchestrator/codex_cli_runtime.py": 4140,

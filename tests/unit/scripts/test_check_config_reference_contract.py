@@ -11,6 +11,7 @@ import importlib.util
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -8258,3 +8259,2538 @@ def test_runtime_scan_ambiguous_cycle_preserves_bound_helper_edges(
     assert bool(_audit_as_documented_inert(contract, field, reads).violations) is (
         argument == "settings" and forwarding != "foreign"
     )
+
+
+@pytest.mark.parametrize("accessor", ["getattr", "hasattr"])
+@pytest.mark.parametrize("binding", ["direct", "alias", "imported"])
+@pytest.mark.parametrize(
+    ("name_expression", "known_read"),
+    [
+        ('os.getenv("FIELD", "stage1_enabled")', False),
+        ('"stage1_enabled" if unknown else dynamic_field', True),
+        ('"untracked_name" if unknown else dynamic_field', False),
+    ],
+)
+def test_builtin_accessor_preserves_unresolved_field_name(
+    contract, tmp_path: Path, accessor: str, binding: str, name_expression: str, known_read: bool
+) -> None:
+    setup = {
+        "direct": "",
+        "alias": f"reader = {accessor}\n",
+        "imported": f"from builtins import {accessor} as reader\n",
+    }[binding]
+    callee = accessor if binding == "direct" else "reader"
+    (tmp_path / "dynamic_accessor.py").write_text(
+        f"import os\n{setup}field = {name_expression}\n"
+        f"result = {callee}(config.evaluation, field)\n",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    assert reads == (frozenset({field}) if known_read else frozenset())
+    assert any(
+        "unresolved builtin accessor field name" in item for item in reads.unresolved_semantics
+    )
+    assert _audit_as_documented_inert(contract, field, reads).violations
+
+
+@pytest.mark.parametrize("accessor", ["getattr", "hasattr"])
+@pytest.mark.parametrize("control", ["literal", "foreign_literal", "foreign_receiver", "shadowed"])
+def test_builtin_accessor_uncertainty_controls(
+    contract, tmp_path: Path, accessor: str, control: str
+) -> None:
+    setup = ""
+    if control == "foreign_receiver":
+        setup = "class Report:\n    evaluation = object()\nconfig = Report()\n"
+    elif control == "shadowed":
+        setup = f"def {accessor}(*args):\n    return None\n"
+    name = {"literal": '"stage1_enabled"', "foreign_literal": '"untracked_name"'}.get(
+        control, 'os.getenv("FIELD", "stage1_enabled")'
+    )
+    (tmp_path / "accessor_control.py").write_text(
+        f"import os\n{setup}field = {name}\nresult = {accessor}(config.evaluation, field)\n",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    assert reads == (frozenset({field}) if control == "literal" else frozenset())
+    assert not reads.unresolved_semantics
+    assert bool(_audit_as_documented_inert(contract, field, reads).violations) is (
+        control == "literal"
+    )
+
+
+@pytest.mark.parametrize("forwarding", ["map", "partial"])
+@pytest.mark.parametrize(
+    ("name_expression", "known_read"),
+    [
+        ('os.getenv("FIELD", "stage1_enabled")', False),
+        ('"stage1_enabled" if unknown else dynamic_field', True),
+        ('"untracked_name" if unknown else dynamic_field', False),
+    ],
+)
+def test_forwarded_getattr_preserves_unresolved_field_name(
+    contract, tmp_path: Path, forwarding: str, name_expression: str, known_read: bool
+) -> None:
+    call = {
+        "map": "list(map(getattr, [config.evaluation], [field]))",
+        "partial": "partial(getattr, config.evaluation, field)()",
+    }[forwarding]
+    (tmp_path / "forwarded_accessor.py").write_text(
+        f"import os\nfrom functools import partial\nfield = {name_expression}\n{call}\n",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+    assert reads == (frozenset({field}) if known_read else frozenset())
+    assert any(
+        "unresolved builtin accessor field name" in item for item in reads.unresolved_semantics
+    )
+    assert _audit_as_documented_inert(contract, field, reads).violations
+
+
+@pytest.mark.parametrize("forwarding", ["map", "partial"])
+@pytest.mark.parametrize("control", ["literal", "foreign_literal", "foreign_receiver", "shadowed"])
+def test_forwarded_getattr_uncertainty_controls(
+    contract, tmp_path: Path, forwarding: str, control: str
+) -> None:
+    setup = ""
+    if control == "foreign_receiver":
+        setup = "class Report:\n    evaluation = object()\nconfig = Report()\n"
+    elif control == "shadowed":
+        setup = "def getattr(*args):\n    return None\n"
+    name = {"literal": '"stage1_enabled"', "foreign_literal": '"untracked_name"'}.get(
+        control, 'os.getenv("FIELD", "stage1_enabled")'
+    )
+    call = {
+        "map": "list(map(getattr, [config.evaluation], [field]))",
+        "partial": "partial(getattr, config.evaluation, field)()",
+    }[forwarding]
+    (tmp_path / "forwarded_control.py").write_text(
+        f"import os\nfrom functools import partial\n{setup}field = {name}\n{call}\n",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+    assert reads == (frozenset({field}) if control == "literal" else frozenset())
+    assert not reads.unresolved_semantics
+    assert bool(_audit_as_documented_inert(contract, field, reads).violations) is (
+        control == "literal"
+    )
+
+
+@pytest.mark.parametrize("forwarding", ["map", "partial"])
+@pytest.mark.parametrize(
+    "name_expression",
+    [
+        'os.getenv("FIELD", "stage1_enabled")',
+        '"stage1_enabled" if unknown else dynamic_field',
+        '"untracked_name" if unknown else dynamic_field',
+    ],
+)
+def test_forwarded_hasattr_preserves_only_unresolved_field_name(
+    contract, tmp_path: Path, forwarding: str, name_expression: str
+) -> None:
+    call = {
+        "map": "list(map(hasattr, [config.evaluation], [field]))",
+        "partial": "partial(hasattr, config.evaluation, field)()",
+    }[forwarding]
+    (tmp_path / "forwarded_hasattr.py").write_text(
+        f"import os\nfrom functools import partial\nfield = {name_expression}\n{call}\n",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+    # Existing hasattr forwarding has no positive-read model. Preserve only its
+    # unknown-name uncertainty, including a mixed known/unknown alternative.
+    assert not reads
+    assert any(
+        "unresolved builtin accessor field name" in item for item in reads.unresolved_semantics
+    )
+    assert _audit_as_documented_inert(contract, field, reads).violations
+
+
+@pytest.mark.parametrize("forwarding", ["map", "partial"])
+@pytest.mark.parametrize("control", ["literal", "foreign_literal", "foreign_receiver", "shadowed"])
+def test_forwarded_hasattr_does_not_add_a_positive_read_model(
+    contract, tmp_path: Path, forwarding: str, control: str
+) -> None:
+    setup = ""
+    if control == "foreign_receiver":
+        setup = "class Report:\n    evaluation = object()\nconfig = Report()\n"
+    elif control == "shadowed":
+        setup = "def hasattr(*args):\n    return False\n"
+    name = {"literal": '"stage1_enabled"', "foreign_literal": '"untracked_name"'}.get(
+        control, 'os.getenv("FIELD", "stage1_enabled")'
+    )
+    call = {
+        "map": "list(map(hasattr, [config.evaluation], [field]))",
+        "partial": "partial(hasattr, config.evaluation, field)()",
+    }[forwarding]
+    (tmp_path / "forwarded_hasattr_control.py").write_text(
+        f"import os\nfrom functools import partial\n{setup}field = {name}\n{call}\n",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+    assert not reads
+    assert not reads.unresolved_semantics
+    assert not _audit_as_documented_inert(contract, field, reads).violations
+
+
+@pytest.mark.parametrize(
+    "adapter",
+    [
+        'map(hasattr, [config.evaluation], ["stage1_enabled"])',
+        "filter(hasattr, [config.evaluation])",
+        'accumulate([config.evaluation, "stage1_enabled"], hasattr)',
+        "dropwhile(hasattr, [config.evaluation])",
+        "groupby([config.evaluation], key=hasattr)",
+    ],
+)
+def test_unmodeled_hasattr_adapter_preserves_existing_branch_value(
+    contract, tmp_path: Path, monkeypatch, adapter: str
+) -> None:
+    # A false branch containing the existing unbounded shape join must remain
+    # unreachable. Bound the test instrumentation so a regression fails promptly.
+    joins = 0
+    original = contract._RuntimeReadVisitor._join_binding_snapshots
+
+    def bounded_join(self, *snapshots):
+        nonlocal joins
+        joins += 1
+        assert joins < 12, "unsupported hasattr adapter opened an unreachable branch"
+        return original(self, *snapshots)
+
+    monkeypatch.setattr(contract._RuntimeReadVisitor, "_join_binding_snapshots", bounded_join)
+    (tmp_path / "adapter_branch.py").write_text(
+        "from itertools import accumulate, dropwhile, groupby\n"
+        f"flag = {adapter}\n"
+        "if flag:\n    pass\nelse:\n"
+        "    value = config\n    for item in [1]:\n        value = (value,)\n",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+    assert not reads
+    assert not reads.unresolved_semantics
+    assert joins == 0
+
+
+@pytest.mark.parametrize("consumed", [False, True])
+def test_hasattr_adapter_uncertainty_remains_lazy(contract, tmp_path: Path, consumed: bool) -> None:
+    (tmp_path / "lazy_hasattr.py").write_text(
+        'import os\nfield = os.getenv("FIELD", "stage1_enabled")\n'
+        "values = map(hasattr, [config.evaluation], [field])\n"
+        + ("list(values)\n" if consumed else ""),
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+    assert not reads
+    assert bool(reads.unresolved_semantics) is consumed
+
+
+def test_unresolved_callable_join_is_idempotent_and_preserves_distinct_sources(contract) -> None:
+    functions = contract.ast.parse("def first(): pass\ndef second(): pass\n").body
+    targets = tuple(
+        contract._UnresolvedCallable(function, "opaque", "fixture", function.lineno)
+        for function in functions
+    )
+    first = contract._AbstractValue(unresolved_callables=(targets[0],))
+    second = contract._AbstractValue(unresolved_callables=(targets[1],))
+    joined = contract._join_values(first, second)
+    assert joined.unresolved_callables == targets
+    for _ in range(20):
+        joined = contract._join_values(joined, second, joined)
+        assert joined.unresolved_callables == targets
+
+
+@pytest.mark.parametrize("edge", ["items", "entries", "attributes", "receiver"])
+def test_abstract_value_construction_rejects_excessive_depth(contract, edge: str) -> None:
+    value = contract._UNKNOWN_VALUE
+    function = contract.ast.parse("def reader(): pass").body[0]
+    with pytest.raises(contract._AnalysisLimitError, match="depth"):
+        for _ in range(contract._MAX_ABSTRACT_DEPTH + 1):
+            if edge == "items":
+                value = contract._AbstractValue(items=(value,))
+            elif edge == "entries":
+                value = contract._AbstractValue(entries=(("key", value),))
+            elif edge == "attributes":
+                value = contract._AbstractValue(attributes=(("key", value),))
+            else:
+                value = contract._AbstractValue(
+                    callables=(contract._CallableTarget(function, value),)
+                )
+
+
+@pytest.mark.parametrize("receiver", [False, True])
+def test_shared_abstract_dag_is_bounded_by_expanded_cost(contract, receiver: bool) -> None:
+    value = contract._UNKNOWN_VALUE
+    function = contract.ast.parse("def reader(): pass").body[0]
+    with pytest.raises(contract._AnalysisLimitError, match="expanded cost"):
+        for _ in range(20):
+            if receiver:
+                target = contract._CallableTarget(function, value)
+                value = contract._AbstractValue(callables=(target, target))
+            else:
+                value = contract._AbstractValue(items=(value, value))
+
+
+def test_expanded_value_limit_exact_boundary_and_plus_one(contract) -> None:
+    value = contract._UNKNOWN_VALUE
+    for _ in range(15):
+        value = contract._AbstractValue(items=(value, value))
+    exact = contract._AbstractValue(items=(value,), origins=frozenset({"one"}))
+    assert contract._validate_abstract_values((exact,))[0] == 131072
+    with pytest.raises(contract._AnalysisLimitError, match="value expanded cost exceeds 131072"):
+        contract._AbstractValue(items=(value,), origins=frozenset({"one", "two"}))
+
+
+def test_expanded_values_are_accepted_by_all_ordinary_value_consumers(contract) -> None:
+    value = contract._AbstractValue(items=(contract._UNKNOWN_VALUE,) * 3000)
+    assert contract._validate_abstract_values((value,))[0] == 6001
+    target = contract._CallableTarget(contract.ast.parse("def reader(): pass").body[0], value)
+    assert target.receiver is value
+    assert contract._contained_origins(value) == frozenset()
+
+
+def test_standalone_validation_cache_reuses_identity_without_structural_work(
+    contract, monkeypatch
+) -> None:
+    leaf = contract._AbstractValue(origins=frozenset({"evaluation"}))
+    value = contract._AbstractValue(items=(leaf, leaf))
+    expected = contract._validate_abstract_values((value,))
+    entry = contract._VALIDATION_CACHE[id(value)]
+    assert entry.root is value
+    assert any(node.value is leaf for node in entry.nodes)
+    assert contract._VALIDATION_CACHE_RETAINED_NODES <= contract._MAX_VALIDATION_CACHE_NODES
+    assert contract._VALIDATION_CACHE_RETAINED_METADATA <= contract._MAX_VALIDATION_CACHE_METADATA
+
+    def forbidden(_value):
+        raise AssertionError("cache hit expanded the immutable value graph")
+
+    monkeypatch.setattr(contract, "_abstract_children", forbidden)
+    assert contract._validate_abstract_values((value,)) == expected
+
+
+def test_identity_cache_entry_lifetime_is_bounded(contract) -> None:
+    contract._VALIDATION_CACHE.clear()
+    contract._VALIDATION_CACHE_RETAINED_NODES = 0
+    contract._VALIDATION_CACHE_RETAINED_METADATA = 0
+    value = contract._AbstractValue(origins=frozenset({"evaluation"}))
+    contract._validate_abstract_values((value,))
+    entry = contract._VALIDATION_CACHE[id(value)]
+    contract._VALIDATION_CACHE[id(value)] = entry._replace(
+        created_at=(time.monotonic() - contract._MAX_VALIDATION_CACHE_AGE_SECONDS - 1)
+    )
+    assert contract._get_validation_cache_entry(id(value)) is None
+    assert id(value) not in contract._VALIDATION_CACHE
+    assert contract._VALIDATION_CACHE_RETAINED_NODES == 0
+    assert contract._VALIDATION_CACHE_RETAINED_METADATA == 0
+
+
+def test_identity_cache_seeds_shared_memo_with_exact_operation_accounting(contract) -> None:
+    leaf = contract._AbstractValue(origins=frozenset({"evaluation"}))
+    root = contract._AbstractValue(items=(leaf, leaf))
+
+    def run_with_cache(enabled: bool):
+        contract._VALIDATION_CACHE.clear()
+        contract._VALIDATION_CACHE_RETAINED_NODES = 0
+        contract._VALIDATION_CACHE_RETAINED_METADATA = 0
+        if enabled:
+            contract._validate_abstract_values((root,))
+        work = [0]
+        graph_nodes = set()
+        graph_edges = [0]
+        graph_metadata = [0]
+        unique_nodes = set()
+        unique_cost = [0]
+        result = contract._validate_abstract_values(
+            (root, root),
+            aggregate_limit=1000,
+            _shared_work=work,
+            _shared_memo={},
+            _unique_node_aggregate=True,
+            _unique_aggregate_limit=1000,
+            _shared_unique_nodes=unique_nodes,
+            _shared_unique_cost=unique_cost,
+            _shared_graph_nodes=graph_nodes,
+            _shared_graph_edges=graph_edges,
+            _shared_graph_metadata=graph_metadata,
+        )
+        return result, work, graph_nodes, graph_edges, graph_metadata, unique_cost
+
+    uncached = run_with_cache(False)
+    cached = run_with_cache(True)
+    assert cached == uncached
+
+
+def test_identity_cache_mixed_memo_preserves_expanded_cost_and_physical_budgets(
+    contract, monkeypatch
+) -> None:
+    leaf = contract._AbstractValue(origins=frozenset({"evaluation"}))
+    root = contract._AbstractValue(items=(leaf, leaf))
+    contract._VALIDATION_CACHE.clear()
+    contract._VALIDATION_CACHE_RETAINED_NODES = 0
+    contract._VALIDATION_CACHE_RETAINED_METADATA = 0
+    contract._validate_abstract_values((root,))
+
+    work = [0]
+    graph_nodes = set()
+    graph_edges = [0]
+    graph_metadata = [0]
+    result = contract._validate_abstract_values(
+        (root, root),
+        aggregate_limit=1000,
+        _shared_work=work,
+        _shared_memo={},
+        _shared_graph_nodes=graph_nodes,
+        _shared_graph_edges=graph_edges,
+        _shared_graph_metadata=graph_metadata,
+    )
+    assert result[0] == 2 * contract._VALIDATION_CACHE[id(root)].cost
+    assert work == [2]
+    assert (len(graph_nodes), graph_edges[0]) == (2, 2)
+    assert graph_metadata[0] == sum(
+        contract._abstract_metadata_width(node) for node in (root, leaf)
+    )
+
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_OPERATION_WORK", 1)
+    with pytest.raises(contract._AnalysisLimitError, match="traversal exceeds 1"):
+        contract._validate_abstract_values(
+            (root,),
+            aggregate_limit=1000,
+            _shared_work=[0],
+            _shared_memo={},
+            _shared_graph_nodes=set(),
+            _shared_graph_edges=[0],
+            _shared_graph_metadata=[0],
+        )
+
+
+def test_standalone_validation_cache_rechecks_current_limits(contract, monkeypatch) -> None:
+    value = contract._AbstractValue(items=(contract._UNKNOWN_VALUE,) * 2)
+    assert contract._validate_abstract_values((value,))[0] > 0
+
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_DEPTH", 1)
+    with pytest.raises(contract._AnalysisLimitError, match="depth exceeds 1"):
+        contract._validate_abstract_values((value,))
+
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_DEPTH", 32)
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_OPERATION_WORK", 1)
+    with pytest.raises(contract._AnalysisLimitError, match="traversal exceeds 1"):
+        contract._validate_abstract_values((value,))
+
+
+def test_validator_charges_root_alias_references_to_operation_budget(contract) -> None:
+    value = contract._UNKNOWN_VALUE
+    assert contract._validate_abstract_values((value,) * 8192)[0] == 8192
+    with pytest.raises(contract._AnalysisLimitError, match="root reference work exceeds 8192"):
+        contract._validate_abstract_values((value,) * 8193)
+
+
+def test_receiverless_callable_width_is_also_bounded(contract) -> None:
+    target = contract._CallableTarget(contract.ast.parse("def reader(): pass").body[0])
+    with pytest.raises(contract._AnalysisLimitError, match="metadata limit"):
+        contract._AbstractValue(
+            callables=(target,) * (contract._MAX_ABSTRACT_EXPANDED_VALUE_WORK // 2 + 1)
+        )
+
+
+@pytest.mark.parametrize(
+    ("limit_name", "value", "message"),
+    [
+        (
+            "_MAX_ABSTRACT_GRAPH_NODES",
+            lambda c: c._AbstractValue(items=(c._UNKNOWN_VALUE,)),
+            "node limit",
+        ),
+        (
+            "_MAX_ABSTRACT_GRAPH_EDGES",
+            lambda c: c._AbstractValue(items=(c._UNKNOWN_VALUE, c._UNKNOWN_VALUE)),
+            "edge limit",
+        ),
+        (
+            "_MAX_ABSTRACT_GRAPH_METADATA",
+            lambda c: c._AbstractValue(origins=frozenset({"a", "b"})),
+            "metadata limit",
+        ),
+    ],
+)
+def test_abstract_graph_limits_fail_closed(
+    contract, monkeypatch, limit_name, value, message
+) -> None:
+    monkeypatch.setattr(contract, limit_name, 1)
+    with pytest.raises(contract._AnalysisLimitError, match=message):
+        value(contract)
+
+
+def test_abstract_expansion_and_traversal_have_independent_budgets(contract, monkeypatch) -> None:
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_OPERATION_WORK", 1)
+    with pytest.raises(contract._AnalysisLimitError, match="traversal exceeds"):
+        contract._AbstractValue(items=(contract._UNKNOWN_VALUE, contract._UNKNOWN_VALUE))
+
+
+def test_abstract_validator_uses_no_structural_equality_or_hash_and_rejects_cycles(
+    contract, monkeypatch
+) -> None:
+    def forbidden(*_args):
+        raise AssertionError("validator invoked structural equality/hash")
+
+    monkeypatch.setattr(contract._AbstractValue, "__eq__", forbidden)
+    monkeypatch.setattr(contract._AbstractValue, "__hash__", forbidden)
+    monkeypatch.setattr(contract._CallableTarget, "__eq__", forbidden)
+    monkeypatch.setattr(contract._CallableTarget, "__hash__", forbidden)
+    leaf = contract._AbstractValue(origins=frozenset({"evaluation"}))
+    target = contract._CallableTarget(contract.ast.parse("def reader(): pass").body[0], leaf)
+    value = contract._AbstractValue(items=(leaf, leaf), callables=(target,))
+    assert contract._validate_abstract_values((value,))[0] > 0
+
+    # Deliberately violate frozen construction only to exercise the cycle guard.
+    cyclic = object.__new__(contract._AbstractValue)
+    for name, member in vars(contract._UNKNOWN_VALUE).items():
+        object.__setattr__(cyclic, name, member)
+    object.__setattr__(cyclic, "items", (cyclic,))
+    with pytest.raises(contract._AnalysisLimitError, match="cyclic"):
+        contract._validate_abstract_values((cyclic,))
+
+
+def test_join_identity_fastpath_cannot_bypass_individual_value_budget(
+    contract, monkeypatch
+) -> None:
+    value = contract._AbstractValue(origins=frozenset({"evaluation"}))
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_EXPANDED_VALUE_WORK", 1)
+    with pytest.raises(contract._AnalysisLimitError, match="expanded cost"):
+        contract._join_values(value, value)
+
+
+def test_snapshot_budget_includes_annotations(contract, tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "fixture.py"
+    index = contract._SourceIndex(tmp_path, {path: contract.ast.parse("")})
+    visitor = contract._RuntimeReadVisitor(frozenset(), index, index.module_for_path(path))
+    visitor._annotations[-1] = dict.fromkeys(("a", "b", "c"), contract._UNKNOWN_VALUE)
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_OPERATION_WORK", 2)
+    with pytest.raises(contract._AnalysisLimitError, match="root reference work"):
+        visitor._binding_snapshot()
+
+
+@pytest.mark.parametrize("loop", ["for", "while", "async_for"])
+def test_fixed_point_budget_raises_instead_of_returning_partial_reads(
+    contract, tmp_path: Path, monkeypatch, loop: str
+) -> None:
+    header = {
+        "for": "for item in [1]:",
+        "while": "while condition:",
+        "async_for": "async for item in source:",
+    }[loop]
+    source = f"{header}\n    alias = config\nalias.evaluation.stage1_enabled\n"
+    if loop == "async_for":
+        source = "async def consume(config):\n" + "".join(
+            "    " + line + "\n" for line in source.splitlines()
+        )
+    (tmp_path / "limited_loop.py").write_text(source)
+    monkeypatch.setattr(contract, "_MAX_ANALYSIS_ITERATIONS", 1)
+    with pytest.raises(contract._AnalysisLimitError, match="limited_loop:.*did not converge"):
+        contract.runtime_reads(
+            tmp_path, frozenset({contract.ConfigField("evaluation", "stage1_enabled")})
+        )
+
+
+def test_analysis_limit_is_not_a_valueerror_fallback(contract, monkeypatch) -> None:
+    assert not issubclass(contract._AnalysisLimitError, ValueError)
+
+    def recursive(*_args):
+        raise RecursionError("synthetic recursion capacity failure")
+
+    monkeypatch.setattr(contract, "_runtime_reads", recursive)
+    with pytest.raises(contract._AnalysisLimitError, match="recursion capacity"):
+        contract.runtime_reads(Path("unused"), frozenset())
+
+
+def test_bound_relevance_checks_receiver_graph_before_key_hash(
+    contract, tmp_path: Path, monkeypatch
+) -> None:
+    path = tmp_path / "fixture.py"
+    tree = contract.ast.parse("def reader(): pass")
+    index = contract._SourceIndex(tmp_path, {path: tree})
+    visitor = contract._RuntimeReadVisitor(frozenset(), index, index.module_for_path(path))
+    target = contract._CallableTarget(tree.body[0], contract._UNKNOWN_VALUE)
+    value = contract._AbstractValue(callables=(target,))
+
+    def forbidden(*_args):
+        raise AssertionError("unsafe key hash reached")
+
+    monkeypatch.setattr(contract._CallableTarget, "__hash__", forbidden)
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_EXPANDED_VALUE_WORK", 3)
+    with pytest.raises(contract._AnalysisLimitError, match="expanded cost"):
+        visitor._has_bound_callable_relevance(tree.body[0], {"receiver": value})
+
+
+def test_analysis_limit_does_not_publish_partial_module_data_cache(
+    contract, tmp_path: Path
+) -> None:
+    path = tmp_path / "fixture.py"
+    tree = contract.ast.parse(
+        "partial = config\nvalue = config\nfor item in [1]:\n    value = (value,)\n"
+    )
+    index = contract._SourceIndex(tmp_path, {path: tree})
+    module = index.module_for_path(path)
+    with pytest.raises(contract._AnalysisLimitError, match="fixture:.*abstract value"):
+        index.resolve_data_value(module, "partial", frozenset())
+    assert module.name not in index._data_states
+    assert module.name not in index._data_states_in_progress
+
+
+@pytest.mark.parametrize("case", ["shape", "decorated"])
+def test_finite_runtime_loops_complete_with_truthful_nonpass_cli(
+    contract, tmp_path: Path, case: str
+) -> None:
+    prefix = "from ouroboros.config.models import OuroborosConfig\n"
+    source = {
+        "shape": prefix + "def inspect(config: OuroborosConfig):\n"
+        "    observed = config.evaluation.stage1_enabled\n"
+        "    value = config\n    for item in [1]:\n        value = (value,)\n"
+        "    return observed\nresult = inspect(OuroborosConfig())\n",
+        "decorated": prefix + "from typing import no_type_check\nimport os\n"
+        "@no_type_check\ndef first(config: OuroborosConfig):\n"
+        "    return config.evaluation.stage1_enabled\n"
+        "@no_type_check\ndef second(config: OuroborosConfig):\n"
+        "    return config.evaluation.stage1_enabled\n"
+        'value = first\nchoice = os.getenv("FORCE_SECOND", "")\n'
+        "for item in [1]:\n    value = second if choice else value\n"
+        "result = value(OuroborosConfig())\n",
+    }[case]
+    scope = {}
+    exec(compile(source, "finite_runtime.py", "exec"), scope)
+    assert scope["result"] is True
+    fixture = tmp_path / "src" / "ouroboros"
+    fixture.mkdir(parents=True)
+    (fixture / "finite_runtime.py").write_text(source)
+    reference = tmp_path / contract.REFERENCE_PATH
+    reference.parent.mkdir(parents=True)
+    reference.write_text((REPO_ROOT / contract.REFERENCE_PATH).read_text())
+    driver = (
+        "import importlib.util,sys;from pathlib import Path;"
+        "s=importlib.util.spec_from_file_location('cli_fixture',sys.argv[1]);"
+        "m=importlib.util.module_from_spec(s);sys.modules[s.name]=m;s.loader.exec_module(m);"
+        "audit=m.audit_repository;m.audit_repository=lambda:audit(Path(sys.argv[2]));"
+        "sys.exit(m.main())"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", driver, str(SCRIPT), str(tmp_path)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == (2 if case == "shape" else 1), result.stdout + result.stderr
+    assert "Config reference contract OK" not in result.stdout
+    if case == "shape":
+        assert "finite_runtime:" in result.stderr
+        assert "abstract value" in result.stderr
+    else:
+        assert "runtime scan unresolved semantics" in result.stdout
+
+
+def test_large_identity_join_validates_one_value_without_structural_operations(
+    contract, monkeypatch
+):
+    value = contract._AbstractValue(items=(contract._UNKNOWN_VALUE,) * 1322)
+    assert contract._validate_abstract_values((value,)) == (2645, 2)
+
+    def forbidden(*_args):
+        raise AssertionError("identity join performed structural equality/hash")
+
+    monkeypatch.setattr(contract._AbstractValue, "__eq__", forbidden)
+    monkeypatch.setattr(contract._AbstractValue, "__hash__", forbidden)
+    assert contract._join_values(value, value) is value
+
+
+def test_distinct_safe_values_join_under_separate_operation_budget(contract):
+    left = contract._AbstractValue(items=(contract._UNKNOWN_VALUE,) * 1322)
+    right = contract._AbstractValue(items=(contract._UNKNOWN_VALUE,) * 1322)
+    assert left is not right
+    joined = contract._join_values(left, right)
+    assert contract._validate_abstract_values((joined,)) == (2645, 2)
+    assert joined.items == left.items
+
+
+def test_many_small_uncached_join_operands_use_exact_validation_work(contract):
+    values = tuple(contract._AbstractValue() for _ in range(100))
+    contract._VALIDATION_CACHE.clear()
+    contract._VALIDATION_CACHE_RETAINED_NODES = 0
+    contract._VALIDATION_CACHE_RETAINED_METADATA = 0
+    context = contract._JoinValidationContext()
+
+    joined = contract._join_values(*values, _validation_context=context)
+
+    assert joined is not contract._UNKNOWN_VALUE
+    assert context.output_work[0] < contract._MAX_ABSTRACT_JOIN_OUTPUT_WORK
+    assert context.work[0] <= contract._MAX_ABSTRACT_OPERATION_WORK
+
+
+def test_input_validation_reserves_each_visit_before_continuing(contract, monkeypatch):
+    leaf = contract._AbstractValue()
+    root = contract._AbstractValue(items=(leaf,))
+    contract._VALIDATION_CACHE.clear()
+    contract._VALIDATION_CACHE_RETAINED_NODES = 0
+    contract._VALIDATION_CACHE_RETAINED_METADATA = 0
+    output_work = [0]
+    traversal_work = [0]
+    exact_root_visit = contract._abstract_overhead(root) + contract._abstract_metadata_width(root)
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", exact_root_visit)
+
+    with pytest.raises(
+        contract._AnalysisLimitError,
+        match=f"abstract join output work exceeds {exact_root_visit}",
+    ):
+        contract._validate_abstract_values(
+            (root,),
+            _shared_work=traversal_work,
+            _join_output_work=output_work,
+        )
+
+    assert output_work == [exact_root_visit]
+    assert traversal_work == [0]
+
+
+def test_input_validation_charges_verified_operation_memo_cost(contract, monkeypatch):
+    leaf = contract._AbstractValue(origins=frozenset({"memo-leaf"}))
+    root = contract._AbstractValue(items=(leaf,))
+    exact_cost, depth = contract._validate_abstract_values((root,))
+    contract._VALIDATION_CACHE.clear()
+    contract._VALIDATION_CACHE_RETAINED_NODES = 0
+    contract._VALIDATION_CACHE_RETAINED_METADATA = 0
+    memo = {id(root): (root, exact_cost, depth)}
+    graph_nodes = {id(root)}
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", exact_cost)
+    output_work = [0]
+
+    assert contract._validate_abstract_values(
+        (root,),
+        _shared_memo=memo,
+        _shared_graph_nodes=graph_nodes,
+        _join_output_work=output_work,
+    ) == (exact_cost, depth)
+    assert output_work == [exact_cost]
+
+    output_work[0] = 0
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", exact_cost - 1)
+    with pytest.raises(contract._AnalysisLimitError, match="abstract join output work"):
+        contract._validate_abstract_values(
+            (root,),
+            _shared_memo=memo,
+            _shared_graph_nodes=graph_nodes,
+            _join_output_work=output_work,
+        )
+    assert output_work == [0]
+
+
+def test_input_validation_charges_verified_memo_child_before_reuse(contract, monkeypatch):
+    child = contract._AbstractValue(origins=frozenset({"memo-child"}))
+    child_cost, child_depth = contract._validate_abstract_values((child,))
+    root = contract._AbstractValue(items=(child,))
+    contract._VALIDATION_CACHE.clear()
+    contract._VALIDATION_CACHE_RETAINED_NODES = 0
+    contract._VALIDATION_CACHE_RETAINED_METADATA = 0
+    memo = {id(child): (child, child_cost, child_depth)}
+    root_work = contract._abstract_overhead(root) + contract._abstract_metadata_width(root)
+    exact_work = root_work + 1 + child_cost
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", exact_work)
+    output_work = [0]
+    traversal_work = [0]
+
+    assert (
+        contract._validate_abstract_values(
+            (root,),
+            _shared_memo=memo,
+            _shared_work=traversal_work,
+            _join_output_work=output_work,
+        )[0]
+        == root_work + child_cost
+    )
+    assert output_work == [exact_work]
+
+    memo.pop(id(root))
+    output_work[0] = 0
+    traversal_work[0] = 0
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", exact_work - 1)
+    with pytest.raises(contract._AnalysisLimitError, match="abstract join output work"):
+        contract._validate_abstract_values(
+            (root,),
+            _shared_memo=memo,
+            _shared_work=traversal_work,
+            _join_output_work=output_work,
+        )
+    assert output_work == [root_work + 1]
+    assert traversal_work == [1]
+
+
+def test_operation_budget_exact_boundary_and_streaming_duplicate_charge(contract):
+    value = contract._AbstractValue(origins=frozenset(str(i) for i in range(4095)))
+    assert contract._validate_abstract_values(
+        (value, value), aggregate_limit=contract._MAX_ABSTRACT_OPERATION_WORK
+    ) == (8192, 1)
+    consumed = []
+
+    def roots():
+        for item in (value, value, contract._UNKNOWN_VALUE):
+            consumed.append(item)
+            yield item
+        raise AssertionError("validator consumed beyond the first excess root")
+
+    with pytest.raises(
+        contract._AnalysisLimitError, match="aggregate expanded cost exceeds 8192"
+    ) as caught:
+        contract._validate_abstract_values(
+            roots(),
+            aggregate_limit=contract._MAX_ABSTRACT_OPERATION_WORK,
+            boundary="fixture_operation",
+        )
+    assert len(consumed) == 3
+    message = str(caught.value)
+    assert '"aggregate_cost": 8193' in message
+    assert '"root_cost": 1' in message
+    assert '"maximum_completed_root_cost": 4096' in message
+    assert '"root_count": 3' in message
+    assert '"boundary": "fixture_operation"' in message
+    assert '"costs_complete": 1' in message
+
+
+def test_operation_budget_does_not_admit_an_individually_unsafe_root(contract, monkeypatch):
+    # Bypass construction only to test the operation boundary's own defense.
+    invalid = object.__new__(contract._AbstractValue)
+    for name, member in vars(contract._UNKNOWN_VALUE).items():
+        object.__setattr__(invalid, name, member)
+    object.__setattr__(invalid, "origins", frozenset(str(i) for i in range(101)))
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_EXPANDED_VALUE_WORK", 100)
+    with pytest.raises(contract._AnalysisLimitError, match="value expanded cost exceeds 100"):
+        contract._validate_abstract_values(
+            (invalid,), aggregate_limit=contract._MAX_ABSTRACT_OPERATION_WORK
+        )
+
+
+def test_identity_join_fanin_and_recursive_work_remain_bounded(contract):
+    value = contract._UNKNOWN_VALUE
+    assert contract._join_values(*((value,) * 8192)) is value
+    with pytest.raises(contract._AnalysisLimitError, match="operand count exceeds 8192"):
+        contract._join_values(*((value,) * 8193))
+    with pytest.raises(contract._AnalysisLimitError, match="join work exceeds 4096"):
+        contract._join_values(value, value, _work=[4096])
+
+
+def test_snapshots_charge_repeated_large_safe_roots_including_annotations(contract, tmp_path):
+    path = tmp_path / "fixture.py"
+    index = contract._SourceIndex(tmp_path, {path: contract.ast.parse("")})
+    visitor = contract._RuntimeReadVisitor(frozenset(), index, index.module_for_path(path))
+    value = contract._AbstractValue(items=(contract._UNKNOWN_VALUE,) * 1322)
+    visitor._states[-1] = {f"s{i}": value for i in range(8190)}
+    visitor._annotations[-1] = {"c": value}
+    visitor._binding_snapshot()
+    visitor._annotations[-1].update({f"a{i}": value for i in range(2)})
+    with pytest.raises(
+        contract._AnalysisLimitError, match="root reference work exceeds 8192"
+    ) as caught:
+        visitor._binding_snapshot()
+    assert '"boundary": "binding_snapshot"' in str(caught.value)
+    assert '"boundary": "binding_snapshot"' in str(caught.value)
+
+
+def test_snapshot_identity_union_reuses_shared_traversal_but_charges_root_refs(contract):
+    leaf = contract._AbstractValue(origins=frozenset({"evaluation"}))
+    root = contract._AbstractValue(items=(leaf,) * 20)
+    memo = {}
+    work = [0]
+    assert (
+        contract._validate_abstract_values(
+            (root,) * 3,
+            aggregate_limit=100,
+            _unique_node_aggregate=True,
+            _shared_memo=memo,
+            _shared_work=work,
+        )[0]
+        > 0
+    )
+    assert work == [20]
+    with pytest.raises(contract._AnalysisLimitError, match="root reference work exceeds 10"):
+        contract._validate_abstract_values(
+            (contract._UNKNOWN_VALUE,) * 11,
+            aggregate_limit=10,
+            _unique_node_aggregate=True,
+        )
+
+
+def test_collection_root_keeps_member_aggregate_and_depth_bounds(contract):
+    value = contract._UNKNOWN_VALUE
+    for _ in range(contract._MAX_ABSTRACT_DEPTH - 2):
+        value = contract._AbstractValue(items=(value,))
+    root = contract._AbstractValue(items=(value,), _collection_root=True)
+    assert (
+        contract._validate_abstract_values(
+            (root,),
+            aggregate_limit=contract._MAX_ABSTRACT_OPERATION_WORK,
+            allow_collection_roots=True,
+        )[1]
+        == contract._MAX_ABSTRACT_DEPTH
+    )
+    with pytest.raises(contract._AnalysisLimitError, match="depth exceeds 32"):
+        contract._AbstractValue(
+            items=(contract._AbstractValue(items=(value,)),), _collection_root=True
+        )
+    wide = object.__new__(contract._AbstractValue)
+    for name, member in vars(contract._UNKNOWN_VALUE).items():
+        object.__setattr__(wide, name, member)
+    object.__setattr__(wide, "items", (contract._UNKNOWN_VALUE,) * 9000)
+    object.__setattr__(wide, "_collection_root", True)
+    with pytest.raises(contract._AnalysisLimitError, match="aggregate expanded cost exceeds 8192"):
+        contract._validate_abstract_values(
+            (wide,),
+            aggregate_limit=contract._MAX_ABSTRACT_OPERATION_WORK,
+            allow_collection_roots=True,
+        )
+
+
+def test_unique_snapshot_traversal_still_fails_closed(contract, monkeypatch):
+    value = contract._AbstractValue(items=(contract._UNKNOWN_VALUE,) * 3)
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_OPERATION_WORK", 2)
+    with pytest.raises(contract._AnalysisLimitError, match="traversal exceeds 2"):
+        contract._validate_abstract_values(
+            (value,),
+            aggregate_limit=100,
+            _unique_node_aggregate=True,
+        )
+
+
+def test_snapshot_unique_union_counts_distinct_marked_members(contract, tmp_path):
+    path = tmp_path / "fixture.py"
+    index = contract._SourceIndex(tmp_path, {path: contract.ast.parse("")})
+    visitor = contract._RuntimeReadVisitor(frozenset(), index, index.module_for_path(path))
+    first = contract._AbstractValue(
+        items=tuple(contract._AbstractValue(origins=frozenset({f"a{i}"})) for i in range(2200)),
+        _collection_root=True,
+    )
+    second = contract._AbstractValue(
+        items=tuple(contract._AbstractValue(origins=frozenset({f"b{i}"})) for i in range(2200)),
+        _collection_root=True,
+    )
+    visitor._states[-1] = {"first": first, "second": second}
+    with pytest.raises(contract._AnalysisLimitError, match="graph node limit"):
+        visitor._binding_snapshot()
+
+
+def test_snapshot_rechecks_cached_member_depth_with_collection_offset(contract, tmp_path):
+    path = tmp_path / "fixture.py"
+    index = contract._SourceIndex(tmp_path, {path: contract.ast.parse("")})
+    visitor = contract._RuntimeReadVisitor(frozenset(), index, index.module_for_path(path))
+    deep = contract._UNKNOWN_VALUE
+    for _ in range(contract._MAX_ABSTRACT_DEPTH - 1):
+        deep = contract._AbstractValue(items=(deep,))
+    marked = object.__new__(contract._AbstractValue)
+    for name, member in vars(contract._UNKNOWN_VALUE).items():
+        object.__setattr__(marked, name, member)
+    object.__setattr__(marked, "items", (deep,))
+    object.__setattr__(marked, "_collection_root", True)
+    visitor._states[-1] = {"deep": deep, "marked": marked}
+    with pytest.raises(contract._AnalysisLimitError, match="depth exceeds 32"):
+        visitor._binding_snapshot()
+
+
+def test_join_snapshot_shared_identity_plan_is_bounded_and_reused(contract, tmp_path):
+    path = tmp_path / "fixture.py"
+    index = contract._SourceIndex(tmp_path, {path: contract.ast.parse("")})
+    visitor = contract._RuntimeReadVisitor(frozenset(), index, index.module_for_path(path))
+    root = contract._AbstractValue(items=(contract._UNKNOWN_VALUE,) * 1200)
+    snapshots = tuple(({"x": root}, {}, {"x": root}) for _ in range(64))
+    state, _, annotations = visitor._join_binding_snapshots(*snapshots)
+    assert state["x"] is root
+    assert annotations["x"] is root
+    assert visitor._join_binding_snapshots((state, {}, annotations))[0]["x"] is root
+
+
+def test_join_snapshot_uses_only_its_prevalidated_identity_plan(contract, tmp_path, monkeypatch):
+    path = tmp_path / "fixture.py"
+    index = contract._SourceIndex(tmp_path, {path: contract.ast.parse("")})
+    visitor = contract._RuntimeReadVisitor(frozenset(), index, index.module_for_path(path))
+    root = contract._AbstractValue(items=(contract._UNKNOWN_VALUE,) * 8)
+    calls: list[str] = []
+    original = contract._validate_abstract_values
+
+    def observe(values, **kwargs):
+        calls.append(kwargs.get("boundary", "value"))
+        return original(values, **kwargs)
+
+    monkeypatch.setattr(contract, "_validate_abstract_values", observe)
+    state, _, annotations = visitor._join_binding_snapshots(
+        ({"x": root}, {}, {"x": root}),
+        ({"x": root}, {}, {"x": root}),
+    )
+    assert state["x"] is root
+    assert annotations["x"] is root
+    assert calls.count("joined_binding_snapshot") == 2
+    assert "join_identity" not in calls
+    assert "join_input" not in calls
+
+
+def test_join_snapshot_rejects_foreign_prevalidation_token(contract, monkeypatch):
+    context = contract._JoinValidationContext()
+    value = contract._UNKNOWN_VALUE
+    foreign = contract._JoinOperandGroup((value, value), True, object())
+    boundaries: list[str] = []
+    original = contract._validate_abstract_values
+
+    def observe(values, **kwargs):
+        boundaries.append(kwargs.get("boundary", "value"))
+        return original(values, **kwargs)
+
+    monkeypatch.setattr(contract, "_validate_abstract_values", observe)
+    assert (
+        contract._join_values(
+            value,
+            value,
+            _validation_context=context,
+            _same_identity=True,
+            _prevalidated_group=foreign,
+        )
+        is value
+    )
+    assert "join_identity" in boundaries
+
+
+def test_join_snapshot_high_fanin_reference_budget_boundary(contract, tmp_path, monkeypatch):
+    path = tmp_path / "fixture.py"
+    index = contract._SourceIndex(tmp_path, {path: contract.ast.parse("")})
+    visitor = contract._RuntimeReadVisitor(frozenset(), index, index.module_for_path(path))
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_OPERATION_WORK", 12)
+    snapshots = tuple(({"x": contract._UNKNOWN_VALUE}, {}, {}) for _ in range(6))
+    assert visitor._join_binding_snapshots(*snapshots)[0]["x"] is contract._UNKNOWN_VALUE
+    over = snapshots + (({"x": contract._UNKNOWN_VALUE}, {}, {}),)
+    with pytest.raises(
+        contract._AnalysisLimitError, match="operand-reference cost exceeds 12"
+    ) as caught:
+        visitor._join_binding_snapshots(*over)
+    assert '"operand_references": 7' in str(caught.value)
+
+
+def test_join_snapshot_mixed_work_above_8192_is_bounded_by_output_budget(
+    contract, tmp_path, monkeypatch
+):
+    path = tmp_path / "fixture.py"
+    index = contract._SourceIndex(tmp_path, {path: contract.ast.parse("")})
+    visitor = contract._RuntimeReadVisitor(frozenset(), index, index.module_for_path(path))
+
+    first = contract._AbstractValue(origins=frozenset(f"a{i}" for i in range(4100)))
+    second = contract._AbstractValue(origins=frozenset(f"b{i}" for i in range(4100)))
+    input_cost = sum(contract._validate_abstract_values((value,))[0] for value in (first, second))
+    assert input_cost > 8192
+    snapshots = (({"x": first}, {}, {}), ({"x": second}, {}, {}))
+    reserves = []
+    original_reserve = contract._reserve_join_output
+
+    def observe_reserve(work, amount, boundary):
+        reserves.append((work, work[0], amount, boundary))
+        return original_reserve(work, amount, boundary)
+
+    monkeypatch.setattr(contract, "_reserve_join_output", observe_reserve)
+    assert "x" in visitor._join_binding_snapshots(*snapshots)[0]
+    result_validation = [item for item in reserves if item[3] == "result_validation_walks"]
+    assert result_validation
+    outer_reserve = result_validation[-1]
+    # Projected result cost reflects the retained union shape rather than
+    # repeating the summed expanded input cost as a result-validation proxy.
+    assert 0 < outer_reserve[2] < input_cost * 2
+    assert outer_reserve[0][0] <= contract._MAX_ABSTRACT_JOIN_OUTPUT_WORK
+
+    # The same input must fail at the pre-construction reservation when the
+    # remaining operation budget is one unit too small.
+    capped = outer_reserve[1] + outer_reserve[2] - 1
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", capped)
+    reserves.clear()
+    with pytest.raises(contract._AnalysisLimitError, match="join output work") as caught:
+        visitor._join_binding_snapshots(*snapshots)
+    assert '"boundary": "result_validation_walks"' in str(caught.value)
+
+
+def test_join_snapshot_mixed_cost_is_not_double_charged_as_unique_overhead(contract, tmp_path):
+    path = tmp_path / "fixture.py"
+    index = contract._SourceIndex(tmp_path, {path: contract.ast.parse("")})
+    visitor = contract._RuntimeReadVisitor(frozenset(), index, index.module_for_path(path))
+    first = contract._AbstractValue(items=(contract._UNKNOWN_VALUE,) * 1250)
+    second = contract._AbstractValue(items=(contract._UNKNOWN_VALUE,) * 1250)
+    assert first is not second
+    state, _, _ = visitor._join_binding_snapshots(({"x": first}, {}, {}), ({"x": second}, {}, {}))
+    assert len(state["x"].items or ()) == 1250
+
+
+def test_unknown_sentinel_comparison_matches_dataclass_equality_for_every_field(contract):
+    function = contract.ast.parse("def reader(): pass").body[0]
+    class_node = contract.ast.parse("class Reader: pass").body[0]
+    unresolved = contract._UnresolvedCallable(function, "decorator", "module", 1)
+    cases = {
+        "origins": frozenset({"origin"}),
+        "items": (contract._UNKNOWN_VALUE,),
+        "entries": (("key", contract._UNKNOWN_VALUE),),
+        "attributes": (("name", contract._UNKNOWN_VALUE),),
+        "identity": frozenset({1}),
+        "literal": "literal",
+        "string_value": "value",
+        "string_values": frozenset({"value"}),
+        "truth": True,
+        "classes": frozenset({class_node}),
+        "instance_classes": frozenset({class_node}),
+        "modules": frozenset({"module"}),
+        "callables": (contract._CallableTarget(function),),
+        "serialized_sections": frozenset({"section"}),
+        "accessed_attributes": frozenset({"attribute"}),
+        "unresolved_callables": (unresolved,),
+        "unknown_alternative": True,
+    }
+    for expected_comparisons, (field_name, field_value) in enumerate(cases.items(), start=1):
+        value = contract._AbstractValue(**{field_name: field_value})
+        work = [0]
+        assert contract._equals_unknown_value(value, work) == (value == contract._UNKNOWN_VALUE), (
+            field_name
+        )
+        assert work[0] == expected_comparisons, field_name
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        pytest.param((), id="empty-tuple"),
+        pytest.param("child", id="one-child-tuple"),
+    ],
+)
+def test_unknown_sentinel_comparison_preserves_none_empty_and_large_shape_semantics(
+    contract, value
+):
+    if value == "child":
+        value = (contract._UNKNOWN_VALUE,)
+    instance = contract._AbstractValue(items=value)
+    work = [0]
+    assert contract._equals_unknown_value(instance, work) == (instance == contract._UNKNOWN_VALUE)
+    assert work[0] == (17 if instance == contract._UNKNOWN_VALUE else 2)
+
+    large = contract._AbstractValue(
+        origins=frozenset(f"origin-{index}" for index in range(4000)),
+        items=(contract._UNKNOWN_VALUE,) * 4000,
+    )
+    large_work = [0]
+    assert not contract._equals_unknown_value(large, large_work)
+    assert large_work[0] == 1
+
+
+def test_unknown_sentinel_comparison_excludes_collection_root_and_short_circuits(
+    contract,
+):
+    root = contract._AbstractValue(items=(), _collection_root=True)
+    root_work = [0]
+    ordinary = contract._AbstractValue(items=())
+    assert root == ordinary
+    assert contract._equals_unknown_value(root, root_work) == (root == contract._UNKNOWN_VALUE)
+    assert root_work[0] == 2
+
+    subclass = type("AbstractValueSubclass", (contract._AbstractValue,), {})()
+    subclass_work = [0]
+    assert (subclass == contract._UNKNOWN_VALUE) is False
+    assert not contract._equals_unknown_value(subclass, subclass_work)
+    assert subclass_work[0] == 0
+
+
+def test_unknown_sentinel_comparison_charges_one_unit_per_field_before_compare(
+    contract, monkeypatch
+):
+    work = [0]
+    assert contract._equals_unknown_value(contract._UNKNOWN_VALUE, work)
+    assert work[0] == 17
+
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", 16)
+    capped = [0]
+    with pytest.raises(contract._AnalysisLimitError) as caught:
+        contract._equals_unknown_value(contract._UNKNOWN_VALUE, capped)
+    assert '"boundary": "unknown_alternative_field_comparison"' in str(caught.value)
+    assert capped[0] == 16
+
+
+def test_join_snapshot_mixed_structurally_unequal_values_keep_both_shapes(contract, tmp_path):
+    path = tmp_path / "fixture.py"
+    index = contract._SourceIndex(tmp_path, {path: contract.ast.parse("")})
+    visitor = contract._RuntimeReadVisitor(frozenset(), index, index.module_for_path(path))
+    shared = contract._AbstractValue(origins=frozenset({"evaluation"}))
+    first = contract._AbstractValue(origins=frozenset({"evaluation"}), items=(shared, shared))
+    second = contract._AbstractValue(origins=frozenset({"consensus"}), items=(shared,))
+    state, _, _ = visitor._join_binding_snapshots(({"x": first}, {}, {}), ({"x": second}, {}, {}))
+    assert state["x"].items == (shared,)
+    assert state["x"].origins == frozenset({"evaluation", "consensus"})
+
+
+def test_append_abrupt_uses_join_snapshot_plan_for_matching_paths(contract, tmp_path):
+    path = tmp_path / "fixture.py"
+    index = contract._SourceIndex(tmp_path, {path: contract.ast.parse("")})
+    visitor = contract._RuntimeReadVisitor(frozenset(), index, index.module_for_path(path))
+    first = contract._AbstractValue(origins=frozenset({"evaluation"}))
+    second = contract._AbstractValue(origins=frozenset({"consensus"}))
+    left = ({"value": first}, {}, {"value": first})
+    right = ({"value": second}, {}, {"value": second})
+    target = [contract._AbruptPath("return", left)]
+    visitor._append_abrupt(target, contract._AbruptPath("return", right))
+    assert len(target) == 1
+    assert target[0].bindings[0]["value"].origins == frozenset({"evaluation", "consensus"})
+
+
+def test_join_snapshot_repeated_mixed_vector_reuses_the_join_result(contract, tmp_path):
+    path = tmp_path / "fixture.py"
+    index = contract._SourceIndex(tmp_path, {path: contract.ast.parse("")})
+    visitor = contract._RuntimeReadVisitor(frozenset(), index, index.module_for_path(path))
+    values = tuple(
+        contract._AbstractValue(items=(contract._UNKNOWN_VALUE,) * 750) for _ in range(3)
+    )
+    snapshots = tuple(({"x": value, "y": value}, {}, {}) for value in values)
+    state, _, _ = visitor._join_binding_snapshots(*snapshots)
+    assert state["x"] is state["y"]
+
+
+def test_join_snapshot_mixed_memo_stays_within_separate_operation_and_graph_budgets(
+    contract, tmp_path, monkeypatch
+):
+    path = tmp_path / "fixture.py"
+    index = contract._SourceIndex(tmp_path, {path: contract.ast.parse("")})
+    visitor = contract._RuntimeReadVisitor(frozenset(), index, index.module_for_path(path))
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_OPERATION_WORK", 29)
+    shared = contract._AbstractValue(items=(contract._UNKNOWN_VALUE,))
+    mixed = tuple(contract._AbstractValue(items=(shared,)) for _ in range(3))
+    snapshots = tuple(({"mixed": value}, {}, {"same": shared}) for value in mixed)
+    state, _, annotation = visitor._join_binding_snapshots(*snapshots)
+    assert state["mixed"] is not shared
+    assert annotation["same"] is shared
+
+
+def test_join_snapshot_reuses_mixed_preflight_memo_for_actual_join(contract, tmp_path, monkeypatch):
+    path = tmp_path / "fixture.py"
+    index = contract._SourceIndex(tmp_path, {path: contract.ast.parse("")})
+    visitor = contract._RuntimeReadVisitor(frozenset(), index, index.module_for_path(path))
+    leaf = contract._AbstractValue()
+    first = contract._AbstractValue(items=(leaf,) * 200)
+    second = contract._AbstractValue(items=(leaf,) * 200)
+    traversals: list[tuple[str, int]] = []
+    original = contract._validate_abstract_values
+
+    def observe(values, **kwargs):
+        work = kwargs.get("_shared_work")
+        before = work[0] if work is not None else 0
+        result = original(values, **kwargs)
+        after = work[0] if work is not None else before
+        traversals.append((kwargs.get("boundary", ""), after - before))
+        return result
+
+    monkeypatch.setattr(contract, "_validate_abstract_values", observe)
+    state, _, _ = visitor._join_binding_snapshots(({"x": first}, {}, {}), ({"x": second}, {}, {}))
+    assert len(state["x"].items or ()) == 200
+    assert any(boundary == "joined_binding_snapshot" and work > 0 for boundary, work in traversals)
+    assert not any(boundary in {"join_input", "join_identity"} for boundary, _ in traversals)
+
+
+def test_join_snapshot_memo_reuses_identical_mixed_results_across_bindings(contract, tmp_path):
+    path = tmp_path / "fixture.py"
+    index = contract._SourceIndex(tmp_path, {path: contract.ast.parse("")})
+    visitor = contract._RuntimeReadVisitor(frozenset(), index, index.module_for_path(path))
+    operands = tuple(
+        contract._AbstractValue(origins=frozenset(f"{index}-{item}" for item in range(2100)))
+        for index in range(3)
+    )
+    snapshots = tuple(
+        ({"left": value, "right": value}, {}, {"annotation": value}) for value in operands
+    )
+    joined, _, annotations = visitor._join_binding_snapshots(*snapshots)
+    expected = contract._join_values(*operands)
+    assert joined["left"] is joined["right"]
+    assert joined["left"].origins == expected.origins
+    assert annotations["annotation"].origins == expected.origins
+
+
+def test_join_result_memo_replays_work_and_keeps_operand_order(contract, monkeypatch):
+    context = contract._JoinValidationContext()
+    first = contract._AbstractValue(origins=frozenset({"first"}))
+    second = contract._AbstractValue(origins=frozenset({"second"}))
+    forward = contract._join_values(first, second, _validation_context=context)
+    assert contract._join_values(first, second, _validation_context=context) is forward
+    reverse = contract._join_values(second, first, _validation_context=context)
+    assert reverse is not forward
+    assert reverse.origins == forward.origins
+
+    nested_first = contract._AbstractValue(items=(first,))
+    nested_second = contract._AbstractValue(items=(second,))
+    shallow = contract._join_values(
+        nested_first, nested_second, _validation_context=context, _depth=0
+    )
+    deep = contract._join_values(nested_first, nested_second, _validation_context=context, _depth=8)
+    assert shallow is not deep
+    assert shallow.items is not None
+    assert deep.items is None
+
+    limited = contract._JoinValidationContext()
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_WORK", 1)
+    contract._join_values(first, second, _validation_context=limited)
+    with pytest.raises(contract._AnalysisLimitError, match="abstract join work exceeds 1"):
+        contract._join_values(first, second, _validation_context=limited)
+
+
+def test_join_output_budget_reserves_metadata_union_before_construction(contract, monkeypatch):
+    first = contract._AbstractValue(origins=frozenset({"a" * 64, "b" * 64}))
+    second = contract._AbstractValue(origins=frozenset({"c" * 64, "d" * 64}))
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", 8)
+    with pytest.raises(contract._AnalysisLimitError, match="join output work") as caught:
+        contract._join_values(first, second)
+    assert '"boundary": "origins_payload_scan"' in str(caught.value)
+
+
+def test_join_output_budget_reserves_mapping_copy_and_key_product(contract, monkeypatch):
+    leaf = contract._AbstractValue(origins=frozenset({"source"}))
+    names = tuple((f"key-{index}", leaf) for index in range(4))
+    first = contract._AbstractValue(entries=names)
+    second = contract._AbstractValue(entries=names)
+    context = contract._JoinValidationContext()
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", 275)
+    with pytest.raises(contract._AnalysisLimitError, match="join output work") as caught:
+        contract._join_values(first, second, _validation_context=context)
+    assert '"boundary": "entry_key_lookup_and_candidates"' in str(caught.value)
+    assert '"requested_work": 24' in str(caught.value)
+    assert context.output_work[0] <= 285
+
+
+def test_join_snapshot_rejects_raw_reference_lower_bound_before_key_union(contract, monkeypatch):
+    class KeysForbidden(dict):
+        def keys(self):
+            raise AssertionError("key union ran before raw-reference admission")
+
+    state = KeysForbidden({f"name-{index}": contract._UNKNOWN_VALUE for index in range(3)})
+    snapshots = ((state, {}, {}), (state, {}, {}))
+    path = Path("fixture.py")
+    index = contract._SourceIndex(Path("."), {path: contract.ast.parse("")})
+    visitor = contract._RuntimeReadVisitor(frozenset(), index, index.module_for_path(path))
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_OPERATION_WORK", 4)
+    with pytest.raises(contract._AnalysisLimitError, match="operand-reference cost") as caught:
+        visitor._join_binding_snapshots(*snapshots)
+    assert '"boundary": "join_operand_reference_lower_bound"' in str(caught.value)
+
+
+def test_join_output_budget_reserves_deep_callable_hash_work(contract, monkeypatch):
+    function = contract.ast.parse("def reader(): pass").body[0]
+    receiver = contract._AbstractValue(origins=frozenset({"receiver-" + "x" * 256}))
+    target = contract._CallableTarget(function, receiver)
+    first = contract._AbstractValue(callables=(target,))
+    second = contract._AbstractValue(callables=(target,))
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", 1024)
+
+    def forbidden_hash(_value):
+        raise AssertionError("callable hashing began before receiver work was reserved")
+
+    monkeypatch.setattr(contract._AbstractValue, "__hash__", forbidden_hash)
+    with pytest.raises(contract._AnalysisLimitError, match="join output work") as caught:
+        contract._join_values(first, second)
+    assert '"boundary": "callable_hash_and_equality"' in str(caught.value)
+
+
+def test_join_uncached_shared_deep_receivers_charge_actual_validation_work(contract, monkeypatch):
+    reader_a, reader_b = contract.ast.parse("def reader_a(): pass\ndef reader_b(): pass").body
+    leaf = contract._AbstractValue(origins=frozenset({"receiver"}))
+    receiver = contract._AbstractValue(items=(leaf,) * 8)
+    targets = (
+        contract._CallableTarget(reader_a, receiver),
+        contract._CallableTarget(reader_b, receiver),
+    )
+    first = contract._AbstractValue(callables=targets)
+    second = contract._AbstractValue(callables=targets)
+    monkeypatch.setattr(contract, "_get_validation_cache_entry", lambda _key: None)
+
+    original_validate = contract._validate_abstract_values
+    profile_validations: list[tuple[int, int]] = []
+
+    def observe_validation(values, **kwargs):
+        if kwargs.get("boundary") != "callable_receiver_profile":
+            return original_validate(values, **kwargs)
+        output_work = kwargs.get("_join_output_work")
+        assert output_work is not None
+        before = output_work[0]
+        result = original_validate(values, **kwargs)
+        profile_validations.append((before, output_work[0] - before))
+        return result
+
+    reserves: list[tuple[int, str]] = []
+    original_reserve = contract._reserve_join_output
+
+    def observe_reserve(work, amount, boundary):
+        reserves.append((amount, boundary))
+        return original_reserve(work, amount, boundary)
+
+    monkeypatch.setattr(contract, "_validate_abstract_values", observe_validation)
+    monkeypatch.setattr(contract, "_reserve_join_output", observe_reserve)
+    joined = contract._join_values(first, second)
+
+    assert joined.callables == targets
+    assert len(profile_validations) == 2
+    assert all(before >= 0 and actual > 0 for before, actual in profile_validations)
+    assert any(name == "join_input_validation_node" for _, name in reserves)
+    assert any(name == "join_input_validation_edge" for _, name in reserves)
+    assert not any(name == "callable_receiver_validation_upper_bound" for _, name in reserves)
+
+    before, actual_receiver_work = profile_validations[0]
+    monkeypatch.setattr(
+        contract,
+        "_MAX_ABSTRACT_JOIN_OUTPUT_WORK",
+        before + actual_receiver_work - 1,
+    )
+
+    def forbidden_hash(_value):
+        raise AssertionError("callable hashing began before receiver validation")
+
+    monkeypatch.setattr(contract._AbstractValue, "__hash__", forbidden_hash)
+    with pytest.raises(contract._AnalysisLimitError, match="join output work") as caught:
+        contract._join_values(first, second)
+    assert '"boundary": "join_input_validation_' in str(caught.value)
+
+
+def test_join_cached_callable_receiver_uses_bounded_cache_profile(contract, monkeypatch):
+    function = contract.ast.parse("def reader(): pass").body[0]
+    receiver = contract._AbstractValue(origins=frozenset({"cached receiver"}))
+    target = contract._CallableTarget(function, receiver)
+    first = contract._AbstractValue(callables=(target,))
+    second = contract._AbstractValue(callables=(target,))
+    receiver_entry = contract._get_validation_cache_entry(id(receiver))
+    assert receiver_entry is not None and receiver_entry.root is receiver
+
+    original_get = contract._get_validation_cache_entry
+    monkeypatch.setattr(
+        contract,
+        "_get_validation_cache_entry",
+        lambda key: receiver_entry if key == id(receiver) else original_get(key),
+    )
+    profile_scans: list[str] = []
+    original_reserve = contract._reserve_join_output
+
+    def observe_reserve(work, amount, boundary):
+        if boundary.startswith("callable_receiver_"):
+            profile_scans.append(boundary)
+        return original_reserve(work, amount, boundary)
+
+    monkeypatch.setattr(contract, "_reserve_join_output", observe_reserve)
+    joined = contract._join_values(first, second)
+
+    assert joined.callables == (target,)
+    assert "callable_receiver_profile_scan" in profile_scans
+    assert "callable_receiver_validation_upper_bound" not in profile_scans
+
+
+def test_callable_receiver_validation_output_work_exact_and_one_under(contract, monkeypatch):
+    leaf = contract._AbstractValue(origins=frozenset({"deep"}))
+    receiver = contract._AbstractValue(items=(leaf,) * 4)
+    monkeypatch.setattr(contract, "_get_validation_cache_entry", lambda _key: None)
+
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", 10000)
+    measured = [0]
+    contract._validate_abstract_values(
+        (receiver,),
+        allow_collection_roots=True,
+        boundary="callable_receiver_profile",
+        _join_output_work=measured,
+    )
+    exact_work = measured[0]
+    assert exact_work > 0
+
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", exact_work)
+    exact = [0]
+    contract._validate_abstract_values(
+        (receiver,),
+        allow_collection_roots=True,
+        boundary="callable_receiver_profile",
+        _join_output_work=exact,
+    )
+    assert exact[0] == exact_work
+
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", exact_work - 1)
+    one_under = [0]
+    with pytest.raises(contract._AnalysisLimitError, match="join output work") as caught:
+        contract._validate_abstract_values(
+            (receiver,),
+            allow_collection_roots=True,
+            boundary="callable_receiver_profile",
+            _join_output_work=one_under,
+        )
+    assert one_under[0] < exact_work
+    assert '"boundary": "join_input_validation_' in str(caught.value)
+
+
+def test_join_result_memo_hit_charges_lookup_and_retains_bounded_result(contract, monkeypatch):
+    first = contract._AbstractValue(origins=frozenset({"first"}))
+    second = contract._AbstractValue(origins=frozenset({"second"}))
+    context = contract._JoinValidationContext()
+    result = contract._join_values(first, second, _validation_context=context)
+    entry = next(iter(context.result_memo.values()))
+    assert entry.output_work > 0
+    context.output_work[0] = 0
+    # Even a memo hit must reserve the bounded operand validation and identity
+    # lookup scans performed before the memo table can be consulted.
+    hit_budget = len(entry.operands) * 3
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", hit_budget)
+    assert contract._join_values(first, second, _validation_context=context) is result
+    assert context.output_work[0] == hit_budget
+    context.output_work[0] = 0
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", hit_budget - 1)
+    with pytest.raises(contract._AnalysisLimitError, match="join output work"):
+        contract._join_values(first, second, _validation_context=context)
+
+
+def test_join_result_memo_is_operation_local_and_does_not_admit_foreign_context(contract):
+    first = contract._AbstractValue(origins=frozenset({"first"}))
+    second = contract._AbstractValue(origins=frozenset({"second"}))
+    left_context = contract._JoinValidationContext()
+    right_context = contract._JoinValidationContext()
+    first_result = contract._join_values(first, second, _validation_context=left_context)
+    second_result = contract._join_values(first, second, _validation_context=right_context)
+    assert second_result is not first_result
+    assert not right_context.result_memo or all(
+        entry.result is not first_result for entry in right_context.result_memo.values()
+    )
+
+
+def test_join_snapshot_missing_names_use_unknown_operand_and_count_refs(
+    contract, tmp_path, monkeypatch
+):
+    path = tmp_path / "fixture.py"
+    index = contract._SourceIndex(tmp_path, {path: contract.ast.parse("")})
+    visitor = contract._RuntimeReadVisitor(frozenset(), index, index.module_for_path(path))
+    value = contract._AbstractValue(origins=frozenset({"evaluation"}))
+    snapshots = (({"left": value}, {}, {}), ({"right": value}, {}, {}))
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_OPERATION_WORK", 4)
+    with pytest.raises(contract._AnalysisLimitError, match="operand-reference cost"):
+        visitor._join_binding_snapshots(*snapshots)
+
+
+def test_join_snapshot_validates_direct_and_embedded_marked_roots(contract, tmp_path):
+    path = tmp_path / "fixture.py"
+    index = contract._SourceIndex(tmp_path, {path: contract.ast.parse("")})
+    visitor = contract._RuntimeReadVisitor(frozenset(), index, index.module_for_path(path))
+    marked = contract._AbstractValue(items=(contract._UNKNOWN_VALUE,) * 2050, _collection_root=True)
+    assert (
+        contract._validate_abstract_values(
+            (marked,),
+            aggregate_limit=contract._MAX_ABSTRACT_OPERATION_WORK,
+            allow_collection_roots=True,
+        )[0]
+        > contract._MAX_ABSTRACT_WORK
+    )
+    embedded = contract._AbstractValue(items=(marked,))
+    assert embedded.items is not None and embedded.items[0] is marked
+    snapshots = (({"direct": marked}, {}, {}), ({"direct": marked}, {}, {}))
+    state, _, _ = visitor._join_binding_snapshots(*snapshots)
+    assert state["direct"] is marked
+
+
+@pytest.mark.parametrize("receiver", [False, True])
+def test_operation_change_preserves_shared_dag_rejection_without_eq_or_hash(
+    contract, monkeypatch, receiver
+):
+    def forbidden(*_args):
+        raise AssertionError("DAG rejection reached structural equality/hash")
+
+    monkeypatch.setattr(contract._AbstractValue, "__eq__", forbidden)
+    monkeypatch.setattr(contract._AbstractValue, "__hash__", forbidden)
+    monkeypatch.setattr(contract._CallableTarget, "__eq__", forbidden)
+    monkeypatch.setattr(contract._CallableTarget, "__hash__", forbidden)
+    value = contract._UNKNOWN_VALUE
+    function = contract.ast.parse("def reader(): pass").body[0]
+    with pytest.raises(contract._AnalysisLimitError, match="value expanded cost exceeds 131072"):
+        for _ in range(20):
+            if receiver:
+                target = contract._CallableTarget(function, value)
+                value = contract._AbstractValue(callables=(target, target))
+            else:
+                value = contract._AbstractValue(items=(value, value))
+
+
+def test_validator_traversal_budget_is_independent_of_aggregate_allowance(contract, monkeypatch):
+    value = contract._AbstractValue(items=(contract._UNKNOWN_VALUE,) * 3)
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_OPERATION_WORK", 2)
+    with pytest.raises(contract._AnalysisLimitError, match="traversal exceeds 2"):
+        contract._validate_abstract_values((value,), aggregate_limit=100)
+
+
+def test_join_scalar_comparison_budget_tracks_short_circuit_prefix(contract, monkeypatch):
+    first = contract._AbstractValue(literal="same")
+    equal_copy = contract._AbstractValue(literal=b"same".decode())
+    third = contract._AbstractValue(literal="different")
+    output_work = [0]
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", 19)
+    assert (
+        contract._joined_scalar_string((first, equal_copy, third), "literal", output_work) is None
+    )
+    assert output_work == [19]
+
+    output_work[0] = 0
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", 18)
+    with pytest.raises(contract._AnalysisLimitError, match="join output work"):
+        contract._joined_scalar_string((first, equal_copy, third), "literal", output_work)
+    assert output_work == [18]
+
+    equal_values = tuple(contract._AbstractValue(literal=b"long-text".decode()) for _ in range(3))
+    output_work[0] = 0
+    all_equal_work = 1 + 2 * (1 + 4 * len("long-text"))
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", all_equal_work)
+    assert contract._joined_scalar_string(equal_values, "literal", output_work) == "long-text"
+    assert output_work == [all_equal_work]
+
+    output_work[0] = 0
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", all_equal_work - 1)
+    with pytest.raises(contract._AnalysisLimitError, match="join output work"):
+        contract._joined_scalar_string(equal_values, "literal", output_work)
+    assert output_work == [1 + (1 + 4 * len("long-text"))]
+
+    class UnsafeString(str):
+        def __eq__(self, other):
+            raise AssertionError("comparison after the first mismatch must not run")
+
+    output_work[0] = 0
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", 18)
+    assert (
+        contract._joined_scalar_string(
+            (
+                contract._AbstractValue(literal="same"),
+                contract._AbstractValue(literal="else"),
+                contract._AbstractValue(literal=UnsafeString("later")),
+            ),
+            "literal",
+            output_work,
+        )
+        is None
+    )
+    assert output_work == [18]
+
+
+def test_join_scalar_comparison_rejects_string_subclass_before_custom_equality(
+    contract,
+):
+    class UnsafeString(str):
+        def __eq__(self, other):
+            raise AssertionError("custom equality must not run")
+
+    with pytest.raises(contract._AnalysisLimitError, match="unsupported literal"):
+        contract._joined_scalar_string(
+            (contract._AbstractValue(literal=UnsafeString("x")),),
+            "literal",
+            [0],
+        )
+
+
+def test_join_string_value_hash_is_identity_cached_and_insertions_are_per_operand(
+    contract, monkeypatch
+):
+    shared = "shared-value"
+    repeated = tuple(contract._AbstractValue(string_value=shared) for _ in range(3))
+    exact_work = 3 + 4 * len(shared) + 2 * 3
+    output_work = [0]
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", exact_work)
+    contract._reserve_join_string_value_work(repeated, output_work)
+    assert output_work == [exact_work]
+
+    output_work[0] = 0
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", exact_work - 1)
+    with pytest.raises(contract._AnalysisLimitError, match="join output work"):
+        contract._reserve_join_string_value_work(repeated, output_work)
+    assert output_work == [3 + 4 * len(shared)]
+
+
+def test_join_string_value_hash_budget_reserves_before_hash(contract, monkeypatch):
+    text = "hash-before-insert"
+    value = contract._AbstractValue(string_value=text)
+    hash_calls = []
+    monkeypatch.setattr(
+        contract,
+        "hash",
+        lambda candidate: hash_calls.append(candidate) or 0,
+        raising=False,
+    )
+    output_work = [0]
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", 4 * len(text))
+    with pytest.raises(contract._AnalysisLimitError) as caught:
+        contract._reserve_join_string_value_work((value,), output_work)
+    assert '"boundary": "string_value_hash_payload"' in str(caught.value)
+    assert output_work == [1]
+    assert hash_calls == []
+
+    output_work[0] = 0
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", 1 + 4 * len(text))
+    with pytest.raises(contract._AnalysisLimitError) as caught:
+        contract._reserve_join_string_value_work((value,), output_work)
+    assert '"boundary": "string_value_set_insertions"' in str(caught.value)
+    assert output_work == [1 + 4 * len(text)]
+    assert hash_calls == [text]
+
+
+def test_join_string_value_candidate_scan_exact_and_one_under(contract, monkeypatch):
+    value = contract._AbstractValue()
+    output_work = [0]
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", 1)
+    contract._reserve_join_string_value_work((value,), output_work)
+    assert output_work == [1]
+
+    output_work[0] = 0
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", 0)
+    with pytest.raises(contract._AnalysisLimitError) as caught:
+        contract._reserve_join_string_value_work((value,), output_work)
+    assert '"boundary": "string_value_candidate_scan"' in str(caught.value)
+    assert output_work == [0]
+
+
+def test_join_equal_distinct_strings_dedupe_retained_semantic_payload(contract):
+    left_text = "equal-but-distinct-text"
+    right_text = left_text.encode().decode()
+    assert left_text == right_text and left_text is not right_text
+    left = contract._AbstractValue(string_value=left_text, string_values=frozenset({left_text}))
+    right = contract._AbstractValue(string_value=right_text, string_values=frozenset({right_text}))
+
+    joined = contract._join_values(left, right)
+
+    assert joined.string_value == left_text
+    assert len(joined.string_values) == 1
+    assert joined.string_values == frozenset({left_text})
+
+    output_work = [0]
+    exact_hash_work = 2 + 8 * len(left_text) + 4
+    contract._reserve_join_string_value_work(
+        (
+            contract._AbstractValue(string_value=left_text),
+            contract._AbstractValue(string_value=right_text),
+        ),
+        output_work,
+    )
+    assert output_work == [exact_hash_work]
+
+
+def test_join_retained_payload_reservation_exact_and_one_under(contract, monkeypatch):
+    text = "x" * 65535
+    retained = frozenset({text})
+    exact_work = 1 + 4 * len(text)
+    output_work = [0]
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", exact_work)
+    contract._reserve_join_retained_string_payload(retained, None, output_work)
+    assert output_work == [exact_work]
+
+    output_work[0] = 0
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", exact_work - 1)
+    with pytest.raises(contract._AnalysisLimitError, match="join output work"):
+        contract._reserve_join_retained_string_payload(retained, None, output_work)
+    assert output_work == [1]
+
+
+def test_join_retained_payload_scan_exact_and_one_under(contract, monkeypatch):
+    text = "x"
+    output_work = [0]
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", 1)
+    with pytest.raises(contract._AnalysisLimitError) as caught:
+        contract._reserve_join_retained_string_payload(frozenset({text}), None, output_work)
+    assert '"boundary": "retained_string_payload"' in str(caught.value)
+    assert output_work == [1]
+
+    output_work[0] = 0
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", 0)
+    with pytest.raises(contract._AnalysisLimitError) as caught:
+        contract._reserve_join_retained_string_payload(frozenset({text}), None, output_work)
+    assert '"boundary": "retained_string_values_scan"' in str(caught.value)
+    assert output_work == [0]
+
+
+def test_join_retained_payload_dedupes_equal_distinct_literal(contract, monkeypatch):
+    text = "same-payload"
+    literal = text.encode().decode()
+    assert literal == text and literal is not text
+    retained = frozenset({text})
+    exact_work = 1 + (1 + 8 * len(literal)) + (4 * len(text))
+    output_work = [0]
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", exact_work)
+    contract._reserve_join_retained_string_payload(retained, literal, output_work)
+    assert output_work == [exact_work]
+
+    output_work[0] = 0
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", exact_work - 1)
+    with pytest.raises(contract._AnalysisLimitError, match="join output work"):
+        contract._reserve_join_retained_string_payload(retained, literal, output_work)
+    assert output_work == [1 + (1 + 8 * len(literal))]
+
+    output_work[0] = 0
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", 8 * len(literal))
+    with pytest.raises(contract._AnalysisLimitError) as caught:
+        contract._reserve_join_retained_string_payload(frozenset(), literal, output_work)
+    assert '"boundary": "retained_literal_membership"' in str(caught.value)
+    assert output_work == [0]
+
+
+def test_join_r14_shape_admits_under_unchanged_output_cap(contract):
+    def text_with_length(index, length):
+        return chr(0x1000 + index) + ("x" * (length - 1))
+
+    literal_lengths = [214, 214] + [241] * 3 + [240] * 26
+    value_lengths = [221 if index < 6833 % 31 else 220 for index in range(31)]
+    literals = [text_with_length(index, length) for index, length in enumerate(literal_lengths)]
+    string_values = [
+        text_with_length(100 + index, length) for index, length in enumerate(value_lengths)
+    ]
+    literal_identities = literals + [literals[0].encode().decode(), literals[1].encode().decode()]
+    joined_values = tuple(
+        contract._AbstractValue(
+            literal=literal_identities[index],
+            string_value=string_values[index] if index < 31 else None,
+            string_values=(frozenset({string_values[index]}) if index < 31 else frozenset()),
+        )
+        for index in range(33)
+    )
+    operands = tuple(joined_values[index % 33] for index in range(143))
+    assert len({id(value) for value in operands}) == 33
+    assert operands[0] is not operands[1]
+    assert operands[0].literal != operands[1].literal
+    assert operands[0].string_value != operands[1].string_value
+    assert (
+        sum(len(value.literal or "") + len(value.string_value or "") for value in joined_values)
+        == 14652
+    )
+
+    output_work = [0]
+    joined = contract._join_values(*operands, _output_work=output_work)
+
+    assert contract._MAX_ABSTRACT_JOIN_OUTPUT_WORK == 262144
+    assert output_work[0] <= contract._MAX_ABSTRACT_JOIN_OUTPUT_WORK
+    assert joined.literal is None
+    assert joined.string_value is None
+    assert len(joined.string_values) == 31
+    assert sum(map(len, joined.string_values)) == 6833
+
+
+def test_join_large_string_values_fail_closed_before_result_construction(contract):
+    value = contract._AbstractValue(string_values=frozenset({"x" * 70000}))
+    with pytest.raises(contract._AnalysisLimitError, match="join output work") as caught:
+        contract._join_values(value, contract._AbstractValue())
+    assert '"boundary": "metadata_union"' in str(caught.value)
+
+
+def _empty_join_result_fields(contract):
+    from dataclasses import fields
+
+    empty = contract._AbstractValue()
+    return {
+        item.name: getattr(empty, item.name)
+        for item in fields(contract._AbstractValue)
+        if item.name != "_collection_root"
+    }
+
+
+def test_join_result_validation_projection_uses_collapsed_prepared_shape(contract):
+    text = "scalar-input" * 100
+    inputs = (
+        contract._AbstractValue(literal=text, string_value=text),
+        contract._AbstractValue(literal=text.encode().decode(), string_value=None),
+    )
+    input_cost = sum(contract._validate_abstract_values((value,))[0] for value in inputs)
+    fields = _empty_join_result_fields(contract)
+    fields.update(literal=None, string_value=None)
+
+    output_work = [0]
+    projected_cost = contract._reserve_join_result_validation_work(
+        fields, output_work, memo_admission=False
+    )
+
+    assert (
+        projected_cost
+        == contract._validate_abstract_values(
+            [contract.SimpleNamespace(**fields, _collection_root=False)]
+        )[0]
+    )
+    assert projected_cost < input_cost
+    assert output_work[0] > projected_cost  # projection scan plus reserved constructor pass
+
+
+def test_join_result_validation_projection_counts_shared_child_per_reference(contract):
+    child = contract._AbstractValue(string_values=frozenset({"shared child"}))
+    fields = _empty_join_result_fields(contract)
+    fields["items"] = (child, child)
+
+    projected_cost = contract._reserve_join_result_validation_work(
+        fields, [0], memo_admission=False
+    )
+    constructed = contract._AbstractValue(**fields)
+    actual_cost = contract._validate_abstract_values((constructed,))[0]
+
+    assert projected_cost == actual_cost
+    assert projected_cost >= contract._abstract_overhead(
+        constructed
+    ) + 2 * contract._abstract_overhead(child)
+
+
+@pytest.mark.parametrize("memo_admission", [False, True])
+def test_join_result_validation_projection_reserves_exact_or_one_under(
+    contract, monkeypatch, memo_admission
+):
+    child = contract._AbstractValue(string_value="memo child")
+    fields = _empty_join_result_fields(contract)
+    fields["entries"] = (("key", child),)
+    multiplier = 2 if memo_admission else 1
+
+    output_work = [0]
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", 100000)
+    projected_cost = contract._reserve_join_result_validation_work(
+        fields, output_work, memo_admission=memo_admission
+    )
+    exact_total = output_work[0]
+    projection_scan = exact_total - multiplier * projected_cost
+    assert projection_scan > 0
+
+    output_work[0] = 0
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", exact_total)
+    assert (
+        contract._reserve_join_result_validation_work(
+            fields, output_work, memo_admission=memo_admission
+        )
+        == projected_cost
+    )
+    assert output_work == [exact_total]
+
+    output_work[0] = 0
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", exact_total - 1)
+    with pytest.raises(contract._AnalysisLimitError) as caught:
+        contract._reserve_join_result_validation_work(
+            fields, output_work, memo_admission=memo_admission
+        )
+    assert '"boundary": "result_validation_walks"' in str(caught.value)
+    assert output_work == [projection_scan]
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_callable_receiver_string_payload_rejects_before_hash(contract, monkeypatch, cached):
+    receiver = contract._AbstractValue(literal="x" * 70000)
+    function = contract.ast.parse("def reader(): pass").body[0]
+    target = contract._CallableTarget(function, receiver)
+    first = contract._AbstractValue(callables=(target,))
+    second = contract._AbstractValue(callables=(target,))
+    if not cached:
+        monkeypatch.setattr(contract, "_get_validation_cache_entry", lambda _key: None)
+
+    def forbidden_hash(_value):
+        raise AssertionError("receiver hashing preceded its string payload reservation")
+
+    monkeypatch.setattr(contract._AbstractValue, "__hash__", forbidden_hash)
+    with pytest.raises(contract._AnalysisLimitError, match="join output work") as caught:
+        contract._join_values(first, second)
+    assert '"boundary": "callable_hash_and_equality"' in str(caught.value)
+    assert '"requested_work": 280001' in str(caught.value)
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_callable_receiver_profile_counts_shared_string_payload_once(contract, monkeypatch, cached):
+    leaf = contract._AbstractValue(literal="payload")
+    receiver = contract._AbstractValue(items=(leaf, leaf))
+    function = contract.ast.parse("def reader(): pass").body[0]
+    target = contract._CallableTarget(function, receiver)
+    first = contract._AbstractValue(callables=(target,))
+    second = contract._AbstractValue(callables=(target,))
+    cost = contract._validate_abstract_values((receiver,))[0]
+    if not cached:
+        monkeypatch.setattr(contract, "_get_validation_cache_entry", lambda _key: None)
+    reservations = []
+    original_reserve = contract._reserve_join_output
+
+    def observe(work, amount, boundary):
+        if boundary == "callable_hash_and_equality":
+            reservations.append(amount)
+        return original_reserve(work, amount, boundary)
+
+    monkeypatch.setattr(contract, "_reserve_join_output", observe)
+    result = contract._join_values(first, second)
+    assert result.callables == (target,)
+    assert reservations == [cost + 4 * len("payload")]
+
+
+@pytest.mark.parametrize("slot", [0, 2])
+def test_join_snapshot_reuses_admitted_long_binding_names(contract, tmp_path, monkeypatch, slot):
+    path = tmp_path / "fixture.py"
+    index = contract._SourceIndex(tmp_path, {path: contract.ast.parse("")})
+    visitor = contract._RuntimeReadVisitor(frozenset(), index, index.module_for_path(path))
+    value = contract._AbstractValue(origins=frozenset({"evaluation"}))
+    names = {f"setting_{number:03d}_" + "x" * 130: value for number in range(174)}
+    first = ({}, {}, {})
+    second = ({}, {}, {})
+    first[slot].update(names)
+    second[slot].update(names)
+    result = visitor._join_binding_snapshots(first, second)
+    assert set(result[slot]) == set(names)
+    assert all(joined is value for joined in result[slot].values())
+
+    # Admission still charges the complete payload before any key union.
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", 100_000)
+    with pytest.raises(contract._AnalysisLimitError, match="binding_snapshot_key_bytes"):
+        visitor._join_binding_snapshots(first, second)
+
+
+@pytest.mark.parametrize("method", ["_join_states", "_join_annotation_bindings"])
+def test_join_binding_foreign_plan_cannot_hide_missing_names(contract, method):
+    context = contract._JoinValidationContext()
+    value = contract._AbstractValue(origins=frozenset({"evaluation"}))
+    with pytest.raises(KeyError, match="tracked"):
+        getattr(contract._RuntimeReadVisitor, method)(
+            {"tracked": value}, _plan={}, _context=context
+        )
+
+
+def _snapshot_proof_visitor(contract, tmp_path):
+    path = tmp_path / "snapshot-proof.py"
+    index = contract._SourceIndex(tmp_path, {path: contract.ast.parse("")})
+    return contract._RuntimeReadVisitor(frozenset(), index, index.module_for_path(path))
+
+
+def _capture_proven_snapshot(visitor, state, annotations=None):
+    visitor._states[-1] = state
+    visitor._annotations[-1] = annotations or {}
+    return visitor._binding_snapshot()
+
+
+def test_completed_snapshot_proof_replaces_join_preflight_and_survives_outputs(
+    contract, tmp_path, monkeypatch
+):
+    visitor = _snapshot_proof_visitor(contract, tmp_path)
+    first = _capture_proven_snapshot(
+        visitor, {"x": contract._AbstractValue(origins=frozenset({"evaluation"}))}
+    )
+    second = _capture_proven_snapshot(
+        visitor, {"x": contract._AbstractValue(origins=frozenset({"consensus"}))}
+    )
+    calls = []
+    original = contract._validate_abstract_values
+
+    def observe(values, **kwargs):
+        calls.append(kwargs.get("boundary", "value"))
+        return original(values, **kwargs)
+
+    monkeypatch.setattr(contract, "_validate_abstract_values", observe)
+    joined = visitor._join_binding_snapshots(first, second)
+    assert type(joined) is contract._ProvenBindingSnapshot
+    assert joined[0]["x"].origins == frozenset({"evaluation", "consensus"})
+    assert visitor._join_binding_snapshots(joined, joined)[0]["x"] is joined[0]["x"]
+    assert "joined_binding_snapshot" not in calls
+    assert len(joined) == 3
+    state, functions, annotations = joined
+    assert (state, functions, annotations) == joined.slots
+    with pytest.raises(AttributeError):
+        joined.proof.nodes[0].cost = 0
+
+
+def test_completed_snapshot_proof_changed_map_uses_legacy_validation(
+    contract, tmp_path, monkeypatch
+):
+    visitor = _snapshot_proof_visitor(contract, tmp_path)
+    snapshot = _capture_proven_snapshot(visitor, {"x": contract._UNKNOWN_VALUE})
+    snapshot[0]["added"] = contract._AbstractValue(origins=frozenset({"evaluation"}))
+    calls = []
+    original = contract._validate_abstract_values
+
+    def observe(values, **kwargs):
+        calls.append(kwargs.get("boundary", "value"))
+        return original(values, **kwargs)
+
+    monkeypatch.setattr(contract, "_validate_abstract_values", observe)
+    assert "added" in visitor._join_binding_snapshots(snapshot, snapshot)[0]
+    assert "joined_binding_snapshot" in calls
+
+
+@pytest.mark.parametrize("also_change_map", [False, True])
+def test_completed_snapshot_proof_detects_forced_node_mutation(contract, tmp_path, also_change_map):
+    visitor = _snapshot_proof_visitor(contract, tmp_path)
+    leaf = contract._AbstractValue(origins=frozenset({"evaluation"}))
+    snapshot = _capture_proven_snapshot(visitor, {"x": contract._AbstractValue(items=(leaf,))})
+    object.__setattr__(leaf, "items", (contract._UNKNOWN_VALUE,) * 30)
+    if also_change_map:
+        snapshot[0]["added"] = contract._UNKNOWN_VALUE
+    with pytest.raises(contract._AnalysisLimitError, match="snapshot proof value changed"):
+        visitor._join_binding_snapshots(snapshot, snapshot)
+
+
+def test_completed_snapshot_proof_detects_callable_receiver_mutation(contract, tmp_path):
+    visitor = _snapshot_proof_visitor(contract, tmp_path)
+    target = contract._CallableTarget(
+        contract.ast.parse("def f(): pass").body[0], contract._UNKNOWN_VALUE
+    )
+    snapshot = _capture_proven_snapshot(
+        visitor, {"x": contract._AbstractValue(callables=(target,))}
+    )
+    object.__setattr__(
+        target, "receiver", contract._AbstractValue(origins=frozenset({"evaluation"}))
+    )
+    with pytest.raises(contract._AnalysisLimitError, match="snapshot proof callable changed"):
+        visitor._join_binding_snapshots(snapshot, snapshot)
+
+
+def test_completed_snapshot_proof_declines_mutable_fields_and_build_overflow(
+    contract, tmp_path, monkeypatch
+):
+    visitor = _snapshot_proof_visitor(contract, tmp_path)
+    mutable = contract._AbstractValue(items=[contract._UNKNOWN_VALUE])
+    assert type(_capture_proven_snapshot(visitor, {"x": mutable})) is tuple
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", 10)
+    assert type(_capture_proven_snapshot(visitor, {"x": contract._UNKNOWN_VALUE})) is tuple
+
+
+def test_completed_snapshot_proof_preserves_mixed_root_multiplicity(
+    contract, tmp_path, monkeypatch
+):
+    visitor = _snapshot_proof_visitor(contract, tmp_path)
+    first_value = contract._AbstractValue(items=(contract._UNKNOWN_VALUE,) * 5)
+    second_value = contract._AbstractValue(items=(contract._UNKNOWN_VALUE,) * 5)
+    first = _capture_proven_snapshot(visitor, {"x": first_value})
+    second = _capture_proven_snapshot(visitor, {"x": second_value})
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_EXPANDED_VALUE_WORK", 15)
+    with pytest.raises(contract._AnalysisLimitError, match="aggregate expanded cost exceeds 15"):
+        visitor._join_binding_snapshots(first, second)
+
+
+def test_completed_snapshot_proof_rechecks_current_depth_limit(contract, tmp_path, monkeypatch):
+    visitor = _snapshot_proof_visitor(contract, tmp_path)
+    value = contract._AbstractValue(
+        items=(contract._AbstractValue(items=(contract._UNKNOWN_VALUE,)),)
+    )
+    snapshot = _capture_proven_snapshot(visitor, {"x": value})
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_DEPTH", 2)
+    with pytest.raises(contract._AnalysisLimitError, match="depth exceeds 2"):
+        visitor._join_binding_snapshots(snapshot, snapshot)
+
+
+def test_completed_snapshot_proof_missing_name_validates_unknown_root(
+    contract, tmp_path, monkeypatch
+):
+    visitor = _snapshot_proof_visitor(contract, tmp_path)
+    first = _capture_proven_snapshot(
+        visitor, {"x": contract._AbstractValue(origins=frozenset({"evaluation"}))}
+    )
+    second = _capture_proven_snapshot(visitor, {})
+    calls = []
+    original = contract._validate_abstract_values
+
+    def observe(values, **kwargs):
+        calls.append(kwargs.get("boundary", "value"))
+        return original(values, **kwargs)
+
+    monkeypatch.setattr(contract, "_validate_abstract_values", observe)
+    assert "x" in visitor._join_binding_snapshots(first, second)[0]
+    assert "joined_binding_snapshot" not in calls
+    assert "value" in calls
+
+
+def test_completed_snapshot_proof_overlap_preserves_supported_shared_graph(contract, tmp_path):
+    visitor = _snapshot_proof_visitor(contract, tmp_path)
+    first_value = contract._AbstractValue(items=(contract._UNKNOWN_VALUE,) * 3000)
+    second_value = contract._AbstractValue(items=(contract._UNKNOWN_VALUE,) * 3000)
+    first = _capture_proven_snapshot(visitor, {"same": first_value, "mixed": first_value})
+    second = _capture_proven_snapshot(visitor, {"same": first_value, "mixed": second_value})
+    assert visitor._join_binding_snapshots(first, second)[0]["same"] is first_value
+
+
+def test_completed_snapshot_proof_equality_uses_only_legacy_slots(contract, tmp_path):
+    visitor = _snapshot_proof_visitor(contract, tmp_path)
+    first = _capture_proven_snapshot(
+        visitor, {"x": contract._AbstractValue(items=(contract._UNKNOWN_VALUE,))}
+    )
+    second = _capture_proven_snapshot(
+        visitor, {"x": contract._AbstractValue(items=(contract._AbstractValue(),))}
+    )
+    assert first == second
+    assert first == first.slots
+    assert first.slots == first
+    different_proof = contract._ProvenBindingSnapshot(first.slots, first.proof._replace(nodes=()))
+    assert first == different_proof
+    with pytest.raises(TypeError):
+        hash(first)
+
+
+def _scoped_result_proof_fixture(contract, tmp_path):
+    visitor = _snapshot_proof_visitor(contract, tmp_path)
+    leaf = contract._AbstractValue()
+    branch = contract._AbstractValue(items=(leaf, leaf))
+    snapshot = _capture_proven_snapshot(visitor, {"x": branch})
+    context = contract._JoinValidationContext()
+    context.snapshot_profiles = {
+        id(node.value): (node.value, node.cost, node.depth) for node in snapshot.proof.nodes
+    }
+    context.snapshot_factory_edges = sum(len(node.children) for node in snapshot.proof.nodes)
+    context.snapshot_factory_metadata = sum(node.metadata for node in snapshot.proof.nodes)
+    fields = {
+        name: getattr(contract._UNKNOWN_VALUE, name)
+        for name in contract._AbstractValue.__dataclass_fields__
+        if name != "_collection_root"
+    }
+    fields.update(
+        items=(branch, branch),
+        entries=(("e", leaf),),
+        attributes=(("a", leaf),),
+        callables=(contract._CallableTarget(contract.ast.parse("def f(): pass").body[0], branch),),
+    )
+    return context, fields
+
+
+def test_scoped_result_proof_preserves_all_child_kinds_and_expanded_multiplicity(
+    contract, tmp_path
+):
+    context, fields = _scoped_result_proof_fixture(contract, tmp_path)
+    result = contract._join_result_from_scoped_proofs(fields, [0], context, context)
+    assert result is not None
+    profile = context.snapshot_profiles[id(result)]
+    assert profile[0] is result
+    assert (profile[1], profile[2]) == contract._validate_abstract_values((result,))
+    assert profile[1] == 26
+    context.result_memo[((), 0, False)] = contract._JoinResultMemoEntry((), result, 1, 1)
+    contract._flush_snapshot_memo_graph(context, [0])
+    nodes, edges, metadata = set(), [0], [0]
+    contract._validate_abstract_values(
+        (result,),
+        _shared_graph_nodes=nodes,
+        _shared_graph_edges=edges,
+        _shared_graph_metadata=metadata,
+    )
+    assert context.result_graph_nodes == nodes
+    assert context.result_graph_edges == edges
+    assert context.result_graph_metadata == metadata
+    assert not context.snapshot_memo_deferred
+
+
+@pytest.mark.parametrize(
+    ("limit", "value"), [("_MAX_ABSTRACT_EXPANDED_VALUE_WORK", 25), ("_MAX_ABSTRACT_DEPTH", 2)]
+)
+def test_scoped_result_proof_rejects_expanded_or_depth_before_materialization(
+    contract, tmp_path, monkeypatch, limit, value
+):
+    context, fields = _scoped_result_proof_fixture(contract, tmp_path)
+    monkeypatch.setattr(contract, limit, value)
+    boundaries = []
+    original = contract._reserve_join_output
+
+    def observe(work, amount, boundary):
+        boundaries.append(boundary)
+        return original(work, amount, boundary)
+
+    monkeypatch.setattr(contract, "_reserve_join_output", observe)
+    with pytest.raises(contract._AnalysisLimitError):
+        contract._join_result_from_scoped_proofs(fields, [0], context, None)
+    assert "result_proof_materialization" not in boundaries
+
+
+@pytest.mark.parametrize(
+    "limit",
+    ["_MAX_ABSTRACT_GRAPH_NODES", "_MAX_ABSTRACT_GRAPH_EDGES", "_MAX_ABSTRACT_GRAPH_METADATA"],
+)
+def test_scoped_result_proof_cumulative_overflow_declines_without_publishing(
+    contract, tmp_path, monkeypatch, limit
+):
+    context, fields = _scoped_result_proof_fixture(contract, tmp_path)
+    before = dict(context.snapshot_profiles)
+    monkeypatch.setattr(contract, limit, 2)
+    assert contract._join_result_from_scoped_proofs(fields, [0], context, None) is None
+    assert context.snapshot_profiles == before
+    assert not context.snapshot_memo_deferred
+
+
+def test_scoped_result_proof_unproven_child_declines(contract, tmp_path):
+    context, fields = _scoped_result_proof_fixture(contract, tmp_path)
+    fields["items"] = (contract._AbstractValue(origins=frozenset({"foreign"})),)
+    assert contract._join_result_from_scoped_proofs(fields, [0], context, None) is None
+
+
+def test_scoped_result_proof_fallback_flushes_existing_memo_and_stops_reuse(
+    contract, tmp_path, monkeypatch
+):
+    visitor = _snapshot_proof_visitor(contract, tmp_path)
+    first = _capture_proven_snapshot(
+        visitor,
+        {
+            "x": contract._AbstractValue(origins=frozenset({"a"})),
+            "y": contract._AbstractValue(origins=frozenset({"c"})),
+        },
+    )
+    second = _capture_proven_snapshot(
+        visitor,
+        {
+            "x": contract._AbstractValue(origins=frozenset({"b"})),
+            "y": contract._AbstractValue(origins=frozenset({"d"})),
+        },
+    )
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_GRAPH_METADATA", 7)
+    boundaries = []
+    contexts = []
+    original_reserve, original_init = (
+        contract._reserve_join_output,
+        contract._JoinValidationContext.__init__,
+    )
+
+    def observe(work, amount, boundary):
+        boundaries.append(boundary)
+        return original_reserve(work, amount, boundary)
+
+    def capture(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        contexts.append(self)
+
+    monkeypatch.setattr(contract, "_reserve_join_output", observe)
+    monkeypatch.setattr(contract._JoinValidationContext, "__init__", capture)
+    joined = visitor._join_binding_snapshots(first, second)
+    assert joined[0]["x"].origins == frozenset({"a", "b"})
+    assert joined[0]["y"].origins == frozenset({"c", "d"})
+    assert "result_proof_memo_walk" in boundaries
+    assert "result_validation_walks" in boundaries
+    assert contexts[-1].snapshot_profiles is None
+    assert not contexts[-1].snapshot_memo_deferred
+    assert contexts[-1].result_graph_metadata == [4]
+
+
+def test_function_snapshot_plan_reuses_exact_keys_and_rejects_foreign_or_changed_maps(
+    contract, tmp_path, monkeypatch
+):
+    visitor = _snapshot_proof_visitor(contract, tmp_path)
+    name = "function_plan_shared_long_name"
+    states = ({name: contract._UNKNOWN_VALUE}, {name: contract._UNKNOWN_VALUE})
+    functions = ({name: frozenset()}, {name: frozenset()})
+    contexts = []
+    boundaries = []
+    original_init, original_reserve = (
+        contract._JoinValidationContext.__init__,
+        contract._reserve_join_output,
+    )
+
+    def capture(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        contexts.append(self)
+
+    def observe(work, amount, boundary):
+        boundaries.append(boundary)
+        return original_reserve(work, amount, boundary)
+
+    monkeypatch.setattr(contract._JoinValidationContext, "__init__", capture)
+    monkeypatch.setattr(contract, "_reserve_join_output", observe)
+    visitor._join_binding_snapshots((states[0], functions[0], {}), (states[1], functions[1], {}))
+    context = contexts[-1]
+    assert "binding_function_plan_coverage" in boundaries
+    assert "binding_function_plan_identity_check" in boundaries
+    assert "binding_function_key_bytes" not in boundaries
+    boundaries.clear()
+    assert name in visitor._join_function_bindings(*functions, _context=context)
+    assert "binding_function_key_bytes" not in boundaries
+    boundaries.clear()
+    assert name in visitor._join_function_bindings(
+        *(dict(state) for state in functions), _context=context
+    )
+    assert "binding_function_key_bytes" in boundaries
+    functions[0].clear()
+    functions[0]["replacement_name"] = frozenset()
+    boundaries.clear()
+    joined = visitor._join_function_bindings(*functions, _context=context)
+    assert "replacement_name" in joined
+    assert "binding_function_key_bytes" in boundaries
+
+
+def test_function_snapshot_plan_declines_equal_but_distinct_key_objects(
+    contract, tmp_path, monkeypatch
+):
+    visitor = _snapshot_proof_visitor(contract, tmp_path)
+    state_key = "same_text_but_distinct_name_object"
+    function_key = state_key.encode().decode()
+    assert state_key == function_key and state_key is not function_key
+    boundaries = []
+    original = contract._reserve_join_output
+
+    def observe(work, amount, boundary):
+        boundaries.append(boundary)
+        return original(work, amount, boundary)
+
+    monkeypatch.setattr(contract, "_reserve_join_output", observe)
+    visitor._join_binding_snapshots(
+        ({state_key: contract._UNKNOWN_VALUE}, {function_key: frozenset()}, {})
+    )
+    assert "binding_function_key_bytes" in boundaries
+
+
+def test_completed_snapshot_duplicate_profiles_must_agree(contract, tmp_path):
+    visitor = _snapshot_proof_visitor(contract, tmp_path)
+    value = contract._AbstractValue(origins=frozenset({"evaluation"}))
+    first = _capture_proven_snapshot(visitor, {"x": value})
+    second = _capture_proven_snapshot(visitor, {"x": value})
+    bad_nodes = tuple(
+        node._replace(cost=node.cost + 1) if node.value is value else node
+        for node in second.proof.nodes
+    )
+    second = contract._ProvenBindingSnapshot(second.slots, second.proof._replace(nodes=bad_nodes))
+    with pytest.raises(contract._AnalysisLimitError, match="snapshot proof profiles disagree"):
+        visitor._join_binding_snapshots(first, second)
+
+
+@pytest.mark.parametrize("mutation", ["value", "callable"])
+def test_scoped_output_proof_detects_later_forced_mutation(contract, tmp_path, mutation):
+    visitor = _snapshot_proof_visitor(contract, tmp_path)
+    target = contract._CallableTarget(
+        contract.ast.parse("def f(): pass").body[0], contract._UNKNOWN_VALUE
+    )
+    first = _capture_proven_snapshot(
+        visitor, {"x": contract._AbstractValue(origins=frozenset({"a"}), callables=(target,))}
+    )
+    second = _capture_proven_snapshot(
+        visitor, {"x": contract._AbstractValue(origins=frozenset({"b"}), callables=(target,))}
+    )
+    joined = visitor._join_binding_snapshots(first, second)
+    assert type(joined) is contract._ProvenBindingSnapshot
+    assert any(node.value is joined[0]["x"] for node in joined.proof.nodes)
+    if mutation == "value":
+        object.__setattr__(joined[0]["x"], "items", (contract._UNKNOWN_VALUE,) * 30)
+    else:
+        object.__setattr__(
+            target, "receiver", contract._AbstractValue(origins=frozenset({"changed"}))
+        )
+    with pytest.raises(contract._AnalysisLimitError, match="snapshot proof .* changed"):
+        visitor._join_binding_snapshots(joined, joined)
+
+
+@pytest.mark.parametrize("coverage", ["exact", "equal_distinct", "missing"])
+def test_join_reuses_only_exact_scalar_string_already_in_frozenset(
+    contract, monkeypatch, coverage
+):
+    text = "already-retained-scalar-text"
+    equal_copy = text.encode().decode()
+    assert equal_copy == text and equal_copy is not text
+    group = frozenset({text if coverage == "exact" else equal_copy})
+    if coverage == "missing":
+        group = frozenset()
+    value = contract._AbstractValue(string_value=text, string_values=group)
+    hashes = []
+    reserve_scalar = contract._reserve_join_string_value_work
+
+    def observe_scalar(values, work):
+        hashes.extend(value.string_value for value in values if value.string_value is not None)
+        return reserve_scalar(values, work)
+
+    monkeypatch.setattr(contract, "_reserve_join_string_value_work", observe_scalar)
+    result = contract._join_values(value, contract._AbstractValue())
+    assert result.string_values == frozenset({text})
+    assert result.string_value is None
+    assert hashes == ([] if coverage == "exact" else [text])
+
+
+def test_join_covered_and_uncovered_shared_scalar_keep_uncovered_hash_path(contract, monkeypatch):
+    text = "shared-covered-and-missing-text"
+    covered = contract._AbstractValue(string_value=text, string_values=frozenset({text}))
+    missing = contract._AbstractValue(string_value=text)
+    hashes = []
+    monkeypatch.setattr(
+        contract, "hash", lambda candidate: hashes.append(candidate) or 0, raising=False
+    )
+    result = contract._join_values(covered, missing)
+    assert result.string_values == frozenset({text})
+    assert result.string_value is text
+    assert hashes == [text]
+
+
+@pytest.mark.parametrize("covered", [False, True])
+def test_join_large_scalar_string_preserves_metadata_and_prehash_limits(
+    contract, monkeypatch, covered
+):
+    text = "x" * 70000
+    value = contract._AbstractValue(
+        string_value=text, string_values=frozenset({text}) if covered else frozenset()
+    )
+
+    def forbidden_hash(_value):
+        raise AssertionError("large scalar hashed before admission")
+
+    monkeypatch.setattr(contract, "hash", forbidden_hash, raising=False)
+    with pytest.raises(contract._AnalysisLimitError) as caught:
+        contract._join_values(value, contract._AbstractValue())
+    boundary = "metadata_union" if covered else "string_value_hash_payload"
+    assert f'"boundary": "{boundary}"' in str(caught.value)
+
+
+def test_cached_string_union_reserves_plan_before_cached_hash(contract, monkeypatch):
+    text = ""
+    values = (contract._AbstractValue(string_values=frozenset({text})),)
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", 2)
+    hashes = []
+    monkeypatch.setattr(
+        contract, "hash", lambda candidate: hashes.append(candidate) or 0, raising=False
+    )
+    with pytest.raises(contract._AnalysisLimitError) as caught:
+        contract._plan_cached_string_union(values, [None], [0], len(text) * 4)
+    assert '"boundary": "string_values_cached_plan"' in str(caught.value)
+    assert hashes == []
+
+
+def test_cached_string_union_equal_distinct_compares_under_exact_budget(contract, monkeypatch):
+    text = "🟦"
+    copy = text.encode().decode()
+    assert text == copy and text is not copy
+    values = tuple(
+        contract._AbstractValue(string_values=frozenset({item})) for item in (text, copy)
+    )
+    exact = 6 + len(text) * 4
+    work = [0]
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", exact)
+    plan = contract._plan_cached_string_union(values, [None, None], work, len(text) * 8)
+    assert plan is not None and list(plan.values()) == [text]
+    assert work == [exact]
+    monkeypatch.setattr(contract, "_MAX_ABSTRACT_JOIN_OUTPUT_WORK", exact - 1)
+    with pytest.raises(contract._AnalysisLimitError) as caught:
+        contract._plan_cached_string_union(values, [None, None], [0], len(text) * 8)
+    assert '"boundary": "string_values_cached_equality"' in str(caught.value)
+
+
+@pytest.mark.parametrize("texts", [("first", "other"), ("short", "much-longer")])
+def test_cached_string_union_unequal_collision_declines_to_full_payload(
+    contract, monkeypatch, texts
+):
+    # Force planner buckets to collide. This is a controlled fallback probe,
+    # not a claim to reproduce a real CPython 64-bit string-hash collision.
+    values = tuple(
+        contract._AbstractValue(string_values=frozenset({text})) for text in texts
+    )
+    monkeypatch.setattr(contract, "hash", lambda _candidate: 7, raising=False)
+    work = [0]
+    assert contract._plan_cached_string_union(values, [None, None], work, sum(4 * len(item) for item in texts)) is None
+    assert work[0] == 6 + (4 * len(texts[0]) if len(texts[0]) == len(texts[1]) else 0)
+    observed = []
+    reserve = contract._reserve_join_output
+    def track(counter, amount, boundary):
+        observed.append((boundary, amount))
+        return reserve(counter, amount, boundary)
+    monkeypatch.setattr(contract, "_reserve_join_output", track)
+    result = contract._join_values(*values)
+    assert result.string_values == frozenset(texts)
+    assert ("metadata_union", 4 + sum(4 * len(text) for text in texts)) in observed
+    assert ("retained_string_payload", sum(4 * len(text) for text in texts)) in observed
+
+
+def test_cached_string_union_non_cpython_keeps_full_legacy_payload(contract, monkeypatch):
+    monkeypatch.setattr(
+        contract, "sys", contract.SimpleNamespace(implementation=contract.SimpleNamespace(name="pypy"))
+    )
+    text = "legacy-runtime-text"
+    values = (contract._AbstractValue(string_values=frozenset({text})), contract._AbstractValue())
+    assert contract._plan_cached_string_union(values, [None, None], [0], len(text) * 8) is None
+    observed = []
+    reserve = contract._reserve_join_output
+    def track(counter, amount, boundary):
+        observed.append((boundary, amount))
+        return reserve(counter, amount, boundary)
+    monkeypatch.setattr(contract, "_reserve_join_output", track)
+    result = contract._join_values(*values)
+    assert result.string_values == frozenset({text})
+    assert ("metadata_union", 2 + len(text) * 4) in observed
+    assert ("retained_string_payload", len(text) * 4) in observed
+
+
+def test_cached_string_union_nonexact_group_and_missing_scalar_decline(contract):
+    class DerivedSet(frozenset):
+        pass
+    text = "uncovered"
+    subclass_value = contract._AbstractValue(string_values=DerivedSet({text}))
+    missing_value = contract._AbstractValue(string_value=text)
+    assert contract._plan_cached_string_union((subclass_value,), [None], [0], len(text) * 4) is None
+    assert contract._plan_cached_string_union((missing_value,), [None], [0], 0) is None

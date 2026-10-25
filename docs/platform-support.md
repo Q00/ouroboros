@@ -56,7 +56,19 @@ Known limitations:
 - **Process management**: Subprocess spawning and signal handling differ on Windows.
 - **Codex CLI**: Not supported on native Windows. Use WSL 2 instead.
 - **Terminal/TUI**: Requires a terminal with ANSI support (Windows Terminal recommended; `cmd.exe` is not supported).
-- **CI testing**: Native Windows is not part of the current CI matrix.
+- **Execution sandbox**: Native Windows has a per-command AppContainer
+  backend. Confined `.cmd`/`.bat` commands (including `npm.cmd`) are refused
+  as `windows_batch_file` and remain indeterminate. Loopback reaches only
+  processes inside the same AppContainer, not services on the host.
+- **Verifier replay copies**: Linking dependency trees or preserving workspace
+  symlinks requires Windows symlink permission (Developer Mode or the
+  appropriate privilege); if copying fails, replay is unavailable. See the
+  [verifier evidence policy](contributing/verifier-evidence-policy.md#replay-first-corroboration).
+- **CI testing**: The `Runtime sandbox (Windows)` job in
+  [`.github/workflows/test.yml`](../.github/workflows/test.yml) runs on
+  `windows-latest`. Its AppContainer tests fail rather than skip if the
+  backend is unavailable on CI; this targeted coverage does not make native
+  Windows fully supported.
 
 Git worktree discovery decodes Git for Windows output as UTF-8, so repository
 paths containing non-ASCII characters do not depend on the active ANSI code

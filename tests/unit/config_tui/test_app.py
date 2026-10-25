@@ -355,6 +355,55 @@ async def test_dynamic_model_listing_merges_into_select(app_env, monkeypatch) ->
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("extra_count", [0, 300])
+async def test_minimax_discovery_preserves_saved_selection_and_custom_entry(
+    app_env, monkeypatch, extra_count
+) -> None:
+    legacy = "minimax/MiniMax-M2.7"
+    flash = "minimax/MiniMax-M3.1-Flash"
+    m3 = "minimax/MiniMax-M3"
+    app_env["orchestrator"]["runtime_profile"]["stages"] = {"execute": "opencode"}
+    app_env["execution"] = {"default_model": legacy}
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(persistence, "apply_config_values", lambda values: captured.update(values))
+    monkeypatch.setattr(
+        "ouroboros.config_tui.app.installed_backends", lambda: {"opencode": "/bin/opencode"}
+    )
+    listing = (legacy, m3, flash, "custom/MiniMax-M2.7", "minimax/speech-02-hd") + tuple(
+        f"provider/model-{i}" for i in range(extra_count)
+    )
+    monkeypatch.setattr(
+        "ouroboros.config_tui.app.refresh_models",
+        lambda backend: listing if backend == "opencode" else None,
+    )
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        choices = app._all_models("opencode")
+        assert legacy not in choices
+        assert choices.index(flash) < choices.index(m3)
+        assert "custom/MiniMax-M2.7" in choices
+        assert "minimax/speech-02-hd" in choices
+        select = app.query_one(f"#stage-model-{Stage.EXECUTE.value}", Select)
+        assert select.value == legacy
+        assert CUSTOM_SENTINEL in {value for _, value in select._options}
+        if extra_count:
+            select.value = SEARCH_SENTINEL
+            await pilot.pause()
+            app.screen.query_one("#search-input", Input).value = "minimax/MiniMax-M"
+            await pilot.pause()
+            results = app.screen.query_one("#search-results", OptionList)
+            assert results.option_count == 2
+            await pilot.press("escape")
+            await pilot.pause()
+            assert select.value == legacy
+        app.action_save()
+        await pilot.pause()
+    assert "execution.default_model" not in captured
+
+
+@pytest.mark.asyncio
 async def test_kiro_dynamic_model_listing_appears_in_select(app_env, monkeypatch) -> None:
     """Kiro's authenticated CLI catalog is visible without replacing default."""
 

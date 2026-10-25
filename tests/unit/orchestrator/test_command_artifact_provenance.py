@@ -7,10 +7,13 @@ import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 import inspect
+import json
 import os
 from pathlib import Path
+import shlex
 import stat
 import subprocess
+import sys
 import textwrap
 from typing import Any
 from unittest.mock import MagicMock
@@ -22,11 +25,519 @@ from ouroboros.events.base import BaseEvent
 import ouroboros.harness.deliver_gate as deliver_gate_module
 from ouroboros.harness.deliver_gate import load_ac_evidence_manifest
 from ouroboros.harness.journal import EvidenceManifest
+from ouroboros.harness.wrapper_receipt import _RUNNER_PROGRAM, matching_wrapper_receipts
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+from ouroboros.orchestrator.evidence.verification import (
+    _verify_atomic_evidence_against_runtime_messages,
+)
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord
 from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
 from ouroboros.orchestrator.parallel_executor import ParallelACExecutor, _standard_deliver_facts
+from ouroboros.orchestrator.profile_loader import EvidenceSchema, load_profile
+
+_WRAPPER_INNER = shlex.join([sys.executable, "-m", "pytest", "-q", "test_inner.py"])
+_WRAPPER_OUTER = shlex.join(
+    [
+        sys.executable,
+        "-I",
+        "-c",
+        _RUNNER_PROGRAM,
+        "--receipt",
+        "receipt.json",
+        "--stdout",
+        "stdout.txt",
+        "--stderr",
+        "stderr.txt",
+        "--",
+        *shlex.split(_WRAPPER_INNER),
+    ]
+)
+
+
+def _wrapper_receipt_case(tmp_path: Path, **changes: object):
+    (tmp_path / "test_inner.py").write_text("def test_inner():\n    assert True\n")
+    completed = subprocess.run(_WRAPPER_OUTER, cwd=tmp_path, shell=True, check=False)
+    assert completed.returncode == 0
+    receipt_path = tmp_path / "receipt.json"
+    stdout_path = tmp_path / "stdout.txt"
+    stderr_path = tmp_path / "stderr.txt"
+    receipt: dict[str, object] = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt.update(changes)
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    effects = [
+        _effect(path, relative_path=path.name) for path in (receipt_path, stdout_path, stderr_path)
+    ]
+    claim = {
+        "receipt_path": "receipt.json",
+        "outer_command": _WRAPPER_OUTER,
+        "inner_command": _WRAPPER_INNER,
+    }
+    return _command_events(call_id="wrapper", effects=effects, command=_WRAPPER_OUTER), claim
+
+
+@pytest.mark.asyncio
+async def test_wrapper_receipt_proves_inner_test_through_journal(tmp_path: Path) -> None:
+    assert "\n" not in _WRAPPER_OUTER
+    events, claim = _wrapper_receipt_case(tmp_path)
+    manifest = await load_ac_evidence_manifest(
+        _EventStore(events),
+        ac_id="ac_1",
+        execution_id="exec_1",
+        admit_accepted_tool_starts=True,
+        accepted_retry_attempt=1,
+        accepted_session_attempt_id="ac_1_attempt_2",
+    )
+    matches = matching_wrapper_receipts(
+        manifest, claims=[claim], execution_id="exec_1", task_cwd=str(tmp_path)
+    )
+    assert matches is not None and _WRAPPER_INNER in matches
+    facts = _standard_deliver_facts(
+        EvidenceRecord(
+            data={
+                "commands_run": [_WRAPPER_OUTER],
+                "tests_passed": [_WRAPPER_INNER],
+                "wrapper_receipts": [claim],
+            }
+        ),
+        manifest,
+        task_cwd=str(tmp_path),
+        verifier_passed=True,
+        wrapper_receipts=matches,
+        receipt_mode=True,
+    )
+    assert facts is not None
+    assert facts[0].evidence_handle == manifest.entries[0].handle
+    assert facts[1].evidence_handle == manifest.entries[0].handle
+    verifier = _verify_atomic_evidence_against_runtime_messages(
+        messages=(
+            AgentMessage(
+                type="tool",
+                content="wrapper started",
+                tool_name="Bash",
+                data={"tool_call_id": "wrapper", "tool_input": {"command": _WRAPPER_OUTER}},
+            ),
+            AgentMessage(
+                type="tool_result",
+                content="wrapper completed",
+                data={"tool_call_id": "wrapper", "exit_code": 0, "is_error": False},
+            ),
+            AgentMessage(type="result", content="done"),
+        ),
+        typed_evidence=EvidenceRecord(data={"tests_passed": [_WRAPPER_INNER]}),
+        ac_content="Verify the implementation",
+        execution_profile=load_profile("code").model_copy(
+            update={"evidence_schema": EvidenceSchema(required=("tests_passed",))}
+        ),
+        task_cwd=str(tmp_path),
+        adapter_working_directory=None,
+        verified_wrapper_commands=frozenset(matches),
+    )
+    assert verifier.passed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    [
+        "valid",
+        "absent_runtime",
+        "unrelated_test",
+        "mixed_test",
+        "unrelated_command",
+        "unrelated_file",
+        "path_escape",
+        "missing",
+        "malformed",
+        "duplicate",
+        "stale",
+        "inner_failed",
+        "collect_only_override",
+        "collect_only_override_equals",
+        "collect_only_override_cluster",
+        "collect_only_config",
+        "fake_json",
+        "source_substitution",
+        "earlier_retry",
+        "foreign_session",
+        "foreign_tool_completion",
+        "duplicate_foreign_tool",
+        "conflicting_alias_completion",
+    ],
+)
+async def test_wrapper_receipt_real_dispatch_capture_to_verifier(tmp_path: Path, case: str) -> None:
+    (tmp_path / "test_inner.py").write_text(
+        f"def test_inner():\n    from pathlib import Path\n"
+        f"    Path('inner-ran').write_text('yes')\n    assert {case != 'inner_failed'}\n"
+    )
+    inner_command = _WRAPPER_INNER
+    outer = _WRAPPER_OUTER
+    if case in {
+        "collect_only_override",
+        "collect_only_override_equals",
+        "collect_only_override_cluster",
+    }:
+        parts = shlex.split(outer)
+        parts[-1:-1] = {
+            "collect_only_override": ["-o", "addopts=--collect-only"],
+            "collect_only_override_equals": ["-o=addopts=--collect-only"],
+            "collect_only_override_cluster": ["-qo=addopts=--collect-only"],
+        }[case]
+        outer = shlex.join(parts)
+        inner_command = shlex.join(parts[11:])
+    if case == "collect_only_config":
+        (tmp_path / "pytest.ini").write_text("[pytest]\naddopts = --collect-only\n")
+    fake_command = "printf %s 'fake' > receipt.json"
+    outer_command = fake_command if case == "fake_json" else outer
+    if case == "source_substitution":
+        parts = shlex.split(outer_command)
+        parts[3] += ";pass"
+        outer_command = shlex.join(parts)
+
+    class StubRuntime:
+        runtime_backend = "opencode"
+        permission_mode = "acceptEdits"
+        working_directory = str(tmp_path)
+
+        async def execute_task(self, **_kwargs: Any):
+            if case == "absent_runtime":
+                yield AgentMessage(
+                    type="result",
+                    content="```json\n"
+                    + json.dumps(
+                        {
+                            "commands_run": [outer_command],
+                            "tests_passed": [inner_command],
+                            "wrapper_receipts": [
+                                {
+                                    "receipt_path": "receipt.json",
+                                    "outer_command": outer_command,
+                                    "inner_command": inner_command,
+                                }
+                            ],
+                        }
+                    )
+                    + "\n```",
+                    data={"subtype": "success"},
+                )
+                return
+            yield AgentMessage(
+                type="assistant",
+                content="run wrapper",
+                tool_name="Bash",
+                data={"tool_call_id": "real-wrapper", "tool_input": {"command": outer_command}},
+            )
+            if case == "stale":
+                (tmp_path / "receipt.json").write_text("stale", encoding="utf-8")
+            completed = subprocess.run(
+                outer_command,
+                cwd=tmp_path,
+                shell=True,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert (completed.returncode == 0) is (
+                case
+                not in {
+                    "stale",
+                    "inner_failed",
+                    "collect_only_override",
+                    "collect_only_override_equals",
+                    "collect_only_override_cluster",
+                    "collect_only_config",
+                }
+            )
+            if case in {
+                "valid",
+                "collect_only_override",
+                "collect_only_override_equals",
+                "collect_only_override_cluster",
+                "collect_only_config",
+            }:
+                assert (tmp_path / "inner-ran").exists() is (case == "valid")
+                receipt = json.loads((tmp_path / "receipt.json").read_text())
+                assert receipt["test_result"] == ("passed" if case == "valid" else "failed")
+                assert receipt["inner_exit_status"] == 0
+            if case == "missing":
+                (tmp_path / "receipt.json").unlink()
+            elif case in {"malformed", "unrelated_command", "unrelated_file"}:
+                (tmp_path / "receipt.json").write_text("{bad json", encoding="utf-8")
+            yield AgentMessage(
+                type="assistant",
+                content="wrapper complete",
+                tool_name="Bash",
+                data={
+                    "subtype": "tool_result",
+                    "tool_call_id": "real-wrapper",
+                    "tool_result": {
+                        "is_error": completed.returncode != 0,
+                        "meta": {"exit_status": completed.returncode},
+                        "content": completed.stdout,
+                    },
+                },
+            )
+            if case in {"earlier_retry", "foreign_session", "foreign_tool_completion"}:
+                index = next(
+                    index
+                    for index, event in enumerate(store.events)
+                    if event.type == "execution.tool.completed"
+                )
+                completion = store.events[index]
+                field = {
+                    "earlier_retry": "retry_attempt",
+                    "foreign_session": "session_attempt_id",
+                    "foreign_tool_completion": "tool_name",
+                }[case]
+                value = {
+                    "earlier_retry": 0,
+                    "foreign_session": "foreign-session",
+                    "foreign_tool_completion": "Write",
+                }[case]
+                store.events[index] = completion.model_copy(
+                    update={"data": {**completion.data, field: value}}
+                )
+            if case in {"duplicate_foreign_tool", "conflicting_alias_completion"}:
+                completion = next(
+                    event for event in store.events if event.type == "execution.tool.completed"
+                )
+                extra = (
+                    {**completion.data, "tool_name": "Write"}
+                    if case == "duplicate_foreign_tool"
+                    else {**completion.data, "call_id": "contradictory-call-id"}
+                )
+                store.events.append(
+                    completion.model_copy(update={"id": "extra-completion", "data": extra})
+                )
+            claim = {
+                "receipt_path": "receipt.json",
+                "outer_command": outer_command,
+                "inner_command": inner_command,
+            }
+            if case == "path_escape":
+                claim["receipt_path"] = "../receipt.json"
+            claims = [claim, claim] if case == "duplicate" else [claim]
+            tests_passed = [inner_command]
+            if case == "unrelated_test":
+                tests_passed = ["pytest never_executed.py"]
+            elif case == "mixed_test":
+                tests_passed.append("pytest never_executed.py")
+            evidence = {
+                "commands_run": ["pytest never_executed.py"]
+                if case == "unrelated_command"
+                else [outer_command],
+                "tests_passed": tests_passed,
+                "wrapper_receipts": claims,
+            }
+            if case == "unrelated_file":
+                evidence["files_touched"] = ["never_created.py"]
+            yield AgentMessage(
+                type="result",
+                content="```json\n" + json.dumps(evidence) + "\n```",
+                data={"subtype": "success"},
+            )
+
+    store = _EventStore([])
+    executor = ParallelACExecutor(
+        adapter=StubRuntime(),
+        event_store=store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        task_cwd=str(tmp_path),
+        run_verify_commands=False,
+        execution_profile=load_profile("code").model_copy(
+            update={
+                "evidence_schema": EvidenceSchema(
+                    required=("commands_run", "tests_passed", "files_touched")
+                    if case == "unrelated_file"
+                    else ("commands_run", "tests_passed")
+                )
+            }
+        ),
+        fat_harness_mode=True,
+    )
+    result = await executor._execute_atomic_ac(
+        ac_index=0,
+        ac_content="Update implementation and run inner test"
+        if case == "unrelated_file"
+        else "Run inner test",
+        session_id="sess_1",
+        execution_id="exec_1",
+        tools=["Bash"],
+        system_prompt="test",
+        seed_goal="test wrapper",
+        depth=0,
+        start_time=datetime.now(UTC),
+        retry_attempt=1,
+        node_identity=ExecutionNodeIdentity.root(execution_context_id="exec_1", ac_index=0),
+    )
+    assert result.success is (case == "valid")
+    assert result.atomic_verifier_verdict is not None
+    assert result.atomic_verifier_verdict.passed is (case == "valid")
+    if case == "valid":
+        assert result.atomic_verifier_verdict.failure_class is None
+    else:
+        fabricated = case in {
+            "absent_runtime",
+            "unrelated_test",
+            "mixed_test",
+            "unrelated_command",
+            "unrelated_file",
+            "fake_json",
+            "source_substitution",
+            "earlier_retry",
+            "foreign_session",
+            "foreign_tool_completion",
+            "duplicate_foreign_tool",
+            "conflicting_alias_completion",
+        }
+        expected_class = "FABRICATION_SUSPECTED" if fabricated else "EVIDENCE_FORM_MISMATCH"
+        assert result.atomic_verifier_verdict.failure_class == expected_class
+        assert (
+            "retry with a contract-compliant receipt" in result.atomic_verifier_verdict.reasons[0]
+        ) is (not fabricated)
+    if case == "absent_runtime":
+        assert not any(event.type.startswith("execution.tool.") for event in store.events)
+        return
+    start = next(event for event in store.events if event.type == "execution.tool.started")
+    completion = next(event for event in store.events if event.type == "execution.tool.completed")
+    assert ("filesystem_effects" in completion.data) is (case != "source_substitution")
+    manifest = await load_ac_evidence_manifest(
+        store,
+        ac_id=str(start.data["ac_id"]),
+        execution_id="exec_1",
+        admit_accepted_tool_starts=True,
+        accepted_retry_attempt=1,
+        accepted_session_attempt_id=str(start.data["session_attempt_id"]),
+    )
+    claim = {
+        "receipt_path": "receipt.json",
+        "outer_command": outer_command,
+        "inner_command": inner_command,
+    }
+    matches = matching_wrapper_receipts(
+        manifest, claims=[claim], execution_id="exec_1", task_cwd=str(tmp_path)
+    )
+    if case == "valid":
+        assert matches is not None and inner_command in matches
+    elif case in {
+        "collect_only_override",
+        "collect_only_override_equals",
+        "collect_only_override_cluster",
+        "collect_only_config",
+    }:
+        assert matches is None
+
+
+@pytest.mark.asyncio
+async def test_agent_written_passing_receipt_is_not_wrapper_authority(tmp_path: Path) -> None:
+    events, claim = _wrapper_receipt_case(tmp_path)
+    forged = "printf fake > receipt.json"
+    start = dict(events[0].data)
+    start["tool_input"] = {"command": forged}
+    events[0] = events[0].model_copy(update={"data": start})
+    claim["outer_command"] = forged
+    manifest = await load_ac_evidence_manifest(
+        _EventStore(events),
+        ac_id="ac_1",
+        execution_id="exec_1",
+        admit_accepted_tool_starts=True,
+        accepted_retry_attempt=1,
+        accepted_session_attempt_id="ac_1_attempt_2",
+    )
+    assert (
+        matching_wrapper_receipts(
+            manifest, claims=[claim], execution_id="exec_1", task_cwd=str(tmp_path)
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("change", "value"),
+    [
+        ("schema_version", 2),
+        ("inner_exit_status", 1),
+        ("outer_exit_status", 1),
+        ("inner_command", "pytest other"),
+        ("outer_command", "foreign command"),
+        ("stdout_ref", "receipt.json"),
+        ("stdout_ref", "../escape.txt"),
+        ("test_result", "failed"),
+    ],
+)
+async def test_wrapper_receipt_rejects_invalid_identity_or_status(
+    tmp_path: Path, change: str, value: object
+) -> None:
+    events, claim = _wrapper_receipt_case(tmp_path, **{change: value})
+    manifest = await load_ac_evidence_manifest(
+        _EventStore(events),
+        ac_id="ac_1",
+        execution_id="exec_1",
+        admit_accepted_tool_starts=True,
+        accepted_retry_attempt=1,
+        accepted_session_attempt_id="ac_1_attempt_2",
+    )
+    assert (
+        matching_wrapper_receipts(
+            manifest, claims=[claim], execution_id="exec_1", task_cwd=str(tmp_path)
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    ["missing", "stale", "duplicate", "path_escape", "earlier_retry", "foreign_session"],
+)
+async def test_wrapper_receipt_rejects_unattributed_or_foreign_file(
+    tmp_path: Path, case: str
+) -> None:
+    events, claim = _wrapper_receipt_case(tmp_path)
+    if case in {"missing", "stale"}:
+        if case == "missing":
+            (tmp_path / "receipt.json").unlink()
+        effects = list(events[1].data["filesystem_effects"])
+        events[1] = events[1].model_copy(
+            update={
+                "data": {
+                    **events[1].data,
+                    "filesystem_effects": [
+                        effect
+                        for effect in effects
+                        if effect["workspace_relative_path"] != "receipt.json"
+                    ],
+                }
+            }
+        )
+    elif case == "duplicate":
+        events.extend(
+            _command_events(call_id="wrapper", effects=events[1].data["filesystem_effects"])
+        )
+    elif case == "path_escape":
+        claim["receipt_path"] = "../receipt.json"
+    elif case in {"earlier_retry", "foreign_session"}:
+        data = dict(events[1].data)
+        data["retry_attempt" if case == "earlier_retry" else "session_attempt_id"] = (
+            0 if case == "earlier_retry" else "other-session"
+        )
+        events[1] = events[1].model_copy(update={"data": data})
+    manifest = await load_ac_evidence_manifest(
+        _EventStore(events),
+        ac_id="ac_1",
+        execution_id="exec_1",
+        admit_accepted_tool_starts=True,
+        accepted_retry_attempt=1,
+        accepted_session_attempt_id="ac_1_attempt_2",
+    )
+    assert (
+        matching_wrapper_receipts(
+            manifest, claims=[claim], execution_id="exec_1", task_cwd=str(tmp_path)
+        )
+        is None
+    )
 
 
 class _EventStore:
@@ -104,6 +615,7 @@ def _command_events(
     session_attempt_id: str = "ac_1_attempt_2",
     failed: bool = False,
     when: datetime | None = None,
+    command: str = "printf accepted > claimed.txt",
 ) -> list[BaseEvent]:
     started_at = when or datetime.now(UTC)
     identity = {
@@ -123,7 +635,7 @@ def _command_events(
                 **identity,
                 "tool_name": "Bash",
                 "tool_call_id": call_id,
-                "tool_input": {"command": "printf accepted > claimed.txt"},
+                "tool_input": {"command": command},
             },
         ),
         BaseEvent(
@@ -542,7 +1054,6 @@ async def test_production_route_rejects_post_capture_ordinary_ancestor_replaceme
 
     assert swapped is True
     assert len(tool_completion.data["filesystem_effects"]) == 1
-    assert manifest.entries[0].payload.get("command_artifacts") is not None
     assert artifact.read_text(encoding="utf-8") == "accepted"
     assert fact.evidence_handle == "missing:files_touched:0"
 
@@ -1679,7 +2190,6 @@ async def test_crafted_idless_other_tool_terminal_preserves_named_journal_pair(
 
     manifest, fact = await _artifact_fact([events[0], orphan, events[1]], task_cwd=tmp_path)
 
-    assert manifest.entries[0].payload.get("command_artifacts") is not None
     assert fact.evidence_handle == manifest.entries[0].handle
 
 
@@ -2274,7 +2784,6 @@ async def test_closed_terminal_success_status_preserves_journal_authority(
 
     manifest, fact = await _artifact_fact(events, task_cwd=tmp_path)
 
-    assert manifest.entries[0].payload.get("command_artifacts") is not None
     assert fact.evidence_handle == manifest.entries[0].handle
 
 
