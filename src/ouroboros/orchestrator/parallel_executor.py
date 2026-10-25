@@ -9063,10 +9063,8 @@ Respond with either ATOMIC or the structured JSON object only.
 
             duration = (datetime.now(UTC) - start_time).total_seconds()
 
-            # A quota result is a resumable, nonterminal provider boundary.
-            # Preserve its exact scoped handle and leave the capsule dispatch
-            # unsealed; marking the child failed here would make safe resume
-            # impossible and tempt the composite owner to repeat its effects.
+            # Quota pauses retain their scoped handle and unsealed dispatch
+            # so resume cannot repeat completed effects.
             if any(is_usage_limit_pause_message(message) for message in reversed(messages)):
                 return ACExecutionResult(
                     ac_index=ac_index,
@@ -9082,9 +9080,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     route_candidate=observed_route_candidate,
                 )
 
-            # Success contracts add deterministic evidence; they never remove
-            # transcript obligations. This makes verification monotonic: adding
-            # a command cannot weaken the evidence required from the worker.
+            # Success contracts add evidence without weakening transcript obligations.
             has_success_contract = (
                 isinstance(ac_spec, AcceptanceCriterionSpec) and ac_spec.has_success_contract
             )
@@ -9092,9 +9088,8 @@ Respond with either ATOMIC or the structured JSON object only.
                 ac_spec.expected_artifacts
             )
             verify_gate_active = self._run_verify_commands
-            # A worker shown the sourced objective owns that objective, not
-            # ac_content: its evidence is checked against the full schema it
-            # was asked for (``dispatch_renders_sourced_objective``).
+            # Check sourced-objective evidence against the full schema shown,
+            # without exemptions from hidden ac_content.
             sourced_objective = dispatch_renders_sourced_objective(
                 self, parent_ac_index if is_sub_ac else ac_index
             )
@@ -9188,8 +9183,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 and verifier_verdict.status is VerifierStatus.UNAVAILABLE
             )
             if verifier_unavailable:
-                # No evidence to judge (lost transcript, or only unreplayable runs):
-                # keep the work successful and expose it in the final report.
+                # Keep work successful and report the unavailable evidence.
                 fat_harness_error = None
                 log.warning(
                     "parallel_executor.ac.transcript_verification_unavailable",
@@ -9263,10 +9257,8 @@ Respond with either ATOMIC or the structured JSON object only.
                 verify_gate_active=verify_gate_active,
                 sourced_objective=sourced_objective,
             )
-            # Frugality-proof grounding axis (seed AC4). Only when the leaf was
-            # accepted AND emitted a structured evidence claim (the fat-harness
-            # case) do we run the deterministic TraceGuard verdict; the common
-            # non-fat-harness leaf has no structured claim surface and is skipped.
+            # AC4: TraceGuard checks accepted fat-harness leaves with structured
+            # evidence; non-fat-harness leaves have no claim surface.
             await self._observe_deliver_verdict(
                 runtime_identity=runtime_identity,
                 execution_id=execution_context_id,
@@ -12828,9 +12820,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     record=scoped_evidence,
                 )
                 if verifier is not None and not force_runtime_transcript
-                # Do not route acceptance through the mutable executor wrapper.
-                # Foundation A captured this closed transcript verifier at
-                # construction and has just checked that binding above.
+                # Use the constructor-captured transcript verifier checked above.
                 else self._authority_transcript_verifier(
                     messages=messages,
                     typed_evidence=scoped_evidence,
@@ -13078,7 +13068,6 @@ Respond with either ATOMIC or the structured JSON object only.
         while True:
             await anyio.sleep(interval)
 
-            # RC4: Stop when all ACs are done
             if all(s in terminal_states for s in ac_statuses.values()):
                 log.info("parallel_executor.progress_emitter.all_done")
                 return
