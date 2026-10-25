@@ -5,62 +5,45 @@ This document explains how Ouroboros's components fit together so you can orient
 ## High-Level Flow
 
 ```
-User Input
+CLI / MCP / skills
     |
     v
-Phase 0: Big Bang (Interview)
-    | Ambiguity <= 0.2
-    v
-Immutable Seed (YAML)
+Authoring: bigbang/ and auto/ -> immutable Seed
     |
     v
-Phase 1: PAL Router ──> Select model tier (Frugal/Standard/Frontier)
+Execution: orchestrator/ -> selected runtime backend
     |
     v
-Phase 2: Double Diamond ──> Decompose ACs, execute via runtime backend
-    |                         (parallel or sequential)
+Verification: evaluation/ -> results and feedback
     |
-    v
-Phase 3: Resilience ──> Detect stagnation, rotate personas if stuck
-    |
-    v
-Phase 4: Evaluation ──> Stage 1: Mechanical (lint/test)
-    |                    Stage 2: Semantic (LLM evaluation)
-    |                    Stage 3: Consensus (multi-model vote, if triggered)
-    |
-    v
-Phase 5: Secondary Loop ──> Process deferred TODOs
-    |
-    +──> Cycle back if needed
+    +--> refinement / evolution where the selected workflow supports it
+
+State: persistence/ stores events; CLI and TUI observe them.
 ```
 
-## Module Dependency Map
+These are responsibility boundaries, not six mandatory execution phases.
+Runtime selection follows the [runtime factory contract](../architecture.md#runtime-factory).
 
-```
-                        core/
-                    (types, errors, seed)
-                     /    |    \
-                    /     |     \
-              bigbang/  routing/  execution/
-                  |       |         |
-                  +-------+---------+
-                          |
-                    orchestrator/
-                    (runner, adapter,
-                     parallel_executor,
-                     execution_strategy)
-                          |
-                    +-----+-----+
-                    |           |
-              evaluation/   resilience/
-                    |
-              persistence/
-              (event_store)
-                    |
-              +-----+-----+
-              |           |
-            tui/        cli/
-```
+## Module Responsibility Map
+
+Paths below are relative to `src/ouroboros/`. Start with the boundary that
+owns the behavior being changed rather than adding another execution layer.
+
+| Boundary | Packages | Responsibility |
+|----------|----------|----------------|
+| Entry points | `cli/`, `mcp/`, `skills/` | User commands, tool schemas, and skill dispatch |
+| Authoring | `bigbang/`, `auto/`, `pm/` | Interactive requirements, bounded automatic interview, and product requirements |
+| Execution | `orchestrator/` | Runtime adapters, scheduling, workflow execution, and session control |
+| Backend selection | `backends/`, `providers/`, `router/`, `config/` | Capability registry, LLM adapters, model routing, and configuration |
+| Verification | `evaluation/`, `resilience/` | Mechanical/semantic/consensus evaluation and recovery helpers |
+| Shared contracts | `core/` | Seed, result/error types, and shared domain contracts |
+| Durable state | `persistence/` | Events, checkpoints, and state reconstruction |
+| Observation | `tui/` | Terminal views of execution state |
+
+The runtime and LLM backend are distinct configuration surfaces. The registry
+and factories decide supported capabilities; this map does not promise equal
+features across adapters. See [The Development Loop](developing.md) for local
+source selection, state locations, and the smallest validation for each boundary.
 
 ## Key Module Guide
 
@@ -78,7 +61,7 @@ Phase 5: Secondary Loop ──> Process deferred TODOs
 | `ontology_aspect.py` | AOP-based ontological analysis (`OntologicalAspect`, `AnalysisResult`) |
 | `ontology_questions.py` | Centralized Socratic/ontological question engine |
 
-### evaluation/ -- Phase 4: Three-Stage Pipeline
+### evaluation/ -- Three-Stage Pipeline
 
 **When to touch**: Adding check types, modifying evaluation logic, changing consensus rules.
 
@@ -139,19 +122,19 @@ Phase 5: Secondary Loop ──> Process deferred TODOs
 | `checkpoint.py` | Checkpoint/recovery for session resumption |
 | `schema.py` | Database schema definitions |
 
-## How the Six Phases Connect
+## How the Boundaries Connect
 
-### Phase 0 -> Phase 2: Seed drives execution
+### Authoring -> execution: Seed drives execution
 
-The `Seed` object flows from Big Bang interview through PAL Router to Double Diamond execution. The `seed.task_type` field selects the `ExecutionStrategy`, and `seed.acceptance_criteria` become the execution tree nodes.
+The `Seed` object records the authoring result for execution. The runner selects an execution strategy/profile from `seed.task_type`, and `seed.acceptance_criteria` become execution tree nodes. Model routing is not a mandatory intermediate phase between authoring and execution.
 
-### Phase 2 <-> Phase 4: Execution produces artifacts for evaluation
+### Execution -> verification: artifacts are evaluated
 
 Each AC execution produces an artifact (code or document). The `EvaluationContext` wraps this artifact with the AC text, goal, and constraints for the pipeline to evaluate.
 
-### Phase 4 -> Phase 3: Evaluation failure triggers resilience
+### Verification -> recovery: workflow-specific feedback
 
-When evaluation fails repeatedly, the resilience system detects stagnation patterns and rotates to a different persona (Hacker, Researcher, Simplifier, Architect).
+Evaluation results feed the selected workflow's recovery or refinement policy. The `resilience/` package provides stagnation and persona helpers; not every CLI command runs the same recovery loop.
 
 ### Orchestrator ties it together
 

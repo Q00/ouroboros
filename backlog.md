@@ -1,7 +1,7 @@
 # Ouroboros Code Audit Backlog
 
 > Generated: 2026-08-23
-> Method: 5 parallel analysis agents over `src/ouroboros/` (312k LOC, 597 modules)
+> Method: 5 parallel analysis agents over `src/ouroboros/` (312k LOC at audit time; live tracked-module counts are intentionally omitted because they change independently of these findings)
 > Baseline: `ruff` clean · `mypy` clean **only because 14 error codes are disabled**
 
 ## Executive summary
@@ -18,7 +18,8 @@
 | H. Validation gaps | 14 | HIGH |
 | **Total** | **158** | |
 
-Headline: `mypy` reports "no issues in 597 files", but re-enabling just 3 of the 14
+Headline: `mypy` reported "no issues" under the configured suppressions. Its checked-file
+total can include Hatch-VCS-generated `src/ouroboros/_version.py`, so it is not a tracked-module inventory. Re-enabling just 3 of the 14
 suppressed error codes surfaces **430 errors across 102 files**. The suppression is
 concentrated where it hurts most — the runtime factory that constructs all 15
 backends, and the MCP wire boundary.

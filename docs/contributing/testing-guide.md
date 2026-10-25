@@ -49,18 +49,20 @@ uv run pytest tests/unit/tui/ -v
 uv run pytest tests/unit/ --cov=src/ouroboros --cov-report=term-missing
 ```
 
-### Skip Slow Tests
+### Focused Tests
 
-MCP tests require network and external servers. Skip them for fast iteration:
+Unit MCP tests use local fixtures and mocks; they do not inherently require
+external servers. Install the `mcp-test` dependency group when running them:
 
 ```bash
-uv run pytest tests/ --ignore=tests/unit/mcp --ignore=tests/integration/mcp --ignore=tests/e2e
+uv sync --python 3.12 --dev --group mcp-test --group litellm-test
+uv run --python 3.12 --no-sync pytest tests/unit/mcp/ -q
 ```
 
 ### TUI-Specific Tests
 
 ```bash
-uv run pytest tests/ --ignore=tests/unit/mcp --ignore=tests/integration/mcp --ignore=tests/e2e -k "tui or tree"
+uv run pytest tests/unit/tui/ -q
 ```
 
 ### E2E Tests
@@ -71,7 +73,38 @@ End-to-end tests exercise the full CLI:
 uv run pytest tests/e2e/ -v
 ```
 
-Note: `test_run_workflow_verbose` is a known pre-existing failure; do not block on it.
+Check each integration or E2E test's fixtures and markers for its external
+requirements. Compare unexpected failures with the same command and environment
+on `main`; a historical failure note is not permission to ignore a regression.
+
+### HOME and Worker Isolation
+
+`tests/conftest.py` redirects `HOME` to a temporary session directory before
+test collection. This covers import-time configuration, database defaults, and
+logging paths that resolve through `Path.home()` or `expanduser("~")`; child
+processes inherit that home. `UV_CACHE_DIR` retains an explicit cache location
+so packaging tests can use uv without relying on the real home.
+
+The autouse `isolate_ouroboros_home` fixture gives each test another temporary
+home. Tests needing a specific location may override `HOME` with `monkeypatch`
+after that fixture. Do not restore the developer's home to make a test pass.
+This contract describes the HOME-based paths; it does not claim isolation of
+every platform-specific profile variable or external credential store.
+
+Parallel execution is opt-in locally with pytest-xdist. Each worker runs the
+collection-time isolation and per-test fixtures independently. The
+`isolate_heartbeat_locks_per_test_worker` fixture also gives each worker private
+heartbeat lock and cancellation directories, preventing illustrative session
+IDs from colliding across workers while preserving lease semantics within one.
+
+```bash
+uv run --python 3.12 --no-sync pytest tests/unit/test_home_isolation.py -n 2 --dist loadgroup -q
+```
+
+Use `--dist loadgroup` for parallel runs that include wheel-building tests.
+The collection hook marks consumers of the shared `built_wheel` fixture,
+including indirect consumers, as `slow` and groups them on one worker. This
+lets them reuse one session-scoped wheel instead of building one per worker.
 
 ## Writing Tests
 
@@ -196,16 +229,34 @@ async def test_dashboard_renders():
 
 | Category | Location | Speed | Dependencies | When to Run |
 |----------|----------|-------|--------------|-------------|
-| Unit | `tests/unit/` | Fast (<30s) | None | Every change |
-| Integration | `tests/integration/` | Medium | Network, MCP | Before PR |
-| E2E | `tests/e2e/` | Slow | Full system | Before release |
+| Unit | `tests/unit/` | Usually fastest when focused | Test dependencies; optional groups by module | Every change |
+| Integration | `tests/integration/` | Varies | Real local components or external services, as specified by fixtures | Before PR |
+| E2E | `tests/e2e/` | Varies | CLI/system prerequisites specified by each test | Before release |
+
+The collection hook marks every test under `tests/integration/` as
+`integration`, so `-m integration` selects that directory's tests. Marker
+filters are independent of directory selection: `slow` wheel consumers also
+exist under `tests/unit/`.
 
 ## CI Commands
 
 ```bash
-# What CI runs (approximately):
+# Python 3.12 pull-request test job in .github/workflows/test.yml
+uv sync --python 3.12 --dev --group mcp-test --group litellm-test
+uv run --python 3.12 --no-sync pytest tests/ -n 4 --dist loadgroup --durations=25 -m "not performance and not slow" -q
+
+# Python 3.12 push test job: includes slow tests and collects coverage
+uv run --python 3.12 --no-sync pytest tests/ -n 4 --dist loadgroup --durations=25 -m "not performance" --cov=src/ouroboros --cov-report=xml -q
+
+# Separate lint and type-check gates
 uv run ruff check src/ tests/
 uv run ruff format --check src/ tests/
-uv run mypy src/ouroboros --ignore-missing-imports
-uv run pytest tests/unit/ -v --cov=src/ouroboros
+uv run mypy src/ouroboros
 ```
+
+Pushes to main/develop also test Python 3.13 and 3.14. The 3.14 job omits
+`litellm-test`. Pull requests exclude `performance` and `slow` tests; push
+correctness jobs exclude only `performance`. Performance tests run separately
+on pushes with `-m performance -n 0` in an advisory job. The workflow is
+authoritative for the matrix and platform-specific jobs; see
+[CI Gates](ci-gates.md).
