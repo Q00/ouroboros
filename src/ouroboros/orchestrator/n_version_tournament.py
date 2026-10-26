@@ -1,4 +1,4 @@
-"""N-version tournament scaffolding (PR-X X3, opt-in, NOT live-wired).
+"""N-version tournament scaffolding (PR-X X3, opt-in; the tournament is NOT live-wired).
 
 The idea: an AC that has already burned its one cross-harness redispatch (X1) and
 failed *again* can, when ``execution.n_version_tournament`` is on, be dispatched
@@ -22,6 +22,11 @@ mechanically-testable primitives as pure functions plus a worktree manager:
   file listing, ``--`` before pathnames, and rejects rc=1 with no patch. A
   failed export is reported as ``None`` (distinct from an empty ``b""`` diff) so
   a git error can never be mistaken for "the winner changed nothing".
+
+One part has a live caller: the example-questions candidate runner
+(``ouroboros.examples.candidates``, opt-in through ``examples.enabled``) uses
+:class:`RunWorktreeManager` and :func:`export_worktree_diff` to give each
+candidate its own isolated worktree at one pinned base commit.
 
 Wiring the live per-AC trigger into ``parallel_executor`` is intentionally left
 out: it is deeply entangled with the executor's per-AC dispatch internals and the
@@ -152,8 +157,17 @@ class RunWorktreeManager:
             timeout=GIT_COMMAND_TIMEOUT_SECONDS,
         )
 
-    def create(self, label: str) -> Path:
-        """Add an isolated worktree for ``label`` at the workspace HEAD.
+    def head_commit(self) -> str:
+        """Return the commit id the workspace ``HEAD`` points at now.
+
+        A caller that creates several worktrees resolves it once and passes it
+        to :meth:`create` as ``ref``, so every worktree starts from the same
+        commit even if the workspace ``HEAD`` moves in between.
+        """
+        return self._git("rev-parse", "--verify", "HEAD^{commit}").stdout.strip()
+
+    def create(self, label: str, *, ref: str = "HEAD") -> Path:
+        """Add an isolated worktree for ``label`` at ``ref`` (default: the workspace HEAD).
 
         Raises ``CalledProcessError``/``TimeoutExpired``/``OSError`` when git
         cannot produce the worktree: a contestant with no isolated checkout must
@@ -164,7 +178,7 @@ class RunWorktreeManager:
         # --detach keeps each contestant on a detached HEAD so no branch name
         # collides across contestants sharing the same base commit.
         try:
-            self._git("worktree", "add", "--detach", str(path), "HEAD")
+            self._git("worktree", "add", "--detach", str(path), ref)
         except _GIT_CLEANUP_ERRORS:
             # A failed or timed-out ``worktree add`` may still have left a
             # partial checkout and a registration behind. Track it so cleanup

@@ -895,6 +895,45 @@ class BoundaryConfig(BaseModel, frozen=True):
         return value
 
 
+class ExampleCandidateConfig(BaseModel, frozen=True):
+    """One (runtime backend, model) pair that writes example-question candidates.
+
+    Attributes:
+        backend: Agent runtime backend name (as for ``orchestrator.runtime_backend``).
+        model: Model id for that runtime; unset uses the runtime's own default.
+    """
+
+    backend: str = Field(min_length=1)
+    model: str | None = None
+
+
+class ExamplesConfig(BaseModel, frozen=True):
+    """Example questions chosen by execution (opt-in; off by default).
+
+    When on, several candidate solutions are written in isolated worktrees,
+    each under a different stated reading of the goal, and their outputs on
+    small probes are compared to find where a requester must choose
+    (``ouroboros.examples``). Nothing on the ``ooo auto`` path calls it yet.
+
+    Attributes:
+        enabled: Turns the candidate step on. Off by default.
+        k: Number of candidates per step (2..8; default 4).
+        parallel: Candidates running at once (1..8; default 4).
+        max_cards: Question cards asked per session; the rest are recorded.
+        candidates: The (backend, model) pairs that write candidates, in
+            order. Empty (default) means the execute-stage runtime with its
+            model, then the other allowlisted runtimes (Codex CLI, Claude
+            Code) with their default models. A pair that fails its preflight
+            is skipped and recorded.
+    """
+
+    enabled: bool = False
+    k: int = Field(default=4, ge=2, le=8)
+    parallel: int = Field(default=4, ge=1, le=8)
+    max_cards: int = Field(default=5, ge=0, le=20)
+    candidates: tuple[ExampleCandidateConfig, ...] = ()
+
+
 class OuroborosConfig(BaseModel, frozen=True):
     """Top-level Ouroboros configuration.
 
@@ -918,6 +957,7 @@ class OuroborosConfig(BaseModel, frozen=True):
         logging: Logging configuration
         seed: Seed-authoring gates applied before execution
         boundary: Pre-dispatch check package for ``ooo run`` (on by default)
+        examples: Example questions chosen by execution (off by default)
     """
 
     economics: EconomicsConfig = Field(default_factory=EconomicsConfig)
@@ -938,6 +978,7 @@ class OuroborosConfig(BaseModel, frozen=True):
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     seed: SeedConfig = Field(default_factory=SeedConfig)
     boundary: BoundaryConfig = Field(default_factory=BoundaryConfig)
+    examples: ExamplesConfig = Field(default_factory=ExamplesConfig)
 
 
 def get_default_config() -> OuroborosConfig:

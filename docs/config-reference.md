@@ -160,6 +160,7 @@ url = "http://127.0.0.1:12000/mcp"
 | `runtime_controls` | `RuntimeControlsConfig` | Long-running workflow liveness and progress controls |
 | `logging` | `LoggingConfig` | Log level, path, and verbosity |
 | `boundary` | `BoundaryConfig` | Check package boundary of `ooo run` (on by default) |
+| `examples` | `ExamplesConfig` | Example questions chosen by execution (off by default) |
 
 ---
 
@@ -789,6 +790,34 @@ holds the admitted package, its full decision runs, held-out cases included.
 In another process the held-out cases are gone (they are never written to
 disk), so no check runs: covered criteria are undecided
 (`held_out_unavailable`) and the existing verifier decides the rest.
+
+## `examples`
+
+Example questions chosen by execution. Off by default, and nothing on the
+`ooo auto` path calls it yet. When on, the candidate step states readings of
+the goal with one model call, writes `k` candidate solutions in isolated git
+worktrees (one per (runtime, model) pair and reading), runs the probes they
+write on the base and on every finished candidate, and builds the question
+cards where their outputs differ. Each candidate has a 600 s wall-clock cap
+and the whole step a 900 s cap, probe runs included. Fewer than two finished
+candidates means no card.
+
+```yaml
+examples:
+  enabled: false
+  k: 4
+  parallel: 4
+  max_cards: 5
+  candidates: []          # e.g. [{backend: codex}, {backend: claude, model: <model id>}]
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | `bool` | `false` | Turns the candidate step on. |
+| `k` | `int` (2..8) | `4` | Candidates per step. |
+| `parallel` | `int` (1..8) | `4` | Candidates running at once. |
+| `max_cards` | `int` (0..20) | `5` | Question cards asked per session; the rest are recorded. |
+| `candidates` | list of `{backend, model}` | `[]` | Pairs that write candidates, in order. Empty means the execute-stage runtime with its model, then Codex CLI and Claude Code with their default models. A pair that fails its runtime preflight is skipped and recorded. |
 
 ## `resilience`
 
