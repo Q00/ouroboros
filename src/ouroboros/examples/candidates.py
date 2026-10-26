@@ -58,7 +58,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 import inspect
 import json
@@ -173,7 +173,13 @@ class SkippedPair:
 
 @dataclass(frozen=True, slots=True)
 class CandidateStepResult:
-    """Everything the step did. ``enabled`` is ``False`` when the flag is off."""
+    """Everything the step did. ``enabled`` is ``False`` when the flag is off.
+
+    ``failure`` says why the step stopped early: ``step_deadline`` (before
+    the base tree), ``base_worktree_failed:<error>``,
+    ``worktree_root_failed:<error>``, or ``probe_pool_step_deadline`` (the
+    candidates are kept, no card is built).
+    """
 
     enabled: bool
     failure: str | None = None
@@ -677,7 +683,17 @@ async def _candidates_and_probes(
     pool_trees.update(
         {outcome.slot.candidate_id: trees[outcome.slot.candidate_id] for outcome in finished}
     )
-    pool = await probe_pool_runner(probes, pool_trees, deadline=step.deadline)
+    # The pool launches a process only when it ends before the deadline; the
+    # bound here also covers the tree copies and preparation around them.
+    left = step.remaining()
+    if left <= 0:
+        return replace(result, failure=f"probe_pool_{SkipReason.STEP_DEADLINE.value}")
+    try:
+        pool = await asyncio.wait_for(
+            probe_pool_runner(probes, pool_trees, deadline=step.deadline), timeout=left
+        )
+    except TimeoutError:
+        return replace(result, failure=f"probe_pool_{SkipReason.STEP_DEADLINE.value}")
     report = find_disagreements(pool.records, [outcome.slot.candidate_id for outcome in finished])
     asked, recorded = select_cards(build_cards(report.disagreements), max_cards)
     return CandidateStepResult(
@@ -776,9 +792,7 @@ async def run_candidate_step(
     finally:
         # Shielded: a cancelled step still removes every worktree it made.
         await asyncio.shield(asyncio.to_thread(manager.cleanup_all))
-    if result.failure is not None:
-        return CandidateStepResult(True, result.failure, readings, events=tuple(step.events))
-    return result
+    return replace(result, events=tuple(step.events))
 
 
 __all__ = [

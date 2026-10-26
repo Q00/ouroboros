@@ -605,6 +605,18 @@ async def test_a_slow_event_sink_never_dispatches_past_the_step_deadline(
     assert len(_worktrees(workspace)) == 1
 
 
+async def test_a_probe_pool_past_the_deadline_builds_no_card(workspace: Path) -> None:
+    async def stuck_pool(probes: Any, trees: Any, *, deadline: float) -> Any:
+        await asyncio.sleep(3600)
+
+    factory = _Factory({"codex": writes("5400"), "claude": writes("90")})
+    result = await run(workspace, factory, probe_pool_runner=stuck_pool, step_timeout=2.0)
+    assert result.failure == "probe_pool_step_deadline"
+    assert len(result.finished) == 2
+    assert result.pool is None and result.asked == ()
+    assert len(_worktrees(workspace)) == 1
+
+
 async def test_agreeing_candidates_give_no_card(workspace: Path) -> None:
     factory = _Factory({"codex": writes("5400"), "claude": writes("5400")})
     result = await run(workspace, factory)
