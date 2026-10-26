@@ -193,7 +193,7 @@ Ouroboros applies two ancient methods to transmute irrational input into executa
 ```
 Phase 0: BIG BANG         -> Crystallize requirements into a Seed
 Phase 1: PAL ROUTER       -> Select appropriate model tier
-Phase 2: DOUBLE DIAMOND   -> Decompose and execute tasks
+Phase 2: EXECUTION        -> Fan out and execute acceptance criteria
 Phase 3: RESILIENCE       -> Handle stagnation with lateral thinking
 Phase 4: EVALUATION       -> Verify outputs at three stages
 Phase 5: SECONDARY LOOP   -> Process deferred TODOs

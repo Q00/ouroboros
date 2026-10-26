@@ -104,11 +104,11 @@ for current AgentOS sequencing.
 
 ### Economic Model
 
-| Tier | Cost | When |
+| Tier | Cost | When (shipped defaults) |
 |:----:|:----:|------|
-| FRUGAL | 1x | complexity < 0.4 |
-| STANDARD | 10x | complexity < 0.7 |
-| FRONTIER | 30x | critical decisions |
+| FRUGAL | 1x | Trusted decomposed children, when child lowering is enabled |
+| STANDARD | 10x | Default for top-level ACs |
+| FRONTIER | 30x | Reached by escalation on repeated retries |
 
 ### Core Principles
 
