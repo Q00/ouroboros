@@ -9,6 +9,7 @@ import pytest
 from ouroboros.examples.cards import (
     build_cards,
     card_id_for,
+    option_label,
     partition_signature,
     select_cards,
 )
@@ -146,3 +147,30 @@ def test_no_disagreements_gives_no_cards() -> None:
     assert build_cards([]) == ()
     records = _values("p1", 0, {"c1": 1})
     assert build_cards(find_disagreements(records, ["c1"]).disagreements) == ()
+
+
+def test_option_labels_continue_past_z() -> None:
+    assert [option_label(i) for i in (0, 1, 25, 26, 27, 51, 52, 701, 702)] == [
+        "A",
+        "B",
+        "Z",
+        "AA",
+        "AB",
+        "AZ",
+        "BA",
+        "ZZ",
+        "AAA",
+    ]
+    with pytest.raises(ValueError, match="negative"):
+        option_label(-1)
+
+
+def test_more_than_26_groups_still_make_one_card() -> None:
+    candidates = [f"c{i:02d}" for i in range(27)]
+    records = _values("p1", -1, {c: i for i, c in enumerate(candidates)})
+    report = find_disagreements(records, candidates)
+    (card,) = build_cards(report.disagreements)
+    labels = [o.label for o in card.options]
+    assert len(labels) == 27 and len(set(labels)) == 27
+    assert labels[:2] == ["A", "B"] and labels[-1] == "AA"
+    assert card.group_count == 27

@@ -50,9 +50,26 @@ def test_fields_are_detached_from_caller_containers() -> None:
     value = [1, 2]
     record = _record(value=value)
     value.append(3)
-    assert record.fields["value"] == [1, 2]
+    assert record.fields["value"] == (1, 2)
     with pytest.raises(TypeError):
         record.fields["value"] = 0  # type: ignore[index]
+
+
+def test_nested_fields_are_read_only_and_digest_is_fixed() -> None:
+    record = _record(value={"items": [1, {"k": "v"}]}, files={"a.txt": {"sha256": "x"}})
+    digest = record.digest()
+    with pytest.raises(AttributeError):
+        record.fields["value"]["items"].append(2)
+    with pytest.raises(TypeError):
+        record.fields["value"]["items"][1]["k"] = "w"
+    with pytest.raises(TypeError):
+        record.fields["files"]["b.txt"] = {}
+    assert record.digest() == digest
+    assert record.payload() == {
+        "status": "returned",
+        "value": {"items": [1, {"k": "v"}]},
+        "files": {"a.txt": {"sha256": "x"}},
+    }
 
 
 def test_payload_is_a_fresh_copy() -> None:

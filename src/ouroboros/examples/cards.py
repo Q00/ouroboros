@@ -11,7 +11,8 @@ A card:
   id on the card.
 - ``probe_ids``: the probes shown, at most ``max_probes`` (default 3), the
   smallest probe ids first. The rest are kept in ``overflow_probe_ids``.
-- ``options``: one per block of the partition, labelled ``A``, ``B``, ...
+- ``options``: one per block of the partition, labelled ``A`` to ``Z``,
+  then ``AA``, ``AB``, ... (``option_label``), so any number of blocks fits.
   The design labels options by the order of the canonical group bytes, but a
   card with several probes has different bytes on each probe, and a label
   must name the same block on every probe. So the order is fixed by the
@@ -32,7 +33,6 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-import string
 from typing import Any
 
 from ouroboros.examples.disagreement import BaseRelation, OutcomeGroup, ProbeComparison
@@ -40,7 +40,7 @@ from ouroboros.examples.record import canonical_json_bytes, sha256_hex
 
 DEFAULT_MAX_PROBES_PER_CARD = 3
 DEFAULT_MAX_CARDS = 5
-OPTION_LABELS = string.ascii_uppercase
+_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 PartitionSignature = tuple[tuple[str, ...], ...]
 
@@ -83,6 +83,18 @@ class QuestionCard:
         return min(len(block) for block in self.partition)
 
 
+def option_label(index: int) -> str:
+    """Return the label of the option at ``index``: A..Z, then AA, AB, ..."""
+    if index < 0:
+        raise ValueError("index must not be negative")
+    label = ""
+    index += 1
+    while index:
+        index, rest = divmod(index - 1, len(_LETTERS))
+        label = _LETTERS[rest] + label
+    return label
+
+
 def partition_signature(comparison: ProbeComparison) -> PartitionSignature:
     """Return the set partition of candidate ids induced by the probe's groups."""
     return tuple(sorted(tuple(sorted(group.candidate_ids)) for group in comparison.groups))
@@ -103,14 +115,12 @@ def _build_card(
 ) -> QuestionCard:
     ordered = sorted(comparisons, key=lambda item: item.probe_id)
     shown, overflow = ordered[:max_probes], ordered[max_probes:]
-    if len(partition) > len(OPTION_LABELS):
-        raise ValueError(f"a card supports at most {len(OPTION_LABELS)} options")
     by_block = [_group_by_block(comparison) for comparison in shown]
     first = by_block[0]
     blocks = sorted(partition, key=lambda block: (first[block].outcome_bytes, block))
     options = tuple(
         CardOption(
-            label=OPTION_LABELS[index],
+            label=option_label(index),
             candidate_ids=block,
             outcomes=tuple(
                 OptionOutcome(

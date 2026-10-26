@@ -42,7 +42,6 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from types import MappingProxyType
 from typing import Any
 
 from ouroboros.boundary.harness import equal
@@ -54,6 +53,7 @@ from ouroboros.examples.record import (
     OutcomeRecord,
     ProbeStatus,
     canonical_json_bytes,
+    freeze_json,
 )
 
 
@@ -220,7 +220,7 @@ def _compare_probe(
     groups = tuple(
         OutcomeGroup(
             candidate_ids=ids,
-            outcome=MappingProxyType(representative),
+            outcome=freeze_json(representative),
             outcome_bytes=rep_bytes,
             base_relation=(
                 BaseRelation.SAME_AS_BASE
@@ -233,7 +233,7 @@ def _compare_probe(
     return ProbeComparison(
         probe_id=probe_id,
         unstable_fields=tuple(sorted(mask)),
-        base_outcome=MappingProxyType(base_outcome),
+        base_outcome=freeze_json(base_outcome),
         groups=groups,
     )
 

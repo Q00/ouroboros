@@ -24,6 +24,11 @@ encodes anything else (a tuple, a set, a non-finite float, an arbitrary
 object) before it builds the record. A record that breaks these rules is
 refused with ``ValueError``; it is never coerced.
 
+A record is deeply immutable. ``fields`` holds a detached copy in which a
+JSON array reads back as a ``tuple`` and a JSON object as a read-only
+mapping (``freeze_json``); ``payload`` returns plain JSON data again. So the
+canonical bytes and the digest of a record never change after creation.
+
 The canonical bytes of a record are the JSON text of its payload (``status``
 plus the fields) with sorted keys, no whitespace, and ASCII escapes, encoded
 as UTF-8. Two records with the same payload have the same bytes and the same
@@ -92,6 +97,24 @@ def _check_json(value: Any, where: str) -> None:
     raise ValueError(f"{where}: {type(value).__name__} is not JSON data")
 
 
+def freeze_json(value: Any) -> Any:
+    """Return a deeply read-only copy of JSON data (tuples, read-only mappings)."""
+    if isinstance(value, (list, tuple)):
+        return tuple(freeze_json(item) for item in value)
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: freeze_json(item) for key, item in value.items()})
+    return value
+
+
+def thaw_json(value: Any) -> Any:
+    """Return plain JSON data (lists, dicts) for a value from ``freeze_json``."""
+    if isinstance(value, (list, tuple)):
+        return [thaw_json(item) for item in value]
+    if isinstance(value, Mapping):
+        return {key: thaw_json(item) for key, item in value.items()}
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class OutcomeRecord:
     """One run of one probe on one tree. Immutable; validated on creation."""
@@ -117,17 +140,14 @@ class OutcomeRecord:
             raise ValueError(f"unknown outcome fields: {unknown}")
         plain = dict(self.fields)
         _check_json(plain, "fields")
-        # A deep, detached copy: later changes to the caller's containers
-        # cannot change this record.
-        frozen = json.loads(canonical_json_bytes(plain))
-        object.__setattr__(self, "fields", MappingProxyType(frozen))
+        # A deep, detached, read-only copy: neither later changes to the
+        # caller's containers nor writes through ``fields`` can change this
+        # record.
+        object.__setattr__(self, "fields", freeze_json(json.loads(canonical_json_bytes(plain))))
 
     def payload(self) -> dict[str, Any]:
         """Return the outcome as one JSON object: ``status`` plus the fields."""
-        return {
-            STATUS_KEY: self.status.value,
-            **json.loads(canonical_json_bytes(dict(self.fields))),
-        }
+        return {STATUS_KEY: self.status.value, **thaw_json(self.fields)}
 
     def canonical_bytes(self) -> bytes:
         """Return the canonical bytes of the payload."""

@@ -273,3 +273,13 @@ def test_no_records_gives_an_empty_report() -> None:
     report = find_disagreements([], ["c1", "c2"])
     assert report.disagreements == report.consensus_changes == report.unchanged == ()
     assert report.dropped == ()
+
+
+def test_group_and_base_outcomes_are_read_only() -> None:
+    records = probe("p1", {"value": [0]}, {"c1": {"value": [1]}, "c2": {"value": [2]}})
+    comparison = find_disagreements(records, ["c1", "c2"]).disagreements[0]
+    with pytest.raises(AttributeError):
+        comparison.groups[0].outcome["value"].append(3)
+    with pytest.raises(TypeError):
+        comparison.base_outcome["value"] = 9
+    assert comparison.groups[0].outcome["value"] == (1,)
