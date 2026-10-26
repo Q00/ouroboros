@@ -24,8 +24,11 @@ command <nonce> <path>
     ``ValueError`` for an argv item with a NUL byte); ``exited``
     otherwise, with its exit status and the first ``STREAM_LIMIT`` bytes of
     each output stream, decoded as UTF-8 with backslash escapes (longer
-    output is cut at the limit). The command stays in this process's group,
-    so the controller's deadline ends it with this process.
+    output is cut at the limit). Once the command exits, its output is read
+    for at most ``DRAIN_SECONDS`` more: a process it left behind that holds
+    its pipes open cannot turn a finished command into a timeout. The
+    command stays in this process's group, so the controller's deadline
+    ends it with this process.
 
 The record is one line, '<nonce> <json>', written to a private copy of the
 original stdout. The JSON object holds ``status`` plus the outcome fields of
@@ -61,6 +64,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from typing import Any, Dict, List
 
 OBJECT_KEY = "$object"
@@ -70,6 +74,7 @@ MAX_MESSAGE = 2000
 MAX_INT_BITS = 3000
 MAX_VALUE_CHARS = 256 * 1024
 STREAM_LIMIT = 64 * 1024
+DRAIN_SECONDS = 1.0
 _CHUNK = 65536
 PROBE_MODULE = "ouroboros_probe"
 
@@ -191,10 +196,15 @@ def _call(nonce: str, path: str) -> None:
 
 
 def _drain(stream: Any, kept: List[bytes]) -> None:
-    """Read ``stream`` to its end; keep its first ``STREAM_LIMIT`` bytes."""
+    """Read ``stream`` to its end; keep its first ``STREAM_LIMIT`` bytes.
+
+    ``os.read`` returns what has arrived; a buffered ``read(n)`` would wait
+    for ``n`` bytes, so output written before the command exits could be
+    held back by a process that keeps the pipe open.
+    """
     size = 0
     while True:
-        chunk = stream.read(_CHUNK)
+        chunk = os.read(stream.fileno(), _CHUNK)
         if not chunk:
             break
         if size < STREAM_LIMIT:
@@ -245,13 +255,16 @@ def _command(nonce: str, path: str) -> None:
         thread.daemon = True
         thread.start()
     code = process.wait()
+    # A process the command left behind may still hold its pipes open; the
+    # output is read for at most DRAIN_SECONDS after the command exits.
+    limit = time.monotonic() + DRAIN_SECONDS
     for thread in threads:
-        thread.join()
+        thread.join(max(limit - time.monotonic(), 0))
     record = {
         "status": "exited",
         "exit_code": code,
-        "stdout": _decoded(out),
-        "stderr": _decoded(err),
+        "stdout": _decoded(list(out)),
+        "stderr": _decoded(list(err)),
     }
     _report(channel, nonce, record)
     os._exit(0)

@@ -671,7 +671,7 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         "src/ouroboros/examples/probe_wrapper.py",
         "_command",
         "subprocess.Popen",
-        226,
+        236,
         18,
     ): "Runs inside the confined probe process (check_env.check_command); the inherited environment is the sandbox's allowlisted check environment, never the controller's; no shell.",
     (

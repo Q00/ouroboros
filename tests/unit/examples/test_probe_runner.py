@@ -282,6 +282,21 @@ async def test_an_argv_item_with_a_nul_byte_is_not_run(
     assert record.fields["exception_type"] == "builtins.ValueError"
 
 
+async def test_a_child_holding_the_pipes_cannot_turn_an_exit_into_a_timeout(
+    trees: dict[str, Path], python: CheckInterpreter, tmp_path: Path
+) -> None:
+    """The command prints, exits 0, and leaves a child holding stdout and stderr."""
+    script = (
+        "import subprocess, sys\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(8)'])\n"
+        "print('done')\n"
+    )
+    record = await _once(command(PY, "-c", script), trees["cand-a"], python, tmp_path, timeout=4)
+    assert record.status is ProbeStatus.EXITED
+    assert record.fields["exit_code"] == 0
+    assert record.fields["stdout"].strip() == "done"
+
+
 async def test_command_output_is_cut_at_the_stream_limit(
     trees: dict[str, Path], python: CheckInterpreter, tmp_path: Path
 ) -> None:
