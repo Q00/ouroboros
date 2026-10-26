@@ -480,6 +480,7 @@ async def test_a_missing_pair_is_skipped_and_recorded(workspace: Path) -> None:
         ]
         pair_skip = [e for e in result.events if e.type == "examples.candidate.skipped"]
         assert len(pair_skip) == 1 and pair_skip[0].data["candidate_id"] is None
+        assert pair_skip[0].data["detail"] in {"missing CLI", "RuntimeError"}
         assert len(result.asked) == 1
 
 
@@ -487,6 +488,8 @@ async def test_a_failed_runtime_leaves_fewer_than_two_and_no_card(workspace: Pat
     factory = _Factory({"codex": fails(), "claude": writes("90")})
     result = await run(workspace, factory)
     assert [o.skipped for o in result.outcomes] == [SkipReason.RUNTIME_FAILED, None]
+    skipped = [e for e in result.events if e.type == "examples.candidate.skipped"]
+    assert [e.data["detail"] for e in skipped] == ["ProviderError"]
     assert len(result.finished) == 1
     assert result.pool is None and result.asked == ()
 

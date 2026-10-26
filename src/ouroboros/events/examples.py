@@ -109,8 +109,12 @@ def create_candidate_skipped_event(
     reason: str,
     wall_clock_seconds: float | None,
     cost_usd: float | None,
+    detail: str | None = None,
 ) -> BaseEvent:
-    """A candidate, or a pair before any candidate (``candidate_id`` null), was not used."""
+    """A candidate, or a pair before any candidate (``candidate_id`` null), was not used.
+
+    ``detail`` is the exception class name or the preflight reason, when there is one.
+    """
     return BaseEvent(
         type="examples.candidate.skipped",
         aggregate_type=EXAMPLES_AGGREGATE_TYPE,
@@ -123,6 +127,7 @@ def create_candidate_skipped_event(
             "reason": reason,
             "wall_clock_seconds": wall_clock_seconds,
             "cost_usd": cost_usd,
+            "detail": detail,
         },
     )
 

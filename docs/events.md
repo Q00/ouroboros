@@ -307,6 +307,7 @@ a whole pair was left out before planning.
 | `probe_count` | `int` | completed only: probes kept (at most 6) |
 | `probes_refused` | `int` | completed only: entries in the probe directory not kept |
 | `reason` | `string` | skipped only: `runtime_unavailable`, `preflight_failed`, `worktree_failed`, `timed_out`, `step_deadline`, `runtime_failed`, `patch_export_failed` |
+| `detail` | `string?` | skipped only: the exception class name, the runtime's preflight reason, or `unsuccessful` for a result that reported failure; null when there is none |
 
 ## Adding new event types
 

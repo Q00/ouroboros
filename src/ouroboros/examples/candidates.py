@@ -149,6 +149,7 @@ class CandidateOutcome:
     patch_digest: str | None = None
     probes: tuple[Probe, ...] = ()
     probes_refused: int = 0
+    detail: str = ""
 
     @property
     def finished(self) -> bool:
@@ -360,6 +361,7 @@ class _Step:
         reason: SkipReason,
         seconds: float | None = None,
         cost: float | None = None,
+        detail: str = "",
     ) -> CandidateOutcome:
         await self.emit(
             create_candidate_skipped_event(
@@ -371,9 +373,10 @@ class _Step:
                 reason=reason.value,
                 wall_clock_seconds=seconds,
                 cost_usd=cost,
+                detail=detail or None,
             )
         )
-        return CandidateOutcome(slot, reason, seconds, cost)
+        return CandidateOutcome(slot, reason, seconds, cost, detail=detail)
 
 
 async def _close(runtime: AgentRuntime) -> None:
@@ -428,8 +431,10 @@ async def _run_candidate(
             runtime = await asyncio.to_thread(
                 runtime_factory, backend=slot.pair.backend, model=slot.pair.model, cwd=tree
             )
-        except Exception:  # noqa: BLE001 - a runtime that cannot be built skips this slot
-            return await step.skipped(slot, SkipReason.RUNTIME_UNAVAILABLE)
+        except Exception as exc:  # noqa: BLE001 - a runtime that cannot be built skips this slot
+            return await step.skipped(
+                slot, SkipReason.RUNTIME_UNAVAILABLE, detail=type(exc).__name__
+            )
         reading_id = slot.reading.reading_id if slot.reading else None
         await step.emit(
             create_candidate_started_event(
@@ -451,14 +456,22 @@ async def _run_candidate(
         except TimeoutError:
             reason = SkipReason.STEP_DEADLINE if bound_by_step else SkipReason.TIMED_OUT
             return await step.skipped(slot, reason, time.monotonic() - started)
-        except Exception:  # noqa: BLE001 - a failed runtime skips this slot
-            return await step.skipped(slot, SkipReason.RUNTIME_FAILED, time.monotonic() - started)
+        except Exception as exc:  # noqa: BLE001 - a failed runtime skips this slot
+            return await step.skipped(
+                slot,
+                SkipReason.RUNTIME_FAILED,
+                time.monotonic() - started,
+                detail=type(exc).__name__,
+            )
         finally:
             await _close(runtime)
         seconds = time.monotonic() - started
-    cost = reported_cost(result.value) if result.is_ok else None
-    if result.is_err or not result.value.success:
-        return await step.skipped(slot, SkipReason.RUNTIME_FAILED, seconds, cost)
+    if result.is_err:
+        detail = type(result.error).__name__
+        return await step.skipped(slot, SkipReason.RUNTIME_FAILED, seconds, None, detail)
+    cost = reported_cost(result.value)
+    if not result.value.success:
+        return await step.skipped(slot, SkipReason.RUNTIME_FAILED, seconds, cost, "unsuccessful")
     probes, refused = await asyncio.to_thread(take_probes, tree)
     diff = await asyncio.to_thread(export_worktree_diff, tree)
     if diff is None:
@@ -512,6 +525,7 @@ async def _candidates_and_probes(
                 reason=item.reason.value,
                 wall_clock_seconds=None,
                 cost_usd=None,
+                detail=item.detail or None,
             )
         )
     slots = plan_candidates(usable, readings.readings, k)
@@ -522,8 +536,10 @@ async def _candidates_and_probes(
             trees[slot.candidate_id] = await asyncio.to_thread(
                 manager.create, slot.candidate_id, ref=commit
             )
-        except Exception:  # noqa: BLE001 - a slot without a worktree is skipped
-            outcomes[slot.candidate_id] = await step.skipped(slot, SkipReason.WORKTREE_FAILED)
+        except Exception as exc:  # noqa: BLE001 - a slot without a worktree is skipped
+            outcomes[slot.candidate_id] = await step.skipped(
+                slot, SkipReason.WORKTREE_FAILED, detail=type(exc).__name__
+            )
     gate = asyncio.Semaphore(parallel)
     ran = await asyncio.gather(
         *(
