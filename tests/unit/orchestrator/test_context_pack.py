@@ -256,6 +256,28 @@ class TestCache:
         data = json.loads(cache_path.read_text(encoding="utf-8"))
         assert "repo_map" not in data
 
+    def test_content_edit_invalidates_cache_when_mtime_and_size_are_preserved(
+        self, tmp_path: Path
+    ) -> None:
+        import os
+
+        _write_fixture_repo(tmp_path)
+        self._init_git(tmp_path)
+        before = build_context_pack(tmp_path)
+        assert before is not None
+        manifest = tmp_path / "pyproject.toml"
+        original = manifest.stat()
+        manifest.write_text(_PYPROJECT.replace("fixture-app", "changed-app"), encoding="utf-8")
+        os.utime(manifest, ns=(original.st_atime_ns, original.st_mtime_ns))
+        assert manifest.stat().st_size == original.st_size
+        assert manifest.stat().st_mtime_ns == original.st_mtime_ns
+
+        after = build_context_pack(tmp_path)
+
+        assert after is not None
+        assert any("changed-app" in line for line in after.stack)
+        assert not any("fixture-app" in line for line in after.stack)
+
 
 class TestSystemPromptInjection:
     def test_pack_present_when_flag_on(self, tmp_path: Path, monkeypatch) -> None:
