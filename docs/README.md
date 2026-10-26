@@ -108,7 +108,7 @@ for current AgentOS sequencing.
 |:----:|:----:|------|
 | FRUGAL | 1x | Trusted decomposed children, when child lowering is enabled |
 | STANDARD | 10x | Default for top-level ACs |
-| FRONTIER | 30x | Reached by escalation on repeated retries |
+| FRONTIER | 30x | Reached by escalation after failures |
 
 ### Core Principles
 

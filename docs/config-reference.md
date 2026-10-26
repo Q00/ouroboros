@@ -343,7 +343,7 @@ Configures the PAL Router (Progressive Adaptive LLM): cost tiers and escalation 
 ```yaml
 economics:
   default_tier: frugal          # "frugal" | "standard" | "frontier"
-  escalation_threshold: 2       # Retry attempt escalation begins; then +1 tier per retry
+  escalation_threshold: 2       # Retry-count escalation threshold (see the table below)
   downgrade_success_streak: 5   # Accepted but not read; there is no downgrade path
   tiers:
     frugal:
@@ -391,7 +391,7 @@ economics:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `default_tier` | `"frugal"` \| `"standard"` \| `"frontier"` | `"frugal"` | Sets the base tier, one tier above this value and capped at frontier: the shipped `frugal` gives `standard`, and both `standard` and `frontier` give `frontier`. Top-level and untrusted decomposed work start at the base tier. In adaptive efficiency mode a decomposed child with explicit trust authorization starts one tier lower, never below frugal, which equals this value except for `frontier` (then `standard`). |
-| `escalation_threshold` | `int >= 1` | `2` | The retry attempt at which tier escalation begins. From this attempt onward the tier climbs one notch per retry (progressive), capped at the frontier tier. Top-level and untrusted decomposed work start at the base tier. Only a decomposed child with explicit trust authorization starts one tier lower, so that trusted-child ladder may require one additional retry to reach the same frontier ceiling. Live decomposition issues that authorization when a generic split passes structural and semantic verification, and lowering applies only in adaptive efficiency mode. |
+| `escalation_threshold` | `int >= 1` | `2` | Retry-count threshold used by `decide_model()` (`orchestrator/model_routing.py`). It does not apply to top-level ACs on the bounded route path, which escalate through `advance_route()` (`orchestrator/route_escalation.py`). Top-level and untrusted decomposed work start at the base tier. Only a decomposed child with explicit trust authorization starts one tier lower, so that trusted-child ladder may require one additional retry to reach the same frontier ceiling. Live decomposition issues that authorization when a generic split passes structural and semantic verification, and lowering applies only in adaptive efficiency mode. |
 | `downgrade_success_streak` | `int >= 1` | `5` | **Not read.** The field is accepted for config compatibility, but no code downgrades a tier after consecutive successes; tiers only escalate on retry. |
 | `tiers` | `dict[str, TierConfig]` | (see above) | Tier definitions keyed by name. Explicit tier selection and enabled per-AC routing use the active runtime's native model entries. Unpinned Claude vendor defaults use `haiku`/`sonnet`/`opus` aliases; explicit runtime-specific economics entries remain literal. A resumed run replays its resolved model ladder. |
 

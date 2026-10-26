@@ -244,13 +244,7 @@ It is a stateless decision point in the orchestrator; there is no `routing/` pac
 - No complexity score is computed: token count, tool count, and AC depth do not affect the tier.
 - Routing stays dormant, leaving model choice to the runtime, when `OUROBOROS_MODEL_TIER_ROUTING` is `0`, `off`, or `false`; when an explicit Execute-stage model pin is in effect; when the runtime backend has no mapped tier ladder (for example OpenCode); or when Codex runs on plain automatic model selection (opt in with `OUROBOROS_MODEL_TIER_ROUTING=1`).
 
-**Escalation Path:**
-
-Retry attempts count from 0 (the initial dispatch). From attempt `economics.escalation_threshold` (default 2) onward, the tier climbs one notch per retry, capped at frontier:
-
-```
-Frugal → Standard → Frontier
-```
+**Escalation:** failures move a unit toward the frontier tier. Top-level ACs on the bounded route path escalate in `orchestrator/route_escalation.py` (`advance_route()`); the retry-count rule in `decide_model()` (`orchestrator/model_routing.py`) covers the remaining units.
 
 **No downgrade path:** a tier is never lowered after consecutive successes.
 `economics.downgrade_success_streak` is accepted by the config schema, but nothing reads it.
