@@ -479,6 +479,68 @@ async def test_a_slow_start_never_runs_past_the_step_deadline(workspace: Path) -
     assert len(_worktrees(workspace)) == 1
 
 
+async def test_a_slow_base_commit_lookup_fails_the_step_at_its_deadline(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = cand.RunWorktreeManager.head_commit
+
+    def slow(self: Any) -> str:
+        time.sleep(1.0)
+        return original(self)
+
+    monkeypatch.setattr(cand.RunWorktreeManager, "head_commit", slow)
+    factory = _Factory({"codex": writes("5400"), "claude": writes("90")})
+    result = await run(workspace, factory, step_timeout=0.3)
+    assert result.failure == "step_deadline"
+    assert result.outcomes == () and factory.built == []
+    assert len(_worktrees(workspace)) == 1
+
+
+async def test_a_slow_worktree_creation_skips_its_slot_and_is_still_removed(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = cand.RunWorktreeManager.create
+
+    def slow(self: Any, label: str, *, ref: str = "HEAD") -> Path:
+        if label != "base":
+            time.sleep(1.0)
+        return original(self, label, ref=ref)
+
+    monkeypatch.setattr(cand.RunWorktreeManager, "create", slow)
+    factory = _Factory({"codex": writes("5400"), "claude": writes("90")})
+    result = await run(workspace, factory, step_timeout=0.5)
+    assert [o.skipped for o in result.outcomes] == [SkipReason.STEP_DEADLINE] * 2
+    assert factory.dispatched() == []
+    # The cleanup waited for the creation it abandoned, so nothing is left.
+    assert len(_worktrees(workspace)) == 1
+
+
+async def test_a_preflight_that_raises_skips_only_its_pair(workspace: Path) -> None:
+    class _Raising(_Factory):
+        def __call__(self, *, backend: str, model: str | None, cwd: Path) -> _Runtime:
+            runtime = super().__call__(backend=backend, model=model, cwd=cwd)
+            if backend == "claude":
+
+                def boom() -> str | None:
+                    raise RuntimeError("preflight crashed")
+
+                runtime.preflight = boom  # type: ignore[method-assign]
+            return runtime
+
+    calls = iter(["5400", "90"])
+
+    async def act(cwd: Path, prompt: str) -> Any:
+        return await writes(next(calls))(cwd, prompt)
+
+    factory = _Raising({"codex": act, "claude": writes("1")})
+    result = await run(workspace, factory)
+    assert [(s.pair.backend, s.reason, s.detail) for s in result.skipped_pairs] == [
+        ("claude", SkipReason.PREFLIGHT_FAILED, "RuntimeError")
+    ]
+    assert [o.slot.pair.backend for o in result.outcomes] == ["codex", "codex"]
+    assert len(result.asked) == 1
+
+
 async def test_agreeing_candidates_give_no_card(workspace: Path) -> None:
     factory = _Factory({"codex": writes("5400"), "claude": writes("5400")})
     result = await run(workspace, factory)

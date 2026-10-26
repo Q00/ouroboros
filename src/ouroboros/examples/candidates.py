@@ -20,8 +20,9 @@ path calls it yet. One call of ``run_candidate_step``:
    once. Each has a wall-clock cap (``candidate_timeout``, default 600 s);
    the whole step has one too (``step_timeout``, default 900 s, readings call
    and probe runs included). A candidate still running at its cap is
-   cancelled and skipped. Runtime construction, preflight and worktree
-   creation are bounded by the step's time left too, and a candidate's
+   cancelled and skipped. The base commit lookup, worktree creation,
+   runtime construction, preflight, probe collection and the diff export
+   are bounded by the step's time left too, and a candidate's
    budget is taken immediately before its dispatch, so no candidate runs
    past the step deadline. The base tree for the probes is one more clean
    worktree at the same commit.
@@ -66,6 +67,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import threading
 import time
 from typing import Any
 
@@ -419,6 +421,31 @@ class _Step:
         return CandidateOutcome(slot, reason, seconds, cost, detail=detail)
 
 
+class _Worktrees:
+    """The step's worktree manager; creation and cleanup never overlap.
+
+    A creation the step stopped waiting for (its deadline passed) keeps
+    running in its thread. The lock makes the final cleanup wait for it, so
+    a worktree finished after the deadline is still removed. Each git command
+    is bounded by ``GIT_COMMAND_TIMEOUT_SECONDS``.
+    """
+
+    def __init__(self, manager: RunWorktreeManager) -> None:
+        self._manager = manager
+        self._lock = threading.Lock()
+
+    def head_commit(self) -> str:
+        return self._manager.head_commit()
+
+    def create(self, label: str, ref: str) -> Path:
+        with self._lock:
+            return self._manager.create(label, ref=ref)
+
+    def cleanup_all(self) -> None:
+        with self._lock:
+            self._manager.cleanup_all()
+
+
 async def _close(runtime: AgentRuntime) -> None:
     closer = getattr(runtime, "aclose", None)
     if closer is not None and inspect.iscoroutinefunction(closer):
@@ -460,6 +487,9 @@ async def _preflight_pairs(
             blocker = await _within(step, preflight_agent_runtime, runtime=runtime)
         except TimeoutError:
             skipped.append(SkippedPair(pair, SkipReason.STEP_DEADLINE))
+            continue
+        except Exception as exc:  # noqa: BLE001 - a preflight that raises skips its pair
+            skipped.append(SkippedPair(pair, SkipReason.PREFLIGHT_FAILED, type(exc).__name__))
             continue
         finally:
             await _close(runtime)
@@ -540,8 +570,11 @@ async def _run_candidate(
     cost = reported_cost(result.value)
     if not result.value.success:
         return await step.skipped(slot, SkipReason.RUNTIME_FAILED, seconds, cost, "unsuccessful")
-    probes, refused = await asyncio.to_thread(take_probes, tree, base_tree)
-    diff = await asyncio.to_thread(export_worktree_diff, tree)
+    try:
+        probes, refused = await _within(step, take_probes, tree=tree, base=base_tree)
+        diff = await _within(step, export_worktree_diff, worktree_path=tree)
+    except TimeoutError:
+        return await step.skipped(slot, SkipReason.STEP_DEADLINE, seconds, cost)
     if diff is None:
         return await step.skipped(slot, SkipReason.PATCH_EXPORT_FAILED, seconds, cost)
     outcome = CandidateOutcome(slot, None, seconds, cost, sha256_hex(diff), probes, refused)
@@ -564,7 +597,7 @@ async def _run_candidate(
 
 async def _candidates_and_probes(
     step: _Step,
-    manager: RunWorktreeManager,
+    manager: _Worktrees,
     *,
     goal: str,
     readings: ReadingsResult,
@@ -577,8 +610,10 @@ async def _candidates_and_probes(
     candidate_timeout: float,
 ) -> CandidateStepResult:
     try:
-        commit = await asyncio.to_thread(manager.head_commit)
-        base_tree = await asyncio.to_thread(manager.create, BASE_TREE_ID, ref=commit)
+        commit = await _within(step, manager.head_commit)
+        base_tree = await _within(step, manager.create, label=BASE_TREE_ID, ref=commit)
+    except TimeoutError:
+        return CandidateStepResult(True, SkipReason.STEP_DEADLINE.value, readings)
     except Exception as exc:  # noqa: BLE001 - no base tree means no step
         return CandidateStepResult(True, f"base_worktree_failed:{type(exc).__name__}", readings)
     usable, skipped_pairs = await _preflight_pairs(step, pairs, base_tree, runtime_factory)
@@ -600,13 +635,13 @@ async def _candidates_and_probes(
     outcomes: dict[str, CandidateOutcome] = {}
     trees: dict[str, Path] = {}
     for slot in slots:
-        if step.remaining() <= 0:
+        try:
+            trees[slot.candidate_id] = await _within(
+                step, manager.create, label=slot.candidate_id, ref=commit
+            )
+        except TimeoutError:
             outcomes[slot.candidate_id] = await step.skipped(slot, SkipReason.STEP_DEADLINE)
             continue
-        try:
-            trees[slot.candidate_id] = await asyncio.to_thread(
-                manager.create, slot.candidate_id, ref=commit
-            )
         except Exception as exc:  # noqa: BLE001 - a slot without a worktree is skipped
             outcomes[slot.candidate_id] = await step.skipped(
                 slot, SkipReason.WORKTREE_FAILED, detail=type(exc).__name__
@@ -710,7 +745,7 @@ async def run_candidate_step(
     )
     pairs = resolve_pairs(config, execute_backend=execute_backend, execute_model=execute_model)
     try:
-        manager = await asyncio.to_thread(RunWorktreeManager, workspace)
+        manager = _Worktrees(await asyncio.to_thread(RunWorktreeManager, workspace))
     except Exception as exc:  # noqa: BLE001 - no worktree root means no step
         return CandidateStepResult(
             True, f"worktree_root_failed:{type(exc).__name__}", readings, events=tuple(step.events)
