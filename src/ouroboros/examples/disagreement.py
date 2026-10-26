@@ -26,6 +26,8 @@ Rules, applied per probe in this order:
    visited in order of their canonical bytes (then candidate id) and each
    joins the first group whose representative (its first member) it
    matches. Groups are ordered by the representative's canonical bytes.
+   An integer too large for a float never equals a float (``equal`` would
+   raise ``OverflowError`` converting it; that pair counts as unequal).
 4. Base relation. Each group is marked ``same_as_base`` or
    ``changed_from_base`` by matching its representative against the masked
    base outcome with the same rule.
@@ -119,13 +121,27 @@ class DisagreementReport:
     dropped: tuple[DroppedProbe, ...]
 
 
+def _values_equal(left: Any, right: Any) -> bool:
+    """``harness.equal`` with no tolerance; an integer beyond float range is unequal.
+
+    ``equal`` converts an integer to ``float`` when the other side is a
+    float, which raises ``OverflowError`` for an integer above about
+    1.8e308. No float equals such an integer, so the pair is unequal, as the
+    controller's own ``harness.compare`` decides a case that raises.
+    """
+    try:
+        return equal(left, right, None)
+    except OverflowError:
+        return False
+
+
 def outcomes_match(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
     """Return whether two masked outcome payloads count as the same output."""
     if set(left) != set(right):
         return False
     for key in left:
         if key == VALUE_KEY:
-            if not equal(left[key], right[key], None):
+            if not _values_equal(left[key], right[key]):
                 return False
         elif canonical_json_bytes(left[key]) != canonical_json_bytes(right[key]):
             return False

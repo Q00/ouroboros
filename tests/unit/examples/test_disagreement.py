@@ -283,3 +283,13 @@ def test_group_and_base_outcomes_are_read_only() -> None:
     with pytest.raises(TypeError):
         comparison.base_outcome["value"] = 9
     assert comparison.groups[0].outcome["value"] == (1,)
+
+
+def test_integer_beyond_float_range_is_unequal_to_a_float() -> None:
+    big = 10**310
+    records = probe("p1", {"value": 0}, {"a": {"value": 1.0}, "b": {"value": big}})
+    comparison = find_disagreements(records, ["a", "b"]).disagreements[0]
+    assert [g.candidate_ids for g in comparison.groups] == [("a",), ("b",)]
+    assert outcomes_match({"value": big}, {"value": big})
+    assert not outcomes_match({"value": [big]}, {"value": [1e308]})
+    assert not outcomes_match({"value": 1e308}, {"value": big})
