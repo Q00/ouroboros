@@ -126,7 +126,8 @@ lower its model tier unless the routing call receives explicit trusted
 decomposition authorization and the run is in adaptive efficiency mode. Live
 decomposition issues that authorization when a generic split passes structural
 and semantic verification, so on a mapped backend those children start one tier
-below the base tier; untrusted splits and quality-first runs stay at the base tier.
+below the base tier (never below frugal); untrusted splits and quality-first
+runs stay at the base tier.
 
 ### Integration Surface (UX differences)
 

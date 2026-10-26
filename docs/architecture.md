@@ -237,11 +237,12 @@ It is a stateless decision point in the orchestrator; there is no `routing/` pac
 | FRONTIER | 30 |
 
 **Starting tier:**
-- Top-level ACs, and decomposed children without an explicit trust signal, start one tier above `economics.default_tier`. With the shipped `frugal` default they run on `standard`.
-- A decomposed child starts at `economics.default_tier` only when its decomposition carries an explicit trust signal and the run enables child lowering. Quality-first runs never lower.
+- The base tier is one tier above `economics.default_tier`, capped at frontier: the shipped `frugal` gives `standard`, and both `standard` and `frontier` give `frontier`.
+- Top-level ACs and decomposed children without an explicit trust signal start at the base tier.
+- In adaptive efficiency mode, a decomposed child whose decomposition carries an explicit trust signal starts one tier lower, never below frugal. That equals `default_tier` when it is `frugal` or `standard`, but is `standard` when it is `frontier`. Quality-first runs never lower.
 - An execution-profile hint can suggest a different starting tier.
 - No complexity score is computed: token count, tool count, and AC depth do not affect the tier.
-- Routing stays dormant, leaving model choice to the runtime, when an explicit model pin is set (`OUROBOROS_EXECUTION_MODEL`) or the runtime backend has no mapped tier ladder (for example OpenCode).
+- Routing stays dormant, leaving model choice to the runtime, when `OUROBOROS_MODEL_TIER_ROUTING` is `0`, `off`, or `false`; when an explicit Execute-stage model pin is in effect; when the runtime backend has no mapped tier ladder (for example OpenCode); or when Codex runs on plain automatic model selection (opt in with `OUROBOROS_MODEL_TIER_ROUTING=1`).
 
 **Escalation Path:**
 
