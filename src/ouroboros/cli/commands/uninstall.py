@@ -223,7 +223,7 @@ def _remove_opencode_mcp(dry_run: bool) -> bool:
     try:
         original_text = config_path.read_text(encoding="utf-8")
         data = json.loads(_strip_jsonc(original_text))
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
         print_warning(f"{config_path} is malformed — skipping.")
         return False
     mcp = data.get("mcp")
@@ -325,7 +325,7 @@ def _remove_opencode_bridge_plugin(dry_run: bool) -> bool:
 
     if config_path is not None:
         try:
-            raw = config_path.read_text()
+            raw = config_path.read_text(encoding="utf-8")
             # Use the shared JSONC stripper — consistent with the other
             # uninstall paths (lines ~200, ~421) and handles block comments
             # + trailing commas that the previous inline single-line
@@ -355,7 +355,7 @@ def _remove_opencode_bridge_plugin(dry_run: bool) -> bool:
                     suffix = "" if removed_count == 1 else f" ({removed_count} entries)"
                     print_success(f"Removed bridge plugin entry from {config_path}{suffix}")
                     removed_files = True
-        except (json.JSONDecodeError, OSError, KeyError):
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError, KeyError):
             pass  # Best effort — don't fail uninstall over config parse
 
     return removed_files
