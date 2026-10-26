@@ -668,6 +668,13 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         16,
     ): "implicit inherit; `git -C <path> status --porcelain`.",
     (
+        "src/ouroboros/examples/probe_wrapper.py",
+        "_command",
+        "subprocess.Popen",
+        226,
+        18,
+    ): "Runs inside the confined probe process (check_env.check_command); the inherited environment is the sandbox's allowlisted check environment, never the controller's; no shell.",
+    (
         "src/ouroboros/mcp/detached_jobs.py",
         "_spawn_worker",
         "subprocess.Popen",

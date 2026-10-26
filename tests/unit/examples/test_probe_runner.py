@@ -273,6 +273,15 @@ async def test_a_missing_program_is_not_run(
     assert record.fields["exception_type"] == "builtins.FileNotFoundError"
 
 
+@pytest.mark.parametrize("argv", [("x\x00y",), (PY, "-c", "print(1)", "a\x00b")])
+async def test_an_argv_item_with_a_nul_byte_is_not_run(
+    argv: tuple[str, ...], trees: dict[str, Path], python: CheckInterpreter, tmp_path: Path
+) -> None:
+    record = await _once(command(*argv), trees["cand-a"], python, tmp_path)
+    assert record.status is ProbeStatus.NOT_RUN
+    assert record.fields["exception_type"] == "builtins.ValueError"
+
+
 async def test_command_output_is_cut_at_the_stream_limit(
     trees: dict[str, Path], python: CheckInterpreter, tmp_path: Path
 ) -> None:
@@ -412,6 +421,30 @@ async def test_a_slow_copy_that_eats_the_step_budget_starts_no_process(
     )
     assert run.indeterminate == {probe.probe_id: STEP_DEADLINE}
     assert all(record.payload() == {"status": "not_run"} for record in run.records)
+    assert not marker.exists()
+
+
+async def test_a_slow_preparation_that_eats_the_step_budget_starts_no_process(
+    trees: dict[str, Path],
+    python: CheckInterpreter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The last deadline check is after ``check_command``, right before the launch."""
+    marker = tmp_path / "ran"
+    probe = call(f"def probe():\n    open({str(marker)!r}, 'w').write('x')\n")
+    real = probe_runner.check_command
+
+    def slow_check_command(argv, **kwargs):
+        time.sleep(1.25)
+        return real(argv, **kwargs)
+
+    monkeypatch.setattr(probe_runner, "check_command", slow_check_command)
+    deadline = time.monotonic() + 2.1
+    run = await run_probe_pool(
+        [probe], trees, interpreter=python, timeout=1, parallel=4, deadline=deadline
+    )
+    assert run.indeterminate == {probe.probe_id: STEP_DEADLINE}
     assert not marker.exists()
 
 

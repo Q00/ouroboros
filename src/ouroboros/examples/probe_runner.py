@@ -237,8 +237,9 @@ async def run_probe(
     """Run ``probe`` once on a fresh copy of ``tree``; the copy is removed afterwards.
 
     With a step ``deadline`` (``time.monotonic()`` seconds), the process is
-    launched only when a full ``timeout`` still fits before it once the copy
-    is ready (``fits``); otherwise nothing runs and the run is indeterminate
+    launched only when a full ``timeout`` still fits before it, checked
+    immediately before the launch, after the copy and the command are ready
+    (``fits``); otherwise nothing runs and the run is indeterminate
     (``STEP_DEADLINE``).
     """
     probe_id = probe.probe_id
@@ -251,8 +252,6 @@ async def run_probe(
             return ProbeRun(
                 _not_run(probe_id, tree_id, repeat), f"{COPY_FAILED}:{type(exc).__name__}"
             )
-        if not fits(deadline, timeout):
-            return ProbeRun(_not_run(probe_id, tree_id, repeat), STEP_DEADLINE)
         with check_scratch(run_dir) as scratch:
             nonce = secrets.token_hex(16)
             path = _write_probe(probe, scratch)
@@ -266,6 +265,10 @@ async def run_probe(
             )
             if isinstance(command, CheckUnavailable):
                 return ProbeRun(_not_run(probe_id, tree_id, repeat), command.reason)
+            if not fits(deadline, timeout):
+                # Checked last, after the copy and the preparation: the run
+                # launches only with its full timeout still before the deadline.
+                return ProbeRun(_not_run(probe_id, tree_id, repeat), STEP_DEADLINE)
             completed = await _run_in_environment(command, timeout)
     finally:
         await asyncio.to_thread(shutil.rmtree, run_dir, True)
@@ -319,8 +322,9 @@ async def run_probe_pool(
     tree), so every tree runs the same interpreter. At most ``parallel``
     runs are in flight. ``deadline`` (``time.monotonic()`` seconds) is the
     step's: a run starts only when a full ``timeout`` plus the reap margin
-    still fits before it, checked again after its copy is made and before
-    its process starts, so a run is never cut short by the step.
+    still fits before it, checked again immediately before its process
+    starts (after the copy and the preparation), so a run is never cut
+    short by the step.
     Copies and scratch directories are made in ``work_dir`` (default: a
     temporary directory, removed afterwards). The result satisfies
     ``examples.disagreement.find_disagreements``: exactly one record per

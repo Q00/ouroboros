@@ -20,7 +20,8 @@ call <nonce> <path>
 command <nonce> <path>
     ``path`` holds ``{"argv": [...], "stdin": "..."}``. The command runs
     without a shell, in the copy, with ``stdin`` on its standard input.
-    Status ``not_run`` when it cannot be started (``OSError``); ``exited``
+    Status ``not_run`` when it cannot be started (``OSError``, or
+    ``ValueError`` for an argv item with a NUL byte); ``exited``
     otherwise, with its exit status and the first ``STREAM_LIMIT`` bytes of
     each output stream, decoded as UTF-8 with backslash escapes (longer
     output is cut at the limit). The command stays in this process's group,
@@ -229,7 +230,8 @@ def _command(nonce: str, path: str) -> None:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # ValueError: an argv item the OS cannot take (an embedded NUL byte).
         _report(channel, nonce, _failure("not_run", exc))
         os._exit(0)
     out = []  # type: List[bytes]
