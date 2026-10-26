@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import time
 from typing import Any
 
 import pytest
@@ -138,11 +139,15 @@ class _Factory:
         *,
         blocked: frozenset[str] = frozenset(),
         broken: frozenset[str] = frozenset(),
+        slow_build: float = 0.0,
     ) -> None:
         self.behaviors, self.blocked, self.broken = behaviors, blocked, broken
+        self.slow_build = slow_build
         self.built: list[_Runtime] = []
 
     def __call__(self, *, backend: str, model: str | None, cwd: Path) -> _Runtime:
+        if self.slow_build and Path(cwd).name != "base":
+            time.sleep(self.slow_build)  # a slow candidate start; preflight stays fast
         if backend in self.broken:
             raise RuntimeError("not installed")
         runtime = _Runtime(
@@ -268,6 +273,11 @@ def test_default_pairs_are_the_execute_pair_then_the_allowlist() -> None:
     off = ExamplesConfig()
     assert resolve_pairs(off, execute_backend="codex", execute_model="m1") == (
         CandidatePair("codex", "m1"),
+        CandidatePair("codex"),
+        CandidatePair("claude"),
+    )
+    assert resolve_pairs(off, execute_backend="codex", execute_model=None) == (
+        CandidatePair("codex"),
         CandidatePair("claude"),
     )
     assert resolve_pairs(off, execute_backend="opencode", execute_model=None) == (
@@ -332,6 +342,25 @@ def test_take_probes_reads_commands_and_refuses_malformed_entries(tmp_path: Path
     assert probes == (Probe(ProbeKind.COMMAND, argv=("python3", "-V"), stdin="x"),)
     assert refused == 9
     assert not probe_dir.exists() and outside.exists()
+
+
+def test_take_probes_skips_and_restores_the_commits_own_directory(tmp_path: Path) -> None:
+    base, tree = tmp_path / "base", tmp_path / "tree"
+    for root in (base, tree):
+        (root / PROBE_DIR).mkdir(parents=True)
+        (root / PROBE_DIR / "keep.py").write_text("def probe():\n    return 'tracked'\n")
+        (root / PROBE_DIR / "edited.py").write_text("def probe():\n    return 0\n")
+    (tree / PROBE_DIR / "edited.py").write_text("def probe():\n    return 1\n")
+    (tree / PROBE_DIR / "new.py").write_text("def probe():\n    return 2\n")
+    probes, refused = take_probes(tree, base)
+    assert [p.source for p in probes] == [
+        "def probe():\n    return 1\n",
+        "def probe():\n    return 2\n",
+    ]
+    assert refused == 0
+    assert sorted(os.listdir(tree / PROBE_DIR)) == ["edited.py", "keep.py"]
+    for name in ("edited.py", "keep.py"):
+        assert (tree / PROBE_DIR / name).read_bytes() == (base / PROBE_DIR / name).read_bytes()
 
 
 def test_take_probes_without_a_directory_is_empty(tmp_path: Path) -> None:
@@ -422,6 +451,32 @@ async def test_the_patch_digest_excludes_the_probe_directory(workspace: Path) ->
     first = result.outcomes[0]
     assert first.patch_digest == sha256_hex(b"") and first.cost_usd is None
     assert len(first.probes) == 1
+
+
+async def test_a_tracked_probe_directory_stays_out_of_the_digest(workspace: Path) -> None:
+    (workspace / PROBE_DIR).mkdir()
+    (workspace / PROBE_DIR / "keep.py").write_text("def probe():\n    return 'tracked'\n")
+    _git(workspace, "add", "-A")
+    _git(workspace, "commit", "-qm", "tracked probe dir")
+
+    async def probes_only(cwd: Path, prompt: str) -> Any:
+        (cwd / PROBE_DIR / "p.py").write_text(CALL_PROBE)
+        return Result.ok(TaskResult(True, "done", ()))
+
+    factory = _Factory({"codex": probes_only, "claude": writes("90")})
+    result = await run(workspace, factory)
+    first = result.outcomes[0]
+    assert first.patch_digest == sha256_hex(b"")
+    assert [p.source for p in first.probes] == [CALL_PROBE] and first.probes_refused == 0
+
+
+async def test_a_slow_start_never_runs_past_the_step_deadline(workspace: Path) -> None:
+    factory = _Factory({"codex": writes("5400"), "claude": writes("90")}, slow_build=1.0)
+    result = await run(workspace, factory, step_timeout=0.5)
+    assert [o.skipped for o in result.outcomes] == [SkipReason.STEP_DEADLINE] * 2
+    assert factory.dispatched() == []
+    assert "examples.candidate.started" not in types(result)
+    assert len(_worktrees(workspace)) == 1
 
 
 async def test_agreeing_candidates_give_no_card(workspace: Path) -> None:

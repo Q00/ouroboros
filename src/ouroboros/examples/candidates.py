@@ -20,11 +20,15 @@ path calls it yet. One call of ``run_candidate_step``:
    once. Each has a wall-clock cap (``candidate_timeout``, default 600 s);
    the whole step has one too (``step_timeout``, default 900 s, readings call
    and probe runs included). A candidate still running at its cap is
-   cancelled and skipped. The base tree for the probes is one more clean
+   cancelled and skipped. Runtime construction, preflight and worktree
+   creation are bounded by the step's time left too, and a candidate's
+   budget is taken immediately before its dispatch, so no candidate runs
+   past the step deadline. The base tree for the probes is one more clean
    worktree at the same commit.
 4. Reads at most ``MAX_PROBES_PER_CANDIDATE`` probes each finished candidate
    wrote into ``PROBE_DIR`` (``<name>.py``: a ``call``; ``<name>.json`` with
-   ``argv`` and ``stdin``: a ``command``), then removes that directory, so
+   ``argv`` and ``stdin``: a ``command``), skipping files the commit itself
+   holds there, then puts that directory back to the commit's content, so
    probes are neither part of the candidate's tree nor of its patch digest.
 5. With at least two finished candidates and at least one probe, runs the
    pooled probes on the base and on every finished candidate under the
@@ -194,13 +198,16 @@ def resolve_pairs(
 ) -> tuple[CandidatePair, ...]:
     """The configured pairs, or the default list: the execute pair, then the allowlist.
 
-    Duplicate pairs are kept once, first occurrence first.
+    The allowlisted runtimes come with their default models (``model`` None),
+    so an execute pair with an explicit model keeps its backend's default
+    pair too. Exact duplicate (backend, model) pairs are kept once, first
+    occurrence first.
     """
     if config.candidates:
         pairs = [CandidatePair(item.backend, item.model) for item in config.candidates]
     else:
         pairs = [CandidatePair(execute_backend, execute_model)]
-        pairs += [CandidatePair(name) for name in allowlist if name != execute_backend]
+        pairs += [CandidatePair(name) for name in allowlist]
     unique: list[CandidatePair] = []
     for pair in pairs:
         if pair not in unique:
@@ -292,35 +299,68 @@ def _read_probe(path: Path) -> Probe | None:
     return None
 
 
-def take_probes(tree: Path) -> tuple[tuple[Probe, ...], int]:
-    """Read the probes a candidate wrote into ``PROBE_DIR``, then remove the directory.
+def _same_file(left: Path, right: Path) -> bool:
+    """Whether both are regular files (no links) with the same bytes."""
+    try:
+        a, b = left.lstat(), right.lstat()
+        if not (stat.S_ISREG(a.st_mode) and stat.S_ISREG(b.st_mode)) or a.st_size != b.st_size:
+            return False
+        return left.read_bytes() == right.read_bytes()
+    except OSError:
+        return False
 
-    Entries are read in name order; only regular files (no links) of at most
-    ``MAX_PROBE_FILE_BYTES`` with a declared suffix count. The first
-    ``MAX_PROBES_PER_CANDIDATE`` well-formed probes are kept; every other
-    entry is counted as refused. Returns (probes, refused).
+
+def _remove(path: Path) -> None:
+    try:
+        info = path.lstat()
+    except OSError:
+        return
+    if stat.S_ISDIR(info.st_mode):
+        shutil.rmtree(path, ignore_errors=True)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def take_probes(tree: Path, base: Path | None = None) -> tuple[tuple[Probe, ...], int]:
+    """Read the probes a candidate wrote into ``PROBE_DIR``, then restore the directory.
+
+    ``base`` is a clean checkout of the same commit (the step's base tree).
+    An entry that is also in ``base``'s ``PROBE_DIR`` with the same bytes is
+    the commit's own content, not a probe: it is skipped and not counted.
+    Every other entry is read in name order; only regular files (no links)
+    of at most ``MAX_PROBE_FILE_BYTES`` with a declared suffix count. The
+    first ``MAX_PROBES_PER_CANDIDATE`` well-formed probes are kept; every
+    other entry is counted as refused. Afterwards the directory is put back
+    to ``base``'s content (removed when ``base`` has none), so collecting
+    probes leaves no change in the tree or in its diff. Returns (probes,
+    refused).
     """
     directory = tree / PROBE_DIR
+    original = base / PROBE_DIR if base is not None else None
     try:
         info = directory.lstat()
     except OSError:
-        return (), 0
-    if not stat.S_ISDIR(info.st_mode):
-        directory.unlink(missing_ok=True)
-        return (), 1
+        info = None
     probes: list[Probe] = []
     refused = 0
     try:
-        for name in sorted(os.listdir(directory)):
-            probe = (
-                None if len(probes) >= MAX_PROBES_PER_CANDIDATE else _read_probe(directory / name)
-            )
-            if probe is None:
-                refused += 1
-            else:
-                probes.append(probe)
+        if info is not None and not stat.S_ISDIR(info.st_mode):
+            refused = 1
+        elif info is not None:
+            for name in sorted(os.listdir(directory)):
+                if original is not None and _same_file(directory / name, original / name):
+                    continue
+                probe = None
+                if len(probes) < MAX_PROBES_PER_CANDIDATE:
+                    probe = _read_probe(directory / name)
+                if probe is None:
+                    refused += 1
+                else:
+                    probes.append(probe)
     finally:
-        shutil.rmtree(directory, ignore_errors=True)
+        _remove(directory)
+        if original is not None and original.is_dir() and not original.is_symlink():
+            shutil.copytree(original, directory, symlinks=True)
     return tuple(probes), refused
 
 
@@ -388,21 +428,39 @@ async def _close(runtime: AgentRuntime) -> None:
             log.warning("examples.runtime_close_failed", error=str(exc))
 
 
+async def _within(step: _Step, call: Callable[..., Any], /, **kwargs: Any) -> Any:
+    """Run a blocking ``call`` in a thread, bounded by the step's time left.
+
+    Raises ``TimeoutError`` when no time is left or the call outlasts it. A
+    call that outlasts it keeps running in its thread; its result is unused.
+    """
+    left = step.remaining()
+    if left <= 0:
+        raise TimeoutError
+    return await asyncio.wait_for(asyncio.to_thread(call, **kwargs), timeout=left)
+
+
 async def _preflight_pairs(
-    pairs: Sequence[CandidatePair], cwd: Path, runtime_factory: RuntimeFactory
+    step: _Step, pairs: Sequence[CandidatePair], cwd: Path, runtime_factory: RuntimeFactory
 ) -> tuple[list[CandidatePair], list[SkippedPair]]:
     usable: list[CandidatePair] = []
     skipped: list[SkippedPair] = []
     for pair in pairs:
         try:
-            runtime = await asyncio.to_thread(
-                runtime_factory, backend=pair.backend, model=pair.model, cwd=cwd
+            runtime = await _within(
+                step, runtime_factory, backend=pair.backend, model=pair.model, cwd=cwd
             )
+        except TimeoutError:
+            skipped.append(SkippedPair(pair, SkipReason.STEP_DEADLINE))
+            continue
         except Exception as exc:  # noqa: BLE001 - a pair that cannot be built is skipped
             skipped.append(SkippedPair(pair, SkipReason.RUNTIME_UNAVAILABLE, type(exc).__name__))
             continue
         try:
-            blocker = preflight_agent_runtime(runtime)
+            blocker = await _within(step, preflight_agent_runtime, runtime=runtime)
+        except TimeoutError:
+            skipped.append(SkippedPair(pair, SkipReason.STEP_DEADLINE))
+            continue
         finally:
             await _close(runtime)
         if blocker is not None:
@@ -417,24 +475,34 @@ async def _run_candidate(
     slot: CandidateSlot,
     tree: Path,
     *,
+    base_tree: Path,
     goal: str,
     runtime_factory: RuntimeFactory,
     candidate_timeout: float,
     gate: asyncio.Semaphore,
 ) -> CandidateOutcome:
     async with gate:
-        budget = min(candidate_timeout, step.remaining())
-        if budget <= 0:
-            return await step.skipped(slot, SkipReason.STEP_DEADLINE)
-        bound_by_step = budget < candidate_timeout
         try:
-            runtime = await asyncio.to_thread(
-                runtime_factory, backend=slot.pair.backend, model=slot.pair.model, cwd=tree
+            runtime = await _within(
+                step,
+                runtime_factory,
+                backend=slot.pair.backend,
+                model=slot.pair.model,
+                cwd=tree,
             )
+        except TimeoutError:
+            return await step.skipped(slot, SkipReason.STEP_DEADLINE)
         except Exception as exc:  # noqa: BLE001 - a runtime that cannot be built skips this slot
             return await step.skipped(
                 slot, SkipReason.RUNTIME_UNAVAILABLE, detail=type(exc).__name__
             )
+        # The budget is taken after construction, immediately before dispatch,
+        # so a slow start can never carry a candidate past the step deadline.
+        budget = min(candidate_timeout, step.remaining())
+        if budget <= 0:
+            await _close(runtime)
+            return await step.skipped(slot, SkipReason.STEP_DEADLINE)
+        bound_by_step = budget < candidate_timeout
         reading_id = slot.reading.reading_id if slot.reading else None
         await step.emit(
             create_candidate_started_event(
@@ -472,7 +540,7 @@ async def _run_candidate(
     cost = reported_cost(result.value)
     if not result.value.success:
         return await step.skipped(slot, SkipReason.RUNTIME_FAILED, seconds, cost, "unsuccessful")
-    probes, refused = await asyncio.to_thread(take_probes, tree)
+    probes, refused = await asyncio.to_thread(take_probes, tree, base_tree)
     diff = await asyncio.to_thread(export_worktree_diff, tree)
     if diff is None:
         return await step.skipped(slot, SkipReason.PATCH_EXPORT_FAILED, seconds, cost)
@@ -513,7 +581,7 @@ async def _candidates_and_probes(
         base_tree = await asyncio.to_thread(manager.create, BASE_TREE_ID, ref=commit)
     except Exception as exc:  # noqa: BLE001 - no base tree means no step
         return CandidateStepResult(True, f"base_worktree_failed:{type(exc).__name__}", readings)
-    usable, skipped_pairs = await _preflight_pairs(pairs, base_tree, runtime_factory)
+    usable, skipped_pairs = await _preflight_pairs(step, pairs, base_tree, runtime_factory)
     for item in skipped_pairs:
         await step.emit(
             create_candidate_skipped_event(
@@ -532,6 +600,9 @@ async def _candidates_and_probes(
     outcomes: dict[str, CandidateOutcome] = {}
     trees: dict[str, Path] = {}
     for slot in slots:
+        if step.remaining() <= 0:
+            outcomes[slot.candidate_id] = await step.skipped(slot, SkipReason.STEP_DEADLINE)
+            continue
         try:
             trees[slot.candidate_id] = await asyncio.to_thread(
                 manager.create, slot.candidate_id, ref=commit
@@ -547,6 +618,7 @@ async def _candidates_and_probes(
                 step,
                 slot,
                 trees[slot.candidate_id],
+                base_tree=base_tree,
                 goal=goal,
                 runtime_factory=runtime_factory,
                 candidate_timeout=candidate_timeout,
