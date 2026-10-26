@@ -123,8 +123,10 @@ Per-AC investment decisions are separately observable. The executor emits
 `execution.ac.effort_routed` for the enforced or advised effort result, and
 `execution.ac.model_routed` for model-tier resolution. A decomposed child cannot
 lower its model tier unless the routing call receives explicit trusted
-decomposition authorization. Current live decomposition supplies no such issuer,
-so live children stay at the base tier.
+decomposition authorization and the run is in adaptive efficiency mode. Live
+decomposition issues that authorization when a generic split passes structural
+and semantic verification, so on a mapped backend those children start one tier
+below the base tier; untrusted splits and quality-first runs stay at the base tier.
 
 ### Integration Surface (UX differences)
 
