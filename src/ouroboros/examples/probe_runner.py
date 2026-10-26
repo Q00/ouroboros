@@ -218,6 +218,11 @@ def _write_probe(probe: Probe, scratch: Path) -> Path:
     return path
 
 
+def fits(deadline: float | None, timeout: int) -> bool:
+    """Whether a full run (``timeout`` plus the reap margin) ends before ``deadline``."""
+    return deadline is None or time.monotonic() + timeout + REAP_MARGIN_SECONDS <= deadline
+
+
 async def run_probe(
     probe: Probe,
     tree: Path,
@@ -227,8 +232,15 @@ async def run_probe(
     interpreter: CheckInterpreter,
     work_dir: Path,
     timeout: int = PROBE_TIMEOUT_SECONDS,
+    deadline: float | None = None,
 ) -> ProbeRun:
-    """Run ``probe`` once on a fresh copy of ``tree``; the copy is removed afterwards."""
+    """Run ``probe`` once on a fresh copy of ``tree``; the copy is removed afterwards.
+
+    With a step ``deadline`` (``time.monotonic()`` seconds), the process is
+    launched only when a full ``timeout`` still fits before it once the copy
+    is ready (``fits``); otherwise nothing runs and the run is indeterminate
+    (``STEP_DEADLINE``).
+    """
     probe_id = probe.probe_id
     run_dir = Path(tempfile.mkdtemp(prefix="probe-run-", dir=work_dir))
     try:
@@ -239,6 +251,8 @@ async def run_probe(
             return ProbeRun(
                 _not_run(probe_id, tree_id, repeat), f"{COPY_FAILED}:{type(exc).__name__}"
             )
+        if not fits(deadline, timeout):
+            return ProbeRun(_not_run(probe_id, tree_id, repeat), STEP_DEADLINE)
         with check_scratch(run_dir) as scratch:
             nonce = secrets.token_hex(16)
             path = _write_probe(probe, scratch)
@@ -305,7 +319,8 @@ async def run_probe_pool(
     tree), so every tree runs the same interpreter. At most ``parallel``
     runs are in flight. ``deadline`` (``time.monotonic()`` seconds) is the
     step's: a run starts only when a full ``timeout`` plus the reap margin
-    still fits before it, so a run is never cut short by the step.
+    still fits before it, checked again after its copy is made and before
+    its process starts, so a run is never cut short by the step.
     Copies and scratch directories are made in ``work_dir`` (default: a
     temporary directory, removed afterwards). The result satisfies
     ``examples.disagreement.find_disagreements``: exactly one record per
@@ -331,7 +346,7 @@ async def run_probe_pool(
         async with gate:
             if probe_id in reasons:
                 return
-            if deadline is not None and time.monotonic() + timeout + REAP_MARGIN_SECONDS > deadline:
+            if not fits(deadline, timeout):
                 reasons.setdefault(probe_id, STEP_DEADLINE)
                 return
             run = await run_probe(
@@ -342,6 +357,7 @@ async def run_probe_pool(
                 interpreter=pinned,
                 work_dir=root,
                 timeout=timeout,
+                deadline=deadline,
             )
         runs[(probe_id, tree_id, repeat)] = run
         if run.indeterminate is not None:
@@ -383,6 +399,7 @@ __all__ = [
     "PROBE_TIMEOUT_SECONDS",
     "PROBE_WRAPPER_SOURCE",
     "STEP_DEADLINE",
+    "fits",
     "Probe",
     "ProbeKind",
     "ProbePoolRun",

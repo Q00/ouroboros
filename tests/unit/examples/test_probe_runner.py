@@ -390,6 +390,39 @@ async def test_no_run_starts_past_the_step_deadline(
     assert len(run.records) == 6 and not marker.exists()
 
 
+async def test_a_slow_copy_that_eats_the_step_budget_starts_no_process(
+    trees: dict[str, Path],
+    python: CheckInterpreter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deadline is checked again once the copy is ready, before the launch."""
+    marker = tmp_path / "ran"
+    probe = call(f"def probe():\n    open({str(marker)!r}, 'w').write('x')\n")
+    real_copy = probe_runner.copy_checkout
+
+    def slow_copy(source: Path, destination: Path) -> None:
+        time.sleep(1.2)
+        real_copy(source, destination)
+
+    monkeypatch.setattr(probe_runner, "copy_checkout", slow_copy)
+    deadline = time.monotonic() + 2.1  # fits 1 s plus the reap margin before the copy only
+    run = await run_probe_pool(
+        [probe], trees, interpreter=python, timeout=1, parallel=4, deadline=deadline
+    )
+    assert run.indeterminate == {probe.probe_id: STEP_DEADLINE}
+    assert all(record.payload() == {"status": "not_run"} for record in run.records)
+    assert not marker.exists()
+
+
+def test_fits_counts_the_timeout_and_the_reap_margin() -> None:
+    now = time.monotonic()
+    margin = probe_runner.REAP_MARGIN_SECONDS
+    assert probe_runner.fits(None, 20)
+    assert probe_runner.fits(now + 20 + margin + 5, 20)
+    assert not probe_runner.fits(now + 20 + margin - 0.5, 20)
+
+
 # ------------------------------------------------------------------ the pool
 
 
