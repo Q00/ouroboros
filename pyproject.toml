@@ -272,6 +272,9 @@ known-first-party = ["ouroboros"]
 # annotations must use typing generics, and no f-strings are allowed
 # (boundary/harness.py docstring).
 "src/ouroboros/boundary/harness.py" = ["UP006", "UP032", "UP035", "UP045"]
+# Same constraint: the probe wrapper runs in the tree's interpreter
+# (examples/probe_wrapper.py docstring).
+"src/ouroboros/examples/probe_wrapper.py" = ["UP006", "UP032", "UP035", "UP045"]
 
 [tool.ruff.format]
 quote-style = "double"
