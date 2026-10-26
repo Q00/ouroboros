@@ -409,7 +409,7 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
         if message.tool_name or message.type != "assistant" or message.data.get("thinking"):
             return last_content
         if message.data.get("terminal"):
-            return message.content
+            return message.content or last_content
         if message.data.get("text_delta"):
             return last_content + message.content
         if not message.content:
