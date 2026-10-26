@@ -54,6 +54,7 @@ from ouroboros.providers.codex_cli_stream import (
     malformed_event_message,
     parse_json_event,
     terminate_runtime_process,
+    wait_runtime_exit,
 )
 from ouroboros.providers.pi_message_error import assistant_message_error
 
@@ -743,10 +744,24 @@ class OmpRuntime:
             )
             return
         else:
-            returncode = await process.wait()
+            try:
+                returncode, stderr_lines = await wait_runtime_exit(
+                    process,
+                    stderr_task,
+                    shutdown_timeout=self._process_shutdown_timeout_seconds,
+                    display_name=self._display_name,
+                )
+            except TimeoutError as exc:
+                await self._terminate_process(process)
+                process_terminated = True
+                yield AgentMessage(
+                    type="result",
+                    content=str(exc),
+                    data={"subtype": "error", "error_type": "TimeoutError"},
+                    resume_handle=current_handle,
+                )
+                return
             process_finished = True
-
-            stderr_lines = await stderr_task if stderr_task else []
             if returncode != 0 or pending_error_content:
                 stderr_text = "\n".join(stderr_lines).strip()
                 if returncode == 0 and pending_error_content:
