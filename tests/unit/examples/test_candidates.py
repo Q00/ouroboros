@@ -541,6 +541,56 @@ async def test_a_preflight_that_raises_skips_only_its_pair(workspace: Path) -> N
     assert len(result.asked) == 1
 
 
+async def test_no_worktree_root_is_made_once_the_deadline_passed(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    made: list[Path] = []
+    original = cand.RunWorktreeManager.__init__
+
+    def tracked(self: Any, root: Any) -> None:
+        original(self, root)
+        made.append(self._root)
+
+    monkeypatch.setattr(cand.RunWorktreeManager, "__init__", tracked)
+
+    class _SlowLlm(_Llm):
+        async def complete(self, messages: Any, config: Any) -> Any:
+            await asyncio.sleep(1.0)
+            return await super().complete(messages, config)
+
+    factory = _Factory({"codex": writes("5400"), "claude": writes("90")})
+    result = await run(workspace, factory, llm=_SlowLlm(), step_timeout=0.3)
+    assert result.failure == "step_deadline" and made == []
+    assert result.readings is not None and result.readings.call_failed == "call_timed_out"
+
+
+async def test_cancelling_right_after_the_readings_leaves_no_worktree_root(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    made: list[Path] = []
+    original = cand.RunWorktreeManager.__init__
+
+    def tracked(self: Any, root: Any) -> None:
+        original(self, root)
+        made.append(self._root)
+
+    monkeypatch.setattr(cand.RunWorktreeManager, "__init__", tracked)
+    factory = _Factory({"codex": sleeps(), "claude": sleeps()})
+    task = asyncio.create_task(run(workspace, factory))
+    for _ in range(200):
+        if made:
+            break
+        await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    for _ in range(200):
+        if not any(root.exists() for root in made):
+            break
+        await asyncio.sleep(0.05)
+    assert made and not any(root.exists() for root in made)
+
+
 async def test_agreeing_candidates_give_no_card(workspace: Path) -> None:
     factory = _Factory({"codex": writes("5400"), "claude": writes("5400")})
     result = await run(workspace, factory)

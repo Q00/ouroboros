@@ -744,8 +744,16 @@ async def run_candidate_step(
         )
     )
     pairs = resolve_pairs(config, execute_backend=execute_backend, execute_model=execute_model)
+    if step.remaining() <= 0:
+        return CandidateStepResult(
+            True, SkipReason.STEP_DEADLINE.value, readings, events=tuple(step.events)
+        )
+    # Built inline, with no await between it and the cleanup guard below: the
+    # constructor only resolves a path and makes one temporary directory (no
+    # subprocess), and a cancellation can never land after the root exists
+    # but before the guard that removes it.
     try:
-        manager = _Worktrees(await asyncio.to_thread(RunWorktreeManager, workspace))
+        manager = _Worktrees(RunWorktreeManager(workspace))
     except Exception as exc:  # noqa: BLE001 - no worktree root means no step
         return CandidateStepResult(
             True, f"worktree_root_failed:{type(exc).__name__}", readings, events=tuple(step.events)
