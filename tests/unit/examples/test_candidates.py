@@ -591,6 +591,20 @@ async def test_cancelling_right_after_the_readings_leaves_no_worktree_root(
     assert made and not any(root.exists() for root in made)
 
 
+async def test_a_slow_event_sink_never_dispatches_past_the_step_deadline(
+    workspace: Path,
+) -> None:
+    async def sink(event: Any) -> None:
+        if event.type == "examples.candidate.started":
+            await asyncio.sleep(1.0)
+
+    factory = _Factory({"codex": writes("5400"), "claude": writes("90")})
+    result = await run(workspace, factory, event_sink=sink, step_timeout=0.5)
+    assert all(o.skipped is SkipReason.STEP_DEADLINE for o in result.outcomes)
+    assert factory.dispatched() == []
+    assert len(_worktrees(workspace)) == 1
+
+
 async def test_agreeing_candidates_give_no_card(workspace: Path) -> None:
     factory = _Factory({"codex": writes("5400"), "claude": writes("5400")})
     result = await run(workspace, factory)

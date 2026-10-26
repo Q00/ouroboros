@@ -290,8 +290,9 @@ structural check (span contained in the goal, identical text merged).
 | `dropped` | `int` | Reply items that failed the check, repeated an earlier reading, or exceeded k |
 | `call_failed` | `string?` | Why the readings call kept nothing (`reply_not_json`, `call_failed:<error>`, `call_timed_out`, ...); null when the reply parsed |
 
-`examples.candidate.started`: one candidate runtime was dispatched in its own
-worktree. `examples.candidate.completed`: it finished with a patch.
+`examples.candidate.started`: one candidate runtime was built in its own
+worktree and is about to be dispatched (a `step_deadline` skip follows when the
+step's time ran out before the dispatch). `examples.candidate.completed`: it finished with a patch.
 `examples.candidate.skipped`: it was not used, or (with `candidate_id` null)
 a whole pair was left out before planning.
 

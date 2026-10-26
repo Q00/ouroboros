@@ -526,13 +526,6 @@ async def _run_candidate(
             return await step.skipped(
                 slot, SkipReason.RUNTIME_UNAVAILABLE, detail=type(exc).__name__
             )
-        # The budget is taken after construction, immediately before dispatch,
-        # so a slow start can never carry a candidate past the step deadline.
-        budget = min(candidate_timeout, step.remaining())
-        if budget <= 0:
-            await _close(runtime)
-            return await step.skipped(slot, SkipReason.STEP_DEADLINE)
-        bound_by_step = budget < candidate_timeout
         reading_id = slot.reading.reading_id if slot.reading else None
         await step.emit(
             create_candidate_started_event(
@@ -543,6 +536,14 @@ async def _run_candidate(
                 reading_id=reading_id,
             )
         )
+        # The budget is taken after construction and after the started event,
+        # with no await before the dispatch, so neither a slow start nor a
+        # slow event sink can carry a candidate past the step deadline.
+        budget = min(candidate_timeout, step.remaining())
+        if budget <= 0:
+            await _close(runtime)
+            return await step.skipped(slot, SkipReason.STEP_DEADLINE)
+        bound_by_step = budget < candidate_timeout
         started = time.monotonic()
         try:
             result = await asyncio.wait_for(

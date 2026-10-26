@@ -10,7 +10,8 @@ Event types (aggregate type ``auto_session``, aggregate id the step's
 session id):
 
 - ``examples.readings.stated``: the readings that passed the structural check.
-- ``examples.candidate.started``: a candidate's runtime was dispatched.
+- ``examples.candidate.started``: a candidate's runtime was built and is
+  about to be dispatched.
 - ``examples.candidate.completed``: a candidate finished with a patch.
 - ``examples.candidate.skipped``: a candidate (or a whole pair) was not used,
   with a reason.
