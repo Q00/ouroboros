@@ -23,6 +23,7 @@ from ouroboros.mcp.job_manager import (
     JobSnapshot,
     JobStatus,
 )
+from ouroboros.mcp.job_read_state import pending_job_result
 from ouroboros.mcp.tools import host_dispatch_status
 from ouroboros.mcp.tools.ac_tree_hud_handler import (
     format_subtask_progress_summary,
@@ -1266,6 +1267,8 @@ class JobStatusHandler:
             try:
                 snapshot = await self._job_manager.get_snapshot(job_id)
             except ValueError as exc:
+                if pending := pending_job_result(self._job_manager, job_id):
+                    return Result.ok(pending)
                 return Result.err(MCPToolError(str(exc), tool_name="ouroboros_job_status"))
 
         text, progress = await _render_job_snapshot(snapshot, self._event_store)
@@ -1609,6 +1612,8 @@ class JobWaitHandler:
                 )
             )
         except ValueError as exc:
+            if pending := pending_job_result(self._job_manager, job_id):
+                return Result.ok(pending)
             log.debug(
                 "mcp.tool.job_wait.not_found",
                 job_id=job_id,
@@ -2068,6 +2073,8 @@ class JobResultHandler:
             try:
                 snapshot = await self._job_manager.get_snapshot(job_id)
             except ValueError as exc:
+                if pending := pending_job_result(self._job_manager, job_id):
+                    return Result.ok(pending)
                 return Result.err(
                     MCPToolError(
                         f"Job handle not found: {job_id}. Result unavailable.",

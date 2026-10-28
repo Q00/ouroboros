@@ -48,6 +48,7 @@ from ouroboros.mcp.detached_jobs import (
 )
 from ouroboros.mcp.errors import JobWorkError, MCPToolError
 from ouroboros.mcp.failure_taxonomy import RUN_FAILURE_CAUSES, FailureReasonCode
+from ouroboros.mcp.job_read_state import PendingJobReceipts
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator.agent_process import run_with_agent_process
 
@@ -268,6 +269,13 @@ async def start_background_tool_job(
                 settle_external_acceptance(job_id)
         except DetachedJobAcceptanceTimeout as exc:
             acceptance_state.mark_accepted()
+            observations = getattr(job_manager, "pending_receipts", None)
+            if isinstance(observations, PendingJobReceipts):
+                observations.remember(
+                    job_id=exc.job_id,
+                    worker_pid=exc.worker_pid,
+                    timeout_seconds=exc.timeout_seconds,
+                )
             settle_external_acceptance = getattr(
                 job_manager, "settle_external_job_acceptance", None
             )
