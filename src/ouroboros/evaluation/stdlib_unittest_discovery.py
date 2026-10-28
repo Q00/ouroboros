@@ -85,7 +85,7 @@ def manifest_free_unittest_proposal(working_dir: Path) -> dict[str, str] | None:
 def _package_uses_default_discovery(init_file: Path) -> bool:
     """A package load_tests hook replaces discovery of its descendants."""
     try:
-        tree = ast.parse(init_file.read_text(encoding="utf-8"))
+        tree = ast.parse(init_file.read_bytes())
     except (OSError, UnicodeError, SyntaxError):
         return False
     return not _module_binds_load_tests(tree)

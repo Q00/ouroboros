@@ -403,3 +403,47 @@ def test_separate_test_module_still_proves_a_suite_despite_custom_package_loader
     )
     assert result.returncode == 0
     assert "Ran 1 test" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("encoding", "cookie"),
+    [
+        ("latin-1", "# coding: latin-1\n"),
+        ("cp1252", "# coding: cp1252\n"),
+        ("utf-8-sig", ""),
+    ],
+)
+def test_encoded_package_init_keeps_ordinary_child_tests_discoverable(
+    tmp_path: Path, encoding: str, cookie: str
+) -> None:
+    """Inspecting load_tests must preserve Python's package source decoding."""
+    package = tmp_path / "tests" / "unit"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_bytes((cookie + "LABEL = 'café'\n").encode(encoding))
+    (package / "test_text.py").write_text(
+        "import unittest\n"
+        "from . import LABEL\n"
+        "class TestText(unittest.TestCase):\n"
+        "    def test_label(self):\n"
+        "        self.assertEqual(LABEL, 'caf\\u00e9')\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Ran 1 test" in result.stderr
+    assert _run(ensure_mechanical_toml(tmp_path, None)) is True
+    assert build_mechanical_config(tmp_path).test_command == (
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests",
+    )
