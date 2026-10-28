@@ -1003,7 +1003,7 @@ def _apply_overrides(
     if "timeout" in source:
         try:
             current["timeout"] = int(source["timeout"])
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             log.warning("mechanical.toml_bad_timeout", value=source["timeout"])
     if "coverage_threshold" in source:
         try:
