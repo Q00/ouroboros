@@ -73,3 +73,40 @@ def _pi_family_usage(lines: Iterable[str]) -> UsageInfo:
         completion += output_count
         unallocated += total - allocated
     return UsageInfo(prompt, completion, prompt + completion, unallocated_tokens=unallocated)
+
+
+def opencode_cli_usage(events: Iterable[object]) -> UsageInfo:
+    """Read OpenCode 1.x final steps, retaining the latest report per part."""
+    parts: dict[str, dict[str, object]] = {}
+    for event in events:
+        if not isinstance(event, dict) or event.get("type") != "step_finish":
+            continue
+        part = event.get("part")
+        if not isinstance(part, dict) or part.get("type") != "step-finish":
+            continue
+        part_id = part.get("id")
+        if isinstance(part_id, str) and part_id:
+            parts[part_id] = part
+
+    prompt = completion = unallocated = 0
+    for part in parts.values():
+        tokens = part.get("tokens")
+        if not isinstance(tokens, dict):
+            continue
+        input_count = _token_count(tokens.get("input"))
+        output_count = _token_count(tokens.get("output"))
+        cache = tokens.get("cache")
+        caches = (
+            _token_count(cache.get("read")) + _token_count(cache.get("write"))
+            if isinstance(cache, dict)
+            else 0
+        )
+        allocated = input_count + output_count
+        # OpenCode stores raw usage.outputTokens as output (no reasoning
+        # subtraction) and adjusts input to exclude cache groups. Honor its
+        # authoritative total without adding a second reasoning count.
+        total = max(_token_count(tokens.get("total")), allocated + caches)
+        prompt += input_count
+        completion += output_count
+        unallocated += total - allocated
+    return UsageInfo(prompt, completion, prompt + completion, unallocated_tokens=unallocated)
