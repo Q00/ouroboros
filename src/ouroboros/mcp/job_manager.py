@@ -18,7 +18,7 @@ import structlog
 from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.failure_taxonomy import classify_failure
-from ouroboros.mcp.job_read_state import PendingJobReceipts, cached_job_snapshot
+from ouroboros.mcp.job_read_state import JobNotFoundError, PendingJobReceipts, cached_job_snapshot
 from ouroboros.mcp.job_snapshot import (
     JobEventFold,
     JobLinks,
@@ -436,7 +436,7 @@ class JobManager:
         self._live_snapshots: dict[str, JobSnapshot] = {}
         self._fold_cache: dict[str, JobEventFold] = {}
         self._telemetry = JobTelemetryBoundary()
-        self.pending_receipts = PendingJobReceipts()
+        self.pending_receipts = PendingJobReceipts(self._event_store)
 
     def get_cached_snapshot(self, job_id: str) -> JobSnapshot | None:
         """Return cache only when durable reconciliation is unnecessary.
@@ -1951,7 +1951,7 @@ class JobManager:
         await self._maybe_cleanup_expired()
         events, cursor = await self._event_store.get_events_after("job", job_id, last_row_id=0)
         if not events:
-            raise ValueError(f"Job not found: {job_id}")
+            raise JobNotFoundError(f"Job not found: {job_id}")
         self.pending_receipts.discard(job_id)
         fold = fold_job_events(None, events, cursor=cursor)
         # A full replay is authoritative: refresh the tail cache so polling
