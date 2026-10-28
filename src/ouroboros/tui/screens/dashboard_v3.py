@@ -915,6 +915,11 @@ class DashboardScreenV3(Screen[None]):
         """Handle node selection from tree."""
         if self._detail_panel:
             self._detail_panel.selected_node = message.node_data
+            node_id = message.node_data.get("id")
+            thinking = self._state.thinking.get(node_id, "") if self._state else ""
+            history = self._state.tool_history.get(node_id, []) if self._state else []
+            self._detail_panel.update_thinking(thinking)
+            self._detail_panel.update_tool_history(list(history))
 
     def on_execution_updated(self, message: ExecutionUpdated) -> None:
         pass  # Status display removed
@@ -1054,6 +1059,15 @@ class DashboardScreenV3(Screen[None]):
         """Handle tool call completed - clear inline activity."""
         if self._tree:
             self._tree.clear_node_activity(message.ac_id)
+        if (
+            self._state is not None
+            and self._detail_panel is not None
+            and self._detail_panel.selected_node is not None
+            and self._detail_panel.selected_node.get("id") == message.ac_id
+        ):
+            self._detail_panel.update_tool_history(
+                list(self._state.tool_history.get(message.ac_id, []))
+            )
         if self._activity_bar:
             tools = dict(self._activity_bar.active_tools)
             tools.pop(message.ac_id, None)
