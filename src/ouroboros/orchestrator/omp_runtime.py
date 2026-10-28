@@ -54,7 +54,6 @@ from ouroboros.providers.codex_cli_stream import (
     malformed_event_message,
     parse_json_event,
     terminate_runtime_process,
-    wait_runtime_exit,
 )
 from ouroboros.providers.pi_message_error import assistant_message_error
 
@@ -744,6 +743,8 @@ class OmpRuntime:
             )
             return
         else:
+            from ouroboros.providers.codex_cli_stream import wait_runtime_exit
+
             try:
                 returncode, stderr_lines = await wait_runtime_exit(
                     process,
