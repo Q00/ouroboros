@@ -743,10 +743,26 @@ class OmpRuntime:
             )
             return
         else:
-            returncode = await process.wait()
-            process_finished = True
+            from ouroboros.providers.codex_cli_stream import wait_runtime_exit
 
-            stderr_lines = await stderr_task if stderr_task else []
+            try:
+                returncode, stderr_lines = await wait_runtime_exit(
+                    process,
+                    stderr_task,
+                    shutdown_timeout=self._process_shutdown_timeout_seconds,
+                    display_name=self._display_name,
+                )
+            except TimeoutError as exc:
+                await self._terminate_process(process)
+                process_terminated = True
+                yield AgentMessage(
+                    type="result",
+                    content=str(exc),
+                    data={"subtype": "error", "error_type": "TimeoutError"},
+                    resume_handle=current_handle,
+                )
+                return
+            process_finished = True
             if returncode != 0 or pending_error_content:
                 stderr_text = "\n".join(stderr_lines).strip()
                 if returncode == 0 and pending_error_content:
