@@ -44,8 +44,8 @@ from ouroboros.providers.base import (
     MessageRole,
 )
 from ouroboros.providers.codex_cli_stream import RuntimeStreamMixin, collect_stream_lines
-from ouroboros.providers.codex_usage import codex_cli_usage
 from ouroboros.providers.llm_response import truncate_llm_response_if_oversized
+from ouroboros.providers.native_cli_usage import native_cli_usage
 from ouroboros.providers.profiles import resolve_completion_profile_result
 
 log = structlog.get_logger()
@@ -1214,7 +1214,7 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
                 CompletionResponse(
                     content=content,
                     model=normalized_model or "default",
-                    usage=codex_cli_usage(stdout_lines, provider=self._provider_name),
+                    usage=native_cli_usage(stdout_lines, provider=self._provider_name),
                     finish_reason="stop",
                     raw_response={
                         "session_id": session_id,
@@ -1379,7 +1379,7 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
             CompletionResponse(
                 content=content,
                 model=normalized_model or "default",
-                usage=codex_cli_usage(stdout_lines, provider=self._provider_name),
+                usage=native_cli_usage(stdout_lines, provider=self._provider_name),
                 finish_reason="stop",
                 raw_response={
                     "session_id": session_id,

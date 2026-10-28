@@ -76,22 +76,22 @@ async def test_native_usage_survives_success_paths(process_type, final_repetitio
 
 
 def test_latest_native_turn_report_replaces_earlier_report() -> None:
-    from ouroboros.providers.codex_usage import codex_cli_usage
+    from ouroboros.providers.native_cli_usage import native_cli_usage
 
     lines = [
         json.dumps({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 2}}),
         json.dumps({"type": "turn.completed", "usage": {"input_tokens": 15, "output_tokens": 3}}),
     ]
-    assert codex_cli_usage(lines, provider="codex_cli") == UsageInfo(15, 3, 18)
-    assert codex_cli_usage(lines, provider="pi") == UsageInfo(0, 0, 0)
+    assert native_cli_usage(lines, provider="codex_cli") == UsageInfo(15, 3, 18)
+    assert native_cli_usage(lines, provider="pi") == UsageInfo(0, 0, 0)
 
 
 def test_missing_or_incomplete_native_usage_keeps_zero_fallback() -> None:
-    from ouroboros.providers.codex_usage import codex_cli_usage
+    from ouroboros.providers.native_cli_usage import native_cli_usage
 
     lines = [
         "plain output",
         json.dumps({"type": "turn.completed"}),
         json.dumps({"type": "turn.completed", "usage": {"input_tokens": True, "output_tokens": 2}}),
     ]
-    assert codex_cli_usage(lines, provider="codex_cli") == UsageInfo(0, 0, 0)
+    assert native_cli_usage(lines, provider="codex_cli") == UsageInfo(0, 0, 0)
