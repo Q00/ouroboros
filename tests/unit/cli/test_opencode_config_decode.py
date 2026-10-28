@@ -74,3 +74,65 @@ def test_cleanup_reads_utf8_independently_of_locale(
     result = json.loads(config.read_bytes().decode("utf-8"))
     assert result["label"] == "한글"
     assert result["plugin"] == []
+
+
+@pytest.mark.parametrize("suffix", [".json", ".jsonc"])
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_public_uninstall_preserves_undecodable_opencode_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, suffix: str, dry_run: bool
+) -> None:
+    from typer.testing import CliRunner
+
+    from ouroboros.cli.main import app
+
+    config = tmp_path / ("opencode" + suffix)
+    original = b'{"mcp": {}, "plugin": [], "label": "\xff"}'
+    config.write_bytes(original)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENCODE_CONFIG", str(config))
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(tmp_path / "opencode"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+
+    options = ["--dry-run"] if dry_run else ["--yes", "--keep-data"]
+    result = CliRunner().invoke(app, ["uninstall", *options])
+
+    assert result.exit_code == (0 if dry_run else 1), result.output
+    assert not isinstance(result.exception, UnicodeDecodeError)
+    assert "may be malformed" in result.output
+    assert ("Dry run" if dry_run else "partially removed") in result.output
+    assert config.read_bytes() == original
+
+
+@pytest.mark.parametrize("mode", ["plugin", "subprocess"])
+def test_public_setup_preserves_undecodable_opencode_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    from typer.testing import CliRunner
+
+    from ouroboros.cli.main import app
+
+    config = tmp_path / "opencode.json"
+    original = b'{"mcp": {}, "plugin": [], "label": "\xff"}'
+    config.write_bytes(original)
+    ouroboros_config_dir = tmp_path / "ouroboros"
+    ouroboros_config_dir.mkdir()
+    (ouroboros_config_dir / "config.yaml").write_text("{}", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENCODE_CONFIG", str(config))
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(tmp_path / "opencode"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+    with (
+        patch.object(setup, "_detect_runtimes", return_value={"opencode": "/selected/opencode"}),
+        patch.object(setup, "plugin_version_error", return_value=None),
+        patch.object(setup, "_install_opencode_bridge_plugin", return_value=True),
+        patch.object(setup, "_install_runtime_instruction_artifact"),
+        patch("ouroboros.config.loader.ensure_config_dir", return_value=ouroboros_config_dir),
+    ):
+        result = CliRunner().invoke(
+            app, ["setup", "--runtime", "opencode", "--opencode-mode", mode, "--non-interactive"]
+        )
+
+    assert result.exit_code == (1 if mode == "plugin" else 0), result.output
+    assert not isinstance(result.exception, UnicodeDecodeError)
+    assert ("setup incomplete" if mode == "plugin" else "Setup complete") in result.output
+    assert config.read_bytes() == original

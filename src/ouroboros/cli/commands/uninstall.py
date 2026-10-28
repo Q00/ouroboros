@@ -460,10 +460,10 @@ def uninstall(
     opencode_config = _find_opencode_config()
     try:
         if opencode_config is not None:
-            oc_data = json.loads(_strip_jsonc(opencode_config.read_text()))
+            oc_data = json.loads(_strip_jsonc(opencode_config.read_text(encoding="utf-8")))
             if isinstance(oc_data.get("mcp"), dict) and "ouroboros" in oc_data["mcp"]:
                 targets.append(f"OpenCode MCP config ({opencode_config})")
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
         targets.append(f"OpenCode MCP config ({opencode_config} — may be malformed)")
 
     codex_dir = resolve_codex_home()
@@ -498,13 +498,13 @@ def uninstall(
         _oc_cfg = find_opencode_config(allow_default=False)
         if _oc_cfg is not None:
             try:
-                _oc_data = json.loads(_strip_jsonc(_oc_cfg.read_text()))
+                _oc_data = json.loads(_strip_jsonc(_oc_cfg.read_text(encoding="utf-8")))
                 _oc_plugins = _oc_data.get("plugin", [])
                 if isinstance(_oc_plugins, list) and any(
                     is_bridge_plugin_entry(e) for e in _oc_plugins
                 ):
                     targets.append(f"OpenCode bridge plugin entry in {_oc_cfg}")
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError):
                 pass
 
     data_dir = Path.home() / ".ouroboros"
