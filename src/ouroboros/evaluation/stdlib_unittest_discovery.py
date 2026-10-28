@@ -55,6 +55,7 @@ def manifest_free_unittest_proposal(working_dir: Path) -> dict[str, str] | None:
                         path.name.isidentifier()
                         and init_file.is_file()
                         and not init_file.is_symlink()
+                        and _package_uses_default_discovery(init_file)
                     ):
                         next_depth = depth + 1
                         if next_depth > _MAX_UNITTEST_DISCOVERY_DEPTH:
@@ -81,8 +82,27 @@ def manifest_free_unittest_proposal(working_dir: Path) -> dict[str, str] | None:
     return {"test": "python3 -m unittest discover -s tests"} if found_test_case else None
 
 
+def _package_uses_default_discovery(init_file: Path) -> bool:
+    """A package load_tests hook replaces discovery of its descendants."""
+    try:
+        tree = ast.parse(init_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, SyntaxError):
+        return False
+    return not _module_binds_load_tests(tree)
+
+
+def _module_binds_load_tests(tree: ast.Module) -> bool:
+    """Find loader hooks without importing the project modules."""
+    return any("load_tests" in _module_scope_writes(statement) for statement in tree.body)
+
+
 def _module_has_unittest_test(tree: ast.Module) -> bool:
     """Find a unittest test class while honoring statically visible module writes."""
+    if _module_binds_load_tests(tree):
+        # unittest hands the entire discovered suite to this arbitrary hook.
+        # Visible TestCase methods do not prove the returned suite contains them.
+        return False
+
     imported_testcase_names: set[str] = set()
     unittest_aliases: set[str] = set()
     local_testcase_classes: set[str] = set()

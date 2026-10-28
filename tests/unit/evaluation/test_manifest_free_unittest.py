@@ -346,3 +346,60 @@ async def test_verification_artifacts_run_manifest_free_unittest_without_provide
     assert run["passed"] is True
     assert "Ran 1 test" in run["final_outcome"]
     assert "OK" in run["final_outcome"]
+
+
+@pytest.mark.parametrize("package_hook", [False, True])
+def test_custom_load_tests_cannot_prove_statically_visible_tests_run(
+    tmp_path: Path, package_hook: bool
+) -> None:
+    """unittest lets a hook replace the discovered tests with an empty suite."""
+    tests = tmp_path / "tests"
+    directory = tests / "unit" if package_hook else tests
+    _write_unittest(directory / "test_hidden.py", fail=True)
+    hook = (
+        "import unittest\n"
+        "def load_tests(loader, tests, pattern):\n"
+        "    return unittest.TestSuite()\n"
+    )
+    if package_hook:
+        (directory / "__init__.py").write_text(hook, encoding="utf-8")
+    else:
+        path = directory / "test_hidden.py"
+        path.write_text(path.read_text(encoding="utf-8") + hook, encoding="utf-8")
+
+    # This is a real unittest protocol: the failing method is not run.
+    result = subprocess.run(
+        [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert "Ran 0 tests" in result.stderr
+    assert _run(ensure_mechanical_toml(tmp_path, None)) is False
+    assert has_mechanical_toml(tmp_path) is False
+
+
+def test_separate_test_module_still_proves_a_suite_despite_custom_package_loader(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "tests" / "custom"
+    _write_unittest(package / "test_hidden.py", fail=True)
+    (package / "__init__.py").write_text(
+        "import unittest\n"
+        "def load_tests(loader, tests, pattern):\n"
+        "    return unittest.TestSuite()\n",
+        encoding="utf-8",
+    )
+    _write_unittest(tmp_path / "tests" / "test_visible.py")
+
+    assert _run(ensure_mechanical_toml(tmp_path, None)) is True
+    result = subprocess.run(
+        [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert "Ran 1 test" in result.stderr
