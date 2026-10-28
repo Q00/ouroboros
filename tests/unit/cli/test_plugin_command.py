@@ -689,7 +689,12 @@ def test_inspect_unreadable_manifest_reports_friendly_error(
         manifest_path.chmod(original_mode)
 
     assert result.exit_code == 1
-    assert "manifest is unreadable" in result.output
+    # Match the diagnostic across Rich's styled panel line breaks.
+    import re
+
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    flat = " ".join(plain.replace("│", " ").split())
+    assert "manifest is unreadable" in flat
     assert "Traceback" not in result.output
 
 
