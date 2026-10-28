@@ -402,13 +402,20 @@ async def accepting_parent(
             deadline = asyncio.get_running_loop().time() + 60.0
             while not probe.record.get("ready"):
                 if receipt.exists():
-                    probe.record = json.loads(receipt.read_text(encoding="utf-8"))
-                    for key in ("parent_pid", "launcher_pid", "owner_pid"):
-                        if (
-                            key in probe.record
-                            and (identities / f"{probe.record[key]}.json").exists()
-                        ):
-                            probe.track(probe.record[key])
+                    try:
+                        record = receipt.read_text(encoding="utf-8")
+                    except (FileNotFoundError, PermissionError):
+                        # A visible file can still be locked during publication on Windows.
+                        # Keep the existing deadline and process-exit checks below active.
+                        pass
+                    else:
+                        probe.record = json.loads(record)
+                        for key in ("parent_pid", "launcher_pid", "owner_pid"):
+                            if (
+                                key in probe.record
+                                and (identities / f"{probe.record[key]}.json").exists()
+                            ):
+                                probe.track(probe.record[key])
                 if parent.poll() is not None or asyncio.get_running_loop().time() >= deadline:
                     raise AssertionError(
                         f"accepting parent did not become ready: {home / 'parent.log'}"
