@@ -453,6 +453,13 @@ class AnthropicAdapter:
             content = reconstructed
 
         usage = response.usage
+        # SDK input_tokens excludes these additive cache groups. Retention
+        # details subdivide cache creation and must not be counted again.
+        cache_counts = (
+            getattr(usage, "cache_read_input_tokens", 0),
+            getattr(usage, "cache_creation_input_tokens", 0),
+        )
+        cache_tokens = sum(value for value in cache_counts if type(value) is int and value >= 0)
 
         return CompletionResponse(
             content=content,
@@ -461,6 +468,7 @@ class AnthropicAdapter:
                 prompt_tokens=usage.input_tokens if usage else 0,
                 completion_tokens=usage.output_tokens if usage else 0,
                 total_tokens=((usage.input_tokens + usage.output_tokens) if usage else 0),
+                unallocated_tokens=cache_tokens,
             ),
             finish_reason=response.stop_reason or "end_turn",
         )
