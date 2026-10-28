@@ -21,8 +21,8 @@ class _Stream:
 
 
 class _Process:
-    def __init__(self, event: dict) -> None:
-        self.stdout = _Stream(json.dumps(event) + "\n")
+    def __init__(self, event: dict, *, indent: int | None = None) -> None:
+        self.stdout = _Stream(json.dumps(event, indent=indent) + "\n")
         self.stderr = _Stream()
         self.returncode = None
 
@@ -32,6 +32,7 @@ class _Process:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("indent", [None, 2], ids=["compact", "multiline"])
 @pytest.mark.parametrize(
     "event,expected",
     [
@@ -67,10 +68,10 @@ class _Process:
     ],
     ids=["native-stream-stats", "batch-multiple-models"],
 )
-async def test_reported_token_counts_are_not_discarded(event, expected) -> None:
+async def test_reported_token_counts_are_not_discarded(event, expected, indent) -> None:
     # Official schema/formatter at google-gemini/gemini-cli@b8fa817155731c783d47dc6eaeee63163c0ec723.
     adapter = GeminiCLIAdapter(cli_path="gemini")
-    with patch("asyncio.create_subprocess_exec", return_value=_Process(event)):
+    with patch("asyncio.create_subprocess_exec", return_value=_Process(event, indent=indent)):
         result = await adapter.complete(
             [Message(role=MessageRole.USER, content="Question")], CompletionConfig(model="default")
         )

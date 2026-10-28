@@ -339,6 +339,7 @@ class GeminiCLIAdapter:
         error_seen: str | None = None
         reported_stats: object = None
         total_bytes = 0
+        json_lines: list[str] = []
 
         async for line in iter_stream_lines(process.stdout, provider=self._provider_name):
             line = line.strip()
@@ -357,11 +358,22 @@ class GeminiCLIAdapter:
                     )
                 )
 
+            if json_lines:
+                json_lines.append(line)
+                candidate = "\n".join(json_lines)
+            else:
+                candidate = line
             try:
-                event = json.loads(line)
+                event = json.loads(candidate)
             except json.JSONDecodeError:
-                # Plain-text line — accumulate it (fallback for non-JSON output)
-                content_parts.append(line)
+                if not json_lines and line == "{":
+                    json_lines.append(line)
+                elif not json_lines:
+                    content_parts.append(line)
+                continue
+            json_lines.clear()
+            if not isinstance(event, dict):
+                content_parts.append(candidate)
                 continue
 
             event_type = event.get("type", "")
@@ -431,6 +443,9 @@ class GeminiCLIAdapter:
                 if event.get("error"):
                     err = event["error"]
                     error_seen = err.get("message", str(err))
+
+        if json_lines:
+            content_parts.extend(json_lines)
 
         returncode = await process.wait()
 
