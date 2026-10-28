@@ -46,9 +46,9 @@ from ouroboros.providers.base import (
     CompletionResponse,
     Message,
     MessageRole,
-    UsageInfo,
 )
 from ouroboros.providers.codex_cli_stream import iter_stream_lines, terminate_process
+from ouroboros.providers.gemini_usage import gemini_usage_from_stats
 from ouroboros.providers.profiles import resolve_completion_profile_result
 from ouroboros.runtime.child_env import DEFAULT_OUROBOROS_STRIP_KEYS, build_child_env
 
@@ -337,6 +337,7 @@ class GeminiCLIAdapter:
         model_name: str | None = None
         final_response: str | None = None
         error_seen: str | None = None
+        reported_stats: object = None
         total_bytes = 0
 
         async for line in iter_stream_lines(process.stdout, provider=self._provider_name):
@@ -364,6 +365,8 @@ class GeminiCLIAdapter:
                 continue
 
             event_type = event.get("type", "")
+            if event_type == "result" or (not event_type and "response" in event):
+                reported_stats = event.get("stats")
 
             # Handle batch JSON format (--output-format json): a single
             # object with "response", "stats" and "error" fields, no "type".
@@ -498,11 +501,7 @@ class GeminiCLIAdapter:
             CompletionResponse(
                 content=content,
                 model=model_name or self._model,
-                usage=UsageInfo(
-                    prompt_tokens=0,  # Gemini CLI does not expose token counts
-                    completion_tokens=0,
-                    total_tokens=0,
-                ),
+                usage=gemini_usage_from_stats(reported_stats),
                 finish_reason="stop",
                 raw_response={"session_id": session_id},
             )
