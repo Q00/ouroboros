@@ -360,7 +360,7 @@ class GeminiCLIAdapter:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 # Plain-text line — accumulate it (fallback for non-JSON output)
-                content_parts.append(line)
+                content_parts.append(("\n" if content_parts else "") + line)
                 continue
 
             event_type = event.get("type", "")
@@ -386,8 +386,9 @@ class GeminiCLIAdapter:
             elif event_type == "message":
                 role = event.get("role", "")
                 text = event.get("content", "")
-                if role == "model" and text:
-                    content_parts.append(text)
+                if role in {"assistant", "model"} and isinstance(text, str) and text:
+                    separator = "" if event.get("delta") is True or not content_parts else "\n"
+                    content_parts.append(separator + text)
                     if self._on_message and text.strip():
                         self._on_message("thinking", text.strip())
 
@@ -454,7 +455,7 @@ class GeminiCLIAdapter:
             )
 
         # Prefer the aggregated result event; fall back to accumulated parts.
-        content = final_response if final_response is not None else "\n".join(content_parts)
+        content = final_response if final_response is not None else "".join(content_parts)
 
         # Only treat stream-level errors as fatal when there is no usable
         # content.  Non-fatal warnings (e.g. deprecation notices) may appear
