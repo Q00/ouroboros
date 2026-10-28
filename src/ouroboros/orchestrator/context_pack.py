@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import configparser
 from dataclasses import dataclass, replace
-import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -512,6 +511,8 @@ def _source_fingerprint(root: Path) -> dict[str, Any]:
     made by tools that preserve timestamps and file sizes while ``HEAD`` stays
     fixed; hashing is streamed so source size does not increase peak memory.
     """
+    import hashlib
+
     fingerprint: dict[str, Any] = {}
     for rel in _FINGERPRINT_SOURCES:
         try:
