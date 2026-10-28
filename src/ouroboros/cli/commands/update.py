@@ -1091,7 +1091,7 @@ def update(
         )
         raise typer.Exit(1) from exc
     console.print(f"Installer:   [cyan]{identity.manager}[/cyan]")
-    console.print(f"Environment: [cyan]{identity.environment}[/cyan]")
+    console.print(f"Environment: [cyan]{escape(str(identity.environment))}[/cyan]")
     console.print(f"Profile:     {identity.profile}\n", markup=False)
 
     try:

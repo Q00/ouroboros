@@ -55,4 +55,5 @@ def test_public_dry_run_preserves_the_selected_manager_path(
     assert result.exit_code == 0, result.output
     execute.assert_not_called()
     assert identity.manager_binary in result.output
+    assert f"Environment: {identity.environment}" in result.output
     assert "UV_TOOL_DIR=" + str(identity.manager_home) in result.output
