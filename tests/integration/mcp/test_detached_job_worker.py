@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 import platform
 from types import SimpleNamespace
@@ -102,7 +103,9 @@ def test_detached_tool_error_rejection_rejects_non_json_details() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("spoof", ["job_id", "worker_pid", "request_tool_name"])
+@pytest.mark.parametrize(
+    "spoof", ["job_id", "request_tool_name", "launch_token", "missing_token", "worker_pid"]
+)
 async def test_detached_launcher_fails_closed_and_cleans_spoofed_rejection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -133,13 +136,18 @@ async def test_detached_launcher_fails_closed_and_cleans_spoofed_rejection(
             "job_id": job_id,
             "request_tool_name": "ouroboros_start_evolve_step",
             "rejection": encode_tool_error_rejection(MCPToolError("seed rejected")),
+            "launch_token": json.loads(request_path.read_text(encoding="utf-8"))["launch_token"],
         }
         if spoof == "job_id":
             payload["job_id"] = "job_swapped"
         elif spoof == "worker_pid":
-            payload["worker_pid"] = 9999
-        else:
+            payload["worker_pid"] = -1
+        elif spoof == "request_tool_name":
             payload["request_tool_name"] = "ouroboros_start_execute_seed"
+        elif spoof == "missing_token":
+            del payload["launch_token"]
+        else:
+            payload["launch_token"] = "0" * 64
         write_private_json(status_path_for(request_path), payload, exclusive=False)
         return FakeProcess()
 
