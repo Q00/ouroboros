@@ -1,6 +1,7 @@
 """Dry-run command previews preserve ordinary literal path text."""
 
 from io import StringIO
+import re
 from unittest.mock import patch
 
 import pytest
@@ -54,6 +55,8 @@ def test_public_dry_run_preserves_the_selected_manager_path(
 
     assert result.exit_code == 0, result.output
     execute.assert_not_called()
-    assert identity.manager_binary in result.output
-    assert f"Environment: {identity.environment}" in result.output
-    assert "UV_TOOL_DIR=" + str(identity.manager_home) in result.output
+    # Discard color codes only; literal bracketed path characters remain exact.
+    visible_output = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    assert identity.manager_binary in visible_output
+    assert f"Environment: {identity.environment}" in visible_output
+    assert "UV_TOOL_DIR=" + str(identity.manager_home) in visible_output
