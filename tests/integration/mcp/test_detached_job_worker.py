@@ -562,9 +562,27 @@ async def test_slow_acceptance_returns_structured_status_receipt(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("exit_mode", ["normal", "forced"])
-async def test_detached_job_survives_accepting_process_exit(tmp_path: Path, exit_mode: str) -> None:
+@pytest.mark.parametrize("receipt_read_error", [None, PermissionError, FileNotFoundError])
+async def test_detached_job_survives_accepting_process_exit(
+    tmp_path: Path,
+    exit_mode: str,
+    receipt_read_error: type[OSError] | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The worker, not the exited MCP-like parent, owns terminal delivery."""
     database_url = f"sqlite+aiosqlite:///{tmp_path / 'events.db'}"
+    receipt = tmp_path / "home" / "parent.json"
+    read_text = Path.read_text
+    read_failures = 0
+
+    def read_with_transient_failure(path: Path, *args, **kwargs):
+        nonlocal read_failures
+        if path == receipt and receipt_read_error is not None and read_failures == 0:
+            read_failures += 1
+            raise receipt_read_error("transient receipt publication contention")
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_with_transient_failure)
     async with accepting_parent(
         database_url=database_url,
         cwd=Path.cwd(),
@@ -572,6 +590,7 @@ async def test_detached_job_survives_accepting_process_exit(tmp_path: Path, exit
         delay=5.0,
         exit_mode=exit_mode,
     ) as probe:
+        assert read_failures == (1 if receipt_read_error is not None else 0)
         store, manager, job_id = probe.store, probe.manager, probe.job_id
         snapshot = await manager.get_snapshot(job_id)
         events = await store.replay("job", job_id)
