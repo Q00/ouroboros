@@ -76,6 +76,11 @@ as well as concrete IDs, remain explicit choices. Request/profile model values
 keep the existing `gemini/` and `google/` prefix normalization. An invocation-level Ouroboros
 `auto` choice is different: the role resolver converts it to `default`.
 
+The completion response reports native `result.stats` token counts. Batch JSON
+statistics are aggregated across the reported models. Provider totals beyond
+reported prompt and completion tokens are preserved as `unallocated_tokens`;
+cached counts and per-model streaming breakdowns are not added twice.
+
 The completion response uses the model reported by the CLI's `init` event.
 If no model was selected and that event does not report one, the response uses
 `default` rather than inventing a concrete model ID. This completion behavior does not

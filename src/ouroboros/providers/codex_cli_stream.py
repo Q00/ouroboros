@@ -270,6 +270,29 @@ async def iter_runtime_stream_lines(
         yield buffer.rstrip("\r")
 
 
+async def wait_runtime_exit(
+    process: Any,
+    stderr_task: asyncio.Task[list[str]] | None,
+    *,
+    shutdown_timeout: float,
+    display_name: str,
+) -> tuple[int, list[str]]:
+    """Bound the exit and pipe-drain phase after runtime stdout has completed."""
+
+    async def collect() -> tuple[int, list[str]]:
+        returncode = await process.wait()
+        # The runtime owns and cancels the collector in its cleanup block.
+        lines = await asyncio.shield(stderr_task) if stderr_task is not None else []
+        return returncode, lines
+
+    try:
+        return await asyncio.wait_for(collect(), timeout=shutdown_timeout)
+    except TimeoutError as exc:
+        raise TimeoutError(
+            f"{display_name} did not exit and close stderr within {shutdown_timeout} seconds."
+        ) from exc
+
+
 async def terminate_runtime_process(
     process: Any,
     *,
@@ -582,4 +605,5 @@ __all__ = [
     "parse_json_event",
     "terminate_process",
     "terminate_runtime_process",
+    "wait_runtime_exit",
 ]
