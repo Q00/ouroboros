@@ -53,13 +53,13 @@ from ouroboros.providers.base import (
     CompletionResponse,
     Message,
     MessageRole,
-    UsageInfo,
 )
 from ouroboros.providers.codex_cli_stream import (
     collect_stream_lines,
     iter_stream_lines,
     terminate_process,
 )
+from ouroboros.providers.native_cli_usage import opencode_cli_usage
 from ouroboros.providers.profiles import resolve_completion_profile_result
 from ouroboros.runtime.child_env import DEFAULT_OUROBOROS_STRIP_KEYS, build_child_env
 
@@ -718,11 +718,7 @@ class OpenCodeLLMAdapter:
             CompletionResponse(
                 content=content,
                 model=model or "opencode-default",
-                usage=UsageInfo(
-                    prompt_tokens=0,
-                    completion_tokens=0,
-                    total_tokens=0,
-                ),
+                usage=opencode_cli_usage(events),
                 finish_reason="stop",
             )
         )

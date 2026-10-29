@@ -108,7 +108,7 @@ each entry point supplies its resolved request, workspace, and host context.
 **5-phase pipeline ensuring comprehensive execution**
 - Phase 0: Big Bang (Interview → Seed)
 - Phase 1: PAL Router (Cost optimization)
-- Phase 2: Double Diamond (Discover → Define → Design → Deliver)
+- Phase 2: Execution (dependency-staged AC fan-out to agent runtimes)
 - Phase 3: Resilience (Lateral thinking)
 - Phase 4: Evaluation (3-stage pipeline)
 
@@ -193,7 +193,7 @@ Ouroboros applies two ancient methods to transmute irrational input into executa
 ```
 Phase 0: BIG BANG         -> Crystallize requirements into a Seed
 Phase 1: PAL ROUTER       -> Select appropriate model tier
-Phase 2: DOUBLE DIAMOND   -> Decompose and execute tasks
+Phase 2: EXECUTION        -> Fan out and execute acceptance criteria
 Phase 3: RESILIENCE       -> Handle stagnation with lateral thinking
 Phase 4: EVALUATION       -> Verify outputs at three stages
 Phase 5: SECONDARY LOOP   -> Process deferred TODOs
@@ -220,55 +220,34 @@ The Big Bang phase transforms vague ideas into crystallized specifications throu
 
 ### Phase 1: PAL Router (Progressive Adaptive LLM)
 
-The PAL Router selects the most cost-effective model tier based on task complexity.
+The PAL Router picks a model tier for each unit of work and escalates it on retry.
+It is a stateless decision point in the orchestrator; there is no `routing/` package
+(`src/ouroboros/router/` is the unrelated skill-dispatch router).
 
 **Components:**
-- `routing/router.py` - Main routing logic
-- `routing/complexity.py` - Task complexity estimation
-- `routing/tiers.py` - Model tier definitions
-- `routing/escalation.py` - Escalation logic on failure
-- `routing/downgrade.py` - Downgrade logic on success
+- `orchestrator/model_routing.py` - Tier ladder, `build_model_router()`, and per-unit `decide_model()`
+- `orchestrator/effort_routing.py` - Sibling policy for reasoning effort (not model tier)
+- `config/models.py` - `EconomicsConfig` and `TierConfig` (tier definitions and thresholds)
 
 **Tiers:**
-| Tier | Cost | Complexity Threshold |
-|------|------|---------------------|
-| FRUGAL | 1x | < 0.4 |
-| STANDARD | 10x | < 0.7 |
-| FRONTIER | 30x | >= 0.7 or critical |
+| Tier | `cost_factor` (shipped default) |
+|------|------|
+| FRUGAL | 1 |
+| STANDARD | 10 |
+| FRONTIER | 30 |
 
-**Strategy:** Start frugal, escalate only on failure.
+**Starting tier:**
+- The base tier is one tier above `economics.default_tier`, capped at frontier: the shipped `frugal` gives `standard`, and both `standard` and `frontier` give `frontier`.
+- Top-level ACs and decomposed children without an explicit trust signal start at the base tier.
+- In adaptive efficiency mode, a decomposed child whose decomposition carries an explicit trust signal starts one tier lower, never below frugal. That equals `default_tier` when it is `frugal` or `standard`, but is `standard` when it is `frontier`. Quality-first runs never lower.
+- An execution-profile hint can suggest a different starting tier.
+- No complexity score is computed: token count, tool count, and AC depth do not affect the tier.
+- Routing stays dormant, leaving model choice to the runtime, when `OUROBOROS_MODEL_TIER_ROUTING` is `0`, `off`, or `false`; when an explicit Execute-stage model pin is in effect; when the runtime backend has no mapped tier ladder (for example OpenCode); or when Codex runs on plain automatic model selection (opt in with `OUROBOROS_MODEL_TIER_ROUTING=1`).
 
-**Complexity Scoring Algorithm:**
+**Escalation:** failures move a unit toward the frontier tier. Top-level ACs on the bounded route path escalate in `orchestrator/route_escalation.py` (`advance_route()`); the retry-count rule in `decide_model()` (`orchestrator/model_routing.py`) covers the remaining units.
 
-The complexity score is a weighted sum of three normalized factors:
-
-| Factor | Weight | Normalization | Threshold |
-|--------|--------|---------------|-----------|
-| Token count | 30% | `min(tokens / 4000, 1.0)` | 4000 tokens |
-| Tool dependencies | 30% | `min(tools / 5, 1.0)` | 5 tools |
-| AC nesting depth | 40% | `min(depth / 5, 1.0)` | depth 5 |
-
-```
-complexity = 0.30 * norm_tokens + 0.30 * norm_tools + 0.40 * norm_depth
-```
-
-**Escalation Path:**
-
-When a task fails consecutively at its current tier (threshold: 2 failures), it escalates:
-
-```
-Frugal → Standard → Frontier → Stagnation Event (triggers resilience)
-```
-
-**Downgrade Path:**
-
-After sustained success (threshold: 5 consecutive successes), the tier downgrades:
-
-```
-Frontier → Standard → Frugal
-```
-
-Similar task patterns (Jaccard similarity >= 0.80) inherit tier preferences from previously successful tasks.
+**No downgrade path:** a tier is never lowered after consecutive successes.
+`economics.downgrade_success_streak` is accepted by the config schema, but nothing reads it.
 
 ### Phase 2: Execution
 
@@ -409,7 +388,6 @@ src/ouroboros/
 |   +-- ac_tree.py     # Acceptance criteria tree
 |
 +-- bigbang/        # Phase 0: Interview and seed generation
-+-- routing/        # Phase 1: PAL router
 +-- resilience/     # Phase 3: Stagnation and lateral thinking
 +-- evaluation/     # Phase 4: Three-stage evaluation
 |
@@ -418,6 +396,7 @@ src/ouroboros/
 |   +-- codex_cli_runtime.py  # CodexCliRuntime adapter
 |   +-- runtime_factory.py    # create_agent_runtime() factory
 |   +-- runner.py      # Orchestration logic
+|   +-- model_routing.py      # Phase 1: PAL model-tier routing
 |   +-- session.py     # Session state tracking
 |   +-- events.py      # Orchestrator events
 |   +-- mcp_tools.py   # MCP tool provider for external tools
