@@ -651,7 +651,7 @@ def _run_step(
         prefix = ""
         if env_overrides:
             prefix = " ".join(f"{key}={value}" for key, value in env_overrides.items()) + " "
-        print_info(f"[dry-run] Would run: {prefix}{' '.join(command)}")
+        print_info(escape(f"[dry-run] Would run: {prefix}{' '.join(command)}"))
         return True
     try:
         command_env = None
@@ -1091,7 +1091,7 @@ def update(
         )
         raise typer.Exit(1) from exc
     console.print(f"Installer:   [cyan]{identity.manager}[/cyan]")
-    console.print(f"Environment: [cyan]{identity.environment}[/cyan]")
+    console.print(f"Environment: [cyan]{escape(str(identity.environment))}[/cyan]")
     console.print(f"Profile:     {identity.profile}\n", markup=False)
 
     try:
