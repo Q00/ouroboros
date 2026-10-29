@@ -369,11 +369,11 @@ class GeminiCLIAdapter:
                 if not json_lines and line == "{":
                     json_lines.append(line)
                 elif not json_lines:
-                    content_parts.append(line)
+                    content_parts.append(("\n" if content_parts else "") + line)
                 continue
             json_lines.clear()
             if not isinstance(event, dict):
-                content_parts.append(candidate)
+                content_parts.append(("\n" if content_parts else "") + candidate)
                 continue
 
             event_type = event.get("type", "")
@@ -401,8 +401,9 @@ class GeminiCLIAdapter:
             elif event_type == "message":
                 role = event.get("role", "")
                 text = event.get("content", "")
-                if role == "model" and text:
-                    content_parts.append(text)
+                if role in {"assistant", "model"} and isinstance(text, str) and text:
+                    separator = "" if event.get("delta") is True or not content_parts else "\n"
+                    content_parts.append(separator + text)
                     if self._on_message and text.strip():
                         self._on_message("thinking", text.strip())
 
@@ -445,7 +446,7 @@ class GeminiCLIAdapter:
                     error_seen = err.get("message", str(err))
 
         if json_lines:
-            content_parts.extend(json_lines)
+            content_parts.append(("\n" if content_parts else "") + "\n".join(json_lines))
 
         returncode = await process.wait()
 
@@ -472,7 +473,7 @@ class GeminiCLIAdapter:
             )
 
         # Prefer the aggregated result event; fall back to accumulated parts.
-        content = final_response if final_response is not None else "\n".join(content_parts)
+        content = final_response if final_response is not None else "".join(content_parts)
 
         # Only treat stream-level errors as fatal when there is no usable
         # content.  Non-fatal warnings (e.g. deprecation notices) may appear
