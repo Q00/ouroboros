@@ -895,6 +895,11 @@ ouroboros config set KEY VALUE
 | `KEY` | Yes | Configuration key (dot notation) |
 | `VALUE` | Yes | Value to set |
 
+Boolean settings accept `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`,
+`t`/`f`, and `y`/`n` (case-insensitive). Other values, including empty strings
+and values with surrounding whitespace, are rejected with a nonzero exit code;
+the configuration file and any existing undo backup remain unchanged.
+
 **Examples:**
 
 ```bash
