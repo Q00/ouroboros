@@ -396,11 +396,11 @@ def _go_stack(root: Path) -> list[str]:
     module = ""
     go_version = ""
     for raw in text.splitlines():
-        line = raw.strip()
-        if line.startswith("module ") and not module:
-            module = line[len("module ") :].strip()
-        elif line.startswith("go ") and not go_version:
-            go_version = line[len("go ") :].strip()
+        parts = raw.strip().split(maxsplit=1)
+        if len(parts) == 2 and parts[0] == "module" and not module:
+            module = parts[1].strip()
+        elif len(parts) == 2 and parts[0] == "go" and not go_version:
+            go_version = parts[1].strip()
     return [_manifest_line("go.mod", [("module", module), ("go", go_version)])]
 
 
