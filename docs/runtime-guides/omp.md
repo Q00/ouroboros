@@ -322,3 +322,7 @@ first scheduled ACs, attention, and terminal assurance. The main session stays
 available and selects the relevant AC semantically rather than asking the user
 for IDs. English is the canonical instruction language; the host renders the UX
 naturally in the current conversation language.
+
+After native completion or stdout EOF, the runtime gives the worker five seconds
+to exit and close stderr. If that exit phase stalls, it terminates the worker
+and returns a `TimeoutError`; active stdout startup and idle budgets are unchanged.
