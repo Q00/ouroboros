@@ -36,7 +36,7 @@ from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal
+from textual.containers import Container, Horizontal, VerticalScroll
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.reactive import reactive
@@ -185,7 +185,7 @@ class DoubleDiamondBar(Static):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-class NodeDetailPanel(Static):
+class NodeDetailPanel(VerticalScroll):
     """Panel showing detailed information about the selected AC node."""
 
     DEFAULT_CSS = """
@@ -249,6 +249,7 @@ class NodeDetailPanel(Static):
 
     NodeDetailPanel > .thinking-section {
         width: 100%;
+        height: auto;
         max-height: 6;
         margin-top: 1;
         padding-top: 1;
@@ -267,7 +268,8 @@ class NodeDetailPanel(Static):
 
     NodeDetailPanel > .tool-history-section {
         width: 100%;
-        max-height: 10;
+        height: auto;
+        max-height: 11;
         margin-top: 1;
         padding-top: 1;
         border-top: dashed $primary-darken-2;
@@ -933,6 +935,11 @@ class DashboardScreenV3(Screen[None]):
         """Handle node selection from tree."""
         if self._detail_panel:
             self._detail_panel.selected_node = message.node_data
+            node_id = message.node_data.get("id")
+            thinking = self._state.thinking.get(node_id, "") if self._state else ""
+            history = self._state.tool_history.get(node_id, []) if self._state else []
+            self._detail_panel.update_thinking(thinking)
+            self._detail_panel.update_tool_history(list(history))
 
     def on_execution_updated(self, message: ExecutionUpdated) -> None:
         pass  # Status display removed
@@ -1072,6 +1079,15 @@ class DashboardScreenV3(Screen[None]):
         """Handle tool call completed - clear inline activity."""
         if self._tree:
             self._tree.clear_node_activity(message.ac_id)
+        if (
+            self._state is not None
+            and self._detail_panel is not None
+            and self._detail_panel.selected_node is not None
+            and self._detail_panel.selected_node.get("id") == message.ac_id
+        ):
+            self._detail_panel.update_tool_history(
+                list(self._state.tool_history.get(message.ac_id, []))
+            )
         if self._activity_bar:
             tools = dict(self._activity_bar.active_tools)
             tools.pop(message.ac_id, None)
