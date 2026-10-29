@@ -73,7 +73,9 @@ def manifest_free_unittest_proposal(working_dir: Path) -> dict[str, str] | None:
     found_test_case = False
     for path in test_files:
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            # Let Python honor coding cookies and UTF-8 BOMs just as its
+            # module loader does, rather than pre-decoding every file as UTF-8.
+            tree = ast.parse(path.read_bytes())
         except (OSError, UnicodeError, SyntaxError):
             continue
         if _module_has_unittest_test(tree):
