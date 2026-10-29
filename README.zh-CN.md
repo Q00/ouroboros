@@ -319,7 +319,7 @@ ouroboros uninstall
 ```
 interview  ->  苏格拉底式提问揭示了 12 条隐藏假设
 seed       ->  把回答凝结成不可变规约（Ambiguity: 0.15）
-run        ->  按 Double Diamond 分解执行
+run        ->  按依赖顺序把验收标准分发给智能体执行
 evaluate   ->  三阶段验证：Mechanical -> Semantic -> Consensus
 ```
 
@@ -360,7 +360,7 @@ AI 编码工具本身很强 —— 但当输入不清晰时，它们解的是**�
 | :------------ | :-------------------------------------------------------------------- |
 | **Interview** | 用苏格拉底式提问揭示隐藏假设                                          |
 | **Seed**      | 把回答凝结成一份不可变规约                                            |
-| **Execute**   | Double Diamond：Discover → Define → Design → Deliver                  |
+| **Execute**   | 按依赖顺序把验收标准分发给智能体执行                                  |
 | **Evaluate**  | 三阶段关卡：Mechanical（$0）→ Semantic → Multi-Model Consensus        |
 | **Evolve**    | Wonder *("我们还有什么没搞清楚？")* → Reflect → 进入下一代            |
 
@@ -394,7 +394,7 @@ Ralph Cycle 3: evolve_step(lineage)       -> Gen 3 -> action=CONVERGED
 | `ooo interview`      | `ouroboros init start`                                            | 苏格拉底式提问 —— 把隐藏假设挖出来                            |
 | `ooo auto`           | `ouroboros auto`                                                  | 从一个目标 → A 级 Seed → 在有界循环里完成执行交接             |
 | `ooo seed`           | *(由 interview 生成)*                                             | 凝结为不可变规约                                              |
-| `ooo run`            | `ouroboros run seed.yaml`                                         | 用 Double Diamond 分解执行                                    |
+| `ooo run`            | `ouroboros run seed.yaml`                                         | 执行 Seed 的验收标准                                          |
 | `ooo evaluate`       | *(经由 MCP)*                                                      | 三阶段验证关卡                                                |
 | `ooo evolve`         | *(经由 MCP)*                                                      | 演化循环，直到本体收敛                                        |
 | `ooo unstuck`        | *(经由 MCP)*                                                      | 卡住时，5 个横向思维人格替你换个角度                          |
@@ -447,7 +447,7 @@ Ralph Cycle 3: evolve_step(lineage)       -> Gen 3 -> action=CONVERGED
 ```
 src/ouroboros/
 +-- bigbang/        Interview、模糊度打分、brownfield 探查
-+-- routing/        PAL Router —— 三档成本优化（1x / 10x / 30x）
++-- router/         技能分发（`ooo <skill>` → MCP 工具）；PAL 档位路由在 orchestrator/
 +-- execution/      （已弃用 —— 逻辑已移至 orchestrator/ 和 mcp/tools/）
 +-- evaluation/     Mechanical -> Semantic -> Multi-Model Consensus
 +-- evolution/      Wonder / Reflect 循环、收敛判定
@@ -464,7 +464,7 @@ src/ouroboros/
 ```
 
 **关键内部细节：**
-- **PAL Router** —— Frugal（1x）→ Standard（10x）→ Frontier（30x），失败自动升级，成功自动降级
+- **PAL Router** —— Frugal（1x）→ Standard（10x）→ Frontier（30x），重试时升级（不会自动降级）
 - **Drift** —— Goal（50%）+ Constraint（30%）+ Ontology（20%）加权度量，阈值 ≤ 0.3
 - **Brownfield** —— 自动识别多种语言生态的配置文件
 - **Evolution** —— 最多 30 代，本体相似度 ≥ 0.95 时收敛
