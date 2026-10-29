@@ -36,7 +36,7 @@ from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal
+from textual.containers import Container, Horizontal, VerticalScroll
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.reactive import reactive
@@ -185,7 +185,7 @@ class DoubleDiamondBar(Static):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-class NodeDetailPanel(Static):
+class NodeDetailPanel(VerticalScroll):
     """Panel showing detailed information about the selected AC node."""
 
     DEFAULT_CSS = """
@@ -249,6 +249,7 @@ class NodeDetailPanel(Static):
 
     NodeDetailPanel > .thinking-section {
         width: 100%;
+        height: auto;
         max-height: 6;
         margin-top: 1;
         padding-top: 1;
@@ -267,6 +268,7 @@ class NodeDetailPanel(Static):
 
     NodeDetailPanel > .tool-history-section {
         width: 100%;
+        height: auto;
         max-height: 11;
         margin-top: 1;
         padding-top: 1;

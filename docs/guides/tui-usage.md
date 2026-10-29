@@ -123,6 +123,8 @@ When an AC or sub-AC is selected in the tree, this panel shows:
 - **Content**: The full acceptance criterion text
 - **Thinking and recent tool calls**: Recorded activity for the selected node, updated as new activity arrives
 
+At smaller terminal sizes, click the detail panel or press Tab to focus it. Use the arrow keys, Page Up, Page Down, Home, or End to scroll its contents.
+
 ## Textual Logs Screen (Key: 3 or `l`)
 
 Filterable, scrollable log viewer with color-coded severity levels:

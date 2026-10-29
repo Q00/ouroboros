@@ -56,10 +56,11 @@ async def test_selected_details_update_only_from_the_selected_nodes_live_activit
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("count", [8, 12])
-async def test_latest_tool_completion_is_visible_in_selected_details(count):
+@pytest.mark.parametrize("count", [1, 8, 12])
+@pytest.mark.parametrize("size", [(180, 60), (80, 24)])
+async def test_latest_tool_completion_is_visible_in_selected_details(count, size):
     app = OuroborosTUI()
-    async with app.run_test(size=(180, 60)) as pilot:
+    async with app.run_test(size=size) as pilot:
         await pilot.pause()
         screen = app.screen
         assert isinstance(screen, DashboardScreenV3)
@@ -69,6 +70,9 @@ async def test_latest_tool_completion_is_visible_in_selected_details(count):
                 ToolCallCompleted("e1", "a", "Read", f"VISIBLE_TOOL_{index:02}", 1, 0.2, True)
             )
             await pilot.pause()
+        await pilot.click("NodeDetailPanel")
+        await pilot.press("end")
+        await pilot.pause()
         screenshot = app.export_screenshot()
         assert f"VISIBLE_TOOL_{count:02}" in screenshot
         if count > 8:
