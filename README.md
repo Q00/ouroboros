@@ -58,23 +58,17 @@ irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | i
 
 <p align="center"><sub>One command installs it. Then run <code>ooo setup</code> once inside your coding agent — details in <a href="#quick-start">Quick Start</a>.</sub></p>
 
-<p align="center"><sub><b>Separate runs, separate hosts. Different tasks on purpose — the engine is what is shared, not the prompt</b></sub></p>
+Demo videos for each runtime.
 
-<table align="center">
+<table>
 <tr>
-<td align="center" width="50%"><img src="./docs/images/ooo-interview.gif" alt="Terminal recording of the ouroboros CLI interview reporting an ambiguity score"><br><sub><b>Terminal CLI</b> — a task-management CLI: <code>ouroboros init start</code> asking about ordering and scope, then reporting an ambiguity score</sub></td>
-<td align="center" width="50%"><img src="./docs/images/host-codex.gif" alt="Screen recording of the ChatGPT app calling Ouroboros as an integration"><br><sub><b>ChatGPT (Codex)</b> — called as an integration, on a video-publishing harness: the interview, its advisory lanes, and the ambiguity ledger</sub></td>
-</tr>
-<tr>
-<td align="center" width="50%"><img src="./docs/images/host-claude.gif" alt="Screen recording of Claude Code running six Ouroboros interview advisory lanes in parallel"><br><sub><b>Claude Code</b> — a YouTube automation task, with the six advisory lanes running in parallel before the interview submits</sub></td>
-<td align="center" width="50%"><img src="./docs/images/host-hermes.gif" alt="Screen recording of a Discord bot running the Ouroboros interview and reporting a final ambiguity of 0.15"><br><sub><b>Hermes (Discord)</b> — a kart-racing game, run as a chat bot, ending at <code>Final ambiguity: 0.15</code></sub></td>
-</tr>
-<tr>
-<td align="center" width="50%"><img src="./docs/images/host-dsh.gif" alt="Screen recording of DeepSeek Harness calling the Ouroboros interview tool and submitting advisory fan-out results"><br><sub><b>DeepSeek Harness</b> — an OSS-trend outreach script, driven from a dsh chat: <code>mcp__ouroboros__ouroboros_interview</code> turn by turn, fan-out results submitted between rounds</sub></td>
-<td align="center" width="50%"><img src="./docs/images/host-kiro.gif" alt="10x screen recording of Kiro CLI running an Ouroboros interview"><br><sub><b>Kiro</b> — the Kiro CLI running the Ouroboros interview flow, turning a vague request into a structured, testable Seed</sub></td>
-</tr>
-<tr>
-<td align="center" colspan="2"><img src="./docs/images/host-antigravity.gif" width="50%" alt="Screen recording of Antigravity running an Ouroboros interview and submitting the selected answer"><br><sub><b>Antigravity</b> — a YouTube-publishing automation interview: asks what to automate, shows advisory lanes, and submits the selected answer</sub></td>
+<td align="center" valign="top"><img width="320" src="./docs/images/7-ooo-interview-framed.gif" alt="Terminal recording of the ouroboros CLI interview reporting an ambiguity score"><br><sub><b>Terminal CLI</b><br> — a task-management CLI:<br> <code>ouroboros init start</code> asking about<br> ordering and scope, then reporting<br> an ambiguity score</sub><br><sub>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</sub></td>
+<td align="center" valign="top"><img width="320" src="./docs/images/3-host-codex-framed.gif" alt="Screen recording of the ChatGPT app calling Ouroboros as an integration"><br><sub><b>ChatGPT (Codex)</b><br> — called as an integration,<br> on a video-publishing harness: the interview,<br> its advisory lanes, and the ambiguity ledger</sub><br><sub>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</sub></td>
+<td align="center" valign="top"><img width="320" src="./docs/images/2-host-claude-framed.gif" alt="Screen recording of Claude Code running six Ouroboros interview advisory lanes in parallel"><br><sub><b>Claude Code</b><br> — a YouTube automation task, with the six<br> advisory lanes running in parallel<br> before the interview submits</sub><br><sub>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</sub></td>
+<td align="center" valign="top"><img width="320" src="./docs/images/5-host-hermes-framed.gif" alt="Screen recording of a Discord bot running the Ouroboros interview and reporting a final ambiguity of 0.15"><br><sub><b>Hermes (Discord)</b><br> — a kart-racing game, run as a chat bot,<br> ending at <code>Final ambiguity: 0.15</code></sub><br><sub>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</sub></td>
+<td align="center" valign="top"><img width="320" src="./docs/images/4-host-dsh-framed.gif" alt="Screen recording of DeepSeek Harness calling the Ouroboros interview tool and submitting advisory fan-out results"><br><sub><b>DeepSeek Harness</b><br> — an OSS-trend outreach script,<br> driven from a dsh chat:<br> <code>mcp__ouroboros__ouroboros_interview</code><br> turn by turn, fan-out results<br> submitted between rounds</sub><br><sub>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</sub></td>
+<td align="center" valign="top"><img width="320" src="./docs/images/6-host-kiro-framed.gif" alt="10x screen recording of Kiro CLI running an Ouroboros interview"><br><sub><b>Kiro</b><br> — the Kiro CLI running the Ouroboros<br> interview flow, turning a vague request<br> into a structured, testable Seed</sub><br><sub>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</sub></td>
+<td align="center" valign="top"><img width="320" src="./docs/images/1-host-antigravity-framed.gif" alt="Screen recording of Antigravity running an Ouroboros interview and submitting the selected answer"><br><sub><b>Antigravity</b><br> — a YouTube-publishing automation interview:<br> asks what to automate, shows advisory lanes,<br> and submits the selected answer</sub><br><sub>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</sub></td>
 </tr>
 </table>
 
@@ -344,7 +338,7 @@ After one loop of the Ouroboros cycle, a vague idea becomes a verified codebase:
 ```
 interview  ->  Socratic questioning exposed 12 hidden assumptions
 seed       ->  Crystallized answers into an immutable spec (Ambiguity: 0.15)
-run        ->  Executed via Double Diamond decomposition
+run        ->  Fanned acceptance criteria out to agents in dependency order
 evaluate   ->  3-stage verification: Mechanical -> Semantic -> Consensus
 ```
 
@@ -385,7 +379,7 @@ Each cycle does not repeat -- it **evolves**. The output of evaluation feeds bac
 | :------------ | :-------------------------------------------------------------------- |
 | **Interview** | Socratic questioning exposes hidden assumptions                       |
 | **Seed**      | Answers crystallize into an immutable specification                   |
-| **Execute**   | Double Diamond: Discover -> Define -> Design -> Deliver               |
+| **Execute**   | Acceptance criteria fan out to agents in dependency order             |
 | **Evaluate**  | 3-stage gate: Mechanical ($0) -> Semantic -> Multi-Model Consensus    |
 | **Evolve**    | Wonder *("What do we still not know?")* -> Reflect -> next generation |
 
@@ -419,7 +413,7 @@ Inside AI coding agent sessions, use `ooo <cmd>` skills. From the terminal, use 
 | `ooo interview`  | `ouroboros init start`                                            | Socratic questioning -- expose hidden assumptions            |
 | `ooo auto`       | `ouroboros auto`                                                  | Goal → A-grade Seed → execution handoff with bounded loops   |
 | `ooo seed`       | *(generated by interview)*                                        | Crystallize into immutable spec                              |
-| `ooo run`        | `ouroboros run seed.yaml`                                         | Execute via Double Diamond decomposition                     |
+| `ooo run`        | `ouroboros run seed.yaml`                                         | Execute the seed's acceptance criteria                       |
 | `ooo evaluate`   | *(via MCP)*                                                       | 3-stage verification gate                                    |
 | `ooo evolve`     | *(via MCP)*                                                       | Evolutionary loop until ontology converges                   |
 | `ooo unstuck`    | *(via MCP)*                                                       | 5 lateral thinking personas when you are stuck               |
@@ -473,7 +467,7 @@ Nine highlighted agents below, with 12 more specialized agents available (21 tot
 ```
 src/ouroboros/
 +-- bigbang/        Interview, ambiguity scoring, brownfield explorer
-+-- router/         PAL Router -- 3-tier cost optimization (1x / 10x / 30x)
++-- router/         Skill dispatch (`ooo <skill>` -> MCP tool); PAL tier routing is in orchestrator/
 +-- execution/      (deprecated — logic moved to orchestrator/ and mcp/tools/)
 +-- evaluation/     Mechanical -> Semantic -> Multi-Model Consensus
 +-- evolution/      Wonder / Reflect cycle, convergence detection
@@ -490,7 +484,7 @@ src/ouroboros/
 ```
 
 **Key internals:**
-- **PAL Router** -- Frugal (1x) -> Standard (10x) -> Frontier (30x) with auto-escalation on failure, auto-downgrade on success
+- **PAL Router** -- Frugal (1x) -> Standard (10x) -> Frontier (30x) with escalation on retry (no automatic downgrade)
 - **Drift** -- Goal (50%) + Constraint (30%) + Ontology (20%) weighted measurement, threshold <= 0.3
 - **Brownfield** -- Auto-detects config files across multiple language ecosystems
 - **Evolution** -- Up to 30 generations, convergence at ontology similarity >= 0.95
