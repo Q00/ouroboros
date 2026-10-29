@@ -678,7 +678,7 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         "src/ouroboros/mcp/detached_jobs.py",
         "_spawn_worker",
         "subprocess.Popen",
-        298,
+        331,
         14,
     ): "os.environ.copy()+marker via **kwargs; fixed `sys.executable -m` argv. PYTHON* keys are denied from the untrusted .env by the loader.",
     (
