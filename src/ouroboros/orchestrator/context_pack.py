@@ -240,10 +240,10 @@ def render_context_pack(pack: ContextPack) -> str:
     repo_map = list(pack.repo_map)
     while True:
         rendered = _render(pack.stack, pack.verify_commands, tuple(repo_map))
-        if len(rendered) <= MAX_PACK_CHARS or not repo_map:
+        if len(rendered) <= MAX_PACK_CHARS:
             return rendered
-        # Drop the last map line and retry; the stack/verify facts are the
-        # highest-value signal and are never trimmed.
+        if not repo_map:
+            return _render_fitting_facts(pack)
         repo_map.pop()
 
 
@@ -506,18 +506,24 @@ def _git_head(root: Path) -> str | None:
 def _source_fingerprint(root: Path) -> dict[str, Any]:
     """Return a deterministic signature of the scanner's working-tree sources.
 
-    Each source maps to ``[mtime_ns, size]`` (or :data:`_FINGERPRINT_ABSENT`
-    when missing), so any edit, creation, or deletion of a parsed file changes
-    the fingerprint even while git ``HEAD`` stays fixed.
+    Each source maps to ``[mtime_ns, size, sha256]`` (or
+    :data:`_FINGERPRINT_ABSENT` when missing). The content hash catches edits
+    made by tools that preserve timestamps and file sizes while ``HEAD`` stays
+    fixed; hashing is streamed so source size does not increase peak memory.
     """
+    import hashlib
+
     fingerprint: dict[str, Any] = {}
     for rel in _FINGERPRINT_SOURCES:
         try:
-            stat = (root / rel).stat()
+            source = root / rel
+            stat = source.stat()
+            with source.open("rb") as handle:
+                digest = hashlib.file_digest(handle, "sha256").hexdigest()
         except OSError:
             fingerprint[rel] = _FINGERPRINT_ABSENT
             continue
-        fingerprint[rel] = [stat.st_mtime_ns, stat.st_size]
+        fingerprint[rel] = [stat.st_mtime_ns, stat.st_size, digest]
     return fingerprint
 
 
@@ -562,3 +568,20 @@ def _write_cache(root: Path, pack: ContextPack, fingerprint: dict[str, Any]) -> 
         )
     except OSError as exc:
         log.warning("context_pack.cache_write_failed", path=str(cache_path), error=str(exc))
+
+
+def _render_fitting_facts(pack: ContextPack) -> str:
+    # A manifest value or command can itself exceed the entire budget. Keep
+    # complete facts only: truncating a command would advertise a different
+    # command, and an oversized early fact must not hide later facts that fit.
+    stack: tuple[str, ...] = ()
+    commands: tuple[str, ...] = ()
+    for fact in pack.stack:
+        candidate = (*stack, fact)
+        if len(_render(candidate, commands, ())) <= MAX_PACK_CHARS:
+            stack = candidate
+    for fact in pack.verify_commands:
+        candidate = (*commands, fact)
+        if len(_render(stack, candidate, ())) <= MAX_PACK_CHARS:
+            commands = candidate
+    return _render(stack, commands, ())

@@ -20,7 +20,8 @@ Known native file, search, and command tools receive canonical names and
 path/command hints. Original arguments remain available; malformed inputs do
 not become invented file paths or commands. Unknown tools retain their names.
 Tool output is kept separate from assistant answer accumulation. Deltas are
-concatenated exactly, and a terminal full response replaces accumulated text.
+concatenated exactly, and a nonempty terminal full response replaces accumulated
+text. A status-only or empty terminal response retains the streamed answer.
 Plain-text fallback still joins lines for compatibility with wrapped output.
 
 Workspace and resume validation are separate runtime changes.

@@ -5,6 +5,11 @@ doc_metadata:
 
 # Running Ouroboros with OpenCode
 
+OpenCode 1.x LLM completions report token usage from native `step_finish`
+events, counting the latest report for each step part once. The native output
+count already uses raw output tokens, so reasoning is not added again; additive
+cache groups and any remaining reported total are preserved as `unallocated_tokens`.
+
 OpenCode 2.x plugin mode is not yet supported. Setup rejects a detected 2.x
 CLI before installing the V1 bridge or writing configuration. Use
 `ouroboros setup --runtime opencode --opencode-mode subprocess` for the existing

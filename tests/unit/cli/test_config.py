@@ -1037,6 +1037,77 @@ class TestConfigSet:
         data = yaml.safe_load((config_dir / "config.yaml").read_text())
         assert data["models"] == {"pin": True, "default": "frontier"}
 
+    @pytest.mark.parametrize("stored_value", [None, True, False])
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("True", True),
+            ("1", True),
+            ("YES", True),
+            ("on", True),
+            ("t", True),
+            ("Y", True),
+            ("FaLsE", False),
+            ("0", False),
+            ("no", False),
+            ("OFF", False),
+            ("F", False),
+            ("n", False),
+        ],
+    )
+    def test_set_boolean_spellings(
+        self, config_dir: Path, stored_value: bool | None, value: str, expected: bool
+    ) -> None:
+        config_path = config_dir / "config.yaml"
+        data = yaml.safe_load(config_path.read_text())
+        if stored_value is not None:
+            data["models"] = {"pin": stored_value}
+        config_path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
+            patch("ouroboros.config.loader.get_config_dir", return_value=config_dir),
+        ):
+            result = runner.invoke(app, ["set", "models.pin", value])
+
+        assert result.exit_code == 0, result.output
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert saved["models"]["pin"] is expected
+        data["models"] = {"pin": expected}
+        assert saved == data
+
+    @pytest.mark.parametrize("stored_value", [None, True, False])
+    @pytest.mark.parametrize("backup_exists", [False, True])
+    @pytest.mark.parametrize("value", ["tru", "flase", "2", "", " true ", "maybe"])
+    def test_set_invalid_boolean_preserves_config_and_backup_bytes(
+        self,
+        cp949_config_dir: Path,
+        stored_value: bool | None,
+        backup_exists: bool,
+        value: str,
+    ) -> None:
+        config_path = cp949_config_dir / "config.yaml"
+        backup_path = cp949_config_dir / "config.yaml.bak"
+        original = "\ufeff# 한글 설정 🚀\r\nlogging:\r\n  level: info  # keep comment\r\n"
+        if stored_value is not None:
+            original += f"models:\r\n  pin: {str(stored_value).lower()}\r\n"
+        original_bytes = original.encode("utf-8")
+        config_path.write_bytes(original_bytes)
+        backup_bytes = "\ufeff# 이전 설정 🚀\r\nmodels:\r\n  pin: false\r\n".encode("utf-8")
+        if backup_exists:
+            backup_path.write_bytes(backup_bytes)
+
+        result = runner.invoke(app, ["set", "models.pin", value])
+
+        assert result.exit_code == 1, result.output
+        assert "Invalid boolean value" in result.output
+        assert "models.pin" in result.output
+        assert config_path.read_bytes() == original_bytes
+        if backup_exists:
+            assert backup_path.read_bytes() == backup_bytes
+        else:
+            assert not backup_path.exists()
+
     def test_set_unknown_top_level_key_rejected(self, config_dir: Path) -> None:
         """config set should reject unknown top-level keys."""
         with patch("ouroboros.config.models.get_config_dir", return_value=config_dir):
