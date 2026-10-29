@@ -23,6 +23,7 @@ from ouroboros.mcp.job_manager import (
     JobSnapshot,
     JobStatus,
 )
+from ouroboros.mcp.job_read_state import JobNotFoundError, pending_job_result
 from ouroboros.mcp.tools import host_dispatch_status
 from ouroboros.mcp.tools.ac_tree_hud_handler import (
     format_subtask_progress_summary,
@@ -35,6 +36,9 @@ from ouroboros.mcp.tools.attention_relay import (
 from ouroboros.mcp.tools.job_wait_guard import (
     JOB_WAIT_GUARD_VERSION,
     await_job_wait_request,
+)
+from ouroboros.mcp.tools.job_wait_guard import (
+    job_wait_internal_timeout_result as _job_wait_internal_timeout_result,
 )
 from ouroboros.mcp.types import (
     ContentType,
@@ -203,39 +207,6 @@ def _parse_non_negative_int_argument(
             MCPToolError(f"{name} must be a non-negative integer", tool_name=tool_name)
         )
     return Result.ok(value)
-
-
-def _job_wait_internal_timeout_result(
-    *,
-    job_id: str,
-    cursor: int,
-    timeout_seconds: int,
-    requested_timeout_seconds: int,
-    view: str,
-    stream: str,
-    wait_for: str,
-) -> MCPToolResult:
-    text = (
-        f"job_wait timed out before producing a snapshot for `{job_id}`. "
-        "Poll `ouroboros_job_status` or call `ouroboros_job_wait` again."
-    )
-    return MCPToolResult(
-        content=(MCPContentItem(type=ContentType.TEXT, text=text),),
-        is_error=False,
-        meta={
-            "job_id": job_id,
-            "cursor": cursor,
-            "changed": False,
-            "view": view,
-            "stream": stream,
-            "wait_for": wait_for,
-            "timeout_seconds": timeout_seconds,
-            "timeout_seconds_requested": requested_timeout_seconds,
-            "timeout_seconds_capped": timeout_seconds != requested_timeout_seconds,
-            "wait_timed_out": True,
-            "result_available": False,
-        },
-    )
 
 
 async def _query_all_execution_subtask_events(
@@ -1266,6 +1237,10 @@ class JobStatusHandler:
             try:
                 snapshot = await self._job_manager.get_snapshot(job_id)
             except ValueError as exc:
+                if isinstance(exc, JobNotFoundError) and (
+                    pending := await pending_job_result(self._job_manager, job_id)
+                ):
+                    return Result.ok(pending)
                 return Result.err(MCPToolError(str(exc), tool_name="ouroboros_job_status"))
 
         text, progress = await _render_job_snapshot(snapshot, self._event_store)
@@ -1609,6 +1584,32 @@ class JobWaitHandler:
                 )
             )
         except ValueError as exc:
+            if isinstance(exc, JobNotFoundError):
+                try:
+                    pending = await await_job_wait_request(
+                        pending_job_result(self._job_manager, job_id),
+                        timeout_seconds=timeout_seconds,
+                        response_timeout=max(
+                            0.0,
+                            started_at + wait_response_timeout - asyncio.get_running_loop().time(),
+                        ),
+                        job_id=job_id,
+                        branch="pending_receipt",
+                    )
+                except TimeoutError:
+                    return Result.ok(
+                        _job_wait_internal_timeout_result(
+                            job_id=job_id,
+                            cursor=cursor,
+                            timeout_seconds=timeout_seconds,
+                            requested_timeout_seconds=requested_timeout_seconds,
+                            view=view,
+                            stream=stream,
+                            wait_for=wait_for,
+                        )
+                    )
+                if pending is not None:
+                    return Result.ok(pending)
             log.debug(
                 "mcp.tool.job_wait.not_found",
                 job_id=job_id,
@@ -2068,6 +2069,10 @@ class JobResultHandler:
             try:
                 snapshot = await self._job_manager.get_snapshot(job_id)
             except ValueError as exc:
+                if isinstance(exc, JobNotFoundError) and (
+                    pending := await pending_job_result(self._job_manager, job_id)
+                ):
+                    return Result.ok(pending)
                 return Result.err(
                     MCPToolError(
                         f"Job handle not found: {job_id}. Result unavailable.",
