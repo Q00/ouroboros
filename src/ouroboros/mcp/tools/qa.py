@@ -10,7 +10,7 @@ https://github.com/Yeachan-Heo/oh-my-codex/commit/6fd5471
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 import math
 import re
@@ -592,7 +592,7 @@ class QAHandler:
     @property
     def definition(self) -> MCPToolDefinition:
         """Return the tool definition."""
-        return MCPToolDefinition(
+        definition = MCPToolDefinition(
             name="ouroboros_qa",
             description=(
                 "General-purpose QA verdict for any artifact type. "
@@ -666,6 +666,9 @@ class QAHandler:
                 ),
             ),
         )
+        schema = definition.to_input_schema()
+        schema["properties"]["pass_threshold"].update(minimum=0.0, maximum=1.0)
+        return replace(definition, input_schema=schema)
 
     async def handle(
         self,
@@ -692,7 +695,15 @@ class QAHandler:
 
         artifact_type = arguments.get("artifact_type", "code")
         reference = arguments.get("reference")
-        pass_threshold = float(arguments.get("pass_threshold", DEFAULT_PASS_THRESHOLD))
+        threshold = arguments.get("pass_threshold", DEFAULT_PASS_THRESHOLD)
+        if not _is_finite_number(threshold) or not 0.0 <= threshold <= 1.0:
+            return Result.err(
+                MCPToolError(
+                    "pass_threshold must be a finite number between 0.0 and 1.0",
+                    tool_name="ouroboros_qa",
+                )
+            )
+        pass_threshold = float(threshold)
         qa_session_id = arguments.get("qa_session_id") or f"qa-{uuid.uuid4().hex[:8]}"
         iteration_history = arguments.get("iteration_history")
         if iteration_history is None:
