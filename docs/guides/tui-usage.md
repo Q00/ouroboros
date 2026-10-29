@@ -112,7 +112,7 @@ Hierarchical view of all acceptance criteria and their sub-ACs:
 | `◆` (blue) | Atomic -- leaf node, no further decomposition |
 | `◇` (cyan) | Decomposed -- has child sub-ACs |
 
-**Navigation**: Use arrow keys to move through the tree. Press Enter or click to select a node and view its details in the right panel. Press `t` to focus the tree widget.
+**Navigation**: Use arrow keys to move through the tree. Press Enter or click to select a node and view its details in the right panel. Press `t` to focus the tree widget. Live updates preserve the cursor node and expanded or collapsed branches while those nodes remain in the tree.
 
 ### Node Detail Panel
 
@@ -121,6 +121,9 @@ When an AC or sub-AC is selected in the tree, this panel shows:
 - **Status**: Current execution status
 - **Depth**: Tree depth (0 = root, 1 = top-level AC, 2+ = sub-AC)
 - **Content**: The full acceptance criterion text
+- **Thinking and recent tool calls**: Recorded activity for the selected node, updated as new activity arrives
+
+At smaller terminal sizes, click the detail panel or press Tab to focus it. Use the arrow keys, Page Up, Page Down, Home, or End to scroll its contents.
 
 ## Textual Logs Screen (Key: 3 or `l`)
 

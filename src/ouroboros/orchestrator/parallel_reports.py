@@ -57,11 +57,11 @@ def render_parallel_verification_report(
         lines.append(render_unverifiable_summary(unverifiable_indices))
 
     warning_paths: list[str] = []
-    for user_facing_idx, result in enumerate(parallel_result.results, start=1):
+    for result in parallel_result.results:
         warning_paths.extend(
             collect_decomposition_depth_warning_paths(
                 result,
-                index_path=(user_facing_idx,),
+                index_path=(result.ac_index + 1,),
             )
         )
 

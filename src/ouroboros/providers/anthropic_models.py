@@ -18,9 +18,10 @@ def is_claude_5_5(model: str) -> bool:
 def response_format_instruction(response_format: dict[str, object]) -> str:
     """Steer JSON output on Anthropic models that reject assistant prefill."""
     if response_format.get("type") == "json_schema":
-        schema_json = json.dumps(
-            response_format.get("json_schema", {}), sort_keys=True, separators=(",", ":")
-        )
+        schema = response_format.get("json_schema", {})
+        if isinstance(schema, dict) and isinstance(schema.get("schema"), dict):
+            schema = schema["schema"]
+        schema_json = json.dumps(schema, sort_keys=True, separators=(",", ":"))
         return (
             "Respond only with valid JSON that conforms to this JSON schema. "
             f"Do not include prose or Markdown.\nSchema: {schema_json}"

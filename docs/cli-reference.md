@@ -501,7 +501,10 @@ requires its optional package and a supported Python version. If initialization 
 `Could not initialize LLM adapter` before discovery and writes no configuration.
 After successful initialization, a manifest-free, discoverable standard-library
 `unittest.TestCase` suite under `tests/` uses deterministic discovery without an
-LLM call; an empty project produces no configuration. If the file already exists,
+LLM call. Modules or packages with a custom `load_tests` hook do not establish
+a discoverable suite from their visible test classes, because the hook can replace
+those tests. Another ordinary module can still establish a suite; otherwise no
+configuration is produced. An empty project also produces no configuration. If the file already exists,
 the command leaves it unchanged without initializing an adapter unless `--force`
 is passed. This command
 authors the deterministic Stage 1 configuration; it does not detect installed
@@ -894,6 +897,11 @@ ouroboros config set KEY VALUE
 |----------|----------|-------------|
 | `KEY` | Yes | Configuration key (dot notation) |
 | `VALUE` | Yes | Value to set |
+
+Boolean settings accept `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`,
+`t`/`f`, and `y`/`n` (case-insensitive). Other values, including empty strings
+and values with surrounding whitespace, are rejected with a nonzero exit code;
+the configuration file and any existing undo backup remain unchanged.
 
 **Examples:**
 
