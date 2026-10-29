@@ -3558,7 +3558,7 @@ class TestJobManager:
             assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
             assert await is_cancellation_requested(session_id) is True
         finally:
-            lock_path(session_id).unlink(missing_ok=True)
+            release_session_lock(session_id)
             await clear_cancellation(session_id)
             await _cancel_manager_tasks(manager)
             await store.close()
@@ -3763,7 +3763,6 @@ class TestJobManager:
                 session_id=session_id,
             )
             assert create_result.is_ok
-            lock_path(session_id).write_text("1")
 
             async def _runner() -> MCPToolResult:
                 await asyncio.sleep(10)
@@ -3780,10 +3779,16 @@ class TestJobManager:
             )
             runner_task = manager._runner_tasks[started.job_id]
 
-            with patch.object(
-                store,
-                "query_events",
-                new=AsyncMock(side_effect=PersistenceError("query failed")),
+            # This path requires a live external holder. PID 1 is not portable,
+            # and our own PID would select the different local-owner contract.
+            with (
+                patch.object(
+                    store,
+                    "query_events",
+                    new=AsyncMock(side_effect=PersistenceError("query failed")),
+                ),
+                patch.object(job_manager_module, "is_holder_alive", return_value=True),
+                patch.object(job_manager_module, "is_owned_by_current_process", return_value=False),
             ):
                 snapshot = await manager.cancel_job(started.job_id)
             await asyncio.sleep(0)
@@ -6535,8 +6540,9 @@ class TestJobManager:
                 await manager.find_active_job_by_session("auto_recovery", job_type="ralph")
             ) is None
 
+            job_task = manager._tasks[started.job_id]
             gate.set()
-            await asyncio.sleep(0.05)
+            await asyncio.wait_for(asyncio.shield(job_task), timeout=5.0)
 
             assert (await manager.find_active_job_by_session("auto_recovery")) is None
             terminal_recovered = await manager.find_active_job_by_session(

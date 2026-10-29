@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
+import hmac
 import json
 import logging
 import os
 from pathlib import Path
+import secrets
 import subprocess
 import sys
 import threading
@@ -66,6 +68,7 @@ class DetachedJobRequest:
     runtime_backend: str | None = None
     llm_backend: str | None = None
     opencode_mode: str | None = None
+    launch_token: str | None = None
 
     @classmethod
     def from_json(cls, payload: dict[str, Any]) -> DetachedJobRequest:
@@ -85,6 +88,9 @@ class DetachedJobRequest:
         tool_name = str(payload["tool_name"])
         database_url = str(payload["database_url"])
         cwd = str(payload["cwd"])
+        launch_token = payload.get("launch_token")
+        if launch_token is not None and not _valid_launch_token(launch_token):
+            raise ValueError("Detached job request has an invalid launch token")
         return cls(
             job_id=job_id,
             tool_name=tool_name,
@@ -94,6 +100,7 @@ class DetachedJobRequest:
             runtime_backend=_optional_string(payload.get("runtime_backend")),
             llm_backend=_optional_string(payload.get("llm_backend")),
             opencode_mode=_optional_string(payload.get("opencode_mode")),
+            launch_token=launch_token,
         )
 
 
@@ -253,22 +260,48 @@ def decode_tool_error_rejection(payload: object) -> MCPToolError:
     )
 
 
+def _valid_launch_token(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
 def _preacceptance_rejection(
     status: dict[str, Any] | None,
     *,
     job_id: str,
     request_tool_name: str,
     worker_pid: int,
+    launch_token: str | None = None,
 ) -> MCPToolError | None:
     if status is None or status.get("state") != "rejected":
         return None
-    if set(status) != _REJECTED_STATUS_FIELDS:
+    expected_fields = _REJECTED_STATUS_FIELDS | (
+        {"launch_token"} if launch_token is not None else set()
+    )
+    if set(status) != expected_fields:
         raise RuntimeError("Detached worker rejection has unexpected fields")
     if status.get("job_id") != job_id:
         raise RuntimeError("Detached worker rejection has an unexpected job id")
     if status.get("request_tool_name") != request_tool_name:
         raise RuntimeError("Detached worker rejection has an unexpected request tool")
-    if status.get("worker_pid") != worker_pid:
+    status_pid = status.get("worker_pid")
+    if type(status_pid) is not int or status_pid <= 0:
+        raise RuntimeError("Detached worker rejection has an invalid worker pid")
+    if launch_token is not None:
+        received_token = status.get("launch_token")
+        if (
+            not _valid_launch_token(launch_token)
+            or not _valid_launch_token(received_token)
+            or not hmac.compare_digest(launch_token, str(received_token))
+        ):
+            raise RuntimeError("Detached worker rejection has an unexpected launch token")
+    # Windows venv redirectors have a different PID from the Python child.
+    # The private per-launch token binds that child's rejection to this launch.
+    # POSIX and legacy helper calls retain their direct PID identity check.
+    if status_pid != worker_pid and (os.name != "nt" or launch_token is None):
         raise RuntimeError("Detached worker rejection has an unexpected worker pid")
     try:
         return decode_tool_error_rejection(status.get("rejection"))
@@ -337,6 +370,8 @@ async def launch_detached_job(
             raise ValueError(
                 "Detached worker request must use the accepting EventStore database URL"
             )
+        # A fresh capability belongs to this spawn, never to a caller-supplied request.
+        request = replace(request, launch_token=secrets.token_hex(32))
         request_path = request_path_for(request.job_id)
         status_path = status_path_for(request_path)
         for stale in (request_path, status_path):
@@ -376,6 +411,7 @@ async def launch_detached_job(
                 job_id=request.job_id,
                 request_tool_name=request.tool_name,
                 worker_pid=process.pid,
+                launch_token=request.launch_token,
             )
         except RuntimeError:
             job_manager.abandon_reserved_job_id(request.job_id)
@@ -404,6 +440,7 @@ async def launch_detached_job(
                     job_id=request.job_id,
                     request_tool_name=request.tool_name,
                     worker_pid=process.pid,
+                    launch_token=request.launch_token,
                 )
             except RuntimeError:
                 job_manager.abandon_reserved_job_id(request.job_id)

@@ -41,6 +41,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ouroboros.core.errors import PersistenceError
 from ouroboros.mcp.detached_jobs import (
     DetachedJobAcceptanceTimeout,
     DetachedJobRequest,
@@ -48,6 +49,7 @@ from ouroboros.mcp.detached_jobs import (
 )
 from ouroboros.mcp.errors import JobWorkError, MCPToolError
 from ouroboros.mcp.failure_taxonomy import RUN_FAILURE_CAUSES, FailureReasonCode
+from ouroboros.mcp.job_read_state import PendingJobReceipts
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator.agent_process import run_with_agent_process
 
@@ -268,6 +270,14 @@ async def start_background_tool_job(
                 settle_external_acceptance(job_id)
         except DetachedJobAcceptanceTimeout as exc:
             acceptance_state.mark_accepted()
+            observations = getattr(job_manager, "pending_receipts", None)
+            observation = None
+            if isinstance(observations, PendingJobReceipts):
+                observation = observations.remember(
+                    job_id=exc.job_id,
+                    worker_pid=exc.worker_pid,
+                    timeout_seconds=exc.timeout_seconds,
+                )
             settle_external_acceptance = getattr(
                 job_manager, "settle_external_job_acceptance", None
             )
@@ -282,6 +292,16 @@ async def start_background_tool_job(
                         extra={"job_type": job_type},
                         exc_info=True,
                     )
+            if isinstance(observations, PendingJobReceipts) and observation is not None:
+                exc.receipt["pending_receipt_persisted"] = False
+                try:
+                    await observations.persist(observation)
+                except (PersistenceError, TimeoutError):
+                    # The worker may already have accepted. A receipt write
+                    # failure must not restore retry or handoff authority.
+                    logger.warning("mcp.background_job.pending_receipt_persistence_failed")
+                else:
+                    exc.receipt["pending_receipt_persisted"] = True
             raise MCPToolError(
                 "Detached worker acceptance is still pending. Do not start a duplicate; "
                 "use the structured status_check receipt.",
