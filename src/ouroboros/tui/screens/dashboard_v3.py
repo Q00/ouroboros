@@ -580,14 +580,20 @@ class SelectableACTree(Static):
         except NoMatches:
             return
 
+        # Rows move when branches expand or the tree gains nodes. Preserve the
+        # semantic cursor and the user's branch choices, rather than a row index.
+        cursor_id = next(
+            (key for key, node in self._tree_node_map.items() if node is tree.cursor_node),
+            None,
+        )
+        expanded = {
+            key: node.is_expanded for key, node in self._tree_node_map.items() if node.allow_expand
+        }
         tree.clear()
         tree.root.label = Text("Seed", style="bold")
         tree.root.data = {"id": "seed", "content": "Seed", "status": "executing", "depth": 0}
         self._node_map = {"seed": tree.root.data}
         self._tree_node_map = {"seed": tree.root}
-
-        if not self.tree_data:
-            return
 
         root_id = self.tree_data.get("root_id", "root")
         nodes = self.tree_data.get("nodes", {})
@@ -597,6 +603,18 @@ class SelectableACTree(Static):
             self._add_children(tree.root, root_node, nodes)
 
         tree.root.expand()
+        for node_id, is_expanded in expanded.items():
+            node = self._tree_node_map.get(node_id)
+            if node is not None and node.allow_expand:
+                if is_expanded:
+                    node.expand()
+                else:
+                    node.collapse()
+        # New TreeNodes have no row until layout traverses the rebuilt tree.
+        # Build before moving, otherwise move_cursor sees row -1 and resets.
+        tree._build()
+        cursor_node = self._tree_node_map.get(cursor_id) if cursor_id is not None else None
+        tree.move_cursor(cursor_node or tree.root)
 
     def _add_children(
         self,
