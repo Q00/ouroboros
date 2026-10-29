@@ -506,18 +506,24 @@ def _git_head(root: Path) -> str | None:
 def _source_fingerprint(root: Path) -> dict[str, Any]:
     """Return a deterministic signature of the scanner's working-tree sources.
 
-    Each source maps to ``[mtime_ns, size]`` (or :data:`_FINGERPRINT_ABSENT`
-    when missing), so any edit, creation, or deletion of a parsed file changes
-    the fingerprint even while git ``HEAD`` stays fixed.
+    Each source maps to ``[mtime_ns, size, sha256]`` (or
+    :data:`_FINGERPRINT_ABSENT` when missing). The content hash catches edits
+    made by tools that preserve timestamps and file sizes while ``HEAD`` stays
+    fixed; hashing is streamed so source size does not increase peak memory.
     """
+    import hashlib
+
     fingerprint: dict[str, Any] = {}
     for rel in _FINGERPRINT_SOURCES:
         try:
-            stat = (root / rel).stat()
+            source = root / rel
+            stat = source.stat()
+            with source.open("rb") as handle:
+                digest = hashlib.file_digest(handle, "sha256").hexdigest()
         except OSError:
             fingerprint[rel] = _FINGERPRINT_ABSENT
             continue
-        fingerprint[rel] = [stat.st_mtime_ns, stat.st_size]
+        fingerprint[rel] = [stat.st_mtime_ns, stat.st_size, digest]
     return fingerprint
 
 
