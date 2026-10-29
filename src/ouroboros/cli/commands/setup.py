@@ -4060,7 +4060,7 @@ def _ensure_opencode_mcp_entry() -> bool:
         try:
             original_text = config_path.read_text(encoding="utf-8")
             data = json.loads(_strip_jsonc(original_text))
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             print_warning(
                 f"Could not parse {config_path} — skipping MCP registration to avoid "
                 "overwriting existing settings.  Fix the JSON syntax and re-run setup."
@@ -4366,7 +4366,7 @@ def _ensure_opencode_plugin_entry() -> bool:
         try:
             original_text = config_path.read_text(encoding="utf-8")
             data = json.loads(_strip_jsonc(original_text))
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             print_warning(f"Could not parse {config_path} — skipping plugin registration.")
             return False
 
@@ -4431,7 +4431,7 @@ def _cleanup_plugin_artifacts() -> None:
     config_path = find_opencode_config(allow_default=False)
     if config_path is not None:
         try:
-            raw = config_path.read_text()
+            raw = config_path.read_text(encoding="utf-8")
             data = json.loads(_strip_jsonc(raw))
             plugins = data.get("plugin", [])
             if isinstance(plugins, list):
@@ -4443,7 +4443,7 @@ def _cleanup_plugin_artifacts() -> None:
                         json.dump(data, f, indent=2)
                         f.write("\n")
                     print_info(f"Removed bridge plugin entry from {config_path}")
-        except (json.JSONDecodeError, OSError, KeyError):
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError, KeyError):
             pass  # best effort
 
 

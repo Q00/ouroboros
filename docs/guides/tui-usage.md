@@ -112,7 +112,7 @@ Hierarchical view of all acceptance criteria and their sub-ACs:
 | `◆` (blue) | Atomic -- leaf node, no further decomposition |
 | `◇` (cyan) | Decomposed -- has child sub-ACs |
 
-**Navigation**: Use arrow keys to move through the tree. Press Enter or click to select a node and view its details in the right panel. Press `t` to focus the tree widget.
+**Navigation**: Use arrow keys to move through the tree. Press Enter or click to select a node and view its details in the right panel. Press `t` to focus the tree widget. Live updates preserve the cursor node and expanded or collapsed branches while those nodes remain in the tree.
 
 ### Node Detail Panel
 

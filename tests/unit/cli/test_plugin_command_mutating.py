@@ -2516,9 +2516,14 @@ def test_url_refresh_filesystem_failure_is_reported_without_traceback(
     )
 
     assert result.exit_code == 1
-    assert "plugin cache refresh failed" in result.output
-    assert "No space left on device" in result.output
-    assert ".bak-*" in result.output
+    # Rich can wrap the cause between words inside its styled error panel.
+    import re
+
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    flat = " ".join(plain.replace("│", " ").split())
+    assert "plugin cache refresh failed" in flat
+    assert "No space left on device" in flat
+    assert ".bak-*" in flat
     assert result.exception is not None
     assert not isinstance(result.exception, OSError)
 

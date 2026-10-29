@@ -119,6 +119,30 @@ Fail-closed marker for a provider boundary whose effects may have occurred but
 whose terminal result is not yet durable. Recovery must not redispatch a sealed
 attempt; a later terminal lifecycle event supersedes the seal.
 
+### mcp.job.acceptance_pending_observed
+
+Emitted when a detached start exceeds its acceptance deadline while its worker
+has not yet registered the actual job. The server records this observation before
+returning a pending receipt. It belongs to aggregate `job_receipt`, keyed by the
+job ID, **not** the `job` aggregate. It is not job acceptance, current liveness,
+execution ownership, or permission to retry.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `worker_pid` | positive `integer` | Worker PID observed at the startup deadline; historical only |
+| `startup_timeout_seconds` | positive finite `number` | Deadline used for the detached start |
+
+No prompts, tool arguments, request contents, or credentials are stored. A new
+manager using the same EventStore can read this observation before normal job
+registration. Real job events always take precedence. The observation remains
+append-only historical evidence under the existing EventStore retention policy;
+it does not keep a job active or create an independent cleanup owner. If the
+observation write cannot complete within its two-second persistence budget or
+otherwise fails, the pending response explicitly reports
+`pending_receipt_persisted=false` and retains only the initiating manager's memory
+fallback. Unknown event versions or malformed observation payloads are errors,
+not invented pending jobs.
+
 ### mcp.job.created
 
 Emitted when a background MCP job is created. Its owner fields let a later

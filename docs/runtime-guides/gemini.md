@@ -76,6 +76,11 @@ as well as concrete IDs, remain explicit choices. Request/profile model values
 keep the existing `gemini/` and `google/` prefix normalization. An invocation-level Ouroboros
 `auto` choice is different: the role resolver converts it to `default`.
 
+The completion response reports native `result.stats` token counts. Batch JSON
+statistics are aggregated across the reported models. Provider totals beyond
+reported prompt and completion tokens are preserved as `unallocated_tokens`;
+cached counts and per-model streaming breakdowns are not added twice.
+
 The completion response uses the model reported by the CLI's `init` event.
 If no model was selected and that event does not report one, the response uses
 `default` rather than inventing a concrete model ID. This completion behavior does not
@@ -133,18 +138,18 @@ The runtime parses Gemini's `stream-json` events through
 | Gemini event   | Ouroboros message                                 |
 |----------------|---------------------------------------------------|
 | `init`         | session metadata only — no message emitted        |
-| `message` / `text` | `assistant` message                            |
+| `message` / `text` | assistant content; native `role=user` echoes are omitted and `delta=true` chunks are concatenated exactly |
 | `thinking`     | `assistant` with `data.thinking`                  |
 | `tool_use`     | `assistant` with `tool_name` + `data.tool_input`  |
 | `tool_result`  | `tool` message with `data.is_error`               |
 | `error`        | `system` message with `data.is_error=True`        |
 | `result`       | **terminal** `assistant` message — Gemini emits the final response in this event when no intermediate `message` event was produced |
 
-The terminal `result` event is critical: it is the only way the final
-assistant text reaches the orchestrator when Gemini chose not to emit a
-mid-stream `message`. Earlier prototypes dropped this event and lost the
-final answer; the runtime now surfaces it explicitly with
-`data.terminal=True`.
+Native assistant `message` chunks with `delta=true` are concatenated without
+inserting whitespace. The CLI's status/statistics-only `result` keeps that
+streamed answer. For compatible emitters that include `result.response`, a
+nonempty full response replaces the accumulated chunks. Legacy `role=model`
+completion messages remain supported by the LLM adapter.
 
 ## Capabilities
 

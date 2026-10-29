@@ -256,6 +256,28 @@ class TestCache:
         data = json.loads(cache_path.read_text(encoding="utf-8"))
         assert "repo_map" not in data
 
+    def test_content_edit_invalidates_cache_when_mtime_and_size_are_preserved(
+        self, tmp_path: Path
+    ) -> None:
+        import os
+
+        _write_fixture_repo(tmp_path)
+        self._init_git(tmp_path)
+        before = build_context_pack(tmp_path)
+        assert before is not None
+        manifest = tmp_path / "pyproject.toml"
+        original = manifest.stat()
+        manifest.write_text(_PYPROJECT.replace("fixture-app", "changed-app"), encoding="utf-8")
+        os.utime(manifest, ns=(original.st_atime_ns, original.st_mtime_ns))
+        assert manifest.stat().st_size == original.st_size
+        assert manifest.stat().st_mtime_ns == original.st_mtime_ns
+
+        after = build_context_pack(tmp_path)
+
+        assert after is not None
+        assert any("changed-app" in line for line in after.stack)
+        assert not any("fixture-app" in line for line in after.stack)
+
 
 class TestSystemPromptInjection:
     def test_pack_present_when_flag_on(self, tmp_path: Path, monkeypatch) -> None:
@@ -500,3 +522,32 @@ class TestManifestFacts:
 
         assert second is not None
         assert second.stack == ("setup.cfg: name Renamed, python_requires >=3.6",)
+
+
+@pytest.mark.parametrize("oversized_section", ["stack", "verify_commands"])
+def test_render_budget_applies_to_facts_without_partial_commands(oversized_section: str) -> None:
+    """Large manifest values and commands cannot bypass the worker prompt budget."""
+    facts = {
+        "stack": ("pyproject.toml: name fixture-app",),
+        "verify_commands": ("test: uv run pytest",),
+    }
+    oversized_fact = "oversized-fact:" + "x" * MAX_PACK_CHARS
+    facts[oversized_section] = (oversized_fact, *facts[oversized_section])
+    pack = ContextPack(**facts, repo_map=("project/", "  src/"))
+
+    rendered = render_context_pack(pack)
+
+    assert len(rendered) <= MAX_PACK_CHARS
+    assert "oversized-fact:" not in rendered
+    assert "pyproject.toml: name fixture-app" in rendered
+    assert "test: uv run pytest" in rendered
+
+
+def test_render_budget_applies_when_many_complete_facts_accumulate() -> None:
+    facts = tuple(f"test-{index}: " + "x" * 100 for index in range(100))
+    rendered = render_context_pack(ContextPack(stack=(), verify_commands=facts, repo_map=()))
+
+    assert len(rendered) <= MAX_PACK_CHARS
+    kept = [line.removeprefix("- ") for line in rendered.splitlines() if line.startswith("- ")]
+    assert kept
+    assert all(line in facts for line in kept)
