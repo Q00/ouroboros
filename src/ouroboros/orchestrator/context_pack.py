@@ -240,10 +240,10 @@ def render_context_pack(pack: ContextPack) -> str:
     repo_map = list(pack.repo_map)
     while True:
         rendered = _render(pack.stack, pack.verify_commands, tuple(repo_map))
-        if len(rendered) <= MAX_PACK_CHARS or not repo_map:
+        if len(rendered) <= MAX_PACK_CHARS:
             return rendered
-        # Drop the last map line and retry; the stack/verify facts are the
-        # highest-value signal and are never trimmed.
+        if not repo_map:
+            return _render_fitting_facts(pack)
         repo_map.pop()
 
 
@@ -568,3 +568,20 @@ def _write_cache(root: Path, pack: ContextPack, fingerprint: dict[str, Any]) -> 
         )
     except OSError as exc:
         log.warning("context_pack.cache_write_failed", path=str(cache_path), error=str(exc))
+
+
+def _render_fitting_facts(pack: ContextPack) -> str:
+    # A manifest value or command can itself exceed the entire budget. Keep
+    # complete facts only: truncating a command would advertise a different
+    # command, and an oversized early fact must not hide later facts that fit.
+    stack: tuple[str, ...] = ()
+    commands: tuple[str, ...] = ()
+    for fact in pack.stack:
+        candidate = (*stack, fact)
+        if len(_render(candidate, commands, ())) <= MAX_PACK_CHARS:
+            stack = candidate
+    for fact in pack.verify_commands:
+        candidate = (*commands, fact)
+        if len(_render(stack, candidate, ())) <= MAX_PACK_CHARS:
+            commands = candidate
+    return _render(stack, commands, ())

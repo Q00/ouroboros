@@ -522,3 +522,32 @@ class TestManifestFacts:
 
         assert second is not None
         assert second.stack == ("setup.cfg: name Renamed, python_requires >=3.6",)
+
+
+@pytest.mark.parametrize("oversized_section", ["stack", "verify_commands"])
+def test_render_budget_applies_to_facts_without_partial_commands(oversized_section: str) -> None:
+    """Large manifest values and commands cannot bypass the worker prompt budget."""
+    facts = {
+        "stack": ("pyproject.toml: name fixture-app",),
+        "verify_commands": ("test: uv run pytest",),
+    }
+    oversized_fact = "oversized-fact:" + "x" * MAX_PACK_CHARS
+    facts[oversized_section] = (oversized_fact, *facts[oversized_section])
+    pack = ContextPack(**facts, repo_map=("project/", "  src/"))
+
+    rendered = render_context_pack(pack)
+
+    assert len(rendered) <= MAX_PACK_CHARS
+    assert "oversized-fact:" not in rendered
+    assert "pyproject.toml: name fixture-app" in rendered
+    assert "test: uv run pytest" in rendered
+
+
+def test_render_budget_applies_when_many_complete_facts_accumulate() -> None:
+    facts = tuple(f"test-{index}: " + "x" * 100 for index in range(100))
+    rendered = render_context_pack(ContextPack(stack=(), verify_commands=facts, repo_map=()))
+
+    assert len(rendered) <= MAX_PACK_CHARS
+    kept = [line.removeprefix("- ") for line in rendered.splitlines() if line.startswith("- ")]
+    assert kept
+    assert all(line in facts for line in kept)
