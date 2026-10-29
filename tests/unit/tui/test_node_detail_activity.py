@@ -53,3 +53,23 @@ async def test_selected_details_update_only_from_the_selected_nodes_live_activit
         await pilot.pause()
         assert panel.thinking_text == "New thought"
         assert panel.tool_history == app.state.tool_history["a"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", [8, 12])
+async def test_latest_tool_completion_is_visible_in_selected_details(count):
+    app = OuroborosTUI()
+    async with app.run_test(size=(180, 60)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, DashboardScreenV3)
+        screen.on_node_selected(NodeSelected({"id": "a", "content": "A"}))
+        for index in range(1, count + 1):
+            app.post_message(
+                ToolCallCompleted("e1", "a", "Read", f"VISIBLE_TOOL_{index:02}", 1, 0.2, True)
+            )
+            await pilot.pause()
+        screenshot = app.export_screenshot()
+        assert f"VISIBLE_TOOL_{count:02}" in screenshot
+        if count > 8:
+            assert "VISIBLE_TOOL_01" not in screenshot

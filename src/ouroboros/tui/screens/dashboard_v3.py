@@ -267,7 +267,7 @@ class NodeDetailPanel(Static):
 
     NodeDetailPanel > .tool-history-section {
         width: 100%;
-        max-height: 10;
+        max-height: 11;
         margin-top: 1;
         padding-top: 1;
         border-top: dashed $primary-darken-2;
