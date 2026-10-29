@@ -188,7 +188,8 @@ def test_blocked_update_stops_before_prompt_and_mutating_steps(
     assert "==0.55.4" in output
     assert "0.55.6" in output
     assert "No changes were made" in output
-    assert "uv-receipt.toml" in output
+    # Rich may wrap the basename in a long installation path across lines.
+    assert "uv-receipt.toml" in "".join(output.split())
     assert "Upgraded" not in output
     confirm.assert_not_called()
     step.assert_not_called()
