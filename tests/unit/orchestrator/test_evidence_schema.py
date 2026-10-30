@@ -319,6 +319,20 @@ class TestExtractEvidence:
         with pytest.raises(EvidenceError):
             extract_evidence(text)
 
+    @pytest.mark.parametrize("earlier_fenced", [False, True])
+    @pytest.mark.parametrize("prefix", ["", "trailing note "])
+    @pytest.mark.parametrize("closer", ["]", ""])
+    @pytest.mark.parametrize("nested", ['{"files_touched":["nested.py"]}', "0", '"text"'])
+    def test_bare_malformed_owner_cannot_rescue_earlier_value(
+        self, earlier_fenced: bool, prefix: str, closer: str, nested: str
+    ) -> None:
+        earlier = '{"files_touched":["stale.py"]}'
+        if earlier_fenced:
+            earlier = f"```json\n{earlier}\n```"
+        text = f"{earlier}\n{prefix}[bogus\n{nested}\n{closer}\n"
+        with pytest.raises(EvidenceError):
+            extract_evidence(text)
+
     @pytest.mark.parametrize(
         "trailing_prose",
         [

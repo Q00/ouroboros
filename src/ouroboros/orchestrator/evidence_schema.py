@@ -151,6 +151,7 @@ class _ContainerExtent:
 @dataclass(frozen=True)
 class _EvidenceScan:
     values: list[tuple[int, int, Any]]
+    decoded: dict[int, tuple[int, Any]]
     malformed: dict[int, _ContainerExtent]
     nested_values: set[int]
 
@@ -225,9 +226,8 @@ def _find_body_start(text: str) -> tuple[int, bool]:
             pos = token.start()
             if pos < owned_until:
                 continue
-            try:
-                _, end_offset = _DECODER.raw_decode(recovery_text[pos:])
-            except json.JSONDecodeError:
+            decoded = scan.decoded.get(pos)
+            if decoded is None:
                 extent = scan.malformed[pos]
                 gap = recovery_text[fenced_end:pos]
                 adjacent_to_value = "\n" not in gap and "\r" not in gap and not gap.strip()
@@ -241,7 +241,7 @@ def _find_body_start(text: str) -> tuple[int, bool]:
                     fenced_start = pos
                 owned_until = extent.end
             else:
-                owned_until = pos + end_offset
+                owned_until = decoded[0]
                 if "\n" in recovery_text[pos:owned_until]:
                     fenced_start = pos
 
@@ -249,14 +249,9 @@ def _find_body_start(text: str) -> tuple[int, bool]:
         terminal_start = later_values[-1][0] if later_values else -1
         terminal_end = later_values[-1][1] if later_values else fence_end
 
-        for pos in range(terminal_end, len(recovery_text)):
-            if recovery_text[pos] not in "{[":
-                continue
-            try:
-                _DECODER.raw_decode(recovery_text[pos:])
-            except json.JSONDecodeError:
-                if _looks_like_json_container(recovery_text, pos):
-                    terminal_start = pos
+        for pos in sorted(scan.malformed):
+            if pos >= terminal_end and _is_terminal_malformed_container(recovery_text, pos, scan):
+                terminal_start = pos
 
         if terminal_start >= 0:
             return terminal_start, False
@@ -264,14 +259,9 @@ def _find_body_start(text: str) -> tuple[int, bool]:
 
     terminal_start = top_level_values[-1][0] if top_level_values else -1
     terminal_end = top_level_values[-1][1] if top_level_values else 0
-    for pos in range(terminal_end, len(recovery_text)):
-        if recovery_text[pos] not in "{[":
-            continue
-        try:
-            _DECODER.raw_decode(recovery_text[pos:])
-        except json.JSONDecodeError:
-            if _looks_like_json_container(recovery_text, pos):
-                terminal_start = pos
+    for pos in sorted(scan.malformed):
+        if pos >= terminal_end and _is_terminal_malformed_container(recovery_text, pos, scan):
+            terminal_start = pos
 
     if terminal_start >= 0:
         return terminal_start, False
@@ -463,6 +453,15 @@ def _looks_like_json_container(text: str, opener_pos: int, *, limit: int | None 
     return (
         re.match(r"[A-Za-z_][A-Za-z0-9_]*\s*:", candidate) is not None
         or re.fullmatch(r"(?:undefined|NaN)\s*,?", candidate) is not None
+    )
+
+
+def _is_terminal_malformed_container(text: str, position: int, scan: _EvidenceScan) -> bool:
+    extent = scan.malformed[position]
+    if position in scan.nested_values:
+        return True
+    return _is_evidence_container_opener(text, position) and (
+        not extent.closed or _looks_like_json_container(text, position, limit=extent.end)
     )
 
 
@@ -758,9 +757,10 @@ def _scan_evidence_values(text: str) -> _EvidenceScan:
         )
     }
     return _EvidenceScan(
-        sorted(top_level_values, key=lambda candidate: (candidate[0], candidate[1])),
-        malformed_boundaries,
-        nested_values,
+        values=sorted(top_level_values, key=lambda candidate: (candidate[0], candidate[1])),
+        decoded={start: (end, value) for start, end, value in all_spans},
+        malformed=malformed_boundaries,
+        nested_values=nested_values,
     )
 
 
@@ -864,30 +864,26 @@ def _recover_json_value(
         raise EvidenceError(msg) from primary_exc
 
     recovery_text = _mask_markdown_examples(text)
-    top_level_values = _scan_evidence_values(recovery_text).values
+    scan = _scan_evidence_values(recovery_text)
+    top_level_values = scan.values
 
     if top_level_values:
         # A later malformed structural boundary is authoritative over every
         # earlier valid value, including an otherwise valid evidence object.
         last_value_end = max(end for _, end, _ in top_level_values)
-        for ch_pos in range(last_value_end, len(recovery_text)):
-            if recovery_text[ch_pos] not in "{[":
+        for ch_pos in sorted(scan.malformed):
+            if ch_pos < last_value_end or not _is_terminal_malformed_container(
+                recovery_text, ch_pos, scan
+            ):
                 continue
-            try:
-                _DECODER.raw_decode(recovery_text[ch_pos:])
-            except json.JSONDecodeError:
-                if not _looks_like_json_container(recovery_text, ch_pos):
-                    continue
-                msg = (
-                    f"Evidence is not valid JSON: {primary_exc.msg} "
-                    f"(line {primary_exc.lineno}, col {primary_exc.colno}). "
-                    f"Malformed evidence at position {ch_pos} follows earlier "
-                    f"values; recovery refused because the final boundary "
-                    f"is authoritative."
-                )
-                raise EvidenceError(msg) from primary_exc
-            else:
-                break
+            msg = (
+                f"Evidence is not valid JSON: {primary_exc.msg} "
+                f"(line {primary_exc.lineno}, col {primary_exc.colno}). "
+                f"Malformed evidence at position {ch_pos} follows earlier "
+                f"values; recovery refused because the final boundary "
+                f"is authoritative."
+            )
+            raise EvidenceError(msg) from primary_exc
 
         # Return the final complete value. extract_evidence owns the object
         # type check so terminal non-object payloads fail with the same clear
