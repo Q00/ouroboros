@@ -615,6 +615,9 @@ class TestExtractEvidence:
             "[1! done]",
             "See [1_000 items] for details.",
             "[1_000 items]",
+            "[100 % complete]",
+            "[1 / 2 complete]",
+            "[50% complete, 2 pending]",
         ],
     )
     def test_brackets_in_fenced_trailing_prose_do_not_displace_evidence(
