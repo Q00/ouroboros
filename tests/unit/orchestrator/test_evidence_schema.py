@@ -271,6 +271,21 @@ class TestExtractEvidence:
         )
         assert extract_evidence(text).data == {"files_touched": ["real.py"]}
 
+    @pytest.mark.parametrize("fence_tag", ["json", ""])
+    @pytest.mark.parametrize("ticks", ["`", "``"])
+    @pytest.mark.parametrize("literal", ['"', "'", '"] }, ['])
+    @pytest.mark.parametrize("delimiters", [("[", "]"), ("{", "}")])
+    def test_backtick_literal_context_is_shared_by_ownership_scanners(
+        self, fence_tag: str, ticks: str, literal: str, delimiters: tuple[str, str]
+    ) -> None:
+        opener, closer = delimiters
+        prose = f"See {opener}example {ticks}{literal}{ticks} then{closer} for details."
+        text = (
+            f'```{fence_tag}\n{{"files_touched":["stale.py"]}}\n{prose}\n'
+            '{"files_touched":["real.py"]}\n```'
+        )
+        assert extract_evidence(text).data == {"files_touched": ["real.py"]}
+
     @pytest.mark.parametrize(
         "trailing_prose",
         [

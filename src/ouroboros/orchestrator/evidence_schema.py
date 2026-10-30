@@ -323,6 +323,12 @@ def _mask_markdown_examples(text: str) -> str:
     return text if masked is None else "".join(masked)
 
 
+def _complete_inline_literal_end(text: str, position: int, limit: int) -> int:
+    """Share candidate selection's complete literal spans with structural scans."""
+    token = _FENCE_TAIL_TOKEN_RE.match(text, position, limit)
+    return token.end() if token is not None and token.group("opener") is None else position
+
+
 def _is_container_quote_start(text: str, position: int) -> bool:
     if text[position] == '"':
         return True
@@ -348,9 +354,12 @@ def _malformed_boundary_end(text: str, opener_pos: int, *, limit: int | None = N
     depth = 0
     quote_char: str | None = None
     escape_next = False
+    opaque_until = opener_pos
 
     boundary = len(text) if limit is None else min(limit, len(text))
     for i in range(opener_pos, boundary):
+        if i < opaque_until:
+            continue
         ch = text[i]
         if quote_char is not None:
             if escape_next:
@@ -362,6 +371,10 @@ def _malformed_boundary_end(text: str, opener_pos: int, *, limit: int | None = N
             if ch == quote_char:
                 quote_char = None
             continue
+        if ch in ('"', "'", "`"):
+            opaque_until = _complete_inline_literal_end(text, i, boundary)
+            if opaque_until > i:
+                continue
         if ch in ('"', "'") and _is_container_quote_start(text, i):
             quote_char = ch
             continue
@@ -455,8 +468,11 @@ def _split_outer_components(
     has_trailing_comma = False
     quote_char: str | None = None
     escape_next = False
+    opaque_until = opener_pos
 
     for index in range(opener_pos + 1, limit):
+        if index < opaque_until:
+            continue
         char = text[index]
         if quote_char is not None:
             if escape_next:
@@ -466,6 +482,12 @@ def _split_outer_components(
             elif char == quote_char:
                 quote_char = None
             continue
+        if char in ('"', "'", "`"):
+            opaque_until = _complete_inline_literal_end(text, index, limit)
+            if opaque_until > index:
+                if len(stack) == 1:
+                    has_trailing_comma = False
+                continue
         if char in ('"', "'") and _is_container_quote_start(text, index):
             if len(stack) == 1:
                 has_trailing_comma = False

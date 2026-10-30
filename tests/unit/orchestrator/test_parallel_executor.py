@@ -9437,6 +9437,8 @@ class TestParallelACExecutor:
             "See `[true false]` for notation.",
             'See [example "[true false]"] for details.',
             "See [owner's report] for details.",
+            'See [example `"` then] for details.',
+            "See {example ``'`` then} for details.",
         ],
     )
     @pytest.mark.parametrize(
