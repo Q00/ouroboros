@@ -618,7 +618,12 @@ def _has_structural_container_intent(text: str, opener_pos: int, limit: int) -> 
             component_signal = True
             continue
 
-        if _is_malformed_scalar_lexeme(stripped.split(maxsplit=1)[0]):
+        lexemes = stripped.split(maxsplit=1)
+        separated_payload = len(lexemes) == 2 and (
+            (_is_evidence_container_opener(text, opener_pos) and _complete_json_value(lexemes[0]))
+            or (_is_malformed_scalar_lexeme(lexemes[0]) and _complete_json_value(lexemes[1]))
+        )
+        if _is_malformed_scalar_lexeme(stripped) or separated_payload:
             component_signal = True
             continue
 

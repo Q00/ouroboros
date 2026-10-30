@@ -380,6 +380,9 @@ class TestExtractEvidence:
             "[True]",
             "[False]",
             "[None]",
+            "[true undefined]",
+            "[false word]",
+            "[null garbage]",
         ],
     )
     @pytest.mark.parametrize("context", ["bare", "after-fence", "in-fence"])
@@ -610,6 +613,8 @@ class TestExtractEvidence:
             "[100% complete]",
             "[1/2 complete]",
             "[1! done]",
+            "See [1_000 items] for details.",
+            "[1_000 items]",
         ],
     )
     def test_brackets_in_fenced_trailing_prose_do_not_displace_evidence(
