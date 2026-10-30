@@ -272,39 +272,23 @@ def _mask_markdown_examples(text: str) -> str:
     """
     masked: list[str] | None = None
 
-    search_pos = 0
-    while True:
-        opener = _FENCE_LINE_RE.search(text, search_pos)
-        if opener is None:
-            break
-
-        fence = opener.group("fence")
-        marker = re.escape(fence[0])
-        info = opener.group("info").strip().lower()
+    fence_bodies = list(_top_level_fence_body_starts(text))
+    for info, body_start, body_end, _ in fence_bodies:
         tag = info.split(maxsplit=1)[0:1]
-        body_start = opener.end()
-        if body_start < len(text) and text[body_start] == "\n":
-            body_start += 1
-
-        closing_fence_re = re.compile(
-            rf"^[ \t]{{0,3}}{marker}{{{len(fence)},}}[ \t]*\r?$", re.MULTILINE
-        )
-        closer = closing_fence_re.search(text, body_start)
-        body_end = closer.start() if closer is not None else len(text)
-
         if tag and tag[0] != "json":
             if masked is None:
                 masked = list(text)
             masked[body_start:body_end] = " " * (body_end - body_start)
 
-        if closer is None:
-            break
-        search_pos = closer.end()
-
     offset = 0
     in_indented_block = False
     previous_blank = True
     for line in text.splitlines(keepends=True):
+        if any(body_start <= offset < body_end for _, body_start, body_end, _ in fence_bodies):
+            in_indented_block = False
+            previous_blank = False
+            offset += len(line)
+            continue
         content = line.rstrip("\r\n")
         blank = not content.strip()
         blockquote = re.match(r"^[ ]{0,3}>", content) is not None

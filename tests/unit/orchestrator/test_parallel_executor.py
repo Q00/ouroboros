@@ -9529,7 +9529,7 @@ class TestParallelACExecutor:
         ],
     )
     @pytest.mark.parametrize("tag", ["json", ""])
-    @pytest.mark.parametrize("separator", [" ", "\n"])
+    @pytest.mark.parametrize("separator", [" ", "\n", "\n\n    ", "\n\n\t"])
     async def test_terminal_malformed_fence_does_not_publish_stale_evidence(
         self, tmp_path, tail: str, tag: str, separator: str
     ) -> None:

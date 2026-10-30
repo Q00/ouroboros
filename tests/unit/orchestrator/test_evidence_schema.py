@@ -342,6 +342,24 @@ class TestExtractEvidence:
             with pytest.raises(EvidenceError):
                 extract_evidence(text)
 
+    @pytest.mark.parametrize("tag", ["json", ""])
+    @pytest.mark.parametrize("marker", ["```", "~~~"])
+    @pytest.mark.parametrize("indent", ["    ", "\t", "        "])
+    @pytest.mark.parametrize("tail", ["[true false]", "[1 2]"])
+    @pytest.mark.parametrize("later_real", [False, True])
+    def test_supported_fence_body_is_not_an_indented_markdown_example(
+        self, tag: str, marker: str, indent: str, tail: str, later_real: bool
+    ) -> None:
+        body = '{"files_touched":["stale.py"]}\n\n' + indent + tail
+        if later_real:
+            body += "\n\n" + indent + '{"files_touched":["real.py"]}'
+        text = f"{marker}{tag}\n{body}\n{marker}"
+        if later_real:
+            assert extract_evidence(text).data == {"files_touched": ["real.py"]}
+        else:
+            with pytest.raises(EvidenceError):
+                extract_evidence(text)
+
     @pytest.mark.parametrize("earlier_fenced", [False, True])
     @pytest.mark.parametrize("prefix", ["", "trailing note "])
     @pytest.mark.parametrize("closer", ["]", ""])
