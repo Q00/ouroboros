@@ -44,6 +44,7 @@ type CompletionItem = {{ value: string; label: string; description?: string }};
 // as one deterministic MCP call. Kept in sync by a unit test.
 const DISPATCHABLE_COMMANDS: Array<{{ cmd: string; description: string }}> = [
   {{ cmd: "auto", description: "Interview, Seed generation, and run handoff" }},
+  {{ cmd: "idk", description: "Calibrate the pending interview question" }},
   {{ cmd: "interview", description: "Socratic interview to clarify requirements" }},
   {{ cmd: "run", description: "Execute a Seed specification" }},
   {{ cmd: "seed", description: "Generate a Seed from an interview session" }},
