@@ -43,8 +43,8 @@ jobs:
 
           assert claude_agent_sdk is not None
           assert mcp is not None
-          assert version("claude-agent-sdk") == "0.2.165"
-          assert version("anthropic") == "1.13.0"
+          assert version("claude-agent-sdk") == "0.2.168"
+          assert version("anthropic") == "1.15.0"
           assert version("mcp").split(".", maxsplit=1)[0] == "1"
           PY
           uv pip check
@@ -207,6 +207,9 @@ jobs:
           if ($nativeCases.Count -ne 1 -or $null -ne $nativeCases[0].SelectSingleNode('skipped')) {
             throw 'The native Windows heartbeat lease regression must run without skipping.'
           }
+
+      - name: Run native Windows updater recovery tests
+        run: uv run --python 3.12 --no-sync pytest tests/unit/cli/test_update_recovery.py -n 0 -q
 
       - name: Run native Windows plugin hook tests
         run: uv run --python 3.12 --no-sync pytest tests/unit/scripts/test_windows_plugin_hooks.py -n 0 -q

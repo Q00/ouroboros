@@ -58,6 +58,24 @@ def shares_one_attempt(scope: SourcedScope | None, criteria: tuple[str, ...]) ->
     return scope is not None and len(criteria) > 1 and not sourced_criteria_aligned(scope, criteria)
 
 
+def renders_sourced_objective(
+    scope: SourcedScope | None, criteria: tuple[str, ...], root_index: int | None
+) -> bool:
+    """True when the dispatch under root ``root_index`` shows the worker the sourced objective.
+
+    That is every dispatch of a Seed with ``sourced_scope`` unless its binding
+    criteria are the Seed's own, position for position, and ``root_index``
+    names one of them. The worker then owns the sourced objective, not the
+    Seed's criterion text, so no criterion-text exemption applies to it.
+    """
+    aligned = (
+        sourced_criteria_aligned(scope, criteria)
+        and root_index is not None
+        and 0 <= root_index < len(criteria)
+    )
+    return isinstance(scope, SourcedScope) and not aligned
+
+
 def shared_attempt_graph(seed: Seed) -> DependencyGraph | None:
     """One stage holding every criterion, for a shared-attempt Seed; else ``None``.
 
@@ -124,6 +142,11 @@ async def settle_from_shared_attempt(
         "has_success_contract": has_success_contract,
         "has_expected_artifacts": has_expected_artifacts,
         "verify_gate_active": verify_gate_active,
+        # Root 0's worker was shown the sourced objective; every criterion
+        # judged from its attempt is checked against the schema it was asked for.
+        "sourced_objective": renders_sourced_objective(
+            seed.sourced_scope, ac_texts(seed.acceptance_criteria), SHARED_ATTEMPT_ROOT
+        ),
     }
     verify_gate_outcome = None
     if verify_gate_active and has_success_contract:

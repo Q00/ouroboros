@@ -32,7 +32,11 @@ from ouroboros.orchestrator.profile_strategy import (
     WHOLE_REQUEST_REQUIREMENTS,
     render_completion_check,
 )
-from ouroboros.orchestrator.shared_attempt import shares_one_attempt, sourced_criteria_aligned
+from ouroboros.orchestrator.shared_attempt import (
+    renders_sourced_objective,
+    shares_one_attempt,
+    sourced_criteria_aligned,
+)
 
 if TYPE_CHECKING:
     from ouroboros.orchestrator.evidence.runtime_metadata import _SiblingACRef
@@ -78,6 +82,19 @@ def install_sourced_scope(
     """Record the run Seed's sourced scope and criteria on ``executor`` for its leaf prompts."""
     setattr(executor, SOURCED_SCOPE_ATTR, scope)
     setattr(executor, SEED_CRITERIA_ATTR, criteria)
+
+
+def dispatch_renders_sourced_objective(executor: object, root_index: int | None) -> bool:
+    """True when ``executor``'s dispatch under root ``root_index`` shows the sourced objective.
+
+    The prompt and the acceptance check read this one answer, so the evidence
+    schema the worker is asked for is the schema its evidence is checked against.
+    """
+    return renders_sourced_objective(
+        getattr(executor, SOURCED_SCOPE_ATTR, None),
+        getattr(executor, SEED_CRITERIA_ATTR, ()),
+        root_index,
+    )
 
 
 @dataclass(frozen=True)
@@ -139,9 +156,7 @@ class AtomicPromptBuilder:
             and root_index is not None
             and 0 <= root_index < len(criteria)
         )
-        sourced_objective = isinstance(scope, SourcedScope) and not (
-            aligned and root_index is not None
-        )
+        sourced_objective = renders_sourced_objective(scope, criteria, root_index)
         if isinstance(scope, SourcedScope):
             # Binding criteria that are the Seed's own, position for position:
             # each leaf sees only its own. Otherwise one leaf runs the request
@@ -300,6 +315,7 @@ class AtomicPromptBuilder:
                     has_success_contract=has_success_contract,
                     has_expected_artifacts=has_expected_artifacts,
                     verify_gate_active=verify_gate_active,
+                    sourced_objective=sourced_objective,
                 ).required
             }
             required_fields = ", ".join(
@@ -308,7 +324,11 @@ class AtomicPromptBuilder:
                 if field in required
             )
             doc_only_note = ""
-            if all(_is_documentation_only_ac(text) for text in schema_criteria):
+            # A sourced objective is the criterion the worker owns: the hidden
+            # criterion text sets no exemption and no note for it.
+            if not sourced_objective and all(
+                _is_documentation_only_ac(text) for text in schema_criteria
+            ):
                 doc_only_note = (
                     "This is a documentation-only current AC: verify the requested docs "
                     "with current-session README/docs evidence such as Edit plus a direct "
@@ -319,7 +339,9 @@ class AtomicPromptBuilder:
                     "do not list individual test names or prior test IDs.\n"
                 )
             validation_only_note = ""
-            if all(_is_validation_only_ac(text) for text in schema_criteria):
+            if not sourced_objective and all(
+                _is_validation_only_ac(text) for text in schema_criteria
+            ):
                 validation_only_note = (
                     "This is a validation-only current AC: prove it with commands_run "
                     "and tests_passed from this runtime session. Do not include "

@@ -1,6 +1,6 @@
 """Controller-written code that runs under the task's own interpreter parses for Python 3.5.
 
-The oracle harness and the footprint programs are executed by the task
+The oracle harness, the footprint programs and the probe wrapper are run by the task
 image's ``python3`` (``python -I -B -c <source>``), which on SWE-bench images
 of older repositories is Python 3.6, and for two of them 3.5. CI has neither,
 so these checks are static: the source must parse with the 3.5 and 3.6
@@ -20,11 +20,13 @@ import pytest
 from ouroboros.boundary import harness
 from ouroboros.boundary.footprint import PYTEST_BOOTSTRAP, oracle_program
 from ouroboros.boundary.oracle import ORACLE_HARNESS_SOURCE
+from ouroboros.examples.probe_runner import PROBE_WRAPPER_SOURCE
 
 SOURCES = {
     "oracle_harness": ORACLE_HARNESS_SOURCE,
     "pytest_bootstrap": PYTEST_BOOTSTRAP,
     "oracle_program": oracle_program(ORACLE_HARNESS_SOURCE),
+    "probe_wrapper": PROBE_WRAPPER_SOURCE,
 }
 BUILTIN_GENERICS = frozenset({"list", "dict", "tuple", "set", "frozenset", "type"})
 NEWER_BUILTINS = frozenset(

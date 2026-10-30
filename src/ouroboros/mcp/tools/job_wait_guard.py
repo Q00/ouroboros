@@ -6,9 +6,44 @@ from typing import Any
 
 import structlog
 
+from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
+
 log = structlog.get_logger(__name__)
 
 JOB_WAIT_GUARD_VERSION = "detached-branch-timeout-v2"
+
+
+def job_wait_internal_timeout_result(
+    *,
+    job_id: str,
+    cursor: int,
+    timeout_seconds: int,
+    requested_timeout_seconds: int,
+    view: str,
+    stream: str,
+    wait_for: str,
+) -> MCPToolResult:
+    text = (
+        f"job_wait timed out before producing a snapshot for `{job_id}`. "
+        "Poll `ouroboros_job_status` or call `ouroboros_job_wait` again."
+    )
+    return MCPToolResult(
+        content=(MCPContentItem(type=ContentType.TEXT, text=text),),
+        is_error=False,
+        meta={
+            "job_id": job_id,
+            "cursor": cursor,
+            "changed": False,
+            "view": view,
+            "stream": stream,
+            "wait_for": wait_for,
+            "timeout_seconds": timeout_seconds,
+            "timeout_seconds_requested": requested_timeout_seconds,
+            "timeout_seconds_capped": timeout_seconds != requested_timeout_seconds,
+            "wait_timed_out": True,
+            "result_available": False,
+        },
+    )
 
 
 def _consume_detached_wait_task(task: asyncio.Task[Any]) -> None:

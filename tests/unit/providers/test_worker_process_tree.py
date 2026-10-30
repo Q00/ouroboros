@@ -127,6 +127,18 @@ def test_alive_returns_false_when_kill_probe_finds_no_process() -> None:
         exists.assert_not_called()
 
 
+@pytest.mark.parametrize("stage", ["kill", "read"])
+def test_alive_observation_preserves_permission_errors(monkeypatch, stage):
+    def denied(*_args):
+        raise PermissionError("unknown process state")
+
+    monkeypatch.setattr(os, "kill", denied if stage == "kill" else lambda *_args: None)
+    monkeypatch.setattr(Path, "exists", lambda _path: True)
+    monkeypatch.setattr(Path, "read_text", denied)
+    with pytest.raises(PermissionError):
+        _alive(123)
+
+
 @pytest.mark.parametrize("error", [PermissionError, OSError])
 def test_alive_preserves_unexpected_stat_errors(error: type[OSError]) -> None:
     with (

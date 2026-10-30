@@ -37,6 +37,7 @@ from ouroboros.core.filesystem_capability import (
     nofollow_directory_capabilities_available,
     open_nofollow_directory_chain,
 )
+from ouroboros.harness.wrapper_receipt import trusted_wrapper_invocation
 from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.evidence.claims import (
     _runtime_message_command_values,
@@ -227,7 +228,11 @@ def _pending_bash_filesystem_targets_locked(
     targets: list[_PendingBashTarget] = []
     try:
         for command in _runtime_message_command_values(message):
-            for target in _shell_command_mutation_targets(command):
+            command_targets = list(_shell_command_mutation_targets(command))
+            wrapper = trusted_wrapper_invocation(command, task_cwd)
+            if wrapper is not None:
+                command_targets.extend(wrapper[:3])
+            for target in dict.fromkeys(command_targets):
                 try:
                     pending = _lease_bash_target(
                         target,

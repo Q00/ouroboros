@@ -183,7 +183,7 @@ def test_built_wheel_preserves_packaging_contracts(built_wheel: Path, tmp_path: 
         assert unsupported.returncode != 0
         resolver_error = unsupported.stdout + unsupported.stderr
         # The conflict is now a direct mcp==1.28.1 (claude extras) vs
-        # mcp==2.0.0 ([mcp]) clash, so the resolver names the conflicting
+        # mcp==2.3.0 ([mcp]) clash, so the resolver names the conflicting
         # ouroboros-ai extras and the mcp pins rather than claude-agent-sdk's
         # own ceiling.
         assert "ouroboros-ai[" in resolver_error
