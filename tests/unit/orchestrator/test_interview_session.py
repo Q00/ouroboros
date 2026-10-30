@@ -12,6 +12,7 @@ from ouroboros.mcp.types import MCPToolResult
 from ouroboros.orchestrator.adapter import RuntimeHandle
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.orchestrator.command_dispatcher import CodexCommandDispatcher
+from ouroboros.orchestrator.copilot_acp_runtime import CopilotAcpRuntime
 from ouroboros.orchestrator.copilot_cli_runtime import CopilotCliRuntime
 from ouroboros.orchestrator.gemini_cli_runtime import GeminiCLIRuntime
 from ouroboros.orchestrator.gjc_runtime import GjcRuntime
@@ -21,6 +22,7 @@ from ouroboros.orchestrator.interview_session import (
     INTERVIEW_SESSION_METADATA_KEY,
 )
 from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
+from ouroboros.orchestrator.megacode_runtime import MegacodeRuntime
 from ouroboros.orchestrator.omp_runtime import OmpRuntime
 from ouroboros.orchestrator.opencode_runtime import OpenCodeRuntime
 from ouroboros.orchestrator.pi_runtime import PiRuntime
@@ -28,6 +30,8 @@ from ouroboros.orchestrator.pi_runtime import PiRuntime
 RUNTIMES = [
     CodexCliRuntime,
     CopilotCliRuntime,
+    CopilotAcpRuntime,
+    MegacodeRuntime,
     GeminiCLIRuntime,
     OpenCodeRuntime,
     HermesCliRuntime,
