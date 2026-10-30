@@ -40,6 +40,8 @@ RUNTIME_HANDLE_BACKEND_ALIASES: dict[str, str] = {
     "antigravity_cli": "antigravity_cli",
     "zcode": "zcode_cli",
     "zcode_cli": "zcode_cli",
+    "megacode": "megacode",
+    "megacode_cli": "megacode",
     "host": "host",
     "host_dispatch": "host",
 }

@@ -222,6 +222,7 @@ def test_complete_runtime_factory_catalog_is_process_local() -> None:
         "gjc",
         "antigravity",
         "grok",
+        "megacode",
         "host",
     }
     assert set(runtime_backend_choices()) == expected_backends

@@ -35,7 +35,8 @@ You can also override the configured backend with the `OUROBOROS_AGENT_RUNTIME` 
 > contract lives in the per-runtime guide rather than as a column here:
 > Antigravity (`agy`) → [runtime-guides/antigravity.md](runtime-guides/antigravity.md);
 > Grok (`grok`) → [runtime-guides/grok.md](runtime-guides/grok.md);
-> Zcode (`zcode`) → [runtime-guides/zcode.md](runtime-guides/zcode.md).
+> Zcode (`zcode`) → [runtime-guides/zcode.md](runtime-guides/zcode.md);
+> Megacode harness (`harness`) → [runtime-guides/megacode.md](runtime-guides/megacode.md).
 
 ### Workflow Layer (identical across runtimes)
 

@@ -67,6 +67,7 @@ from ouroboros.config.loader import (
     get_llm_permission_mode,
     get_max_parallel_workers,
     get_mechanical_detector_model,
+    get_megacode_cli_path,
     get_n_version_tournament_enabled,
     get_native_session_index_enabled,
     get_omp_cli_path,
@@ -88,6 +89,7 @@ from ouroboros.config.loader import (
     get_zcode_cli_path,
     load_config,
     load_credentials,
+    resolve_megacode_cli_path,
     resolve_omp_cli_path,
 )
 from ouroboros.config.models import (
@@ -199,6 +201,8 @@ __all__ = [
     "get_dsh_config_path",
     "get_omp_cli_path",
     "resolve_omp_cli_path",
+    "get_megacode_cli_path",
+    "resolve_megacode_cli_path",
     "get_pi_cli_path",
     "get_zcode_cli_path",
     "get_qa_model",

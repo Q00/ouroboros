@@ -49,6 +49,7 @@ def _repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init", "-q")
+    _git(repo, "config", "maintenance.auto", "false")
     _git(repo, "config", "user.email", "t@example.com")
     _git(repo, "config", "user.name", "t")
     (repo / "module.py").write_text("VALUE = 1\n", encoding="utf-8")

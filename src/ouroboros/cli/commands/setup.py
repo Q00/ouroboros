@@ -53,6 +53,7 @@ from ouroboros.cli.commands.claude_setup import (
 from ouroboros.cli.commands.claude_setup import (
     setup_claude_sdk as _setup_claude_sdk,
 )
+from ouroboros.cli.commands.megacode_setup import detect_megacode_runtime, select_megacode_runtime
 from ouroboros.cli.commands.omp_setup import (
     detect_omp_runtime as _detect_omp_runtime,
 )
@@ -411,6 +412,7 @@ def _detect_runtimes() -> dict[str, str | None]:
 
     # OMP (Oh My Pi): omp_setup owns the explicit-path-config-then-PATH rule.
     runtimes["omp"] = _detect_omp_runtime()
+    runtimes["megacode"] = detect_megacode_runtime()
 
     # GJC: explicit-path config first, then PATH.
     try:
@@ -4733,7 +4735,7 @@ def setup(
         typer.Option(
             "--runtime",
             "-r",
-            help="Runtime backend to configure (claude, claude-sdk, claude-cli, codex, opencode, hermes, gemini, goose, kiro, copilot, pi, omp, gjc, antigravity, grok, zcode, host).",
+            help="Runtime backend to configure (claude, claude-sdk, claude-cli, codex, opencode, hermes, gemini, goose, kiro, copilot, pi, omp, gjc, antigravity, grok, zcode, megacode, host).",
         ),
     ] = None,
     non_interactive: Annotated[
@@ -5000,6 +5002,8 @@ def setup(
         _setup_pi(pi_path)
     elif selected in ("omp", "omp_cli"):
         select_omp_runtime(available)
+    elif selected in ("megacode", "megacode_cli"):
+        select_megacode_runtime(available)
     elif selected in ("gjc", "gajae-code", "gajae_code"):
         gjc_path = available.get("gjc")
         if not gjc_path:

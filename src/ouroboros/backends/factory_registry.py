@@ -116,6 +116,13 @@ _FACTORY_SPECS: tuple[BackendFactorySpec, ...] = (
         agent_runtime_factory="_create_grok_runtime",
     ),
     BackendFactorySpec(
+        name="megacode",
+        llm_backend="megacode",
+        runtime_backend="megacode",
+        llm_adapter_factory="_create_megacode_adapter",
+        agent_runtime_factory="_create_megacode_runtime",
+    ),
+    BackendFactorySpec(
         name="zcode",
         llm_backend="zcode",
         runtime_backend="zcode",

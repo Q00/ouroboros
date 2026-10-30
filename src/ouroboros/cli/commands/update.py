@@ -67,6 +67,7 @@ _RUNTIME_CLI_IDENTITIES: dict[str, tuple[str, str, str]] = {
     "antigravity": ("OUROBOROS_ANTIGRAVITY_CLI_PATH", "antigravity_cli_path", "agy"),
     "grok": ("OUROBOROS_GROK_CLI_PATH", "grok_cli_path", "grok"),
     "zcode": ("OUROBOROS_ZCODE_CLI_PATH", "zcode_cli_path", "zcode"),
+    "megacode": ("OUROBOROS_MEGACODE_CLI_PATH", "megacode_cli_path", "harness"),
 }
 
 _HOST_PLUGIN_RUNTIMES = ("claude", "codex")

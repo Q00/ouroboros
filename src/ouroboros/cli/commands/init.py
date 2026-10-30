@@ -97,6 +97,7 @@ class LLMBackend(str, Enum):  # noqa: UP042
     OMP = "omp"
     ZCODE = "zcode"
     DSH = "dsh"
+    MEGACODE = "megacode"
 
 
 class _DefaultStartGroup(typer.core.TyperGroup):

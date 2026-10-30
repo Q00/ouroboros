@@ -169,6 +169,7 @@ class LLMBackend(str, Enum):  # noqa: UP042
     OMP = "omp"
     ZCODE = "zcode"
     DSH = "dsh"
+    MEGACODE = "megacode"
 
 
 def _write_pid_file() -> bool:
