@@ -49,7 +49,8 @@ _FENCE_LINE_RE = re.compile(
 )
 _EXPR_RE = re.compile(r"^\s*(?P<field>[A-Za-z_][A-Za-z0-9_]*)\s*==\s*(?P<lit>.+?)\s*$")
 _DECODER = json.JSONDecoder()
-_NUMERIC_LOOKING_LEXEME_RE = re.compile(r"[+-]?[0-9][0-9.eE+-]*\Z")
+_NUMERIC_LOOKING_LEXEME_RE = re.compile(r"[+-]?(?:[0-9]|\.[0-9])[0-9.eE+-]*\Z")
+_RADIX_LOOKING_LEXEME_RE = re.compile(r"[+-]?0[xob][\w.+-]*\Z", re.IGNORECASE)
 _NUMERIC_MANTISSA_LEXEME_RE = re.compile(r"[+-]?[0-9]+(?:\.[0-9]*)?\Z")
 # Complete single-line literals own their contents, but never subsequent
 # containers. Unclosed quotes/backticks leave later evidence openers visible.
@@ -526,15 +527,19 @@ def _is_malformed_scalar_lexeme(value: str) -> bool:
     candidate = value.strip()
     if _complete_json_value(candidate):
         return False
+    if _RADIX_LOOKING_LEXEME_RE.fullmatch(candidate):
+        return True
     if _NUMERIC_LOOKING_LEXEME_RE.fullmatch(candidate) and (
-        "e" in candidate.lower()
-        or ".." in candidate
-        or _NUMERIC_MANTISSA_LEXEME_RE.fullmatch(candidate)
+        "e" in candidate.lower() or _NUMERIC_MANTISSA_LEXEME_RE.fullmatch(candidate)
     ):
         return True
     try:
         literal = ast.literal_eval(candidate)
-    except (ValueError, SyntaxError):
+    except SyntaxError:
+        return _NUMERIC_LOOKING_LEXEME_RE.fullmatch(candidate) is not None and not re.fullmatch(
+            r"[+-]?[0-9]+(?:\.[0-9]+){2,}", candidate
+        )
+    except ValueError:
         return False
     return type(literal) in (int, float, complex, bool, type(None))
 

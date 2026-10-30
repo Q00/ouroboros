@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 from itertools import product
 
 import pytest
@@ -32,6 +33,50 @@ def analysis_profile():
 
 
 class TestExtractEvidence:
+    def test_numeric_and_scalar_sequences_cannot_revive_stale_evidence(self) -> None:
+        stale = '{"files_touched":["stale.py"]}'
+        numeric = {
+            prefix + "".join(tail)
+            for prefix in ("1", "-1", "+1")
+            for width in range(4)
+            for tail in product("01.e+-", repeat=width)
+        }
+        atoms = (
+            "0",
+            "-1",
+            "true",
+            "null",
+            '"with space"',
+            "0x10",
+            "0o7",
+            "0b1",
+            "1_000",
+            "True",
+            "None",
+            ".5",
+        )
+        payloads = []
+        for value in sorted(numeric):
+            try:
+                if isinstance(ast.parse(value, mode="eval").body, ast.BinOp):
+                    continue
+            except SyntaxError:
+                pass
+            payloads.append(f"[{value}]")
+        payloads += [f"[{value}]" for value in ("0x", "0xGG", "0o9", "0b2", "0x1.fp2")]
+        payloads += [f"[{first} {second}]" for first, second in product(atoms, repeat=2)]
+        failures = []
+        for payload in payloads:
+            body = f"{stale}\n{payload}"
+            for text in (body, f"```json\n{body}\n```", f"```\n{body}\n```"):
+                try:
+                    extract_evidence(text)
+                except EvidenceError:
+                    pass
+                else:
+                    failures.append(text)
+        assert not failures, f"{len(failures)} stale acceptances; first examples: {failures[:10]}"
+
     def test_bare_json_object(self) -> None:
         record = extract_evidence('{"files_touched": ["a.py"]}')
         assert record.data == {"files_touched": ["a.py"]}
