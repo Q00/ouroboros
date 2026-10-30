@@ -31,6 +31,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Build Tools",
     "Topic :: Software Development :: Code Generators",
 ]
@@ -39,6 +40,7 @@ dependencies = [
     "anyio>=4.0.0,<5.0.0",
     "click>=8.1.0,<9.0.0",
     "jsonschema>=4.21.0,<5.0.0",
+    "packaging>=25.0,<27.0",
     "pydantic>=2.0.0,<3.0.0",
     "prompt-toolkit>=3.0.0,<4.0.0",
     # Ceiling is deliberately tighter than the major-version bounds around it:
@@ -73,15 +75,15 @@ Sponsor = "https://github.com/sponsors/Q00"
 # selected in one interpreter.
 # claude-agent-sdk 0.2.144 dropped its own MCP 1.x ceiling; the profile
 # contract (MCP 1.x graph) is preserved by pinning it here explicitly.
-claude = ["claude-agent-sdk==0.2.158", "anthropic==1.8.0", "mcp==1.28.1"]
+claude = ["claude-agent-sdk==0.2.168", "anthropic==1.15.0", "mcp==1.28.1"]
 claude-cli = []
 # Explicit alias for automation and migrations that want to spell out the SDK
 # transport rather than rely on the historical `[claude]` name.
-claude-sdk = ["claude-agent-sdk==0.2.158", "anthropic==1.8.0", "mcp==1.28.1"]
+claude-sdk = ["claude-agent-sdk==0.2.168", "anthropic==1.15.0", "mcp==1.28.1"]
 copilot = []
 litellm = ["litellm==1.91.0; python_version < '3.14'"]
 dashboard = []
-mcp = ["mcp==2.2.0"]
+mcp = ["mcp==2.3.0"]
 tui = ["textual==8.2.8", "textual-serve==1.1.3"]
 # `[all]` remains the MCP 1.x application bundle. The MCP 2 server profile is
 # explicit and isolated; `[all,mcp]` is intentionally unsupported.
@@ -174,7 +176,7 @@ litellm-test = [
     "ouroboros-ai[litellm]",
 ]
 mcp-test = [
-    "mcp==2.2.0",
+    "mcp==2.3.0",
 ]
 claude-sdk-test = [
     "ouroboros-ai[claude-sdk]",
@@ -270,6 +272,9 @@ known-first-party = ["ouroboros"]
 # annotations must use typing generics, and no f-strings are allowed
 # (boundary/harness.py docstring).
 "src/ouroboros/boundary/harness.py" = ["UP006", "UP032", "UP035", "UP045"]
+# Same constraint: the probe wrapper runs in the tree's interpreter
+# (examples/probe_wrapper.py docstring).
+"src/ouroboros/examples/probe_wrapper.py" = ["UP006", "UP032", "UP035", "UP045"]
 
 [tool.ruff.format]
 quote-style = "double"

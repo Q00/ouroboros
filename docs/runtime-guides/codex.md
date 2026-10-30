@@ -272,6 +272,11 @@ ouroboros init start "Build a task management CLI"
 
 ## How It Works
 
+Codex LLM completion responses preserve the native completed-turn input and
+output token counts. Cached-input and reasoning-token fields are breakdowns of
+those counts and are not added again. Missing native usage keeps the zero
+fallback; each invocation uses its last valid completed-turn report.
+
 ```
 +-----------------+     +------------------+     +-----------------+
 |   Seed YAML     | --> |   Orchestrator   | --> |   Codex CLI     |

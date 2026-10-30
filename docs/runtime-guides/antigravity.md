@@ -9,7 +9,7 @@ API-key Gemini access is unaffected). If you authenticated the Gemini runtime
 through a Pro/Ultra subscription, switch the affected stages to the
 `antigravity` runtime.
 
-The Antigravity runtime extends the Gemini runtime (Antigravity is Google's Gemini-CLI successor): Ouroboros owns the orchestration loop and invokes `agy -p --output-format stream-json` for each task. It normalizes native assistant, tool, session, and terminal events into Ouroboros messages. Workflow checkpoints remain at the Ouroboros layer (event store + lineage). The installed CLI must support `--output-format stream-json`; CLI-dependent behavior is documented in `docs/antigravity-stream-contract.md`.
+The Antigravity runtime extends the Gemini runtime (Antigravity is Google's Gemini-CLI successor): Ouroboros owns the orchestration loop and invokes `agy -p --output-format stream-json` for each task. It normalizes native assistant, tool, session, and terminal events into Ouroboros messages. Workflow checkpoints remain at the Ouroboros layer (event store + lineage). The installed CLI must support `--output-format stream-json`; CLI-dependent behavior is documented in the [Antigravity stream contract](../antigravity-stream-contract.md).
 
 ## Prerequisites
 
@@ -55,8 +55,9 @@ orchestrator:
 ```
 
 Antigravity is **runtime-only** — it drives the agentic orchestrator but is not
-registered as an LLM-completion backend (`agy -p` returns plain text, not a
-structured JSON/schema payload), so it is not a valid `llm.backend` value. Use
+registered as an LLM-completion backend, so it is not a valid `llm.backend`
+value. A structured runtime event stream does not establish a completion
+adapter or provider-native JSON/schema enforcement. Use
 the runtime via `orchestrator.runtime_backend`, per-stage routing, or
 `--runtime antigravity`. For completion-level diversity (consensus / role
 models) route Gemini/other vendors through `litellm`/OpenRouter.
@@ -82,14 +83,28 @@ Each task spawns:
 ```text
 agy -p <PROMPT> \
     --dangerously-skip-permissions \
-    [--model <MODEL>]
+    --output-format stream-json \
+    [--model <MODEL>] \
+    [--effort <low|medium|high|xhigh|max>] \
+    [--conversation <CONVERSATION_ID>]
 ```
 
 | Flag                             | Why                                                       |
 |----------------------------------|-----------------------------------------------------------|
 | `-p` (`--print` / `--prompt`)    | Runs a single prompt non-interactively, prints the answer |
 | `--dangerously-skip-permissions` | Auto-approves tool requests so the subprocess never blocks|
+| `--output-format stream-json`   | Emits native assistant, tool, session, and terminal events |
 | `--model`                        | Forwarded only for an explicit, non-sentinel model id     |
+| `--effort`                       | Optional native reasoning effort; unsupported values fail before launch |
+| `--conversation`                 | Resumes the exact supplied conversation ID or runtime handle |
+
+The runtime normalizes structured events and keeps tool output separate from
+the final assistant response. Plain-text wrapped output remains a compatibility
+fallback; it cannot establish which tools ran. Resume uses `--conversation`,
+not `--continue` (the most recent conversation). Unsupported resume requests
+fail explicitly and are never retried as fresh sessions. A different native
+conversation ID in the stream terminates the invocation before that event's
+content is delivered.
 
 `agy` has a native `--mode accept-edits` option. In headless use, however,
 approval-required calls may be soft-denied without an interactive prompt; the
@@ -99,7 +114,7 @@ permission modes continue to map to the skip flag:
 
 | Ouroboros permission mode | `agy` behavior                  | Notes                                         |
 |---------------------------|---------------------------------|-----------------------------------------------|
-| `acceptEdits` (default)   | `--dangerously-skip-permissions`| Over-approximated to full skip (no narrower mode) |
+| `acceptEdits` (default)   | `--dangerously-skip-permissions`| Existing full-skip mapping; not an edit-only guarantee |
 | `bypassPermissions`       | `--dangerously-skip-permissions`| Explicit full bypass                          |
 
 The interactive Ouroboros `default` mode is normalized to `acceptEdits` (with an
@@ -133,12 +148,13 @@ configured model and only forwards `--model` when you set an explicit id.
 |--------------------------|-------------------------------------------------------|
 | Headless execution       | ✅ `agy -p`                                           |
 | Tool calls               | ✅ (Antigravity-managed via `--dangerously-skip-permissions`) |
-| Structured event stream  | ❌ plain-text stdout (no `--output-format`)           |
-| Session resumption       | ❌ not surfaced in v1 (recovery at the Ouroboros lineage layer) |
+| Structured event stream  | ✅ `--output-format stream-json`; plain-text compatibility fallback |
+| Session resumption       | ✅ Exact native conversation via `--conversation`; no fresh-session fallback |
+| Reasoning effort         | ✅ Native `--effort`: `low`, `medium`, `high`, `xhigh`, `max` |
 | LLM-completion backend   | ❌ runtime-only                                       |
 
-If you need a structured event stream or resumable sessions, use the Claude,
-Codex, or Grok runtime.
+These capabilities depend on the installed CLI accepting the documented flags.
+They do not imply live turn interruption or a hard tool/sandbox boundary.
 
 ## Troubleshooting
 

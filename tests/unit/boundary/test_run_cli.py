@@ -115,7 +115,7 @@ async def _run_cli(
     with (
         patch("ouroboros.cli.commands.run._load_seed_from_yaml", return_value=SEED_DATA),
         patch("ouroboros.orchestrator.create_agent_runtime"),
-        patch("ouroboros.orchestrator.OrchestratorRunner", return_value=runner),
+        patch("ouroboros.orchestrator.runner_factory.OrchestratorRunner", return_value=runner),
         patch("ouroboros.persistence.event_store.EventStore", return_value=store),
         patch("ouroboros.boundary.constructor.CheckConstructor", constructor_cls),
         patch(

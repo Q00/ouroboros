@@ -19,12 +19,14 @@ the source *supports* the claim stays a synthesis-level judgment.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
+import ipaddress
 import json
 import re
+import string
 import time
 from typing import Any
+import unicodedata
 import urllib.error
-import urllib.parse
 import urllib.request
 
 VERIFIED = "verified"
@@ -38,6 +40,113 @@ _MAX_URLS = 8
 _MAX_URL_LEN = 2000
 
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+_UNRESERVED = frozenset(string.ascii_letters + string.digits + "-._~")
+_SUB_DELIMS = frozenset("!$&'()*+,;=")
+_REG_NAME_CHARS = _UNRESERVED | _SUB_DELIMS
+_PCHAR = _REG_NAME_CHARS | frozenset(":@")
+_HEX = frozenset(string.hexdigits)
+
+
+def _iri_codepoint_allowed(codepoint: int, *, query: bool) -> bool:
+    # RFC 3987 ucschar; private-use codepoints are permitted only in iquery.
+    ucschar = (
+        0xA0 <= codepoint <= 0xD7FF
+        or 0xF900 <= codepoint <= 0xFDCF
+        or 0xFDF0 <= codepoint <= 0xFFEF
+        or (
+            0x10000 <= codepoint <= 0xEFFFD
+            and codepoint & 0xFFFF <= 0xFFFD
+            and not 0xE0000 <= codepoint <= 0xE0FFF
+        )
+    )
+    private = (
+        0xE000 <= codepoint <= 0xF8FF
+        or 0xF0000 <= codepoint <= 0xFFFFD
+        or 0x100000 <= codepoint <= 0x10FFFD
+    )
+    return ucschar or (query and private)
+
+
+def _uri_component_is_syntactic(
+    value: str, allowed: frozenset[str], *, query: bool = False
+) -> bool:
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char == "%":
+            if index + 2 >= len(value) or not all(
+                digit in _HEX for digit in value[index + 1 : index + 3]
+            ):
+                return False
+            index += 3
+        elif char in allowed or _iri_codepoint_allowed(ord(char), query=query):
+            index += 1
+        else:
+            return False
+    return True
+
+
+def _eligible_http_citation(url: str) -> bool:
+    if len(url) > _MAX_URL_LEN or any(
+        char.isspace() or unicodedata.category(char) in {"Cc", "Cf", "Cs"} for char in url
+    ):
+        return False
+    # Split raw components before validating: urlsplit rejects valid IPvFuture V.
+    parsed = re.fullmatch(r"(?i)https?://([^/?#]*)([^?#]*)(?:\?([^#]*))?(?:#(.*))?", url)
+    if parsed is None:
+        return False
+    authority, path, query, fragment = parsed.groups(default="")
+    if "@" in authority:
+        if authority.count("@") != 1:
+            return False
+        userinfo, authority = authority.split("@", 1)
+        if not _uri_component_is_syntactic(userinfo, _REG_NAME_CHARS | frozenset(":")):
+            return False
+    if authority.startswith("["):
+        literal, closing, port_suffix = authority[1:].partition("]")
+        if not closing:
+            return False
+        if literal[:1].lower() == "v":
+            version, separator, address = literal[1:].partition(".")
+            if (
+                not separator
+                or not version
+                or not set(version) <= _HEX
+                or not address
+                or not all(char in _REG_NAME_CHARS or char == ":" for char in address)
+            ):
+                return False
+        else:
+            address, zone_separator, zone = literal.partition("%25")
+            if zone_separator:
+                if (
+                    not zone
+                    or not zone.isascii()
+                    or not _uri_component_is_syntactic(zone, _UNRESERVED)
+                ):
+                    return False
+            if "%" in address:
+                return False
+            try:
+                ipaddress.IPv6Address(address)
+            except ipaddress.AddressValueError:
+                return False
+        if port_suffix and not port_suffix.startswith(":"):
+            return False
+    else:
+        host, separator, port = authority.partition(":")
+        if not host or not _uri_component_is_syntactic(host, _REG_NAME_CHARS):
+            return False
+        port_suffix = separator + port
+    if port_suffix:
+        port = port_suffix[1:]
+        if not port or not port.isascii() or not port.isdigit() or int(port) > 65535:
+            return False
+    return (
+        _uri_component_is_syntactic(path, _PCHAR | frozenset("/"))
+        and _uri_component_is_syntactic(query, _PCHAR | frozenset("/?"), query=True)
+        and _uri_component_is_syntactic(fragment, _PCHAR | frozenset("/?"))
+    )
 
 
 def extract_cited_urls(text: str) -> tuple[str, ...]:
@@ -47,7 +156,8 @@ def extract_cited_urls(text: str) -> tuple[str, ...]:
     ``build_lateral_multi_subagent``: ``external_sources`` (list of URLs) and
     ``claims[].source``. Order-preserving, deduplicated. Any malformed block
     is skipped rather than raised — a persona that broke the format simply
-    contributes no checkable citations.
+    contributes no checkable citations. Preserve nonblank URL strings exactly so
+    the prefetch validator can detect padding and other malformed characters.
     """
     if not text:
         return ()
@@ -70,8 +180,8 @@ def extract_cited_urls(text: str) -> tuple[str, ...]:
         for candidate in candidates:
             if not isinstance(candidate, str):
                 continue
-            url = candidate.strip()
-            if url and url not in seen:
+            url = candidate
+            if url.strip() and url not in seen:
                 seen.add(url)
                 urls.append(url)
     return tuple(urls)
@@ -84,9 +194,39 @@ def _default_fetch(url: str, timeout: float) -> bool:
     one ranged GET so it is not falsely marked dead. Anything else — DNS
     failure, TLS failure, timeout, 4xx/5xx — is "not alive right now".
     """
+    # urllib's Request rejects percent escapes inside IPv6 ZoneIDs. Decode
+    # characters it can represent in the authority without changing delimiters.
+    request_url = url
+    authority_match = re.match(r"(?i)^https?://([^/?#]*)", url)
+    if authority_match:
+        authority = authority_match.group(1)
+        opening = authority.find("[")
+        closing = authority.find("]", opening + 1)
+        if opening >= 0 and closing > opening:
+            literal = authority[opening + 1 : closing]
+            address, separator, zone = literal.partition("%25")
+            if separator and "%" in zone:
+                zone = re.sub(
+                    r"%([0-9A-Fa-f]{2})",
+                    lambda match: (
+                        char
+                        if (char := chr(int(match.group(1), 16)))
+                        in (_UNRESERVED | _SUB_DELIMS | frozenset(":"))
+                        else match.group(0)
+                    ),
+                    zone,
+                )
+                offset = authority_match.start(1)
+                request_url = (
+                    url[: offset + opening + 1]
+                    + address
+                    + separator
+                    + zone
+                    + url[offset + closing :]
+                )
     for method, headers in (("HEAD", {}), ("GET", {"Range": "bytes=0-0"})):
         request = urllib.request.Request(  # noqa: S310 - scheme validated by caller
-            url,
+            request_url,
             method=method,
             headers={"User-Agent": "ouroboros-citation-check/1", **headers},
         )
@@ -113,7 +253,7 @@ def audit_citations(
 
     Returns ``{"checked": n, "urls": {url: verdict}, "unverified_present":
     bool}`` where each verdict is one of ``verified`` / ``unreachable`` /
-    ``invalid`` (non-http(s) or oversized URL — never fetched) / ``unchecked``
+    ``invalid`` (malformed, non-http(s), or oversized URL — never fetched) / ``unchecked``
     (budget or count cap reached before this URL's turn). Never raises.
     """
     urls: list[str] = []
@@ -130,8 +270,7 @@ def audit_citations(
     deadline = time.monotonic() + total_budget_seconds
     checked = 0
     for url in urls:
-        parsed = urllib.parse.urlparse(url)
-        if parsed.scheme not in ("http", "https") or len(url) > _MAX_URL_LEN:
+        if not _eligible_http_citation(url):
             verdicts[url] = INVALID
             continue
         if checked >= max_urls or time.monotonic() >= deadline:

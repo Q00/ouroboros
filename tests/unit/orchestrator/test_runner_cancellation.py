@@ -113,6 +113,17 @@ class TestCancellationRegistry:
         assert not await is_cancellation_requested("sess_999")
 
     @pytest.mark.asyncio
+    async def test_is_cancellation_requested_uses_runner_getter(self) -> None:
+        """The runner entry point resolves its patchable getter at call time."""
+        with patch(
+            "ouroboros.orchestrator.runner.get_cancellation_request",
+            new_callable=AsyncMock,
+            return_value=object(),
+        ) as getter:
+            assert await is_cancellation_requested("sess_123")
+        getter.assert_awaited_once_with("sess_123")
+
+    @pytest.mark.asyncio
     async def test_clear_cancellation(self) -> None:
         """Test that clearing cancellation removes session from registry."""
         await request_cancellation("sess_123")

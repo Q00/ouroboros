@@ -5,6 +5,7 @@ Supports both standard workflow execution and agent-runtime orchestrator mode.
 """
 
 import asyncio
+from collections.abc import Mapping
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
@@ -531,6 +532,18 @@ def _resolve_resume_fat_harness_mode(
     )
 
 
+def _resolve_resume_checkpoint_store_enabled(progress: Mapping[str, Any]) -> bool:
+    """Carry a persisted checkpoint mode into runner assembly on resume.
+
+    Only an actual boolean can select the old no-store mode. The runner still
+    validates the full durable contract and its proof before resuming.
+    """
+    contract = progress.get("execution_contract")
+    semantics = contract.get("execution_semantics") if isinstance(contract, Mapping) else None
+    mode = semantics.get("checkpoint_store_enabled") if isinstance(semantics, Mapping) else None
+    return mode if type(mode) is bool else True
+
+
 def _resolve_max_parallel_workers() -> int:
     """Resolve the parallel worker cap from environment, config, then default."""
     env_value = os.environ.get("OUROBOROS_MAX_PARALLEL_WORKERS", "").strip()
@@ -634,6 +647,7 @@ async def _record_cli_run_outcome(
     status and sends only its anonymous no-evidence count
     (``acceptance_no_evidence``). Never raises.
     """
+    from ouroboros.mcp.tools.run_ac_tally import derive_run_ac_tally
     from ouroboros.mcp.tools.run_failure_meta import derive_run_failure_meta
     from ouroboros.orchestrator.session import SessionStatus
 
@@ -680,6 +694,16 @@ async def _record_cli_run_outcome(
             try:
                 # A paused run returned above: the final verdict exists.
                 check_package_run.finish(terminal_status, surface="cli_run")
+            except Exception:
+                pass
+        if session_id is not None:
+            # Same enrichment rule: the tally never blocks the outcome.
+            try:
+                result_meta.update(
+                    await derive_run_ac_tally(
+                        event_store, session_id=session_id, execution_id=execution_id
+                    )
+                )
             except Exception:
                 pass
         usage_telemetry.capture_job_outcome(
@@ -734,12 +758,12 @@ async def _run_orchestrator(
     """
     from ouroboros.core.seed import Seed
     from ouroboros.orchestrator import (
-        OrchestratorRunner,
         create_agent_runtime,
         create_agent_runtime_async,
         preflight_agent_runtime,
         resolve_agent_runtime_backend,
     )
+    from ouroboros.orchestrator.runner_factory import build_orchestrator_runner
     from ouroboros.orchestrator.session import SessionRepository
     from ouroboros.persistence.event_store import EventStore
 
@@ -805,6 +829,7 @@ async def _run_orchestrator(
     workspace: TaskWorkspace | None = None
     execution_id: str | None = None
     session_id_for_run: str | None = None
+    checkpoint_store_enabled = True
 
     try:
         if resume_session:
@@ -825,6 +850,9 @@ async def _run_orchestrator(
             resolved_fat_harness_mode = _resolve_resume_fat_harness_mode(
                 seed_data,
                 reconstructed.value.progress,
+            )
+            checkpoint_store_enabled = _resolve_resume_checkpoint_store_enabled(
+                reconstructed.value.progress
             )
         else:
             session_id_for_run = f"orch_{uuid4().hex[:12]}"
@@ -869,17 +897,25 @@ async def _run_orchestrator(
     if runtime_blocker is not None:
         print_error(f"Runtime '{resolved_runtime_backend}' cannot execute: {runtime_blocker}")
         raise typer.Exit(1)
-    runner = OrchestratorRunner(
-        adapter,
-        event_store,
-        console,
+    runner = build_orchestrator_runner(
+        adapter=adapter,
+        event_store=event_store,
+        console=console,
         mcp_manager=mcp_manager,
         mcp_tool_prefix=mcp_tool_prefix,
         debug=debug,
         task_workspace=workspace,
+        enable_decomposition=True,
         max_decomposition_depth=resolved_max_decomposition_depth,
         max_parallel_workers=resolved_max_parallel_workers,
         fat_harness_mode=resolved_fat_harness_mode,
+        base_model_tier=None,
+        efficiency_mode=None,
+        frugality_assurance=None,
+        inherited_runtime_handle=None,
+        inherited_tools=None,
+        session_signal_hub=None,
+        checkpoint_store_enabled=checkpoint_store_enabled,
     )
 
     # The URL is emitted before execution starts so it can be opened while the
