@@ -422,7 +422,7 @@ def _looks_like_json_container(text: str, opener_pos: int, *, limit: int | None 
         return bool(
             candidate[0] in '{["'
             or numeric_atom
-            or _is_malformed_numeric_lexeme(candidate)
+            or _is_malformed_scalar_lexeme(candidate)
             or re.match(r"(?:true|false|null)(?:\s*[,\]])", candidate)
             or re.fullmatch(r"(?:undefined|NaN)\s*,?", candidate)
         )
@@ -524,23 +524,20 @@ def _complete_json_value(value: str) -> bool:
     return not value[start + end_offset :].strip()
 
 
-def _is_malformed_numeric_lexeme(value: str) -> bool:
-    """Recognize numeric-only tokens that are not complete JSON numbers.
-
-    Intent is broader than the JSON number grammar. An explicit exponent
-    marker keeps a numeric-only token structural even when its mantissa or
-    exponent is malformed. Without an exponent, the token must still look like
-    a single mantissa; this leaves dates and dotted references on the prose
-    path while catching leading-zero and unfinished decimal forms.
-    """
+def _is_malformed_scalar_lexeme(value: str) -> bool:
+    """Recognize numeric corruption and scalar literals outside JSON syntax."""
     candidate = value.strip()
-    if not _NUMERIC_LOOKING_LEXEME_RE.fullmatch(candidate):
-        return False
     if _complete_json_value(candidate):
         return False
-    if "e" in candidate.lower():
+    if _NUMERIC_LOOKING_LEXEME_RE.fullmatch(candidate) and (
+        "e" in candidate.lower() or _NUMERIC_MANTISSA_LEXEME_RE.fullmatch(candidate)
+    ):
         return True
-    return bool(_NUMERIC_MANTISSA_LEXEME_RE.fullmatch(candidate))
+    try:
+        literal = ast.literal_eval(candidate)
+    except (ValueError, SyntaxError):
+        return False
+    return type(literal) in (int, float, complex, bool, type(None))
 
 
 def _has_nonstructural_json_prefix_suffix(value: str) -> bool:
@@ -621,7 +618,7 @@ def _has_structural_container_intent(text: str, opener_pos: int, limit: int) -> 
             component_signal = True
             continue
 
-        if _is_malformed_numeric_lexeme(stripped.split(maxsplit=1)[0]):
+        if _is_malformed_scalar_lexeme(stripped.split(maxsplit=1)[0]):
             component_signal = True
             continue
 

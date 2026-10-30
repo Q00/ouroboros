@@ -371,6 +371,15 @@ class TestExtractEvidence:
             "[+1 2]",
             "[+1e 2]",
             "[+1e+ 2]",
+            "[0x10]",
+            "[0o10]",
+            "[0b10]",
+            "[1_000]",
+            "[.5]",
+            "[1j]",
+            "[True]",
+            "[False]",
+            "[None]",
         ],
     )
     @pytest.mark.parametrize("context", ["bare", "after-fence", "in-fence"])
