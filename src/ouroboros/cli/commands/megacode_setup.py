@@ -91,13 +91,23 @@ def resolve_harness_config_dir(harness_path: str) -> Path | None:
     for line in completed.stdout.splitlines():
         parts = line.split(maxsplit=1)
         if len(parts) == 2 and parts[0] == "CONFIG":
-            path = Path(parts[1])
+            # harness 0.23 reports the source after two spaces. Remove only
+            # that suffix: spaces and parentheses can belong to the path.
+            value = parts[1]
+            for source in ("default", "XDG_CONFIG_HOME", "HARNESS_HOME"):
+                suffix = f"  ({source})"
+                if value.endswith(suffix):
+                    value = value.removesuffix(suffix)
+                    break
+            path = Path(value)
             return path if path.is_absolute() else None
     return None
 
 
 def _toml_string(value: str) -> str:
-    return json.dumps(value, ensure_ascii=True)
+    # JSON escapes the C0 controls TOML forbids, but ASCII surrogate-pair
+    # escapes are not TOML Unicode scalars. Keep Unicode literal; escape DEL.
+    return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
 
 
 def _toml_array(values: tuple[str, ...] | list[str]) -> str:
@@ -295,10 +305,15 @@ def setup_megacode(
         )
         return False
 
-    skills_root = install_megacode_skills(config_dir, skills_dir=skills_dir)
+    skills_root = config_dir / _SKILLS_SUBDIR
     block = render_harness_block(skills_root=skills_root, mcp_command=mcp_command)
     new_config = merge_managed_block(existing, block, _BLOCK_BEGIN, _BLOCK_END)
-    tomllib.loads(new_config)
+    try:
+        tomllib.loads(new_config)
+    except tomllib.TOMLDecodeError as exc:
+        print_error(f"Generated harness config is not valid TOML ({exc}); setup was not applied.")
+        return False
+    install_megacode_skills(config_dir, skills_dir=skills_dir)
     _atomic_write_text(config_path, new_config, mode=0o600)
 
     agents_path = config_dir / "AGENTS.md"

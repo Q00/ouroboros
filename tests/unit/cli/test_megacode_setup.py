@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import subprocess
 import sys
 import tomllib
 
@@ -144,17 +146,57 @@ def test_paths_preserves_spaces_and_uses_only_absolute_config(tmp_path: Path) ->
     harness.write_text(f"#!{sys.executable}\nprint({str('CONFIG ' + str(target))!r})\n")
     harness.chmod(0o700)
     assert megacode_setup.resolve_harness_config_dir(str(harness)) == target
-    harness.write_text(f'#!{sys.executable}\nprint("CONFIG relative/path")\n')
+    harness.write_text(f'#!{sys.executable}\nprint("CONFIG relative/path  (XDG_CONFIG_HOME)")\n')
     assert megacode_setup.resolve_harness_config_dir(str(harness)) is None
 
 
+def test_paths_removes_only_the_final_source_annotation(tmp_path: Path) -> None:
+    harness = tmp_path / "harness"
+    target = tmp_path / "config  (default)"
+    output = f"CONFIG   {target}  (HARNESS_HOME)"
+    harness.write_text(f"#!{sys.executable}\nprint({output!r})\n")
+    harness.chmod(0o700)
+    assert megacode_setup.resolve_harness_config_dir(str(harness)) == target
+
+
 def test_render_roundtrips_control_characters_and_quotes(tmp_path: Path) -> None:
-    skills = tmp_path / 'quote" slash\\ tab\t newline\n'
-    command = ["uvx", 'quote"', "slash\\", "tab\t", "newline\n", "\x00"]
+    skills = tmp_path / 'quote" slash\\ tab\t newline\n 😀'
+    command = ["uvx", 'quote"', "slash\\", "tab\t", "newline\n", "\x00", "\x7f", "😀"]
     block = megacode_setup.render_harness_block(skills_root=skills, mcp_command=command)
     data = tomllib.loads(block)
     assert data["skills"]["extra_roots"] == [str(skills)]
     assert data["mcp"]["servers"]["ouroboros"]["command"] == command
+
+
+_NATIVE_PATHS = json.loads(
+    (Path(__file__).parents[2] / "fixtures/megacode/harness-0.23.0-paths.json").read_text(
+        encoding="utf-8"
+    )
+)["cases"]
+
+
+@pytest.mark.parametrize("case", _NATIVE_PATHS, ids=lambda case: case["name"])
+def test_paths_from_native_023_fixture(case: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        megacode_setup.subprocess,
+        "run",
+        lambda *args, **_kwargs: subprocess.CompletedProcess(args[0], 0, case["stdout"], ""),
+    )
+    assert megacode_setup.resolve_harness_config_dir("harness") == Path(case["config_dir"])
+
+
+def test_invalid_render_does_not_replace_installed_skills(
+    harness_config: Path, packaged_skills: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = install_megacode_skills(harness_config, skills_dir=packaged_skills)
+    sentinel = root / "sentinel"
+    sentinel.write_text("keep")
+    monkeypatch.setattr(megacode_setup, "render_harness_block", lambda **_kwargs: "invalid = [")
+
+    assert not setup_megacode("harness", mcp_entry=_MCP_ENTRY, skills_dir=packaged_skills)
+    assert sentinel.read_text() == "keep"
+    assert not (harness_config / "config.toml").exists()
+    assert not (harness_config / "AGENTS.md").exists()
 
 
 @pytest.mark.parametrize("name", ["../escaped", "ABSOLUTE", "..", ".", "a/b", "a\\b"])

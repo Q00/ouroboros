@@ -1,0 +1,36 @@
+{
+  "version": "harness 0.23.0",
+  "provenance": "Captured from the published Linux x86_64 musl 0.23.0 release using harness paths; env is the complete subprocess environment.",
+  "cases": [
+    {
+      "name": "default",
+      "env": {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/tmp/harness023-fixture/home"
+      },
+      "config_dir": "/tmp/harness023-fixture/home/.config/harness",
+      "stdout": "CONFIG   /tmp/harness023-fixture/home/.config/harness  (default)\nDATA     /tmp/harness023-fixture/home/.local/share/harness  (XDG/default)\nSTATE    /tmp/harness023-fixture/home/.local/state/harness  (XDG/default)\nCACHE    /tmp/harness023-fixture/home/.cache/harness  (XDG/default)\nRUNTIME  /tmp/harness023-fixture/home/.cache/harness  (XDG/default)\n"
+    },
+    {
+      "name": "xdg",
+      "env": {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/tmp/harness023-fixture/home",
+        "XDG_CONFIG_HOME": "/tmp/harness023-fixture/config with spaces 😀"
+      },
+      "config_dir": "/tmp/harness023-fixture/config with spaces 😀/harness",
+      "stdout": "CONFIG   /tmp/harness023-fixture/config with spaces 😀/harness  (XDG_CONFIG_HOME)\nDATA     /tmp/harness023-fixture/home/.local/share/harness  (XDG/default)\nSTATE    /tmp/harness023-fixture/home/.local/state/harness  (XDG/default)\nCACHE    /tmp/harness023-fixture/home/.cache/harness  (XDG/default)\nRUNTIME  /tmp/harness023-fixture/home/.cache/harness  (XDG/default)\n"
+    },
+    {
+      "name": "override",
+      "env": {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/tmp/harness023-fixture/home",
+        "HARNESS_HOME": "/tmp/harness023-fixture/override with spaces 😀",
+        "XDG_CONFIG_HOME": "/tmp/harness023-fixture/ignored"
+      },
+      "config_dir": "/tmp/harness023-fixture/override with spaces 😀/config",
+      "stdout": "CONFIG   /tmp/harness023-fixture/override with spaces 😀/config  (HARNESS_HOME)\nDATA     /tmp/harness023-fixture/override with spaces 😀/data  (HARNESS_HOME)\nSTATE    /tmp/harness023-fixture/override with spaces 😀/state  (HARNESS_HOME)\nCACHE    /tmp/harness023-fixture/override with spaces 😀/cache  (HARNESS_HOME)\nRUNTIME  /tmp/harness023-fixture/override with spaces 😀/runtime  (HARNESS_HOME)\n"
+    }
+  ]
+}
