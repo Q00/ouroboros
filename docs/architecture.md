@@ -595,6 +595,7 @@ worker transports; the remaining entries are user-selectable runtimes.
 | `claude_mcp` | `LeaderDrivenWorkerRuntime` over `claude -p --resume` | `claude_worker` | `src/ouroboros/orchestrator/claude_worker_runtime.py` |
 | `copilot` | `CopilotCliRuntime` | `copilot_cli` | `src/ouroboros/orchestrator/copilot_cli_runtime.py` |
 | `gemini` | `GeminiCLIRuntime` | `gemini_cli` | `src/ouroboros/orchestrator/gemini_cli_runtime.py` |
+| `megacode` | `MegacodeRuntime` | `megacode_cli` | `src/ouroboros/orchestrator/megacode_runtime.py` |
 | `zcode` | `ZcodeCLIRuntime` | `zcode_cli` | `src/ouroboros/orchestrator/zcode_cli_runtime.py` |
 | `hermes` | `HermesCliRuntime` | `hermes_cli` | `src/ouroboros/orchestrator/hermes_runtime.py` |
 | `kiro` | `KiroAgentAdapter` | `kiro_cli` | `src/ouroboros/orchestrator/kiro_adapter.py` |
