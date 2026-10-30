@@ -87,3 +87,57 @@ async def test_stream_is_persisted_before_completion_and_replay_preserves_correl
     assert tool_events[-2].data["tool_output"] == "step one\n"
     assert events[-1].data["runtime_status"] == "completed"
     assert not any("PRIVATE_REASONING" in str(event.data) for event in events)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("mode", ["auth_prompt", "malformed_prompt", "exit_prompt"])
+async def test_failed_submitted_prompt_is_not_replayed_and_survives_database_reopen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    wire = tmp_path / "wire.ndjson"
+    monkeypatch.setenv("FAKE_COPILOT_ACP_MODE", mode)
+    monkeypatch.setenv("FAKE_COPILOT_ACP_LOG", str(wire))
+    adapter = CopilotAcpRuntime(cli_path=_FAKE, cwd=tmp_path, permission_mode="acceptEdits")
+    database = sqlite_database_url(tmp_path / "events.db")
+    store = EventStore(database)
+    await store.initialize()
+
+    async def append(event) -> bool:
+        await store.append(event)
+        return True
+
+    emitter = ExecutionEventEmitter(store, safe_emit_event=append)
+    messages = []
+    try:
+        async for message in adapter.execute_task("Inspect this fixture", tools=["Read"]):
+            messages.append(message)
+            await store.append(
+                emitter.build_session_progress_event(
+                    "failed-session", message, projected=project_runtime_message(message)
+                )
+            )
+    finally:
+        await store.close()
+
+    assert sum(message.is_final for message in messages) == 1
+    assert messages[-1].is_error
+    assert not any(message.data.get("fallback_from") for message in messages)
+    rows = [json.loads(line) for line in wire.read_text().splitlines()]
+    launches = [row for row in rows if "argv" in row]
+    assert len(launches) == 1
+    assert sum(row.get("method") == "session/prompt" for row in rows) == 1
+    assert "-p" not in launches[0]["argv"]
+    observation = await messages[-1].resume_handle.observe()
+    assert observation["returncode"] is not None
+
+    replay = EventStore(database)
+    await replay.initialize()
+    try:
+        events = await replay.replay("session", "failed-session")
+    finally:
+        await replay.close()
+    assert len(events) == len(messages)
+    assert events[-1].data["runtime_status"] == "failed"
+    assert events[-1].data["runtime_event_type"] == "turn.failed"
+    assert events[-1].data["runtime"]["metadata"]["acp_session_id"].startswith("session-")
+    assert not any(event.data.get("runtime_status") == "completed" for event in events)
