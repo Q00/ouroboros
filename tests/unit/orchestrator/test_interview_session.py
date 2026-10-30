@@ -1,6 +1,7 @@
 """The interview control-turn contract must hold at every runtime entry point."""
 
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -59,7 +60,7 @@ def runtime(request, tmp_path, monkeypatch):
         "asyncio.create_subprocess_exec",
         AsyncMock(side_effect=AssertionError("Interview control turns must stay in MCP")),
     )
-    return request.param(cli_path="test-runtime", cwd=tmp_path, skills_dir=SKILLS_DIR)
+    return request.param(cli_path=sys.executable, cwd=tmp_path, skills_dir=SKILLS_DIR)
 
 
 def install_handler(runtime, results, shared_dispatcher):
