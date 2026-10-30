@@ -9457,6 +9457,8 @@ class TestParallelACExecutor:
             "\n0x10",
             "\nTrue",
             "\n1_000",
+            "\n[bogus\nTrue\n]",
+            "\n[bogus\n0x10\n]",
             '\ntrailing note [undefined,\n{"files_touched":["nested.py"]}\n]',
             '\ntrailing note [undefined, {"broken": ]\n{\n"files_touched":["nested.py"]\n}\n]',
             '\ntrailing note [bogus\n{"files_touched":["nested.py"]}\n]',

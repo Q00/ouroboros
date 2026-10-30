@@ -153,7 +153,7 @@ class _EvidenceScan:
     values: list[tuple[int, int, Any]]
     decoded: dict[int, tuple[int, Any]]
     malformed: dict[int, _EvidenceExtent]
-    nested_values: set[int]
+    nested_payloads: set[int]
     payload_attempts: set[int]
 
 
@@ -433,7 +433,7 @@ def _looks_like_json_container(text: str, opener_pos: int, *, limit: int | None 
 
 
 def _is_terminal_malformed_payload(text: str, position: int, scan: _EvidenceScan) -> bool:
-    return position in scan.nested_values or (
+    return position in scan.nested_payloads or (
         _is_evidence_container_opener(text, position) and position in scan.payload_attempts
     )
 
@@ -736,28 +736,32 @@ def _scan_evidence_values(text: str) -> _EvidenceScan:
             continue
         top_level_values.append((start, end, value))
 
-    nested_values = {
+    direct_payload_attempts = {
+        position
+        for position, extent in malformed_boundaries.items()
+        if position in malformed_scalars
+        or not extent.closed
+        or _looks_like_json_container(text, position, limit=extent.end)
+        or _has_structural_container_intent(text, position, extent.end)
+    }
+    nested_payloads = {
         owner
         for owner, extent in malformed_boundaries.items()
         if any(
             owner < start and end <= extent.end and _is_evidence_container_opener(text, start)
             for start, end, _ in all_spans
         )
+        or any(
+            owner < child and malformed_boundaries[child].end <= extent.end
+            for child in direct_payload_attempts
+        )
     }
     return _EvidenceScan(
         values=sorted(top_level_values, key=lambda candidate: (candidate[0], candidate[1])),
         decoded={start: (end, value) for start, end, value in all_spans},
         malformed=malformed_boundaries,
-        nested_values=nested_values,
-        payload_attempts={
-            position
-            for position, extent in malformed_boundaries.items()
-            if position in malformed_scalars
-            or not extent.closed
-            or position in nested_values
-            or _looks_like_json_container(text, position, limit=extent.end)
-            or _has_structural_container_intent(text, position, extent.end)
-        },
+        nested_payloads=nested_payloads,
+        payload_attempts=direct_payload_attempts | nested_payloads,
     )
 
 

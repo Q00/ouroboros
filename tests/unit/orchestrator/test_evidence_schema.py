@@ -426,6 +426,28 @@ class TestExtractEvidence:
             with pytest.raises(EvidenceError):
                 extract_evidence(text)
 
+    @pytest.mark.parametrize(
+        "payload", ["True", "0x10", "[true false]", "[true undefined]", '{"broken":}']
+    )
+    @pytest.mark.parametrize("tag", ["json", ""])
+    @pytest.mark.parametrize("depth", [1, 2, 3])
+    @pytest.mark.parametrize("later_real", [False, True])
+    def test_malformed_parent_retains_failed_child_authority(
+        self, payload: str, tag: str, depth: int, later_real: bool
+    ) -> None:
+        body = payload
+        for _ in range(depth):
+            body = f"[bogus\n{body}\n]"
+        body = '{"files_touched":["stale.py"]}\n' + body
+        if later_real:
+            body += '\n{"files_touched":["real.py"]}'
+        text = f"```{tag}\n{body}\n```"
+        if later_real:
+            assert extract_evidence(text).data == {"files_touched": ["real.py"]}
+        else:
+            with pytest.raises(EvidenceError):
+                extract_evidence(text)
+
     @pytest.mark.parametrize("earlier_fenced", [False, True])
     @pytest.mark.parametrize("prefix", ["", "trailing note "])
     @pytest.mark.parametrize("closer", ["]", ""])
