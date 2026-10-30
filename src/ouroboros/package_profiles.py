@@ -65,6 +65,7 @@ class PublicAgentRuntimeBackend(str, Enum):  # noqa: UP042
     ANTIGRAVITY = "antigravity"
     GROK = "grok"
     ZCODE = "zcode"
+    MEGACODE = "megacode"
     HOST = "host"
 
 

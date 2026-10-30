@@ -116,6 +116,7 @@ _CLI_PATH_ENV_BY_BACKEND = {
     "pi": "OUROBOROS_PI_CLI_PATH",
     "omp": "OUROBOROS_OMP_CLI_PATH",
     "zcode": "OUROBOROS_ZCODE_CLI_PATH",
+    "megacode": "OUROBOROS_MEGACODE_CLI_PATH",
 }
 
 

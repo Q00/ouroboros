@@ -679,6 +679,24 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         skill_execution_capabilities=_GENERIC_SKILL_EXECUTION_CAPABILITIES,
     ),
     BackendCapability(
+        # Megacode harness — the ``harness`` binary. ``harness -p
+        # --output-format stream-json`` drives one headless turn per call for
+        # both the agentic runtime and LLM completions. Auth and model choice
+        # (e.g. ``mega:full``) belong to the harness, so it is a sentinel-model
+        # backend. Headless runs cannot resume a session (``resume -p`` is a
+        # documented harness limit), so recovery stays at the lineage layer.
+        name="megacode",
+        aliases=("megacode_cli",),
+        supports_runtime=True,
+        supports_llm=True,
+        supports_interview_driver=False,
+        switchable_runtime=True,
+        cli_name="harness",
+        cli_config_key="megacode_cli_path",
+        supports_tool_envelope=False,
+        skill_execution_capabilities=_GENERIC_SKILL_EXECUTION_CAPABILITIES,
+    ),
+    BackendCapability(
         # ourocode is an LLM-completion backend only: it streams a single Claude
         # turn over ACP (`ourocode --acp`, its OAuth `:claude_api`) with no tool
         # use, so it backs completions (interview/seed/qa/evaluate) but NOT the
