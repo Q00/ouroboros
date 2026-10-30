@@ -217,6 +217,7 @@ class MegacodeRuntime(CodexCliRuntime):
         # ``--thinking`` level is not routed in v1 (capabilities declares
         # reasoning_effort_support=IGNORED, so it is surfaced as advised).
         reasoning_effort: str | None = None,
+        model: str | None = None,
     ) -> list[str]:
         """Build the ``harness -p`` command; the prompt is fed via stdin."""
         del output_last_message_path, resume_session_id, prompt, runtime_handle
@@ -232,7 +233,7 @@ class MegacodeRuntime(CodexCliRuntime):
         ]
         if self._permission_mode == "bypassPermissions":
             command.extend(["--sandbox", "off"])
-        normalized_model = self._normalize_model(self._model)
+        normalized_model = self._normalize_model(model or self._model)
         if normalized_model and normalized_model != _SENTINEL_MODEL:
             command.extend(["--model", normalized_model])
         return command

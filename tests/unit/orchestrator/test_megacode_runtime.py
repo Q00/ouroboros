@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -280,6 +281,50 @@ def test_cli_runtime_enums_accept_megacode() -> None:
 
 
 # --- End to end over a fake process -----------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("constructor_model", "call_model", "expected_model"),
+    [
+        (None, "mega:full", "mega:full"),
+        ("mega:fast", "mega:full", "mega:full"),
+        ("mega:fast", None, "mega:fast"),
+        ("mega:fast", "default", None),
+        ("default", "mega:full", "mega:full"),
+        ("default", None, None),
+        (None, "default", None),
+        (None, None, None),
+    ],
+)
+async def test_execute_task_launches_with_effective_model(
+    tmp_path: Path,
+    constructor_model: str | None,
+    call_model: str | None,
+    expected_model: str | None,
+) -> None:
+    harness = tmp_path / "harness"
+    harness.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        "payload = {'argv': sys.argv[1:], 'prompt': sys.stdin.read()}\n"
+        "print(json.dumps({'type': 'result', 'outcome': 'completed', "
+        "'is_error': False, 'result': json.dumps(payload)}))\n"
+    )
+    harness.chmod(0o755)
+    runtime = MegacodeRuntime(cli_path=harness, cwd=tmp_path, model=constructor_model)
+
+    messages = [message async for message in runtime.execute_task("hello", model=call_model)]
+
+    final = messages[-1]
+    assert final.type == "result"
+    assert final.data["subtype"] == "success", final.content
+    payload = json.loads(final.content)
+    expected_argv = ["-p", "--output-format", "stream-json", "--mode", MEGACODE_WORKER_MODE]
+    if expected_model is not None:
+        expected_argv.extend(["--model", expected_model])
+    assert payload["argv"] == expected_argv
+    assert "hello" in payload["prompt"]
 
 
 @pytest.mark.asyncio
