@@ -323,6 +323,14 @@ def _mask_markdown_examples(text: str) -> str:
     return text if masked is None else "".join(masked)
 
 
+def _is_container_quote_start(text: str, position: int) -> bool:
+    if text[position] == '"':
+        return True
+    return text[position] == "'" and (
+        position == 0 or not (text[position - 1].isalnum() or text[position - 1] == "_")
+    )
+
+
 def _malformed_boundary_end(text: str, opener_pos: int, *, limit: int | None = None) -> int:
     """Find the textual extent of a malformed JSON opener via bracket matching.
 
@@ -354,7 +362,7 @@ def _malformed_boundary_end(text: str, opener_pos: int, *, limit: int | None = N
             if ch == quote_char:
                 quote_char = None
             continue
-        if ch in ('"', "'"):
+        if ch in ('"', "'") and _is_container_quote_start(text, i):
             quote_char = ch
             continue
         if ch == opener:
@@ -458,7 +466,7 @@ def _split_outer_components(
             elif char == quote_char:
                 quote_char = None
             continue
-        if char in ('"', "'"):
+        if char in ('"', "'") and _is_container_quote_start(text, index):
             if len(stack) == 1:
                 has_trailing_comma = False
             quote_char = char
@@ -640,6 +648,7 @@ def _collect_top_level_values(text: str) -> list[tuple[int, int, Any]]:
     # whether trailing prose is authoritative, but not for containment: an
     # uncommon invalid key or array token must not expose a valid inner object.
     malformed_boundaries: list[tuple[int, int]] = []
+    fence_bodies = [(start, end) for _, start, end, _ in _top_level_fence_body_starts(text)]
     for token in _FENCE_TAIL_TOKEN_RE.finditer(text):
         if token.group("opener") is None:
             continue
@@ -648,7 +657,15 @@ def _collect_top_level_values(text: str) -> list[tuple[int, int, Any]]:
             parsed, end_offset = _DECODER.raw_decode(text[pos:])
             all_spans.append((pos, pos + end_offset, parsed))
         except json.JSONDecodeError:
-            malformed_boundaries.append((pos, _malformed_boundary_end(text, pos)))
+            boundary = len(text)
+            for body_start, body_end in fence_bodies:
+                if pos < body_start:
+                    boundary = body_start
+                    break
+                if pos < body_end:
+                    boundary = body_end
+                    break
+            malformed_boundaries.append((pos, _malformed_boundary_end(text, pos, limit=boundary)))
 
     # Containers can begin anywhere for ownership detection, but scalars are
     # eligible only when they occupy a Markdown line. This avoids interpreting

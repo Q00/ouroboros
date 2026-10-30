@@ -9436,6 +9436,7 @@ class TestParallelACExecutor:
             'The literal string "[1 2]" is documentation.',
             "See `[true false]` for notation.",
             'See [example "[true false]"] for details.',
+            "See [owner's report] for details.",
         ],
     )
     @pytest.mark.parametrize(
@@ -9446,8 +9447,9 @@ class TestParallelACExecutor:
             '\ntrailing note [undefined,\n{"files_touched":["nested.py"]}\n]',
         ],
     )
+    @pytest.mark.parametrize("has_later_record", [False, True])
     async def test_quoted_prose_preserves_atomic_evidence_and_terminal_authority(
-        self, tmp_path, tag: str, prose: str, terminal_corruption: str
+        self, tmp_path, tag: str, prose: str, terminal_corruption: str, has_later_record: bool
     ) -> None:
         event_store, appended_events = _make_replaying_event_store()
         data = {
@@ -9455,10 +9457,12 @@ class TestParallelACExecutor:
             "commands_run": ["pytest tests/test_ok.py"],
             "tests_passed": ["tests/test_ok.py::test_ok"],
         }
+        first = {**data, "files_touched": ["stale.py"]} if has_later_record else data
+        later = "\n" + json.dumps(data) if has_later_record else ""
         tail = terminal_corruption
         executor = ParallelACExecutor(
             adapter=_FinalMessageRuntime(
-                f"```{tag}\n{json.dumps(data)}\n{prose}{tail}\n```",
+                f"```{tag}\n{json.dumps(first)}\n{prose}{later}{tail}\n```",
                 native_session_id="quoted-prose-evidence",
                 cwd=str(tmp_path),
             ),

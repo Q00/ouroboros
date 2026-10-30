@@ -242,6 +242,35 @@ class TestExtractEvidence:
         text = f'```{fence_tag}\n{prose}\n{{"files_touched":["current.py"]}}\n```'
         assert extract_evidence(text).data == {"files_touched": ["current.py"]}
 
+    @pytest.mark.parametrize("fence_tag", ["json", ""])
+    @pytest.mark.parametrize("prose", ["See [owner's report] for details.", "See [don't]."])
+    def test_word_apostrophe_does_not_hide_final_fenced_record(
+        self, fence_tag: str, prose: str
+    ) -> None:
+        text = (
+            f'```{fence_tag}\n{{"files_touched":["stale.py"]}}\n{prose}\n'
+            '{"files_touched":["real.py"]}\n```'
+        )
+        assert extract_evidence(text).data == {"files_touched": ["real.py"]}
+
+    @pytest.mark.parametrize("fence_tag", ["json", ""])
+    @pytest.mark.parametrize(
+        "earlier",
+        [
+            "```json\ntrailing note [undefined,\n```\n",
+            "```\ntrailing note {bogus:\n```\n",
+            "trailing note [undefined,\n",
+        ],
+    )
+    def test_malformed_ownership_stops_before_independent_final_fence(
+        self, fence_tag: str, earlier: str
+    ) -> None:
+        text = (
+            earlier
+            + f'```{fence_tag}\nFinal evidence follows.\n{{"files_touched":["real.py"]}}\n```'
+        )
+        assert extract_evidence(text).data == {"files_touched": ["real.py"]}
+
     @pytest.mark.parametrize(
         "trailing_prose",
         [
