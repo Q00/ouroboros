@@ -506,8 +506,17 @@ def _has_nonstructural_json_prefix_suffix(value: str) -> bool:
         _, prefix_end = _DECODER.raw_decode(value)
     except json.JSONDecodeError:
         return False
+    suffix = value[prefix_end:].strip()
+    if not suffix or _is_malformed_numeric_lexeme(value):
+        return False
+    try:
+        _, suffix_end = _DECODER.raw_decode(suffix)
+    except json.JSONDecodeError:
+        return True
     return bool(
-        prefix_end and value[prefix_end:].strip() and not _is_malformed_numeric_lexeme(value)
+        suffix_end < len(suffix)
+        and not suffix[suffix_end].isspace()
+        and suffix[suffix_end] not in '{["'
     )
 
 
@@ -571,6 +580,14 @@ def _has_structural_container_intent(text: str, opener_pos: int, limit: int) -> 
         # in ``"x"word``. Do not let the legacy classifier promote either
         # prefix to a complete component.
         if _has_nonstructural_json_prefix_suffix(stripped):
+            continue
+
+        try:
+            _DECODER.raw_decode(stripped)
+        except json.JSONDecodeError:
+            pass
+        else:
+            component_signal = True
             continue
 
         # Keep a trailing boundary beyond the synthetic closer. Without it,
