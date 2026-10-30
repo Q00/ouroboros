@@ -1356,10 +1356,10 @@ def __getattr__(name: str) -> object:
         from ouroboros.config import _omp_cli
 
         return getattr(_omp_cli, name)
-    if name == "get_megacode_cli_path":
+    if name in ("get_megacode_cli_path", "resolve_megacode_cli_path"):
         from ouroboros.config import _megacode_cli
 
-        return _megacode_cli.get_megacode_cli_path
+        return getattr(_megacode_cli, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

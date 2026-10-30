@@ -184,7 +184,7 @@ def test_paths_from_native_023_fixture(case: dict, monkeypatch: pytest.MonkeyPat
         "run",
         lambda *args, **_kwargs: subprocess.CompletedProcess(args[0], 0, case["stdout"], ""),
     )
-    assert megacode_setup.resolve_harness_config_dir("harness") == Path(case["config_dir"])
+    assert megacode_setup.resolve_harness_config_dir(sys.executable) == Path(case["config_dir"])
 
 
 def test_invalid_render_does_not_replace_installed_skills(
@@ -277,7 +277,7 @@ def test_paths_refuses_incomplete_or_duplicate_config(
         "run",
         lambda *args, **_kwargs: subprocess.CompletedProcess(args[0], 0, output, ""),
     )
-    assert megacode_setup.resolve_harness_config_dir("harness") is None
+    assert megacode_setup.resolve_harness_config_dir(sys.executable) is None
 
 
 @pytest.fixture

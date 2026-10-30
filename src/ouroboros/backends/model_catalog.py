@@ -396,7 +396,7 @@ _CLI_PATH_GETTERS: dict[str, str] = {
     # Without this entry, ``detect_backend_cli("zcode")`` ignored the
     # configured path and Zcode was invisible to ``installed_backends()``.
     "zcode": "get_zcode_cli_path",
-    "megacode": "get_megacode_cli_path",
+    "megacode": "resolve_megacode_cli_path",
     "dsh": "get_dsh_cli_path",
 }
 
@@ -420,6 +420,10 @@ def detect_backend_cli(backend: str) -> str | None:
         from ouroboros.config import loader as config_loader
 
         configured = getattr(config_loader, getter_name)()
+        if capability.name == "megacode":
+            # The shared resolver already validated this path. Do not fall
+            # back to catalog PATH lookup, which accepts relative entries.
+            return configured
         if configured:
             configured_path = _resolve_executable_candidate(configured)
             if configured_path is not None:

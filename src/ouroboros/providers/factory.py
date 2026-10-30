@@ -308,11 +308,11 @@ def _create_dsh_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
 
 
 def _create_megacode_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
-    from ouroboros.config import get_megacode_cli_path
     from ouroboros.providers.megacode_llm_adapter import MegacodeLLMAdapter
 
+    # The constructor owns shared resolution for both factory and direct calls.
     return MegacodeLLMAdapter(
-        cli_path=request.cli_path or get_megacode_cli_path(),
+        cli_path=request.cli_path,
         cwd=request.cwd,
         permission_mode=request.permission_mode,
         allowed_tools=request.allowed_tools,

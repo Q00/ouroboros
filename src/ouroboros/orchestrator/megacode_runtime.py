@@ -34,6 +34,7 @@ from typing import Any
 
 import structlog
 
+from ouroboros.config import resolve_megacode_cli_path
 from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH, InputValidator
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
@@ -146,6 +147,15 @@ class MegacodeRuntime(CodexCliRuntime):
             startup_output_timeout_seconds=startup_output_timeout_seconds,
             stdout_idle_timeout_seconds=stdout_idle_timeout_seconds,
         )
+
+    def _resolve_cli_path(self, cli_path: str | Path | None) -> str:
+        """Apply the shared executable boundary, including direct construction."""
+        resolved = resolve_megacode_cli_path(cli_path)
+        if resolved is None:
+            raise FileNotFoundError(
+                "No supported Megacode executable found; use an absolute path or a bare name on an absolute PATH entry"
+            )
+        return resolved
 
     # -- Permission mode overrides -----------------------------------------
 

@@ -31,6 +31,7 @@ import tomllib
 import typer
 
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success
+from ouroboros.config import resolve_megacode_cli_path
 
 _BLOCK_BEGIN = "# >>> ouroboros: managed by `ouroboros setup --runtime megacode` >>>"
 _BLOCK_END = "# <<< ouroboros <<<"
@@ -69,16 +70,17 @@ _ROUTES = (
 
 def detect_megacode_runtime() -> str | None:
     """Resolve the harness CLI: explicit env/config path first, then PATH."""
-    from ouroboros.config import get_megacode_cli_path
-
-    return get_megacode_cli_path() or shutil.which("harness")
+    return resolve_megacode_cli_path()
 
 
 def resolve_harness_config_dir(harness_path: str) -> Path | None:
     """Return the harness ``CONFIG`` folder as ``harness paths`` reports it."""
+    executable = resolve_megacode_cli_path(harness_path)
+    if executable is None:
+        return None
     try:
         completed = subprocess.run(
-            [harness_path, "paths"],
+            [executable, "paths"],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,

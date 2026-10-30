@@ -189,11 +189,11 @@ def _create_grok_runtime(request: _AgentRuntimeRequest) -> AgentRuntime:
 
 
 def _create_megacode_runtime(request: _AgentRuntimeRequest) -> AgentRuntime:
-    from ouroboros.config import get_megacode_cli_path
     from ouroboros.orchestrator.megacode_runtime import MegacodeRuntime
 
+    # The constructor owns shared resolution for both factory and direct calls.
     return MegacodeRuntime(
-        cli_path=request.cli_path or get_megacode_cli_path(),
+        cli_path=request.cli_path,
         startup_output_timeout_seconds=request.startup_output_timeout_seconds,
         stdout_idle_timeout_seconds=request.stdout_idle_timeout_seconds,
         **_runtime_kwargs(request),

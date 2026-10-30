@@ -17,12 +17,11 @@ from dataclasses import replace
 import json
 import os
 from pathlib import Path
-import shutil
 from typing import Any
 
 import structlog
 
-from ouroboros.config import get_megacode_cli_path
+from ouroboros.config import resolve_megacode_cli_path
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.types import Result
@@ -105,16 +104,14 @@ class MegacodeLLMAdapter(CodexCliLLMAdapter):
         """No permission flags: completions run in the read-only LLM mode."""
         return []
 
-    def _get_configured_cli_path(self) -> str | None:
-        """Resolve the harness CLI path from config helpers."""
-        return get_megacode_cli_path()
-
     def _resolve_cli_path(self, cli_path: str | Path | None) -> str:
-        """Resolve the harness CLI path from explicit value, config, or PATH."""
-        candidate = cli_path or self._get_configured_cli_path()
-        if candidate:
-            return str(Path(candidate).expanduser())
-        return shutil.which(self._default_cli_name) or self._default_cli_name
+        """Apply the shared executable boundary, including direct construction."""
+        resolved = resolve_megacode_cli_path(cli_path)
+        if resolved is None:
+            raise FileNotFoundError(
+                "No supported Megacode executable found; use an absolute path or a bare name on an absolute PATH entry"
+            )
+        return resolved
 
     def _normalize_model(self, model: str) -> str | None:
         candidate = super()._normalize_model(model)

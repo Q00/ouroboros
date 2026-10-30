@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from typing import Any
 from unittest.mock import patch
 
@@ -78,7 +79,7 @@ def _result(text: str | None, *, is_error: bool = False, error: str | None = Non
 
 class TestMegacodeLLMAdapter:
     def test_build_command_runs_one_headless_turn_in_llm_mode(self) -> None:
-        adapter = MegacodeLLMAdapter(cli_path="/tmp/harness", max_turns=3)
+        adapter = MegacodeLLMAdapter(cli_path=sys.executable, max_turns=3)
 
         command = adapter._build_command(
             output_last_message_path="/tmp/out.txt",
@@ -86,22 +87,22 @@ class TestMegacodeLLMAdapter:
             model="mega:full",
         )
 
-        assert command[:4] == ["/tmp/harness", "-p", "--output-format", "stream-json"]
+        assert command[:4] == [sys.executable, "-p", "--output-format", "stream-json"]
         assert command[command.index("--mode") + 1] == MEGACODE_LLM_MODE
         assert command[command.index("--max-iterations") + 1] == "3"
         assert command[-2:] == ["--model", "mega:full"]
 
     def test_sentinel_model_is_not_forwarded(self) -> None:
-        adapter = MegacodeLLMAdapter(cli_path="/tmp/harness")
+        adapter = MegacodeLLMAdapter(cli_path=sys.executable)
         assert adapter._normalize_model("default") is None
 
     @pytest.mark.asyncio
     async def test_complete_returns_the_result_record_answer(self) -> None:
-        adapter = MegacodeLLMAdapter(cli_path="/tmp/harness", cwd="/tmp/project")
+        adapter = MegacodeLLMAdapter(cli_path=sys.executable, cwd="/tmp/project")
         fake_processes: list[_FakeProcess] = []
 
         async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
-            assert command[:2] == ("/tmp/harness", "-p")
+            assert command[:2] == (sys.executable, "-p")
             assert kwargs["cwd"] == "/tmp/project"
             process = _FakeProcess(
                 stdout=_jsonl(
@@ -132,7 +133,7 @@ class TestMegacodeLLMAdapter:
 
     @pytest.mark.asyncio
     async def test_complete_surfaces_the_result_error(self) -> None:
-        adapter = MegacodeLLMAdapter(cli_path="/tmp/harness", max_retries=1)
+        adapter = MegacodeLLMAdapter(cli_path=sys.executable, max_retries=1)
 
         async def fake_create_subprocess_exec(*_command: str, **_kwargs: Any) -> _FakeProcess:
             return _FakeProcess(
@@ -156,7 +157,7 @@ class TestMegacodeLLMAdapter:
 
     @pytest.mark.asyncio
     async def test_complete_extracts_json_when_response_format_requested(self) -> None:
-        adapter = MegacodeLLMAdapter(cli_path="/tmp/harness")
+        adapter = MegacodeLLMAdapter(cli_path=sys.executable)
 
         async def fake_create_subprocess_exec(*_command: str, **_kwargs: Any) -> _FakeProcess:
             return _FakeProcess(stdout=_jsonl(_result('```json\n{"approved": true}\n```')))
@@ -185,7 +186,9 @@ class TestMegacodeLLMAdapter:
     def test_factory_builds_megacode_adapter(self) -> None:
         from ouroboros.providers.factory import create_llm_adapter
 
-        with patch("ouroboros.config.get_megacode_cli_path", return_value="/tmp/harness"):
+        with patch(
+            "ouroboros.config._megacode_cli.get_megacode_cli_path", return_value=sys.executable
+        ):
             adapter = create_llm_adapter(backend="megacode", cwd="/tmp")
 
         assert isinstance(adapter, MegacodeLLMAdapter)

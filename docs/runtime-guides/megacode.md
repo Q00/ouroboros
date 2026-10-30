@@ -95,3 +95,14 @@ model calls.
 1. `OUROBOROS_MEGACODE_CLI_PATH` (ignored when it comes from a project `.env`)
 2. `orchestrator.megacode_cli_path` in `~/.ouroboros/config.yaml`
 3. `harness` on `PATH`
+
+Setup, model discovery, workers, and LLM completions share this rule, including
+explicit factory and constructor paths. The selected value must be a runnable
+absolute path (including `~/bin/harness`, expanded against the operator's home)
+or a bare executable name such as `harness`. Bare names search only absolute
+`PATH` entries and are pinned to an absolute path before launching in a project.
+Empty, `.` and relative `PATH` entries are ignored. A selected invalid value
+fails safely; relative paths with directory components such as `bin/harness`
+and `./harness`, and Windows drive-relative values such as `C:harness`, are
+unsupported. Use `/home/you/bin/harness` or `~/bin/harness` instead. Absolute
+paths remain an operator choice, without executable identity attestation.

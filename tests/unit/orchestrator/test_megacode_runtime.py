@@ -258,7 +258,9 @@ def test_factory_builds_megacode_runtime() -> None:
             "ouroboros.orchestrator.runtime_factory.get_llm_backend",
             return_value="claude",
         ),
-        patch("ouroboros.config.get_megacode_cli_path", return_value=_test_cli_path()),
+        patch(
+            "ouroboros.config._megacode_cli.get_megacode_cli_path", return_value=_test_cli_path()
+        ),
         patch(
             "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
             return_value=None,
