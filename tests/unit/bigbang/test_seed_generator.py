@@ -835,6 +835,20 @@ class TestSeedGeneratorExtraction:
             ("second.txt",),
         )
 
+    def test_extraction_preserves_verify_execution_contract(self) -> None:
+        generator = SeedGenerator(llm_adapter=AsyncMock())
+        response = create_valid_extraction_response(
+            acceptance_criteria=(
+                '[{"description":"UI tests pass","verify":"npm test",'
+                '"cwd":"app","artifacts":"NONE","expect":"NONE"}]'
+            )
+        )
+
+        requirements = generator._parse_extraction_response(response)
+        (criterion,) = requirements["acceptance_criteria"]
+
+        assert criterion.verify_cwd == "app"
+
     @pytest.mark.parametrize(
         "acceptance_criteria",
         (

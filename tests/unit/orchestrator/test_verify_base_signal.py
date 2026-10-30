@@ -36,6 +36,77 @@ class _StubAdapter:
         self.permission_mode = "acceptEdits"
 
 
+@pytest.mark.asyncio
+async def test_base_signal_compares_same_cwd_and_caches_each_directory(tmp_path: Path) -> None:
+    workspace = tmp_path / "work"
+    (workspace / "app").mkdir(parents=True)
+    (workspace / "site").mkdir()
+    (workspace / "app" / "proof.txt").write_text("original")
+    snapshot = snapshot_base(workspace, tmp_path / "store")
+    signal = VerifyBaseSignal(snapshot, tree_digest(snapshot))
+    (workspace / "app" / "proof.txt").unlink()
+    executor = _executor(workspace, signal)
+
+    for cwd, no_signal in [(None, True), ("app", False), ("site", True), ("app", False)]:
+        spec = AcceptanceCriterionSpec(
+            description="proof exists", verify_command="test -f proof.txt", verify_cwd=cwd
+        )
+        outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(workspace))
+        assert outcome.passed is False
+        assert outcome.no_signal is no_signal
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("relative_cwd", ["../outside", "/tmp", "missing", "link"])
+async def test_base_signal_rejects_invalid_or_symlink_cwd(
+    tmp_path: Path, relative_cwd: str
+) -> None:
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (workspace / "link").symlink_to(outside, target_is_directory=True)
+    snapshot = snapshot_base(workspace, tmp_path / "store")
+    signal = VerifyBaseSignal(snapshot, tree_digest(snapshot))
+
+    assert (
+        await signal.fails_on_base(
+            "exit 1", shell_path="/bin/sh", timeout_seconds=5, relative_cwd=relative_cwd
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_base_signal_rejects_cwd_replaced_before_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ouroboros.orchestrator import verify_base_signal
+
+    workspace = tmp_path / "work"
+    (workspace / "app").mkdir(parents=True)
+    snapshot = snapshot_base(workspace, tmp_path / "store")
+    signal = VerifyBaseSignal(snapshot, tree_digest(snapshot))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    real_run = verify_base_signal.run_with_shell
+
+    async def replace_before_spawn(*args: object, **kwargs: object) -> object:
+        cwd = Path(str(kwargs["cwd"]))
+        cwd.rename(cwd.with_name("old-app"))
+        cwd.symlink_to(outside, target_is_directory=True)
+        return await real_run(*args, **kwargs)
+
+    monkeypatch.setattr(verify_base_signal, "run_with_shell", replace_before_spawn)
+    assert (
+        await signal.fails_on_base(
+            "touch escaped; exit 1", shell_path="/bin/sh", timeout_seconds=5, relative_cwd="app"
+        )
+        is False
+    )
+    assert not (outside / "escaped").exists()
+
+
 def _executor(workspace: Path, base_signal: VerifyBaseSignal | None = None) -> ParallelACExecutor:
     executor = ParallelACExecutor(
         adapter=_StubAdapter(str(workspace)),

@@ -776,7 +776,7 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         "src/ouroboros/orchestrator/verify_command_runner.py",
         "_run_process",
         "asyncio.create_subprocess_exec",
-        222,
+        238,
         21,
     ): "parameter passthrough `dict(env)`; every caller passes sanitized_verify_environment() (verify_shell, leaf_dispatcher, parallel_executor).",
     (

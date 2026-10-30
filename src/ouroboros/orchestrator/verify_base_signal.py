@@ -34,7 +34,9 @@ from typing import Any
 import structlog
 
 from ouroboros.boundary.tree import copy_checkout, tree_digest
+from ouroboros.core.seed import AcceptanceCriterionSpec
 from ouroboros.orchestrator.verify_command_runner import run_with_shell
+from ouroboros.orchestrator.verify_cwd import BoundVerifyCommandCwd, bind_verify_command_cwd
 from ouroboros.orchestrator.verify_gate_outcome import _VerifyGateOutcome
 from ouroboros.orchestrator.verify_shell import project_verify_environment
 
@@ -56,8 +58,8 @@ class VerifyBaseSignal:
         # True only when the check package was attempted and its preparation
         # failed, so the base snapshot it takes was never taken.
         self._base_missing = base_missing and base_snapshot is None
-        self._fails_on_base: dict[str, bool] = {}
-        self._locks: dict[str, asyncio.Lock] = {}
+        self._fails_on_base: dict[tuple[str, str], bool] = {}
+        self._locks: dict[tuple[str, str], asyncio.Lock] = {}
 
     @classmethod
     def from_acceptance_authority(cls, authority: Any) -> VerifyBaseSignal:
@@ -88,7 +90,9 @@ class VerifyBaseSignal:
         """Whether the check package's base snapshot should exist but does not."""
         return self._base_missing
 
-    async def fails_on_base(self, command: str, *, shell_path: str, timeout_seconds: float) -> bool:
+    async def fails_on_base(
+        self, command: str, *, shell_path: str, timeout_seconds: float, relative_cwd: str = "."
+    ) -> bool:
         """Return True only when ``command`` exits non-zero on the untouched base.
 
         Also True when the base snapshot is missing (``base_missing``): whether
@@ -98,13 +102,17 @@ class VerifyBaseSignal:
             return True
         if not self.available:
             return False
-        lock = self._locks.setdefault(command, asyncio.Lock())
+        key = (command, relative_cwd)
+        lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
-            if command not in self._fails_on_base:
-                self._fails_on_base[command] = await self._run_on_base(
-                    command, shell_path=shell_path, timeout_seconds=timeout_seconds
+            if key not in self._fails_on_base:
+                self._fails_on_base[key] = await self._run_on_base(
+                    command,
+                    shell_path=shell_path,
+                    timeout_seconds=timeout_seconds,
+                    relative_cwd=relative_cwd,
                 )
-            return self._fails_on_base[command]
+            return self._fails_on_base[key]
 
     def no_signal(
         self, returncode: int, output_tail: str, workspace_digest: str | None, replay_required: bool
@@ -118,7 +126,9 @@ class VerifyBaseSignal:
             base_missing=self._base_missing,
         )
 
-    async def _run_on_base(self, command: str, *, shell_path: str, timeout_seconds: float) -> bool:
+    async def _run_on_base(
+        self, command: str, *, shell_path: str, timeout_seconds: float, relative_cwd: str
+    ) -> bool:
         assert self._base_snapshot is not None
         with tempfile.TemporaryDirectory(prefix="ooo-verify-base-") as scratch:
             base = Path(scratch) / "base"
@@ -131,12 +141,31 @@ class VerifyBaseSignal:
             if digest != self._base_digest:
                 log.warning("verify_gate.base_signal.snapshot_changed")
                 return False
-            run = await run_with_shell(
-                (shell_path, "-c", command),
-                cwd=str(base),
-                env=project_verify_environment(base),
-                timeout_seconds=timeout_seconds,
+            try:
+                spec = AcceptanceCriterionSpec(
+                    description="base verification",
+                    verify_command=command,
+                    verify_cwd=relative_cwd if relative_cwd != "." else None,
+                )
+            except ValueError:
+                return False
+            bound_cwd = (
+                BoundVerifyCommandCwd(cwd=str(base))
+                if relative_cwd == "."
+                else bind_verify_command_cwd(str(base), spec)
             )
+            if bound_cwd.error is not None:
+                return False
+            try:
+                run = await run_with_shell(
+                    (shell_path, "-c", command),
+                    cwd=bound_cwd.cwd,
+                    env=project_verify_environment(base),
+                    timeout_seconds=timeout_seconds,
+                    cwd_capability=bound_cwd.capability,
+                )
+            finally:
+                bound_cwd.close()
         judged = run.start_error is None and not run.timed_out
         fails = judged and run.returncode != 0
         log.info(
