@@ -265,3 +265,27 @@ class TestNonVerifyingModeCoverage:
         # argv shapes cannot fail (version / help / list / dry-run / exit-zero
         # / executor overrides) re-opens #2450's hole for that tool.
         assert set(_MODE_SPECS) == set(_ALLOWED_EXECUTABLES)
+
+
+@pytest.mark.parametrize("timeout", ["inf", "+inf", "-inf"])
+def test_infinite_toml_timeout_preserves_default(tmp_path: Path, timeout: str) -> None:
+    config_dir = tmp_path / ".ouroboros"
+    config_dir.mkdir()
+    (config_dir / "mechanical.toml").write_text(f"timeout = {timeout}\n", encoding="utf-8")
+
+    config = build_mechanical_config(tmp_path)
+
+    assert config.timeout_seconds == 300
+
+
+@pytest.mark.parametrize("timeout", [float("inf"), float("-inf")])
+def test_infinite_timeout_override_preserves_valid_file_value(
+    tmp_path: Path, timeout: float
+) -> None:
+    config_dir = tmp_path / ".ouroboros"
+    config_dir.mkdir()
+    (config_dir / "mechanical.toml").write_text("timeout = 120\n", encoding="utf-8")
+
+    config = build_mechanical_config(tmp_path, overrides={"timeout": timeout})
+
+    assert config.timeout_seconds == 120

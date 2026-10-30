@@ -427,12 +427,13 @@ class GeminiCLIRuntime(CodexCliRuntime):
                 content = content[:MAX_LLM_RESPONSE_LENGTH]
 
         if event_type in ("text", "message"):
-            if not content:
+            if not content or metadata.get("role") == "user":
                 return []
             return [
                 AgentMessage(
                     type="assistant",
                     content=content,
+                    data={"text_delta": True} if metadata.get("delta") is True else {},
                     resume_handle=current_handle,
                 )
             ]
@@ -524,6 +525,12 @@ class GeminiCLIRuntime(CodexCliRuntime):
         # Ignore other auxiliary events (init/done/etc.) that don't map
         # to messages; init's session_id is captured separately above.
         return []
+
+    def _update_last_content(self, last_content: str, message: AgentMessage) -> str:
+        """Concatenate native assistant chunks without altering their whitespace."""
+        if message.type == "assistant" and message.data.get("text_delta"):
+            return last_content + message.content
+        return super()._update_last_content(last_content, message)
 
     # -- Session resumption ------------------------------------------------
 
