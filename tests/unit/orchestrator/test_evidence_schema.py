@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from itertools import product
+
 import pytest
 
 from ouroboros.orchestrator.evidence_schema import (
@@ -285,6 +287,18 @@ class TestExtractEvidence:
             '{"files_touched":["real.py"]}\n```'
         )
         assert extract_evidence(text).data == {"files_touched": ["real.py"]}
+
+    def test_complete_inline_code_cannot_change_final_record_authority(self) -> None:
+        for length in range(4):
+            for characters in product("'\"[]{},\\`", repeat=length):
+                literal = "".join(characters)
+                for tag, delimiters in product(("json", ""), ("[]", "{}")):
+                    prose = f"See {delimiters[0]}example ```` {literal} ```` then{delimiters[1]}."
+                    text = (
+                        f'```{tag}\n{{"files_touched":["stale.py"]}}\n{prose}\n'
+                        '{"files_touched":["real.py"]}\n```'
+                    )
+                    assert extract_evidence(text).data == {"files_touched": ["real.py"]}, text
 
     @pytest.mark.parametrize(
         "trailing_prose",
