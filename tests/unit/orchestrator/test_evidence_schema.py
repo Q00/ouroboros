@@ -361,7 +361,17 @@ class TestExtractEvidence:
                 extract_evidence(text)
 
     @pytest.mark.parametrize(
-        "tail", ["[1e 2]", "[1. 2]", "[1e+ 2]", "[1 /*x*/ 2]", "[true: false]"]
+        "tail",
+        [
+            "[1e 2]",
+            "[1. 2]",
+            "[1e+ 2]",
+            "[1 /*x*/ 2]",
+            "[true: false]",
+            "[+1 2]",
+            "[+1e 2]",
+            "[+1e+ 2]",
+        ],
     )
     @pytest.mark.parametrize("context", ["bare", "after-fence", "in-fence"])
     @pytest.mark.parametrize("later_real", [False, True])

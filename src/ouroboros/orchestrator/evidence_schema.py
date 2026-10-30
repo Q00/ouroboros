@@ -550,8 +550,7 @@ def _has_nonstructural_json_prefix_suffix(value: str) -> bool:
     except json.JSONDecodeError:
         return False
     suffix = value[prefix_end:].strip()
-    first_lexeme = value.split(maxsplit=1)[0]
-    if not suffix or _is_malformed_numeric_lexeme(first_lexeme):
+    if not suffix:
         return False
     if suffix.startswith((":", "/*", "//")):
         return False
@@ -619,6 +618,10 @@ def _has_structural_container_intent(text: str, opener_pos: int, limit: int) -> 
             component_signal = True
             continue
         if opener == "{" and _complete_json_member(stripped):
+            component_signal = True
+            continue
+
+        if _is_malformed_numeric_lexeme(stripped.split(maxsplit=1)[0]):
             component_signal = True
             continue
 
