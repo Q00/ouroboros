@@ -18,6 +18,7 @@ from ouroboros.mcp.tools.interview_calibration import (
     handle_interview_calibration_turn,
 )
 from ouroboros.mcp.tools.subagent import build_interview_subagent
+from ouroboros.persistence.event_store import EventStore, sqlite_database_url
 from ouroboros.providers.base import CompletionResponse, UsageInfo
 from ouroboros.router import SkillDispatchRouter
 from ouroboros.router.types import Resolved
@@ -245,6 +246,80 @@ async def test_unchanged_provider_output_preserves_pending_question(tmp_path, pa
     assert len(reloaded.value.rounds) == 1
     assert reloaded.value.rounds[0].question == question
     assert reloaded.value.rounds[0].user_response is None
+
+
+@pytest.mark.parametrize("question_length", [3999, 4000, 4001, 4522])
+async def test_rephrase_preserves_required_tail_or_returns_original(
+    tmp_path, question_length
+) -> None:
+    required_tail = "MUST retain a seven-year immutable audit trail. Is that acceptable?"
+    prefix = "Payment retries require clarity. "
+    question = (prefix * 150)[: question_length - len(required_tail)] + required_tail
+    assert len(question) == question_length
+    adapter = MagicMock()
+    adapter.complete = AsyncMock(
+        return_value=Result.ok(
+            CompletionResponse(
+                content="When should a request be retried?",
+                model="offline",
+                usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+        )
+    )
+    engine = InterviewEngine(llm_adapter=adapter, state_dir=tmp_path / "state")
+    state = InterviewState(
+        interview_id="interview_1234567890abcdef",
+        initial_context="payment design",
+        rounds=[InterviewRound(round_number=1, question=question)],
+    )
+    assert (await engine.save_state(state)).is_ok
+    before = {path: path.read_bytes() for path in engine.state_dir.rglob("*.json")}
+    store = EventStore(sqlite_database_url(tmp_path / "events.db"))
+    with patch("ouroboros.mcp.tools.authoring_handlers.EventStore", return_value=store):
+        handler = InterviewHandler(interview_engine=engine, llm_adapter=adapter)
+    await handler._ensure_initialized()
+    resolved = SkillDispatchRouter().resolve(
+        "ooo idk idempotency", skills_dir=Path(__file__).resolve().parents[4] / "skills"
+    )
+    assert isinstance(resolved, Resolved)
+
+    try:
+        with patch.object(store, "close", wraps=store.close) as close:
+            result = await handler.handle({**resolved.mcp_args, "session_id": state.interview_id})
+            close.assert_awaited_once()
+        assert handler._closed and not handler._initialized
+        assert result.is_ok and not result.value.is_error
+        meta = result.value.meta
+        assert meta["calibration_updated"] is True
+        assert meta["interview_calibration"]["unknown_terms"] == ["idempotency"]
+        assert meta["pending_question_preserved"] is True
+        assert meta["pending_question"] == question
+        assert meta["session_id"] == state.interview_id
+        delivered = "\n".join(
+            message.content for call in adapter.complete.call_args_list for message in call.args[0]
+        )
+        # Either the provider sees the whole decision, or the user keeps the original.
+        assert required_tail in delivered or (
+            meta["question_rephrased"] is False and question in result.value.text_content
+        )
+        if question_length <= 4000:
+            adapter.complete.assert_awaited_once()
+            assert question in delivered
+            assert meta["question_rephrased"] is True
+        else:
+            adapter.complete.assert_not_awaited()
+            assert meta["question_rephrased"] is False
+            assert "rephrased_question" not in meta
+            assert question in result.value.text_content
+            assert "plainer language" not in result.value.text_content
+        assert before == {path: path.read_bytes() for path in engine.state_dir.rglob("*.json")}
+        reloaded = await engine.load_state(state.interview_id)
+        assert reloaded.is_ok
+        assert len(reloaded.value.rounds) == 1
+        assert reloaded.value.rounds[0].question == question
+        assert reloaded.value.rounds[0].user_response is None
+    finally:
+        await handler.close()
 
 
 class _LegacyEngine:

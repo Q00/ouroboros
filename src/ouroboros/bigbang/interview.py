@@ -61,6 +61,7 @@ DEFAULT_INTERVIEW_ROUNDS = 10  # Reference value for prompts (not enforced)
 # Legacy alias for backward compatibility
 MAX_INTERVIEW_ROUNDS = DEFAULT_INTERVIEW_ROUNDS
 MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS = 3500
+MAX_REPHRASE_QUESTION_CHARS = 4000
 INITIAL_CONTEXT_SUMMARY_QUESTION = (
     "Your saved initial context is too long to safely send to the interview "
     "model without risking CLI prompt failure. Please reply with a concise "
@@ -1085,7 +1086,11 @@ class InterviewEngine:
         question: str,
         calibration: InterviewCalibration,
     ) -> Result[str, ProviderError]:
-        """Reword one pending question while preserving its decision semantics."""
+        """Reword a whole pending question, or return it unchanged if over budget."""
+        if len(question) > MAX_REPHRASE_QUESTION_CHARS:
+            # Optional wording must not omit constraints to fit the prompt budget.
+            # The calibration handler treats unchanged output as a truthful fallback.
+            return Result.ok(question)
         messages = [
             Message(
                 role=MessageRole.SYSTEM,
@@ -1102,7 +1107,7 @@ class InterviewEngine:
                 role=MessageRole.USER,
                 content=(
                     f"User-stated evidence:\n{calibration.evidence}\n\n"
-                    f"Pending question:\n{question[:4000]}"
+                    f"Pending question:\n{question}"
                 ),
             ),
         ]
