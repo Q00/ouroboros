@@ -360,6 +360,28 @@ class TestExtractEvidence:
             with pytest.raises(EvidenceError):
                 extract_evidence(text)
 
+    @pytest.mark.parametrize(
+        "tail", ["[1e 2]", "[1. 2]", "[1e+ 2]", "[1 /*x*/ 2]", "[true: false]"]
+    )
+    @pytest.mark.parametrize("context", ["bare", "after-fence", "in-fence"])
+    @pytest.mark.parametrize("later_real", [False, True])
+    def test_known_review_json_lexeme_corruption_remains_authoritative(
+        self, tail: str, context: str, later_real: bool
+    ) -> None:
+        stale = '{"files_touched":["stale.py"]}'
+        text = f"{stale}\n{tail}"
+        if context == "after-fence":
+            text = f"```json\n{stale}\n```\n{tail}"
+        if later_real:
+            text += '\n{"files_touched":["real.py"]}'
+        if context == "in-fence":
+            text = f"```json\n{text}\n```"
+        if later_real:
+            assert extract_evidence(text).data == {"files_touched": ["real.py"]}
+        else:
+            with pytest.raises(EvidenceError):
+                extract_evidence(text)
+
     @pytest.mark.parametrize("earlier_fenced", [False, True])
     @pytest.mark.parametrize("prefix", ["", "trailing note "])
     @pytest.mark.parametrize("closer", ["]", ""])

@@ -550,7 +550,10 @@ def _has_nonstructural_json_prefix_suffix(value: str) -> bool:
     except json.JSONDecodeError:
         return False
     suffix = value[prefix_end:].strip()
-    if not suffix or _is_malformed_numeric_lexeme(value):
+    first_lexeme = value.split(maxsplit=1)[0]
+    if not suffix or _is_malformed_numeric_lexeme(first_lexeme):
+        return False
+    if not (suffix[0].isalnum() or suffix[0] in "_.+-"):
         return False
     try:
         _, suffix_end = _DECODER.raw_decode(suffix)
