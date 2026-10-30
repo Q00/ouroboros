@@ -59,7 +59,8 @@ from ouroboros.mcp.tools.job_observer import (
     append_job_observer_inline_handoff,
     build_job_observer_contract,
 )
-from ouroboros.mcp.tools.run_failure_meta import derive_run_failure_meta, launch_error
+from ouroboros.mcp.tools.run_ac_tally import derive_terminal_run_meta
+from ouroboros.mcp.tools.run_failure_meta import launch_error
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_PLUGIN,
     DELEGATED_TO_SUBAGENT,
@@ -89,6 +90,7 @@ from ouroboros.orchestrator.adapter import (
     DELEGATED_PARENT_TRANSCRIPT_PATH_ARG,
     RuntimeHandle,
 )
+from ouroboros.orchestrator.decomposition_limits import seed_allows_decomposition
 from ouroboros.orchestrator.execution_authority import (
     _has_live_process_local_authority_registration,
     _register_process_local_authority_terminal_finalizer,
@@ -103,8 +105,8 @@ from ouroboros.orchestrator.runner import (
     clear_cancellation,
     request_cancellation,
 )
+from ouroboros.orchestrator.runner_factory import build_orchestrator_runner
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus, SessionTracker
-from ouroboros.persistence.checkpoint import CheckpointStore
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers.base import LLMAdapter
 
@@ -1054,7 +1056,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
             name="ouroboros_execute_seed",
             description=(
                 "Execute a seed (task specification) in Ouroboros. "
-                "A seed defines a task to be executed with acceptance criteria. "
+                "Worktree provisioning is internal; use_worktree is not a public argument. "
                 "This is the handler for 'ooo run' commands — "
                 "do NOT run 'ooo' in the shell; call this MCP tool instead."
             ),
@@ -1615,9 +1617,6 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                         execution_id=execution_id,
                     )
 
-                    # Create checkpoint store for execution state persistence
-                    checkpoint_store = CheckpointStore()
-                    checkpoint_store.initialize()
                     fat_harness_mode = _fresh_fat_harness_mode(execution_mode)
                     if is_resume:
                         persisted_fat_harness_mode = tracker.progress.get("fat_harness_mode")
@@ -1629,19 +1628,19 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                             # seed opts out with execution_mode='legacy'.
                             fat_harness_mode = _fresh_fat_harness_mode(execution_mode)
 
-                    # Create orchestrator runner
-                    runner = OrchestratorRunner(
+                    # Assemble the same runner and stores as the other entry points.
+                    runner = build_orchestrator_runner(
                         adapter=agent_adapter,
                         event_store=event_store,
                         console=console,
                         mcp_manager=self.mcp_manager,
                         mcp_tool_prefix=self.mcp_tool_prefix,
                         debug=False,
-                        enable_decomposition=True,
+                        enable_decomposition=seed_allows_decomposition(seed, tracker),
                         inherited_runtime_handle=inherited_runtime_handle,
                         inherited_tools=inherited_effective_tools,
                         task_workspace=workspace,
-                        checkpoint_store=checkpoint_store,
+                        max_decomposition_depth=None,
                         max_parallel_workers=max_parallel_workers,
                         fat_harness_mode=fat_harness_mode,
                         # Drive model-tier routing from the MCP model_tier arg
@@ -2091,18 +2090,16 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 if success is not None:
                     meta["success"] = success
                 meta.update(await check_package.meta_for(tracker, session_status))
-                if synchronous and session_status in {
-                    SessionStatus.FAILED,
-                    SessionStatus.CANCELLED,
-                }:
-                    failure_meta = await derive_run_failure_meta(
+                if synchronous:
+                    terminal_meta = await derive_terminal_run_meta(
                         event_store,
                         session_id=tracker.session_id,
                         execution_id=tracker.execution_id,
                         session_status=session_status,
                     )
-                    meta.update(failure_meta)
-                    message += f"Failure Cause: {failure_meta['failure_cause']}\n"
+                    meta.update(terminal_meta)
+                    if "failure_cause" in terminal_meta:
+                        message += f"Failure Cause: {terminal_meta['failure_cause']}\n"
                 if session_status == SessionStatus.PAUSED:
                     meta["paused"] = True
                     meta.update(pause_metadata)
@@ -2432,8 +2429,8 @@ class StartExecuteSeedHandler:
                 "ambiguous natural language with no Seed (use ouroboros_interview or "
                 "ouroboros_start_auto instead). In plugin mode, execution is delegated to an "
                 "OpenCode Task pane and job_id is None; results appear in the Task pane instead "
-                "of being pollable via job_status/job_result. This is the handler for 'ooo run' "
-                "commands; do NOT run 'ooo' in the shell; call this MCP tool instead."
+                "of being pollable via job_status/job_result. For 'ooo run', use MCP, not the shell. "
+                "Worktree provisioning is internal; use_worktree is not a public argument."
             ),
             parameters=(
                 *ExecuteSeedHandler().definition.parameters,

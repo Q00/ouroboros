@@ -55,7 +55,32 @@ async def test_handle_returns_waiting_message_when_no_ac_tree_progress_exists(
         "session_id": "sess_waiting",
         "execution_id": "exec_waiting",
         "status": "running",
-        "cursor": 0,
+        "cursor": 1,
         "changed": False,
         "warning": "waiting for the first AC tree update.",
     }
+
+    repeated = await handler.handle({"session_id": "sess_waiting", "cursor": 1})
+    assert repeated.is_ok
+    assert repeated.value.meta["cursor"] == 1
+    assert repeated.value.meta["changed"] is False
+
+    await memory_event_store.append(
+        BaseEvent(
+            type="workflow.progress.updated",
+            aggregate_type="execution",
+            aggregate_id="exec_waiting",
+            data={
+                "session_id": "sess_waiting",
+                "execution_id": "exec_waiting",
+                "acceptance_criteria": [
+                    {"index": 1, "content": "First delivered AC", "status": "in_progress"}
+                ],
+            },
+        )
+    )
+    progressed = await handler.handle({"session_id": "sess_waiting", "cursor": 1})
+    assert progressed.is_ok
+    assert progressed.value.meta["cursor"] == 2
+    assert progressed.value.meta["changed"] is True
+    assert "First delivered AC" in progressed.value.text_content

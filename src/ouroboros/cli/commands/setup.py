@@ -23,6 +23,7 @@ from importlib import util as importlib_util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
@@ -80,6 +81,7 @@ from ouroboros.cli.opencode_config import (
 from ouroboros.cli.opencode_config import (
     find_opencode_config,
     opencode_config_dir,
+    plugin_version_error,
 )
 from ouroboros.cli.opencode_config import (
     is_bridge_plugin_entry as _is_bridge_plugin_entry,
@@ -4016,6 +4018,13 @@ def _strip_jsonc(text: str) -> str:
     return strip_jsonc(text)
 
 
+def _warn_if_opencode_jsonc_comments_removed(config_path: Path, original_text: str) -> None:
+    """Warn before rewriting an OpenCode config that contains JSONC comments."""
+    without_strings = re.sub(r'"(?:\\.|[^"\\])*"', '""', original_text, flags=re.DOTALL)
+    if "//" in without_strings or "/*" in without_strings:
+        print_warning(f"Note: JSONC comments in {config_path} were removed during config update.")
+
+
 def _find_opencode_config() -> Path:
     """Locate the existing OpenCode config file, or return a default path.
 
@@ -4046,10 +4055,12 @@ def _ensure_opencode_mcp_entry() -> bool:
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
     data: dict = {}
+    original_text = ""
     if config_path.exists():
         try:
-            data = json.loads(_strip_jsonc(config_path.read_text()))
-        except (json.JSONDecodeError, OSError):
+            original_text = config_path.read_text(encoding="utf-8")
+            data = json.loads(_strip_jsonc(original_text))
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             print_warning(
                 f"Could not parse {config_path} — skipping MCP registration to avoid "
                 "overwriting existing settings.  Fix the JSON syntax and re-run setup."
@@ -4130,16 +4141,7 @@ def _ensure_opencode_mcp_entry() -> bool:
             existing["timeout"] = 300000
         print_info("MCP server already registered — verified config.")
 
-    # Warn if we're about to overwrite a .jsonc file that contained comments.
-    if config_path.suffix == ".jsonc":
-        try:
-            original_text = config_path.read_text(encoding="utf-8")
-        except OSError:
-            original_text = ""
-        if "//" in original_text or "/*" in original_text:
-            print_warning(
-                f"Note: JSONC comments in {config_path} were removed during config update."
-            )
+    _warn_if_opencode_jsonc_comments_removed(config_path, original_text)
 
     # Write back as plain JSON.  This intentionally discards JSONC
     # comments — the same approach Claude and Codex setup use for their
@@ -4359,10 +4361,12 @@ def _ensure_opencode_plugin_entry() -> bool:
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
     data: dict = {}
+    original_text = ""
     if config_path.exists():
         try:
-            data = json.loads(_strip_jsonc(config_path.read_text()))
-        except (json.JSONDecodeError, OSError):
+            original_text = config_path.read_text(encoding="utf-8")
+            data = json.loads(_strip_jsonc(original_text))
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             print_warning(f"Could not parse {config_path} — skipping plugin registration.")
             return False
 
@@ -4391,16 +4395,7 @@ def _ensure_opencode_plugin_entry() -> bool:
 
     data["plugin"] = cleaned
 
-    # Warn if we're about to overwrite a .jsonc file that contained comments.
-    if config_path.suffix == ".jsonc":
-        try:
-            original_text = config_path.read_text(encoding="utf-8")
-        except OSError:
-            original_text = ""
-        if "//" in original_text or "/*" in original_text:
-            print_warning(
-                f"Note: JSONC comments in {config_path} were removed during config update."
-            )
+    _warn_if_opencode_jsonc_comments_removed(config_path, original_text)
 
     try:
         _atomic_write_text(config_path, json.dumps(data, indent=2) + "\n")
@@ -4436,18 +4431,19 @@ def _cleanup_plugin_artifacts() -> None:
     config_path = find_opencode_config(allow_default=False)
     if config_path is not None:
         try:
-            raw = config_path.read_text()
+            raw = config_path.read_text(encoding="utf-8")
             data = json.loads(_strip_jsonc(raw))
             plugins = data.get("plugin", [])
             if isinstance(plugins, list):
                 kept = [e for e in plugins if not _is_bridge_plugin_entry(e)]
                 if len(kept) != len(plugins):
                     data["plugin"] = kept
+                    _warn_if_opencode_jsonc_comments_removed(config_path, raw)
                     with config_path.open("w") as f:
                         json.dump(data, f, indent=2)
                         f.write("\n")
                     print_info(f"Removed bridge plugin entry from {config_path}")
-        except (json.JSONDecodeError, OSError, KeyError):
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError, KeyError):
             pass  # best effort
 
 
@@ -4470,12 +4466,12 @@ def _setup_opencode(opencode_path: str, mode: str = "plugin") -> bool:
     """
     if mode not in ("plugin", "subprocess"):
         raise ValueError(f"Invalid opencode mode: {mode!r} (expected 'plugin' or 'subprocess')")
+    if mode == "plugin" and (version_error := plugin_version_error(opencode_path)):
+        print_error(version_error)
+        return False
 
     from ouroboros.config.loader import create_default_config, ensure_config_dir
 
-    # Persist mode to config.yaml for both branches so the MCP runtime gate
-    # can read it later. Plugin branch still writes (no runtime_backend/cli
-    # fields — plugin runs in-process inside OpenCode; but mode signal matters).
     config_dir = ensure_config_dir()
     config_path = config_dir / "config.yaml"
     if config_path.exists():

@@ -149,7 +149,7 @@ url = "http://127.0.0.1:12000/mcp"
 | `models` | `ModelsConfig` | Automatic model selection and the explicit pin switch |
 | `economics` | `EconomicsConfig` | PAL Router tier definitions and escalation thresholds |
 | `clarification` | `ClarificationConfig` | Phase 0 — Interview / Big Bang settings |
-| `execution` | `ExecutionConfig` | Phase 2 — Double Diamond execution settings |
+| `execution` | `ExecutionConfig` | Phase 2 — Execution settings |
 | `resilience` | `ResilienceConfig` | Phase 3 — Stagnation detection and lateral thinking |
 | `evaluation` | `EvaluationConfig` | Phase 4 — 3-stage evaluation pipeline settings |
 | `consensus` | `ConsensusConfig` | Phase 5 — Multi-model consensus settings |
@@ -347,13 +347,13 @@ Anthropic API Claude Haiku/Sonnet/Opus 5.5 omit `temperature` and `top_p` at dis
 
 ## `economics`
 
-Configures the PAL Router (Progressive Adaptive LLM): cost tiers, escalation on failure, and downgrade on success.
+Configures the PAL Router (Progressive Adaptive LLM): cost tiers and escalation on retry. Tiers are not downgraded after success; see `downgrade_success_streak` below.
 
 ```yaml
 economics:
   default_tier: frugal          # "frugal" | "standard" | "frontier"
-  escalation_threshold: 2       # Retry attempt escalation begins; then +1 tier per retry
-  downgrade_success_streak: 5   # Consecutive successes before downgrading tier
+  escalation_threshold: 2       # Retry-count escalation threshold (see the table below)
+  downgrade_success_streak: 5   # Accepted but not read; there is no downgrade path
   tiers:
     frugal:
       cost_factor: 1
@@ -399,9 +399,9 @@ economics:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `default_tier` | `"frugal"` \| `"standard"` \| `"frontier"` | `"frugal"` | The starting tier used when no task-specific override applies. |
-| `escalation_threshold` | `int >= 1` | `2` | The retry attempt at which tier escalation begins. From this attempt onward the tier climbs one notch per retry (progressive), capped at the frontier tier. Top-level and untrusted decomposed work start at the base tier. Only a decomposed child with explicit trust authorization starts one tier lower, so that trusted-child ladder may require one additional retry to reach the same frontier ceiling. Current live decomposition supplies no such trust authorization. |
-| `downgrade_success_streak` | `int >= 1` | `5` | Number of consecutive successes at the current tier before downgrading to the previous tier. |
+| `default_tier` | `"frugal"` \| `"standard"` \| `"frontier"` | `"frugal"` | Sets the base tier, one tier above this value and capped at frontier: the shipped `frugal` gives `standard`, and both `standard` and `frontier` give `frontier`. Top-level and untrusted decomposed work start at the base tier. In adaptive efficiency mode a decomposed child with explicit trust authorization starts one tier lower, never below frugal, which equals this value except for `frontier` (then `standard`). |
+| `escalation_threshold` | `int >= 1` | `2` | Retry-count threshold used by `decide_model()` (`orchestrator/model_routing.py`). It does not apply to top-level ACs on the bounded route path, which escalate through `advance_route()` (`orchestrator/route_escalation.py`). Top-level and untrusted decomposed work start at the base tier. Only a decomposed child with explicit trust authorization starts one tier lower, so that trusted-child ladder may require one additional retry to reach the same frontier ceiling. Live decomposition issues that authorization when a generic split passes structural and semantic verification, and lowering applies only in adaptive efficiency mode. |
+| `downgrade_success_streak` | `int >= 1` | `5` | **Not read.** The field is accepted for config compatibility, but no code downgrades a tier after consecutive successes; tiers only escalate on retry. |
 | `tiers` | `dict[str, TierConfig]` | (see above) | Tier definitions keyed by name. Explicit tier selection and enabled per-AC routing use the active runtime's native model entries. Unpinned Claude vendor defaults use `haiku`/`sonnet`/`opus` aliases; explicit runtime-specific economics entries remain literal. A resumed run replays its resolved model ladder. |
 
 **`TierConfig` fields:**
@@ -507,7 +507,7 @@ clarification:
 
 ## `execution`
 
-Controls Phase 2 — the Double Diamond execution loop.
+Controls Phase 2 — the execution loop.
 
 ```yaml
 execution:

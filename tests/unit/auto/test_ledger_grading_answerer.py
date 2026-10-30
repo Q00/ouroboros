@@ -783,9 +783,9 @@ def test_auto_answerer_does_not_stop_on_secret_wording() -> None:
     _assert_never_self_authorizes(answer, question)
 
 
-def test_credential_question_stays_an_open_question_for_the_worker() -> None:
+def test_credential_question_stays_an_open_question() -> None:
     """The question is kept, the guessed draft never binds, nothing is blocked."""
-    from ouroboros.auto.ledger_seed import ledger_assumptions
+    from ouroboros.auto.ledger_seed import ledger_assumptions, ledger_open_questions
 
     ledger = SeedDraftLedger.from_goal("Deploy a service")
     answerer = AutoAnswerer()
@@ -800,7 +800,8 @@ def test_credential_question_stays_an_open_question_for_the_worker() -> None:
         for section in ledger.sections.values()
         for entry in section.entries
     )
-    assert f"Open question: {question}" in ledger_assumptions(ledger)
+    assert ledger_open_questions(ledger) == (question,)
+    assert not any(question in line for line in ledger_assumptions(ledger))
 
 
 def test_auto_answerer_allows_benign_sensitive_domain_vocabulary() -> None:

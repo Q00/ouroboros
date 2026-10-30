@@ -722,6 +722,8 @@ Changes under `src/ouroboros/orchestrator/` affect runtime behavior documentatio
 | `runtime_message_projection.py` | `docs/architecture.md` — normalized progress, delta persistence and replay metadata |
 | `opencode_runtime.py` (`OpenCodeRuntime`) | `docs/runtime-capability-matrix.md`, `docs/runtime-guides/opencode.md` — permission modes, `--runtime opencode` behavior |
 | `runner.py` (`OrchestratorRunner`) | `docs/architecture.md` — orchestration lifecycle; `docs/getting-started.md` — session ID output, resume flow |
+| `runner_factory.py` | `docs/architecture.md` — shared runner assembly for CLI, MCP, and evolution |
+| `cancellation.py` (`CancellationLifecycle`) | `docs/architecture.md` — cancellation lifecycle and runner delegation |
 | `project_anchor.py` (`ProjectAnchor`) | `docs/architecture.md` — project/workspace identity, proof and legacy representations, and resolver error ownership; `docs/getting-started.md` — resume workspace identity compatibility |
 | `parallel_executor.py` | `docs/cli-reference.md` — `--sequential` flag behavior; `docs/architecture.md` — parallel execution strategy |
 | `coordinator.py` (`LevelCoordinator`) | `docs/architecture.md` — inter-level conflict resolution and coordinator review gate |

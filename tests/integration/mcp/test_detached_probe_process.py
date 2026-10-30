@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ast
 import ctypes
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -15,6 +17,113 @@ import pytest
 from ouroboros.mcp.job_manager import JobManager
 from ouroboros.persistence.event_store import EventStore
 from tests.integration.mcp import detached_probe_process as probes
+
+
+def _receipt_publisher(receipt: Path, record: dict, clock: SimpleNamespace):
+    """Exercise the exact embedded writer without launching its process tree."""
+    main = next(
+        node
+        for node in ast.parse(probes._LAUNCH_PARENT).body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "main"
+    )
+    publish = next(
+        node for node in main.body if isinstance(node, ast.FunctionDef) and node.name == "publish"
+    )
+    namespace = {"receipt": receipt, "record": record, "json": json, "time": clock}
+    exec(compile(ast.Module(body=[publish], type_ignores=[]), "<probe-publish>", "exec"), namespace)
+    return namespace["publish"]
+
+
+def _publication_clock() -> SimpleNamespace:
+    clock = SimpleNamespace(now=0.0, sleeps=[])
+
+    def sleep(seconds):
+        assert 0 < seconds <= 0.01
+        clock.sleeps.append(seconds)
+        clock.now += seconds
+
+    clock.monotonic = lambda: clock.now
+    clock.sleep = sleep
+    return clock
+
+
+def test_receipt_publication_retries_transient_permission_error(tmp_path, monkeypatch) -> None:
+    receipt = tmp_path / "parent.json"
+    previous = b'{"ready": false}'
+    receipt.write_bytes(previous)
+    record = {"ready": True, "job_id": "job_publication_probe"}
+    replace = Path.replace
+    attempts = 0
+
+    def replace_after_reader_releases(path, target):
+        nonlocal attempts
+        attempts += 1
+        assert receipt.read_bytes() == previous
+        assert json.loads(path.read_text(encoding="utf-8")) == record
+        if attempts == 1:
+            raise PermissionError("reader holds destination")
+        return replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", replace_after_reader_releases)
+    clock = _publication_clock()
+    _receipt_publisher(receipt, record, clock)()
+    assert attempts == 2
+    assert clock.sleeps == [0.01]
+    assert json.loads(receipt.read_text(encoding="utf-8")) == record
+    assert not receipt.with_suffix(".tmp").exists()
+
+
+def test_receipt_publication_permission_failure_has_bounded_retry(tmp_path, monkeypatch) -> None:
+    receipt = tmp_path / "parent.json"
+    previous = b'{"ready": false}'
+    receipt.write_bytes(previous)
+    clock = _publication_clock()
+    attempts = 0
+
+    def blocked_replace(path, target):
+        nonlocal attempts
+        attempts += 1
+        assert target == receipt
+        raise PermissionError("persistent destination denial")
+
+    monkeypatch.setattr(Path, "replace", blocked_replace)
+    with pytest.raises(PermissionError, match="persistent destination denial"):
+        _receipt_publisher(receipt, {"ready": True}, clock)()
+    assert attempts > 1
+    assert clock.now == pytest.approx(2.0)
+    assert receipt.read_bytes() == previous
+    assert json.loads(receipt.with_suffix(".tmp").read_text(encoding="utf-8")) == {"ready": True}
+
+
+@pytest.mark.parametrize("error", [FileNotFoundError, OSError])
+def test_receipt_publication_does_not_retry_other_replace_errors(
+    tmp_path, monkeypatch, error
+) -> None:
+    receipt = tmp_path / "parent.json"
+    previous = b'{"ready": false}'
+    receipt.write_bytes(previous)
+    replace = MagicMock(side_effect=error("publication failed"))
+    monkeypatch.setattr(Path, "replace", replace)
+    clock = _publication_clock()
+    with pytest.raises(error, match="publication failed"):
+        _receipt_publisher(receipt, {"ready": True}, clock)()
+    replace.assert_called_once_with(receipt)
+    assert clock.sleeps == []
+    assert receipt.read_bytes() == previous
+
+
+def test_receipt_publication_invalid_record_still_fails_before_replacement(tmp_path, monkeypatch):
+    receipt = tmp_path / "parent.json"
+    previous = b'{"ready": false}'
+    receipt.write_bytes(previous)
+    replace = MagicMock()
+    monkeypatch.setattr(Path, "replace", replace)
+    clock = _publication_clock()
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        _receipt_publisher(receipt, {"invalid": object()}, clock)()
+    replace.assert_not_called()
+    assert clock.sleeps == []
+    assert receipt.read_bytes() == previous
 
 
 @pytest.mark.parametrize("matches", [False, True])

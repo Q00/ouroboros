@@ -35,6 +35,9 @@ def test_public_runtime_backend_preserves_profile_contract(
     ("versions", "unsupported"),
     [
         ({"mcp": "2.2.0", "claude-agent-sdk": "0.2.139"}, True),
+        ({"mcp": "2.3.0", "claude-agent-sdk": "0.2.165"}, True),
+        ({"mcp": "1.28.1", "claude-agent-sdk": "0.2.165"}, False),
+        ({"mcp": "2.3.0"}, False),
         ({"mcp": "1.28.1", "claude-agent-sdk": "0.2.139"}, False),
         ({"mcp": "2.2.0"}, False),
     ],
@@ -52,7 +55,7 @@ def test_forced_mixed_environment_detection(versions: dict[str, str], unsupporte
 
 @pytest.mark.parametrize(
     ("installed", "expected"),
-    [("2.2.0", True), ("2.0.0", False), ("1.28.1", False), (None, False)],
+    [("2.3.0", True), ("2.2.0", False), ("2.0.0", False), ("1.28.1", False), (None, False)],
 )
 def test_mcp_v2_profile_requires_the_current_exact_pin(
     installed: str | None, expected: bool

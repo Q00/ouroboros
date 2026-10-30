@@ -280,6 +280,28 @@ ouroboros_job_wait(job_id="JOB_ID")
 ouroboros_job_result(job_id="JOB_ID")
 ```
 
+If a detached start exceeds its acceptance deadline, it returns
+`detached_job_acceptance_pending` with a `job_id` and `status_check` instructions.
+Do not start a duplicate. Until the worker persists its acceptance, status, wait,
+and result reads return `acceptance_pending`,
+`acceptance_confirmed=false`, and `result_available=false`. This records the
+pending start receipt; it does not assert that the worker is still alive.
+Once durable job events appear, normal running or terminal status takes precedence.
+
+The server stores this minimal observation in the existing EventStore, separately
+from the actual job stream. `pending_receipt_persisted=true` means another manager
+or a restarted server using the same database can discover the pending handle.
+The observation does not grant acceptance, ownership, or permission to retry.
+Different databases and genuinely unknown handles retain their not-found errors.
+
+If that storage write fails within its two-second persistence budget,
+`pending_receipt_persisted=false` explicitly
+reports the limitation: the initiating server can still read its memory fallback,
+but a new server cannot recover that observation until the worker registers the
+actual job. A missing handle never revokes the earlier no-duplicate instruction.
+Stored observations are historical evidence; they do not diagnose startup delays,
+prove current worker liveness, or change persisted job recovery.
+
 Pollable background start responses also include
 `meta.job_observer.protocol="ouroboros.job_observer.v1"`. Hosts with independent
 child sessions should delegate that object to exactly one read-only observer.

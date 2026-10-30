@@ -245,6 +245,7 @@ async def run_shadow_replay(
     ac_spec: AcceptanceCriterionSpec | None = None,
     isolated_cwd: str | None = None,
     suggested_tier: str | None = None,
+    sourced_objective: bool = False,
 ) -> None:
     """Re-run a decomposed child at the parent tier/effort and emit its baseline.
 
@@ -276,6 +277,7 @@ async def run_shadow_replay(
             ac_spec=ac_spec,
             isolated_cwd=isolated_cwd,
             suggested_tier=suggested_tier,
+            sourced_objective=sourced_objective,
         )
     except Exception as exc:
         log.warning(
@@ -301,6 +303,7 @@ async def _run_shadow_replay_inner(
     ac_spec: AcceptanceCriterionSpec | None,
     isolated_cwd: str | None,
     suggested_tier: str | None,
+    sourced_objective: bool = False,
 ) -> None:
     # The hypothesis is only about decomposed children (a top-level AC has no
     # parent baseline). Guard here too, independent of the call site.
@@ -368,6 +371,7 @@ async def _run_shadow_replay_inner(
         retry_attempt=runtime_identity.retry_attempt,
         ac_content=ac_content,
         ac_spec=ac_spec,
+        sourced_objective=sourced_objective,
     )
 
     if baseline_spend is None:
@@ -412,6 +416,7 @@ async def _measure_baseline_spend(
     retry_attempt: int,
     ac_content: str,
     ac_spec: AcceptanceCriterionSpec | None,
+    sourced_objective: bool = False,
 ) -> float | None:
     """Run the baseline once in the isolated cwd and sum its runtime token spend.
 
@@ -515,6 +520,7 @@ async def _measure_baseline_spend(
             ac_content=ac_content,
             ac_spec=ac_spec,
             isolated_cwd=isolated_cwd,
+            sourced_objective=sourced_objective,
         ):
             log.debug(
                 "parallel_executor.ac.shadow_replay.baseline_evidence_rejected",
@@ -613,6 +619,7 @@ async def _baseline_semantically_accepted(
     ac_content: str,
     ac_spec: AcceptanceCriterionSpec | None,
     isolated_cwd: str,
+    sourced_objective: bool = False,
 ) -> bool:
     """Run fat-harness evidence + verifier (+ contract gate) for a baseline."""
     if not executor._fat_harness_mode or executor._execution_profile is None:
@@ -633,6 +640,7 @@ async def _baseline_semantically_accepted(
         has_success_contract=has_success_contract,
         has_expected_artifacts=has_expected_artifacts,
         verify_gate_active=verify_gate_active,
+        sourced_objective=sourced_objective,
     )
     # Do not look up ``executor._run_atomic_verifier_pass`` dynamically here.
     # The live executor registered a constructor-captured root, and the registry
@@ -654,6 +662,7 @@ async def _baseline_semantically_accepted(
         has_success_contract=has_success_contract,
         has_expected_artifacts=has_expected_artifacts,
         verify_gate_active=verify_gate_active,
+        sourced_objective=sourced_objective,
         force_runtime_transcript=True,
         task_cwd_override=isolated_cwd,
     )

@@ -76,6 +76,7 @@ _LAUNCH_PARENT = textwrap.dedent(
     import os
     from pathlib import Path
     import sys
+    import time
 
     from ouroboros.mcp import detached_jobs
     from ouroboros.mcp.detached_jobs import DetachedJobRequest, launch_detached_job
@@ -108,7 +109,17 @@ _LAUNCH_PARENT = textwrap.dedent(
         def publish():
             temporary = receipt.with_suffix(".tmp")
             temporary.write_text(json.dumps(record), encoding="utf-8")
-            temporary.replace(receipt)
+            deadline = time.monotonic() + 2.0
+            while True:
+                try:
+                    temporary.replace(receipt)
+                    return
+                except PermissionError:
+                    # A concurrent Windows reader can briefly prevent replacement.
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise
+                    time.sleep(min(0.01, remaining))
 
         if legacy_windows_console == "1":
             from types import SimpleNamespace
@@ -402,13 +413,20 @@ async def accepting_parent(
             deadline = asyncio.get_running_loop().time() + 60.0
             while not probe.record.get("ready"):
                 if receipt.exists():
-                    probe.record = json.loads(receipt.read_text(encoding="utf-8"))
-                    for key in ("parent_pid", "launcher_pid", "owner_pid"):
-                        if (
-                            key in probe.record
-                            and (identities / f"{probe.record[key]}.json").exists()
-                        ):
-                            probe.track(probe.record[key])
+                    try:
+                        record = receipt.read_text(encoding="utf-8")
+                    except (FileNotFoundError, PermissionError):
+                        # A visible file can still be locked during publication on Windows.
+                        # Keep the existing deadline and process-exit checks below active.
+                        pass
+                    else:
+                        probe.record = json.loads(record)
+                        for key in ("parent_pid", "launcher_pid", "owner_pid"):
+                            if (
+                                key in probe.record
+                                and (identities / f"{probe.record[key]}.json").exists()
+                            ):
+                                probe.track(probe.record[key])
                 if parent.poll() is not None or asyncio.get_running_loop().time() >= deadline:
                     raise AssertionError(
                         f"accepting parent did not become ready: {home / 'parent.log'}"

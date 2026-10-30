@@ -145,7 +145,9 @@ if TYPE_CHECKING:
     from ouroboros.boundary.package import CheckPackage
 
 RECONCILIATION_SCHEMA = "ouroboros.acceptance_reconciliation.v2"
-_EXISTING_PASS_OUTCOMES = frozenset({"succeeded", "satisfied_externally"})
+_EXISTING_PASS_OUTCOMES = frozenset(
+    {"succeeded", "satisfied_externally", "settled_from_shared_attempt"}
+)
 
 
 class PackageCriterionStatus(StrEnum):

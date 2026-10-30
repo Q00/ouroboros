@@ -18,6 +18,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import ssl
 import subprocess
@@ -26,10 +27,12 @@ import tomllib
 from typing import Annotated, Literal
 import urllib.request
 
+from rich.markup import escape
 import typer
 
 from ouroboros import __version__
 from ouroboros.backends import get_backend_capability, resolve_runtime_backend_name
+from ouroboros.cli.codex_plugin import inspect_codex_plugin, plugin_versions_match
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import (
     print_info,
@@ -188,6 +191,8 @@ class InstallationIdentity:
     console_path: Path
     manager_binary: str
     manager_home: Path
+    version_specifier: str = ""
+    requirement_marker: str = ""
 
 
 @dataclass(frozen=True)
@@ -272,7 +277,8 @@ _UV_REGISTRY_REQUIREMENT_FIELDS = frozenset(
 )
 
 
-def _uv_profile(receipt_path: Path) -> str:
+def _uv_profile(receipt_path: Path) -> tuple[str, str, str]:
+    """Read the display profile and the root requirement's constraint together."""
     try:
         with receipt_path.open("rb") as receipt_file:
             data = tomllib.load(receipt_file)
@@ -300,7 +306,7 @@ def _uv_profile(receipt_path: Path) -> str:
             )
         rendered.append((requirement, label))
     main = [
-        label
+        (requirement, label)
         for requirement, label in rendered
         if _normalise_distribution_name(str(requirement.get("name", ""))) == PACKAGE_NAME
     ]
@@ -308,8 +314,14 @@ def _uv_profile(receipt_path: Path) -> str:
         raise InstallationIdentityError(
             f"uv receipt {receipt_path} does not identify exactly one {PACKAGE_NAME} requirement"
         )
-    additions = [label for _, label in rendered if label != main[0]]
-    return main[0] if not additions else f"{main[0]} (with {', '.join(additions)})"
+    requirement, root_label = main[0]
+    specifier = requirement.get("specifier", "")
+    marker = requirement.get("marker", "")
+    if not isinstance(specifier, str) or not isinstance(marker, str):
+        raise InstallationIdentityError(f"uv receipt {receipt_path} has an invalid root constraint")
+    additions = [label for _, label in rendered if label != root_label]
+    profile = root_label if not additions else f"{root_label} (with {', '.join(additions)})"
+    return profile, specifier, marker
 
 
 _PYPI_OUROBOROS_SPEC = re.compile(
@@ -388,14 +400,17 @@ def _detect_installation_identity(prefix: Path | None = None) -> InstallationIde
             raise InstallationIdentityError(
                 "uv owns this environment but the uv executable is unavailable"
             )
+        profile, specifier, marker = _uv_profile(uv_receipt)
         return InstallationIdentity(
             manager="uv",
             tool_name=environment.name,
             environment=environment,
-            profile=_uv_profile(uv_receipt),
+            profile=profile,
             console_path=console_path,
             manager_binary=binary,
             manager_home=environment.parent,
+            version_specifier=specifier,
+            requirement_marker=marker,
         )
     if pipx_receipt.is_file():
         binary = shutil.which("pipx")
@@ -422,6 +437,50 @@ def _detect_installation_identity(prefix: Path | None = None) -> InstallationIde
     )
 
 
+def _check_uv_target(identity: InstallationIdentity, target: str) -> None:
+    """Reject a known-ineligible target without relaxing the operator's constraint."""
+    if identity.manager != "uv":
+        return
+    if not identity.version_specifier and not identity.requirement_marker:
+        return
+    try:
+        from packaging.markers import (
+            InvalidMarker,
+            Marker,
+            UndefinedComparison,
+            UndefinedEnvironmentName,
+        )
+        from packaging.specifiers import InvalidSpecifier, SpecifierSet
+        from packaging.version import InvalidVersion
+    except ImportError as exc:
+        raise InstallationIdentityError(
+            "this installation lacks packaging, which is required to validate its uv "
+            "root constraint; restore packaging in this tool environment using the original "
+            "manager and installation options, then retry. No constraint was relaxed"
+        ) from exc
+    try:
+        specifier = SpecifierSet(identity.version_specifier)
+        if identity.requirement_marker and not Marker(identity.requirement_marker).evaluate():
+            return
+        # Target selection already applied the requested prerelease policy.
+        allowed = specifier.contains(target, prereleases=True)
+    except (
+        InvalidSpecifier,
+        InvalidVersion,
+        InvalidMarker,
+        UndefinedComparison,
+        UndefinedEnvironmentName,
+        KeyError,
+    ) as exc:
+        raise InstallationIdentityError(
+            f"cannot validate uv root version constraint: {exc}"
+        ) from exc
+    if not allowed:
+        raise InstallationIdentityError(
+            f"uv root version constraint {identity.version_specifier!r} excludes target v{target}"
+        )
+
+
 def _upgrade_command(identity: InstallationIdentity, prerelease: bool) -> list[str]:
     """Build a receipt-replaying upgrade command for *identity*."""
     if identity.manager == "uv":
@@ -442,6 +501,140 @@ def _upgrade_environment(identity: InstallationIdentity) -> dict[str, str]:
     return {"PIPX_HOME": str(identity.manager_home)}
 
 
+_RECOVERY_CONTROL = re.compile(r"([\x00-\x09\x0b-\x1f\x7f-\x9f])")
+_RECOVERY_POSIX_ESCAPE = re.compile(r"([\x00-\x09\x0b-\x1f\x7f-\x9f\udc80-\udcff])")
+
+
+def _quote_recovery_posix(value: str) -> str:
+    """Keep controls and surrogateescaped path bytes printable for /bin/sh."""
+    parts = []
+    for part in _RECOVERY_POSIX_ESCAPE.split(value):
+        if _RECOVERY_POSIX_ESCAPE.fullmatch(part):
+            # Only generated octal escapes enter printf's format. LF remains
+            # literal in shlex.quote, avoiding command substitution's removal
+            # of trailing newlines. fsencode restores undecodable POSIX path
+            # bytes without trying to print surrogate code points to a terminal.
+            # Adjacent quoted fragments form one argument.
+            octal = "".join(f"\\{byte:03o}" for byte in os.fsencode(part))
+            parts.append(f"\"$(printf '{octal}')\"")
+        else:
+            parts.append(shlex.quote(part))
+    return "".join(parts)
+
+
+def _quote_recovery_powershell(value: str) -> str:
+    """Represent controls as characters without printing them to the terminal."""
+    parts = []
+    for part in _RECOVERY_CONTROL.split(value):
+        if _RECOVERY_CONTROL.fullmatch(part):
+            parts.append(f"[char]{ord(part)}")
+        else:
+            # PowerShell treats typographic single quotes as delimiters too.
+            for delimiter in ("'", "\u2018", "\u2019", "\u201a", "\u201b"):
+                part = part.replace(delimiter, delimiter * 2)
+            parts.append("'" + part + "'")
+    return parts[0] if len(parts) == 1 else "(" + " + ".join(parts) + ")"
+
+
+def _format_recovery_command(
+    command: list[str],
+    env_overrides: Mapping[str, str] | None = None,
+    *,
+    windows: bool | None = None,
+) -> str:
+    """Render a shell command without losing argument or environment boundaries."""
+    is_windows = os.name == "nt" if windows is None else windows
+    if not is_windows:
+        if env_overrides:
+            command = ["env", *(f"{key}={value}" for key, value in env_overrides.items()), *command]
+        return " ".join(_quote_recovery_posix(argument) for argument in command)
+
+    quote = _quote_recovery_powershell
+    invocation = "& " + " ".join(quote(argument) for argument in command)
+    if not env_overrides:
+        return invocation
+
+    # A scriptblock scopes the temporary variables; finally also restores the
+    # process environment if the command fails. Environment changes themselves
+    # are not scoped by a PowerShell scriptblock.
+    # .NET Framework (Windows PowerShell) treats an empty value as deletion.
+    # The native API distinguishes empty from null. Prepare the versioned helper
+    # before changing any environment value, and reuse it on repeated recovery.
+    lines = [
+        "& {",
+        "    if (-not ('Ouroboros.UpdateRecovery.EnvironmentV1' -as [type])) {",
+        "        Add-Type -ErrorAction Stop -TypeDefinition @'",
+        "using System.ComponentModel;",
+        "using System.Runtime.InteropServices;",
+        "namespace Ouroboros.UpdateRecovery {",
+        "    public static class EnvironmentV1 {",
+        '        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]',
+        "        [return: MarshalAs(UnmanagedType.Bool)]",
+        "        private static extern bool SetEnvironmentVariableW(string name, string value);",
+        # PowerShell coerces $null to "" for string parameters. Object retains
+        # the distinction until the C# call marshals the native string pointer.
+        "        public static void Set(string name, object value) {",
+        "            if (!SetEnvironmentVariableW(name, (string)value))",
+        "                throw new Win32Exception(Marshal.GetLastWin32Error());",
+        "        }",
+        "    }",
+        "}",
+        "'@",
+        "    }",
+    ]
+    # Capture existing empty values from the environment block, retaining
+    # Windows' case-insensitive keys. A failed snapshot must prevent mutation.
+    lines.extend(
+        [
+            "    try {",
+            "        $oooPreviousEnvironment = [System.Collections.Hashtable]::new(",
+            "            [Environment]::GetEnvironmentVariables('Process'),",
+            "            [System.StringComparer]::OrdinalIgnoreCase)",
+        ]
+    )
+    for index, key in enumerate(env_overrides):
+        lines.append(f"        $oooPreviousEnv{index} = $oooPreviousEnvironment[{quote(key)}]")
+    lines.extend(["    } catch { throw }", "    try {"])
+    for key, value in env_overrides.items():
+        lines.append(
+            f"        [Ouroboros.UpdateRecovery.EnvironmentV1]::Set({quote(key)}, {quote(value)})"
+        )
+    lines.extend([f"        {invocation}", "    } finally {"])
+    for index, key in enumerate(env_overrides):
+        lines.append(
+            f"        [Ouroboros.UpdateRecovery.EnvironmentV1]::Set("
+            f"{quote(key)}, $oooPreviousEnv{index})"
+        )
+    lines.extend(["    }", "}"])
+    return "\n".join(lines)
+
+
+def _print_step_recovery(
+    command: list[str],
+    env_overrides: Mapping[str, str] | None,
+    follow_up: list[list[str]] | None,
+) -> None:
+    """Show the failed invocation and any pending commands needed to finish it."""
+    shell = "PowerShell" if os.name == "nt" else "POSIX shell"
+    console.print(f"Recovery command ({shell}; use the same environment):", markup=False)
+    console.print(
+        _format_recovery_command(command, env_overrides),
+        markup=False,
+        emoji=False,
+        highlight=False,
+        soft_wrap=True,
+    )
+    for pending in follow_up or []:
+        console.print("After the previous command succeeds, complete the step with:", markup=False)
+        console.print(
+            _format_recovery_command(pending, env_overrides),
+            markup=False,
+            emoji=False,
+            highlight=False,
+            soft_wrap=True,
+        )
+
+
 def _run_step(
     command: list[str],
     *,
@@ -449,13 +642,16 @@ def _run_step(
     dry_run: bool,
     timeout: float = 600.0,
     env_overrides: Mapping[str, str] | None = None,
+    recovery: bool = False,
+    recovery_follow_up: list[list[str]] | None = None,
+    report_success: bool = True,
 ) -> bool:
     """Run one update step, streaming its output. Returns True on success."""
     if dry_run:
         prefix = ""
         if env_overrides:
             prefix = " ".join(f"{key}={value}" for key, value in env_overrides.items()) + " "
-        print_info(f"[dry-run] Would run: {prefix}{' '.join(command)}")
+        print_info(escape(f"[dry-run] Would run: {prefix}{' '.join(command)}"))
         return True
     try:
         command_env = None
@@ -464,12 +660,15 @@ def _run_step(
         result = subprocess.run(command, timeout=timeout, env=command_env)
     except (OSError, subprocess.SubprocessError):
         print_warning(f"{description} failed — could not run {command[0]!r}.")
-        return False
-    if result.returncode != 0:
+    else:
+        if result.returncode == 0:
+            if report_success:
+                print_success(description)
+            return True
         print_warning(f"{description} exited with code {result.returncode}.")
-        return False
-    print_success(description)
-    return True
+    if recovery:
+        _print_step_recovery(command, env_overrides, recovery_follow_up)
+    return False
 
 
 # ── Runtime integration refresh ──────────────────────────────────
@@ -486,10 +685,13 @@ def _refresh_claude_plugin(dry_run: bool, claude_executable: str | None) -> bool
         description="Refreshed ouroboros marketplace",
         dry_run=dry_run,
     )
+    update_command = [claude_executable, "plugin", "update", "ouroboros@ouroboros"]
     installed = _run_step(
         [claude_executable, "plugin", "install", "ouroboros@ouroboros"],
         description="Installed Claude Code plugin",
         dry_run=dry_run,
+        recovery=True,
+        recovery_follow_up=[update_command],
     )
     if not installed:
         return False
@@ -497,9 +699,10 @@ def _refresh_claude_plugin(dry_run: bool, claude_executable: str | None) -> bool
     # update is what advances an existing installation to the marketplace's
     # refreshed version.
     return _run_step(
-        [claude_executable, "plugin", "update", "ouroboros@ouroboros"],
+        update_command,
         description="Updated Claude Code plugin",
         dry_run=dry_run,
+        recovery=True,
     )
 
 
@@ -512,6 +715,7 @@ def _refresh_codex_plugin(dry_run: bool, codex_executable: str | None) -> bool |
         [codex_executable, "plugin", "marketplace", "upgrade", "ouroboros"],
         description="Refreshed Codex Ouroboros marketplace",
         dry_run=dry_run,
+        recovery=True,
     )
 
 
@@ -524,6 +728,7 @@ def _refresh_all_runtime_artifacts(
         [str(identity.console_path), "setup", "refresh"],
         description="Refreshed installed runtime artifacts",
         dry_run=dry_run,
+        recovery=True,
     )
 
 
@@ -552,6 +757,7 @@ def _refresh_runtime_config(
             if runtime_executable is not None and runtime_executable_env_key is not None
             else None
         ),
+        recovery=True,
     )
 
 
@@ -722,6 +928,56 @@ def _installed_version(identity: InstallationIdentity) -> str | None:
     return match.group(0) if match else None
 
 
+def _report_codex_plugin_version(
+    package_version: str,
+    runtime: str,
+    *,
+    dry_run: bool = False,
+    topology: RuntimeRefreshTopology | None = None,
+) -> None:
+    """Report installed plugin drift without changing refs or update exit status."""
+    if dry_run or runtime not in {"auto", "codex", "codex_cli", "all"}:
+        return
+    if topology is None:
+        try:
+            topology = _configured_runtime_topology("codex" if runtime == "all" else runtime)
+        except ConfigError:
+            print_warning("Codex plugin version: unknown (runtime configuration is invalid).")
+            return
+    if runtime != "all" and _resolve_runtime(
+        runtime, configured_backend=topology.runtime_backend
+    ) not in {"codex", "codex_cli"}:
+        return
+
+    plugin = inspect_codex_plugin(topology.runtime_executable)
+    if plugin.status == "unknown":
+        print_warning(f"Codex plugin version: unknown ({escape(plugin.reason or 'query failed')}).")
+    elif plugin.status == "not_installed":
+        print_info("Codex plugin: not installed.")
+    elif package_version == "0.0.0":
+        print_info(
+            f"Codex plugin: v{escape(plugin.version or '')}. "
+            "Package version is unavailable; version comparison skipped."
+        )
+    else:
+        assert plugin.version is not None
+        matches = plugin_versions_match(plugin.version, package_version)
+        if matches is None:
+            print_warning(
+                f"Codex plugin: v{escape(plugin.version)}. Version comparison with package "
+                f"v{escape(package_version)} is unknown (unsupported version format)."
+            )
+        elif matches:
+            print_info(f"Codex plugin: v{escape(plugin.version)} (matches package).")
+        else:
+            print_warning(
+                f"Codex plugin v{escape(plugin.version)} differs from package "
+                f"v{escape(package_version)}. Review the Ouroboros marketplace ref in Codex; "
+                "refreshing a pinned ref can retain an older plugin. "
+                "This check leaves existing refs and configuration unchanged."
+            )
+
+
 # ── CLI Command ──────────────────────────────────────────────────
 
 
@@ -799,13 +1055,15 @@ def update(
                 "Could not set OMP MCP tool timeout; run: "
                 "omp config set extensionHandlers.toolCallTimeoutMs 60000"
             )
-        console.print(f"\n[green]Ouroboros is up to date (v{current}).[/green]\n")
+        console.print(f"\n[green]Ouroboros package is up to date (v{current}).[/green]\n")
+        _report_codex_plugin_version(current, runtime, dry_run=dry_run)
         raise typer.Exit()
 
     console.print(f"\nUpdate available: [yellow]v{current}[/yellow] → [green]v{latest}[/green]")
     console.print(f"[dim]Changes: https://github.com/Q00/ouroboros/releases/tag/v{latest}[/dim]\n")
 
     if check:
+        _report_codex_plugin_version(current, runtime, dry_run=dry_run)
         raise typer.Exit()
 
     configured_topology = RuntimeRefreshTopology()
@@ -833,8 +1091,25 @@ def update(
         )
         raise typer.Exit(1) from exc
     console.print(f"Installer:   [cyan]{identity.manager}[/cyan]")
-    console.print(f"Environment: [cyan]{identity.environment}[/cyan]")
-    console.print(f"Profile:     [cyan]{identity.profile}[/cyan]\n")
+    console.print(f"Environment: [cyan]{escape(str(identity.environment))}[/cyan]")
+    console.print(f"Profile:     {identity.profile}\n", markup=False)
+
+    try:
+        _check_uv_target(identity, latest)
+    except InstallationIdentityError as exc:
+        console.print(f"Cannot update: {exc}.", style="yellow", markup=False)
+        console.print(
+            f"Receipt: {identity.environment / 'uv-receipt.toml'}\n"
+            f"Manager: {identity.manager_binary}\n"
+            f"UV_TOOL_DIR: {identity.manager_home}\n"
+            "No changes were made. The recorded version constraint is preserved.\n"
+            "To update beyond it, explicitly revise the root version requirement in your "
+            "original uv tool install command. Preserve the same tool root and executable "
+            "directory, Python selection, extras, additional requirements, and index/options "
+            "recorded in the receipt. Do not edit the receipt directly.",
+            markup=False,
+        )
+        raise typer.Exit(1) from exc
 
     if not yes and not dry_run:
         if not typer.confirm(f"Update to v{latest}?", default=True):
@@ -843,9 +1118,10 @@ def update(
 
     if not _run_step(
         _upgrade_command(identity, include_prereleases),
-        description=f"Upgraded {identity.profile} via {identity.manager}",
+        description=f"Package upgrade via {identity.manager}",
         dry_run=dry_run,
         env_overrides=_upgrade_environment(identity),
+        report_success=False,
     ):
         console.print(
             "\n[bold yellow]Update failed — package upgrade did not complete.[/bold yellow]\n"
@@ -869,6 +1145,8 @@ def update(
             )
             console.print("[bold yellow]Runtime integration was not refreshed.[/bold yellow]\n")
             raise typer.Exit(1)
+
+        print_success(f"Upgraded {PACKAGE_NAME} to v{installed} via {identity.manager}")
 
     failed: list[str] = []
     resolved_runtime = _resolve_runtime(
@@ -953,9 +1231,23 @@ def update(
         console.print("[yellow]Could not complete:[/yellow]")
         for step in failed:
             console.print(f"  [yellow]![/yellow] {step}")
+        console.print(
+            "Use the recovery commands above to finish these steps. Once the package is current, "
+            "rerunning `ouroboros update` does not retry runtime refreshes.",
+            markup=False,
+        )
         console.print()
     else:
-        console.print(f"[bold green]Updated to v{installed}.[/bold green]")
+        console.print(f"[bold green]Package updated to v{installed}.[/bold green]")
+    _report_codex_plugin_version(
+        installed,
+        resolved_runtime,
+        topology=(
+            configured_host_topologies["codex"]
+            if resolved_runtime == "all"
+            else configured_topology
+        ),
+    )
     if resolved_runtime == "all":
         refreshed_hosts = [
             host

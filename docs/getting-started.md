@@ -408,7 +408,7 @@ ooo run
 
 > **CLI equivalent:** `ouroboros run ~/.ouroboros/seeds/seed_abc123.yaml` (requires the seed file path as a positional argument)
 
-Ouroboros decomposes the seed into tasks via the Double Diamond (Discover -> Define -> Design -> Deliver) and executes them through your configured runtime backend.
+Ouroboros fans the seed's acceptance criteria out in dependency order, splitting an AC only when it spans independently verifiable units, and executes them through your configured runtime backend.
 
 ### Step 3: Monitor
 

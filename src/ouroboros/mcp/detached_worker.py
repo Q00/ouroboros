@@ -229,6 +229,11 @@ async def run_worker(request_path: Path) -> int:
                             job_id=request.job_id,
                             request_tool_name=request.tool_name,
                             rejection=rejection,
+                            **(
+                                {"launch_token": request.launch_token}
+                                if request.launch_token is not None
+                                else {}
+                            ),
                         )
                         return 1
                 await _compensate_unaccepted_start_failure(

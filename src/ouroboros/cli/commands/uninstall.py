@@ -221,8 +221,9 @@ def _remove_opencode_mcp(dry_run: bool) -> bool:
         return False
 
     try:
-        data = json.loads(_strip_jsonc(config_path.read_text()))
-    except (json.JSONDecodeError, OSError):
+        original_text = config_path.read_text(encoding="utf-8")
+        data = json.loads(_strip_jsonc(original_text))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
         print_warning(f"{config_path} is malformed — skipping.")
         return False
     mcp = data.get("mcp")
@@ -235,16 +236,9 @@ def _remove_opencode_mcp(dry_run: bool) -> bool:
 
     del mcp["ouroboros"]
 
-    # Warn if we're about to overwrite a .jsonc file that contained comments.
-    if config_path.suffix == ".jsonc":
-        try:
-            original_text = config_path.read_text(encoding="utf-8")
-        except OSError:
-            original_text = ""
-        if "//" in original_text or "/*" in original_text:
-            print_warning(
-                f"Note: JSONC comments in {config_path} were removed during config update."
-            )
+    from ouroboros.cli.commands.setup import _warn_if_opencode_jsonc_comments_removed
+
+    _warn_if_opencode_jsonc_comments_removed(config_path, original_text)
 
     try:
         config_path.write_text(json.dumps(data, indent=2) + "\n")
@@ -262,8 +256,8 @@ def _remove_claude_md_block(project_dir: Path, dry_run: bool) -> bool:
         return False
 
     try:
-        content = claude_md.read_text()
-    except OSError:
+        content = claude_md.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
         print_warning(f"Could not read {claude_md} — skipping.")
         return False
     if "<!-- ooo:START -->" not in content:
@@ -280,7 +274,7 @@ def _remove_claude_md_block(project_dir: Path, dry_run: bool) -> bool:
         flags=re.DOTALL,
     )
     try:
-        claude_md.write_text(cleaned)
+        claude_md.write_text(cleaned, encoding="utf-8")
     except OSError:
         print_warning(f"Could not write {claude_md} — skipping.")
         return False
@@ -331,7 +325,7 @@ def _remove_opencode_bridge_plugin(dry_run: bool) -> bool:
 
     if config_path is not None:
         try:
-            raw = config_path.read_text()
+            raw = config_path.read_text(encoding="utf-8")
             # Use the shared JSONC stripper — consistent with the other
             # uninstall paths (lines ~200, ~421) and handles block comments
             # + trailing commas that the previous inline single-line
@@ -349,6 +343,11 @@ def _remove_opencode_bridge_plugin(dry_run: bool) -> bool:
                         print_info(f"[dry-run] Would remove bridge plugin from {config_path}")
                         return True
                     data["plugin"] = kept
+                    from ouroboros.cli.commands.setup import (
+                        _warn_if_opencode_jsonc_comments_removed,
+                    )
+
+                    _warn_if_opencode_jsonc_comments_removed(config_path, raw)
                     with config_path.open("w") as f:
                         json.dump(data, f, indent=2)
                         f.write("\n")
@@ -356,7 +355,7 @@ def _remove_opencode_bridge_plugin(dry_run: bool) -> bool:
                     suffix = "" if removed_count == 1 else f" ({removed_count} entries)"
                     print_success(f"Removed bridge plugin entry from {config_path}{suffix}")
                     removed_files = True
-        except (json.JSONDecodeError, OSError, KeyError):
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError, KeyError):
             pass  # Best effort — don't fail uninstall over config parse
 
     return removed_files
@@ -461,10 +460,10 @@ def uninstall(
     opencode_config = _find_opencode_config()
     try:
         if opencode_config is not None:
-            oc_data = json.loads(_strip_jsonc(opencode_config.read_text()))
+            oc_data = json.loads(_strip_jsonc(opencode_config.read_text(encoding="utf-8")))
             if isinstance(oc_data.get("mcp"), dict) and "ouroboros" in oc_data["mcp"]:
                 targets.append(f"OpenCode MCP config ({opencode_config})")
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
         targets.append(f"OpenCode MCP config ({opencode_config} — may be malformed)")
 
     codex_dir = resolve_codex_home()
@@ -480,8 +479,10 @@ def uninstall(
     cwd = Path.cwd()
     claude_md = cwd / "CLAUDE.md"
     try:
-        if claude_md.exists() and "<!-- ooo:START -->" in claude_md.read_text():
+        if claude_md.exists() and "<!-- ooo:START -->" in claude_md.read_text(encoding="utf-8"):
             targets.append(f"CLAUDE.md integration block ({claude_md})")
+    except UnicodeDecodeError:
+        print_warning(f"Could not read {claude_md} — skipping.")
     except OSError:
         pass
 
@@ -497,13 +498,13 @@ def uninstall(
         _oc_cfg = find_opencode_config(allow_default=False)
         if _oc_cfg is not None:
             try:
-                _oc_data = json.loads(_strip_jsonc(_oc_cfg.read_text()))
+                _oc_data = json.loads(_strip_jsonc(_oc_cfg.read_text(encoding="utf-8")))
                 _oc_plugins = _oc_data.get("plugin", [])
                 if isinstance(_oc_plugins, list) and any(
                     is_bridge_plugin_entry(e) for e in _oc_plugins
                 ):
                     targets.append(f"OpenCode bridge plugin entry in {_oc_cfg}")
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError):
                 pass
 
     data_dir = Path.home() / ".ouroboros"
