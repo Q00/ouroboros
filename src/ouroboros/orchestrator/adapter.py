@@ -630,13 +630,13 @@ class RuntimeHandle:
         }
 
     def to_persisted_dict(self) -> dict[str, Any]:
-        """Serialize the handle for event/session persistence.
+        """Persist resumable runtime state without conversation-local calibration."""
+        from ouroboros.orchestrator.interview_session import INTERVIEW_CALIBRATION_METADATA_KEY
 
-        OpenCode runtime sessions persist only the reconnectable session handle
-        plus AC ownership metadata so stored events remain minimal and resume-safe.
-        """
         if self.backend != "opencode":
-            return self.to_dict()
+            metadata = dict(self.metadata)
+            metadata.pop(INTERVIEW_CALIBRATION_METADATA_KEY, None)
+            return {**self.to_dict(), "metadata": metadata}
 
         metadata = {
             key: value
