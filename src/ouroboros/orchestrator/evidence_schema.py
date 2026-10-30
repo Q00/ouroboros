@@ -154,6 +154,7 @@ class _EvidenceScan:
     decoded: dict[int, tuple[int, Any]]
     malformed: dict[int, _ContainerExtent]
     nested_values: set[int]
+    payload_attempts: set[int]
 
 
 def _top_level_fence_body_starts(text: str) -> Iterator[tuple[str, int, int, int]]:
@@ -231,13 +232,7 @@ def _find_body_start(text: str) -> tuple[int, bool]:
                 extent = scan.malformed[pos]
                 gap = recovery_text[fenced_end:pos]
                 adjacent_to_value = "\n" not in gap and "\r" not in gap and not gap.strip()
-                if (
-                    adjacent_to_value
-                    or not extent.closed
-                    or pos in scan.nested_values
-                    or _looks_like_json_container(recovery_text, pos, limit=body_end)
-                    or _has_structural_container_intent(recovery_text, pos, body_end)
-                ):
+                if adjacent_to_value or pos in scan.payload_attempts:
                     fenced_start = pos
                 owned_until = extent.end
             else:
@@ -457,11 +452,8 @@ def _looks_like_json_container(text: str, opener_pos: int, *, limit: int | None 
 
 
 def _is_terminal_malformed_container(text: str, position: int, scan: _EvidenceScan) -> bool:
-    extent = scan.malformed[position]
-    if position in scan.nested_values:
-        return True
-    return _is_evidence_container_opener(text, position) and (
-        not extent.closed or _looks_like_json_container(text, position, limit=extent.end)
+    return position in scan.nested_values or (
+        _is_evidence_container_opener(text, position) and position in scan.payload_attempts
     )
 
 
@@ -761,6 +753,14 @@ def _scan_evidence_values(text: str) -> _EvidenceScan:
         decoded={start: (end, value) for start, end, value in all_spans},
         malformed=malformed_boundaries,
         nested_values=nested_values,
+        payload_attempts={
+            position
+            for position, extent in malformed_boundaries.items()
+            if not extent.closed
+            or position in nested_values
+            or _looks_like_json_container(text, position, limit=extent.end)
+            or _has_structural_container_intent(text, position, extent.end)
+        },
     )
 
 

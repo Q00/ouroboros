@@ -319,6 +319,29 @@ class TestExtractEvidence:
         with pytest.raises(EvidenceError):
             extract_evidence(text)
 
+    @pytest.mark.parametrize(
+        "malformed", ["[true false]", "[1 2]", "[bogus,]", "[bogus,,other]", "[bogus, true]"]
+    )
+    @pytest.mark.parametrize("context", ["bare", "after-fence", "in-fence"])
+    @pytest.mark.parametrize("later_real", [False, True])
+    def test_structural_malformed_authority_is_shared_across_contexts(
+        self, malformed: str, context: str, later_real: bool
+    ) -> None:
+        stale = '{"files_touched":["stale.py"]}'
+        real = '{"files_touched":["real.py"]}'
+        text = f"{stale}\n{malformed}"
+        if context == "after-fence":
+            text = f"```json\n{stale}\n```\n{malformed}"
+        if later_real:
+            text += f"\n{real}"
+        if context == "in-fence":
+            text = f"```json\n{text}\n```"
+        if later_real:
+            assert extract_evidence(text).data == {"files_touched": ["real.py"]}
+        else:
+            with pytest.raises(EvidenceError):
+                extract_evidence(text)
+
     @pytest.mark.parametrize("earlier_fenced", [False, True])
     @pytest.mark.parametrize("prefix", ["", "trailing note "])
     @pytest.mark.parametrize("closer", ["]", ""])
