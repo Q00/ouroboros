@@ -1,6 +1,7 @@
 """Test project initialization structure."""
 
 from pathlib import Path
+import tomllib
 
 
 def test_project_structure_exists():
@@ -28,6 +29,19 @@ def test_python_version_file():
     assert python_version.is_file(), f".python-version should exist at {python_version}"
     content = python_version.read_text().strip()
     assert content == "3.14", f".python-version should contain '3.14', got '{content}'"
+
+
+def test_python_classifier_matches_supported_toolchain() -> None:
+    """The package advertises the repository's tested Python 3.14 runtime."""
+    root = Path(__file__).parent.parent.parent
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    classifiers = pyproject["project"]["classifiers"]
+    pinned_version = (root / ".python-version").read_text(encoding="utf-8").strip()
+    test_workflow = (root / ".github" / "workflows" / "test.yml").read_text(encoding="utf-8")
+
+    assert pyproject["project"]["requires-python"] == ">=3.12"
+    assert f"Programming Language :: Python :: {pinned_version}" in classifiers
+    assert f'"{pinned_version}"' in test_workflow
 
 
 def test_package_entry_point():

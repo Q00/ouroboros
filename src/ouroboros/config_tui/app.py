@@ -38,6 +38,7 @@ from ouroboros.backends.model_catalog import (
     configured_default_model,
     installed_backends,
     model_choices,
+    recommended_cli_models,
     refresh_models,
     uses_default_model_sentinel,
 )
@@ -434,6 +435,8 @@ class SettingsApp(App[None]):
 
     def _on_models_fetched(self, backend: str, models: tuple[str, ...] | None) -> None:
         self._fetch_pending.discard(backend)
+        if models is not None:
+            models = recommended_cli_models(backend, models)
         self._fetched_models[backend] = models
         if not models:
             return

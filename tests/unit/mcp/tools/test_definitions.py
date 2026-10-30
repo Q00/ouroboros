@@ -209,7 +209,7 @@ class TestExecuteSeedHandler:
             "ouroboros.mcp.tools.execution_handlers.SessionRepository",
             FakeSessionRepository,
         )
-        monkeypatch.setattr("ouroboros.mcp.tools.execution_handlers.OrchestratorRunner", FakeRunner)
+        monkeypatch.setattr("ouroboros.orchestrator.runner_factory.OrchestratorRunner", FakeRunner)
         monkeypatch.setattr(
             "ouroboros.mcp.tools.execution_handlers.create_agent_runtime",
             lambda **_kwargs: SimpleNamespace(runtime_backend="test"),
@@ -335,7 +335,7 @@ class TestExecuteSeedHandler:
             "ouroboros.mcp.tools.execution_handlers.SessionRepository",
             FakeSessionRepository,
         )
-        monkeypatch.setattr("ouroboros.mcp.tools.execution_handlers.OrchestratorRunner", FakeRunner)
+        monkeypatch.setattr("ouroboros.orchestrator.runner_factory.OrchestratorRunner", FakeRunner)
         monkeypatch.setattr(
             "ouroboros.mcp.tools.execution_handlers.create_agent_runtime",
             fake_create_agent_runtime,
@@ -418,7 +418,7 @@ class TestExecuteSeedHandler:
             "ouroboros.mcp.tools.execution_handlers.SessionRepository",
             FakeSessionRepository,
         )
-        monkeypatch.setattr("ouroboros.mcp.tools.execution_handlers.OrchestratorRunner", FakeRunner)
+        monkeypatch.setattr("ouroboros.orchestrator.runner_factory.OrchestratorRunner", FakeRunner)
         monkeypatch.setattr(
             "ouroboros.mcp.tools.execution_handlers.create_agent_runtime",
             lambda **_kwargs: SimpleNamespace(runtime_backend="test"),

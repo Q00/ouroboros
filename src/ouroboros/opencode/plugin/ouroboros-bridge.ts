@@ -416,7 +416,15 @@ export function _resetDedupe(): void {
 }
 
 function isRalphTool(s: Sub): boolean {
-  return s.tool === "ouroboros_ralph"
+  return s.tool === "ouroboros_ralph" || s.tool === "ouroboros_start_ralph"
+}
+
+class NestedRalphError extends Error {
+  readonly name = "NestedRalphError"
+
+  constructor(readonly sessionID: string, readonly tool: string) {
+    super("nested ouroboros_ralph delegation is not allowed")
+  }
 }
 
 export function markRalphChild(childID: string): void {
@@ -774,6 +782,12 @@ async function dispatch(
 export const OuroborosBridge: Plugin = async (ctx) => {
   log(`INIT dir=${ctx.directory ?? "?"} timeout=${CHILD_TIMEOUT_MS}ms`)
   return {
+    "tool.execute.before": async (input: { readonly tool: string; readonly sessionID: string }) => {
+      if (isRalphOwnedSession(input.sessionID)
+        && (input.tool === "ouroboros_ouroboros_ralph" || input.tool === "ouroboros_ouroboros_start_ralph")) {
+        throw new NestedRalphError(input.sessionID, input.tool)
+      }
+    },
     "tool.execute.after": async (input, output) => {
       // Enough to render a failure from the catch below. An exception after the
       // fan-out was registered is the same harm as an explicit rejection, so it

@@ -8296,6 +8296,120 @@ class TestParallelACExecutor:
         assert "sibling or future ACs" not in prompt
         assert render_completion_check(WHOLE_REQUEST_REQUIREMENTS) in prompt
 
+    # The hidden Seed criterion of the pytest-dev__pytest-6197 run reads like a
+    # validation-only criterion; the worker saw only the sourced objective (#2759).
+    _SOURCED_VALIDATION_LOOKING_CRITERION = (
+        "A command/API check returns stable observable output or artifacts proving "
+        "the original requirement for test collection."
+    )
+    _SOURCED_DOCS_LOOKING_CRITERION = "Document slugify and truncate usage in README.md."
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "criterion",
+        [_SOURCED_VALIDATION_LOOKING_CRITERION, _SOURCED_DOCS_LOOKING_CRITERION],
+    )
+    async def test_fat_harness_sourced_objective_prompt_asks_for_the_full_schema(
+        self, criterion: str
+    ) -> None:
+        """A sourced objective owns the request: the hidden criterion sets no exemption."""
+        from ouroboros.orchestrator.evidence.ac_classification import (
+            _is_documentation_only_ac,
+            _is_validation_only_ac,
+        )
+
+        assert _is_validation_only_ac(criterion) or _is_documentation_only_ac(criterion)
+        plain = await self._fat_harness_scope_prompt(criteria=(criterion,))
+        sourced = await self._fat_harness_scope_prompt(
+            criteria=(criterion,),
+            scope=SourcedScope(goal="Fix the request as the user wrote it."),
+        )
+
+        # Without a sourced scope the criterion keeps its keyword exemption.
+        assert "only current AC" in plain
+        assert "files_touched, commands_run, tests_passed" not in plain
+        assert "validation-only current AC" not in sourced
+        assert "documentation-only current AC" not in sourced
+        assert "Do not include files_touched unless you actually edited" not in sourced
+        assert "Do not include tests_passed at all" not in sourced
+        assert "files_touched, commands_run, tests_passed" in sourced
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("criterion", "evidence", "missing_field"),
+        [
+            (
+                _SOURCED_VALIDATION_LOOKING_CRITERION,
+                '{"commands_run":["pytest"],"tests_passed":["pytest"]}',
+                "files_touched",
+            ),
+            (
+                _SOURCED_DOCS_LOOKING_CRITERION,
+                '{"files_touched":["README.md"],"commands_run":["grep -n slugify README.md"]}',
+                "tests_passed",
+            ),
+        ],
+    )
+    async def test_fat_harness_sourced_objective_acceptance_checks_the_full_schema(
+        self, criterion: str, evidence: str, missing_field: str
+    ) -> None:
+        """The acceptance check asks for the same full schema the sourced prompt asked for."""
+        event_store, appended_events = _make_replaying_event_store()
+        runtime = _FinalMessageRuntime(
+            f"Done.\n```json\n{evidence}\n```",
+            native_session_id="opencode-session-sourced-schema",
+            support_messages=(
+                AgentMessage(
+                    type="tool",
+                    content="Bash: pytest",
+                    tool_name="Bash",
+                    data={"tool_input": {"command": "pytest"}},
+                ),
+                AgentMessage(
+                    type="tool_result",
+                    content="1 passed",
+                    data={"subtype": "tool_result", "exit_code": 0},
+                ),
+            ),
+        )
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+        install_sourced_scope(
+            executor, SourcedScope(goal="Fix the request as the user wrote it."), (criterion,)
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content=criterion,
+            session_id="orch_123",
+            tools=["Read", "Edit", "Bash"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["required_fields"] == [
+            "files_touched",
+            "commands_run",
+            "tests_passed",
+        ]
+        assert evidence_event.data["missing_fields"] == [missing_field]
+        assert evidence_event.data["ignored_out_of_scope_evidence_fields"] == []
+
     @pytest.mark.asyncio
     async def test_fat_harness_docs_only_ac_uses_docs_evidence_contract(self, tmp_path) -> None:
         """Regression for #961: README-only ACs must not require prior test IDs."""

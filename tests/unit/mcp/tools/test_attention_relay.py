@@ -7,6 +7,7 @@ import pytest
 
 from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.tools.attention_relay import classify_relay_events
+from ouroboros.persistence.event_store import acceptance_generation_id_for_session
 
 _BASE = datetime(2026, 7, 13, tzinfo=UTC)
 Relay = dict[str, Any]
@@ -379,6 +380,8 @@ def test_acceptance_relay_is_scoped_to_the_linked_session() -> None:
             "root_ac_index": 0,
             "final_retry_attempt": 0,
             "accepted": True,
+            "acceptance_generation_id": acceptance_generation_id_for_session("orch_1", "exec_1"),
+            "outcome": "succeeded",
             "disposition": "accepted",
             "terminal_status": "completed",
         },
@@ -388,6 +391,8 @@ def test_acceptance_relay_is_scoped_to_the_linked_session() -> None:
         "execution.ac.acceptance_finalized",
         {
             "session_id": "orch_2",
+            "acceptance_generation_id": acceptance_generation_id_for_session("orch_2", "exec_1"),
+            "outcome": "succeeded",
             "root_ac_index": 1,
             "final_retry_attempt": 0,
             "accepted": True,

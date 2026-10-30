@@ -218,7 +218,8 @@ function cardHtml(c) {
   const indent = c.depth ? `style="margin-left:${Math.min(c.depth,4)*10}px"` : "";
   return `<div class="card st-${esc(c.status)}" ${indent}>
     <div class="title">${esc(c.title).slice(0,160)}</div>
-    <div class="sub">${prov}${tier}${ac}${tokHtml}${tool}</div></div>`;
+    <div class="sub">${prov}${tier}${ac}${tokHtml}${tool}</div>
+    <div class="sub">${c.runtime ? Object.entries(c.runtime).filter(([key]) => key !== "generation").map(([key,value]) => `${esc(key)}: ${esc(value == null ? "unknown" : value)}`).join(" · ") : ""}</div></div>`;
 }
 
 function setView(detail, runId) {

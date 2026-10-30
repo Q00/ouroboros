@@ -1,5 +1,10 @@
 # Pi CLI Runtime
 
+LLM completion usage is summed from assistant messages in the final per-run
+`agent_end` snapshot. Earlier message/turn completion events repeat these
+messages and are not counted again. Additive cache tokens are preserved as
+`unallocated_tokens`; cache-retention and reasoning breakdowns are not added twice.
+
 Run Ouroboros workflow execution on top of the locally installed
 [`pi`](https://github.com/earendil-works/pi) CLI.
 
@@ -311,3 +316,7 @@ first scheduled ACs, attention, and terminal assurance. The main session stays
 available and selects the relevant AC semantically rather than asking the user
 for IDs. English is the canonical instruction language; the host renders the UX
 naturally in the current conversation language.
+
+After native completion or stdout EOF, the runtime gives the worker five seconds
+to exit and close stderr. If that exit phase stalls, it terminates the worker
+and returns a `TimeoutError`; active stdout startup and idle budgets are unchanged.

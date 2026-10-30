@@ -36,7 +36,7 @@ from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal
+from textual.containers import Container, Horizontal, VerticalScroll
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.reactive import reactive
@@ -185,7 +185,7 @@ class DoubleDiamondBar(Static):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-class NodeDetailPanel(Static):
+class NodeDetailPanel(VerticalScroll):
     """Panel showing detailed information about the selected AC node."""
 
     DEFAULT_CSS = """
@@ -249,6 +249,7 @@ class NodeDetailPanel(Static):
 
     NodeDetailPanel > .thinking-section {
         width: 100%;
+        height: auto;
         max-height: 6;
         margin-top: 1;
         padding-top: 1;
@@ -267,7 +268,8 @@ class NodeDetailPanel(Static):
 
     NodeDetailPanel > .tool-history-section {
         width: 100%;
-        max-height: 10;
+        height: auto;
+        max-height: 11;
         margin-top: 1;
         padding-top: 1;
         border-top: dashed $primary-darken-2;
@@ -285,7 +287,7 @@ class NodeDetailPanel(Static):
     }
     """
 
-    selected_node: reactive[dict[str, Any] | None] = reactive(None)
+    selected_node: reactive[dict[str, Any] | None] = reactive(None, always_update=True)
     thinking_text: reactive[str] = reactive("")
     tool_history: reactive[list[dict[str, Any]]] = reactive([], always_update=True)
 
@@ -310,6 +312,19 @@ class NodeDetailPanel(Static):
             with Horizontal(classes="detail-row"):
                 yield Label("Status:", classes="label")
                 yield Static(status_display, classes="value")
+
+            runtime = node.get("runtime")
+            if isinstance(runtime, dict):
+                yield Static(
+                    Text(
+                        "\n".join(
+                            f"{key}: {value if value is not None else 'unknown'}"
+                            for key, value in runtime.items()
+                            if key != "generation"
+                        )
+                    ),
+                    classes="content-section",
+                )
 
             with Horizontal(classes="detail-row"):
                 yield Label("Depth:", classes="label")
@@ -567,14 +582,20 @@ class SelectableACTree(Static):
         except NoMatches:
             return
 
+        # Rows move when branches expand or the tree gains nodes. Preserve the
+        # semantic cursor and the user's branch choices, rather than a row index.
+        cursor_id = next(
+            (key for key, node in self._tree_node_map.items() if node is tree.cursor_node),
+            None,
+        )
+        expanded = {
+            key: node.is_expanded for key, node in self._tree_node_map.items() if node.allow_expand
+        }
         tree.clear()
         tree.root.label = Text("Seed", style="bold")
         tree.root.data = {"id": "seed", "content": "Seed", "status": "executing", "depth": 0}
         self._node_map = {"seed": tree.root.data}
         self._tree_node_map = {"seed": tree.root}
-
-        if not self.tree_data:
-            return
 
         root_id = self.tree_data.get("root_id", "root")
         nodes = self.tree_data.get("nodes", {})
@@ -584,6 +605,18 @@ class SelectableACTree(Static):
             self._add_children(tree.root, root_node, nodes)
 
         tree.root.expand()
+        for node_id, is_expanded in expanded.items():
+            node = self._tree_node_map.get(node_id)
+            if node is not None and node.allow_expand:
+                if is_expanded:
+                    node.expand()
+                else:
+                    node.collapse()
+        # New TreeNodes have no row until layout traverses the rebuilt tree.
+        # Build before moving, otherwise move_cursor sees row -1 and resets.
+        tree._build()
+        cursor_node = self._tree_node_map.get(cursor_id) if cursor_id is not None else None
+        tree.move_cursor(cursor_node or tree.root)
 
     def _add_children(
         self,
@@ -902,6 +935,11 @@ class DashboardScreenV3(Screen[None]):
         """Handle node selection from tree."""
         if self._detail_panel:
             self._detail_panel.selected_node = message.node_data
+            node_id = message.node_data.get("id")
+            thinking = self._state.thinking.get(node_id, "") if self._state else ""
+            history = self._state.tool_history.get(node_id, []) if self._state else []
+            self._detail_panel.update_thinking(thinking)
+            self._detail_panel.update_tool_history(list(history))
 
     def on_execution_updated(self, message: ExecutionUpdated) -> None:
         pass  # Status display removed
@@ -1041,6 +1079,15 @@ class DashboardScreenV3(Screen[None]):
         """Handle tool call completed - clear inline activity."""
         if self._tree:
             self._tree.clear_node_activity(message.ac_id)
+        if (
+            self._state is not None
+            and self._detail_panel is not None
+            and self._detail_panel.selected_node is not None
+            and self._detail_panel.selected_node.get("id") == message.ac_id
+        ):
+            self._detail_panel.update_tool_history(
+                list(self._state.tool_history.get(message.ac_id, []))
+            )
         if self._activity_bar:
             tools = dict(self._activity_bar.active_tools)
             tools.pop(message.ac_id, None)
