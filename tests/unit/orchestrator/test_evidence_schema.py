@@ -428,6 +428,60 @@ class TestExtractEvidence:
 
     @pytest.mark.parametrize("fence_tag", ["json", ""])
     @pytest.mark.parametrize(
+        "prose",
+        [
+            'The literal string "[1 2]" is documentation.',
+            "See `[true false]` for notation.",
+            'See [example "[true false]"] for details.',
+            r'The note "escaped \" [1 2] text" is prose.',
+            "The note '[true false]' is prose.",
+            "See ``code `[1 2]` sample`` for notation.",
+            'It\'s "[1 2]" in prose.',
+        ],
+    )
+    def test_quoted_prose_preserves_fenced_evidence(self, fence_tag: str, prose: str) -> None:
+        text = f'```{fence_tag}\n{{"files_touched":["ok.py"]}}\n{prose}\n```'
+
+        assert extract_evidence(text).data == {"files_touched": ["ok.py"]}
+
+    @pytest.mark.parametrize("fence_tag", ["json", ""])
+    @pytest.mark.parametrize("separator", ["", " ", "\n"])
+    @pytest.mark.parametrize(
+        "prose",
+        [
+            'The literal string "[1 2]" is documentation.',
+            "See `[true false]` for notation.",
+            'See [example "[true false]"] for details.',
+        ],
+    )
+    @pytest.mark.parametrize("tail", ["[1 2]", "[true false]", '["a" "b"]'])
+    def test_quoted_prose_cannot_hide_terminal_corruption(
+        self, fence_tag: str, separator: str, prose: str, tail: str
+    ) -> None:
+        text = f'```{fence_tag}\n{{"files_touched":["stale.py"]}}\n{prose}{separator}{tail}\n```'
+
+        with pytest.raises(EvidenceError):
+            extract_evidence(text)
+
+    @pytest.mark.parametrize(
+        "tail",
+        [
+            'An unclosed "quote precedes [true false]',
+            "An unclosed `literal precedes [true false]",
+            'An unclosed "quote\n[1 2]\nA closing quote later"',
+            "An unclosed `literal\n[1 2]\nA closing backtick later`",
+            "It's invalid: [true false] and it's still invalid.",
+            '["a [true false]" "b"]',
+        ],
+    )
+    def test_prose_literal_context_cannot_hide_malformed_payload(self, tail: str) -> None:
+        text = f'```json\n{{"files_touched":["stale.py"]}}\n{tail}\n```'
+
+        with pytest.raises(EvidenceError):
+            extract_evidence(text)
+
+    @pytest.mark.parametrize("fence_tag", ["json", ""])
+    @pytest.mark.parametrize(
         "terminal_payload",
         [
             "[broken,",

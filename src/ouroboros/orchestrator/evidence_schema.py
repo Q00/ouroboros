@@ -51,6 +51,17 @@ _EXPR_RE = re.compile(r"^\s*(?P<field>[A-Za-z_][A-Za-z0-9_]*)\s*==\s*(?P<lit>.+?
 _DECODER = json.JSONDecoder()
 _NUMERIC_LOOKING_LEXEME_RE = re.compile(r"[+-]?[0-9][0-9.eE+-]*\Z")
 _NUMERIC_MANTISSA_LEXEME_RE = re.compile(r"[+-]?[0-9]+(?:\.[0-9]*)?\Z")
+# Complete single-line literals own their contents, but never subsequent
+# containers. Unclosed quotes/backticks leave later evidence openers visible.
+_FENCE_TAIL_TOKEN_RE = re.compile(
+    r"""
+    "(?:\\[^\r\n]|[^"\\\r\n])*"
+    | (?<!\w)'(?:\\[^\r\n]|[^'\\\r\n])*'
+    | (?<!`)(?P<ticks>`+)(?!`)[^\r\n]*?(?<!`)(?P=ticks)(?!`)
+    | (?P<opener>\{|\[)
+    """,
+    re.VERBOSE,
+)
 
 
 class EvidenceError(ValueError):
@@ -193,9 +204,10 @@ def _find_body_start(text: str) -> tuple[int, bool]:
         fenced_start = fenced_values[-1][0] if fenced_values else body_start
         fenced_end = fenced_values[-1][1] if fenced_values else body_start
 
-        for pos in range(fenced_end, body_end):
-            if recovery_text[pos] not in "{[":
+        for token in _FENCE_TAIL_TOKEN_RE.finditer(recovery_text, fenced_end, body_end):
+            if token.group("opener") is None:
                 continue
+            pos = token.start()
             try:
                 _DECODER.raw_decode(recovery_text[pos:])
             except json.JSONDecodeError:
