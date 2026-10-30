@@ -20,6 +20,7 @@ config — shared with every other host — is left as it is.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -88,14 +89,15 @@ def resolve_harness_config_dir(harness_path: str) -> Path | None:
     if completed.returncode != 0:
         return None
     for line in completed.stdout.splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and parts[0] == "CONFIG":
-            return Path(parts[1])
+        parts = line.split(maxsplit=1)
+        if len(parts) == 2 and parts[0] == "CONFIG":
+            path = Path(parts[1])
+            return path if path.is_absolute() else None
     return None
 
 
 def _toml_string(value: str) -> str:
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return json.dumps(value, ensure_ascii=True)
 
 
 def _toml_array(values: tuple[str, ...] | list[str]) -> str:
@@ -226,6 +228,8 @@ def install_megacode_skills(config_dir: Path, *, skills_dir: str | Path | None =
             for bundle in collect_skill_bundle_dirs(source):
                 name = load_skill_frontmatter(bundle / SKILL_ENTRYPOINT).get("name")
                 folder = name.strip() if isinstance(name, str) and name.strip() else bundle.name
+                if folder in {".", ".."} or "/" in folder or "\\" in folder:
+                    raise ValueError(f"Invalid skill folder name: {folder!r}")
                 shutil.copytree(bundle, staging_root / folder)
                 if folder != bundle.name:
                     renamed[bundle.name] = folder
@@ -259,6 +263,11 @@ def setup_megacode(
     if config_dir is None:
         print_error(f"Could not read the harness config folder from `{harness_path} paths`.")
         return False
+    for relative in ("config.toml", "AGENTS.md", "ouroboros", "ouroboros/skills"):
+        destination = config_dir / relative
+        if destination.is_symlink():
+            print_error(f"Refusing symlinked managed destination: {destination}")
+            return False
 
     entry = mcp_entry if mcp_entry is not None else _detect_mcp_entry()
     if entry is None:

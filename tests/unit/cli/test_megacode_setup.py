@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 import tomllib
 
 import pytest
@@ -135,3 +136,76 @@ def test_setup_refuses_invalid_toml(harness_config: Path, packaged_skills: Path)
 def test_select_runtime_requires_the_harness_cli() -> None:
     with pytest.raises(typer.Exit):
         select_megacode_runtime({"megacode": None})
+
+
+def test_paths_preserves_spaces_and_uses_only_absolute_config(tmp_path: Path) -> None:
+    harness = tmp_path / "harness stub"
+    target = tmp_path / "config with spaces"
+    harness.write_text(f"#!{sys.executable}\nprint({str('CONFIG ' + str(target))!r})\n")
+    harness.chmod(0o700)
+    assert megacode_setup.resolve_harness_config_dir(str(harness)) == target
+    harness.write_text(f'#!{sys.executable}\nprint("CONFIG relative/path")\n')
+    assert megacode_setup.resolve_harness_config_dir(str(harness)) is None
+
+
+def test_render_roundtrips_control_characters_and_quotes(tmp_path: Path) -> None:
+    skills = tmp_path / 'quote" slash\\ tab\t newline\n'
+    command = ["uvx", 'quote"', "slash\\", "tab\t", "newline\n", "\x00"]
+    block = megacode_setup.render_harness_block(skills_root=skills, mcp_command=command)
+    data = tomllib.loads(block)
+    assert data["skills"]["extra_roots"] == [str(skills)]
+    assert data["mcp"]["servers"]["ouroboros"]["command"] == command
+
+
+@pytest.mark.parametrize("name", ["../escaped", "ABSOLUTE", "..", ".", "a/b", "a\\b"])
+def test_skill_name_cannot_escape_staging(tmp_path: Path, name: str) -> None:
+    source = tmp_path / "source"
+    if name == "ABSOLUTE":
+        name = str(tmp_path / "escaped")
+    _write_skill(source, "evil", name)
+    with pytest.raises(ValueError, match="skill.*name"):
+        install_megacode_skills(tmp_path / "cfg", skills_dir=source)
+    assert not (tmp_path / "cfg" / "ouroboros" / "escaped").exists()
+
+
+def test_setup_through_paths_cli_is_idempotent(tmp_path: Path, packaged_skills: Path) -> None:
+    target = tmp_path / 'config with spaces and "quotes"'
+    target.mkdir()
+    (target / "config.toml").write_text('mode = "manual"\n')
+    (target / "AGENTS.md").write_text("# Mine\n")
+    harness = tmp_path / "harness"
+    harness.write_text(f"#!{sys.executable}\nprint({('CONFIG ' + str(target))!r})\n")
+    harness.chmod(0o700)
+    assert setup_megacode(str(harness), mcp_entry=_MCP_ENTRY, skills_dir=packaged_skills)
+    first = {p.relative_to(target): p.read_bytes() for p in target.rglob("*") if p.is_file()}
+    assert setup_megacode(str(harness), mcp_entry=_MCP_ENTRY, skills_dir=packaged_skills)
+    second = {p.relative_to(target): p.read_bytes() for p in target.rglob("*") if p.is_file()}
+    assert first == second
+    assert not (tmp_path / "config").exists()
+    parsed = tomllib.loads((target / "config.toml").read_text())
+    assert parsed["skills"]["extra_roots"] == [str(target / "ouroboros" / "skills")]
+
+
+@pytest.mark.parametrize(
+    "destination", ["config.toml", "AGENTS.md", "ouroboros", "ouroboros/skills"]
+)
+def test_setup_refuses_symlinked_managed_destinations(
+    harness_config: Path, packaged_skills: Path, tmp_path: Path, destination: str
+) -> None:
+    outside = tmp_path / "outside"
+    is_dir = destination.startswith("ouroboros")
+    if is_dir:
+        outside.mkdir()
+        (outside / "sentinel").write_text("keep")
+    else:
+        outside.write_text("# keep\n")
+    link = harness_config / destination
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(outside, target_is_directory=is_dir)
+    assert not setup_megacode("harness", mcp_entry=_MCP_ENTRY, skills_dir=packaged_skills)
+    assert link.is_symlink()
+    assert (
+        (outside / "sentinel").read_text() == "keep"
+        if is_dir
+        else outside.read_text() == "# keep\n"
+    )
