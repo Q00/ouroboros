@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 from itertools import product
 
 import pytest
@@ -41,6 +40,11 @@ class TestExtractEvidence:
             for width in range(4)
             for tail in product("01.e+-", repeat=width)
         }
+        numeric |= {
+            value[:index] + " " + value[index:]
+            for value in tuple(numeric)
+            for index in range(1, len(value))
+        }
         atoms = (
             "0",
             "-1",
@@ -55,14 +59,7 @@ class TestExtractEvidence:
             "None",
             ".5",
         )
-        payloads = []
-        for value in sorted(numeric):
-            try:
-                if isinstance(ast.parse(value, mode="eval").body, ast.BinOp):
-                    continue
-            except SyntaxError:
-                pass
-            payloads.append(f"[{value}]")
+        payloads = [f"[{value}]" for value in sorted(numeric)]
         payloads += [f"[{value}]" for value in ("0x", "0xGG", "0o9", "0b2", "0x1.fp2")]
         payloads += [f"[{first} {second}]" for first, second in product(atoms, repeat=2)]
         failures = []
