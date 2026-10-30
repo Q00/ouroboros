@@ -57,6 +57,7 @@ class TestExtractEvidence:
             "1_000",
             "True",
             "None",
+            "undefined",
             ".5",
         )
         payloads = [f"[{value}]" for value in sorted(numeric)]

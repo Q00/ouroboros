@@ -522,8 +522,10 @@ def _complete_json_value(value: str) -> bool:
 
 
 def _is_malformed_scalar_lexeme(value: str) -> bool:
-    """Recognize numeric payload attempts while preserving date/version notes."""
+    """Recognize foreign scalar attempts while preserving date/version notes."""
     candidate = value.strip()
+    if candidate == "undefined":
+        return True
     if _complete_json_value(candidate):
         return False
     compact = "".join(candidate.split())
