@@ -639,6 +639,33 @@ The public CLI additionally maps `claude-sdk` and `claude_sdk` to `claude`, and
 spellings are defined in `src/ouroboros/package_profiles.py`; all other aliases
 are the registered aliases in the table above.
 
+### Copilot ACP transport
+
+The existing `copilot` factory selects `CopilotCliRuntime` by default or
+`CopilotAcpRuntime` when `orchestrator.copilot_transport=acp`. This is not another
+backend enum or an LLM adapter: LLM-only flows keep `CopilotCliLLMAdapter`.
+
+```text
+CopilotAcpRuntime → CopilotAcpClient → copilot --acp --stdio
+  → CopilotAcpEventTranslator → AgentMessage
+  → project_runtime_message → ExecutionEventEmitter → existing EventStore
+  → live consumers, task history, replay
+```
+
+ACP-specific process/RPC, permission, and translation code lives under
+`src/ouroboros/copilot/acp_*.py`. Each invocation owns a fresh process/session.
+The sequential runner and parallel executor share a progress-emission policy
+that preserves every text delta and tool progress event rather than sampling
+deltas every tenth message. Projection keeps exact delta whitespace, tool IDs,
+available parent/agent correlation, command exit codes, and transport metadata.
+Private thought chunks never enter the normalized event stream.
+
+Cancellation sends ACP cancel before process cleanup. Native session resume is
+not supported; persisted history remains replayable. Pre-prompt fallback is
+limited to read-only/tool-less envelopes and never hides authentication failures
+or replays a submitted prompt. See the [ACP runtime guide](runtime-guides/copilot-acp.md)
+for the wire contract, permissions, diagnostics, and supported boundaries.
+
 For API details, see the source in `src/ouroboros/orchestrator/adapter.py`. For contributing a new runtime adapter, see [Contributing](contributing/).
 
 ## Integration Points
