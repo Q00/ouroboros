@@ -285,6 +285,29 @@ def test_a_scan_over_its_budget_refuses_the_start(
     assert find_workspace_leaks(workspace, [package]) != ()
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, 2_000_000),
+        ("50", 50),
+        (" 7 ", 7),
+        ("0", 2_000_000),
+        ("-3", 2_000_000),
+        ("lots", 2_000_000),
+    ],
+)
+def test_scan_budget_reads_a_positive_integer_from_the_environment(
+    raw: str | None, expected: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ouroboros.boundary.package as package_module
+
+    if raw is None:
+        monkeypatch.delenv("OUROBOROS_LEAK_SCAN_MAX_ENTRIES", raising=False)
+    else:
+        monkeypatch.setenv("OUROBOROS_LEAK_SCAN_MAX_ENTRIES", raw)
+    assert package_module._scan_entries_budget() == expected
+
+
 def test_scan_does_not_enumerate_past_its_budget(
     tmp_path: Path,
     package,
