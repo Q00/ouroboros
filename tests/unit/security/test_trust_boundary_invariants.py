@@ -444,6 +444,13 @@ def _discover_spawn_sites(root: Path) -> tuple[SpawnSite, ...]:
 #: inheriting is acceptable so the allowlist never silently absorbs a finding.
 SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
     (
+        "src/ouroboros/copilot/acp_client.py",
+        "CopilotAcpClient.__aenter__",
+        "asyncio.create_subprocess_exec",
+        99,
+        12,
+    ): "Required explicit env parameter; production CopilotAcpRuntime supplies inherited _build_child_env -> build_copilot_child_env, stripping runtime selectors and enforcing recursion depth. Client never implicitly inherits os.environ.",
+    (
         "src/ouroboros/auto/checkpoint_commits.py",
         "_staged_changes",
         "subprocess.run",
@@ -1239,7 +1246,9 @@ LOADER_KEY_CATALOG_DENIED: tuple[str, ...] = (
     "OUROBOROS_CONSENSUS_JUDGE_MODEL",
     "OUROBOROS_CONSENSUS_MODELS",
     "OUROBOROS_CONTEXT_COMPRESSION_MODEL",
+    "OUROBOROS_COPILOT_ACP_FALLBACK",
     "OUROBOROS_COPILOT_CLI_PATH",
+    "OUROBOROS_COPILOT_TRANSPORT",
     "OUROBOROS_CROSS_HARNESS_REDISPATCH",
     "OUROBOROS_DEPENDENCY_ANALYSIS_MODEL",
     "OUROBOROS_DETECTOR_MODEL",
