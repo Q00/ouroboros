@@ -2670,7 +2670,9 @@ async def test_settlement_replay_mutation_invalidates_every_provisional_success(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("change", [None, "command", "artifact", "assertion", "goal", "legacy"])
+@pytest.mark.parametrize(
+    "change", [None, "command", "artifact", "assertion", "goal", "legacy", "cwd"]
+)
 async def test_checkpoint_restores_verify_evidence_and_result_retry_identity(
     tmp_path: Any, change: str | None
 ) -> None:
@@ -2721,6 +2723,7 @@ async def test_checkpoint_restores_verify_evidence_and_result_retry_identity(
     elif change is not None:
         updates = {
             "command": {"verify_command": "exit 7"},
+            "cwd": {"verify_cwd": "app"},
             "artifact": {"expected_artifacts": ("missing.txt",)},
             "assertion": {"output_assertion": "missing output"},
         }
