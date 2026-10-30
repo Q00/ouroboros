@@ -203,6 +203,50 @@ async def test_rephrase_cancellation_propagates_and_closes_owned_store() -> None
     handler.close.assert_awaited_once()
 
 
+@pytest.mark.parametrize("padding", ["", "  ", "\n\t"])
+async def test_unchanged_provider_output_preserves_pending_question(tmp_path, padding) -> None:
+    question = "What idempotency guarantee is required?"
+    adapter = MagicMock()
+    adapter.complete = AsyncMock(
+        return_value=Result.ok(
+            CompletionResponse(
+                content=f"{padding}{question}{padding}",
+                model="test",
+                usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+        )
+    )
+    engine = InterviewEngine(llm_adapter=adapter, state_dir=tmp_path)
+    state = InterviewState(
+        interview_id="interview_1234567890abcdef",
+        initial_context="payments",
+        rounds=[InterviewRound(round_number=1, question=question)],
+    )
+    assert (await engine.save_state(state)).is_ok
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    handler = InterviewHandler(interview_engine=engine, llm_adapter=adapter)
+    resolved = SkillDispatchRouter().resolve(
+        "ooo idk idempotency", skills_dir=Path(__file__).resolve().parents[4] / "skills"
+    )
+    assert isinstance(resolved, Resolved)
+
+    result = await handler.handle({**resolved.mcp_args, "session_id": state.interview_id})
+
+    assert result.is_ok
+    assert result.value.meta["question_rephrased"] is False
+    assert result.value.meta["pending_question_preserved"] is True
+    assert result.value.meta["interview_calibration"]["unknown_terms"] == ["idempotency"]
+    assert "rephrased_question" not in result.value.meta
+    assert "pending question is unchanged" in result.value.text_content
+    assert "plainer language" not in result.value.text_content
+    assert before == {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    reloaded = await engine.load_state(state.interview_id)
+    assert reloaded.is_ok
+    assert len(reloaded.value.rounds) == 1
+    assert reloaded.value.rounds[0].question == question
+    assert reloaded.value.rounds[0].user_response is None
+
+
 class _LegacyEngine:
     """Fake engine with old one-argument ask_next_question contract."""
 
