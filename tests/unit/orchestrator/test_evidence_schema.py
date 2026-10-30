@@ -448,6 +448,28 @@ class TestExtractEvidence:
             with pytest.raises(EvidenceError):
                 extract_evidence(text)
 
+    @pytest.mark.parametrize(
+        "payload", ["evidence: true false", "Evidence: invalid payload", "evidence:"]
+    )
+    @pytest.mark.parametrize("context", ["bare", "json", "untagged", "after-fence"])
+    @pytest.mark.parametrize("later_real", [False, True])
+    def test_terminal_explicit_evidence_failure(
+        self, payload: str, context: str, later_real: bool
+    ) -> None:
+        stale = '{"files_touched":["stale.py"]}'
+        text = f"{stale}\n{payload}"
+        if context == "after-fence":
+            text = f"```json\n{stale}\n```\n{payload}"
+        if later_real:
+            text += '\n{"files_touched":["real.py"]}'
+        if context in ("json", "untagged"):
+            text = f"```{'json' if context == 'json' else ''}\n{text}\n```"
+        if later_real:
+            assert extract_evidence(text).data == {"files_touched": ["real.py"]}
+        else:
+            with pytest.raises(EvidenceError):
+                extract_evidence(text)
+
     @pytest.mark.parametrize("earlier_fenced", [False, True])
     @pytest.mark.parametrize("prefix", ["", "trailing note "])
     @pytest.mark.parametrize("closer", ["]", ""])

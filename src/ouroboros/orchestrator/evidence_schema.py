@@ -705,7 +705,10 @@ def _scan_evidence_values(text: str) -> _EvidenceScan:
             payload_leading = len(payload) - len(payload.lstrip(" \t"))
             start += inline_value_start + payload_leading
             candidate = payload[payload_leading:]
-        if candidate and candidate[0] not in "{[":
+        if (candidate or inline_value_start is not None) and (
+            not candidate or candidate[0] not in "{["
+        ):
+            complete_scalar = False
             try:
                 parsed, end_offset = _DECODER.raw_decode(candidate)
             except json.JSONDecodeError:
@@ -713,7 +716,10 @@ def _scan_evidence_values(text: str) -> _EvidenceScan:
             else:
                 if not candidate[end_offset:].strip():
                     all_spans.append((start, start + end_offset, parsed))
-            if _is_malformed_scalar_lexeme(candidate):
+                    complete_scalar = True
+            if not complete_scalar and (
+                inline_value_start is not None or _is_malformed_scalar_lexeme(candidate)
+            ):
                 malformed_boundaries[start] = _EvidenceExtent(start + len(candidate), True)
                 malformed_scalars.add(start)
         offset += len(line)
