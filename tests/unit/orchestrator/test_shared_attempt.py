@@ -26,6 +26,7 @@ from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
 from ouroboros.orchestrator.parallel_executor_models import ACExecutionOutcome, ACExecutionResult
 from ouroboros.orchestrator.profile_loader import load_profile
 from ouroboros.orchestrator.shared_attempt import (
+    renders_sourced_objective,
     shared_attempt_graph,
     shares_one_attempt,
     sourced_criteria_aligned,
@@ -194,6 +195,21 @@ def test_one_attempt_is_decided_by_structure() -> None:
     assert graph is not None and graph.execution_levels == ((0, 1, 2),)
 
 
+def test_a_dispatch_renders_the_sourced_objective_by_structure() -> None:
+    """The worker owns the sourced objective unless its binding criterion is its own (#2759)."""
+    scope = SourcedScope(goal=USER_REQUEST)
+    assert renders_sourced_objective(scope, MODEL_CRITERIA, 0)
+    assert renders_sourced_objective(scope, (CODE_CRITERION,), 0)
+    reordered = SourcedScope(goal=USER_REQUEST, acceptance_criteria=MODEL_CRITERIA[::-1])
+    assert renders_sourced_objective(reordered, MODEL_CRITERIA, 1)
+    # Aligned binding criteria: each leaf sees its own criterion.
+    aligned = SourcedScope(goal=USER_REQUEST, acceptance_criteria=MODEL_CRITERIA)
+    assert not renders_sourced_objective(aligned, MODEL_CRITERIA, 1)
+    assert renders_sourced_objective(aligned, MODEL_CRITERIA, None)
+    # No sourced scope: the worker sees the Seed criterion itself.
+    assert not renders_sourced_objective(None, MODEL_CRITERIA, 0)
+
+
 @pytest.mark.asyncio
 async def test_a_shared_attempt_seed_runs_one_worker_and_judges_every_criterion(
     tmp_path,
@@ -236,6 +252,25 @@ async def test_a_shared_attempt_seed_runs_one_worker_and_judges_every_criterion(
     # The check package gate judged each criterion once, on its own text.
     assert sorted(judged) == [(0, DOC_CRITERION), (1, CODE_CRITERION), (2, TEST_CRITERION)]
     assert result.success_count == 3 and result.all_succeeded
+
+
+@pytest.mark.asyncio
+async def test_a_docs_looking_criterion_keeps_the_full_schema_of_the_sourced_attempt(
+    tmp_path,
+) -> None:
+    """Root 0 and a criterion settled from it keep tests_passed: no keyword exemption (#2759)."""
+    runtime = _CountingRuntime(str(tmp_path))
+    executor = _executor(runtime)
+    result = await _execute(
+        executor, _seed(criteria=(DOC_CRITERION, CODE_CRITERION, DOC_CRITERION))
+    )
+
+    by_index = {r.ac_index: r for r in result.results}
+    assert by_index[2].outcome is ACExecutionOutcome.SETTLED_FROM_SHARED_ATTEMPT
+    for index in (0, 2):
+        typed_evidence = by_index[index].typed_evidence
+        assert typed_evidence is not None
+        assert typed_evidence.data["tests_passed"] == ["pytest"]
 
 
 @pytest.mark.asyncio

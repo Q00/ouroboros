@@ -47,11 +47,15 @@ from ouroboros.config import (
     get_usage_limit_pause_seconds,
 )
 from ouroboros.config.exec_sandbox import exec_sandbox_enabled
+from ouroboros.config.models import EconomicsConfig
+from ouroboros.core.conductor import ConductorDirective as ConductorDirective
 from ouroboros.core.errors import ConfigError, OuroborosError, PersistenceError
 from ouroboros.core.execution_preferences import (
     ResolvedExecutionPreferences,
-    execution_preferences_from_contract,
     resolve_execution_preferences,
+)
+from ouroboros.core.execution_preferences import (
+    execution_preferences_from_contract as execution_preferences_from_contract,
 )
 from ouroboros.core.project_identity import (
     ManagedProjectOwnershipError as ManagedProjectOwnershipError,
@@ -96,6 +100,25 @@ from ouroboros.orchestrator.backend_limits import (
     plan_fan_out_concurrency,
     resolve_backend_limits,
 )
+from ouroboros.orchestrator.cancellation import CancellationDependencies, CancellationLifecycle
+from ouroboros.orchestrator.cancellation import (
+    _cancellation_lock as _cancellation_lock,
+)
+from ouroboros.orchestrator.cancellation import (
+    _cancellation_registry as _cancellation_registry,
+)
+from ouroboros.orchestrator.cancellation import (
+    clear_cancellation as clear_cancellation,
+)
+from ouroboros.orchestrator.cancellation import (
+    get_cancellation_request as get_cancellation_request,
+)
+from ouroboros.orchestrator.cancellation import (
+    get_pending_cancellations as get_pending_cancellations,
+)
+from ouroboros.orchestrator.cancellation import (
+    request_cancellation as request_cancellation,
+)
 from ouroboros.orchestrator.capabilities import (
     CapabilityGraph,
     build_capability_graph,
@@ -121,7 +144,6 @@ from ouroboros.orchestrator.events import (
 )
 from ouroboros.orchestrator.evidence.common import _SUCCESSFUL_ATTEMPT_OUTCOMES
 from ouroboros.orchestrator.execution_authority import (
-    ProcessLocalCancellationDisposition,
     _authenticate_process_local_prepared_contract,
     _await_process_local_cleanup,
     _claim_process_local_authority_generation,
@@ -149,6 +171,78 @@ from ouroboros.orchestrator.execution_authority import (
     valid_runtime_effect_capabilities_contract,
     valid_runtime_execution_identity_contract,
 )
+from ouroboros.orchestrator.execution_contract import (
+    _MAX_EXECUTION_ALLOWED_TOOLS as _MAX_EXECUTION_ALLOWED_TOOLS,
+)
+from ouroboros.orchestrator.execution_contract import (
+    _MAX_EXECUTION_CONTEXT_FRAGMENT_CHARS as _MAX_EXECUTION_CONTEXT_FRAGMENT_CHARS,
+)
+from ouroboros.orchestrator.execution_contract import (
+    _MAX_EXECUTION_PROFILE_CHARS as _MAX_EXECUTION_PROFILE_CHARS,
+)
+from ouroboros.orchestrator.execution_contract import (
+    _MAX_EXECUTION_RUNTIME_HANDLE_CHARS as _MAX_EXECUTION_RUNTIME_HANDLE_CHARS,
+)
+from ouroboros.orchestrator.execution_contract import (
+    _MAX_EXECUTION_STRATEGY_TEXT_CHARS as _MAX_EXECUTION_STRATEGY_TEXT_CHARS,
+)
+from ouroboros.orchestrator.execution_contract import (
+    _MAX_EXECUTION_STRATEGY_TOOLS as _MAX_EXECUTION_STRATEGY_TOOLS,
+)
+from ouroboros.orchestrator.execution_contract import (
+    _MAX_EXECUTION_TOOL_CATALOG_CHARS as _MAX_EXECUTION_TOOL_CATALOG_CHARS,
+)
+from ouroboros.orchestrator.execution_contract import (
+    _MISSING as _MISSING,
+)
+from ouroboros.orchestrator.execution_contract import (
+    EXECUTION_CONTRACT_PROGRESS_KEY as EXECUTION_CONTRACT_PROGRESS_KEY,
+)
+from ouroboros.orchestrator.execution_contract import (
+    EXECUTION_CONTRACT_V9_TOP_LEVEL_KEYS as EXECUTION_CONTRACT_V9_TOP_LEVEL_KEYS,
+)
+from ouroboros.orchestrator.execution_contract import (
+    EXECUTION_CONTRACT_VERSION as EXECUTION_CONTRACT_VERSION,
+)
+from ouroboros.orchestrator.execution_contract import (
+    FRUGALITY_PROOF_PROTOCOL_VERSION as FRUGALITY_PROOF_PROTOCOL_VERSION,
+)
+from ouroboros.orchestrator.execution_contract import (
+    PRE_DURABLE_PAUSE_POLICY_EXECUTION_CONTRACT_VERSION as PRE_DURABLE_PAUSE_POLICY_EXECUTION_CONTRACT_VERSION,
+)
+from ouroboros.orchestrator.execution_contract import (
+    PRE_EXECUTION_INPUTS_EXECUTION_CONTRACT_VERSION as PRE_EXECUTION_INPUTS_EXECUTION_CONTRACT_VERSION,
+)
+from ouroboros.orchestrator.execution_contract import (
+    PRE_EXECUTION_SEMANTICS_EXECUTION_CONTRACT_VERSION as PRE_EXECUTION_SEMANTICS_EXECUTION_CONTRACT_VERSION,
+)
+from ouroboros.orchestrator.execution_contract import (
+    PRE_REQUESTED_TIER_EXECUTION_CONTRACT_VERSION as PRE_REQUESTED_TIER_EXECUTION_CONTRACT_VERSION,
+)
+from ouroboros.orchestrator.execution_contract import (
+    PRE_RESOLVED_EFFECT_INPUTS_EXECUTION_CONTRACT_VERSION as PRE_RESOLVED_EFFECT_INPUTS_EXECUTION_CONTRACT_VERSION,
+)
+from ouroboros.orchestrator.execution_contract import (
+    PRE_ROUTE_ADMISSION_EXECUTION_CONTRACT_VERSION as PRE_ROUTE_ADMISSION_EXECUTION_CONTRACT_VERSION,
+)
+from ouroboros.orchestrator.execution_contract import (
+    PRE_RUNTIME_EFFECT_CAPABILITIES_EXECUTION_CONTRACT_VERSION as PRE_RUNTIME_EFFECT_CAPABILITIES_EXECUTION_CONTRACT_VERSION,
+)
+from ouroboros.orchestrator.execution_contract import (
+    ContractStateCell,
+    ExecutionContract,
+    ExecutionContractDependencies,
+    ExecutionContractState,
+)
+from ouroboros.orchestrator.execution_contract import (
+    _mapping_has_exact_keys as _mapping_has_exact_keys,
+)
+from ouroboros.orchestrator.execution_contract import (
+    _PersistedExecutionStrategy as _PersistedExecutionStrategy,
+)
+from ouroboros.orchestrator.execution_contract import (
+    _require_exact_execution_contract_v9 as _contract_require_exact_v9,
+)
 from ouroboros.orchestrator.execution_event_replay import (
     replay_execution_events_chronologically,
 )
@@ -173,7 +267,9 @@ from ouroboros.orchestrator.execution_strategy import ExecutionStrategy, get_str
 from ouroboros.orchestrator.failure_taxonomy import FailureClass
 from ouroboros.orchestrator.legacy_identity import (
     legacy_task_workspace_identity,
-    note_legacy_identity_path,
+)
+from ouroboros.orchestrator.legacy_identity import (
+    note_legacy_identity_path as note_legacy_identity_path,
 )
 from ouroboros.orchestrator.mcp_tools import (
     MCPToolProvider,
@@ -210,14 +306,15 @@ from ouroboros.orchestrator.runtime_param_negotiation import (
     runtime_capabilities_for,
 )
 from ouroboros.orchestrator.session import (
-    ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY,
     SESSION_RUNTIME_IDENTITY_PROGRESS_KEY,
-    SESSION_START_IDENTITY_PROGRESS_KEY,
     SessionRepository,
     SessionStatus,
     SessionTracker,
     _optional_create_session_kwargs,
     runtime_resume_identity_from_payload,
+)
+from ouroboros.orchestrator.session import (
+    SESSION_START_IDENTITY_PROGRESS_KEY as SESSION_START_IDENTITY_PROGRESS_KEY,
 )
 from ouroboros.orchestrator.shared_attempt import shared_attempt_graph
 from ouroboros.orchestrator.verify_base_signal import VerifyBaseSignal
@@ -225,7 +322,8 @@ from ouroboros.orchestrator.verify_shell import (
     capture_verify_shell_identity,
     resolve_verify_shell,
 )
-from ouroboros.orchestrator.workflow_state import ActivityType, coerce_ac_marker_update
+from ouroboros.orchestrator.workflow_state import ActivityType as ActivityType
+from ouroboros.orchestrator.workflow_state import coerce_ac_marker_update
 from ouroboros.persistence.checkpoint import CheckpointStore
 from ouroboros.persistence.event_store import acceptance_generation_id_for_session
 from ouroboros.providers import create_llm_adapter, resolve_llm_backend
@@ -243,7 +341,6 @@ if TYPE_CHECKING:
     from ouroboros.events.base import BaseEvent
     from ouroboros.mcp.client.manager import MCPClientManager
     from ouroboros.orchestrator.dependency_analyzer import DependencyAnalyzer
-    from ouroboros.orchestrator.heartbeat import CancellationRequest
     from ouroboros.orchestrator.model_routing import ModelRouter
     from ouroboros.orchestrator.route_escalation import RouteEscalationDecision
     from ouroboros.orchestrator.route_policy import RouteCandidate
@@ -252,13 +349,6 @@ if TYPE_CHECKING:
 
 log = get_logger(__name__)
 _DIRECT_ROUTE_PAUSE_REPLAY_PAGE_SIZE = 64
-_MAX_EXECUTION_STRATEGY_TOOLS = 256
-_MAX_EXECUTION_STRATEGY_TEXT_CHARS = 100_000
-_MAX_EXECUTION_TOOL_CATALOG_CHARS = 1_000_000
-_MAX_EXECUTION_ALLOWED_TOOLS = 1024
-_MAX_EXECUTION_CONTEXT_FRAGMENT_CHARS = 100_000
-_MAX_EXECUTION_PROFILE_CHARS = 100_000
-_MAX_EXECUTION_RUNTIME_HANDLE_CHARS = 1_000_000
 _DIRECT_ROUTE_OBSERVATION_KEYS = frozenset(
     {
         "schema_version",
@@ -272,51 +362,6 @@ _DIRECT_ROUTE_OBSERVATION_KEYS = frozenset(
         "final_acceptance_declared",
     }
 )
-
-
-def _mapping_has_exact_keys(value: object, expected: frozenset[str]) -> bool:
-    """Inspect at most one key beyond a finite durable-contract schema."""
-
-    if not isinstance(value, Mapping):
-        return False
-    try:
-        iterator = iter(value)
-    except Exception:
-        return False
-    seen: set[str] = set()
-    for index in range(len(expected) + 1):
-        try:
-            key = next(iterator)
-        except StopIteration:
-            return len(seen) == len(expected)
-        except Exception:
-            return False
-        if index >= len(expected) or type(key) is not str or key not in expected or key in seen:
-            return False
-        seen.add(key)
-    return False
-
-
-@dataclass(frozen=True, slots=True)
-class _PersistedExecutionStrategy:
-    """Effect-bearing prompt/tool strategy restored without live config reads."""
-
-    tools: tuple[str, ...]
-    system_prompt_fragment: str
-    task_prompt_suffix: str
-    activity_map: tuple[tuple[str, ActivityType], ...]
-
-    def get_tools(self) -> list[str]:
-        return list(self.tools)
-
-    def get_system_prompt_fragment(self) -> str:
-        return self.system_prompt_fragment
-
-    def get_task_prompt_suffix(self) -> str:
-        return self.task_prompt_suffix
-
-    def get_activity_map(self) -> dict[str, ActivityType]:
-        return dict(self.activity_map)
 
 
 # =============================================================================
@@ -423,47 +468,6 @@ class ExecutionCancelledError(OuroborosError):
 # In-memory Cancellation Registry
 # =============================================================================
 
-# Module-level requests keyed by session ID.
-# The MCP cancel tool adds metadata here; the runner's execution loop checks it.
-# Guarded by _cancellation_lock to prevent races between MCP cancel calls
-# and the runner's message loop reading the mapping concurrently.
-_cancellation_registry: dict[str, CancellationRequest] = {}
-_cancellation_lock: asyncio.Lock = asyncio.Lock()
-
-
-async def request_cancellation(
-    session_id: str,
-    *,
-    reason: str = "Cancellation detected during execution",
-    cancelled_by: str = "runner",
-) -> None:
-    """Mark a session for cancellation.
-
-    Called by the MCP cancel tool to signal that the runner should
-    stop processing the given session at its next checkpoint.
-
-    Args:
-        session_id: Session to cancel.
-    """
-    from ouroboros.orchestrator.heartbeat import normalize_cancellation_request
-
-    async with _cancellation_lock:
-        _cancellation_registry[session_id] = normalize_cancellation_request(
-            reason=reason,
-            cancelled_by=cancelled_by,
-        )
-
-
-async def get_cancellation_request(session_id: str) -> CancellationRequest | None:
-    """Return local or cross-process metadata for a pending cancellation."""
-    async with _cancellation_lock:
-        request = _cancellation_registry.get(session_id)
-    if request is not None:
-        return request
-    from ouroboros.orchestrator.heartbeat import read_cancellation_request
-
-    return read_cancellation_request(session_id)
-
 
 async def is_cancellation_requested(session_id: str) -> bool:
     """Check whether cancellation has been requested for a session.
@@ -474,33 +478,8 @@ async def is_cancellation_requested(session_id: str) -> bool:
     Returns:
         True if cancellation was requested.
     """
+    # Keep the runner's historical global lookup patchable by callers.
     return await get_cancellation_request(session_id) is not None
-
-
-async def clear_cancellation(session_id: str) -> None:
-    """Remove a session from the cancellation registry.
-
-    Called after the runner has acknowledged the cancellation and
-    emitted the appropriate event, so the ID doesn't linger.
-
-    Args:
-        session_id: Session to clear.
-    """
-    async with _cancellation_lock:
-        _cancellation_registry.pop(session_id, None)
-    from ouroboros.orchestrator.heartbeat import clear_cancellation_request
-
-    clear_cancellation_request(session_id)
-
-
-async def get_pending_cancellations() -> frozenset[str]:
-    """Return a snapshot of all pending cancellation session IDs.
-
-    Returns:
-        Frozen set of session IDs awaiting cancellation.
-    """
-    async with _cancellation_lock:
-        return frozenset(_cancellation_registry)
 
 
 # =============================================================================
@@ -747,64 +726,13 @@ CANCELLATION_CHECK_INTERVAL = 5
 # most this many same-seed executions.
 FRUGALITY_PROOF_SESSION_LOOKBACK = 1000
 FRUGALITY_PROOF_MAX_COHORT_RUNS = 50
-EXECUTION_CONTRACT_VERSION = 9
-EXECUTION_CONTRACT_V9_TOP_LEVEL_KEYS = frozenset(
-    {
-        "version",
-        "foundation_a_authority",
-        "execution_preferences",
-        "execution_semantics",
-        "execution_inputs",
-        "model_routing",
-        "frugality_proof",
-        "guidance",
-        "resume",
-    }
-)
-PRE_ROUTE_ADMISSION_EXECUTION_CONTRACT_VERSION = 2
-PRE_REQUESTED_TIER_EXECUTION_CONTRACT_VERSION = 3
-PRE_EXECUTION_SEMANTICS_EXECUTION_CONTRACT_VERSION = 4
-PRE_EXECUTION_INPUTS_EXECUTION_CONTRACT_VERSION = 5
-PRE_RESOLVED_EFFECT_INPUTS_EXECUTION_CONTRACT_VERSION = 6
-PRE_DURABLE_PAUSE_POLICY_EXECUTION_CONTRACT_VERSION = 7
-PRE_RUNTIME_EFFECT_CAPABILITIES_EXECUTION_CONTRACT_VERSION = 8
-FRUGALITY_PROOF_PROTOCOL_VERSION = 1
-_MISSING = object()
-EXECUTION_CONTRACT_PROGRESS_KEY = "execution_contract"
+
+
 FORCED_EXECUTION_PERMISSION_MODE = "bypassPermissions"
 
 
 def _require_exact_execution_contract_v9(raw_contract: object) -> Mapping[str, Any]:
-    """Return a current contract only when its complete top-level shape is canonical."""
-    raw_version = raw_contract.get("version") if isinstance(raw_contract, Mapping) else None
-    if (
-        not isinstance(raw_contract, Mapping)
-        or isinstance(raw_version, bool)
-        or not isinstance(raw_version, int)
-        or raw_version != EXECUTION_CONTRACT_VERSION
-    ):
-        raise OrchestratorError(
-            message="Cannot resume with an invalid execution contract",
-            details={"contract_version": raw_version},
-        )
-
-    actual_top_level_keys = frozenset(raw_contract)
-    if actual_top_level_keys != EXECUTION_CONTRACT_V9_TOP_LEVEL_KEYS:
-        missing_keys = sorted(EXECUTION_CONTRACT_V9_TOP_LEVEL_KEYS - actual_top_level_keys)
-        unknown_keys = sorted(
-            key if isinstance(key, str) else repr(key)
-            for key in actual_top_level_keys - EXECUTION_CONTRACT_V9_TOP_LEVEL_KEYS
-        )
-        raise OrchestratorError(
-            message="Cannot resume with an invalid execution contract top-level schema",
-            details={
-                "contract_version": raw_version,
-                "invalid": "top_level_schema",
-                "missing": missing_keys,
-                "unknown": unknown_keys,
-            },
-        )
-    return raw_contract
+    return _contract_require_exact_v9(raw_contract, _error_type=OrchestratorError)
 
 
 _LONG_RETRY_AFTER_SECONDS = 60 * 60
@@ -1178,11 +1106,232 @@ class OrchestratorRunner:
         self._announced_param_degradations: set[tuple[str, str]] = set()
         # Track active session for external cancellation by execution_id
         self._active_sessions: dict[str, str] = {}  # execution_id -> session_id
+        self._cancellation_lifecycle = CancellationLifecycle(
+            CancellationDependencies(
+                event_store=lambda: self._event_store,
+                session_repo=lambda: self._session_repo,
+                active_sessions=lambda: self._active_sessions,
+                pending_lifecycle_intents=lambda: self._pending_lifecycle_intents,
+                console=lambda: self._console,
+                log=lambda: log,
+                task_summary=lambda: self._task_summary(),
+                request_cancellation=lambda session_id, **kwargs: request_cancellation(
+                    session_id, **kwargs
+                ),
+                get_cancellation_request=lambda session_id: get_cancellation_request(session_id),
+                is_cancellation_requested=lambda session_id: is_cancellation_requested(session_id),
+                request_process_local_cancellation=lambda *args, **kwargs: (
+                    request_process_local_cancellation(*args, **kwargs)
+                ),
+                collect_cancellation_acceptance_plan=lambda **kwargs: (
+                    collect_cancellation_acceptance_plan(**kwargs)
+                ),
+                await_process_local_cleanup=lambda awaitable: _await_process_local_cleanup(
+                    awaitable
+                ),
+                create_execution_terminal_event=lambda **kwargs: create_execution_terminal_event(
+                    **kwargs
+                ),
+                cancel_session_directly=lambda **kwargs: self._cancel_session_directly(**kwargs),
+                check_cancellation=lambda session_id: self._check_cancellation(session_id),
+                handle_cancellation=lambda **kwargs: self._handle_cancellation(**kwargs),
+                cancellation_persistence_pending_result=lambda **kwargs: (
+                    self._cancellation_persistence_pending_result(**kwargs)
+                ),
+                cleanup_terminal_process_local_state=lambda **kwargs: (
+                    self._cleanup_terminal_process_local_state(**kwargs)
+                ),
+                process_local_authority_held_elsewhere_error=lambda *args: (
+                    self._process_local_authority_held_elsewhere_error(*args)
+                ),
+                report_frugality_retrospective=lambda **kwargs: (
+                    self._report_frugality_retrospective(**kwargs)
+                ),
+                preserve_process_local_owner_for_retry=lambda **kwargs: (
+                    self._preserve_process_local_owner_for_retry(**kwargs)
+                ),
+                reconcile_durable_terminal_and_cleanup=lambda **kwargs: (
+                    self._reconcile_durable_terminal_and_cleanup(**kwargs)
+                ),
+                error_type=OrchestratorError,
+                result_type=OrchestratorResult,
+                pending_intent_type=_PendingLifecycleIntent,
+            )
+        )
         # Resume restores invocation-specific routing/guidance into runner
         # fields for compatibility with the existing execution path. Serialize
         # the whole resume invocation so one session cannot observe another
         # session's restored contract between those mutations and first use.
         self._resume_lock = asyncio.Lock()
+
+        def set_execution_contract(value: dict[str, Any] | None) -> None:
+            self._execution_contract = value
+
+        def set_execution_guidance(value: ExecutionGuidanceBundle | None) -> None:
+            self._execution_guidance = value
+
+        def set_execution_preferences(value: ResolvedExecutionPreferences) -> None:
+            self._execution_preferences = value
+
+        def set_model_router(value: ModelRouter | None) -> None:
+            self._model_router = value
+
+        def set_requested_model_tier(value: str | None) -> None:
+            self._requested_model_tier = value
+
+        def set_route_economics(value: EconomicsConfig) -> None:
+            self._route_economics = value
+
+        def set_shadow_replay_enabled(value: bool) -> None:
+            self._shadow_replay_enabled = value
+
+        def set_transcript_verifier(value: Literal["decide", "record"]) -> None:
+            self._transcript_verifier = value
+
+        def set_verify_shell_identity(value: dict[str, str] | None) -> None:
+            self._verify_shell_identity = value
+
+        self._contract_operations = ExecutionContract(
+            state=ExecutionContractState(
+                _execution_contract=ContractStateCell(
+                    lambda: self._execution_contract, set_execution_contract
+                ),
+                _execution_guidance=ContractStateCell(
+                    lambda: self._execution_guidance, set_execution_guidance
+                ),
+                _execution_preferences=ContractStateCell(
+                    lambda: self._execution_preferences, set_execution_preferences
+                ),
+                _model_router=ContractStateCell(lambda: self._model_router, set_model_router),
+                _requested_model_tier=ContractStateCell(
+                    lambda: self._requested_model_tier, set_requested_model_tier
+                ),
+                _route_economics=ContractStateCell(
+                    lambda: self._route_economics, set_route_economics
+                ),
+                _shadow_replay_enabled=ContractStateCell(
+                    lambda: self._shadow_replay_enabled, set_shadow_replay_enabled
+                ),
+                _transcript_verifier=ContractStateCell(
+                    lambda: self._transcript_verifier, set_transcript_verifier
+                ),
+                _verify_shell_identity=ContractStateCell(
+                    lambda: self._verify_shell_identity, set_verify_shell_identity
+                ),
+            ),
+            dependencies=ExecutionContractDependencies(
+                _authoritative_model_router=lambda preferences, *, requested_model_tier: (
+                    self._authoritative_model_router(
+                        preferences, requested_model_tier=requested_model_tier
+                    )
+                ),
+                _build_execution_contract=lambda *, seed=None, seed_fingerprint=None, authority_generation=None, execution_inputs_contract=None, project_identity, runtime_handle=None: (
+                    self._build_execution_contract(
+                        seed=seed,
+                        seed_fingerprint=seed_fingerprint,
+                        authority_generation=authority_generation,
+                        execution_inputs_contract=execution_inputs_contract,
+                        project_identity=project_identity,
+                        runtime_handle=runtime_handle,
+                    )
+                ),
+                _build_execution_inputs_contract=lambda seed: self._build_execution_inputs_contract(
+                    seed
+                ),
+                _constructor_model_contract=lambda: self._constructor_model_contract(),
+                _ensure_new_run_guidance=lambda: self._ensure_new_run_guidance(),
+                _execution_inputs_fingerprint=lambda inputs_contract: (
+                    self._execution_inputs_fingerprint(inputs_contract)
+                ),
+                _execution_inputs_snapshot=lambda execution_contract, *, require_bound: (
+                    self._execution_inputs_snapshot(execution_contract, require_bound=require_bound)
+                ),
+                _execution_semantics_contract=lambda: self._execution_semantics_contract(),
+                _execution_semantics_fingerprint=lambda semantics_contract: (
+                    self._execution_semantics_fingerprint(semantics_contract)
+                ),
+                _guidance_contract=lambda bundle: self._guidance_contract(bundle),
+                _legacy_proof_workspace_identity=lambda: self._legacy_proof_workspace_identity(),
+                _llm_backend_contract=lambda: self._llm_backend_contract(),
+                _normalize_execution_inputs_contract=lambda value, *, require_bound: (
+                    self._normalize_execution_inputs_contract(value, require_bound=require_bound)
+                ),
+                _permission_mode_contract=lambda: self._permission_mode_contract(),
+                _process_local_authority_contract=lambda generation: (
+                    self._process_local_authority_contract(generation)
+                ),
+                _project_identity=lambda: self._project_identity(),
+                _project_identity_error=lambda exc: self._project_identity_error(exc),
+                _project_start_identity=lambda progress: self._project_start_identity(progress),
+                _proof_workspace_identity=lambda: self._proof_workspace_identity(),
+                _resolve_guidance_bundle=lambda guidance_ids, *, expected_metadata=None: (
+                    self._resolve_guidance_bundle(guidance_ids, expected_metadata=expected_metadata)
+                ),
+                _resolved_proof_workspace_identity=lambda project_identity: (
+                    self._resolved_proof_workspace_identity(project_identity)
+                ),
+                _resolved_shadow_replay_enabled=lambda: self._resolved_shadow_replay_enabled(),
+                _restore_guidance_contract=lambda raw_contract: self._restore_guidance_contract(
+                    raw_contract
+                ),
+                _resume_workspace_identity=lambda: self._resume_workspace_identity(),
+                _routing_fingerprint=lambda routing_contract: self._routing_fingerprint(
+                    routing_contract
+                ),
+                _runtime_backend_contract=lambda: self._runtime_backend_contract(),
+                _runtime_execution_authorizes_automatic_codex_resume=lambda _value: (
+                    self._runtime_execution_authorizes_automatic_codex_resume(_value)
+                ),
+                _runtime_execution_identity_contract=lambda runtime_handle=None: (
+                    self._runtime_execution_identity_contract(runtime_handle)
+                ),
+                _runtime_execution_proves_effective_model=lambda value: (
+                    self._runtime_execution_proves_effective_model(value)
+                ),
+                _seed_semantics_fingerprint=lambda seed: self._seed_semantics_fingerprint(seed),
+                _valid_constructor_model_contract=lambda value: (
+                    self._valid_constructor_model_contract(value)
+                ),
+                _valid_execution_semantics_contract=lambda value: (
+                    self._valid_execution_semantics_contract(value)
+                ),
+                _valid_legacy_preflight_execution_semantics_contract=lambda value: (
+                    self._valid_legacy_preflight_execution_semantics_contract(value)
+                ),
+                _valid_permission_mode_contract=lambda value: self._valid_permission_mode_contract(
+                    value
+                ),
+                _valid_runtime_execution_identity_contract=lambda value: (
+                    self._valid_runtime_execution_identity_contract(value)
+                ),
+                _adapter=lambda: self._adapter,
+                _configured_route_economics=lambda: self._configured_route_economics,
+                _execution_preferences_override_explicit=lambda: (
+                    self._execution_preferences_override_explicit
+                ),
+                _model_routing_override_explicit=lambda: self._model_routing_override_explicit,
+                _reasoning_effort=lambda: self._reasoning_effort,
+                uuid4=lambda: uuid4(),
+                _require_exact_execution_contract_v9=lambda value: (
+                    _require_exact_execution_contract_v9(value)
+                ),
+                pre_adaptive_execution_semantics_rejection=lambda value, persisted_fingerprint, *, fingerprint: (
+                    pre_adaptive_execution_semantics_rejection(
+                        value, persisted_fingerprint, fingerprint=fingerprint
+                    )
+                ),
+                migrated_pre_verify_shell_execution_semantics=lambda value: (
+                    migrated_pre_verify_shell_execution_semantics(value)
+                ),
+                migrated_pre_exec_sandbox_execution_semantics=lambda value: (
+                    migrated_pre_exec_sandbox_execution_semantics(value)
+                ),
+                migrated_pre_transcript_verifier_execution_semantics=lambda value: (
+                    migrated_pre_transcript_verifier_execution_semantics(value)
+                ),
+                error_type=OrchestratorError,
+            ),
+        )
 
     def _apply_efficiency_mode_to_router(self) -> None:
         """Apply the public efficiency preference to the resolved tier router."""
@@ -3378,36 +3527,15 @@ class OrchestratorRunner:
 
     @staticmethod
     def _routing_fingerprint(routing_contract: Mapping[str, Any]) -> str:
-        """Hash a resolved routing contract into a stable cohort key."""
-        encoded = json.dumps(
-            dict(routing_contract),
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
-        ).encode("utf-8")
-        return hashlib.sha256(encoded).hexdigest()
+        return ExecutionContract._routing_fingerprint(routing_contract)
 
     @staticmethod
     def _execution_semantics_fingerprint(semantics_contract: Mapping[str, Any]) -> str:
-        """Hash the complete scalar executor contract used by resume."""
-        encoded = json.dumps(
-            dict(semantics_contract),
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
-        ).encode("utf-8")
-        return hashlib.sha256(encoded).hexdigest()
+        return ExecutionContract._execution_semantics_fingerprint(semantics_contract)
 
     @staticmethod
     def _execution_inputs_fingerprint(inputs_contract: Mapping[str, Any]) -> str:
-        """Hash the resolved prompt and complete provider tool authority."""
-        encoded = json.dumps(
-            dict(inputs_contract),
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
-        ).encode("utf-8")
-        return hashlib.sha256(encoded).hexdigest()
+        return ExecutionContract._execution_inputs_fingerprint(inputs_contract)
 
     def _build_execution_inputs_contract(self, seed: Seed | None) -> dict[str, object]:
         """Freeze every prompt/profile/session input before publication."""
@@ -3510,194 +3638,9 @@ class OrchestratorRunner:
         *,
         require_bound: bool,
     ) -> dict[str, object] | None:
-        """Return a bounded plain copy of the exact durable input schema."""
-        input_keys = frozenset(
-            {
-                "schema_version",
-                "strategy",
-                "allowed_tools",
-                "tool_catalog_json",
-                "tool_catalog_fingerprint",
-                "context_pack_fragment",
-                "execution_profile_json",
-                "inherited_runtime_handle_json",
-            }
+        return ExecutionContract._normalize_execution_inputs_contract(
+            value, require_bound=require_bound, _exact_keys=_mapping_has_exact_keys
         )
-        strategy_keys = frozenset(
-            {
-                "schema_version",
-                "resolver",
-                "tools",
-                "system_prompt_fragment",
-                "task_prompt_suffix",
-                "activity_map",
-            }
-        )
-        try:
-            if not _mapping_has_exact_keys(value, input_keys):
-                return None
-            assert isinstance(value, Mapping)
-            if value.get("schema_version") != 2:
-                return None
-            raw_strategy = value.get("strategy")
-            if not _mapping_has_exact_keys(raw_strategy, strategy_keys):
-                return None
-            assert isinstance(raw_strategy, Mapping)
-            if raw_strategy.get("schema_version") != 1:
-                return None
-            resolver = raw_strategy.get("resolver")
-            tools = raw_strategy.get("tools")
-            system_fragment = raw_strategy.get("system_prompt_fragment")
-            task_suffix = raw_strategy.get("task_prompt_suffix")
-            raw_activity_map = raw_strategy.get("activity_map")
-            context_pack_fragment = value.get("context_pack_fragment")
-            execution_profile_json = value.get("execution_profile_json")
-            inherited_runtime_handle_json = value.get("inherited_runtime_handle_json")
-            if (
-                resolver not in {"registry", "profile_backed"}
-                or type(tools) is not list
-                or not tools
-                or len(tools) > _MAX_EXECUTION_STRATEGY_TOOLS
-                or any(type(tool) is not str or not tool or len(tool) > 256 for tool in tools)
-                or len(set(tools)) != len(tools)
-                or type(system_fragment) is not str
-                or not system_fragment
-                or len(system_fragment) > _MAX_EXECUTION_STRATEGY_TEXT_CHARS
-                or type(task_suffix) is not str
-                or not task_suffix
-                or len(task_suffix) > _MAX_EXECUTION_STRATEGY_TEXT_CHARS
-                or type(raw_activity_map) is not list
-                or len(raw_activity_map) > _MAX_EXECUTION_STRATEGY_TOOLS
-                or type(context_pack_fragment) is not str
-                or len(context_pack_fragment) > _MAX_EXECUTION_CONTEXT_FRAGMENT_CHARS
-            ):
-                return None
-            normalized_activity: list[list[str]] = []
-            activity_tools: set[str] = set()
-            allowed_activity_values = {activity.value for activity in ActivityType}
-            for row in raw_activity_map:
-                if (
-                    type(row) is not list
-                    or len(row) != 2
-                    or type(row[0]) is not str
-                    or not row[0]
-                    or len(row[0]) > 256
-                    or row[0] in activity_tools
-                    or row[0] not in tools
-                    or type(row[1]) is not str
-                    or row[1] not in allowed_activity_values
-                ):
-                    return None
-                activity_tools.add(row[0])
-                normalized_activity.append([row[0], row[1]])
-
-            allowed_tools = value.get("allowed_tools")
-            catalog_json = value.get("tool_catalog_json")
-            catalog_fingerprint = value.get("tool_catalog_fingerprint")
-            unbound = allowed_tools is None and catalog_json is None and catalog_fingerprint is None
-            if unbound:
-                if require_bound:
-                    return None
-                normalized_allowed_tools: list[str] | None = None
-            else:
-                if (
-                    type(allowed_tools) is not list
-                    or len(allowed_tools) > _MAX_EXECUTION_ALLOWED_TOOLS
-                    or any(
-                        type(tool) is not str or not tool or len(tool) > 256
-                        for tool in allowed_tools
-                    )
-                    or len(set(allowed_tools)) != len(allowed_tools)
-                    or type(catalog_json) is not str
-                    or len(catalog_json) > _MAX_EXECUTION_TOOL_CATALOG_CHARS
-                    or type(catalog_fingerprint) is not str
-                    or len(catalog_fingerprint) != 64
-                    or any(char not in "0123456789abcdef" for char in catalog_fingerprint)
-                    or hashlib.sha256(catalog_json.encode("utf-8")).hexdigest()
-                    != catalog_fingerprint
-                ):
-                    return None
-                decoded_catalog = json.loads(catalog_json)
-                if not isinstance(decoded_catalog, list | dict):
-                    return None
-                canonical_catalog = json.dumps(
-                    decoded_catalog,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    ensure_ascii=True,
-                    allow_nan=False,
-                )
-                if canonical_catalog != catalog_json:
-                    return None
-                normalized_allowed_tools = list(allowed_tools)
-
-            if execution_profile_json is None:
-                normalized_profile_json: str | None = None
-            else:
-                if (
-                    type(execution_profile_json) is not str
-                    or len(execution_profile_json) > _MAX_EXECUTION_PROFILE_CHARS
-                ):
-                    return None
-                decoded_profile = json.loads(execution_profile_json)
-                if not isinstance(decoded_profile, dict):
-                    return None
-                normalized_profile = ExecutionProfile.model_validate(decoded_profile)
-                canonical_profile = json.dumps(
-                    normalized_profile.model_dump(mode="json"),
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    ensure_ascii=True,
-                    allow_nan=False,
-                )
-                if canonical_profile != execution_profile_json:
-                    return None
-                normalized_profile_json = execution_profile_json
-
-            if inherited_runtime_handle_json is None:
-                normalized_runtime_handle_json: str | None = None
-            else:
-                if (
-                    type(inherited_runtime_handle_json) is not str
-                    or len(inherited_runtime_handle_json) > _MAX_EXECUTION_RUNTIME_HANDLE_CHARS
-                ):
-                    return None
-                decoded_runtime_handle = json.loads(inherited_runtime_handle_json)
-                if not isinstance(decoded_runtime_handle, dict):
-                    return None
-                normalized_runtime_handle = RuntimeHandle.from_dict(decoded_runtime_handle)
-                if normalized_runtime_handle is None:
-                    return None
-                canonical_runtime_handle = json.dumps(
-                    normalized_runtime_handle.to_persisted_dict(),
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    ensure_ascii=True,
-                    allow_nan=False,
-                )
-                if canonical_runtime_handle != inherited_runtime_handle_json:
-                    return None
-                normalized_runtime_handle_json = inherited_runtime_handle_json
-
-            return {
-                "schema_version": 2,
-                "strategy": {
-                    "schema_version": 1,
-                    "resolver": resolver,
-                    "tools": list(tools),
-                    "system_prompt_fragment": system_fragment,
-                    "task_prompt_suffix": task_suffix,
-                    "activity_map": normalized_activity,
-                },
-                "context_pack_fragment": context_pack_fragment,
-                "execution_profile_json": normalized_profile_json,
-                "inherited_runtime_handle_json": normalized_runtime_handle_json,
-                "allowed_tools": normalized_allowed_tools,
-                "tool_catalog_json": catalog_json,
-                "tool_catalog_fingerprint": catalog_fingerprint,
-            }
-        except Exception:
-            return None
 
     def _execution_inputs_snapshot(
         self,
@@ -3705,22 +3648,9 @@ class OrchestratorRunner:
         *,
         require_bound: bool,
     ) -> dict[str, object]:
-        """Return the validated immutable provider-input population."""
-        raw_inputs = (
-            execution_contract.get("execution_inputs")
-            if isinstance(execution_contract, Mapping)
-            else None
+        return self._contract_operations._execution_inputs_snapshot(
+            execution_contract, require_bound=require_bound
         )
-        normalized = self._normalize_execution_inputs_contract(
-            raw_inputs,
-            require_bound=require_bound,
-        )
-        if normalized is None:
-            raise OrchestratorError(
-                message="Cannot execute with an invalid prompt/tool input snapshot",
-                details={"invalid": "execution_inputs"},
-            )
-        return normalized
 
     def _execution_strategy_snapshot(
         self,
@@ -3728,19 +3658,8 @@ class OrchestratorRunner:
         *,
         require_bound: bool,
     ) -> _PersistedExecutionStrategy:
-        normalized = self._execution_inputs_snapshot(
-            execution_contract,
-            require_bound=require_bound,
-        )
-        strategy = normalized["strategy"]
-        assert isinstance(strategy, dict)
-        raw_activity = strategy["activity_map"]
-        assert isinstance(raw_activity, list)
-        return _PersistedExecutionStrategy(
-            tools=tuple(strategy["tools"]),
-            system_prompt_fragment=strategy["system_prompt_fragment"],
-            task_prompt_suffix=strategy["task_prompt_suffix"],
-            activity_map=tuple((row[0], ActivityType(row[1])) for row in raw_activity),
+        return self._contract_operations._execution_strategy_snapshot(
+            execution_contract, require_bound=require_bound
         )
 
     def _execution_context_pack_fragment_snapshot(
@@ -3749,14 +3668,9 @@ class OrchestratorRunner:
         *,
         require_bound: bool,
     ) -> str:
-        """Return context text resolved before the durable session existed."""
-        inputs = self._execution_inputs_snapshot(
-            execution_contract,
-            require_bound=require_bound,
+        return self._contract_operations._execution_context_pack_fragment_snapshot(
+            execution_contract, require_bound=require_bound
         )
-        fragment = inputs["context_pack_fragment"]
-        assert isinstance(fragment, str)
-        return fragment
 
     def _execution_profile_snapshot(
         self,
@@ -3764,16 +3678,9 @@ class OrchestratorRunner:
         *,
         require_bound: bool,
     ) -> ExecutionProfile | None:
-        """Restore the complete profile without rereading mutable YAML."""
-        inputs = self._execution_inputs_snapshot(
-            execution_contract,
-            require_bound=require_bound,
+        return self._contract_operations._execution_profile_snapshot(
+            execution_contract, require_bound=require_bound
         )
-        raw_profile = inputs["execution_profile_json"]
-        if raw_profile is None:
-            return None
-        assert isinstance(raw_profile, str)
-        return ExecutionProfile.model_validate(json.loads(raw_profile))
 
     def _execution_inherited_runtime_handle_snapshot(
         self,
@@ -3781,19 +3688,9 @@ class OrchestratorRunner:
         *,
         require_bound: bool,
     ) -> RuntimeHandle | None:
-        """Restore parent conversation lineage from the durable snapshot."""
-        inputs = self._execution_inputs_snapshot(
-            execution_contract,
-            require_bound=require_bound,
+        return self._contract_operations._execution_inherited_runtime_handle_snapshot(
+            execution_contract, require_bound=require_bound
         )
-        raw_handle = inputs["inherited_runtime_handle_json"]
-        if raw_handle is None:
-            return None
-        assert isinstance(raw_handle, str)
-        restored = RuntimeHandle.from_dict(json.loads(raw_handle))
-        if restored is None:  # pragma: no cover - exact-schema validation owns this path
-            raise OrchestratorError(message="Cannot restore inherited runtime authority")
-        return restored
 
     def _bind_execution_tool_authority(
         self,
@@ -3802,64 +3699,9 @@ class OrchestratorRunner:
         merged_tools: list[str],
         tool_catalog: SessionToolCatalog,
     ) -> tuple[dict[str, Any], bool]:
-        """Seal or validate the exact allowed tools and complete catalog."""
-        normalized = self._normalize_execution_inputs_contract(
-            execution_contract.get("execution_inputs"),
-            require_bound=False,
+        return self._contract_operations._bind_execution_tool_authority(
+            execution_contract, merged_tools=merged_tools, tool_catalog=tool_catalog
         )
-        if normalized is None:
-            raise OrchestratorError(
-                message="Cannot bind an invalid prompt/tool input snapshot",
-                details={"invalid": "execution_inputs"},
-            )
-        serialized_catalog = serialize_tool_catalog(tool_catalog)
-        try:
-            catalog_json = json.dumps(
-                serialized_catalog,
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=True,
-            )
-        except (TypeError, ValueError) as exc:
-            raise OrchestratorError(
-                message="Cannot persist a non-canonical tool catalog",
-                details={"cause": type(exc).__name__},
-            ) from exc
-        if len(catalog_json) > _MAX_EXECUTION_TOOL_CATALOG_CHARS:
-            raise OrchestratorError(message="Cannot persist an oversized tool catalog")
-        current_allowed = list(merged_tools)
-        if (
-            len(current_allowed) > _MAX_EXECUTION_ALLOWED_TOOLS
-            or any(type(tool) is not str or not tool or len(tool) > 256 for tool in current_allowed)
-            or len(set(current_allowed)) != len(current_allowed)
-        ):
-            raise OrchestratorError(message="Cannot persist an invalid allowed-tool catalog")
-
-        persisted_catalog = normalized["tool_catalog_json"]
-        persisted_allowed = normalized["allowed_tools"]
-        if persisted_catalog is not None:
-            if persisted_catalog != catalog_json or persisted_allowed != current_allowed:
-                raise OrchestratorError(
-                    message="Cannot resume with changed prompt/tool authority",
-                    details={
-                        "resume_blocked": "execution_tool_authority_drift",
-                        "hint": "Restore the original tool catalog or start a new session.",
-                    },
-                )
-            return dict(execution_contract), False
-
-        normalized["allowed_tools"] = current_allowed
-        normalized["tool_catalog_json"] = catalog_json
-        normalized["tool_catalog_fingerprint"] = hashlib.sha256(
-            catalog_json.encode("utf-8")
-        ).hexdigest()
-        bound_contract = deepcopy(dict(execution_contract))
-        bound_contract["execution_inputs"] = normalized
-        proof = bound_contract.get("frugality_proof")
-        if not isinstance(proof, dict):
-            raise OrchestratorError(message="Cannot bind an invalid proof contract")
-        proof["execution_inputs_fingerprint"] = self._execution_inputs_fingerprint(normalized)
-        return bound_contract, True
 
     def _execution_semantics_contract(self) -> dict[str, object]:
         """Return every scalar setting that can change resumed AC effects."""
@@ -3915,36 +3757,11 @@ class OrchestratorRunner:
         self,
         execution_contract: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
-        """Return one validated immutable-input snapshot from a durable contract."""
-        raw_execution_semantics = (
-            execution_contract.get("execution_semantics")
-            if isinstance(execution_contract, Mapping)
-            else None
-        )
-        if not self._valid_execution_semantics_contract(raw_execution_semantics):
-            raise OrchestratorError(
-                message="Cannot execute with an invalid execution-semantics snapshot",
-                details={"invalid": "execution_semantics"},
-            )
-        return dict(raw_execution_semantics)
+        return self._contract_operations._execution_semantics_snapshot(execution_contract)
 
     @staticmethod
     def _seed_semantics_fingerprint(seed: Seed) -> str:
-        """Hash executable Seed semantics while excluding volatile identity fields."""
-        payload = seed.to_dict()
-        metadata = payload.get("metadata")
-        if isinstance(metadata, dict):
-            metadata = dict(metadata)
-            for key in ("seed_id", "created_at", "interview_id", "parent_seed_id"):
-                metadata.pop(key, None)
-            payload["metadata"] = metadata
-        encoded = json.dumps(
-            payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
-        ).encode("utf-8")
-        return hashlib.sha256(encoded).hexdigest()
+        return ExecutionContract._seed_semantics_fingerprint(seed)
 
     def _constructor_model_contract(self) -> dict[str, Any]:
         """Return the runtime's normalized constructor-model pin contract.
@@ -5421,10 +5238,7 @@ class OrchestratorRunner:
 
     @staticmethod
     def _valid_permission_mode_contract(value: object) -> bool:
-        if not isinstance(value, Mapping) or value.get("observed") is not True:
-            return False
-        mode = value.get("mode")
-        return set(value) == {"observed", "mode"} and isinstance(mode, str) and bool(mode.strip())
+        return ExecutionContract._valid_permission_mode_contract(value)
 
     def _guidance_root(self, guidance_ids: tuple[str, ...]) -> Path:
         """Return the project root used for declared execution guidance."""
@@ -5466,11 +5280,7 @@ class OrchestratorRunner:
 
     @staticmethod
     def _guidance_contract(bundle: ExecutionGuidanceBundle) -> dict[str, Any]:
-        return {
-            "mode": "declared" if bundle.refs else "disabled",
-            "provenance_scope": "ouroboros_declared_guidance_only",
-            **bundle.to_metadata(),
-        }
+        return ExecutionContract._guidance_contract(bundle)
 
     def _ensure_new_run_guidance(self) -> ExecutionGuidanceBundle:
         if self._execution_guidance is None:
@@ -5478,56 +5288,7 @@ class OrchestratorRunner:
         return self._execution_guidance
 
     def _restore_guidance_contract(self, raw_contract: Mapping[str, Any]) -> None:
-        """Restore persisted guidance refs without consulting the current allowlist."""
-        raw_guidance = raw_contract.get("guidance")
-        if not isinstance(raw_guidance, Mapping):
-            raise OrchestratorError(
-                message="Cannot resume with an invalid execution contract",
-                details={"invalid": "guidance"},
-            )
-
-        mode = raw_guidance.get("mode")
-        provenance_scope = raw_guidance.get("provenance_scope")
-        items = raw_guidance.get("items")
-        if (
-            mode not in {"disabled", "declared"}
-            or provenance_scope != "ouroboros_declared_guidance_only"
-            or not isinstance(items, list)
-        ):
-            raise OrchestratorError(
-                message="Cannot resume with an invalid execution contract",
-                details={"invalid": "guidance metadata"},
-            )
-
-        guidance_ids: list[str] = []
-        for item in items:
-            if not isinstance(item, Mapping):
-                raise OrchestratorError(
-                    message="Cannot resume with an invalid execution contract",
-                    details={"invalid": "guidance item"},
-                )
-            guidance_id = item.get("id")
-            if not isinstance(guidance_id, str) or not guidance_id.strip():
-                raise OrchestratorError(
-                    message="Cannot resume with an invalid execution contract",
-                    details={"invalid": "guidance id"},
-                )
-            guidance_ids.append(guidance_id.strip())
-        if (mode == "disabled") != (not guidance_ids):
-            raise OrchestratorError(
-                message="Cannot resume with an invalid execution contract",
-                details={"invalid": "guidance mode"},
-            )
-
-        expected_metadata = {
-            key: value
-            for key, value in raw_guidance.items()
-            if key not in {"mode", "provenance_scope"}
-        }
-        self._execution_guidance = self._resolve_guidance_bundle(
-            tuple(guidance_ids),
-            expected_metadata=expected_metadata,
-        )
+        return self._contract_operations._restore_guidance_contract(raw_contract)
 
     def _build_execution_contract(
         self,
@@ -5539,103 +5300,14 @@ class OrchestratorRunner:
         project_identity: ProjectIdentity | None,
         runtime_handle: RuntimeHandle | None = None,
     ) -> dict[str, Any]:
-        """Build the durable resolved inputs shared by resume and proof cohorting."""
-        from ouroboros.orchestrator.model_routing import serialize_model_router
-        from ouroboros.orchestrator.resolved_models import resolved_models_contract
-        from ouroboros.orchestrator.route_compat import (
-            build_route_compat_projection,
-            serialize_route_compat_contract,
+        return self._contract_operations._build_execution_contract(
+            seed=seed,
+            seed_fingerprint=seed_fingerprint,
+            authority_generation=authority_generation,
+            execution_inputs_contract=execution_inputs_contract,
+            project_identity=project_identity,
+            runtime_handle=runtime_handle,
         )
-
-        guidance_bundle = self._ensure_new_run_guidance()
-        execution_semantics = self._execution_semantics_contract()
-        if execution_inputs_contract is None:
-            execution_inputs = self._build_execution_inputs_contract(seed)
-        else:
-            normalized_inputs = self._normalize_execution_inputs_contract(
-                execution_inputs_contract,
-                require_bound=True,
-            )
-            if normalized_inputs is None:
-                raise OrchestratorError(
-                    message="Cannot preserve an invalid execution input contract",
-                    details={"invalid": "execution_inputs"},
-                )
-            execution_inputs = normalized_inputs
-        routing_contract = serialize_model_router(self._model_router)
-        routing_contract["requested_model_tier"] = self._requested_model_tier
-        # Effort routing is independent of model-tier routing. Persist it even
-        # when the optional model router is dormant so resume cannot silently
-        # adopt a different provider-effect policy.
-        routing_contract["reasoning_effort"] = self._reasoning_effort
-        route_projection = build_route_compat_projection(
-            self._route_economics,
-            model_router=self._model_router,
-            runtime_backend=getattr(self._adapter, "runtime_backend", None),
-            effort=self._reasoning_effort,
-        )
-        routing_contract["route_compat"] = serialize_route_compat_contract(route_projection)
-        # This base effort reaches both direct runner dispatches and the
-        # parallel executor. Persist it beside model routing so a config/env
-        # change cannot silently alter ``model_reasoning_effort`` on resume.
-        routing_contract["base_reasoning_effort"] = self._reasoning_effort
-        routing_contract["constructor_model"] = self._constructor_model_contract()
-        routing_contract["resolved_models"] = resolved_models_contract(
-            self._route_economics,
-            runtime_backend=getattr(self._adapter, "runtime_backend", None),
-            execute_model=routing_contract["constructor_model"].get("model"),
-        )
-        routing_contract["runtime_execution"] = self._runtime_execution_identity_contract(
-            runtime_handle
-        )
-        routing_contract["runtime_backend"] = self._runtime_backend_contract()
-        routing_contract["llm_backend"] = self._llm_backend_contract()
-        routing_contract["permission_mode"] = self._permission_mode_contract()
-        proof_contract: dict[str, Any] = {
-            "protocol_version": FRUGALITY_PROOF_PROTOCOL_VERSION,
-            "routing_fingerprint": self._routing_fingerprint(routing_contract),
-            "execution_semantics_fingerprint": self._execution_semantics_fingerprint(
-                execution_semantics
-            ),
-            "execution_inputs_fingerprint": self._execution_inputs_fingerprint(execution_inputs),
-        }
-        workspace_identity = self._resolved_proof_workspace_identity(project_identity)
-        if workspace_identity is not None:
-            proof_contract.update(workspace_identity)
-        resolved_seed_fingerprint = seed_fingerprint
-        if resolved_seed_fingerprint is None and seed is not None:
-            resolved_seed_fingerprint = self._seed_semantics_fingerprint(seed)
-        if resolved_seed_fingerprint is not None:
-            proof_contract["seed_fingerprint"] = resolved_seed_fingerprint
-        if authority_generation is None:
-            # Diagnostics and contract-validation callers need attribution
-            # shape, not a live capability. Do not mint a registry issuance
-            # here: there is no session lifecycle that could register and
-            # retire it. The random correlation remains evidence-only, and
-            # cannot be claimed or registered without an explicit generation.
-            authority_contract: dict[str, object] = {
-                "version": 1,
-                "scope": "process_local",
-                "correlation_id": uuid4().hex,
-            }
-        else:
-            authority_contract = self._process_local_authority_contract(authority_generation)
-        contract = {
-            "version": EXECUTION_CONTRACT_VERSION,
-            "foundation_a_authority": authority_contract,
-            "execution_preferences": self._execution_preferences.to_contract_data(),
-            "execution_semantics": execution_semantics,
-            "execution_inputs": execution_inputs,
-            "model_routing": routing_contract,
-            "frugality_proof": proof_contract,
-            "guidance": self._guidance_contract(guidance_bundle),
-            "resume": {
-                "workspace": self._resume_workspace_identity(),
-            },
-        }
-        if frozenset(contract) != EXECUTION_CONTRACT_V9_TOP_LEVEL_KEYS:
-            raise AssertionError("execution contract v9 builder emitted a non-canonical shape")
-        return contract
 
     def _build_new_session_contract(
         self,
@@ -5983,814 +5655,14 @@ class OrchestratorRunner:
         prepared_live_execution: bool = False,
         runtime_handle: RuntimeHandle | None = None,
     ) -> bool:
-        """Restore the persisted router unless this invocation explicitly overrides it.
-
-        Returns whether a replacement contract (an explicit override or one-time
-        legacy migration) should be checkpointed for subsequent resumes. A present
-        malformed contract blocks resume; it is never reinterpreted as a legacy
-        session or allowed to change models silently. ``prepared_live_execution``
-        admits only the explicit unobservable states emitted by the new-run builder;
-        the caller must already hold and match that run's sealed process-local
-        contract, while the normal durable resume path remains strict.
-        """
-        if EXECUTION_CONTRACT_PROGRESS_KEY not in progress:
-            raise OrchestratorError(
-                message="Cannot resume a session without durable effect inputs",
-                details={
-                    "contract_version": None,
-                    "resume_blocked": "execution_inputs_unavailable",
-                    "hint": "Start a new session under the current execution contract.",
-                },
-            )
-        raw_contract = progress.get(EXECUTION_CONTRACT_PROGRESS_KEY)
-
-        raw_version = raw_contract.get("version") if isinstance(raw_contract, Mapping) else None
-        if (
-            not isinstance(raw_contract, Mapping)
-            or isinstance(raw_version, bool)
-            or not isinstance(raw_version, int)
-            or raw_version
-            not in {
-                PRE_ROUTE_ADMISSION_EXECUTION_CONTRACT_VERSION,
-                PRE_REQUESTED_TIER_EXECUTION_CONTRACT_VERSION,
-                PRE_EXECUTION_SEMANTICS_EXECUTION_CONTRACT_VERSION,
-                PRE_EXECUTION_INPUTS_EXECUTION_CONTRACT_VERSION,
-                PRE_RESOLVED_EFFECT_INPUTS_EXECUTION_CONTRACT_VERSION,
-                PRE_DURABLE_PAUSE_POLICY_EXECUTION_CONTRACT_VERSION,
-                PRE_RUNTIME_EFFECT_CAPABILITIES_EXECUTION_CONTRACT_VERSION,
-                EXECUTION_CONTRACT_VERSION,
-            }
-        ):
-            raise OrchestratorError(
-                message="Cannot resume with an invalid execution contract",
-                details={"contract_version": raw_version},
-            )
-
-        if raw_version != EXECUTION_CONTRACT_VERSION:
-            # Every older version may already have dispatched provider effects,
-            # but none sealed the complete v9 effect population, including the
-            # runtime capability/vocabulary that builds provider-call kwargs.
-            # Reconstructing any missing field from current runtime state would
-            # change replay authorization.
-            raise OrchestratorError(
-                message="Cannot resume a session without durable effect inputs",
-                details={
-                    "contract_version": raw_version,
-                    "resume_blocked": "execution_inputs_unavailable",
-                    "hint": "Start a new session under the current execution contract.",
-                },
-            )
-
-        raw_contract = _require_exact_execution_contract_v9(raw_contract)
-
-        migrate_v2_contract = raw_version == PRE_ROUTE_ADMISSION_EXECUTION_CONTRACT_VERSION
-        migrate_v3_contract = raw_version == PRE_REQUESTED_TIER_EXECUTION_CONTRACT_VERSION
-        migrate_v4_contract = raw_version == PRE_EXECUTION_SEMANTICS_EXECUTION_CONTRACT_VERSION
-        migrate_legacy_contract = migrate_v2_contract or migrate_v3_contract or migrate_v4_contract
-        raw_proof = raw_contract.get("frugality_proof")
-        raw_routing = raw_contract.get("model_routing")
-        raw_resume = raw_contract.get("resume")
-        raw_preferences = raw_contract.get("execution_preferences")
-        preferences_migrated = "execution_preferences" not in raw_contract
-        raw_execution_semantics = raw_contract.get("execution_semantics")
-        raw_execution_inputs = raw_contract.get("execution_inputs")
-        raw_authority = raw_contract.get("foundation_a_authority")
-        if (
-            not isinstance(raw_proof, Mapping)
-            or not isinstance(raw_routing, Mapping)
-            or not isinstance(raw_resume, Mapping)
-            or not valid_process_local_authority_contract(raw_authority)
-        ):
-            raise OrchestratorError(
-                message="Cannot resume with an invalid execution contract",
-                details={
-                    "missing": "frugality_proof, model_routing, resume, or foundation_a_authority"
-                },
-            )
-
-        pre_adaptive_rejection = pre_adaptive_execution_semantics_rejection(
-            raw_execution_semantics,
-            raw_proof.get("execution_semantics_fingerprint"),
-            fingerprint=self._execution_semantics_fingerprint,
+        return self._contract_operations._restore_execution_contract(
+            progress,
+            seed=seed,
+            authority_generation=authority_generation,
+            require_bound_execution_inputs=require_bound_execution_inputs,
+            prepared_live_execution=prepared_live_execution,
+            runtime_handle=runtime_handle,
         )
-        if pre_adaptive_rejection is not None:
-            raise OrchestratorError(
-                message=pre_adaptive_rejection.message,
-                details=pre_adaptive_rejection.details,
-            )
-
-        migrated_verify_shell_semantics = migrated_pre_verify_shell_execution_semantics(
-            raw_execution_semantics
-        )
-        if migrated_verify_shell_semantics is not None:
-            persisted_v4_fingerprint = raw_proof.get("execution_semantics_fingerprint")
-            if not isinstance(
-                persisted_v4_fingerprint, str
-            ) or persisted_v4_fingerprint != self._execution_semantics_fingerprint(
-                raw_execution_semantics
-            ):
-                raise OrchestratorError(
-                    message="Cannot resume with an invalid pre-verify-shell contract",
-                    details={"invalid": "execution_semantics_fingerprint"},
-                )
-            migrated_contract = deepcopy(dict(raw_contract))
-            migrated_proof = migrated_contract["frugality_proof"]
-            assert isinstance(migrated_proof, dict)
-            migrated_contract["execution_semantics"] = migrated_verify_shell_semantics
-            migrated_proof["execution_semantics_fingerprint"] = (
-                self._execution_semantics_fingerprint(migrated_verify_shell_semantics)
-            )
-            raw_contract = migrated_contract
-            raw_proof = migrated_proof
-            raw_execution_semantics = migrated_verify_shell_semantics
-            self._verify_shell_identity = None
-
-        migrated_sandbox_semantics = migrated_pre_exec_sandbox_execution_semantics(
-            raw_execution_semantics
-        )
-        if migrated_sandbox_semantics is not None:
-            if raw_proof.get("execution_semantics_fingerprint") != (
-                self._execution_semantics_fingerprint(raw_execution_semantics)
-            ):
-                raise OrchestratorError(
-                    message="Cannot resume with an invalid pre-exec-sandbox contract",
-                    details={"invalid": "execution_semantics_fingerprint"},
-                )
-            raw_contract = deepcopy(dict(raw_contract))
-            raw_proof = raw_contract["frugality_proof"]
-            raw_contract["execution_semantics"] = migrated_sandbox_semantics
-            raw_proof["execution_semantics_fingerprint"] = self._execution_semantics_fingerprint(
-                migrated_sandbox_semantics
-            )
-            raw_execution_semantics = migrated_sandbox_semantics
-
-        migrated_verifier_semantics = migrated_pre_transcript_verifier_execution_semantics(
-            raw_execution_semantics
-        )
-        if migrated_verifier_semantics is not None:
-            if raw_proof.get("execution_semantics_fingerprint") != (
-                self._execution_semantics_fingerprint(raw_execution_semantics)
-            ):
-                raise OrchestratorError(
-                    message="Cannot resume with an invalid pre-transcript-verifier contract",
-                    details={"invalid": "execution_semantics_fingerprint"},
-                )
-            raw_contract = deepcopy(dict(raw_contract))
-            raw_proof = raw_contract["frugality_proof"]
-            raw_contract["execution_semantics"] = migrated_verifier_semantics
-            raw_proof["execution_semantics_fingerprint"] = self._execution_semantics_fingerprint(
-                migrated_verifier_semantics
-            )
-            raw_execution_semantics = migrated_verifier_semantics
-
-        migrate_preflight_contract = self._valid_legacy_preflight_execution_semantics_contract(
-            raw_execution_semantics
-        )
-        if migrate_preflight_contract:
-            persisted_legacy_fingerprint = raw_proof.get("execution_semantics_fingerprint")
-            if not isinstance(
-                persisted_legacy_fingerprint, str
-            ) or persisted_legacy_fingerprint != self._execution_semantics_fingerprint(
-                raw_execution_semantics
-            ):
-                raise OrchestratorError(
-                    message="Cannot resume with an invalid legacy preflight contract",
-                    details={"invalid": "execution_semantics_fingerprint"},
-                )
-            migrated_contract = deepcopy(dict(raw_contract))
-            migrated_semantics = migrated_contract["execution_semantics"]
-            migrated_proof = migrated_contract["frugality_proof"]
-            assert isinstance(migrated_semantics, dict)
-            assert isinstance(migrated_proof, dict)
-            migrated_semantics["decomposition_mode"] = "bounce_only"
-            migrated_proof["execution_semantics_fingerprint"] = (
-                self._execution_semantics_fingerprint(migrated_semantics)
-            )
-            raw_contract = migrated_contract
-            raw_proof = migrated_proof
-            raw_execution_semantics = migrated_semantics
-
-        # Version 2 predates effort/Route B fields; version 3 predates the
-        # independent requested-tier field; version 4 predates the complete
-        # executor-semantics snapshot. Only those exact shapes migrate.
-        # A malformed current contract must never fall through either path.
-        if migrate_legacy_contract and (
-            "execution_semantics" in raw_contract
-            or "execution_semantics_fingerprint" in raw_proof
-            or "execution_inputs" in raw_contract
-            or "execution_inputs_fingerprint" in raw_proof
-        ):
-            raise OrchestratorError(
-                message="Cannot resume with an invalid execution contract",
-                details={"invalid": f"version {raw_version} execution semantics extension"},
-            )
-        if migrate_v2_contract and (
-            "reasoning_effort" in raw_routing
-            or "route_compat" in raw_routing
-            or "requested_model_tier" in raw_routing
-        ):
-            raise OrchestratorError(
-                message="Cannot resume with an invalid execution contract",
-                details={"invalid": "version 2 routing extension"},
-            )
-        if migrate_v3_contract and "requested_model_tier" in raw_routing:
-            raise OrchestratorError(
-                message="Cannot resume with an invalid execution contract",
-                details={"invalid": "version 3 routing extension"},
-            )
-
-        self._restore_guidance_contract(raw_contract)
-
-        protocol_version = raw_proof.get("protocol_version")
-        persisted_project_root = raw_proof.get("project_root")
-        persisted_workspace_path = raw_proof.get("workspace_path")
-        persisted_routing_fingerprint = raw_proof.get("routing_fingerprint")
-        persisted_execution_semantics_fingerprint = raw_proof.get("execution_semantics_fingerprint")
-        persisted_execution_inputs_fingerprint = raw_proof.get("execution_inputs_fingerprint")
-        persisted_seed_fingerprint = raw_proof.get("seed_fingerprint")
-        from ouroboros.orchestrator import resolved_models as model_replay
-
-        persisted_constructor_model = raw_routing.get("constructor_model")
-        persisted_runtime_execution = raw_routing.get("runtime_execution")
-        persisted_runtime_backend = raw_routing.get("runtime_backend")
-        persisted_llm_backend = raw_routing.get("llm_backend")
-        persisted_permission_mode = raw_routing.get("permission_mode")
-        persisted_requested_model_tier = raw_routing.get("requested_model_tier")
-        persisted_reasoning_effort = (
-            self._reasoning_effort if migrate_v2_contract else raw_routing.get("reasoning_effort")
-        )
-        persisted_base_reasoning_effort = raw_routing.get("base_reasoning_effort", _MISSING)
-        persisted_resume_workspace = raw_resume.get("workspace")
-        base_reasoning_effort_missing = persisted_base_reasoning_effort is _MISSING
-        if base_reasoning_effort_missing and not migrate_v2_contract:
-            # Pre-base-effort contracts already persisted the same dispatch effort
-            # under model_routing.reasoning_effort.  Treat that value as the
-            # historical base effort instead of rejecting otherwise valid v9
-            # checkpoints.
-            persisted_base_reasoning_effort = persisted_reasoning_effort
-        valid_base_reasoning_effort = (persisted_base_reasoning_effort is None) or (
-            isinstance(persisted_base_reasoning_effort, str)
-            and persisted_base_reasoning_effort in {"low", "medium", "high", "xhigh"}
-        )
-        valid_seed_fingerprint = (
-            isinstance(persisted_seed_fingerprint, str)
-            and len(persisted_seed_fingerprint) == 64
-            and all(char in "0123456789abcdef" for char in persisted_seed_fingerprint)
-        )
-        normalized_execution_inputs = (
-            None
-            if migrate_legacy_contract
-            else self._normalize_execution_inputs_contract(
-                raw_execution_inputs,
-                require_bound=require_bound_execution_inputs,
-            )
-        )
-        if (
-            isinstance(protocol_version, bool)
-            or not isinstance(protocol_version, int)
-            or protocol_version != FRUGALITY_PROOF_PROTOCOL_VERSION
-            or not (
-                isinstance(persisted_project_root, str)
-                and bool(persisted_project_root.strip())
-                and isinstance(persisted_workspace_path, str)
-                and bool(persisted_workspace_path.strip())
-                or prepared_live_execution
-                and persisted_project_root is None
-                and persisted_workspace_path is None
-            )
-            or not isinstance(persisted_routing_fingerprint, str)
-            or persisted_routing_fingerprint != self._routing_fingerprint(raw_routing)
-            or (
-                not migrate_legacy_contract
-                and (
-                    not self._valid_execution_semantics_contract(raw_execution_semantics)
-                    or not isinstance(persisted_execution_semantics_fingerprint, str)
-                    or persisted_execution_semantics_fingerprint
-                    != self._execution_semantics_fingerprint(raw_execution_semantics)
-                )
-            )
-            or (
-                not migrate_legacy_contract
-                and (
-                    normalized_execution_inputs is None
-                    or not isinstance(persisted_execution_inputs_fingerprint, str)
-                    or persisted_execution_inputs_fingerprint
-                    != self._execution_inputs_fingerprint(normalized_execution_inputs)
-                )
-            )
-            or (seed is not None and not valid_seed_fingerprint)
-            or not (
-                self._valid_constructor_model_contract(persisted_constructor_model)
-                or (prepared_live_execution and persisted_constructor_model == {"observed": False})
-            )
-            or not model_replay.valid_resolved_models(raw_routing.get("resolved_models"))
-            or not self._valid_runtime_execution_identity_contract(persisted_runtime_execution)
-            or not (
-                isinstance(persisted_runtime_backend, str)
-                and bool(persisted_runtime_backend.strip())
-                or prepared_live_execution
-                and persisted_runtime_backend is None
-            )
-            or not (
-                isinstance(persisted_llm_backend, str)
-                and bool(persisted_llm_backend.strip())
-                or prepared_live_execution
-                and persisted_llm_backend is None
-            )
-            or not self._valid_permission_mode_contract(persisted_permission_mode)
-            or (
-                not migrate_v2_contract
-                and (
-                    "reasoning_effort" not in raw_routing
-                    or persisted_reasoning_effort not in {None, "low", "medium", "high", "xhigh"}
-                )
-            )
-            or (
-                not (migrate_v2_contract or migrate_v3_contract)
-                and (
-                    "requested_model_tier" not in raw_routing
-                    or persisted_requested_model_tier
-                    not in {None, "frugal", "standard", "frontier"}
-                )
-            )
-            or not (
-                isinstance(persisted_resume_workspace, Mapping)
-                or prepared_live_execution
-                and persisted_resume_workspace is None
-            )
-            or not valid_base_reasoning_effort
-        ):
-            raise OrchestratorError(
-                message="Cannot resume with an invalid execution contract",
-                details={"invalid": "proof identity"},
-            )
-
-        persisted_preferences = execution_preferences_from_contract(raw_preferences)
-        if persisted_preferences is None:
-            raise OrchestratorError(
-                message="Cannot resume with invalid execution preferences",
-                details={"invalid": "execution_preferences"},
-            )
-        if (
-            self._execution_preferences_override_explicit
-            and self._execution_preferences != persisted_preferences
-        ):
-            raise OrchestratorError(
-                message="Cannot change efficiency or frugality preferences on resume",
-                details={
-                    "persisted_preferences": persisted_preferences.to_contract_data(),
-                    "requested_preferences": self._execution_preferences.to_contract_data(),
-                    "hint": "Start a new successor execution for an intentional change.",
-                },
-            )
-
-        if persisted_base_reasoning_effort != self._reasoning_effort:
-            raise OrchestratorError(
-                message="Cannot resume with a different reasoning effort",
-                details={
-                    "persisted_base_reasoning_effort": persisted_base_reasoning_effort,
-                    "current_base_reasoning_effort": self._reasoning_effort,
-                    "hint": "Start a new session after changing reasoning effort.",
-                },
-            )
-
-        current_seed_fingerprint = (
-            self._seed_semantics_fingerprint(seed) if seed is not None else None
-        )
-        persisted_workspace = (
-            None
-            if persisted_project_root is None and persisted_workspace_path is None
-            else {
-                "project_root": persisted_project_root,
-                "workspace_path": persisted_workspace_path,
-            }
-        )
-        has_project_anchor, start_project_identity = self._project_start_identity(progress)
-        if has_project_anchor:
-            assert start_project_identity is not None
-            active_project_identity = self._project_identity()
-            if (
-                persisted_workspace != start_project_identity.to_workspace_data()
-                or active_project_identity != start_project_identity
-            ):
-                raise OrchestratorError(
-                    message="Cannot resume with conflicting project identity",
-                    details={
-                        "persisted_workspace": persisted_workspace,
-                        "start_project_identity": start_project_identity.to_event_data(),
-                        "current_project_identity": (
-                            active_project_identity.to_event_data()
-                            if active_project_identity is not None
-                            else None
-                        ),
-                    },
-                )
-            active_workspace = active_project_identity.to_workspace_data()
-        else:
-            # Historical v9 session starts predate the additive project anchor.
-            # Preserve their exact direct-cwd representation rather than
-            # rewriting durable resume authority under the new resolver.
-            # Transitional (#1799): this branch is a package-wide
-            # project-identity support contract — see the removal criterion in
-            # orchestrator/legacy_identity.py and docs/rfc/project-map-v1.md.
-            # It does not bypass other resume gates. Removal is allowed only
-            # after the documented identity-compatibility window ends and must
-            # replace this path with a typed fail-closed rejection.
-            #
-            # Current prepared executions intentionally restore an anchorless
-            # contract-only mapping; only a durable historical start snapshot
-            # that still lacks the anchor counts as a legacy activation.
-            raw_start_snapshot = progress.get(SESSION_START_IDENTITY_PROGRESS_KEY)
-            if isinstance(raw_start_snapshot, Mapping):
-                note_legacy_identity_path(
-                    "resume_workspace_comparison",
-                    prepared_live_execution=prepared_live_execution,
-                )
-            active_workspace = (
-                self._proof_workspace_identity()
-                if prepared_live_execution
-                else self._legacy_proof_workspace_identity()
-            )
-        if active_workspace != persisted_workspace:
-            raise OrchestratorError(
-                message="Cannot resume from a different project workspace",
-                details={
-                    "persisted_workspace": persisted_workspace,
-                    "current_workspace": active_workspace,
-                    "hint": "Resume from the original project/workspace.",
-                },
-            )
-        replacement_project_identity = start_project_identity
-        if replacement_project_identity is None and persisted_workspace is not None:
-            # A pre-anchor session owns its historical proof representation in
-            # the persisted contract.  Rebuilding for a routing override must
-            # carry that representation forward; recomputing under the current
-            # resolver would make the following resume disagree with the
-            # immutable, still-unanchored start event.
-            try:
-                replacement_project_identity = ProjectIdentity.from_root(
-                    persisted_workspace["project_root"],
-                    workspace_path=persisted_workspace["workspace_path"],
-                    require_exists=True,
-                )
-            except ProjectIdentityError as exc:
-                raise self._project_identity_error(exc) from exc
-        active_resume_workspace = self._resume_workspace_identity()
-        normalized_persisted_resume_workspace = (
-            dict(persisted_resume_workspace)
-            if isinstance(persisted_resume_workspace, Mapping)
-            else None
-        )
-        if active_resume_workspace != normalized_persisted_resume_workspace:
-            raise OrchestratorError(
-                message="Cannot resume from a different execution workspace",
-                details={
-                    "persisted_workspace": normalized_persisted_resume_workspace,
-                    "current_workspace": active_resume_workspace,
-                    "hint": "Resume from the exact original worktree and branch.",
-                },
-            )
-        current_runtime_backend = self._runtime_backend_contract()
-        if current_runtime_backend != persisted_runtime_backend:
-            raise OrchestratorError(
-                message="Cannot resume with a different runtime backend",
-                details={
-                    "persisted_runtime_backend": persisted_runtime_backend,
-                    "current_runtime_backend": current_runtime_backend,
-                    "hint": "Resume with the original runtime, or start a new session.",
-                },
-            )
-        current_llm_backend = self._llm_backend_contract()
-        if current_llm_backend != persisted_llm_backend:
-            raise OrchestratorError(
-                message="Cannot resume with a different LLM backend",
-                details={
-                    "persisted_llm_backend": persisted_llm_backend,
-                    "current_llm_backend": current_llm_backend,
-                    "hint": "Restore the original LLM backend or start a new session.",
-                },
-            )
-        current_permission_mode = self._permission_mode_contract()
-        if current_permission_mode != persisted_permission_mode:
-            raise OrchestratorError(
-                message="Cannot resume with a different permission mode",
-                details={
-                    "persisted_permission_mode": dict(persisted_permission_mode),
-                    "current_permission_mode": current_permission_mode,
-                    "hint": "Restore the original permission mode or start a new session.",
-                },
-            )
-        if (
-            valid_seed_fingerprint
-            and current_seed_fingerprint is not None
-            and persisted_seed_fingerprint != current_seed_fingerprint
-        ):
-            raise OrchestratorError(
-                message="Cannot resume with a modified Seed",
-                details={
-                    "persisted_seed_fingerprint": persisted_seed_fingerprint,
-                    "current_seed_fingerprint": current_seed_fingerprint,
-                    "hint": "Start a new session for changed goals, constraints, or ACs.",
-                },
-            )
-        # Replay the models the run started on instead of resolving them again.
-        persisted_resolved = raw_routing.get("resolved_models") or {}
-        runtime_backend = getattr(self._adapter, "runtime_backend", None)
-        if not self._model_routing_override_explicit:
-            model_replay.replay_constructor_model(
-                self._adapter,
-                runtime_backend=runtime_backend,
-                persisted=persisted_resolved.get(
-                    "execute", persisted_constructor_model.get("model")
-                ),
-            )
-        current_constructor_model = self._constructor_model_contract()
-        if persisted_constructor_model != current_constructor_model:
-            raise OrchestratorError(
-                message="Cannot resume with a different constructor model",
-                details={
-                    "persisted_constructor_model": dict(persisted_constructor_model),
-                    "current_constructor_model": current_constructor_model,
-                    "hint": (
-                        "Resume with the original runtime model, or start a new session "
-                        "for an intentional model change."
-                    ),
-                },
-            )
-        current_runtime_execution = self._runtime_execution_identity_contract(runtime_handle)
-        if persisted_runtime_execution != current_runtime_execution:
-            raise OrchestratorError(
-                message="Cannot resume with a different runtime execution profile",
-                details={
-                    "persisted_runtime_execution": dict(persisted_runtime_execution),
-                    "current_runtime_execution": current_runtime_execution,
-                    "hint": (
-                        "Restore the original runtime/model profile, or start a new "
-                        "session for an intentional execution-profile change."
-                    ),
-                },
-            )
-
-        from ouroboros.orchestrator.model_routing import (
-            deserialize_model_router,
-            is_legacy_quality_first_router,
-        )
-
-        recognized, restored_router = deserialize_model_router(raw_routing)
-        if not recognized:
-            raise OrchestratorError(
-                message="Cannot resume with an invalid execution contract",
-                details={"invalid": "model_routing"},
-            )
-        if (
-            not (migrate_v2_contract or migrate_v3_contract)
-            and restored_router is None
-            and persisted_requested_model_tier is not None
-        ):
-            raise OrchestratorError(
-                message="Cannot resume with an invalid execution contract",
-                details={"invalid": "requested_model_tier"},
-            )
-
-        if (
-            restored_router is not None
-            and persisted_runtime_backend != restored_router.runtime_backend
-        ):
-            raise OrchestratorError(
-                message="Cannot resume with an inconsistent runtime backend contract",
-                details={
-                    "persisted_runtime_backend": restored_router.runtime_backend,
-                    "execution_runtime_backend": persisted_runtime_backend,
-                },
-            )
-        if is_legacy_quality_first_router(
-            raw_routing, persisted_preferences.efficiency_mode.value, restored_router
-        ):
-            raise OrchestratorError(
-                message="Cannot resume a legacy quality-first routing contract",
-                details={
-                    "reason": "The saved child-routing behavior differs from the corrected quality-first policy",
-                    "hint": "Start a successor or new run under the corrected policy.",
-                },
-            )
-        if migrate_v2_contract or migrate_v3_contract:
-            persisted_requested_model_tier = (
-                restored_router.base_tier if restored_router is not None else None
-            )
-        replayed_economics = model_replay.replay_route_economics(
-            self._route_economics,
-            self._configured_route_economics,
-            runtime_backend=runtime_backend,
-            persisted_tiers=persisted_resolved.get(
-                "tiers", restored_router.tier_models if restored_router is not None else {}
-            ),
-        )
-        if replayed_economics is not None and not self._model_routing_override_explicit:
-            self._route_economics = replayed_economics
-        authoritative_router = self._authoritative_model_router(
-            persisted_preferences,
-            requested_model_tier=persisted_requested_model_tier,
-        )
-        if (
-            not self._model_routing_override_explicit
-            and restored_router is not None
-            and restored_router != authoritative_router
-        ):
-            raise OrchestratorError(
-                message="Cannot resume with a changed model-routing policy",
-                details={
-                    "runtime_backend": persisted_runtime_backend,
-                    "hint": "Restore the current route policy or start a new session.",
-                },
-            )
-        raw_route_compat = raw_routing.get("route_compat")
-        if migrate_v2_contract:
-            # The v2 router has already been compared with the router rebuilt
-            # from current config/backend/preferences. Its replacement v3
-            # contract below adds the independently derived Route B projection.
-            pass
-        elif raw_route_compat is None:
-            raise OrchestratorError(
-                message="Cannot resume without an explicit route compatibility contract",
-                details={"invalid": "route_compat", "reason": "missing"},
-            )
-        else:
-            from ouroboros.orchestrator.route_compat import (
-                deserialize_route_compat_contract,
-                validate_route_compat_projection,
-            )
-
-            route_compat_recognized, restored_projection = deserialize_route_compat_contract(
-                raw_route_compat
-            )
-            if not route_compat_recognized:
-                raise OrchestratorError(
-                    message="Cannot resume with an invalid execution contract",
-                    details={"invalid": "route_compat"},
-                )
-            if restored_router is not None and restored_projection is None:
-                raise OrchestratorError(
-                    message="Cannot resume without an enabled route compatibility contract",
-                    details={"invalid": "route_compat", "reason": "dormant"},
-                )
-            if restored_router is None and restored_projection is not None:
-                raise OrchestratorError(
-                    message="Cannot resume with an enabled route compatibility contract",
-                    details={"invalid": "route_compat", "reason": "router_dormant"},
-                )
-            if (
-                restored_projection is not None
-                and not self._model_routing_override_explicit
-                and not validate_route_compat_projection(
-                    restored_projection,
-                    self._route_economics,
-                    model_router=authoritative_router,
-                    runtime_backend=persisted_runtime_backend,
-                    current_effort=self._reasoning_effort,
-                )
-            ):
-                raise OrchestratorError(
-                    message="Cannot resume with a changed route compatibility catalog",
-                    details={
-                        "runtime_backend": persisted_runtime_backend,
-                        "hint": "Restore the original route catalog or start a new session.",
-                    },
-                )
-        if not migrate_v2_contract and persisted_reasoning_effort != self._reasoning_effort:
-            raise OrchestratorError(
-                message="Cannot resume with a changed reasoning-effort contract",
-                details={
-                    "persisted_reasoning_effort": persisted_reasoning_effort,
-                    "current_reasoning_effort": self._reasoning_effort,
-                    "hint": "Restore the original reasoning effort or start a new session.",
-                },
-            )
-        constructor_model_value = persisted_constructor_model.get("model")
-        effective_model_observed = self._runtime_execution_proves_effective_model(
-            persisted_runtime_execution
-        )
-        process_local_authority = (
-            prepared_live_execution
-            and valid_process_local_authority_contract(raw_contract.get("foundation_a_authority"))
-        )
-        model_override_support = getattr(
-            getattr(self._adapter, "capabilities", None),
-            "model_override_support",
-            ParamSupport.IGNORED,
-        )
-        automatic_codex_default_authorized = (
-            self._runtime_execution_authorizes_automatic_codex_resume(persisted_runtime_execution)
-        )
-        if (
-            constructor_model_value is None
-            and not effective_model_observed
-            and not automatic_codex_default_authorized
-            and not (restored_router is not None and model_override_support is ParamSupport.NATIVE)
-            and not process_local_authority
-        ):
-            raise OrchestratorError(
-                message="Cannot resume because the effective runtime model is unverifiable",
-                details={
-                    "runtime_backend": persisted_runtime_backend,
-                    "constructor_model": None,
-                    "effective_model_observed": False,
-                    "model_routing_enforced": (
-                        restored_router is not None
-                        and model_override_support is ParamSupport.NATIVE
-                    ),
-                    "automatic_codex_default_authorized": automatic_codex_default_authorized,
-                    "hint": ("Pin the original runtime model/profile, or start a new session."),
-                },
-            )
-        self._execution_preferences = persisted_preferences
-        self._shadow_replay_enabled = self._resolved_shadow_replay_enabled()
-        persisted_verifier = (
-            raw_execution_semantics.get("transcript_verifier")
-            if isinstance(raw_execution_semantics, Mapping)
-            else None
-        )
-        if persisted_verifier in ("decide", "record"):
-            # The run's own sealed mode, never the live config: a run that
-            # started deciding (every run sealed before the setting existed)
-            # resumes deciding, one that started recording keeps recording.
-            self._transcript_verifier = persisted_verifier
-        current_execution_semantics = self._execution_semantics_contract()
-        if (
-            not migrate_legacy_contract
-            and dict(raw_execution_semantics) != current_execution_semantics
-        ):
-            runtime_capability_drift = raw_execution_semantics.get(
-                "runtime_effect_capabilities"
-            ) != current_execution_semantics.get("runtime_effect_capabilities")
-            raise OrchestratorError(
-                message="Cannot resume with changed execution semantics",
-                details={
-                    "persisted_execution_semantics": dict(raw_execution_semantics),
-                    "current_execution_semantics": current_execution_semantics,
-                    "resume_blocked": (
-                        "runtime_effect_capability_drift"
-                        if runtime_capability_drift
-                        else "execution_semantics_drift"
-                    ),
-                    "retryable": True,
-                    "hint": (
-                        "Restore the original verification, retry, decomposition, and "
-                        "executor settings or start a new session."
-                    ),
-                },
-            )
-        if self._model_routing_override_explicit:
-            replacement = self._build_execution_contract(
-                seed=seed,
-                seed_fingerprint=(persisted_seed_fingerprint if valid_seed_fingerprint else None),
-                authority_generation=authority_generation,
-                execution_inputs_contract=normalized_execution_inputs,
-                project_identity=replacement_project_identity,
-                runtime_handle=runtime_handle,
-            )
-            # Only the public resume path reaches this branch with a live,
-            # registry-issued generation.  Preserve the persisted diagnostics
-            # in direct contract-validation calls so those calls cannot mint a
-            # replacement correlation id by accident.
-            if authority_generation is None:
-                replacement["foundation_a_authority"] = dict(raw_contract["foundation_a_authority"])
-            self._execution_contract = replacement
-            return self._execution_contract != raw_contract
-
-        self._model_router = restored_router
-        self._requested_model_tier = persisted_requested_model_tier
-        if migrate_legacy_contract:
-            replacement = self._build_execution_contract(
-                seed=seed,
-                seed_fingerprint=(persisted_seed_fingerprint if valid_seed_fingerprint else None),
-                authority_generation=authority_generation,
-                project_identity=replacement_project_identity,
-                runtime_handle=runtime_handle,
-            )
-            if authority_generation is None:
-                replacement["foundation_a_authority"] = dict(raw_contract["foundation_a_authority"])
-            self._execution_contract = replacement
-            return True
-        if migrate_preflight_contract:
-            self._execution_contract = dict(raw_contract)
-            return True
-        # Preserve the exact persisted proof identity alongside the restored
-        # router. Recomputing it from a resumed throwaway worktree would make the
-        # same execution appear to be a different experiment.
-        self._execution_contract = dict(raw_contract)
-        if preferences_migrated or base_reasoning_effort_missing:
-            self._execution_contract["execution_preferences"] = (
-                persisted_preferences.to_contract_data()
-            )
-            migrated_routing = dict(raw_routing)
-            if base_reasoning_effort_missing:
-                migrated_routing["base_reasoning_effort"] = persisted_base_reasoning_effort
-            self._execution_contract["model_routing"] = migrated_routing
-            migrated_proof = dict(raw_proof)
-            migrated_proof["routing_fingerprint"] = self._routing_fingerprint(migrated_routing)
-            self._execution_contract["frugality_proof"] = migrated_proof
-            return True
-        return False
 
     def _restore_execution_contract_snapshot(
         self,
@@ -7627,39 +6499,8 @@ class OrchestratorRunner:
         Returns:
             Result with cancellation details on success, or error.
         """
-        session_id = self._active_sessions.get(execution_id)
-
-        if session_id is not None:
-            # In-flight cancellation: signal via the cancellation registry
-            await request_cancellation(
-                session_id,
-                reason=reason,
-                cancelled_by=cancelled_by,
-            )
-            log.info(
-                "orchestrator.runner.cancellation_requested",
-                execution_id=execution_id,
-                session_id=session_id,
-                reason=reason,
-                cancelled_by=cancelled_by,
-                in_flight=True,
-            )
-            # The message loop will detect this and call _handle_cancellation
-            return Result.ok(
-                {
-                    "execution_id": execution_id,
-                    "session_id": session_id,
-                    "status": "cancellation_requested",
-                    "in_flight": True,
-                    "reason": reason,
-                }
-            )
-
-        # Not in-flight: cancel directly via session repository
-        return await self._cancel_session_directly(
-            execution_id=execution_id,
-            reason=reason,
-            cancelled_by=cancelled_by,
+        return await self._cancellation_lifecycle.cancel_execution(
+            execution_id, reason, cancelled_by
         )
 
     async def _cancel_session_directly(
@@ -7682,203 +6523,8 @@ class OrchestratorRunner:
         Returns:
             Result with cancellation details on success, or error.
         """
-        session_id: str | None = None
-        # Try to find session_id from event store
-        try:
-            events = await self._event_store.get_all_sessions()
-            for event in events:
-                if (
-                    event.type == "orchestrator.session.started"
-                    and event.data.get("execution_id") == execution_id
-                ):
-                    session_id = event.aggregate_id
-                    break
-        except Exception as e:
-            log.warning(
-                "orchestrator.runner.session_lookup_failed",
-                execution_id=execution_id,
-                error=str(e),
-            )
-
-        if session_id is None:
-            return Result.err(
-                OrchestratorError(
-                    message=f"No session found for execution {execution_id}",
-                    details={"execution_id": execution_id},
-                )
-            )
-
-        tracker_result = await self._session_repo.reconstruct_session(session_id)
-        if tracker_result.is_err:
-            return Result.err(
-                OrchestratorError(
-                    message=f"Failed to reconstruct session for cancellation: {tracker_result.error}",
-                    details={"execution_id": execution_id, "session_id": session_id},
-                )
-            )
-        tracker = tracker_result.value
-        if tracker.status in {
-            SessionStatus.COMPLETED,
-            SessionStatus.FAILED,
-            SessionStatus.CANCELLED,
-        }:
-            await self._cleanup_terminal_process_local_state(
-                session_id=session_id,
-                execution_id=execution_id,
-            )
-            return Result.ok(
-                {
-                    "execution_id": execution_id,
-                    "session_id": session_id,
-                    "status": "already_terminal",
-                    "terminal_status": tracker.status.value,
-                    "reason": reason,
-                }
-            )
-
-        process_local = await request_process_local_cancellation(
-            tracker,
-            self._session_repo,
-            reason=reason,
-            cancelled_by=cancelled_by,
-        )
-        if process_local is not None:
-            if (
-                process_local.disposition
-                == ProcessLocalCancellationDisposition.CANCELLATION_REQUESTED
-            ):
-                return Result.ok(
-                    {
-                        "execution_id": execution_id,
-                        "session_id": session_id,
-                        "status": "cancellation_requested",
-                        "in_flight": True,
-                        "reason": reason,
-                    }
-                )
-            if process_local.disposition == ProcessLocalCancellationDisposition.HELD_ELSEWHERE:
-                return Result.err(
-                    self._process_local_authority_held_elsewhere_error(session_id, execution_id)
-                )
-            if process_local.disposition == ProcessLocalCancellationDisposition.PERSISTENCE_PENDING:
-                return Result.err(
-                    OrchestratorError(
-                        message="Failed to persist cancellation; retained process-local owner must retry",
-                        details={
-                            "execution_id": execution_id,
-                            "session_id": session_id,
-                            "resume_blocked": "cancellation_persistence_pending",
-                            "cause": str(process_local.error),
-                        },
-                    )
-                )
-            if process_local.disposition == ProcessLocalCancellationDisposition.ALREADY_TERMINAL:
-                return Result.ok(
-                    {
-                        "execution_id": execution_id,
-                        "session_id": session_id,
-                        "status": "already_terminal",
-                        "reason": reason,
-                    }
-                )
-
-            await self._report_frugality_retrospective(
-                execution_id=execution_id,
-                session_id=session_id,
-                terminal_status="cancelled",
-            )
-            return Result.ok(
-                {
-                    "execution_id": execution_id,
-                    "session_id": session_id,
-                    "status": "cancelled",
-                    "in_flight": False,
-                    "reason": reason,
-                }
-            )
-
-        # Historical sessions have no live Foundation A capability to coordinate.
-        raw_root_indices = tracker.progress.get(ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY)
-        expected_root_indices = (
-            tuple(raw_root_indices) if isinstance(raw_root_indices, (list, tuple)) else None
-        )
-        try:
-            acceptance_finalizations = await collect_cancellation_acceptance_plan(
-                session_id=session_id,
-                execution_id=execution_id,
-                event_store=self._event_store,
-                expected_root_indices=expected_root_indices,
-            )
-        except Exception as exc:
-            return self._cancellation_persistence_pending_result(
-                session_id=session_id,
-                execution_id=execution_id,
-                cause=exc,
-                cancellation_reason=reason,
-                cancelled_by=cancelled_by,
-            )
-        cancel_result = await self._session_repo.mark_cancelled(
-            session_id=session_id,
-            reason=reason,
-            cancelled_by=cancelled_by,
-            acceptance_finalizations=acceptance_finalizations,
-        )
-
-        if cancel_result.is_err:
-            return Result.err(
-                OrchestratorError(
-                    message=f"Failed to cancel session: {cancel_result.error}",
-                    details={
-                        "execution_id": execution_id,
-                        "session_id": session_id,
-                    },
-                )
-            )
-        if cancel_result.value is False:
-            terminal_result = await self._session_repo.reconstruct_session(session_id)
-            terminal_status = (
-                terminal_result.value.status
-                if terminal_result.is_ok
-                and terminal_result.value.status
-                in {SessionStatus.COMPLETED, SessionStatus.FAILED, SessionStatus.CANCELLED}
-                else None
-            )
-            return Result.ok(
-                {
-                    "execution_id": execution_id,
-                    "session_id": session_id,
-                    "status": "already_terminal",
-                    **(
-                        {"terminal_status": terminal_status.value}
-                        if terminal_status is not None
-                        else {}
-                    ),
-                    "reason": reason,
-                }
-            )
-
-        await self._report_frugality_retrospective(
-            execution_id=execution_id,
-            session_id=session_id,
-            terminal_status="cancelled",
-        )
-
-        log.info(
-            "orchestrator.runner.session_cancelled_directly",
-            execution_id=execution_id,
-            session_id=session_id,
-            reason=reason,
-            cancelled_by=cancelled_by,
-        )
-
-        return Result.ok(
-            {
-                "execution_id": execution_id,
-                "session_id": session_id,
-                "status": "cancelled",
-                "in_flight": False,
-                "reason": reason,
-            }
+        return await self._cancellation_lifecycle._cancel_session_directly(
+            execution_id, reason, cancelled_by
         )
 
     def _assemble_strategy_base_catalog(
@@ -8045,45 +6691,11 @@ class OrchestratorRunner:
         Returns:
             True if cancellation was requested, False otherwise.
         """
-        # Fast path: check the in-memory cancellation set first.
-        # This is O(1) and requires no I/O.
-        if await is_cancellation_requested(session_id):
-            return True
-
-        # Slow path: check event store for externally-persisted cancellation
-        try:
-            events = await self._event_store.query_events(
-                aggregate_id=session_id,
-                event_type="orchestrator.session.cancelled",
-                limit=1,
-            )
-            return len(events) > 0
-        except Exception:
-            # Graceful degradation: if event store query fails,
-            # don't interrupt execution — just log and continue
-            log.warning(
-                "orchestrator.runner.cancellation_check_failed",
-                session_id=session_id,
-            )
-            return False
+        return await self._cancellation_lifecycle._check_cancellation(session_id)
 
     async def _check_startup_cancellation(self, session_id: str) -> bool:
         """Check cancellation before normal message-loop checkpoints exist."""
-        if await is_cancellation_requested(session_id):
-            return True
-        try:
-            events = await self._event_store.query_events(
-                aggregate_id=session_id,
-                event_type="orchestrator.session.cancelled",
-                limit=1,
-            )
-            return len(events) > 0
-        except Exception:
-            log.warning(
-                "orchestrator.runner.startup_cancellation_check_failed",
-                session_id=session_id,
-            )
-            return False
+        return await self._cancellation_lifecycle._check_startup_cancellation(session_id)
 
     async def _handle_requested_cancellation(
         self,
@@ -8095,10 +6707,7 @@ class OrchestratorRunner:
         expected_root_indices: Iterable[int] | None = None,
     ) -> Result[OrchestratorResult, OrchestratorError] | None:
         """Apply the terminal cancellation transition at an effect choke point."""
-
-        if not await self._check_cancellation(session_id):
-            return None
-        return await self._handle_cancellation(
+        return await self._cancellation_lifecycle._handle_requested_cancellation(
             session_id=session_id,
             execution_id=execution_id,
             messages_processed=messages_processed,
@@ -8124,29 +6733,13 @@ class OrchestratorRunner:
         exiting, so they must be released for a retained owner to retry the
         durable terminal write on a later resume request.
         """
-        self._preserve_process_local_owner_for_retry(
+        return self._cancellation_lifecycle._cancellation_persistence_pending_result(
             session_id=session_id,
             execution_id=execution_id,
-        )
-        if acceptance_finalizations is not None or cancellation_reason is not None:
-            self._pending_lifecycle_intents[session_id] = _PendingLifecycleIntent(
-                execution_id=execution_id,
-                status=SessionStatus.CANCELLED,
-                error_message=cancellation_reason or "Execution cancelled",
-                cancelled_by=cancelled_by,
-                acceptance_finalizations=acceptance_finalizations,
-            )
-        return Result.err(
-            OrchestratorError(
-                message="Failed to persist cancellation; process-local authority remains live",
-                details={
-                    "session_id": session_id,
-                    "execution_id": execution_id,
-                    "cause": str(cause),
-                    "resume_blocked": "cancellation_persistence_pending",
-                    "cancellation_persistence_pending": True,
-                },
-            )
+            cause=cause,
+            acceptance_finalizations=acceptance_finalizations,
+            cancellation_reason=cancellation_reason,
+            cancelled_by=cancelled_by,
         )
 
     async def _drain_requested_cancellation_before_pre_execution_cleanup(
@@ -8172,49 +6765,13 @@ class OrchestratorRunner:
         it returns the normal cancellation result.  A second raw cancellation
         is re-raised after the child has drained its lifecycle work.
         """
-        if not await is_cancellation_requested(session_id):
-            return None
-
-        task = asyncio.create_task(
-            self._handle_cancellation(
-                session_id=session_id,
-                execution_id=execution_id,
-                messages_processed=messages_processed,
-                start_time=start_time,
-                expected_root_indices=expected_root_indices,
-            )
+        return await self._cancellation_lifecycle._drain_requested_cancellation_before_pre_execution_cleanup(
+            session_id=session_id,
+            execution_id=execution_id,
+            messages_processed=messages_processed,
+            start_time=start_time,
+            expected_root_indices=expected_root_indices,
         )
-        repeated_cancellation: asyncio.CancelledError | None = None
-        while not task.done():
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError as exc:
-                repeated_cancellation = repeated_cancellation or exc
-
-        try:
-            result = task.result()
-        except asyncio.CancelledError as exc:
-            repeated_cancellation = repeated_cancellation or exc
-            result = self._cancellation_persistence_pending_result(
-                session_id=session_id,
-                execution_id=execution_id,
-                cause="cancellation lifecycle task cancelled",
-            )
-        except Exception as exc:  # pragma: no cover - defensive task boundary
-            log.exception(
-                "orchestrator.runner.pre_execution_cancellation_drain_failed",
-                session_id=session_id,
-                execution_id=execution_id,
-            )
-            result = self._cancellation_persistence_pending_result(
-                session_id=session_id,
-                execution_id=execution_id,
-                cause=exc,
-            )
-
-        if repeated_cancellation is not None:
-            raise repeated_cancellation
-        return result
 
     async def _handle_cancellation(
         self,
@@ -8235,253 +6792,8 @@ class OrchestratorRunner:
         Returns:
             Result containing OrchestratorResult with success=False and cancellation info.
         """
-        duration = (datetime.now(UTC) - start_time).total_seconds()
-
-        log.info(
-            "orchestrator.runner.execution_cancelled",
-            session_id=session_id,
-            execution_id=execution_id,
-            messages_processed=messages_processed,
-            duration_seconds=duration,
-        )
-        cancellation_request = await get_cancellation_request(session_id)
-        cancellation_reason = (
-            cancellation_request.reason
-            if cancellation_request is not None
-            else "Cancellation detected during execution"
-        )
-        cancelled_by = (
-            cancellation_request.cancelled_by if cancellation_request is not None else "runner"
-        )
-
-        # Determine and durably publish the terminal state *before* withdrawing
-        # the process-local capability or its heartbeat.  A RUNNING tracker
-        # with neither liveness signal is indistinguishable from a crashed
-        # owner to another process, so releasing first can cause a concurrent
-        # observer to terminalize this deliberate cancellation as lost
-        # authority.  It would also make a persistence failure report a
-        # cancellation that the durable session never recorded.
-        session_result = await self._session_repo.reconstruct_session(session_id)
-        _terminal = {SessionStatus.COMPLETED, SessionStatus.FAILED, SessionStatus.CANCELLED}
-        # An unreadable snapshot cannot prove that a terminal state already
-        # exists.  Continue through ``mark_cancelled`` while retaining the live
-        # owner; that append is the authoritative terminal write and preserves
-        # the legacy best-effort reconstruction posture without ever releasing
-        # a RUNNING session first.
-        session_already_terminal = session_result.is_ok and session_result.value.status in _terminal
-        if session_already_terminal:
-            terminal_status = session_result.value.status
-            final_message = f"Execution already {terminal_status.value}"
-            summary = {"terminal_status": terminal_status.value, **self._task_summary()}
-            if terminal_status == SessionStatus.CANCELLED:
-                summary["cancelled"] = True
-            try:
-                execution_terminal_events = await self._event_store.query_events(
-                    aggregate_id=execution_id,
-                    event_type="execution.terminal",
-                    limit=1,
-                )
-            except Exception:
-                execution_terminal_events = []
-
-            async def _reconcile_existing_terminal_owner() -> None:
-                try:
-                    if not execution_terminal_events:
-                        await self._event_store.append(
-                            create_execution_terminal_event(
-                                execution_id=execution_id,
-                                session_id=session_id,
-                                status=terminal_status.value,
-                                summary=(
-                                    summary if terminal_status == SessionStatus.COMPLETED else None
-                                ),
-                                error_message=(
-                                    final_message
-                                    if terminal_status != SessionStatus.COMPLETED
-                                    else None
-                                ),
-                                messages_processed=messages_processed,
-                            )
-                        )
-                finally:
-                    await self._cleanup_terminal_process_local_state(
-                        session_id=session_id,
-                        execution_id=execution_id,
-                    )
-
-            await _await_process_local_cleanup(_reconcile_existing_terminal_owner())
-            await self._report_frugality_retrospective(
-                execution_id=execution_id,
-                session_id=session_id,
-                terminal_status=terminal_status.value,
-            )
-            return Result.ok(
-                OrchestratorResult(
-                    success=terminal_status == SessionStatus.COMPLETED,
-                    session_id=session_id,
-                    execution_id=execution_id,
-                    summary=summary,
-                    messages_processed=messages_processed,
-                    final_message=final_message,
-                    duration_seconds=duration,
-                )
-            )
-
-        # Compute the complete observed-root decision set before the terminal
-        # CAS.  The terminal session event carries this exact plan so a
-        # cancellation cannot commit a durable winner and then lose its final
-        # acceptance records to interruption.
-        try:
-            cancellation_acceptance_finalizations = await collect_cancellation_acceptance_plan(
-                session_id=session_id,
-                execution_id=execution_id,
-                event_store=self._event_store,
-                expected_root_indices=expected_root_indices,
-            )
-        except Exception as exc:
-            return self._cancellation_persistence_pending_result(
-                session_id=session_id,
-                execution_id=execution_id,
-                cause=exc,
-                cancellation_reason=cancellation_reason,
-                cancelled_by=cancelled_by,
-            )
-        try:
-            cancel_result = await self._session_repo.mark_cancelled(
-                session_id,
-                reason=cancellation_reason,
-                cancelled_by=cancelled_by,
-                acceptance_finalizations=cancellation_acceptance_finalizations,
-            )
-        except asyncio.CancelledError:
-            if (
-                await self._reconcile_durable_terminal_and_cleanup(
-                    session_id=session_id,
-                    execution_id=execution_id,
-                )
-                is None
-            ):
-                self._pending_lifecycle_intents[session_id] = _PendingLifecycleIntent(
-                    execution_id=execution_id,
-                    status=SessionStatus.CANCELLED,
-                    error_message=cancellation_reason,
-                    cancelled_by=cancelled_by,
-                    acceptance_finalizations=cancellation_acceptance_finalizations,
-                )
-                self._preserve_process_local_owner_for_retry(
-                    session_id=session_id,
-                    execution_id=execution_id,
-                )
-            raise
-        except Exception as exc:
-            durable_status = await self._reconcile_durable_terminal_and_cleanup(
-                session_id=session_id,
-                execution_id=execution_id,
-            )
-            if durable_status is not None:
-                return await self._handle_cancellation(
-                    session_id=session_id,
-                    execution_id=execution_id,
-                    messages_processed=messages_processed,
-                    start_time=start_time,
-                    expected_root_indices=expected_root_indices,
-                )
-            log.warning(
-                "orchestrator.runner.mark_cancelled_raised",
-                session_id=session_id,
-                error=str(exc),
-            )
-            return self._cancellation_persistence_pending_result(
-                session_id=session_id,
-                execution_id=execution_id,
-                cause=exc,
-                acceptance_finalizations=cancellation_acceptance_finalizations,
-                cancellation_reason=cancellation_reason,
-                cancelled_by=cancelled_by,
-            )
-        if cancel_result is not None and cancel_result.is_err:
-            log.warning(
-                "orchestrator.runner.mark_cancelled_failed",
-                session_id=session_id,
-                error=str(cancel_result.error),
-            )
-            return self._cancellation_persistence_pending_result(
-                session_id=session_id,
-                execution_id=execution_id,
-                cause=cancel_result.error,
-                acceptance_finalizations=cancellation_acceptance_finalizations,
-                cancellation_reason=cancellation_reason,
-                cancelled_by=cancelled_by,
-            )
-        if cancel_result is not None and cancel_result.value is False:
-            # The session became terminal after the initial reconstruction but
-            # before this owner won its cancellation transition. Re-enter once
-            # so the authoritative terminal branch mirrors the real winner and
-            # tears down this process-local owner without reporting cancellation.
-            winner = await self._session_repo.reconstruct_session(session_id)
-            if winner.is_ok and winner.value.status in _terminal:
-                return await self._handle_cancellation(
-                    session_id=session_id,
-                    execution_id=execution_id,
-                    messages_processed=messages_processed,
-                    start_time=start_time,
-                    expected_root_indices=expected_root_indices,
-                )
-            return self._cancellation_persistence_pending_result(
-                session_id=session_id,
-                execution_id=execution_id,
-                cause=PersistenceError(
-                    "Terminal cancellation lost its CAS but the durable winner could not be read"
-                ),
-            )
-
-        # The session is now terminal. Drain the complete reconciliation in a
-        # shielded child task: repeated caller cancellation may not interrupt
-        # marker acknowledgement, projection, or live-owner teardown after the
-        # durable CAS has committed.
-        async def _reconcile_cancelled_owner() -> None:
-            try:
-                await self._event_store.append(
-                    create_execution_terminal_event(
-                        execution_id=execution_id,
-                        session_id=session_id,
-                        status="cancelled",
-                        error_message=cancellation_reason,
-                        messages_processed=messages_processed,
-                    )
-                )
-            finally:
-                await self._cleanup_terminal_process_local_state(
-                    session_id=session_id,
-                    execution_id=execution_id,
-                )
-
-        await _await_process_local_cleanup(_reconcile_cancelled_owner())
-        await self._report_frugality_retrospective(
-            execution_id=execution_id,
-            session_id=session_id,
-            terminal_status="cancelled",
-        )
-
-        # Display cancellation notice
-        self._console.print(
-            Panel(
-                Text("Execution cancelled by external request", style="yellow"),
-                title="[yellow]Execution Cancelled[/yellow]",
-                border_style="yellow",
-            )
-        )
-
-        return Result.ok(
-            OrchestratorResult(
-                success=False,
-                session_id=session_id,
-                execution_id=execution_id,
-                summary={"cancelled": True, **self._task_summary()},
-                messages_processed=messages_processed,
-                final_message="Execution cancelled by external request",
-                duration_seconds=duration,
-            )
+        return await self._cancellation_lifecycle._handle_cancellation(
+            session_id, execution_id, messages_processed, start_time, expected_root_indices
         )
 
     async def _close_adapter(self) -> None:

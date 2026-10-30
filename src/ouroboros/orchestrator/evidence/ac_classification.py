@@ -266,15 +266,22 @@ def _effective_evidence_schema_for_ac(
     has_success_contract: bool = False,
     has_expected_artifacts: bool = False,
     verify_gate_active: bool = False,
+    sourced_objective: bool = False,
 ) -> EvidenceSchema:
     """Return the profile schema without verifier-specific exemptions.
 
     A verify command is additive evidence. Declaring one never removes the
     worker transcript obligations; this keeps a vacuous command from making
     an acceptance criterion weaker than a contract-less one.
+
+    ``sourced_objective`` marks a dispatch whose worker was shown the sourced
+    objective instead of ``ac_content``. That objective is the criterion the
+    worker owns, so ``ac_content`` sets no exemption: the full schema applies.
     """
     del has_success_contract, has_expected_artifacts, verify_gate_active
     schema = profile.evidence_schema
+    if sourced_objective:
+        return schema
     if _is_validation_only_ac(ac_content) and "files_touched" in schema.required:
         schema = _drop_required_evidence_field(schema, "files_touched")
     elif _is_documentation_only_ac(ac_content) and "tests_passed" in schema.required:
@@ -290,6 +297,7 @@ def _out_of_scope_evidence_fields_for_ac(
     has_success_contract: bool = False,
     has_expected_artifacts: bool = False,
     verify_gate_active: bool = False,
+    sourced_objective: bool = False,
 ) -> tuple[str, ...]:
     """Return non-empty evidence fields excluded by the AC-specific schema."""
     if record is None:
@@ -300,6 +308,7 @@ def _out_of_scope_evidence_fields_for_ac(
         has_success_contract=has_success_contract,
         has_expected_artifacts=has_expected_artifacts,
         verify_gate_active=verify_gate_active,
+        sourced_objective=sourced_objective,
     )
     required_fields = set(effective_schema.required)
     return tuple(
@@ -317,6 +326,7 @@ def _out_of_scope_evidence_values_for_ac(
     has_success_contract: bool = False,
     has_expected_artifacts: bool = False,
     verify_gate_active: bool = False,
+    sourced_objective: bool = False,
 ) -> dict[str, Any]:
     """Return out-of-scope evidence values retained for audit metadata only."""
     if record is None:
@@ -328,6 +338,7 @@ def _out_of_scope_evidence_values_for_ac(
         has_success_contract=has_success_contract,
         has_expected_artifacts=has_expected_artifacts,
         verify_gate_active=verify_gate_active,
+        sourced_objective=sourced_objective,
     )
     return {field: record.data[field] for field in fields if field in record.data}
 
@@ -340,6 +351,7 @@ def _scoped_evidence_record_for_ac(
     has_success_contract: bool = False,
     has_expected_artifacts: bool = False,
     verify_gate_active: bool = False,
+    sourced_objective: bool = False,
 ) -> EvidenceRecord:
     """Return only evidence fields inside the AC-specific schema."""
     effective_schema = _effective_evidence_schema_for_ac(
@@ -348,6 +360,7 @@ def _scoped_evidence_record_for_ac(
         has_success_contract=has_success_contract,
         has_expected_artifacts=has_expected_artifacts,
         verify_gate_active=verify_gate_active,
+        sourced_objective=sourced_objective,
     )
     allowed_fields = set(effective_schema.required) | set(effective_schema.optional)
     return EvidenceRecord(

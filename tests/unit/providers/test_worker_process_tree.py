@@ -10,6 +10,7 @@ import subprocess
 import sys
 import textwrap
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -75,8 +76,78 @@ def _alive(pid: int) -> bool:
         return False
     stat = Path(f"/proc/{pid}/stat")
     if stat.exists():
-        return stat.read_text().rpartition(")")[2].split()[0] not in {"Z", "X"}
+        try:
+            contents = stat.read_text()
+        except (FileNotFoundError, ProcessLookupError):
+            # The process can exit after both earlier existence checks.
+            return False
+        return contents.rpartition(")")[2].split()[0] not in {"Z", "X"}
     return True
+
+
+@pytest.mark.parametrize("error", [FileNotFoundError, ProcessLookupError])
+def test_alive_handles_process_exit_during_stat_read(error: type[OSError]) -> None:
+    """A process can disappear after both kill(0) and stat.exists() succeed."""
+    with (
+        patch.object(os, "kill"),
+        patch.object(Path, "exists", return_value=True),
+        patch.object(Path, "read_text", side_effect=error),
+    ):
+        assert not _alive(123)
+
+
+@pytest.mark.parametrize(("state", "expected"), [("S", True), ("Z", False), ("X", False)])
+def test_alive_checks_process_state(state: str, expected: bool) -> None:
+    with (
+        patch.object(os, "kill"),
+        patch.object(Path, "exists", return_value=True),
+        patch.object(Path, "read_text", return_value=f"123 (worker) {state} 1"),
+    ):
+        assert _alive(123) is expected
+
+
+def test_alive_without_proc_uses_kill_probe() -> None:
+    """POSIX platforms without /proc retain the successful kill(0) result."""
+    with (
+        patch.object(os, "kill") as kill,
+        patch.object(Path, "exists", return_value=False),
+        patch.object(Path, "read_text") as read_text,
+    ):
+        assert _alive(123)
+        kill.assert_called_once_with(123, 0)
+        read_text.assert_not_called()
+
+
+def test_alive_returns_false_when_kill_probe_finds_no_process() -> None:
+    with (
+        patch.object(os, "kill", side_effect=ProcessLookupError),
+        patch.object(Path, "exists") as exists,
+    ):
+        assert not _alive(123)
+        exists.assert_not_called()
+
+
+@pytest.mark.parametrize("stage", ["kill", "read"])
+def test_alive_observation_preserves_permission_errors(monkeypatch, stage):
+    def denied(*_args):
+        raise PermissionError("unknown process state")
+
+    monkeypatch.setattr(os, "kill", denied if stage == "kill" else lambda *_args: None)
+    monkeypatch.setattr(Path, "exists", lambda _path: True)
+    monkeypatch.setattr(Path, "read_text", denied)
+    with pytest.raises(PermissionError):
+        _alive(123)
+
+
+@pytest.mark.parametrize("error", [PermissionError, OSError])
+def test_alive_preserves_unexpected_stat_errors(error: type[OSError]) -> None:
+    with (
+        patch.object(os, "kill"),
+        patch.object(Path, "exists", return_value=True),
+        patch.object(Path, "read_text", side_effect=error),
+        pytest.raises(error),
+    ):
+        _alive(123)
 
 
 async def _wait_for_file(path: Path, timeout: float = 10.0) -> str:
@@ -145,7 +216,53 @@ def own_process_view(monkeypatch: pytest.MonkeyPatch) -> None:
 
 async def _cleanup(pid: int) -> None:
     if _alive(pid):
-        os.kill(pid, signal.SIGKILL)
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            # The process can exit after the liveness probe succeeds.
+            return
+
+
+@pytest.mark.asyncio
+async def test_cleanup_handles_process_exit_after_alive_probe() -> None:
+    with (
+        patch(f"{__name__}._alive", return_value=True),
+        patch.object(os, "kill", side_effect=ProcessLookupError) as kill,
+    ):
+        await _cleanup(123)
+        kill.assert_called_once_with(123, signal.SIGKILL)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_kills_live_process_once() -> None:
+    with (
+        patch(f"{__name__}._alive", return_value=True),
+        patch.object(os, "kill") as kill,
+    ):
+        await _cleanup(123)
+        kill.assert_called_once_with(123, signal.SIGKILL)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_does_not_kill_dead_process() -> None:
+    with (
+        patch(f"{__name__}._alive", return_value=False),
+        patch.object(os, "kill") as kill,
+    ):
+        await _cleanup(123)
+        kill.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [PermissionError, OSError, FileNotFoundError])
+async def test_cleanup_preserves_unexpected_kill_errors(error: type[OSError]) -> None:
+    with (
+        patch(f"{__name__}._alive", return_value=True),
+        patch.object(os, "kill", side_effect=error) as kill,
+    ):
+        with pytest.raises(error):
+            await _cleanup(123)
+        kill.assert_called_once_with(123, signal.SIGKILL)
 
 
 @pytest.mark.asyncio

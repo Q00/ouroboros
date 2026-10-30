@@ -11,6 +11,7 @@ from pathlib import Path
 import shutil
 from typing import Annotated, get_args, get_origin
 
+from pydantic import TypeAdapter, ValidationError
 from rich.markup import escape
 import typer
 import yaml
@@ -1157,7 +1158,14 @@ def set_value(
     parsed_value: str | int | float | bool = value
     if type_reference is not None:
         if isinstance(type_reference, bool):
-            parsed_value = value.lower() in ("true", "1", "yes")
+            try:
+                parsed_value = TypeAdapter(bool).validate_python(value)
+            except ValidationError:
+                print_error(
+                    f"Invalid boolean value for {key}. "
+                    "Use true/false, 1/0, yes/no, on/off, t/f, or y/n."
+                )
+                raise typer.Exit(1) from None
         elif isinstance(type_reference, int):
             try:
                 parsed_value = int(value)

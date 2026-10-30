@@ -82,6 +82,7 @@ from ouroboros.harness.deliver_gate import (
 )
 from ouroboros.harness.journal import EvidenceEntry, EvidenceManifest
 from ouroboros.harness.traceguard_validator import validate_evidence_claims
+from ouroboros.harness.wrapper_receipt import matching_wrapper_receipts
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator import (
     adaptive_concurrency,
@@ -106,6 +107,7 @@ from ouroboros.orchestrator.adapter import (
 from ouroboros.orchestrator.atomic_prompt_builder import (
     AtomicPromptBuilder,
     _build_success_contract_block,  # noqa: F401  (re-exported for tests/back-compat)
+    dispatch_renders_sourced_objective,
 )
 from ouroboros.orchestrator.attempt_evidence import attempt_workspace_evidence, judgment_envelope_ok
 from ouroboros.orchestrator.backend_limits import (
@@ -305,6 +307,7 @@ from ouroboros.orchestrator.evidence.typed_evidence import (  # noqa: F401
 )
 from ouroboros.orchestrator.evidence.verification import (
     _verify_atomic_evidence_against_runtime_messages,
+    observe_wrapper_receipts,
 )
 from ouroboros.orchestrator.evidence_schema import (
     EvidenceError,
@@ -368,6 +371,7 @@ from ouroboros.orchestrator.parallel_executor_models import (
     ParallelExecutionStageResult,
     StageExecutionOutcome,
     check_package_record,
+    checkpoint_contract_fingerprint,
     checkpoint_outcome,
     governing_verifier_verdict,
     inherit_check_package_hooks,
@@ -1452,6 +1456,8 @@ def _standard_deliver_facts(
     *,
     task_cwd: str | None,
     verifier_passed: bool,
+    wrapper_receipts: Mapping[str, EvidenceEntry] | None = None,
+    receipt_mode: bool = False,
 ) -> list[DeliverEvidenceFact] | None:
     """Bind default-profile evidence to exact accepted-leaf tool journal rows.
 
@@ -1488,19 +1494,28 @@ def _standard_deliver_facts(
                 match_value = normalized
                 eligible = bool(normalized) and "\n" not in normalized and "\r" not in normalized
             if field == "tests_passed":
-                eligible = eligible and verifier_passed and normalized in commands
+                eligible = (
+                    eligible
+                    and verifier_passed
+                    and (
+                        normalized in (wrapper_receipts or {})
+                        if receipt_mode
+                        else normalized in commands
+                    )
+                )
 
             dedupe_key = (field, match_value)
             if dedupe_key in seen:
                 continue
             seen.add(dedupe_key)
-            matches = (
-                _matching_journal_entries(
+            if eligible and field == "tests_passed" and wrapper_receipts is not None:
+                matches = (wrapper_receipts[normalized],)
+            elif eligible:
+                matches = _matching_journal_entries(
                     manifest, field=field, value=match_value, task_cwd=task_cwd
                 )
-                if eligible
-                else ()
-            )
+            else:
+                matches = ()
             if len(matches) == 1:
                 handle = matches[0].handle
             elif len(matches) > 1:
@@ -3823,6 +3838,9 @@ class ParallelACExecutor:
             session_id=session_id,
         )
 
+        contract_fingerprint = checkpoint_contract_fingerprint(
+            seed, self._execution_authority_policy()
+        )
         if self._checkpoint_store:
             try:
                 seed_id = getattr(seed, "id", session_id)
@@ -3841,6 +3859,7 @@ class ParallelACExecutor:
                         and checkpoint_state.get("session_id") == session_id
                         and checkpoint_state.get("execution_id") == execution_id
                         and checkpoint_state.get("workspace_identity") == current_workspace_identity
+                        and checkpoint_state.get("contract_fingerprint") == contract_fingerprint
                     )
                     if checkpoint_matches_invocation:
                         coordinator_mutated_workspace = bool(
@@ -4719,6 +4738,7 @@ class ParallelACExecutor:
                             state={
                                 "session_id": session_id,
                                 "execution_id": execution_id,
+                                "contract_fingerprint": contract_fingerprint,
                                 "workspace_identity": canonical_workspace_authority(
                                     self._task_cwd
                                     or getattr(self._adapter, "working_directory", None)
@@ -4867,6 +4887,7 @@ class ParallelACExecutor:
                         state={
                             "session_id": session_id,
                             "execution_id": execution_id,
+                            "contract_fingerprint": contract_fingerprint,
                             "workspace_identity": canonical_workspace_authority(
                                 self._task_cwd
                                 or getattr(self._adapter, "working_directory", None)
@@ -4986,14 +5007,6 @@ class ParallelACExecutor:
 
     @staticmethod
     def _coordinator_review_may_mutate_workspace(review: Any) -> bool:
-        """Return whether a coordinator review could have changed the workspace.
-
-        Coordinator sessions are allowed to use ``Edit`` and ``Bash``.  The
-        structured review summary is not treated as proof of a mutation: a
-        model can report a proposed fix without applying one.  The caller also
-        compares workspace digests around the review, so direct writes remain
-        observable even when a runtime omits tool messages.
-        """
         if review is None:
             return False
         for message in getattr(review, "messages", ()) or ():
@@ -5076,9 +5089,10 @@ class ParallelACExecutor:
                             continue
                         digest.update(b"F\0")
                         digest.update(relative.as_posix().encode("utf-8", "surrogateescape"))
-                        digest.update(b"\0")
-                        digest.update(str(stat.st_mode).encode("ascii"))
-                        digest.update(b"\0")
+                        digest.update(f"\0{stat.st_mode}\0".encode("ascii"))
+                        digest.update(
+                            f"{stat.st_ino}:{stat.st_mtime_ns}:{stat.st_ctime_ns}\0".encode("ascii")
+                        )
                         with path.open("rb") as handle:
                             while chunk := handle.read(1024 * 1024):
                                 digest.update(chunk)
@@ -9049,10 +9063,8 @@ Respond with either ATOMIC or the structured JSON object only.
 
             duration = (datetime.now(UTC) - start_time).total_seconds()
 
-            # A quota result is a resumable, nonterminal provider boundary.
-            # Preserve its exact scoped handle and leave the capsule dispatch
-            # unsealed; marking the child failed here would make safe resume
-            # impossible and tempt the composite owner to repeat its effects.
+            # Quota pauses retain their scoped handle and unsealed dispatch
+            # so resume cannot repeat completed effects.
             if any(is_usage_limit_pause_message(message) for message in reversed(messages)):
                 return ACExecutionResult(
                     ac_index=ac_index,
@@ -9068,9 +9080,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     route_candidate=observed_route_candidate,
                 )
 
-            # Success contracts add deterministic evidence; they never remove
-            # transcript obligations. This makes verification monotonic: adding
-            # a command cannot weaken the evidence required from the worker.
+            # Success contracts add evidence without weakening transcript obligations.
             has_success_contract = (
                 isinstance(ac_spec, AcceptanceCriterionSpec) and ac_spec.has_success_contract
             )
@@ -9078,6 +9088,11 @@ Respond with either ATOMIC or the structured JSON object only.
                 ac_spec.expected_artifacts
             )
             verify_gate_active = self._run_verify_commands
+            # Check sourced-objective evidence against the full schema shown,
+            # without exemptions from hidden ac_content.
+            sourced_objective = dispatch_renders_sourced_objective(
+                self, parent_ac_index if is_sub_ac else ac_index
+            )
             verify_gate_outcome: _VerifyGateOutcome | None = None
             if success and verify_gate_active and has_success_contract:
                 cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
@@ -9087,7 +9102,6 @@ Respond with either ATOMIC or the structured JSON object only.
                     spec=ac_spec,
                     cwd=cwd,
                 )
-
             typed_evidence, typed_validation, typed_error = self._observe_atomic_typed_evidence(
                 ac_content=ac_content,
                 final_message=final_message,
@@ -9095,6 +9109,18 @@ Respond with either ATOMIC or the structured JSON object only.
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
+                sourced_objective=sourced_objective,
+            )
+            typed_data = typed_evidence.data if typed_evidence is not None else {}
+            (
+                verified_wrapper_commands,
+                receipt_failure,
+                related_wrapper_commands,
+            ) = await observe_wrapper_receipts(
+                self._event_store,
+                runtime_identity,
+                typed_data,
+                self._task_cwd or getattr(self._adapter, "working_directory", None),
             )
             verifier_verdict = _invoke_execution_authority_entry(
                 self,
@@ -9108,7 +9134,16 @@ Respond with either ATOMIC or the structured JSON object only.
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
+                verified_wrapper_commands=verified_wrapper_commands,
+                related_wrapper_commands=related_wrapper_commands,
+                sourced_objective=sourced_objective,
             )
+            if receipt_failure is not None and (
+                verifier_verdict is None
+                or verifier_verdict.passed
+                or receipt_failure.failure_class == "FABRICATION_SUSPECTED"
+            ):
+                verifier_verdict = receipt_failure
             verify_gate_replaces_all_evidence = bool(
                 verify_gate_outcome is not None
                 and self._execution_profile is not None
@@ -9118,6 +9153,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     has_success_contract=has_success_contract,
                     has_expected_artifacts=has_expected_artifacts,
                     verify_gate_active=verify_gate_active,
+                    sourced_objective=sourced_objective,
                 ).required
             )
             if (
@@ -9147,8 +9183,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 and verifier_verdict.status is VerifierStatus.UNAVAILABLE
             )
             if verifier_unavailable:
-                # No evidence to judge (lost transcript, or only unreplayable runs):
-                # keep the work successful and expose it in the final report.
+                # Keep work successful and report the unavailable evidence.
                 fat_harness_error = None
                 log.warning(
                     "parallel_executor.ac.transcript_verification_unavailable",
@@ -9220,11 +9255,10 @@ Respond with either ATOMIC or the structured JSON object only.
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
+                sourced_objective=sourced_objective,
             )
-            # Frugality-proof grounding axis (seed AC4). Only when the leaf was
-            # accepted AND emitted a structured evidence claim (the fat-harness
-            # case) do we run the deterministic TraceGuard verdict; the common
-            # non-fat-harness leaf has no structured claim surface and is skipped.
+            # AC4: TraceGuard checks accepted fat-harness leaves with structured
+            # evidence; non-fat-harness leaves have no claim surface.
             await self._observe_deliver_verdict(
                 runtime_identity=runtime_identity,
                 execution_id=execution_context_id,
@@ -9258,6 +9292,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     ac_spec=ac_spec,
                     isolated_cwd=shadow_snapshot_cwd,
                     suggested_tier=suggested_tier,
+                    sourced_objective=sourced_objective,
                 )
             await self._emit_ac_runtime_event(
                 event_type=(
@@ -9287,6 +9322,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     has_success_contract=has_success_contract,
                     has_expected_artifacts=has_expected_artifacts,
                     verify_gate_active=verify_gate_active,
+                    sourced_objective=sourced_objective,
                 )
 
             log.info(
@@ -9583,6 +9619,18 @@ Respond with either ATOMIC or the structured JSON object only.
                 manifest,
                 task_cwd=self._task_cwd or getattr(self._adapter, "working_directory", None),
                 verifier_passed=verifier_verdict.passed,
+                wrapper_receipts=(
+                    matching_wrapper_receipts(
+                        manifest,
+                        claims=typed_data["wrapper_receipts"],
+                        execution_id=execution_id,
+                        task_cwd=self._task_cwd
+                        or getattr(self._adapter, "working_directory", None),
+                    )
+                    if "wrapper_receipts" in typed_data
+                    else None
+                ),
+                receipt_mode="wrapper_receipts" in typed_data,
             )
             facts = standard_facts if standard_facts is not None else explicit_facts
             if not facts:
@@ -9632,6 +9680,7 @@ Respond with either ATOMIC or the structured JSON object only.
         has_success_contract: bool = False,
         has_expected_artifacts: bool = False,
         verify_gate_active: bool = False,
+        sourced_objective: bool = False,
     ) -> tuple[EvidenceRecord | None, ValidationResult | None, str | None]:
         """Parse and validate typed evidence at the atomic AC acceptance boundary.
 
@@ -9651,6 +9700,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
+                sourced_objective=sourced_objective,
             )
             validation = validate_evidence(
                 _profile_with_evidence_schema(self._execution_profile, effective_schema),
@@ -12722,8 +12772,11 @@ Respond with either ATOMIC or the structured JSON object only.
         has_success_contract: bool = False,
         has_expected_artifacts: bool = False,
         verify_gate_active: bool = False,
+        sourced_objective: bool = False,
         force_runtime_transcript: bool = False,
         task_cwd_override: str | None = None,
+        verified_wrapper_commands: frozenset[str] = frozenset(),
+        related_wrapper_commands: frozenset[str] = frozenset(),
     ) -> VerifierVerdict | None:
         """Run the separate verifier pass once typed evidence is schema-valid."""
         if (
@@ -12745,6 +12798,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
+                sourced_objective=sourced_objective,
             )
             effective_profile = _profile_with_evidence_schema(
                 self._execution_profile, effective_schema
@@ -12756,6 +12810,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
+                sourced_objective=sourced_objective,
             )
             verdict = (
                 verifier(
@@ -12765,9 +12820,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     record=scoped_evidence,
                 )
                 if verifier is not None and not force_runtime_transcript
-                # Do not route acceptance through the mutable executor wrapper.
-                # Foundation A captured this closed transcript verifier at
-                # construction and has just checked that binding above.
+                # Use the constructor-captured transcript verifier checked above.
                 else self._authority_transcript_verifier(
                     messages=messages,
                     typed_evidence=scoped_evidence,
@@ -12780,6 +12833,9 @@ Respond with either ATOMIC or the structured JSON object only.
                     has_success_contract=has_success_contract,
                     has_expected_artifacts=has_expected_artifacts,
                     verify_gate_active=verify_gate_active,
+                    verified_wrapper_commands=verified_wrapper_commands,
+                    related_wrapper_commands=related_wrapper_commands,
+                    sourced_objective=sourced_objective,
                 )
             )
         except VerifierContractError:
@@ -12800,6 +12856,7 @@ Respond with either ATOMIC or the structured JSON object only.
         has_success_contract: bool = False,
         has_expected_artifacts: bool = False,
         verify_gate_active: bool = False,
+        sourced_objective: bool = False,
         task_cwd_override: str | None = None,
     ) -> VerifierVerdict:
         return self._authority_transcript_verifier(
@@ -12812,6 +12869,7 @@ Respond with either ATOMIC or the structured JSON object only.
             has_success_contract=has_success_contract,
             has_expected_artifacts=has_expected_artifacts,
             verify_gate_active=verify_gate_active,
+            sourced_objective=sourced_objective,
         )
 
     async def _emit_atomic_typed_evidence_event(
@@ -12830,6 +12888,7 @@ Respond with either ATOMIC or the structured JSON object only.
         has_success_contract: bool = False,
         has_expected_artifacts: bool = False,
         verify_gate_active: bool = False,
+        sourced_objective: bool = False,
     ) -> None:
         """Persist typed-evidence metadata for atomic AC completion."""
         if self._execution_profile is None:
@@ -12849,6 +12908,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     has_success_contract=has_success_contract,
                     has_expected_artifacts=has_expected_artifacts,
                     verify_gate_active=verify_gate_active,
+                    sourced_objective=sourced_objective,
                 ).required
             ),
             "observe_only": not self._fat_harness_mode,
@@ -12889,6 +12949,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     has_success_contract=has_success_contract,
                     has_expected_artifacts=has_expected_artifacts,
                     verify_gate_active=verify_gate_active,
+                    sourced_objective=sourced_objective,
                 )
             )
             data["ignored_out_of_scope_evidence"] = _out_of_scope_evidence_values_for_ac(
@@ -12898,6 +12959,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
+                sourced_objective=sourced_objective,
             )
         if typed_validation is not None:
             data["missing_fields"] = list(typed_validation.missing_fields)
@@ -13006,7 +13068,6 @@ Respond with either ATOMIC or the structured JSON object only.
         while True:
             await anyio.sleep(interval)
 
-            # RC4: Stop when all ACs are done
             if all(s in terminal_states for s in ac_statuses.values()):
                 log.info("parallel_executor.progress_emitter.all_done")
                 return

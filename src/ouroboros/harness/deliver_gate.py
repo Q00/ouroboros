@@ -445,6 +445,8 @@ def _accepted_tool_start_entries(
         payload: dict[str, Any] = {
             "tool_name": normalized_tool_name,
             "accepted_leaf_dispatch": True,
+            "execution_id": execution_id,
+            "ac_id": scope_id,
         }
         accepted_call_id = _event_tool_call_id(event)
         if accepted_call_id is not None:
@@ -646,6 +648,17 @@ def _journal_entry_proves_command_artifact(
     task_cwd: str | None,
 ) -> bool:
     """Verify one Phase-1 command artifact still names its captured file."""
+    return _journal_command_artifact(entry, relative_path=relative_path, task_cwd=task_cwd)[0]
+
+
+def _journal_command_artifact(
+    entry: EvidenceEntry,
+    *,
+    relative_path: str,
+    task_cwd: str | None,
+    read_limit: int | None = None,
+) -> tuple[bool, bytes | None]:
+    """Validate Phase-1 authority and optionally read the held no-follow leaf."""
     payload = entry.payload
     provenance = payload.get("command_artifacts")
     if (
@@ -670,49 +683,53 @@ def _journal_entry_proves_command_artifact(
         or not str(provenance["session_attempt_id"]).strip()
         or provenance.get("session_attempt_id") != payload.get("session_attempt_id")
     ):
-        return False
+        return False, None
     artifacts = provenance.get("artifacts")
     if (
         not isinstance(artifacts, (list, tuple))
         or not artifacts
         or len(artifacts) > _MAX_COMMAND_ARTIFACTS
     ):
-        return False
+        return False, None
     validated: list[Mapping[str, object]] = []
     seen_paths: set[str] = set()
     for artifact in artifacts:
         if not isinstance(artifact, Mapping) or frozenset(artifact) != _COMMAND_ARTIFACT_KEYS:
-            return False
+            return False, None
         path = artifact.get("path")
         if (
             not isinstance(path, str)
             or not _is_canonical_command_artifact_path(path)
             or path in seen_paths
         ):
-            return False
+            return False, None
         for key in _COMMAND_ARTIFACT_KEYS - {"path"}:
             value = artifact.get(key)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                return False
+                return False, None
         if artifact.get("st_ino") == 0 or not stat.S_ISREG(int(artifact["st_mode"])):
-            return False
+            return False, None
         seen_paths.add(path)
         validated.append(artifact)
     matches = [artifact for artifact in validated if artifact["path"] == relative_path]
     if len(matches) != 1:
-        return False
+        return False, None
     artifact = matches[0]
     if frozenset(artifact) != _COMMAND_ARTIFACT_KEYS:
-        return False
+        return False, None
     workspace_fingerprint = _workspace_chain_fingerprint(provenance.get("workspace_chain"))
     if workspace_fingerprint is None:
-        return False
-    return _nofollow_workspace_artifact_matches(
+        return False, None
+    captured: list[bytes] = []
+    valid = _nofollow_workspace_artifact_matches(
         task_cwd,
         relative_path,
         expected=artifact,
         expected_workspace=workspace_fingerprint,
+        read_limit=read_limit,
+        captured=captured,
     )
+    return valid, captured[0] if valid and captured else None
 
 
 def _nofollow_workspace_artifact_matches(
@@ -721,6 +738,8 @@ def _nofollow_workspace_artifact_matches(
     *,
     expected: Mapping[str, object],
     expected_workspace: DirectoryChainFingerprint,
+    read_limit: int | None = None,
+    captured: list[bytes] | None = None,
 ) -> bool:
     """Match an artifact while its no-follow directory and leaf fds stay held."""
     leased_chain: NoFollowDirectoryChain | None = None
@@ -782,7 +801,21 @@ def _nofollow_workspace_artifact_matches(
             current_leaf
         ):
             return False
-        return leased_chain.postvalidate() and current_chain.postvalidate()
+        if read_limit is not None:
+            if read_limit < 0 or leased_leaf.st_size > read_limit:
+                return False
+            content = os.read(leased_leaf_fd, read_limit + 1)
+            if len(content) != leased_leaf.st_size or len(content) > read_limit:
+                return False
+            if _command_artifact_stat_fingerprint(os.fstat(leased_leaf_fd)) != (
+                _command_artifact_stat_fingerprint(leased_leaf)
+            ):
+                return False
+        if not (leased_chain.postvalidate() and current_chain.postvalidate()):
+            return False
+        if read_limit is not None and captured is not None:
+            captured.append(content)
+        return True
     except (OSError, RuntimeError, ValueError):
         return False
     finally:

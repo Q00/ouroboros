@@ -56,7 +56,19 @@ Known limitations:
 - **Process management**: Subprocess spawning and signal handling differ on Windows.
 - **Codex CLI**: Not supported on native Windows. Use WSL 2 instead.
 - **Terminal/TUI**: Requires a terminal with ANSI support (Windows Terminal recommended; `cmd.exe` is not supported).
-- **CI testing**: Native Windows is not part of the current CI matrix.
+- **Execution sandbox**: Native Windows has a per-command AppContainer
+  backend. Confined `.cmd`/`.bat` commands (including `npm.cmd`) are refused
+  as `windows_batch_file` and remain indeterminate. Loopback reaches only
+  processes inside the same AppContainer, not services on the host.
+- **Verifier replay copies**: Linking dependency trees or preserving workspace
+  symlinks requires Windows symlink permission (Developer Mode or the
+  appropriate privilege); if copying fails, replay is unavailable. See the
+  [verifier evidence policy](contributing/verifier-evidence-policy.md#replay-first-corroboration).
+- **CI testing**: The `Runtime sandbox (Windows)` job in
+  [`.github/workflows/test.yml`](../.github/workflows/test.yml) runs on
+  `windows-latest`. Its AppContainer tests fail rather than skip if the
+  backend is unavailable on CI; this targeted coverage does not make native
+  Windows fully supported.
 
 Git worktree discovery decodes Git for Windows output as UTF-8, so repository
 paths containing non-ASCII characters do not depend on the active ANSI code
@@ -98,7 +110,7 @@ The package profile is a process contract, not a dependency-pin workaround:
 |-------|-------------------|----------------|-----------------------|
 | `[claude]` | Default in-process Claude Agent SDK runtime | Exact SDK/Anthropic pins and MCP 1.x graph | **No** — separate process/environment |
 | `[claude-cli]` | Claude CLI subprocess for completions and agent workers | None | Yes |
-| `[mcp]` | MCP 2 server/client process | `mcp==2.2.0` | Yes, with CLI profiles |
+| `[mcp]` | MCP 2 server/client process | `mcp==2.3.0` | Yes, with CLI profiles |
 | `[claude-sdk]` | Explicit alias for the Claude Agent SDK runtime | Same exact SDK/Anthropic pins and MCP 1.x graph | **No** — separate process/environment |
 | `[all]` | MCP 1.x application bundle | Includes `[claude]`; excludes MCP 2 | **No** — run `[mcp]` separately |
 

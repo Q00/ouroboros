@@ -5,6 +5,21 @@ doc_metadata:
 
 # Running Ouroboros with OpenCode
 
+OpenCode 1.x LLM completions report token usage from native `step_finish`
+events, counting the latest report for each step part once. The native output
+count already uses raw output tokens, so reasoning is not added again; additive
+cache groups and any remaining reported total are preserved as `unallocated_tokens`.
+
+OpenCode 2.x plugin mode is not yet supported. Setup rejects a detected 2.x
+CLI before installing the V1 bridge or writing configuration. Use
+`ouroboros setup --runtime opencode --opencode-mode subprocess` for the existing
+subprocess path. This does not enable in-host child Task dispatch.
+
+V2 uses directory plugin entries and a different setup, tool-hook, session
+permission, completion, and interruption API. Renaming the entry or adding a
+`setup` export alone does not establish compatibility; the remaining port is
+tracked in [#2529](https://github.com/Q00/ouroboros/issues/2529).
+
 > For installation and first-run onboarding, see [Getting Started](../getting-started.md).
 
 Ouroboros integrates with **OpenCode** ([opencode.ai](https://opencode.ai)) — an open-source multi-provider AI coding agent — via two complementary paths:

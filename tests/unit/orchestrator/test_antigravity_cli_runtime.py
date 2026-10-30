@@ -1146,3 +1146,30 @@ async def test_resume_unavailable_terminal_has_no_following_workspace_warning() 
     assert messages[-1].is_final and messages[-1].is_error
     assert messages[-1].data["error_type"] == "ResumeUnavailable"
     assert messages[-1].resume_handle == handle
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_response", [None, ""])
+async def test_status_only_terminal_keeps_streamed_answer(terminal_response: str | None) -> None:
+    runtime = _make_runtime()
+    terminal = {"status": "SUCCESS"}
+    if terminal_response is not None:
+        terminal["response"] = terminal_response
+    events = [
+        {
+            "event": "step_update",
+            "step_update": {"step_type": "agent_response", "text_delta": delta},
+        }
+        for delta in ("Hello", " world", "\n")
+    ]
+    events.append({"event": "result", "result": terminal})
+    with (
+        patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            return_value=_FakeProcess([json.dumps(event) for event in events]),
+        ),
+        patch.object(runtime, "_process_group_id", return_value=None),
+    ):
+        result = await runtime.execute_task_to_result("Answer the question")
+    assert result.is_ok
+    assert result.value.final_message == "Hello world\n"

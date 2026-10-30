@@ -4,7 +4,6 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-import httpx
 import pytest
 
 from ouroboros.config import get_default_config
@@ -107,6 +106,8 @@ async def test_litellm_55_actual_http_body(
     response_format: dict | None,
 ) -> None:
     pytest.importorskip("litellm")
+    import httpx
+
     from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 
     is_openrouter = route.startswith("openrouter/")
@@ -205,6 +206,8 @@ async def test_legacy_litellm_keeps_request_arguments(
     monkeypatch: pytest.MonkeyPatch, model: str, thinking: dict, output_config: dict | None
 ) -> None:
     pytest.importorskip("litellm")
+    import httpx
+
     from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 
     requests: list[dict] = []

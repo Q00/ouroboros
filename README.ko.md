@@ -314,7 +314,7 @@ ouroboros uninstall
 ```text
 ooo interview  →  소크라테스식 질문으로 숨겨진 가정 12개를 드러냄
 ooo seed       →  답변을 확정된 스펙으로 정리 (Ambiguity: 0.15)
-ooo run        →  Double Diamond로 실행
+ooo run        →  수용 기준을 의존 순서대로 에이전트에 나눠 실행
 ooo evaluate   →  3단계 검증: Mechanical → Semantic → Consensus
 ```
 
@@ -346,7 +346,7 @@ ooo evaluate   →  3단계 검증: Mechanical → Semantic → Consensus
 |:------|:-------------|
 | **Interview** | 소크라테스식 질문으로 숨겨진 가정 드러내기 |
 | **Seed** | 답변을 확정된 스펙으로 정리 |
-| **Execute** | Double Diamond: 발견 → 정의 → 설계 → 전달 |
+| **Execute** | 수용 기준을 의존 순서대로 에이전트에 나눠 실행 |
 | **Evaluate** | 3단계 게이트: Mechanical ($0) → Semantic → Multi-Model Consensus |
 | **Evolve** | Wonder *("우리가 아직 모르는 게 뭐지?")* → 성찰 → 다음 세대 |
 
@@ -446,7 +446,7 @@ Gen 3: {Task, Priority, Status, DueDate}     → similarity 1.00 → CONVERGED �
 | `ooo interview` | 소크라테스식 질문 → 숨겨진 가정 드러내기 |
 | `ooo auto` | 목표 하나에서 A-grade Seed까지 자동 수렴 후 실행 시작 |
 | `ooo seed` | 확정된 스펙으로 정리 |
-| `ooo run` | Double Diamond로 실행 |
+| `ooo run` | Seed의 수용 기준 실행 |
 | `ooo evaluate` | 3단계 검증 게이트 |
 | `ooo evolve` | 온톨로지 수렴까지 진화 루프 |
 | `ooo unstuck` | 막혔을 때 활용 가능한 5가지 수평적 사고 페르소나 |
@@ -493,12 +493,14 @@ Gen 3: {Task, Priority, Status, DueDate}     → similarity 1.00 → CONVERGED �
 ## 내부 구조
 
 <details>
-<summary><strong>18개 패키지 · 166개 모듈 · 95개 테스트 파일 · Python 3.12+</strong></summary>
+<summary><strong>저장소에서 직접 확인하는 소스·테스트 인벤토리 · Python 3.12+</strong></summary>
+
+정확한 파일 수는 현재 체크아웃을 기준으로 `git ls-files ':(glob)src/ouroboros/**/*.py'`와 `git ls-files ':(glob)tests/**/test_*.py'`에서 확인합니다. Hatch-VCS가 빌드할 때 생성하는 `src/ouroboros/_version.py`는 tracked 소스 인벤토리에 포함되지 않습니다.
 
 ```text
 src/ouroboros/
 ├── bigbang/        Interview, 모호성 점수 산정, brownfield 탐색
-├── routing/        PAL Router — 3단계 비용 최적화 (1x / 10x / 30x)
+├── router/         스킬 디스패치 (`ooo <skill>` → MCP 도구); PAL 등급 라우팅은 orchestrator/에 있음
 ├── execution/      (deprecated — 로직이 orchestrator/ 및 mcp/tools/로 이동됨)
 ├── evaluation/     Mechanical → Semantic → Multi-Model Consensus
 ├── evolution/      Wonder / Reflect 순환, 수렴 감지
@@ -515,7 +517,7 @@ src/ouroboros/
 ```
 
 **핵심 내부 구조:**
-- **PAL Router** — Frugal (1x) → Standard (10x) → Frontier (30x), 실패 시 자동 상향, 성공 시 자동 하향
+- **PAL Router** — Frugal (1x) → Standard (10x) → Frontier (30x), 재시도 시 상향 (자동 하향 없음)
 - **Drift** — Goal (50%) + Constraint (30%) + 온톨로지 (20%) 가중 측정, 임계값 ≤ 0.3
 - **Brownfield** — 12개 이상의 언어 생태계에서 15종의 설정 파일 스캔
 - **Evolution** — 최대 30세대, 온톨로지 유사도 ≥ 0.95에서 수렴

@@ -271,7 +271,7 @@ async def test_run_orchestrator_records_and_flushes_non_success_outcomes(
     with (
         patch("ouroboros.cli.commands.run._load_seed_from_yaml", return_value=VALID_SEED_DATA),
         patch("ouroboros.orchestrator.create_agent_runtime"),
-        patch("ouroboros.orchestrator.OrchestratorRunner", return_value=mock_runner),
+        patch("ouroboros.orchestrator.runner_factory.OrchestratorRunner", return_value=mock_runner),
         patch("ouroboros.persistence.event_store.EventStore") as mock_event_store_cls,
         patch("ouroboros.telemetry.capture_job_outcome") as capture,
         patch("ouroboros.telemetry.flush") as flush,
@@ -285,3 +285,67 @@ async def test_run_orchestrator_records_and_flushes_non_success_outcomes(
     assert capture.call_args.kwargs["terminal_status"] == expected_status
     assert capture.call_args.kwargs["result_meta"]["success"] is False
     flush.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("success", "status", "terminal"),
+    [(True, SessionStatus.COMPLETED, "completed"), (False, SessionStatus.FAILED, "failed")],
+)
+async def test_terminal_run_carries_ac_tally(
+    success: bool, status: SessionStatus, terminal: str
+) -> None:
+    """The CLI outcome carries the same ac_passed/ac_total pair as an MCP job."""
+    check_package_run = MagicMock()
+    with (
+        patch("ouroboros.telemetry.capture_job_outcome") as capture,
+        patch(
+            "ouroboros.mcp.tools.run_failure_meta.derive_run_failure_meta",
+            new_callable=AsyncMock,
+            return_value=_FAILURE_META,
+        ),
+        patch(
+            "ouroboros.mcp.tools.run_ac_tally.derive_run_ac_tally",
+            new_callable=AsyncMock,
+            return_value={"ac_passed": 3, "ac_total": 4},
+        ) as tally,
+    ):
+        await _record_cli_run_outcome(
+            Result.ok(_exec_result(success=success)),
+            event_store=MagicMock(),
+            session_repo=_session_repo(status),
+            execution_id="exec-local",
+            session_id="sess-local",
+            check_package_run=check_package_run,
+        )
+
+    tally.assert_awaited_once_with(ANY, session_id="sess-test", execution_id="exec-test")
+    forwarded = capture.call_args.kwargs["result_meta"]
+    assert capture.call_args.kwargs["terminal_status"] == terminal
+    assert (forwarded["ac_passed"], forwarded["ac_total"]) == (3, 4)
+    check_package_run.finish.assert_called_once_with(terminal, surface="cli_run")
+
+
+@pytest.mark.asyncio
+async def test_tally_read_failure_preserves_cli_outcome_and_check_package() -> None:
+    check_package_run = MagicMock()
+    with (
+        patch("ouroboros.telemetry.capture_job_outcome") as capture,
+        patch(
+            "ouroboros.mcp.tools.run_ac_tally.derive_run_ac_tally",
+            new_callable=AsyncMock,
+            side_effect=OSError("store unavailable"),
+        ),
+    ):
+        await _record_cli_run_outcome(
+            Result.ok(_exec_result(success=True)),
+            event_store=MagicMock(),
+            session_repo=_session_repo(SessionStatus.COMPLETED),
+            execution_id="exec-local",
+            session_id="sess-local",
+            check_package_run=check_package_run,
+        )
+    capture.assert_called_once_with(
+        ANY, "run", terminal_status="completed", result_meta={"success": True}
+    )
+    check_package_run.finish.assert_called_once_with("completed", surface="cli_run")

@@ -132,6 +132,9 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         "GJC_CODING_AGENT_DIR",
         "GJC_CONFIG_DIR",
         "PI_CONFIG_DIR",
+        # Hermes hosting-profile roots select the spawned CLI's configuration.
+        "HERMES_HOME",
+        "HERMES_REAL_HOME",
         # OMP (Oh My Pi) resolves its agent dir — sessions, extensions, and rules
         # loaded into every spawned session — from this var (see `omp --help`).
         # Same spawned-CLI discovery-root class as GJC/PI above: an untrusted
