@@ -223,12 +223,13 @@ class TestExtractEvidence:
     @pytest.mark.parametrize("fence_tag", ["json", ""])
     @pytest.mark.parametrize("invalid_token", ["undefined", "bogus", "NaN", "true false"])
     @pytest.mark.parametrize("closer", ["]", ""])
+    @pytest.mark.parametrize("separator", [",", ""])
     def test_inline_malformed_container_owns_nested_evidence(
-        self, fence_tag: str, invalid_token: str, closer: str
+        self, fence_tag: str, invalid_token: str, closer: str, separator: str
     ) -> None:
         text = (
             f'```{fence_tag}\n{{"files_touched":["stale.py"]}}\n'
-            f'trailing note [{invalid_token},\n{{"files_touched":["nested.py"]}}\n'
+            f'trailing note [{invalid_token}{separator}\n{{"files_touched":["nested.py"]}}\n'
             f"{closer}\n```"
         )
         with pytest.raises(EvidenceError):

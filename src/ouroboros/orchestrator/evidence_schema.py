@@ -142,6 +142,19 @@ class EvidenceRecord:
         return self.data.get(name, default)
 
 
+@dataclass(frozen=True)
+class _ContainerExtent:
+    end: int
+    closed: bool
+
+
+@dataclass(frozen=True)
+class _EvidenceScan:
+    values: list[tuple[int, int, Any]]
+    malformed: dict[int, _ContainerExtent]
+    nested_values: set[int]
+
+
 def _top_level_fence_body_starts(text: str) -> Iterator[tuple[str, int, int, int]]:
     """Yield ``(info, body_start, body_end, fence_end)`` for top-level fences."""
     search_pos = 0
@@ -194,7 +207,8 @@ def _find_body_start(text: str) -> tuple[int, bool]:
             supported_fences.append((body_start, body_end, fence_end))
 
     recovery_text = _mask_markdown_examples(text)
-    top_level_values = _collect_top_level_values(recovery_text)
+    scan = _scan_evidence_values(recovery_text)
+    top_level_values = scan.values
 
     if supported_fences:
         body_start, body_end, fence_end = supported_fences[-1]
@@ -214,15 +228,18 @@ def _find_body_start(text: str) -> tuple[int, bool]:
             try:
                 _, end_offset = _DECODER.raw_decode(recovery_text[pos:])
             except json.JSONDecodeError:
+                extent = scan.malformed[pos]
                 gap = recovery_text[fenced_end:pos]
                 adjacent_to_value = "\n" not in gap and "\r" not in gap and not gap.strip()
                 if (
                     adjacent_to_value
+                    or not extent.closed
+                    or pos in scan.nested_values
                     or _looks_like_json_container(recovery_text, pos, limit=body_end)
                     or _has_structural_container_intent(recovery_text, pos, body_end)
                 ):
                     fenced_start = pos
-                owned_until = _malformed_boundary_end(recovery_text, pos, limit=body_end)
+                owned_until = extent.end
             else:
                 owned_until = pos + end_offset
                 if "\n" in recovery_text[pos:owned_until]:
@@ -337,13 +354,13 @@ def _is_container_quote_start(text: str, position: int) -> bool:
     )
 
 
-def _malformed_boundary_end(text: str, opener_pos: int, *, limit: int | None = None) -> int:
+def _container_extent(text: str, opener_pos: int, *, limit: int | None = None) -> _ContainerExtent:
     """Find the textual extent of a malformed JSON opener via bracket matching.
 
     When ``{`` or ``[`` at *opener_pos* fails to parse as valid JSON, this
     function determines how far the malformed structure extends by counting
-    balanced brackets. Returns the position just past the matching closer,
-    or ``len(text)`` if the structure never closes (owns everything to EOF).
+    balanced brackets. Return the end and whether a matching closer exists;
+    an unclosed container owns the remainder of its enclosing region.
 
     Quoted strings are treated as opaque (bracket characters inside quotes
     do not affect nesting) to avoid false boundaries from prose like
@@ -384,8 +401,8 @@ def _malformed_boundary_end(text: str, opener_pos: int, *, limit: int | None = N
                 continue
             stack.pop()
             if not stack:
-                return i + 1
-    return boundary
+                return _ContainerExtent(i + 1, True)
+    return _ContainerExtent(boundary, False)
 
 
 _INLINE_EVIDENCE_LABEL_RE = re.compile(
@@ -423,9 +440,9 @@ def _looks_like_json_container(text: str, opener_pos: int, *, limit: int | None 
     if _INLINE_EVIDENCE_LABEL_RE.search(text[line_start:opener_pos]) is not None:
         return True
 
-    boundary_end = _malformed_boundary_end(text, opener_pos, limit=limit)
-    boundary = len(text) if limit is None else min(limit, len(text))
-    if text[opener_pos] == "{" and boundary_end == boundary:
+    extent = _container_extent(text, opener_pos, limit=limit)
+    boundary_end = extent.end
+    if text[opener_pos] == "{" and not extent.closed:
         return True
     candidate = text[opener_pos + 1 : boundary_end - 1].lstrip()
     if not candidate:
@@ -641,10 +658,7 @@ def _has_structural_container_intent(text: str, opener_pos: int, limit: int) -> 
             component_signal = True
             continue
 
-        # Keep a trailing boundary beyond the synthetic closer. Without it,
-        # a complete prose delimiter such as ``{config.host}`` appears to
-        # consume the whole input and is mistaken for an unclosed JSON object.
-        wrapped = f"{opener}{stripped}{closer}\n"
+        wrapped = f"{opener}{stripped}{closer}"
         if _looks_like_json_container(wrapped, 0):
             component_signal = True
 
@@ -653,7 +667,7 @@ def _has_structural_container_intent(text: str, opener_pos: int, limit: int) -> 
     return component_signal
 
 
-def _collect_top_level_values(text: str) -> list[tuple[int, int, Any]]:
+def _scan_evidence_values(text: str) -> _EvidenceScan:
     """Parse eligible complete top-level JSON values in *text*.
 
     Recovery candidates must start on their own Markdown line and outside
@@ -661,7 +675,8 @@ def _collect_top_level_values(text: str) -> list[tuple[int, int, Any]]:
     Container scans retain structural ownership of nested values, while a
     line-level scan also records scalar JSON values such as ``null`` or a
     quoted string so a prohibited terminal payload cannot be skipped in favor
-    of stale earlier evidence.
+    of stale earlier evidence. Retain closure and nested-value facts so
+    boundary selection consumes the same ownership interpretation.
     """
     # Collect all successfully-decoded JSON containers with their spans.
     # Nested values are discovered separately so containment can be enforced.
@@ -670,7 +685,7 @@ def _collect_top_level_values(text: str) -> list[tuple[int, int, Any]]:
     # the first invalid token. Token-shape heuristics are suitable for deciding
     # whether trailing prose is authoritative, but not for containment: an
     # uncommon invalid key or array token must not expose a valid inner object.
-    malformed_boundaries: list[tuple[int, int]] = []
+    malformed_boundaries: dict[int, _ContainerExtent] = {}
     fence_bodies = [(start, end) for _, start, end, _ in _top_level_fence_body_starts(text)]
     for token in _FENCE_TAIL_TOKEN_RE.finditer(text):
         if token.group("opener") is None:
@@ -688,7 +703,7 @@ def _collect_top_level_values(text: str) -> list[tuple[int, int, Any]]:
                 if pos < body_end:
                     boundary = body_end
                     break
-            malformed_boundaries.append((pos, _malformed_boundary_end(text, pos, limit=boundary)))
+            malformed_boundaries[pos] = _container_extent(text, pos, limit=boundary)
 
     # Containers can begin anywhere for ownership detection, but scalars are
     # eligible only when they occupy a Markdown line. This avoids interpreting
@@ -728,13 +743,25 @@ def _collect_top_level_values(text: str) -> list[tuple[int, int, Any]]:
         if not _is_evidence_container_opener(text, start):
             continue
         if any(
-            malformed_start < start and end <= malformed_end
-            for malformed_start, malformed_end in malformed_boundaries
+            malformed_start < start and end <= extent.end
+            for malformed_start, extent in malformed_boundaries.items()
         ):
             continue
         top_level_values.append((start, end, value))
 
-    return sorted(top_level_values, key=lambda candidate: (candidate[0], candidate[1]))
+    nested_values = {
+        owner
+        for owner, extent in malformed_boundaries.items()
+        if any(
+            owner < start and end <= extent.end and _is_evidence_container_opener(text, start)
+            for start, end, _ in all_spans
+        )
+    }
+    return _EvidenceScan(
+        sorted(top_level_values, key=lambda candidate: (candidate[0], candidate[1])),
+        malformed_boundaries,
+        nested_values,
+    )
 
 
 def _has_json_attempt(text: str) -> bool:
@@ -837,7 +864,7 @@ def _recover_json_value(
         raise EvidenceError(msg) from primary_exc
 
     recovery_text = _mask_markdown_examples(text)
-    top_level_values = _collect_top_level_values(recovery_text)
+    top_level_values = _scan_evidence_values(recovery_text).values
 
     if top_level_values:
         # A later malformed structural boundary is authoritative over every
