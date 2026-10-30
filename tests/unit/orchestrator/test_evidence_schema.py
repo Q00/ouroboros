@@ -300,6 +300,24 @@ class TestExtractEvidence:
                     )
                     assert extract_evidence(text).data == {"files_touched": ["real.py"]}, text
 
+    @pytest.mark.parametrize("tag", ["json", ""])
+    @pytest.mark.parametrize(
+        "prefix,closer",
+        [
+            ('trailing note [undefined, {"broken": ]', "]"),
+            ('trailing note {"broken": [undefined, }', "}"),
+        ],
+    )
+    def test_mismatched_nested_closer_cannot_expose_inner_evidence(
+        self, tag: str, prefix: str, closer: str
+    ) -> None:
+        text = (
+            f'```{tag}\n{{"files_touched":["stale.py"]}}\n{prefix}\n'
+            '{\n "files_touched":["nested.py"]\n}\n' + closer + "\n```"
+        )
+        with pytest.raises(EvidenceError):
+            extract_evidence(text)
+
     @pytest.mark.parametrize(
         "trailing_prose",
         [

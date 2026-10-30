@@ -349,9 +349,7 @@ def _malformed_boundary_end(text: str, opener_pos: int, *, limit: int | None = N
     do not affect nesting) to avoid false boundaries from prose like
     ``{"key": "value with ] inside"}``.
     """
-    opener = text[opener_pos]
-    closer = "}" if opener == "{" else "]"
-    depth = 0
+    stack: list[str] = []
     quote_char: str | None = None
     escape_next = False
     opaque_until = opener_pos
@@ -378,11 +376,14 @@ def _malformed_boundary_end(text: str, opener_pos: int, *, limit: int | None = N
         if ch in ('"', "'") and _is_container_quote_start(text, i):
             quote_char = ch
             continue
-        if ch == opener:
-            depth += 1
-        elif ch == closer:
-            depth -= 1
-            if depth == 0:
+        if ch in "[{":
+            stack.append(ch)
+        elif ch in "]}":
+            expected = "]" if stack[-1] == "[" else "}"
+            if ch != expected:
+                continue
+            stack.pop()
+            if not stack:
                 return i + 1
     return boundary
 

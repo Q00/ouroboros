@@ -9447,6 +9447,7 @@ class TestParallelACExecutor:
             "",
             "\n[true false]",
             '\ntrailing note [undefined,\n{"files_touched":["nested.py"]}\n]',
+            '\ntrailing note [undefined, {"broken": ]\n{\n"files_touched":["nested.py"]\n}\n]',
         ],
     )
     @pytest.mark.parametrize("has_later_record", [False, True])
