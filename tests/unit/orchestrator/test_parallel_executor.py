@@ -9438,9 +9438,16 @@ class TestParallelACExecutor:
             'See [example "[true false]"] for details.',
         ],
     )
-    @pytest.mark.parametrize("terminal_corruption", [False, True])
+    @pytest.mark.parametrize(
+        "terminal_corruption",
+        [
+            "",
+            "\n[true false]",
+            '\ntrailing note [undefined,\n{"files_touched":["nested.py"]}\n]',
+        ],
+    )
     async def test_quoted_prose_preserves_atomic_evidence_and_terminal_authority(
-        self, tmp_path, tag: str, prose: str, terminal_corruption: bool
+        self, tmp_path, tag: str, prose: str, terminal_corruption: str
     ) -> None:
         event_store, appended_events = _make_replaying_event_store()
         data = {
@@ -9448,7 +9455,7 @@ class TestParallelACExecutor:
             "commands_run": ["pytest tests/test_ok.py"],
             "tests_passed": ["tests/test_ok.py::test_ok"],
         }
-        tail = "\n[true false]" if terminal_corruption else ""
+        tail = terminal_corruption
         executor = ParallelACExecutor(
             adapter=_FinalMessageRuntime(
                 f"```{tag}\n{json.dumps(data)}\n{prose}{tail}\n```",

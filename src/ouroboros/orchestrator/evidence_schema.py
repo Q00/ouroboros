@@ -204,12 +204,15 @@ def _find_body_start(text: str) -> tuple[int, bool]:
         fenced_start = fenced_values[-1][0] if fenced_values else body_start
         fenced_end = fenced_values[-1][1] if fenced_values else body_start
 
+        owned_until = fenced_end
         for token in _FENCE_TAIL_TOKEN_RE.finditer(recovery_text, fenced_end, body_end):
             if token.group("opener") is None:
                 continue
             pos = token.start()
+            if pos < owned_until:
+                continue
             try:
-                _DECODER.raw_decode(recovery_text[pos:])
+                _, end_offset = _DECODER.raw_decode(recovery_text[pos:])
             except json.JSONDecodeError:
                 gap = recovery_text[fenced_end:pos]
                 adjacent_to_value = "\n" not in gap and "\r" not in gap and not gap.strip()
@@ -218,6 +221,11 @@ def _find_body_start(text: str) -> tuple[int, bool]:
                     or _looks_like_json_container(recovery_text, pos, limit=body_end)
                     or _has_structural_container_intent(recovery_text, pos, body_end)
                 ):
+                    fenced_start = pos
+                owned_until = _malformed_boundary_end(recovery_text, pos, limit=body_end)
+            else:
+                owned_until = pos + end_offset
+                if "\n" in recovery_text[pos:owned_until]:
                     fenced_start = pos
 
         later_values = [candidate for candidate in top_level_values if candidate[0] >= fence_end]
@@ -627,21 +635,20 @@ def _collect_top_level_values(text: str) -> list[tuple[int, int, Any]]:
     # Collect all successfully-decoded JSON containers with their spans.
     # Nested values are discovered separately so containment can be enforced.
     all_spans: list[tuple[int, int, Any]] = []
-    # Every failed line-level opener owns its structural extent, regardless of
+    # Every failed nonliteral opener owns its structural extent, regardless of
     # the first invalid token. Token-shape heuristics are suitable for deciding
     # whether trailing prose is authoritative, but not for containment: an
     # uncommon invalid key or array token must not expose a valid inner object.
     malformed_boundaries: list[tuple[int, int]] = []
-    pos = 0
-    while pos < len(text):
-        if text[pos] in "{[":
-            try:
-                parsed, end_offset = _DECODER.raw_decode(text[pos:])
-                all_spans.append((pos, pos + end_offset, parsed))
-            except json.JSONDecodeError:
-                if _is_evidence_container_opener(text, pos):
-                    malformed_boundaries.append((pos, _malformed_boundary_end(text, pos)))
-        pos += 1
+    for token in _FENCE_TAIL_TOKEN_RE.finditer(text):
+        if token.group("opener") is None:
+            continue
+        pos = token.start()
+        try:
+            parsed, end_offset = _DECODER.raw_decode(text[pos:])
+            all_spans.append((pos, pos + end_offset, parsed))
+        except json.JSONDecodeError:
+            malformed_boundaries.append((pos, _malformed_boundary_end(text, pos)))
 
     # Containers can begin anywhere for ownership detection, but scalars are
     # eligible only when they occupy a Markdown line. This avoids interpreting

@@ -218,6 +218,30 @@ class TestExtractEvidence:
             "tests_passed": ["graceful.test.ts::test_basic"],
         }
 
+    @pytest.mark.parametrize("fence_tag", ["json", ""])
+    @pytest.mark.parametrize("invalid_token", ["undefined", "bogus", "NaN", "true false"])
+    @pytest.mark.parametrize("closer", ["]", ""])
+    def test_inline_malformed_container_owns_nested_evidence(
+        self, fence_tag: str, invalid_token: str, closer: str
+    ) -> None:
+        text = (
+            f'```{fence_tag}\n{{"files_touched":["stale.py"]}}\n'
+            f'trailing note [{invalid_token},\n{{"files_touched":["nested.py"]}}\n'
+            f"{closer}\n```"
+        )
+        with pytest.raises(EvidenceError):
+            extract_evidence(text)
+
+    @pytest.mark.parametrize("fence_tag", ["json", ""])
+    @pytest.mark.parametrize(
+        "prose", ['The note "[unfinished" is literal.', "See `[unfinished` for notation."]
+    )
+    def test_quoted_unclosed_opener_does_not_own_later_evidence(
+        self, fence_tag: str, prose: str
+    ) -> None:
+        text = f'```{fence_tag}\n{prose}\n{{"files_touched":["current.py"]}}\n```'
+        assert extract_evidence(text).data == {"files_touched": ["current.py"]}
+
     @pytest.mark.parametrize(
         "trailing_prose",
         [
@@ -397,6 +421,7 @@ class TestExtractEvidence:
         "trailing_prose",
         [
             "See [report] for details.",
+            "See [1] for details.",
             "Configuration remains at {config.host}.",
             "[done]",
             "[AC_COMPLETE: 1]",
