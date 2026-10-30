@@ -143,7 +143,7 @@ class EvidenceRecord:
 
 
 @dataclass(frozen=True)
-class _ContainerExtent:
+class _EvidenceExtent:
     end: int
     closed: bool
 
@@ -152,7 +152,7 @@ class _ContainerExtent:
 class _EvidenceScan:
     values: list[tuple[int, int, Any]]
     decoded: dict[int, tuple[int, Any]]
-    malformed: dict[int, _ContainerExtent]
+    malformed: dict[int, _EvidenceExtent]
     nested_values: set[int]
     payload_attempts: set[int]
 
@@ -221,11 +221,8 @@ def _find_body_start(text: str) -> tuple[int, bool]:
         fenced_end = fenced_values[-1][1] if fenced_values else body_start
 
         owned_until = fenced_end
-        for token in _FENCE_TAIL_TOKEN_RE.finditer(recovery_text, fenced_end, body_end):
-            if token.group("opener") is None:
-                continue
-            pos = token.start()
-            if pos < owned_until:
+        for pos in sorted(scan.decoded.keys() | scan.malformed.keys()):
+            if pos < fenced_end or pos >= body_end or pos < owned_until:
                 continue
             decoded = scan.decoded.get(pos)
             if decoded is None:
@@ -245,7 +242,7 @@ def _find_body_start(text: str) -> tuple[int, bool]:
         terminal_end = later_values[-1][1] if later_values else fence_end
 
         for pos in sorted(scan.malformed):
-            if pos >= terminal_end and _is_terminal_malformed_container(recovery_text, pos, scan):
+            if pos >= terminal_end and _is_terminal_malformed_payload(recovery_text, pos, scan):
                 terminal_start = pos
 
         if terminal_start >= 0:
@@ -255,7 +252,7 @@ def _find_body_start(text: str) -> tuple[int, bool]:
     terminal_start = top_level_values[-1][0] if top_level_values else -1
     terminal_end = top_level_values[-1][1] if top_level_values else 0
     for pos in sorted(scan.malformed):
-        if pos >= terminal_end and _is_terminal_malformed_container(recovery_text, pos, scan):
+        if pos >= terminal_end and _is_terminal_malformed_payload(recovery_text, pos, scan):
             terminal_start = pos
 
     if terminal_start >= 0:
@@ -323,7 +320,7 @@ def _is_container_quote_start(text: str, position: int) -> bool:
     )
 
 
-def _container_extent(text: str, opener_pos: int, *, limit: int | None = None) -> _ContainerExtent:
+def _container_extent(text: str, opener_pos: int, *, limit: int | None = None) -> _EvidenceExtent:
     """Find the textual extent of a malformed JSON opener via bracket matching.
 
     When ``{`` or ``[`` at *opener_pos* fails to parse as valid JSON, this
@@ -370,8 +367,8 @@ def _container_extent(text: str, opener_pos: int, *, limit: int | None = None) -
                 continue
             stack.pop()
             if not stack:
-                return _ContainerExtent(i + 1, True)
-    return _ContainerExtent(boundary, False)
+                return _EvidenceExtent(i + 1, True)
+    return _EvidenceExtent(boundary, False)
 
 
 _INLINE_EVIDENCE_LABEL_RE = re.compile(
@@ -435,7 +432,7 @@ def _looks_like_json_container(text: str, opener_pos: int, *, limit: int | None 
     )
 
 
-def _is_terminal_malformed_container(text: str, position: int, scan: _EvidenceScan) -> bool:
+def _is_terminal_malformed_payload(text: str, position: int, scan: _EvidenceScan) -> bool:
     return position in scan.nested_values or (
         _is_evidence_container_opener(text, position) and position in scan.payload_attempts
     )
@@ -671,7 +668,7 @@ def _scan_evidence_values(text: str) -> _EvidenceScan:
     # the first invalid token. Token-shape heuristics are suitable for deciding
     # whether trailing prose is authoritative, but not for containment: an
     # uncommon invalid key or array token must not expose a valid inner object.
-    malformed_boundaries: dict[int, _ContainerExtent] = {}
+    malformed_boundaries: dict[int, _EvidenceExtent] = {}
     fence_bodies = [(start, end) for _, start, end, _ in _top_level_fence_body_starts(text)]
     for token in _FENCE_TAIL_TOKEN_RE.finditer(text):
         if token.group("opener") is None:
@@ -695,6 +692,7 @@ def _scan_evidence_values(text: str) -> _EvidenceScan:
     # eligible only when they occupy a Markdown line. This avoids interpreting
     # ordinary prose tokens as terminal JSON while preserving explicit scalar
     # payload authority.
+    malformed_scalars: set[int] = set()
     offset = 0
     for line in text.splitlines(keepends=True):
         content = line.rstrip("\r\n")
@@ -715,6 +713,9 @@ def _scan_evidence_values(text: str) -> _EvidenceScan:
             else:
                 if not candidate[end_offset:].strip():
                     all_spans.append((start, start + end_offset, parsed))
+            if _is_malformed_scalar_lexeme(candidate):
+                malformed_boundaries[start] = _EvidenceExtent(start + len(candidate), True)
+                malformed_scalars.add(start)
         offset += len(line)
 
     # Filter values that are nested within another decoded span or a malformed
@@ -751,7 +752,8 @@ def _scan_evidence_values(text: str) -> _EvidenceScan:
         payload_attempts={
             position
             for position, extent in malformed_boundaries.items()
-            if not extent.closed
+            if position in malformed_scalars
+            or not extent.closed
             or position in nested_values
             or _looks_like_json_container(text, position, limit=extent.end)
             or _has_structural_container_intent(text, position, extent.end)
@@ -867,7 +869,7 @@ def _recover_json_value(
         # earlier valid value, including an otherwise valid evidence object.
         last_value_end = max(end for _, end, _ in top_level_values)
         for ch_pos in sorted(scan.malformed):
-            if ch_pos < last_value_end or not _is_terminal_malformed_container(
+            if ch_pos < last_value_end or not _is_terminal_malformed_payload(
                 recovery_text, ch_pos, scan
             ):
                 continue
