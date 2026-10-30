@@ -8130,7 +8130,10 @@ class TestParallelACExecutor:
         assert evidence_event.data["typed_evidence_present"] is False
         assert evidence_event.data["typed_evidence_valid"] is False
         assert evidence_event.data["verifier_ran"] is False
-        assert "Evidence is not valid JSON" in evidence_event.data["typed_evidence_error"]
+        assert (
+            "no JSON object and no fenced evidence block"
+            in evidence_event.data["typed_evidence_error"]
+        )
 
     @pytest.mark.asyncio
     async def test_fat_harness_atomic_prompt_requests_json_evidence_without_task_complete(
@@ -9424,6 +9427,239 @@ class TestParallelACExecutor:
             "tests_passed",
         ]
         assert evidence_event.data["verifier_ran"] is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tag", ["json", ""])
+    @pytest.mark.parametrize(
+        "prose",
+        [
+            'The literal string "[1 2]" is documentation.',
+            "See `[true false]` for notation.",
+            'See [example "[true false]"] for details.',
+            "See [owner's report] for details.",
+            "[100% complete]",
+            "[1/2 complete]",
+            "[1! done]",
+            "See [1_000 items] for details.",
+            "[1_000 items]",
+            "[100 % complete]",
+            "[1 / 2 complete]",
+            "[50% complete, 2 pending]",
+            'See [example `"` then] for details.',
+            "See {example ``'`` then} for details.",
+        ],
+    )
+    @pytest.mark.parametrize(
+        "terminal_corruption",
+        [
+            "",
+            "\n[true false]",
+            "\n0x10",
+            "\nTrue",
+            "\nevidence: true false",
+            "\nEvidence: invalid payload",
+            "\nevidence:",
+            "\n1_000",
+            "\n[bogus\nTrue\n]",
+            "\n[bogus\n0x10\n]",
+            '\ntrailing note [undefined,\n{"files_touched":["nested.py"]}\n]',
+            '\ntrailing note [undefined, {"broken": ]\n{\n"files_touched":["nested.py"]\n}\n]',
+            '\ntrailing note [bogus\n{"files_touched":["nested.py"]}\n]',
+        ],
+    )
+    @pytest.mark.parametrize("has_later_record", [False, True])
+    async def test_quoted_prose_preserves_atomic_evidence_and_terminal_authority(
+        self, tmp_path, tag: str, prose: str, terminal_corruption: str, has_later_record: bool
+    ) -> None:
+        event_store, appended_events = _make_replaying_event_store()
+        data = {
+            "files_touched": ["ok.py"],
+            "commands_run": ["pytest tests/test_ok.py"],
+            "tests_passed": ["tests/test_ok.py::test_ok"],
+        }
+        first = {**data, "files_touched": ["stale.py"]} if has_later_record else data
+        later = "\n" + json.dumps(data) if has_later_record else ""
+        tail = terminal_corruption
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                f"```{tag}\n{json.dumps(first)}\n{prose}{later}{tail}\n```",
+                native_session_id="quoted-prose-evidence",
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+            task_cwd=str(tmp_path),
+        )
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement the feature",
+            session_id="quoted-prose-session",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is True
+        assert result.atomic_verifier_verdict is not None
+        assert result.atomic_verifier_verdict.status is VerifierStatus.UNAVAILABLE
+        event = next(e for e in appended_events if e.type == "execution.ac.typed_evidence.observed")
+        if terminal_corruption:
+            assert result.typed_evidence is None
+            assert result.typed_evidence_validation is None
+            assert result.typed_evidence_error
+            assert event.data["typed_evidence_present"] is False
+            assert event.data["typed_evidence_valid"] is False
+        else:
+            assert result.typed_evidence is not None
+            assert result.typed_evidence.data == data
+            assert result.typed_evidence_validation is not None
+            assert result.typed_evidence_validation.ok is True
+            assert result.typed_evidence_error is None
+            assert event.data["typed_evidence_present"] is True
+            assert event.data["typed_evidence_valid"] is True
+        assert event.data["typed_evidence_error"] == result.typed_evidence_error
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "tail",
+        [
+            "[undefined]",
+            "{undefined}",
+            "[NaN,]",
+            "[true false]",
+            "[1 2]",
+            '["a" "b"]',
+            "[null true false]",
+            "[1e 2]",
+            "[1. 2]",
+            "[1e+ 2]",
+            "[1 /*x*/ 2]",
+            "[true: false]",
+            "[+1 2]",
+            "[+1e 2]",
+            "[+1e+ 2]",
+            "[0x10]",
+            "[0o10]",
+            "[0b10]",
+            "[1_000]",
+            "[.5]",
+            "[1j]",
+            "[True]",
+            "[False]",
+            "[None]",
+            "[true undefined]",
+            "[1..2]",
+            "[+1..2]",
+            "[0x10 0x20]",
+            "[0x10 0x20 0x30]",
+            "[True False]",
+            '[0x10 "with space" "next"]',
+            '[0x10 {"x":1}{"y":2}]',
+            "[false word]",
+            "[null garbage]",
+            "[{}{}]",
+            "[[] []]",
+            "[broken,]",
+            "[broken,",
+            "[one, two,]",
+            "[1e]",
+        ],
+    )
+    @pytest.mark.parametrize("tag", ["json", ""])
+    @pytest.mark.parametrize("separator", [" ", "\n", "\n\n    ", "\n\n\t"])
+    async def test_terminal_malformed_fence_does_not_publish_stale_evidence(
+        self, tmp_path, tail: str, tag: str, separator: str
+    ) -> None:
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                f'```{tag}\n{{"files_touched":["stale.py"],'
+                f'"commands_run":[],"tests_passed":[]}}{separator}{tail}\n```',
+                native_session_id="terminal-malformed-evidence",
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+            task_cwd=str(tmp_path),
+        )
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement the feature",
+            session_id="terminal-evidence-session",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+        assert result.success is True
+        assert result.typed_evidence is None
+        assert result.typed_evidence_validation is None
+        assert result.typed_evidence_error
+        assert result.atomic_verifier_verdict is not None
+        assert result.atomic_verifier_verdict.status is VerifierStatus.UNAVAILABLE
+        event = next(e for e in appended_events if e.type == "execution.ac.typed_evidence.observed")
+        assert event.data["typed_evidence_present"] is False
+        assert event.data["typed_evidence_valid"] is False
+        assert event.data["typed_evidence_error"] == result.typed_evidence_error
+        assert event.data["verifier_status"] == VerifierStatus.UNAVAILABLE.value
+        assert event.data["enforced"] is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tail", ["[undefined, 1]", '{undefined, "x": 1}'])
+    @pytest.mark.parametrize("tag", ["json", ""])
+    async def test_multicomponent_terminal_fence_does_not_publish_stale_evidence(
+        self, tmp_path, tail: str, tag: str
+    ) -> None:
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                f'```{tag}\n{{"files_touched":["stale.py"],'
+                f'"commands_run":[],"tests_passed":[]}}\n{tail}\n```',
+                native_session_id="multicomponent-terminal-malformed-evidence",
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+            task_cwd=str(tmp_path),
+        )
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement the feature",
+            session_id="multicomponent-terminal-evidence-session",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is True
+        assert result.typed_evidence is None
+        assert result.typed_evidence_validation is None
+        assert result.typed_evidence_error
+        assert result.atomic_verifier_verdict is not None
+        assert result.atomic_verifier_verdict.status is VerifierStatus.UNAVAILABLE
+        event = next(e for e in appended_events if e.type == "execution.ac.typed_evidence.observed")
+        assert event.data["typed_evidence_present"] is False
+        assert event.data["typed_evidence_valid"] is False
+        assert event.data["typed_evidence_error"] == result.typed_evidence_error
+        assert event.data["verifier_status"] == VerifierStatus.UNAVAILABLE.value
+        assert event.data["enforced"] is False
 
     @pytest.mark.asyncio
     async def test_contract_ac_with_artifacts_keeps_transcript_obligations(
