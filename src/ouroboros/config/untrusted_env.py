@@ -172,6 +172,9 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # Claude Code resolves settings.json (hooks, permission mode, MCP
         # servers) from this root; same class as CODEX_HOME.
         "CLAUDE_CONFIG_DIR",
+        # Megacode harness config root, inherited by both runtime workers
+        # and LLM completions. Only trusted sources may select this config.
+        "HARNESS_HOME",
         # Platform home selectors also choose Ouroboros' trusted config root.
         # A project .env must not turn a repository directory into ~/.ouroboros.
         "HOME",
