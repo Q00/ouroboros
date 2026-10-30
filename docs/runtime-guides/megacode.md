@@ -30,7 +30,12 @@ harness            # then type: ooo interview build me a small CLI
 
 Setup only writes inside the harness config folder (`harness paths` →
 `CONFIG`); `~/.ouroboros/config.yaml` is unchanged, so other hosts keep their
-runtime. To use the backend from the Ouroboros CLI as well, select it per run:
+runtime. Setup refuses incomplete or ambiguous native CONFIG displays before
+writing anything. Harness 0.23 displays control characters as escapes that can
+also occur literally in pathnames (for example, `\x09` and `\r`), so setup
+cannot safely choose a directory from those displays. Spaces, emoji, and Unicode
+line/paragraph separators remain supported. To use the backend from the Ouroboros
+CLI as well, select it per run:
 
 ```bash
 ouroboros run workflow seed.yaml --runtime megacode

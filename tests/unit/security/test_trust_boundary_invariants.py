@@ -524,7 +524,7 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         "src/ouroboros/cli/commands/megacode_setup.py",
         "resolve_harness_config_dir",
         "subprocess.run",
-        79,
+        80,
         20,
     ): "Operator-selected harness with literal paths argv, no shell or prompt; executable and loader controls are denied from project .env, bounded by 15s.",
     (

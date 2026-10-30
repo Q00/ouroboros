@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -88,20 +89,29 @@ def resolve_harness_config_dir(harness_path: str) -> Path | None:
         return None
     if completed.returncode != 0:
         return None
-    for line in completed.stdout.splitlines():
-        parts = line.split(maxsplit=1)
-        if len(parts) == 2 and parts[0] == "CONFIG":
-            # harness 0.23 reports the source after two spaces. Remove only
-            # that suffix: spaces and parentheses can belong to the path.
-            value = parts[1]
-            for source in ("default", "XDG_CONFIG_HOME", "HARNESS_HOME"):
-                suffix = f"  ({source})"
-                if value.endswith(suffix):
-                    value = value.removesuffix(suffix)
-                    break
-            path = Path(value)
-            return path if path.is_absolute() else None
-    return None
+    # Native records end with LF; Unicode LS/PS are valid pathname characters.
+    # Require a complete, unique CONFIG record with the native source suffix.
+    if not completed.stdout.endswith("\n"):
+        return None
+    records = [
+        line for line in completed.stdout.split("\n") if re.match(r"^CONFIG(?:[ \t]|$)", line)
+    ]
+    if len(records) != 1:
+        return None
+    match = re.fullmatch(
+        r"CONFIG[ \t]+(.+)  \((?:default|XDG_CONFIG_HOME|HARNESS_HOME)\)", records[0]
+    )
+    if match is None:
+        return None
+    value = match[1]
+    # 0.23's display is not reversible: TAB and literal backslash-x09
+    # print identically (CR uses backslash-r). Never decode or guess a root.
+    if re.search(r"\\(?:x[0-9a-fA-F]{2}|r)", value) or any(
+        ord(char) < 32 or ord(char) == 127 for char in value
+    ):
+        return None
+    path = Path(value)
+    return path if path.is_absolute() else None
 
 
 def _toml_string(value: str) -> str:
@@ -271,7 +281,11 @@ def setup_megacode(
 
     config_dir = resolve_harness_config_dir(harness_path)
     if config_dir is None:
-        print_error(f"Could not read the harness config folder from `{harness_path} paths`.")
+        print_error(
+            f"Could not read an unambiguous, complete CONFIG folder from `{harness_path} paths`; "
+            "setup was not applied. Native display escapes (including literal escape-like "
+            "pathnames) cannot safely identify the destination."
+        )
         return False
     for relative in ("config.toml", "AGENTS.md", "ouroboros", "ouroboros/skills"):
         destination = config_dir / relative

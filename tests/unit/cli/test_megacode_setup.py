@@ -143,7 +143,9 @@ def test_select_runtime_requires_the_harness_cli() -> None:
 def test_paths_preserves_spaces_and_uses_only_absolute_config(tmp_path: Path) -> None:
     harness = tmp_path / "harness stub"
     target = tmp_path / "config with spaces"
-    harness.write_text(f"#!{sys.executable}\nprint({str('CONFIG ' + str(target))!r})\n")
+    harness.write_text(
+        f"#!{sys.executable}\nprint({str('CONFIG ' + str(target) + '  (default)')!r})\n"
+    )
     harness.chmod(0o700)
     assert megacode_setup.resolve_harness_config_dir(str(harness)) == target
     harness.write_text(f'#!{sys.executable}\nprint("CONFIG relative/path  (XDG_CONFIG_HOME)")\n')
@@ -216,7 +218,9 @@ def test_setup_through_paths_cli_is_idempotent(tmp_path: Path, packaged_skills: 
     (target / "config.toml").write_text('mode = "manual"\n')
     (target / "AGENTS.md").write_text("# Mine\n")
     harness = tmp_path / "harness"
-    harness.write_text(f"#!{sys.executable}\nprint({('CONFIG ' + str(target))!r})\n")
+    harness.write_text(
+        f"#!{sys.executable}\nprint({('CONFIG ' + str(target) + '  (default)')!r})\n"
+    )
     harness.chmod(0o700)
     assert setup_megacode(str(harness), mcp_entry=_MCP_ENTRY, skills_dir=packaged_skills)
     first = {p.relative_to(target): p.read_bytes() for p in target.rglob("*") if p.is_file()}
@@ -251,3 +255,150 @@ def test_setup_refuses_symlinked_managed_destinations(
         if is_dir
         else outside.read_text() == "# keep\n"
     )
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "CONFIG /tmp/config",
+        "CONFIG /tmp/config\n",
+        "CONFIG /tmp/config  (default)",
+        "CONFIG /tmp/config  (unknown)\n",
+        "CONFIG /tmp/config  (default)\nCONFIG /tmp/other  (default)\n",
+        "CONFIG /tmp/pre\nfix  (default)\n",
+        "CONFIG /tmp/raw\tcontrol  (default)\n",
+    ],
+)
+def test_paths_refuses_incomplete_or_duplicate_config(
+    output: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        megacode_setup.subprocess,
+        "run",
+        lambda *args, **_kwargs: subprocess.CompletedProcess(args[0], 0, output, ""),
+    )
+    assert megacode_setup.resolve_harness_config_dir("harness") is None
+
+
+@pytest.fixture
+def native_harness() -> str:
+    import os
+
+    binary = os.environ.get("OUROBOROS_TEST_HARNESS")
+    if not binary:
+        pytest.skip("Set OUROBOROS_TEST_HARNESS to a local harness 0.23 binary")
+    return binary
+
+
+def _native_env(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+
+    for key in tuple(os.environ):
+        monkeypatch.delenv(key)
+    for key, value in {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(root / "home"),
+        "LANG": "C.UTF-8",
+        "NO_COLOR": "1",
+        **{f"XDG_{kind}_HOME": str(root / kind.lower()) for kind in ("DATA", "CACHE", "STATE")},
+        "XDG_RUNTIME_DIR": str(root / "runtime"),
+    }.items():
+        monkeypatch.setenv(key, value)
+    (root / "home").mkdir()
+
+
+def _filesystem_snapshot(root: Path) -> dict:
+    import os
+    import stat
+
+    return {
+        str(p.relative_to(root)): (
+            stat.S_IMODE(p.lstat().st_mode),
+            os.readlink(p) if p.is_symlink() else p.read_bytes() if p.is_file() else None,
+        )
+        for p in root.rglob("*")
+    }
+
+
+@pytest.mark.parametrize("authority", ["XDG_CONFIG_HOME", "HARNESS_HOME"])
+@pytest.mark.parametrize(
+    "component",
+    [f"control{chr(i)}part" for i in (*range(1, 32), 127)]
+    + [r"literal\x09part", r"literal\x0apart", r"literal\rpart", r"literal\x7fpart"],
+)
+def test_native_setup_refuses_ambiguous_display_without_filesystem_changes(
+    native_harness: str,
+    tmp_path: Path,
+    packaged_skills: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    authority: str,
+    component: str,
+) -> None:
+    _native_env(tmp_path, monkeypatch)
+    monkeypatch.setenv(authority, str(tmp_path / component))
+    target = tmp_path / component / ("config" if authority == "HARNESS_HOME" else "harness")
+    target.mkdir(parents=True)
+    (target / "config.toml").write_bytes(b'model = "unsupported-local-probe:never"\n')
+    (target / "AGENTS.md").write_bytes(b"# Keep routing\n")
+    (tmp_path / "sentinel").write_bytes(bytes(range(256)))
+    before = _filesystem_snapshot(tmp_path)
+    assert not setup_megacode(native_harness, mcp_entry=_MCP_ENTRY, skills_dir=packaged_skills)
+    assert _filesystem_snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("authority", ["default", "XDG_CONFIG_HOME", "HARNESS_HOME"])
+@pytest.mark.parametrize(
+    "component", ['space "quote" 😀  (default)', "unicode\u2028part", "unicode\u2029part"]
+)
+def test_native_setup_exact_directory_and_modes(
+    native_harness: str,
+    tmp_path: Path,
+    packaged_skills: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    authority: str,
+    component: str,
+) -> None:
+    _native_env(tmp_path, monkeypatch)
+    if authority == "default":
+        monkeypatch.setenv("HOME", str(tmp_path / component))
+        target = tmp_path / component / ".config/harness"
+    else:
+        monkeypatch.setenv(authority, str(tmp_path / component))
+        if authority == "HARNESS_HOME":
+            monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "ignored"))
+        target = tmp_path / component / ("config" if authority == "HARNESS_HOME" else "harness")
+    assert megacode_setup.resolve_harness_config_dir(native_harness) == target
+    target.mkdir(parents=True)
+    (target / "config.toml").write_text('model = "unsupported-local-probe:never"\n')
+    (target / "AGENTS.md").write_text("# User routing\n")
+    entry = {"command": "/usr/bin/false", "args": []}
+    assert setup_megacode(native_harness, mcp_entry=entry, skills_dir=packaged_skills)
+    before = _filesystem_snapshot(target)
+    assert setup_megacode(native_harness, mcp_entry=entry, skills_dir=packaged_skills)
+    assert _filesystem_snapshot(target) == before
+    config = tomllib.loads((target / "config.toml").read_text())
+    assert config["skills"]["extra_roots"] == [str(target / "ouroboros/skills")]
+    assert (target / "AGENTS.md").read_text().startswith("# User routing\n")
+    assert not (tmp_path / "unicode").exists()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    for mode in ("ouroboros-worker", "ouroboros-llm"):
+        result = subprocess.run(
+            [
+                native_harness,
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--mode",
+                mode,
+                "--model",
+                "unsupported-local-probe:never",
+            ],
+            input="Local invalid-provider check only.",
+            capture_output=True,
+            text=True,
+            cwd=workspace,
+            timeout=20,
+        )
+        assert result.returncode == 1, result.stderr
+        assert 'no provider named "unsupported-local-probe"' in result.stderr
