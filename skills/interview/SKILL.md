@@ -49,6 +49,34 @@ Ouroboros tools may be deferred, and a schema loaded on one turn can unload by t
 
 If `ouroboros_interview` is callable, use Path A. Use Path B only when it is genuinely absent (no Ouroboros MCP server).
 
+### Interview language calibration
+
+Before asking or relaying the first question, look in the current conversation
+for the most recent `Interview calibration` produced by `ooo idk`. If present,
+apply it to all user-facing interview prose:
+
+- **Foundational**: use plain language, define necessary terms before using
+  them, and add one neutral concrete example when it helps.
+- **Working**: use standard terminology and briefly define only new or
+  overloaded terms; frame questions around practical trade-offs.
+- **Fluent**: use precise domain terminology and concise trade-off language.
+
+Use one overall explanation level plus explicitly unknown terms. Do not infer
+low general ability from an unknown English term, typo, or terse answer. Adapt
+vocabulary, sentence structure, context, and example depth only; preserve the
+original question's decision, constraints, acceptance
+meaning, and all interview gates.
+If the previous `ooo idk` or `ooo interview` response included
+`meta.interview_calibration`, pass it to the next `ouroboros_interview` MCP call
+as the `interview_calibration` argument.
+
+If the user says they do not know a word or invokes `ooo idk` while a question
+is pending, do not forward that statement to MCP as the answer. Explain the term
+at the calibrated level, update the provisional calibration when warranted,
+rephrase the same question without steering the decision, and wait for the
+user's actual answer. The active calibration lives only in the current
+conversation unless the user supplies it again.
+
 ## Path A: MCP Mode
 
 MCP generates the questions, keeps state, and scores ambiguity; it cannot read code, browse, or call tools. You (the main session) answer what code or research can answer and route to the user only what needs human judgment: goals, acceptance criteria, business logic, preferences. You never decide for the user; auto-confirm is for facts only.

@@ -1168,19 +1168,17 @@ def build_interview_subagent(
     transcript: str = "",
     turn_context: Any | None = None,
     adapter_question: str | None = None,
+    language_calibration: Any | None = None,
 ) -> SubagentPayload:
-    """Build subagent payload for Socratic interview.
-
-    Supports start (with initial_context), answer (with user answer),
-    and resume (session_id only) actions.
-
-    Args:
-        transcript: Full conversation history (Q&A pairs) for context
-            continuity across subagent invocations.
-    """
+    """Build a start, answer, or resume subagent payload for Socratic interview."""
     from ouroboros.agents.loader import load_agent_prompt
 
-    system_prompt = bounded_system_prompt(load_agent_prompt("socratic-interviewer"))
+    system_prompt = load_agent_prompt("socratic-interviewer")
+    if language_calibration is not None:
+        prompt_guidance = getattr(language_calibration, "prompt_guidance", None)
+        if callable(prompt_guidance):
+            system_prompt = f"{system_prompt}\n\n{prompt_guidance()}"
+    system_prompt = bounded_system_prompt(system_prompt)
     seed_closer_summary = _load_seed_closer_summary()
     plugin_question_advisory = """
 ## Question-first Advisory Fanout
