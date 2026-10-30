@@ -12,6 +12,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from ouroboros.core.filesystem_capability import nofollow_directory_capabilities_available
+from ouroboros.core.seed import AcceptanceCriterionSpec
 from ouroboros.orchestrator import verify_command_runner
 from ouroboros.orchestrator.verify_command_runner import (
     _run_process,
@@ -20,6 +22,7 @@ from ouroboros.orchestrator.verify_command_runner import (
     _WindowsJob,
     run_with_shell,
 )
+from ouroboros.orchestrator.verify_cwd import bind_verify_command_cwd
 from ouroboros.orchestrator.verify_shell import resolve_verify_shell
 
 
@@ -105,6 +108,120 @@ async def test_run_with_shell_reports_start_error(tmp_path: Path) -> None:
 
     assert run.start_error is not None
     assert run.timed_out is False
+
+
+@pytest.mark.skipif(
+    not nofollow_directory_capabilities_available(),
+    reason="requires POSIX no-follow directory capabilities",
+)
+@pytest.mark.parametrize("cwd_source", ["explicit", "inferred"])
+@pytest.mark.asyncio
+async def test_run_with_shell_fails_closed_when_bound_cwd_leaf_is_replaced(
+    tmp_path: Path,
+    cwd_source: str,
+) -> None:
+    route = _route_or_skip()
+    workspace = tmp_path / "workspace"
+    app = workspace / "app"
+    replacement = workspace / "app-replaced"
+    outside = tmp_path / "outside"
+    app.mkdir(parents=True)
+    outside.mkdir()
+    (app / "package.json").write_text("{}", encoding="utf-8")
+    if cwd_source == "explicit":
+        spec = AcceptanceCriterionSpec(
+            description="ac",
+            verify_command="printf owned > marker.txt",
+            verify_cwd="app",
+        )
+    else:
+        spec = AcceptanceCriterionSpec(description="ac", verify_command="npm test")
+    bound_cwd = bind_verify_command_cwd(str(workspace), spec)
+    assert bound_cwd.error is None
+    assert bound_cwd.capability is not None
+    app.rename(replacement)
+    app.symlink_to(outside, target_is_directory=True)
+    try:
+        run = await run_with_shell(
+            route.argv("printf owned > marker.txt"),
+            cwd=bound_cwd.cwd,
+            env=dict(os.environ),
+            timeout_seconds=30,
+            cwd_capability=bound_cwd.capability,
+        )
+    finally:
+        bound_cwd.close()
+
+    assert run.start_error == "verify_command cwd binding changed before launch"
+    assert not (outside / "marker.txt").exists()
+    assert not (app / "marker.txt").exists()
+
+
+@pytest.mark.skipif(
+    not nofollow_directory_capabilities_available(),
+    reason="requires POSIX no-follow directory capabilities",
+)
+def test_bind_verify_command_cwd_rejects_symlinked_parent_component(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    real_parent = workspace / "real-parent"
+    real_app = real_parent / "app"
+    link_parent = workspace / "link-parent"
+    real_app.mkdir(parents=True)
+    link_parent.symlink_to(real_parent, target_is_directory=True)
+    spec = AcceptanceCriterionSpec(
+        description="ac",
+        verify_command="printf owned > marker.txt",
+        verify_cwd="link-parent/app",
+    )
+
+    bound_cwd = bind_verify_command_cwd(str(workspace), spec)
+
+    assert bound_cwd.error is not None
+    assert bound_cwd.capability is None
+
+
+@pytest.mark.skipif(
+    not nofollow_directory_capabilities_available(),
+    reason="requires POSIX no-follow directory capabilities",
+)
+@pytest.mark.asyncio
+async def test_run_with_shell_fails_closed_when_bound_cwd_binding_changes_during_run(
+    tmp_path: Path,
+) -> None:
+    route = _route_or_skip()
+    workspace = tmp_path / "workspace"
+    app = workspace / "app"
+    replacement = workspace / "app-replaced"
+    outside = tmp_path / "outside"
+    app.mkdir(parents=True)
+    outside.mkdir()
+    spec = AcceptanceCriterionSpec(
+        description="ac",
+        verify_command="printf owned > marker.txt",
+        verify_cwd="app",
+    )
+    bound_cwd = bind_verify_command_cwd(str(workspace), spec)
+    assert bound_cwd.error is None
+    assert bound_cwd.capability is not None
+    command = (
+        "mv ../app ../app-replaced && "
+        f"ln -s {shlex.quote(str(outside))} ../app && "
+        "printf owned > marker.txt"
+    )
+    try:
+        run = await run_with_shell(
+            route.argv(command),
+            cwd=bound_cwd.cwd,
+            env=dict(os.environ),
+            timeout_seconds=30,
+            cwd_capability=bound_cwd.capability,
+        )
+    finally:
+        bound_cwd.close()
+
+    assert run.start_error == "verify_command cwd binding changed during run"
+    assert (replacement / "marker.txt").read_text(encoding="utf-8") == "owned"
+    assert not (outside / "marker.txt").exists()
 
 
 def test_windows_spawn_uses_process_group(monkeypatch: pytest.MonkeyPatch) -> None:
