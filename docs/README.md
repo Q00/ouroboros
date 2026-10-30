@@ -96,19 +96,19 @@ for current AgentOS sequencing.
 ### The Six Phases
 
 1. **Big Bang (Phase 0)** - Socratic and ontological questioning to crystallize requirements into a Seed (Ambiguity <= 0.2)
-2. **PAL Router (Phase 1)** - Progressive Adaptive LLM selection (Frugal -> Standard -> Frontier)
-3. **Double Diamond (Phase 2)** - Discover, Define, Design, Deliver with recursive decomposition
+2. **PAL Router (Phase 1)** - Progressive Adaptive LLM selection (Frugal -> Standard -> Frontier), escalating on retry
+3. **Execution (Phase 2)** - Dependency-staged AC fan-out to agent runtimes, splitting an AC only when it spans independently verifiable units
 4. **Resilience (Phase 3)** - Stagnation detection and lateral thinking via persona rotation
 5. **Evaluation (Phase 4)** - Three-stage verification (Mechanical, Semantic, Consensus)
 6. **Secondary Loop (Phase 5)** - TODO registry and batch processing
 
 ### Economic Model
 
-| Tier | Cost | When |
+| Tier | Cost | When (shipped defaults) |
 |:----:|:----:|------|
-| FRUGAL | 1x | complexity < 0.4 |
-| STANDARD | 10x | complexity < 0.7 |
-| FRONTIER | 30x | critical decisions |
+| FRUGAL | 1x | Trusted decomposed children, when child lowering is enabled |
+| STANDARD | 10x | Default for top-level ACs |
+| FRONTIER | 30x | Reached by escalation after failures |
 
 ### Core Principles
 
