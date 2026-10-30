@@ -297,6 +297,43 @@ size-bounded, and both reject replay-unsafe names (``stdout``, ``stderr``,
 ``prompt``, ``api_key``, ``token`` and similar secret/raw-output names) so
 durable lifecycle history can be replayed without leaking raw payload material.
 
+### examples.readings.stated / examples.candidate.started / completed / skipped
+
+Emitted by the example-questions candidate step
+(`ouroboros.examples.candidates`, opt-in through `examples.enabled`, off by
+default). Aggregate type `auto_session`; aggregate id the step's session id.
+Factories: `ouroboros.events.examples`. No event carries a candidate patch, a
+prompt, or probe source.
+
+`examples.readings.stated`: the readings of the goal kept after the
+structural check (span contained in the goal, identical text merged).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `readings` | `object[]` | Each `{reading_id, span, text}`; `reading_id` is the sha256 of the reading text's canonical bytes |
+| `dropped` | `int` | Reply items that failed the check, repeated an earlier reading, or exceeded k |
+| `call_failed` | `string?` | Why the readings call kept nothing (`reply_not_json`, `call_failed:<error>`, `call_timed_out`, ...); null when the reply parsed |
+
+`examples.candidate.started`: one candidate runtime was built in its own
+worktree and is about to be dispatched (a `step_deadline` skip follows when the
+step's time ran out before the dispatch). `examples.candidate.completed`: it finished with a patch.
+`examples.candidate.skipped`: it was not used, or (with `candidate_id` null)
+a whole pair was left out before planning.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `candidate_id` | `string?` | Opaque id (`cand-1` ...); null on a pair-level skip |
+| `backend` | `string` | Runtime backend of the pair |
+| `model` | `string?` | Model of the pair; null means the runtime's default |
+| `reading_id` | `string?` | The reading the candidate was written under; null when none was stated |
+| `wall_clock_seconds` | `number?` | Runtime wall-clock time (completed; skipped when it ran) |
+| `cost_usd` | `number?` | The runtime's reported `total_cost_usd`; null when it reported none |
+| `patch_digest` | `string` | completed only: sha256 of the worktree diff (`git diff --binary HEAD` plus untracked files) |
+| `probe_count` | `int` | completed only: probes kept (at most 6) |
+| `probes_refused` | `int` | completed only: entries in the probe directory not kept |
+| `reason` | `string` | skipped only: `runtime_unavailable`, `preflight_failed`, `worktree_failed`, `timed_out`, `step_deadline`, `runtime_failed`, `patch_export_failed` |
+| `detail` | `string?` | skipped only: the exception class name, the runtime's preflight reason, or `unsuccessful` for a result that reported failure; null when there is none |
+
 ## Adding new event types
 
 When introducing a new event type:
