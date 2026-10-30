@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+import re
 import tomllib
 
 import pytest
@@ -163,8 +164,8 @@ def test_mcp_claude_cli_and_sdk_profiles_have_explicit_contracts():
 
     assert optional_deps["mcp"] == ["mcp==2.2.0"]
     sdk_pins = [
-        "claude-agent-sdk==0.2.165",
-        "anthropic==1.13.0",
+        "claude-agent-sdk==0.2.168",
+        "anthropic==1.15.0",
         # SDK 0.2.144 dropped its own MCP 1.x ceiling; the profile contract
         # keeps the 1.x graph through this explicit pin.
         "mcp==1.28.1",
@@ -525,3 +526,16 @@ def test_shipped_mcp_launcher_requests_only_the_servers_own_extra() -> None:
         "['mcp']. Adding 'claude' here reintroduces the unsatisfiable "
         "mcp==2.0.0 vs claude-agent-sdk(mcp<2.0.0) install from #1839."
     )
+
+
+def test_claude_sdk_ci_verifies_declared_pins() -> None:
+    """The isolated CI job must accept the versions shipped by the SDK extra."""
+    root = Path(__file__).resolve().parents[2]
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text())
+    workflow = (root / ".github/workflows/test.yml").read_text()
+    sdk_job = workflow.split("  claude-sdk:\n", 1)[1].split("\n  test:\n", 1)[0]
+    asserted_versions = dict(re.findall(r'assert version\("([^"\n]+)"\) == "([^"\n]+)"', sdk_job))
+    for pin in pyproject["project"]["optional-dependencies"]["claude-sdk"]:
+        name, version = pin.split("==")
+        if name != "mcp":
+            assert asserted_versions.get(name) == version, pin
