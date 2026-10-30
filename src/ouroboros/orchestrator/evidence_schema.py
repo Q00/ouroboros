@@ -527,7 +527,9 @@ def _is_malformed_scalar_lexeme(value: str) -> bool:
     if _complete_json_value(candidate):
         return False
     if _NUMERIC_LOOKING_LEXEME_RE.fullmatch(candidate) and (
-        "e" in candidate.lower() or _NUMERIC_MANTISSA_LEXEME_RE.fullmatch(candidate)
+        "e" in candidate.lower()
+        or ".." in candidate
+        or _NUMERIC_MANTISSA_LEXEME_RE.fullmatch(candidate)
     ):
         return True
     try:
@@ -616,12 +618,21 @@ def _has_structural_container_intent(text: str, opener_pos: int, limit: int) -> 
             continue
 
         lexemes = stripped.split(maxsplit=1)
+        following = lexemes[1].split(maxsplit=1)[0] if len(lexemes) == 2 else ""
+        following_payload = bool(following) and (
+            _complete_json_value(following)
+            or _is_malformed_scalar_lexeme(following)
+            or following.startswith(("{", "[", '"', ":", "/*", "//"))
+        )
         separated_payload = len(lexemes) == 2 and (
             (
                 _is_evidence_container_opener(text, opener_pos)
                 and lexemes[0] in ("true", "false", "null")
             )
-            or (_is_malformed_scalar_lexeme(lexemes[0]) and _complete_json_value(lexemes[1]))
+            or (
+                (_complete_json_value(lexemes[0]) or _is_malformed_scalar_lexeme(lexemes[0]))
+                and following_payload
+            )
         )
         if _is_malformed_scalar_lexeme(stripped) or separated_payload:
             component_signal = True
