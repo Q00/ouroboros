@@ -588,6 +588,9 @@ class TestExtractEvidence:
             "[one, two]",
             "[1word, two]",
             "{broken,}",
+            "[100% complete]",
+            "[1/2 complete]",
+            "[1! done]",
         ],
     )
     def test_brackets_in_fenced_trailing_prose_do_not_displace_evidence(

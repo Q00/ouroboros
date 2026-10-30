@@ -553,7 +553,7 @@ def _has_nonstructural_json_prefix_suffix(value: str) -> bool:
     first_lexeme = value.split(maxsplit=1)[0]
     if not suffix or _is_malformed_numeric_lexeme(first_lexeme):
         return False
-    if not (suffix[0].isalnum() or suffix[0] in "_.+-"):
+    if suffix.startswith((":", "/*", "//")):
         return False
     try:
         _, suffix_end = _DECODER.raw_decode(suffix)
