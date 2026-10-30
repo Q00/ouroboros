@@ -71,10 +71,12 @@ Format: single-line JSON array of strings, or `[]` when there is none.
 ### 3. ACCEPTANCE_CRITERIA
 Specific, measurable criteria for success.
 Format: exactly one non-empty, single-line JSON array. Every object contains
-exactly `description`, `verify`, `artifacts`, and `expect`. `artifacts` is a JSON
-array of paths or the string `NONE`; the other contract fields are strings.
-Example: `[{"description":"Tasks can be created","verify":"python -m pytest tests/test_tasks.py -q","artifacts":"NONE","expect":"NONE"}]`
-Multi-artifact example: `[{"description":"Build outputs exist","verify":"NONE","artifacts":["dist/app","docs/User Guide.md"],"expect":"NONE"}]`
+exactly `description`, `verify`, `cwd`, `artifacts`, and `expect`.
+`artifacts` is a JSON array of paths or the string `NONE`; the other contract fields are strings.
+`cwd` is a portable workspace-relative directory or `NONE` for default resolution.
+Only npm/npx/yarn/pnpm infer a sole nested Node project; other commands use the workspace root.
+Example: `[{"description":"Tasks can be created","verify":"python -m pytest tests/test_tasks.py -q","cwd":"NONE","artifacts":"NONE","expect":"NONE"}]`
+Multi-artifact example: `[{"description":"Build outputs exist","verify":"NONE","cwd":"NONE","artifacts":["dist/app","docs/User Guide.md"],"expect":"NONE"}]`
 
 `verify` / `verify_command` semantics:
 - Use exactly one single-line shell command.
@@ -148,7 +150,7 @@ Provide your analysis in this exact structure. In particular,
 GOAL: <clear goal statement>
 CONSTRAINTS: ["<constraint 1>", "<constraint 2>", ...]
 ASSUMPTIONS: ["<assumption 1>", ...]
-ACCEPTANCE_CRITERIA: [{"description": "Observable outcome", "verify": "<single-line command that decides this criterion, or NONE>", "artifacts": ["path/to/artifact"], "expect": "NONE"}]
+ACCEPTANCE_CRITERIA: [{"description": "Observable outcome", "verify": "<single-line command that decides this criterion, or NONE>", "cwd": "NONE", "artifacts": ["path/to/artifact"], "expect": "NONE"}]
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
 ONTOLOGY_FIELDS: [{"name": "<name>", "type": "<string|number|boolean|array|object>", "description": "<description>"}, ...]
@@ -169,5 +171,5 @@ For brownfield projects, ensure context references and patterns are extracted fr
 Few-shot examples:
 
 ```
-ACCEPTANCE_CRITERIA: [{"description":"Task create/list flows pass automated verification","verify":"python -m pytest tests/test_tasks.py -q && echo OK","artifacts":"NONE","expect":"OK"},{"description":"Greeting import check prints OK","verify":"python -c \"from hello import greet; assert greet('Alice') == 'Hello, Alice'; print('OK')\"","artifacts":["hello.py"],"expect":"OK"},{"description":"README documents the CLI usage examples","verify":"NONE","artifacts":["README.md"],"expect":"NONE"}]
+ACCEPTANCE_CRITERIA: [{"description":"Task create/list flows pass automated verification","verify":"python -m pytest tests/test_tasks.py -q && echo OK","cwd": "NONE", "artifacts":"NONE","expect":"OK"},{"description":"Greeting import check prints OK","verify":"python -c \"from hello import greet; assert greet('Alice') == 'Hello, Alice'; print('OK')\"","cwd": "NONE", "artifacts":["hello.py"],"expect":"OK"},{"description":"README documents the CLI usage examples","verify":"NONE","cwd": "NONE", "artifacts":["README.md"],"expect":"NONE"}]
 ```
