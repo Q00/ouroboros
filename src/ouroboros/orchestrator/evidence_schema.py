@@ -586,6 +586,28 @@ def _complete_json_member(member: str) -> bool:
     return not member[value_start + value_end :].strip()
 
 
+def _has_scalar_sequence_intent(value: str) -> bool:
+    """Recognize separated payload atoms using the same rule in every context."""
+    value = value.strip()
+    parts = value.split(maxsplit=1)
+    if len(parts) != 2:
+        return False
+    first, remainder = parts
+    try:
+        _, end = _DECODER.raw_decode(value)
+    except json.JSONDecodeError:
+        pass
+    else:
+        if end < len(value) and value[end].isspace():
+            first, remainder = value[:end], value[end:].lstrip()
+    following = remainder.split(maxsplit=1)[0]
+    return (_complete_json_value(first) or _is_malformed_scalar_lexeme(first)) and (
+        _complete_json_value(following)
+        or _is_malformed_scalar_lexeme(following)
+        or following.startswith(("{", "[", '"', ":", "/*", "//"))
+    )
+
+
 def _has_structural_container_intent(text: str, opener_pos: int, limit: int) -> bool:
     """Recognize JSON-shaped attempts without new token names.
 
@@ -623,21 +645,10 @@ def _has_structural_container_intent(text: str, opener_pos: int, limit: int) -> 
             continue
 
         lexemes = stripped.split(maxsplit=1)
-        following = lexemes[1].split(maxsplit=1)[0] if len(lexemes) == 2 else ""
-        following_payload = bool(following) and (
-            _complete_json_value(following)
-            or _is_malformed_scalar_lexeme(following)
-            or following.startswith(("{", "[", '"', ":", "/*", "//"))
-        )
-        separated_payload = len(lexemes) == 2 and (
-            (
-                _is_evidence_container_opener(text, opener_pos)
-                and lexemes[0] in ("true", "false", "null")
-            )
-            or (
-                (_complete_json_value(lexemes[0]) or _is_malformed_scalar_lexeme(lexemes[0]))
-                and following_payload
-            )
+        separated_payload = _has_scalar_sequence_intent(stripped) or (
+            len(lexemes) == 2
+            and _is_evidence_container_opener(text, opener_pos)
+            and lexemes[0] in ("true", "false", "null")
         )
         if _is_malformed_scalar_lexeme(stripped) or separated_payload:
             component_signal = True
@@ -734,7 +745,9 @@ def _scan_evidence_values(text: str) -> _EvidenceScan:
                     all_spans.append((start, start + end_offset, parsed))
                     complete_scalar = True
             if not complete_scalar and (
-                inline_value_start is not None or _is_malformed_scalar_lexeme(candidate)
+                inline_value_start is not None
+                or _is_malformed_scalar_lexeme(candidate)
+                or _has_scalar_sequence_intent(candidate)
             ):
                 malformed_boundaries[start] = _EvidenceExtent(start + len(candidate), True)
                 malformed_scalars.add(start)

@@ -62,6 +62,7 @@ class TestExtractEvidence:
         payloads = [f"[{value}]" for value in sorted(numeric)]
         payloads += [f"[{value}]" for value in ("0x", "0xGG", "0o9", "0b2", "0x1.fp2")]
         payloads += [f"[{first} {second}]" for first, second in product(atoms, repeat=2)]
+        payloads += [f"{first} {second}" for first, second in product(atoms, repeat=2)]
         failures = []
         for payload in payloads:
             body = f"{stale}\n{payload}"
