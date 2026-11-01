@@ -182,3 +182,14 @@ def test_replacing_publishes_the_new_checkout(tmp_path: Path) -> None:
 
     assert (destination / "new.py").read_text() == "new = True\n"
     assert not (destination / "old.py").exists()
+
+
+def test_a_copy_that_cannot_start_raises_the_original_error(tmp_path: Path) -> None:
+    # A missing source is deterministic: no retry, and the caller keeps the
+    # OSError subclass it has always seen (probe_runner reports its name).
+    destination = tmp_path / "copy"
+
+    with pytest.raises(FileNotFoundError):
+        copy_checkout(tmp_path / "missing", destination)
+
+    assert not destination.exists()

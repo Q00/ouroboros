@@ -139,7 +139,7 @@ COPY_ATTEMPTS = 3
 """How many times ``copy_checkout`` retries a copy that a live writer disturbed."""
 
 
-class CheckoutCopyError(RuntimeError):
+class CheckoutCopyError(OSError):
     """A checkout could not be copied consistently; nothing partial was published."""
 
 
@@ -167,9 +167,11 @@ def copy_checkout(
     transient lock file between the directory walk and the copy, which
     ``shutil.copytree`` reports as ``shutil.Error`` (#2808). The copy is built in
     a scratch sibling and moved into place only once it is complete, so a
-    partial tree is never published as a baseline. A copy that a live writer
-    keeps disturbing is retried ``attempts`` times and then raises
-    ``CheckoutCopyError`` instead of leaking ``shutil.Error``.
+    partial tree is never published as a baseline. Such a copy is retried
+    ``attempts`` times and then raises ``CheckoutCopyError`` instead of leaking
+    ``shutil.Error``. An ``OSError`` is not retried: it means the copy could not
+    start (a missing source, an unwritable parent), and it reaches the caller
+    with the type it always had.
 
     ``destination`` must not exist unless ``replace`` is set; even then it is
     replaced only after the new copy completed, so a failed copy leaves the
@@ -181,16 +183,19 @@ def copy_checkout(
         raise FileExistsError(destination)
     scratch = destination.with_name(f".{destination.name}.copying")
     _discard(scratch)
-    last: shutil.Error | OSError | None = None
+    last: shutil.Error | None = None
     for _ in range(attempts):
         try:
             shutil.copytree(
                 source, scratch, symlinks=True, ignore=shutil.ignore_patterns("__pycache__")
             )
-        except (shutil.Error, OSError) as exc:
+        except shutil.Error as exc:
             last = exc
             _discard(scratch)
             continue
+        except OSError:
+            _discard(scratch)
+            raise
         if destination.exists() or destination.is_symlink():
             _discard(destination)
         os.replace(scratch, destination)
