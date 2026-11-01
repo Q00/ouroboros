@@ -160,11 +160,16 @@ def _publish_over(scratch: Path, destination: Path) -> None:
     Deleting the published checkout first would make a failed promotion cost the
     baseline it was replacing. The old copy is renamed aside instead, put back if
     the promotion raises, and only then removed — so a failed promotion leaves the
-    previous checkout in place and no scratch tree behind.
+    previous checkout in place. Any publication rename that raises also discards the
+    scratch copy, so a failed promotion leaves no scratch tree behind either.
     """
     previous = destination.with_name(f".{destination.name}.previous")
     _discard(previous)
-    os.replace(destination, previous)
+    try:
+        os.replace(destination, previous)
+    except OSError:
+        _discard(scratch)
+        raise
     try:
         os.replace(scratch, destination)
     except OSError:

@@ -222,3 +222,31 @@ def test_a_failed_promotion_keeps_the_previous_checkout(
     assert (destination / "old.py").read_text() == "old = True\n", "the baseline survives"
     assert not (destination / "new.py").exists()
     assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == [], "no scratch left"
+
+
+def test_a_failed_rename_aside_leaves_no_scratch_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #2808 review round 3: the first publication rename can fail too; the completed
+    # scratch copy must not be left behind when it does.
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "new.py").write_text("new = True\n")
+    destination = tmp_path / "snapshot"
+    destination.mkdir()
+    (destination / "old.py").write_text("old = True\n")
+
+    real_replace = os.replace
+
+    def failing_first_rename(src: object, dst: object) -> None:
+        if Path(src) == destination:
+            raise OSError("rename aside failed")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(tree.os, "replace", failing_first_rename)
+
+    with pytest.raises(OSError, match="rename aside failed"):
+        copy_checkout(source, destination, replace=True)
+
+    assert (destination / "old.py").read_text() == "old = True\n", "the baseline survives"
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == [], "no scratch left"
