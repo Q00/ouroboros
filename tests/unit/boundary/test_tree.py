@@ -193,3 +193,32 @@ def test_a_copy_that_cannot_start_raises_the_original_error(tmp_path: Path) -> N
         copy_checkout(tmp_path / "missing", destination)
 
     assert not destination.exists()
+
+
+def test_a_failed_promotion_keeps_the_previous_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #2808 review round 2: the promotion that replaces a published snapshot must
+    # not delete it before the new copy is known to be in place.
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "new.py").write_text("new = True\n")
+    destination = tmp_path / "snapshot"
+    destination.mkdir()
+    (destination / "old.py").write_text("old = True\n")
+
+    real_replace = os.replace
+
+    def failing_promotion(src: object, dst: object) -> None:
+        if str(src).endswith(".copying") and Path(dst) == destination:
+            raise OSError("promotion failed")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(tree.os, "replace", failing_promotion)
+
+    with pytest.raises(OSError, match="promotion failed"):
+        copy_checkout(source, destination, replace=True)
+
+    assert (destination / "old.py").read_text() == "old = True\n", "the baseline survives"
+    assert not (destination / "new.py").exists()
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == [], "no scratch left"
