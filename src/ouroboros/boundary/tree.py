@@ -160,16 +160,12 @@ def _publish_over(scratch: Path, destination: Path) -> None:
     Deleting the published checkout first would make a failed promotion cost the
     baseline it was replacing. The old copy is renamed aside instead, put back if
     the promotion raises, and only then removed — so a failed promotion leaves the
-    previous checkout in place. Any publication rename that raises also discards the
-    scratch copy, so a failed promotion leaves no scratch tree behind either.
+    previous checkout in place. Discarding ``scratch`` is the caller's job, so every
+    publication failure is cleaned up in one place.
     """
     previous = destination.with_name(f".{destination.name}.previous")
     _discard(previous)
-    try:
-        os.replace(destination, previous)
-    except OSError:
-        _discard(scratch)
-        raise
+    os.replace(destination, previous)
     try:
         os.replace(scratch, destination)
     except OSError:
@@ -180,7 +176,6 @@ def _publish_over(scratch: Path, destination: Path) -> None:
                 f"could not promote {scratch} to {destination}; "
                 f"the previous checkout is still at {previous}"
             ) from restore
-        _discard(scratch)
         raise
     _discard(previous)
 
@@ -227,10 +222,14 @@ def copy_checkout(
         except OSError:
             _discard(scratch)
             raise
-        if destination.exists() or destination.is_symlink():
-            _publish_over(scratch, destination)
-        else:
-            os.replace(scratch, destination)
+        try:
+            if destination.exists() or destination.is_symlink():
+                _publish_over(scratch, destination)
+            else:
+                os.replace(scratch, destination)
+        except OSError:
+            _discard(scratch)
+            raise
         return
     raise CheckoutCopyError(
         f"could not copy the checkout {source} to {destination} in {attempts} attempts"

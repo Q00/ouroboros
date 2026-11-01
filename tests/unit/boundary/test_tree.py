@@ -250,3 +250,25 @@ def test_a_failed_rename_aside_leaves_no_scratch_tree(
 
     assert (destination / "old.py").read_text() == "old = True\n", "the baseline survives"
     assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == [], "no scratch left"
+
+
+def test_a_failed_first_publication_leaves_no_scratch_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #2808 review round 4: the same cleanup has to cover the path where there is no
+    # destination to replace yet.
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "code.py").write_text("x = 1\n")
+    destination = tmp_path / "snapshot"
+
+    def failing_replace(src: object, dst: object) -> None:
+        raise OSError("first publication failed")
+
+    monkeypatch.setattr(tree.os, "replace", failing_replace)
+
+    with pytest.raises(OSError, match="first publication failed"):
+        copy_checkout(source, destination)
+
+    assert not destination.exists()
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == [], "no scratch left"
