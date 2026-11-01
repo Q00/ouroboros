@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 import hashlib
+import os
 from pathlib import Path
 import shutil
 import stat
@@ -134,13 +135,66 @@ def added_paths(before: Mapping[str, str], after: Mapping[str, str]) -> tuple[st
     return tuple(sorted(set(after) - set(before)))
 
 
-def copy_checkout(source: Path, destination: Path) -> None:
-    """Copy a checkout, preserving symlinks, into a new ``destination``.
+COPY_ATTEMPTS = 3
+"""How many times ``copy_checkout`` retries a copy that a live writer disturbed."""
+
+
+class CheckoutCopyError(RuntimeError):
+    """A checkout could not be copied consistently; nothing partial was published."""
+
+
+def _discard(path: Path) -> None:
+    """Remove ``path`` whether it is a tree, a file or a link (a missing path is fine)."""
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path, ignore_errors=True)
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def copy_checkout(
+    source: Path, destination: Path, *, attempts: int = COPY_ATTEMPTS, replace: bool = False
+) -> None:
+    """Copy a checkout, preserving symlinks, into ``destination``.
 
     ``__pycache__`` is not copied: it is outside the protected digest, so a
     planted ``.pyc`` matching a source file's mtime and size could otherwise
     run in place of the reviewed source.
+
+    A checkout may be written to while it is copied: Git maintenance removes a
+    transient lock file between the directory walk and the copy, which
+    ``shutil.copytree`` reports as ``shutil.Error`` (#2808). The copy is built in
+    a scratch sibling and moved into place only once it is complete, so a
+    partial tree is never published as a baseline. A copy that a live writer
+    keeps disturbing is retried ``attempts`` times and then raises
+    ``CheckoutCopyError`` instead of leaking ``shutil.Error``.
+
+    ``destination`` must not exist unless ``replace`` is set; even then it is
+    replaced only after the new copy completed, so a failed copy leaves the
+    previous checkout in place.
     """
-    shutil.copytree(
-        source, destination, symlinks=True, ignore=shutil.ignore_patterns("__pycache__")
-    )
+    if attempts < 1:
+        raise ValueError("attempts must be at least 1")
+    if (destination.exists() or destination.is_symlink()) and not replace:
+        raise FileExistsError(destination)
+    scratch = destination.with_name(f".{destination.name}.copying")
+    _discard(scratch)
+    last: shutil.Error | OSError | None = None
+    for _ in range(attempts):
+        try:
+            shutil.copytree(
+                source, scratch, symlinks=True, ignore=shutil.ignore_patterns("__pycache__")
+            )
+        except (shutil.Error, OSError) as exc:
+            last = exc
+            _discard(scratch)
+            continue
+        if destination.exists() or destination.is_symlink():
+            _discard(destination)
+        os.replace(scratch, destination)
+        return
+    raise CheckoutCopyError(
+        f"could not copy the checkout {source} to {destination} in {attempts} attempts"
+    ) from last
