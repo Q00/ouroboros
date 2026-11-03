@@ -204,3 +204,12 @@ async def test_real_worker_isolates_sub_poll_parent_mutation(
     assert summary.call_count == 1
     assert summary.token_spend is None
     assert summary.complete is False
+
+
+def test_worker_accepts_reasoning_shape_and_rejects_sampling_controls() -> None:
+    config = CompletionConfig(model="openai/o4-mini")
+    kwargs = litellm_adapter.LiteLLMAdapter()._build_completion_kwargs([], config)
+    kwargs.update(api_key="test", api_base="https://provider.example/v1", max_retries=0)
+    assert worker._valid_completion_kwargs(kwargs, config)
+    assert not worker._valid_completion_kwargs({**kwargs, "temperature": 0.7}, config)
+    assert not worker._valid_completion_kwargs({**kwargs, "top_p": 1.0}, config)
