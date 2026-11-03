@@ -1180,7 +1180,7 @@ class LiteLLMAdapter:
             kwargs["max_retries"] = _PROOF_LITELLM_MAX_RETRIES
 
         # Anthropic models don't accept both temperature and top_p together
-        # Other providers (OpenAI, OpenRouter) support both
+        # Direct OpenAI reasoning routes may also reject sampling controls.
         model_lower = config.model.lower()
         claude_5_5 = is_claude_5_5(config.model)
         openrouter_5_5 = claude_5_5 and model_lower.startswith("openrouter/")

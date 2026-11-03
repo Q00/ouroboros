@@ -246,15 +246,17 @@ async def test_legacy_litellm_keeps_request_arguments(
 
 
 @pytest.mark.parametrize(
-    ("model", "top_p"),
+    ("model", "top_p", "temperature"),
     [
-        ("claude-opus-5", None),
-        ("claude-custom-proxy", None),
-        ("openrouter/anthropic/claude-opus-5", None),
-        ("openai/gpt-5.4", 0.8),
+        ("claude-opus-5", None, 0.2),
+        ("claude-custom-proxy", None, 0.2),
+        ("openrouter/anthropic/claude-opus-5", None, 0.2),
+        ("openai/gpt-5.4", None, None),
     ],
 )
-def test_other_models_keep_litellm_arguments(model: str, top_p: float | None) -> None:
+def test_other_models_keep_litellm_arguments(
+    model: str, top_p: float | None, temperature: float | None
+) -> None:
     pytest.importorskip("litellm")
     from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 
@@ -269,7 +271,11 @@ def test_other_models_keep_litellm_arguments(model: str, top_p: float | None) ->
         ),
     )
     assert request["model"] == model
-    assert request["temperature"] == 0.2
+    assert request.get("temperature") == temperature
+    if temperature is None:
+        assert "temperature" not in request
+    if top_p is None:
+        assert "top_p" not in request
     assert request.get("top_p") == top_p
     assert request["reasoning_effort"] == "high"
     assert request["response_format"] == {"type": "json_object"}
