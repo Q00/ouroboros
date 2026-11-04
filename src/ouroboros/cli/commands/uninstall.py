@@ -55,8 +55,8 @@ def _remove_claude_mcp(dry_run: bool) -> bool:
         return False
 
     try:
-        data = json.loads(mcp_path.read_text())
-    except (json.JSONDecodeError, OSError):
+        data = json.loads(mcp_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
         print_warning("~/.claude/mcp.json is malformed — skipping.")
         return False
     servers = data.get("mcpServers", {})
@@ -69,7 +69,7 @@ def _remove_claude_mcp(dry_run: bool) -> bool:
 
     del servers["ouroboros"]
     try:
-        mcp_path.write_text(json.dumps(data, indent=2) + "\n")
+        mcp_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     except OSError:
         print_warning("Could not write ~/.claude/mcp.json — skipping.")
         return False
@@ -94,8 +94,8 @@ def _remove_codex_mcp(dry_run: bool) -> bool:
 
     config_snapshot = _snapshot_path(codex_config)
     try:
-        raw = codex_config.read_text()
-    except OSError:
+        raw = codex_config.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
         print_warning("~/.codex/config.toml is unreadable — skipping.")
         return False
     try:
@@ -460,16 +460,16 @@ def uninstall(
     mcp_path = Path.home() / ".claude" / "mcp.json"
     if mcp_path.exists():
         try:
-            mcp_data = json.loads(mcp_path.read_text())
+            mcp_data = json.loads(mcp_path.read_text(encoding="utf-8"))
             if "ouroboros" in mcp_data.get("mcpServers", {}):
                 targets.append("MCP server registration (~/.claude/mcp.json)")
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             targets.append("MCP server registration (~/.claude/mcp.json — may be malformed)")
 
     codex_config = resolve_codex_home() / "config.toml"
     try:
         if codex_config.exists():
-            raw_codex_config = codex_config.read_text()
+            raw_codex_config = codex_config.read_text(encoding="utf-8")
             try:
                 parsed_codex_config = tomllib.loads(raw_codex_config)
             except tomllib.TOMLDecodeError:
@@ -487,7 +487,7 @@ def uninstall(
                     has_managed_comment=_has_managed_codex_mcp_comment(raw_codex_config),
                 ):
                     targets.append("Codex MCP config (~/.codex/config.toml)")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         targets.append("Codex MCP config (~/.codex/config.toml — may be unreadable)")
 
     opencode_config = _find_opencode_config()
