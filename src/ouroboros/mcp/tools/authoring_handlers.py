@@ -1361,10 +1361,12 @@ class GenerateSeedHandler:
             interview_state.requirement_distillation = distillation
             cache_save_result = await _plugin_save_state(state_dir, interview_state)
             if cache_save_result.is_err:
-                log.warning(
-                    "mcp.tool.generate_seed.persist_distillation_failed",
-                    session_id=session_id,
-                    error=str(cache_save_result.error),
+                return Result.err(
+                    MCPToolError(
+                        f"Failed to save interview state for {session_id}: "
+                        f"{cache_save_result.error}. Reload before generating a Seed.",
+                        tool_name="ouroboros_generate_seed",
+                    )
                 )
 
             if reference_aware:
@@ -1496,10 +1498,12 @@ class GenerateSeedHandler:
                 )
                 save_result = await interview_engine.save_state(state)
                 if save_result.is_err:
-                    log.warning(
-                        "mcp.tool.generate_seed.persist_ambiguity_failed",
-                        session_id=session_id,
-                        error=str(save_result.error),
+                    return Result.err(
+                        MCPToolError(
+                            f"Failed to save interview state for {session_id}: "
+                            f"{save_result.error}. Reload before generating a Seed.",
+                            tool_name="ouroboros_generate_seed",
+                        )
                     )
 
             # Use injected or create seed generator
@@ -1904,9 +1908,13 @@ class InterviewHandler:
         state = complete_result.value
         save_result = await engine.save_state(state)
         if save_result.is_err:
-            log.warning(
-                "mcp.tool.interview.save_failed_on_complete",
-                error=str(save_result.error),
+            log.warning("mcp.tool.interview.save_failed_on_complete", error=str(save_result.error))
+            return Result.err(
+                MCPToolError(
+                    f"Failed to save completion for session {session_id}: "
+                    f"{save_result.error}. Resume this session to inspect its state before retrying.",
+                    tool_name="ouroboros_interview",
+                )
             )
 
         from ouroboros.events.interview import interview_completed
@@ -2637,8 +2645,7 @@ class InterviewHandler:
                 save_result = await engine.save_state(state)
                 if save_result.is_err:
                     log.warning(
-                        "mcp.tool.interview.save_failed_on_start",
-                        error=str(save_result.error),
+                        "mcp.tool.interview.save_failed_on_start", error=str(save_result.error)
                     )
                     return Result.err(
                         MCPToolError(
@@ -3580,10 +3587,7 @@ class InterviewHandler:
 
         save_result = await engine.save_state(state)
         if save_result.is_err:
-            log.warning(
-                "mcp.tool.interview.save_failed",
-                error=str(save_result.error),
-            )
+            log.warning("mcp.tool.interview.save_failed", error=str(save_result.error))
             return Result.err(
                 MCPToolError(
                     f"Failed to save the question for session {session_id}: "

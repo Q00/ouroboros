@@ -899,3 +899,23 @@ async def test_answer_pending_question_save_failure_is_visible(tmp_path: Path) -
         outcome = await handler.handle({"session_id": sid, "answer": "Make it accessible"})
     assert outcome.is_err
     assert "conflict" in str(outcome.error)
+
+
+@pytest.mark.asyncio
+async def test_completion_save_failure_does_not_report_success_or_emit_completion(
+    tmp_path: Path,
+) -> None:
+    from unittest.mock import MagicMock
+
+    sid = "interview_0123456789abcdef"
+    state = InterviewState(interview_id=sid, status=InterviewStatus.COMPLETED)
+    engine = MagicMock()
+    engine.complete_interview = AsyncMock(return_value=Result.ok(state))
+    engine.save_state = AsyncMock(return_value=Result.err(MCPServerError("disk conflict")))
+    handler = InterviewHandler(interview_engine=engine, data_dir=tmp_path)
+    handler._emit_event_bg = MagicMock()
+    outcome = await handler._complete_interview_response(engine, state, sid)
+    assert outcome.is_err
+    assert "disk conflict" in str(outcome.error)
+    assert sid in str(outcome.error)
+    handler._emit_event_bg.assert_not_called()
