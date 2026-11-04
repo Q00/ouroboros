@@ -203,3 +203,35 @@ def is_bridge_plugin_entry(entry: object) -> bool:
         and parts[-2] == BRIDGE_PLUGIN_SUBDIR[1]
         and parts[-3] == BRIDGE_PLUGIN_SUBDIR[0]
     )
+
+
+def is_v2_bridge_plugin_entry(entry: object, config_dir: Path, config_parent: Path) -> bool:
+    """Match V2 directory references only when they resolve to our installed bridge."""
+    from urllib.parse import urlsplit
+    from urllib.request import url2pathname
+
+    if isinstance(entry, dict):
+        entry = entry.get("package")
+    if not isinstance(entry, str) or not entry:
+        return False
+    if entry.lower().startswith("file:"):
+        uri = urlsplit(entry)
+        if uri.query or uri.fragment:
+            return False
+        if uri.netloc not in ("", "localhost"):
+            if os.name != "nt":
+                return False
+            actual = url2pathname(f"//{uri.netloc}{uri.path}")
+        else:
+            actual = url2pathname(uri.path)
+    else:
+        actual = entry
+    # Support Windows separators while keeping unrelated paths untouched.
+    actual = actual.replace("\\", "/")
+    path = Path(actual)
+    if not path.is_absolute():
+        path = config_parent / path
+    try:
+        return path.resolve() == config_dir.joinpath(*BRIDGE_PLUGIN_SUBDIR).resolve()
+    except (OSError, RuntimeError):
+        return False
