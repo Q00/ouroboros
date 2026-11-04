@@ -47,6 +47,7 @@ import yaml
 
 from ouroboros.backends import get_backend_capability
 from ouroboros.config.completion_backend_guard import guard_completion_backend
+from ouroboros.config.credential_errors import sanitize_credential_errors
 from ouroboros.config.model_selection import (
     backend_model_selection,
     pin_models_enabled,
@@ -439,24 +440,7 @@ def load_credentials(credentials_path: Path | None = None) -> CredentialsConfig:
     try:
         return CredentialsConfig.model_validate(credentials_dict)
     except PydanticValidationError as e:
-        messages = {
-            "dict_type": "Input should be a valid mapping",
-            "model_type": "Input should be a valid provider mapping",
-            "missing": "Field required",
-            "string_type": "Input should be a valid string",
-            "string_too_short": "String is too short",
-        }
-        safe_errors = []
-        for error in e.errors(include_input=False, include_context=False, include_url=False):
-            # Provider names are user-controlled, so hide them even in locations.
-            loc = tuple(
-                item if index != 1 and item in {"providers", "api_key", "base_url"} else "*"
-                for index, item in enumerate(error["loc"])
-            )
-            error_type = error["type"] if error["type"] in messages else "invalid"
-            safe_errors.append(
-                {"loc": loc, "type": error_type, "msg": messages.get(error_type, "Invalid value")}
-            )
+        safe_errors = sanitize_credential_errors(e)
         error_messages = [f"  - {'.'.join(error['loc'])}: {error['msg']}" for error in safe_errors]
         validation_failure = ConfigError(
             "Credentials validation failed:\n" + "\n".join(error_messages),
