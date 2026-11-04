@@ -575,6 +575,11 @@ def _format_verdict_text(
     return "\n".join(lines)
 
 
+def _reject_json_constant(value: str) -> None:
+    """Reject NaN and infinities, which are not JSON values."""
+    raise ValueError(f"Invalid JSON constant: {value}")
+
+
 @dataclass
 class QAHandler:
     """Handler for the ouroboros_qa tool.
@@ -667,7 +672,20 @@ class QAHandler:
             ),
         )
         schema = definition.to_input_schema()
-        schema["properties"]["pass_threshold"].update(minimum=0.0, maximum=1.0)
+        threshold_schema = schema["properties"]["pass_threshold"]
+        threshold_schema.pop("type")
+        threshold_schema["anyOf"] = [
+            {"type": "number", "minimum": 0.0, "maximum": 1.0},
+            {
+                "type": "string",
+                "pattern": r"^[ \t\r\n]*-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?[ \t\r\n]*$",
+            },
+        ]
+        threshold_schema["description"] += " A JSON-encoded number is also accepted."
+        history_schema = schema["properties"]["iteration_history"]
+        history_schema.pop("type")
+        history_schema["anyOf"] = [{"type": "array"}, {"type": "string"}]
+        history_schema["description"] += " A JSON-encoded array is also accepted."
         return replace(definition, input_schema=schema)
 
     async def handle(
@@ -696,6 +714,11 @@ class QAHandler:
         artifact_type = arguments.get("artifact_type", "code")
         reference = arguments.get("reference")
         threshold = arguments.get("pass_threshold", DEFAULT_PASS_THRESHOLD)
+        if isinstance(threshold, str):
+            try:
+                threshold = json.loads(threshold, parse_constant=_reject_json_constant)
+            except (ValueError, RecursionError):
+                threshold = None
         if not _is_finite_number(threshold) or not 0.0 <= threshold <= 1.0:
             return Result.err(
                 MCPToolError(
@@ -706,6 +729,26 @@ class QAHandler:
         pass_threshold = float(threshold)
         qa_session_id = arguments.get("qa_session_id") or f"qa-{uuid.uuid4().hex[:8]}"
         iteration_history = arguments.get("iteration_history")
+        if isinstance(iteration_history, str):
+            try:
+                iteration_history = json.loads(
+                    iteration_history, parse_constant=_reject_json_constant
+                )
+            except (ValueError, RecursionError):
+                return Result.err(
+                    MCPToolError(
+                        "iteration_history must be a list of objects",
+                        tool_name="ouroboros_qa",
+                    )
+                )
+            # A serialized null is not an omitted optional parameter.
+            if iteration_history is None:
+                return Result.err(
+                    MCPToolError(
+                        "iteration_history must be a list of objects",
+                        tool_name="ouroboros_qa",
+                    )
+                )
         if iteration_history is None:
             iteration_history = []
         if not isinstance(iteration_history, list) or not all(
