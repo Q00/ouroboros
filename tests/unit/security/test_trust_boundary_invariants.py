@@ -846,14 +846,14 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         "src/ouroboros/runtime/exec_sandbox.py",
         "_unshare_prefix",
         "subprocess.run",
-        814,
+        826,
         17,
     ): "Sandbox capability probe uses fixed _bootstrap_environment (os.defpath plus serialized command environment), not inherited loaders.",
     (
         "src/ouroboros/runtime/exec_sandbox.py",
         "_private_mounts_unshare",
         "subprocess.run",
-        882,
+        894,
         17,
     ): "Sandbox capability probe uses fixed _bootstrap_environment (os.defpath plus serialized command environment), not inherited loaders.",
     (
