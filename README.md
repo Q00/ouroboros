@@ -17,9 +17,9 @@
 
 
 <p align="center">
-  <strong>It gets smarter on its own. We just hold the line.</strong>
+  <strong>Make the goal clear. Keep the evidence visible.</strong>
   <br/>
-  <sub>Skip the prompt engineering. The agent runs, fails, and gets smarter every generation. The grading command and expected result never make it into the success contract we hand it.</sub>
+  <sub>Turn an idea into a Seed, execute it, and evaluate the result against its acceptance criteria.</sub>
   <br/>
   <sub>The <strong>Agent OS</strong> for replayable AI coding workflows</sub>
 </p>
@@ -43,6 +43,7 @@
   <a href="#the-loop">How It Works</a> ·
   <a href="#commands">Commands</a> ·
   <a href="#from-wonder-to-ontology">Philosophy</a> ·
+  <a href="#find-your-next-step">Docs</a> ·
   <a href="https://ouroboros.page/learn/en/">Guide</a>
 </p>
 
@@ -72,7 +73,7 @@ Demo videos for each runtime.
 </tr>
 </table>
 
-**Turn a vague idea into a verified, working codebase -- across Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Pi, OMP, Zcode, Goose, GJC, Antigravity, and Grok.**
+**Turn a vague idea into a testable specification and working code -- across Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Pi, OMP, Zcode, Goose, GJC, Antigravity, and Grok.**
 
 Ouroboros is an **Agent OS** for AI coding: a local-first runtime layer that
 turns non-deterministic agent work into a replayable, observable, policy-bound
@@ -101,9 +102,8 @@ sit in front of. Three repos, one stack:
    shell             user-level apps                        kernel
 ```
 
-- The **kernel** (`ouroboros`) owns the contract: every action becomes a
-  Seed-bound, ledger-recorded, replayable event — regardless of which LLM
-  executes it.
+- The **kernel** (`ouroboros`) provides Seed, execution, and event-journal
+  primitives for recording and replaying supported workflows across runtimes.
 - **Plugins** (`ouroboros-plugins`) declare scoped capabilities against that
   contract, so domain workflows (review a PR, triage a Linear ticket, run a
   release) stay auditable and policy-bound instead of being one-off prompts.
@@ -130,7 +130,7 @@ workflows, or install `ourocode` when you want a unified terminal cockpit.
 
 ## Why Ouroboros?
 
-Most AI coding fails at the **input**, not the output. The bottleneck is not AI capability -- it is human clarity.
+A coding agent can implement an assumption that nobody intended. Ouroboros makes the goal, constraints, and evidence of success explicit before execution, then uses evaluation to guide further work.
 
 | Problem       | What Happens                     | Ouroboros Fix                                 |
 | :------------ | :------------------------------- | :-------------------------------------------- |
@@ -159,7 +159,7 @@ lets uv download its own Python, then installs `ouroboros-ai` and wires the
 host it finds. Native Windows is experimental and Codex CLI needs WSL 2; see
 [platform support](./docs/platform-support.md).
 
-**First command** — open your AI coding agent and run these in order:
+**First command** — open a new project folder in your AI coding agent and run these in order:
 
 ```
 > ooo setup
@@ -172,6 +172,21 @@ its currently selected model and Claude Code starts with its recommended model
 settings. Choose **Directly configure models** only when you want to pin a
 stage to a specific model; it opens the local settings screen in your browser.
 You can return to those settings any time with `ooo config`.
+
+After the interview, ask for `ooo seed`, then read the generated Seed: check
+its goal, constraints, acceptance criteria, and target project. Ask for `ooo run`
+to execute it. Use `ooo evaluate` to review the result against the Seed; for
+assessment without automatically starting a follow-up fix loop, specify
+`auto_evolve: false`. Inspect the changed files and evaluation evidence against
+your original request. A started job or finished execution alone is not proof
+that the requested outcome was achieved. Model calls can take time and incur
+provider charges; execution can change files in the selected project.
+
+`ooo` phrases are entered in a supported agent's conversation; `ouroboros`
+commands below are entered in a terminal. The host plugin's MCP server and a
+standalone CLI can be separate installations, so check the version and runtime
+actually used by each. For an existing Seed, start with `ooo run`; for an
+end-to-end guided path from a new idea, use `ooo auto`.
 
 Or from a plain terminal, without an agent host:
 
@@ -335,27 +350,29 @@ Removes all configuration, MCP registration, and data. See [UNINSTALL.md](./UNIN
 
 ## What You Get
 
-After one loop of the Ouroboros cycle, a vague idea becomes a verified codebase:
+A small task might progress like this (illustrative, not a recorded run). For
+example, decide whether completed tasks should be deleted or retained before
+putting that behavior in an acceptance criterion:
 
 | Step          | Before                  | After                                                                   |
 | :------------ | :---------------------- | :---------------------------------------------------------------------- |
-| **Interview** | *"Build me a task CLI"* | 12 hidden assumptions exposed, ambiguity scored to 0.19                 |
+| **Interview** | *"Build me a task CLI"* | Questions expose assumptions; ambiguity is scored                 |
 | **Seed**      | No spec                 | Immutable specification with acceptance criteria, ontology, constraints |
-| **Evaluate**  | Manual review           | 3-stage gate: Mechanical (free) -> Semantic -> Multi-Model Consensus    |
+| **Evaluate**  | Manual review           | Mechanical checks -> semantic review -> consensus when needed    |
 
 <details>
 <summary><strong>What just happened?</strong></summary>
 
 ```
-interview  ->  Socratic questioning exposed 12 hidden assumptions
-seed       ->  Crystallized answers into an immutable spec (Ambiguity: 0.15)
-run        ->  Fanned acceptance criteria out to agents in dependency order
-evaluate   ->  3-stage verification: Mechanical -> Semantic -> Consensus
+interview  ->  Questions clarify goal, constraints, and success
+seed       ->  Answers become a specification with acceptance criteria
+run        ->  Executes work against the Seed's acceptance criteria
+evaluate   ->  Checks and reviews provide evidence for each criterion
 ```
 
 > Use `ooo <cmd>` inside your AI coding agent session, or `ouroboros init start`, `ouroboros run seed.yaml`, etc. from the terminal.
 
-The serpent completed one loop. Each loop, it knows more than the last.
+Review the evidence and any unresolved criteria before deciding what to do next.
 
 </details>
 
@@ -363,14 +380,14 @@ The serpent completed one loop. Each loop, it knows more than the last.
 
 ## How It Compares
 
-AI coding tools are powerful -- but they solve the **wrong problem** when the input is unclear.
+Ouroboros adds structure around an AI coding agent when the input is unclear:
 
 |                     | Vanilla AI Coding                        | Ouroboros                                                                       |
 | :------------------ | :--------------------------------------- | :------------------------------------------------------------------------------ |
 | **Vague prompt**    | AI guesses intent, builds on assumptions | Socratic interview forces clarity *before* code                                 |
-| **Spec validation** | No spec -- architecture drifts mid-build | Immutable seed spec locks intent; ambiguity gate (<= 0.2) blocks premature code without explicit `force` |
-| **Evaluation**      | "Looks good" / manual QA                 | 3-stage automated gate: Mechanical -> Semantic -> Multi-Model Consensus         |
-| **Rework rate**     | High -- wrong assumptions surface late   | Low -- assumptions surface in the interview, not in the PR review               |
+| **Spec validation** | Depends on the workflow | A Seed records intent; the default ambiguity gate can be overridden explicitly |
+| **Evaluation**      | Depends on the workflow                  | Mechanical checks and semantic review; consensus when needed                   |
+| **Feedback**        | Depends on the workflow                  | Evaluation can inform a subsequent generation                                  |
 
 ---
 
@@ -384,33 +401,32 @@ The ouroboros -- a serpent devouring its own tail -- is not decoration. It IS th
         +---- Evolutionary Loop ----+
 ```
 
-Each cycle does not repeat -- it **evolves**. The output of evaluation feeds back as input for the next generation, until the system truly knows what it is building.
+Evolution uses evaluation feedback to propose a next generation. The Seed records the agreed contract for a generation; review any proposed changes against the original goal.
 
 | Phase         | What Happens                                                          |
 | :------------ | :-------------------------------------------------------------------- |
 | **Interview** | Socratic questioning exposes hidden assumptions                       |
 | **Seed**      | Answers crystallize into an immutable specification                   |
-| **Execute**   | Acceptance criteria fan out to agents in dependency order             |
-| **Evaluate**  | 3-stage gate: Mechanical ($0) -> Semantic -> Multi-Model Consensus    |
+| **Execute**   | Work proceeds against the Seed's acceptance criteria                  |
+| **Evaluate**  | Mechanical checks and semantic review; consensus when needed          |
 | **Evolve**    | Wonder *("What do we still not know?")* -> Reflect -> next generation |
 
 > *"This is where the Ouroboros eats its tail: the output of evaluation*
 > *becomes the input for the next generation's seed specification."*
 > -- `reflect.py`
 
-Convergence is reached when ontology similarity >= 0.95 -- when the system has questioned itself into clarity.
+Ontology similarity is one convergence signal; in execution mode, an independently evaluated outcome must also pass. A stable ontology alone does not prove the result works.
 
-### Ralph: The Loop That Never Stops
+### Ralph: A bounded evolutionary loop
 
-`ooo ralph` runs the evolutionary loop persistently -- across session boundaries -- until convergence is reached. Each step is **stateless**: the EventStore reconstructs the full lineage, so even if your machine restarts, the serpent picks up where it left off.
-
-```
-Ralph Cycle 1: evolve_step(lineage, seed) -> Gen 1 -> action=CONTINUE
-Ralph Cycle 2: evolve_step(lineage)       -> Gen 2 -> action=CONTINUE
-Ralph Cycle 3: evolve_step(lineage)       -> Gen 3 -> action=CONVERGED
-                                                +-- Ralph stops.
-                                                    The ontology has stabilized.
-```
+`ooo evolve` runs one generation at a time. `ooo ralph` starts a background
+loop that can run successive generations until convergence, another terminal
+outcome, cancellation, or its generation limit (default 10). A job ID is a
+receipt, not a result: check the job and any chained job for their final status,
+then inspect the criteria and evidence. Saved lineage supports recovery, but a
+machine restart does not itself guarantee that a running job resumes. See the
+[evolution guide](./docs/guides/evolution-loop.md) and
+[Ralph skill](./skills/ralph/SKILL.md).
 
 ---
 
@@ -427,12 +443,12 @@ Inside AI coding agent sessions, use `ooo <cmd>` skills. From the terminal, use 
 | `ooo seed`       | *(generated by interview)*                                        | Crystallize into immutable spec                              |
 | `ooo run`        | `ouroboros run seed.yaml`                                         | Execute the seed's acceptance criteria                       |
 | `ooo evaluate`   | *(via MCP)*                                                       | 3-stage verification gate                                    |
-| `ooo evolve`     | *(via MCP)*                                                       | Evolutionary loop until ontology converges                   |
+| `ooo evolve`     | *(via MCP)*                                                       | Run one evolutionary generation                              |
 | `ooo unstuck`    | *(via MCP)*                                                       | 5 lateral thinking personas when you are stuck               |
 | `ooo status`     | `ouroboros status executions` / `ouroboros status execution <id>` | Session tracking + (MCP-only) drift detection                |
 | `ooo resume-session` | `ouroboros resume`                                           | List in-flight sessions and re-attach commands              |
 | `ooo cancel`     | `ouroboros cancel execution [<id>\|--all]`                        | Cancel stuck or orphaned executions                          |
-| `ooo ralph`      | *(via MCP)*                                                       | Persistent loop until verified                               |
+| `ooo ralph`      | *(via MCP)*                                                       | Bounded background evolutionary loop                         |
 | `ooo tutorial`   | *(interactive)*                                                   | Interactive hands-on learning                                |
 | `ooo help`       | `ouroboros --help`                                                | Full reference                                               |
 | `ooo pm`         | *(via MCP)*                                                       | PM-focused interview + PRD generation                        |
@@ -456,6 +472,23 @@ after reopening a saved session. See the [calibration contract](docs/architectur
 > `ooo help`, and `ooo config` phrases remain supported.
 
 See the [CLI reference](./docs/cli-reference.md) for full details.
+
+---
+
+## Find Your Next Step
+
+| Your situation | Where to go |
+| :--- | :--- |
+| Installing or troubleshooting a first run | [Getting started](./docs/getting-started.md) · [Platform support](./docs/platform-support.md) · [Runtime guides](./docs/README.md#runtime-guides) |
+| Writing or reviewing a Seed | [Seed authoring](./docs/guides/seed-authoring.md) · [Seed skill](./skills/seed/SKILL.md) |
+| Checking progress or recovering a session | `ooo status` and `ooo resume-session` · [CLI reference](./docs/cli-reference.md) · [Evolution guide](./docs/guides/evolution-loop.md) |
+| Understanding a result or a failed check | [Evaluation pipeline](./docs/guides/evaluation-pipeline.md) · [Execution vs. evaluation](./docs/guides/execution-vs-evaluation.md) · [Safe but wrong output](./docs/guides/safe-but-wrong-output.md) |
+| Configuring, integrating, or contributing | [Configuration](./docs/config-reference.md) · [MCP API](./docs/api/mcp.md) · [Architecture](./docs/architecture.md) · [Contributing](./CONTRIBUTING.md) |
+
+The [documentation index](./docs/README.md) lists the full guides and API
+references. Consult the help and skill files for the version you installed;
+the published package, host plugin, and this repository may be at different
+versions.
 
 ---
 
@@ -505,7 +538,7 @@ src/ouroboros/
 - **PAL Router** -- Frugal (1x) -> Standard (10x) -> Frontier (30x) with escalation on retry (no automatic downgrade)
 - **Drift** -- Goal (50%) + Constraint (30%) + Ontology (20%) weighted measurement, threshold <= 0.3
 - **Brownfield** -- Auto-detects config files across multiple language ecosystems
-- **Evolution** -- Up to 30 generations, convergence at ontology similarity >= 0.95
+- **Evolution** -- Default limit of 30 generations; ontology similarity is one convergence signal
 - **Stagnation** -- Detects spinning, oscillation, no-drift, and diminishing returns patterns
 - **Agent OS runtime** -- Replayable execution contract across capability discovery, policy, directives, event journal, and agent processes
 - **Runtime backends** -- Pluggable abstraction layer (`orchestrator.runtime_backend` config) with first-class support for every canonical backend returned by `runtime_backend_choices()`, including GJC, Antigravity, Grok, and Zcode; same workflow spec, different execution engines
@@ -549,20 +582,20 @@ Ouroboros embeds this into its architecture through the **Double Diamond**:
     * Ontology        * Evaluation
 ```
 
-The first diamond is **Socratic**: diverge into questions, converge into ontological clarity. The second diamond is **pragmatic**: diverge into design options, converge into verified delivery. Each diamond requires the one before it -- you cannot design what you have not understood.
+The first diamond is **Socratic**: diverge into questions, then converge on a clearer understanding. The second is **pragmatic**: explore design options, then evaluate delivery. This is a way to understand the design, not a mandatory sequence for every task. If the goal, constraints, and success criteria are already settled, you can create a Seed from that agreement; if you already have a Seed, you can start with `ooo run`. In either case, review the Seed and its fit to the original request before execution.
 
 </details>
 
 <details>
 <summary><strong>Ambiguity Score: The Gate Between Wonder and Code</strong></summary>
 
-The Interview does not end when you feel ready -- it ends when the **math** says you are ready. Ouroboros quantifies ambiguity as the inverse of weighted clarity:
+The interview uses a score to make remaining ambiguity visible. Ouroboros computes ambiguity as the inverse of weighted clarity:
 
 ```
 Ambiguity = 1 - Sum(clarity_i * weight_i)
 ```
 
-Each dimension is scored 0.0-1.0 by the LLM (temperature 0.1 for reproducibility), then weighted:
+Each dimension is assessed on a 0.0-1.0 scale by a model, then weighted. These are judgments, not measured probabilities, and scores can vary:
 
 | Dimension                                                     | Greenfield | Brownfield |
 | :------------------------------------------------------------ | :--------: | :--------: |
@@ -584,44 +617,24 @@ Example (Greenfield):
   Ambiguity = 1 - 0.81 = 0.19  <= 0.2 -> Ready for Seed
 ```
 
-Why 0.2? Because at 80% weighted clarity, the remaining unknowns are small enough that code-level decisions can resolve them. Above that threshold, you are still guessing at architecture.
+The threshold is a practical default for deciding when to crystallize a Seed, not a guarantee of correctness. Review the Seed even when it passes.
 
 </details>
 
 <details>
 <summary><strong>Ontology Convergence: When the Serpent Stops</strong></summary>
 
-The evolutionary loop does not run forever. It stops when consecutive generations produce ontologically identical schemas. Similarity is measured as a weighted comparison of schema fields:
+The evolutionary loop uses ontology similarity as one signal that a design
+has stabilized. Its default similarity threshold is 0.95, and its convergence
+checker also considers stagnation, oscillation, and a generation limit. The
+default evolution limit is 30; the separate Ralph loop defaults to 10.
 
-```
-Similarity = 0.5 * name_overlap + 0.3 * type_match + 0.2 * exact_match
-```
-
-| Component        | Weight | What It Measures                                   |
-| :--------------- | :----: | :------------------------------------------------- |
-| **Name overlap** |  50%   | Do the same field names exist in both generations? |
-| **Type match**   |  30%   | Do shared fields have the same types?              |
-| **Exact match**  |  20%   | Are name, type, AND description all identical?     |
-
-**Threshold: Similarity >= 0.95** -- the loop converges and stops evolving.
-
-But raw similarity is not the only signal. The system also detects pathological patterns:
-
-| Signal                  | Condition                                        | What It Means                      |
-| :---------------------- | :----------------------------------------------- | :--------------------------------- |
-| **Stagnation**          | Similarity >= 0.95 for 3 consecutive generations | Ontology has stabilized            |
-| **Oscillation**         | Gen N ~ Gen N-2 (period-2 cycle)                 | Stuck bouncing between two designs |
-| **Repetitive feedback** | >= 70% question overlap across 3 generations     | Wonder is asking the same things   |
-| **Hard cap**            | 30 generations reached                           | Safety valve                       |
-
-```
-Gen 1: {Task, Priority, Status}
-Gen 2: {Task, Priority, Status, DueDate}     -> similarity 0.78 -> CONTINUE
-Gen 3: {Task, Priority, Status, DueDate}     -> similarity 1.00 -> CONVERGED
-```
-
-Two mathematical gates, one philosophy: **do not build until you are clear (Ambiguity <= 0.2), do not stop evolving until you are stable (Similarity >= 0.95).**
-
+Stability is not the same as a successful outcome: execution mode also needs
+acceptance evidence. A generation may stop with `ontology_stable`,
+`stagnated`, `exhausted`, or an error instead of `converged`. Read the actual
+action and evaluation, and compare the result with the original request. See
+the [evolution guide](./docs/guides/evolution-loop.md) and
+[convergence implementation](./src/ouroboros/evolution/convergence.py).
 </details>
 
 ---
