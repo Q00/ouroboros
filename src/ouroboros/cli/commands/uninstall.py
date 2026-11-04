@@ -531,7 +531,10 @@ def uninstall(
                         targets.append(f"OpenCode MCP config ({opencode_config})")
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
             opencode_editable = False
-            manual_cleanup.append(f"OpenCode config ({opencode_config}) and bridge directory")
+            manual_cleanup.append(
+                f"OpenCode config ({opencode_config} — may be malformed or unreadable) "
+                "and bridge directory"
+            )
 
     codex_dir = resolve_codex_home()
     try:
