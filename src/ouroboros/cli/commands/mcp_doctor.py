@@ -297,7 +297,7 @@ async def _probe_local_stdio() -> list[CheckResult]:
     try:
         temporary_directory = tempfile.TemporaryDirectory(prefix="ouroboros-doctor-")
         config = _local_stdio_probe_config(Path(temporary_directory.name))
-        adapter = MCPClientAdapter(max_retries=1)
+        adapter = MCPClientAdapter(max_retries=1, include_cleanup_error_details=False)
         results = await _collect_local_stdio_results(adapter, config)
     except BaseException as exc:
         primary_error = exc
