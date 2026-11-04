@@ -284,3 +284,14 @@ async def test_context_exit_preserves_body_error_when_baseexception_cleanup_fail
 
     assert caught.value is original
     assert any("SystemExit): 73" in note for note in original.__notes__)
+
+
+def test_cleanup_note_details_remain_enabled_by_default():
+    from ouroboros.mcp.client.adapter import _record_cleanup_failure
+
+    original = RuntimeError("primary")
+    cleanup = RuntimeError("synthetic cleanup detail")
+    with patch("ouroboros.mcp.client.adapter.log.warning") as warning:
+        _record_cleanup_failure(original, cleanup)
+    assert "synthetic cleanup detail" in str(original.__notes__)
+    assert warning.call_args.kwargs["error"] is cleanup

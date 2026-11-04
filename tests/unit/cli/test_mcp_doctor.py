@@ -626,7 +626,8 @@ def _fake_probe_client(
 ):
     """Return an adapter factory with explicit connection and cleanup results."""
 
-    def create_client(*, max_retries):
+    def create_client(*, max_retries, include_cleanup_error_details):
+        assert include_cleanup_error_details is False
         captured["max_retries"] = max_retries
 
         async def connect(config):

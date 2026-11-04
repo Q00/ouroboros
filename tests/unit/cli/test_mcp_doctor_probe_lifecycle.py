@@ -1,6 +1,7 @@
 """Exercise the production adapter/SDK boundary used by the doctor probe."""
 
 from contextlib import asynccontextmanager
+import traceback
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -251,3 +252,28 @@ def test_authoritative_manifest_matches_real_production_composition(tmp_path):
         event_store=store, runtime_backend="host", project_dir=tmp_path, state_dir=tmp_path
     )
     assert frozenset(tool.name for tool in server.info.tools) == BUILTIN_TOOL_NAMES
+
+
+async def test_real_adapter_cancellation_does_not_echo_cleanup_error():
+    cancellation = anyio.get_cancelled_exc_class()("caller cancelled")
+    cancellation.add_note("caller note")
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(side_effect=cancellation)
+    client.__aexit__ = AsyncMock(side_effect=RuntimeError("SYNTHETIC_PRIVATE_VALUE"))
+    with (
+        patch(
+            "ouroboros.mcp.client.adapter.build_sdk_client",
+            return_value=SDKClientResources(
+                client, transport_lifecycle=TransportLifecycle(entered=True)
+            ),
+        ),
+        patch("ouroboros.mcp.client.adapter.log.warning") as warning,
+    ):
+        with pytest.raises(type(cancellation)) as caught:
+            await _probe_local_stdio()
+    assert caught.value is cancellation
+    assert "caller note" in cancellation.__notes__
+    assert "SYNTHETIC_PRIVATE_VALUE" not in str(cancellation.__notes__)
+    assert "SYNTHETIC_PRIVATE_VALUE" not in "".join(traceback.format_exception(cancellation))
+    assert "SYNTHETIC_PRIVATE_VALUE" not in str(warning.call_args_list)
+    client.__aexit__.assert_awaited_once()
