@@ -31,6 +31,7 @@ from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
 )
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime, _CodexItemCorrelationScope
+from ouroboros.orchestrator.runtime_model_errors import UnsupportedModelOverrideError
 
 log = get_logger(__name__)
 
@@ -180,6 +181,7 @@ class GooseCliRuntime(CodexCliRuntime):
         # `goose run` exposes no per-invocation effort flag (capabilities declares
         # reasoning_effort_support=IGNORED, so it is surfaced as advised).
         reasoning_effort: str | None = None,
+        model: str | None = None,
     ) -> list[str]:
         """Build ``goose run`` args. Prompt is fed through stdin.
 
@@ -187,6 +189,10 @@ class GooseCliRuntime(CodexCliRuntime):
         Goose does not have an equivalent flag; the base completion path falls
         back to the last streamed assistant/result content.
         """
+        if model is not None and resume_session_id is not None:
+            raise UnsupportedModelOverrideError(
+                "request-local model override is unsupported with Goose resume"
+            )
         self._reconcile_cli_executable_identity()
         requested_resume_session_id = resume_session_id
         resume_session_id = self._drift.retire_resume(resume_session_id, runtime_handle)
@@ -220,7 +226,7 @@ class GooseCliRuntime(CodexCliRuntime):
         if resume_session_id:
             command.insert(-2, "--resume")
 
-        normalized_model = self._normalize_model(self._model)
+        normalized_model = self._normalize_model(model if model is not None else self._model)
         if normalized_model:
             command.extend(["--model", normalized_model])
 
