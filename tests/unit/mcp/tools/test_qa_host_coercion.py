@@ -71,3 +71,23 @@ async def test_sdk_tool_boundary_accepts_serialized_values():
     assert not result.is_error
     assert result.meta["pass_threshold"] == 0.8
     adapter.complete.assert_awaited_once()
+
+
+async def test_attached_mcp_provider_preserves_qa_composite_schema():
+    """SDK discovery and the tool provider retain both advertised forms."""
+    pytest.importorskip("mcp.server")
+    from ouroboros.mcp.sdk_mapping import tool_from_sdk, tool_to_sdk
+    from ouroboros.orchestrator.mcp_tools import MCPToolProvider
+
+    definition = QAHandler().definition
+    received = tool_from_sdk(tool_to_sdk(definition), server_name="qa-server")
+    manager = AsyncMock()
+    manager.list_all_tools.return_value = (received,)
+    tools = await MCPToolProvider(manager).get_tools()
+    assert len(tools) == 1
+    assert tools[0].input_schema == definition.to_input_schema()
+    validate({**ARGS, "pass_threshold": 0.8, "iteration_history": []}, tools[0].input_schema)
+    validate(
+        {**ARGS, "pass_threshold": "0.8", "iteration_history": "[]"},
+        tools[0].input_schema,
+    )

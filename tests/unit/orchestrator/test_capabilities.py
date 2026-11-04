@@ -1858,7 +1858,25 @@ def test_ouroboros_capability_registry_covers_every_owned_tool_identifier() -> N
         }
         for parameter in definition.parameters:
             property_schema = metadata.input_schema["properties"][parameter.name]
-            assert property_schema["type"] == parameter.type.value
+            if name == "ouroboros_qa" and parameter.name in {
+                "pass_threshold",
+                "iteration_history",
+            }:
+                # QA deliberately advertises both the native value and the
+                # host-serialized JSON form. Other tools retain the exact
+                # single-type assertion below.
+                assert "type" not in property_schema
+                branches = property_schema["anyOf"]
+                assert len(branches) == 2
+                assert branches[0]["type"] == parameter.type.value
+                assert branches[1]["type"] == "string"
+                if parameter.name == "pass_threshold":
+                    assert branches[0] == {"type": "number", "minimum": 0.0, "maximum": 1.0}
+                    assert "pattern" in branches[1]
+                else:
+                    assert branches == [{"type": "array"}, {"type": "string"}]
+            else:
+                assert property_schema["type"] == parameter.type.value
             if parameter.enum:
                 assert property_schema["enum"] == list(parameter.enum)
             if parameter.items:
