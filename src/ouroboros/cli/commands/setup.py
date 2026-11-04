@@ -266,7 +266,7 @@ def _get_current_backend() -> str | None:
     if not config_path.exists():
         return None
     try:
-        data = yaml.safe_load(config_path.read_text()) or {}
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         backend = data.get("orchestrator", {}).get("runtime_backend")
         if backend == "claude_mcp":
             return "claude-cli"
@@ -4477,10 +4477,10 @@ def _setup_opencode(opencode_path: str, mode: str = "plugin") -> bool:
     config_dir = ensure_config_dir()
     config_path = config_dir / "config.yaml"
     if config_path.exists():
-        config_dict = yaml.safe_load(config_path.read_text()) or {}
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     else:
         create_default_config(config_dir)
-        config_dict = yaml.safe_load(config_path.read_text()) or {}
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     if not isinstance(config_dict, dict):
         print_warning("~/.ouroboros/config.yaml top-level is not a mapping — resetting.")
         config_dict = {}
@@ -4500,7 +4500,7 @@ def _setup_opencode(opencode_path: str, mode: str = "plugin") -> bool:
             config_dict["llm"] = llm
         llm["backend"] = "opencode"
 
-        with config_path.open("w") as f:
+        with config_path.open("w", encoding="utf-8") as f:
             yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
 
         # Mutual-exclusion cleanup: remove plugin-mode artifacts so both
@@ -4560,7 +4560,7 @@ def _setup_opencode(opencode_path: str, mode: str = "plugin") -> bool:
         config_dict["llm"] = llm
     llm["backend"] = "opencode"
 
-    with config_path.open("w") as f:
+    with config_path.open("w", encoding="utf-8") as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
 
     print_success("Installed OpenCode bridge plugin and registered MCP entry")
