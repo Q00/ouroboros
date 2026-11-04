@@ -879,11 +879,15 @@ def _check_credentials(data: dict, config_path: Path) -> dict[str, str]:
         return _health_row("Credentials", "error", f"missing {credentials_path} for {provider}")
 
     try:
-        raw_credentials = yaml.safe_load(credentials_path.read_text())
+        raw_credentials = yaml.safe_load(credentials_path.read_text(encoding="utf-8"))
         if raw_credentials is None:
             raw_credentials = {}
-    except (OSError, yaml.YAMLError) as exc:
-        return _health_row("Credentials", "error", f"cannot read credentials: {exc}")
+    except UnicodeDecodeError:
+        return _health_row("Credentials", "error", "credentials.yaml is not valid UTF-8")
+    except yaml.YAMLError:
+        return _health_row("Credentials", "error", "credentials.yaml contains invalid YAML")
+    except OSError:
+        return _health_row("Credentials", "error", "cannot read credentials.yaml")
 
     if not isinstance(raw_credentials, dict):
         return _health_row("Credentials", "error", "credentials.yaml must contain a mapping")
