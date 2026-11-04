@@ -312,6 +312,8 @@ async def _refresh_ambiguity(
             interview_id=state.interview_id,
             error=str(save_result.error),
         )
+        print_error(f"Failed to save interview; reload before retrying: {save_result.error}")
+        raise typer.Exit(code=1)
 
     return None if score_result.is_err else score_result.value
 
@@ -424,7 +426,10 @@ async def _run_interview_loop(
         # Save state immediately after recording
         save_result = await engine.save_state(state)
         if save_result.is_err:
-            print_error(f"Warning: Failed to save state: {save_result.error.message}")
+            print_error(
+                f"Failed to save state; reload before retrying: {save_result.error.message}"
+            )
+            raise typer.Exit(code=1)
         elif not await _append_hitl_events(
             event_store,
             [
@@ -468,7 +473,12 @@ async def _run_interview_loop(
                 complete_result = await engine.complete_interview(state)
                 if complete_result.is_ok:
                     state = complete_result.value
-                await engine.save_state(state)
+                save_result = await engine.save_state(state)
+                if save_result.is_err:
+                    print_error(
+                        f"Failed to save state; reload before retrying: {save_result.error.message}"
+                    )
+                    raise typer.Exit(code=1)
                 break
 
     return InterviewLoopOutcome(
@@ -617,7 +627,12 @@ async def _run_interview(
                 console.print()
                 print_info("Continuing interview to reduce ambiguity...")
                 state.status = InterviewStatus.IN_PROGRESS
-                await engine.save_state(state)  # Save status change immediately
+                save_result = await engine.save_state(state)
+                if save_result.is_err:
+                    print_error(
+                        f"Failed to save state; reload before retrying: {save_result.error.message}"
+                    )
+                    raise typer.Exit(code=1)
 
                 # Continue interview loop (reusing the same helper)
                 loop_event_store = (

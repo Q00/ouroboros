@@ -53,7 +53,7 @@ from ouroboros.bigbang.turn_planner import InterviewTurnPlanner
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.initial_context import resolve_initial_context_input
-from ouroboros.core.owner_only import secure_directory, write_owner_only
+from ouroboros.core.owner_only import secure_directory
 from ouroboros.core.types import Result
 from ouroboros.interview_adapters import (
     InterviewTurnContext,
@@ -1051,16 +1051,11 @@ async def _plugin_save_state(state_dir: Path, state: InterviewState) -> Result[P
     try:
         file_path = state_dir / f"interview_{state.interview_id}.json"
         state.mark_updated()
-        content = state.model_dump_json(indent=2)
+        from ouroboros.bigbang.interview import save_interview_state_checked
 
-        def _sync_write() -> bool:
-            # The plugin transport persists the same transcript the stdio one
-            # does, so it uses the same owner-only writer. This fourth site was
-            # still on write_text and produced 0644 under a 022 umask.
-            secure_directory(file_path.parent)
-            return write_owner_only(file_path, content)
+        secure_directory(file_path.parent)
+        durability_confirmed = await save_interview_state_checked(file_path, state)
 
-        durability_confirmed = await asyncio.to_thread(_sync_write)
         if not durability_confirmed:
             # The stdio writer logs this state; discarding it here reported a
             # durability the filesystem never confirmed.
@@ -1083,12 +1078,15 @@ async def _plugin_load_state(state_dir: Path, interview_id: str) -> Result[Inter
     if not file_path.exists():
         return Result.err(f"Interview state not found: {interview_id}")
     try:
+        from ouroboros.core.file_lock import file_lock
 
         def _sync_read() -> str:
-            return file_path.read_text(encoding="utf-8")
+            with file_lock(file_path, exclusive=False):
+                return file_path.read_text(encoding="utf-8")
 
         content = await asyncio.to_thread(_sync_read)
         state = InterviewState.model_validate_json(content)
+        state._loaded_revision = state.persistence_revision
         state.discard_stale_requirement_distillation()
         return Result.ok(state)
     except (OSError, ValueError) as e:
@@ -3111,6 +3109,14 @@ class InterviewHandler:
             declare_provenance(state.rounds[-1] if state.rounds else None, arguments)
             state.clear_stored_ambiguity()
 
+            # Report conflict before emitting an event or generating the next
+            # question; the caller must reload and decide how to retry.
+            save_result = await engine.save_state(state)
+            if save_result.is_err:
+                return Result.err(
+                    MCPToolError(str(save_result.error), tool_name="ouroboros_interview")
+                )
+
             # Emit response recorded event
             from ouroboros.events.interview import interview_response_recorded
 
@@ -3127,10 +3133,6 @@ class InterviewHandler:
                 "mcp.tool.interview.response_recorded",
                 session_id=session_id,
             )
-
-            # Persist recorded answer immediately so it survives
-            # question generation failures downstream
-            await engine.save_state(state)
 
             # Once completion is possible, plan the new ambiguity snapshot and
             # next question atomically. This keeps the score→question dependency
