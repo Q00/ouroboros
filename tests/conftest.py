@@ -194,8 +194,19 @@ def render_logged_exceptions_with_plain_tracebacks():
         obs_logging._get_console_processors = original_get_console_processors
 
 
+def _is_explicit_live_canonical_test(request: pytest.FixtureRequest) -> bool:
+    """Only the opt-in canonical live test may use production LLM dependencies."""
+    enabled = os.environ.get("OUROBOROS_RUN_CANONICAL", "").strip().lower() in {"1", "true", "yes"}
+    canonical_test = Path(__file__).resolve().parent / "canonical" / "test_canonical.py"
+    return (
+        enabled
+        and request.node.path.resolve() == canonical_test
+        and getattr(request.node, "originalname", None) == "test_scenario_live_run_or_skip"
+    )
+
+
 @pytest.fixture(autouse=True)
-def block_runner_real_llm_adapter(monkeypatch):
+def block_runner_real_llm_adapter(monkeypatch, request):
     """Block execute_seed's dependency analysis from spawning real agent CLIs.
 
     ``OrchestratorRunner._build_dependency_analyzer`` resolves an LLM adapter
@@ -214,6 +225,8 @@ def block_runner_real_llm_adapter(monkeypatch):
     Gated on sys.modules so tests that never import the orchestrator don't
     pay the import cost.
     """
+    if _is_explicit_live_canonical_test(request):
+        return
     runner_mod = sys.modules.get("ouroboros.orchestrator.runner")
     if runner_mod is not None:
 
@@ -228,7 +241,7 @@ def block_runner_real_llm_adapter(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def block_interview_answer_refiner_cli_spawn(monkeypatch):
+def block_interview_answer_refiner_cli_spawn(monkeypatch, request):
     """Stop the auto interview's answer refiner from spawning real agent CLIs.
 
     ``build_answer_refiner()`` builds an ``LLMAnswerRefiner`` from the configured
@@ -247,6 +260,8 @@ def block_interview_answer_refiner_cli_spawn(monkeypatch):
     Patched in the consuming modules (where the name is bound at import) and
     gated on sys.modules so tests that never import them don't pay.
     """
+    if _is_explicit_live_canonical_test(request):
+        return
     for mod_name in ("ouroboros.mcp.tools.auto_handler", "ouroboros.cli.commands.auto"):
         mod = sys.modules.get(mod_name)
         if mod is not None and hasattr(mod, "build_answer_refiner"):
@@ -254,7 +269,7 @@ def block_interview_answer_refiner_cli_spawn(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def block_interview_investigator_cli_spawn(monkeypatch):
+def block_interview_investigator_cli_spawn(monkeypatch, request):
     """Stop the auto self-answer investigator from spawning real agent CLIs.
 
     ``build_repo_investigator()`` returns a ``RepoInvestigator`` that builds an
@@ -263,6 +278,8 @@ def block_interview_investigator_cli_spawn(monkeypatch):
     machine without any agent CLI. Tests that exercise the investigator inject
     one directly or re-patch after this fixture and win.
     """
+    if _is_explicit_live_canonical_test(request):
+        return
     for mod_name in ("ouroboros.mcp.tools.auto_handler", "ouroboros.cli.commands.auto"):
         mod = sys.modules.get(mod_name)
         if mod is not None and hasattr(mod, "build_repo_investigator"):
