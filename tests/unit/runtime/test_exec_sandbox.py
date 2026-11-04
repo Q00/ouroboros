@@ -94,7 +94,9 @@ def test_windows_ci_failure_includes_safe_probe_diagnostic(monkeypatch: pytest.M
         _require_backend()
 
 
-def test_windows_ci_failure_without_captured_probe_is_honest(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_windows_ci_failure_without_captured_probe_is_honest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setitem(globals(), "_WINDOWS", True)
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
     monkeypatch.setattr(
