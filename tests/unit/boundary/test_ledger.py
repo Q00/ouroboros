@@ -1046,3 +1046,67 @@ def test_a_file_planted_at_a_receipt_target_never_stands_in_for_the_receipt(
     stored.write_bytes(b"corrupt")
     with pytest.raises(CheckPackageError, match="different file"):
         write_receipt(admission, tmp_path)
+
+
+async def test_scan_budget_exhaustion_reports_incomplete_not_confirmed_leak(
+    store, tmp_path: Path, package, admission, monkeypatch
+) -> None:
+    import ouroboros.boundary.package as package_module
+
+    ledger = BoundaryLedger(store)
+    await ledger.record_package_frozen("task-1/V1", package, seed=seed_for(package))
+    await ledger.record_admission("task-1/V1", admission)
+    workspace = tmp_path / "worker"
+    workspace.mkdir()
+    for index in range(3):
+        (workspace / f"file{index}.txt").write_text("innocent")
+    monkeypatch.setattr(package_module, "_MAX_SCAN_ENTRIES", 2)
+    with pytest.raises(BoundaryLeakError, match="scan incomplete") as caught:
+        await ledger.record_actor_started(
+            "actor-1", ["task-1/V1"], workspace=workspace, packages=[package]
+        )
+    assert caught.value.details["scan_limit"] == 2
+    assert caught.value.details["scan_reasons"] == ["entry_limit"]
+    assert not any(
+        event.type == ACTOR_STARTED for event in await ledger.events("task-1/V1")
+    )
+
+
+async def test_scan_reports_both_observed_leak_and_later_incomplete_scan(
+    store, tmp_path: Path, package, admission, monkeypatch
+) -> None:
+    import ouroboros.boundary.package as package_module
+
+    ledger = BoundaryLedger(store)
+    await ledger.record_package_frozen("task-1/V1", package, seed=seed_for(package))
+    await ledger.record_admission("task-1/V1", admission)
+    workspace = tmp_path / "worker"
+    workspace.mkdir()
+    (workspace / "hidden_copy.py").write_text(REPRO_SCRIPT)
+    folder = workspace / "more"
+    folder.mkdir()
+    for index in range(3):
+        (folder / f"file{index}.txt").write_text("innocent")
+    monkeypatch.setattr(package_module, "_MAX_SCAN_ENTRIES", 4)
+    real_scandir = package_module.os.scandir
+
+    class FilesFirst:
+        def __init__(self, path):
+            self.inner = real_scandir(path)
+
+        def __enter__(self):
+            self.inner.__enter__()
+            return iter(sorted(self.inner, key=lambda entry: entry.is_dir()))
+
+        def __exit__(self, *args):
+            return self.inner.__exit__(*args)
+
+    monkeypatch.setattr(package_module.os, "scandir", FilesFirst)
+    with pytest.raises(
+        BoundaryLeakError, match="contains generated check files; scan incomplete"
+    ) as caught:
+        await ledger.record_actor_started(
+            "actor-1", ["task-1/V1"], workspace=workspace, packages=[package]
+        )
+    assert "hidden_copy.py" in caught.value.details["paths"]
+    assert caught.value.details["scan_reasons"] == ["entry_limit"]
