@@ -21,7 +21,6 @@ from ouroboros.mcp.tools.ac_tree_hud_handler import (
     format_subtask_progress_summary,
     summarize_subtask_events,
 )
-from ouroboros.mcp.tools.qa_session import read_session_events
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -32,7 +31,7 @@ from ouroboros.mcp.types import (
 )
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 from ouroboros.persistence.event_store import EventStore
-from ouroboros.persistence.qa_session_store import QA_EVALUATED, qa_compatible_event
+from ouroboros.persistence.qa_session_store import QA_EVALUATED, read_qa_evaluation
 
 log = structlog.get_logger(__name__)
 
@@ -322,19 +321,15 @@ class SessionStatusHandler:
                 event_type=QA_EVALUATED,
                 limit=1,
             )
-            session_events = (
-                await read_session_events(self._event_store, session_id) if has_qa else []
-            )
-            qa_events = [event for event in session_events if event.type == QA_EVALUATED]
-            if qa_events:
-                if any(not qa_compatible_event(event) for event in session_events):
+            data = await read_qa_evaluation(self._event_store, session_id) if has_qa else None
+            if data is not None:
+                if not isinstance(data, dict):
                     return Result.err(
                         MCPToolError(
-                            "Session ID is shared by QA and another session type",
+                            "QA session record is invalid",
                             tool_name="ouroboros_session_status",
                         )
                     )
-                data = qa_events[-1].data
                 iteration, score = data.get("iteration"), data.get("score")
                 threshold, passed, verdict = (
                     data.get("pass_threshold"),
