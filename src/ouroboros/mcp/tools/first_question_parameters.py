@@ -8,6 +8,44 @@ from ouroboros.mcp.types import MCPToolParameter, ToolInputType
 def first_question_parameters() -> tuple[MCPToolParameter, ...]:
     return (
         MCPToolParameter(
+            name="structured_first_batch",
+            type=ToolInputType.BOOLEAN,
+            required=False,
+            description="Opt in to a proposed first batch of questions, requiring explicit independence confirmation.",
+        ),
+        MCPToolParameter(
+            name="batch_reject",
+            type=ToolInputType.BOOLEAN,
+            required=False,
+            description="Discard unanswered batch questions while keeping recorded answers.",
+        ),
+        MCPToolParameter(
+            name="batch_answers",
+            type=ToolInputType.ARRAY,
+            required=False,
+            items={"type": "object"},
+            max_items=5,
+            description="ID-addressed answers to a confirmed batch; do not combine with other answer fields.",
+        ),
+        MCPToolParameter(
+            name="batch_answers_text",
+            type=ToolInputType.STRING,
+            required=False,
+            description="Explicit numbered answers like 1: a / 2: a,c / 3: \"free text\"; '-' selects none.",
+        ),
+        MCPToolParameter(
+            name="batch_confirm_digest",
+            type=ToolInputType.STRING,
+            required=False,
+            description="Digest of the exact question batch shown to the user.",
+        ),
+        MCPToolParameter(
+            name="batch_independence_confirmed",
+            type=ToolInputType.BOOLEAN,
+            required=False,
+            description="True only after the user confirms that the proposed questions are independent.",
+        ),
+        MCPToolParameter(
             name="selected_first_choice",
             type=ToolInputType.INTEGER,
             description="Explicit 1-based selection from a pending structured first question; omit answer.",
