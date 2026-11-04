@@ -8,6 +8,7 @@ centralising the logic here avoids duplication and keeps the ``PermissionError``
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import os
 from pathlib import Path
 import re
@@ -17,7 +18,17 @@ import sys
 import yaml
 
 
-def plugin_version_error(cli_path: str) -> str | None:
+def plugin_version_error(
+    cli_path: str, on_unknown: Callable[[str], None] | None = None
+) -> str | None:
+    def warn_unknown() -> None:
+        if on_unknown is not None:
+            on_unknown(
+                "Could not determine the OpenCode version. Plugin compatibility is unverified: "
+                "OpenCode 2.x and later are not supported. Check 'opencode --version', or use "
+                "'ouroboros setup --runtime opencode --opencode-mode subprocess'."
+            )
+
     try:
         result = subprocess.run(
             [cli_path, "--version"],
@@ -26,14 +37,19 @@ def plugin_version_error(cli_path: str) -> str | None:
             text=True,
             timeout=5,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired, UnicodeError):
+        warn_unknown()
         return None
     if result.returncode != 0:
+        warn_unknown()
         return None
     version = re.fullmatch(
         r"(?:opencode\s+)?v?(\d+)\.\d+\.\d+(?:[-+][\w.-]+)?", result.stdout.strip()
     )
-    if version is None or int(version.group(1)) < 2:
+    if version is None:
+        warn_unknown()
+        return None
+    if int(version.group(1)) < 2:
         return None
     return (
         "OpenCode 2.x and later plugin mode is not supported by this bridge. "
