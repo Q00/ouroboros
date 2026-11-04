@@ -215,28 +215,29 @@ def _find_opencode_config() -> Path | None:
     return find_opencode_config(allow_default=False)
 
 
+def _opencode_unique_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
 def _load_opencode_uninstall_config(config_path: Path) -> tuple[str, dict, object] | None:
     """Read a stable editable config, refusing ambiguous V2 JSONC rewrites."""
     from ouroboros.cli.commands.setup import _snapshot_path
 
-    def no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
-        result: dict[str, object] = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError("duplicate JSON key")
-            result[key] = value
-        return result
-
     try:
         snapshot = _snapshot_path(config_path)
         raw = config_path.read_text(encoding="utf-8")
-        parsed = json.loads(_strip_jsonc(raw), object_pairs_hook=no_duplicates)
+        parsed = json.loads(_strip_jsonc(raw), object_pairs_hook=_opencode_unique_keys)
         if not isinstance(parsed, dict):
             raise ValueError("expected config object")
         # JSONC-to-JSON rewriting erases user comments. Retain legacy V1
         # behavior, but never expand that data loss to V2 configurations.
         if "plugins" in parsed:
-            json.loads(raw, object_pairs_hook=no_duplicates)
+            json.loads(raw, object_pairs_hook=_opencode_unique_keys)
         return raw, parsed, snapshot
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
         print_warning(
@@ -454,6 +455,7 @@ def uninstall(
 
     # Preview what will be removed
     targets: list[str] = []
+    manual_cleanup: list[str] = []
 
     mcp_path = Path.home() / ".claude" / "mcp.json"
     if mcp_path.exists():
@@ -489,13 +491,47 @@ def uninstall(
         targets.append("Codex MCP config (~/.codex/config.toml — may be unreadable)")
 
     opencode_config = _find_opencode_config()
-    try:
-        if opencode_config is not None:
-            oc_data = json.loads(_strip_jsonc(opencode_config.read_text(encoding="utf-8")))
-            if isinstance(oc_data.get("mcp"), dict) and "ouroboros" in oc_data["mcp"]:
-                targets.append(f"OpenCode MCP config ({opencode_config})")
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-        targets.append(f"OpenCode MCP config ({opencode_config} — may be malformed)")
+    opencode_data: dict | None = None
+    opencode_editable = True
+    if opencode_config is not None:
+        try:
+            preview_data = json.loads(
+                _strip_jsonc(opencode_config.read_text(encoding="utf-8")),
+                object_pairs_hook=_opencode_unique_keys,
+            )
+            if not isinstance(preview_data, dict):
+                raise ValueError("expected config object")
+            opencode_data = preview_data
+            v1 = preview_data.get("plugin", [])
+            v2 = preview_data.get("plugins", [])
+            mcp = preview_data.get("mcp", {})
+            bridge_dir = opencode_config_dir() / "plugins" / "ouroboros-bridge"
+            has_owned_entry = (
+                (isinstance(mcp, dict) and "ouroboros" in mcp)
+                or (isinstance(v1, list) and any(is_bridge_plugin_entry(e) for e in v1))
+                or (
+                    isinstance(v2, list)
+                    and any(
+                        is_v2_bridge_plugin_entry(e, opencode_config_dir(), opencode_config.parent)
+                        for e in v2
+                    )
+                )
+            )
+            if bridge_dir.exists() or has_owned_entry:
+                loaded = _load_opencode_uninstall_config(opencode_config)
+                if loaded is None:
+                    opencode_editable = False
+                    manual_cleanup.append(
+                        f"OpenCode config ({opencode_config}) and bridge directory"
+                    )
+                else:
+                    _, opencode_data, _ = loaded
+                    loaded_mcp = opencode_data.get("mcp", {})
+                    if isinstance(loaded_mcp, dict) and "ouroboros" in loaded_mcp:
+                        targets.append(f"OpenCode MCP config ({opencode_config})")
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            opencode_editable = False
+            manual_cleanup.append(f"OpenCode config ({opencode_config}) and bridge directory")
 
     codex_dir = resolve_codex_home()
     try:
@@ -522,42 +558,40 @@ def uninstall(
         targets.append(f"Project config ({ooo_dir}/)")
 
     bridge_plugin_dir = opencode_config_dir() / "plugins" / "ouroboros-bridge"
-    if bridge_plugin_dir.exists():
-        targets.append(f"OpenCode bridge plugin ({bridge_plugin_dir}/)")
-    else:
-        # Directory gone but config entry may linger — check opencode config
-        _oc_cfg = find_opencode_config(allow_default=False)
-        if _oc_cfg is not None:
-            try:
-                _oc_data = json.loads(_strip_jsonc(_oc_cfg.read_text(encoding="utf-8")))
-                _oc_plugins = _oc_data.get("plugin", [])
-                _oc_v2_plugins = _oc_data.get("plugins", [])
-                if (
-                    isinstance(_oc_plugins, list)
-                    and any(is_bridge_plugin_entry(e) for e in _oc_plugins)
-                ) or (
-                    isinstance(_oc_v2_plugins, list)
-                    and any(
-                        is_v2_bridge_plugin_entry(e, opencode_config_dir(), _oc_cfg.parent)
-                        for e in _oc_v2_plugins
-                    )
-                ):
-                    targets.append(f"OpenCode bridge plugin entry in {_oc_cfg}")
-            except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-                pass
+    if opencode_editable:
+        if bridge_plugin_dir.exists():
+            targets.append(f"OpenCode bridge plugin ({bridge_plugin_dir}/)")
+        elif opencode_data is not None and opencode_config is not None:
+            # Directory gone but an entry may linger in the selected config.
+            v1 = opencode_data.get("plugin", [])
+            v2 = opencode_data.get("plugins", [])
+            if (isinstance(v1, list) and any(is_bridge_plugin_entry(e) for e in v1)) or (
+                isinstance(v2, list)
+                and any(
+                    is_v2_bridge_plugin_entry(e, opencode_config_dir(), opencode_config.parent)
+                    for e in v2
+                )
+            ):
+                targets.append(f"OpenCode bridge plugin entry in {opencode_config}")
 
     data_dir = Path.home() / ".ouroboros"
     if not keep_data and data_dir.exists():
         targets.append("Data directory (~/.ouroboros/)")
 
-    if not targets:
+    if not targets and not manual_cleanup:
         console.print("[green]Nothing to remove — Ouroboros is not installed.[/green]\n")
         raise typer.Exit()
 
-    console.print("[bold]Will remove:[/bold]")
-    for t in targets:
-        console.print(f"  [red]-[/red] {t}")
-    console.print()
+    if targets:
+        console.print("[bold]Will remove:[/bold]")
+        for t in targets:
+            console.print(f"  [red]-[/red] {t}")
+        console.print()
+    if manual_cleanup:
+        console.print("[bold yellow]Manual cleanup required; will be preserved:[/bold yellow]")
+        for item in manual_cleanup:
+            console.print(f"  [yellow]-[/yellow] {item}")
+        console.print()
 
     console.print("[bold]Will NOT remove:[/bold]")
     console.print("  [dim]- Python package (run: pip uninstall ouroboros-ai)[/dim]")
@@ -580,7 +614,7 @@ def uninstall(
     # Execute removal — track failures only for items we expected to remove.
     # Each helper returns True on success, False on skip/failure.
     console.print()
-    failed: list[str] = []
+    failed: list[str] = list(manual_cleanup)
 
     if not _remove_claude_mcp(dry_run=False):
         # Only record as failed if we expected to clean it (was in targets)
@@ -591,9 +625,8 @@ def uninstall(
         if any("codex/config.toml" in t for t in targets):
             failed.append("~/.codex/config.toml")
 
-    if not _remove_opencode_mcp(dry_run=False):
-        if any("OpenCode MCP" in t for t in targets):
-            failed.append("OpenCode MCP config")
+    if any("OpenCode MCP" in t for t in targets) and not _remove_opencode_mcp(dry_run=False):
+        failed.append("OpenCode MCP config")
 
     if not _remove_codex_artifacts(dry_run=False):
         if any("Codex rules" in t for t in targets):
@@ -607,9 +640,10 @@ def uninstall(
         if any("Project config" in t for t in targets):
             failed.append(f"{cwd}/.ouroboros/")
 
-    if not _remove_opencode_bridge_plugin(dry_run=False):
-        if any("OpenCode bridge plugin" in t for t in targets):
-            failed.append("OpenCode bridge plugin")
+    if any("OpenCode bridge plugin" in t for t in targets) and not _remove_opencode_bridge_plugin(
+        dry_run=False
+    ):
+        failed.append("OpenCode bridge plugin")
 
     if not keep_data:
         if not _remove_data_dir(dry_run=False):
