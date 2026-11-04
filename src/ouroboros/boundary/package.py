@@ -865,7 +865,12 @@ class _Scan:
             self.entry(entry, relative, root, depth)
 
     def entry(self, entry: os.DirEntry[str], relative: str, root: str, depth: int) -> None:
-        if entry.is_symlink():
+        try:
+            is_symlink = entry.is_symlink()
+        except OSError:
+            self.incomplete(relative, "unreadable_entry")
+            return
+        if is_symlink:
             # Resolved, never trusted: the target is judged by what it is.
             try:
                 target = os.stat(entry.path)

@@ -1108,3 +1108,46 @@ async def test_scan_reports_both_observed_leak_and_later_incomplete_scan(
         )
     assert "hidden_copy.py" in caught.value.details["paths"]
     assert caught.value.details["scan_reasons"] == ["entry_limit"]
+
+
+async def test_scan_entry_inspection_failure_refuses_worker_with_context(
+    store, tmp_path: Path, package, admission, monkeypatch
+) -> None:
+    import errno
+
+    import ouroboros.boundary.package as package_module
+
+    ledger = BoundaryLedger(store)
+    await ledger.record_package_frozen("task-1/V1", package, seed=seed_for(package))
+    await ledger.record_admission("task-1/V1", admission)
+    workspace = tmp_path / "worker"
+    workspace.mkdir()
+    (workspace / "uninspectable").write_text("innocent")
+    real_scandir = package_module.os.scandir
+
+    class BadEntry:
+        name = "uninspectable"
+
+        def is_symlink(self):
+            raise OSError(errno.EIO, "injected")
+
+    class BrokenScandir:
+        def __init__(self, path):
+            self.inner = real_scandir(path)
+
+        def __enter__(self):
+            self.inner.__enter__()
+            return (BadEntry() if entry.name == "uninspectable" else entry for entry in self.inner)
+
+        def __exit__(self, *args):
+            return self.inner.__exit__(*args)
+
+    monkeypatch.setattr(package_module.os, "scandir", BrokenScandir)
+    with pytest.raises(BoundaryLeakError, match="scan incomplete") as caught:
+        await ledger.record_actor_started(
+            "actor-1", ["task-1/V1"], workspace=workspace, packages=[package]
+        )
+    assert caught.value.details["actor_id"] == "actor-1"
+    assert caught.value.details["paths"] == ["uninspectable"]
+    assert caught.value.details["scan_reasons"] == ["unreadable_entry"]
+    assert all(event.type != ACTOR_STARTED for event in await ledger.events("task-1/V1"))
