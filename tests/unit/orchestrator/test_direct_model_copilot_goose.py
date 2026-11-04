@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 from pathlib import Path
@@ -226,3 +227,65 @@ async def test_goose_new_or_retired_handle_allows_model(tmp_path: Path, mode: st
     assert commands, [message.content for message in messages]
     assert "--resume" not in commands[0]
     assert commands[0][commands[0].index("--model") + 1] == "choice.1"
+
+
+def test_goose_model_with_newly_retired_resume_starts_fresh(tmp_path: Path) -> None:
+    cli = tmp_path / "goose"
+    cli.write_text("#!/bin/sh\necho goose 1.0\n", encoding="utf-8")
+    cli.chmod(0o755)
+    runtime = GooseCliRuntime(cli_path=str(cli), cwd=str(tmp_path))
+    handle = runtime._build_runtime_handle("old-session")
+    assert handle is not None
+    cli.write_text("#!/bin/sh\necho goose 2.0\n", encoding="utf-8")
+    command = runtime._build_command(
+        "/tmp/unused", resume_session_id="old-session", runtime_handle=handle, model="choice.1"
+    )
+    assert runtime._drift.epoch == 1
+    assert "--resume" not in command
+    assert command[command.index("-n") + 1] != "old-session"
+    assert command[command.index("--model") + 1] == "choice.1"
+    assert handle.native_session_id == "old-session"
+
+
+def test_goose_model_conflict_preserves_handle_and_default(tmp_path: Path) -> None:
+    runtime = GooseCliRuntime(cli_path=_cli("goose"), cwd=str(tmp_path), model="base.1")
+    handle = runtime._build_runtime_handle("existing")
+    assert handle is not None
+    original = copy.deepcopy(handle)
+    with pytest.raises(ValueError, match="model.*resume"):
+        runtime._build_command(
+            "/tmp/unused", resume_session_id="existing", runtime_handle=handle, model="choice.1"
+        )
+    assert handle.native_session_id == "existing"
+    assert handle == original
+    assert runtime._model == "base.1"
+    assert runtime._drift.epoch == 0
+
+
+@pytest.mark.asyncio
+async def test_goose_execution_after_executable_drift_uses_fresh_model(tmp_path: Path) -> None:
+    cli = tmp_path / "goose"
+    cli.write_text("#!/bin/sh\necho goose 1.0\n", encoding="utf-8")
+    cli.chmod(0o755)
+    runtime = GooseCliRuntime(cli_path=str(cli), cwd=str(tmp_path))
+    handle = runtime._build_runtime_handle("old-session")
+    assert handle is not None
+    original = copy.deepcopy(handle)
+    cli.write_text("#!/bin/sh\necho goose 2.0\n", encoding="utf-8")
+    with patch(
+        "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+        return_value=_FakeProcess([json.dumps({"type": "completed", "text": "done"})]),
+    ) as spawn:
+        messages = [
+            message
+            async for message in runtime.execute_task(
+                "test", model="choice.1", resume_handle=handle
+            )
+        ]
+    assert spawn.call_count == 1
+    command = spawn.call_args.args
+    assert "--resume" not in command
+    assert command[command.index("-n") + 1] != "old-session"
+    assert command[command.index("--model") + 1] == "choice.1"
+    assert messages and not messages[-1].is_error
+    assert handle == original

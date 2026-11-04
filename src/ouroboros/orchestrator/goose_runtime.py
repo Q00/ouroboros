@@ -189,13 +189,13 @@ class GooseCliRuntime(CodexCliRuntime):
         Goose does not have an equivalent flag; the base completion path falls
         back to the last streamed assistant/result content.
         """
+        self._reconcile_cli_executable_identity()
+        requested_resume_session_id = resume_session_id
+        resume_session_id = self._drift.retire_resume(resume_session_id, runtime_handle)
         if model is not None and resume_session_id is not None:
             raise UnsupportedModelOverrideError(
                 "request-local model override is unsupported with Goose resume"
             )
-        self._reconcile_cli_executable_identity()
-        requested_resume_session_id = resume_session_id
-        resume_session_id = self._drift.retire_resume(resume_session_id, runtime_handle)
         del output_last_message_path, prompt
 
         # A retired resume target must not leak back in as the ``-n`` name:
