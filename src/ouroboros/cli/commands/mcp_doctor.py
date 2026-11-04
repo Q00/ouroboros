@@ -132,12 +132,12 @@ def _not_run_result(name: str, blocked_by: str) -> CheckResult:
     )
 
 
-def _local_stdio_failure(exc: BaseException) -> list[CheckResult]:
+def _local_stdio_failure() -> list[CheckResult]:
     return [
         CheckResult(
             _LOCAL_STDIO_STAGE_STARTUP,
             "fail",
-            f"Local probe failed ({type(exc).__name__}): {exc}",
+            "Local probe failed unexpectedly",
             "Inspect the isolated MCP installation and rerun the doctor.",
         ),
         _not_run_result(_LOCAL_STDIO_STAGE_PROTOCOL, "local probe"),
@@ -145,9 +145,9 @@ def _local_stdio_failure(exc: BaseException) -> list[CheckResult]:
     ]
 
 
-def _note_cleanup_failure(primary: BaseException, cleanup: BaseException) -> None:
+def _note_cleanup_failure(primary: BaseException) -> None:
     try:
-        primary.add_note(f"Local stdio cleanup also failed ({type(cleanup).__name__}): {cleanup}")
+        primary.add_note("Local stdio cleanup also failed")
     except (asyncio.CancelledError, KeyboardInterrupt, GeneratorExit):
         raise
     except BaseException:
@@ -225,7 +225,7 @@ async def _collect_local_stdio_results(
                 CheckResult(
                     _LOCAL_STDIO_STAGE_PROTOCOL,
                     "fail",
-                    f"MCP protocol discovery failed: {connected.error}",
+                    "MCP protocol discovery failed",
                     "Check protocol compatibility in the isolated MCP 2 installation.",
                 ),
                 _not_run_result(_LOCAL_STDIO_STAGE_TOOLS, "protocol discovery"),
@@ -234,7 +234,7 @@ async def _collect_local_stdio_results(
             CheckResult(
                 _LOCAL_STDIO_STAGE_STARTUP,
                 "fail",
-                f"Local server startup or stdio transport failed: {connected.error}",
+                "Local server startup or stdio transport failed",
                 "Resolve package checks, then rerun --probe-local-stdio.",
             ),
             _not_run_result(_LOCAL_STDIO_STAGE_PROTOCOL, "startup/transport"),
@@ -267,7 +267,7 @@ async def _collect_local_stdio_results(
             CheckResult(
                 _LOCAL_STDIO_STAGE_TOOLS,
                 "fail",
-                f"MCP tools/list failed: {tools.error}",
+                "MCP tools/list failed",
                 "Inspect server stderr and reinstall the isolated MCP 2 profile.",
             )
         )
@@ -320,8 +320,8 @@ async def _probe_local_stdio() -> list[CheckResult]:
 
     external_exceptions = (asyncio.CancelledError, KeyboardInterrupt, GeneratorExit)
     if isinstance(primary_error, external_exceptions):
-        for cleanup_error in cleanup_errors:
-            _note_cleanup_failure(primary_error, cleanup_error)
+        for _cleanup_error in cleanup_errors:
+            _note_cleanup_failure(primary_error)
         raise primary_error.with_traceback(primary_error.__traceback__)
 
     cleanup_cancellation = next(
@@ -329,25 +329,24 @@ async def _probe_local_stdio() -> list[CheckResult]:
     )
     if cleanup_cancellation is not None:
         if primary_error is not None:
-            _note_cleanup_failure(cleanup_cancellation, primary_error)
+            _note_cleanup_failure(cleanup_cancellation)
         for cleanup_error in cleanup_errors:
             if cleanup_error is not cleanup_cancellation:
-                _note_cleanup_failure(cleanup_cancellation, cleanup_error)
+                _note_cleanup_failure(cleanup_cancellation)
         raise cleanup_cancellation.with_traceback(cleanup_cancellation.__traceback__)
 
     if primary_error is not None:
-        results = _local_stdio_failure(primary_error)
+        results = _local_stdio_failure()
     if cleanup_errors:
         if not results:
-            results = _local_stdio_failure(cleanup_errors[0])
+            results = _local_stdio_failure()
         # Cleanup failure makes the overall Doctor fail, but cannot rewrite
         # the observed startup/discovery/tool results into a different diagnosis.
-        cleanup_message = "; ".join(f"{type(error).__name__}: {error}" for error in cleanup_errors)
         results.append(
             CheckResult(
                 "local_stdio_cleanup",
                 "fail",
-                f"Local stdio teardown failed ({cleanup_message})",
+                "Local stdio teardown failed",
                 "Resolve local stdio teardown before rerunning the probe.",
             )
         )
