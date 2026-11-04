@@ -355,6 +355,7 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
         runtime_handle: RuntimeHandle | None = None,
         # Native effort is accepted only from the advertised CLI vocabulary.
         reasoning_effort: str | None = None,
+        model: str | None = None,
     ) -> list[str]:
         """Build the Antigravity CLI command for non-interactive execution.
 
@@ -384,7 +385,7 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
         session_id = resume_session_id or self._resolve_resume_session_id(runtime_handle)
         if session_id:
             command.extend(["--conversation", session_id])
-        normalized_model = self._normalize_model(self._model)
+        normalized_model = self._normalize_model(model if model is not None else self._model)
         if normalized_model and normalized_model != _SENTINEL_MODEL:
             command.extend(["--model", normalized_model])
         return command
