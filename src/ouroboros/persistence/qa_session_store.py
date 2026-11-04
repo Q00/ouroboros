@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import literal_column, select
 
 from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
@@ -22,9 +22,39 @@ class QASessionConflict(ValueError):
     """A QA ID is already used by a different kind of session."""
 
 
-def qa_compatible_event(event: BaseEvent) -> bool:
-    """I/O journal records do not claim session lifecycle ownership."""
-    return event.type in _COMPATIBLE_EVENTS
+async def read_qa_evaluation(store: EventStore, session_id: str) -> object | None:
+    """Read the latest result and ownership in one SQLite statement snapshot."""
+    engine = store._engine
+    if engine is None:
+        raise PersistenceError("EventStore not initialized", operation="read_qa_evaluation")
+    conflict = (
+        select(events_table.c.id)
+        .where(
+            events_table.c.aggregate_type == "session",
+            events_table.c.aggregate_id == session_id,
+            events_table.c.event_type.not_in(_COMPATIBLE_EVENTS),
+        )
+        .exists()
+    )
+    statement = (
+        select(events_table.c.payload, conflict.label("conflict"))
+        .where(
+            events_table.c.aggregate_type == "session",
+            events_table.c.aggregate_id == session_id,
+            events_table.c.event_type == QA_EVALUATED,
+        )
+        .order_by(literal_column("rowid").desc())
+        .limit(1)
+    )
+    async with engine.connect() as conn:
+        row = (await conn.execute(statement)).first()
+    if row is None:
+        return None
+    if row.conflict:
+        raise QASessionConflict("Session ID is shared by QA and another session type")
+    if row.payload is None:
+        raise QASessionConflict("QA session record is invalid")
+    return row.payload
 
 
 async def append_qa_evaluation(store: EventStore, event: BaseEvent) -> None:

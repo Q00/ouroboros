@@ -8,27 +8,8 @@ from ouroboros.events.base import BaseEvent
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.persistence.qa_session_store import (
     QA_EVALUATED,
-    QASessionConflict,
     append_qa_evaluation,
 )
-
-
-async def read_session_events(store: EventStore, session_id: str) -> list[BaseEvent]:
-    """Read one bounded, rowid-ordered snapshot, failing closed on overflow."""
-    boundary = await store.get_current_rowid()
-    cursor = 0
-    events: list[BaseEvent] = []
-    while cursor < boundary:
-        page, next_cursor = await store.get_events_after(
-            "session", session_id, cursor, limit=512, max_row_id=boundary
-        )
-        if not page:
-            break
-        events.extend(page)
-        if len(events) > 10_000 or next_cursor <= cursor:
-            raise QASessionConflict("session history cannot be safely reconstructed")
-        cursor = next_cursor
-    return events
 
 
 async def record_qa_evaluation(

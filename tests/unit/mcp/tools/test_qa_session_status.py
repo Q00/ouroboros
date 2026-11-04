@@ -318,3 +318,35 @@ async def test_score_verdict_disagreement_is_not_reported_as_valid(
     )
     result = await SessionStatusHandler(event_store=store).handle({"session_id": "qa-mismatch"})
     assert result.is_err
+
+
+async def test_large_compatible_history_remains_queryable_and_detects_conflict(store):
+    from ouroboros.persistence.schema import events_table
+
+    session_id = "qa-long-history"
+    args = {"artifact": "x", "quality_bar": "works", "qa_session_id": session_id}
+    assert (await qa(store, 0.7).handle(args)).is_ok
+    assert store._engine is not None
+    journal = [
+        BaseEvent(
+            type="llm.call.returned", aggregate_type="session", aggregate_id=session_id
+        ).to_db_dict()
+        for _ in range(10_001)
+    ]
+    async with store._engine.begin() as conn:
+        await conn.execute(events_table.insert(), journal)
+    assert (await qa(store, 0.9).handle({**args, "iteration_history": [{}]})).is_ok
+    status = await SessionStatusHandler(event_store=store).handle({"session_id": session_id})
+    assert status.is_ok
+    assert status.value.meta["iteration"] == 2
+    assert status.value.meta["score"] == 0.9
+    await store.append(
+        BaseEvent(
+            type="orchestrator.session.progressed",
+            aggregate_type="session",
+            aggregate_id=session_id,
+        )
+    )
+    conflict = await SessionStatusHandler(event_store=store).handle({"session_id": session_id})
+    assert conflict.is_err
+    assert "shared by QA" in str(conflict.error)
