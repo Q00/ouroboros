@@ -2499,7 +2499,36 @@ class TestCodexDoctor:
             failures = _check_auto_dispatch_surface(codex_dir, live_mcp=True)
 
         assert any("initialize/list_tools failed" in failure for failure in failures)
-        assert any("connection closed during initialize" in failure for failure in failures)
+        assert any(
+            "server rejected the request or returned an invalid response" in failure
+            for failure in failures
+        )
+        assert not any("connection closed during initialize" in failure for failure in failures)
+
+    def test_doctor_live_mcp_redacts_configured_secret_from_real_server(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        codex_dir = tmp_path / "custom-codex-home"
+        self._write_healthy_codex_surface(codex_dir)
+        secret = "synthetic-cli-sentinel-449a"
+        with (codex_dir / "config.toml").open("a", encoding="utf-8") as config:
+            config.write(f'TEST_CREDENTIAL = "{secret}"\n')
+        launcher = tmp_path / "uvx"
+        launcher.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "request = json.loads(sys.stdin.readline())\n"
+            "print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], "
+            "'error': {'code': -32000, 'message': os.environ['TEST_CREDENTIAL']}}), flush=True)\n",
+            encoding="utf-8",
+        )
+        launcher.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}")
+        monkeypatch.setenv("CODEX_HOME", str(codex_dir))
+        result = runner.invoke(app, ["doctor", "--live-mcp"])
+        assert result.exit_code == 1
+        assert "initialize/list_tools failed" in result.output
+        assert secret not in result.output
 
     def test_packaged_codex_artifacts_satisfy_doctor_contract(
         self,
