@@ -181,8 +181,7 @@ class GjcRuntime:
         )
         try:
             await client.connect()
-            await client.stop_session(session_id)
-            return True
+            return await self._stop_session_bounded(client, session_id)
         except GjcCoordinatorError as exc:
             log.warning(
                 f"{self._log_namespace}.terminate_failed",

@@ -451,3 +451,44 @@ async def test_cancellation_during_terminal_stop_retries_under_cleanup_shield() 
         await asyncio.wait_for(task, timeout=5)
     assert client.stopped == ["session-1", "session-1"]
     assert client.closed
+
+
+@pytest.mark.asyncio
+async def test_handle_termination_retries_transient_stop_failure() -> None:
+    from ouroboros.gjc.sdk_client import GjcCoordinatorError
+
+    class FlakyStop(FakeClient):
+        async def stop_session(self, session_id: str) -> None:
+            self.stopped.append(session_id)
+            if len(self.stopped) == 1:
+                raise GjcCoordinatorError("temporary", code="timeout")
+
+    client = FlakyStop([])
+    runtime = GjcRuntime(cwd="/tmp/project", coordinator_client_factory=_factory(client))
+    handle = RuntimeHandle(backend="gjc", kind="agent_runtime", native_session_id="session-1")
+    assert await runtime._terminate_session(handle) is True
+    assert client.stopped == ["session-1", "session-1"]
+    assert client.closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "expected_calls"),
+    [("timeout", 2), ("force_not_authorized", 1), ("endpoint_stale", 1)],
+)
+async def test_handle_termination_reports_failure_after_bounded_cleanup(
+    code: str, expected_calls: int
+) -> None:
+    from ouroboros.gjc.sdk_client import GjcCoordinatorError
+
+    class FailedStop(FakeClient):
+        async def stop_session(self, session_id: str) -> None:
+            self.stopped.append(session_id)
+            raise GjcCoordinatorError("stop failed", code=code)
+
+    client = FailedStop([])
+    runtime = GjcRuntime(cwd="/tmp/project", coordinator_client_factory=_factory(client))
+    handle = RuntimeHandle(backend="gjc", kind="agent_runtime", native_session_id="session-1")
+    assert await runtime._terminate_session(handle) is False
+    assert client.stopped == ["session-1"] * expected_calls
+    assert client.closed
