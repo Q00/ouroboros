@@ -583,16 +583,17 @@ async def _run_interview(
                 console.print()
                 _raise_for_aborted_interview(state)
 
-            # Interview complete
+            # Save final state before reporting completion or generating Seed.
+            save_result = await engine.save_state(state)
+            if save_result.is_err:
+                print_error(f"Failed to save final interview state: {save_result.error.message}")
+                raise typer.Exit(code=1)
+
             console.print()
             print_success("Interview completed!")
             console.print(f"[muted]Total rounds: {len(state.rounds)}[/]")
             console.print(f"[muted]Interview ID: {state.interview_id}[/]")
-
-            # Save final state
-            save_result = await engine.save_state(state)
-            if save_result.is_ok:
-                console.print(f"[muted]State saved to: {save_result.value}[/]")
+            console.print(f"[muted]State saved to: {save_result.value}[/]")
 
             console.print()
 

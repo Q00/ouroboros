@@ -288,7 +288,12 @@ async def test_handler_surfaces_runnable_lateral_review_dispatch() -> None:
     assert "Lateral review queued" not in content_text
     assert "Session sess-817" in content_text
     assert state.lateral_review_advised_milestones == ["progress"]
-    handler._emit_event_bg.assert_called()
+    emitted = [call.args[0] for call in handler._emit_event_bg.call_args_list]
+    recommendation = [
+        event for event in emitted if event.type == "interview.lateral_review.recommended"
+    ]
+    assert len(recommendation) == 1
+    assert recommendation[0].data["round_number"] == 3
 
 
 def test_required_advisory_personas_reads_the_interview_catalog() -> None:

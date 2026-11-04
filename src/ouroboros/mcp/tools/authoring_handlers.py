@@ -2640,6 +2640,13 @@ class InterviewHandler:
                         "mcp.tool.interview.save_failed_on_start",
                         error=str(save_result.error),
                     )
+                    return Result.err(
+                        MCPToolError(
+                            f"Failed to save the question for session {state.interview_id}: "
+                            f"{save_result.error}. Resume this session to inspect its state.",
+                            tool_name="ouroboros_interview",
+                        )
+                    )
 
                 # Emit interview started event
                 from ouroboros.events.interview import interview_started
@@ -3557,19 +3564,6 @@ class InterviewHandler:
         )
         if lateral_review_meta is not None and live_score is not None:
             state.note_lateral_review_advisory(lateral_review_meta["lateral_review_milestone"])
-            from ouroboros.events.interview import (
-                interview_lateral_review_recommended,
-            )
-
-            self._emit_event_bg(
-                interview_lateral_review_recommended(
-                    session_id,
-                    from_milestone=lateral_review_meta["lateral_review_from_milestone"],
-                    to_milestone=lateral_review_meta["lateral_review_milestone"],
-                    ambiguity_score=live_score.overall_score,
-                    round_number=len(state.rounds),
-                )
-            )
         display_question = _format_question_with_ambiguity(question, live_score)
 
         # Save pending question as unanswered round for next resume
@@ -3590,7 +3584,28 @@ class InterviewHandler:
                 "mcp.tool.interview.save_failed",
                 error=str(save_result.error),
             )
+            return Result.err(
+                MCPToolError(
+                    f"Failed to save the question for session {session_id}: "
+                    f"{save_result.error}. Resume this session to inspect its state before retrying.",
+                    tool_name="ouroboros_interview",
+                )
+            )
 
+        if lateral_review_meta is not None and live_score is not None:
+            from ouroboros.events.interview import (
+                interview_lateral_review_recommended,
+            )
+
+            self._emit_event_bg(
+                interview_lateral_review_recommended(
+                    session_id,
+                    from_milestone=lateral_review_meta["lateral_review_from_milestone"],
+                    to_milestone=lateral_review_meta["lateral_review_milestone"],
+                    ambiguity_score=live_score.overall_score,
+                    round_number=len(state.rounds) - 1,
+                )
+            )
         log.info(
             "mcp.tool.interview.question_asked",
             session_id=session_id,
