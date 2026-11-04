@@ -32,6 +32,7 @@ from ouroboros.cli.formatters.panels import (
 from ouroboros.cli.opencode_config import (
     find_opencode_config,
     is_bridge_plugin_entry,
+    is_v2_bridge_plugin_entry,
     opencode_config_dir,
 )
 from ouroboros.codex import CODEX_RULE_FILENAME, resolve_codex_home, resolve_packaged_codex_assets
@@ -214,18 +215,60 @@ def _find_opencode_config() -> Path | None:
     return find_opencode_config(allow_default=False)
 
 
+def _load_opencode_uninstall_config(config_path: Path) -> tuple[str, dict, object] | None:
+    """Read a stable editable config, refusing ambiguous V2 JSONC rewrites."""
+    from ouroboros.cli.commands.setup import _snapshot_path
+
+    def no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+
+    try:
+        snapshot = _snapshot_path(config_path)
+        raw = config_path.read_text(encoding="utf-8")
+        parsed = json.loads(_strip_jsonc(raw), object_pairs_hook=no_duplicates)
+        if not isinstance(parsed, dict):
+            raise ValueError("expected config object")
+        # JSONC-to-JSON rewriting erases user comments. Retain legacy V1
+        # behavior, but never expand that data loss to V2 configurations.
+        if "plugins" in parsed:
+            json.loads(raw, object_pairs_hook=no_duplicates)
+        return raw, parsed, snapshot
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        print_warning(
+            f"Cannot safely edit {config_path}; remove the Ouroboros entries manually "
+            "to preserve comments and ambiguous settings."
+        )
+        return None
+
+
+def _write_opencode_uninstall_config(config_path: Path, data: dict, snapshot: object) -> bool:
+    from ouroboros.cli.commands.setup import _atomic_write_text_if_current_matches
+
+    try:
+        _atomic_write_text_if_current_matches(
+            config_path, json.dumps(data, indent=2) + "\n", snapshot
+        )
+    except OSError:
+        print_warning(f"Could not safely write {config_path} — skipping.")
+        return False
+    return True
+
+
 def _remove_opencode_mcp(dry_run: bool) -> bool:
     """Remove ouroboros entry from OpenCode config (opencode.jsonc or opencode.json)."""
     config_path = _find_opencode_config()
     if config_path is None:
         return False
 
-    try:
-        original_text = config_path.read_text(encoding="utf-8")
-        data = json.loads(_strip_jsonc(original_text))
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-        print_warning(f"{config_path} is malformed — skipping.")
+    loaded = _load_opencode_uninstall_config(config_path)
+    if loaded is None:
         return False
+    original_text, data, snapshot = loaded
     mcp = data.get("mcp")
     if not isinstance(mcp, dict) or "ouroboros" not in mcp:
         return False
@@ -240,10 +283,7 @@ def _remove_opencode_mcp(dry_run: bool) -> bool:
 
     _warn_if_opencode_jsonc_comments_removed(config_path, original_text)
 
-    try:
-        config_path.write_text(json.dumps(data, indent=2) + "\n")
-    except OSError:
-        print_warning(f"Could not write {config_path} — skipping.")
+    if not _write_opencode_uninstall_config(config_path, data, snapshot):
         return False
     print_success(f"Removed ouroboros from {config_path}")
     return True
@@ -302,63 +342,54 @@ def _remove_data_dir(dry_run: bool) -> bool:
 
 
 def _remove_opencode_bridge_plugin(dry_run: bool) -> bool:
-    """Remove the ouroboros-bridge plugin from OpenCode's plugin directory and config."""
-    plugin_dir = opencode_config_dir() / "plugins" / "ouroboros-bridge"
-    removed_files = False
+    """Remove the installed bridge and its V1 or V2 config registration."""
+    config_dir = opencode_config_dir()
+    plugin_dir = config_dir / "plugins" / "ouroboros-bridge"
+    config_path = find_opencode_config(allow_default=False)
+    removed = False
+    if config_path is not None:
+        loaded = _load_opencode_uninstall_config(config_path)
+        if loaded is None:
+            return False
+        raw, data, snapshot = loaded
+        count = 0
+        for key, matcher in (
+            ("plugin", is_bridge_plugin_entry),
+            (
+                "plugins",
+                lambda entry: is_v2_bridge_plugin_entry(entry, config_dir, config_path.parent),
+            ),
+        ):
+            entries = data.get(key, [])
+            if isinstance(entries, list):
+                kept = [entry for entry in entries if not matcher(entry)]
+                count += len(entries) - len(kept)
+                if len(kept) != len(entries):
+                    data[key] = kept
+        if count:
+            if dry_run:
+                print_info(f"[dry-run] Would remove bridge plugin from {config_path}")
+                removed = True
+            else:
+                from ouroboros.cli.commands.setup import _warn_if_opencode_jsonc_comments_removed
 
+                _warn_if_opencode_jsonc_comments_removed(config_path, raw)
+                if not _write_opencode_uninstall_config(config_path, data, snapshot):
+                    return False
+                print_success(f"Removed bridge plugin entry from {config_path}")
+                removed = True
     if plugin_dir.exists():
         if dry_run:
             print_info(f"[dry-run] Would remove {plugin_dir}/")
-            removed_files = True
-        else:
-            try:
-                shutil.rmtree(plugin_dir)
-                print_success(f"Removed OpenCode bridge plugin ({plugin_dir}/)")
-                removed_files = True
-            except OSError:
-                print_warning(f"Could not remove {plugin_dir}/ — skipping.")
-
-    # Also remove from opencode config plugin array.
-    # Use find_opencode_config() for correct precedence (.jsonc before .json)
-    # — avoids drift with the shared helper in opencode_config.py.
-    config_path = find_opencode_config(allow_default=False)
-
-    if config_path is not None:
+            return True
         try:
-            raw = config_path.read_text(encoding="utf-8")
-            # Use the shared JSONC stripper — consistent with the other
-            # uninstall paths (lines ~200, ~421) and handles block comments
-            # + trailing commas that the previous inline single-line
-            # stripper missed.
-            data = json.loads(_strip_jsonc(raw))
-            plugins = data.get("plugin", [])
-            if isinstance(plugins, list):
-                # Tail-match removal: sweep any bridge-plugin entry (exact
-                # canonical path, legacy installs, XDG/root migrations,
-                # Windows separator variants). Mirrors setup's dedupe so
-                # uninstall actually cleans what setup can register.
-                kept = [e for e in plugins if not is_bridge_plugin_entry(e)]
-                if len(kept) != len(plugins):
-                    if dry_run:
-                        print_info(f"[dry-run] Would remove bridge plugin from {config_path}")
-                        return True
-                    data["plugin"] = kept
-                    from ouroboros.cli.commands.setup import (
-                        _warn_if_opencode_jsonc_comments_removed,
-                    )
-
-                    _warn_if_opencode_jsonc_comments_removed(config_path, raw)
-                    with config_path.open("w") as f:
-                        json.dump(data, f, indent=2)
-                        f.write("\n")
-                    removed_count = len(plugins) - len(kept)
-                    suffix = "" if removed_count == 1 else f" ({removed_count} entries)"
-                    print_success(f"Removed bridge plugin entry from {config_path}{suffix}")
-                    removed_files = True
-        except (json.JSONDecodeError, OSError, UnicodeDecodeError, KeyError):
-            pass  # Best effort — don't fail uninstall over config parse
-
-    return removed_files
+            shutil.rmtree(plugin_dir)
+        except OSError:
+            print_warning(f"Could not remove {plugin_dir}/ — skipping.")
+            return False
+        print_success(f"Removed OpenCode bridge plugin ({plugin_dir}/)")
+        removed = True
+    return removed
 
 
 def _remove_project_dir(project_dir: Path, dry_run: bool) -> bool:
@@ -500,8 +531,16 @@ def uninstall(
             try:
                 _oc_data = json.loads(_strip_jsonc(_oc_cfg.read_text(encoding="utf-8")))
                 _oc_plugins = _oc_data.get("plugin", [])
-                if isinstance(_oc_plugins, list) and any(
-                    is_bridge_plugin_entry(e) for e in _oc_plugins
+                _oc_v2_plugins = _oc_data.get("plugins", [])
+                if (
+                    isinstance(_oc_plugins, list)
+                    and any(is_bridge_plugin_entry(e) for e in _oc_plugins)
+                ) or (
+                    isinstance(_oc_v2_plugins, list)
+                    and any(
+                        is_v2_bridge_plugin_entry(e, opencode_config_dir(), _oc_cfg.parent)
+                        for e in _oc_v2_plugins
+                    )
                 ):
                     targets.append(f"OpenCode bridge plugin entry in {_oc_cfg}")
             except (json.JSONDecodeError, OSError, UnicodeDecodeError):
