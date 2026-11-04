@@ -1067,9 +1067,7 @@ async def test_scan_budget_exhaustion_reports_incomplete_not_confirmed_leak(
         )
     assert caught.value.details["scan_limit"] == 2
     assert caught.value.details["scan_reasons"] == ["entry_limit"]
-    assert not any(
-        event.type == ACTOR_STARTED for event in await ledger.events("task-1/V1")
-    )
+    assert not any(event.type == ACTOR_STARTED for event in await ledger.events("task-1/V1"))
 
 
 async def test_scan_reports_both_observed_leak_and_later_incomplete_scan(
