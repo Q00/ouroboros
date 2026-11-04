@@ -78,3 +78,36 @@ def test_subprocess_mode_does_not_probe_plugin_compatibility(tmp_path: Path) -> 
     ):
         assert setup_cmd._setup_opencode("/selected/opencode", mode="subprocess")
     probe.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [
+        subprocess.CompletedProcess([], 0, "development\n", ""),
+        subprocess.CompletedProcess([], 1, "", "sensitive stderr"),
+        subprocess.TimeoutExpired("opencode", 5),
+        UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid"),
+    ],
+)
+def test_unknown_plugin_version_warns_without_exposing_probe_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], probe: object
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text("{}", encoding="utf-8")
+    run = {"side_effect": probe} if isinstance(probe, Exception) else {"return_value": probe}
+    with (
+        patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+        patch("ouroboros.cli.opencode_config.subprocess.run", **run),
+        patch("ouroboros.cli.commands.setup._install_opencode_bridge_plugin", return_value=True),
+        patch("ouroboros.cli.commands.setup._ensure_opencode_mcp_entry", return_value=True),
+        patch("ouroboros.cli.commands.setup._ensure_opencode_plugin_entry", return_value=True),
+        patch("ouroboros.cli.commands.setup._install_runtime_instruction_artifact"),
+        patch("ouroboros.cli.commands.setup.opencode_config_dir", return_value=tmp_path),
+    ):
+        assert setup_cmd._setup_opencode("/selected/opencode", mode="plugin")
+    output = capsys.readouterr().out
+    assert "could not determine" in output.lower()
+    assert "2.x" in output
+    assert "--opencode-mode" in output and "subprocess" in output
+    assert "sensitive stderr" not in output

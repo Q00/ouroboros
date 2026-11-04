@@ -608,7 +608,7 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         "src/ouroboros/cli/opencode_config.py",
         "_debug_paths_config_dir",
         "subprocess.run",
-        91,
+        107,
         17,
     ): "Operator configuration resolves the OpenCode executable; literal debug paths argv and no shell. Inherits operator profile/config after project .env PATH, OPENCODE_CONFIG(_DIR), HOME and loader controls are denied. 5s timeout; unavailable/nonzero/unparseable config returns None for deterministic fallback.",
     (
@@ -909,7 +909,7 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         "src/ouroboros/cli/opencode_config.py",
         "plugin_version_error",
         "subprocess.run",
-        22,
+        33,
         17,
     ): "Operator/config-selected OpenCode CLI with literal --version, no shell; inherits trusted operator profile after project .env PATH, OpenCode config and loader controls are denied. 5s timeout; unavailable/nonzero/unparseable version returns None (no compatibility diagnosis), never authorizes a security action.",
 }
