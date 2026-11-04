@@ -3964,10 +3964,11 @@ class CodexCliRuntime:
             returncode = await process.wait()
             process_finished = True
             control_state["returncode"] = returncode
-            if control_state.get("terminated") is True and returncode < 0:
-                control_state["runtime_status"] = "terminated"
-            else:
-                control_state["runtime_status"] = "completed" if returncode == 0 else "failed"
+            if control_state.get("runtime_status") != "termination_unconfirmed":
+                if control_state.get("terminated") is True and returncode < 0:
+                    control_state["runtime_status"] = "terminated"
+                else:
+                    control_state["runtime_status"] = "completed" if returncode == 0 else "failed"
             current_handle = self._bind_runtime_handle_controls(
                 current_handle,
                 process=process,

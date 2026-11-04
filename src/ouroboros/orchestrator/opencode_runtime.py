@@ -1321,7 +1321,8 @@ class OpenCodeRuntime:
             returncode = await process.wait()
             process_finished = True
             control_state["returncode"] = returncode
-            control_state["runtime_status"] = "completed" if returncode == 0 else "failed"
+            if control_state.get("runtime_status") != "termination_unconfirmed":
+                control_state["runtime_status"] = "completed" if returncode == 0 else "failed"
             current_handle = self._bind_runtime_handle_controls(
                 current_handle,
                 process=process,

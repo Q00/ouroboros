@@ -286,3 +286,68 @@ def test_non_posix_capture_without_scan_is_not_owned() -> None:
     assert tree.members == {}
     # This empty capture must not be accepted by require_owned_tree.
     assert tree.leader_pid not in tree.members
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("runtime_type", "module"),
+    [
+        (CodexCliRuntime, "ouroboros.orchestrator.codex_cli_runtime"),
+        (OpenCodeRuntime, "ouroboros.orchestrator.opencode_runtime"),
+    ],
+)
+@pytest.mark.parametrize("returncode", [0, 1, -15])
+async def test_unconfirmed_tree_survives_normal_leader_exit(
+    runtime_type, module, returncode
+) -> None:
+    import asyncio
+
+    runtime = runtime_type(cli_path="test-cli", cwd="/tmp")
+    ready = asyncio.Event()
+    finish = asyncio.Event()
+    handles = []
+    bind = runtime._bind_runtime_handle_controls
+
+    class Process:
+        pid = None
+        stdout = object()
+        stderr = object()
+        stdin = None
+        returncode = None
+
+        async def wait(self):
+            self.returncode = returncode
+            return returncode
+
+    process = Process()
+
+    def capture(*args, **kwargs):
+        handle = bind(*args, **kwargs)
+        if handle is not None:
+            handles.append(handle)
+        return handle
+
+    async def stream(*args, **kwargs):
+        ready.set()
+        await finish.wait()
+        if False:
+            yield ""
+
+    async def consume():
+        return [message async for message in runtime.execute_task("work", resume_session_id="s")]
+
+    with (
+        patch(f"{module}.asyncio.create_subprocess_exec", new=AsyncMock(return_value=process)),
+        patch.object(runtime, "_bind_runtime_handle_controls", side_effect=capture),
+        patch.object(runtime, "_iter_stream_lines", side_effect=stream),
+        patch.object(runtime, "_collect_stream_lines", new=AsyncMock(return_value=[])),
+        patch.object(runtime, "_terminate_process", new=AsyncMock(return_value=False)),
+    ):
+        task = asyncio.create_task(consume())
+        await asyncio.wait_for(ready.wait(), timeout=2)
+        assert handles
+        assert await handles[-1].terminate() is False
+        assert (await handles[-1].observe())["lifecycle_state"] == "termination_unconfirmed"
+        finish.set()
+        await asyncio.wait_for(task, timeout=2)
+        assert (await handles[-1].observe())["lifecycle_state"] == "termination_unconfirmed"
