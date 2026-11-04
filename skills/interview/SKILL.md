@@ -107,6 +107,34 @@ ambiguous response: ask the person to clarify. On resume use the persisted prese
 returned by the server; do not invent or re-order choices. If the server does not support
 this opt-in or reports a normal text question, use the existing free-text path.
 
+**Optional first-question batch:** Only if the person explicitly asks for several
+questions at once, and the tool schema offers `structured_first_batch`, start in
+in-process mode with that flag. The response is a *proposal*, not established
+independence or user intent. Present every question, its a-d choices, direct-input
+escape and suggested answer as a hypothesis. Ask the person to confirm that the
+questions are independent; do not accept an approval inferred from the model or
+from silence. Where the host permits, collect that confirmation and their answers
+in the same user interaction. If they do not confirm, send `batch_reject: true` with the returned
+`session_id` and exact `batch_confirm_digest`, then resume the normal interview.
+When the host does not expose response metadata, take the labelled Session ID,
+Batch digest and question IDs from the server's text response instead.
+
+After explicit confirmation, collect answers by question. In text mode display
+numbered questions with a-d options and accept `1: a / 2: a,c / 3: "free text"`;
+quote free text as JSON, and use `-` only for none on a multi-select question.
+Send the exact input in `batch_answers_text`, together with the session ID, exact
+`batch_confirm_digest`, and `batch_independence_confirmed: true`. A native host
+can instead send `batch_answers` with stable `question_id` and exactly one of
+`answer` or `selected_choices`; never mix both formats or fabricate an answer.
+Partial answers are allowed. Resume the session to retrieve the same questions,
+IDs, digest and answered IDs. A repeat is safe only when the recorded answer is
+identical; on a conflict reload and ask the person. If the person discovers a
+dependency or wants to abandon pending questions, send `batch_reject: true` with
+the same digest. Already recorded answers remain, and unanswered proposals are
+discarded; resume normally. When `batch_complete` is true, resume to continue
+one question at a time. Editing a recorded batch answer is not supported by this
+partial protocol. If the schema or opt-in is unavailable, use the normal path.
+
 2. **Route each question** through the PATHs below. First check the response:
    - `meta.status="parent_question_required"` or `meta.ask_user_directly=true`: a normal turn, not a failure. Follow the response text: ask one Socratic question yourself, never mention MCP, provider failures, or `reason_code`, and send the user's answer with `last_question` set to the exact question you asked.
    - `meta.question_advisory_request`: run the question-first advisory fan-out below.

@@ -64,6 +64,15 @@ async def handle_interview_calibration_turn(
                     MCPToolError(str(load_result.error), tool_name="ouroboros_interview")
                 )
             state = load_result.value
+            from ouroboros.mcp.tools.interview_batch import pending_batch
+
+            if pending_batch(state):
+                return Result.err(
+                    MCPToolError(
+                        "Finish or discard the pending batch before calibration",
+                        tool_name="ouroboros_interview",
+                    )
+                )
             if state.rounds and state.rounds[-1].user_response is None:
                 pending_question = state.rounds[-1].question
                 candidate = getattr(state.rounds[-1], "first_question_presentation", None)

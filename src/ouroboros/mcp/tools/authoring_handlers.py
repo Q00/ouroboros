@@ -81,6 +81,7 @@ from ouroboros.mcp.tools.interview_calibration import (
     handle_interview_calibration_turn,
     interview_calibration_parameters,
 )
+from ouroboros.mcp.tools.interview_reasoning import _interview_reasoning_meta
 from ouroboros.mcp.tools.interview_transcript import (
     _build_question_advisory_request as _build_question_advisory_request,
 )
@@ -610,90 +611,6 @@ def _with_lateral_review_dispatch(
     return enriched
 
 
-def _interview_reasoning_meta(
-    *,
-    state: InterviewState | None,
-    session_id: str | None,
-    phase: str,
-    next_action: str,
-    score: AmbiguityScore | None = None,
-    question: str | None = None,
-    recoverable: bool = False,
-) -> dict[str, Any]:
-    """Build compact interview reasoning metadata for client-side UI surfaces."""
-    answered_rounds = _count_answered_rounds(state) if state is not None else None
-    total_rounds = len(state.rounds) if state is not None else None
-    pending_question = (
-        bool(state.rounds and state.rounds[-1].user_response is None)
-        if state is not None
-        else False
-    )
-    floor_failures: list[str] = []
-    completion_qualified: bool | None = None
-    if score is not None:
-        floor_failures = get_completion_floor_failures(
-            score,
-            is_brownfield=state.is_brownfield if state is not None else False,
-        )
-        completion_qualified = (
-            qualifies_for_seed_completion(
-                score,
-                is_brownfield=state.is_brownfield if state is not None else False,
-            )
-            and not floor_failures
-        )
-
-    lines = [f"phase: {phase}"]
-    if session_id:
-        lines.append(f"session: {session_id}")
-    if answered_rounds is not None and total_rounds is not None:
-        lines.append(f"rounds: {answered_rounds} answered / {total_rounds} total")
-    if state is not None:
-        lines.append(f"brownfield: {str(state.is_brownfield).lower()}")
-        if pending_question:
-            lines.append("pending: waiting for user answer")
-        if state.completion_candidate_streak:
-            lines.append(
-                f"stability: {state.completion_candidate_streak}/{AUTO_COMPLETE_STREAK_REQUIRED}"
-            )
-    if score is not None:
-        lines.append(f"ambiguity: {score.overall_score:.2f}")
-        milestone = _milestone_for_score(score)
-        if milestone:
-            lines.append(f"milestone: {milestone}")
-        if floor_failures:
-            lines.append(f"completion blocked: {'; '.join(floor_failures)}")
-    if question:
-        lines.append(f"question_chars: {len(question)}")
-    if recoverable:
-        lines.append("recoverable: true")
-    lines.append(f"next: {next_action}")
-
-    return {
-        "internal_reasoning": lines,
-        "interview_reasoning": {
-            "phase": phase,
-            "next_action": next_action,
-            "session_id": session_id,
-            "answered_rounds": answered_rounds,
-            "total_rounds": total_rounds,
-            "pending_question": pending_question,
-            "is_brownfield": state.is_brownfield if state is not None else None,
-            "ambiguity_score": score.overall_score if score is not None else None,
-            "milestone": _milestone_for_score(score),
-            "seed_ready": (score.is_ready_for_seed if score is not None else None),
-            "completion_qualified": completion_qualified,
-            "completion_floor_failures": floor_failures,
-            "completion_candidate_streak": (
-                state.completion_candidate_streak if state is not None else None
-            ),
-            "streak_required": AUTO_COMPLETE_STREAK_REQUIRED,
-            "recoverable": recoverable,
-            "question_chars": len(question) if question else None,
-        },
-    }
-
-
 def _classify_interview_answer_source(answer: str) -> str:
     """Return a coarse provenance class for an ``ooo interview`` answer."""
     lowered = str(answer).lstrip().casefold()
@@ -1192,6 +1109,15 @@ class GenerateSeedHandler:
                     )
                 )
             interview_state = load_result.value
+            from ouroboros.mcp.tools.interview_batch import pending_batch
+
+            if pending_batch(interview_state):
+                return Result.err(
+                    MCPToolError(
+                        "Answer or discard the pending batch before generating a Seed",
+                        tool_name="ouroboros_generate_seed",
+                    )
+                )
 
             # Determine best available ambiguity score for the gate.
             _THRESHOLD = 0.2
@@ -1355,6 +1281,15 @@ class GenerateSeedHandler:
                 )
 
             state: InterviewState = state_result.value
+            from ouroboros.mcp.tools.interview_batch import pending_batch
+
+            if pending_batch(state):
+                return Result.err(
+                    MCPToolError(
+                        "Answer or discard the pending batch before generating a Seed",
+                        tool_name="ouroboros_generate_seed",
+                    )
+                )
 
             # Always use a trusted ambiguity score: persisted snapshot or
             # freshly computed.  The caller-supplied ``ambiguity_score``
@@ -2033,6 +1968,48 @@ class InterviewHandler:
                 )
             )
 
+        from ouroboros.mcp.tools.interview_batch import answer_batch, reject_batch, start_batch
+
+        if (
+            "structured_first_batch" in arguments
+            and type(arguments["structured_first_batch"]) is not bool
+        ):
+            return Result.err(
+                MCPToolError(
+                    "structured_first_batch must be boolean", tool_name="ouroboros_interview"
+                )
+            )
+        if (
+            arguments.get("structured_first_batch") is True
+            or "batch_answers" in arguments
+            or "batch_answers_text" in arguments
+            or "batch_reject" in arguments
+        ):
+            if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+                return Result.err(
+                    MCPToolError("Batches require in-process mode", tool_name="ouroboros_interview")
+                )
+            if arguments.get("structured_first_batch") is True:
+                return await start_batch(self, arguments)
+            if "batch_reject" in arguments:
+                if (
+                    arguments.get("batch_reject") is not True
+                    or "batch_answers" in arguments
+                    or "batch_answers_text" in arguments
+                ):
+                    return Result.err(
+                        MCPToolError("Invalid batch rejection", tool_name="ouroboros_interview")
+                    )
+                return await reject_batch(self, arguments)
+            if answer is not None or selected_first_choice is not None or selections is not None:
+                return Result.err(
+                    MCPToolError(
+                        "Batch answers cannot be combined with other answers",
+                        tool_name="ouroboros_interview",
+                    )
+                )
+            return await answer_batch(self, arguments)
+
         # --- Argument validation (before any dispatch) ---
         # Determine action from arguments
         if isinstance(calibration_input, str) and calibration_input.strip():
@@ -2226,6 +2203,15 @@ class InterviewHandler:
                     MCPToolError(str(load_result.error), tool_name="ouroboros_interview")
                 )
             state = load_result.value
+            from ouroboros.mcp.tools.interview_batch import pending_batch
+
+            if pending_batch(state):
+                return Result.err(
+                    MCPToolError(
+                        "Pending batches require in-process handling",
+                        tool_name="ouroboros_interview",
+                    )
+                )
             plugin_state = state
             plugin_state_changed = state.merge_turn_context(turn_context)
             # Record answer into persisted state.
@@ -2691,7 +2677,7 @@ class InterviewHandler:
                     interview_response_emitted(
                         state.interview_id,
                         response_kind="start",
-                        round_number=len(state.rounds),
+                        round_number=state.rounds[-1].round_number if state.rounds else 0,
                         payload_chars=len(start_response_text),
                         transcript_chars=_compute_transcript_chars(state),
                         ambiguity_prefix_present=start_response_text.startswith("(ambiguity:"),
@@ -2773,6 +2759,14 @@ class InterviewHandler:
                 )
 
             state = load_result.value
+            from ouroboros.mcp.tools.interview_batch import pending_batch
+
+            if pending_batch(state):
+                return Result.err(
+                    MCPToolError(
+                        "Answer the pending batch by question ID", tool_name="ouroboros_interview"
+                    )
+                )
             selection = arguments.get("selected_first_choice")
             selections = arguments.get("selected_first_choices")
             if selection is not None or selections is not None:
@@ -3123,7 +3117,7 @@ class InterviewHandler:
             self._emit_event_bg(
                 interview_response_recorded(
                     interview_id=session_id,
-                    round_number=len(state.rounds),
+                    round_number=state.rounds[-1].round_number if state.rounds else 0,
                     question_preview=pending_question,
                     response_preview=answer,
                 )
@@ -3295,6 +3289,14 @@ class InterviewHandler:
                 )
 
             state = load_result.value
+            from ouroboros.mcp.tools.interview_batch import batch_view, pending_batch
+
+            if pending_batch(state):
+                if state.interview_id != session_id:
+                    return Result.err(
+                        MCPToolError("Invalid batch session", tool_name="ouroboros_interview")
+                    )
+                return Result.ok(batch_view(state))
             if state.merge_turn_context(_normalized_turn_context(arguments)):
                 merge_save_result = await engine.save_state(state)
                 if merge_save_result.is_err:
@@ -3380,7 +3382,7 @@ class InterviewHandler:
                     interview_response_emitted(
                         session_id,
                         response_kind="resume_pending",
-                        round_number=len(state.rounds),
+                        round_number=state.rounds[-1].round_number if state.rounds else 0,
                         payload_chars=len(resume_response_text),
                         transcript_chars=_compute_transcript_chars(state),
                         ambiguity_prefix_present=resume_response_text.startswith("(ambiguity:"),
@@ -3598,7 +3600,7 @@ class InterviewHandler:
                     from_milestone=lateral_review_meta["lateral_review_from_milestone"],
                     to_milestone=lateral_review_meta["lateral_review_milestone"],
                     ambiguity_score=live_score.overall_score,
-                    round_number=len(state.rounds) - 1,
+                    round_number=state.rounds[-2].round_number if len(state.rounds) > 1 else 0,
                 )
             )
         log.info(
@@ -3688,7 +3690,7 @@ class InterviewHandler:
             interview_response_emitted(
                 session_id,
                 response_kind="answer",
-                round_number=len(state.rounds),
+                round_number=state.rounds[-1].round_number if state.rounds else 0,
                 payload_chars=len(answer_response_text),
                 transcript_chars=_compute_transcript_chars(state),
                 ambiguity_prefix_present=answer_response_text.startswith("(ambiguity:"),
