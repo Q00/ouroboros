@@ -92,6 +92,21 @@ MCP generates the questions, keeps state, and scores ambiguity; it cannot read c
    ```
    Returns a session ID and the first question. `confused_terms` and `references` are structured adapter context, not requirements. They MUST NOT alter the first question; later, glossary help covers only explicitly confused terms and references serve only contrast questions. Do not infer them from vocabulary density or fetch referenced URLs/files. On a later answer, include them only when the user introduces a new reference or asks what a term means; product decisions stay in the answer.
 
+For an explicitly requested select-all decision, if the discovered tool schema supports
+both `structured_first_question` and `multi_select_first_question`, an in-process start
+may set both to true. Treat `meta.first_question_presentation.choices` as unconfirmed
+suggestions, never as the user's decisions. When `multi_select` is true, show the question
+and all choices in the user's language, explicitly explain that zero, one, or multiple may
+be selected, and preserve the direct-input escape. In text-only hosts label the choices
+`a`, `b`, `c`, `d` in their returned order; explicitly ask for comma-separated labels or
+`-` for none. Pass an exact confirmed label response in `selected_first_choices_text`,
+not in `answer`. For a native multi-select host, pass its confirmed 1-based indices in
+`selected_first_choices` (an empty array means none). Ordinary free text, including numeric
+or comma-containing text, goes in `answer` unchanged. Never infer a choice from an
+ambiguous response: ask the person to clarify. On resume use the persisted presentation
+returned by the server; do not invent or re-order choices. If the server does not support
+this opt-in or reports a normal text question, use the existing free-text path.
+
 2. **Route each question** through the PATHs below. First check the response:
    - `meta.status="parent_question_required"` or `meta.ask_user_directly=true`: a normal turn, not a failure. Follow the response text: ask one Socratic question yourself, never mention MCP, provider failures, or `reason_code`, and send the user's answer with `last_question` set to the exact question you asked.
    - `meta.question_advisory_request`: run the question-first advisory fan-out below.

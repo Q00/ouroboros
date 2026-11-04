@@ -56,7 +56,10 @@ from ouroboros.core.types import Result
 from ouroboros.interview_adapters import (
     InterviewTurnContext,
 )
-from ouroboros.interview_adapters.first_question import selected_answer
+from ouroboros.interview_adapters.first_question import (
+    selected_answer,
+    selected_answers,
+)
 from ouroboros.interview_calibration import normalize_interview_calibration
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.host_context import resolve_request_subagent_dispatch
@@ -64,6 +67,10 @@ from ouroboros.mcp.tools.advisory_dispatch import (
     append_question_advisory_dispatch,
     echo_carries_dispatch,
     strip_bridge_notice,
+)
+from ouroboros.mcp.tools.first_question_parameters import (
+    first_question_parameters,
+    normalize_first_selections,
 )
 from ouroboros.mcp.tools.interview_advisory import (
     _attach_question_assist_requests,
@@ -1896,21 +1903,7 @@ class InterviewHandler:
                     description="Response to the current interview question",
                     required=False,
                 ),
-                MCPToolParameter(
-                    name="selected_first_choice",
-                    type=ToolInputType.INTEGER,
-                    description="Explicit 1-based selection from a pending structured first question; omit answer.",
-                    required=False,
-                ),
-                MCPToolParameter(
-                    name="structured_first_question",
-                    type=ToolInputType.BOOLEAN,
-                    description=(
-                        "Opt in on start to one structured single-choice first question. "
-                        "In-process mode only; subsequent questions remain free text."
-                    ),
-                    required=False,
-                ),
+                *first_question_parameters(),
                 MCPToolParameter(
                     name="cwd",
                     type=ToolInputType.STRING,
@@ -2020,6 +2013,10 @@ class InterviewHandler:
         last_question = arguments.get("last_question")
         structured_first = arguments.get("structured_first_question", False)
         selected_first_choice = arguments.get("selected_first_choice")
+        try:
+            selections = normalize_first_selections(arguments)
+        except ValueError as exc:
+            return Result.err(MCPToolError(str(exc), tool_name="ouroboros_interview"))
         if selected_first_choice is not None and (
             type(selected_first_choice) is not int or answer is not None
         ):
@@ -2042,7 +2039,7 @@ class InterviewHandler:
             action = "calibrate"
         elif initial_context:
             action = "start"
-        elif answer or selected_first_choice is not None:
+        elif answer or selected_first_choice is not None or selections is not None:
             action = "answer"
         else:
             action = "resume"
@@ -2058,7 +2055,7 @@ class InterviewHandler:
                 )
             )
 
-        if selected_first_choice is not None and (
+        if (selected_first_choice is not None or selections is not None) and (
             action != "answer"
             or should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode)
         ):
@@ -2441,7 +2438,9 @@ class InterviewHandler:
                 try:
                     if arguments.get("structured_first_question"):
                         structured_result = await engine.ask_structured_first_question(
-                            state, language_calibration=calibration
+                            state,
+                            language_calibration=calibration,
+                            multi_select=arguments.get("multi_select_first_question", False),
                         )
                         if structured_result.is_err:
                             question_result = Result.err(structured_result.error)
@@ -2775,15 +2774,19 @@ class InterviewHandler:
 
             state = load_result.value
             selection = arguments.get("selected_first_choice")
-            if selection is not None:
+            selections = arguments.get("selected_first_choices")
+            if selection is not None or selections is not None:
                 pending = (
                     state.rounds[-1]
                     if state.rounds and state.rounds[-1].user_response is None
                     else None
                 )
                 try:
-                    answer = selected_answer(
-                        pending.first_question_presentation if pending else None, selection
+                    presentation = pending.first_question_presentation if pending else None
+                    answer = (
+                        selected_answers(presentation, selections)
+                        if selections is not None
+                        else selected_answer(presentation, selection)
                     )
                 except ValueError as exc:
                     return Result.err(MCPToolError(str(exc), tool_name="ouroboros_interview"))
@@ -2802,7 +2805,7 @@ class InterviewHandler:
             intent_guard_report: IntentGuardReport | None = None
 
             # If answer provided, record it first
-            if selection is None and _is_interview_completion_signal(answer):
+            if selection is None and selections is None and _is_interview_completion_signal(answer):
                 is_safe_default_synthesis = _is_safe_default_synthesis_completion(answer)
                 # Remember whether a round is awaiting an answer so we
                 # can pop it only on the branches that actually end
@@ -3101,6 +3104,8 @@ class InterviewHandler:
                     )
                 )
             state = record_result.value
+            if selections is not None:
+                state.rounds[-1].first_question_selected_indices = tuple(selections)
             declare_provenance(state.rounds[-1] if state.rounds else None, arguments)
             state.clear_stored_ambiguity()
 

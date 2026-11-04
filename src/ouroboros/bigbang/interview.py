@@ -44,8 +44,9 @@ from ouroboros.interview_adapters import (
     select_glossary_injection,
 )
 from ouroboros.interview_adapters.first_question import (
-    FIRST_QUESTION_INSTRUCTION,
     FirstQuestionPresentation,
+    first_question_instruction,
+    validate_stored_selection,
 )
 from ouroboros.interview_calibration import InterviewCalibration
 from ouroboros.providers.base import (
@@ -208,6 +209,7 @@ class InterviewRound(BaseModel):
     round_number: int = Field(ge=1)  # No upper limit - user decides when to stop
     question: str
     first_question_presentation: FirstQuestionPresentation | None = None
+    first_question_selected_indices: tuple[int, ...] | None = None
     user_response: str | None = None
     provenance: AnswerProvenance = "user"
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -230,6 +232,11 @@ class InterviewRound(BaseModel):
             and self.first_question_presentation.question != self.question
         ):
             raise ValueError("structured presentation does not match the recorded question")
+        validate_stored_selection(
+            self.first_question_presentation,
+            self.first_question_selected_indices,
+            self.user_response,
+        )
         if self.user_response is not None and self.provenance not in DECLARED_PROVENANCES:
             answer_for_classification = self.user_response
             # PM interviews before #1823 decorated reframed answers after the
@@ -1170,6 +1177,7 @@ class InterviewEngine:
         state: InterviewState,
         *,
         language_calibration: InterviewCalibration | None = None,
+        multi_select: bool = False,
     ) -> Result[FirstQuestionPresentation | None, ProviderError | ValidationError]:
         """Generate the opt-in first presentation with a single provider call.
 
@@ -1188,13 +1196,17 @@ class InterviewEngine:
             return Result.ok(None)
         assert prepared.config is not None
         messages = list(prepared.messages)
-        messages.append(Message(role=MessageRole.USER, content=FIRST_QUESTION_INSTRUCTION))
+        messages.append(
+            Message(role=MessageRole.USER, content=first_question_instruction(multi_select))
+        )
         result = await self._require_llm_adapter().complete(messages, prepared.config)
         if result.is_err:
             return Result.err(result.error)
         try:
             presentation = FirstQuestionPresentation.model_validate_json(result.value.content)
         except ValueError:
+            return Result.err(ValidationError("Invalid structured first question"))
+        if presentation.multi_select != multi_select:
             return Result.err(ValidationError("Invalid structured first question"))
         return Result.ok(presentation)
 
