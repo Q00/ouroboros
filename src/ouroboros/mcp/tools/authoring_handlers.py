@@ -33,10 +33,8 @@ from ouroboros.bigbang.ambiguity import (
     get_milestone,
     qualifies_for_seed_completion,
 )
-from ouroboros.bigbang.answer_provenance import declare_provenance, extraction_rounds
+from ouroboros.bigbang.answer_provenance import declare_provenance
 from ouroboros.bigbang.interview import (
-    INITIAL_CONTEXT_SUMMARY_QUESTION,
-    MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS,
     MIN_ROUNDS_BEFORE_EARLY_EXIT,
     InterviewEngine,
     InterviewState,
@@ -58,6 +56,7 @@ from ouroboros.core.types import Result
 from ouroboros.interview_adapters import (
     InterviewTurnContext,
 )
+from ouroboros.interview_adapters.first_question import selected_answer
 from ouroboros.interview_calibration import normalize_interview_calibration
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.host_context import resolve_request_subagent_dispatch
@@ -75,10 +74,19 @@ from ouroboros.mcp.tools.interview_calibration import (
     handle_interview_calibration_turn,
     interview_calibration_parameters,
 )
-from ouroboros.mcp.tools.question_advisory import (
-    build_question_advisory_request,
-    required_advisory_personas,
+from ouroboros.mcp.tools.interview_transcript import (
+    _build_question_advisory_request as _build_question_advisory_request,
 )
+from ouroboros.mcp.tools.interview_transcript import (
+    _compute_transcript_chars,
+    _count_answered_rounds,
+    _format_interview_transcript,
+    _is_initial_context_length_guard_question,
+    _is_question_generation_envelope_violation,
+    _length_guard_meta_fields,
+    _provider_error_type,
+)
+from ouroboros.mcp.tools.question_advisory import required_advisory_personas
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
     FanoutRegistry,
@@ -120,7 +128,6 @@ _DATA_DIR = Path.home() / ".ouroboros" / "data"
 _SUGGESTED_INTERVIEW_ID_RE = re.compile(r"^interview_[a-f0-9]{16}$")
 
 _LIVE_AMBIGUITY_MAX_RETRIES = 3
-_QUESTION_GENERATION_ENVELOPE_VIOLATION = "ToolUseBlockViolation"
 _QUESTION_GENERATION_ENVELOPE_REASON_CODE = "question_generation_envelope_violation"
 
 REQUIRED_CLIENT_GATES: tuple[str, ...] = (
@@ -349,11 +356,6 @@ def _is_interview_completion_signal(answer: str | None) -> bool:
     if "ambiguity" in tokens and "no" in tokens and tokens.intersection({"remaining", "left"}):
         return True
     return normalized.endswith(" done") or normalized == "done"
-
-
-def _count_answered_rounds(state: InterviewState) -> int:
-    """Return the number of completed interview rounds."""
-    return sum(1 for round_data in state.rounds if round_data.user_response is not None)
 
 
 def _reset_stale_completion_streak(state: InterviewState) -> None:
@@ -599,92 +601,6 @@ def _with_lateral_review_dispatch(
         }
     )
     return enriched
-
-
-def _compute_transcript_chars(state: InterviewState) -> int:
-    """Sum question + user_response length over every round in ``state``.
-
-    Used by the response-shape diagnostic event (Q00/ouroboros#831) so we
-    can correlate hang reports with cumulative interview context size.
-    """
-    total = 0
-    for round_data in state.rounds:
-        total += len(round_data.question or "")
-        total += len(round_data.user_response or "")
-    return total
-
-
-def _build_question_advisory_request(
-    *,
-    session_id: str,
-    question: str,
-    phase: str,
-    score: AmbiguityScore | None,
-    code_investigation_request: dict[str, Any] | None = None,
-    last_question: str | None = None,
-) -> dict[str, Any]:
-    """Build the interview's advisory request. Kept for existing importers.
-
-    The builder moved to ``question_advisory`` and is shared with every tool
-    that declares a catalog; this signature stays so a caller that had the
-    interview's ambiguity score in hand does not have to unpack it here.
-    """
-    return build_question_advisory_request(
-        tool_name="ouroboros_interview",
-        session_id=session_id,
-        question=question,
-        phase=phase,
-        ambiguity_score=score.overall_score if score is not None else None,
-        milestone=_milestone_for_score(score),
-        code_investigation_request=code_investigation_request,
-        last_question=last_question,
-    )
-
-
-def _is_initial_context_length_guard_question(question: str) -> bool:
-    """Return True when ``question`` is the length-guard meta-directive.
-
-    The interview engine surfaces a fixed string as the "next question" when
-    ``initial_context`` exceeds ``MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS``.
-    That string is not a real interview question — it asks the *caller* to
-    re-send a shorter summary — so MCP responses carrying it must carry a
-    distinguishing meta signal.  See Q00/ouroboros#831.
-    """
-    return question == INITIAL_CONTEXT_SUMMARY_QUESTION
-
-
-def _length_guard_meta_fields() -> dict[str, Any]:
-    """Return the meta keys that mark a length-guard response.
-
-    The handler merges these into the existing ``meta`` dict (``session_id``,
-    ``ambiguity_score``, etc.) when the returned question is the length-guard
-    meta-directive.  Clients can branch on ``meta.reason`` to handle the case
-    programmatically instead of mis-routing the question to a human via
-    AskUserQuestion.
-    """
-    return {
-        "recoverable": True,
-        "reason": "initial_context_too_large",
-        "expected_action": "resend_with_summary",
-        "max_chars": MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS,
-    }
-
-
-def _provider_error_type(error: Any) -> str | None:
-    details = getattr(error, "details", None)
-    if isinstance(details, dict):
-        error_type = details.get("error_type")
-        if isinstance(error_type, str) and error_type:
-            return error_type
-    return None
-
-
-def _is_question_generation_envelope_violation(error: Any) -> bool:
-    """Return true for strict provider tool-envelope violations."""
-    provider_error_type = _provider_error_type(error)
-    if provider_error_type == _QUESTION_GENERATION_ENVELOPE_VIOLATION:
-        return True
-    return _QUESTION_GENERATION_ENVELOPE_VIOLATION in str(error)
 
 
 def _interview_reasoning_meta(
@@ -1009,37 +925,6 @@ def _stored_ambiguity_snapshot_is_degraded(state: InterviewState) -> bool:
         return True
 
     return False
-
-
-def _format_interview_transcript(
-    state: InterviewState, *, withhold_observations: bool = False
-) -> str:
-    """Format persisted interview rounds as a readable transcript for subagent context.
-
-    Two call sites with different roles read this one formatter. Seed generation
-    is a requirement-producing consumer and passes ``withhold_observations``; the
-    interview subagent's conversation history does not, because the interview
-    keeps seeing observations in full — informing the next question is what they
-    were collected for (#1755). Question lines are unchanged either way.
-    """
-    if not state.rounds:
-        return ""
-    if withhold_observations:
-        rendered = [
-            (item.round_number, item.question, item.answer) for item in extraction_rounds(state)
-        ]
-    else:
-        rendered = [(r.round_number, r.question, r.user_response) for r in state.rounds]
-    lines: list[str] = []
-    if state.initial_context:
-        lines.append(f"**Initial Context:** {state.initial_context}")
-        lines.append("")
-    for round_number, question, answer in rendered:
-        lines.append(f"**Q{round_number}:** {question}")
-        if answer:
-            lines.append(f"**A{round_number}:** {answer}")
-        lines.append("")
-    return "\n".join(lines).rstrip()
 
 
 async def _plugin_save_state(state_dir: Path, state: InterviewState) -> Result[Path, str]:
@@ -2012,6 +1897,21 @@ class InterviewHandler:
                     required=False,
                 ),
                 MCPToolParameter(
+                    name="selected_first_choice",
+                    type=ToolInputType.INTEGER,
+                    description="Explicit 1-based selection from a pending structured first question; omit answer.",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="structured_first_question",
+                    type=ToolInputType.BOOLEAN,
+                    description=(
+                        "Opt in on start to one structured single-choice first question. "
+                        "In-process mode only; subsequent questions remain free text."
+                    ),
+                    required=False,
+                ),
+                MCPToolParameter(
                     name="cwd",
                     type=ToolInputType.STRING,
                     description=(
@@ -2118,6 +2018,23 @@ class InterviewHandler:
         # Taken as given; whether it is a repair or an echo of our own output is
         # settled where the round is identified.
         last_question = arguments.get("last_question")
+        structured_first = arguments.get("structured_first_question", False)
+        selected_first_choice = arguments.get("selected_first_choice")
+        if selected_first_choice is not None and (
+            type(selected_first_choice) is not int or answer is not None
+        ):
+            return Result.err(
+                MCPToolError(
+                    "A selection must be an integer and cannot accompany answer",
+                    tool_name="ouroboros_interview",
+                )
+            )
+        if type(structured_first) is not bool:
+            return Result.err(
+                MCPToolError(
+                    "structured_first_question must be boolean", tool_name="ouroboros_interview"
+                )
+            )
 
         # --- Argument validation (before any dispatch) ---
         # Determine action from arguments
@@ -2125,10 +2042,32 @@ class InterviewHandler:
             action = "calibrate"
         elif initial_context:
             action = "start"
-        elif answer:
+        elif answer or selected_first_choice is not None:
             action = "answer"
         else:
             action = "resume"
+
+        if structured_first and (
+            action != "start"
+            or should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode)
+        ):
+            return Result.err(
+                MCPToolError(
+                    "structured_first_question is supported only on an in-process start",
+                    tool_name="ouroboros_interview",
+                )
+            )
+
+        if selected_first_choice is not None and (
+            action != "answer"
+            or should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode)
+        ):
+            return Result.err(
+                MCPToolError(
+                    "Selection requires an in-process pending question",
+                    tool_name="ouroboros_interview",
+                )
+            )
 
         # Reject invalid combos early — applies to both plugin and subprocess paths.
         if action not in {"start", "calibrate"} and not session_id:
@@ -2497,8 +2436,22 @@ class InterviewHandler:
                 # (pm_interview.py:889); apply the same optimisation here.
                 live_score = None
                 question_generation_started_at = time.perf_counter()
+                presentation = None
+                question_result: Any
                 try:
-                    question_result = await _ask_next_question(engine, state, calibration)
+                    if arguments.get("structured_first_question"):
+                        structured_result = await engine.ask_structured_first_question(
+                            state, language_calibration=calibration
+                        )
+                        if structured_result.is_err:
+                            question_result = Result.err(structured_result.error)
+                        elif structured_result.value is None:
+                            question_result = await _ask_next_question(engine, state, calibration)
+                        else:
+                            presentation = structured_result.value
+                            question_result = Result.ok(presentation.question)
+                    else:
+                        question_result = await _ask_next_question(engine, state, calibration)
                 finally:
                     question_generation_duration_ms = _elapsed_ms(question_generation_started_at)
                 if question_result.is_err:
@@ -2627,7 +2580,9 @@ class InterviewHandler:
                     )
 
                 question = question_result.value
-                display_question = _format_question_with_ambiguity(question, live_score)
+                display_question = _format_question_with_ambiguity(
+                    presentation.render() if presentation else question, live_score
+                )
 
                 # Record the question as an unanswered round so resume can find it
                 from ouroboros.bigbang.interview import InterviewRound
@@ -2636,6 +2591,7 @@ class InterviewHandler:
                     InterviewRound(
                         round_number=1,
                         question=question,
+                        first_question_presentation=presentation,
                         user_response=None,
                     )
                 )
@@ -2654,7 +2610,6 @@ class InterviewHandler:
                             tool_name="ouroboros_interview",
                         )
                     )
-
                 # Emit interview started event
                 from ouroboros.events.interview import interview_started
 
@@ -2689,6 +2644,8 @@ class InterviewHandler:
                         question=question,
                     ),
                 }
+                if presentation is not None:
+                    start_meta["first_question_presentation"] = presentation.model_dump(mode="json")
                 if is_length_guard:
                     # Q00/ouroboros#831 (Direction A): surface the length-guard
                     # meta-directive via structured meta keys so clients can
@@ -2817,6 +2774,19 @@ class InterviewHandler:
                 )
 
             state = load_result.value
+            selection = arguments.get("selected_first_choice")
+            if selection is not None:
+                pending = (
+                    state.rounds[-1]
+                    if state.rounds and state.rounds[-1].user_response is None
+                    else None
+                )
+                try:
+                    answer = selected_answer(
+                        pending.first_question_presentation if pending else None, selection
+                    )
+                except ValueError as exc:
+                    return Result.err(MCPToolError(str(exc), tool_name="ouroboros_interview"))
             if state.merge_turn_context(_normalized_turn_context(arguments)):
                 merge_save_result = await engine.save_state(state)
                 if merge_save_result.is_err:
@@ -2832,7 +2802,7 @@ class InterviewHandler:
             intent_guard_report: IntentGuardReport | None = None
 
             # If answer provided, record it first
-            if _is_interview_completion_signal(answer):
+            if selection is None and _is_interview_completion_signal(answer):
                 is_safe_default_synthesis = _is_safe_default_synthesis_completion(answer)
                 # Remember whether a round is awaiting an answer so we
                 # can pop it only on the branches that actually end
@@ -3079,8 +3049,15 @@ class InterviewHandler:
                 # (79ef2cf5); one carrying our directive is not a repair, and
                 # the stored question of an unanswered round is what we asked.
                 issued = state.rounds[-1].question
+                presentation = state.rounds[-1].first_question_presentation
                 pending_question = (
-                    issued if echo_carries_dispatch(last_question) else (last_question or issued)
+                    issued
+                    if presentation
+                    else (
+                        issued
+                        if echo_carries_dispatch(last_question)
+                        else (last_question or issued)
+                    )
                 )
             else:
                 if not last_question:
@@ -3108,7 +3085,11 @@ class InterviewHandler:
                         tool_name="ouroboros_interview",
                     )
                 )
-            if state.rounds and state.rounds[-1].user_response is None:
+            if (
+                state.rounds
+                and state.rounds[-1].user_response is None
+                and state.rounds[-1].first_question_presentation is None
+            ):
                 state.rounds.pop()
 
             record_result = await engine.record_response(state, answer, pending_question)
@@ -3322,8 +3303,9 @@ class InterviewHandler:
 
             if not answer and state.rounds and state.rounds[-1].user_response is None:
                 pending_question = state.rounds[-1].question
+                presentation = state.rounds[-1].first_question_presentation
                 display_question = _format_question_with_ambiguity(
-                    pending_question,
+                    presentation.render() if presentation else pending_question,
                     _load_state_ambiguity_score(state),
                 )
                 resume_is_length_guard = _is_initial_context_length_guard_question(pending_question)
@@ -3348,6 +3330,10 @@ class InterviewHandler:
                         question=pending_question,
                     ),
                 }
+                if presentation is not None:
+                    resume_meta["first_question_presentation"] = presentation.model_dump(
+                        mode="json"
+                    )
                 if resume_is_length_guard:
                     # Q00/ouroboros#831 (Direction A): structured signal
                     # when resuming an interview whose pending round is

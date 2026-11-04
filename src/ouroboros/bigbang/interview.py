@@ -43,6 +43,10 @@ from ouroboros.interview_adapters import (
     reference_question_anchor,
     select_glossary_injection,
 )
+from ouroboros.interview_adapters.first_question import (
+    FIRST_QUESTION_INSTRUCTION,
+    FirstQuestionPresentation,
+)
 from ouroboros.interview_calibration import InterviewCalibration
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -203,6 +207,7 @@ class InterviewRound(BaseModel):
 
     round_number: int = Field(ge=1)  # No upper limit - user decides when to stop
     question: str
+    first_question_presentation: FirstQuestionPresentation | None = None
     user_response: str | None = None
     provenance: AnswerProvenance = "user"
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -220,6 +225,11 @@ class InterviewRound(BaseModel):
         A declared provenance (``"assumption"``, ``"requester"``) is not derived
         from the answer, so it is kept as recorded rather than re-derived.
         """
+        if (
+            self.first_question_presentation is not None
+            and self.first_question_presentation.question != self.question
+        ):
+            raise ValueError("structured presentation does not match the recorded question")
         if self.user_response is not None and self.provenance not in DECLARED_PROVENANCES:
             answer_for_classification = self.user_response
             # PM interviews before #1823 decorated reframed answers after the
@@ -1154,6 +1164,39 @@ class InterviewEngine:
             question_length=len(question),
         )
         return Result.ok(question)
+
+    async def ask_structured_first_question(
+        self,
+        state: InterviewState,
+        *,
+        language_calibration: InterviewCalibration | None = None,
+    ) -> Result[FirstQuestionPresentation | None, ProviderError | ValidationError]:
+        """Generate the opt-in first presentation with a single provider call.
+
+        None means the existing deterministic length-guard question must be used.
+        Malformed provider output is an error, rather than user-visible JSON.
+        """
+        if state.rounds or self.question_candidate_panel:
+            return Result.err(ValidationError("Structured first question is unavailable"))
+        prepared_result = self.prepare_next_question(
+            state, language_calibration=language_calibration
+        )
+        if prepared_result.is_err:
+            return Result.err(prepared_result.error)
+        prepared = prepared_result.value
+        if prepared.immediate_question is not None:
+            return Result.ok(None)
+        assert prepared.config is not None
+        messages = list(prepared.messages)
+        messages.append(Message(role=MessageRole.USER, content=FIRST_QUESTION_INSTRUCTION))
+        result = await self._require_llm_adapter().complete(messages, prepared.config)
+        if result.is_err:
+            return Result.err(result.error)
+        try:
+            presentation = FirstQuestionPresentation.model_validate_json(result.value.content)
+        except ValueError:
+            return Result.err(ValidationError("Invalid structured first question"))
+        return Result.ok(presentation)
 
     async def rephrase_pending_question(
         self,
