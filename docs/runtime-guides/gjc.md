@@ -214,9 +214,15 @@ JSON extraction and validation rather than provider-native schema enforcement.
 - LLM structured output remains prompt-enforced and validated after the turn;
   GJC does not expose a provider-native output-schema envelope through this SDK
   route.
-- Coordinator-created sessions and turn journals are durable. Cleanup failures
-  do not replace a completed result; the next Coordinator startup can reconcile
-  retained state through GJC's own lifecycle authority.
+- Coordinator-created sessions and turn journals are durable. Terminal session
+  cleanup retries a transient timeout, unavailable response, or pending deletion
+  once for the same session. If cleanup still fails, the result keeps its turn
+  outcome and sets `cleanup_unconfirmed: true`; a warning is logged. Confirmation
+  requires a `closed: true` response for the exact session; absent, malformed,
+  or mismatched responses and missing-session errors remain unconfirmed. Older
+  coordinator versions without that response shape have not been verified.
+  Question turns and coordinator errors remain
+  resumable and are not reclaimed by this terminal cleanup.
 
 ## Troubleshooting
 
