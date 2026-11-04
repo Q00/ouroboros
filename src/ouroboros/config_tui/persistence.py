@@ -105,9 +105,9 @@ def apply_config_values(values: Mapping[str, Any]) -> None:
             else:
                 config_path.write_bytes(original_bytes)
         except OSError as rollback_exc:
-            msg = f"Save failed: {exc}. Configuration rollback also failed: {rollback_exc}"
+            msg = f"{exc}. Configuration rollback also failed: {rollback_exc}"
             raise ConfigWriteError(msg) from exc
-        msg = f"Save failed — rolled back. {exc}"
+        msg = f"Configuration rolled back. {exc}"
         raise ConfigWriteError(msg) from exc
     finally:
         if backup_temp is not None:
