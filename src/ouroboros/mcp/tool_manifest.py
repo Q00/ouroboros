@@ -38,6 +38,7 @@ BUILTIN_TOOL_NAMES: frozenset[str] = frozenset(
         "ouroboros_session_status",
         "ouroboros_start_auto",
         "ouroboros_start_evaluate",
+        "ouroboros_start_qa",
         "ouroboros_start_evolve_step",
         "ouroboros_start_execute_seed",
         "ouroboros_start_ralph",
