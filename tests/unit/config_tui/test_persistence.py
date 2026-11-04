@@ -7,6 +7,7 @@ validation failure.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -263,7 +264,7 @@ def test_invalid_value_restores_original_utf8_bytes_under_cp949(
         persistence.apply_config_values({"logging.level": "not-a-level"})
 
     assert config_path.read_bytes() == original
-    assert (config_dir / "config.yaml.bak").read_bytes() == original
+    assert not (config_dir / "config.yaml.bak").exists()
 
 
 @pytest.mark.usefixtures("cp949_config_files")
@@ -286,3 +287,163 @@ def test_invalid_utf8_is_rejected_without_writes(config_dir: Path, operation: st
 
     assert config_path.read_bytes() == original
     assert backup_path.read_bytes() == existing_backup
+
+
+@pytest.mark.parametrize("backup_bytes", [None, b"", b"# previous backup\r\n{}\r\n"])
+@pytest.mark.parametrize(
+    "changes",
+    [{"logging.level": "not-a-level"}, {"not_a_key": "value"}, {}],
+    ids=["invalid-value", "unknown-key", "no-changes"],
+)
+def test_rejected_or_empty_save_preserves_undo_snapshot(
+    config_dir: Path, backup_bytes: bytes | None, changes: dict
+) -> None:
+    config_path = config_dir / "config.yaml"
+    backup_path = config_dir / "config.yaml.bak"
+    original = _utf8_config("C:/workspace/문서😀", newline="\r\n", bom=True)
+    config_path.write_bytes(original)
+    if backup_bytes is not None:
+        backup_path.write_bytes(backup_bytes)
+
+    if changes:
+        with pytest.raises(persistence.ConfigWriteError):
+            persistence.apply_config_values(changes)
+    else:
+        persistence.apply_config_values(changes)
+
+    assert config_path.read_bytes() == original
+    assert (backup_path.read_bytes() if backup_path.exists() else None) == backup_bytes
+    assert not list(config_dir.glob(".config.yaml.bak-*"))
+
+
+@pytest.mark.usefixtures("cp949_config_files")
+@pytest.mark.parametrize("reject_save", [False, True], ids=["normal", "after-rejected-save"])
+def test_saved_settings_can_be_undone_and_redone(config_dir: Path, reject_save: bool) -> None:
+    from typer.testing import CliRunner
+
+    from ouroboros.cli.commands.config import app
+
+    config_path = config_dir / "config.yaml"
+    backup_path = config_dir / "config.yaml.bak"
+    original = _utf8_config("C:/workspace/문서😀", newline="\r\n", bom=True)
+    config_path.write_bytes(original)
+    persistence.apply_config_values({"logging.level": "debug"})
+    saved = config_path.read_bytes()
+    assert saved != original
+    assert backup_path.read_bytes() == original
+
+    if reject_save:
+        for _ in range(2):
+            with pytest.raises(persistence.ConfigWriteError, match="rolled back"):
+                persistence.apply_config_values({"logging.level": "not-a-level"})
+            assert config_path.read_bytes() == saved
+            assert backup_path.read_bytes() == original
+
+    runner = CliRunner()
+    undone = runner.invoke(app, ["undo"])
+    assert undone.exit_code == 0, undone.output
+    assert config_path.read_bytes() == original
+    assert backup_path.read_bytes() == saved
+    redone = runner.invoke(app, ["undo"])
+    assert redone.exit_code == 0, redone.output
+    assert config_path.read_bytes() == saved
+    assert backup_path.read_bytes() == original
+
+    persistence.apply_config_values({"logging.level": "warning"})
+    assert _read(config_dir)["logging"]["level"] == "warning"
+    assert backup_path.read_bytes() == saved
+    assert not list(config_dir.glob(".config.yaml.bak-*"))
+
+
+@pytest.mark.parametrize("backup_bytes", [None, b"", b"# previous backup\n{}\n"])
+@pytest.mark.parametrize("failure", ["config-write", "backup-write", "backup-replace"])
+def test_save_io_failure_preserves_config_and_backup(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, backup_bytes: bytes | None, failure: str
+) -> None:
+    config_path = config_dir / "config.yaml"
+    backup_path = config_dir / "config.yaml.bak"
+    original = _utf8_config("C:/workspace/문서😀", newline="\r\n", bom=True)
+    config_path.write_bytes(original)
+    if backup_bytes is not None:
+        backup_path.write_bytes(backup_bytes)
+
+    original_write_text = Path.write_text
+    original_replace = Path.replace
+    original_tempfile = persistence.NamedTemporaryFile
+
+    def fail_config_write(path, text, *args, **kwargs):
+        if path == config_path:
+            original_write_text(path, text[:5], *args, **kwargs)
+            raise OSError("config write failed")
+        return original_write_text(path, text, *args, **kwargs)
+
+    @contextmanager
+    def fail_backup_write(*args, **kwargs):
+        with original_tempfile(*args, **kwargs) as handle:
+            original_write = handle.write
+
+            def partial_write(data):
+                original_write(data[:5])
+                raise OSError("backup write failed")
+
+            monkeypatch.setattr(handle, "write", partial_write)
+            yield handle
+
+    def fail_backup_replace(path, target):
+        if target == backup_path:
+            raise OSError("backup replace failed")
+        return original_replace(path, target)
+
+    if failure == "config-write":
+        monkeypatch.setattr(Path, "write_text", fail_config_write)
+    elif failure == "backup-write":
+        monkeypatch.setattr(persistence, "NamedTemporaryFile", fail_backup_write)
+    else:
+        monkeypatch.setattr(Path, "replace", fail_backup_replace)
+
+    with pytest.raises(persistence.ConfigWriteError, match="rolled back"):
+        persistence.apply_config_values({"logging.level": "debug"})
+
+    assert config_path.read_bytes() == original
+    assert (backup_path.read_bytes() if backup_path.exists() else None) == backup_bytes
+    assert not list(config_dir.glob(".config.yaml.bak-*"))
+
+
+def test_failed_initial_write_leaves_no_config_or_backup(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = config_dir / "config.yaml"
+
+    def partial_write(path, *_args, **_kwargs):
+        assert path == config_path
+        path.write_bytes(b"partial")
+        raise OSError("config write failed")
+
+    monkeypatch.setattr(Path, "write_text", partial_write)
+    with pytest.raises(persistence.ConfigWriteError, match="rolled back"):
+        persistence.apply_config_values({"logging.level": "debug"})
+
+    assert not config_path.exists()
+    assert not (config_dir / "config.yaml.bak").exists()
+
+
+def test_rollback_failure_is_reported_without_overwriting_backup(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = config_dir / "config.yaml"
+    backup_path = config_dir / "config.yaml.bak"
+    config_path.write_bytes(b"logging:\n  level: info\n")
+    backup_bytes = b"# earlier snapshot\n{}\n"
+    backup_path.write_bytes(backup_bytes)
+
+    def fail_rollback(path, _data):
+        assert path == config_path
+        raise OSError("cannot restore original")
+
+    monkeypatch.setattr(Path, "write_bytes", fail_rollback)
+    with pytest.raises(persistence.ConfigWriteError, match="rollback also failed") as error:
+        persistence.apply_config_values({"logging.level": "not-a-level"})
+
+    assert "cannot restore original" in str(error.value)
+    assert "rolled back" not in str(error.value)
+    assert backup_path.read_bytes() == backup_bytes
