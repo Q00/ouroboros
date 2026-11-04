@@ -98,7 +98,8 @@ async def handle_interview_calibration_turn(
                             error_type=type(exc).__name__,
                         )
         finally:
-            if handler._owns_event_store:
+            active_calls = getattr(handler, "_active_owned_calls", 0)
+            if handler._owns_event_store and not (isinstance(active_calls, int) and active_calls > 0):
                 await handler.close()
 
     unknown_terms = ", ".join(calibration.unknown_terms) or "none explicitly extracted"

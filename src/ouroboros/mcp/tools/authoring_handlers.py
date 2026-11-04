@@ -81,6 +81,7 @@ from ouroboros.mcp.tools.interview_calibration import (
     handle_interview_calibration_turn,
     interview_calibration_parameters,
 )
+from ouroboros.mcp.tools.interview_owned_lifecycle import run_owned_interview_call
 from ouroboros.mcp.tools.interview_reasoning import _interview_reasoning_meta
 from ouroboros.mcp.tools.interview_transcript import (
     _build_question_advisory_request as _build_question_advisory_request,
@@ -1449,6 +1450,8 @@ class InterviewHandler:
         self._initialized = False
         self._closed = False
         self._bg_tasks: set[asyncio.Task] = set()
+        self._owned_call_lock = asyncio.Lock()
+        self._active_owned_calls = 0
 
     async def _ensure_initialized(self) -> None:
         """Ensure the event store is initialized."""
@@ -1914,6 +1917,13 @@ class InterviewHandler:
         Returns:
             Result containing interview question and session_id or error.
         """
+        if self._owns_event_store:
+            return await run_owned_interview_call(self, arguments)
+        return await self._handle_request(arguments)
+
+    async def _handle_request(
+        self, arguments: dict[str, Any]
+    ) -> Result[MCPToolResult, MCPServerError]:
         try:
             turn_context = InterviewTurnContext.model_validate(
                 {
@@ -1968,47 +1978,11 @@ class InterviewHandler:
                 )
             )
 
-        from ouroboros.mcp.tools.interview_batch import answer_batch, reject_batch, start_batch
+        from ouroboros.mcp.tools.interview_batch import dispatch_batch_if_requested
 
-        if (
-            "structured_first_batch" in arguments
-            and type(arguments["structured_first_batch"]) is not bool
-        ):
-            return Result.err(
-                MCPToolError(
-                    "structured_first_batch must be boolean", tool_name="ouroboros_interview"
-                )
-            )
-        if (
-            arguments.get("structured_first_batch") is True
-            or "batch_answers" in arguments
-            or "batch_answers_text" in arguments
-            or "batch_reject" in arguments
-        ):
-            if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
-                return Result.err(
-                    MCPToolError("Batches require in-process mode", tool_name="ouroboros_interview")
-                )
-            if arguments.get("structured_first_batch") is True:
-                return await start_batch(self, arguments)
-            if "batch_reject" in arguments:
-                if (
-                    arguments.get("batch_reject") is not True
-                    or "batch_answers" in arguments
-                    or "batch_answers_text" in arguments
-                ):
-                    return Result.err(
-                        MCPToolError("Invalid batch rejection", tool_name="ouroboros_interview")
-                    )
-                return await reject_batch(self, arguments)
-            if answer is not None or selected_first_choice is not None or selections is not None:
-                return Result.err(
-                    MCPToolError(
-                        "Batch answers cannot be combined with other answers",
-                        tool_name="ouroboros_interview",
-                    )
-                )
-            return await answer_batch(self, arguments)
+        batch_result = await dispatch_batch_if_requested(self, arguments)
+        if batch_result is not None:
+            return batch_result
 
         # --- Argument validation (before any dispatch) ---
         # Determine action from arguments
@@ -2730,7 +2704,7 @@ class InterviewHandler:
                 )
             )
         finally:
-            if self._owns_event_store:
+            if self._owns_event_store and self._active_owned_calls == 0:
                 await self.close()
 
     async def _handle_answer(
@@ -3260,7 +3234,7 @@ class InterviewHandler:
                 )
             )
         finally:
-            if self._owns_event_store:
+            if self._owns_event_store and self._active_owned_calls == 0:
                 await self.close()
 
     async def _handle_resume(
@@ -3450,7 +3424,7 @@ class InterviewHandler:
                 )
             )
         finally:
-            if self._owns_event_store:
+            if self._owns_event_store and self._active_owned_calls == 0:
                 await self.close()
 
     async def _respond_with_next_question(

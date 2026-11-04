@@ -448,3 +448,41 @@ def parse_batch_text(value: str, question_ids: list[str]) -> list[dict[str, Any]
     if not entries:
         raise ValueError("No answers")
     return entries
+
+
+async def dispatch_batch_if_requested(
+    handler: "InterviewHandler",
+    arguments: dict[str, Any],
+) -> Result[MCPToolResult, MCPServerError] | None:
+    from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
+
+    if (
+        "structured_first_batch" in arguments
+        and type(arguments["structured_first_batch"]) is not bool
+    ):
+        return batch_error("structured_first_batch must be boolean")
+    if not (
+        arguments.get("structured_first_batch") is True
+        or "batch_answers" in arguments
+        or "batch_answers_text" in arguments
+        or "batch_reject" in arguments
+    ):
+        return None
+    if should_dispatch_via_plugin(handler.agent_runtime_backend, handler.opencode_mode):
+        return batch_error("Batches require in-process mode")
+    if arguments.get("structured_first_batch") is True:
+        return await start_batch(handler, arguments)
+    if "batch_reject" in arguments:
+        if (
+            arguments.get("batch_reject") is not True
+            or "batch_answers" in arguments
+            or "batch_answers_text" in arguments
+        ):
+            return batch_error("Invalid batch rejection")
+        return await reject_batch(handler, arguments)
+    if any(
+        arguments.get(key) is not None
+        for key in ("answer", "selected_first_choice", "selected_first_choices")
+    ):
+        return batch_error("Batch answers cannot be combined with other answers")
+    return await answer_batch(handler, arguments)
