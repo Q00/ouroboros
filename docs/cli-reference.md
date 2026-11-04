@@ -752,7 +752,14 @@ ouroboros cleanup [OPTIONS]
 
 Safety rules:
 
-- Worktrees with a live (non-stale) lock are never touched — running sessions are safe.
+- Cleanup retains worktrees with a live or unverifiable task lock. This relies on
+  participants using compatible lock-aware versions, reliable filesystem locking,
+  and unique hostnames across machines that share the worktree root. In particular,
+  two different machines with the same hostname cannot safely share that root.
+- A remote-host lock is retained even if its heartbeat is old; a timestamp cannot
+  prove the remote owner exited. The legacy `worktree_lock_stale_after_minutes`
+  setting no longer authorizes remote lock recovery. Verify remote ownership and
+  resolve abandoned locks manually before retrying cleanup.
 - Dirty worktrees are never removed, even with `--force`.
 - Branches are only deleted via safe `git branch -d` (fully merged); unmerged branches always survive.
 - Without `--force`, only worktrees whose branch is fully merged are removed.

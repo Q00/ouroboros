@@ -2782,7 +2782,7 @@ class OrchestratorRunner:
         ):
             return False
 
-        release_lock(self._task_workspace.lock_path)
+        release_lock(self._task_workspace.lock_path, self._task_workspace.lock_owner)
         self._task_workspace_lock_held = False
         return True
 
@@ -2806,7 +2806,7 @@ class OrchestratorRunner:
             or self._task_workspace_reservations
         ):
             return False
-        release_lock(self._task_workspace.lock_path)
+        release_lock(self._task_workspace.lock_path, self._task_workspace.lock_owner)
         self._task_workspace_lock_held = False
         return True
 

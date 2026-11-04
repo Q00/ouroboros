@@ -44,7 +44,7 @@ def _init_repo(repo: Path) -> None:
 def _make_auto_workspace(repo_root: Path, worktree_root: Path, session_id: str):
     with patch("ouroboros.core.worktree._worktree_root", return_value=worktree_root):
         workspace = prepare_task_workspace(repo_root, session_id)
-    release_lock(workspace.lock_path)
+    release_lock(workspace.lock_path, workspace.lock_owner)
     return workspace
 
 
@@ -70,11 +70,11 @@ class TestDiscoverManagedWorkspaces:
 
 
 class TestLockFileIsStale:
-    def test_missing_or_corrupt_lock_is_stale(self, tmp_path: Path) -> None:
+    def test_missing_lock_is_stale_but_corrupt_lock_is_preserved(self, tmp_path: Path) -> None:
         assert lock_file_is_stale(tmp_path / "missing.json")
         corrupt = tmp_path / "corrupt.json"
         corrupt.write_text("{not json", encoding="utf-8")
-        assert lock_file_is_stale(corrupt)
+        assert not lock_file_is_stale(corrupt)
 
     def test_live_lock_is_not_stale(self, tmp_path: Path) -> None:
         import os
@@ -83,6 +83,16 @@ class TestLockFileIsStale:
         lock = tmp_path / "live.json"
         lock.write_text(
             json.dumps({"pid": os.getpid(), "host": socket.gethostname()}),
+            encoding="utf-8",
+        )
+        assert not lock_file_is_stale(lock)
+
+    def test_old_remote_lock_is_not_proof_of_dead_owner(self, tmp_path: Path) -> None:
+        lock = tmp_path / "remote.json"
+        lock.write_text(
+            json.dumps(
+                {"pid": 123, "host": "remote-host", "updated_at": "2000-01-01T00:00:00+00:00"}
+            ),
             encoding="utf-8",
         )
         assert not lock_file_is_stale(lock)
@@ -160,12 +170,138 @@ class TestCleanupCommand:
         assert result.exit_code == 0
         assert worktree_path.exists()
 
+    def test_force_preserves_workspace_with_unreadable_owner(self, tmp_path: Path) -> None:
+        repo_root = tmp_path / "repo"
+        worktree_root = tmp_path / "worktrees"
+        _init_repo(repo_root)
+        workspace = _make_auto_workspace(repo_root, worktree_root, "auto_unknown11111")
+        lock_path = Path(workspace.lock_path)
+        lock_path.write_text("{invalid", encoding="utf-8")
+
+        result = self._run(worktree_root, tmp_path / "data", "--force")
+
+        assert result.exit_code == 0
+        assert Path(workspace.worktree_path).exists()
+        assert lock_path.read_text(encoding="utf-8") == "{invalid"
+
+    def test_restore_waits_for_cleanup_then_recreates_workspace(self, tmp_path: Path) -> None:
+        import threading
+
+        from ouroboros.cli.commands.cleanup import _prune_workspaces
+        from ouroboros.core.worktree import cleanup_task_workspace, restore_task_workspace
+
+        repo_root = tmp_path / "repo"
+        worktree_root = tmp_path / "worktrees"
+        _init_repo(repo_root)
+        workspace = _make_auto_workspace(repo_root, worktree_root, "auto_concurrent11")
+        entered = threading.Event()
+        proceed = threading.Event()
+        restored: list = []
+        errors: list[BaseException] = []
+
+        def paused_cleanup(*args, **kwargs):
+            entered.set()
+            assert proceed.wait(5)
+            return cleanup_task_workspace(*args, **kwargs)
+
+        def prune() -> None:
+            try:
+                _prune_workspaces(policy="remove", dry_run=False)
+            except BaseException as exc:
+                errors.append(exc)
+
+        def restore() -> None:
+            try:
+                restored.append(restore_task_workspace(workspace.durable_id, workspace))
+            except BaseException as exc:
+                errors.append(exc)
+
+        with (
+            patch(
+                "ouroboros.cli.commands.cleanup.discover_managed_workspaces",
+                return_value=[workspace],
+            ),
+            patch(
+                "ouroboros.cli.commands.cleanup.cleanup_task_workspace", side_effect=paused_cleanup
+            ),
+        ):
+            pruning = threading.Thread(target=prune)
+            pruning.start()
+            assert entered.wait(5)
+            restoring = threading.Thread(target=restore)
+            restoring.start()
+            try:
+                restoring.join(0.1)
+                assert restoring.is_alive()
+            finally:
+                proceed.set()
+                pruning.join(10)
+                restoring.join(10)
+        assert not pruning.is_alive() and not restoring.is_alive()
+        assert not errors
+        assert len(restored) == 1
+        assert Path(workspace.worktree_path).exists()
+        assert Path(workspace.lock_path).exists()
+        release_lock(workspace.lock_path, workspace.lock_owner)
+
+    def test_cleanup_preserves_workspace_while_prepare_is_in_progress(self, tmp_path: Path) -> None:
+        import threading
+
+        from ouroboros.cli.commands.cleanup import _prune_workspaces
+        from ouroboros.core.worktree import _ensure_clean_checkout
+
+        repo_root = tmp_path / "repo"
+        worktree_root = tmp_path / "worktrees"
+        _init_repo(repo_root)
+        workspace = _make_auto_workspace(repo_root, worktree_root, "auto_preparing11")
+        entered = threading.Event()
+        proceed = threading.Event()
+        errors: list[BaseException] = []
+
+        def paused_check(path):
+            entered.set()
+            assert proceed.wait(5)
+            _ensure_clean_checkout(path)
+
+        def prepare() -> None:
+            try:
+                prepare_task_workspace(repo_root, workspace.durable_id)
+            except BaseException as exc:
+                errors.append(exc)
+
+        with (
+            patch("ouroboros.core.worktree._worktree_root", return_value=worktree_root),
+            patch("ouroboros.core.worktree._ensure_clean_checkout", side_effect=paused_check),
+            patch(
+                "ouroboros.cli.commands.cleanup.discover_managed_workspaces",
+                return_value=[workspace],
+            ),
+        ):
+            preparing = threading.Thread(target=prepare)
+            preparing.start()
+            assert entered.wait(5)
+            try:
+                removed, skipped, failed = _prune_workspaces(policy="remove", dry_run=False)
+                assert not removed and skipped == [workspace] and not failed
+                assert Path(workspace.worktree_path).exists()
+            finally:
+                proceed.set()
+                preparing.join(10)
+        assert not preparing.is_alive()
+        assert not errors
+        release_lock(workspace.lock_path, workspace.lock_owner)
+
     def test_prunes_stale_lock_without_worktree(self, tmp_path: Path) -> None:
+        import socket
+
         worktree_root = tmp_path / "worktrees"
         lock_dir = worktree_root / ".locks" / "repo"
         lock_dir.mkdir(parents=True)
         stale_lock = lock_dir / "auto_gone11111111.json"
-        stale_lock.write_text(json.dumps({"pid": 1, "host": "nowhere"}), encoding="utf-8")
+        stale_lock.write_text(
+            json.dumps({"pid": 999999999, "host": socket.gethostname()}),
+            encoding="utf-8",
+        )
 
         result = self._run(worktree_root, tmp_path / "data")
 

@@ -688,7 +688,9 @@ class OrchestratorConfig(BaseModel, frozen=True):
               clean
             - ``remove``: remove clean worktrees; delete the branch only when
               Git accepts a safe merged-branch deletion
-        worktree_lock_stale_after_minutes: Staleness threshold for task lock recovery
+        worktree_lock_stale_after_minutes: Legacy compatibility setting. Remote
+            task locks are retained regardless of heartbeat age because age alone
+            cannot prove the remote owner has exited.
         pm_snapshot_worktrees: Whether PM brownfield exploration reads from
             persistent detached worktrees pinned to the remote default branch
             (``origin/HEAD``) instead of the developer's live checkout. The
