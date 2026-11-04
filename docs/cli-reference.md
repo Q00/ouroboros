@@ -967,6 +967,14 @@ ouroboros qa ARTIFACT [OPTIONS]
 `ARTIFACT` may be literal text or a path to a file. `--reference` and
 `--seed-content` accept the same literal-or-file behavior.
 
+For an in-process QA evaluation, the returned QA session ID can be passed to
+`ouroboros_session_status` to read the last completed evaluation's score and
+verdict. That status describes the last completed evaluation, not an active or
+failed later attempt. The QA status record stores the score summary, not the
+artifact, reference, prompt, or model response. The `auto_` ID prefix is
+reserved for auto sessions; a QA ID that conflicts with another session is
+reported as an error. Plugin delegation retains its host-owned lifecycle.
+
 **Options:**
 
 | Option | Description |

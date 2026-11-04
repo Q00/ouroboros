@@ -7,6 +7,7 @@ This module contains handlers for querying session state and events:
 """
 
 from dataclasses import dataclass, field
+import math
 from typing import Any
 
 import structlog
@@ -20,6 +21,7 @@ from ouroboros.mcp.tools.ac_tree_hud_handler import (
     format_subtask_progress_summary,
     summarize_subtask_events,
 )
+from ouroboros.mcp.tools.qa_session import read_session_events
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -30,6 +32,7 @@ from ouroboros.mcp.types import (
 )
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 from ouroboros.persistence.event_store import EventStore
+from ouroboros.persistence.qa_session_store import QA_EVALUATED, qa_compatible_event
 
 log = structlog.get_logger(__name__)
 
@@ -309,6 +312,98 @@ class SessionStatusHandler:
         try:
             # Ensure event store is initialized
             await self._ensure_initialized()
+
+            # QA evaluations share the session ID namespace but have their
+            # own event kind. Read in append order, in one snapshot, and never
+            # silently choose between conflicting owners of the same ID.
+            has_qa = await self._event_store.query_events(
+                aggregate_id=session_id,
+                aggregate_type="session",
+                event_type=QA_EVALUATED,
+                limit=1,
+            )
+            session_events = (
+                await read_session_events(self._event_store, session_id) if has_qa else []
+            )
+            qa_events = [event for event in session_events if event.type == QA_EVALUATED]
+            if qa_events:
+                if any(not qa_compatible_event(event) for event in session_events):
+                    return Result.err(
+                        MCPToolError(
+                            "Session ID is shared by QA and another session type",
+                            tool_name="ouroboros_session_status",
+                        )
+                    )
+                data = qa_events[-1].data
+                iteration, score = data.get("iteration"), data.get("score")
+                threshold, passed, verdict = (
+                    data.get("pass_threshold"),
+                    data.get("passed"),
+                    data.get("verdict"),
+                )
+                if (
+                    type(iteration) is not int
+                    or iteration < 1
+                    or isinstance(score, bool)
+                    or not isinstance(score, (int, float))
+                    or not math.isfinite(score)
+                    or not 0 <= score <= 1
+                    or isinstance(threshold, bool)
+                    or not isinstance(threshold, (int, float))
+                    or not math.isfinite(threshold)
+                    or not 0 <= threshold <= 1
+                    or type(passed) is not bool
+                    or passed != (score >= threshold)
+                    or not isinstance(verdict, str)
+                    or verdict not in {"pass", "revise", "fail"}
+                ):
+                    return Result.err(
+                        MCPToolError(
+                            "QA session record is invalid",
+                            tool_name="ouroboros_session_status",
+                        )
+                    )
+                from ouroboros.mcp.tools.qa import FAIL_THRESHOLD
+
+                expected_verdict = (
+                    "pass" if passed else "revise" if score >= FAIL_THRESHOLD else "fail"
+                )
+                if verdict != expected_verdict:
+                    return Result.err(
+                        MCPToolError(
+                            "QA session record is invalid",
+                            tool_name="ouroboros_session_status",
+                        )
+                    )
+                return Result.ok(
+                    MCPToolResult(
+                        content=(
+                            MCPContentItem(
+                                type=ContentType.TEXT,
+                                text=(
+                                    f"Session: {session_id}\n"
+                                    "Type: QA\nStatus: completed\nTerminal: True\n"
+                                    f"Last completed evaluation: {iteration}\n"
+                                    f"Score: {score}\nVerdict: {verdict}\n"
+                                ),
+                            ),
+                        ),
+                        is_error=False,
+                        meta={
+                            "session_id": session_id,
+                            "session_kind": "qa",
+                            "status": "completed",
+                            "is_active": False,
+                            "is_completed": True,
+                            "is_failed": False,
+                            "iteration": iteration,
+                            "score": score,
+                            "verdict": verdict,
+                            "passed": passed,
+                            "pass_threshold": threshold,
+                        },
+                    )
+                )
 
             # Query session state from repository
             result = await self._session_repo.reconstruct_session(session_id)
