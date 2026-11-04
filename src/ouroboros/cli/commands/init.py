@@ -724,7 +724,7 @@ async def _generate_seed_from_interview(
 
     # Persist the evaluation like the MCP path does (#1901): without this the
     # state file reads ambiguity_score: null and the score only survives in
-    # rotating logs. A save failure must never block seed generation.
+    # rotating logs. A failed save leaves this state unsafe for generation.
     state.store_ambiguity(
         score=ambiguity_score.overall_score,
         breakdown=ambiguity_score.breakdown.model_dump(mode="json"),
@@ -736,6 +736,10 @@ async def _generate_seed_from_interview(
             interview_id=state.interview_id,
             error=str(save_result.error),
         )
+        print_error(
+            f"Failed to save interview; reload before retrying: {save_result.error.message}"
+        )
+        raise typer.Exit(code=1)
 
     # One predicate for one decision. The loop's confirmation already asks
     # whether the interview is seed-ready using overall ambiguity *and* the
@@ -789,6 +793,10 @@ async def _generate_seed_from_interview(
                     interview_id=state.interview_id,
                     error=str(clear_result.error),
                 )
+                print_error(
+                    f"Failed to save interview; reload before retrying: {clear_result.error.message}"
+                )
+                raise typer.Exit(code=1)
             return None, SeedGenerationResult.CONTINUE_INTERVIEW
         elif choice == "3":
             return None, SeedGenerationResult.CANCELLED
