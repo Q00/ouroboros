@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
 from ouroboros.core.types import Result
@@ -29,6 +30,12 @@ class StartQAHandler:
     llm_backend: str | None = field(default=None, repr=False)
     agent_runtime_backend: str | None = field(default=None, repr=False)
     opencode_mode: str | None = field(default=None, repr=False)
+    project_dir: str | None = field(default=None, repr=False)
+    reconstructible_backend: bool = field(default=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.project_dir:
+            self.project_dir = str(Path(self.project_dir).expanduser().resolve())
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -40,6 +47,7 @@ class StartQAHandler:
                 "Poll with ouroboros_job_wait and read the verdict with "
                 "ouroboros_job_result. The request is written to a private local file; "
                 "the full result is stored in the local event store and may repeat input. "
+                "The worker reconstructs the configured backend rather than injected adapters. "
                 "Requires a durable local event store and a subprocess-capable backend; "
                 "host or plugin dispatch should use ouroboros_qa instead."
             ),
@@ -53,14 +61,17 @@ class StartQAHandler:
                 MCPToolError("quality_bar is required", tool_name="ouroboros_start_qa")
             )
         if (
-            not self.job_manager.durable_jobs_enabled
+            not self.project_dir
+            or not self.reconstructible_backend
+            or not self.job_manager.durable_jobs_enabled
             or not self.event_store.supports_cross_process_workers
             or _runtime_requires_in_process_job(self.agent_runtime_backend)
             or should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode)
         ):
             return Result.err(
                 MCPToolError(
-                    "Background QA requires a durable event store and subprocess backend; "
+                    "Background QA requires a reconstructible backend, project directory, "
+                    "durable event store, and subprocess backend; "
                     "use ouroboros_qa for host or plugin dispatch.",
                     tool_name="ouroboros_start_qa",
                 )
@@ -87,6 +98,7 @@ class StartQAHandler:
             runtime_backend=self.agent_runtime_backend,
             llm_backend=self.llm_backend,
             opencode_mode=self.opencode_mode,
+            project_dir=self.project_dir,
         )
         meta = {
             "job_id": snapshot.job_id,
