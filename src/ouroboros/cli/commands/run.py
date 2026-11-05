@@ -783,7 +783,12 @@ async def _run_orchestrator(
     from ouroboros.persistence.event_store import EventStore
 
     # Load seed
-    seed_data = _load_seed_from_yaml(seed_file)
+    try:
+        seed_data = _load_seed_from_yaml(seed_file)
+    except typer.Exit as exc:
+        if isinstance(exc.__cause__, yaml.YAMLError):
+            _record_cli_prelaunch_failure("launch_seed_invalid", "validation")
+        raise
 
     try:
         seed = Seed.from_dict(seed_data)
