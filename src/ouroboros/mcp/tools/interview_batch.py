@@ -421,8 +421,8 @@ async def answer_batch(
                             MCPContentItem(
                                 type=ContentType.TEXT,
                                 text=(
-                                "Your batch update was saved before the state changed or became unavailable. "
-                                "Material drafting was deferred; resume to retrieve the current state."
+                                    "Your batch update was saved before the state changed or became unavailable. "
+                                    "Material drafting was deferred; resume to retrieve the current state."
                                 ),
                             ),
                         ),

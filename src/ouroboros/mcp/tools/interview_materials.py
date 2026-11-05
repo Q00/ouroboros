@@ -26,20 +26,11 @@ def material_followup_error(state: "InterviewState", echo: object, question: obj
     source = state.inline_material
     if source is None or state.proposed_opening is not None:
         return "Material follow-up is unavailable for this session"
-    suggestions = (
-        ()
-        if source.draft is None
-        else (
-            *source.draft.source_quotes,
-            *source.draft.inferred_assumptions,
-        )
-    )
     if (
         echo is not None
         or not isinstance(question, str)
         or not question.strip()
         or len(question) > 2000
-        or any(len(item) >= 8 and item.casefold() in question.casefold() for item in suggestions)
     ):
         return "Use the person's exact authored question, not a material draft or host suggestion"
     return None

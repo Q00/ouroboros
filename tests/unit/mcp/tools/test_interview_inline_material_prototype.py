@@ -131,7 +131,7 @@ async def test_sdk_material_is_optional_separate_and_resumable(tmp_path):
                 {
                     "session_id": sid,
                     "answer": "yes",
-                    "inline_material_user_followup_question": candidate,
+                    "last_question": candidate,
                     "confused_terms": ["ontology"],
                 },
             )
@@ -146,13 +146,14 @@ async def test_sdk_material_is_optional_separate_and_resumable(tmp_path):
             {
                 "session_id": sid,
                 "answer": "yes",
-                "inline_material_user_followup_question": "Can we add export?",
+                "inline_material_user_followup_question": "Can we use synthetic apples are green?",
             },
         )
         assert not reopened.is_error
         after_reopen = (await engine.load_state(sid)).value
         assert any(
-            round_data.question == "Can we add export?" for round_data in after_reopen.rounds
+            round_data.question == "Can we use synthetic apples are green?"
+            for round_data in after_reopen.rounds
         )
         loaded = (await engine.load_state(sid)).value
         loaded.rounds.append(
