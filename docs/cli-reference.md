@@ -805,8 +805,10 @@ persist into `orchestrator.runtime_profile.stages`. The shipped presets:
 | `Frugal Mix`    | antigravity | grok    | antigravity | codex   | Cost/speed-leaning mix (Gemini Flash via `agy`, fast Grok)       |
 
 > The spine of these recommendations is **vendor diversity between the generate
-> stage (execute) and the verify stage (evaluate)** — the same principle Ouroboros
-> already encodes in `consensus.diversity_required`. A preset may reference a
+> stage (execute) and the verify stage (evaluate)**. The persisted
+> `consensus.diversity_required` setting is currently inert and does not enforce
+> provider diversity; verify the effective providers for your configuration.
+> A preset may reference a
 > backend whose CLI is not installed; staging still works and the per-card
 > warning flags it. Pick the preset closest to your subscriptions, then tune
 > individual cards. Model presets (Auto / Frugal / Standard / Frontier) sit in
