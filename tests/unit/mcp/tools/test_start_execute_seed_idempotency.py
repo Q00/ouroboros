@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from ouroboros.core.types import Result
 from ouroboros.mcp.job_manager import JobLinks, JobManager, JobSnapshot, JobStatus
 from ouroboros.mcp.tools.execution_handlers import StartExecuteSeedHandler
+from ouroboros.mcp.types import MCPToolResult
 from ouroboros.persistence.event_store import EventStore
 
 
@@ -92,6 +94,64 @@ def _make_handler(event_store: EventStore, start_calls: list[dict]) -> StartExec
         event_store=event_store,
         job_manager=_make_job_manager_stub(start_calls),
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("initial", "later", "selected"),
+    [
+        ("adaptive", "quality_first", "adaptive"),
+        ("quality_first", "adaptive", "quality_first"),
+        (None, "quality_first", "adaptive"),
+    ],
+)
+async def test_inline_worker_uses_accepted_default_snapshot(
+    event_store, tmp_path, initial, later, selected
+):
+    handler = _make_handler(event_store, [])
+    received = {}
+
+    async def execute(arguments, **kwargs):
+        received["snapshot"] = kwargs["_preference_snapshot"]
+        return Result.ok(MCPToolResult(content=()))
+
+    handler._execute_handler.handle = AsyncMock(side_effect=execute)
+
+    async def start_job(**kwargs):
+        with patch(
+            "ouroboros.mcp.tools.execution_handlers.default_execution_efficiency_mode",
+            return_value=later,
+        ):
+            await kwargs["work_fn"](None)
+        now = datetime.now(UTC)
+        return JobSnapshot(
+            job_id="job_snapshot",
+            job_type="execute_seed",
+            status=JobStatus.QUEUED,
+            cursor=0,
+            message="queued",
+            links=kwargs["links"],
+            created_at=now,
+            updated_at=now,
+        )
+
+    with (
+        patch(
+            "ouroboros.mcp.tools.execution_handlers.default_execution_efficiency_mode",
+            return_value=initial,
+        ),
+        patch("ouroboros.mcp.tools.execution_handlers.start_background_tool_job", start_job),
+    ):
+        result = await handler.handle(
+            {"seed_content": "goal: test\n", "cwd": str(tmp_path), "auto_evaluate": False}
+        )
+
+    assert result.is_ok
+    assert f"Efficiency Mode: {selected}" in result.value.text_content
+    preferences, raw_mode, raw_assurance = received["snapshot"]
+    assert preferences.efficiency_mode.value == selected
+    assert raw_mode == initial
+    assert raw_assurance is None
 
 
 @pytest.mark.asyncio
