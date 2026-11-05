@@ -151,8 +151,8 @@ def _eligible_http_citation(url: str) -> bool:
     )
 
 
-def extract_cited_urls(text: str) -> tuple[str, ...]:
-    """Extract cited URLs from the fenced evidence JSON block(s) in ``text``.
+def _extract_cited_urls(text: str, *, include_bare: bool) -> tuple[str, ...]:
+    """Extract cited URLs from fenced blocks and, optionally, a bare object.
 
     Reads the deep-tier contract shape written by
     ``build_lateral_multi_subagent``: ``external_sources`` (list of URLs) and
@@ -165,9 +165,15 @@ def extract_cited_urls(text: str) -> tuple[str, ...]:
         return ()
     urls: list[str] = []
     seen: set[str] = set()
-    for match in _FENCED_JSON_RE.finditer(text):
+    blocks = [match.group(1) for match in _FENCED_JSON_RE.finditer(text)]
+    # The shared evidence parser also accepts a bare JSON object. Only parse
+    # the entire stripped text here: prose surrounding unrelated JSON must not
+    # be reinterpreted as an evidence block.
+    if include_bare and text.lstrip().startswith("{"):
+        blocks.append(text.strip())
+    for block in blocks:
         try:
-            payload = json.loads(match.group(1))
+            payload = json.loads(block)
         except Exception:
             continue
         if not isinstance(payload, Mapping):
@@ -187,6 +193,11 @@ def extract_cited_urls(text: str) -> tuple[str, ...]:
                 seen.add(url)
                 urls.append(url)
     return tuple(urls)
+
+
+def extract_cited_urls(text: str) -> tuple[str, ...]:
+    """Return citations found in fenced blocks or a bare evidence object."""
+    return _extract_cited_urls(text, include_bare=True)
 
 
 class _NoRedirectBody:
@@ -315,13 +326,23 @@ def audit_citations(
     ``invalid`` (malformed, non-http(s), or oversized URL — never fetched) / ``unchecked``
     (budget or count cap reached before this URL's turn). Never raises.
     """
-    urls: list[str] = []
-    seen: set[str] = set()
+    all_urls: list[str] = []
+    all_seen: set[str] = set()
+    fenced_order: list[str] = []
+    fenced_urls: set[str] = set()
     for text in texts:
-        for url in extract_cited_urls(text if isinstance(text, str) else ""):
-            if url not in seen:
-                seen.add(url)
-                urls.append(url)
+        text = text if isinstance(text, str) else ""
+        for url in _extract_cited_urls(text, include_bare=False):
+            if url not in fenced_urls:
+                fenced_urls.add(url)
+                fenced_order.append(url)
+        for url in extract_cited_urls(text):
+            if url not in all_seen:
+                all_seen.add(url)
+                all_urls.append(url)
+    # Preserve the pre-existing fenced-only fetch order and budget exactly.
+    # A bare occurrence must not promote a later fenced URL into the cap.
+    urls = fenced_order + [url for url in all_urls if url not in fenced_urls]
     if not urls:
         return None
 
@@ -331,6 +352,11 @@ def audit_citations(
     for url in urls:
         if not _eligible_http_citation(url):
             verdicts[url] = INVALID
+            continue
+        # Bare evidence was not historically a network-fetch input. Surface
+        # its citations as unverified without expanding destination access.
+        if url not in fenced_urls:
+            verdicts[url] = UNCHECKED
             continue
         remaining = min(_REQUEST_TIMEOUT_SECONDS, deadline - time.monotonic())
         if checked >= max_urls or remaining <= 0:
