@@ -98,6 +98,17 @@ class TestWorktreeIsolation:
         assert not wt_a.exists()
         assert not wt_b.exists()
 
+    def test_worktrees_start_from_a_pinned_commit(self, git_workspace: Path) -> None:
+        """``head_commit`` resolved once pins every later worktree, even after HEAD moves."""
+        with nvt.RunWorktreeManager(git_workspace) as manager:
+            pinned = manager.head_commit()
+            (git_workspace / "file.txt").write_text("moved\n")
+            _git(git_workspace, "commit", "-am", "move")
+            at_pin = manager.create("pinned", ref=pinned)
+            at_head = manager.create("head")
+            assert (at_pin / "file.txt").read_text() == "base\n"
+            assert (at_head / "file.txt").read_text() == "moved\n"
+
     def test_winner_diff_applies_to_workspace(self, git_workspace: Path) -> None:
         with nvt.RunWorktreeManager(git_workspace) as manager:
             winner = manager.create("codex")
