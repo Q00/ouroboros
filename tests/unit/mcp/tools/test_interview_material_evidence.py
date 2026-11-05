@@ -400,7 +400,7 @@ async def test_generated_timestamp_session_concurrent_decisions_use_cas(tmp_path
 
 
 @pytest.mark.parametrize("field", ["inline_material_text", "material_evidence_prompt"])
-def test_material_prose_exemption_is_limited_to_interview_root(field):
+def test_material_prose_does_not_bypass_existing_security_checks(field):
     from ouroboros.mcp.server.security import InputValidator
 
     value = "Reference example; subprocess.run()"
