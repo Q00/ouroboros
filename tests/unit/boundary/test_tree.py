@@ -272,3 +272,84 @@ def test_a_failed_first_publication_leaves_no_scratch_tree(
 
     assert not destination.exists()
     assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == [], "no scratch left"
+
+
+@pytest.mark.parametrize("sibling_name", [".copy.copying", ".copy.previous"])
+def test_copy_preserves_unowned_sibling_data(tmp_path: Path, sibling_name: str) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "new.py").write_text("new\n")
+    destination = tmp_path / "copy"
+    destination.mkdir()
+    (destination / "old.py").write_text("old\n")
+    sibling = tmp_path / sibling_name
+    sibling.mkdir()
+    (sibling / "user.txt").write_text("keep\n")
+
+    copy_checkout(source, destination, replace=True)
+
+    assert (sibling / "user.txt").read_text() == "keep\n"
+    assert (destination / "new.py").read_text() == "new\n"
+
+
+@pytest.mark.parametrize("late_kind", ["directory", "file", "symlink"])
+def test_a_destination_created_during_copy_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, late_kind: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "new.py").write_text("new\n")
+    destination = tmp_path / "copy"
+    real_copytree = shutil.copytree
+
+    def create_destination(src: Path, dst: Path, **kwargs: object) -> object:
+        result = real_copytree(src, dst, **kwargs)
+        if late_kind == "directory":
+            destination.mkdir()
+            (destination / "user.txt").write_text("keep\n")
+        elif late_kind == "file":
+            destination.write_text("keep\n")
+        else:
+            destination.symlink_to("missing-target")
+        return result
+
+    monkeypatch.setattr(shutil, "copytree", create_destination)
+
+    with pytest.raises(FileExistsError):
+        copy_checkout(source, destination)
+
+    if late_kind == "directory":
+        assert (destination / "user.txt").read_text() == "keep\n"
+    elif late_kind == "file":
+        assert destination.read_text() == "keep\n"
+    else:
+        assert destination.is_symlink()
+        assert os.readlink(destination) == "missing-target"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["copy", "source"]
+
+
+def test_interleaved_copies_do_not_remove_each_others_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "new.py").write_text("new\n")
+    destination = tmp_path / "copy"
+    real_copytree = shutil.copytree
+    nested = False
+
+    def interleaved_copy(src: Path, dst: Path, **kwargs: object) -> object:
+        nonlocal nested
+        result = real_copytree(src, dst, **kwargs)
+        if not nested:
+            nested = True
+            copy_checkout(source, destination)
+        return result
+
+    monkeypatch.setattr(shutil, "copytree", interleaved_copy)
+
+    with pytest.raises(FileExistsError):
+        copy_checkout(source, destination)
+
+    assert (destination / "new.py").read_text() == "new\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["copy", "source"]
