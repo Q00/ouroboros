@@ -220,6 +220,12 @@ def parse_coverage_from_output(output: str) -> float | None:
         return None
     # Detect Jest's aggregate table row without treating it as a measurement.
     jest_coverage = r"[ \t]*All[ \t]+files[ \t]*\|"
+    # Tarpaulin reports a percentage before its line-count summary. It is
+    # not a supported dialect and must not be masked by a separate TOTAL.
+    tarpaulin_coverage = (
+        r"[ \t]*\d+(?:\.\d+)?%[ \t]+coverage[ \t]*,[ \t]*"
+        r"\d+[ \t]*/[ \t]*\d+[ \t]+lines[ \t]+covered\b"
+    )
     for row in output.splitlines():
         # Strip bounded terminal SGR sequences only for detection, not proof.
         uncolored = re.sub(r"\x1b\[[0-9;]{0,32}m", "", row)
@@ -228,7 +234,9 @@ def parse_coverage_from_output(output: str) -> float | None:
             or re.match(go_coverage, uncolored, re.IGNORECASE)
         ):
             return None
-        if re.match(jest_coverage, uncolored, re.IGNORECASE):
+        if re.match(jest_coverage, uncolored, re.IGNORECASE) or re.match(
+            tarpaulin_coverage, uncolored, re.IGNORECASE
+        ):
             return None
         # An unknown control sequence can conceal a measurement in any row,
         # including a Go package result with no table separator. Do not guess
@@ -279,6 +287,7 @@ def parse_coverage_from_output(output: str) -> float | None:
             re.match(candidate_pattern, line, re.IGNORECASE)
             or re.match(go_coverage, line, re.IGNORECASE)
             or re.match(jest_coverage, line, re.IGNORECASE)
+            or re.match(tarpaulin_coverage, line, re.IGNORECASE)
             for line in uncolored.splitlines()
         ):
             return None

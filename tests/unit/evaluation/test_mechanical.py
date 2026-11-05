@@ -550,6 +550,14 @@ _UNPARSED_COVERAGE_OUTPUTS = {
         "TOTAL 10 0 100%\n" + '{"Action":"output","Package":"p","Output":"x"}\n' * 257
     ),
     "cargo tarpaulin": "15.00% coverage, 15/100 lines covered",
+    "tarpaulin conflicting with TOTAL": "TOTAL 10 0 100%\n15.00% coverage, 15/100 lines covered",
+    "colored tarpaulin conflicting with TOTAL": (
+        "TOTAL 10 0 100%\n\x1b[31m15.00% coverage, 15/100 lines covered\x1b[0m"
+    ),
+    "tarpaulin output split across go events": (
+        'TOTAL 10 0 100%\n{"Action":"output","Package":"p","Output":"15.00% cov"}\n'
+        '{"Action":"output","Package":"p","Output":"erage, 15/100 lines covered\\n"}'
+    ),
     "coverage report --format=total": "15",
     "no output": "",
     "requirement beside decimal TOTAL": "Required Coverage: 70%\nTOTAL   100   85   15.00%",
