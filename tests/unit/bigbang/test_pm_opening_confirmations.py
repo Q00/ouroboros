@@ -299,3 +299,83 @@ async def test_pm_seed_keeps_two_individual_confirmations_and_ignores_unconfirme
         second.item_id,
     ]
     assert "UNCERTAINTY_BETA" not in str(result.value.to_dict())
+
+
+@pytest.mark.asyncio
+async def test_pm_seed_rejects_regular_interview_revision_change_during_generation(tmp_path):
+    adapter = SimpleNamespace(complete=AsyncMock())
+    engine = PMInterviewEngine.create(llm_adapter=adapter, model="synthetic", state_dir=tmp_path)
+    state = _state()
+    state.proposed_opening = None
+    state.opening_decisions = ()
+    assert (await engine.inner.save_state(state)).is_ok
+    original = (await engine.inner.load_state(state.interview_id)).value
+
+    async def change(*_args, **_kwargs):
+        latest = (await engine.inner.load_state(state.interview_id)).value
+        latest.rounds[0].user_response = "A different user"
+        assert (await engine.inner.save_state(latest)).is_ok
+        return _response()
+
+    adapter.complete.side_effect = change
+    result = await engine.generate_pm_seed(original)
+    assert result.is_err and "changed" in str(result.error)
+
+
+@pytest.mark.asyncio
+async def test_pm_seed_rejects_first_opening_appearing_during_generation(tmp_path):
+    adapter = SimpleNamespace(complete=AsyncMock())
+    engine = PMInterviewEngine.create(llm_adapter=adapter, model="synthetic", state_dir=tmp_path)
+    opening_state = _state()
+    state = opening_state.model_copy(deep=True)
+    state.proposed_opening = None
+    state.opening_decisions = ()
+    assert (await engine.inner.save_state(state)).is_ok
+    original = (await engine.inner.load_state(state.interview_id)).value
+
+    async def attach(*_args, **_kwargs):
+        latest = (await engine.inner.load_state(state.interview_id)).value
+        latest.proposed_opening = opening_state.proposed_opening
+        latest.opening_decisions = opening_state.opening_decisions
+        assert (await engine.inner.save_state(latest)).is_ok
+        return _response()
+
+    adapter.complete.side_effect = attach
+    result = await engine.generate_pm_seed(original)
+    assert result.is_err and "changed" in str(result.error)
+
+
+@pytest.mark.asyncio
+async def test_pm_seed_rejects_same_object_first_opening_during_generation(tmp_path):
+    adapter = SimpleNamespace(complete=AsyncMock())
+    engine = PMInterviewEngine.create(llm_adapter=adapter, model="synthetic", state_dir=tmp_path)
+    opening_state = _state()
+    state = opening_state.model_copy(deep=True)
+    state.proposed_opening = None
+    state.opening_decisions = ()
+
+    async def attach(*_args, **_kwargs):
+        state.proposed_opening = opening_state.proposed_opening
+        state.opening_decisions = opening_state.opening_decisions
+        return _response()
+
+    adapter.complete.side_effect = attach
+    result = await engine.generate_pm_seed(state)
+    assert result.is_err and "changed" in str(result.error)
+
+
+@pytest.mark.asyncio
+async def test_pm_seed_rejects_same_object_regular_answer_change(tmp_path):
+    adapter = SimpleNamespace(complete=AsyncMock())
+    engine = PMInterviewEngine.create(llm_adapter=adapter, model="synthetic", state_dir=tmp_path)
+    state = _state()
+    state.proposed_opening = None
+    state.opening_decisions = ()
+
+    async def change(*_args, **_kwargs):
+        state.rounds[0].user_response = "Different user"
+        return _response()
+
+    adapter.complete.side_effect = change
+    result = await engine.generate_pm_seed(state)
+    assert result.is_err and "changed" in str(result.error)
