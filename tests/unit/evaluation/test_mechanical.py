@@ -559,6 +559,12 @@ _UNPARSED_COVERAGE_OUTPUTS = {
         "TOTAL 10 0 100%\nok example.com/m (cached) Coverage: 15% of statements"
     ),
     "jest --coverage": "All files |   15.2 |   10.1 |   12.3 |   15.2 |",
+    "node spec coverage conflicting with TOTAL": (
+        "TOTAL 10 0 100%\nℹ all files | 12.50 | 66.67 | 100.00 |"
+    ),
+    "node tap coverage conflicting with TOTAL": (
+        "TOTAL 10 0 100%\n# all files | 12.50 | 66.67 | 100.00 |"
+    ),
     "jest conflicting with TOTAL": (
         "TOTAL 10 0 100%\nAll files |   15.2 |   10.1 |   12.3 |   15.2 |"
     ),

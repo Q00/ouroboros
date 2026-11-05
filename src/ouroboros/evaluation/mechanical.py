@@ -218,8 +218,9 @@ def parse_coverage_from_output(output: str) -> float | None:
     go_coverage = r"[ \t]*ok[ \t]+\S+[ \t]+\S+[ \t]+coverage:"
     if any(re.match(go_coverage, row, re.IGNORECASE) for row in output.splitlines()):
         return None
-    # Detect Jest's aggregate table row without treating it as a measurement.
-    jest_coverage = r"[ \t]*All[ \t]+files[ \t]*\|"
+    # Detect Jest's aggregate and Node's spec/TAP-prefixed coverage rows
+    # without interpreting their values as supported measurements.
+    jest_coverage = r"[ \t]*(?:[ℹ#][ \t]*)?All[ \t]+files[ \t]*\|"
     # Tarpaulin reports a percentage before its line-count summary. It is
     # not a supported dialect and must not be masked by a separate TOTAL.
     tarpaulin_coverage = (
