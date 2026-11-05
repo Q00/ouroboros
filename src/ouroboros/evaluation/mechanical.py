@@ -212,6 +212,65 @@ def parse_coverage_from_output(output: str) -> float | None:
     go_coverage = r"[ \t]*ok[ \t]+\S+[ \t]+\S+[ \t]+coverage:"
     if any(re.match(go_coverage, row, re.IGNORECASE) for row in output.splitlines()):
         return None
+    # Detect Jest's aggregate table row without treating it as a measurement.
+    jest_coverage = r"[ \t]*All[ \t]+files[ \t]*\|"
+    for row in output.splitlines():
+        # Strip bounded terminal SGR sequences only for detection, not proof.
+        uncolored = re.sub(r"\x1b\[[0-9;]{0,32}m", "", row)
+        if uncolored != row and (
+            re.match(candidate_pattern, uncolored, re.IGNORECASE)
+            or re.match(go_coverage, uncolored, re.IGNORECASE)
+        ):
+            return None
+        if re.match(jest_coverage, uncolored, re.IGNORECASE):
+            return None
+        # An unrecognized escape in a table-like row may hide the aggregate.
+        if "\x1b" in uncolored and "|" in uncolored:
+            return None
+
+    # go test -json wraps the same text in line-delimited output events. Do
+    # not let an unrelated supported row stand in for a wrapped Go report.
+    import json
+
+    streams: dict[str, str] = {}
+    stream_size = 0
+    event_count = 0
+    for row in output.splitlines():
+        if not row.lstrip().startswith("{"):
+            continue
+        # Unparseable or oversized JSON-shaped output must not hide another
+        # coverage dialect beside a seemingly supported measurement.
+        if len(row) > 65536:
+            return None
+        try:
+            event = json.loads(row)
+        except (ValueError, TypeError, RecursionError):
+            return None
+        if not isinstance(event, dict) or event.get("Action") != "output":
+            continue
+        package = event.get("Package")
+        if not isinstance(package, str):
+            continue
+        text = event.get("Output")
+        if not isinstance(text, str):
+            continue
+        event_count += 1
+        stream_size += len(text)
+        if (
+            event_count > 256
+            or stream_size > 65536
+            or (package not in streams and len(streams) >= 64)
+        ):
+            return None
+        streams[package] = streams.get(package, "") + text
+        uncolored = re.sub(r"\x1b\[[0-9;]{0,32}m", "", streams[package])
+        if "\x1b" in uncolored or any(
+            re.match(candidate_pattern, line, re.IGNORECASE)
+            or re.match(go_coverage, line, re.IGNORECASE)
+            or re.match(jest_coverage, line, re.IGNORECASE)
+            for line in uncolored.splitlines()
+        ):
+            return None
     matches = [re.fullmatch(pattern, row) for row in total_rows]
     matches += [re.fullmatch(alt_pattern, row) for row in coverage_rows]
     if not all(matches):

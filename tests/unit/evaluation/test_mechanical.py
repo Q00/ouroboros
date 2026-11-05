@@ -46,6 +46,16 @@ class TestParseCoverageFromOutput:
         output = "TOTAL   500   0   100%"
         assert parse_coverage_from_output(output) == 1.0
 
+    def test_colored_non_table_prose_does_not_hide_supported_total(self) -> None:
+        assert parse_coverage_from_output("\x1b[32mTests passed\x1b[0m\nTOTAL 10 0 100%") == 1.0
+
+    def test_unrelated_go_json_output_does_not_hide_supported_total(self) -> None:
+        output = (
+            'TOTAL 10 0 100%\n{"Action":"output","Package":"p","Output":"ok\\n"}\n'
+            '{"Action":"output","Package":"q","Output":"pass\\n"}'
+        )
+        assert parse_coverage_from_output(output) == 1.0
+
     def test_parse_0_percent(self) -> None:
         """Parse 0% coverage."""
         output = "TOTAL   500   500   0%"
@@ -93,6 +103,10 @@ class TestParseCoverageFromOutput:
     def test_ambiguous_or_impossible_figures_are_unread(self, output: str) -> None:
         """A figure the output does not pin down is not a measurement."""
         assert parse_coverage_from_output(output) is None
+
+    def test_unrelated_go_json_output_does_not_mask_a_supported_total(self) -> None:
+        output = 'TOTAL 10 0 100%\n{"Action":"output","Package":"example.com/m","Output":"PASS\\n"}'
+        assert parse_coverage_from_output(output) == 1.0
 
     @pytest.mark.parametrize(
         "output",
@@ -478,6 +492,27 @@ _UNPARSED_COVERAGE_OUTPUTS = {
     ),
     "pytest-cov precision=2": "TOTAL   100   85   15.00%",
     "go test -cover": "ok  \texample.com/m\t0.002s\tcoverage: 15.0% of statements",
+    "go json coverage conflicting with TOTAL": (
+        "TOTAL 10 0 100%\n"
+        '{"Action":"output","Package":"example.com/m",'
+        '"Output":"coverage: 15.0% of statements\\n"}'
+    ),
+    "go json package summary conflicting with TOTAL": (
+        "TOTAL 10 0 100%\n"
+        '{"Action":"output","Package":"example.com/m",'
+        '"Output":"ok\\texample.com/m\\t0.002s\\tcoverage: 15.0% of statements\\n"}'
+    ),
+    "split go json conflicting with TOTAL": (
+        'TOTAL 10 0 100%\n{"Action":"output","Package":"p","Output":"cover"}\n'
+        '{"Action":"output","Package":"p","Output":"age: 15% of statements\\n"}'
+    ),
+    "colored go json conflicting with TOTAL": (
+        'TOTAL 10 0 100%\n{"Action":"output","Package":"p",'
+        '"Output":"\\u001b[31mcoverage: 15% of statements\\u001b[0m\\n"}'
+    ),
+    "colored go plain conflicting with TOTAL": (
+        "TOTAL 10 0 100%\n\x1b[31mok p 0.1s coverage: 15% of statements\x1b[0m"
+    ),
     "go conflicting with TOTAL": (
         "TOTAL 10 0 100%\nok  \texample.com/m\t0.002s\tcoverage: 15.0% of statements"
     ),
@@ -486,6 +521,20 @@ _UNPARSED_COVERAGE_OUTPUTS = {
         "TOTAL 10 0 100%\nok example.com/m (cached) Coverage: 15% of statements"
     ),
     "jest --coverage": "All files |   15.2 |   10.1 |   12.3 |   15.2 |",
+    "jest conflicting with TOTAL": (
+        "TOTAL 10 0 100%\nAll files |   15.2 |   10.1 |   12.3 |   15.2 |"
+    ),
+    "colored jest conflicting with TOTAL": (
+        "TOTAL 10 0 100%\n\x1b[31mAll files\x1b[0m | 15.2 | 10.1 | 12.3 | 15.2 |"
+    ),
+    "malformed ANSI table beside TOTAL": (
+        "TOTAL 10 0 100%\n\x1b[" + "3" * 33 + "mAll files | 15.2 | 10.1 | 12.3 | 15.2 |"
+    ),
+    "deep JSON beside TOTAL": "TOTAL 10 0 100%\n" + '{"x":' * 10000 + "0" + "}" * 10000,
+    "malformed JSON beside TOTAL": 'TOTAL 10 0 100%\n{"Action":"output",',
+    "excess JSON events beside TOTAL": (
+        "TOTAL 10 0 100%\n" + '{"Action":"output","Package":"p","Output":"x"}\n' * 257
+    ),
     "cargo tarpaulin": "15.00% coverage, 15/100 lines covered",
     "coverage report --format=total": "15",
     "no output": "",
