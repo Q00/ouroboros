@@ -175,6 +175,45 @@ def test_request_rejects_malformed_launch_token(token: object, tmp_path: Path) -
         detached_jobs.DetachedJobRequest.from_json(payload)
 
 
+def test_request_preserves_optional_project_dir_and_legacy_requests(tmp_path: Path) -> None:
+    payload = {
+        "job_id": "job_token_test",
+        "tool_name": "ouroboros_start_evaluate",
+        "arguments": {},
+        "database_url": "sqlite+aiosqlite:///test.db",
+        "cwd": str(tmp_path),
+    }
+    assert detached_jobs.DetachedJobRequest.from_json(payload).project_dir is None
+    payload["project_dir"] = str(tmp_path / "project")
+    assert detached_jobs.DetachedJobRequest.from_json(payload).project_dir == payload["project_dir"]
+
+
+def test_qa_request_without_project_dir_is_rejected(tmp_path: Path) -> None:
+    payload = {
+        "job_id": "job_token_test",
+        "tool_name": "ouroboros_start_qa",
+        "arguments": {},
+        "database_url": "sqlite+aiosqlite:///test.db",
+        "cwd": str(tmp_path),
+    }
+    with pytest.raises(ValueError, match="QA request requires project_dir"):
+        detached_jobs.DetachedJobRequest.from_json(payload)
+
+
+@pytest.mark.parametrize("project_dir", ["", "relative/path", 3, [], {}])
+def test_request_rejects_invalid_project_dir(project_dir: object, tmp_path: Path) -> None:
+    payload = {
+        "job_id": "job_token_test",
+        "tool_name": "ouroboros_start_qa",
+        "arguments": {},
+        "database_url": "sqlite+aiosqlite:///test.db",
+        "cwd": str(tmp_path),
+        "project_dir": project_dir,
+    }
+    with pytest.raises(ValueError, match="project_dir must be an absolute path"):
+        detached_jobs.DetachedJobRequest.from_json(payload)
+
+
 @pytest.mark.asyncio
 async def test_each_launch_replaces_caller_token_and_keeps_it_out_of_public_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
