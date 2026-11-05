@@ -353,3 +353,46 @@ def test_interleaved_copies_do_not_remove_each_others_staging(
 
     assert (destination / "new.py").read_text() == "new\n"
     assert sorted(p.name for p in tmp_path.iterdir()) == ["copy", "source"]
+
+
+def test_failed_rollback_keeps_a_recoverable_previous_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "new.py").write_text("new\n")
+    destination = tmp_path / "copy"
+    destination.mkdir()
+    (destination / "old.py").write_text("keep\n")
+    real_replace = os.replace
+    recovery_paths: list[Path] = []
+
+    def fail_publication_and_rollback(src: object, dst: object) -> None:
+        if Path(src) == destination:
+            recovery_paths.append(Path(dst))
+            real_replace(src, dst)
+        else:
+            raise OSError("publication and rollback failed")
+
+    monkeypatch.setattr(tree.os, "replace", fail_publication_and_rollback)
+
+    with pytest.raises(CheckoutCopyError) as raised:
+        copy_checkout(source, destination, replace=True)
+
+    previous = recovery_paths[0]
+    assert str(previous) in str(raised.value)
+    assert (previous / "old.py").read_text() == "keep\n"
+    assert not destination.exists()
+    assert sorted(previous.parent.iterdir()) == [previous]
+
+
+def test_copy_creates_missing_destination_parents(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "code.py").write_text("code\n")
+    destination = tmp_path / "missing" / "parents" / "copy"
+
+    copy_checkout(source, destination)
+
+    assert (destination / "code.py").read_text() == "code\n"
+    assert list(destination.parent.iterdir()) == [destination]

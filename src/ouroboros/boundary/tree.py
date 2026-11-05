@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import tempfile
 
 from ouroboros.core.filesystem_capability import NoFollowDirectoryChain, open_directory_anchor
 
@@ -163,8 +164,7 @@ def _publish_over(scratch: Path, destination: Path) -> None:
     previous checkout in place. Discarding ``scratch`` is the caller's job, so every
     publication failure is cleaned up in one place.
     """
-    previous = destination.with_name(f".{destination.name}.previous")
-    _discard(previous)
+    previous = scratch.parent / ".previous"
     os.replace(destination, previous)
     try:
         os.replace(scratch, destination)
@@ -192,9 +192,9 @@ def copy_checkout(
     A checkout may be written to while it is copied: Git maintenance removes a
     transient lock file between the directory walk and the copy, which
     ``shutil.copytree`` reports as ``shutil.Error`` (#2808). The copy is built in
-    a scratch sibling and moved into place only once it is complete, so a
-    partial tree is never published as a baseline. Such a copy is retried
-    ``attempts`` times and then raises ``CheckoutCopyError`` instead of leaking
+    a scratch tree in a unique sibling directory and moved into place only
+    once it is complete, so a partial tree is never published as a baseline.
+    Such a copy is retried ``attempts`` times and then raises ``CheckoutCopyError`` instead of leaking
     ``shutil.Error``. An ``OSError`` is not retried: it means the copy could not
     start (a missing source, an unwritable parent), and it reaches the caller
     with the type it always had.
@@ -207,30 +207,33 @@ def copy_checkout(
         raise ValueError("attempts must be at least 1")
     if (destination.exists() or destination.is_symlink()) and not replace:
         raise FileExistsError(destination)
-    scratch = destination.with_name(f".{destination.name}.copying")
-    _discard(scratch)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{destination.name}.", dir=destination.parent))
+    scratch = staging / ".copying"
+    previous = staging / ".previous"
     last: shutil.Error | None = None
-    for _ in range(attempts):
-        try:
-            shutil.copytree(
-                source, scratch, symlinks=True, ignore=shutil.ignore_patterns("__pycache__")
-            )
-        except shutil.Error as exc:
-            last = exc
-            _discard(scratch)
-            continue
-        except OSError:
-            _discard(scratch)
-            raise
-        try:
+    try:
+        for _ in range(attempts):
+            try:
+                shutil.copytree(
+                    source, scratch, symlinks=True, ignore=shutil.ignore_patterns("__pycache__")
+                )
+            except shutil.Error as exc:
+                last = exc
+                _discard(scratch)
+                continue
             if destination.exists() or destination.is_symlink():
+                if not replace:
+                    raise FileExistsError(destination)
                 _publish_over(scratch, destination)
             else:
                 os.replace(scratch, destination)
-        except OSError:
-            _discard(scratch)
-            raise
-        return
-    raise CheckoutCopyError(
-        f"could not copy the checkout {source} to {destination} in {attempts} attempts"
-    ) from last
+            return
+        raise CheckoutCopyError(
+            f"could not copy the checkout {source} to {destination} in {attempts} attempts"
+        ) from last
+    finally:
+        _discard(scratch)
+        # A failed rollback leaves the baseline at the path reported by _publish_over.
+        if not (previous.exists() or previous.is_symlink()):
+            _discard(staging)
