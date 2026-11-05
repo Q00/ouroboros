@@ -2160,13 +2160,6 @@ class InterviewHandler:
                     MCPToolError(str(load_result.error), tool_name="ouroboros_interview")
                 )
             state = load_result.value
-            if state.inline_material is not None:
-                return Result.err(
-                    MCPToolError(
-                        "Interviews with optional material require in-process handling",
-                        tool_name="ouroboros_interview",
-                    )
-                )
             from ouroboros.mcp.tools.interview_batch import pending_batch
 
             if pending_batch(state):
@@ -2177,6 +2170,13 @@ class InterviewHandler:
                     )
                 )
             plugin_state = state
+            if state.inline_material is not None:
+                return Result.err(
+                    MCPToolError(
+                        "Interviews with optional material require in-process handling",
+                        tool_name="ouroboros_interview",
+                    )
+                )
             plugin_state_changed = state.merge_turn_context(turn_context)
             # Record answer into persisted state.
             # In plugin mode each dispatch = new child session. The child
@@ -3019,6 +3019,17 @@ class InterviewHandler:
                 else "initial"
             )
 
+            if (
+                state.rounds
+                and state.rounds[-1].user_response is not None
+                and state.inline_material is not None
+            ):
+                from ouroboros.mcp.tools.interview_materials import material_followup_error
+
+                if error := material_followup_error(state, last_question, explicit_question):
+                    return Result.err(MCPToolError(error, tool_name="ouroboros_interview"))
+                last_question = explicit_question
+
             if not state.rounds:
                 pass
             elif state.rounds[-1].user_response is None:
@@ -3037,13 +3048,7 @@ class InterviewHandler:
                     )
                 )
             else:
-                if state.inline_material is not None:
-                    from ouroboros.mcp.tools.interview_materials import material_followup_error
-
-                    if error := material_followup_error(state, last_question, explicit_question):
-                        return Result.err(MCPToolError(error, tool_name="ouroboros_interview"))
-                    pending_question = explicit_question
-                elif not last_question:
+                if not last_question:
                     return Result.err(
                         MCPToolError(
                             "Cannot record answer - the previous round is "
