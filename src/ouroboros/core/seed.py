@@ -37,6 +37,7 @@ from pydantic import (
 from pydantic_core.core_schema import SerializerFunctionWrapHandler
 
 from ouroboros.core.conductor import ConductorDirective
+from ouroboros.core.material_evidence import MaterialEvidenceRef
 
 _OUTPUT_ASSERTION_CONDITION_RE = re.compile(
     r"^(?:exit\s*(?:code|status)?\s*0|returns?\s*0|success|succeeds|passed|passes|ok exit|no errors?)$",
@@ -974,6 +975,11 @@ class Seed(BaseModel, frozen=True):
             "record and never rendered into the worker's execution input"
         ),
     )
+    material_evidence_refs: tuple[MaterialEvidenceRef, ...] = Field(
+        default_factory=tuple,
+        max_length=10,
+        description="Non-authoritative local lookup handles, not facts or requirements",
+    )
     sourced_scope: SourcedScope | None = Field(
         default=None,
         description=(
@@ -1119,6 +1125,13 @@ class Seed(BaseModel, frozen=True):
     @model_validator(mode="after")
     def _validate_plugin_extra_fields(self) -> Seed:
         """Keep plugin-owned extra fields safe for Seed persistence paths."""
+        if self.material_evidence_refs:
+            interview_id = self.metadata.interview_id
+            if not interview_id or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", interview_id) is None:
+                raise ValueError("Material evidence references require a valid local interview ID")
+            keys = {(ref.source_id, ref.evidence_id) for ref in self.material_evidence_refs}
+            if len(keys) != len(self.material_evidence_refs):
+                raise ValueError("Duplicate material evidence references")
         materialized_criteria = tuple(
             criterion.with_materialized_semantic_key()
             if isinstance(criterion, AcceptanceCriterionSpec)
@@ -1159,6 +1172,8 @@ class Seed(BaseModel, frozen=True):
             excluded.add("repo_facts")
         if not self.open_questions:
             excluded.add("open_questions")
+        if not self.material_evidence_refs:
+            excluded.add("material_evidence_refs")
         if self.sourced_scope is None:
             excluded.add("sourced_scope")
         data = self.model_dump(mode="json", by_alias=True, exclude=excluded)
