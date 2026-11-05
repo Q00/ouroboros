@@ -262,7 +262,28 @@ def test_ambiguous_plain_score_is_not_promoted_to_passing_prefix(value: str) -> 
         "Score: 0.9\nScore:",
         "Score: 0.9\nscore is\nVerdict: fail",
         "Score: 0.9\r\nscore is  \r\nVerdict: fail",
+        "Score: 0.9\n  Score: 0.1",
+        "Score: 0.9\n\tscore = 0.1",
+        "Score: 0.9\r\n  Score:\r\nVerdict: fail",
+        "Score: 0.9\n\u00a0Score: 0.1",
+        "Score: 0.9\r\n\u2003score\u00a0=\u20090.1\r\nVerdict: fail",
     ],
 )
 def test_multiple_plain_score_statements_are_not_a_pass(response: str) -> None:
     assert _parse_qa_response(response).is_err
+
+
+def test_indented_single_score_is_accepted() -> None:
+    result = _parse_qa_response("  Score: 0.85\nVerdict: pass")
+    assert result.is_ok
+    assert result.value.score == pytest.approx(0.85)
+
+
+def test_unicode_indented_single_score_is_accepted() -> None:
+    result = _parse_qa_response("\u00a0Score\u2003:\u20090.85\r\nVerdict: pass")
+    assert result.is_ok
+    assert result.value.score == pytest.approx(0.85)
+
+
+def test_score_field_does_not_consume_next_line() -> None:
+    assert _parse_qa_response("Score\n: 0.9\nVerdict: pass").is_err
