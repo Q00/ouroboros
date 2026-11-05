@@ -22,6 +22,7 @@ from ouroboros.bigbang.answer_provenance import (
     classify_answer_provenance,
     extraction_rounds,
 )
+from ouroboros.bigbang.pm_opening import anchor_pm_opening, opening_confirmation_markdown
 from ouroboros.bigbang.pm_seed import PMSeed
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError
@@ -182,6 +183,11 @@ def generate_pm_markdown(seed: PMSeed) -> str:
             lines.append(item)
         lines.append("")
 
+    confirmation_section = opening_confirmation_markdown(
+        seed.opening_confirmations, seed.opening_state_revision
+    )
+    if confirmation_section:
+        lines.extend([confirmation_section, ""])
     return "\n".join(lines)
 
 
@@ -289,18 +295,27 @@ class PMDocumentGenerator:
             Result containing the generated Markdown string or ProviderError.
         """
         if interview_state is not None:
-            from ouroboros.interview_adapters.opening_interpretations import (
-                confirmed_interpretations,
-            )
+            anchored = anchor_pm_opening(seed, interview_state)
+            if anchored.opening_confirmations:
+                if seed.interview_id != interview_state.interview_id:
+                    return Result.err(ProviderError("PM Seed belongs to a different interview"))
+                if (
+                    seed.opening_confirmations != anchored.opening_confirmations
+                    or seed.opening_state_revision != anchored.opening_state_revision
+                ):
+                    return Result.err(ProviderError("PM Seed opening confirmations are stale"))
+            elif seed.opening_confirmations:
+                return Result.err(ProviderError("PM Seed opening confirmations are stale"))
+            seed = anchored
 
-            if confirmed_interpretations(
-                interview_state.proposed_opening, interview_state.opening_decisions
-            ):
+        # A confirmation-bearing PM is a deterministic snapshot. Do not await
+        # an unconstrained model rewrite while the underlying decision may change.
+        if seed.opening_confirmations:
+            if qa_pairs is not None:
                 return Result.err(
-                    ProviderError(
-                        "PM documents do not yet preserve confirmed opening interpretations"
-                    )
+                    ProviderError("Raw Q&A cannot be combined with opening confirmations")
                 )
+            return Result.ok(generate_pm_markdown(seed))
 
         # The PRD is a requirement-producing artifact. Typed state uses the
         # shared projection; the public raw-pair ingress settles the same

@@ -1273,16 +1273,6 @@ Apply this canonical PM routing policy:
         Returns:
             Result containing PMSeed or error.
         """
-        from ouroboros.interview_adapters.opening_interpretations import confirmed_interpretations
-
-        if confirmed_interpretations(state.proposed_opening, state.opening_decisions):
-            return Result.err(
-                ValidationError(
-                    "PM Seed generation does not yet preserve confirmed opening interpretations",
-                    field="opening_decisions",
-                )
-            )
-
         substantive_rounds = [
             round_data
             for round_data in state.rounds
@@ -1313,6 +1303,17 @@ Apply this canonical PM routing policy:
                 )
             )
 
+        from ouroboros.interview_adapters.opening_interpretations import opening_revision
+
+        opening_before = (
+            opening_revision(state.proposed_opening, state.opening_decisions)
+            if state.proposed_opening is not None
+            else None
+        )
+        persisted_before = state.persistence_revision
+        loaded_before = state._loaded_revision
+        status_before = state.status
+        input_before = state.requirement_input_fingerprint()
         context = self._build_interview_context(state, withhold_observations=True)
 
         messages = [
@@ -1337,11 +1338,42 @@ Apply this canonical PM routing policy:
         if result.is_err:
             return Result.err(result.error)
 
+        opening_after = (
+            opening_revision(state.proposed_opening, state.opening_decisions)
+            if state.proposed_opening is not None
+            else None
+        )
+        if (
+            opening_after != opening_before
+            or state.requirement_input_fingerprint() != input_before
+            or state.status != status_before
+            or state.persistence_revision != persisted_before
+            or state._loaded_revision != loaded_before
+        ):
+            return Result.err(
+                ValidationError(
+                    "Interview changed during PM Seed generation; reload and retry",
+                    field="interview_id",
+                )
+            )
+        if loaded_before is not None:
+            current = await self.inner.load_state(state.interview_id)
+            if current.is_err or current.value.persistence_revision != persisted_before:
+                return Result.err(
+                    ValidationError(
+                        "Interview changed during PM Seed generation; reload and retry",
+                        field="interview_id",
+                    )
+                )
+
         try:
             seed = self._parse_pm_seed(
                 result.value.content,
                 interview_id=state.interview_id,
             )
+            from ouroboros.bigbang.pm_opening import anchor_pm_opening
+
+            seed = anchor_pm_opening(seed, state)
             log.info(
                 "pm.seed_generated",
                 pm_id=seed.pm_id,
