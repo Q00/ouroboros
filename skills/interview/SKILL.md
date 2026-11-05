@@ -107,6 +107,17 @@ ambiguous response: ask the person to clarify. On resume use the persisted prese
 returned by the server; do not invent or re-order choices. If the server does not support
 this opt-in or reports a normal text question, use the existing free-text path.
 
+**Optional competing interpretations:** If the person explicitly asks to compare
+interpretations, the discovered tool schema supports `propose_opening_interpretations`,
+and the interview runs in-process, opt in on start. Present both returned proposals,
+their model-cited unverified evidence and uncertainty, and the neither path before the open question. They
+are model hypotheses, not user decisions: neither a recommendation, silence, nor
+a bulk approval confirms an item. The server does not verify that the two ideas genuinely
+compete or that the cited evidence supports them. This path has no item-confirmation operation; ask
+the person to state their actual requirements in their own words and pass those words
+unchanged as the answer. Never turn an interpretation label into a user decision.
+On resume show the persisted proposals, without inventing or changing them.
+
 **Optional first-question batch:** Only if the person explicitly asks for several
 questions at once, and the tool schema offers `structured_first_batch`, start in
 in-process mode with that flag. The response is a *proposal*, not established

@@ -1957,6 +1957,13 @@ class InterviewHandler:
         # settled where the round is identified.
         last_question = arguments.get("last_question")
         structured_first = arguments.get("structured_first_question", False)
+        from ouroboros.mcp.tools.interview_opening import validate_opening_args
+
+        opening_error = validate_opening_args(
+            arguments, should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode)
+        )
+        if opening_error:
+            return Result.err(MCPToolError(opening_error, tool_name="ouroboros_interview"))
         page_size = arguments.get("batch_page_size")
         if page_size is not None and (type(page_size) is not int or not 1 <= page_size <= 5):
             return Result.err(
@@ -2404,7 +2411,11 @@ class InterviewHandler:
                 presentation = None
                 question_result: Any
                 try:
-                    if arguments.get("structured_first_question"):
+                    if arguments.get("propose_opening_interpretations"):
+                        from ouroboros.mcp.tools.interview_opening import opening_question
+
+                        question_result = await opening_question(engine, state, calibration)
+                    elif arguments.get("structured_first_question"):
                         structured_result = await engine.ask_structured_first_question(
                             state,
                             language_calibration=calibration,
@@ -2550,6 +2561,8 @@ class InterviewHandler:
                 display_question = _format_question_with_ambiguity(
                     presentation.render() if presentation else question, live_score
                 )
+                if state.proposed_opening is not None:
+                    display_question = state.proposed_opening.render()
 
                 # Record the question as an unanswered round so resume can find it
                 from ouroboros.bigbang.interview import InterviewRound
@@ -2613,6 +2626,10 @@ class InterviewHandler:
                 }
                 if presentation is not None:
                     start_meta["first_question_presentation"] = presentation.model_dump(mode="json")
+                if state.proposed_opening is not None:
+                    start_meta["opening_interpretations"] = state.proposed_opening.model_dump(
+                        mode="json"
+                    )
                 if is_length_guard:
                     # Q00/ouroboros#831 (Direction A): surface the length-guard
                     # meta-directive via structured meta keys so clients can
@@ -3297,6 +3314,8 @@ class InterviewHandler:
                     presentation.render() if presentation else pending_question,
                     _load_state_ambiguity_score(state),
                 )
+                if state.proposed_opening is not None and len(state.rounds) == 1:
+                    display_question = state.proposed_opening.render(pending_question)
                 resume_is_length_guard = _is_initial_context_length_guard_question(pending_question)
                 resume_meta: dict[str, Any] = {
                     "session_id": session_id,
@@ -3321,6 +3340,10 @@ class InterviewHandler:
                 }
                 if presentation is not None:
                     resume_meta["first_question_presentation"] = presentation.model_dump(
+                        mode="json"
+                    )
+                if state.proposed_opening is not None and len(state.rounds) == 1:
+                    resume_meta["opening_interpretations"] = state.proposed_opening.model_dump(
                         mode="json"
                     )
                 if resume_is_length_guard:

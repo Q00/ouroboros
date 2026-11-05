@@ -6,6 +6,7 @@ from typing import Any
 
 from ouroboros.core.types import Result
 from ouroboros.interview_adapters.first_question import FirstQuestionPresentation
+from ouroboros.interview_adapters.opening_interpretations import ProposedOpening
 from ouroboros.interview_calibration import infer_interview_calibration
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.types import (
@@ -55,6 +56,7 @@ async def handle_interview_calibration_turn(
     pending_question: str | None = None
     rephrased_question: str | None = None
     pending_presentation: Any | None = None
+    pending_opening: ProposedOpening | None = None
     if isinstance(session_id, str) and session_id.strip():
         engine, _ = handler._create_interview_engine()
         try:
@@ -79,8 +81,15 @@ async def handle_interview_calibration_turn(
                 pending_presentation = (
                     candidate if isinstance(candidate, FirstQuestionPresentation) else None
                 )
+                candidate_opening = getattr(state, "proposed_opening", None)
+                if len(state.rounds) == 1 and isinstance(candidate_opening, ProposedOpening):
+                    pending_opening = candidate_opening
                 rephrase_method = getattr(engine, "rephrase_pending_question", None)
-                if pending_presentation is None and callable(rephrase_method):
+                if (
+                    pending_presentation is None
+                    and pending_opening is None
+                    and callable(rephrase_method)
+                ):
                     try:
                         rephrase_result = await rephrase_method(pending_question, calibration)
                         if rephrase_result.is_ok and isinstance(rephrase_result.value, str):
@@ -99,7 +108,9 @@ async def handle_interview_calibration_turn(
                         )
         finally:
             active_calls = getattr(handler, "_active_owned_calls", 0)
-            if handler._owns_event_store and not (isinstance(active_calls, int) and active_calls > 0):
+            if handler._owns_event_store and not (
+                isinstance(active_calls, int) and active_calls > 0
+            ):
                 await handler.close()
 
     unknown_terms = ", ".join(calibration.unknown_terms) or "none explicitly extracted"
@@ -124,7 +135,11 @@ async def handle_interview_calibration_turn(
                 [
                     "",
                     "Rephrasing was not available. The pending question is unchanged:",
-                    pending_presentation.render() if pending_presentation else pending_question,
+                    pending_opening.render(pending_question)
+                    if pending_opening
+                    else pending_presentation.render()
+                    if pending_presentation
+                    else pending_question,
                 ]
             )
     else:
@@ -142,6 +157,8 @@ async def handle_interview_calibration_turn(
         meta["pending_question"] = pending_question
     if pending_presentation is not None:
         meta["first_question_presentation"] = pending_presentation.model_dump(mode="json")
+    if pending_opening is not None:
+        meta["opening_interpretations"] = pending_opening.model_dump(mode="json")
     if rephrased_question is not None:
         meta["rephrased_question"] = rephrased_question
     return Result.ok(
