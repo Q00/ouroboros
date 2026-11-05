@@ -48,6 +48,38 @@ def test_redirect_limit_http_error_is_not_verified() -> None:
     close.assert_called_once()
 
 
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_redirect_never_reads_response_body(status: int) -> None:
+    handler = _BoundedRedirectHandler()
+    handler.parent = MagicMock()
+    request = Request("https://example.test/0", method="HEAD")
+    request.timeout = 1.0
+    headers = Message()
+    headers["Location"] = "https://example.test/1"
+    response = MagicMock()
+    response.read.side_effect = AssertionError("redirect body must not be read")
+
+    getattr(handler, f"http_error_{status}")(request, response, status, "redirect", headers)
+
+    response.read.assert_not_called()
+    response.close.assert_called_once()
+    handler.parent.open.assert_called_once()
+
+
+def test_redirect_limit_closes_unread_response() -> None:
+    handler = _BoundedRedirectHandler()
+    request = Request("https://example.test/3", method="HEAD")
+    request._citation_redirects = 3
+    headers = Message()
+    headers["Location"] = "https://example.test/4"
+    response = MagicMock()
+    with pytest.raises(HTTPError) as error:
+        handler.http_error_302(request, response, 302, "redirect", headers)
+    error.value.close()
+    response.read.assert_not_called()
+    response.close.assert_called_once()
+
+
 @pytest.mark.parametrize("status", [405, 501])
 def test_rejected_head_is_closed_before_ranged_get(status: int) -> None:
     error = HTTPError("https://example.test/0", status, "HEAD rejected", {}, None)
