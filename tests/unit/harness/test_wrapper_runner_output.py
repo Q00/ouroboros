@@ -361,7 +361,18 @@ def test_wrapper_rejects_collection_from_config(
     assert receipt["test_result"] == "failed"
 
 
-@pytest.mark.parametrize("mode", ["--collect-only", "--setup-plan", "--setup-only", "--cache-show"])
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "--collect-only",
+        "--collectonly",
+        "--setup-plan",
+        "--setupplan",
+        "--setup-only",
+        "--setuponly",
+        "--cache-show",
+    ],
+)
 def test_frozen_wrapper_rejects_nonexecuting_pytest_modes(mode: str, tmp_path: Path) -> None:
     test_path, marker = _make_pytest_contract(tmp_path, failing=False)
     argv = _pytest_wrapper_argv(
@@ -422,6 +433,9 @@ def test_wrapper_withholds_authority_for_pytest_argument_file(tmp_path: Path) ->
     "options",
     [
         ["-o", "addopts=--collect-only"],
+        ["-o", "addopts=--collectonly"],
+        ["-o", "addopts=--setupplan"],
+        ["-o", "addopts=--setuponly"],
         ["-oaddopts=--collect-only"],
         ["-o=addopts=--collect-only"],
         ["--override-ini", "addopts=--collect-only"],

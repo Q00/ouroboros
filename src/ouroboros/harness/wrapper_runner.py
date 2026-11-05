@@ -93,6 +93,7 @@ def _nonexecuting_pytest_mode(command: list[str], *, check_config: bool = True) 
     options = _normalize_pytest_options(options)
     nonexecuting = {
         "--collect-only",
+        "--collectonly",
         "--co",
         "--help",
         "-h",
@@ -103,7 +104,9 @@ def _nonexecuting_pytest_mode(command: list[str], *, check_config: bool = True) 
         "--fixtures-per-test",
         "--markers",
         "--setup-plan",
+        "--setupplan",
         "--setup-only",
+        "--setuponly",
         "--cache-show",
     }
     arguments = iter(options)
