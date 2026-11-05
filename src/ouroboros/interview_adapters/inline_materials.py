@@ -12,10 +12,11 @@ from ouroboros.interview_adapters.first_question import _safe_single_line
 
 
 class MaterialDraft(BaseModel):
-    """Bounded model output; the caller separately validates source quotes."""
+    """Bounded literal excerpts; legacy states may also contain model assumptions."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    origin: Literal["legacy_model", "local_excerpts"] = "legacy_model"
     source_quotes: tuple[str, ...] = Field(max_length=5)
     inferred_assumptions: tuple[str, ...] = Field(max_length=5)
 
@@ -26,6 +27,12 @@ class MaterialDraft(BaseModel):
             if not value.strip() or len(value) > 400 or not _safe_single_line(value):
                 raise ValueError("Invalid material draft item")
         return values
+
+    @model_validator(mode="after")
+    def local_has_no_assumptions(self) -> "MaterialDraft":
+        if self.origin == "local_excerpts" and self.inferred_assumptions:
+            raise ValueError("Local excerpts cannot contain model assumptions")
+        return self
 
 
 class InlineMaterial(BaseModel):

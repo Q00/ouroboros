@@ -22,17 +22,10 @@ from tests.unit.mcp.tools.test_interview_batch_prototype import _proposal
 @pytest.mark.asyncio
 async def test_sdk_material_is_optional_separate_and_resumable(tmp_path):
     material = "A previous note says synthetic apples are green."
-    draft = json.dumps(
-        {
-            "source_quotes": ["synthetic apples are green"],
-            "inferred_assumptions": ["Colour may matter"],
-        }
-    )
     adapter = SimpleNamespace(
         complete=AsyncMock(
             side_effect=[
                 Result.ok(SimpleNamespace(content=_proposal())),
-                Result.ok(SimpleNamespace(content=draft)),
             ]
         )
     )
@@ -95,7 +88,8 @@ async def test_sdk_material_is_optional_separate_and_resumable(tmp_path):
             },
         )
         assert not replay.is_error
-        assert adapter.complete.await_count == 2
+        assert adapter.complete.await_count == 1
+        assert material not in str(adapter.complete.await_args_list)
         conflict = await client.call_tool(
             "ouroboros_interview",
             {
@@ -175,17 +169,10 @@ async def test_sdk_material_is_optional_separate_and_resumable(tmp_path):
 
 @pytest.mark.asyncio
 async def test_cancelled_draft_keeps_material_and_answer(tmp_path):
-    drafting = asyncio.Event()
     entered_draft = asyncio.Event()
-
-    async def complete(*args, **kwargs):
-        if not drafting.is_set():
-            drafting.set()
-            return Result.ok(SimpleNamespace(content=_proposal()))
-        entered_draft.set()
-        await asyncio.Future()
-
-    adapter = SimpleNamespace(complete=AsyncMock(side_effect=complete))
+    adapter = SimpleNamespace(
+        complete=AsyncMock(return_value=Result.ok(SimpleNamespace(content=_proposal())))
+    )
     engine = InterviewEngine(llm_adapter=adapter, state_dir=tmp_path, model="synthetic")
     handler = InterviewHandler(interview_engine=engine, llm_adapter=adapter, data_dir=tmp_path)
     handler._create_interview_engine = lambda: (engine, adapter)
@@ -198,25 +185,37 @@ async def test_cancelled_draft_keeps_material_and_answer(tmp_path):
     )
     assert started.is_ok
     meta = started.value.meta
-    task = asyncio.create_task(
-        answer_batch(
-            handler,
-            {
-                "session_id": meta["session_id"],
-                "batch_confirm_digest": meta["batch_digest"],
-                "batch_independence_confirmed": True,
-                "batch_answers": [
-                    {"question_id": meta["questions"][0]["question_id"], "answer": "User decision"}
-                ],
-                "inline_material_text": "Synthetic material",
-                "inline_material_consent": True,
-            },
+    original_save = engine.save_state
+
+    async def interrupted_save(state):
+        if state.inline_material is not None and state.inline_material.status == "ready":
+            entered_draft.set()
+            await asyncio.Future()
+        return await original_save(state)
+
+    with patch.object(engine, "save_state", side_effect=interrupted_save):
+        task = asyncio.create_task(
+            answer_batch(
+                handler,
+                {
+                    "session_id": meta["session_id"],
+                    "batch_confirm_digest": meta["batch_digest"],
+                    "batch_independence_confirmed": True,
+                    "batch_answers": [
+                        {
+                            "question_id": meta["questions"][0]["question_id"],
+                            "answer": "User decision",
+                        }
+                    ],
+                    "inline_material_text": "Synthetic material",
+                    "inline_material_consent": True,
+                },
+            )
         )
-    )
-    await asyncio.wait_for(entered_draft.wait(), timeout=5)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+        await asyncio.wait_for(entered_draft.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
     loaded = await engine.load_state(meta["session_id"])
     assert loaded.is_ok
     assert loaded.value.inline_material.text == "Synthetic material"
@@ -224,17 +223,6 @@ async def test_cancelled_draft_keeps_material_and_answer(tmp_path):
     assert any(item.user_response == "User decision" for item in loaded.value.rounds)
     assert len(events) >= 2
     event_count = len(events)
-    adapter.complete.side_effect = None
-    adapter.complete.return_value = Result.ok(
-        SimpleNamespace(
-            content=json.dumps(
-                {
-                    "source_quotes": ["Synthetic material"],
-                    "inferred_assumptions": [],
-                }
-            )
-        )
-    )
     retried = await answer_batch(
         handler,
         {
@@ -247,26 +235,13 @@ async def test_cancelled_draft_keeps_material_and_answer(tmp_path):
     assert retried.is_ok
     assert (await engine.load_state(meta["session_id"])).value.inline_material.status == "ready"
     assert len(events) == event_count
+    assert adapter.complete.await_count == 1
 
 
 @pytest.mark.asyncio
 async def test_sdk_retries_unavailable_draft_only_when_requested(tmp_path, capfd, caplog):
     adapter = SimpleNamespace(
-        complete=AsyncMock(
-            side_effect=[
-                Result.ok(SimpleNamespace(content=_proposal())),
-                Result.ok(
-                    SimpleNamespace(
-                        content='{"source_quotes":["invented"],"inferred_assumptions":[]}'
-                    )
-                ),
-                Result.ok(
-                    SimpleNamespace(
-                        content='{"source_quotes":["real source"],"inferred_assumptions":[]}'
-                    )
-                ),
-            ]
-        )
+        complete=AsyncMock(return_value=Result.ok(SimpleNamespace(content=_proposal())))
     )
     engine = InterviewEngine(llm_adapter=adapter, state_dir=tmp_path, model="synthetic")
     handler = InterviewHandler(interview_engine=engine, llm_adapter=adapter, data_dir=tmp_path)
@@ -304,7 +279,7 @@ async def test_sdk_retries_unavailable_draft_only_when_requested(tmp_path, capfd
                 "session_id": sid,
                 "batch_confirm_digest": digest,
                 "batch_answers": [],
-                "inline_material_text": "A real source",
+                "inline_material_text": "\u2066",
                 "inline_material_consent": True,
             },
         )
@@ -315,12 +290,12 @@ async def test_sdk_retries_unavailable_draft_only_when_requested(tmp_path, capfd
                 "session_id": sid,
                 "batch_confirm_digest": digest,
                 "batch_answers": [],
-                "inline_material_text": "A real source",
+                "inline_material_text": "\u2066",
                 "inline_material_consent": True,
             },
         )
         assert replay.meta["inline_material_status"] == "unavailable"
-        assert adapter.complete.await_count == 2
+        assert adapter.complete.await_count == 1
         rejected = await client.call_tool(
             "ouroboros_interview",
             {
@@ -346,8 +321,8 @@ async def test_sdk_retries_unavailable_draft_only_when_requested(tmp_path, capfd
                 "inline_material_retry": True,
             },
         )
-        assert retried.meta["inline_material_status"] == "ready"
-        assert adapter.complete.await_count == 3
+        assert retried.meta["inline_material_status"] == "unavailable"
+        assert adapter.complete.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -355,17 +330,9 @@ async def test_owned_event_store_survives_draft_cancellation(tmp_path):
     from ouroboros.persistence.event_store import EventStore
 
     entered = asyncio.Event()
-    calls = 0
-
-    async def complete(*args, **kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return Result.ok(SimpleNamespace(content=_proposal()))
-        entered.set()
-        await asyncio.Future()
-
-    adapter = SimpleNamespace(complete=AsyncMock(side_effect=complete))
+    adapter = SimpleNamespace(
+        complete=AsyncMock(return_value=Result.ok(SimpleNamespace(content=_proposal())))
+    )
     engine = InterviewEngine(llm_adapter=adapter, state_dir=tmp_path, model="synthetic")
     handler = InterviewHandler(interview_engine=engine, llm_adapter=adapter, data_dir=tmp_path)
     url = f"sqlite+aiosqlite:///{tmp_path / 'events.db'}"
@@ -376,24 +343,36 @@ async def test_owned_event_store_survives_draft_cancellation(tmp_path):
     )
     assert started.is_ok
     meta = started.value.meta
-    task = asyncio.create_task(
-        handler.handle(
-            {
-                "session_id": meta["session_id"],
-                "batch_confirm_digest": meta["batch_digest"],
-                "batch_independence_confirmed": True,
-                "batch_answers": [
-                    {"question_id": meta["questions"][0]["question_id"], "answer": "User decision"}
-                ],
-                "inline_material_text": "Synthetic material",
-                "inline_material_consent": True,
-            }
+    original_save = engine.save_state
+
+    async def interrupted_save(state):
+        if state.inline_material is not None and state.inline_material.status == "ready":
+            entered.set()
+            await asyncio.Future()
+        return await original_save(state)
+
+    with patch.object(engine, "save_state", side_effect=interrupted_save):
+        task = asyncio.create_task(
+            handler.handle(
+                {
+                    "session_id": meta["session_id"],
+                    "batch_confirm_digest": meta["batch_digest"],
+                    "batch_independence_confirmed": True,
+                    "batch_answers": [
+                        {
+                            "question_id": meta["questions"][0]["question_id"],
+                            "answer": "User decision",
+                        }
+                    ],
+                    "inline_material_text": "Synthetic material",
+                    "inline_material_consent": True,
+                }
+            )
         )
-    )
-    await asyncio.wait_for(entered.wait(), timeout=5)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
     reopened = EventStore(url)
     await reopened.initialize()
     try:
@@ -443,6 +422,53 @@ async def test_corrupt_material_is_absent_from_sdk_error_and_logs(tmp_path, capf
     captured = capfd.readouterr()
     assert "SYNTHETIC_SECRET_123" not in captured.out + captured.err
     assert "SYNTHETIC_SECRET_123" not in caplog.text
+
+
+def test_local_excerpts_are_literal_bounded_and_relevance_ranked():
+    from ouroboros.mcp.tools.interview_materials import _local_excerpts
+
+    text = (
+        "Unrelated intro\nBudget is fixed\nPriority budget is reviewed\nBudget is fixed\n"
+        + "x" * 500
+        + "\n\u2066hidden"
+    )
+    draft = _local_excerpts(text, "Budget priority")
+    assert draft is not None
+    assert draft.source_quotes[:2] == ("Priority budget is reviewed", "Budget is fixed")
+    assert len(draft.source_quotes) == 4
+    assert all(len(item) <= 400 and item in text for item in draft.source_quotes)
+    assert draft.inferred_assumptions == ()
+    assert draft.origin == "local_excerpts"
+    assert _local_excerpts("\u2066", "Anything") is None
+
+
+def test_legacy_model_draft_is_not_mislabeled_as_local():
+    from ouroboros.interview_adapters.inline_materials import InlineMaterial, MaterialDraft
+    from ouroboros.mcp.tools.interview_materials import material_content
+
+    draft = MaterialDraft.model_validate(
+        {
+            "source_quotes": ["Earlier source"],
+            "inferred_assumptions": ["An earlier unconfirmed guess"],
+        }
+    )
+    state = InterviewState(
+        interview_id="interview_0123456789abcdef",
+        initial_context="A tool",
+        inline_material=InlineMaterial(text="Earlier source", status="ready", draft=draft),
+    )
+    text = material_content(state)[0].text
+    assert draft.origin == "legacy_model"
+    assert "earlier model-assisted draft" in text
+    assert "Earlier model assumptions (unconfirmed, not requirements)" in text
+    assert "An earlier unconfirmed guess" in text
+    assert "ranked by word overlap" not in text
+    with pytest.raises(ValueError):
+        MaterialDraft(
+            origin="local_excerpts",
+            source_quotes=("Earlier source",),
+            inferred_assumptions=("guess",),
+        )
 
 
 @pytest.mark.asyncio
@@ -505,7 +531,7 @@ async def test_retry_respects_other_process_lock_and_recovers(tmp_path):
         assert await process.wait() != 0
     retried = await retry_material(handler, args)
     assert retried.is_ok
-    assert adapter.complete.await_count == 1
+    assert adapter.complete.await_count == 0
     assert (await engine.load_state(state.interview_id)).value.inline_material.status == "ready"
 
 
@@ -516,11 +542,7 @@ async def test_concurrent_retry_fails_fast_and_cancel_releases_lock(tmp_path):
 
     entered = asyncio.Event()
 
-    async def blocked(*args, **kwargs):
-        entered.set()
-        await asyncio.Future()
-
-    adapter = SimpleNamespace(complete=AsyncMock(side_effect=blocked))
+    adapter = SimpleNamespace(complete=AsyncMock())
     engine = InterviewEngine(llm_adapter=adapter, state_dir=tmp_path, model="synthetic")
     handler = InterviewHandler(interview_engine=engine, llm_adapter=adapter, data_dir=tmp_path)
     handler._create_interview_engine = lambda: (engine, adapter)
@@ -530,21 +552,24 @@ async def test_concurrent_retry_fails_fast_and_cancel_releases_lock(tmp_path):
     state.inline_material = InlineMaterial(text="Synthetic source")
     assert (await engine.save_state(state)).is_ok
     args = {"session_id": state.interview_id, "inline_material_retry": True}
-    first = asyncio.create_task(retry_material(handler, args))
-    await asyncio.wait_for(entered.wait(), timeout=5)
-    second = await retry_material(handler, args)
-    assert second.is_err and adapter.complete.await_count == 1
-    first.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await first
-    adapter.complete.side_effect = None
-    adapter.complete.return_value = Result.ok(
-        SimpleNamespace(
-            content='{"source_quotes":["Synthetic source"],"inferred_assumptions":[]}',
-        )
-    )
+    original_save = engine.save_state
+
+    async def interrupted_save(state):
+        if state.inline_material is not None and state.inline_material.status == "ready":
+            entered.set()
+            await asyncio.Future()
+        return await original_save(state)
+
+    with patch.object(engine, "save_state", side_effect=interrupted_save):
+        first = asyncio.create_task(retry_material(handler, args))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        second = await retry_material(handler, args)
+        assert second.is_err and adapter.complete.await_count == 0
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
     retried = await retry_material(handler, args)
-    assert retried.is_ok and adapter.complete.await_count == 2
+    assert retried.is_ok and adapter.complete.await_count == 0
 
 
 @pytest.mark.asyncio
@@ -716,3 +741,64 @@ async def test_material_safe_default_does_not_store_source_echo(tmp_path, pendin
     loaded = (await engine.load_state(state.interview_id)).value
     context = object.__new__(SeedGenerator)._build_interview_context(loaded)
     assert "Synthetic private source" not in context
+
+
+@pytest.mark.asyncio
+async def test_sdk_material_is_never_sent_to_question_provider_on_resume(tmp_path):
+    marker = "SYNTHETIC_MATERIAL_PRIVACY_498"
+    adapter = SimpleNamespace(
+        complete=AsyncMock(
+            side_effect=[
+                Result.ok(SimpleNamespace(content=_proposal())),
+                Result.ok(SimpleNamespace(content="What outcome matters?")),
+            ]
+        )
+    )
+    engine = InterviewEngine(llm_adapter=adapter, state_dir=tmp_path, model="synthetic")
+    handler = InterviewHandler(interview_engine=engine, llm_adapter=adapter, data_dir=tmp_path)
+    handler._create_interview_engine = lambda: (engine, adapter)
+    server = MCPServerAdapter(name="material-provider-boundary")
+    server.register_tool(handler)
+    with patch.object(MCPServer, "run_stdio_async", new=AsyncMock()):
+        await server.serve(transport="stdio")
+    async with Client(server._mcp_server, mode="auto") as client:
+        started = await client.call_tool(
+            "ouroboros_interview",
+            {
+                "initial_context": "Build a tool",
+                "structured_first_batch": True,
+            },
+        )
+        sid, digest = started.meta["session_id"], started.meta["batch_digest"]
+        submitted = await client.call_tool(
+            "ouroboros_interview",
+            {
+                "session_id": sid,
+                "batch_confirm_digest": digest,
+                "batch_independence_confirmed": True,
+                "batch_answers": [
+                    {
+                        "question_id": started.meta["questions"][0]["question_id"],
+                        "answer": "A user decision",
+                    }
+                ],
+                "inline_material_text": marker,
+                "inline_material_consent": True,
+            },
+        )
+        assert not submitted.is_error and submitted.meta["inline_material_status"] == "ready"
+        assert marker in str(submitted.content)
+        assert adapter.complete.await_count == 1
+        discarded = await client.call_tool(
+            "ouroboros_interview",
+            {
+                "session_id": sid,
+                "batch_confirm_digest": digest,
+                "batch_reject": True,
+            },
+        )
+        assert not discarded.is_error
+        resumed = await client.call_tool("ouroboros_interview", {"session_id": sid})
+        assert not resumed.is_error
+        assert adapter.complete.await_count == 2
+        assert marker not in str(adapter.complete.await_args_list)
