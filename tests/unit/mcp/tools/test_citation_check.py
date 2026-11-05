@@ -504,3 +504,42 @@ def test_urllib_representable_encoded_zones_are_fetchable() -> None:
         assert audit["urls"][url] == VERIFIED
         urlopen.assert_called_once()
         assert urlopen.call_args.args[0].full_url == f"https://[fe80::1%25{normalized}]/doc"
+
+
+def test_bare_evidence_with_trailing_prose_is_unchecked_without_fetch() -> None:
+    text = '{"external_sources":["http://127.0.0.1/private"]}\nDone.'
+    calls: list[str] = []
+    result = audit_citations([text], fetch=lambda url, _: calls.append(url) or True)
+    assert result is not None
+    assert result["urls"]["http://127.0.0.1/private"] == UNCHECKED
+    assert result["unverified_present"] is True
+    assert calls == []
+
+
+def test_trailing_prose_bare_duplicate_does_not_reorder_fenced_budget() -> None:
+    urls = [f"https://example.test/{i}" for i in range(8)]
+    extra = "http://127.0.0.1/private"
+    bare = json.dumps({"external_sources": [extra]}) + "\nDone."
+    fenced = "```json\n" + json.dumps({"external_sources": [*urls, extra]}) + "\n```"
+    calls: list[str] = []
+    result = audit_citations([bare, fenced], fetch=lambda url, _: calls.append(url) or True)
+    assert result is not None
+    assert calls == urls
+    assert result["urls"][extra] == UNCHECKED
+
+
+def test_bare_prefix_with_brace_inside_string_and_trailing_prose() -> None:
+    url = "https://example.test/path"
+    text = json.dumps({"claims": [{"text": "brace } in text", "source": url}]}) + "\nDone."
+    calls: list[str] = []
+    result = audit_citations([text], fetch=lambda url, _: calls.append(url) or True)
+    assert result is not None
+    assert result["urls"][url] == UNCHECKED
+    assert calls == []
+
+
+def test_invalid_bare_prefix_does_not_scan_later_prose_json() -> None:
+    text = "{broken}\n" + json.dumps({"external_sources": ["http://127.0.0.1/private"]})
+    calls: list[str] = []
+    assert audit_citations([text], fetch=lambda url, _: calls.append(url) or True) is None
+    assert calls == []
