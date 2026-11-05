@@ -70,14 +70,20 @@ def _normalize_pytest_options(options: list[str]) -> list[str]:
 
 def _nonexecuting_pytest_mode(command: list[str], *, check_config: bool = True) -> bool:
     """Reject pytest's reporting/collection modes, including addopts overrides."""
-    executable = Path(command[0]).name
+
+    def executable_name(value: str) -> str:
+        return Path(value).name.lower().removesuffix(".exe")
+
+    executable = executable_name(command[0])
     if executable in {"pytest", "py.test"}:
         options = command[1:]
     elif executable in {"uv", "uvx"} and any(
-        Path(part).name in {"pytest", "py.test"} for part in command[1:]
+        executable_name(part) in {"pytest", "py.test"} for part in command[1:]
     ):
         index = next(
-            index for index, part in enumerate(command) if Path(part).name in {"pytest", "py.test"}
+            index
+            for index, part in enumerate(command)
+            if executable_name(part) in {"pytest", "py.test"}
         )
         options = command[index + 1 :]
     elif "-m" in command and command[command.index("-m") + 1 :][:1] == ["pytest"]:

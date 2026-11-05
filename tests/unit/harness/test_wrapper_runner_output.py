@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -395,6 +396,8 @@ def test_frozen_wrapper_rejects_collection_from_nodeid_config(tmp_path: Path) ->
     [
         ["uv", "run", "pytest", "-o", "addopts=--collect-only", "test_inner.py"],
         ["uvx", "pytest", "--override-ini=addopts=--co", "test_inner.py"],
+        ["uv.exe", "run", "pytest.exe", "--collect-only", "test_inner.py"],
+        ["UVX.EXE", "py.test.EXE", "--setup-plan", "test_inner.py"],
     ],
 )
 def test_wrapper_recognizes_pytest_launcher_nonexecuting_mode(command: list[str]) -> None:
@@ -488,3 +491,18 @@ def test_frozen_wrapper_preserves_executing_option_values(
     assert result.returncode == receipt["inner_exit_status"] == receipt["outer_exit_status"] == 0
     assert receipt["test_result"] == "passed"
     assert marker.read_text() == "ran"
+
+
+def test_frozen_wrapper_rejects_pytest_exe_collection(tmp_path: Path) -> None:
+    launcher = Path(sys.executable).parent / ("pytest.exe" if os.name == "nt" else "pytest")
+    alias = tmp_path / "pytest.exe"
+    shutil.copy2(launcher, alias)
+    test_path, marker = _make_pytest_contract(tmp_path, failing=False)
+    argv = _pytest_wrapper_argv(("receipt.json", "stdout.txt", "stderr.txt"), test_path)
+    argv[-5:] = [str(alias), "--collect-only", "-q", str(test_path)]
+    result = subprocess.run(argv, cwd=tmp_path, capture_output=True, check=False)
+    receipt = json.loads((tmp_path / "receipt.json").read_text())
+    assert receipt["inner_exit_status"] == 0
+    assert not marker.exists()
+    assert result.returncode != 0
+    assert receipt["test_result"] == "failed"
