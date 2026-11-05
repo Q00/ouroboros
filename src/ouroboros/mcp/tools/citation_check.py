@@ -8,8 +8,9 @@ fenced evidence blocks and reports, per URL, whether it was reachable.
 Enforcement is withhold-only, mirroring the verify-gate invariant: an
 unreachable or malformed citation is *marked*, never a failure of the tool
 call, and a submission with no evidence block touches no network at all.
-Checks are bounded twice — per-request timeout and a total wall-clock budget —
-so a slow host cannot stall fan-out synthesis.
+Socket operations use a timeout and the audit stops starting requests after its
+budget. These are not a strict wall-clock bound: DNS and slow responses may
+still take longer than the budget.
 
 No similarity scoring and no content judgment: this gate answers exactly one
 deterministic question per URL — "did this fetch succeed right now?". Whether
@@ -205,10 +206,22 @@ class _NoRedirectBody:
 class _BoundedRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Count all redirects, including repeated URLs, per fetch request."""
 
+    def __init__(self, deadline: float = float("inf")):
+        super().__init__()
+        self.deadline = deadline
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         redirects = getattr(req, "_citation_redirects", 0)
         if redirects >= _MAX_REDIRECTS:
             raise urllib.error.HTTPError(req.full_url, code, "redirect limit exceeded", headers, fp)
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise urllib.error.HTTPError(
+                req.full_url, code, "citation timeout expired", headers, fp
+            )
+        # urllib follows redirects using the previous request's timeout.
+        if self.deadline != float("inf"):
+            req.timeout = min(req.timeout, remaining)
         redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
         if redirected is not None:
             redirected._citation_redirects = redirects + 1
@@ -260,16 +273,20 @@ def _default_fetch(url: str, timeout: float) -> bool:
                     + zone
                     + url[offset + closing :]
                 )
-    opener = urllib.request.build_opener(_BoundedRedirectHandler())
+    deadline = time.monotonic() + timeout
+    opener = urllib.request.build_opener(_BoundedRedirectHandler(deadline))
     for method, headers in (("HEAD", {}), ("GET", {"Range": "bytes=0-0"})):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
         request = urllib.request.Request(  # noqa: S310 - scheme validated by caller
             request_url,
             method=method,
             headers={"User-Agent": "ouroboros-citation-check/1", **headers},
         )
         try:
-            with opener.open(request, timeout=timeout):  # noqa: S310
-                return True
+            with opener.open(request, timeout=remaining):  # noqa: S310
+                return time.monotonic() <= deadline
         except urllib.error.HTTPError as error:
             try:
                 if method == "HEAD" and error.code in (405, 501):
@@ -315,12 +332,12 @@ def audit_citations(
         if not _eligible_http_citation(url):
             verdicts[url] = INVALID
             continue
-        if checked >= max_urls or time.monotonic() >= deadline:
+        remaining = min(_REQUEST_TIMEOUT_SECONDS, deadline - time.monotonic())
+        if checked >= max_urls or remaining <= 0:
             verdicts[url] = UNCHECKED
             continue
-        remaining = min(_REQUEST_TIMEOUT_SECONDS, deadline - time.monotonic())
         try:
-            alive = bool(fetch(url, max(remaining, 0.1)))
+            alive = bool(fetch(url, remaining))
         except Exception:
             alive = False
         verdicts[url] = VERIFIED if alive else UNREACHABLE

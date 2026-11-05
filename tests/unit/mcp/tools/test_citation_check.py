@@ -105,6 +105,63 @@ def test_not_found_is_closed_and_not_verified() -> None:
     open_request.assert_called_once()
 
 
+def test_redirect_uses_remaining_timeout() -> None:
+    handler = _BoundedRedirectHandler(deadline=10.0)
+    request = Request("https://example.test/0", method="HEAD")
+    request.timeout = 4.0
+    with patch("ouroboros.mcp.tools.citation_check.time.monotonic", return_value=9.5):
+        handler.redirect_request(request, None, 302, "Found", Message(), "https://example.test/1")
+    assert request.timeout == 0.5
+
+
+def test_expired_redirect_closes_response_without_following() -> None:
+    handler = _BoundedRedirectHandler(deadline=10.0)
+    handler.parent = MagicMock()
+    request = Request("https://example.test/0", method="HEAD")
+    request.timeout = 4.0
+    headers = Message()
+    headers["Location"] = "https://example.test/1"
+    response = MagicMock()
+    with (
+        patch("ouroboros.mcp.tools.citation_check.time.monotonic", return_value=10.0),
+        pytest.raises(HTTPError) as error,
+    ):
+        handler.http_error_302(request, response, 302, "Found", headers)
+    error.value.close()
+    response.close.assert_called_once()
+    handler.parent.open.assert_not_called()
+
+
+def test_head_fallback_uses_remaining_timeout() -> None:
+    error = HTTPError("https://example.test/0", 405, "HEAD rejected", {}, None)
+    response = MagicMock()
+    with (
+        patch("ouroboros.mcp.tools.citation_check.time.monotonic", side_effect=[0, 0, 0.75, 0.9]),
+        patch("urllib.request.OpenerDirector.open", side_effect=[error, response]) as open_request,
+    ):
+        assert _default_fetch("https://example.test/0", 1.0) is True
+    assert open_request.call_args_list[1].kwargs["timeout"] == 0.25
+
+
+def test_head_fallback_is_not_started_after_timeout() -> None:
+    error = HTTPError("https://example.test/0", 405, "HEAD rejected", {}, None)
+    with (
+        patch("ouroboros.mcp.tools.citation_check.time.monotonic", side_effect=[0, 0, 1]),
+        patch("urllib.request.OpenerDirector.open", side_effect=error) as open_request,
+    ):
+        assert _default_fetch("https://example.test/0", 1.0) is False
+    open_request.assert_called_once()
+
+
+def test_response_after_timeout_is_not_verified() -> None:
+    response = MagicMock()
+    with (
+        patch("ouroboros.mcp.tools.citation_check.time.monotonic", side_effect=[0, 0, 1.1]),
+        patch("urllib.request.OpenerDirector.open", return_value=response),
+    ):
+        assert _default_fetch("https://example.test/0", 1.0) is False
+
+
 _EVIDENCE = (
     "My analysis...\n"
     "```json\n"
@@ -226,6 +283,16 @@ def test_url_count_cap_marks_rest_unchecked() -> None:
     assert verdicts.count(VERIFIED) == 3
     assert verdicts.count(UNCHECKED) == 9
     assert audit["checked"] == 3
+
+
+def test_small_remaining_budget_is_not_rounded_up() -> None:
+    fetch = MagicMock(return_value=True)
+    text = '```json\n{"external_sources": ["https://ok.example"]}\n```'
+    with patch("ouroboros.mcp.tools.citation_check.time.monotonic", side_effect=[0, 0.95]):
+        audit = audit_citations([text], fetch=fetch, total_budget_seconds=1)
+    assert audit is not None
+    assert audit["urls"]["https://ok.example"] == VERIFIED
+    assert fetch.call_args.args[1] == pytest.approx(0.05)
 
 
 def test_fetcher_exception_degrades_to_unreachable() -> None:
