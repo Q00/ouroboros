@@ -13,6 +13,8 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
+from ouroboros.bigbang.pm_opening import PMOpeningConfirmation
+
 
 @dataclass(frozen=True, slots=True)
 class UserStory:
@@ -91,6 +93,7 @@ class PMSeed:
     serialized via that; dicts and strings are passed through as-is.
     """
     referenced_repos: tuple[dict[str, str], ...] = ()
+    opening_confirmations: tuple[PMOpeningConfirmation, ...] = ()
 
     def __post_init__(self) -> None:
         """Merge deprecated fields into their canonical counterparts."""
@@ -143,6 +146,21 @@ class PMSeed:
             "brownfield_repos": [dict(r) for r in self.brownfield_repos],
             "created_at": self.created_at,
         }
+        if self.opening_confirmations:
+            d["opening_confirmation_notice"] = (
+                "These exchanges are host-reported; the server cannot verify that the "
+                "person saw or answered them."
+            )
+            d["opening_confirmations"] = [
+                {
+                    "event_id": item.event_id,
+                    "item_id": item.item_id,
+                    "question": item.question,
+                    "answer": item.answer,
+                    "source": item.source,
+                }
+                for item in self.opening_confirmations
+            ]
         # Preserve legacy seed for round-trip safety.
         # Handles Seed objects (via to_dict()), raw dicts, and strings.
         # Explicit None check: falsey-but-present values ({}, 0) are preserved.
@@ -204,6 +222,9 @@ class PMSeed:
             success_criteria=tuple(data.get("success_criteria", [])),
             decide_later_items=tuple(decide_later),
             assumptions=tuple(data.get("assumptions", [])),
+            opening_confirmations=tuple(
+                PMOpeningConfirmation(**item) for item in data.get("opening_confirmations", [])
+            ),
             interview_id=data.get("interview_id", ""),
             codebase_context=data.get("codebase_context", ""),
             brownfield_repos=tuple(dict(r) for r in brownfield_raw),
