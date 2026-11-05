@@ -266,10 +266,12 @@ def parse_coverage_from_output(output: str) -> float | None:
             continue
         package = event.get("Package")
         if not isinstance(package, str):
-            continue
+            # An output event without a package cannot be safely joined to a
+            # stream; it may contain part of a conflicting measurement.
+            return None
         text = event.get("Output")
         if not isinstance(text, str):
-            continue
+            return None
         # JSON escapes can hide C1 controls until decoding.
         if any("\x80" <= char <= "\x9f" for char in text):
             return None
@@ -284,7 +286,8 @@ def parse_coverage_from_output(output: str) -> float | None:
         streams[package] = streams.get(package, "") + text
         uncolored = re.sub(r"\x1b\[[0-9;]{0,32}m", "", streams[package])
         if "\x1b" in uncolored or any(
-            re.match(candidate_pattern, line, re.IGNORECASE)
+            re.match(r"[ \t]*TOTAL\b", line)
+            or re.match(candidate_pattern, line, re.IGNORECASE)
             or re.match(go_coverage, line, re.IGNORECASE)
             or re.match(jest_coverage, line, re.IGNORECASE)
             or re.match(tarpaulin_coverage, line, re.IGNORECASE)

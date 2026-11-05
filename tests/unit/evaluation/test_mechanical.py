@@ -59,6 +59,10 @@ class TestParseCoverageFromOutput:
         )
         assert parse_coverage_from_output(output) == 1.0
 
+    def test_unrelated_non_output_json_without_package_preserves_total(self) -> None:
+        output = 'TOTAL 10 0 100%\n{"Action":"pass"}\n{"message":"unrelated"}'
+        assert parse_coverage_from_output(output) == 1.0
+
     def test_parse_0_percent(self) -> None:
         """Parse 0% coverage."""
         output = "TOTAL   500   500   0%"
@@ -499,6 +503,28 @@ _UNPARSED_COVERAGE_OUTPUTS = {
         "TOTAL 10 0 100%\n"
         '{"Action":"output","Package":"example.com/m",'
         '"Output":"coverage: 15.0% of statements\\n"}'
+    ),
+    "go json TOTAL conflicting with TOTAL": (
+        'TOTAL 10 0 100%\n{"Action":"output","Package":"p","Output":"TOTAL 10 8 20%\\n"}'
+    ),
+    "go json TOTAL without package": (
+        'TOTAL 10 0 100%\n{"Action":"output","Output":"TOTAL 10 8 20%\\n"}'
+    ),
+    "go json TOTAL null package": (
+        'TOTAL 10 0 100%\n{"Action":"output","Package":null,"Output":"TOTAL 10 8 20%\\n"}'
+    ),
+    "split go json TOTAL without package": (
+        'TOTAL 10 0 100%\n{"Action":"output","Output":"TO"}\n'
+        '{"Action":"output","Output":"TAL 10 8 20%\\n"}'
+    ),
+    "go json output missing text": 'TOTAL 10 0 100%\n{"Action":"output","Package":"p"}',
+    "split go json TOTAL conflicting with TOTAL": (
+        'TOTAL 10 0 100%\n{"Action":"output","Package":"p","Output":"TO"}\n'
+        '{"Action":"output","Package":"p","Output":"TAL 10 8 20%\\n"}'
+    ),
+    "colored go json TOTAL conflicting with TOTAL": (
+        'TOTAL 10 0 100%\n{"Action":"output","Package":"p",'
+        '"Output":"\\u001b[31mTOTAL 10 8 20%\\u001b[0m\\n"}'
     ),
     "go json package summary conflicting with TOTAL": (
         "TOTAL 10 0 100%\n"
