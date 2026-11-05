@@ -599,7 +599,12 @@ async def dispatch_batch_if_requested(
     handler: "InterviewHandler",
     arguments: dict[str, Any],
 ) -> Result[MCPToolResult, MCPServerError] | None:
+    from ouroboros.mcp.tools.material_evidence_actions import dispatch_material_evidence
     from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
+
+    evidence_result = await dispatch_material_evidence(handler, arguments)
+    if evidence_result is not None:
+        return evidence_result
 
     if "inline_material_retry" in arguments and "batch_answers" not in arguments:
         if should_dispatch_via_plugin(handler.agent_runtime_backend, handler.opencode_mode):

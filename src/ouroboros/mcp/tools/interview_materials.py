@@ -118,6 +118,34 @@ def material_content(state: "InterviewState") -> tuple[MCPContentItem, ...]:
         else:
             lines.append("Earlier model assumptions (unconfirmed, not requirements):")
             lines.extend(f"- {item}" for item in source.draft.inferred_assumptions)
+        from ouroboros.interview_adapters.material_evidence import (
+            confirmation_prompt,
+            revision,
+            verified_active,
+        )
+
+        active = verified_active(source, state.interview_id)
+        if active is None:
+            lines.append(
+                "Material evidence history is unavailable; no references can be confirmed."
+            )
+        else:
+            lines.append(f"Material evidence revision: {revision(source)}")
+            for kind, values in (
+                ("source_quote", source.draft.source_quotes),
+                ("model_assumption", source.draft.inferred_assumptions),
+            ):
+                for index, value in enumerate(values):
+                    decision = active.get((kind, index))
+                    action = "remove" if decision else "include"
+                    label = (
+                        f"; source={decision.source_id}; evidence={decision.evidence_id}"
+                        if decision
+                        else ""
+                    )
+                    lines.append(
+                        f"Material item {kind} {index}{label}: {value}\n{confirmation_prompt(source, kind, index, action, session_id=state.interview_id)}"
+                    )
     return (MCPContentItem(type=ContentType.TEXT, text="\n".join(lines)),)
 
 

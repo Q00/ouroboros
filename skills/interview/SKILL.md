@@ -153,6 +153,19 @@ If a completed material session needs to reopen with no pending server question,
 send only a question explicitly authored by the person as
 `inline_material_user_followup_question` with their answer; never send a draft,
 an interpretation, or a host-generated question as that value.
+The material draft can offer an optional local evidence reference for each item.
+Show the exact item text alongside its exact server-provided prompt and obtain the person's exact INCLUDE or
+REMOVE response before submitting a decision with that item's kind, index and
+revision. Decisions record whether to include a local lookup handle in a future
+Seed; they do not confirm truth, accept an inference as a requirement, or make
+the reference portable. This can be collected alongside an existing question;
+never add a mandatory turn. An exported Seed may show the random IDs but needs
+the original local interview state to resolve them. To resolve a reference,
+first request the server's retrieval prompt, show it, and send the person's
+exact SHOW only if they explicitly ask to reveal that item to this host. A host
+may transmit displayed content elsewhere. Missing, changed or removed local
+evidence is unknown. Never copy a resolved excerpt or model assumption into a
+question, answer or requirement unless the person separately authors it.
 If extraction is unavailable or remains pending after an interrupted call, the person may
 explicitly request a local retry by sending `inline_material_retry: true` and
 the session ID. Unchanged material produces the same excerpts. Do not retry

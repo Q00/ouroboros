@@ -35,6 +35,30 @@ class MaterialDraft(BaseModel):
         return self
 
 
+class MaterialEvidenceDecision(BaseModel):
+    """A host-reported decision to include or remove one local evidence reference."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    event_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    source_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    evidence_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    kind: Literal["source_quote", "model_assumption"]
+    index: int = Field(ge=0, le=4)
+    action: Literal["include", "remove"]
+    source_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    draft_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    previous_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+    presented_prompt: str = Field(min_length=1, max_length=2000)
+    user_response: Literal["INCLUDE", "REMOVE"]
+
+    @model_validator(mode="after")
+    def decision_matches_response(self) -> "MaterialEvidenceDecision":
+        if self.user_response != self.action.upper():
+            raise ValueError("Material evidence decision does not match response")
+        return self
+
+
 class InlineMaterial(BaseModel):
     """One user-provided source, kept outside requirements and score inputs."""
 
@@ -43,6 +67,7 @@ class InlineMaterial(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
     status: Literal["pending", "ready", "unavailable"] = "pending"
     draft: MaterialDraft | None = None
+    evidence_decisions: tuple[MaterialEvidenceDecision, ...] = Field(default=(), max_length=50)
 
     @model_validator(mode="after")
     def validate_draft(self) -> "InlineMaterial":

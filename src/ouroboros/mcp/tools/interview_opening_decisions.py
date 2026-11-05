@@ -49,6 +49,12 @@ def plugin_seed_blocker(state: Any) -> str | None:
         return "Answer or discard the pending batch before generating a Seed"
     if has_confirmed_opening(state):
         return "Use in-process Seed generation for confirmed opening interpretations"
+    if state.inline_material is not None and state.inline_material.evidence_decisions:
+        from ouroboros.interview_adapters.material_evidence import verified_active
+
+        active = verified_active(state.inline_material, state.interview_id)
+        if active is None or active:
+            return "Use in-process Seed generation for local material references"
     return None
 
 
