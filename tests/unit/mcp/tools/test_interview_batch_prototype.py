@@ -216,7 +216,14 @@ async def test_discard_after_partial_answers_keeps_confirmed_ids_and_round_numbe
 
 
 @pytest.mark.asyncio
-async def test_sdk_batch_text_transport_and_explicit_independence(tmp_path):
+@pytest.mark.parametrize(
+    ("answers", "last_answer"),
+    [
+        ('1: a / 2: b / 3: "fast / 2: must not split"', "fast / 2: must not split"),
+        ("1: 1 / 2: 2 / 3: fast enough", "fast enough"),
+    ],
+)
+async def test_sdk_batch_text_transport_and_explicit_independence(tmp_path, answers, last_answer):
     from unittest.mock import patch
 
     from mcp import Client
@@ -248,7 +255,6 @@ async def test_sdk_batch_text_transport_and_explicit_independence(tmp_path):
         assert not start.is_error
         sid, digest = start.meta["session_id"], start.meta["batch_digest"]
         assert "a. Gardeners" in start.content[0].text
-        answers = '1: a / 2: b / 3: "fast / 2: must not split"'
         result = await client.call_tool(
             "ouroboros_interview",
             {
@@ -263,7 +269,7 @@ async def test_sdk_batch_text_transport_and_explicit_independence(tmp_path):
     state = (await engine.load_state(sid)).value
     assert state.rounds[0].batch_selected_indices == (1,)
     assert state.rounds[1].batch_selected_indices == (2,)
-    assert state.rounds[2].user_response == "fast / 2: must not split"
+    assert state.rounds[2].user_response == last_answer
 
 
 @pytest.mark.asyncio

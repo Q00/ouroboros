@@ -121,7 +121,13 @@ Batch digest and question IDs from the server's text response instead.
 
 After explicit confirmation, collect answers by question. In text mode display
 numbered questions with a-d options and accept `1: a / 2: a,c / 3: "free text"`;
-quote free text as JSON, and use `-` only for none on a multi-select question.
+numeric choice labels are also accepted (for example `1: 2 / 2: 1,3`), as is
+unquoted descriptive free text. Quote free text as JSON when it is a choice label,
+a number, begins with a single letter or number followed by a comma, or contains a
+`/` followed by a question number and colon; otherwise it may be rejected or
+interpreted as a choice or another answer. Use `-` only for none on a
+multi-select question. Ask the person to clarify ambiguous or invalid input;
+never turn an out-of-range or mixed-format choice into an inferred answer.
 Send the exact input in `batch_answers_text`, together with the session ID, exact
 `batch_confirm_digest`, and `batch_independence_confirmed: true`. A native host
 can instead send `batch_answers` with stable `question_id` and exactly one of
