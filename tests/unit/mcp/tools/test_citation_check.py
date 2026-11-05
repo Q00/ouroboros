@@ -235,6 +235,91 @@ def test_malformed_block_and_plain_text_yield_nothing() -> None:
     assert extract_cited_urls("```json\n{not json]\n```") == ()
 
 
+def test_bare_evidence_json_is_audited_without_fencing() -> None:
+    text = json.dumps(
+        {
+            "external_sources": ["https://example.invalid/doc"],
+            "claims": [{"source": "https://example.invalid/doc"}],
+        }
+    )
+    calls: list[str] = []
+    audit = audit_citations([text], fetch=lambda url, _timeout: calls.append(url) or False)
+    assert audit is not None
+    assert audit["urls"] == {"https://example.invalid/doc": UNCHECKED}
+    assert audit["unverified_present"] is True
+    assert calls == []
+
+
+@pytest.mark.parametrize("url", ["http://127.0.0.1/", "http://169.254.169.254/", "http://[::1]/"])
+def test_bare_evidence_never_fetches_private_destinations(url: str) -> None:
+    calls: list[str] = []
+    audit = audit_citations(
+        [json.dumps({"external_sources": [url]})],
+        fetch=lambda candidate, _timeout: calls.append(candidate) or True,
+    )
+    assert audit is not None
+    assert audit["urls"] == {url: UNCHECKED}
+    assert calls == []
+
+
+def test_duplicate_bare_and_fenced_url_preserves_fenced_fetch() -> None:
+    url = "https://example.invalid/doc"
+    evidence = json.dumps({"external_sources": [url]})
+    calls: list[str] = []
+    audit = audit_citations(
+        [evidence, f"```json\n{evidence}\n```"],
+        fetch=lambda candidate, _timeout: calls.append(candidate) or False,
+    )
+    assert audit is not None
+    assert audit["urls"] == {url: UNREACHABLE}
+    assert calls == [url]
+
+
+def test_bare_duplicates_do_not_reorder_fenced_fetch_budget() -> None:
+    public = [f"https://example{i}.invalid/doc" for i in range(8)]
+    loopback = "http://127.0.0.1:43210/private"
+    bare_only = "http://169.254.169.254/latest"
+    fenced = "```json\n" + json.dumps({"external_sources": [*public, loopback]}) + "\n```"
+    bare = json.dumps({"external_sources": [loopback, bare_only, public[4]]})
+    calls: list[str] = []
+    result = audit_citations([bare, fenced], fetch=lambda url, _: calls.append(url) or True)
+    assert result is not None
+    assert calls == public
+    assert result["checked"] == 8
+    assert result["urls"][loopback] == UNCHECKED
+    assert result["urls"][bare_only] == UNCHECKED
+    assert result["urls"][public[4]] == VERIFIED
+
+
+def test_bare_invalids_and_duplicates_do_not_consume_fenced_budget() -> None:
+    urls = ["https://a.example/", "https://b.example/"]
+    bare = json.dumps({"external_sources": ["file:///etc/passwd", urls[1], urls[1]]})
+    fenced = "```json\n" + json.dumps({"external_sources": urls}) + "\n```"
+    calls: list[str] = []
+    result = audit_citations(
+        [bare, fenced], fetch=lambda url, _: calls.append(url) or True, max_urls=1
+    )
+    assert result is not None
+    assert calls == [urls[0]]
+    assert result["urls"][urls[1]] == UNCHECKED
+    assert result["urls"]["file:///etc/passwd"] == INVALID
+
+
+def test_bare_non_evidence_and_prose_wrapped_json_do_not_trigger_fetch() -> None:
+    calls: list[str] = []
+
+    def fetch(url: str, _timeout: float) -> bool:
+        calls.append(url)
+        return True
+
+    assert audit_citations(['{"unrelated":"https://example.invalid"}'], fetch=fetch) is None
+    assert (
+        audit_citations(['opinion {"external_sources":["https://example.invalid"]}'], fetch=fetch)
+        is None
+    )
+    assert calls == []
+
+
 def test_no_citations_means_no_audit_and_no_network() -> None:
     calls: list[str] = []
 
