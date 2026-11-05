@@ -220,19 +220,12 @@ Scope your test runs while iterating:
 uv run pytest tests/unit/<area> -q
 ```
 
-For a broad local run, keep external MCP integration and end-to-end coverage
-separate while retaining the hermetic MCP unit suite:
-
-```bash
-uv run --group mcp-test pytest tests/ --ignore=tests/integration/mcp \
-  --ignore=tests/e2e -n auto --dist worksteal
-```
-
-`tests/conftest.py` redirects `$HOME` before collection and gives every test a
-separate home, so `tests/unit/mcp` cannot write to your real config, event DB,
-logs, or worktrees. Run that suite while changing MCP handlers; reserve the
-external integration and end-to-end suites for environments that provide their
-required services. See [Testing Guide](./testing-guide.md).
+For broader local runs and the CI-equivalent commands, use the
+[Testing Guide](./testing-guide.md). It describes the MCP test dependency
+profile, HOME isolation and the `loadgroup` scheduling required for tests that
+share the `built_wheel` fixture. Before running tests, check any inherited
+`CODEX_HOME` and platform-specific profile variables separately; redirecting
+`HOME` alone does not establish isolation for every user configuration path.
 
 
 ## Before you open the PR
