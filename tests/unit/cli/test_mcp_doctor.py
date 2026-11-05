@@ -684,10 +684,10 @@ class TestLocalStdioProbe:
 
         config = captured["config"]
         assert config.command == sys.executable
-        assert config.args[:3] == ("-I", "-B", "-c")
-        assert "os.chdir(" in config.args[3]
-        assert "_serve_local_stdio_probe" in config.args[3]
-        assert "do-not-execute" not in config.args[3]
+        assert config.args[:4] == ("-I", "-S", "-B", "-c")
+        assert "os.chdir(" in config.args[4]
+        assert "_serve_local_stdio_probe" in config.args[4]
+        assert "do-not-execute" not in config.args[4]
         assert config.transport is TransportType.STDIO
         assert config.url is None
         assert "OUROBOROS_MCP_COMMAND" not in config.env

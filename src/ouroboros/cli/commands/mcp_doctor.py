@@ -158,18 +158,30 @@ def _local_stdio_probe_config(home: Path) -> MCPServerConfig:
     # -I ignores caller PYTHONPATH and cwd imports. Only this already-imported
     # installation is added, and cwd changes before importing its entrypoint.
     source_root = str(Path(__file__).resolve().parents[3])
+    # Build the stdlib event loop before the guard: Windows may implement its
+    # self-pipe using loopback sockets. -S prevents site hooks from running yet.
+    # Restore site paths only after the network/command guard is in place.
     bootstrap = (
-        "import os,sys; "
-        f"os.chdir({str(home)!r}); "
-        f"sys.path.insert(0, {source_root!r}); "
-        "from ouroboros.cli.commands.mcp_doctor import _serve_local_stdio_probe; "
-        "import asyncio; asyncio.run(_serve_local_stdio_probe())"
+        "import asyncio, sys\n"
+        "with asyncio.Runner() as runner:\n"
+        "    def guard(event, args):\n"
+        "        if event.startswith('socket.') or event in "
+        "('subprocess.Popen', 'os.system', 'os.exec', 'os.posix_spawn', "
+        "'os.fork', 'os.forkpty'):\n"
+        "            raise RuntimeError('Network and command execution are disabled for the local doctor probe')\n"
+        "    sys.addaudithook(guard)\n"
+        "    import site; site.main()\n"
+        "    import os\n"
+        f"    os.chdir({str(home)!r})\n"
+        f"    sys.path.insert(0, {source_root!r})\n"
+        "    from ouroboros.cli.commands.mcp_doctor import _serve_local_stdio_probe\n"
+        "    runner.run(_serve_local_stdio_probe())\n"
     )
     return MCPServerConfig(
         name="ouroboros-doctor-local",
         transport=TransportType.STDIO,
         command=sys.executable,
-        args=("-I", "-B", "-c", bootstrap),
+        args=("-I", "-S", "-B", "-c", bootstrap),
         env=_local_stdio_probe_environment(home),
         timeout=15.0,
     )
@@ -188,6 +200,8 @@ async def _serve_local_stdio_probe() -> None:
             "os.system",
             "os.exec",
             "os.posix_spawn",
+            "os.fork",
+            "os.forkpty",
         }:
             raise RuntimeError(
                 "Network and command execution are disabled for the local doctor probe"
