@@ -220,7 +220,15 @@ def _is_finite_number(value: object) -> bool:
 _LINE_DECORATION_RE = re.compile(r"^\s*(?:[-*]\s+|\d+[.)]\s+)")
 _BOLD_RE = re.compile(r"\*{1,2}([^*]+)\*{1,2}")
 _KV_RE = re.compile(r"(?im)^(\w[\w ]*?)[ \t]*[:=\-][ \t]*(.+)$")
-_SCORE_FALLBACK_RE = re.compile(r"(?im)\bscore\b[ \t]*(?:is|-)[ \t]*([0-9]*\.?[0-9]+)")
+# Unicode whitespace is allowed within a line, but never cross a line break.
+_HSPACE = r"[^\S\r\n\v\f\x85\u2028\u2029]"
+_SCORE_FIELD_RE = re.compile(rf"(?im)^{_HSPACE}*score{_HSPACE}*[:=\-]{_HSPACE}*([^\r\n]*)$")
+_SCORE_FALLBACK_RE = re.compile(rf"(?im)\bscore\b{_HSPACE}*(?:is\b|-){_HSPACE}*([^\r\n]*)")
+_PLAIN_SCORE_RE = re.compile(
+    r"\s*([0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)\s*"
+    r"(?:/\s*1(?:\.0+)?\s*)?(?:\[(?:pass|revise|fail)\]\s*)?",
+    re.IGNORECASE,
+)
 
 
 def _strip_line_decorations(text: str) -> str:
@@ -252,13 +260,20 @@ def _parse_non_json_qa_response(response_text: str) -> dict[str, Any] | None:
     cleaned = _strip_line_decorations(response_text)
     fields = _extract_kv_fields(cleaned)
 
-    raw_score = fields.get("score")
-    if raw_score:
-        score_num = re.match(r"([0-9]*\.?[0-9]+)", raw_score)
-    else:
-        # Fallback: "score is 0.85" / "score - 0.85" (word-bounded, not in KV)
-        score_num = _SCORE_FALLBACK_RE.search(cleaned)
-
+    # Multiple score statements have no authoritative winner. In particular,
+    # retaining only the first key can turn a later correction into a pass.
+    key_matches = list(_SCORE_FIELD_RE.finditer(cleaned))
+    score_values = [m.group(1).strip() for m in key_matches]
+    for match in _SCORE_FALLBACK_RE.finditer(cleaned):
+        # ``Score - 0.85`` is also a key/value match, not a second statement.
+        if not any(m.start() <= match.start() < m.end() for m in key_matches):
+            score_values.append(match.group(1).strip())
+    if len(score_values) != 1:
+        return None
+    raw_score = score_values[0]
+    # Consume the complete score expression: accepting a numeric prefix turns
+    # 0.9e-2 or 0.9/10 into a false passing score of 0.9.
+    score_num = _PLAIN_SCORE_RE.fullmatch(raw_score) if raw_score else None
     if not score_num:
         return None
     try:
