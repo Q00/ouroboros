@@ -235,6 +235,8 @@ def parse_coverage_from_output(output: str) -> float | None:
     # recognizable partial records as ambiguous too; their values need not be
     # complete for a separate TOTAL to mask an unreadable report.
     lcov = r"[ \t]*(?:(?:TN|SF|VER|FN|FNDA|FNF|FNH|BRDA|BRF|BRH|DA|LF|LH):.*|end_of_record)[ \t]*"
+    # Cobertura XML is not interpreted as a supported aggregate.
+    xml_coverage = r"<(?:[^\s<>/:]+:)?coverage(?:[ \t/>]|$)"
     for row in output.splitlines():
         # Strip bounded terminal SGR sequences only for detection, not proof.
         uncolored = re.sub(r"\x1b\[[0-9;]{0,32}m", "", row)
@@ -248,6 +250,7 @@ def parse_coverage_from_output(output: str) -> float | None:
             or re.match(tarpaulin_coverage, uncolored, re.IGNORECASE)
             or re.fullmatch(bare_coverage, uncolored)
             or re.fullmatch(lcov, uncolored)
+            or re.search(xml_coverage, uncolored, re.IGNORECASE)
         ):
             return None
         # An unknown control sequence can conceal a measurement in any row,
@@ -305,6 +308,7 @@ def parse_coverage_from_output(output: str) -> float | None:
             or re.match(tarpaulin_coverage, line, re.IGNORECASE)
             or re.fullmatch(bare_coverage, line)
             or re.fullmatch(lcov, line)
+            or re.search(xml_coverage, line, re.IGNORECASE)
             for line in uncolored.splitlines()
         ):
             return None

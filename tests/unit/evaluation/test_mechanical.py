@@ -53,6 +53,14 @@ class TestParseCoverageFromOutput:
         output = "daily: checks passed\nSF builds passed\nTOTAL 10 0 100%"
         assert parse_coverage_from_output(output) == 1.0
 
+    def test_unrelated_xml_element_preserves_supported_total(self) -> None:
+        assert (
+            parse_coverage_from_output(
+                "<coverage-example/><cov:coverage-example/>\nTOTAL 10 0 100%"
+            )
+            == 1.0
+        )
+
     def test_unicode_non_control_prose_preserves_supported_total(self) -> None:
         assert parse_coverage_from_output("검사 성공 ✓\nTOTAL 10 0 100%") == 1.0
 
@@ -584,6 +592,37 @@ _UNPARSED_COVERAGE_OUTPUTS = {
     "malformed JSON beside TOTAL": 'TOTAL 10 0 100%\n{"Action":"output",',
     "excess JSON events beside TOTAL": (
         "TOTAL 10 0 100%\n" + '{"Action":"output","Package":"p","Output":"x"}\n' * 257
+    ),
+    "coverage.py XML conflicting with TOTAL": (
+        'TOTAL 10 0 100%\n<?xml version="1.0" ?>\n'
+        '<coverage version="7.13.5" line-rate="0.8">\n</coverage>\n'
+    ),
+    "inline XML declaration and coverage": (
+        'TOTAL 10 0 100%\n<?xml version="1.0"?><coverage line-rate="0.8"/>\n'
+    ),
+    "nested coverage XML element": (
+        'TOTAL 10 0 100%\n<report><coverage line-rate="0.8"/></report>\n'
+    ),
+    "partial embedded coverage element": "TOTAL 10 0 100%\n<report><coverage\n",
+    "namespaced coverage XML conflicting with TOTAL": (
+        'TOTAL 10 0 100%\n<cov:coverage xmlns:cov="urn:cov" line-rate="0.8"/>\n'
+    ),
+    "unicode namespaced coverage XML": (
+        'TOTAL 10 0 100%\n<보고:coverage xmlns:보고="urn:cov" line-rate="0.8"/>\n'
+    ),
+    "colored namespaced coverage XML": (
+        'TOTAL 10 0 100%\n\x1b[31m<cov:coverage line-rate="0.8"/>\x1b[0m\n'
+    ),
+    "namespaced coverage XML split across go events": (
+        'TOTAL 10 0 100%\n{"Action":"output","Package":"p","Output":"<cov:cov"}\n'
+        '{"Action":"output","Package":"p","Output":"erage/>\\n"}'
+    ),
+    "colored coverage XML conflicting with TOTAL": (
+        'TOTAL 10 0 100%\n\x1b[32m<coverage line-rate="0.8">\x1b[0m\n'
+    ),
+    "coverage XML split across go events": (
+        'TOTAL 10 0 100%\n{"Action":"output","Package":"p","Output":"<cover"}\n'
+        '{"Action":"output","Package":"p","Output":"age line-rate=\\"0.8\\">\\n"}'
     ),
     "node lcov conflicting with TOTAL": (
         "TOTAL 10 0 100%\nTN:\nSF:src/subject.js\nDA:1,1\nDA:2,0\nLH:1\nLF:2\nend_of_record\n"
