@@ -99,7 +99,7 @@ def test_a_file_that_vanishes_during_the_copy_is_copied_after_a_retry(
         attempts.append(1)
 
         def copy_function(from_path: str, to_path: str, **inner: object) -> object:
-            if Path(from_path).name == "kept.py" and len(attempts) == 1:
+            if Path(from_path).name == "maintenance.lock" and len(attempts) == 1:
                 (source / "maintenance.lock").unlink()
             return shutil.copy2(from_path, to_path, **inner)
 
