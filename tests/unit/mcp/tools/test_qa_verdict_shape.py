@@ -742,3 +742,8 @@ async def test_plain_score_suffix_cannot_mint_a_pass(body: str) -> None:
 async def test_later_plain_score_correction_does_not_mint_a_pass() -> None:
     result = await _handler("Score: 0.9\nScore: 0.1\nVerdict: fail").handle(dict(_ARGS))
     assert result.is_err
+
+
+async def test_empty_later_score_is_does_not_mint_a_pass() -> None:
+    result = await _handler("Score: 0.9\nscore is\nVerdict: fail").handle(dict(_ARGS))
+    assert result.is_err
