@@ -755,6 +755,13 @@ class PMInterviewHandler:
                         MCPToolError(str(load_result.error), tool_name="ouroboros_pm_interview")
                     )
                 state = load_result.value
+                if state.inline_material is not None:
+                    return Result.err(
+                        MCPToolError(
+                            "Interviews with optional material cannot be continued in PM mode",
+                            tool_name="ouroboros_pm_interview",
+                        )
+                    )
                 if action == "generate":
                     from ouroboros.mcp.tools.interview_opening_decisions import (
                         has_confirmed_opening,
@@ -1396,6 +1403,13 @@ class PMInterviewHandler:
         state = load_result.value
 
         # Restore PM meta into engine
+        if state.inline_material is not None:
+            return Result.err(
+                MCPToolError(
+                    "Interviews with optional material cannot be continued in PM mode",
+                    tool_name="ouroboros_pm_interview",
+                )
+            )
         meta = _load_pm_meta(session_id, self.data_dir)
         if meta:
             engine.restore_meta(meta)

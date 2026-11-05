@@ -76,6 +76,34 @@ def first_question_parameters() -> tuple[MCPToolParameter, ...]:
             description="ID-addressed answers to a confirmed batch; do not combine with other answer fields.",
         ),
         MCPToolParameter(
+            name="inline_material_text",
+            type=ToolInputType.STRING,
+            required=False,
+            description=(
+                "Optional material supplied with a first-batch reply (up to 4000 characters). "
+                "It is stored in the local interview state and sent to the configured model "
+                "only with explicit inline_material_consent. It is not user intent."
+            ),
+        ),
+        MCPToolParameter(
+            name="inline_material_consent",
+            type=ToolInputType.BOOLEAN,
+            required=False,
+            description="True only when the person explicitly agrees to storage and model processing of this material.",
+        ),
+        MCPToolParameter(
+            name="inline_material_retry",
+            type=ToolInputType.BOOLEAN,
+            required=False,
+            description="Explicitly retry a pending or unavailable material draft. This sends the stored material to the model again and can incur extra cost. A prior interrupted request may still run and cause duplicate charges.",
+        ),
+        MCPToolParameter(
+            name="inline_material_user_followup_question",
+            type=ToolInputType.STRING,
+            required=False,
+            description="For reopening an interview with optional material and no pending question: the exact new question explicitly authored by the person, not material or a model suggestion. Do not combine with last_question.",
+        ),
+        MCPToolParameter(
             name="batch_answers_text",
             type=ToolInputType.STRING,
             required=False,

@@ -81,6 +81,8 @@ def batch_payload(state: InterviewState) -> tuple[str, list[dict[str, Any]]]:
 
 
 def batch_view(state: InterviewState, page_size: int | None = None) -> MCPToolResult:
+    from ouroboros.mcp.tools.interview_materials import material_content
+
     if re.fullmatch(r"interview_[0-9a-f]{16}", state.interview_id) is None:
         raise ValueError("Invalid batch session ID")
     digest, items = batch_payload(state)
@@ -113,13 +115,16 @@ def batch_view(state: InterviewState, page_size: int | None = None) -> MCPToolRe
         "independence_source": "user_confirmation_required",
         "batch_complete": bool(items) and not pending_batch(state),
     }
+    if state.inline_material is not None:
+        meta["inline_material_status"] = state.inline_material.status
     if page_size is not None:
         numbered_items = [dict(item, batch_number=i) for i, item in enumerate(items, 1)]
         meta["question_pages"] = [
             numbered_items[i : i + page_size] for i in range(0, len(items), page_size)
         ]
     return MCPToolResult(
-        content=(MCPContentItem(type=ContentType.TEXT, text="\n".join(lines)),),
+        content=(MCPContentItem(type=ContentType.TEXT, text="\n".join(lines)),)
+        + material_content(state),
         meta=meta,
     )
 
@@ -230,6 +235,9 @@ async def answer_batch(
         "batch_confirm_digest",
         "batch_independence_confirmed",
         "batch_page_size",
+        "inline_material_text",
+        "inline_material_consent",
+        "inline_material_retry",
         "_normalized_interview_turn_context",
     }
     if any(key not in allowed and value is not None for key, value in arguments.items()):
@@ -237,6 +245,32 @@ async def answer_batch(
     session_id = arguments.get("session_id")
     raw_answers = arguments.get("batch_answers")
     raw_text = arguments.get("batch_answers_text")
+    material_text = arguments.get("inline_material_text")
+    material_consent = arguments.get("inline_material_consent")
+    retry_material = arguments.get("inline_material_retry")
+    if retry_material is not None and retry_material is not True:
+        return batch_error("Material retry must be true when provided")
+    if retry_material and (
+        material_text is not None
+        or material_consent is not None
+        or raw_answers != []
+        or raw_text is not None
+    ):
+        return batch_error("Retry material alone with an empty batch answer list")
+    if material_text is not None:
+        if (
+            not isinstance(material_text, str)
+            or not material_text.strip()
+            or len(material_text) > 4000
+            or material_consent is not True
+        ):
+            return batch_error("Optional material requires bounded text and explicit consent")
+        try:
+            material_text.encode("utf-8")
+        except UnicodeEncodeError:
+            return batch_error("Optional material must be valid UTF-8 text")
+    elif material_consent is not None:
+        return batch_error("Material consent requires material text")
     if (
         not isinstance(session_id, str)
         or re.fullmatch(r"interview_[0-9a-f]{16}", session_id) is None
@@ -244,7 +278,9 @@ async def answer_batch(
     ):
         return batch_error("Provide a session and exactly one batch answer format")
     if raw_answers is not None and (
-        not isinstance(raw_answers, list) or not raw_answers or len(raw_answers) > 5
+        not isinstance(raw_answers, list)
+        or (not raw_answers and material_text is None and not retry_material)
+        or len(raw_answers) > 5
     ):
         return batch_error("One to five batch answers are required")
     if raw_text is not None and (not isinstance(raw_text, str) or len(raw_text) > 10000):
@@ -260,10 +296,9 @@ async def answer_batch(
         digest, _ = batch_payload(state)
     except ValueError:
         return batch_error("Invalid persisted batch")
-    if (
-        arguments.get("batch_confirm_digest") != digest
-        or arguments.get("batch_independence_confirmed") is not True
-    ):
+    if arguments.get("batch_confirm_digest") != digest:
+        return batch_error("The current batch digest is required")
+    if (raw_answers or raw_text) and arguments.get("batch_independence_confirmed") is not True:
         return batch_error("Confirm independence of the current batch before answering")
     batch_rounds = {r.question_id: r for r in state.rounds if r.batch_id and r.question_id}
     if not batch_rounds:
@@ -274,6 +309,13 @@ async def answer_batch(
         except ValueError:
             return batch_error("Invalid batch answer text")
     assert isinstance(raw_answers, list)
+    if state.inline_material is not None and material_text is not None:
+        if state.inline_material.text != material_text:
+            return batch_error("Different material is already saved for this interview")
+    if retry_material and (
+        state.inline_material is None or state.inline_material.status == "ready"
+    ):
+        return batch_error("There is no pending or unavailable material draft to retry")
     normalized = []
     seen: set[str] = set()
     for raw in raw_answers:
@@ -324,6 +366,12 @@ async def answer_batch(
         normalized.append((round_data, answer, selected if has_choices else None))
     # Work on an isolated snapshot so one invalid answer does not mutate the loaded state.
     working = state.model_copy(deep=True)
+    new_material = material_text is not None and state.inline_material is None
+    if new_material:
+        from ouroboros.interview_adapters.inline_materials import InlineMaterial
+
+        working.inline_material = InlineMaterial(text=material_text)
+        working.mark_updated()
     for old_round, answer, selected in normalized:
         updated = await engine.record_response(
             working, answer, old_round.question, question_id=old_round.question_id
@@ -338,8 +386,10 @@ async def answer_batch(
                 and recorded.first_question_presentation.multi_select
             ):
                 recorded.first_question_selected_indices = tuple(selected)
-    if normalized or state.batch_confirmed_digest != digest:
-        working.batch_confirmed_digest = digest
+    confirmed = arguments.get("batch_independence_confirmed") is True
+    if normalized or new_material or (confirmed and state.batch_confirmed_digest != digest):
+        if confirmed:
+            working.batch_confirmed_digest = digest
         saved = await engine.save_state(working)
         if saved.is_err:
             return batch_error("Batch changed or could not be saved; reload before retrying")
@@ -357,7 +407,76 @@ async def answer_batch(
                     ambiguity_dimension=old_round.ambiguity_dimension,
                 )
             )
+        if new_material:
+            from ouroboros.mcp.tools.interview_materials import draft_inline_material
+
+            state, draft_result = await draft_inline_material(engine, state)
+            if draft_result != "ready":
+                latest = await engine.load_state(state.interview_id)
+                if latest.is_ok and any(r.batch_id for r in latest.value.rounds):
+                    return Result.ok(batch_view(latest.value, arguments.get("batch_page_size")))
+                return Result.ok(
+                    MCPToolResult(
+                        content=(
+                            MCPContentItem(
+                                type=ContentType.TEXT,
+                                text=(
+                                "Your batch update was saved before the state changed or became unavailable. "
+                                "Material drafting was deferred; resume to retrieve the current state."
+                                ),
+                            ),
+                        ),
+                        meta={
+                            "session_id": state.interview_id,
+                            "inline_material_status": "unknown",
+                        },
+                    )
+                )
+    if retry_material:
+        from ouroboros.mcp.tools.interview_materials import draft_inline_material
+
+        state, draft_result = await draft_inline_material(engine, state, retry=True)
+        if draft_result != "ready":
+            return batch_error("Material draft is already running or unavailable")
     return Result.ok(batch_view(state, arguments.get("batch_page_size")))
+
+
+async def retry_material(
+    handler: "InterviewHandler", arguments: dict[str, Any]
+) -> Result[MCPToolResult, MCPServerError]:
+    """Retry an opted-in draft independently of the batch's later lifetime."""
+    allowed = {"session_id", "inline_material_retry", "_normalized_interview_turn_context"}
+    if any(key not in allowed and value is not None for key, value in arguments.items()):
+        return batch_error("Material retry cannot be combined with other interview inputs")
+    session_id = arguments.get("session_id")
+    if (
+        arguments.get("inline_material_retry") is not True
+        or not isinstance(session_id, str)
+        or re.fullmatch(r"interview_[0-9a-f]{16}", session_id) is None
+    ):
+        return batch_error("Provide a valid session and explicit material retry")
+    engine, _ = handler._create_interview_engine()
+    loaded = await engine.load_state(session_id)
+    if loaded.is_err or loaded.value.interview_id != session_id:
+        return batch_error("Could not load interview session")
+    state = loaded.value
+    source = state.inline_material
+    if source is None or source.status == "ready":
+        return batch_error("There is no pending or unavailable material draft to retry")
+    from ouroboros.mcp.tools.interview_materials import draft_inline_material, material_content
+
+    state, draft_result = await draft_inline_material(engine, state, retry=True)
+    if draft_result != "ready":
+        return batch_error("Material draft is already running or unavailable")
+    return Result.ok(
+        MCPToolResult(
+            content=material_content(state),
+            meta={
+                "session_id": session_id,
+                "inline_material_status": state.inline_material.status,
+            },
+        )
+    )
 
 
 async def reject_batch(
@@ -481,6 +600,11 @@ async def dispatch_batch_if_requested(
     arguments: dict[str, Any],
 ) -> Result[MCPToolResult, MCPServerError] | None:
     from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
+
+    if "inline_material_retry" in arguments and "batch_answers" not in arguments:
+        if should_dispatch_via_plugin(handler.agent_runtime_backend, handler.opencode_mode):
+            return batch_error("Material retry requires in-process mode")
+        return await retry_material(handler, arguments)
 
     if (
         "structured_first_batch" in arguments
