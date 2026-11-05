@@ -478,6 +478,13 @@ _UNPARSED_COVERAGE_OUTPUTS = {
     ),
     "pytest-cov precision=2": "TOTAL   100   85   15.00%",
     "go test -cover": "ok  \texample.com/m\t0.002s\tcoverage: 15.0% of statements",
+    "go conflicting with TOTAL": (
+        "TOTAL 10 0 100%\nok  \texample.com/m\t0.002s\tcoverage: 15.0% of statements"
+    ),
+    "lowercase coverage conflicting with TOTAL": "TOTAL 10 0 100%\ncoverage: 15% of statements",
+    "capitalized go coverage conflict": (
+        "TOTAL 10 0 100%\nok example.com/m (cached) Coverage: 15% of statements"
+    ),
     "jest --coverage": "All files |   15.2 |   10.1 |   12.3 |   15.2 |",
     "cargo tarpaulin": "15.00% coverage, 15/100 lines covered",
     "coverage report --format=total": "15",

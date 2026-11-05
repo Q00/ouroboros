@@ -203,7 +203,15 @@ def parse_coverage_from_output(output: str) -> float | None:
     # even with missing/malformed separators, numbers or units. Alphabetic prose
     # remains nonmeasurement; only alt_pattern can grant a supported reading.
     candidate_pattern = r"[ \t]*Coverage[ \t]*(?:$|\d|[^\w\s]|(?i:nan|inf(?:inity)?|percent)\b)"
-    coverage_rows = [row for row in output.splitlines() if re.match(candidate_pattern, row)]
+    coverage_rows = [
+        row for row in output.splitlines() if re.match(candidate_pattern, row, re.IGNORECASE)
+    ]
+    # Go test appends its coverage figure to the package result line. This is
+    # not a supported measurement dialect, but it must not be ignored beside
+    # a different supported figure.
+    go_coverage = r"[ \t]*ok[ \t]+\S+[ \t]+\S+[ \t]+coverage:"
+    if any(re.match(go_coverage, row, re.IGNORECASE) for row in output.splitlines()):
+        return None
     matches = [re.fullmatch(pattern, row) for row in total_rows]
     matches += [re.fullmatch(alt_pattern, row) for row in coverage_rows]
     if not all(matches):
