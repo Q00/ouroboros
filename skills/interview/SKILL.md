@@ -107,6 +107,17 @@ ambiguous response: ask the person to clarify. On resume use the persisted prese
 returned by the server; do not invent or re-order choices. If the server does not support
 this opt-in or reports a normal text question, use the existing free-text path.
 
+When answering a pending question in an opening-interpretation session, omit
+`last_question`: the server keeps the question it issued. If a different question was
+actually shown, do not attach the answer to the stored question; clarify the mismatch
+with the person. To reopen after there is no pending question, ask the person for their
+exact new question and confirm the wording with them. Send it as
+`opening_user_followup_question` with the answer and omit `last_question`. Never send
+a proposal, model-generated question, or host-rewritten text in this field. The server
+relies on the host's statement that this is the person's own question; text matching
+cannot establish its origin or detect every paraphrase. Agent-generated follow-up
+questions are not supported by this opening-session reopen path.
+
 **Optional competing interpretations:** If the person explicitly asks to compare
 interpretations, the discovered tool schema supports `propose_opening_interpretations`,
 and the interview runs in-process, opt in on start. Present both returned proposals,
