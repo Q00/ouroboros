@@ -24,8 +24,26 @@ def test_unquoted_path_ending_in_slash_is_free_text():
     ]
 
 
+def test_quoted_label_with_slash_is_literal_free_text():
+    assert parse_batch_text('1: "5 /"', ["one"]) == [{"question_id": "one", "answer": "5 /"}]
+
+
 @pytest.mark.parametrize(
-    "value", ["1: 1,1", "1: 5", "1: a,2", "1: a,", "1: ", "1: a /", "1: a / 6: b"]
+    "value",
+    [
+        "1: 1,1",
+        "1: 5",
+        "1: a,2",
+        "1: a,",
+        "1: ",
+        "1: a /",
+        "1: 5 /",
+        "1: 5 / 2: a",
+        "1: 9,1 /",
+        "1: a, /",
+        "1: z /",
+        "1: a / 6: b",
+    ],
 )
 def test_ambiguous_or_invalid_selections_are_not_silently_recorded(value):
     with pytest.raises(ValueError):
