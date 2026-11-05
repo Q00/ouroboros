@@ -11,20 +11,20 @@ Pi 런타임은 서브프로세스 어댑터입니다. 워크플로 엔진, Seed
 계층은 세 개로 나뉩니다.
 
 ```text
-User / CLI / MCP
+사용자 / CLI / MCP
       |
-      | 1. Selects runtime_backend: pi, or sends an ooo shortcut
+      | 1. runtime_backend: pi를 선택하거나 ooo 단축 명령 전송
       v
-Ouroboros runtime adapter
+Ouroboros 런타임 어댑터
       |
-      | 2a. ooo shortcut? handle inside Ouroboros before Pi starts
-      | 2b. normal task? spawn Pi JSON mode
+      | 2a. ooo 단축 명령이면 Pi 시작 전 Ouroboros에서 처리
+      | 2b. 일반 작업이면 Pi JSON 모드 실행
       v
 pi --mode json <prompt>
       |
-      | 3. Pi loads its own settings, packages, extensions, tools, model auth
+      | 3. Pi가 자체 설정·패키지·확장·도구·모델 인증을 로드
       v
-Pi model turn and JSONL events
+Pi 모델 턴과 JSONL 이벤트
 ```
 
 따라서 “Pi가 Ouroboros 런타임이다”라는 뜻은 2b 경로가 존재하고 선택 가능하다는 것입니다. Pi 패키지를 Ouroboros로 가져온다는 뜻은 아닙니다. 또한 setup으로 관리형 Pi 브리지 확장을 설치하지 않는 한, Pi의 대화형 명령 UI가 Ouroboros 명령 라우터의 일부가 된다는 뜻도 아닙니다.
