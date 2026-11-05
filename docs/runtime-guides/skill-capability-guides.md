@@ -53,13 +53,22 @@ its rendered guide or a documented fallback.
 
 ## Seed generation client-gate enforcement
 
-`ouroboros_generate_seed` always reports `required_client_gates`,
-`accepted_client_gates`, and `missing_client_gates` metadata so runtimes can
-confirm that the Seed-ready Acceptance Guard and Restate gate ran before seed
-generation. By default, missing gates remain warnings for compatibility with
-existing clients. Set `OUROBOROS_REQUIRE_CLIENT_GATES=1` to promote missing
-gates to a hard MCP precondition while migrating maintained clients to pass the
-`client_gates` acknowledgements.
+For requests using an interview `session_id`, successful and delegated
+`ouroboros_generate_seed` responses include
+`required_client_gates`, `accepted_client_gates`, and `missing_client_gates`
+metadata. The accepted list
+is derived from the caller's `client_gates` acknowledgements: it shows what the
+caller reported, not proof that the Seed-ready Acceptance Guard ran or that a
+person approved the Restate gate. The server does not independently validate
+those actions or issue an audit receipt. By default, missing acknowledgements
+remain warnings for compatibility with existing clients. Set
+`OUROBOROS_REQUIRE_CLIENT_GATES=1` to reject requests with missing names; this
+hard precondition still checks caller-supplied names, not evidence of the gates.
+
+The interview-less `session_context` path checks structural completeness but
+does not evaluate `client_gates` or include this metadata, even when
+`OUROBOROS_REQUIRE_CLIENT_GATES=1`. Do not rely on that setting to enforce
+client-gate acknowledgements on this path.
 
 ## Fallback behavior for new runtimes without generated artifacts
 
