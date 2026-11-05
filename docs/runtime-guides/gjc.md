@@ -208,6 +208,12 @@ JSON extraction and validation rather than provider-native schema enforcement.
 
 ## Limitations
 
+- GJC workers may discover project MCP configuration such as `.mcp.json` and
+  start a nested Ouroboros server. Ouroboros does not currently have a verified
+  GJC option to suppress this discovery. Its child-environment depth guard can
+  limit nested launches when inherited; it does not prevent the first nested
+  server or guarantee that workers have stopped. Check your GJC project MCP
+  configuration before running workflows and avoid unwanted recursive entries.
 - GJC owns the active tool and permission policy. Ouroboros tool allow-lists and
   permission-mode overrides are reported as ignored rather than silently
   claiming enforcement.
