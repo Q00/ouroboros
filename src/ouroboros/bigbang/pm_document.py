@@ -288,6 +288,20 @@ class PMDocumentGenerator:
         Returns:
             Result containing the generated Markdown string or ProviderError.
         """
+        if interview_state is not None:
+            from ouroboros.interview_adapters.opening_interpretations import (
+                confirmed_interpretations,
+            )
+
+            if confirmed_interpretations(
+                interview_state.proposed_opening, interview_state.opening_decisions
+            ):
+                return Result.err(
+                    ProviderError(
+                        "PM documents do not yet preserve confirmed opening interpretations"
+                    )
+                )
+
         # The PRD is a requirement-producing artifact. Typed state uses the
         # shared projection; the public raw-pair ingress settles the same
         # caller-facing marker before it enters the prompt.

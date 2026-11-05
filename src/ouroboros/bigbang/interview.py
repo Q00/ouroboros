@@ -47,7 +47,12 @@ from ouroboros.interview_adapters.first_question import (
     first_question_instruction,
     validate_stored_selection,
 )
-from ouroboros.interview_adapters.opening_interpretations import ProposedOpening
+from ouroboros.interview_adapters.opening_interpretations import (
+    OpeningDecisionEvent,
+    ProposedOpening,
+    confirmed_interpretations,
+    opening_fingerprint_payload,
+)
 from ouroboros.interview_calibration import InterviewCalibration
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -290,6 +295,7 @@ class InterviewState(BaseModel):
     persistence_revision: str = ""
     batch_confirmed_digest: str | None = None
     proposed_opening: ProposedOpening | None = None
+    opening_decisions: tuple[OpeningDecisionEvent, ...] = ()
     _loaded_revision: str | None = PrivateAttr(default=None)
     status: InterviewStatus = InterviewStatus.IN_PROGRESS
     rounds: list[InterviewRound] = Field(default_factory=list)
@@ -309,6 +315,11 @@ class InterviewState(BaseModel):
     pending_confused_terms: tuple[str, ...] = Field(default_factory=tuple)
     requirement_input_revision: int = Field(default=0, ge=0)
     requirement_distillation: RequirementDistillation | None = None
+
+    @model_validator(mode="after")
+    def validate_opening_history(self) -> "InterviewState":
+        confirmed_interpretations(self.proposed_opening, self.opening_decisions)
+        return self
 
     @property
     def current_round_number(self) -> int:
@@ -379,6 +390,7 @@ class InterviewState(BaseModel):
         return compute_requirement_input_fingerprint(
             {
                 "initial_context": self.initial_context,
+                **opening_fingerprint_payload(self.proposed_opening, self.opening_decisions),
                 "rounds": [
                     {
                         "round_number": round_data.round_number,

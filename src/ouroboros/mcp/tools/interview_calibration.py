@@ -57,6 +57,8 @@ async def handle_interview_calibration_turn(
     rephrased_question: str | None = None
     pending_presentation: Any | None = None
     pending_opening: ProposedOpening | None = None
+    opening_decisions: Any = ()
+    opening_metadata: dict[str, Any] = {}
     if isinstance(session_id, str) and session_id.strip():
         engine, _ = handler._create_interview_engine()
         try:
@@ -84,6 +86,10 @@ async def handle_interview_calibration_turn(
                 candidate_opening = getattr(state, "proposed_opening", None)
                 if len(state.rounds) == 1 and isinstance(candidate_opening, ProposedOpening):
                     pending_opening = candidate_opening
+                    opening_decisions = state.opening_decisions
+                    from ouroboros.mcp.tools.interview_opening_decisions import opening_meta
+
+                    opening_metadata = opening_meta(state)
                 rephrase_method = getattr(engine, "rephrase_pending_question", None)
                 if (
                     pending_presentation is None
@@ -135,7 +141,7 @@ async def handle_interview_calibration_turn(
                 [
                     "",
                     "Rephrasing was not available. The pending question is unchanged:",
-                    pending_opening.render(pending_question)
+                    pending_opening.render(pending_question, opening_decisions)
                     if pending_opening
                     else pending_presentation.render()
                     if pending_presentation
@@ -158,7 +164,7 @@ async def handle_interview_calibration_turn(
     if pending_presentation is not None:
         meta["first_question_presentation"] = pending_presentation.model_dump(mode="json")
     if pending_opening is not None:
-        meta["opening_interpretations"] = pending_opening.model_dump(mode="json")
+        meta.update(opening_metadata)
     if rephrased_question is not None:
         meta["rephrased_question"] = rephrased_question
     return Result.ok(

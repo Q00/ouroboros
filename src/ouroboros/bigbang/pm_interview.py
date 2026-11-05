@@ -1273,6 +1273,16 @@ Apply this canonical PM routing policy:
         Returns:
             Result containing PMSeed or error.
         """
+        from ouroboros.interview_adapters.opening_interpretations import confirmed_interpretations
+
+        if confirmed_interpretations(state.proposed_opening, state.opening_decisions):
+            return Result.err(
+                ValidationError(
+                    "PM Seed generation does not yet preserve confirmed opening interpretations",
+                    field="opening_decisions",
+                )
+            )
+
         substantive_rounds = [
             round_data
             for round_data in state.rounds
@@ -1440,6 +1450,16 @@ Apply this canonical PM routing policy:
             rendered = [(item.question, item.answer) for item in extraction_rounds(state)]
         else:
             rendered = [(r.question, r.user_response) for r in state.rounds]
+            from ouroboros.interview_adapters.opening_interpretations import (
+                confirmed_opening_events,
+            )
+
+            rendered = [
+                (event.presented_prompt, event.user_response)
+                for _item, event in confirmed_opening_events(
+                    state.proposed_opening, state.opening_decisions
+                )
+            ] + rendered
 
         for question, answer in rendered:
             if question == INITIAL_CONTEXT_SUMMARY_QUESTION:

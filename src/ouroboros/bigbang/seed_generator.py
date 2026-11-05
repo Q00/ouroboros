@@ -33,6 +33,7 @@ from ouroboros.bigbang.interview import (
     initial_context_summary_missing,
     prompt_safe_initial_context,
 )
+from ouroboros.bigbang.opening_seed import anchor_opening_confirmations
 from ouroboros.bigbang.requirement_distillation import (
     anchor_promoted_requirements,
     apply_requirement_distillation,
@@ -1773,7 +1774,7 @@ class SeedGenerator:
 
         # Build the seed
         try:
-            seed = self._build_seed(requirements, metadata)
+            seed = anchor_opening_confirmations(self._build_seed(requirements, metadata), state)
 
             log.info(
                 "seed.generation.completed",
