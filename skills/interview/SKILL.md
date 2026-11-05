@@ -107,6 +107,28 @@ ambiguous response: ask the person to clarify. On resume use the persisted prese
 returned by the server; do not invent or re-order choices. If the server does not support
 this opt-in or reports a normal text question, use the existing free-text path.
 
+When answering a pending question in an opening-interpretation session, omit
+`last_question`: the server keeps the question it issued. If a different question was
+actually shown, do not attach the answer to the stored question; clarify the mismatch
+with the person. To reopen after there is no pending question, ask the person for their
+exact new question and confirm the wording with them. Send it as
+`opening_user_followup_question` with the answer and omit `last_question`. Never send
+a proposal, model-generated question, or host-rewritten text in this field. The server
+relies on the host's statement that this is the person's own question; text matching
+cannot establish its origin or detect every paraphrase. Agent-generated follow-up
+questions are not supported by this opening-session reopen path.
+
+**Optional competing interpretations:** If the person explicitly asks to compare
+interpretations, the discovered tool schema supports `propose_opening_interpretations`,
+and the interview runs in-process, opt in on start. Present both returned proposals,
+their model-cited unverified evidence and uncertainty, and the neither path before the open question. They
+are model hypotheses, not user decisions: neither a recommendation, silence, nor
+a bulk approval confirms an item. The server does not verify that the two ideas genuinely
+compete or that the cited evidence supports them. This path has no item-confirmation operation; ask
+the person to state their actual requirements in their own words and pass those words
+unchanged as the answer. Never turn an interpretation label into a user decision.
+On resume show the persisted proposals, without inventing or changing them.
+
 **Optional first-question batch:** Only if the person explicitly asks for several
 questions at once, and the tool schema offers `structured_first_batch`, start in
 in-process mode with that flag. The response is a *proposal*, not established

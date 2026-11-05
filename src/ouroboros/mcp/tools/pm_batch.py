@@ -183,6 +183,13 @@ async def record_turn_answers(engine: Any | None, state: Any, pairs: list[tuple[
     engine uniquely owns — the reframe map, and the open items it accumulates
     for the summary — and a runtime that plans no questions has neither.
     """
+    if state.proposed_opening is not None:
+        return Result.err(
+            ValidationError(
+                "Opening interpretation sessions require in-process interview handling",
+                field="session_id",
+            )
+        )
     for question, answer in pairs:
         stripped = answer.strip()
         placeholder = _SKIP_PLACEHOLDERS.get(stripped)

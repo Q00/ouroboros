@@ -8,6 +8,12 @@ from ouroboros.mcp.types import MCPToolParameter, ToolInputType
 def first_question_parameters() -> tuple[MCPToolParameter, ...]:
     return (
         MCPToolParameter(
+            name="propose_opening_interpretations",
+            type=ToolInputType.BOOLEAN,
+            required=False,
+            description="Opt in to two unconfirmed opening interpretations; explain or reject both in free text.",
+        ),
+        MCPToolParameter(
             name="structured_first_batch",
             type=ToolInputType.BOOLEAN,
             required=False,
