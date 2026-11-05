@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 import os
 import re
+import tokenize
 from typing import TYPE_CHECKING, Any
 
 from ouroboros.observability.logging import get_logger
@@ -73,9 +74,15 @@ def _extract_public_api(file_path: str, workspace_root: str) -> list[str]:
         # Check file size before reading to avoid memory exhaustion
         if os.path.getsize(resolved) > _MAX_FILE_SIZE_BYTES:
             return []
-        with open(resolved) as f:
+        # Python files may declare a source encoding (PEP 263). Other
+        # supported source languages use UTF-8, independent of system locale.
+        with (
+            tokenize.open(resolved)
+            if file_path.endswith(".py")
+            else open(resolved, encoding="utf-8")
+        ) as f:
             content = f.read()
-    except (OSError, UnicodeDecodeError):
+    except (OSError, UnicodeDecodeError, SyntaxError, LookupError):
         return []
 
     signatures: list[str] = []

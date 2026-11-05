@@ -179,7 +179,7 @@ def _load_seed_from_yaml(seed_file: Path) -> dict[str, Any]:
         raise typer.Exit(1)
 
     try:
-        with open(seed_file) as f:
+        with open(seed_file, encoding="utf-8") as f:
             data: dict[str, Any] = yaml.safe_load(f)
             return data
     except Exception as e:
