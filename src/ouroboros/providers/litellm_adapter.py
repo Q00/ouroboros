@@ -45,6 +45,7 @@ from ouroboros.providers.frugality_attestation import (
     credential_authority_digest,
     effective_completion_request,
 )
+from ouroboros.providers.openai_sampling import omit_openai_reasoning_sampling
 from ouroboros.providers.profiles import resolve_completion_profile_result
 
 _MINIMAX_MODEL_COST_OVERRIDES = {
@@ -1179,13 +1180,14 @@ class LiteLLMAdapter:
             kwargs["max_retries"] = _PROOF_LITELLM_MAX_RETRIES
 
         # Anthropic models don't accept both temperature and top_p together
-        # Other providers (OpenAI, OpenRouter) support both
+        # Direct OpenAI reasoning routes may also reject sampling controls.
         model_lower = config.model.lower()
         claude_5_5 = is_claude_5_5(config.model)
         openrouter_5_5 = claude_5_5 and model_lower.startswith("openrouter/")
-        if not claude_5_5:
+        omit_sampling = omit_openai_reasoning_sampling(config.model, config.reasoning_effort)
+        if not claude_5_5 and not omit_sampling:
             kwargs["temperature"] = config.temperature
-        if not ("anthropic" in model_lower or "claude" in model_lower):
+        if not omit_sampling and not ("anthropic" in model_lower or "claude" in model_lower):
             kwargs["top_p"] = config.top_p
 
         if config.stop:
