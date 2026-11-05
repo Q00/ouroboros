@@ -224,7 +224,10 @@ Notes:
   Anything else folds to `unknown` before serialization. A job that fails
   before its work function returns (pre-launch rejection, or a run whose
   terminal is recovered from linked execution evidence after a restart)
-  carries the same closed values; a background `evaluate` job that fails
+  carries the same closed values. A CLI run rejected while preparing or restoring
+  its task workspace also emits `launch_workspace_unavailable`; a Seed rejected
+  by model validation emits `launch_seed_invalid`. Other CLI pre-launch
+  failures are not covered by that event. A background `evaluate` job that fails
   carries only the branch-level `failure_reason_code` its handler already
   reports on the direct path (`validation`/`config`/`auth`/`timeout`/`model`),
   never a `failure_cause`.
