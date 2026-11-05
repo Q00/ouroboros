@@ -35,3 +35,16 @@ def test_no_notice_when_the_caller_chose_or_resumes(arguments: dict[str, str]) -
 def test_no_notice_when_the_configured_default_is_not_quality_first(configured: str | None) -> None:
     with patch(_TARGET, return_value=configured):
         assert policy_notice({}) == ""
+
+
+@pytest.mark.parametrize(
+    ("resolved", "later_config", "expected"),
+    [("adaptive", "quality_first", False), ("quality_first", "adaptive", True)],
+)
+def test_receipt_uses_resolved_mode_if_config_changes(
+    resolved: str, later_config: str, expected: bool
+) -> None:
+    with patch(_TARGET, return_value=later_config) as loader:
+        notice = policy_notice({}, resolved_efficiency_mode=resolved)
+    assert bool(notice) is expected
+    loader.assert_not_called()

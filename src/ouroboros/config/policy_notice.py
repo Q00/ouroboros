@@ -14,7 +14,9 @@ _NOTICE = (
 )
 
 
-def policy_notice(arguments: Mapping[str, Any]) -> str:
+def policy_notice(
+    arguments: Mapping[str, Any], *, resolved_efficiency_mode: str | None = None
+) -> str:
     """Return the suffix for a start receipt's ``Efficiency Mode`` line.
 
     A request routed to Ouroboros starts without a policy question; this tells
@@ -25,4 +27,9 @@ def policy_notice(arguments: Mapping[str, Any]) -> str:
     """
     if any(arguments.get(key) for key in ("efficiency_mode", "resume", "session_id")):
         return ""
-    return _NOTICE if default_execution_efficiency_mode() == "quality_first" else ""
+    mode = (
+        resolved_efficiency_mode
+        if resolved_efficiency_mode is not None
+        else default_execution_efficiency_mode()
+    )
+    return _NOTICE if mode == "quality_first" else ""
