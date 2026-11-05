@@ -49,6 +49,9 @@ class TestParseCoverageFromOutput:
     def test_colored_non_table_prose_does_not_hide_supported_total(self) -> None:
         assert parse_coverage_from_output("\x1b[32mTests passed\x1b[0m\nTOTAL 10 0 100%") == 1.0
 
+    def test_unicode_non_control_prose_preserves_supported_total(self) -> None:
+        assert parse_coverage_from_output("검사 성공 ✓\nTOTAL 10 0 100%") == 1.0
+
     def test_unrelated_go_json_output_does_not_hide_supported_total(self) -> None:
         output = (
             'TOTAL 10 0 100%\n{"Action":"output","Package":"p","Output":"ok\\n"}\n'
@@ -513,6 +516,15 @@ _UNPARSED_COVERAGE_OUTPUTS = {
     "colored go plain conflicting with TOTAL": (
         "TOTAL 10 0 100%\n\x1b[31mok p 0.1s coverage: 15% of statements\x1b[0m"
     ),
+    "unknown escape before go report": (
+        "TOTAL 10 0 100%\n\x1b[?25lok p 0.1s coverage: 15% of statements"
+    ),
+    "c1 csi before go report": ("TOTAL 10 0 100%\n\x9b?25lok p 0.1s coverage: 15% of statements"),
+    "c1 sgr before go report": ("TOTAL 10 0 100%\n\x9b31mok p 0.1s coverage: 15% of statements"),
+    "escaped c1 inside go json": (
+        'TOTAL 10 0 100%\n{"Action":"output","Package":"p",'
+        '"Output":"\\u009b?25lok p 0.1s coverage: 15% of statements\\n"}'
+    ),
     "go conflicting with TOTAL": (
         "TOTAL 10 0 100%\nok  \texample.com/m\t0.002s\tcoverage: 15.0% of statements"
     ),
@@ -530,7 +542,9 @@ _UNPARSED_COVERAGE_OUTPUTS = {
     "malformed ANSI table beside TOTAL": (
         "TOTAL 10 0 100%\n\x1b[" + "3" * 33 + "mAll files | 15.2 | 10.1 | 12.3 | 15.2 |"
     ),
-    "deep JSON beside TOTAL": "TOTAL 10 0 100%\n" + '{"x":' * 10000 + "0" + "}" * 10000,
+    # Exceed the explicit row limit rather than depending on the interpreter's
+    # JSON recursion limit, which differs across Python versions.
+    "oversized deep JSON beside TOTAL": "TOTAL 10 0 100%\n" + '{"x":' * 11000 + "0" + "}" * 11000,
     "malformed JSON beside TOTAL": 'TOTAL 10 0 100%\n{"Action":"output",',
     "excess JSON events beside TOTAL": (
         "TOTAL 10 0 100%\n" + '{"Action":"output","Package":"p","Output":"x"}\n' * 257

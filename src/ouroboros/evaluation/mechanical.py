@@ -189,6 +189,12 @@ def parse_coverage_from_output(output: str) -> float | None:
     # Look for "TOTAL ... XX%" pattern
     import re
 
+    # C1 control characters include the single-character CSI (U+009B).
+    # Do not interpret terminal control semantics when approving evidence.
+    # Check before splitlines, which itself consumes some C1 characters.
+    if any("\x80" <= char <= "\x9f" for char in output):
+        return None
+
     # Pattern matches lines like "TOTAL   1234   123  90%"
     pattern = r"[ \t]*TOTAL[ \t]+\d+[ \t]+\d+[ \t]+(\d+)%[ \t]*"
     # Alternative pattern: a line that starts with "Coverage: XX%". Anchored so
@@ -224,8 +230,10 @@ def parse_coverage_from_output(output: str) -> float | None:
             return None
         if re.match(jest_coverage, uncolored, re.IGNORECASE):
             return None
-        # An unrecognized escape in a table-like row may hide the aggregate.
-        if "\x1b" in uncolored and "|" in uncolored:
+        # An unknown control sequence can conceal a measurement in any row,
+        # including a Go package result with no table separator. Do not guess
+        # at its terminal semantics when using output as approval evidence.
+        if "\x1b" in uncolored:
             return None
 
     # go test -json wraps the same text in line-delimited output events. Do
@@ -254,6 +262,9 @@ def parse_coverage_from_output(output: str) -> float | None:
         text = event.get("Output")
         if not isinstance(text, str):
             continue
+        # JSON escapes can hide C1 controls until decoding.
+        if any("\x80" <= char <= "\x9f" for char in text):
+            return None
         event_count += 1
         stream_size += len(text)
         if (
