@@ -837,3 +837,26 @@ class TestReasoningEffortPassthrough:
             CompletionConfig(model="claude-sonnet-4-6"),
         )
         assert "reasoning_effort" not in kwargs
+
+
+@pytest.mark.parametrize(
+    ("model", "effort", "omit"),
+    [
+        ("openai/o3", None, True),
+        ("o4-mini", None, True),
+        ("openai/gpt-5-mini", None, True),
+        ("openai/gpt-5.4", "high", True),
+        ("openai/gpt-5.4", None, False),
+        ("openai/gpt-5.4", "none", False),
+        ("openai/gpt-4o", "high", False),
+        ("openai/gpt-5-chat-latest", "high", False),
+        ("openai/gpt-5.2-chat-latest", "high", False),
+        ("openrouter/openai/o3", "high", False),
+    ],
+)
+def test_openai_reasoning_sampling_kwargs(model: str, effort: str | None, omit: bool) -> None:
+    config = CompletionConfig(model=model, reasoning_effort=effort)
+    kwargs = LiteLLMAdapter()._build_completion_kwargs([], config)
+    assert ("temperature" not in kwargs) is omit
+    assert ("top_p" not in kwargs) is omit
+    assert kwargs.get("reasoning_effort") == effort
