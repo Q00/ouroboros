@@ -2038,7 +2038,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     f"Runtime Backend: {effective_runtime_backend}\n"
                     f"LLM Backend: {resolved_llm_backend}\n"
                     f"Efficiency Mode: {execution_preferences.efficiency_mode.value}"
-                    f"{policy_notice(arguments)}\n"
+                    f"{policy_notice(arguments, resolved_efficiency_mode=execution_preferences.efficiency_mode.value)}\n"
                     "Frugality Assurance: "
                     f"{execution_preferences.frugality_assurance.value}\n"
                 )

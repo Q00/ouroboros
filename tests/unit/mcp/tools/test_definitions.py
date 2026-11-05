@@ -280,13 +280,25 @@ class TestExecuteSeedHandler:
         # a persisted contract mirrors the fresh default.
         assert captured_modes == [True, False, True, False, False, True]
 
+    @pytest.mark.parametrize(
+        "selected, expected, later",
+        [
+            ("adaptive", "adaptive", "quality_first"),
+            ("quality_first", "quality_first", "adaptive"),
+            (None, "adaptive", "quality_first"),
+        ],
+    )
     async def test_handle_passes_execution_model_to_runtime(
         self,
         memory_event_store: EventStore,
         monkeypatch: pytest.MonkeyPatch,
+        selected: str | None,
+        expected: str,
+        later: str,
     ) -> None:
         """Execution handoff honors OUROBOROS_EXECUTION_MODEL for CLI runtimes."""
         captured_runtime_kwargs: dict[str, object] = {}
+        captured_runner_kwargs: dict[str, object] = {}
         tracker = SessionTracker.create("exec_model", "seed-123")
         workspace = SimpleNamespace(
             effective_cwd="/tmp/ouroboros-worktree",
@@ -307,7 +319,7 @@ class TestExecuteSeedHandler:
 
         class FakeRunner:
             def __init__(self, *args: object, **kwargs: object) -> None:
-                pass
+                captured_runner_kwargs.update(kwargs)
 
             def _has_live_process_local_authority(self, *args: object, **kwargs: object) -> bool:
                 return False
@@ -330,6 +342,14 @@ class TestExecuteSeedHandler:
             return SimpleNamespace(runtime_backend="pi")
 
         monkeypatch.setenv("OUROBOROS_PIN_MODELS", "1")
+        monkeypatch.setattr(
+            "ouroboros.mcp.tools.execution_handlers.default_execution_efficiency_mode",
+            lambda: selected,
+        )
+        import importlib
+
+        notice_module = importlib.import_module("ouroboros.config.policy_notice")
+        monkeypatch.setattr(notice_module, "default_execution_efficiency_mode", lambda: later)
         monkeypatch.setenv("OUROBOROS_EXECUTION_MODEL", "openai-codex/gpt-5.4-mini")
         monkeypatch.setattr(
             "ouroboros.mcp.tools.execution_handlers.SessionRepository",
@@ -360,6 +380,9 @@ class TestExecuteSeedHandler:
         )
 
         assert result.is_ok
+        assert captured_runner_kwargs["efficiency_mode"] == selected
+        assert f"Efficiency Mode: {expected}" in result.value.text_content
+        assert ("(default;" in result.value.text_content) == (expected == "quality_first")
         assert captured_runtime_kwargs["backend"] == "pi"
         assert captured_runtime_kwargs["model"] == "openai-codex/gpt-5.4-mini"
         assert captured_runtime_kwargs["llm_backend"] == "claude_code"
