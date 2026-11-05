@@ -183,7 +183,9 @@ def generate_pm_markdown(seed: PMSeed) -> str:
             lines.append(item)
         lines.append("")
 
-    confirmation_section = opening_confirmation_markdown(seed.opening_confirmations)
+    confirmation_section = opening_confirmation_markdown(
+        seed.opening_confirmations, seed.opening_state_revision
+    )
     if confirmation_section:
         lines.extend([confirmation_section, ""])
     return "\n".join(lines)

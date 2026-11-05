@@ -115,6 +115,7 @@ async def test_pm_seed_roundtrip_and_deterministic_document_preserve_only_confir
     template = generate_pm_markdown(seed)
     assert "CONFIRMED_ALPHA" in template and "UNCONFIRMED_BETA" not in template
     assert "snapshot" in template and "server cannot verify" in template
+    assert f"Source state revision: {state.persistence_revision}" in template
     document_adapter = SimpleNamespace(complete=AsyncMock())
     document = PMDocumentGenerator(llm_adapter=document_adapter, model="synthetic")
     generated = await document.generate(seed, interview_state=state)

@@ -65,7 +65,9 @@ def anchor_pm_opening(seed: "PMSeed", state: "InterviewState") -> "PMSeed":
     )
 
 
-def opening_confirmation_markdown(confirmations: tuple[PMOpeningConfirmation, ...]) -> str:
+def opening_confirmation_markdown(
+    confirmations: tuple[PMOpeningConfirmation, ...], revision: str
+) -> str:
     if not confirmations:
         return ""
     lines = [
@@ -74,6 +76,8 @@ def opening_confirmation_markdown(confirmations: tuple[PMOpeningConfirmation, ..
         "These records are a snapshot and may have changed since generation. They claim "
         "to be host-reported; the server cannot verify their source or whether the person "
         "saw or answered them.",
+        "",
+        f"Source state revision: {revision or 'unavailable'}",
         "",
     ]
     for confirmation in confirmations:
