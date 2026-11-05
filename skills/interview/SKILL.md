@@ -139,8 +139,20 @@ a number, begins with a single letter or number followed by a comma, or contains
 `/` followed by a question number and colon; otherwise it may be rejected or
 interpreted as a choice or another answer. Use `-` only for none on a
 multi-select question. Ask the person to clarify ambiguous or invalid input;
-never turn an out-of-range or mixed-format choice into an inferred answer.
-Send the exact input in `batch_answers_text`, together with the session ID, exact
+never turn an out-of-range or mixed-format choice into an inferred answer. For
+one pending batch, allow at most two clarification attempts across consecutive
+invalid text responses (including a server response that says the batch answer
+text is invalid). Do not count a
+transport, session, digest, or persistence error as an invalid answer. If the
+input is still invalid, stop asking for that batch format and offer to abandon
+the pending batch and continue one question at a time. Explain that previously
+recorded answers remain, while unanswered proposals and any input not yet
+recorded will be discarded. Send `batch_reject: true` with the same digest only
+if the person agrees; otherwise leave the pending batch intact and do not send
+the invalid input. The host keeps this count locally; the server does not enforce
+or persist it across host or session restarts.
+When the input is valid, send the exact input in `batch_answers_text`, together
+with the session ID, exact
 `batch_confirm_digest`, and `batch_independence_confirmed: true`. A native host
 can instead send `batch_answers` with stable `question_id` and exactly one of
 `answer` or `selected_choices`; never mix both formats or fabricate an answer.
