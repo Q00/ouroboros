@@ -3059,8 +3059,7 @@ class InterviewHandler:
                             tool_name="ouroboros_interview",
                         )
                     )
-                else:
-                    pending_question = last_question
+                pending_question = last_question
 
             intent_guard_report = _guard_interview_answer(
                 state=state,
