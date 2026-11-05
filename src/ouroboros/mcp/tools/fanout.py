@@ -975,7 +975,19 @@ def synthesize_fanout_results(prepared: PreparedFanoutSynthesis) -> dict[str, An
                 for output in provided.values()
             )
         except Exception:
-            audit = None
+            # Absence of an audit normally means no citations were found. An
+            # audit failure must not masquerade as that successful outcome:
+            # the host cannot treat any source in this panel as verified.
+            audit = {
+                "status": "unavailable",
+                "checked": 0,
+                "urls": {},
+                "unverified_present": True,
+                "rule": (
+                    "Citation audit unavailable: treat all sources in this "
+                    "panel as unverified or omit them; do not cite them as authority."
+                ),
+            }
         response = {
             "status": "complete",
             "fanout_id": fanout_id,
