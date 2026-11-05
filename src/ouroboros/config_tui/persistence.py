@@ -11,6 +11,9 @@ unvalidated write path to ``~/.ouroboros/config.yaml``.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import suppress
+from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 
 import yaml
@@ -19,7 +22,7 @@ from ouroboros.config.models import get_config_dir
 
 
 class ConfigWriteError(Exception):
-    """A settings write was rejected; the file was left (or rolled back) unmodified."""
+    """A settings write failed; the message reports any rollback failure."""
 
 
 def load_raw_config() -> dict[str, Any]:
@@ -39,12 +42,13 @@ def load_raw_config() -> dict[str, Any]:
 
 
 def apply_config_values(values: Mapping[str, Any]) -> None:
-    """Apply dot-notation ``{key: value}`` updates atomically.
+    """Apply a validated batch of dot-notation ``{key: value}`` updates.
 
     A ``None`` value deletes the key (used to clear a per-stage runtime
     override back to "inherit"). Raises :class:`ConfigWriteError` on an
-    unknown key or when the resulting config fails schema validation; in
-    the latter case the previous file content is restored byte-for-byte.
+    unknown key or a failed save. Validation and recoverable I/O failures
+    restore the previous file byte-for-byte without changing the Undo backup.
+    Only a successful save advances the one-step Undo snapshot.
     """
     if not values:
         return
@@ -77,24 +81,38 @@ def apply_config_values(values: Mapping[str, Any]) -> None:
             target[keys[-1]] = value
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    if original_bytes is not None:
-        # One-step undo support: `ouroboros config undo` swaps this back in.
-        (config_path.parent / "config.yaml.bak").write_bytes(original_bytes)
-    config_path.write_text(
-        yaml.dump(data, default_flow_style=False, sort_keys=False), encoding="utf-8"
-    )
-
+    backup_temp: Path | None = None
     try:
+        config_path.write_text(
+            yaml.dump(data, default_flow_style=False, sort_keys=False), encoding="utf-8"
+        )
         from ouroboros.config.loader import load_config
 
         load_config()
+        if original_bytes is not None:
+            # Preserve the previous Undo snapshot until validation and the
+            # complete backup write succeed. Close before replacing on Windows.
+            with NamedTemporaryFile(
+                dir=config_path.parent, prefix=".config.yaml.bak-", delete=False
+            ) as backup:
+                backup_temp = Path(backup.name)
+                backup.write(original_bytes)
+            backup_temp.replace(config_path.parent / "config.yaml.bak")
     except Exception as exc:
-        if original_bytes is None:
-            config_path.unlink(missing_ok=True)
-        else:
-            config_path.write_bytes(original_bytes)
-        msg = f"Invalid value — rolled back. {exc}"
+        try:
+            if original_bytes is None:
+                config_path.unlink(missing_ok=True)
+            else:
+                config_path.write_bytes(original_bytes)
+        except OSError as rollback_exc:
+            msg = f"{exc}. Configuration rollback also failed: {rollback_exc}"
+            raise ConfigWriteError(msg) from exc
+        msg = f"Configuration rolled back. {exc}"
         raise ConfigWriteError(msg) from exc
+    finally:
+        if backup_temp is not None:
+            with suppress(OSError):
+                backup_temp.unlink(missing_ok=True)
 
 
 __all__ = ["ConfigWriteError", "apply_config_values", "load_raw_config"]
