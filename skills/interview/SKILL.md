@@ -119,6 +119,18 @@ in the same user interaction. If they do not confirm, send `batch_reject: true` 
 When the host does not expose response metadata, take the labelled Session ID,
 Batch digest and question IDs from the server's text response instead.
 
+If a native host has a maximum number of questions per presentation, pass its
+capacity (1–5) as `batch_page_size` on start and repeat it on resume and answer
+calls. Display the returned `meta.question_pages` in order, without editing or
+dropping questions, and use each item's `batch_number` as its global number across
+all pages. A page is only a presentation group: show the entire batch before
+requesting independence confirmation, and retain the same batch digest and
+question IDs for all pages. If a native interface requires an answer before the
+entire batch can be reviewed, use the complete text fallback instead. Hosts
+without metadata can also display the complete text. On partial-answer resume,
+use `answered_question_ids` to identify already recorded items: show them as
+answered if needed for context, but do not ask the person to answer them again.
+
 After explicit confirmation, collect answers by question. In text mode display
 numbered questions with a-d options and accept `1: a / 2: a,c / 3: "free text"`;
 numeric choice labels are also accepted (for example `1: 2 / 2: 1,3`), as is
