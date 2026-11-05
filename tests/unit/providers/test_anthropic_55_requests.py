@@ -176,7 +176,14 @@ async def test_litellm_55_actual_http_body(
         assert not {"thinking", "output_config", "reasoning"} & request.keys()
     if response_format:
         if is_openrouter:
-            assert request["response_format"] == response_format
+            expected = response_format
+            if response_format["type"] == "json_schema":
+                # A bare schema is wrapped in the OpenAI name/schema form.
+                expected = {
+                    "type": "json_schema",
+                    "json_schema": {"name": "response", "schema": response_format["json_schema"]},
+                }
+            assert request["response_format"] == expected
         else:
             assert "JSON" in json.dumps(request["system"])
             assert "tools" not in request
