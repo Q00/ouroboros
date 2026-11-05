@@ -7,6 +7,7 @@ import configparser
 from contextlib import ExitStack
 import json
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import tomllib
@@ -74,6 +75,74 @@ def _nonexecuting_pytest_mode(command: list[str], *, check_config: bool = True) 
     def executable_name(value: str) -> str:
         return Path(value).name.lower().removesuffix(".exe")
 
+    def coverage_pytest_options(args: list[str]) -> list[str] | None:
+        # Coverage options end at the target; never interpret target arguments
+        # as launcher options. Unknown options are not guessed.
+        flags = {"-a", "--append", "--branch", "-L", "--pylib", "-p", "--parallel-mode", "--timid"}
+        valued = {
+            "--concurrency",
+            "--context",
+            "--data-file",
+            "--include",
+            "--omit",
+            "--save-signal",
+            "--source",
+            "--debug",
+            "--rcfile",
+        }
+        is_module = False
+        index = 0
+        while index < len(args):
+            value = args[index]
+            if value == "--":
+                index += 1
+                break
+            if value in {"-m", "--module"}:
+                is_module = True
+            elif value in flags:
+                pass
+            elif re.fullmatch(r"-[apLm]+", value):
+                is_module = is_module or "m" in value
+            elif value in valued:
+                index += 1
+                if index >= len(args):
+                    return None
+            elif "=" in value and value.split("=", 1)[0] in valued:
+                pass
+            elif value.startswith("-"):
+                return None
+            else:
+                break
+            index += 1
+        if is_module and args[index : index + 1] == ["pytest"]:
+            return args[index + 1 :]
+        if not is_module and args[index:] and executable_name(args[index]) in {"pytest", "py.test"}:
+            return args[index + 1 :]
+        return None
+
+    def python_module(args: list[str], *, windows_launcher: bool) -> tuple[str, list[str]] | None:
+        flags = {"-B", "-E", "-I", "-O", "-OO", "-P", "-S", "-s", "-u", "-q", "-v", "-b", "-bb"}
+        index = 0
+        while index < len(args):
+            value = args[index]
+            if value == "-m" and index + 1 < len(args):
+                return args[index + 1], args[index + 2 :]
+            if value in {"-W", "-X", "--check-hash-based-pycs"}:
+                index += 1
+                if index >= len(args):
+                    return None
+            elif (
+                value in flags
+                or re.fullmatch(r"-[bBEIOPqSsuv]+", value)
+                or (windows_launcher and re.fullmatch(r"-\d+(?:\.\d+)*", value))
+                or (value.startswith(("-W", "-X")) and len(value) > 2)
+            ):
+                pass
+            else:
+                return None
+            index += 1
+        return None
+
     executable = executable_name(command[0])
     if executable in {"pytest", "py.test"}:
         options = command[1:]
@@ -86,7 +155,29 @@ def _nonexecuting_pytest_mode(command: list[str], *, check_config: bool = True) 
             if executable_name(part) in {"pytest", "py.test"}
         )
         options = command[index + 1 :]
+    elif re.fullmatch(r"coverage(?:-?\d+(?:\.\d+)*)?", executable) and command[1:2] == ["run"]:
+        options = coverage_pytest_options(command[2:])
+        if options is None:
+            return False
+    elif (
+        re.fullmatch(r"(?:(?:pythonw?|pypy)(?:\d+(?:\.\d+)*)?|py)", executable)
+        and (module_call := python_module(command[1:], windows_launcher=executable == "py"))
+        is not None
+    ):
+        module, module_args = module_call
+        if module == "pytest":
+            options = module_args
+        elif module == "coverage" and module_args[:1] == ["run"]:
+            options = coverage_pytest_options(module_args[1:])
+            if options is None:
+                return False
+        else:
+            return False
+    elif re.fullmatch(r"(?:(?:pythonw?|pypy)(?:\d+(?:\.\d+)*)?|py)", executable):
+        return False
     elif "-m" in command and command[command.index("-m") + 1 :][:1] == ["pytest"]:
+        # Preserve existing handling for host launchers such as env and custom
+        # Python aliases; their command contracts are not parsed here.
         options = command[command.index("-m") + 2 :]
     else:
         return False
