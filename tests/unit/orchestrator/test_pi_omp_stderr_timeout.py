@@ -152,3 +152,55 @@ async def test_real_child_terminated_with_external_stderr_writer(runtime_type, t
             with contextlib.suppress(ProcessLookupError):
                 child.kill()
             await child.wait()
+
+
+class _FailedStderr:
+    async def read(self, _n: int = -1) -> bytes:
+        raise OSError("synthetic stderr read failure")
+
+
+@pytest.mark.parametrize("runtime_type", [PiRuntime, OmpRuntime])
+async def test_stdout_timeout_survives_stderr_reader_failure(runtime_type, tmp_path) -> None:
+    with patch("ouroboros.orchestrator.pi_runtime._probe_pi_native_param_flags", return_value=None):
+        runtime = runtime_type(
+            cli_path="/unused/pi", cwd=tmp_path, startup_output_timeout_seconds=0.02
+        )
+    runtime._process_shutdown_timeout_seconds = 0.02
+    process = _FakeProcess()
+    process.stderr = _FailedStderr()  # type: ignore[assignment]
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=process),
+        patch.object(runtime, "_terminate_process", side_effect=process.terminate),
+    ):
+        result = await asyncio.wait_for(runtime.execute_task_to_result("test"), timeout=0.5)
+    assert result.is_err
+    assert "startup window" in str(result.error)
+
+
+@pytest.mark.parametrize(
+    ("runtime_type", "module_name"),
+    [
+        (PiRuntime, "ouroboros.orchestrator.pi_runtime"),
+        (OmpRuntime, "ouroboros.orchestrator.omp_runtime"),
+    ],
+)
+async def test_stdout_timeout_survives_stderr_line_overflow(
+    runtime_type, module_name, tmp_path
+) -> None:
+    with patch("ouroboros.orchestrator.pi_runtime._probe_pi_native_param_flags", return_value=None):
+        runtime = runtime_type(
+            cli_path="/unused/pi", cwd=tmp_path, startup_output_timeout_seconds=0.02
+        )
+    runtime._process_shutdown_timeout_seconds = 0.02
+    process = _FakeProcess()
+    stderr = _FinishedStderr()
+    stderr.data = b"x" * 64
+    process.stderr = stderr  # type: ignore[assignment]
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=process),
+        patch.object(runtime, "_terminate_process", side_effect=process.terminate),
+        patch(f"{module_name}._MAX_LINE_BUFFER_BYTES", 32),
+    ):
+        result = await asyncio.wait_for(runtime.execute_task_to_result("test"), timeout=0.5)
+    assert result.is_err
+    assert "startup window" in str(result.error)
