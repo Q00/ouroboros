@@ -280,6 +280,7 @@ class TestExecuteSeedHandler:
         # a persisted contract mirrors the fresh default.
         assert captured_modes == [True, False, True, False, False, True]
 
+    @pytest.mark.parametrize("use_snapshot", [False, True])
     @pytest.mark.parametrize(
         "selected, expected, later",
         [
@@ -295,6 +296,7 @@ class TestExecuteSeedHandler:
         selected: str | None,
         expected: str,
         later: str,
+        use_snapshot: bool,
     ) -> None:
         """Execution handoff honors OUROBOROS_EXECUTION_MODEL for CLI runtimes."""
         captured_runtime_kwargs: dict[str, object] = {}
@@ -374,9 +376,21 @@ class TestExecuteSeedHandler:
             llm_backend="claude_code",
         )
 
+        snapshot = None
+        if use_snapshot:
+            from ouroboros.mcp.tools.execution_handlers import (
+                _resolve_execution_preferences_request,
+            )
+
+            snapshot = _resolve_execution_preferences_request({}, is_resume=False)
+            monkeypatch.setattr(
+                "ouroboros.mcp.tools.execution_handlers.default_execution_efficiency_mode",
+                lambda: later,
+            )
         result = await handler.handle(
             {"seed_content": VALID_SEED_YAML, "skip_qa": True},
             synchronous=True,
+            _preference_snapshot=snapshot,
         )
 
         assert result.is_ok
