@@ -783,7 +783,25 @@ def _file_manifest(package: CheckPackage) -> tuple[set[str], list[dict[str, Any]
     ]
 
 
-_MAX_SCAN_ENTRIES = 200_000
+_DEFAULT_MAX_SCAN_ENTRIES = 2_000_000
+_SCAN_ENTRIES_ENV = "OUROBOROS_LEAK_SCAN_MAX_ENTRIES"
+
+
+def _scan_entries_budget() -> int:
+    """The scan budget: ``OUROBOROS_LEAK_SCAN_MAX_ENTRIES`` when it is a positive integer.
+
+    The default fits a JavaScript monorepo with an installed ``node_modules``
+    (a few hundred thousand entries); 200 000 refused every run in one.
+    """
+    raw = os.environ.get(_SCAN_ENTRIES_ENV, "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_MAX_SCAN_ENTRIES
+    return value if value > 0 else _DEFAULT_MAX_SCAN_ENTRIES
+
+
+_MAX_SCAN_ENTRIES = _scan_entries_budget()
 _MAX_SCAN_DEPTH = 64
 """Entries the scan reads through links that lead out of the workspace before it refuses."""
 
