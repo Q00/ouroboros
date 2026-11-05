@@ -231,6 +231,10 @@ def parse_coverage_from_output(output: str) -> float | None:
     # decimal precision. It cannot safely be assigned to a report when mixed
     # with another result; the same applies to a bare percentage.
     bare_coverage = r"[ \t]*\d+(?:\.\d+)?%?[ \t]*"
+    # LCOV contains per-file records rather than a supported aggregate. Treat
+    # recognizable partial records as ambiguous too; their values need not be
+    # complete for a separate TOTAL to mask an unreadable report.
+    lcov = r"[ \t]*(?:(?:TN|SF|VER|FN|FNDA|FNF|FNH|BRDA|BRF|BRH|DA|LF|LH):.*|end_of_record)[ \t]*"
     for row in output.splitlines():
         # Strip bounded terminal SGR sequences only for detection, not proof.
         uncolored = re.sub(r"\x1b\[[0-9;]{0,32}m", "", row)
@@ -243,6 +247,7 @@ def parse_coverage_from_output(output: str) -> float | None:
             re.match(jest_coverage, uncolored, re.IGNORECASE)
             or re.match(tarpaulin_coverage, uncolored, re.IGNORECASE)
             or re.fullmatch(bare_coverage, uncolored)
+            or re.fullmatch(lcov, uncolored)
         ):
             return None
         # An unknown control sequence can conceal a measurement in any row,
@@ -299,6 +304,7 @@ def parse_coverage_from_output(output: str) -> float | None:
             or re.match(jest_coverage, line, re.IGNORECASE)
             or re.match(tarpaulin_coverage, line, re.IGNORECASE)
             or re.fullmatch(bare_coverage, line)
+            or re.fullmatch(lcov, line)
             for line in uncolored.splitlines()
         ):
             return None

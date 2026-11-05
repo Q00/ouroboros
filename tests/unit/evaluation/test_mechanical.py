@@ -49,6 +49,10 @@ class TestParseCoverageFromOutput:
     def test_colored_non_table_prose_does_not_hide_supported_total(self) -> None:
         assert parse_coverage_from_output("\x1b[32mTests passed\x1b[0m\nTOTAL 10 0 100%") == 1.0
 
+    def test_unrelated_lcov_like_words_preserve_supported_total(self) -> None:
+        output = "daily: checks passed\nSF builds passed\nTOTAL 10 0 100%"
+        assert parse_coverage_from_output(output) == 1.0
+
     def test_unicode_non_control_prose_preserves_supported_total(self) -> None:
         assert parse_coverage_from_output("검사 성공 ✓\nTOTAL 10 0 100%") == 1.0
 
@@ -580,6 +584,30 @@ _UNPARSED_COVERAGE_OUTPUTS = {
     "malformed JSON beside TOTAL": 'TOTAL 10 0 100%\n{"Action":"output",',
     "excess JSON events beside TOTAL": (
         "TOTAL 10 0 100%\n" + '{"Action":"output","Package":"p","Output":"x"}\n' * 257
+    ),
+    "node lcov conflicting with TOTAL": (
+        "TOTAL 10 0 100%\nTN:\nSF:src/subject.js\nDA:1,1\nDA:2,0\nLH:1\nLF:2\nend_of_record\n"
+    ),
+    "colored lcov source beside TOTAL": ("TOTAL 10 0 100%\n\x1b[32mSF:src/subject.js\x1b[0m\n"),
+    "lcov counters beside TOTAL": "TOTAL 10 0 100%\nLH:1\nLF:2\n",
+    **{
+        f"lcov {name} partial record": f"TOTAL 10 0 100%\n{row}\n"
+        for name, row in {
+            "line": "DA:1,0",
+            "branch": "BRDA:12,0,1,0",
+            "function": "FN:7,foo",
+            "function-hit": "FNDA:0,foo",
+            "test-name": "TN:",
+            "version": "VER:123",
+            "truncated-line": "DA:",
+            "truncated-source": "SF:",
+            "truncated-count": "LF:",
+            "record-end": "end_of_record",
+        }.items()
+    },
+    "lcov output split across go events": (
+        'TOTAL 10 0 100%\n{"Action":"output","Package":"p","Output":"SF"}\n'
+        '{"Action":"output","Package":"p","Output":":src/x.js\\n"}'
     ),
     "cargo tarpaulin": "15.00% coverage, 15/100 lines covered",
     "tarpaulin conflicting with TOTAL": "TOTAL 10 0 100%\n15.00% coverage, 15/100 lines covered",
