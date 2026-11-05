@@ -1192,6 +1192,8 @@ class ExecuteSeedHandler(BridgeAwareMixin):
         session_id_override: str | None = None,
         synchronous: bool = False,
         check_package: CheckPackageRun | None = None,
+        _preference_snapshot: tuple[ResolvedExecutionPreferences, str | None, str | None]
+        | None = None,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Handle a seed execution request.
 
@@ -1266,7 +1268,9 @@ class ExecuteSeedHandler(BridgeAwareMixin):
         )
         try:
             execution_preferences, raw_efficiency_mode, raw_frugality_assurance = (
-                _resolve_execution_preferences_request(arguments, is_resume=is_resume)
+                _preference_snapshot
+                if _preference_snapshot is not None and not is_resume
+                else _resolve_execution_preferences_request(arguments, is_resume=is_resume)
             )
         except ValueError as exc:
             return Result.err(MCPToolError(str(exc), tool_name="ouroboros_execute_seed"))
@@ -2747,6 +2751,11 @@ class StartExecuteSeedHandler:
                 session_id_override=new_session_id,
                 synchronous=True,
                 check_package=check_package,
+                _preference_snapshot=(
+                    (execution_preferences, _raw_efficiency_mode, _raw_frugality_assurance)
+                    if not is_resume
+                    else None
+                ),
             )
             if result.is_err:
                 raise job_work_error(result.error)
@@ -2829,7 +2838,8 @@ class StartExecuteSeedHandler:
             f"Execution ID: {snapshot.links.execution_id or 'pending'}\n\n"
             f"Runtime Backend: {runtime_backend}\n"
             f"LLM Backend: {llm_backend}\n"
-            f"Efficiency Mode: {execution_preferences.efficiency_mode.value}{policy_notice(arguments)}\n"
+            f"Efficiency Mode: {execution_preferences.efficiency_mode.value}"
+            f"{policy_notice(arguments, resolved_efficiency_mode=execution_preferences.efficiency_mode.value)}\n"
             "Frugality Assurance: "
             f"{execution_preferences.frugality_assurance.value}\n"
             f"{dashboard_line}\n"
