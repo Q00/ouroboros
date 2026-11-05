@@ -1746,3 +1746,56 @@ class TestInstallHermesSkills:
         assert not real_workspace.joinpath(
             ".hermes", "skills", "autonomous-ai-agents", "ouroboros", "run"
         ).exists()
+
+
+def test_restore_owned_backup_preserves_concurrent_empty_target(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A generation appearing after the absence check must never be replaced."""
+    from ouroboros.hermes.artifacts import _restore_owned_backup
+
+    backup = tmp_path / "backup"
+    backup.mkdir()
+    (backup / "original").write_text("original", encoding="utf-8")
+    target = tmp_path / "target"
+    original_is_symlink = Path.is_symlink
+
+    def race(path: Path) -> bool:
+        if path == target and not target.exists():
+            target.mkdir()
+            return False
+        return original_is_symlink(path)
+
+    monkeypatch.setattr(Path, "is_symlink", race)
+    with pytest.raises(OSError):
+        _restore_owned_backup(backup, target)
+    assert target.is_dir()
+    assert list(target.iterdir()) == []
+    assert (backup / "original").read_text(encoding="utf-8") == "original"
+
+
+def test_restore_cleanup_failure_preserves_concurrent_backup(tmp_path: Path, monkeypatch) -> None:
+    """Rollback cannot replace a backup name claimed after its absence check."""
+    from ouroboros.hermes.artifacts import _restore_owned_backup
+
+    backup = tmp_path / "backup"
+    backup.mkdir()
+    (backup / "original").write_text("original", encoding="utf-8")
+    target = tmp_path / "target"
+    original_exists = Path.exists
+
+    def race(path: Path) -> bool:
+        if path == backup and original_exists(target) and not original_exists(backup):
+            backup.mkdir()
+            return False
+        return original_exists(path)
+
+    def fail_remove(_path: Path) -> None:
+        raise OSError("synthetic marker cleanup failure")
+
+    monkeypatch.setattr(Path, "exists", race)
+    monkeypatch.setattr("ouroboros.hermes.artifacts._remove_target_path", fail_remove)
+    with pytest.raises(OSError):
+        _restore_owned_backup(backup, target)
+    assert list(backup.iterdir()) == []
+    assert (target / "original").read_text(encoding="utf-8") == "original"
