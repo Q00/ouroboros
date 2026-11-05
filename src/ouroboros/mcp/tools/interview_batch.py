@@ -405,7 +405,7 @@ async def reject_batch(
 
 
 def parse_batch_text(value: str, question_ids: list[str]) -> list[dict[str, Any]]:
-    """Parse 1:a / 2:a,c / 3:"free text" without guessing free text as choices."""
+    """Parse labelled choices and free text; JSON quotes disambiguate literal labels."""
     entries: list[dict[str, Any]] = []
     pos = 0
     while pos < len(value):
@@ -423,16 +423,34 @@ def parse_batch_text(value: str, question_ids: list[str]) -> list[dict[str, Any]
             item = {"question_id": question_ids[number - 1], "answer": answer}
             pos += consumed
         else:
-            labels = re.match(r"(?:-|[a-dA-D](?:\s*,\s*[a-dA-D])*)", value[pos:])
-            if labels is None:
-                raise ValueError("Invalid selection")
-            from ouroboros.interview_adapters.first_question import parse_selection_text
-
-            item = {
-                "question_id": question_ids[number - 1],
-                "selected_choices": parse_selection_text(labels.group(0)),
-            }
-            pos += labels.end()
+            boundary = re.search(r"\s*/\s*(?=[0-9]+\s*:)", value[pos:])
+            end = pos + boundary.start() if boundary else len(value)
+            segment = value[pos:end].strip()
+            if not segment or re.fullmatch(
+                r"(?:-|(?:[a-zA-Z]|[0-9]+)(?:\s*,\s*(?:[a-zA-Z]|[0-9]+)?)*)\s*/", segment
+            ):
+                raise ValueError("Invalid answer")
+            tokens = [token.strip() for token in segment.split(",")]
+            looks_like_selection = (
+                segment == "-"
+                or (len(tokens) > 1 and re.fullmatch(r"[a-zA-Z]|[0-9]+", tokens[0]))
+                or all(re.fullmatch(r"[a-zA-Z]|[0-9]+", token) for token in tokens)
+            )
+            if looks_like_selection:
+                if segment == "-":
+                    indices = []
+                elif all(re.fullmatch(r"[a-dA-D]", token) for token in tokens):
+                    indices = [ord(token.lower()) - ord("a") + 1 for token in tokens]
+                elif all(re.fullmatch(r"[1-4]", token) for token in tokens):
+                    indices = [int(token) for token in tokens]
+                else:
+                    raise ValueError("Invalid selection")
+                if len(indices) != len(set(indices)):
+                    raise ValueError("Duplicate selection")
+                item = {"question_id": question_ids[number - 1], "selected_choices": indices}
+            else:
+                item = {"question_id": question_ids[number - 1], "answer": segment}
+            pos = end
         entries.append(item)
         if len(entries) > 5:
             raise ValueError("Too many answers")

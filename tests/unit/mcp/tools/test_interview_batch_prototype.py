@@ -216,7 +216,40 @@ async def test_discard_after_partial_answers_keeps_confirmed_ids_and_round_numbe
 
 
 @pytest.mark.asyncio
-async def test_sdk_batch_text_transport_and_explicit_independence(tmp_path):
+async def test_dangling_invalid_numeric_selection_does_not_save_an_answer(tmp_path):
+    adapter = SimpleNamespace(
+        complete=AsyncMock(return_value=Result.ok(SimpleNamespace(content=_proposal())))
+    )
+    engine = InterviewEngine(llm_adapter=adapter, state_dir=tmp_path, model="synthetic")
+    handler = InterviewHandler(interview_engine=engine, llm_adapter=adapter, data_dir=tmp_path)
+    handler._create_interview_engine = lambda: (engine, adapter)
+    started = await handler.handle(
+        {"initial_context": "Build a tool", "structured_first_batch": True}
+    )
+    assert started.is_ok
+    sid = started.value.meta["session_id"]
+    before = (await engine.load_state(sid)).value.model_dump(mode="json")
+    rejected = await handler.handle(
+        {
+            "session_id": sid,
+            "batch_confirm_digest": started.value.meta["batch_digest"],
+            "batch_independence_confirmed": True,
+            "batch_answers_text": "1: 5 /",
+        }
+    )
+    assert rejected.is_err
+    assert (await engine.load_state(sid)).value.model_dump(mode="json") == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answers", "last_answer"),
+    [
+        ('1: a / 2: b / 3: "fast / 2: must not split"', "fast / 2: must not split"),
+        ("1: 1 / 2: 2 / 3: fast enough", "fast enough"),
+    ],
+)
+async def test_sdk_batch_text_transport_and_explicit_independence(tmp_path, answers, last_answer):
     from unittest.mock import patch
 
     from mcp import Client
@@ -248,7 +281,6 @@ async def test_sdk_batch_text_transport_and_explicit_independence(tmp_path):
         assert not start.is_error
         sid, digest = start.meta["session_id"], start.meta["batch_digest"]
         assert "a. Gardeners" in start.content[0].text
-        answers = '1: a / 2: b / 3: "fast / 2: must not split"'
         result = await client.call_tool(
             "ouroboros_interview",
             {
@@ -263,7 +295,7 @@ async def test_sdk_batch_text_transport_and_explicit_independence(tmp_path):
     state = (await engine.load_state(sid)).value
     assert state.rounds[0].batch_selected_indices == (1,)
     assert state.rounds[1].batch_selected_indices == (2,)
-    assert state.rounds[2].user_response == "fast / 2: must not split"
+    assert state.rounds[2].user_response == last_answer
 
 
 @pytest.mark.asyncio

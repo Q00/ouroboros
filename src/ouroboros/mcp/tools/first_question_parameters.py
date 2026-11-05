@@ -31,7 +31,10 @@ def first_question_parameters() -> tuple[MCPToolParameter, ...]:
             name="batch_answers_text",
             type=ToolInputType.STRING,
             required=False,
-            description="Explicit numbered answers like 1: a / 2: a,c / 3: \"free text\"; '-' selects none.",
+            description=(
+                "Numbered answers such as 1: 2 / 2: a,c / 3: free text; '-' selects none. "
+                "Use JSON quotes for literal labels, numbers or text containing '/ 2:'."
+            ),
         ),
         MCPToolParameter(
             name="batch_confirm_digest",
