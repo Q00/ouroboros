@@ -579,3 +579,61 @@ async def test_valid_answer_and_turn_context_share_persisted_state(tmp_path):
     assert state.rounds[0].user_response == "A personal tool"
     assert "ontology" in state.pending_confused_terms
     assert [cue.reference_id for cue in state.reference_cues] == ["example"]
+
+
+@pytest.mark.asyncio
+async def test_sdk_reopen_rejects_rendered_opening_with_short_fields(tmp_path):
+    from mcp import Client
+    from mcp.server import MCPServer
+
+    from ouroboros.mcp.server.adapter import MCPServerAdapter
+
+    payload = json.dumps(
+        {
+            "interpretations": [
+                {"interpretation": "A", "evidence": "B", "uncertainty": "C"},
+                {"interpretation": "D", "evidence": "E", "uncertainty": "F"},
+            ]
+        }
+    )
+    llm = SimpleNamespace(
+        complete=AsyncMock(
+            side_effect=[
+                Result.ok(SimpleNamespace(content=payload)),
+                Result.ok(SimpleNamespace(content="What else?")),
+            ]
+        )
+    )
+    engine = InterviewEngine(llm_adapter=llm, state_dir=tmp_path, model="synthetic")
+    handler = InterviewHandler(interview_engine=engine, llm_adapter=llm, data_dir=tmp_path)
+    handler._create_interview_engine = lambda: (engine, llm)
+    server = MCPServerAdapter(name="short-opening-echo-test")
+    server.register_tool(handler)
+    with patch.object(MCPServer, "run_stdio_async", new=AsyncMock()):
+        await server.serve(transport="stdio")
+    async with Client(server._mcp_server, mode="auto") as client:
+        started = await client.call_tool(
+            "ouroboros_interview",
+            {"initial_context": "Build a tool", "propose_opening_interpretations": True},
+        )
+        sid = started.meta["session_id"]
+        assert not (
+            await client.call_tool(
+                "ouroboros_interview", {"session_id": sid, "answer": "A personal tool"}
+            )
+        ).is_error
+        state = (await engine.load_state(sid)).value
+        state.rounds.pop()
+        assert (await engine.save_state(state)).is_ok
+        before = engine._state_file_path(sid).read_bytes()
+        display = state.proposed_opening.render()
+        result = await client.call_tool(
+            "ouroboros_interview",
+            {"session_id": sid, "answer": "yes", "opening_user_followup_question": display},
+        )
+        assert result.is_error
+        assert engine._state_file_path(sid).read_bytes() == before
+    state = (await engine.load_state(sid)).value
+    assert display not in SeedGenerator._build_interview_context(
+        object.__new__(SeedGenerator), state
+    )

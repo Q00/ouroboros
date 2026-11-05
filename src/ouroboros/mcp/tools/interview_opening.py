@@ -134,6 +134,12 @@ def validate_reopen_question(
             or not isinstance(explicit_question, str)
             or not explicit_question.strip()
             or len(explicit_question) > 2000
+            or state.proposed_opening.render().casefold() in explicit_question.casefold()
+            or (
+                "model-cited evidence (unverified):" in explicit_question.casefold()
+                and "uncertainty (proposal):" in explicit_question.casefold()
+                and "neither interpretation may be correct." in explicit_question.casefold()
+            )
             or any(
                 value == explicit_question.strip().casefold()
                 or (len(value) >= 8 and value in explicit_question.casefold())
