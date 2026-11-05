@@ -114,6 +114,17 @@ async def test_sdk_material_is_optional_separate_and_resumable(tmp_path):
         )
         assert ignored_input.is_error
         before_rejected = engine._state_file_path(sid).read_bytes()
+        simultaneous = await client.call_tool(
+            "ouroboros_interview",
+            {
+                "session_id": sid,
+                "answer": "yes",
+                "inline_material_user_followup_question": "Can we add export?",
+                "opening_user_followup_question": "Can we add export?",
+            },
+        )
+        assert simultaneous.is_error
+        assert engine._state_file_path(sid).read_bytes() == before_rejected
         for candidate in ("synthetic apples are green", "Can we use synthetic apples are green?"):
             rejected = await client.call_tool(
                 "ouroboros_interview",
