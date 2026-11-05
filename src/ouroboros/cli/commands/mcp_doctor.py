@@ -166,7 +166,8 @@ def _local_stdio_probe_config(home: Path) -> MCPServerConfig:
         "with asyncio.Runner() as runner:\n"
         "    def guard(event, args):\n"
         "        if event.startswith('socket.') or event in "
-        "('subprocess.Popen', 'os.system', 'os.exec', 'os.posix_spawn'):\n"
+        "('subprocess.Popen', 'os.system', 'os.exec', 'os.posix_spawn', "
+        "'os.fork', 'os.forkpty'):\n"
         "            raise RuntimeError('Network and command execution are disabled for the local doctor probe')\n"
         "    sys.addaudithook(guard)\n"
         "    import site; site.main()\n"
@@ -199,6 +200,8 @@ async def _serve_local_stdio_probe() -> None:
             "os.system",
             "os.exec",
             "os.posix_spawn",
+            "os.fork",
+            "os.forkpty",
         }:
             raise RuntimeError(
                 "Network and command execution are disabled for the local doctor probe"

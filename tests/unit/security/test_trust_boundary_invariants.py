@@ -552,7 +552,7 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         "src/ouroboros/cli/commands/mcp_doctor.py",
         "_pid_is_alive",
         "subprocess.run",
-        708,
+        711,
         25,
     ): "implicit inherit; Windows `tasklist /FI` liveness probe.",
     (
