@@ -137,3 +137,69 @@ def test_probe_bootstrap_does_not_write_bytecode_to_trusted_installation(tmp_pat
     assert json.loads(result.stdout)["no_bytecode"] == 1
     assert not list(trusted.rglob("__pycache__"))
     assert not list(trusted.rglob("*.pyc"))
+
+
+def test_probe_guards_network_before_venv_sitecustomize(tmp_path, monkeypatch):
+    """A venv startup hook must run only after the child installs its guard."""
+    import socket
+    import venv
+
+    venv_dir = tmp_path / "venv"
+    venv.EnvBuilder(with_pip=False).create(venv_dir)
+    executable = venv_dir / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+    purelib = subprocess.check_output(
+        [str(executable), "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+        text=True,
+        timeout=15,
+    ).strip()
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    marker = tmp_path / "startup-result"
+    try:
+        (Path(purelib) / "sitecustomize.py").write_text(
+            "import socket\n"
+            "from pathlib import Path\n"
+            "try:\n"
+            f"    socket.create_connection(('127.0.0.1', {listener.getsockname()[1]}), timeout=2)\n"
+            f"    Path({str(marker)!r}).write_text('connected')\n"
+            "except Exception:\n"
+            f"    if not Path({str(marker)!r}).exists(): Path({str(marker)!r}).write_text('blocked')\n"
+        )
+        trusted = tmp_path / "trusted"
+        package = trusted / "ouroboros" / "cli" / "commands"
+        package.mkdir(parents=True)
+        for directory in (trusted / "ouroboros", trusted / "ouroboros" / "cli", package):
+            (directory / "__init__.py").write_text("")
+        entry = package / "mcp_doctor.py"
+        entry.write_text("async def _serve_local_stdio_probe():\n    pass\n")
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(mcp_doctor, "__file__", str(entry))
+        monkeypatch.setattr(mcp_doctor.sys, "executable", str(executable))
+        config = mcp_doctor._local_stdio_probe_config(home)
+        # Without -S, Python imports sitecustomize before our bootstrap.
+        baseline_args = tuple(arg for arg in config.args if arg != "-S")
+        baseline = subprocess.run(
+            [config.command, *baseline_args],
+            env=config.env,
+            cwd=tmp_path,
+            text=True,
+            capture_output=True,
+            timeout=15,
+        )
+        assert baseline.returncode == 0, baseline.stderr
+        assert marker.read_text() == "connected"
+        marker.unlink()
+        result = subprocess.run(
+            [config.command, *config.args],
+            env=config.env,
+            cwd=tmp_path,
+            text=True,
+            capture_output=True,
+            timeout=15,
+        )
+        assert result.returncode == 0, result.stderr
+        assert marker.read_text() == "blocked"
+    finally:
+        listener.close()
