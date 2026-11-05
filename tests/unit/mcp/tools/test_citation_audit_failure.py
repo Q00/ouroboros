@@ -75,3 +75,38 @@ def test_lateral_bare_json_evidence_is_audited(tmp_path: Path, monkeypatch, as_m
     assert out["status"] == "complete"
     assert out["citation_audit"]["urls"] == {"https://example.invalid/doc": "unchecked"}
     assert out["citation_audit"]["unverified_present"] is True
+
+
+def test_lateral_bare_evidence_with_trailing_prose_is_unverified(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from ouroboros.orchestrator.evidence_schema import extract_evidence
+
+    text = '{"external_sources":["http://127.0.0.1/private"]}\nDone.'
+    assert extract_evidence(text).data["external_sources"] == ["http://127.0.0.1/private"]
+    registry = FanoutRegistry(tmp_path)
+    payload = build_subagent_payload(
+        tool_name="ouroboros_lateral_think",
+        title="researcher",
+        prompt="x",
+        agent="researcher",
+        context={"persona": "researcher"},
+    )
+    fanout_id = register_lateral_persona_fanout(registry, session_id="s", payloads=[payload])
+    calls: list[str] = []
+    audit = citation_check.audit_citations
+    monkeypatch.setattr(
+        citation_check,
+        "audit_citations",
+        lambda texts: audit(texts, fetch=lambda url, _: calls.append(url) or True),
+    )
+    out = submit_fanout_results(
+        registry,
+        session_id="s",
+        correlation_key="context.persona",
+        fanout_id=fanout_id,
+        results=[{"key": "researcher", "content": text}],
+    )
+    assert out["citation_audit"]["urls"] == {"http://127.0.0.1/private": "unchecked"}
+    assert out["citation_audit"]["unverified_present"] is True
+    assert calls == []

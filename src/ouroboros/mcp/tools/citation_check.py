@@ -166,11 +166,16 @@ def _extract_cited_urls(text: str, *, include_bare: bool) -> tuple[str, ...]:
     urls: list[str] = []
     seen: set[str] = set()
     blocks = [match.group(1) for match in _FENCED_JSON_RE.finditer(text)]
-    # The shared evidence parser also accepts a bare JSON object. Only parse
-    # the entire stripped text here: prose surrounding unrelated JSON must not
-    # be reinterpreted as an evidence block.
+    # The shared evidence parser accepts a bare object followed by prose.
+    # Only consider an object at the start; do not search arbitrary prose.
     if include_bare and text.lstrip().startswith("{"):
-        blocks.append(text.strip())
+        candidate = text.lstrip()
+        try:
+            _, end = json.JSONDecoder().raw_decode(candidate)
+        except (ValueError, RecursionError):
+            pass
+        else:
+            blocks.append(candidate[:end])
     for block in blocks:
         try:
             payload = json.loads(block)
