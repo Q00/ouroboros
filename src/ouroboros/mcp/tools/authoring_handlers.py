@@ -51,7 +51,6 @@ from ouroboros.bigbang.turn_planner import InterviewTurnPlanner
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.initial_context import resolve_initial_context_input
-from ouroboros.core.owner_only import secure_directory
 from ouroboros.core.types import Result
 from ouroboros.interview_adapters import (
     InterviewTurnContext,
@@ -83,6 +82,7 @@ from ouroboros.mcp.tools.interview_calibration import (
     interview_calibration_parameters,
 )
 from ouroboros.mcp.tools.interview_owned_lifecycle import run_owned_interview_call
+from ouroboros.mcp.tools.interview_plugin_state import _plugin_load_state, _plugin_save_state
 from ouroboros.mcp.tools.interview_reasoning import _interview_reasoning_meta
 from ouroboros.mcp.tools.interview_transcript import (
     _build_question_advisory_request as _build_question_advisory_request,
@@ -851,57 +851,6 @@ def _stored_ambiguity_snapshot_is_degraded(state: InterviewState) -> bool:
         return True
 
     return False
-
-
-async def _plugin_save_state(state_dir: Path, state: InterviewState) -> Result[Path, str]:
-    """Persist interview state without needing InterviewEngine (no LLM dep).
-
-    Used exclusively in the plugin dispatch path where litellm may not be
-    installed. Returns Result so callers can propagate persistence failures.
-    """
-    try:
-        file_path = state_dir / f"interview_{state.interview_id}.json"
-        state.mark_updated()
-        from ouroboros.bigbang.interview import save_interview_state_checked
-
-        secure_directory(file_path.parent)
-        durability_confirmed = await save_interview_state_checked(file_path, state)
-
-        if not durability_confirmed:
-            # The stdio writer logs this state; discarding it here reported a
-            # durability the filesystem never confirmed.
-            log.warning(
-                "plugin.state_save_durability_uncertain",
-                interview_id=state.interview_id,
-                file_path=str(file_path),
-            )
-        return Result.ok(file_path)
-    except (OSError, ValueError) as e:
-        return Result.err(f"Failed to save interview state: {e}")
-
-
-async def _plugin_load_state(state_dir: Path, interview_id: str) -> Result[InterviewState, str]:
-    """Load interview state without needing InterviewEngine (no LLM dep).
-
-    Used exclusively in the plugin dispatch path.
-    """
-    file_path = state_dir / f"interview_{interview_id}.json"
-    if not file_path.exists():
-        return Result.err(f"Interview state not found: {interview_id}")
-    try:
-        from ouroboros.core.file_lock import file_lock
-
-        def _sync_read() -> str:
-            with file_lock(file_path, exclusive=False):
-                return file_path.read_text(encoding="utf-8")
-
-        content = await asyncio.to_thread(_sync_read)
-        state = InterviewState.model_validate_json(content)
-        state._loaded_revision = state.persistence_revision
-        state.discard_stale_requirement_distillation()
-        return Result.ok(state)
-    except (OSError, ValueError) as e:
-        return Result.err(f"Failed to load interview state: {e}")
 
 
 @dataclass
@@ -1997,10 +1946,26 @@ class InterviewHandler:
             )
 
         from ouroboros.mcp.tools.interview_batch import dispatch_batch_if_requested
+        from ouroboros.mcp.tools.interview_materials import material_argument_error
 
+        material_error = material_argument_error(
+            arguments, should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode)
+        )
+        if material_error:
+            return Result.err(MCPToolError(material_error, tool_name="ouroboros_interview"))
         batch_result = await dispatch_batch_if_requested(self, arguments)
         if batch_result is not None:
             return batch_result
+
+        if any(
+            arguments.get(key) is not None
+            for key in ("inline_material_text", "inline_material_consent", "inline_material_retry")
+        ):
+            return Result.err(
+                MCPToolError(
+                    "Optional material requires a batch answer", tool_name="ouroboros_interview"
+                )
+            )
 
         # --- Argument validation (before any dispatch) ---
         # Determine action from arguments
@@ -2205,6 +2170,13 @@ class InterviewHandler:
                     )
                 )
             plugin_state = state
+            if state.inline_material is not None:
+                return Result.err(
+                    MCPToolError(
+                        "Interviews with optional material require in-process handling",
+                        tool_name="ouroboros_interview",
+                    )
+                )
             plugin_state_changed = state.merge_turn_context(turn_context)
             # Record answer into persisted state.
             # In plugin mode each dispatch = new child session. The child
@@ -2767,6 +2739,14 @@ class InterviewHandler:
                         "Answer the pending batch by question ID", tool_name="ouroboros_interview"
                     )
                 )
+            from ouroboros.mcp.tools.interview_materials import validate_material_answer
+
+            explicit_question = arguments.get("inline_material_user_followup_question")
+            last_question, material_error = validate_material_answer(
+                state, last_question, explicit_question, _is_interview_completion_signal(answer)
+            )
+            if material_error:
+                return Result.err(MCPToolError(material_error, tool_name="ouroboros_interview"))
             selection = arguments.get("selected_first_choice")
             selections = arguments.get("selected_first_choices")
             if selection is not None or selections is not None:
@@ -3038,6 +3018,17 @@ class InterviewHandler:
                 if state.ambiguity_score is not None
                 else "initial"
             )
+
+            if (
+                state.rounds
+                and state.rounds[-1].user_response is not None
+                and state.inline_material is not None
+            ):
+                from ouroboros.mcp.tools.interview_materials import material_followup_error
+
+                if error := material_followup_error(state, last_question, explicit_question):
+                    return Result.err(MCPToolError(error, tool_name="ouroboros_interview"))
+                last_question = explicit_question
 
             if not state.rounds:
                 pass
@@ -3340,6 +3331,8 @@ class InterviewHandler:
                         question=pending_question,
                     ),
                 }
+                if state.inline_material is not None:
+                    resume_meta["inline_material_status"] = state.inline_material.status
                 if presentation is not None:
                     resume_meta["first_question_presentation"] = presentation.model_dump(
                         mode="json"
@@ -3398,6 +3391,8 @@ class InterviewHandler:
                         advisory_build_duration_ms=advisory_build_duration_ms,
                     )
                 )
+                from ouroboros.mcp.tools.interview_materials import material_content
+
                 return Result.ok(
                     MCPToolResult(
                         content=(
@@ -3405,7 +3400,8 @@ class InterviewHandler:
                                 type=ContentType.TEXT,
                                 text=resume_response_text,
                             ),
-                        ),
+                        )
+                        + material_content(state),
                         is_error=False,
                         meta=resume_meta,
                     )
@@ -3628,6 +3624,8 @@ class InterviewHandler:
                 question=question,
             ),
         }
+        if state.inline_material is not None:
+            answer_meta["inline_material_status"] = state.inline_material.status
         if intent_guard_report is not None:
             answer_meta["intent_guard"] = intent_guard_report.to_dict()
         if answer_is_length_guard:
@@ -3706,6 +3704,8 @@ class InterviewHandler:
                 advisory_build_duration_ms=advisory_build_duration_ms,
             )
         )
+        from ouroboros.mcp.tools.interview_materials import material_content
+
         return Result.ok(
             MCPToolResult(
                 content=(
@@ -3713,7 +3713,8 @@ class InterviewHandler:
                         type=ContentType.TEXT,
                         text=answer_response_text,
                     ),
-                ),
+                )
+                + material_content(state),
                 is_error=False,
                 meta=answer_meta,
             )
