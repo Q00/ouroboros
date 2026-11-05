@@ -477,6 +477,13 @@ class MechanicalVerifier:
         # Extract coverage if this was a coverage check
         if check_type == CheckType.COVERAGE and passed:
             coverage = parse_coverage_from_output(cmd_result.stdout)
+            # Do not let a trusted-looking stdout row mask a conflicting or
+            # unreadable coverage report emitted on stderr. A stderr-only row
+            # does not become new positive evidence through this cross-check.
+            if coverage is not None and cmd_result.stderr:
+                combined = parse_coverage_from_output(cmd_result.stdout + "\n" + cmd_result.stderr)
+                if combined != coverage:
+                    coverage = None
             if coverage is None and self.config.coverage_threshold != 0.0:
                 # The exit code says the command ran, not that coverage met the
                 # threshold. Without a figure the threshold is undecided: not a

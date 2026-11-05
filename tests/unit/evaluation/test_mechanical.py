@@ -676,6 +676,50 @@ class TestUnparsedCoverageIsNotEvidence:
     """A coverage command that exits 0 without a readable figure decides nothing."""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("with_passing_test", [False, True])
+    async def test_conflicting_stderr_coverage_is_not_ignored(
+        self, with_passing_test: bool
+    ) -> None:
+        command = (
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.write('TOTAL 10 0 100%\\n'); "
+            "sys.stderr.write('TOTAL 100 85 15%\\n')",
+        )
+        result = await _evaluate_stage1_only(
+            MechanicalConfig(
+                coverage_threshold=0.7,
+                coverage_command=command,
+                test_command=_printing("1 passed") if with_passing_test else None,
+            )
+        )
+        assert result.final_approved is False
+        assert result.acceptance_state is AcceptanceState.UNVERIFIED
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("stdout", "stderr", "approved"),
+        [
+            ("TOTAL 10 0 100%\n", "warning: ordinary diagnostic\n", True),
+            ("TOTAL 10 0 100%\n", "TOTAL 10 0 100%\n", True),
+            ("nothing\n", "TOTAL 10 0 100%\n", False),
+            ("TOTAL 10 0 100%\n", "coverage: 15% of statements\n", False),
+        ],
+    )
+    async def test_stderr_cross_check_preserves_stdout_evidence_contract(
+        self, stdout: str, stderr: str, approved: bool
+    ) -> None:
+        command = (
+            sys.executable,
+            "-c",
+            f"import sys; sys.stdout.write({stdout!r}); sys.stderr.write({stderr!r})",
+        )
+        result = await _evaluate_stage1_only(
+            MechanicalConfig(coverage_threshold=0.7, coverage_command=command)
+        )
+        assert result.final_approved is approved
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("with_passing_test", [False, True], ids=["alone", "with-test"])
     @pytest.mark.parametrize(
         "output", _UNPARSED_COVERAGE_OUTPUTS.values(), ids=list(_UNPARSED_COVERAGE_OUTPUTS)
