@@ -349,3 +349,82 @@ async def test_tally_read_failure_preserves_cli_outcome_and_check_package() -> N
         ANY, "run", terminal_status="completed", result_meta={"success": True}
     )
     check_package_run.finish.assert_called_once_with("completed", surface="cli_run")
+
+
+@pytest.mark.asyncio
+async def test_workspace_rejection_records_and_flushes_cli_outcome(tmp_path: Path) -> None:
+    """A workspace preparation failure contributes the same cause as an MCP run."""
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    # An empty Git repository cannot provision a HEAD-based task worktree.
+    tracked = repo / "user-file"
+    tracked.write_text("preserve me\n", encoding="utf-8")
+    seed_file = tmp_path / "seed.yaml"
+    seed_file.write_text("goal: ignored\n", encoding="utf-8")
+
+    with (
+        patch("ouroboros.cli.commands.run._load_seed_from_yaml", return_value=VALID_SEED_DATA),
+        patch("ouroboros.core.worktree._worktrees_enabled", return_value=True),
+        patch("ouroboros.core.worktree._require_managed_identity_git"),
+        patch("ouroboros.persistence.event_store.EventStore") as store,
+        patch("ouroboros.telemetry.capture_job_outcome") as capture,
+        patch("ouroboros.telemetry.flush") as flush,
+        pytest.raises(typer.Exit) as exc,
+    ):
+        store.return_value.initialize = AsyncMock()
+        await _run_orchestrator(seed_file, project_dir=repo)
+
+    assert exc.value.exit_code == 1
+    capture.assert_called_once_with(
+        ANY,
+        "run",
+        terminal_status="failed",
+        result_meta={
+            "success": False,
+            "failure_cause": "launch_workspace_unavailable",
+            "failure_reason_code": "config",
+        },
+    )
+    flush.assert_called_once()
+    assert tracked.read_text(encoding="utf-8") == "preserve me\n"
+
+
+@pytest.mark.asyncio
+async def test_resume_workspace_failure_records_one_private_outcome(tmp_path: Path) -> None:
+    """A failed restore records no session identifier or exception text in properties."""
+    from ouroboros.core.worktree import WorktreeError
+    from ouroboros.telemetry import capture_job_outcome
+
+    seed_file = tmp_path / "seed.yaml"
+    seed_file.write_text("goal: ignored\n", encoding="utf-8")
+    recovered = SimpleNamespace(progress={}, execution_id="exec-private")
+    with (
+        patch("ouroboros.cli.commands.run._load_seed_from_yaml", return_value=VALID_SEED_DATA),
+        patch("ouroboros.persistence.event_store.EventStore") as store,
+        patch("ouroboros.orchestrator.session.SessionRepository") as repo,
+        patch(
+            "ouroboros.cli.commands.run.maybe_restore_task_workspace",
+            side_effect=WorktreeError("sensitive-workspace-path"),
+        ),
+        patch("ouroboros.telemetry.capture_job_outcome", wraps=capture_job_outcome) as capture,
+        patch("ouroboros.telemetry.capture") as emit,
+        patch("ouroboros.telemetry.flush") as flush,
+        pytest.raises(typer.Exit),
+    ):
+        store.return_value.initialize = AsyncMock()
+        repo.return_value.reconstruct_session = AsyncMock(return_value=Result.ok(recovered))
+        await _run_orchestrator(seed_file, resume_session="private-session", project_dir=tmp_path)
+
+    capture.assert_called_once()
+    flush.assert_called_once()
+    emit.assert_called_once()
+    event, properties = emit.call_args.args
+    assert event == "workflow_outcome"
+    assert properties["failure_cause"] == "launch_workspace_unavailable"
+    assert properties["failure_reason_code"] == "config"
+    assert "private-session" not in str(properties)
+    assert "exec-private" not in str(properties)
+    assert "sensitive-workspace-path" not in str(properties)
