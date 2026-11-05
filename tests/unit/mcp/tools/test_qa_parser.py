@@ -260,6 +260,8 @@ def test_ambiguous_plain_score_is_not_promoted_to_passing_prefix(value: str) -> 
         "Score - 0.9\nScore: 0.9",
         "Score: 0.9\nScore: unknown",
         "Score: 0.9\nScore:",
+        "Score: 0.9\nscore is\nVerdict: fail",
+        "Score: 0.9\r\nscore is  \r\nVerdict: fail",
     ],
 )
 def test_multiple_plain_score_statements_are_not_a_pass(response: str) -> None:

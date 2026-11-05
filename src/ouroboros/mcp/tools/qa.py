@@ -221,7 +221,7 @@ _LINE_DECORATION_RE = re.compile(r"^\s*(?:[-*]\s+|\d+[.)]\s+)")
 _BOLD_RE = re.compile(r"\*{1,2}([^*]+)\*{1,2}")
 _KV_RE = re.compile(r"(?im)^(\w[\w ]*?)[ \t]*[:=\-][ \t]*(.+)$")
 _SCORE_FIELD_RE = re.compile(r"(?im)^score[ \t]*[:=\-][ \t]*([^\r\n]*)$")
-_SCORE_FALLBACK_RE = re.compile(r"(?im)\bscore\b[ \t]*(?:is|-)[ \t]*([^\r\n]+)")
+_SCORE_FALLBACK_RE = re.compile(r"(?im)\bscore\b[ \t]*(?:is\b|-)[ \t]*([^\r\n]*)")
 _PLAIN_SCORE_RE = re.compile(
     r"\s*([0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)\s*"
     r"(?:/\s*1(?:\.0+)?\s*)?(?:\[(?:pass|revise|fail)\]\s*)?",
