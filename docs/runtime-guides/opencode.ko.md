@@ -5,6 +5,12 @@ doc_metadata:
 
 # OpenCode에서 Ouroboros 실행하기
 
+OpenCode 1.x LLM 완료 응답은 네이티브 `step_finish` 이벤트의 토큰 사용량을
+보고하며, 각 단계 파트의 마지막 보고를 한 번씩 집계합니다. 네이티브 출력
+수에는 이미 원시 출력 토큰이 포함되므로 추론 토큰을 다시 더하지 않습니다.
+별도로 합산되는 캐시 그룹과 보고된 전체 토큰 중 남은 양은
+`unallocated_tokens`로 보존합니다.
+
 **OpenCode 2.x 플러그인 모드는 아직 지원하지 않습니다.** 설정 과정에서
 2.x CLI를 감지하면 V1 브리지 설치와 설정 기록 전에 거부합니다. 기존 하위
 프로세스 경로를 사용하려면 `ouroboros setup --runtime opencode --opencode-mode subprocess`를
