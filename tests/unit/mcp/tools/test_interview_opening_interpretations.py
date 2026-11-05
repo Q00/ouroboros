@@ -271,15 +271,21 @@ async def test_sdk_echo_of_opening_cannot_promote_proposals(tmp_path):
         display = (await engine.load_state(sid)).value.proposed_opening.render()
         assert display in started.content[0].text
         assert "SENTINEL_ALPHA" in display
+        before = engine._state_file_path(sid).read_bytes()
         answered = await client.call_tool(
             "ouroboros_interview",
             {
                 "session_id": sid,
                 "answer": "Neither; I want a simple personal tool.",
                 "last_question": display,
+                "confused_terms": ["ontology"],
+                "references": [
+                    {"reference_id": "example", "label": "Example", "origin": "user_text"}
+                ],
             },
         )
         assert answered.is_error
+        assert engine._state_file_path(sid).read_bytes() == before
         assert (await engine.load_state(sid)).value.rounds[0].user_response is None
         answered = await client.call_tool(
             "ouroboros_interview",
@@ -349,6 +355,10 @@ async def test_sdk_safe_default_synthesis_does_not_store_opening_echo(tmp_path, 
                 "session_id": sid,
                 "answer": "[from-auto][safe-default-synthesis] done",
                 "last_question": display,
+                "confused_terms": ["ontology"],
+                "references": [
+                    {"reference_id": "example", "label": "Example", "origin": "user_text"}
+                ],
             },
         )
         assert not result.is_error
@@ -356,6 +366,8 @@ async def test_sdk_safe_default_synthesis_does_not_store_opening_echo(tmp_path, 
     context = SeedGenerator._build_interview_context(object.__new__(SeedGenerator), state)
     assert "SENTINEL_ALPHA" not in context
     assert "SENTINEL_BETA" not in context
+    assert [cue.reference_id for cue in state.reference_cues] == ["example"]
+    assert "ontology" in state.pending_confused_terms
 
 
 @pytest.mark.asyncio
@@ -523,3 +535,47 @@ async def test_sdk_explicit_user_question_reopens_without_model_echo(tmp_path):
     context = SeedGenerator._build_interview_context(object.__new__(SeedGenerator), state)
     assert "Can we add export?" in context
     assert "SENTINEL_ALPHA" not in context and "SENTINEL_BETA" not in context
+
+
+@pytest.mark.asyncio
+async def test_valid_answer_and_turn_context_share_persisted_state(tmp_path):
+    from mcp import Client
+    from mcp.server import MCPServer
+
+    from ouroboros.mcp.server.adapter import MCPServerAdapter
+
+    llm = SimpleNamespace(
+        complete=AsyncMock(return_value=Result.ok(SimpleNamespace(content=_proposal())))
+    )
+    engine = InterviewEngine(llm_adapter=llm, state_dir=tmp_path, model="synthetic")
+    handler = InterviewHandler(interview_engine=engine, llm_adapter=llm, data_dir=tmp_path)
+    handler._create_interview_engine = lambda: (engine, llm)
+    server = MCPServerAdapter(name="opening-context-test")
+    server.register_tool(handler)
+    with patch.object(MCPServer, "run_stdio_async", new=AsyncMock()):
+        await server.serve(transport="stdio")
+    async with Client(server._mcp_server, mode="auto") as client:
+        started = await client.call_tool(
+            "ouroboros_interview",
+            {"initial_context": "Build a tool", "propose_opening_interpretations": True},
+        )
+        sid = started.meta["session_id"]
+        with patch.object(
+            engine, "ask_next_question", new=AsyncMock(return_value=Result.ok("More?"))
+        ):
+            result = await client.call_tool(
+                "ouroboros_interview",
+                {
+                    "session_id": sid,
+                    "answer": "A personal tool",
+                    "confused_terms": ["ontology"],
+                    "references": [
+                        {"reference_id": "example", "label": "Example", "origin": "user_text"}
+                    ],
+                },
+            )
+        assert not result.is_error
+    state = (await engine.load_state(sid)).value
+    assert state.rounds[0].user_response == "A personal tool"
+    assert "ontology" in state.pending_confused_terms
+    assert [cue.reference_id for cue in state.reference_cues] == ["example"]

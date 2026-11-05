@@ -2782,15 +2782,6 @@ class InterviewHandler:
                     )
                 except ValueError as exc:
                     return Result.err(MCPToolError(str(exc), tool_name="ouroboros_interview"))
-            if state.merge_turn_context(_normalized_turn_context(arguments)):
-                merge_save_result = await engine.save_state(state)
-                if merge_save_result.is_err:
-                    return Result.err(
-                        MCPToolError(
-                            str(merge_save_result.error),
-                            tool_name="ouroboros_interview",
-                        )
-                    )
             _interview_id = session_id
 
             lateral_review_meta: dict[str, Any] | None = None
@@ -2798,6 +2789,7 @@ class InterviewHandler:
 
             # If answer provided, record it first
             if selection is None and selections is None and _is_interview_completion_signal(answer):
+                state.merge_turn_context(_normalized_turn_context(arguments))
                 is_safe_default_synthesis = _is_safe_default_synthesis_completion(answer)
                 # Remember whether a round is awaiting an answer so we
                 # can pop it only on the branches that actually end
@@ -3082,6 +3074,7 @@ class InterviewHandler:
                         tool_name="ouroboros_interview",
                     )
                 )
+            state.merge_turn_context(_normalized_turn_context(arguments))
             if (
                 state.rounds
                 and state.rounds[-1].user_response is None
