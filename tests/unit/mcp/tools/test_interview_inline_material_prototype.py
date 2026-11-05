@@ -442,6 +442,25 @@ def test_local_excerpts_are_literal_bounded_and_relevance_ranked():
     assert _local_excerpts("\u2066", "Anything") is None
 
 
+def test_local_excerpts_rank_and_show_late_matching_words():
+    from ouroboros.mcp.tools.interview_materials import _local_excerpts
+
+    relevant = "x" * 401 + " target and context"
+    text = "\n".join([f"plain{i}" for i in range(5)] + [relevant])
+    draft = _local_excerpts(text, "target")
+    assert draft is not None
+    assert "target" in draft.source_quotes[0]
+    assert len(draft.source_quotes[0]) <= 400
+    assert draft.source_quotes[0] in relevant
+    assert draft.source_quotes[1:] == ("plain0", "plain1", "plain2", "plain3")
+
+
+def test_local_excerpts_reject_unsafe_character_beyond_display_limit():
+    from ouroboros.mcp.tools.interview_materials import _local_excerpts
+
+    assert _local_excerpts("x" * 401 + "\u2066 target", "target") is None
+
+
 def test_legacy_model_draft_is_not_mislabeled_as_local():
     from ouroboros.interview_adapters.inline_materials import InlineMaterial, MaterialDraft
     from ouroboros.mcp.tools.interview_materials import material_content

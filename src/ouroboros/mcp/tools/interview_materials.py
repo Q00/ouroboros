@@ -77,10 +77,18 @@ def _local_excerpts(text: str, context: str) -> MaterialDraft | None:
     context_words = {word for word in re.findall(r"\w+", context.casefold()) if len(word) > 1}
     ranked: list[tuple[int, int, str]] = []
     for index, line in enumerate(text.splitlines()):
-        excerpt = line.strip()[:400]
-        if not excerpt or not _safe_single_line(excerpt):
+        line = line.strip()
+        if not line or not _safe_single_line(line):
             continue
-        words = set(re.findall(r"\w+", excerpt.casefold()))
+        words = set(re.findall(r"\w+", line.casefold()))
+        # Select a literal window around the first matching source word, so
+        # late matches influence ranking and remain visible in the excerpt.
+        start = 0
+        for match in re.finditer(r"\w+", line):
+            if context_words.intersection(re.findall(r"\w+", match.group().casefold())):
+                start = max(0, match.start() - 200)
+                break
+        excerpt = line[start : start + 400].strip()
         ranked.append((-len(context_words & words), index, excerpt))
     ranked.sort()
     excerpts = tuple(dict.fromkeys(excerpt for _, _, excerpt in ranked))[:5]
