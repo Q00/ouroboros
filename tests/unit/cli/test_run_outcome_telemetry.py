@@ -428,3 +428,68 @@ async def test_resume_workspace_failure_records_one_private_outcome(tmp_path: Pa
     assert "private-session" not in str(properties)
     assert "exec-private" not in str(properties)
     assert "sensitive-workspace-path" not in str(properties)
+
+
+@pytest.mark.asyncio
+async def test_invalid_seed_records_private_prelaunch_outcome(tmp_path: Path) -> None:
+    """A malformed Seed emits a closed cause without its content or path."""
+    from ouroboros.telemetry import capture_job_outcome
+
+    seed_file = tmp_path / "private-seed.yaml"
+    seed_file.write_text("goal: private-content\n", encoding="utf-8")
+    with (
+        patch("ouroboros.telemetry.capture_job_outcome", wraps=capture_job_outcome) as capture,
+        patch("ouroboros.telemetry.capture") as emit,
+        patch("ouroboros.telemetry.flush") as flush,
+        pytest.raises(typer.Exit) as exc,
+    ):
+        await _run_orchestrator(seed_file)
+
+    assert exc.value.exit_code == 1
+    capture.assert_called_once_with(
+        ANY,
+        "run",
+        terminal_status="failed",
+        result_meta={
+            "success": False,
+            "failure_cause": "launch_seed_invalid",
+            "failure_reason_code": "validation",
+        },
+    )
+    flush.assert_called_once()
+    emit.assert_called_once()
+    _, properties = emit.call_args.args
+    assert properties["failure_cause"] == "launch_seed_invalid"
+    assert properties["failure_reason_code"] == "validation"
+    assert "private-content" not in str(properties)
+    assert "private-seed.yaml" not in str(properties)
+
+
+@pytest.mark.asyncio
+async def test_invalid_seed_preserves_failure_if_telemetry_fails(tmp_path: Path) -> None:
+    seed_file = tmp_path / "invalid.yaml"
+    seed_file.write_text("goal: missing-required-fields\n", encoding="utf-8")
+    with (
+        patch("ouroboros.telemetry.capture_job_outcome", side_effect=RuntimeError("offline")),
+        pytest.raises(typer.Exit) as exc,
+    ):
+        await _run_orchestrator(seed_file)
+    assert exc.value.exit_code == 1
+
+
+@pytest.mark.asyncio
+async def test_seed_parser_unexpected_error_is_not_classified_as_validation(tmp_path: Path) -> None:
+    seed_file = tmp_path / "seed.yaml"
+    seed_file.write_text("goal: example\n", encoding="utf-8")
+    with (
+        patch("ouroboros.core.seed.Seed.from_dict", side_effect=RuntimeError("internal error")),
+        patch("ouroboros.telemetry.capture_job_outcome") as capture,
+        patch("ouroboros.telemetry.flush") as flush,
+        patch("ouroboros.cli.commands.run.print_error") as print_error,
+        pytest.raises(typer.Exit) as exc,
+    ):
+        await _run_orchestrator(seed_file)
+    assert exc.value.exit_code == 1
+    print_error.assert_called_once_with("Invalid seed format: internal error")
+    capture.assert_not_called()
+    flush.assert_not_called()

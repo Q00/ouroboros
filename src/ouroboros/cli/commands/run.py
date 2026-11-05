@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 from uuid import uuid4
 
 import click
+from pydantic import ValidationError
 import typer
 import yaml
 
@@ -716,6 +717,20 @@ async def _record_cli_run_outcome(
         pass
 
 
+def _record_cli_prelaunch_failure(cause: str, reason: str) -> None:
+    """Record a closed pre-launch outcome without affecting the original error."""
+    try:
+        usage_telemetry.capture_job_outcome(
+            f"cli-run:{uuid4().hex}",
+            "run",
+            terminal_status="failed",
+            result_meta={"success": False, "failure_cause": cause, "failure_reason_code": reason},
+        )
+        usage_telemetry.flush()
+    except Exception:  # telemetry must not change the original failure
+        pass
+
+
 async def _run_orchestrator(
     seed_file: Path,
     resume_session: str | None = None,
@@ -773,6 +788,8 @@ async def _run_orchestrator(
     try:
         seed = Seed.from_dict(seed_data)
     except Exception as e:
+        if isinstance(e, ValidationError):
+            _record_cli_prelaunch_failure("launch_seed_invalid", "validation")
         print_error(f"Invalid seed format: {e}")
         raise typer.Exit(1) from e
 
@@ -859,23 +876,7 @@ async def _run_orchestrator(
             execution_id = f"exec_{uuid4().hex[:12]}"
             workspace = maybe_prepare_task_workspace(project_dir, session_id_for_run)
     except WorktreeError as e:
-        # This pre-launch failure never reaches the runner's outcome path.
-        # Record only the same closed cause used by the MCP execution handler,
-        # and flush before exiting so the daemon sender has time to post it.
-        try:
-            usage_telemetry.capture_job_outcome(
-                f"cli-run:{uuid4().hex}",
-                "run",
-                terminal_status="failed",
-                result_meta={
-                    "success": False,
-                    "failure_cause": "launch_workspace_unavailable",
-                    "failure_reason_code": "config",
-                },
-            )
-            usage_telemetry.flush()
-        except Exception:  # telemetry must not change the original failure
-            pass
+        _record_cli_prelaunch_failure("launch_workspace_unavailable", "config")
         print_error(f"Task workspace error: {e.message}")
         raise typer.Exit(1) from e
 
