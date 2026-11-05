@@ -1957,6 +1957,14 @@ class InterviewHandler:
         # settled where the round is identified.
         last_question = arguments.get("last_question")
         structured_first = arguments.get("structured_first_question", False)
+        page_size = arguments.get("batch_page_size")
+        if page_size is not None and (type(page_size) is not int or not 1 <= page_size <= 5):
+            return Result.err(
+                MCPToolError(
+                    "batch_page_size must be an integer from 1 to 5",
+                    tool_name="ouroboros_interview",
+                )
+            )
         selected_first_choice = arguments.get("selected_first_choice")
         try:
             selections = normalize_first_selections(arguments)
@@ -3270,7 +3278,7 @@ class InterviewHandler:
                     return Result.err(
                         MCPToolError("Invalid batch session", tool_name="ouroboros_interview")
                     )
-                return Result.ok(batch_view(state))
+                return Result.ok(batch_view(state, arguments.get("batch_page_size")))
             if state.merge_turn_context(_normalized_turn_context(arguments)):
                 merge_save_result = await engine.save_state(state)
                 if merge_save_result.is_err:

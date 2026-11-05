@@ -14,6 +14,12 @@ def first_question_parameters() -> tuple[MCPToolParameter, ...]:
             description="Opt in to a proposed first batch of questions, requiring explicit independence confirmation.",
         ),
         MCPToolParameter(
+            name="batch_page_size",
+            type=ToolInputType.INTEGER,
+            required=False,
+            description="Optional native-host question capacity per presentation (1–5); repeat on resume and answers.",
+        ),
+        MCPToolParameter(
             name="batch_reject",
             type=ToolInputType.BOOLEAN,
             required=False,

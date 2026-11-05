@@ -55,6 +55,130 @@ def _proposal():
 
 
 @pytest.mark.asyncio
+async def test_sdk_pages_preserve_batch_and_native_text_round_trip(tmp_path):
+    from unittest.mock import patch
+
+    from mcp import Client
+    from mcp.server import MCPServer
+
+    from ouroboros.mcp.server.adapter import MCPServerAdapter
+
+    proposal = json.loads(_proposal())
+    for question, dimension in [("Where is it used?", "context"), ("What is excluded?", "scope")]:
+        proposal["questions"].append(
+            {
+                "presentation": {
+                    "question": question,
+                    "choices": ["First", "Second"],
+                    "direct_input_label": "Type another answer",
+                    "multi_select": False,
+                },
+                "dimension": dimension,
+                "recommended_index": 1,
+                "depends_on": [],
+            }
+        )
+    adapter = SimpleNamespace(
+        complete=AsyncMock(return_value=Result.ok(SimpleNamespace(content=json.dumps(proposal))))
+    )
+    engine = InterviewEngine(llm_adapter=adapter, state_dir=tmp_path, model="synthetic")
+    handler = InterviewHandler(interview_engine=engine, llm_adapter=adapter, data_dir=tmp_path)
+    handler._create_interview_engine = lambda: (engine, adapter)
+    server = MCPServerAdapter(name="batch-capacity")
+    server.register_tool(handler)
+    with patch.object(MCPServer, "run_stdio_async", new=AsyncMock()):
+        await server.serve(transport="stdio")
+    async with Client(server._mcp_server, mode="auto") as client:
+        assert (await client.list_tools()).tools[0].input_schema["properties"]["batch_page_size"][
+            "type"
+        ] == "integer"
+        start = await client.call_tool(
+            "ouroboros_interview",
+            {
+                "initial_context": "Build a tool",
+                "structured_first_batch": True,
+                "batch_page_size": 4,
+            },
+        )
+        assert not start.is_error
+        items = start.meta["questions"]
+        assert list(map(len, start.meta["question_pages"])) == [4, 1]
+        pages = [q for page in start.meta["question_pages"] for q in page]
+        assert [q["batch_number"] for q in pages] == [1, 2, 3, 4, 5]
+        assert [{k: v for k, v in q.items() if k != "batch_number"} for q in pages] == items
+        sid, digest = start.meta["session_id"], start.meta["batch_digest"]
+        resumed = await client.call_tool(
+            "ouroboros_interview", {"session_id": sid, "batch_page_size": 2}
+        )
+        assert resumed.meta["batch_digest"] == digest
+        assert resumed.meta["questions"] == items
+        assert list(map(len, resumed.meta["question_pages"])) == [2, 2, 1]
+        pages = [q for page in resumed.meta["question_pages"] for q in page]
+        assert [q["batch_number"] for q in pages] == [1, 2, 3, 4, 5]
+        assert [{k: v for k, v in q.items() if k != "batch_number"} for q in pages] == items
+        base = {
+            "session_id": sid,
+            "batch_confirm_digest": digest,
+            "batch_independence_confirmed": True,
+        }
+        native = await client.call_tool(
+            "ouroboros_interview",
+            {
+                **base,
+                "batch_page_size": 4,
+                "batch_answers": [
+                    {"question_id": items[0]["question_id"], "selected_choices": []},
+                    {"question_id": items[1]["question_id"], "selected_choices": [2]},
+                ],
+            },
+        )
+        assert not native.is_error
+        assert native.meta["batch_digest"] == digest
+        partial = await client.call_tool(
+            "ouroboros_interview", {"session_id": sid, "batch_page_size": 4}
+        )
+        assert not partial.is_error
+        assert partial.meta["batch_digest"] == digest
+        assert partial.meta["answered_question_ids"] == [
+            items[0]["question_id"],
+            items[1]["question_id"],
+        ]
+        assert [q["question_id"] for page in partial.meta["question_pages"] for q in page] == [
+            q["question_id"] for q in items
+        ]
+        text_result = await client.call_tool(
+            "ouroboros_interview",
+            {**base, "batch_page_size": 4, "batch_answers_text": "3: a / 4: b / 5: free text"},
+        )
+        assert not text_result.is_error
+        assert text_result.meta["batch_complete"] is True
+    state = (await engine.load_state(sid)).value
+    assert state.rounds[0].batch_selected_indices == ()
+    assert state.rounds[1].batch_selected_indices == (2,)
+    assert state.rounds[4].user_response == "free text"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capacity", [0, -1, 6, True, "4"])
+async def test_invalid_page_capacity_rejected_before_start(tmp_path, capacity):
+    adapter = SimpleNamespace(
+        complete=AsyncMock(return_value=Result.ok(SimpleNamespace(content=_proposal())))
+    )
+    engine = InterviewEngine(llm_adapter=adapter, state_dir=tmp_path, model="synthetic")
+    handler = InterviewHandler(interview_engine=engine, llm_adapter=adapter, data_dir=tmp_path)
+    handler._create_interview_engine = lambda: (engine, adapter)
+    result = await handler.handle(
+        {
+            "initial_context": "Build a tool",
+            "structured_first_batch": True,
+            "batch_page_size": capacity,
+        }
+    )
+    assert result.is_err
+    assert adapter.complete.await_count == 0
+
+
+@pytest.mark.asyncio
 async def test_first_batch_partial_replay_resume_and_projection(tmp_path):
     adapter = SimpleNamespace(
         complete=AsyncMock(return_value=Result.ok(SimpleNamespace(content=_proposal())))

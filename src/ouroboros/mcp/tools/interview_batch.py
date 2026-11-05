@@ -80,7 +80,7 @@ def batch_payload(state: InterviewState) -> tuple[str, list[dict[str, Any]]]:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest(), items
 
 
-def batch_view(state: InterviewState) -> MCPToolResult:
+def batch_view(state: InterviewState, page_size: int | None = None) -> MCPToolResult:
     if re.fullmatch(r"interview_[0-9a-f]{16}", state.interview_id) is None:
         raise ValueError("Invalid batch session ID")
     digest, items = batch_payload(state)
@@ -104,17 +104,23 @@ def batch_view(state: InterviewState) -> MCPToolResult:
         recommended = chr(96 + item["recommended_index"])
         lines.append(f"  Suggested option: {recommended} (model proposal, not a decision)")
         lines.append(f"  {presentation['direct_input_label']}")
+    meta: dict[str, Any] = {
+        "session_id": state.interview_id,
+        "batch_digest": digest,
+        "questions": items,
+        "answered_question_ids": answered,
+        "independence_confirmed": state.batch_confirmed_digest == digest,
+        "independence_source": "user_confirmation_required",
+        "batch_complete": bool(items) and not pending_batch(state),
+    }
+    if page_size is not None:
+        numbered_items = [dict(item, batch_number=i) for i, item in enumerate(items, 1)]
+        meta["question_pages"] = [
+            numbered_items[i : i + page_size] for i in range(0, len(items), page_size)
+        ]
     return MCPToolResult(
         content=(MCPContentItem(type=ContentType.TEXT, text="\n".join(lines)),),
-        meta={
-            "session_id": state.interview_id,
-            "batch_digest": digest,
-            "questions": items,
-            "answered_question_ids": answered,
-            "independence_confirmed": state.batch_confirmed_digest == digest,
-            "independence_source": "user_confirmation_required",
-            "batch_complete": bool(items) and not pending_batch(state),
-        },
+        meta=meta,
     )
 
 
@@ -142,6 +148,7 @@ async def start_batch(
         return batch_error("Initial context is required for a batch")
     allowed = {
         "structured_first_batch",
+        "batch_page_size",
         "initial_context",
         "cwd",
         "_normalized_interview_turn_context",
@@ -210,7 +217,7 @@ async def start_batch(
     from ouroboros.events.interview import interview_started
 
     handler._emit_event_bg(interview_started(state.interview_id, resolved.value))
-    return Result.ok(batch_view(state))
+    return Result.ok(batch_view(state, arguments.get("batch_page_size")))
 
 
 async def answer_batch(
@@ -222,6 +229,7 @@ async def answer_batch(
         "batch_answers_text",
         "batch_confirm_digest",
         "batch_independence_confirmed",
+        "batch_page_size",
         "_normalized_interview_turn_context",
     }
     if any(key not in allowed and value is not None for key, value in arguments.items()):
@@ -349,7 +357,7 @@ async def answer_batch(
                     ambiguity_dimension=old_round.ambiguity_dimension,
                 )
             )
-    return Result.ok(batch_view(state))
+    return Result.ok(batch_view(state, arguments.get("batch_page_size")))
 
 
 async def reject_batch(
