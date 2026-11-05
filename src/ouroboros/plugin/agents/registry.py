@@ -342,7 +342,7 @@ class AgentRegistry:
         Returns:
             AgentSpec or None if parsing fails.
         """
-        content = path.read_text()
+        content = path.read_text(encoding="utf-8")
         lines = content.split("\n")
 
         # Parse title (first heading)
