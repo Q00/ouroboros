@@ -8,8 +8,9 @@ fenced evidence blocks and reports, per URL, whether it was reachable.
 Enforcement is withhold-only, mirroring the verify-gate invariant: an
 unreachable or malformed citation is *marked*, never a failure of the tool
 call, and a submission with no evidence block touches no network at all.
-Checks are bounded twice — per-request timeout and a total wall-clock budget —
-so a slow host cannot stall fan-out synthesis.
+Socket operations use a timeout and the audit stops starting requests after its
+budget. These are not a strict wall-clock bound: DNS and slow responses may
+still take longer than the budget.
 
 No similarity scoring and no content judgment: this gate answers exactly one
 deterministic question per URL — "did this fetch succeed right now?". Whether
@@ -38,6 +39,7 @@ _REQUEST_TIMEOUT_SECONDS = 4.0
 _TOTAL_BUDGET_SECONDS = 10.0
 _MAX_URLS = 8
 _MAX_URL_LEN = 2000
+_MAX_REDIRECTS = 3
 
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 _UNRESERVED = frozenset(string.ascii_letters + string.digits + "-._~")
@@ -149,8 +151,8 @@ def _eligible_http_citation(url: str) -> bool:
     )
 
 
-def extract_cited_urls(text: str) -> tuple[str, ...]:
-    """Extract cited URLs from the fenced evidence JSON block(s) in ``text``.
+def _extract_cited_urls(text: str, *, include_bare: bool) -> tuple[str, ...]:
+    """Extract cited URLs from fenced blocks and, optionally, a bare object.
 
     Reads the deep-tier contract shape written by
     ``build_lateral_multi_subagent``: ``external_sources`` (list of URLs) and
@@ -163,9 +165,20 @@ def extract_cited_urls(text: str) -> tuple[str, ...]:
         return ()
     urls: list[str] = []
     seen: set[str] = set()
-    for match in _FENCED_JSON_RE.finditer(text):
+    blocks = [match.group(1) for match in _FENCED_JSON_RE.finditer(text)]
+    # The shared evidence parser accepts a bare object followed by prose.
+    # Only consider an object at the start; do not search arbitrary prose.
+    if include_bare and text.lstrip().startswith("{"):
+        candidate = text.lstrip()
         try:
-            payload = json.loads(match.group(1))
+            _, end = json.JSONDecoder().raw_decode(candidate)
+        except (ValueError, RecursionError):
+            pass
+        else:
+            blocks.append(candidate[:end])
+    for block in blocks:
+        try:
+            payload = json.loads(block)
         except Exception:
             continue
         if not isinstance(payload, Mapping):
@@ -187,12 +200,64 @@ def extract_cited_urls(text: str) -> tuple[str, ...]:
     return tuple(urls)
 
 
+def extract_cited_urls(text: str) -> tuple[str, ...]:
+    """Return citations found in fenced blocks or a bare evidence object."""
+    return _extract_cited_urls(text, include_bare=True)
+
+
+class _NoRedirectBody:
+    """Allow urllib to close a redirect response without draining its body."""
+
+    def __init__(self, response):
+        self._response = response
+
+    def read(self, *args, **kwargs):
+        # Citation liveness needs only the redirect status and Location header.
+        return b""
+
+    def __getattr__(self, name):
+        return getattr(self._response, name)
+
+
+class _BoundedRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Count all redirects, including repeated URLs, per fetch request."""
+
+    def __init__(self, deadline: float = float("inf")):
+        super().__init__()
+        self.deadline = deadline
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        redirects = getattr(req, "_citation_redirects", 0)
+        if redirects >= _MAX_REDIRECTS:
+            raise urllib.error.HTTPError(req.full_url, code, "redirect limit exceeded", headers, fp)
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise urllib.error.HTTPError(
+                req.full_url, code, "citation timeout expired", headers, fp
+            )
+        # urllib follows redirects using the previous request's timeout.
+        if self.deadline != float("inf"):
+            req.timeout = min(req.timeout, remaining)
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None:
+            redirected._citation_redirects = redirects + 1
+        return redirected
+
+    def http_error_302(self, req, fp, code, msg, headers):
+        # stdlib's redirect handler otherwise performs an unbounded fp.read()
+        # before opening the next URL. No response body is needed for liveness.
+        return super().http_error_302(req, _NoRedirectBody(fp), code, msg, headers)
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
+
+
 def _default_fetch(url: str, timeout: float) -> bool:
-    """One bounded liveness probe. True iff the fetch completed with 2xx/3xx.
+    """One bounded liveness probe; accept a response only after opening it.
 
     HEAD first (cheapest); a server that rejects HEAD outright (405/501) gets
     one ranged GET so it is not falsely marked dead. Anything else — DNS
-    failure, TLS failure, timeout, 4xx/5xx — is "not alive right now".
+    failure, TLS failure, timeout or HTTP error is "not alive right now".
+    Redirects are limited to three hops per request.
     """
     # urllib's Request rejects percent escapes inside IPv6 ZoneIDs. Decode
     # characters it can represent in the authority without changing delimiters.
@@ -224,19 +289,29 @@ def _default_fetch(url: str, timeout: float) -> bool:
                     + zone
                     + url[offset + closing :]
                 )
+    deadline = time.monotonic() + timeout
+    opener = urllib.request.build_opener(_BoundedRedirectHandler(deadline))
     for method, headers in (("HEAD", {}), ("GET", {"Range": "bytes=0-0"})):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
         request = urllib.request.Request(  # noqa: S310 - scheme validated by caller
             request_url,
             method=method,
             headers={"User-Agent": "ouroboros-citation-check/1", **headers},
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout):  # noqa: S310
-                return True
+            with opener.open(request, timeout=remaining):  # noqa: S310
+                return time.monotonic() <= deadline
         except urllib.error.HTTPError as error:
-            if method == "HEAD" and error.code in (405, 501):
-                continue  # server refuses HEAD; try the ranged GET once
-            return 200 <= error.code < 400
+            try:
+                if method == "HEAD" and error.code in (405, 501):
+                    continue  # server refuses HEAD; try the ranged GET once
+                # A 3xx HTTPError can indicate the redirect cap was exceeded;
+                # it is not evidence of a reachable final source.
+                return False
+            finally:
+                error.close()
         except Exception:
             return False
     return False
@@ -256,13 +331,23 @@ def audit_citations(
     ``invalid`` (malformed, non-http(s), or oversized URL — never fetched) / ``unchecked``
     (budget or count cap reached before this URL's turn). Never raises.
     """
-    urls: list[str] = []
-    seen: set[str] = set()
+    all_urls: list[str] = []
+    all_seen: set[str] = set()
+    fenced_order: list[str] = []
+    fenced_urls: set[str] = set()
     for text in texts:
-        for url in extract_cited_urls(text if isinstance(text, str) else ""):
-            if url not in seen:
-                seen.add(url)
-                urls.append(url)
+        text = text if isinstance(text, str) else ""
+        for url in _extract_cited_urls(text, include_bare=False):
+            if url not in fenced_urls:
+                fenced_urls.add(url)
+                fenced_order.append(url)
+        for url in extract_cited_urls(text):
+            if url not in all_seen:
+                all_seen.add(url)
+                all_urls.append(url)
+    # Preserve the pre-existing fenced-only fetch order and budget exactly.
+    # A bare occurrence must not promote a later fenced URL into the cap.
+    urls = fenced_order + [url for url in all_urls if url not in fenced_urls]
     if not urls:
         return None
 
@@ -273,12 +358,17 @@ def audit_citations(
         if not _eligible_http_citation(url):
             verdicts[url] = INVALID
             continue
-        if checked >= max_urls or time.monotonic() >= deadline:
+        # Bare evidence was not historically a network-fetch input. Surface
+        # its citations as unverified without expanding destination access.
+        if url not in fenced_urls:
             verdicts[url] = UNCHECKED
             continue
         remaining = min(_REQUEST_TIMEOUT_SECONDS, deadline - time.monotonic())
+        if checked >= max_urls or remaining <= 0:
+            verdicts[url] = UNCHECKED
+            continue
         try:
-            alive = bool(fetch(url, max(remaining, 0.1)))
+            alive = bool(fetch(url, remaining))
         except Exception:
             alive = False
         verdicts[url] = VERIFIED if alive else UNREACHABLE
