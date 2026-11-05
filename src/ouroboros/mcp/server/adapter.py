@@ -1619,6 +1619,7 @@ def create_ouroboros_server(
     from ouroboros.mcp.tools.fanout import FanoutRegistry
     from ouroboros.mcp.tools.fanout_composition import create_fanout_wiring
     from ouroboros.mcp.tools.qa import QAHandler
+    from ouroboros.mcp.tools.qa_background import StartQAHandler
     from ouroboros.mcp.tools.registry import ToolRegistry
     from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
     from ouroboros.mcp.tools.synapse_handler import SynapseSignalHandler, SynapseTargetsHandler
@@ -2414,6 +2415,13 @@ def create_ouroboros_server(
         }
     )
 
+    qa_handler = QAHandler(
+        llm_adapter=evaluation_llm_adapter,
+        llm_backend=evaluate_llm_backend,
+        event_store=event_store,
+        agent_runtime_backend=evaluate_runtime_backend,
+        opencode_mode=opencode_mode,
+    )
     tool_handlers = [
         execute_seed,
         start_execute_seed,
@@ -2529,12 +2537,16 @@ def create_ouroboros_server(
         ACTreeHUDHandler(
             event_store=event_store,
         ),
-        QAHandler(
-            llm_adapter=evaluation_llm_adapter,
+        qa_handler,
+        StartQAHandler(
+            qa_handler=qa_handler,
             llm_backend=evaluate_llm_backend,
             event_store=event_store,
+            job_manager=job_manager,
             agent_runtime_backend=evaluate_runtime_backend,
             opencode_mode=opencode_mode,
+            project_dir=str(effective_cwd),
+            reconstructible_backend=True,
         ),
         CancelExecutionHandler(
             event_store=event_store,

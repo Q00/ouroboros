@@ -188,6 +188,7 @@ async def run_worker(request_path: Path) -> int:
             runtime_backend=request.runtime_backend,
             llm_backend=request.llm_backend,
             opencode_mode=request.opencode_mode,
+            **({"project_dir": request.project_dir} if request.project_dir is not None else {}),
             durable_jobs=True,
             forced_inline_job_id=request.job_id,
         )
