@@ -435,7 +435,7 @@ def parse_batch_text(value: str, question_ids: list[str]) -> list[dict[str, Any]
             end = pos + boundary.start() if boundary else len(value)
             segment = value[pos:end].strip()
             if not segment or re.fullmatch(
-                r"(?:-|[a-dA-D1-4](?:\s*,\s*[a-dA-D1-4])*)\s*/", segment
+                r"(?:-|(?:[a-zA-Z]|[0-9]+)(?:\s*,\s*(?:[a-zA-Z]|[0-9]+)?)*)\s*/", segment
             ):
                 raise ValueError("Invalid answer")
             tokens = [token.strip() for token in segment.split(",")]

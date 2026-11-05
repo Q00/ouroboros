@@ -340,6 +340,32 @@ async def test_discard_after_partial_answers_keeps_confirmed_ids_and_round_numbe
 
 
 @pytest.mark.asyncio
+async def test_dangling_invalid_numeric_selection_does_not_save_an_answer(tmp_path):
+    adapter = SimpleNamespace(
+        complete=AsyncMock(return_value=Result.ok(SimpleNamespace(content=_proposal())))
+    )
+    engine = InterviewEngine(llm_adapter=adapter, state_dir=tmp_path, model="synthetic")
+    handler = InterviewHandler(interview_engine=engine, llm_adapter=adapter, data_dir=tmp_path)
+    handler._create_interview_engine = lambda: (engine, adapter)
+    started = await handler.handle(
+        {"initial_context": "Build a tool", "structured_first_batch": True}
+    )
+    assert started.is_ok
+    sid = started.value.meta["session_id"]
+    before = (await engine.load_state(sid)).value.model_dump(mode="json")
+    rejected = await handler.handle(
+        {
+            "session_id": sid,
+            "batch_confirm_digest": started.value.meta["batch_digest"],
+            "batch_independence_confirmed": True,
+            "batch_answers_text": "1: 5 /",
+        }
+    )
+    assert rejected.is_err
+    assert (await engine.load_state(sid)).value.model_dump(mode="json") == before
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("answers", "last_answer"),
     [
