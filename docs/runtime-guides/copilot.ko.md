@@ -8,7 +8,7 @@
 
 Copilot 런타임은 Codex · Gemini · Hermes · OpenCode · Kiro 런타임의 형제입니다. Ouroboros가 오케스트레이션 루프를 소유하고, 기본 CLI 방식에서는 호스팅 SDK와 대화하는 대신 작업마다 `copilot -p`를 셸로 호출합니다. 인증은 기존 `gh auth` 세션을 타므로 **따로 관리할 API 키가 없습니다.**
 
-assistant와 도구 활동을 실시간으로 보려면 실험적인 [Copilot ACP 전송 방식](copilot-acp.md)(영문)을 명시적으로 선택할 수 있습니다. 같은 `copilot` 백엔드와 설정을 사용하지만 `-p` 대신 `copilot --acp --stdio`를 실행합니다. 이 문서의 CLI 방식이 기본값이며, ACP의 권한과 제한적인 폴백 조건은 별도 문서에서 확인하세요.
+assistant와 도구 활동을 실시간으로 보려면 실험적인 [Copilot ACP 전송 방식](copilot-acp.ko.md)을 명시적으로 선택할 수 있습니다. 같은 `copilot` 백엔드와 설정을 사용하지만 `-p` 대신 `copilot --acp --stdio`를 실행합니다. 이 문서의 CLI 방식이 기본값이며, ACP의 권한과 제한적인 폴백 조건은 별도 문서에서 확인하세요.
 
 > **이 런타임만 다른 점**: Copilot은 Ouroboros 백엔드 중 유일하게 **모델 목록을 실시간으로 발견합니다.** `ouroboros setup --runtime copilot`이 setup 시점에 GitHub Copilot models API를 조회해서, 하드코딩된 모델 ID를 외우게 하는 대신 **지금 당신 구독이 실제로 허용하는 것** 중에서 기본값을 고르게 합니다. GitHub가 새 모델을 내놓는 순간부터 쓸 수 있고, 갱신하려면 setup을 다시 돌리면 됩니다.
 
