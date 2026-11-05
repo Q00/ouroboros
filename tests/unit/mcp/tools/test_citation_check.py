@@ -5,8 +5,11 @@ All tests inject a fake fetcher — the unit suite never touches the network.
 
 from __future__ import annotations
 
+from email.message import Message
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+from urllib.error import HTTPError
+from urllib.request import Request
 
 import pytest
 
@@ -15,9 +18,60 @@ from ouroboros.mcp.tools.citation_check import (
     UNCHECKED,
     UNREACHABLE,
     VERIFIED,
+    _BoundedRedirectHandler,
+    _default_fetch,
     audit_citations,
     extract_cited_urls,
 )
+
+
+@pytest.mark.parametrize("same_url", [True, False])
+def test_redirect_cap_counts_all_hops_including_repeated_urls(same_url: bool) -> None:
+    handler = _BoundedRedirectHandler()
+    request = Request("https://example.test/0", method="HEAD")
+    headers = Message()
+    for index in range(3):
+        url = "https://example.test/0" if same_url else f"https://example.test/{index + 1}"
+        request = handler.redirect_request(request, None, 302, "Found", headers, url)
+        assert request is not None
+    with pytest.raises(HTTPError, match="redirect limit exceeded"):
+        handler.redirect_request(request, None, 302, "Found", headers, "https://example.test/4")
+
+
+def test_redirect_limit_http_error_is_not_verified() -> None:
+    error = HTTPError("https://example.test/3", 302, "redirect limit exceeded", {}, None)
+    with (
+        patch("urllib.request.OpenerDirector.open", side_effect=error),
+        patch.object(error, "close", wraps=error.close) as close,
+    ):
+        assert _default_fetch("https://example.test/0", 1.0) is False
+    close.assert_called_once()
+
+
+@pytest.mark.parametrize("status", [405, 501])
+def test_rejected_head_is_closed_before_ranged_get(status: int) -> None:
+    error = HTTPError("https://example.test/0", status, "HEAD rejected", {}, None)
+    response = MagicMock()
+    with (
+        patch("urllib.request.OpenerDirector.open", side_effect=[error, response]) as open_request,
+        patch.object(error, "close", wraps=error.close) as close,
+    ):
+        assert _default_fetch("https://example.test/0", 1.0) is True
+    close.assert_called_once()
+    assert open_request.call_args_list[1].args[0].get_method() == "GET"
+    assert open_request.call_args_list[1].args[0].get_header("Range") == "bytes=0-0"
+
+
+def test_not_found_is_closed_and_not_verified() -> None:
+    error = HTTPError("https://example.test/0", 404, "Not Found", {}, None)
+    with (
+        patch("urllib.request.OpenerDirector.open", side_effect=error) as open_request,
+        patch.object(error, "close", wraps=error.close) as close,
+    ):
+        assert _default_fetch("https://example.test/0", 1.0) is False
+    close.assert_called_once()
+    open_request.assert_called_once()
+
 
 _EVIDENCE = (
     "My analysis...\n"
@@ -259,7 +313,7 @@ def test_urllib_representable_encoded_zones_are_fetchable() -> None:
         url = f"https://[fe80::1%25{zone}]/doc"
         text = "```json\n" + json.dumps({"external_sources": [url]}) + "\n```"
 
-        with patch("urllib.request.urlopen") as urlopen:
+        with patch("urllib.request.OpenerDirector.open") as urlopen:
             audit = audit_citations([text])
 
         assert audit is not None

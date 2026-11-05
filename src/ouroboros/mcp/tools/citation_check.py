@@ -38,6 +38,7 @@ _REQUEST_TIMEOUT_SECONDS = 4.0
 _TOTAL_BUDGET_SECONDS = 10.0
 _MAX_URLS = 8
 _MAX_URL_LEN = 2000
+_MAX_REDIRECTS = 3
 
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 _UNRESERVED = frozenset(string.ascii_letters + string.digits + "-._~")
@@ -187,12 +188,26 @@ def extract_cited_urls(text: str) -> tuple[str, ...]:
     return tuple(urls)
 
 
+class _BoundedRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Count all redirects, including repeated URLs, per fetch request."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        redirects = getattr(req, "_citation_redirects", 0)
+        if redirects >= _MAX_REDIRECTS:
+            raise urllib.error.HTTPError(req.full_url, code, "redirect limit exceeded", headers, fp)
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None:
+            redirected._citation_redirects = redirects + 1
+        return redirected
+
+
 def _default_fetch(url: str, timeout: float) -> bool:
-    """One bounded liveness probe. True iff the fetch completed with 2xx/3xx.
+    """One bounded liveness probe; accept a response only after opening it.
 
     HEAD first (cheapest); a server that rejects HEAD outright (405/501) gets
     one ranged GET so it is not falsely marked dead. Anything else — DNS
-    failure, TLS failure, timeout, 4xx/5xx — is "not alive right now".
+    failure, TLS failure, timeout or HTTP error is "not alive right now".
+    Redirects are limited to three hops per request.
     """
     # urllib's Request rejects percent escapes inside IPv6 ZoneIDs. Decode
     # characters it can represent in the authority without changing delimiters.
@@ -224,6 +239,7 @@ def _default_fetch(url: str, timeout: float) -> bool:
                     + zone
                     + url[offset + closing :]
                 )
+    opener = urllib.request.build_opener(_BoundedRedirectHandler())
     for method, headers in (("HEAD", {}), ("GET", {"Range": "bytes=0-0"})):
         request = urllib.request.Request(  # noqa: S310 - scheme validated by caller
             request_url,
@@ -231,12 +247,17 @@ def _default_fetch(url: str, timeout: float) -> bool:
             headers={"User-Agent": "ouroboros-citation-check/1", **headers},
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout):  # noqa: S310
+            with opener.open(request, timeout=timeout):  # noqa: S310
                 return True
         except urllib.error.HTTPError as error:
-            if method == "HEAD" and error.code in (405, 501):
-                continue  # server refuses HEAD; try the ranged GET once
-            return 200 <= error.code < 400
+            try:
+                if method == "HEAD" and error.code in (405, 501):
+                    continue  # server refuses HEAD; try the ranged GET once
+                # A 3xx HTTPError can indicate the redirect cap was exceeded;
+                # it is not evidence of a reachable final source.
+                return False
+            finally:
+                error.close()
         except Exception:
             return False
     return False
