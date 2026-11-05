@@ -591,6 +591,14 @@ _UNPARSED_COVERAGE_OUTPUTS = {
         '{"Action":"output","Package":"p","Output":"erage, 15/100 lines covered\\n"}'
     ),
     "coverage report --format=total": "15",
+    "bare total conflicting with TOTAL": "TOTAL 10 0 100%\n15\n",
+    "bare decimal conflicting with TOTAL": "TOTAL 10 0 100%\n15.00\n",
+    "bare percentage conflicting with TOTAL": "TOTAL 10 0 100%\n15%\n",
+    "colored bare percentage conflicting with TOTAL": "TOTAL 10 0 100%\n\x1b[31m15%\x1b[0m\n",
+    "bare total split across go events": (
+        'TOTAL 10 0 100%\n{"Action":"output","Package":"p","Output":"1"}\n'
+        '{"Action":"output","Package":"p","Output":"5\\n"}'
+    ),
     "no output": "",
     "requirement beside decimal TOTAL": "Required Coverage: 70%\nTOTAL   100   85   15.00%",
     "coverage over 100%": "Coverage: 999%",

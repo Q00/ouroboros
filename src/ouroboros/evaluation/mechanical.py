@@ -227,6 +227,10 @@ def parse_coverage_from_output(output: str) -> float | None:
         r"[ \t]*\d+(?:\.\d+)?%[ \t]+coverage[ \t]*,[ \t]*"
         r"\d+[ \t]*/[ \t]*\d+[ \t]+lines[ \t]+covered\b"
     )
+    # `coverage report --format=total` emits a bare number, optionally with
+    # decimal precision. It cannot safely be assigned to a report when mixed
+    # with another result; the same applies to a bare percentage.
+    bare_coverage = r"[ \t]*\d+(?:\.\d+)?%?[ \t]*"
     for row in output.splitlines():
         # Strip bounded terminal SGR sequences only for detection, not proof.
         uncolored = re.sub(r"\x1b\[[0-9;]{0,32}m", "", row)
@@ -235,8 +239,10 @@ def parse_coverage_from_output(output: str) -> float | None:
             or re.match(go_coverage, uncolored, re.IGNORECASE)
         ):
             return None
-        if re.match(jest_coverage, uncolored, re.IGNORECASE) or re.match(
-            tarpaulin_coverage, uncolored, re.IGNORECASE
+        if (
+            re.match(jest_coverage, uncolored, re.IGNORECASE)
+            or re.match(tarpaulin_coverage, uncolored, re.IGNORECASE)
+            or re.fullmatch(bare_coverage, uncolored)
         ):
             return None
         # An unknown control sequence can conceal a measurement in any row,
@@ -292,6 +298,7 @@ def parse_coverage_from_output(output: str) -> float | None:
             or re.match(go_coverage, line, re.IGNORECASE)
             or re.match(jest_coverage, line, re.IGNORECASE)
             or re.match(tarpaulin_coverage, line, re.IGNORECASE)
+            or re.fullmatch(bare_coverage, line)
             for line in uncolored.splitlines()
         ):
             return None
