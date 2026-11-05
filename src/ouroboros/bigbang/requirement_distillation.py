@@ -11,6 +11,7 @@ from ouroboros.bigbang.answer_provenance import (
     classify_answer_provenance,
 )
 from ouroboros.bigbang.interview import INITIAL_CONTEXT_SUMMARY_QUESTION, InterviewState
+from ouroboros.bigbang.opening_seed import anchor_opening_confirmations
 from ouroboros.core.requirement_candidate import (
     CandidateContentSource,
     CandidateResolution,
@@ -469,7 +470,7 @@ def build_promoted_reference_seed(
         project_type="brownfield" if state.is_brownfield else "greenfield",
         context_references=context_references,
     )
-    return Seed(
+    seed = Seed(
         goal=str(requirements["goal"]),
         constraints=constraints,
         acceptance_criteria=criteria,
@@ -498,6 +499,7 @@ def build_promoted_reference_seed(
             interview_id=state.interview_id,
         ),
     )
+    return anchor_opening_confirmations(seed, state)
 
 
 def seed_readiness_details(

@@ -113,10 +113,23 @@ and the interview runs in-process, opt in on start. Present both returned propos
 their model-cited unverified evidence and uncertainty, and the neither path before the open question. They
 are model hypotheses, not user decisions: neither a recommendation, silence, nor
 a bulk approval confirms an item. The server does not verify that the two ideas genuinely
-compete or that the cited evidence supports them. This path has no item-confirmation operation; ask
-the person to state their actual requirements in their own words and pass those words
-unchanged as the answer. Never turn an interpretation label into a user decision.
-On resume show the persisted proposals, without inventing or changing them.
+compete or that the cited evidence supports them. If the person explicitly confirms an
+individual exact item, call `ouroboros_interview` with `session_id`, that item's
+`opening_confirm_item_id`, `opening_user_confirmed: true` and the current
+`opening_revision`. First show the person the exact server-provided prompt from
+`opening_confirmation_prompts[item_id]`, without rewording; pass that same prompt as
+`opening_confirmation_prompt` and their exact response as `opening_confirmation_text`.
+The person must respond exactly `YES` to confirm; otherwise do not record confirmation.
+A selection or recommendation alone is not confirmation: ask
+the person explicitly for that item before recording it. If the person explicitly
+rejects both, send `opening_neither: true` with the session ID, current revision,
+the exact server-provided `opening_neither_prompt` shown without rewording as
+`opening_confirmation_prompt`, and their exact response in `opening_confirmation_text`;
+the person must respond exactly `NEITHER`; this clears earlier confirmations. Never send a list or bulk confirmation. After
+each decision use the returned revision; if stale, resume and show the current items
+before asking again. An edited interpretation is not confirmed: ask the person to
+state their actual requirements in their own words and pass those words unchanged
+as the answer. On resume show the persisted proposals without changing them.
 
 **Optional first-question batch:** Only if the person explicitly asks for several
 questions at once, and the tool schema offers `structured_first_batch`, start in

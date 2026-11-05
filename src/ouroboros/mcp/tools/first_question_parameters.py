@@ -8,6 +8,42 @@ from ouroboros.mcp.types import MCPToolParameter, ToolInputType
 def first_question_parameters() -> tuple[MCPToolParameter, ...]:
     return (
         MCPToolParameter(
+            name="opening_revision",
+            type=ToolInputType.STRING,
+            required=False,
+            description="Revision of the exact opening and decisions shown to the person.",
+        ),
+        MCPToolParameter(
+            name="opening_confirm_item_id",
+            type=ToolInputType.STRING,
+            required=False,
+            description="One opening item explicitly confirmed by the person; never infer from a recommendation.",
+        ),
+        MCPToolParameter(
+            name="opening_user_confirmed",
+            type=ToolInputType.BOOLEAN,
+            required=False,
+            description="True only after explicit individual confirmation of the exact item.",
+        ),
+        MCPToolParameter(
+            name="opening_confirmation_text",
+            type=ToolInputType.STRING,
+            required=False,
+            description="The person's exact response to the individual confirmation or neither question.",
+        ),
+        MCPToolParameter(
+            name="opening_confirmation_prompt",
+            type=ToolInputType.STRING,
+            required=False,
+            description="The exact server-issued confirmation prompt shown to the person.",
+        ),
+        MCPToolParameter(
+            name="opening_neither",
+            type=ToolInputType.BOOLEAN,
+            required=False,
+            description="True only when the person explicitly rejects both opening interpretations.",
+        ),
+        MCPToolParameter(
             name="propose_opening_interpretations",
             type=ToolInputType.BOOLEAN,
             required=False,

@@ -63,6 +63,7 @@ from ouroboros.interview_adapters.first_question import (
 from ouroboros.interview_calibration import normalize_interview_calibration
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.host_context import resolve_request_subagent_dispatch
+from ouroboros.mcp.tools import interview_opening_decisions as opening_decisions
 from ouroboros.mcp.tools.advisory_dispatch import (
     append_question_advisory_dispatch,
     echo_carries_dispatch,
@@ -1110,12 +1111,10 @@ class GenerateSeedHandler:
                     )
                 )
             interview_state = load_result.value
-            from ouroboros.mcp.tools.interview_batch import pending_batch
-
-            if pending_batch(interview_state):
+            if blocker := opening_decisions.plugin_seed_blocker(interview_state):
                 return Result.err(
                     MCPToolError(
-                        "Answer or discard the pending batch before generating a Seed",
+                        blocker,
                         tool_name="ouroboros_generate_seed",
                     )
                 )
@@ -1941,6 +1940,10 @@ class InterviewHandler:
         arguments = dict(arguments)
         arguments[_NORMALIZED_TURN_CONTEXT_KEY] = turn_context
 
+        opening_decision = await opening_decisions.dispatch_opening_decision(self, arguments)
+        if opening_decision is not None:
+            return opening_decision
+
         calibration_input = arguments.get("calibration_input")
         initial_context = arguments.get("initial_context")
         session_id = arguments.get("session_id")
@@ -2561,8 +2564,9 @@ class InterviewHandler:
                 display_question = _format_question_with_ambiguity(
                     presentation.render() if presentation else question, live_score
                 )
-                if state.proposed_opening is not None:
-                    display_question = state.proposed_opening.render()
+                display_question = opening_decisions.render_opening(
+                    state, question, display_question
+                )
 
                 # Record the question as an unanswered round so resume can find it
                 from ouroboros.bigbang.interview import InterviewRound
@@ -2626,10 +2630,7 @@ class InterviewHandler:
                 }
                 if presentation is not None:
                     start_meta["first_question_presentation"] = presentation.model_dump(mode="json")
-                if state.proposed_opening is not None:
-                    start_meta["opening_interpretations"] = state.proposed_opening.model_dump(
-                        mode="json"
-                    )
+                start_meta.update(opening_decisions.opening_meta(state))
                 if is_length_guard:
                     # Q00/ouroboros#831 (Direction A): surface the length-guard
                     # meta-directive via structured meta keys so clients can
@@ -3314,8 +3315,9 @@ class InterviewHandler:
                     presentation.render() if presentation else pending_question,
                     _load_state_ambiguity_score(state),
                 )
-                if state.proposed_opening is not None and len(state.rounds) == 1:
-                    display_question = state.proposed_opening.render(pending_question)
+                display_question = opening_decisions.render_opening(
+                    state, pending_question, display_question
+                )
                 resume_is_length_guard = _is_initial_context_length_guard_question(pending_question)
                 resume_meta: dict[str, Any] = {
                     "session_id": session_id,
@@ -3342,10 +3344,8 @@ class InterviewHandler:
                     resume_meta["first_question_presentation"] = presentation.model_dump(
                         mode="json"
                     )
-                if state.proposed_opening is not None and len(state.rounds) == 1:
-                    resume_meta["opening_interpretations"] = state.proposed_opening.model_dump(
-                        mode="json"
-                    )
+                if len(state.rounds) == 1:
+                    resume_meta.update(opening_decisions.opening_meta(state))
                 if resume_is_length_guard:
                     # Q00/ouroboros#831 (Direction A): structured signal
                     # when resuming an interview whose pending round is

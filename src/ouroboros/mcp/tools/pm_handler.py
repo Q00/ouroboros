@@ -755,6 +755,18 @@ class PMInterviewHandler:
                         MCPToolError(str(load_result.error), tool_name="ouroboros_pm_interview")
                     )
                 state = load_result.value
+                if action == "generate":
+                    from ouroboros.mcp.tools.interview_opening_decisions import (
+                        has_confirmed_opening,
+                    )
+
+                    if has_confirmed_opening(state):
+                        return Result.err(
+                            MCPToolError(
+                                "PM Seed generation does not yet preserve confirmed opening interpretations",
+                                tool_name="ouroboros_pm_interview",
+                            )
+                        )
 
                 # Restore brownfield repos from pm_meta if not provided in
                 # the current request.  The user selects repos during
