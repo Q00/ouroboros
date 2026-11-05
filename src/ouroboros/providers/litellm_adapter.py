@@ -1209,7 +1209,7 @@ class LiteLLMAdapter:
                     },
                 ]
             else:
-                kwargs["response_format"] = config.response_format
+                kwargs["response_format"] = _litellm_response_format(config.response_format)
 
         # Effort-first investment dial (RFC #1405). LiteLLM forwards
         # ``reasoning_effort`` to each provider's native knob (Anthropic's
@@ -1491,3 +1491,27 @@ class LiteLLMAdapter:
         if model.startswith("gemini"):
             return "google"
         return "unknown"
+
+
+# ``json_schema.name`` used when a caller passes a bare schema.
+_DEFAULT_JSON_SCHEMA_NAME = "response"
+
+
+def _litellm_response_format(response_format: dict[str, Any]) -> dict[str, Any]:
+    """Return ``response_format`` in the wrapped form LiteLLM forwards to providers.
+
+    Callers may pass ``json_schema`` as the bare schema or as an OpenAI-style
+    wrapper holding it under ``schema`` (see ``providers.response_format``).
+    LiteLLM expects the wrapper, so a bare schema is wrapped with a default
+    ``name``. Wrapped values and other formats are returned unchanged, and the
+    caller's dict is never mutated.
+    """
+    if response_format.get("type") != "json_schema":
+        return response_format
+    schema = response_format.get("json_schema")
+    if not isinstance(schema, dict) or isinstance(schema.get("schema"), dict):
+        return response_format
+    return {
+        **response_format,
+        "json_schema": {"name": _DEFAULT_JSON_SCHEMA_NAME, "schema": schema},
+    }
