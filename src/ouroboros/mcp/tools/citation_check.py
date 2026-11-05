@@ -188,6 +188,20 @@ def extract_cited_urls(text: str) -> tuple[str, ...]:
     return tuple(urls)
 
 
+class _NoRedirectBody:
+    """Allow urllib to close a redirect response without draining its body."""
+
+    def __init__(self, response):
+        self._response = response
+
+    def read(self, *args, **kwargs):
+        # Citation liveness needs only the redirect status and Location header.
+        return b""
+
+    def __getattr__(self, name):
+        return getattr(self._response, name)
+
+
 class _BoundedRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Count all redirects, including repeated URLs, per fetch request."""
 
@@ -199,6 +213,13 @@ class _BoundedRedirectHandler(urllib.request.HTTPRedirectHandler):
         if redirected is not None:
             redirected._citation_redirects = redirects + 1
         return redirected
+
+    def http_error_302(self, req, fp, code, msg, headers):
+        # stdlib's redirect handler otherwise performs an unbounded fp.read()
+        # before opening the next URL. No response body is needed for liveness.
+        return super().http_error_302(req, _NoRedirectBody(fp), code, msg, headers)
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
 
 
 def _default_fetch(url: str, timeout: float) -> bool:
