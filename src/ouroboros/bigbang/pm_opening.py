@@ -58,17 +58,22 @@ def anchor_pm_opening(seed: "PMSeed", state: "InterviewState") -> "PMSeed":
         )
         for item, event in confirmed_opening_events(state.proposed_opening, state.opening_decisions)
     )
-    return replace(seed, opening_confirmations=confirmations)
+    return replace(
+        seed,
+        opening_confirmations=confirmations,
+        opening_state_revision=state.persistence_revision if confirmations else "",
+    )
 
 
 def opening_confirmation_markdown(confirmations: tuple[PMOpeningConfirmation, ...]) -> str:
     if not confirmations:
         return ""
     lines = [
-        "## Host-reported opening confirmations",
+        "## Unverified opening confirmation records",
         "",
-        "The host reported these exact confirmation exchanges; the server cannot verify "
-        "that the person saw or answered them.",
+        "These records are a snapshot and may have changed since generation. They claim "
+        "to be host-reported; the server cannot verify their source or whether the person "
+        "saw or answered them.",
         "",
     ]
     for confirmation in confirmations:

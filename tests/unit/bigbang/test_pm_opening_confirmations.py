@@ -96,6 +96,7 @@ async def test_pm_seed_roundtrip_and_deterministic_document_preserve_only_confir
     item = seed.opening_confirmations[0]
     assert item.question == state.opening_decisions[0].presented_prompt
     assert item.answer == "YES" and item.source == "host_reported_explicit_user_decision"
+    assert seed.opening_state_revision == state.persistence_revision
     assert "UNCONFIRMED_BETA" not in str(seed.to_dict())
     assert "EVIDENCE_ALPHA" not in str(seed.to_dict())
     assert "FORGED" not in str(seed.to_dict())
@@ -109,9 +110,11 @@ async def test_pm_seed_roundtrip_and_deterministic_document_preserve_only_confir
         and "host_reported_explicit_user_decision" in context.value
     )
     assert "UNCONFIRMED_BETA" not in context.value
-    assert "server cannot verify" in yaml.safe_load(context.value)["opening_confirmation_notice"]
+    notice = yaml.safe_load(context.value)["opening_confirmation_notice"]
+    assert "server cannot verify" in notice and "snapshot" in notice
     template = generate_pm_markdown(seed)
     assert "CONFIRMED_ALPHA" in template and "UNCONFIRMED_BETA" not in template
+    assert "snapshot" in template and "server cannot verify" in template
     document_adapter = SimpleNamespace(complete=AsyncMock())
     document = PMDocumentGenerator(llm_adapter=document_adapter, model="synthetic")
     generated = await document.generate(seed, interview_state=state)

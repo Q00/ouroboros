@@ -297,7 +297,10 @@ class PMDocumentGenerator:
             if anchored.opening_confirmations:
                 if seed.interview_id != interview_state.interview_id:
                     return Result.err(ProviderError("PM Seed belongs to a different interview"))
-                if seed.opening_confirmations != anchored.opening_confirmations:
+                if (
+                    seed.opening_confirmations != anchored.opening_confirmations
+                    or seed.opening_state_revision != anchored.opening_state_revision
+                ):
                     return Result.err(ProviderError("PM Seed opening confirmations are stale"))
             elif seed.opening_confirmations:
                 return Result.err(ProviderError("PM Seed opening confirmations are stale"))
