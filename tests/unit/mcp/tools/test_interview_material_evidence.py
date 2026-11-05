@@ -487,3 +487,72 @@ async def test_legacy_model_assumption_is_only_an_unverified_local_reference(tmp
         assert shown.meta["material_evidence_status"] == "resolved"
         assert "Unverified model assumption" in shown.content[0].text
         assert marker in shown.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_mixed_opening_and_material_cannot_bypass_either_followup_guard(tmp_path):
+    from ouroboros.bigbang.interview import InterviewRound
+    from ouroboros.interview_adapters.inline_materials import InlineMaterial, MaterialDraft
+    from ouroboros.interview_adapters.opening_interpretations import (
+        ProposedOpening,
+        ProviderOpening,
+    )
+    from tests.unit.mcp.tools.test_interview_opening_interpretations import (
+        _proposal as opening_proposal,
+    )
+
+    llm = SimpleNamespace(complete=AsyncMock())
+    engine = InterviewEngine(llm_adapter=llm, state_dir=tmp_path, model="synthetic")
+    state = (
+        await engine.start_interview("Build a tool", interview_id="interview_0123456789abcdef")
+    ).value
+    state.rounds.append(
+        InterviewRound(round_number=1, question="User question?", user_response="User answer")
+    )
+    state.proposed_opening = ProposedOpening.from_provider(
+        ProviderOpening.model_validate_json(opening_proposal())
+    )
+    state.inline_material = InlineMaterial(
+        text="Synthetic source",
+        status="ready",
+        draft=MaterialDraft(
+            origin="local_excerpts", source_quotes=("Synthetic source",), inferred_assumptions=()
+        ),
+    )
+    assert (await engine.save_state(state)).is_ok
+    before = engine._state_file_path(state.interview_id).read_bytes()
+    handler = InterviewHandler(interview_engine=engine, llm_adapter=llm, data_dir=tmp_path)
+    handler._create_interview_engine = lambda: (engine, llm)
+    handler._score_interview_state = AsyncMock(return_value=None)
+    server = MCPServerAdapter(name="mixed-opening-material-test")
+    server.register_tool(handler)
+    with patch.object(MCPServer, "run_stdio_async", new=AsyncMock()):
+        await server.serve(transport="stdio")
+    async with Client(server._mcp_server, mode="auto") as client:
+        for field in (
+            "last_question",
+            "inline_material_user_followup_question",
+            "opening_user_followup_question",
+        ):
+            result = await client.call_tool(
+                "ouroboros_interview",
+                {
+                    "session_id": state.interview_id,
+                    "answer": "yes",
+                    field: "SENTINEL_ALPHA",
+                },
+            )
+            assert result.is_error
+            assert engine._state_file_path(state.interview_id).read_bytes() == before
+        result = await client.call_tool(
+            "ouroboros_interview",
+            {
+                "session_id": state.interview_id,
+                "answer": "[from-auto][safe-default-synthesis] done",
+                "last_question": "SENTINEL_ALPHA",
+            },
+        )
+        assert not result.is_error
+    saved = (await engine.load_state(state.interview_id)).value
+    context = object.__new__(SeedGenerator)._build_interview_context(saved)
+    assert "SENTINEL_ALPHA" not in context and "Synthetic source" not in context
