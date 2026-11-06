@@ -401,12 +401,15 @@ class GjcCoordinatorClient:
         )
 
     async def stop_session(self, session_id: str) -> None:
-        try:
-            await self._call(
-                "gjc_coordinator_stop_session",
-                {"session_id": session_id, "force": True, "allow_mutation": True},
-                timeout=min(self._timeout, 30.0),
+        payload = await self._call(
+            "gjc_coordinator_stop_session",
+            {"session_id": session_id, "force": True, "allow_mutation": True},
+            timeout=min(self._timeout, 30.0),
+        )
+        # An acknowledgement is not proof that this exact broker session was
+        # reaped. Missing, false or mismatched identity must remain uncertain.
+        if payload.get("session_id") != session_id or payload.get("closed") is not True:
+            raise GjcCoordinatorError(
+                "GJC Coordinator did not confirm that the requested session was closed.",
+                code="cleanup_unconfirmed",
             )
-        except GjcCoordinatorError as exc:
-            if exc.code not in {"not_found", "resource_gone"}:
-                raise
