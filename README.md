@@ -222,12 +222,22 @@ Review the outcome against the Seed:
 3. Run the app. Add a task, mark it complete, and check persistence if the Seed
    requires it. Record the observed behavior rather than relying on a score.
 
-If formal evaluation was not completed, ask for `ooo evaluate` with the actual
-execution session ID and relevant artifacts. To request an assessment without
-automatically starting another fix loop, explicitly ask the assistant to pass
-`auto_evolve: false`. Default evaluation can continue rejected work into a
-bounded Ralph loop when a Seed is available, incurring more model usage and
-file changes. This override controls that evaluation request; it does not
+If formal evaluation was not completed, request `ooo evaluate` with the actual
+execution session ID and relevant artifacts **in a host conversation where the
+Ouroboros evaluation skill is available**. Its product-managed evaluation
+workflow uses Ouroboros MCP tools; if those tools are unavailable, follow only
+the skill's documented fallback. `ooo evaluate` is not a standalone shell
+command. For CLI-only use, check the installed
+`ouroboros --help`; the cited [main CLI](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/cli/main.py)
+and [0.59.9 CLI](https://github.com/Q00/ouroboros/blob/5f5fca90662861201ff0a26f502edd22b272c4c6/src/ouroboros/cli/main.py)
+have no separate evaluation rerun command. For an MCP evaluation, when
+`execution.auto_evolve` is enabled (on by default in those sources), a Seed is
+available, and formal evaluation returns `final_approved: false`—including
+`unverified`—Ouroboros can queue a bounded Ralph follow-up, adding model usage and file changes ([main
+condition](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/mcp/tools/evaluation_job.py),
+[0.59.9 condition](https://github.com/Q00/ouroboros/blob/5f5fca90662861201ff0a26f502edd22b272c4c6/src/ouroboros/mcp/tools/evaluation_job.py)).
+To request evaluation without a new follow-up, ask the connected host to pass
+`auto_evolve: false`. This applies to that evaluation request; it does not
 cancel jobs already running.
 
 [Evaluation guidance](./docs/guides/evaluation-pipeline.md) ·
