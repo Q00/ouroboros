@@ -47,6 +47,7 @@ import yaml
 
 from ouroboros.backends import get_backend_capability
 from ouroboros.config.completion_backend_guard import guard_completion_backend
+from ouroboros.config.credential_errors import sanitize_credential_errors
 from ouroboros.config.model_selection import (
     backend_model_selection,
     pin_models_enabled,
@@ -413,15 +414,25 @@ def load_credentials(credentials_path: Path | None = None) -> CredentialsConfig:
         # We don't raise an error, but this could be logged
         pass
 
+    parse_failure = None
+    credentials_dict = None
     try:
         with credentials_path.open(encoding="utf-8") as f:
             credentials_dict = yaml.safe_load(f)
     except (UnicodeDecodeError, yaml.YAMLError) as e:
-        raise ConfigError(
-            f"Failed to parse credentials file: {e}",
+        # Parser exception chains and snippets may contain credential values.
+        # Keep the failure category and safe numeric location, not raw input.
+        mark = getattr(e, "problem_mark", None)
+        location = {"line": mark.line + 1, "column": mark.column + 1} if mark is not None else {}
+        category = "invalid_utf8" if isinstance(e, UnicodeDecodeError) else "invalid_yaml"
+        parse_failure = ConfigError(
+            "Failed to parse credentials file",
             config_file=str(credentials_path),
-            details={"yaml_error": str(e)},
-        ) from e
+            details={"yaml_error": category, **location},
+        )
+    if parse_failure is not None:
+        # Raise after leaving the handler so __context__ does not retain input.
+        raise parse_failure
 
     if credentials_dict is None:
         credentials_dict = {}
@@ -429,17 +440,16 @@ def load_credentials(credentials_path: Path | None = None) -> CredentialsConfig:
     try:
         return CredentialsConfig.model_validate(credentials_dict)
     except PydanticValidationError as e:
-        error_messages = []
-        for error in e.errors():
-            loc = ".".join(str(x) for x in error["loc"])
-            msg = error["msg"]
-            error_messages.append(f"  - {loc}: {msg}")
-
-        raise ConfigError(
+        safe_errors = sanitize_credential_errors(e)
+        error_messages = [f"  - {'.'.join(error['loc'])}: {error['msg']}" for error in safe_errors]
+        validation_failure = ConfigError(
             "Credentials validation failed:\n" + "\n".join(error_messages),
             config_file=str(credentials_path),
-            details={"validation_errors": e.errors()},
-        ) from e
+            details={"validation_errors": safe_errors},
+        )
+    # Raise outside the handler so the input-bearing validation error is not
+    # retained as __context__ on this public exception.
+    raise validation_failure
 
 
 def config_exists() -> bool:
