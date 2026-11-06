@@ -3279,6 +3279,47 @@ async def test_missing_artifact_found_elsewhere_flags_worker_cd_signature(
     assert outcome.cause == "artifacts_missing_found_elsewhere"
 
 
+@pytest.mark.asyncio
+async def test_missing_directory_artifact_found_elsewhere_is_diagnostic_only(
+    tmp_path: Any,
+) -> None:
+    (tmp_path / "packages" / "app" / "dist").mkdir(parents=True)
+    executor = _make_executor(working_directory=str(tmp_path))
+    spec = AcceptanceCriterionSpec.model_construct(
+        description="directory artifact",
+        verify_command=None,
+        expected_artifacts=("dist",),
+        output_assertion=None,
+    )
+
+    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
+
+    assert outcome.passed is False
+    assert outcome.cause == "artifacts_missing_found_elsewhere"
+
+
+def test_elsewhere_scan_ignores_symlink_and_excluded_directories(tmp_path: Any) -> None:
+    from ouroboros.orchestrator.verify_gate_outcome import _missing_artifacts_found_elsewhere
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "node_modules" / "dist").mkdir(parents=True)
+    assert not _missing_artifacts_found_elsewhere(("dist",), str(tmp_path))
+    try:
+        (tmp_path / "link").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks unavailable")
+    assert not _missing_artifacts_found_elsewhere(("link",), str(tmp_path))
+
+
+def test_elsewhere_directory_scan_remains_bounded(tmp_path: Any, monkeypatch: Any) -> None:
+    from ouroboros.orchestrator import verify_gate_outcome
+
+    (tmp_path / "package" / "dist").mkdir(parents=True)
+    monkeypatch.setattr(verify_gate_outcome, "_ARTIFACT_ELSEWHERE_SCAN_LIMIT", 1)
+    assert not verify_gate_outcome._missing_artifacts_found_elsewhere(("dist",), str(tmp_path))
+
+
 def test_verify_gate_outcome_cause_roundtrips_and_legacy_checkpoints_decode() -> None:
     from ouroboros.orchestrator.parallel_executor import (
         _deserialize_verify_gate_outcome,

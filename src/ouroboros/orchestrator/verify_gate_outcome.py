@@ -306,9 +306,8 @@ def _missing_artifacts_found_elsewhere(missing: tuple[str, ...], cwd: str) -> bo
                 name = entry.name
                 if entry.is_symlink():
                     continue
-                if entry.is_dir():
-                    if name not in _ELSEWHERE_SCAN_IGNORED_DIRECTORIES:
-                        stack.append(entry)
+                is_directory = entry.is_dir()
+                if is_directory and name in _ELSEWHERE_SCAN_IGNORED_DIRECTORIES:
                     continue
                 relative_parts = entry.relative_to(root).parts
                 for suffix in suffixes:
@@ -316,6 +315,8 @@ def _missing_artifacts_found_elsewhere(missing: tuple[str, ...], cwd: str) -> bo
                         relative_parts[-len(suffix) :] == suffix
                     ):
                         return True
+                if is_directory:
+                    stack.append(entry)
         return False
     except OSError:
         return False
