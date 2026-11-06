@@ -58,6 +58,23 @@ out](./TELEMETRY.md) before installation if you want to disable it.
 | Codex plugin | Codex CLI and `uvx` (included with uv) on the host | A new Codex conversation |
 | Standalone CLI | uv and an installed, authenticated runtime; Python 3.12+ for Ouroboros | Your terminal |
 
+<details>
+<summary><strong>Automated installation on macOS, Linux, or WSL 2</strong></summary>
+
+For automatic host detection instead of choosing a plugin below, enter this
+in a terminal. The script can install dependencies and configure detected
+hosts; review the [installer](./scripts/install.sh) and its choices first.
+Existing telemetry opt-out controls apply.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | OUROBOROS_INSTALL_REF=readme-hero bash
+```
+
+Continue with a new host session and the first task below. Other installation
+methods, including native Windows, are in the expandable section below.
+
+</details>
+
 **Claude Code — enter in a terminal:**
 
 ```bash
@@ -95,11 +112,23 @@ also available for CLI workflows; optional backends and the settings UI have
 separate extras. Host MCP registration needs an isolated launcher such as
 `uvx` or `pipx`.
 
+If you prefer pip, activate a separate Python 3.12+ virtual environment with
+`uvx` or `pipx` available for host registration, then run the same MCP 2 and
+settings-UI profile with an explicit Claude CLI worker:
+
+```bash
+pip install 'ouroboros-ai[mcp,tui]' && ouroboros setup --runtime claude-cli
+```
+
 MCP 2 (`[mcp]`) and the Claude Agent SDK profiles (`[claude]`, `[claude-sdk]`,
 `[all]`) belong in separate environments. LiteLLM profiles need Python
 3.12–3.13. See the [profile matrix](./docs/platform-support.md#python-profile-matrix)
 before combining extras. The legacy `[dashboard]` extra is a compatibility
 no-op.
+
+The SDK-based `ouroboros-ai[claude]` profile is a separate installation choice;
+see the [MCP and Claude profile matrix](./docs/platform-support.md#mcp-2-and-claude-package-profiles)
+before selecting it.
 
 The [installation guide](./docs/getting-started.md) also covers pip, source,
 and automated installation. The scripts below download and execute an
@@ -472,7 +501,7 @@ src/ouroboros/
 - **Evolution** -- Default limit of 30 generations; ontology similarity is one convergence signal
 - **Stagnation** -- Detects spinning, oscillation, no-drift, and diminishing returns patterns
 - **Agent OS runtime** -- Replayable execution contract across capability discovery, policy, directives, event journal, and agent processes
-- **Runtime backends** -- Pluggable execution engines selected through `orchestrator.runtime_backend`; compare their supported features in the [runtime capability matrix](./docs/runtime-capability-matrix.md).
+- **Runtime backends** -- The registry is the source of truth for every canonical backend returned by `runtime_backend_choices()`, including GJC, Antigravity, Grok, and Zcode. Select through `orchestrator.runtime_backend` and compare supported features in the [runtime capability matrix](./docs/runtime-capability-matrix.md); registered engines do not all have identical capabilities.
 
 See [Architecture](./docs/architecture.md) for the full design document.
 
