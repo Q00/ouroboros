@@ -433,3 +433,65 @@ def test_a_copy_of_the_product_harness_is_not_a_leak(tmp_path: Path, seed) -> No
     # Product code (for example this repository's own source tree): not generated.
     (workspace / "harness.py").write_text(ORACLE_HARNESS_SOURCE)
     assert find_workspace_leaks(workspace, [oracle_package]) == ()
+
+
+def test_scan_diagnostics_preserve_existing_refusal_paths_and_report_depth(
+    tmp_path: Path, package, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ouroboros.boundary.package as package_module
+
+    workspace = _workspace(tmp_path)
+    (workspace / "one" / "two").mkdir(parents=True)
+    monkeypatch.setattr(package_module, "_MAX_SCAN_DEPTH", 1)
+    report = package_module.scan_workspace_leaks(workspace, [package])
+    assert report.paths == find_workspace_leaks(workspace, [package])
+    assert report.incomplete_reasons == ("depth_limit",)
+    assert report.entry_limit is None
+    assert not report.confirmed
+
+
+def test_scan_diagnostics_distinguish_read_failure_from_observed_leak(
+    tmp_path: Path, package, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ouroboros.boundary.package as package_module
+
+    workspace = _workspace(tmp_path)
+    (workspace / "sized.py").write_text(REPRO_SCRIPT)
+    real_open = open
+
+    def refusing(file, *args, **kwargs):
+        if str(file).endswith("sized.py"):
+            raise PermissionError("injected")
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", refusing)
+    report = package_module.scan_workspace_leaks(workspace, [package])
+    assert report.paths == ("sized.py",)
+    assert report.incomplete_reasons == ("unreadable_file",)
+    assert not report.confirmed
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX links")
+def test_symlink_target_io_failure_cannot_be_treated_as_dangling(
+    tmp_path: Path, package, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import errno
+
+    import ouroboros.boundary.package as package_module
+
+    workspace = _workspace(tmp_path)
+    target = tmp_path / "outside.py"
+    target.write_text(REPRO_SCRIPT)
+    link = workspace / "link.py"
+    link.symlink_to(target)
+    real_stat = package_module.os.stat
+
+    def stat_with_failure(path, *args, **kwargs):
+        if os.fspath(path) == os.fspath(link):
+            raise OSError(errno.EIO, "simulated I/O failure")
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(package_module.os, "stat", stat_with_failure)
+    report = package_module.scan_workspace_leaks(workspace, [package])
+    assert report.paths == ("link.py",)
+    assert report.incomplete_reasons == ("unreadable_entry",)
