@@ -825,7 +825,7 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         "src/ouroboros/providers/litellm_adapter.py",
         "LiteLLMAdapter._run_isolated_completion",
         "asyncio.create_subprocess_exec",
-        988,
+        989,
         28,
     ): "explicit two-key literal env (PYTHONIOENCODING/PYTHONUTF8) and `-I`; reference pattern.",
     (

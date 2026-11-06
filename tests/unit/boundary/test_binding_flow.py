@@ -898,3 +898,33 @@ async def test_a_held_out_case_the_base_passes_never_makes_a_hardcoded_candidate
         package_id=state.package.package_id,
         reconciliation=decision.to_payload(),
     )
+
+
+def test_snapshot_base_keeps_the_previous_snapshot_when_the_copy_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #2808: a checkout written to during the copy must not cost the baseline
+    # that is already published, and must not publish a partial one.
+    import shutil
+
+    from ouroboros.boundary.binding_flow import BASE_SNAPSHOT_DIR, snapshot_base
+    from ouroboros.boundary.tree import CheckoutCopyError
+
+    base = tmp_path / "repo"
+    base.mkdir()
+    (base / "code.py").write_text("x = 1\n")
+    store = tmp_path / "store"
+
+    snapshot = snapshot_base(base, store)
+    assert snapshot == store / BASE_SNAPSHOT_DIR
+    assert (snapshot / "code.py").read_text() == "x = 1\n"
+
+    def always_disturbed(src: object, dst: object, **kwargs: object) -> object:
+        raise shutil.Error([(str(base / "maintenance.lock"), "", "No such file or directory")])
+
+    monkeypatch.setattr(shutil, "copytree", always_disturbed)
+    with pytest.raises(CheckoutCopyError):
+        snapshot_base(base, store)
+
+    assert (snapshot / "code.py").read_text() == "x = 1\n", "the published baseline survives"
+    assert sorted(path.name for path in store.iterdir()) == [BASE_SNAPSHOT_DIR]
