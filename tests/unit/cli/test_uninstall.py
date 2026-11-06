@@ -1000,3 +1000,360 @@ class TestConfigEncodingLocaleIndependence:
         assert (tmp_path / "CLAUDE.md").read_bytes() == (
             b"# \xff\xfe broken\n\n<!-- ooo:START -->\n<!-- ooo:END -->\n"
         )
+
+
+class TestOpenCodeV2BridgeRemoval:
+    def test_removes_v2_directory_entry_and_preserves_other_entries(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir()
+        config = config_dir / "opencode.json"
+        target = str(config_dir / "plugins" / "ouroboros-bridge")
+        config.write_text(json.dumps({"plugins": ["other", target, {"name": "foreign"}]}))
+        with (
+            patch("ouroboros.cli.commands.uninstall.opencode_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.opencode_config.opencode_config_dir", return_value=config_dir),
+        ):
+            assert _remove_opencode_bridge_plugin(dry_run=False)
+        assert json.loads(config.read_text())["plugins"] == ["other", {"name": "foreign"}]
+
+    def test_v2_jsonc_comments_are_not_destroyed(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir()
+        config = config_dir / "opencode.jsonc"
+        original = "// user comment\n" + json.dumps(
+            {"plugins": [str(config_dir / "plugins" / "ouroboros-bridge")]}
+        )
+        config.write_text(original)
+        with (
+            patch("ouroboros.cli.commands.uninstall.opencode_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.opencode_config.opencode_config_dir", return_value=config_dir),
+        ):
+            assert not _remove_opencode_bridge_plugin(dry_run=False)
+        assert config.read_text() == original
+
+    def test_v2_dry_run_does_not_change_files(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / "opencode"
+        plugin_dir = config_dir / "plugins" / "ouroboros-bridge"
+        plugin_dir.mkdir(parents=True)
+        config = config_dir / "opencode.json"
+        original = json.dumps({"plugins": [str(plugin_dir)], "plugin": ["other"]})
+        config.write_text(original)
+        with (
+            patch("ouroboros.cli.commands.uninstall.opencode_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.opencode_config.opencode_config_dir", return_value=config_dir),
+        ):
+            assert _remove_opencode_bridge_plugin(dry_run=True)
+        assert config.read_text() == original
+        assert plugin_dir.is_dir()
+
+    def test_v2_commented_config_keeps_bridge_directory(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / "opencode"
+        plugin_dir = config_dir / "plugins" / "ouroboros-bridge"
+        plugin_dir.mkdir(parents=True)
+        config = config_dir / "opencode.jsonc"
+        original = "// preserve\n" + json.dumps({"plugins": [str(plugin_dir)]})
+        config.write_text(original)
+        with (
+            patch("ouroboros.cli.commands.uninstall.opencode_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.opencode_config.opencode_config_dir", return_value=config_dir),
+        ):
+            assert not _remove_opencode_bridge_plugin(dry_run=False)
+        assert plugin_dir.is_dir()
+        assert config.read_text() == original
+
+    def test_v2_mixed_generations_are_removed_without_touching_other_keys(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir()
+        config = config_dir / "opencode.json"
+        original = {
+            "plugin": ["/x/plugins/ouroboros-bridge/ouroboros-bridge.ts", "v1-other"],
+            "plugins": [
+                str(config_dir / "plugins" / "ouroboros-bridge").replace("/", "\\"),
+                "v2-other",
+            ],
+            "untouched": {"hello": "world"},
+        }
+        config.write_text(json.dumps(original))
+        with (
+            patch("ouroboros.cli.commands.uninstall.opencode_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.opencode_config.opencode_config_dir", return_value=config_dir),
+        ):
+            assert _remove_opencode_bridge_plugin(dry_run=False)
+        assert json.loads(config.read_text()) == {
+            "plugin": ["v1-other"],
+            "plugins": ["v2-other"],
+            "untouched": {"hello": "world"},
+        }
+
+    def test_public_cli_preserves_commented_v2_and_mcp_configuration(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / "opencode"
+        plugin_dir = config_dir / "plugins" / "ouroboros-bridge"
+        plugin_dir.mkdir(parents=True)
+        config = config_dir / "opencode.jsonc"
+        original = "// keep user comment\n" + json.dumps(
+            {
+                "mcp": {"ouroboros": {"type": "local", "command": ["uvx"]}},
+                "plugins": [str(plugin_dir), "unrelated"],
+            }
+        )
+        config.write_text(original)
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("pathlib.Path.cwd", return_value=tmp_path),
+            patch("ouroboros.cli.commands.uninstall.opencode_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.opencode_config.opencode_config_dir", return_value=config_dir),
+        ):
+            result = runner.invoke(app, ["--keep-data", "-y"])
+        assert result.exit_code != 0
+        assert "Cannot safely edit" in result.output
+        assert config.read_text() == original
+        assert plugin_dir.is_dir()
+
+    def test_config_write_failure_does_not_delete_bridge_directory(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / "opencode"
+        plugin_dir = config_dir / "plugins" / "ouroboros-bridge"
+        plugin_dir.mkdir(parents=True)
+        config = config_dir / "opencode.json"
+        original = json.dumps({"plugins": [str(plugin_dir)]})
+        config.write_text(original)
+        with (
+            patch("ouroboros.cli.commands.uninstall.opencode_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.opencode_config.opencode_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.uninstall._write_opencode_uninstall_config",
+                return_value=False,
+            ),
+        ):
+            assert not _remove_opencode_bridge_plugin(dry_run=False)
+        assert config.read_text() == original
+        assert plugin_dir.is_dir()
+
+    def test_unrelated_directory_suffix_is_preserved(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir()
+        config = config_dir / "opencode.json"
+        foreign = str(tmp_path / "foreign" / "plugins" / "ouroboros-bridge")
+        config.write_text(json.dumps({"plugins": [foreign]}))
+        with (
+            patch("ouroboros.cli.commands.uninstall.opencode_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.opencode_config.opencode_config_dir", return_value=config_dir),
+        ):
+            assert not _remove_opencode_bridge_plugin(dry_run=False)
+        assert json.loads(config.read_text())["plugins"] == [foreign]
+
+    def test_duplicate_keys_are_not_rewritten_or_deleted(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / "opencode"
+        plugin_dir = config_dir / "plugins" / "ouroboros-bridge"
+        plugin_dir.mkdir(parents=True)
+        config = config_dir / "opencode.json"
+        original = '{"plugins": [' + json.dumps(str(plugin_dir)) + '], "plugins": ["other"]}'
+        config.write_text(original)
+        with (
+            patch("ouroboros.cli.commands.uninstall.opencode_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.opencode_config.opencode_config_dir", return_value=config_dir),
+        ):
+            assert not _remove_opencode_bridge_plugin(dry_run=False)
+        assert config.read_text() == original
+        assert plugin_dir.is_dir()
+
+    def test_malformed_configuration_leaves_bridge_directory(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / "opencode"
+        plugin_dir = config_dir / "plugins" / "ouroboros-bridge"
+        plugin_dir.mkdir(parents=True)
+        config = config_dir / "opencode.json"
+        original = '{ "plugins": ['
+        config.write_text(original)
+        with (
+            patch("ouroboros.cli.commands.uninstall.opencode_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.opencode_config.opencode_config_dir", return_value=config_dir),
+        ):
+            assert not _remove_opencode_bridge_plugin(dry_run=False)
+        assert config.read_text() == original
+        assert plugin_dir.is_dir()
+
+    def test_public_cli_removes_mcp_and_v2_bridge_from_strict_json(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / "opencode"
+        plugin_dir = config_dir / "plugins" / "ouroboros-bridge"
+        plugin_dir.mkdir(parents=True)
+        config = config_dir / "opencode.json"
+        config.write_text(
+            json.dumps(
+                {
+                    "mcp": {"ouroboros": {"type": "local", "command": ["uvx"]}, "other": {}},
+                    "plugins": [str(plugin_dir), "unrelated"],
+                }
+            )
+        )
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("pathlib.Path.cwd", return_value=tmp_path),
+            patch("ouroboros.cli.commands.uninstall.opencode_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.opencode_config.opencode_config_dir", return_value=config_dir),
+        ):
+            result = runner.invoke(app, ["--keep-data", "-y"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(config.read_text()) == {"mcp": {"other": {}}, "plugins": ["unrelated"]}
+        assert not plugin_dir.exists()
+
+    @pytest.mark.parametrize("kind", ["relative", "file_uri", "object_relative", "object_uri"])
+    def test_public_cli_removes_v2_path_forms_from_explicit_config(
+        self, tmp_path: Path, kind: str
+    ) -> None:
+        config_dir = tmp_path / "opencode space"
+        plugin_dir = config_dir / "plugins" / "ouroboros-bridge"
+        plugin_dir.mkdir(parents=True)
+        custom = tmp_path / "custom"
+        custom.mkdir()
+        config = custom / "opencode.json"
+        entry = plugin_dir.as_uri() if kind.endswith("uri") else os.path.relpath(plugin_dir, custom)
+        plugin = {"package": entry, "options": {"x": 1}} if kind.startswith("object") else entry
+        unrelated = {"package": "other-package", "options": {"x": 2}}
+        config.write_text(json.dumps({"plugins": [plugin, unrelated]}))
+        with (
+            patch.dict(os.environ, {"OPENCODE_CONFIG": str(config)}),
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("pathlib.Path.cwd", return_value=tmp_path),
+            patch("ouroboros.cli.commands.uninstall.opencode_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.opencode_config.opencode_config_dir", return_value=config_dir),
+        ):
+            result = runner.invoke(app, ["--keep-data", "-y"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(config.read_text())["plugins"] == [unrelated]
+        assert not plugin_dir.exists()
+
+    def test_file_uri_decodes_once_and_preserves_distinct_percent_path(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / "opencode 한글"
+        plugin_dir = config_dir / "plugins" / "ouroboros-bridge"
+        plugin_dir.mkdir(parents=True)
+        config = config_dir / "opencode.json"
+        unrelated = (config_dir / "plugins" / "ouroboros%2dbridge").as_uri()
+        config.write_text(json.dumps({"plugins": [plugin_dir.as_uri(), unrelated]}))
+        with (
+            patch("ouroboros.cli.commands.uninstall.opencode_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.opencode_config.opencode_config_dir", return_value=config_dir),
+        ):
+            assert _remove_opencode_bridge_plugin(dry_run=False)
+        assert json.loads(config.read_text())["plugins"] == [unrelated]
+
+    def test_public_cli_handles_encoded_separator_and_preserves_external_uri(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / "opencode 한글"
+        plugin_dir = config_dir / "plugins" / "ouroboros-bridge"
+        plugin_dir.mkdir(parents=True)
+        config = config_dir / "opencode.json"
+        target = plugin_dir.as_uri().replace("/plugins/", "%2Fplugins%2F")
+        other = (tmp_path / "foreign" / "plugins" / "ouroboros-bridge").as_uri()
+        percent = (config_dir / "plugins" / "ouroboros%2dbridge").as_uri()
+        config.write_text(json.dumps({"plugins": [target, other, percent]}))
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("pathlib.Path.cwd", return_value=tmp_path),
+            patch("ouroboros.cli.commands.uninstall.opencode_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.opencode_config.opencode_config_dir", return_value=config_dir),
+        ):
+            result = runner.invoke(app, ["--keep-data", "-y"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(config.read_text())["plugins"] == [other, percent]
+        assert not plugin_dir.exists()
+
+    @pytest.mark.parametrize("directory_exists", [False, True])
+    @pytest.mark.parametrize("include_mcp", [False, True])
+    def test_preview_marks_commented_v2_as_manual_without_promising_removal(
+        self, tmp_path: Path, directory_exists: bool, include_mcp: bool
+    ) -> None:
+        config_dir = tmp_path / "opencode"
+        plugin_dir = config_dir / "plugins" / "ouroboros-bridge"
+        config_dir.mkdir(parents=True)
+        if directory_exists:
+            plugin_dir.mkdir(parents=True)
+        config = config_dir / "opencode.jsonc"
+        data: dict = {"plugins": [str(plugin_dir), "other"]}
+        if include_mcp:
+            data["mcp"] = {"ouroboros": {"type": "local", "command": ["uvx"]}}
+        original = "// preserve user comment\n" + json.dumps(data)
+        config.write_text(original)
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("pathlib.Path.cwd", return_value=tmp_path),
+            patch("ouroboros.cli.commands.uninstall.opencode_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.opencode_config.opencode_config_dir", return_value=config_dir),
+        ):
+            preview = runner.invoke(app, ["--dry-run", "--keep-data"])
+            execute = runner.invoke(app, ["-y", "--keep-data"])
+        assert preview.exit_code == 0, preview.output
+        assert "Manual cleanup required" in preview.output
+        assert "Will remove:" not in preview.output
+        assert "Nothing to remove" not in preview.output
+        assert execute.exit_code != 0
+        assert "Manual cleanup required" in execute.output
+        assert config.read_text() == original
+        assert plugin_dir.exists() is directory_exists
+
+    def test_preview_of_editable_v2_matches_actual_entry_removal(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir()
+        config = config_dir / "opencode.json"
+        target = str(config_dir / "plugins" / "ouroboros-bridge")
+        original = json.dumps({"plugins": [target, "other"]})
+        config.write_text(original)
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("pathlib.Path.cwd", return_value=tmp_path),
+            patch("ouroboros.cli.commands.uninstall.opencode_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.opencode_config.opencode_config_dir", return_value=config_dir),
+        ):
+            preview = runner.invoke(app, ["--dry-run", "--keep-data"])
+            assert config.read_text() == original
+            execute = runner.invoke(app, ["-y", "--keep-data"])
+        assert preview.exit_code == 0
+        assert "Will remove:" in preview.output
+        assert "OpenCode bridge plugin entry" in preview.output
+        assert "Manual cleanup required" not in preview.output
+        assert execute.exit_code == 0, execute.output
+        assert json.loads(config.read_text())["plugins"] == ["other"]
+
+    def test_unrelated_only_v2_jsonc_does_not_require_manual_cleanup(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir()
+        config = config_dir / "opencode.jsonc"
+        original = '// unrelated\n{"plugins": ["other-plugin"]}\n'
+        config.write_text(original)
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("pathlib.Path.cwd", return_value=tmp_path),
+            patch("ouroboros.cli.commands.uninstall.opencode_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.opencode_config.opencode_config_dir", return_value=config_dir),
+        ):
+            result = runner.invoke(app, ["--keep-data", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "Nothing to remove" in result.output
+        assert "Manual cleanup required" not in result.output
+        assert config.read_text() == original
+
+    def test_unrelated_v2_jsonc_remains_untouched_when_other_target_exists(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir()
+        config = config_dir / "opencode.jsonc"
+        original = '// unrelated\n{"plugins": ["other-plugin"]}\n'
+        config.write_text(original)
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text("# Keep\n<!-- ooo:START -->\nours\n<!-- ooo:END -->\n")
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("pathlib.Path.cwd", return_value=tmp_path),
+            patch("ouroboros.cli.commands.uninstall.opencode_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.opencode_config.opencode_config_dir", return_value=config_dir),
+        ):
+            result = runner.invoke(app, ["--keep-data", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "Manual cleanup required" not in result.output
+        assert "Cannot safely edit" not in result.output
+        assert config.read_text() == original
+        assert "ooo:START" not in claude_md.read_text()
