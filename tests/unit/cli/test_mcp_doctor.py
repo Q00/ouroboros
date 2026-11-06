@@ -626,7 +626,8 @@ def _fake_probe_client(
 ):
     """Return an adapter factory with explicit connection and cleanup results."""
 
-    def create_client(*, max_retries):
+    def create_client(*, max_retries, include_cleanup_error_details):
+        assert include_cleanup_error_details is False
         captured["max_retries"] = max_retries
 
         async def connect(config):
@@ -718,7 +719,7 @@ class TestLocalStdioProbe:
             "local_stdio_tool_recognition",
         ]
         assert [result.status for result in results] == ["fail", "fail", "fail"]
-        assert "child could not start" in results[0].message
+        assert "startup or stdio transport failed" in results[0].message
         assert all(result.remediation for result in results)
         adapter.list_tools.assert_not_awaited()
         adapter.call_tool.assert_not_awaited()
@@ -754,7 +755,7 @@ class TestLocalStdioProbe:
 
         assert [result.status for result in results] == ["pass", "pass", "fail"]
         assert results[2].name == "local_stdio_tool_recognition"
-        assert "tools/list unavailable" in results[2].message
+        assert "tools/list failed" in results[2].message
         assert results[2].remediation
         assert captured["cleaned_up"] is True
         adapter.call_tool.assert_not_awaited()
@@ -803,7 +804,7 @@ class TestLocalStdioProbe:
         assert captured["cleaned_up"] is True
         assert [result.status for result in results] == ["pass", "pass", "pass", "fail"]
         assert results[-1].name == "local_stdio_cleanup"
-        assert "child reap failed" in results[-1].message
+        assert "teardown failed" in results[-1].message
         adapter.call_tool.assert_not_awaited()
 
 
@@ -1510,3 +1511,47 @@ def test_registered_runtime_command_masks_the_same_home_prefix(tmp_path, monkeyp
     else:
         assert "~/bin/ouroboros" in result.output
         assert "~/tools/ouroboros" in result.output
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+@pytest.mark.parametrize("stage", ["startup", "discovery", "tools", "cleanup"])
+def test_local_probe_does_not_echo_untrusted_errors(stage: str, json_output: bool) -> None:
+    adapter = _successful_probe_adapter("ouroboros_interview")
+    adapter.transport_entered = stage != "startup"
+    error = RuntimeError("SYNTHETIC_PRIVATE_VALUE")
+    adapter.connect = AsyncMock(
+        return_value=Result.err(error) if stage in {"startup", "discovery"} else Result.ok(None)
+    )
+    if stage == "tools":
+        adapter.list_tools.return_value = Result.err(error)
+    adapter.disconnect = AsyncMock(
+        return_value=Result.err(error) if stage == "cleanup" else Result.ok(None)
+    )
+    args = ["doctor", "--probe-local-stdio"] + (["--json"] if json_output else [])
+    with (
+        patch("ouroboros.cli.commands.mcp_doctor._ALL_CHECKS", []),
+        patch("ouroboros.cli.commands.mcp_doctor.MCPClientAdapter", return_value=adapter),
+        patch(
+            "ouroboros.cli.commands.mcp_doctor._expected_ouroboros_tool_names",
+            return_value=frozenset({"ouroboros_interview"}),
+        ),
+    ):
+        result = runner.invoke(_make_app(), args)
+    assert result.exit_code == 1
+    assert "SYNTHETIC_PRIVATE_VALUE" not in result.output
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_local_probe_does_not_echo_unexpected_exception(json_output: bool) -> None:
+    args = ["doctor", "--probe-local-stdio"] + (["--json"] if json_output else [])
+    with (
+        patch("ouroboros.cli.commands.mcp_doctor._ALL_CHECKS", []),
+        patch(
+            "ouroboros.cli.commands.mcp_doctor.tempfile.TemporaryDirectory",
+            side_effect=OSError("SYNTHETIC_PRIVATE_VALUE"),
+        ),
+    ):
+        result = runner.invoke(_make_app(), args)
+    assert result.exit_code == 1
+    assert "SYNTHETIC_PRIVATE_VALUE" not in result.output
+    assert "Local probe failed unexpectedly" in result.output
