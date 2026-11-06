@@ -704,7 +704,11 @@ class QAHandler:
                 )
             )
         pass_threshold = float(threshold)
-        qa_session_id = arguments.get("qa_session_id") or f"qa-{uuid.uuid4().hex[:8]}"
+        plugin_dispatch = should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode)
+        qa_session_id = arguments.get("qa_session_id")
+        if not qa_session_id:
+            random_id = uuid.uuid4().hex
+            qa_session_id = f"qa-{random_id[:8]}" if plugin_dispatch else f"qa-{random_id}"
         iteration_history = arguments.get("iteration_history")
         if iteration_history is None:
             iteration_history = []
@@ -740,7 +744,7 @@ class QAHandler:
             iteration_history=iteration_history,
             seed_content=seed_content,
         )
-        if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+        if plugin_dispatch:
             return await dispatch_plugin_terminal(
                 self.event_store,
                 session_id=qa_session_id,
@@ -754,6 +758,19 @@ class QAHandler:
             )
 
         # Fall-through: real in-process QA LLM call (subprocess / non-opencode runtimes).
+
+        if (
+            not isinstance(qa_session_id, str)
+            or not qa_session_id.strip()
+            or qa_session_id != qa_session_id.strip()
+            or qa_session_id.startswith("auto_")
+        ):
+            return Result.err(
+                MCPToolError(
+                    "qa_session_id must be a nonblank session ID outside the auto_ namespace",
+                    tool_name="ouroboros_qa",
+                )
+            )
 
         try:
             from ouroboros.providers.base import CompletionConfig, Message, MessageRole
@@ -842,6 +859,12 @@ class QAHandler:
                 "reasoning": verdict.reasoning,
                 "iteration_entry": iteration_entry,
             }
+
+            # Persist only completed in-process evaluations before reporting
+            # success; session status fails closed if ownership later conflicts.
+            from ouroboros.mcp.tools.qa_session import record_qa_evaluation
+
+            await record_qa_evaluation(self.event_store, qa_session_id, meta)
 
             return Result.ok(
                 MCPToolResult(
