@@ -19,9 +19,16 @@ ooo help
 When asked to diagnose an Ouroboros installation, MCP connection, stalled job,
 or unexpected result, read [TROUBLESHOOTING.md](TROUBLESHOOTING.md) in this
 skill directory first. If the skill was delivered as a standalone cached
-entrypoint without its sibling file, find the same file in the installed
-`ouroboros/skills/help/` package resources; if unavailable, say so and use the
-installed version's help. Follow the installed version's help and preserve the
+entrypoint without its sibling file, use the Python interpreter belonging to
+that same Ouroboros installation to read its packaged resource:
+
+```bash
+python -c 'from importlib.resources import files; print(files("ouroboros").joinpath("skills", "help", "TROUBLESHOOTING.md").read_text(encoding="utf-8"))'
+```
+
+`python` above must be that installation's interpreter, not an arbitrary shell
+Python. If it cannot be identified or the resource is unavailable, say so and
+use the installed version's help. Follow the installed version's help and preserve the
 user's data and running work. Do not claim a repair or successful run without
 evidence.
 
