@@ -4,145 +4,107 @@
 </p>
 
 <p align="center">
-  <br/>
-  ◯ ─────────── ◯
-  <br/><br/>
-  <img src="./docs/images/ouroboros.png" width="420" alt="Ouroboros">
-  <br/><br/>
-  <strong>O U R O B O R O S</strong>
-  <br/><br/>
-  ◯ ─────────── ◯
-  <br/>
+  <img src="./docs/images/ouroboros.png" width="280" alt="Ouroboros">
 </p>
 
+# Ouroboros
 
-<p align="center">
-  <strong>Make the goal clear. Keep the evidence visible.</strong>
-  <br/>
-  <sub>Turn an idea into a Seed, execute it, and evaluate the result against its acceptance criteria.</sub>
-  <br/>
-  <sub>The <strong>Agent OS</strong> for replayable AI coding workflows</sub>
+**Clarify the goal. Build from a specification. Check the result.**
+
+Ouroboros adds a specification-first workflow to your AI coding agent. An
+interview exposes assumptions, a **Seed** records the goal and acceptance
+criteria, and execution and evaluation produce evidence you can review. Use
+it for a new project or a change to an existing codebase.
+
+<p>
+  <a href="https://pypi.org/project/ouroboros-ai/"><img src="https://img.shields.io/pypi/v/ouroboros-ai?color=blue" alt="PyPI version"></a>
+  <a href="https://github.com/Q00/ouroboros/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/Q00/ouroboros/test.yml?branch=main" alt="Main branch tests"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
 </p>
 
-<p align="center">
-  <a href="https://github.com/Q00/ouroboros"><img src="https://img.shields.io/github/stars/Q00/ouroboros?color=yellow&logo=github&label=stars" alt="GitHub stars"></a>
-  <a href="https://pypi.org/project/ouroboros-ai/"><img src="https://img.shields.io/pypi/v/ouroboros-ai?color=blue" alt="PyPI"></a>
-  <a href="https://github.com/Q00/ouroboros/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/Q00/ouroboros/test.yml?branch=main" alt="Tests"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License"></a>
-  <a href="https://github.com/sponsors/Q00"><img src="https://img.shields.io/github/sponsors/Q00?logo=githubsponsors&color=EA4AAA&label=sponsors" alt="GitHub Sponsors"></a>
-</p>
+[Quick start](#quick-start) · [Commands](#commands) ·
+[Status and recovery](#status-and-recovery) · [Documentation](#find-your-next-step) ·
+[English guide](https://ouroboros.page/learn/en/) ·
+[한국어 가이드](https://ouroboros.page/learn/) · [中文指南](https://ouroboros.page/learn/zh/)
 
-<p align="center">
-  <a href="https://trendshift.io/repositories/26008?utm_source=repository-badge&utm_medium=badge&utm_campaign=badge-repository-26008" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/26008" alt="Q00%2Fouroboros | Trendshift" width="250" height="55"/></a>
-</p>
-
-<p align="center">
-  <a href="#quick-start">Quick Start</a> ·
-  <a href="#why-ouroboros">Why</a> ·
-  <a href="#what-you-get">Results</a> ·
-  <a href="#the-loop">How It Works</a> ·
-  <a href="#commands">Commands</a> ·
-  <a href="#from-wonder-to-ontology">Philosophy</a> ·
-  <a href="#find-your-next-step">Docs</a> ·
-  <a href="https://ouroboros.page/learn/en/">Guide</a>
-</p>
-
-```bash
-# macOS / Linux / WSL 2
-curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | OUROBOROS_INSTALL_REF=readme-hero bash
-```
-
-```powershell
-# Windows (PowerShell) — no Python needed; installs Git and uv for you
-irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | iex
-```
-
-<p align="center"><sub>One command installs it. Then run <code>ooo setup</code> once inside your coding agent — details in <a href="#quick-start">Quick Start</a>.</sub></p>
-
-Demo videos for each runtime.
-
-<table>
-<tr>
-<td align="center" valign="top"><img width="320" src="./docs/images/7-ooo-interview-framed.gif" alt="Terminal recording of the ouroboros CLI interview reporting an ambiguity score"><br><sub><b>Terminal CLI</b><br> — a task-management CLI:<br> <code>ouroboros init start</code> asking about<br> ordering and scope, then reporting<br> an ambiguity score</sub><br><sub>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</sub></td>
-<td align="center" valign="top"><img width="320" src="./docs/images/3-host-codex-framed.gif" alt="Screen recording of the ChatGPT app calling Ouroboros as an integration"><br><sub><b>ChatGPT (Codex)</b><br> — called as an integration,<br> on a video-publishing harness: the interview,<br> its advisory lanes, and the ambiguity ledger</sub><br><sub>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</sub></td>
-<td align="center" valign="top"><img width="320" src="./docs/images/2-host-claude-framed.gif" alt="Screen recording of Claude Code running six Ouroboros interview advisory lanes in parallel"><br><sub><b>Claude Code</b><br> — a YouTube automation task, with the six<br> advisory lanes running in parallel<br> before the interview submits</sub><br><sub>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</sub></td>
-<td align="center" valign="top"><img width="320" src="./docs/images/5-host-hermes-framed.gif" alt="Screen recording of a Discord bot running the Ouroboros interview and reporting a final ambiguity of 0.15"><br><sub><b>Hermes (Discord)</b><br> — a kart-racing game, run as a chat bot,<br> ending at <code>Final ambiguity: 0.15</code></sub><br><sub>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</sub></td>
-<td align="center" valign="top"><img width="320" src="./docs/images/4-host-dsh-framed.gif" alt="Screen recording of DeepSeek Harness calling the Ouroboros interview tool and submitting advisory fan-out results"><br><sub><b>DeepSeek Harness</b><br> — an OSS-trend outreach script,<br> driven from a dsh chat:<br> <code>mcp__ouroboros__ouroboros_interview</code><br> turn by turn, fan-out results<br> submitted between rounds</sub><br><sub>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</sub></td>
-<td align="center" valign="top"><img width="320" src="./docs/images/6-host-kiro-framed.gif" alt="10x screen recording of Kiro CLI running an Ouroboros interview"><br><sub><b>Kiro</b><br> — the Kiro CLI running the Ouroboros<br> interview flow, turning a vague request<br> into a structured, testable Seed</sub><br><sub>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</sub></td>
-<td align="center" valign="top"><img width="320" src="./docs/images/1-host-antigravity-framed.gif" alt="Screen recording of Antigravity running an Ouroboros interview and submitting the selected answer"><br><sub><b>Antigravity</b><br> — a YouTube-publishing automation interview:<br> asks what to automate, shows advisory lanes,<br> and submits the selected answer</sub><br><sub>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</sub></td>
-</tr>
-</table>
-
-**Turn a vague idea into a testable specification and working code -- across Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Pi, OMP, Zcode, Goose, GJC, Antigravity, and Grok.**
-
-Ouroboros is an **Agent OS** for AI coding: a local-first runtime layer that
-turns non-deterministic agent work into a replayable, observable, policy-bound
-execution contract. It replaces ad-hoc prompting with a structured
-specification-first workflow: interview, crystallize, execute, evaluate,
-evolve.
-
----
-
-## The Ouroboros Agent OS Stack
-
-Like any OS, Ouroboros is split into a stable **OS layer** of primitives, an
-**application layer** of domain workflows, and a **shell** that humans actually
-sit in front of. Three repos, one stack:
-
-| Layer | Repo | Role | What it gives you |
-| :--- | :--- | :--- | :--- |
-| **Shell** (terminal client) | [`Ouro-labs/ourocode`](https://github.com/Ouro-labs/ourocode) | Native terminal UI for running `ooo` workflows across Claude / Codex / Gemini CLIs in one session | TUI, wonderTool decision pickers, MCP pane state, command discovery |
-| **Apps** (domain workflows) | [`Ouro-labs/ouroboros-plugins`](https://github.com/Ouro-labs/ouroboros-plugins) | UserLevel plugin contract — composes core primitives into installable domain programs (PR ops, Jira sync, incidents, releases) | Plugin manifest, scoped permissions, audit/provenance, reference plugins |
-| **OS** (this repo) | [`Q00/ouroboros`](https://github.com/Q00/ouroboros) | Agent OS core — Seed, Ledger, Runtime, MCP, safety boundaries | `ooo` commands, spec-first workflow engine, multi-runtime adapter |
-
-**How they connect:**
-
-```
-  ourocode  ──►  ooo / ouroboros-plugins  ──►  ouroboros core (Seed · Ledger · MCP · Runtime)
-   shell             user-level apps                        kernel
-```
-
-- The **kernel** (`ouroboros`) provides Seed, execution, and event-journal
-  primitives for recording and replaying supported workflows across runtimes.
-- **Plugins** (`ouroboros-plugins`) declare scoped capabilities against that
-  contract, so domain workflows (review a PR, triage a Linear ticket, run a
-  release) stay auditable and policy-bound instead of being one-off prompts.
-- **Ourocode** is the terminal shell: it surfaces MCP state, interview
-  questions, and wonderTool decisions as first-class TUI elements, so you can
-  drive the OS without leaving the keyboard or switching between CLIs.
-
-Use `ouroboros` alone with any supported CLI, layer plugins on for domain
-workflows, or install `ourocode` when you want a unified terminal cockpit.
-
-> **Disclaimer.** The Ouroboros project and community are **not affiliated with
-> any cryptocurrency, token, memecoin, or trading community** — including, but
-> not limited to, any "ouroboros" tickers on pump.fun or other launchpads. This
-> is an open-source developer tool. We do not issue, endorse, or hold any
-> coins. Any token claiming association with this project is unauthorized.
-
-> **Naming note.** A separate, unaffiliated open-source project also uses the
-> name "Ouroboros" — Anton Razzhigaev's self-modifying, autonomous-memory agent
-> at `github.com/razzant/ouroboros`. No shared code, no relationship. This
-> project locks a specification before executing rather than rewriting its own
-> architecture; if you're looking for the latter, that's the other one.
-
----
-
-## Why Ouroboros?
-
-A coding agent can implement an assumption that nobody intended. Ouroboros makes the goal, constraints, and evidence of success explicit before execution, then uses evaluation to guide further work.
-
-| Problem       | What Happens                     | Ouroboros Fix                                 |
-| :------------ | :------------------------------- | :-------------------------------------------- |
-| Vague prompts | AI guesses, you rework           | Socratic interview exposes hidden assumptions |
-| No spec       | Architecture drifts mid-build    | Immutable seed spec locks intent before code  |
-| Manual QA     | "Looks good" is not verification | 3-stage automated evaluation gate             |
-
----
+| What you have | Where to begin |
+| :--- | :--- |
+| An idea that still needs decisions | Follow the [first-task walkthrough](#quick-start). |
+| An agreed goal, constraints, and completion criteria | Ask for `ooo seed` with that context, then review the specification. |
+| An existing Seed | Open the target project and ask for `ooo run` with the Seed. |
+| An existing repository | Read [brownfield guidance](./skills/brownfield/SKILL.md) before choosing the change. |
 
 ## Quick Start
 
-**Install** — one command, everything auto-detected:
+This example follows one small goal: **a web app that adds tasks and marks them
+complete**. It connects to the existing [step-by-step guide](https://ouroboros.page/learn/en/).
+The questions and criteria below are illustrative, not captured output or a
+promise that a run will pass.
+
+### 1. Choose an installation
+
+Have a signed-in coding agent and internet access ready. For a first exercise,
+open a new project folder: execution can edit files, run commands, and call
+models. Check the selected runtime's authentication, permissions, and billing;
+Ouroboros does not include model usage. Installation and setup can also change
+host configuration.
+
+Usage telemetry is enabled by default; see [what is collected and how to opt
+out](./TELEMETRY.md) before installation if you want to disable it.
+
+| Path | Prerequisites | Where workflow commands go |
+| :--- | :--- | :--- |
+| Claude Code plugin | Claude Code and [uv](https://docs.astral.sh/uv/getting-started/installation/) on the host | A new Claude Code conversation |
+| Codex plugin | Codex CLI and `uvx` (included with uv) on the host | A new Codex conversation |
+| Standalone CLI | uv and an installed, authenticated runtime; Python 3.12+ for Ouroboros | Your terminal |
+
+**Claude Code — enter in a terminal:**
+
+```bash
+claude plugin marketplace add Q00/ouroboros
+claude plugin install ouroboros@ouroboros
+```
+
+**Codex — enter in a terminal:**
+
+```bash
+codex plugin marketplace add Q00/ouroboros
+codex plugin add ouroboros@ouroboros
+```
+
+Start a **new host session** after installing either plugin. If Ouroboros is
+not available there, follow [installation troubleshooting](./docs/getting-started.md#troubleshooting)
+before starting a task.
+
+<details>
+<summary><strong>Standalone CLI and other installation methods</strong></summary>
+
+For a standalone installation with MCP 2 and the settings UI, enter in a
+terminal. This example selects the Claude CLI runtime, which needs an installed
+and authenticated `claude` command:
+
+```bash
+uv tool install --python 3.13 'ouroboros-ai[mcp,tui]'
+ouroboros --version
+ouroboros setup --runtime claude-cli
+```
+
+Use another compatible runtime from the [installation guide](./docs/getting-started.md#installation-details)
+if needed. A base `pip install ouroboros-ai` in a Python 3.12+ environment is
+also available for CLI workflows; optional backends and the settings UI have
+separate extras. Host MCP registration needs an isolated launcher such as
+`uvx` or `pipx`.
+
+MCP 2 (`[mcp]`) and the Claude Agent SDK profiles (`[claude]`, `[claude-sdk]`,
+`[all]`) belong in separate environments. LiteLLM profiles need Python
+3.12–3.13. See the [profile matrix](./docs/platform-support.md#python-profile-matrix)
+before combining extras. The legacy `[dashboard]` extra is a compatibility
+no-op.
+
+The [installation guide](./docs/getting-started.md) also covers pip, source,
+and automated installation. The scripts below download and execute an
+installer, install dependencies, and configure detected hosts; review the
+script and its choices before running it:
 
 ```bash
 # macOS / Linux / WSL 2
@@ -150,365 +112,320 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 ```
 
 ```powershell
-# Windows (PowerShell 5.1+ or pwsh 7+) — nothing to install first
+# Native Windows (experimental), PowerShell
 irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | iex
 ```
 
-The Windows installer installs Git and uv through winget when they are missing,
-lets uv download its own Python, then installs `ouroboros-ai` and wires the
-host it finds. Native Windows is experimental and Codex CLI needs WSL 2; see
-[platform support](./docs/platform-support.md).
+The Windows script can install missing Git and uv through winget, and uv can
+provide Python. Codex CLI uses WSL 2 under the current [platform support contract](./docs/platform-support.md).
+Homebrew is another option through the project's own tap:
 
-**First task** — open a new project folder in a supported, signed-in AI coding agent. Enter these in the agent conversation (not your shell):
-
-```
-> ooo setup
-> ooo interview "I want to build a task management CLI"
-```
-
-`ooo setup` configures the detected runtime. `ooo interview` starts asking
-about your goal, constraints, and success criteria; answer the questions before
-continuing. If the skill or MCP connection is unavailable, use the
-[installation and troubleshooting guide](./docs/getting-started.md). After setup, Codex follows
-its currently selected model and Claude Code starts with its recommended model
-settings. Choose **Directly configure models** only when you want to pin a
-stage to a specific model; it opens the local settings screen in your browser.
-You can return to those settings any time with `ooo config`.
-
-After the interview, ask for `ooo seed`, then read the generated Seed: check
-its goal, constraints, acceptance criteria, and target project. Ask for `ooo run`
-to execute it. Use `ooo evaluate` to review the result against the Seed; for
-assessment without automatically starting a follow-up fix loop, specify
-`auto_evolve: false`. Inspect the changed files and evaluation evidence against
-your original request. A started job or finished execution alone is not proof
-that the requested outcome was achieved. Model calls can take time and incur
-provider charges; execution can change files in the selected project.
-
-`ooo` phrases are entered in a supported agent's conversation; `ouroboros`
-commands below are entered in a terminal. The host plugin's MCP server and a
-standalone CLI can be separate installations, so check the version and runtime
-actually used by each. For an existing Seed, start with `ooo run`; for an
-end-to-end guided path from a new idea, use `ooo auto`.
-
-Or from a plain terminal, without an agent host:
-
-```
-$ ouroboros init start --orchestrator "I want to build a task management CLI tool"
-```
-
-<p align="center">
-  <sub>That recording is this exact command. It is at the top of this page so you can see the tool before installing it.</sub>
-</p>
-
-<p align="center">
-  <img src="./docs/images/ooo-setup-refresh.gif" width="760" alt="Terminal recording of ouroboros setup refresh installing Codex rules and skills, Hermes skills, the OpenCode plugin and instruction guide, and the Pi and GJC bridges, ending with the line Refreshed runtime artifacts: codex, hermes, opencode, pi, gjc">
-</p>
-
-<p align="center">
-  <sub><code>ouroboros setup refresh</code> on one machine. It installs into the hosts that machine actually has, each in the shape that host expects: rules and skills for Codex, skills for Hermes, a plugin and an <code>AGENTS.md</code> for OpenCode, bridges for Pi and GJC. Your machine will show whichever of the thirteen you have installed.</sub>
-</p>
-
-> Works with Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, Hermes, Gemini, Kiro CLI, Pi CLI, OMP CLI, Zcode, Goose, GJC, Antigravity CLI, and Grok Build CLI. The installer detects available runtimes and registers the MCP server where the host supports it. For explicit selection, run `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi|omp|zcode|goose|gjc|antigravity|grok>` after installation. Copilot live-discovers its subscription catalog via the GitHub Copilot models API; Kiro's settings picker queries the authenticated CLI with `kiro-cli chat --listmodels -f json`, so account and enterprise allow-list changes appear without a hardcoded model table.
-
-> **DeepSeek support.** Ouroboros speaks DeepSeek two ways. Point the interview/Seed/QA pipeline at DeepSeek's own models with `--llm-backend dsh` (`ouroboros mcp serve --runtime claude-cli --llm-backend dsh`, or `OUROBOROS_LLM_BACKEND=dsh`) — this drives [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)'s ACP server under the hood. Or go the other way: install the [`dsh-ouroboros` plugin](./integrations/dsh-plugin) (`dsh plugin --profile <your-profile> add "github:Q00/ouroboros#main&path:integrations/dsh-plugin"`) and type `ooo interview` / `ooo auto` directly in the DeepSeek Harness chat — the same `ouroboros_interview` / `ouroboros_auto` tools run natively inside it, Socratic questions and all. Both directions, including what the `dsh` backend needs beyond the one variable, are in the [DeepSeek Harness guide](./docs/guides/deepseek-harness.md).
-
-<details>
-<summary><strong>Codex plugin quick start</strong></summary>
-
-Needs `codex` on your `PATH` and `uvx` on the host (the plugin's MCP descriptor
-launches the server with it). Install uv with `pipx install uv`,
-`pip install --user uv`, or `brew install uv`.
-
-```bash
-codex plugin marketplace add Q00/ouroboros
-codex plugin add ouroboros@ouroboros
-```
-
-Start a new Codex session, then run these commands in order:
-
-```
-ooo setup
-ooo interview "Build a task management CLI"
-```
-
-`ooo setup` is the one-time runtime preparation. Once ready, Ouroboros follows
-Codex's current default model; choose **Directly configure models** only when
-you want to pin a specific model for a pipeline stage.
-
-</details>
-
-<details>
-<summary><strong>Kiro CLI quick start</strong></summary>
-
-```bash
-pipx install 'ouroboros-ai[mcp]'       # or: uv tool install 'ouroboros-ai[mcp]'
-ouroboros setup --runtime kiro         # detects Kiro CLI, registers MCP server, and
-                                        # writes OUROBOROS_RUNTIME=kiro into
-                                        # ~/.kiro/settings/mcp.json (the trusted,
-                                        # setup-managed location -- a project .env
-                                        # is untrusted input and this key is ignored there)
-```
-
-Then use `ooo` commands inside a Kiro CLI session.
-
-</details>
-
-<details>
-<summary><strong>GitHub Copilot CLI quick start</strong></summary>
-
-```bash
-gh auth login                                # one-time GitHub auth (used for live model discovery)
-pipx install 'ouroboros-ai[mcp]'             # or: uv tool install 'ouroboros-ai[mcp]'
-ouroboros setup --runtime copilot            # discovers models live, picks a default,
-                                             # registers MCP server in ~/.copilot/mcp-config.json
-```
-
-Restart your Copilot CLI session, then use `ooo` commands inside it. Model-ID mapping is catalog-gated: the prior direct and OpenRouter Opus 5 pins resolve to `claude-opus-5` when that ID is present; current Anthropic API pins convert only their trailing numeric separator and only when the discovered catalog contains the exact candidate. Unknown IDs remain unchanged so Copilot reports an explicit unavailable-model error instead of silently selecting a different model. Leave role models unset so setup writes a discovered ID, or set a Copilot-valid ID explicitly. See the [Copilot runtime guide](./docs/runtime-guides/copilot.md).
-
-See the [GitHub Copilot CLI runtime guide](./docs/runtime-guides/copilot.md) for full details.
-
-For experimental live task activity, keep `runtime_backend: copilot` and opt into
-the [ACP transport](./docs/runtime-guides/copilot-acp.md):
-
-```bash
-ouroboros config set orchestrator.copilot_transport acp
-```
-
-The default remains `cli` (`copilot -p`). ACP streams assistant text and tool
-progress through the existing event store; authentication is still owned by
-Copilot, and no TCP listener or display is required.
-
-</details>
-
-<details>
-<summary><strong>Other install methods</strong></summary>
-
-**Claude Code plugin only** (no Python package or global Python to install; the
-host needs uv, which provides both `uvx` for the MCP server and the skills'
-Python >= 3.12 fallback):
-```bash
-claude plugin marketplace add Q00/ouroboros && claude plugin install ouroboros@ouroboros
-```
-Then run `ooo setup` inside a Claude Code session.
-
-**pip / uv / pipx**:
-```bash
-pip install 'ouroboros-ai[mcp,tui]' && ouroboros setup --runtime claude-cli  # recommended MCP v2 default
-pip install 'ouroboros-ai[claude]'      # Claude Agent SDK profile (MCP 1.x, isolated)
-pip install 'ouroboros-ai[claude-cli]'  # dependency-free Claude CLI worker
-pip install 'ouroboros-ai[claude-sdk]'  # explicit alias for the Claude SDK profile
-pip install 'ouroboros-ai[litellm]'     # + LiteLLM multi-provider; Python 3.12-3.13
-pip install 'ouroboros-ai[mcp]'         # MCP v2 server/client without the GUI
-pip install 'ouroboros-ai[tui]'         # settings GUI only
-pip install 'ouroboros-ai[all]'         # MCP 1.x app bundle; excludes MCP 2 by design
-ouroboros setup                         # configure runtime
-```
-
-Core and non-LiteLLM installs support Python 3.12-3.14. LiteLLM-bearing installs (`[litellm]`, `[all]`, and source `--extra all`) support Python 3.12-3.13; use Python 3.13 for current examples. See [Platform Support](./docs/platform-support.md#python-profile-matrix).
-
-The recommended standalone installation is `ouroboros-ai[mcp,tui]` followed by
-an explicit MCP v2-compatible runtime selection. The example uses
-`--runtime claude-cli`; substitute another compatible runtime such as `codex`,
-`opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, or `gjc`.
-Use `[claude]` and `[claude-sdk]` only in isolated MCP 1.x environments.
-
-`pip install 'ouroboros-ai[mcp]'` is valid for embedding the MCP client/server library in an already isolated Python environment, but host registration requires `uvx --isolated --python '>=3.12'` or `pipx`. Use `pipx install 'ouroboros-ai[mcp]'` or `uv tool install 'ouroboros-ai[mcp]'` before `ouroboros setup --runtime <claude-cli|codex|opencode|hermes|gemini|goose|kiro|copilot|pi|gjc>`; setup exits without changing runtime configuration when neither isolated launcher is available.
-
-Legacy compatibility: `ouroboros-ai[dashboard]` is still accepted as a compatibility alias/no-op; it does not install dashboard runtime payload. `ouroboros-ai[all]` includes that no-op alias only for compatibility.
-
-**Homebrew (macOS/Linux)**:
 ```bash
 brew tap q00/tap
 brew install ouroboros-ai
-ouroboros setup                         # configure runtime
+ouroboros setup
 ```
-Self-hosted tap, not yet in homebrew-core. Installs the same package published to PyPI.
 
-See runtime guides: [Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md) · [Hermes](./docs/runtime-guides/hermes.md) · [OpenCode](./docs/runtime-guides/opencode.md) · [Kiro CLI](./docs/runtime-guides/kiro.md) · [Gemini CLI](./docs/runtime-guides/gemini.md) · [GitHub Copilot CLI](./docs/runtime-guides/copilot.md) · [Zcode](./docs/runtime-guides/zcode.md) · [Pi JSON mode](https://pi.dev/docs/latest/json) · [OMP (Oh My Pi)](./docs/runtime-guides/omp.md) · [Goose](./docs/runtime-guides/goose.md) · [GJC](./docs/runtime-guides/gjc.md) · [Antigravity CLI](./docs/runtime-guides/antigravity.md) · [Grok Build CLI](./docs/runtime-guides/grok.md) · [Megacode harness](./docs/runtime-guides/megacode.md)
+For removal, read [UNINSTALL.md](./UNINSTALL.md) before `ouroboros uninstall`;
+uninstallation can remove configuration and stored data.
 
 </details>
 
-<details>
-<summary><strong>Uninstall</strong></summary>
+### 2. Discuss the goal and review the Seed
+
+**Plugin users — enter in the host conversation, not the terminal:**
+
+```text
+ooo setup
+ooo interview "Build a web app where I can add tasks and mark them complete"
+```
+
+Answer the interview questions. For example, decide whether tasks should
+survive a page refresh and whether completed tasks remain visible. When the
+interview restates the agreed goal, confirm it, then ask:
+
+```text
+ooo seed
+```
+
+The current Interview skill proposes Seed generation after that confirmation;
+an interview completion message alone does not establish that a Seed exists.
+Read the resulting **Seed YAML**, including its goal, target project,
+constraints, and testable acceptance criteria. Confirm the actual saved path
+if you want to execute a file. If generation fails or no YAML is shown, resolve
+that before running anything. See the [Interview](./skills/interview/SKILL.md)
+and [Seed](./skills/seed/SKILL.md) skills for the version you are using.
+
+**Standalone CLI users — enter in the project terminal instead:**
 
 ```bash
-ouroboros uninstall
+ouroboros init start "Build a web app where I can add tasks and mark them complete"
 ```
 
-Removes all configuration, MCP registration, and data. See [UNINSTALL.md](./UNINSTALL.md) for details.
+The interactive CLI asks about generating the Seed and prints its saved path
+on success. If it asks `Start workflow now?`, choose **No** to review the Seed
+first; the source version's prompt defaults to Yes. Use the path actually
+printed, rather than assuming a file was created.
 
-</details>
+For the example, acceptance criteria might require adding a task, marking it
+complete, and retaining it after refresh **if that was agreed**. These are
+example requirements, not a complete executable Seed. The [Seed authoring
+guide](./docs/guides/seed-authoring.md) explains the schema for manual authoring.
 
-> **Python >= 3.12 required.** LiteLLM-bearing profiles support Python 3.12-3.13. See [Platform Support](./docs/platform-support.md#python-profile-matrix) and [pyproject.toml](./pyproject.toml).
->
-> **Installing as an MCP server: use 0.51.1 or later.** Earlier versions can fail at startup with `Failed to reconnect to plugin:ouroboros:ouroboros: -32000` when an existing environment shadows the `[mcp]` profile ([#2012](https://github.com/Q00/ouroboros/issues/2012)). This matters if you install through a downstream package rather than PyPI, since those can lag.
+### 3. Run the specification and inspect the outcome
 
-<p align="center">
-  <sub>Most people find out they were unclear about three files into the review.<br/>
-  If that feels familiar, star <a href="https://github.com/Q00/ouroboros"><strong>Q00/ouroboros on GitHub</strong></a> so the next person it could save can find it.</sub>
-</p>
+In the **host conversation**, ask for `ooo run` and provide the reviewed Seed
+YAML or its actual file path. In a **terminal**, use
+`ouroboros run <seed-file>` with the actual generated path; replace the
+placeholder, including its angle brackets.
 
----
+Execution may start as a background job. Save its returned IDs and read the
+reported workspace: a job receipt does not prove completion, and an isolated
+worktree should only be assumed when its path is actually reported. The
+[run skill](./skills/run/SKILL.md) describes automatic evaluation and any
+chained fix loop. Follow those jobs to their terminal results before starting
+a duplicate run.
 
-## What You Get
+Review the outcome against the Seed:
 
-A small task might progress like this (illustrative, not a recorded run). For
-example, decide whether completed tasks should be deleted or retained before
-putting that behavior in an acceptance criterion:
+1. Inspect the changed files in the reported project or worktree.
+2. Read the tests, evaluation, and unresolved or unverified criteria.
+3. Run the app. Add a task, mark it complete, and check persistence if the Seed
+   requires it. Record the observed behavior rather than relying on a score.
 
-| Step          | Before                  | After                                                                   |
-| :------------ | :---------------------- | :---------------------------------------------------------------------- |
-| **Interview** | *"Build me a task CLI"* | Questions expose assumptions; ambiguity is scored                 |
-| **Seed**      | No spec                 | Immutable specification with acceptance criteria, ontology, constraints |
-| **Evaluate**  | Manual review           | Mechanical checks -> semantic review -> consensus when needed    |
+If formal evaluation was not completed, ask for `ooo evaluate` with the actual
+execution session ID and relevant artifacts. To request an assessment without
+automatically starting another fix loop, explicitly ask the assistant to pass
+`auto_evolve: false`. Default evaluation can continue rejected work into a
+bounded Ralph loop when a Seed is available, incurring more model usage and
+file changes. This override controls that evaluation request; it does not
+cancel jobs already running.
 
-<details>
-<summary><strong>What just happened?</strong></summary>
+[Evaluation guidance](./docs/guides/evaluation-pipeline.md) ·
+[Execution versus acceptance](./docs/guides/execution-vs-evaluation.md) ·
+[Evaluation skill](./skills/evaluate/SKILL.md)
 
-```
-interview  ->  Questions clarify goal, constraints, and success
-seed       ->  Answers become a specification with acceptance criteria
-run        ->  Executes work against the Seed's acceptance criteria
-evaluate   ->  Checks and reviews provide evidence for each criterion
-```
+## Status and Recovery
 
-> Use `ooo <cmd>` inside your AI coding agent session, or `ouroboros init start`, `ouroboros run seed.yaml`, etc. from the terminal.
+Identify the ID type and active workspace before retrying. A background job,
+execution session, execution aggregate, and Auto session are different things.
+Use the commands supported by the installation that produced the ID:
 
-Review the evidence and any unresolved criteria before deciding what to do next.
+| What you need | Host conversation | Terminal |
+| :--- | :--- | :--- |
+| Inspect an execution session | `ooo status <session-id>` | `ouroboros status run --session-id <session-id>` |
+| Inspect an execution aggregate | Use the execution ID returned by the run | `ouroboros status execution <execution-id>` |
+| Inspect a background job | Ask the assistant for that job's status and terminal result | `ouroboros job status <job-id>`, then `ouroboros job result <job-id>` when terminal |
+| Find in-flight work | `ooo resume-session` | `ouroboros resume` |
+| Stop work | `ooo cancel` with the identified target | See `ouroboros cancel --help` for the target type |
 
-</details>
-
----
-
-## How It Compares
-
-Ouroboros adds structure around an AI coding agent when the input is unclear:
-
-|                     | Vanilla AI Coding                        | Ouroboros                                                                       |
-| :------------------ | :--------------------------------------- | :------------------------------------------------------------------------------ |
-| **Vague prompt**    | AI guesses intent, builds on assumptions | Socratic interview forces clarity *before* code                                 |
-| **Spec validation** | Depends on the workflow | A Seed records intent; the default ambiguity gate can be overridden explicitly |
-| **Evaluation**      | Depends on the workflow                  | Mechanical checks and semantic review; consensus when needed                   |
-| **Feedback**        | Depends on the workflow                  | Evaluation can inform a subsequent generation                                  |
-
----
-
-## The Loop
-
-The ouroboros -- a serpent devouring its own tail -- is not decoration. It IS the architecture:
-
-```
-    Interview -> Seed -> Execute -> Evaluate
-        ^                           |
-        +---- Evolutionary Loop ----+
-```
-
-Evolution uses evaluation feedback to propose a next generation. The Seed records the agreed contract for a generation; review any proposed changes against the original goal.
-
-| Phase         | What Happens                                                          |
-| :------------ | :-------------------------------------------------------------------- |
-| **Interview** | Socratic questioning exposes hidden assumptions                       |
-| **Seed**      | Answers crystallize into an immutable specification                   |
-| **Execute**   | Work proceeds against the Seed's acceptance criteria                  |
-| **Evaluate**  | Mechanical checks and semantic review; consensus when needed          |
-| **Evolve**    | Wonder *("What do we still not know?")* -> Reflect -> next generation |
-
-> *"This is where the Ouroboros eats its tail: the output of evaluation*
-> *becomes the input for the next generation's seed specification."*
-> -- `reflect.py`
-
-Ontology similarity is one convergence signal; in execution mode, an independently evaluated outcome must also pass. A stable ontology alone does not prove the result works.
-
-### Ralph: A bounded evolutionary loop
-
-`ooo evolve` runs one generation at a time. `ooo ralph` starts a background
-loop that can run successive generations until convergence, another terminal
-outcome, cancellation, or its generation limit (default 10). A job ID is a
-receipt, not a result: check the job and any chained job for their final status,
-then inspect the criteria and evidence. Saved lineage supports recovery, but a
-machine restart does not itself guarantee that a running job resumes. See the
-[evolution guide](./docs/guides/evolution-loop.md) and
-[Ralph skill](./skills/ralph/SKILL.md).
-
----
-
-## Commands
-
-Inside AI coding agent sessions, use `ooo <cmd>` skills. From the terminal, use the `ouroboros` CLI.
-
-| Skill (`ooo`)    | CLI equivalent                                                    | What It Does                                                 |
-| :--------------- | :---------------------------------------------------------------- | :----------------------------------------------------------- |
-| `ooo setup`      | `ouroboros setup`                                                 | Register runtime and configure project (one-time)            |
-| `ooo interview`  | `ouroboros init start`                                            | Socratic questioning -- expose hidden assumptions            |
-| `ooo idk`        | *(via skill)*                                                     | Calibrate interview wording to your topic knowledge           |
-| `ooo auto`       | `ouroboros auto`                                                  | Goal → A-grade Seed → execution handoff with bounded loops   |
-| `ooo seed`       | *(generated by interview)*                                        | Crystallize into immutable spec                              |
-| `ooo run`        | `ouroboros run seed.yaml`                                         | Execute the seed's acceptance criteria                       |
-| `ooo evaluate`   | *(via MCP)*                                                       | 3-stage verification gate                                    |
-| `ooo evolve`     | *(via MCP)*                                                       | Run one evolutionary generation                              |
-| `ooo unstuck`    | *(via MCP)*                                                       | 5 lateral thinking personas when you are stuck               |
-| `ooo status`     | `ouroboros status executions` / `ouroboros status execution <id>` | Session tracking + (MCP-only) drift detection                |
-| `ooo resume-session` | `ouroboros resume`                                           | List in-flight sessions and re-attach commands              |
-| `ooo cancel`     | `ouroboros cancel execution [<id>\|--all]`                        | Cancel stuck or orphaned executions                          |
-| `ooo ralph`      | *(via MCP)*                                                       | Bounded background evolutionary loop                         |
-| `ooo tutorial`   | *(interactive)*                                                   | Interactive hands-on learning                                |
-| `ooo help`       | `ouroboros --help`                                                | Full reference                                               |
-| `ooo pm`         | *(via MCP)*                                                       | PM-focused interview + PRD generation                        |
-| `ooo qa`         | *(via skill)*                                                     | General-purpose QA verdict for any artifact                  |
-| `ooo update`     | `ouroboros update`                                                | Check for updates + upgrade to latest                        |
-| `ooo brownfield` | *(via skill)*                                                     | Scan and manage brownfield repo/worktree defaults            |
-| `ooo publish`    | *(skill/runtime surface; uses `gh` CLI)*                          | Publish a Seed as GitHub Epic/Task issues for team workflows |
-
-`ooo idk` adjusts interview wording in the active conversation without answering
-the pending question or lowering requirements rigor. It works with the Claude
-skill relay and intercepted interviews on Codex, Copilot, Gemini, OpenCode,
-Hermes, Pi, OMP, GJC, and Kiro. Calibration is not saved: run `ooo idk` again
-after reopening a saved session. See the [calibration contract](docs/architecture.md#interview-calibration-control-turns).
-
-> Not all skills have direct CLI equivalents. Some (`evaluate`, `evolve`, `unstuck`, `ralph`, `publish`) are available through agent skills, runtime rules, or MCP tools rather than a direct `ouroboros <subcommand>` shell command.
-> `/resume` is reserved for Claude Code's built-in session picker; use `ooo resume-session` for Ouroboros in-flight sessions.
-> Claude Code also reserves `/run`, `/status`, `/help`, and `/config`. The safe
-> direct skill forms are `/ouroboros:ouroboros-run`,
-> `/ouroboros:ouroboros-status`, `/ouroboros:ouroboros-help`, and
-> `/ouroboros:ouroboros-config`; the familiar `ooo run`, `ooo status`,
-> `ooo help`, and `ooo config` phrases remain supported.
-
-See the [CLI reference](./docs/cli-reference.md) for full details.
-
----
+Replace placeholders with returned IDs. Do not use a job ID where a session
+ID is required. If a connection closes, first check whether the worker is
+still running and preserve its Seed, workspace, and state. A restart or a
+saved record does not by itself resume a process. Follow the command returned
+for the relevant workflow; recovery can restart work or consume more model
+usage. See the [CLI reference](./docs/cli-reference.md),
+[resume skill](./skills/resume-session/SKILL.md), and
+[evolution recovery guide](./docs/guides/evolution-loop.md).
 
 ## Find Your Next Step
 
-| Your situation | Where to go |
+| Task | Documentation |
 | :--- | :--- |
-| Installing or troubleshooting a first run | [Getting started](./docs/getting-started.md) · [Platform support](./docs/platform-support.md) · [Runtime guides](./docs/README.md#runtime-guides) |
-| Writing or reviewing a Seed | [Seed authoring](./docs/guides/seed-authoring.md) · [Seed skill](./skills/seed/SKILL.md) |
-| Checking progress or recovering a session | `ooo status` and `ooo resume-session` · [CLI reference](./docs/cli-reference.md) · [Evolution guide](./docs/guides/evolution-loop.md) |
-| Understanding a result or a failed check | [Evaluation pipeline](./docs/guides/evaluation-pipeline.md) · [Execution vs. evaluation](./docs/guides/execution-vs-evaluation.md) · [Safe but wrong output](./docs/guides/safe-but-wrong-output.md) |
-| Configuring, integrating, or contributing | [Configuration](./docs/config-reference.md) · [MCP API](./docs/api/mcp.md) · [Architecture](./docs/architecture.md) · [Contributing](./CONTRIBUTING.md) |
+| Install, authenticate, or fix an MCP connection | [Getting started](./docs/getting-started.md) · [CLI diagnostics](./docs/cli-reference.md) · [`ooo help`](./skills/help/SKILL.md) |
+| Choose a supported OS, Python profile, or runtime | [Platform support](./docs/platform-support.md) · [Runtime capability matrix](./docs/runtime-capability-matrix.md) · [Runtime guides](./docs/README.md#runtime-guides) |
+| Refine an idea or work in an existing repository | [Interview](./skills/interview/SKILL.md) · [Brownfield](./skills/brownfield/SKILL.md) · [Auto](./skills/auto/SKILL.md) |
+| Review or write a specification | [Seed skill](./skills/seed/SKILL.md) · [Seed YAML reference](./docs/guides/seed-authoring.md) |
+| Check evidence or investigate a failed result | [Evaluation](./docs/guides/evaluation-pipeline.md) · [Execution versus evaluation](./docs/guides/execution-vs-evaluation.md) · [Safe but wrong output](./docs/guides/safe-but-wrong-output.md) |
+| Configure models, limits, or integrations | [Configuration](./docs/config-reference.md) · [MCP API](./docs/api/mcp.md) · [Architecture](./docs/architecture.md) |
+| Contribute or run local source | [Contributing](./CONTRIBUTING.md) · [Development setup](./docs/contributing/developing.md) |
 
 The [documentation index](./docs/README.md) lists the full guides and API
-references. Consult the help and skill files for the version you installed;
-the published package, host plugin, and this repository may be at different
-versions.
+references. The existing website provides a chapter-based tutorial in
+[English](https://ouroboros.page/learn/en/), [한국어](https://ouroboros.page/learn/),
+and [中文](https://ouroboros.page/learn/zh/); its displayed product version can
+differ from the repository. Translations are maintained separately, so check
+the page's version and the installed command help.
 
 ### Using these docs with an AI assistant
 
-Give your assistant access to this repository or provide the relevant pages from
-[the documentation index](./docs/README.md). For a first task, start with
-[Getting started](./docs/getting-started.md), then the relevant skill in
-[`skills/`](./skills/). Include your installation path, goal, and any error with
-credentials removed. Ask the assistant to identify the sources and version it
-actually read, distinguish suggested commands from actions it performed, and
-check the result against the Seed. Repository `main`, your installed package,
-and a host-managed MCP server can differ; check the installed version before
-applying instructions.
+Start with the [documentation index](./docs/README.md) and the relevant
+[`skills/`](./skills/) entrypoint. [`llms.txt`](./llms.txt) and
+[`llms-full.txt`](./llms-full.txt) are repository discovery indexes; verify
+workflow instructions against the relevant source skill and installed
+version, especially where summaries differ. These links do not imply the
+repository's complete documentation is installed with every host.
 
----
+Give the assistant your goal, runtime, installation method, relevant IDs, and
+an error excerpt with credentials removed. Ask it to identify the source and
+version it actually read, separate suggested commands from actions it
+performed, and report observed results and remaining uncertainty. For an
+installed entrypoint, start with `ooo help`; host packaging and resource
+discovery can differ. Do not supply API keys or a complete environment dump.
+
+### Version and support scope
+
+These workflow instructions were checked against product source
+[`592c667f`](https://github.com/Q00/ouroboros/tree/592c667f076c3dad7ef68d7844e91480d80135d0)
+on 2026-11-07. The published [v0.59.9 release](https://github.com/Q00/ouroboros/releases/tag/v0.59.9)
+and a host's plugin skills or MCP process are separate version boundaries;
+matching version labels alone do not establish matching source. The plugin
+MCP descriptors in this source pin `ouroboros-ai[mcp]==0.59.9`. A terminal's
+`ouroboros --version` describes that CLI installation, not every host-managed
+server. Follow the installed help when it differs, and identify the mismatch
+before applying a recovery procedure.
+
+The first-task walkthrough has been checked against source, not executed
+end to end with real models across every host. Current platform documentation
+supports macOS, Linux, and WSL 2; native Windows remains experimental, and
+Codex CLI uses WSL 2. See [platform support](./docs/platform-support.md) for
+specific limitations. Model calls use the chosen host/provider's credentials
+and billing. Setup may use that host's default model or configured role pins;
+`ooo config` opens the settings flow when you want to review them. For install
+telemetry and opt-out settings, see the [telemetry documentation](./TELEMETRY.md).
+
+For legacy MCP installations older than 0.51.1, the known
+[`Failed to reconnect` startup issue](https://github.com/Q00/ouroboros/issues/2012)
+also matters; identify the package actually launched before updating it.
+
+<details>
+<summary><strong>Other runtimes, integration paths, and recordings</strong></summary>
+
+Runtime capabilities and prerequisites vary. Choose the guide for your host:
+[Claude Code](./docs/runtime-guides/claude-code.md) ·
+[Codex CLI](./docs/runtime-guides/codex.md) · [Hermes](./docs/runtime-guides/hermes.md) ·
+[OpenCode](./docs/runtime-guides/opencode.md) · [Kiro](./docs/runtime-guides/kiro.md) ·
+[Gemini](./docs/runtime-guides/gemini.md) · [Copilot](./docs/runtime-guides/copilot.md) ·
+[Zcode](./docs/runtime-guides/zcode.md) · [Pi JSON mode](https://pi.dev/docs/latest/json) ·
+[OMP](./docs/runtime-guides/omp.md) · [Goose](./docs/runtime-guides/goose.md) ·
+[GJC](./docs/runtime-guides/gjc.md) · [Antigravity](./docs/runtime-guides/antigravity.md) ·
+[Grok](./docs/runtime-guides/grok.md) · [Megacode](./docs/runtime-guides/megacode.md).
+Copilot live model discovery and its opt-in ACP transport are described in the
+[Copilot guide](./docs/runtime-guides/copilot.md) and [ACP guide](./docs/runtime-guides/copilot-acp.md).
+
+[DeepSeek Harness](./docs/guides/deepseek-harness.md) supports two directions:
+use `dsh` for the interview/Seed/QA backend, or install the
+[`dsh-ouroboros` plugin](./integrations/dsh-plugin) for `ooo` workflows inside a
+dsh conversation. The guide covers the additional backend configuration.
+
+Existing recordings show particular versions and environments, not supported
+behavior for every installation:
+
+- [CLI interview](./docs/images/7-ooo-interview-framed.gif)
+- [ChatGPT integration](./docs/images/3-host-codex-framed.gif)
+- [Claude Code interview](./docs/images/2-host-claude-framed.gif)
+- [Hermes on Discord](./docs/images/5-host-hermes-framed.gif)
+- [DeepSeek Harness](./docs/images/4-host-dsh-framed.gif)
+- [Kiro CLI](./docs/images/6-host-kiro-framed.gif)
+- [Antigravity](./docs/images/1-host-antigravity-framed.gif)
+- [Setup refresh on one machine](./docs/images/ooo-setup-refresh.gif): the
+  artifacts refreshed depend on the hosts actually installed there.
+
+</details>
+
+## Commands
+
+Enter `ooo` phrases in a supported agent's **conversation**. Enter
+`ouroboros` commands in a **terminal**. These are related entrypoints, not
+interchangeable syntax or identical implementations.
+
+| Host skill | Terminal entrypoint or reference | Purpose |
+| :--- | :--- | :--- |
+| `ooo setup`, `ooo config` | `ouroboros setup`, `ouroboros config` | Prepare the runtime and review settings |
+| `ooo interview` | `ouroboros init start` | Clarify goal, constraints, and success |
+| `ooo idk` | [Calibration contract](./docs/architecture.md#interview-calibration-control-turns) | Adjust interview explanations to your understanding |
+| `ooo seed` | [Seed skill](./skills/seed/SKILL.md); CLI interview's generation step | Turn agreed requirements into a specification |
+| `ooo auto` | `ouroboros auto` | Bounded interview, Seed repair, and execution handoff |
+| `ooo run` | `ouroboros run <seed-file>` | Execute an existing specification |
+| `ooo evaluate` | [Evaluation skill](./skills/evaluate/SKILL.md) / MCP | Evaluate an execution against its criteria |
+| `ooo evolve`, `ooo ralph` | [Evolution and Ralph](./docs/guides/evolution-loop.md) / MCP | One evolutionary generation or a bounded loop |
+| `ooo status` | `ouroboros status` | Inspect sessions and progress; the skill also supports drift |
+| `ooo resume-session`, `ooo cancel` | `ouroboros resume`, `ouroboros cancel` | Find recovery commands or cancel the identified work |
+| `ooo unstuck` | [Unstuck skill](./skills/unstuck/SKILL.md) / MCP | Examine a stuck problem from different perspectives |
+| `ooo pm` | `ouroboros pm` | Product-focused interview and requirements |
+| `ooo qa` | [QA skill](./skills/qa/SKILL.md) | Assess an artifact |
+| `ooo brownfield` | [Brownfield skill](./skills/brownfield/SKILL.md) | Inspect an existing repository's context |
+| `ooo publish` | [Publish skill](./skills/publish/SKILL.md), using `gh` | Publish Seed work as GitHub issues |
+| `ooo update` | `ouroboros update` | Check and update an installation |
+| `ooo tutorial`, `ooo help` | [Tutorial](./skills/tutorial/SKILL.md), `ouroboros --help` | Learn the workflow or find commands |
+
+There is no direct CLI subcommand for every skill. `ooo idk` changes the active
+interview's wording, preserves rigor, and must be applied again after reopening
+a saved session. In Claude Code, `/resume` belongs to the host; use
+`ooo resume-session` for Ouroboros. The safe direct slash forms for its
+reserved names are `/ouroboros:ouroboros-run`, `/ouroboros:ouroboros-status`,
+`/ouroboros:ouroboros-help`, and `/ouroboros:ouroboros-config`.
+
+## Why Ouroboros?
+
+A coding agent can implement an assumption nobody intended. Ouroboros makes
+that assumption discussable before execution and records a contract for
+checking the result. It is useful when requirements are unclear, scope keeps
+moving, or a test pass alone does not answer whether the requested outcome
+was delivered.
+
+## What You Get
+
+| Stage | Result to inspect |
+| :--- | :--- |
+| Interview | Decisions, unresolved assumptions, and an ambiguity assessment |
+| Seed | Goal, constraints, ontology, and acceptance criteria in YAML |
+| Execute | Changed artifacts, execution state, and recorded evidence |
+| Evaluate | Executed checks, model feedback, and approved/rejected/unverified acceptance state |
+| Evolve | A proposed next generation informed by evaluation |
+
+Ambiguity and quality scores are model judgments. A passed score, stable
+ontology, or completed process is not sufficient evidence that the result
+works. Review the specification and observed behavior.
+
+## The Loop
+
+```text
+Interview → Seed → Execute → Evaluate
+    ↑                           ↓
+    └────── Evolutionary Loop ──┘
+```
+
+The Seed records the agreed contract for a generation. Evaluation can inform a
+new generation; compare proposed changes with the original goal.
+
+<a id="ralph-the-loop-that-never-stops"></a>
+<a id="ralph-a-bounded-evolutionary-loop"></a>
+
+`ooo evolve` runs one generation, while `ooo ralph` starts a bounded background loop
+(default 10 generations). Neither a job ID nor ontology convergence proves
+acceptance. See [evolution and terminal outcomes](./docs/guides/evolution-loop.md)
+and the [Ralph skill](./skills/ralph/SKILL.md).
+
+## How It Compares
+
+| Need | A direct coding-agent conversation | Ouroboros adds |
+| :--- | :--- | :--- |
+| Agree on intent | Depends on your prompts and process | Interview and an explicit Seed |
+| Decide when requirements are clear | Depends on your process | An interview score gate with an explicit override, or structural checks for already-settled context |
+| Check completion | Depends on the checks you arrange | Mechanical checks and model review against criteria |
+| Iterate on failure | Depends on your process | Recorded lineage and bounded follow-up workflows |
+
+## The Ouroboros Agent OS Stack
+
+Ouroboros also supplies runtime, MCP, event-journal, and execution primitives
+for a wider Agent OS stack. You can use this repository's workflow on its own.
+
+| Layer | Project | Role |
+| :--- | :--- | :--- |
+| Core | [Q00/ouroboros](https://github.com/Q00/ouroboros) | Seed, ledger, runtime, MCP, and execution boundaries |
+| Domain workflows | [Ouro-labs/ouroboros-plugins](https://github.com/Ouro-labs/ouroboros-plugins) | UserLevel plugins with scoped permissions and provenance |
+| Terminal shell | [Ouro-labs/ourocode](https://github.com/Ouro-labs/ourocode) | A terminal UI for workflows, MCP state, and decisions |
+
+See [architecture](./docs/architecture.md) for the core design and plugin contract.
 
 ## The Nine Minds
 
-Nine highlighted agents below, with 12 more specialized agents available (21 total). All loaded on-demand, never preloaded:
+<details>
+<summary><strong>Agent roles</strong></summary>
+
+These nine roles illustrate the workflow. More specialist definitions are available in
+[`src/ouroboros/agents/`](./src/ouroboros/agents/), loaded as needed:
 
 | Agent                    | Role                               | Core Question                                       |
 | :----------------------- | :--------------------------------- | :-------------------------------------------------- |
@@ -522,7 +439,7 @@ Nine highlighted agents below, with 12 more specialized agents available (21 tot
 | **Researcher**           | Stops coding, starts investigating | *"What evidence do we actually have?"*              |
 | **Architect**            | Identifies structural causes       | *"If we started over, would we build it this way?"* |
 
----
+</details>
 
 ## Under the Hood
 
@@ -541,7 +458,7 @@ src/ouroboros/
 +-- persistence/    Event sourcing (SQLAlchemy + aiosqlite), checkpoints
 +-- orchestrator/   Runtime abstraction layer (Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Pi, OMP, GJC, Goose, Antigravity, Grok, Zcode)
 +-- core/           Types, errors, seed, ontology, security
-+-- providers/      LiteLLM adapter (100+ models)
++-- providers/      LiteLLM multi-provider adapter
 +-- mcp/            MCP client/server integration
 +-- plugin/         Plugin system (skill/agent auto-discovery)
 +-- tui/            Terminal UI dashboard
@@ -549,13 +466,13 @@ src/ouroboros/
 ```
 
 **Key internals:**
-- **PAL Router** -- Frugal (1x) -> Standard (10x) -> Frontier (30x) with escalation on retry (no automatic downgrade)
+- **PAL Router** -- Frugal -> Standard -> Frontier, with escalation on retry. The tier cost weights (1x / 10x / 30x) are routing estimates, not a model-price guarantee.
 - **Drift** -- Goal (50%) + Constraint (30%) + Ontology (20%) weighted measurement, threshold <= 0.3
 - **Brownfield** -- Auto-detects config files across multiple language ecosystems
 - **Evolution** -- Default limit of 30 generations; ontology similarity is one convergence signal
 - **Stagnation** -- Detects spinning, oscillation, no-drift, and diminishing returns patterns
 - **Agent OS runtime** -- Replayable execution contract across capability discovery, policy, directives, event journal, and agent processes
-- **Runtime backends** -- Pluggable abstraction layer (`orchestrator.runtime_backend` config) with first-class support for every canonical backend returned by `runtime_backend_choices()`, including GJC, Antigravity, Grok, and Zcode; same workflow spec, different execution engines
+- **Runtime backends** -- Pluggable execution engines selected through `orchestrator.runtime_backend`; compare their supported features in the [runtime capability matrix](./docs/runtime-capability-matrix.md).
 
 See [Architecture](./docs/architecture.md) for the full design document.
 
@@ -618,7 +535,17 @@ Each dimension is assessed on a 0.0-1.0 scale by a model, then weighted. These a
 | **Success Criteria** -- *Are outcomes measurable?*            |    30%     |    25%     |
 | **Context Clarity** -- *Is the existing codebase understood?* |     --     |    15%     |
 
-**Threshold: Ambiguity <= 0.2.** A score above that blocks Seed generation. Passing `force` explicitly is what gets past it, and the CLI puts that choice on screen next to continue and cancel. The gate is a default worth arguing with, not a lock.
+**Interview-based generation:** the first-generation Seed generator uses an
+overall ambiguity threshold of **0.2 or less** by default. CLI `init` also
+checks per-dimension clarity floors. When the CLI requirements do not qualify,
+it offers continuing the interview, generating anyway with an explicit force
+choice, or cancelling. Force does not remove the remaining Seed validation.
+
+This score is not required by every Seed path. For already-agreed
+`session_context`, the MCP tool checks structural completeness and asks for
+missing requirements without running a scored interview. Without MCP, the
+Seed skill can draft from recovered requirements without requiring an
+ambiguity score. See the [Seed skill's generation paths](./skills/seed/SKILL.md).
 
 ```
 Example (Greenfield):
@@ -628,10 +555,12 @@ Example (Greenfield):
   Success: 0.7 * 0.3  = 0.21
                         ------
   Clarity             = 0.81
-  Ambiguity = 1 - 0.81 = 0.19  <= 0.2 -> Ready for Seed
+  Ambiguity = 1 - 0.81 = 0.19  <= 0.2 -> Overall threshold met
 ```
 
-The threshold is a practical default for deciding when to crystallize a Seed, not a guarantee of correctness. Review the Seed even when it passes.
+This calculation meets the overall threshold; CLI dimension floors and Seed
+validation are separate checks. A qualifying score does not guarantee
+correctness. Review the Seed whichever generation path you use.
 
 </details>
 
@@ -698,3 +627,14 @@ These numbers are generated from GitHub data and refreshed automatically; cachin
   <br/><br/>
   <code>MIT License</code>
 </p>
+
+
+### Project identity
+
+This project and community are not affiliated with any cryptocurrency, token,
+memecoin, or trading community. We do not issue or endorse coins; tokens
+claiming association are unauthorized.
+
+A separate, unaffiliated project also uses the name “Ouroboros”: Anton
+Razzhigaev's self-modifying agent at `github.com/razzant/ouroboros`. It has no
+shared code or relationship with this project.
