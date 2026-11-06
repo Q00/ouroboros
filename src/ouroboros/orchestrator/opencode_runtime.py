@@ -684,8 +684,8 @@ class OpenCodeRuntime:
             await stderr_task
         return []
 
-    async def _terminate_process(self, process: Any) -> None:
-        """Best-effort subprocess shutdown.
+    async def _terminate_process(self, process: Any) -> bool:
+        """Shut down the subprocess and report whether its tree is confirmed gone.
 
         Sends ``SIGTERM``, waits up to
         ``_process_shutdown_timeout_seconds``, then escalates to
@@ -695,12 +695,13 @@ class OpenCodeRuntime:
             process: Subprocess object (must expose ``terminate``,
                 ``kill``, and ``wait`` methods).
         """
-        await terminate_runtime_process(
+        return await terminate_runtime_process(
             process,
             shutdown_timeout=self._process_shutdown_timeout_seconds,
             logger=log,
             log_namespace=self._log_namespace,
             workspace=self._cwd,
+            require_owned_tree=True,
         )
 
     # -- Event conversion --------------------------------------------------
@@ -1014,6 +1015,12 @@ class OpenCodeRuntime:
             if isinstance(rc, int):
                 snapshot["returncode"] = rc
                 snapshot["lifecycle_state"] = "completed" if rc == 0 else "failed"
+            status = control_state.get("runtime_status")
+            if isinstance(status, str):
+                snapshot["lifecycle_state"] = status
+            if control_state.get("terminated") is True:
+                snapshot["terminated"] = True
+                snapshot["can_terminate"] = False
             return snapshot
 
         async def _terminate(_handle: RuntimeHandle) -> bool:
@@ -1022,7 +1029,10 @@ class OpenCodeRuntime:
             if getattr(process, "returncode", None) is not None:
                 return False
             control_state["runtime_status"] = "terminating"
-            await self._terminate_process(process)
+            confirmed = await self._terminate_process(process)
+            if not confirmed:
+                control_state["runtime_status"] = "termination_unconfirmed"
+                return False
             control_state["terminated"] = True
             rc = getattr(process, "returncode", None)
             control_state["returncode"] = rc
@@ -1263,11 +1273,15 @@ class OpenCodeRuntime:
                         yield message
 
         except TimeoutError as e:
+            termination_confirmed = False
             if process is not None and control_state is not None:
-                await self._terminate_process(process)
+                termination_confirmed = await self._terminate_process(process)
                 windows_child_cleanup_succeeded = self._cleanup_windows_child_processes(process)
                 windows_child_cleanup_done = True
-                control_state["terminated"] = True
+                control_state["terminated"] = termination_confirmed
+                control_state["runtime_status"] = (
+                    "terminated" if termination_confirmed else "termination_unconfirmed"
+                )
             process_terminated = True
             if stderr_task is not None:
                 stderr_lines = await self._collect_stderr_after_windows_cleanup(
@@ -1276,28 +1290,39 @@ class OpenCodeRuntime:
                 )
             final_message = "\n".join(stderr_lines).strip()
             if not final_message:
-                final_message = f"{self._display_name} became unresponsive and was terminated: {e}"
+                cleanup = (
+                    "was terminated" if termination_confirmed else "termination was not confirmed"
+                )
+                final_message = f"{self._display_name} became unresponsive; {cleanup}: {e}"
             yield AgentMessage(
                 type="result",
                 content=final_message,
-                data={"subtype": "error", "error_type": type(e).__name__},
+                data={
+                    "subtype": "error",
+                    "error_type": type(e).__name__,
+                    "termination_confirmed": termination_confirmed,
+                },
                 resume_handle=current_handle,
             )
             return
         except asyncio.CancelledError:
             if process is not None:
                 log.warning(f"{self._log_namespace}.task_cancelled", cwd=self._cwd)
-                await self._terminate_process(process)
+                confirmed = await self._terminate_process(process)
                 process_terminated = True
                 if control_state is not None:
-                    control_state["terminated"] = True
+                    control_state["terminated"] = confirmed
+                    control_state["runtime_status"] = (
+                        "terminated" if confirmed else "termination_unconfirmed"
+                    )
             raise
         else:
             # Normal completion — stdout stream finished
             returncode = await process.wait()
             process_finished = True
             control_state["returncode"] = returncode
-            control_state["runtime_status"] = "completed" if returncode == 0 else "failed"
+            if control_state.get("runtime_status") != "termination_unconfirmed":
+                control_state["runtime_status"] = "completed" if returncode == 0 else "failed"
             current_handle = self._bind_runtime_handle_controls(
                 current_handle,
                 process=process,
@@ -1347,8 +1372,13 @@ class OpenCodeRuntime:
                     and not process_terminated
                     and getattr(process, "returncode", None) is None
                 ):
-                    await self._terminate_process(process)
+                    confirmed = await self._terminate_process(process)
                     process_terminated = True
+                    if control_state is not None:
+                        control_state["terminated"] = confirmed
+                        control_state["runtime_status"] = (
+                            "terminated" if confirmed else "termination_unconfirmed"
+                        )
                 if not windows_child_cleanup_done:
                     self._cleanup_windows_child_processes(process)
             if stderr_task is not None and not stderr_task.done():
