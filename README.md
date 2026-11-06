@@ -159,15 +159,17 @@ lets uv download its own Python, then installs `ouroboros-ai` and wires the
 host it finds. Native Windows is experimental and Codex CLI needs WSL 2; see
 [platform support](./docs/platform-support.md).
 
-**First command** — open a new project folder in your AI coding agent and run these in order:
+**First task** — open a new project folder in a supported, signed-in AI coding agent. Enter these in the agent conversation (not your shell):
 
 ```
 > ooo setup
 > ooo interview "I want to build a task management CLI"
 ```
 
-`ooo setup` is a one-time configuration step. `ooo interview` is the first
-workflow command and starts the Socratic interview. After setup, Codex follows
+`ooo setup` configures the detected runtime. `ooo interview` starts asking
+about your goal, constraints, and success criteria; answer the questions before
+continuing. If the skill or MCP connection is unavailable, use the
+[installation and troubleshooting guide](./docs/getting-started.md). After setup, Codex follows
 its currently selected model and Claude Code starts with its recommended model
 settings. Choose **Directly configure models** only when you want to pin a
 stage to a specific model; it opens the local settings screen in your browser.
@@ -489,6 +491,18 @@ The [documentation index](./docs/README.md) lists the full guides and API
 references. Consult the help and skill files for the version you installed;
 the published package, host plugin, and this repository may be at different
 versions.
+
+### Using these docs with an AI assistant
+
+Give your assistant access to this repository or provide the relevant pages from
+[the documentation index](./docs/README.md). For a first task, start with
+[Getting started](./docs/getting-started.md), then the relevant skill in
+[`skills/`](./skills/). Include your installation path, goal, and any error with
+credentials removed. Ask the assistant to identify the sources and version it
+actually read, distinguish suggested commands from actions it performed, and
+check the result against the Seed. Repository `main`, your installed package,
+and a host-managed MCP server can differ; check the installed version before
+applying instructions.
 
 ---
 
