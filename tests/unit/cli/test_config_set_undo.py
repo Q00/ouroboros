@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
 import yaml
 
+from ouroboros.cli.commands import config as config_commands
 from ouroboros.cli.commands.config import app
 from ouroboros.config import loader, models
 from ouroboros.config_tui import persistence
@@ -210,11 +212,16 @@ def test_failed_rollback_is_reported_and_preserves_backup(
 
     monkeypatch.setattr(Path, "write_text", fail_config_write)
     monkeypatch.setattr(Path, "write_bytes", fail_rollback)
-    result = runner.invoke(app, ["set", "logging.level", "debug"])
+    with patch.object(
+        config_commands, "print_error", wraps=config_commands.print_error
+    ) as print_error:
+        result = runner.invoke(app, ["set", "logging.level", "debug"])
     assert result.exit_code == 1, result.output
-    assert "candidate write failed" in result.output
-    assert "rollback also failed" in result.output
-    assert "cannot restore current config" in result.output
-    assert "rolled back" not in result.output
+    print_error.assert_called_once()
+    message = print_error.call_args.args[0]
+    assert "candidate write failed" in message
+    assert "rollback also failed" in message
+    assert "cannot restore current config" in message
+    assert "rolled back" not in message
     assert partial_content and partial_content != ORIGINAL
     _assert_files(config_dir, partial_content, prior_backup)
