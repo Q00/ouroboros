@@ -26,9 +26,12 @@ entire configuration files. Report what was observed separately from inference.
 
 ## 2. Diagnose before changing anything
 
-For this version the following CLI diagnostics inspect local state without
-repairing it. They may be unavailable on older installations. Run only those
-relevant to the problem, and inspect each check and warning, not just exit code:
+For this version the following CLI diagnostics inspect local state rather than
+repairing it. An inspection is not guaranteed to leave no local traces: imports,
+logging, and environment-specific initialization may create files or make
+network requests. They may be unavailable on older installations. Run only
+those relevant to the problem, and inspect each check and warning, not just
+the exit code:
 
 - `ouroboros doctor install` identifies installation surfaces and configured
   launchers. Its output can expose launcher arguments.
@@ -42,8 +45,13 @@ relevant to the problem, and inspect each check and warning, not just exit code:
 - `ouroboros mcp doctor-runtime` checks bounded executable provenance, loopback
   bindability and own-server registry metadata. It does not test the actual
   host connection or model.
+- `ouroboros codex doctor` checks Codex auto-dispatch artifacts and configuration.
+  Its optional `--live-mcp` launches the configured stdio server to discover
+  tools; inspect the launcher and its possible network or other effects first.
+  Neither path proves a model call or the host's live connection.
 
-`--json` is available for the doctor commands; with `mcp doctor`, adding
+`--json` is available for `doctor install`, `mcp doctor`, and
+`mcp doctor-runtime`; with `mcp doctor`, adding
 `--machine-snapshot` changes the top-level JSON from a list to an object with
 `checks` and `machine_snapshot`. Redact either form before sharing. An optional
 `ouroboros mcp doctor --probe-local-stdio` starts a temporary local child and
@@ -51,6 +59,10 @@ checks discovery without calling tools. It does not test the host's configured
 launcher, authentication or model. Its Python-level restrictions are not OS
 confinement, and interpreter startup can precede those restrictions. Use it only
 when the extra process and temporary files are appropriate.
+
+Setup and refresh can modify configuration and installed artifacts. A failed
+setup is not evidence that no state was created; inspect the affected environment
+and preserve existing files before retrying.
 
 ## 3. Inspect work and recover carefully
 
@@ -66,9 +78,13 @@ status alone does not prove a process is alive.
 
 Before resuming, restarting, cancelling, updating, or changing settings, inspect
 the existing owner, state, workspace and possible external effects. Do not
-start a duplicate run just because a response was lost. Keep records and user
-files; explain the proposed action and its consequences. Follow the user's
-instructions and permissions for any change.
+start a duplicate run just because a response was lost. In this source version,
+a `run workflow --resume` attempt can record a session as failed when its
+process-local check package is unavailable and start a new attempt. A listing
+such as `resume --list` is distinct from resuming execution. Inspect the
+installed implementation and current state before choosing that action. Keep
+records and user files; explain the proposed action and its consequences. Follow
+the user's instructions and permissions for any change.
 
 ## 4. Verify the outcome
 
