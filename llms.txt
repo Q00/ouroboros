@@ -11,9 +11,9 @@ architecture -- a different project with a different design, no shared code.
 
 ## Core Concepts
 
-- Seed Spec: An immutable YAML specification auto-generated from a Socratic interview. Contains project description, acceptance criteria (AC) tree, constraints, and architecture decisions. The seed is the single source of truth for what should be built. In the happy path, users never create seeds manually — the interview produces one automatically. Manual seed authoring is an advanced workflow (see `docs/guides/seed-authoring.md`).
+- Seed Spec: An immutable YAML specification generated from interview results or already-agreed requirements. Contains project description, acceptance criteria (AC) tree, constraints, and architecture decisions. The seed is the single source of truth for what should be built. In the host-skill flow, confirm the agreed goal, request `ooo seed`, and inspect the returned YAML before execution; interview completion alone does not establish that a Seed exists. The standalone CLI and Auto have separate generation flows. See `skills/seed/SKILL.md`; manual YAML authoring is an advanced workflow (see `docs/guides/seed-authoring.md`).
 - Acceptance Criteria (AC) Tree: A hierarchical decomposition of requirements. Each AC has a status (pending, in_progress, passed, failed) and can contain children. The tree is the unit of progress tracking.
-- Interview: A Socratic dialogue that extracts hidden assumptions and crystallizes vague requirements into a structured seed spec. Auto-generates the seed on completion.
+- Interview: A Socratic dialogue that extracts hidden assumptions and clarifies requirements. After its closure checks and user confirmation of the agreed goal, the host Interview skill suggests `ooo seed`; this does not itself produce a Seed artifact.
 - Evaluation Pipeline: Three-stage verification (mechanical checks, LLM-based review, consensus gating) that determines whether acceptance criteria are met.
 - Event Sourcing: All state changes are persisted as immutable events in a SQLite EventStore (~/.ouroboros/ouroboros.db). The system can reconstruct any past state from events.
 - Evolution Loop: After evaluation, the system can evolve the spec and re-execute, creating an iterative refinement cycle.
@@ -42,8 +42,8 @@ architecture -- a different project with a different design, no shared code.
 ## Commands / Skills
 
 - setup: Guided onboarding wizard. Configures runtime backend and project settings.
-- interview (aliases: socratic): Socratic interview to crystallize vague requirements into a seed spec. Auto-generates the seed on completion.
-- seed (aliases: crystallize): Generate validated seed specifications from interview results. Automatically invoked by interview in the happy path — most users never call this directly. Manual seed authoring is an advanced workflow.
+- interview (aliases: socratic): Clarify vague requirements through Socratic questioning. After closure checks and goal confirmation, the host skill suggests `ooo seed`.
+- seed (aliases: crystallize): Generate a Seed from interview results or already-agreed context. Request `ooo seed` in the host-skill flow and inspect the returned YAML. Calling the skill is distinct from manually authoring YAML, which is an advanced workflow.
 - ouroboros-run (invoked as `ooo run`, alias: execute): Execute a seed specification through the workflow engine. Decomposes ACs into tasks and runs them via the configured backend.
 - evaluate (aliases: eval): Three-stage verification pipeline. Runs mechanical checks, LLM review, and consensus gating against acceptance criteria.
 - evolve: Start or monitor an evolutionary development loop. Iterates on evaluation findings.
