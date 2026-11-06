@@ -18,9 +18,10 @@ ooo help
 
 When asked to diagnose an Ouroboros installation, MCP connection, stalled job,
 or unexpected result, read [TROUBLESHOOTING.md](TROUBLESHOOTING.md) in this
-skill directory first. If the skill was delivered as a standalone cached
-entrypoint without its sibling file, use the Python interpreter belonging to
-that same Ouroboros installation to read its packaged resource:
+skill directory first. Resolve that relative path from the directory containing
+this `SKILL.md`, even if that directory is hidden. If the skill was delivered
+as a standalone cached entrypoint without its sibling file, use the Python
+interpreter belonging to that same Ouroboros installation to read its packaged resource:
 
 ```bash
 python -c 'from importlib.resources import files; print(files("ouroboros").joinpath("skills", "help", "TROUBLESHOOTING.md").read_text(encoding="utf-8"))'
