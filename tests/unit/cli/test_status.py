@@ -1237,6 +1237,27 @@ def test_health_reports_malformed_credentials_without_crashing(monkeypatch, tmp_
     assert "must contain a mapping" in result.output
 
 
+def test_health_reports_non_utf8_credentials_without_crashing(monkeypatch, tmp_path: Path) -> None:
+    """A credentials file that is not UTF-8 is reported, not raised as a traceback."""
+    _clear_auth_env(monkeypatch)
+    config_dir = tmp_path / "config"
+    (config_dir / "data").mkdir(parents=True)
+    cli = _make_cli(tmp_path / "bin" / "claude")
+    (config_dir / "data" / "ouroboros.db").write_text("")
+    _write_config(config_dir, cli_path=cli)
+    # cp1252 "café" is not valid UTF-8; the health check must report it, not abort.
+    (config_dir / "credentials.yaml").write_bytes(
+        b"providers:\n  anthropic:\n    api_key: caf\xe9\n"
+    )
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    result = runner.invoke(app, ["health"])
+
+    assert result.exit_code == 1
+    assert "Credentials" in result.output
+    assert "cannot read credentials" in result.output
+
+
 def test_health_reports_malformed_credentials_providers_without_crashing(
     monkeypatch, tmp_path: Path
 ) -> None:
