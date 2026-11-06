@@ -524,7 +524,7 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         "src/ouroboros/cli/commands/codex.py",
         "_list_stdio_mcp_tool_names_with_framing",
         "asyncio.create_subprocess_exec",
-        962,
+        982,
         17,
     ): "os.environ.copy()+server env from $CODEX_HOME/config.toml (denied root); doctor probe.",
     (
