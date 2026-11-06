@@ -1,10 +1,9 @@
 """The test suite's hermetic-home contract.
 
-conftest redirects ``$HOME`` — the single chokepoint both ``Path.home()`` and
-``os.path.expanduser("~")`` read — so no test resolves state under the
-developer's real home. These tests pin that contract for both resolution
-mechanisms and for subprocess inheritance, so a regression (e.g. isolating only
-one resolver again) fails loudly.
+conftest redirects the home environment used by ``Path.home()`` and
+``os.path.expanduser("~")`` and clears inherited ``CODEX_HOME``. These tests
+pin those paths and subprocess inheritance so tests do not use the invoking
+developer's configuration by default.
 """
 
 from __future__ import annotations
@@ -25,8 +24,10 @@ def test_both_home_resolvers_agree_on_the_isolated_home() -> None:
     home = Path.home()
     assert Path(os.path.expanduser("~")) == home
     assert os.path.expanduser("~/.ouroboros/x") == str(home / ".ouroboros" / "x")
-    # ``$HOME`` is the underlying source both resolvers read.
+    # On Windows both resolvers instead use USERPROFILE.
     assert os.environ["HOME"] == str(home)
+    if sys.platform == "win32":
+        assert os.environ["USERPROFILE"] == str(home)
 
 
 def test_expanduser_based_cli_db_paths_are_isolated() -> None:
@@ -49,3 +50,40 @@ def test_subprocess_inherits_the_isolated_home() -> None:
         check=True,
     )
     assert result.stdout.strip() == str(Path.home())
+
+
+def test_inherited_codex_home_is_not_modified_by_setup_test(tmp_path: Path) -> None:
+    """A test launched from Codex must not write into its inherited profile."""
+    codex_home = tmp_path / "external-codex-home"
+    codex_home.mkdir()
+    config = codex_home / "config.toml"
+    original = b'[existing]\nvalue = "keep"\n'
+    config.write_bytes(original)
+    profile_config = tmp_path / "external-profile" / ".codex" / "config.toml"
+    profile_config.parent.mkdir(parents=True)
+    profile_config.write_bytes(original)
+    env = os.environ.copy()
+    env["CODEX_HOME"] = str(codex_home)
+    env["USERPROFILE"] = str(profile_config.parent.parent)
+    env.pop("PYTEST_ADDOPTS", None)
+    root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "tests/unit/cli/test_setup.py::TestCodexSetup::"
+            "test_register_codex_mcp_server_writes_guidance_comment",
+            "tests/unit/test_home_isolation.py::test_both_home_resolvers_agree_on_the_isolated_home",
+        ],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert config.read_bytes() == original
+    assert profile_config.read_bytes() == original
