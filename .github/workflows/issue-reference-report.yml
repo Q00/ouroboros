@@ -1,0 +1,21 @@
+name: Open issues with merged PR references
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Report for maintainer inspection
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/report-merged-issue-references.py > "$RUNNER_TEMP/issue-reference-report.md"
+          cat "$RUNNER_TEMP/issue-reference-report.md" >> "$GITHUB_STEP_SUMMARY"
