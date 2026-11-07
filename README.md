@@ -191,6 +191,12 @@ uninstallation can remove configuration and stored data.
 
 ```text
 ooo setup
+```
+
+Answer the setup questions and finish setup. Then, in a separate message in
+the same host conversation, ask to start the Interview:
+
+```text
 ooo interview "Build a web app where I can add tasks and mark them complete"
 ```
 
