@@ -268,6 +268,20 @@ cancel jobs already running.
 
 ## Status and Recovery
 
+An Interview session ID identifies the requirements conversation, not an
+execution session or background job. If the Interview was interrupted, keep
+its returned ID and continue it in the same host conversation and connected
+server; continuing may call a model and update the saved interview state.
+For a standalone CLI interview, `ouroboros init list` lists interview records;
+if you used a custom directory, add `--state-dir <actual-directory>` to list
+the same records. After checking the ID and target, use
+`ouroboros init start --resume <interview-id>` in that environment, adding the
+same `--state-dir` when needed. Resuming may call a model, update state, and
+offer to generate a Seed or start a workflow; review each prompt. Host MCP
+and CLI state locations may differ, so do not assume the CLI list includes a
+host interview; matching locations may share records. Check the installed
+version's help before acting.
+
 Identify the ID type and active workspace before retrying. A background job,
 execution session, execution aggregate, and Auto session are different things.
 Use the commands supported by the installation that produced the ID:
