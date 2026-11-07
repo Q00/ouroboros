@@ -269,6 +269,13 @@ To request evaluation without a new follow-up, ask the connected host to pass
 `auto_evolve: false`. This applies to that evaluation request; it does not
 cancel jobs already running.
 
+If evaluation rejects the result, read the stage and failure reason before
+fixing the work or revisiting the requirements. If acceptance is `unverified`,
+check the configured tests, working directory, and execution evidence; add or
+run the needed checks before evaluating again. The [evaluation skill](./skills/evaluate/SKILL.md)
+describes the next action for each outcome; first check whether a follow-up job
+is already running.
+
 [Evaluation guidance](./docs/guides/evaluation-pipeline.md) ·
 [Execution versus acceptance](./docs/guides/execution-vs-evaluation.md) ·
 [Evaluation skill](./skills/evaluate/SKILL.md)
