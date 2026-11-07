@@ -261,6 +261,16 @@ guide](./docs/guides/seed-authoring.md) explains the schema for manual authoring
 
 ### 3. Run the specification and inspect the outcome
 
+Before an MCP run in a Git project, check whether it has a commit by running
+the read-only command `git rev-parse --verify HEAD` in the project terminal. The standard MCP run requests a
+worktree by default; a repository created with `git init` but no commit has no
+`HEAD` for that worktree ([MCP default](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/mcp/tools/execution_handlers.py#L1430),
+[worktree check](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/core/worktree.py#L371-L388)). If the check fails, review the repository and decide whether
+to make an initial commit before running; do not let the tool create a commit
+or change project files. This condition is specific to the standard MCP
+worktree path; it does not establish behavior for non-Git projects,
+worktree-disabled runs, or OpenCode.
+
 In the **host conversation**, ask for `ooo run` and provide the reviewed Seed
 YAML or its actual file path. In a **terminal**, use
 `ouroboros run <seed-file>` with the actual generated path; replace the
@@ -272,10 +282,6 @@ worktree should only be assumed when its path is actually reported. The
 [run skill](./skills/run/SKILL.md) describes automatic evaluation and any
 chained fix loop. Follow those jobs to their terminal results before starting
 a duplicate run.
-
-One worktree launch failure has a narrower cause: the standard MCP run tool
-requests a worktree by default, and a Git repository created with `git init`
-but no commit has no `HEAD` from which to create it ([MCP default](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/mcp/tools/execution_handlers.py#L1430), [worktree check](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/core/worktree.py#L371-L388)). In the project terminal, the read-only check `git rev-parse --verify HEAD` can confirm whether a commit exists. If it fails, review the repository and decide whether an initial commit is appropriate before retrying; do not let the tool create a commit or change project files for you. This finding is limited to the standard MCP worktree path; it does not establish behavior for non-Git projects, worktree-disabled runs, or OpenCode.
 
 Review the outcome against the Seed:
 
