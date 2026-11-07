@@ -221,7 +221,7 @@ terminal flow described above.
 **Both plugin paths — enter in the host conversation:**
 
 ```text
-ooo interview "Build a web app where I can add tasks and mark them complete"
+ooo interview "Build a web app where I can add tasks and mark them complete. Include a README that explains prerequisites, how to install dependencies and run the app, the actual URL and port, how to stop it, and how to run the tests."
 ```
 
 Answer the interview questions. For example, decide whether tasks should
@@ -243,7 +243,7 @@ and [Seed](./skills/seed/SKILL.md) skills for the version you are using.
 **Standalone CLI users — enter in the project terminal instead:**
 
 ```bash
-ouroboros init start "Build a web app where I can add tasks and mark them complete"
+ouroboros init start "Build a web app where I can add tasks and mark them complete. Include a README that explains prerequisites, how to install dependencies and run the app, the actual URL and port, how to stop it, and how to run the tests."
 ```
 
 The interactive CLI asks about generating the Seed and prints its saved path
@@ -252,8 +252,11 @@ first; the source version's prompt defaults to Yes. Use the path actually
 printed, rather than assuming a file was created.
 
 For the example, acceptance criteria might require adding a task, marking it
-complete, and retaining it after refresh **if that was agreed**. These are
-example requirements, not a complete executable Seed. The [Seed authoring
+complete, and retaining it after refresh **if that was agreed**. They can also
+require a project README with prerequisites, dependency installation, app run
+instructions, the actual URL and port, shutdown steps, and test commands.
+Review and agree on these criteria before generating or running a Seed; they
+are example requirements, not a complete executable Seed. The [Seed authoring
 guide](./docs/guides/seed-authoring.md) explains the schema for manual authoring.
 
 ### 3. Run the specification and inspect the outcome
@@ -276,7 +279,10 @@ but no commit has no `HEAD` from which to create it ([MCP default](https://githu
 
 Review the outcome against the Seed:
 
-1. Inspect the changed files in the reported project or worktree.
+1. Inspect the changed files in the reported project or worktree, including its
+   README. If the README is missing or its dependency, run, URL/port, shutdown,
+   or test instructions are unclear, ask the host to inspect the actual project
+   and report verified details; do not guess commands or ports.
 2. Read the tests, evaluation, and unresolved or unverified criteria.
 3. Run the app. Add a task, mark it complete, and check persistence if the Seed
    requires it. Record the observed behavior rather than relying on a score.
