@@ -55,7 +55,7 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | iex
 ```
 
-<p align="center"><sub>一行命令完成安装。然后在你的编码 agent 里运行一次 <code>ooo setup</code>，详见<a href="#快速开始">快速开始</a>。</sub></p>
+<p align="center"><sub>一行命令完成安装。Claude Code 可用 <code>ooo setup</code> 配置；Codex 等其他宿主请按各自的运行时设置流程操作。详见<a href="#快速开始">快速开始</a>。</sub></p>
 
 <p align="center"><sub><b>七次各自独立的运行，七个宿主。任务不同是故意的——共享的是引擎，不是提示词</b></sub></p>
 
@@ -142,7 +142,7 @@ Windows 安装脚本会在缺少 Git 和 uv 时通过 winget 安装它们，Pyth
 然后安装 `ouroboros-ai` 并接入检测到的宿主。原生 Windows 仍是实验性支持，Codex CLI
 需要 WSL 2，详见[平台支持](./docs/platform-support.md)。
 
-**第一条命令** —— 先在 AI 编码 agent 对话中开始 setup：
+**第一条命令** —— 在 Claude Code 中先开始 guided setup：
 
 ```
 ooo setup
@@ -156,7 +156,12 @@ ooo setup
 ooo interview "I want to build a task management CLI"
 ```
 
-`ooo setup` 只需运行一次，用来配置运行环境；`ooo interview` 才是安装后
+这里的 guided setup 流程适用于 Claude Code。Codex 插件会在安装时注册 MCP server，
+因此不要把 `ooo setup` 当作所有宿主都必须重复运行的步骤。单独配置 Codex CLI 时，
+请在终端运行 `ouroboros setup --runtime codex`。其他宿主请从[运行时指南索引](./docs/README.md#runtime-guides)
+选择对应步骤。
+
+`ooo setup` 是 Claude Code 中一次性的 guided 配置；`ooo interview` 才是安装后
 启动第一个工作流的命令，它会开启苏格拉底式访谈。配置完成后，Codex 会沿用
 它当前选中的模型，Claude Code 则使用推荐的模型设置。只有需要把某个阶段
 固定到特定模型时，才选择**直接配置模型**——它会在浏览器里打开本地设置
@@ -218,20 +223,16 @@ codex plugin marketplace add Q00/ouroboros
 codex plugin add ouroboros@ouroboros
 ```
 
-打开一个新的 Codex 会话，先开始 setup：
-
-```
-ooo setup
-```
-
-回答 setup 提出的问题并完成配置后，在同一对话的下一条消息中请求 Interview。
-参见 [main setup skill](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/skills/setup/SKILL.md)：
+打开新的 Codex 会话后，先确认插件已安装且 MCP 连接可用，然后在对话的下一条消息中
+请求首次 Interview。安装插件会注册 Codex 使用的 MCP server，不必重复运行 Claude Code
+的 guided setup。若要单独配置 Codex CLI，请在终端运行 `ouroboros setup --runtime codex`。
+也可参见 [main setup skill](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/skills/setup/SKILL.md)：
 
 ```
 ooo interview "Build a task management CLI"
 ```
 
-`ooo setup` 只需运行一次，用来准备运行环境。准备就绪后，它会沿用 Codex
+完成运行时设置后，Ouroboros 会沿用 Codex
 当前的默认模型；只有在需要为某个流水线阶段固定特定模型时，才选择**直接配置模型**。
 
 </details>
@@ -511,11 +512,13 @@ Ralph Cycle 3: evolve_step(lineage)       -> Gen 3 -> action=CONVERGED
 
 ## 命令
 
-在 AI 编码 agent 会话里用 `ooo <cmd>` 技能，在终端里用 `ouroboros` CLI。
+在支持的 AI 编码 agent 会话里使用 `ooo <cmd>` 技能，在终端里使用 `ouroboros` CLI。
+`ooo setup` 按宿主配置；MCP 注册流程并非所有宿主都相同。Claude Code 使用
+`ooo setup` guided 流程，其他运行时使用相应的 CLI 设置步骤。
 
 | 技能（`ooo`）        | 等效 CLI                                                          | 作用                                                          |
 | :------------------- | :---------------------------------------------------------------- | :------------------------------------------------------------ |
-| `ooo setup`          | `ouroboros setup`                                                 | 注册运行时并配置项目（一次性）                                |
+| `ooo setup`          | `ouroboros setup`                                                 | 按宿主配置；其他运行时使用相应 CLI 设置步骤                    |
 | `ooo interview`      | `ouroboros init start`                                            | 苏格拉底式提问 —— 把隐藏假设挖出来                            |
 | `ooo idk`            | *(经由 skill)*                                                    | 按用户对当前主题的理解调整访谈表述难度                        |
 | `ooo auto`           | `ouroboros auto`                                                  | 从一个目标 → A 级 Seed → 在有界循环里完成执行交接             |
