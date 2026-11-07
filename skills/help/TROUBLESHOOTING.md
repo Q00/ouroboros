@@ -25,12 +25,12 @@ In PowerShell, use `Get-Command ouroboros` to locate the command. The result ide
 | Symptom | First step | If that does not resolve it |
 | --- | --- | --- |
 | The shell cannot find `ouroboros`, or the host does not recognize `ooo` | Separate the standalone CLI from the host plugin; check the affected session and installed version. | Inspect the host's plugin status and installation instructions for that version. Do not assume one installation proves the other. |
-| MCP tools are unavailable or connection fails | Check whether the host reports its server enabled and connected; preserve the redacted error. | Follow **MCP connection** below. |
-| Authentication fails or health reports a credential warning | Identify the selected backend and the environment that actually launches it. Check its supported login or credential setup without sharing the credential. | A credential-presence check does not prove validity; verify an authorized connection separately. |
-| A job appears stuck or a client disconnected | Preserve the original IDs, workspace and owner; query the existing work. | Follow **Status and recovery** below before retrying. |
-| Codex uses broader file or network access than expected | Check the existing job, actual worker command, and product/Codex versions. | Follow **Permission and isolation scope** below. |
-| An update reports partial failure | Identify which package and refresh step changed. | Follow **Update and partial failure** below. |
-| A job completed but the result seems wrong | Compare the Seed and actual files, tests and evaluation evidence. | Follow **Verify and report** below. |
+| MCP tools are unavailable or connection fails | Check whether the host reports its server enabled and connected; preserve the redacted error. | Follow [MCP connection](#mcp-connection-or-authentication-fails). |
+| Authentication fails or health reports a credential warning | Identify the selected backend and the environment that actually launches it. Check its supported login or credential setup without sharing the credential. | A credential-presence check does not prove validity; follow [MCP connection](#mcp-connection-or-authentication-fails) and verify an authorized connection separately. |
+| A job appears stuck or a client disconnected | Preserve the original IDs, workspace and owner; query the existing work. | Follow [Status and recovery](#recovery) before retrying. |
+| Codex uses broader file or network access than expected | Check the existing job, actual worker command, and product/Codex versions. | Follow [Permission and isolation scope](#permission-scope). |
+| An update reports partial failure | Identify which package and refresh step changed. | Follow [Update and partial failure](#update-and-partial-failure). |
+| A job completed but the result seems wrong | Compare the Seed and actual files, tests and evaluation evidence. | Follow [Verify and report](#verify-and-report). |
 
 ## Diagnose without assuming a pass proves success
 
@@ -59,7 +59,9 @@ Run the following in the affected CLI environment only if that installation prov
 
 After an authorized correction, repeat the relevant check in the same host and environment. If a real connection or model call was not tested, report that limit.
 
-## Codex permission and isolation scope differs from expectations {#permission-scope}
+<a id="permission-scope"></a>
+
+## Codex permission and isolation scope differs from expectations
 
 1. Start in the original host conversation: identify the `job_id`, `session_id`, `execution_id`, owner, and current state. Follow [Status and recovery](#recovery) to query that same job and its result. Do not start a duplicate or terminate a user-owned session just because a response disappeared.
 2. Inspect the actual worker command and selected backend/runtime for that job. Codex `--sandbox workspace-write` allows writes in the workspace while retaining a sandbox; `--dangerously-bypass-approvals-and-sandbox` bypasses both Codex approvals and its sandbox. Do not infer effective permissions from a setting name alone, and do not dump tokens or complete environment/config files.
@@ -76,15 +78,15 @@ Sources: for main `592c667`, see the [Codex factory](https://github.com/Q00/ouro
 
 A closed client or missing response does not establish that a worker stopped. Find the original host conversation, start tool, and returned field names first; distinguish `job_id`, `session_id`, `execution_id`, and `auto_session_id`. A field named `session_id` does not by itself mean an execution session. An Interview MCP start response uses `state.interview_id` as its `session_id`; that is a different ID from an orchestrator execution session. Do not pass it to the execution-session commands below. `ouroboros status run --session-id` accepts orchestrator session IDs only. The MCP tool `ouroboros_session_status` queries orchestrator sessions and also handles `auto_<id>` IDs by returning auto-session status; an Interview ID is a separate type. See [main Interview start response](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/mcp/tools/authoring_handlers.py#L2661-L2713), [main status query scope](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/mcp/tools/query_handlers.py#L291-L323), [main session reconstruction requirement](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/orchestrator/session.py#L1298-L1342), and [CLI run status option](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/cli/commands/status.py#L374-L389). The same behavior was checked in release `v0.59.9`: [Interview response](https://github.com/Q00/ouroboros/blob/5f5fca90662861201ff0a26f502edd22b272c4c6/src/ouroboros/mcp/tools/authoring_handlers.py#L2686-L2738), [status query](https://github.com/Q00/ouroboros/blob/5f5fca90662861201ff0a26f502edd22b272c4c6/src/ouroboros/mcp/tools/query_handlers.py#L291-L323), [reconstruction requirement](https://github.com/Q00/ouroboros/blob/5f5fca90662861201ff0a26f502edd22b272c4c6/src/ouroboros/orchestrator/session.py#L1298-L1342), and [CLI option](https://github.com/Q00/ouroboros/blob/5f5fca90662861201ff0a26f502edd22b272c4c6/src/ouroboros/cli/commands/status.py#L374-L389). For standalone CLI status checks, replace each placeholder below with the **matching ID of the indicated type**, and check the installed help first:
 
-```bash
-ouroboros job status JOB_ID
-ouroboros job result JOB_ID
-ouroboros status execution EXECUTION_ID --events
-ouroboros status run --session-id ORCHESTRATOR_SESSION_ID
-ouroboros status auto AUTO_SESSION_ID
-ouroboros resume --list
-ouroboros resume --all --list
-```
+Choose only the row matching the ID or list you need; do not run every command. For a job, query its status first and read its result when it is terminal.
+
+| What you have | Standalone CLI command | Next step |
+| --- | --- | --- |
+| Job ID | `ouroboros job status JOB_ID` | When terminal, use `ouroboros job result JOB_ID` for that same job. |
+| Execution ID | `ouroboros status execution EXECUTION_ID --events` | Inspect the returned events and linked IDs. |
+| Orchestrator session ID | `ouroboros status run --session-id ORCHESTRATOR_SESSION_ID` | Inspect the returned session status. |
+| Auto session ID | `ouroboros status auto AUTO_SESSION_ID` | Inspect auto-session status and linked work. |
+| Execution-session ID is missing | `ouroboros resume --list` | For a wider candidate list, use `ouroboros resume --all --list`; neither command resumes work. |
 
 ### Resume an interview
 
@@ -107,7 +109,15 @@ For a wider execution-session candidate list, `ouroboros resume --all --list` re
 Before resuming, cancelling, or starting a new run, establish the original owner and terminal state, Seed **file path**, target workspace and branch, uncommitted files, and effects already sent to external systems. Do not start a duplicate because a receipt was lost. In the cited revision, a particular `run workflow --resume` failure caused by an unavailable process-local check package can record the original session as failed and start a new attempt. Inspect the installed behavior and target before choosing a recovery action. Cancellation does not undo completed external effects. See [run recovery](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/cli/commands/run.py).
 
 
-**Check separately chained jobs before treating a stop as complete.** In the fixed main and release sources, a run can enqueue a separate evaluation job named by `chained_evaluate_job_id`; its evaluation result can in turn name a separate Ralph job in `chained_ralph_job_id`. These fields appear only when the corresponding chaining path succeeds; do not assume every run has them. Cancelling the original job or execution does not automatically establish that a separately chained job was cancelled, especially after the original is terminal. Inspect the original result, then the evaluation result if present, and check each returned job ID's status and result with the same server. If the user explicitly requests that a still-running follow-up stop, identify its exact ID and owner and request cancellation for that job separately using the installed server's `ouroboros_cancel_job` schema. Check its later status and result, and verify external effects; a cancellation request is not proof of termination or reversal. Preserve existing files and do not guess at missing IDs or start replacement work while the state is uncertain. See [main evaluation receipt](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/mcp/tools/run_evaluate_chain.py#L150-L175), [main Ralph receipt](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/mcp/tools/evaluate_ralph_chain.py#L462-L472), [main job cancellation](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/mcp/tools/job_handlers.py#L2148-L2189), and the corresponding release [evaluation](https://github.com/Q00/ouroboros/blob/5f5fca90662861201ff0a26f502edd22b272c4c6/src/ouroboros/mcp/tools/run_evaluate_chain.py#L150-L175) and [Ralph](https://github.com/Q00/ouroboros/blob/5f5fca90662861201ff0a26f502edd22b272c4c6/src/ouroboros/mcp/tools/evaluate_ralph_chain.py#L462-L472) paths. Other versions and host integrations may differ.
+**Check separately chained jobs before treating a stop as complete.** In the fixed main and release sources, cancelling the original job or execution does not automatically establish that a separately chained job was cancelled, especially after the original is terminal. Follow these steps:
+
+1. Inspect the original result for `chained_evaluate_job_id`. If present, check that evaluation job's status and result using the same server.
+2. Inspect the evaluation result for `chained_ralph_job_id`. If present, check that Ralph job's status and result using the same server. These fields appear only when the corresponding chaining path succeeds; do not assume every run has them.
+3. If the user explicitly requests that a still-running follow-up stop, identify its exact ID and owner and request cancellation for that job separately using the installed server's `ouroboros_cancel_job` schema.
+4. Check its later status and result and verify external effects. A cancellation request is not proof of termination or reversal. Preserve existing files and do not guess at missing IDs or start replacement work while the state is uncertain.
+
+See [main evaluation receipt](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/mcp/tools/run_evaluate_chain.py#L150-L175), [main Ralph receipt](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/mcp/tools/evaluate_ralph_chain.py#L462-L472), [main job cancellation](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/mcp/tools/job_handlers.py#L2148-L2189), and the corresponding release [evaluation](https://github.com/Q00/ouroboros/blob/5f5fca90662861201ff0a26f502edd22b272c4c6/src/ouroboros/mcp/tools/run_evaluate_chain.py#L150-L175) and [Ralph](https://github.com/Q00/ouroboros/blob/5f5fca90662861201ff0a26f502edd22b272c4c6/src/ouroboros/mcp/tools/evaluate_ralph_chain.py#L462-L472) paths. Other versions and host integrations may differ.
+
 
 If the owner, state, target, or external effects remain unknown, preserve the records and ask the person responsible before guessing or starting another attempt.
 
