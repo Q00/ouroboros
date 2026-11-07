@@ -237,6 +237,10 @@ worktree should only be assumed when its path is actually reported. The
 chained fix loop. Follow those jobs to their terminal results before starting
 a duplicate run.
 
+One worktree launch failure has a narrower cause: the standard MCP run tool
+requests a worktree by default, and a Git repository created with `git init`
+but no commit has no `HEAD` from which to create it ([MCP default](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/mcp/tools/execution_handlers.py#L1430), [worktree check](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/core/worktree.py#L371-L388)). In the project terminal, the read-only check `git rev-parse --verify HEAD` can confirm whether a commit exists. If it fails, review the repository and decide whether an initial commit is appropriate before retrying; do not let the tool create a commit or change project files for you. This finding is limited to the standard MCP worktree path; it does not establish behavior for non-Git projects, worktree-disabled runs, or OpenCode.
+
 Review the outcome against the Seed:
 
 1. Inspect the changed files in the reported project or worktree.
