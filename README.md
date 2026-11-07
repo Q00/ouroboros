@@ -49,30 +49,47 @@ models. Check the selected runtime's authentication, permissions, and billing;
 Ouroboros does not include model usage. Installation and setup can also change
 host configuration.
 
-Before using an untrusted project or a sensitive environment, verify the
-selected runtime, target path, and effective permissions. Permission behavior
-is operation-specific: the fixed source selects `bypassPermissions` for Codex
-Interview question generation when no mode is supplied; the task runner and a
-cross-harness retry also request a runtime-native bypass. Other adapter paths
-can use configured modes such as `default` or `acceptEdits`, but the task
-runner can override an adapter's existing mode, so a configured value is not a
-guarantee for every path. For Codex, `bypassPermissions` maps to
-`--dangerously-bypass-approvals-and-sandbox`, disabling both Codex approvals and
-its sandbox for those execution paths. A permission-mode label does not verify
-operating-system or container file and network isolation; check those boundaries independently
-before running. See the [Interview permission resolver](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/providers/factory.py#L113-L143),
-[task-runner override](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/orchestrator/runner.py#L5189-L5207),
-[`bypassPermissions` mapping](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/codex_permissions.py#L26-L50),
-and [cross-harness retry](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/orchestrator/parallel_executor.py#L7069-L7074)
+**Before choosing an installation:** some Codex execution paths can disable
+both Codex approvals and its sandbox. A new project folder or worktree is not
+OS-level isolation. Verify the independent OS, VM, or container file and
+network boundaries first, and do not run an untrusted project or sensitive
+environment until those boundaries are understood. `small` is a starting model
+tier, not a spend or call limit; check provider pricing and budget controls.
+
+<details>
+<summary><strong>Permission paths, source, and model routing details</strong></summary>
+
+Permission behavior is operation-specific: the fixed source selects
+`bypassPermissions` for Codex Interview question generation when no mode is
+supplied; the task runner and a cross-harness retry also request a
+runtime-native bypass. Other adapter paths can use configured modes such as
+`default` or `acceptEdits`, but the task runner can override an adapter's
+existing mode, so a configured value is not a guarantee for every path. For
+Codex, `bypassPermissions` maps to
+`--dangerously-bypass-approvals-and-sandbox`, disabling both Codex approvals
+and its sandbox for those execution paths. A permission-mode label does not
+verify operating-system or container file and network isolation; check those
+boundaries independently before running. See the [Interview permission
+resolver](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/providers/factory.py#L113-L143),
+[task-runner
+override](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/orchestrator/runner.py#L5189-L5207),
+[`bypassPermissions`
+mapping](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/codex_permissions.py#L26-L50),
+and [cross-harness
+retry](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/orchestrator/parallel_executor.py#L7069-L7074)
 in source `592c667f`.
 
 Choosing `small` requests a frugal starting tier; actual routing depends on the
 runtime, explicit model pins, available tier mappings, and execution path. If
 the router is active, retries may raise the tier; evaluations or separate
-workers may add calls. `small` is not a spend limit. Check your provider's
-pricing and budget controls before a run. See [tier mapping](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/orchestrator/model_routing.py#L124-L161),
-[router activation and explicit-pin rules](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/orchestrator/model_routing.py#L381-L428),
-and [retry escalation and native-support gating](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/orchestrator/model_routing.py#L470-L541).
+workers may add calls. `small` is not a spend limit. See [tier
+mapping](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/orchestrator/model_routing.py#L124-L161),
+[router activation and explicit-pin
+rules](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/orchestrator/model_routing.py#L381-L428),
+and [retry escalation and native-support
+gating](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/orchestrator/model_routing.py#L470-L541).
+
+</details>
 
 Usage telemetry is enabled by default; see [what is collected and how to opt
 out](./TELEMETRY.md) before installation if you want to disable it.
