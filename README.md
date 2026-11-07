@@ -187,14 +187,21 @@ uninstallation can remove configuration and stored data.
 
 ### 2. Discuss the goal and review the Seed
 
-**Plugin users — enter in the host conversation, not the terminal:**
+**Claude Code plugin — enter in the host conversation:**
 
 ```text
 ooo setup
 ```
 
-Answer the setup questions and finish setup. Then, in a separate message in
-the same host conversation, ask to start the Interview:
+Answer the setup questions and finish setup before starting the Interview.
+
+**Codex plugin:** In the new Codex session, check that the plugin is enabled and
+its Ouroboros MCP tools are available. If they are missing, follow
+[installation troubleshooting](./docs/getting-started.md#troubleshooting).
+The `ooo setup` skill is for Claude Code; standalone CLI setup is a separate
+terminal flow described above.
+
+**Both plugin paths — enter in the host conversation:**
 
 ```text
 ooo interview "Build a web app where I can add tasks and mark them complete"
@@ -426,7 +433,7 @@ interchangeable syntax or identical implementations.
 
 | Host skill | Terminal entrypoint or reference | Purpose |
 | :--- | :--- | :--- |
-| `ooo setup`, `ooo config` | `ouroboros setup`, `ouroboros config` | Prepare the runtime and review settings |
+| `ooo setup` (Claude Code), `ooo config` | `ouroboros setup`, `ouroboros config` | Prepare the runtime and review settings |
 | `ooo interview` | `ouroboros init start` | Clarify goal, constraints, and success |
 | `ooo idk` | [Calibration contract](./docs/architecture.md#interview-calibration-control-turns) | Adjust interview explanations to your understanding |
 | `ooo seed` | [Seed skill](./skills/seed/SKILL.md); CLI interview's generation step | Turn agreed requirements into a specification |
