@@ -9,11 +9,16 @@ with one ``path:line: <token> — <remedy>`` line per dead reference. Policy:
 What is checked on each corpus line:
 
 1. **Link targets** in prose: Markdown links and images (``[text](target)``,
-   ``![alt](target)``), reference definitions (``[id]: target``), and the
-   ``href`` / ``src`` attribute of an inline HTML tag. Skipped: targets with a
-   URL scheme (``https:``, ``mailto:``, ...), protocol-relative ``//host``
-   targets, and pure ``#anchor`` targets; ``<https://...>`` autolinks are not
-   link targets at all. An angle-bracketed destination
+   ``![alt](target)``), reference definitions (``[id]: target``), and every
+   ``href`` / ``src`` attribute of every inline HTML tag. Destinations are
+   read by CommonMark's rules (balanced parentheses, backslash escapes,
+   optional title), and tags by the standard library's HTML tokenizer, so
+   quoting, case, and entities follow HTML. A link or a link-carrying tag
+   (``<a``, ``<img``, ...) that is still open at the end of the line is
+   reported, since a line-based check cannot see the rest of it. Skipped:
+   targets with a URL scheme (``https:``, ``mailto:``, ...), protocol-relative
+   ``//host`` targets, and pure ``#anchor`` targets; ``<https://...>``
+   autolinks are not link targets at all. An angle-bracketed destination
    (``[text](<a file.md>)``) is unwrapped and checked like any other. The
    ``#fragment``, a ``?query``, and a trailing ``:123`` / ``:123-130`` line
    suffix (hyphen or en dash) are dropped and the rest is percent-decoded. A
@@ -63,9 +68,11 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from functools import cache
+from html.parser import HTMLParser
 import os
 import posixpath
 import re
+import string
 from urllib.parse import unquote
 
 from tests.unit.docs._corpus import REPO_ROOT, DocLine, corpus_files, iter_lines
@@ -108,6 +115,9 @@ REMEDY_OUTSIDE_REPO = (
 REMEDY_ABSOLUTE = (
     "absolute filesystem path is never valid in a repository doc; use a path relative to this doc"
 )
+REMEDY_SPLIT = (
+    "continues on the next line, so its target cannot be checked; keep the link or tag on one line"
+)
 REMEDY_MISSING_PATH = (
     "repository path does not exist; update it to the current location, or add "
     "`<!-- docs-drift: ignore -->` to the line if it is deliberately hypothetical"
@@ -115,17 +125,19 @@ REMEDY_MISSING_PATH = (
 
 # Inline code span: a run of backticks, the content, the same run again.
 _CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)")
-# ``[text](target)`` and ``![alt](target)``, with an optional quoted title. The
-# text may hold one level of brackets, and the lookahead lets matches overlap,
-# so ``[![badge](img.png)](page.md)`` yields both ``img.png`` and ``page.md``.
-_INLINE_LINK = re.compile(
-    r"(?=!?\[(?:[^\[\]]|\[[^\[\]]*\])*\]"
-    r"\(\s*(<[^>]*>|[^)\s]+)(?:\s+(?:\"[^\"]*\"|'[^']*'))?\s*\))"
-)
+# Where an inline link or image destination starts: ``](``. The link text before
+# it needs no matching, so nested brackets and badge links
+# (``[![badge](img.png)](page.md)``) need no special case.
+_LINK_OPEN = re.compile(r"\]\(")
 # ``[id]: target`` at the start of a line; ``[^note]:`` is a footnote, not a link.
 _REFERENCE_DEF = re.compile(r"^ {0,3}\[(?!\^)[^\]]+\]:\s*(<[^>]*>|\S+)")
-# The first ``href="..."`` / ``src='...'`` of an HTML tag.
-_HTML_ATTR = re.compile(r"<[A-Za-z][^>]*?\b(?:href|src)\s*=\s*(?:\"([^\"]*)\"|'([^']*)')")
+_LINK_ATTRIBUTES = frozenset({"href", "src"})
+# A tag that can carry ``href`` / ``src`` and is still open at the end of the line.
+_SPLIT_LINK_TAG = re.compile(
+    r"<(?:a|area|audio|embed|iframe|img|input|link|script|source|track|video)(?=[\s/]|$)[^>]*$",
+    re.IGNORECASE,
+)
+_ESCAPABLE = frozenset(string.punctuation)
 _URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]+:")
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:[\\/]")
 _LINE_SUFFIX = re.compile(r":\d+(?:[-–]\d+)?$")
@@ -189,19 +201,120 @@ def _strip_code_spans(text: str) -> str:
     return _CODE_SPAN.sub("``", text)
 
 
-def link_targets(text: str) -> list[str]:
-    """Every link target on a prose line."""
+class _EndOfLine(Exception):
+    """A link reached the end of the line before it closed."""
+
+
+def _is_escaped(text: str, index: int) -> bool:
+    backslashes = len(text[:index]) - len(text[:index].rstrip("\\"))
+    return backslashes % 2 == 1
+
+
+def _link_destination(text: str, start: int) -> str | None:
+    """The CommonMark link destination of ``(destination "title")`` at ``text[start:]``.
+
+    ``start`` is just past ``](``. Returns ``None`` when the text is not a link,
+    and raises :class:`_EndOfLine` when the line ends inside it. A ``<...>``
+    destination keeps its brackets; backslash escapes are resolved.
+    """
+    end = len(text)
+    i = start
+    while i < end and text[i] in " \t":
+        i += 1
+    chars: list[str] = []
+    if i < end and text[i] == "<":
+        i += 1
+        while i < end and text[i] != ">":
+            if text[i] == "<":
+                return None
+            if text[i] == "\\" and i + 1 < end and text[i + 1] in _ESCAPABLE:
+                i += 1
+            chars.append(text[i])
+            i += 1
+        if i == end:
+            raise _EndOfLine
+        destination = "<" + "".join(chars) + ">"
+        i += 1
+    else:
+        depth = 0
+        while i < end and not text[i].isspace():
+            char = text[i]
+            if char == "\\" and i + 1 < end and text[i + 1] in _ESCAPABLE:
+                i += 1
+                char = text[i]
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                if depth == 0:
+                    break
+                depth -= 1
+            chars.append(char)
+            i += 1
+        if depth:
+            if i == end:
+                raise _EndOfLine
+            return None  # unbalanced parentheses: not a link destination
+        destination = "".join(chars)
+    separated = i < end and text[i].isspace()
+    while i < end and text[i] in " \t":
+        i += 1
+    if i < end and text[i] in "\"'(" and separated:
+        closer = ")" if text[i] == "(" else text[i]
+        i += 1
+        while i < end and text[i] != closer:
+            i += 2 if text[i] == "\\" else 1
+        if i >= end:
+            raise _EndOfLine
+        i += 1
+        while i < end and text[i] in " \t":
+            i += 1
+    if i == end:
+        raise _EndOfLine
+    return destination if text[i] == ")" else None
+
+
+class _TagLinks(HTMLParser):
+    """Every ``href`` / ``src`` value of every tag, from the standard HTML tokenizer."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.values: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.values.extend(value or "" for name, value in attrs if name in _LINK_ATTRIBUTES)
+
+
+def link_targets(text: str) -> tuple[list[str], list[str]]:
+    """The link targets on a prose line, and the links or tags that run past it.
+
+    A line-based check cannot see the rest of a link or tag that continues on
+    the next line, so those are returned for reporting instead of passing.
+    """
     prose = _strip_code_spans(text)
-    # ``![alt](x)`` also matches from its ``[``; keep each target once.
-    starts: dict[int, str] = {}
-    for match in _INLINE_LINK.finditer(prose):
-        starts.setdefault(match.start(1), match.group(1))
-    targets = list(starts.values())
+    targets: list[str] = []
+    split: list[str] = []
+    for match in _LINK_OPEN.finditer(prose):
+        if _is_escaped(prose, match.start()):
+            continue
+        try:
+            destination = _link_destination(prose, match.end())
+        except _EndOfLine:
+            split.append(prose[match.start() :].strip())
+            continue
+        if destination is not None:
+            targets.append(destination)
     reference = _REFERENCE_DEF.match(prose)
     if reference:
         targets.append(reference.group(1))
-    targets.extend(match.group(1) or match.group(2) or "" for match in _HTML_ATTR.finditer(prose))
-    return targets
+    open_tag = _SPLIT_LINK_TAG.search(prose)
+    if open_tag:
+        split.append(open_tag.group(0).strip())
+        prose = prose[: open_tag.start()]
+    parser = _TagLinks()
+    parser.feed(prose)
+    parser.close()
+    targets.extend(parser.values)
+    return targets, split
 
 
 def check_link_target(doc_path: str, target: str) -> str | None:
@@ -273,10 +386,12 @@ def check_line(line: DocLine, dirs: frozenset[str]) -> list[str]:
             if rel and _second_segment_is_real(rel) and not exists_in_repo(rel):
                 found.append((token, REMEDY_MISSING_PATH))
     else:
-        for target in link_targets(line.text):
+        targets, split = link_targets(line.text)
+        for target in targets:
             remedy = check_link_target(line.path, target)
             if remedy:
                 found.append((target, remedy))
+        found.extend((construct, REMEDY_SPLIT) for construct in split)
         for token in inline_code_tokens(line.text):
             rel = repo_path_of(token, dirs)
             if rel and not exists_in_repo(rel):
@@ -302,7 +417,7 @@ def test_maintained_docs_name_only_existing_repository_paths() -> None:
     violations = find_violations(iter_lines())
     assert not violations, (
         f"{len(violations)} dead repository path(s) in maintained docs "
-        "(policy: docs/contributing/docs-freshness.md):\n" + "\n".join(violations)
+        "(see https://github.com/Q00/ouroboros/issues/2921):\n" + "\n".join(violations)
     )
 
 
@@ -349,8 +464,8 @@ def test_reports_every_violation_instead_of_stopping_at_the_first() -> None:
         "./missing-d.md",
         "missing-e.png",
         "../missing-f.md",
-        "missing-h.md",
         "missing-g.svg",
+        "missing-h.md",
         "<missing i.md>",
     ]
 
@@ -459,3 +574,71 @@ def test_runtime_state_dirs_are_not_checked_but_repository_dot_dirs_are() -> Non
     assert find_violations([_line("`.github/workflows/no-such.yml`")]) == [
         f"docs/guides/example.md:7: .github/workflows/no-such.yml — {REMEDY_MISSING_PATH}"
     ]
+
+
+def _tokens(lines: list[DocLine]) -> list[str]:
+    return [v.split(": ", 1)[1].split(" — ")[0] for v in find_violations(lines, DIRS)]
+
+
+def test_reports_every_href_and_src_of_every_html_tag() -> None:
+    lines = [
+        _line('<a href="missing-a.md" src="missing-b.png">x</a>'),
+        # The first target resolves; the dead second one must still be reported.
+        _line('<a href="../README.md" src="missing-c.png"><img src="../README.md" href=missing-d>'),
+        _line("<IMG SRC=missing-e.png> <a href='missing&amp;f.md'>f</a> <br/>"),
+    ]
+    assert _tokens(lines) == [
+        "missing-a.md",
+        "missing-b.png",
+        "missing-c.png",
+        "missing-d",
+        "missing-e.png",
+        "missing&f.md",
+    ]
+
+
+def test_html_comments_and_non_link_angle_text_are_not_tags() -> None:
+    lines = [
+        _line('<!-- <a href="missing.md"> --> a < b, <session_id>, <https://example.com>'),
+        _line('`<img src="missing.png">` is literal text'),
+    ]
+    assert find_violations(lines, DIRS) == []
+
+
+def test_reports_a_link_or_tag_that_continues_on_the_next_line() -> None:
+    lines = [
+        _line('Intro <img width="320"'),
+        _line("See [the guide](../README.md"),
+        _line('See [the guide](../README.md "a title that wraps'),
+    ]
+    violations = find_violations(lines, DIRS)
+    assert [v.split(": ", 1)[1] for v in violations] == [
+        f'<img width="320" — {REMEDY_SPLIT}',
+        f"](../README.md — {REMEDY_SPLIT}",
+        f'](../README.md "a title that wraps — {REMEDY_SPLIT}',
+    ]
+
+
+def test_link_destinations_follow_commonmark() -> None:
+    lines = [
+        _line("[a](../README(archive).md) [b](missing((nested)).md)"),
+        _line("[c](missing\\(1\\).md) [d [nested [text]] here](missing-d.md)"),
+    ]
+    assert _tokens(lines) == [
+        "../README(archive).md",
+        "missing((nested)).md",
+        "missing(1).md",
+        "missing-d.md",
+    ]
+    # Balanced parentheses around a link, titles in every form, and empty targets.
+    ok = [
+        _line("(see [x](../README.md)) [y](../README.md 'Docs') [z](../README.md (Docs)) [e]()"),
+    ]
+    assert find_violations(ok, DIRS) == []
+
+
+def test_text_that_only_resembles_a_link_is_not_checked() -> None:
+    lines = [
+        _line("\\[not a link\\](missing-a.md) [x](missing-b.md junk) [y](missing-c(.md )"),
+    ]
+    assert find_violations(lines, DIRS) == []
