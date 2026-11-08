@@ -423,7 +423,9 @@ Linked worktree expansion has a different boundary. For each normal repo root fo
 Start interactive interview to refine requirements (Big Bang phase).
 
 **Shorthand:** `ouroboros init "context"` is equivalent to `ouroboros init start "context"`.
-When the first argument is not a known subcommand (`start`, `list`), it is treated as the context for `init start`.
+When the first argument is not a known subcommand (`start`, `list`) and does not start with `-`, it is treated as the context for `init start`.
+A leading option is parsed by `init` itself, which accepts only `--help`, so name `start` before it:
+`ouroboros init start --orchestrator "context"`.
 
 The top-level `interview` command is an alias for the same command group, so
 `ouroboros interview start "context"` and `ouroboros interview list` have the
@@ -466,13 +468,13 @@ ouroboros init "I want to build a task management CLI tool"
 ouroboros init start "I want to build a task management CLI tool"
 
 # Start with Claude Code (no API key needed)
-ouroboros init --orchestrator "Build a REST API"
+ouroboros init start --orchestrator "Build a REST API"
 
 # Specify runtime backend for the workflow step
-ouroboros init --orchestrator --runtime codex "Build a REST API"
+ouroboros init start --orchestrator --runtime codex "Build a REST API"
 
 # Use Codex as the LLM backend for interview and seed generation
-ouroboros init --llm-backend codex "Build a REST API"
+ouroboros init start --llm-backend codex "Build a REST API"
 
 # Run the interview and seed generation on the frontier tier
 ouroboros init start --model frontier "Build a REST API"
@@ -500,6 +502,87 @@ ouroboros init list [OPTIONS]
 
 ---
 
+
+## `ouroboros seed`
+
+Generate a Seed YAML specification from a completed interview session, with
+the same ambiguity scoring and Seed generation that `ouroboros init start` runs
+at the end of an interview.
+
+```bash
+ouroboros seed [OPTIONS] SESSION_ID
+```
+
+The session must be completed; otherwise the command exits with status 1 and
+names the command that resumes it. When the ambiguity score is not ready for a
+Seed, the command shows the same menu as `init start`: choosing to generate
+anyway writes the Seed, and the other choices exit with status 1 without one.
+The Seed is written to `~/.ouroboros/seeds/<seed_id>.yaml`.
+
+**Arguments:**
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `SESSION_ID` | Yes | Interview session ID to crystallize into a Seed (see `ouroboros init list`) |
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--state-dir DIRECTORY` | Custom directory for interview state files (default: `~/.ouroboros/data`) |
+| `--llm-backend TEXT` | LLM backend for ambiguity scoring and seed generation (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `omp`, `zcode`, `dsh`, `megacode`). Uses `llm.backend` from config if omitted |
+
+**Example:**
+
+```bash
+ouroboros seed interview_20260116_120000
+```
+
+---
+
+## `ouroboros pm`
+
+Run a PM interview that produces a Product Requirements Document rather than
+code. Questions are classified as planning questions for the PM, or as
+development questions deferred to the dev interview.
+
+```bash
+ouroboros pm [OPTIONS]
+```
+
+When the interview completes, the command saves a PM seed
+(`~/.ouroboros/seeds/pm_seed_<id>.json`) and a human-readable `pm.md` in the
+`--output` directory, prints the command that continues into the dev
+interview, and offers to start it. The PM seed is a handoff artifact for the
+dev interview, not a runnable Seed. Starting a new session when PM seeds
+already exist asks for confirmation first.
+
+This direct CLI runs greenfield interviews only. It exits with status 1, and
+points to `ooo pm` (MCP), which carries the code and data evidence lanes, when
+a new session is started while brownfield repositories are registered or when
+the session being resumed covers a codebase.
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `-r, --resume TEXT` | Resume an existing PM interview session by ID |
+| `-o, --output TEXT` | Output directory for the generated `pm.md` (default: `.ouroboros/` in the current directory) |
+| `-m, --model TEXT` | Model for every role in this command: `auto` (latest of each role's tier), `frugal`, `standard`, `frontier`, or a model id. Default: `models.default` in config (`auto`) |
+| `--pin-models/--no-pin-models` | Run the per-role model ids saved in config for this command (research and reproducibility). Default: `models.pin` in config (off) |
+| `--debug` | Enable debug output |
+
+**Examples:**
+
+```bash
+# Start a new PM interview
+ouroboros pm
+
+# Resume a session and save pm.md to ./docs/
+ouroboros pm --resume abc123 --output ./docs
+```
+
+---
 
 ## `ouroboros detect`
 
@@ -689,6 +772,158 @@ ouroboros run resume [EXECUTION_ID]
 > ```bash
 > ouroboros run seed.yaml --resume <session_id>
 > ```
+
+---
+
+## `ouroboros job`
+
+Inspect background jobs, such as detached `auto` work or a job started by an
+`ouroboros_start_*` MCP tool. `status`, `wait`, and `result` run the same
+handlers as the `ouroboros_job_status`, `ouroboros_job_wait`, and
+`ouroboros_job_result` MCP tools and exit with status 1 when the handler
+reports an error. For the job lifecycle, see
+[Detached `auto` wait and retrieve](#detached-auto-wait-and-retrieve).
+
+### `job status`
+
+Print the latest status for a background job.
+
+```bash
+ouroboros job status [OPTIONS] JOB_ID
+```
+
+| Option | Description |
+|--------|-------------|
+| `--view TEXT` | `full` (default), `summary`, or `compact` |
+
+### `job wait`
+
+Wait briefly for a background job update.
+
+```bash
+ouroboros job wait [OPTIONS] JOB_ID
+```
+
+| Option | Description |
+|--------|-------------|
+| `--cursor INTEGER` | Previous cursor from `job status` or `job wait` (default: `0`) |
+| `--timeout-seconds INTEGER` | Maximum seconds to wait for a change (default: `0`, an immediate snapshot) |
+| `--view TEXT` | `full` (default), `summary`, or `compact` |
+| `--stream TEXT` | `progress` (default) or `linked` |
+
+### `job result`
+
+Print the terminal result for a background job.
+
+```bash
+ouroboros job result JOB_ID
+```
+
+### `job events`
+
+Print the job's events from the EventStore as cursor-paged JSON (`job_id`,
+`cursor`, `count`, `events`, `read_only`). The store is opened read-only; the
+command exits with status 1 if the database file does not exist.
+
+```bash
+ouroboros job events [OPTIONS] JOB_ID
+```
+
+| Option | Description |
+|--------|-------------|
+| `--since INTEGER` | Last seen EventStore rowid cursor; must be non-negative (default: `0`) |
+| `--limit INTEGER` | Maximum job events to return; must be positive (default: `100`) |
+| `--db-path TEXT` | Path to `ouroboros.db` (default: the configured runtime database) |
+
+**Example:**
+
+```bash
+ouroboros job wait JOB_ID --timeout-seconds 30 --view summary
+```
+
+---
+
+## `ouroboros artifacts`
+
+Fetch, replay, and conservatively prune Disposable Memory artifact bodies,
+stored under `.ouroboros/artifacts` in a project. Every subcommand takes
+`--project-dir DIRECTORY` (default: the current directory) and exits with
+status 1 on a store error.
+
+### `artifacts prune`
+
+List the artifact bodies eligible for pruning. Nothing is deleted unless
+`--apply` is passed.
+
+```bash
+ouroboros artifacts prune [OPTIONS]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--project-dir DIRECTORY` | Project containing `.ouroboros/artifacts` (default: `.`) |
+| `--ttl TEXT` | Minimum artifact age: a whole number and a unit `s`, `m`, `h`, `d`, or `w` (default: `90d`) |
+| `--apply` | Write tombstones and delete the listed bodies |
+| `--allow-replay-tombstone` | Also prune inactive contracts still inside replay retention |
+
+### `artifacts fetch`
+
+Print the artifact body bound to one contract id as JSON.
+
+```bash
+ouroboros artifacts fetch [OPTIONS] CONTRACT_ID
+```
+
+| Option | Description |
+|--------|-------------|
+| `--project-dir DIRECTORY` | Project containing `.ouroboros/artifacts` (default: `.`) |
+
+### `artifacts replay`
+
+Replay a contract by reading its stored body; this command never re-executes
+work. The output is the same JSON body `fetch` prints.
+
+```bash
+ouroboros artifacts replay [OPTIONS] CONTRACT_ID
+```
+
+| Option | Description |
+|--------|-------------|
+| `--project-dir DIRECTORY` | Project containing `.ouroboros/artifacts` (default: `.`) |
+
+**Example:**
+
+```bash
+# See what a 30-day prune would remove, without deleting anything
+ouroboros artifacts prune --ttl 30d
+```
+
+---
+
+## `ouroboros workflow-ir`
+
+Inspect read-only Workflow IR projections.
+
+### `workflow-ir inspect`
+
+Project a Seed file into a Workflow IR `WorkflowSpec` without dispatching any
+work. Prints the spec id, node and edge counts, and the validation status. Exits
+with status 1 if the file cannot be read or projected, for example when it is
+not a YAML mapping or not a valid Seed.
+
+```bash
+ouroboros workflow-ir inspect [OPTIONS] SEED_FILE
+```
+
+| Option | Description |
+|--------|-------------|
+| `--json` | Emit `seed_file`, the full `workflow_spec`, and `validation` as JSON |
+
+**Example:**
+
+```bash
+ouroboros workflow-ir inspect seed.yaml --json
+```
 
 ---
 
@@ -955,6 +1190,73 @@ ouroboros codex refresh
 
 This command updates packaged `~/.codex/rules/ouroboros*.md` and `~/.codex/skills/ouroboros-*` artifacts. It does not modify `~/.codex/config.toml` or `~/.ouroboros/config.yaml`. It intentionally does not prune extra `ouroboros-*` files because prefix ownership can include user-managed artifacts.
 
+## `ouroboros zcode`
+
+Convenience commands that run `init start`, `qa`, and `run workflow` with Zcode
+selected for that invocation, without changing `~/.ouroboros/config.yaml`. For a
+persistent default, use `ouroboros setup --runtime zcode`. The standalone `ozo`
+entry point runs this same command group. When `OUROBOROS_ZCODE_CLI_PATH` is
+unset and `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs` exists,
+that path is used.
+
+**Shorthand:** `ouroboros zcode "context"` is equivalent to
+`ouroboros zcode start "context"`. Unless one of the arguments is a subcommand
+name (`start`, `qa`, `run`) or `--help`, all of them go to `start`.
+
+### `zcode start`
+
+Start an interview with Zcode as both the LLM backend and the workflow runtime
+(`init start --orchestrator --runtime zcode --llm-backend zcode`).
+
+```bash
+ouroboros zcode [start] [OPTIONS] [CONTEXT]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-r, --resume TEXT` | Resume an existing interview by ID |
+| `--state-dir DIRECTORY` | Custom directory for interview state files |
+| `-d, --debug` | Show verbose logs |
+
+### `zcode qa`
+
+Evaluate text or a file with `ouroboros qa`, using Zcode as the LLM backend.
+
+```bash
+ouroboros zcode qa [OPTIONS] ARTIFACT
+```
+
+| Option | Description |
+|--------|-------------|
+| `-q, --quality-bar TEXT` | Plain-language description of what PASS means (default: `PASS if this is clear, correct, and useful.`) |
+| `-t, --artifact-type TEXT` | `code`, `document` (default), `api_response`, `screenshot`, `test_output`, or `custom` |
+| `-r, --reference TEXT` | Optional reference text or file path |
+| `--pass-threshold FLOAT` | Score threshold for PASS, from `0.0` to `1.0` (default: `0.8`) |
+
+### `zcode run`
+
+Run a Seed with `run workflow` in orchestrator mode and Zcode as the execution
+runtime. The LLM backend is left as configured.
+
+```bash
+ouroboros zcode run [OPTIONS] SEED_FILE
+```
+
+| Option | Description |
+|--------|-------------|
+| `--project-dir DIRECTORY` | Project directory to run in |
+| `-r, --resume TEXT` | Resume a previous orchestrator session by ID |
+| `--no-qa` | Skip post-execution QA evaluation |
+| `-d, --debug` | Show verbose logs |
+| `-s, --sequential` | Execute acceptance criteria sequentially |
+| `--max-decomposition-depth INTEGER` | Maximum recursive split depth; depths above 4 use legacy execution |
+
+**Example:**
+
+```bash
+ouroboros zcode "Build a REST API"
+```
+
 ## `ouroboros qa`
 
 Run a general-purpose QA verdict over an artifact using the same implementation
@@ -1164,6 +1466,37 @@ Other selected runtimes, `--runtime none`, and `--dry-run` skip this query.
 > anything and asks you to reinstall with the exact original profile.
 >
 > The `[claude]` extra is never combined with or substituted for `[mcp]` — the Claude Agent SDK embeds MCP 1.x while the protocol server requires MCP 2. MCP hosts launch their own isolated `ouroboros-ai[mcp]` process via `uvx`/`pipx run`.
+
+---
+
+## `ouroboros doctor`
+
+Read-only diagnostics for an Ouroboros installation. For MCP server
+diagnostics, see [`mcp doctor`](#mcp-doctor).
+
+### `doctor install`
+
+Inspect the package, plugin, and MCP install surfaces without writing any
+file: the running package, the Codex personal plugin and its MCP launcher, the
+Claude Code plugin and its MCP launcher, a user-level `ouroboros` entry in
+`~/.claude/mcp.json`, and the ZCode bridge plugin and launcher. Each surface is
+reported as `OK`, `WARN`, or `FAIL`, with its path, launcher, and a hint when
+one applies. A Codex or Claude Code plugin manifest whose version differs from
+the running package is a warning. The command exits with status 1 if any surface fails.
+
+```bash
+ouroboros doctor install [OPTIONS]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--json` | Emit the surfaces as a JSON array on stdout |
+
+**Example:**
+
+```bash
+ouroboros doctor install --json
+```
 
 ---
 
@@ -1638,6 +1971,155 @@ ouroboros mcp info [OPTIONS]
 | `ouroboros_session_status` | Get the status of a session |
 | `ouroboros_project_status` | Rebuild complete read-only cross-run project status |
 | `ouroboros_query_events` | Query event history |
+
+---
+
+## `ouroboros plugin`
+
+Manage UserLevel plugins. `discover`, `inspect`, and `list` are read-only.
+`add`, `install`, `trust`, `disable`, and `remove` change the lockfile
+(default `~/.ouroboros/plugins.lock`), the trust store (default
+`~/.ouroboros/trust`), or the installed plugin homes (default
+`~/.ouroboros/plugins`). Every subcommand except `discover` accepts
+`--lockfile PATH` and `--trust-root PATH` to use other locations.
+
+An installed plugin runs as `ouroboros <plugin-name> <command> [ARGS]...`:
+a top-level name that is not a built-in command is looked up in the lockfile.
+
+### `plugin discover`
+
+Inspect a plugin manifest without registering it or granting trust. Reads
+neither the lockfile nor the trust store.
+
+```bash
+ouroboros plugin discover TARGET
+```
+
+`TARGET` is a plugin directory or its `ouroboros.plugin.json` file.
+
+### `plugin inspect`
+
+Show an installed plugin's metadata and trust state, without changing any
+state.
+
+```bash
+ouroboros plugin inspect [OPTIONS] NAME
+```
+
+| Option | Description |
+|--------|-------------|
+| `--lockfile PATH` | Override the lockfile path |
+| `--trust-root PATH` | Override the trust root |
+
+### `plugin list`
+
+List installed plugins with their trust state.
+
+```bash
+ouroboros plugin list [OPTIONS]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--lockfile PATH` | Override the lockfile path |
+| `--trust-root PATH` | Override the trust root |
+| `--json` | Emit JSON for piping instead of a table |
+
+### `plugin add`
+
+Install one or more plugins from a repository URL or a local path. Install
+strings that point inside a repository (such as `...#plugins/<name>`) are
+rejected.
+
+```bash
+ouroboros plugin add [OPTIONS] TARGET
+```
+
+| Option | Description |
+|--------|-------------|
+| `--plugin TEXT` | Name of a plugin in the repository catalog, for non-interactive use; repeatable |
+| `--cache-root PATH` | Where to clone repository URLs (default: `~/.ouroboros/cache`) |
+| `--plugin-home-root PATH` | Where to install plugin homes (default: `~/.ouroboros/plugins`) |
+| `--lockfile PATH` | Override the lockfile path |
+| `--trust-root PATH` | Override the trust root; used to invalidate prior grants on a version bump |
+| `--catalog-state PATH` | Override the known-catalog state path (default: `~/.ouroboros/plugin-catalogs.json`) |
+
+### `plugin install`
+
+Install one plugin, non-interactively. `TARGET` is either a plugin name,
+resolved through the known catalogs, or a local plugin directory containing
+`ouroboros.plugin.json`. A name must be exposed by exactly one known catalog;
+an ambiguous name fails with the list of candidates, and `--from` picks one.
+
+```bash
+ouroboros plugin install [OPTIONS] TARGET
+```
+
+| Option | Description |
+|--------|-------------|
+| `--from TEXT` | Source to install the named plugin from: a repository URL, or an absolute local path (registered on first use) |
+| `--plugin-home-root PATH` | Where to install plugin homes |
+| `--lockfile PATH` | Override the lockfile path |
+| `--trust-root PATH` | Override the trust root; used to invalidate prior grants on a subject change |
+| `--cache-root PATH` | Where to clone repository URLs for `--from` (default: `~/.ouroboros/cache`) |
+| `--catalog-state PATH` | Override the known-catalog state path (default: `~/.ouroboros/plugin-catalogs.json`) |
+
+### `plugin trust`
+
+Grant permission scopes to an installed plugin. Scopes are exact strings: one
+scope does not imply a longer one that starts with it. `trust` is also how a
+disabled plugin is re-enabled: a plugin whose manifest declares no permissions
+can be trusted with no `--scope`, while one that declares permissions needs at
+least one.
+
+```bash
+ouroboros plugin trust [OPTIONS] NAME
+```
+
+| Option | Description |
+|--------|-------------|
+| `--scope TEXT` | Permission scope to grant; repeatable |
+| `--granted-by TEXT` | User identity recorded in the audit trail (default: `user:cli`) |
+| `--lockfile PATH` | Override the lockfile path |
+| `--trust-root PATH` | Override the trust root |
+| `--audit-log PATH` | Append `plugin.trusted` events to this file as JSON Lines (default: not written) |
+
+### `plugin disable`
+
+Disable an installed plugin. The disable record survives upgrades, the trust
+file is wiped, and the lockfile entry stays, so `plugin trust` can re-enable it.
+
+```bash
+ouroboros plugin disable [OPTIONS] NAME
+```
+
+| Option | Description |
+|--------|-------------|
+| `--lockfile PATH` | Override the lockfile path |
+| `--trust-root PATH` | Override the trust root; required when the plugin was trusted under a non-default root |
+
+### `plugin remove`
+
+Remove an installed plugin: its lockfile entry, trust file, disable record,
+and plugin home.
+
+```bash
+ouroboros plugin remove [OPTIONS] NAME
+```
+
+| Option | Description |
+|--------|-------------|
+| `--lockfile PATH` | Override the lockfile path |
+| `--trust-root PATH` | Override the trust root |
+| `--plugin-home-root PATH` | Remove the plugin home from this root instead of the path recorded in the lockfile |
+
+**Example:**
+
+```bash
+ouroboros plugin discover ./my-plugin
+ouroboros plugin install ./my-plugin
+ouroboros plugin list --json
+```
 
 ---
 

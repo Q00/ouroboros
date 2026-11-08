@@ -30,6 +30,8 @@ CONFIG_REFERENCE = Path("docs/config-reference.md")
 # fails the coverage test below rather than passing silently.
 DOCUMENTED_SURFACES: dict[str, type[StrEnum]] = {
     "### `init start`": InitLLMBackend,
+    # `seed` is built from the same enum: cli/commands/seed.py imports it from init.
+    "## `ouroboros seed`": InitLLMBackend,
     "### `mcp serve`": McpLLMBackend,
     "### `mcp info`": McpLLMBackend,
 }
