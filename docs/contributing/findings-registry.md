@@ -212,6 +212,7 @@ Open findings: [FIND-018](#find-018) *(high)*, [FIND-019](#find-019) *(high)*
 
 ## Findings Data (Machine-Parseable)
 
+<!-- docs-drift: ignore-start -->
 ```yaml
 findings:
 
@@ -1071,6 +1072,7 @@ findings:
       recommended fix: add footnote clarifying that the CLI command upgrades
       directly without the version-check wrapper the skill provides
 ```
+<!-- docs-drift: ignore-end -->
 
 ---
 
@@ -1097,7 +1099,7 @@ findings:
 | FIND-017 | high | wrong-value | resolved | `architecture.md` states "9 core workflow skills"; actual count is 14 | `docs/architecture.md` |
 | **FIND-018** | **high** | **link-rot** | **open** | `README.md` → `claude-code.md` workflow mismatch | `README.md`, `docs/runtime-guides/claude-code.md` |
 | **FIND-019** | **high** | **link-rot** | **open** | `architecture.md` → `claude-code.md` workflow mismatch | `docs/architecture.md`, `docs/runtime-guides/claude-code.md` |
-| FIND-020 | **high** | wrong-value | resolved | `OUROBOROS_MAX_PARALLEL` recommended but nonexistent — silently no effect | `docs/getting-started.md` |
+| FIND-020 | **high** | wrong-value | resolved | `OUROBOROS_MAX_PARALLEL` recommended but nonexistent — silently no effect | `docs/getting-started.md` <!-- docs-drift: ignore --> |
 | FIND-021 | medium | wrong-value | resolved | Claude Desktop MCP path wrong (`~/.config/claude/config.json`) | `docs/cli-reference.md`, `docs/guides/cli-usage.md` |
 | FIND-022 | medium | inaccuracy/cross-doc | resolved | TUI shortcuts `Space`/`D`/`C` in getting-started.md not in reference | `docs/getting-started.md` |
 | FIND-023 | medium | missing-content | resolved | `run workflow` `-o`/`-O` short flags not documented | `docs/cli-reference.md`, `docs/guides/cli-usage.md` |

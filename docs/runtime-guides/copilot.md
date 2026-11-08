@@ -263,7 +263,7 @@ Old Ouroboros build that did not yet auto-map hyphen IDs to the dotted
 Copilot form. Upgrade to a release that includes the model-discovery
 module, or override your default to the dotted form
 by rerunning `ouroboros setup --runtime copilot` and picking a
-dotted ID from the live catalog. There is no `OUROBOROS_DEFAULT_MODEL`
+dotted ID from the live catalog. There is no `OUROBOROS_DEFAULT_MODEL` <!-- docs-drift: ignore -->
 environment variable; per-role overrides use their own variables, such as
 `OUROBOROS_CLARIFICATION_MODEL`.
 
