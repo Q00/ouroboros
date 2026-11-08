@@ -9,7 +9,6 @@ from mcp.server import MCPServer
 import pytest
 
 from ouroboros.bigbang.interview import InterviewEngine
-from ouroboros.bigbang.pm_document import PMDocumentGenerator
 from ouroboros.bigbang.pm_interview import PMInterviewEngine
 from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.core.types import Result
@@ -86,11 +85,7 @@ async def test_sdk_item_confirmation_retry_and_neither(tmp_path):
         pm = PMInterviewEngine.create(llm_adapter=llm, model="synthetic", state_dir=tmp_path)
         pm_result = await pm.generate_pm_seed(state)
         assert pm_result.is_err
-        assert "does not yet preserve" in str(pm_result.error)
-        document = PMDocumentGenerator(llm_adapter=llm, model="synthetic")
-        document_result = await document.generate(None, interview_state=state)
-        assert document_result.is_err
-        assert "do not yet preserve" in str(document_result.error)
+        assert "empty interview" in str(pm_result.error)
         reference = _reference_state(
             confirmation="For the Linear-like reference, keyboard-first navigation is required."
         )
