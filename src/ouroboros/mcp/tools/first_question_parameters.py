@@ -8,6 +8,42 @@ from ouroboros.mcp.types import MCPToolParameter, ToolInputType
 def first_question_parameters() -> tuple[MCPToolParameter, ...]:
     return (
         MCPToolParameter(
+            name="opening_revision",
+            type=ToolInputType.STRING,
+            required=False,
+            description="Revision of the exact opening and decisions shown to the person.",
+        ),
+        MCPToolParameter(
+            name="opening_confirm_item_id",
+            type=ToolInputType.STRING,
+            required=False,
+            description="One opening item explicitly confirmed by the person; never infer from a recommendation.",
+        ),
+        MCPToolParameter(
+            name="opening_user_confirmed",
+            type=ToolInputType.BOOLEAN,
+            required=False,
+            description="True only after explicit individual confirmation of the exact item.",
+        ),
+        MCPToolParameter(
+            name="opening_confirmation_text",
+            type=ToolInputType.STRING,
+            required=False,
+            description="The person's exact response to the individual confirmation or neither question.",
+        ),
+        MCPToolParameter(
+            name="opening_confirmation_prompt",
+            type=ToolInputType.STRING,
+            required=False,
+            description="The exact server-issued confirmation prompt shown to the person.",
+        ),
+        MCPToolParameter(
+            name="opening_neither",
+            type=ToolInputType.BOOLEAN,
+            required=False,
+            description="True only when the person explicitly rejects both opening interpretations.",
+        ),
+        MCPToolParameter(
             name="propose_opening_interpretations",
             type=ToolInputType.BOOLEAN,
             required=False,
@@ -38,6 +74,82 @@ def first_question_parameters() -> tuple[MCPToolParameter, ...]:
             items={"type": "object"},
             max_items=5,
             description="ID-addressed answers to a confirmed batch; do not combine with other answer fields.",
+        ),
+        MCPToolParameter(
+            name="inline_material_text",
+            type=ToolInputType.STRING,
+            required=False,
+            description=(
+                "Optional material supplied with a first-batch reply (up to 4000 characters). "
+                "It is stored in the local interview state and literal excerpts are returned "
+                "to the host only with explicit inline_material_consent. It is not user intent."
+            ),
+        ),
+        MCPToolParameter(
+            name="inline_material_consent",
+            type=ToolInputType.BOOLEAN,
+            required=False,
+            description="True only when the person explicitly agrees to local storage and display of excerpts to the calling host.",
+        ),
+        MCPToolParameter(
+            name="inline_material_retry",
+            type=ToolInputType.BOOLEAN,
+            required=False,
+            description="Explicitly retry local extraction of pending or unavailable material excerpts. This operation does not send the stored source to a model.",
+        ),
+        MCPToolParameter(
+            name="inline_material_user_followup_question",
+            type=ToolInputType.STRING,
+            required=False,
+            description="For reopening an interview with optional material and no pending question: the exact new question explicitly authored by the person, not material or a model suggestion. Do not combine with last_question.",
+        ),
+        MCPToolParameter(
+            name="material_evidence_action",
+            type=ToolInputType.STRING,
+            required=False,
+            description="Explicit local evidence action: include, remove, or resolve. Requires a session ID and cannot be combined with other interview input.",
+        ),
+        MCPToolParameter(
+            name="material_evidence_kind",
+            type=ToolInputType.STRING,
+            required=False,
+            description="Item kind: source_quote or model_assumption; inclusion does not confirm truth or user intent.",
+        ),
+        MCPToolParameter(
+            name="material_evidence_index",
+            type=ToolInputType.INTEGER,
+            required=False,
+            description="Zero-based item index displayed with the material draft.",
+        ),
+        MCPToolParameter(
+            name="material_evidence_revision",
+            type=ToolInputType.STRING,
+            required=False,
+            description="Current revision displayed with the material draft.",
+        ),
+        MCPToolParameter(
+            name="material_evidence_prompt",
+            type=ToolInputType.STRING,
+            required=False,
+            description="Exact server-provided decision or retrieval prompt shown to the person.",
+        ),
+        MCPToolParameter(
+            name="material_evidence_response",
+            type=ToolInputType.STRING,
+            required=False,
+            description="Person's exact INCLUDE, REMOVE, or SHOW response, asserted by the host.",
+        ),
+        MCPToolParameter(
+            name="material_evidence_source_id",
+            type=ToolInputType.STRING,
+            required=False,
+            description="Opaque local source ID from a Seed reference, required for resolution.",
+        ),
+        MCPToolParameter(
+            name="material_evidence_id",
+            type=ToolInputType.STRING,
+            required=False,
+            description="Opaque local evidence ID from a Seed reference, required for resolution.",
         ),
         MCPToolParameter(
             name="batch_answers_text",

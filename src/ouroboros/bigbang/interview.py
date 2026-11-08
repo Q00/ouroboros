@@ -47,7 +47,13 @@ from ouroboros.interview_adapters.first_question import (
     first_question_instruction,
     validate_stored_selection,
 )
-from ouroboros.interview_adapters.opening_interpretations import ProposedOpening
+from ouroboros.interview_adapters.inline_materials import InlineMaterial
+from ouroboros.interview_adapters.opening_interpretations import (
+    OpeningDecisionEvent,
+    ProposedOpening,
+    confirmed_interpretations,
+    opening_fingerprint_payload,
+)
 from ouroboros.interview_calibration import InterviewCalibration
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -288,8 +294,10 @@ class InterviewState(BaseModel):
 
     interview_id: str
     persistence_revision: str = ""
+    inline_material: InlineMaterial | None = None
     batch_confirmed_digest: str | None = None
     proposed_opening: ProposedOpening | None = None
+    opening_decisions: tuple[OpeningDecisionEvent, ...] = ()
     _loaded_revision: str | None = PrivateAttr(default=None)
     status: InterviewStatus = InterviewStatus.IN_PROGRESS
     rounds: list[InterviewRound] = Field(default_factory=list)
@@ -309,6 +317,11 @@ class InterviewState(BaseModel):
     pending_confused_terms: tuple[str, ...] = Field(default_factory=tuple)
     requirement_input_revision: int = Field(default=0, ge=0)
     requirement_distillation: RequirementDistillation | None = None
+
+    @model_validator(mode="after")
+    def validate_opening_history(self) -> "InterviewState":
+        confirmed_interpretations(self.proposed_opening, self.opening_decisions)
+        return self
 
     @property
     def current_round_number(self) -> int:
@@ -379,6 +392,7 @@ class InterviewState(BaseModel):
         return compute_requirement_input_fingerprint(
             {
                 "initial_context": self.initial_context,
+                **opening_fingerprint_payload(self.proposed_opening, self.opening_decisions),
                 "rounds": [
                     {
                         "round_number": round_data.round_number,
@@ -1410,17 +1424,9 @@ class InterviewEngine:
 
             return Result.ok(file_path)
         except (OSError, ValueError) as e:
-            log.exception(
-                "interview.state_save_failed",
-                interview_id=state.interview_id,
-                error=str(e),
-            )
-            return Result.err(
-                ValidationError(
-                    f"Failed to save interview state: {e}",
-                    details={"interview_id": state.interview_id},
-                )
-            )
+            from ouroboros.bigbang.interview_state_errors import save_error
+
+            return save_error(e, state.interview_id)
 
     async def load_state(self, interview_id: str) -> Result[InterviewState, ValidationError]:
         """Load interview state from disk.
@@ -1466,19 +1472,9 @@ class InterviewEngine:
 
             return Result.ok(state)
         except (OSError, ValueError) as e:
-            log.exception(
-                "interview.state_load_failed",
-                interview_id=interview_id,
-                error=str(e),
-            )
-            return Result.err(
-                ValidationError(
-                    f"Failed to load interview state: {e}",
-                    field="interview_id",
-                    value=interview_id,
-                    details={"file_path": str(file_path)},
-                )
-            )
+            from ouroboros.bigbang.interview_state_errors import load_error
+
+            return load_error(e, interview_id, file_path)
 
     def _build_system_prompt(
         self,
@@ -1971,11 +1967,9 @@ class InterviewEngine:
                     }
                 )
             except (OSError, ValueError) as e:
-                log.warning(
-                    "interview.list_failed_for_file",
-                    file_path=str(file_path),
-                    error=str(e),
-                )
+                from ouroboros.bigbang.interview_state_errors import list_error
+
+                list_error(e, file_path)
                 continue
 
         return sorted(interviews, key=lambda x: x["updated_at"], reverse=True)
