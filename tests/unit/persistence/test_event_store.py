@@ -2085,6 +2085,51 @@ class TestSessionActivitySnapshots:
 class TestSessionRelatedEvents:
     """Test cross-aggregate session activity queries."""
 
+    async def _store_related_rows(self, event_store: EventStore) -> list[BaseEvent]:
+        session_id, execution_id = "sess-exclude", "exec-exclude"
+        base = datetime(2026, 11, 1, tzinfo=UTC)
+        await event_store.append(
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id=session_id,
+                data={"execution_id": execution_id, "seed_id": "seed-exclude"},
+                timestamp=base,
+            )
+        )
+        await event_store.append_batch(
+            [
+                BaseEvent(
+                    # One id needs JSON escaping on its way through json_each.
+                    **({"id": 'odd-"\\-\u00fc-id'} if i == 3 else {}),
+                    type="orchestrator.progress.updated" if i % 2 else "workflow.progress.updated",
+                    aggregate_type="session" if i % 2 else "execution",
+                    # Execution-typed rows keyed by the session id are related too.
+                    aggregate_id=session_id if i % 3 else execution_id,
+                    data={"session_id": session_id, "i": i},
+                    timestamp=base + timedelta(seconds=i + 1),
+                )
+                for i in range(12)
+            ]
+        )
+        return await event_store.query_session_related_events(session_id, limit=None)
+
+    async def test_exclude_event_ids_omits_exactly_those_rows_before_paging(
+        self, event_store: EventStore
+    ) -> None:
+        full = await self._store_related_rows(event_store)
+        assert len(full) == 13
+        held = frozenset(event.id for event in full if event.aggregate_type == "session")
+        assert 'odd-"\\-\u00fc-id' in held
+        for excluded in (frozenset(), held, frozenset({full[3].id, "not-a-stored-id"})):
+            remaining = [event for event in full if event.id not in excluded]
+            for limit, offset in ((None, 0), (None, 4), (5, 0), (5, 3), (50, 20)):
+                page = await event_store.query_session_related_events(
+                    "sess-exclude", limit=limit, offset=offset, exclude_event_ids=excluded
+                )
+                end = None if limit is None else offset + limit
+                assert page == remaining[offset:end], (sorted(excluded), limit, offset)
+
     async def test_matches_normalized_evolve_execution_scope_ids(
         self,
         event_store: EventStore,
