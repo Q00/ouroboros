@@ -1,3 +1,13 @@
+> [!WARNING]
+> **Immutable historical snapshot — non-normative and superseded.**
+>
+> - Snapshot date: 2026-07 (from the file name)
+> - Source commit: [`715a0c63556d330c529085dfb83d066890703a72`](https://github.com/Q00/ouroboros/commit/715a0c63556d330c529085dfb83d066890703a72)
+> - Repository baseline captured by the handoff: `a752b70e` (after #1590 and #1591)
+>
+> The original handoff below is retained verbatim for traceability. Its work
+> orders must not be executed or treated as current repository guidance.
+
 # HANDOFF — Finish grounding contract-AC evaluation so `ooo auto` completes on codex
 
 > Audience: a fresh implementer (Codex or any agent). Self-contained. Read fully before coding.
