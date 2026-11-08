@@ -111,7 +111,7 @@ from ouroboros.boundary.reference_check import (
     ReferenceCheck,
     check_references,
 )
-from ouroboros.boundary.tree import tree_digest
+from ouroboros.boundary.tree import run_off_loop, tree_digest
 
 if TYPE_CHECKING:
     from ouroboros.boundary.constructor import CheckConstructor
@@ -481,10 +481,10 @@ async def prepare_check_package(
         # admitted package or not; keep the base outside every checkout until
         # then. Taken before the actor start: the journal records a worker
         # start only once everything that start depends on exists.
-        snapshot = snapshot_base(base, store)
+        snapshot = await run_off_loop(snapshot_base, base, store)
         if not admitted:
             # No admission digest pins the base: pin the snapshot as taken.
-            snapshot_digest = tree_digest(snapshot)
+            snapshot_digest = await run_off_loop(tree_digest, snapshot)
     state = BoundaryRunState(
         execution_id=execution_id,
         boundary_id=bound,
@@ -718,7 +718,7 @@ def unavailable_line(state: BoundaryRunState) -> str:
     )
 
 
-def _candidate_unchanged(
+async def _candidate_unchanged(
     digest: str, verification: CandidateVerification | None, candidate: Path
 ) -> bool:
     """Whether verification ran on the tree digested before it, and the tree is still that one.
@@ -731,7 +731,7 @@ def _candidate_unchanged(
     return (
         verification.artifact_tree_digest == digest
         and verification.artifact_tree_digest_after == digest
-        and tree_digest(candidate) == digest
+        and await run_off_loop(tree_digest, candidate) == digest
     )
 
 
@@ -771,7 +771,7 @@ async def verify_check_package(
     ledger = BoundaryLedger(event_store)
     package = state.package
     candidate = candidate_checkout.resolve()
-    candidate_digest = tree_digest(candidate)
+    candidate_digest = await run_off_loop(tree_digest, candidate)
     assignments, results = await assign_tiers(
         package,
         base=state.base_snapshot,
@@ -806,7 +806,7 @@ async def verify_check_package(
         verification,
         admission=state.admission,
         assignments=assignments,
-        candidate_identity_ok=_candidate_unchanged(candidate_digest, verification, candidate),
+        candidate_identity_ok=await _candidate_unchanged(candidate_digest, verification, candidate),
     )
     overall = artifact_verdict(item.status for item in verdicts.values())
     if overall is ArtifactVerdict.UNVERIFIED:
