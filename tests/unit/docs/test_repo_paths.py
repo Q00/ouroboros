@@ -13,9 +13,11 @@ What is checked on each corpus line:
    ``href`` / ``src`` attribute of every inline HTML tag. Destinations are
    read by CommonMark's rules (balanced parentheses, backslash escapes,
    optional title), and tags by the standard library's HTML tokenizer, so
-   quoting, case, and entities follow HTML. A link or a link-carrying tag
-   (``<a``, ``<img``, ...) that is still open at the end of the line is
-   reported, since a line-based check cannot see the rest of it. Skipped:
+   quoting, case, and entities follow HTML. A link, or an HTML tag of any
+   name, that is still open at the end of the line is reported: a line-based
+   check cannot see the rest of it, and the rest may hold its ``href`` /
+   ``src``. Any ``href`` / ``src`` the open tag already has is checked too.
+   Skipped:
    targets with a URL scheme (``https:``, ``mailto:``, ...), protocol-relative
    ``//host`` targets, and pure ``#anchor`` targets; ``<https://...>``
    autolinks are not link targets at all. An angle-bracketed destination
@@ -132,11 +134,6 @@ _LINK_OPEN = re.compile(r"\]\(")
 # ``[id]: target`` at the start of a line; ``[^note]:`` is a footnote, not a link.
 _REFERENCE_DEF = re.compile(r"^ {0,3}\[(?!\^)[^\]]+\]:\s*(<[^>]*>|\S+)")
 _LINK_ATTRIBUTES = frozenset({"href", "src"})
-# A tag that can carry ``href`` / ``src`` and is still open at the end of the line.
-_SPLIT_LINK_TAG = re.compile(
-    r"<(?:a|area|audio|embed|iframe|img|input|link|script|source|track|video)(?=[\s/]|$)[^>]*$",
-    re.IGNORECASE,
-)
 _ESCAPABLE = frozenset(string.punctuation)
 _URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]+:")
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:[\\/]")
@@ -284,6 +281,26 @@ class _TagLinks(HTMLParser):
         self.values.extend(value or "" for name, value in attrs if name in _LINK_ATTRIBUTES)
 
 
+def html_links(prose: str) -> tuple[list[str], str | None]:
+    """Every ``href`` / ``src`` of the line's tags, and the tag still open at its end.
+
+    ``HTMLParser`` leaves an incomplete construct unconsumed in its buffer until
+    more input arrives, so a remainder that opens a start tag is a tag that
+    continues on the next line. The attributes it has so far are read by
+    parsing it again with a closing ``>``.
+    """
+    parser = _TagLinks()
+    parser.feed(prose)
+    pending = parser.rawdata
+    opens_tag = pending[:1] == "<" and pending[1:2].isascii() and pending[1:2].isalpha()
+    if not opens_tag:
+        return parser.values, None
+    closed = _TagLinks()
+    closed.feed(pending + ">")
+    closed.close()
+    return parser.values + closed.values, pending.strip()
+
+
 def link_targets(text: str) -> tuple[list[str], list[str]]:
     """The link targets on a prose line, and the links or tags that run past it.
 
@@ -306,14 +323,10 @@ def link_targets(text: str) -> tuple[list[str], list[str]]:
     reference = _REFERENCE_DEF.match(prose)
     if reference:
         targets.append(reference.group(1))
-    open_tag = _SPLIT_LINK_TAG.search(prose)
+    values, open_tag = html_links(prose)
+    targets.extend(values)
     if open_tag:
-        split.append(open_tag.group(0).strip())
-        prose = prose[: open_tag.start()]
-    parser = _TagLinks()
-    parser.feed(prose)
-    parser.close()
-    targets.extend(parser.values)
+        split.append(open_tag)
     return targets, split
 
 
@@ -602,6 +615,24 @@ def test_html_comments_and_non_link_angle_text_are_not_tags() -> None:
         _line('<!-- <a href="missing.md"> --> a < b, <session_id>, <https://example.com>'),
         _line('`<img src="missing.png">` is literal text'),
     ]
+    assert find_violations(lines, DIRS) == []
+
+
+def test_reports_an_open_tag_whatever_its_name_or_quoted_content() -> None:
+    lines = [
+        _line('<img alt="a > b" src="missing.png"'),
+        _line('<custom-card href="missing.md"'),
+    ]
+    assert [v.split(": ", 1)[1] for v in find_violations(lines, DIRS)] == [
+        f"missing.png — {REMEDY_MISSING_LINK}",
+        f'<img alt="a > b" src="missing.png" — {REMEDY_SPLIT}',
+        f"missing.md — {REMEDY_MISSING_LINK}",
+        f'<custom-card href="missing.md" — {REMEDY_SPLIT}',
+    ]
+
+
+def test_a_complete_tag_with_a_quoted_angle_bracket_is_not_open() -> None:
+    lines = [_line('<img alt="a > b" src="../images/ouroboros.png"> and <a href="../README.md">')]
     assert find_violations(lines, DIRS) == []
 
 
