@@ -19,13 +19,19 @@ Document side, in the reference:
   that heading is a single code span (``## `orchestrator` ``), or under every
   path of the model class named by a label line right above the table
   (``**`TierConfig` fields:**``). The ``Section`` table lists top-level keys.
-* **YAML examples**: every ``yaml`` block, except one under a heading that
-  names another file (``credentials.yaml``, ``backend_limits.yaml``).
+* **YAML examples**: every fenced ``yaml``/``yml`` block, whatever its fence
+  length or character and inside blockquotes too, except one under a heading
+  that names another file (``credentials.yaml``, ``backend_limits.yaml``).
 * **Key references**: an inline code span that is a dotted key whose first
   segment is a top-level section (``models.pin``, ``llm.backend: codex``),
-  and the key given to ``ouroboros config set``. A dotted name that the source
-  spells as a complete string literal (an event type such as
+  and the key given to ``ouroboros config set`` wherever the command appears:
+  in a code span, in plain prose, or on a code line. A dotted name that the
+  source spells as a complete string literal (an event type such as
   ``boundary.acceptance.reconciled``) is a code identifier, not a config key.
+
+One tokenizer (``scan`` and ``_inline``) decides fences and code spans by
+CommonMark rules, so every check reads the same document structure; the shared
+corpus helper decides only which lines the ignore markers hide.
 
 Checks: (a) every field has exactly one key-table row; (b) every key in a
 table, a YAML example, or a key reference exists in the models. Defaults, types
@@ -45,6 +51,7 @@ import types
 from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+import pytest
 import yaml
 from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 
@@ -57,13 +64,11 @@ MODELS = "src/ouroboros/config/models.py"
 _KEY_TABLE_HEADERS = frozenset({"Option", "Field"})
 _SECTION_TABLE_HEADER = "Section"
 _CLASS_LABEL = re.compile(r"^\*\*`(?P<cls>[A-Za-z_]\w*)` fields\b")
-_SINGLE_SPAN = re.compile(r"^`(?P<key>[^`]+)`$")
-_INLINE_SPAN = re.compile(r"`([^`\n]+)`")
 _SEGMENT = r"[A-Za-z_][\w-]*(?:\[\])?"
 _DOTTED_KEY = rf"{_SEGMENT}(?:\.(?:{_SEGMENT}|\*))+"
 _KEY_REFERENCE = re.compile(rf"^(?P<key>{_DOTTED_KEY})(?:\s*:\s.*|\s*:)?$")
-_CONFIG_SET = re.compile(r"\bouroboros config set\s+(?P<key>[A-Za-z_][\w.*\[\]-]*)")
-_FOREIGN_FILE = re.compile(r"`(?P<name>[^`]*\.ya?ml)`")
+_CONFIG_SET = re.compile(r"\bouroboros\s+config\s+set\b")
+_PLACEHOLDER = re.compile(r"[A-Z][A-Z0-9_]*|<[^>]*>")
 _SEPARATOR_ROW = re.compile(r"^\|?\s*:?-{3,}")
 
 
@@ -239,8 +244,143 @@ def resolve(node: KeyNode, segments: Sequence[str]) -> KeyNode | None:
 
 
 # --------------------------------------------------------------------------
-# Document side.
+# Document side: one Markdown tokenizer for fences, inline code and prose.
 # --------------------------------------------------------------------------
+
+# A fence opener: three or more backticks or tildes (CommonMark section 4.5).
+# Any indentation is accepted, as in the corpus helper, so fences nested in list
+# items count. A backtick fence's info string may not contain a backtick (that
+# line is inline code, not a fence).
+_FENCE = re.compile(r"^\s*(?P<run>`{3,}|~{3,})(?P<info>.*)$")
+_QUOTE_MARKER = re.compile(r"^ {0,3}> ?")
+
+
+@dataclass
+class _Block:
+    """A fenced code block; ``lines`` are its content lines with quote markers removed."""
+
+    info: str  # first word of the info string, lower-cased ("" if none)
+    start: int  # line number of the first content line
+    heading: str | None  # nearest heading above the opening fence
+    lines: list[str] = field(default_factory=list)
+
+
+def _strip_quotes(text: str, limit: int | None = None) -> tuple[int, str]:
+    """Remove leading blockquote markers; return ``(depth, rest)``."""
+    depth = 0
+    while limit is None or depth < limit:
+        match = _QUOTE_MARKER.match(text)
+        if match is None:
+            break
+        text = text[match.end() :]
+        depth += 1
+    return depth, text
+
+
+def _inline(text: str) -> list[tuple[bool, str]]:
+    """Split one line into ``(is_code, text)`` runs (CommonMark code spans).
+
+    A backtick string opens a span that the next backtick string of the same
+    length closes; an unmatched one is literal text. A backslash escapes a
+    backtick outside a span. One leading and trailing space is stripped from
+    span content when both are present.
+    """
+    runs: list[tuple[bool, str]] = []
+    prose: list[str] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and index + 1 < len(text):
+            prose.append(text[index : index + 2])
+            index += 2
+            continue
+        if char != "`":
+            prose.append(char)
+            index += 1
+            continue
+        rest = text[index:]
+        width = len(rest) - len(rest.lstrip("`"))
+        opener = text[index : index + width]
+        closer = re.compile(rf"(?<!`){opener}(?!`)")
+        found = closer.search(text, index + width)
+        if found is None:
+            prose.append(opener)
+            index += width
+            continue
+        content = text[index + width : found.start()]
+        if (
+            len(content) > 1
+            and content.startswith(" ")
+            and content.endswith(" ")
+            and content.strip()
+        ):
+            content = content[1:-1]
+        if prose:
+            runs.append((False, "".join(prose)))
+            prose = []
+        runs.append((True, content))
+        index = found.end()
+    if prose:
+        runs.append((False, "".join(prose)))
+    return runs
+
+
+def _only_code_span(text: str) -> str | None:
+    """The span content when ``text`` is exactly one code span, else ``None``."""
+    runs = [run for run in _inline(text.strip()) if run[0] or run[1].strip()]
+    return runs[0][1] if len(runs) == 1 and runs[0][0] else None
+
+
+def _heading(line: DocLine) -> str | None:
+    match = re.match(r"^#{1,6}\s+(.*?)\s*#*\s*$", line.text)
+    return match.group(1) if match else None
+
+
+def scan(rel_path: str) -> tuple[list[DocLine], list[_Block]]:
+    """Tokenize a reference into checkable lines and fenced blocks.
+
+    Which lines count is the corpus helper's decision (ignore markers); whether
+    a line is prose or code is decided here, by CommonMark fence rules: a fence
+    closes on a run of the same character at least as long as the opener, so a
+    shorter fence inside a longer one is content; an unclosed fence runs to the
+    end of the file; a fence inside a blockquote ends with the blockquote.
+    Fence lines themselves are not returned.
+    """
+    kept = {line.lineno for line in iter_lines([rel_path])}
+    raw = (REPO_ROOT / rel_path).read_text(encoding="utf-8").splitlines()
+    lines: list[DocLine] = []
+    blocks: list[_Block] = []
+    heading: str | None = None
+    fence: tuple[str, int, int] | None = None  # (char, width, quote depth)
+    for lineno, text in enumerate(raw, start=1):
+        if fence is not None:
+            char, width, depth = fence
+            found, body = _strip_quotes(text, depth)
+            if found < depth:
+                fence = None  # the enclosing blockquote ended
+            else:
+                stripped = body.strip()
+                if stripped and set(stripped) == {char} and len(stripped) >= width:
+                    fence = None
+                    continue
+                blocks[-1].lines.append(body if lineno in kept else "")
+                if lineno in kept:
+                    lines.append(DocLine(rel_path, lineno, text, in_code_block=True))
+                continue
+        depth, body = _strip_quotes(text)
+        opener = _FENCE.match(body)
+        if opener and not (opener["run"][0] == "`" and "`" in opener["info"]):
+            words = opener["info"].split()
+            blocks.append(_Block(words[0].lower() if words else "", lineno + 1, heading))
+            fence = (opener["run"][0], len(opener["run"]), depth)
+            continue
+        if lineno in kept:
+            line = DocLine(rel_path, lineno, text, in_code_block=False)
+            lines.append(line)
+            title = _heading(line)
+            if title is not None:
+                heading = title
+    return lines, blocks
 
 
 def _cells(text: str) -> list[str]:
@@ -249,11 +389,6 @@ def _cells(text: str) -> list[str]:
     if body.endswith("|") and not body.endswith("\\|"):
         body = body[:-1]
     return [cell.strip() for cell in re.split(r"(?<!\\)\|", body)]
-
-
-def _heading(line: DocLine) -> str | None:
-    match = re.match(r"^#{1,6}\s+(.*?)\s*#*\s*$", line.text)
-    return match.group(1) if match else None
 
 
 @dataclass
@@ -294,41 +429,29 @@ def _tables(lines: list[DocLine]) -> Iterator[_Table]:
         index += 1
 
 
-def _yaml_blocks(rel_path: str, lines: list[DocLine]) -> Iterator[tuple[int, str, str | None]]:
-    """Yield ``(first content line, text, nearest heading)`` for each yaml block.
+def _config_set_keys(text: str) -> Iterator[str]:
+    """Keys given to ``ouroboros config set`` in one run of text.
 
-    Fence lines are read from the file (the corpus helper does not yield them);
-    lines the corpus helper skipped because of an ignore marker are blanked so
-    the block keeps its line numbers.
+    The run is a code span, a stretch of prose between code spans, or a code
+    line, so a command in a span never takes its argument from outside it.
+    Placeholders (``KEY``, ``<key>``) are skipped; options are passed over.
     """
-    kept = {line.lineno for line in lines}
-    headings = {line.lineno: _heading(line) for line in lines if not line.in_code_block}
-    raw = (REPO_ROOT / rel_path).read_text(encoding="utf-8").splitlines()
-    fence = ""
-    info = ""
-    body: list[str] = []
-    start = 0
-    heading: str | None = None
-    for lineno, text in enumerate(raw, start=1):
-        stripped = text.lstrip()
-        if not fence and headings.get(lineno):
-            heading = headings[lineno]
-        if stripped.startswith(("```", "~~~")):
-            marker = stripped[:3]
-            if not fence:
-                fence, info, body, start = marker, stripped[3:].strip().lower(), [], lineno + 1
+    for match in _CONFIG_SET.finditer(text):
+        for word in text[match.end() :].split():
+            token = word.strip("\"'`").rstrip(".,;:!?)")
+            if not token or token.startswith("-"):
                 continue
-            if marker == fence:
-                if info.split()[:1] in (["yaml"], ["yml"]):
-                    yield start, "\n".join(body), heading
-                fence = ""
-                continue
-        if fence:
-            body.append(text if lineno in kept else "")
+            if not _PLACEHOLDER.fullmatch(token):
+                yield token
+            break
 
 
 def _documents_other_file(heading: str | None) -> bool:
-    names = [Path(match["name"]).name for match in _FOREIGN_FILE.finditer(heading or "")]
+    names = [
+        Path(content).name
+        for is_code, content in _inline(heading or "")
+        if is_code and re.search(r"\.ya?ml$", content)
+    ]
     return bool(names) and "config.yaml" not in names
 
 
@@ -356,7 +479,7 @@ def check_reference(
 ) -> list[str]:
     """Every violation in one reference, as ``path:line: token — remedy`` lines."""
     tree = config_tree(root)
-    lines = list(iter_lines([rel_path]))
+    lines, blocks = scan(rel_path)
     violations: list[str] = []
     documented: dict[int, DocLine] = {}
     table_for: dict[int, DocLine] = {}
@@ -375,7 +498,7 @@ def check_reference(
             section_table = table.header
         elif first in _KEY_TABLE_HEADERS:
             label = _CLASS_LABEL.match(table.label or "")
-            heading = _SINGLE_SPAN.match(table.heading or "")
+            heading = _only_code_span(table.heading or "")
             if label:
                 anchors = nodes_by_class.get(label["cls"], [])
                 if not anchors:
@@ -386,10 +509,10 @@ def check_reference(
                     )
                     continue
             elif heading:
-                anchor = resolve(tree, _segments(heading["key"]))
+                anchor = resolve(tree, _segments(heading))
                 if anchor is None or anchor.kind not in ("model", "map"):
                     violations.append(
-                        f"{table.header.where()}: {heading['key']} — the heading above this "
+                        f"{table.header.where()}: {heading} — the heading above this "
                         f"key table names no config section in {MODELS}; fix the heading"
                     )
                     continue
@@ -408,7 +531,7 @@ def check_reference(
         for row in table.rows:
             key_cells.add(row.lineno)
             cell = _cells(row.text)[0]
-            key = _SINGLE_SPAN.match(cell)
+            key = _only_code_span(cell)
             if key is None:
                 violations.append(
                     f"{row.where()}: {cell or '(empty)'} — the first cell of a key-table row "
@@ -416,13 +539,13 @@ def check_reference(
                 )
                 continue
             for anchor in anchors:
-                token = _join(anchor.path, key["key"])
-                target = resolve(anchor, _segments(key["key"]))
+                token = _join(anchor.path, key)
+                target = resolve(anchor, _segments(key))
                 if target is None:
                     violations.append(
                         f"{row.where()}: {token} — documented, but {MODELS} has no such key; "
                         "remove the row or rename it to the current key "
-                        f"(git log -S'{_segments(key['key'])[-1]}' -- {MODELS} finds a rename)"
+                        f"(git log -S'{_segments(key)[-1]}' -- {MODELS} finds a rename)"
                     )
                 elif target.is_field:
                     if id(target) in documented:
@@ -433,23 +556,24 @@ def check_reference(
                     else:
                         documented[id(target)] = row
 
-    # Key references in prose and tables.
+    # Key references: dotted keys in code spans, and every `config set` argument
+    # (in a span, in prose, or on a code line).
     for line in lines:
         if line.in_code_block:
-            spans: list[str] = []
+            runs = [(True, line.text)]
         elif line.lineno in key_cells:
-            spans = _INLINE_SPAN.findall("|".join(_cells(line.text)[1:]))
+            runs = _inline("|".join(_cells(line.text)[1:]))
         else:
-            spans = _INLINE_SPAN.findall(line.text)
+            runs = _inline(line.text)
         # token -> whether a matching source string literal excuses it
         tokens: dict[str, bool] = {}
-        for span in spans:
-            match = _KEY_REFERENCE.match(span.strip())
-            if match and match["key"].split(".")[0] in tree.keys:
-                tokens.setdefault(match["key"], True)
-        for source in [line.text] if line.in_code_block else spans:
-            for match in _CONFIG_SET.finditer(source):
-                tokens[match["key"]] = False  # `config set` only ever takes a key
+        for is_code, text in runs:
+            if is_code and not line.in_code_block:
+                match = _KEY_REFERENCE.match(text.strip())
+                if match and match["key"].split(".")[0] in tree.keys:
+                    tokens.setdefault(match["key"], True)
+            for key in _config_set_keys(text):
+                tokens[key] = False  # `config set` only ever takes a key
         for token, may_be_identifier in tokens.items():
             if resolve(tree, _segments(token)) is not None:
                 continue
@@ -462,21 +586,21 @@ def check_reference(
             )
 
     # YAML examples of config.yaml.
-    for start, text, heading in _yaml_blocks(rel_path, lines):
-        if _documents_other_file(heading):
+    for block in blocks:
+        if block.info not in ("yaml", "yml") or _documents_other_file(block.heading):
             continue
-        where = f"{lines[0].path if lines else rel_path}:{start}"
+        where = f"{rel_path}:{block.start}"
         try:
-            document = yaml.compose(text, Loader=yaml.SafeLoader)
+            document = yaml.compose("\n".join(block.lines), Loader=yaml.SafeLoader)
         except yaml.YAMLError as exc:
             problem = getattr(exc, "problem", None) or type(exc).__name__
             violations.append(
                 f"{where}: yaml example — does not parse ({problem}); fix the example"
             )
             continue
-        for lineno, token in _yaml_unknown_keys(document, tree, start):
+        for lineno, token in _yaml_unknown_keys(document, tree, block.start):
             violations.append(
-                f"{lines[0].path}:{lineno}: {token} — YAML example key that {MODELS} does "
+                f"{rel_path}:{lineno}: {token} — YAML example key that {MODELS} does "
                 "not have (load_config ignores it silently); fix or remove it"
             )
 
@@ -798,3 +922,102 @@ def test_yaml_under_a_config_yaml_heading_is_checked(tmp_path: Path) -> None:
     text = _VALID + "\n### `~/.ouroboros/config.yaml`\n\n```yaml\nsection:\n  nmae: x\n```\n"
     violations = _check(tmp_path, text)
     assert len(violations) == 1 and ": section.nmae — YAML example key" in violations[0]
+
+
+# The scanner reads every form CommonMark gives these inputs: a `config set`
+# command in prose as well as in code, and fences of any length, character, or
+# blockquote depth. Each test plants one stale key in one form.
+
+
+def _violation_lines(tmp_path: Path, text: str) -> list[int]:
+    return [int(item.split(":")[1]) for item in _check(tmp_path, text)]
+
+
+def test_config_set_in_prose_is_checked(tmp_path: Path) -> None:
+    text = _VALID + "\nRun ouroboros config set section.nme y.\n"
+    violations = _check(tmp_path, text)
+    assert len(violations) == 1 and ": section.nme — not a config key" in violations[0]
+    assert _violation_lines(tmp_path, text) == [_lineno(text, "Run ouroboros")]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Use `ouroboros config set` to change a key.",  # the span holds no argument
+        "Run `ouroboros config set KEY VALUE`.",
+        "Run `ouroboros config set <key> <value>`.",
+        "Run ouroboros config set section.name, then restart.",
+        "Run `ouroboros config set --help`.",
+    ],
+)
+def test_config_set_forms_that_name_no_stale_key(tmp_path: Path, line: str) -> None:
+    assert _check(tmp_path, _VALID + "\n" + line + "\n") == []
+
+
+def test_quoted_config_set_argument_is_checked(tmp_path: Path) -> None:
+    text = _VALID + '\nRun `ouroboros config set "section.nme" y`.\n'
+    assert _violation_lines(tmp_path, text) == [_lineno(text, '"section.nme"')]
+
+
+@pytest.mark.parametrize(
+    ("opener", "closer"),
+    [("````yaml", "````"), ("~~~yaml", "~~~"), ("`````yml title=x", "``````")],
+)
+def test_yaml_fence_of_any_length_or_character_is_checked(
+    tmp_path: Path, opener: str, closer: str
+) -> None:
+    text = _VALID + f"\n### Examples\n\n{opener}\nsection: {{nmae: x}}\n{closer}\n"
+    assert _violation_lines(tmp_path, text) == [_lineno(text, "nmae")]
+
+
+def test_a_shorter_fence_inside_a_longer_one_is_content(tmp_path: Path) -> None:
+    # The ``` lines belong to a block scalar; closing the block on them would
+    # drop the stale key below them.
+    text = _VALID + (
+        "\n### Examples\n\n````yaml\nsection:\n  name: |\n    ```\n    literal\n    ```\n"
+        "  nmae: x\n````\n"
+    )
+    assert _violation_lines(tmp_path, text) == [_lineno(text, "nmae")]
+
+
+def test_a_yaml_example_inside_a_markdown_example_is_not_checked(tmp_path: Path) -> None:
+    text = _VALID + (
+        "\n### Examples\n\n````markdown\n```yaml\nsection: {nmae: x}\n```\n````\n\n"
+        "Then `section.nope`.\n"
+    )
+    assert _violation_lines(tmp_path, text) == [_lineno(text, "section.nope")]
+
+
+def test_yaml_fence_in_a_blockquote_is_checked(tmp_path: Path) -> None:
+    text = _VALID + "\n### Examples\n\n> ```yaml\n> section:\n>   nmae: x\n> ```\n"
+    assert _violation_lines(tmp_path, text) == [_lineno(text, "nmae")]
+
+
+def test_blockquote_end_closes_its_fence(tmp_path: Path) -> None:
+    text = _VALID + "\n### Examples\n\n> ```yaml\n> section: {}\n\nThen `section.nope`.\n"
+    assert _violation_lines(tmp_path, text) == [_lineno(text, "section.nope")]
+
+
+def test_unclosed_yaml_fence_runs_to_the_end(tmp_path: Path) -> None:
+    text = _VALID + "\n### Examples\n\n```yaml\nsection:\n  nmae: x\n"
+    assert _violation_lines(tmp_path, text) == [_lineno(text, "nmae")]
+
+
+@pytest.mark.parametrize("span", ["``section.nope``", "`` section.nope ``", "```section.nope```"])
+def test_code_spans_of_any_width_are_key_references(tmp_path: Path, span: str) -> None:
+    # A one-line ```...``` is inline code, not a fence: the rest of the file stays prose.
+    text = _VALID + f"\nSet {span} here.\n\nAnd `section.nada`.\n"
+    assert _violation_lines(tmp_path, text) == [
+        _lineno(text, "Set "),
+        _lineno(text, "section.nada"),
+    ]
+
+
+def test_inline_tokenizer_runs() -> None:
+    assert _inline("a `b` c ``d`e`` \\`f` g") == [
+        (False, "a "),
+        (True, "b"),
+        (False, " c "),
+        (True, "d`e"),
+        (False, " \\`f` g"),
+    ]
