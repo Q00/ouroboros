@@ -179,7 +179,11 @@ ooo interview "I want to build a task management CLI"
 
 이 guided setup 절차는 Claude Code용입니다. Codex 플러그인은 플러그인 설치로 MCP
 서버를 등록하므로 `ooo setup`을 공통 필수 단계로 반복하지 마세요. Codex CLI를
-별도로 설정할 때는 터미널에서 `ouroboros setup --runtime codex`를 실행하세요.
+별도로 설정할 때는 macOS/Linux/WSL 2 터미널에서 실행하세요. 해당 환경에 Ouroboros와
+인증된 Codex CLI가 각각 준비되어 있어야 합니다. Windows PowerShell 설치는 WSL에 자동으로
+공유되지 않습니다. 네이티브 Windows의 `auto` 설정은 성공을 표시해도 새 MCP 항목을
+등록하지 않을 수 있습니다. Desktop HTTP 설정은 별도 서버 등록 방식입니다.
+`ouroboros setup --runtime codex`를 실행하세요.
 다른 호스트는 [런타임 가이드 색인](./docs/README.md#runtime-guides)에서 해당 절차를 확인하세요.
 
 `ooo setup`은 Claude Code에서 한 번 하는 guided 설정이고, `ooo interview`가
@@ -247,7 +251,11 @@ codex plugin add ouroboros@ouroboros
 새 Codex 세션에서 설치된 플러그인과 MCP 연결을 확인한 뒤, 대화의 다음 메시지로
 첫 인터뷰를 요청하세요. 플러그인 설치가 Codex MCP 서버를 등록하므로 Claude Code용
 guided setup을 필수로 반복하지 않습니다. Codex CLI를 별도로 구성하는 경우에는
-터미널에서 `ouroboros setup --runtime codex`를 실행하세요. [main setup skill](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/skills/setup/SKILL.md)도 참고하세요:
+macOS/Linux/WSL 2 터미널에서, 그 환경에 Ouroboros와 인증된 Codex CLI가 준비되어 있는지
+확인한 뒤 실행하세요. Windows PowerShell 설치는 WSL에 자동 공유되지 않습니다. 네이티브
+Windows의 `auto`는 성공을 표시해도 새 MCP 항목을 등록하지 않을 수 있으며, Desktop HTTP는
+별도 서버 등록 방식입니다. `ouroboros setup --runtime codex`를 실행하세요.
+[main setup skill](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/skills/setup/SKILL.md)도 참고하세요:
 
 ```
 ooo interview "Build a task management CLI"
@@ -397,7 +405,11 @@ pip install 'ouroboros-ai[tui]'
 ouroboros setup
 ```
 
-특정 런타임을 선택하려면 setup을 실행할 때 명시하세요. 예를 들어 Codex:
+특정 런타임을 선택하려면 setup을 실행할 때 명시하세요. Codex CLI는 macOS/Linux/WSL 2
+터미널에서, 해당 환경에 Ouroboros와 인증된 Codex CLI가 준비된 뒤 설정해야 합니다.
+Windows PowerShell 설치는 WSL에 자동 공유되지 않습니다. 네이티브 Windows `auto`는 성공을
+표시해도 MCP 항목을 등록하지 않을 수 있고, Desktop HTTP는 별도 서버 등록 방식입니다.
+예를 들어:
 
 ```bash
 ouroboros setup --runtime codex

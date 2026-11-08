@@ -158,7 +158,10 @@ ooo interview "I want to build a task management CLI"
 
 这里的 guided setup 流程适用于 Claude Code。Codex 插件会在安装时注册 MCP server，
 因此不要把 `ooo setup` 当作所有宿主都必须重复运行的步骤。单独配置 Codex CLI 时，
-请在终端运行 `ouroboros setup --runtime codex`。其他宿主请从[运行时指南索引](./docs/README.md#runtime-guides)
+请在 macOS/Linux/WSL 2 终端运行；该环境中必须分别准备好 Ouroboros 和已认证的 Codex CLI。
+Windows PowerShell 中的安装不会自动安装或配置到 WSL。原生 Windows 的 `auto` 即使显示成功，
+也可能没有注册新的 MCP 条目。Desktop HTTP 是单独的 server 注册方式。运行
+`ouroboros setup --runtime codex`。其他宿主请从[运行时指南索引](./docs/README.md#runtime-guides)
 选择对应步骤。
 
 `ooo setup` 是 Claude Code 中一次性的 guided 配置；`ooo interview` 才是安装后
@@ -225,8 +228,11 @@ codex plugin add ouroboros@ouroboros
 
 打开新的 Codex 会话后，先确认插件已安装且 MCP 连接可用，然后在对话的下一条消息中
 请求首次 Interview。安装插件会注册 Codex 使用的 MCP server，不必重复运行 Claude Code
-的 guided setup。若要单独配置 Codex CLI，请在终端运行 `ouroboros setup --runtime codex`。
-也可参见 [main setup skill](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/skills/setup/SKILL.md)：
+的 guided setup。若要单独配置 Codex CLI，请在 macOS/Linux/WSL 2 终端中，先确认该环境
+已分别准备好 Ouroboros 和已认证的 Codex CLI，再运行 `ouroboros setup --runtime codex`。
+Windows PowerShell 中的安装不会自动共享到 WSL；原生 Windows 的 `auto` 即使显示成功，
+也可能未注册新的 MCP 条目。Desktop HTTP 是单独的 server 注册方式。也可参见
+[main setup skill](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/skills/setup/SKILL.md)：
 
 ```
 ooo interview "Build a task management CLI"
@@ -373,7 +379,10 @@ pip install 'ouroboros-ai[tui]'
 ouroboros setup
 ```
 
-若要明确选择 runtime，请在 setup 命令中指定。例如 Codex：
+若要明确选择 runtime，请在 setup 命令中指定。Codex CLI 命令应在 macOS/Linux/WSL 2
+终端运行，且 Ouroboros 与已认证的 Codex CLI 都必须在该环境中准备好。Windows PowerShell
+中的安装不会自动共享到 WSL。原生 Windows 的 `auto` 即使显示成功，也可能未注册新的 MCP
+条目；Desktop HTTP 是单独的 server 注册方式。例如：
 
 ```bash
 ouroboros setup --runtime codex
