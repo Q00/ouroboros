@@ -65,6 +65,12 @@ def _run_git(args: list[str], cwd: Path, *, timeout: int = _GIT_TIMEOUT) -> str:
             cwd=cwd,
             capture_output=True,
             text=True,
+            # Git for Windows reports repository paths as UTF-8 whatever the
+            # console code page is. Decoding them with the locale raised
+            # UnicodeDecodeError for a checkout path that is not valid UTF-8;
+            # ``surrogateescape`` keeps such paths round-trippable.
+            encoding="utf-8",
+            errors="surrogateescape",
             timeout=timeout,
             check=False,
         )
