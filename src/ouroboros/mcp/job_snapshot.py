@@ -85,6 +85,13 @@ class JobEventFold:
     result_meta: dict[str, Any] = field(default_factory=dict)
     result_payload: dict[str, Any] | None = None
     error: str | None = None
+    # True while this fold provably equals a full ``(timestamp, id)`` replay of
+    # the rows up to ``cursor``. A resumed batch holds the rows committed after
+    # the previous cursor; if its earliest row is stamped no later than the
+    # newest row already folded (a concurrent writer that stamped first but
+    # committed second), a full replay would sort it before that row, so the
+    # fold is no longer known to match ``JobManager.get_snapshot``.
+    replay_equivalent: bool = True
 
     def to_snapshot(self, job_id: str) -> JobSnapshot:
         return JobSnapshot(
@@ -133,6 +140,8 @@ def fold_job_events(
             ),
         )
         events = events[1:]
+    elif events and min(event.timestamp for event in events) <= prior.updated_at:
+        prior.replay_equivalent = False
 
     for event in events:
         data = event.data
