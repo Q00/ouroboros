@@ -24,14 +24,20 @@ What is checked:
    footnote, not a definition. Raw HTML (inline tags and HTML blocks) goes
    to the standard library's ``html.parser``, which yields every ``href`` /
    ``src`` of every tag. An HTML block that ends inside an unclosed tag is
-   reported, together with the targets that tag already has. The
-   ``#fragment``, a ``?query``, and a trailing ``:123`` / ``:123-130`` line
-   suffix (hyphen or en dash) are dropped and the rest is percent-decoded.
-   Skipped after that: targets with a URL scheme (``https:``, ``mailto:``,
-   ``vscode:``, ...), protocol-relative ``//host`` targets, and pure
-   ``#anchor`` targets. A scheme is letters, digits, ``+``, and ``-`` before
-   the first ``:``; a prefix with a ``.`` or ``/`` is a file name
-   (``missing.md:123``), not a scheme. A
+   reported, together with the targets that tag already has.
+
+   **URL rule.** A link target is a URL if, after removing a trailing ``:N``
+   or ``:N-M`` line suffix (digits only), it starts with an RFC 3986 scheme:
+   ``^[A-Za-z][A-Za-z0-9+.-]*:``. Exception: a single letter followed by
+   ``:\\`` or ``:/`` is a Windows drive path, which counts as an absolute
+   filesystem path and is reported. (The rule is applied after the
+   ``#fragment`` and ``?query`` are dropped and the target is percent-decoded;
+   as everywhere in this check, the ``-`` of ``:N-M`` may be an en dash.) A
+   URL is not checked, except that a ``file:`` URL is reported as an absolute
+   filesystem path. Protocol-relative ``//host`` targets and pure ``#anchor``
+   targets are not checked either.
+
+   Every other target is a path, checked without its line suffix. A
    relative target is resolved against the doc's own directory; a target
    starting with ``/`` is resolved against the repository root, which is how
    GitHub renders it. The result must exist and stay inside the repository.
@@ -145,7 +151,7 @@ REMEDY_MISSING_PATH = (
 
 _LINK_ATTRIBUTES = frozenset({"href", "src"})
 # A URL scheme. ``.`` is left out on purpose: ``missing.md:x`` names a file.
-_URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+-]+:")
+_URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:[\\/]")
 _LINE_SUFFIX = re.compile(r":\d+(?:[-–]\d+)?$")
 _PLACEHOLDER = re.compile(r"[*?<>{}$\s]|\.\.\.|…")
@@ -351,12 +357,12 @@ def check_link_target(doc_path: str, target: str) -> str | None:
     target = target.strip()
     if not target or target.startswith(("#", "//")):
         return None
-    if target.lower().startswith("file:") or _WINDOWS_DRIVE.match(unquote(target)):
-        return REMEDY_ABSOLUTE
-    # Drop the documented suffixes first, so ``missing.md:123`` is a file
-    # with a line number, not a ``missing.md:`` scheme.
+    # The URL rule in the module docstring: drop the line suffix, then a
+    # drive letter is an absolute path and any other scheme is a URL.
     path = target.split("#", 1)[0].split("?", 1)[0]
     path = _LINE_SUFFIX.sub("", unquote(path))
+    if _WINDOWS_DRIVE.match(path) or path.lower().startswith("file:"):
+        return REMEDY_ABSOLUTE
     if not path or _URL_SCHEME.match(path):
         return None
     resolved = resolve_link(doc_path, path)
@@ -542,12 +548,32 @@ def test_accepts_existing_targets_in_every_supported_form() -> None:
     assert find_violations(lines, DIRS) == []
 
 
-def test_a_line_suffix_is_not_mistaken_for_a_url_scheme() -> None:
-    lines = _doc("[x](missing.md:123)", "[y](missing.md:123-130)", "[z](README:12)")
-    assert _tokens(lines) == ["missing.md:123", "missing.md:123-130", "README:12"]
-    # Real URLs, with or without a trailing ``:N``, are still skipped.
-    urls = _doc("[a](https://x/y:123) [b](mailto:a@b) [c](vscode:extension/x) [d](x-y+z:q)")
-    assert find_violations(urls, DIRS) == []
+def test_url_rule_paths_with_a_line_suffix_and_drive_letters_are_reported() -> None:
+    lines = _doc(
+        "[a](missing.md:123)",
+        "[b](missing.md:123-130)",
+        "[c](README:12)",
+        "[d](C:\\x\\y.md)",
+        "[e](C:/x/y.md)",
+    )
+    assert [v.split(": ", 1)[1] for v in find_violations(lines, DIRS)] == [
+        f"missing.md:123 — {REMEDY_MISSING_LINK}",
+        f"missing.md:123-130 — {REMEDY_MISSING_LINK}",
+        f"README:12 — {REMEDY_MISSING_LINK}",
+        f"C:\\x\\y.md — {REMEDY_ABSOLUTE}",
+        f"C:/x/y.md — {REMEDY_ABSOLUTE}",
+    ]
+
+
+def test_url_rule_any_rfc_3986_scheme_is_a_url() -> None:
+    lines = _doc(
+        "[a](a:b)",
+        "[b](com.example.app:x)",
+        "[c](https://x/y:123)",
+        "[d](mailto:a@b)",
+        "[e](vscode:extension/x) [f](x-y+z:q)",
+    )
+    assert find_violations(lines, DIRS) == []
 
 
 def test_skips_urls_anchors_autolinks_and_non_repository_tokens() -> None:
