@@ -647,7 +647,42 @@ _SUCCESS_CASES = {
         "1.0.0",
         _STABLE,
     ),
+    "malformed channel stamp": (
+        json.dumps({"latest_version": "1.2.3", "latest_version_checked_at": "invalid"}),
+        "1.0.0",
+        _STABLE,
+    ),
+    "oversized channel stamp": (
+        json.dumps({"latest_version": "1.2.3", "latest_version_checked_at": 10**400}),
+        "1.0.0",
+        _STABLE,
+    ),
+    "malformed shared timestamp": (
+        json.dumps({"latest_version": "1.2.3", "timestamp": [1]}),
+        "1.0.0",
+        _STABLE,
+    ),
 }
+
+# Every other key get_latest_version reads, with values that make the freshness
+# calculation raise or come out stale. Beside a recent, valid failure stamp none
+# of them may cause a fetch (#2948 review round 1).
+_MALFORMED_COMPANIONS = [
+    ("1.0.0", "latest_version_checked_at", "invalid"),
+    ("1.0.0", "latest_version_checked_at", [1]),
+    ("1.0.0", "latest_version_checked_at", {"at": 1}),
+    ("1.0.0", "latest_version_checked_at", True),
+    ("1.0.0", "latest_version_checked_at", float("nan")),
+    ("1.0.0", "latest_version_checked_at", 10**400),
+    ("1.0.0", "latest_version_pre_checked_at", "invalid"),
+    ("1.0.0", "timestamp", "invalid"),
+    ("1.0.0", "timestamp", 10**400),
+    ("1.0.0", "latest_version", ["2.0.0"]),
+    ("2.1.0b1", "latest_version_pre_checked_at", "invalid"),
+    ("2.1.0b1", "latest_version_pre_checked_at", 10**400),
+    ("2.1.0b1", "latest_version_checked_at", "invalid"),
+    ("2.1.0b1", "timestamp", [1]),
+]
 
 
 class TestFetchFailureBackoffEquivalence:
@@ -817,14 +852,46 @@ class TestFetchFailureBackoff:
         ):
             assert version_check.get_latest_version(current="1.0.0") == "2.0.0"
 
-    @pytest.mark.parametrize("stamp", ["recent", None, True, [1], float("nan"), float("inf")])
-    def test_malformed_stamp_does_not_skip_the_fetch(self, stamp: object, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(
+        "stamp",
+        ["recent", None, True, False, [1], float("nan"), float("inf"), 10**400, -(10**400)],
+        ids=["str", "null", "true", "false", "list", "nan", "inf", "huge", "-huge"],
+    )
+    @pytest.mark.parametrize(
+        "companion",
+        [{}, {"latest_version_checked_at": "invalid"}],
+        ids=["alone", "beside malformed freshness"],
+    )
+    def test_malformed_stamp_does_not_skip_the_fetch(
+        self, stamp: object, companion: dict, tmp_path: Path
+    ) -> None:
         file_patch, dir_patch, cache_file = self._paths(tmp_path)
-        cache_file.write_text(json.dumps({"latest_version_failed_at": stamp}))
+        cache_file.write_text(json.dumps({**companion, "latest_version_failed_at": stamp}))
         urlopen = MagicMock(return_value=_pypi_response(_STABLE))
         with file_patch, dir_patch, patch("urllib.request.urlopen", urlopen):
             assert version_check.get_latest_version(current="1.0.0") == "2.0.0"
         assert urlopen.call_count == 1
+
+    @pytest.mark.parametrize(
+        ("current", "key", "value"),
+        _MALFORMED_COMPANIONS,
+        ids=[
+            f"{current}-{key}-{type(value).__name__}"
+            for current, key, value in _MALFORMED_COMPANIONS
+        ],
+    )
+    def test_recent_stamp_skips_pypi_whatever_the_other_keys_hold(
+        self, current: str, key: str, value: object, tmp_path: Path
+    ) -> None:
+        file_patch, dir_patch, cache_file = self._paths(tmp_path)
+        channel = (
+            "latest_version_pre" if version_check._is_prerelease(current) else "latest_version"
+        )
+        cache_file.write_text(json.dumps({key: value, f"{channel}_failed_at": time.time()}))
+        urlopen = MagicMock(return_value=_pypi_response(_WITH_PRERELEASES))
+        with file_patch, dir_patch, patch("urllib.request.urlopen", urlopen):
+            assert version_check.get_latest_version(current=current) is None
+        assert urlopen.call_count == 0
 
     def test_stamp_is_per_channel(self, tmp_path: Path) -> None:
         file_patch, dir_patch, cache_file = self._paths(tmp_path)

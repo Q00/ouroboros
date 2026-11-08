@@ -201,10 +201,19 @@ def _get_latest_within_deadline(*, include_prerelease: bool) -> str | None:
 
 
 def _failure_is_recent(stamp: object) -> bool:
-    """True when *stamp* is a failed-fetch time within ``_FAILURE_BACKOFF``."""
-    if not isinstance(stamp, (int, float)):
+    """True when *stamp* is a failed-fetch time within ``_FAILURE_BACKOFF``.
+
+    Validates the stamp on its own and never raises: anything but a real
+    number from the last ``_FAILURE_BACKOFF`` seconds (a bool, a string, a
+    future time, NaN, an integer too large for a float) is not a recent failure.
+    """
+    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
         return False
-    return 0 <= time.time() - stamp < _FAILURE_BACKOFF
+    try:
+        age = time.time() - stamp
+    except OverflowError:
+        return False
+    return 0 <= age < _FAILURE_BACKOFF
 
 
 def _record_fetch_failure(cache_key: str) -> None:
@@ -260,6 +269,7 @@ def get_latest_version(*, current: str | None = None) -> str | None:
     # touch, so once any per-channel stamp exists, an unstamped channel is
     # stale. A cache with no stamps at all predates them and keeps the
     # shared-timestamp semantics for one TTL window.
+    cache = None
     try:
         if _CACHE_FILE.exists():
             cache = json.loads(_CACHE_FILE.read_text())
@@ -275,12 +285,14 @@ def get_latest_version(*, current: str | None = None) -> str | None:
                 cached = cache.get(cache_key)
                 if cached:
                     return cached
-            # A recent failure for this channel: skip PyPI rather than pay
-            # the fetch deadline again on every session start.
-            if _failure_is_recent(cache.get(f"{cache_key}_failed_at")):
-                return None
     except Exception:
         pass
+
+    # A recent failure for this channel: skip PyPI rather than pay the fetch
+    # deadline again on every session start. Checked on its own, outside the
+    # freshness block, so a malformed freshness field cannot hide a valid stamp.
+    if isinstance(cache, dict) and _failure_is_recent(cache.get(f"{cache_key}_failed_at")):
+        return None
 
     # Fetch from PyPI
     try:
