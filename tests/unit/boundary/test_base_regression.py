@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import ast
 import asyncio
+from collections.abc import AsyncIterator
 from dataclasses import replace
+import gc
 import inspect
 from pathlib import Path
 import sys
@@ -1809,8 +1811,31 @@ async def test_a_throwaway_directory_fails_as_a_temporary_directory_does(
             pass
 
 
+@pytest.fixture
+async def unretrieved() -> AsyncIterator[list[str]]:
+    """Messages the loop's exception handler receives ("Task exception was never retrieved")."""
+    seen: list[str] = []
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: seen.append(context["message"]))
+    yield seen
+    loop.set_exception_handler(previous)
+
+
+async def _collected() -> None:
+    """Let every finished task be freed, so an unretrieved exception would be reported."""
+    await asyncio.sleep(0)
+    gc.collect()
+    await asyncio.sleep(0)
+
+
+@pytest.mark.parametrize("copy_fails", [False, True], ids=["copy_ends", "copy_raises"])
 async def test_a_cancelled_check_removes_its_copy_once_the_copy_has_ended(
-    trees: tuple[Path, Path], private_tmp: Path, monkeypatch: pytest.MonkeyPatch
+    trees: tuple[Path, Path],
+    private_tmp: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unretrieved: list[str],
+    copy_fails: bool,
 ) -> None:
     base, candidate = trees
     monkeypatch.setattr(br, "_pytest", _Runner([], []))  # never reached
@@ -1822,6 +1847,8 @@ async def test_a_cancelled_check_removes_its_copy_once_the_copy_has_ended(
             entered.set()
             release.wait(30)
             real_copy(source, destination, **options)  # creates its parent if it is gone
+            if copy_fails:
+                raise OSError("the copy failed after the cancellation")
         finally:
             ended.set()
 
@@ -1837,9 +1864,77 @@ async def test_a_cancelled_check_removes_its_copy_once_the_copy_has_ended(
     # The copy thread is blocked, so the cancelled check cannot have ended yet.
     assert not first and not second and cleanups == []
     release.set()
+    # The cancellation propagates, as from a cancelled ``to_thread``, whatever the copy did.
     with pytest.raises(asyncio.CancelledError):
         await task
 
     assert ended.is_set()  # the copy ended before its directory was removed
     assert cleanups == [REGRESSION_COPY]
     assert list(private_tmp.iterdir()) == []
+    del task
+    await _collected()
+    assert unretrieved == []
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True], ids=["cleanup_ends", "cleanup_raises"])
+async def test_a_cancellation_during_the_cleanup_waits_for_it_and_keeps_its_error(
+    private_tmp: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unretrieved: list[str],
+    cleanup_fails: bool,
+) -> None:
+    entered, release = threading.Event(), threading.Event()
+    real = tempfile.TemporaryDirectory.cleanup
+
+    def blocked(self: tempfile.TemporaryDirectory[str]) -> None:
+        entered.set()
+        release.wait(30)
+        real(self)
+        if cleanup_fails:
+            raise PermissionError("cleanup")
+
+    monkeypatch.setattr(tempfile.TemporaryDirectory, "cleanup", blocked)
+
+    async def leave() -> None:
+        async with br._throwaway("ouroboros-regression-") as work:
+            (Path(work) / "file").write_text("x")
+
+    task = asyncio.create_task(leave())
+    assert await asyncio.to_thread(entered.wait, 30)
+    task.cancel()
+    first, _ = await asyncio.wait({task}, timeout=0.2)
+    task.cancel()
+    second, _ = await asyncio.wait({task}, timeout=0.2)
+    assert not first and not second  # the cleanup is still running
+    release.set()
+
+    if cleanup_fails:
+        # As from ``TemporaryDirectory.__exit__``: the cleanup error replaces
+        # the exception in flight, here the cancellation, which is its context.
+        with pytest.raises(PermissionError, match="cleanup") as raised:
+            await task
+        assert isinstance(raised.value.__context__, asyncio.CancelledError)
+    else:
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert list(private_tmp.iterdir()) == []
+    del task
+    await _collected()
+    assert unretrieved == []
+
+
+async def test_a_finished_thread_task_is_always_retrieved() -> None:
+    async def fails() -> None:
+        raise OSError("failed")
+
+    failing = asyncio.create_task(fails())
+    passing = asyncio.create_task(asyncio.sleep(0))
+    cancelled = asyncio.create_task(asyncio.sleep(30))
+    cancelled.cancel()
+
+    error = await br._outlived(failing)
+    assert isinstance(error, OSError)
+    assert await br._outlived(passing) is None
+    assert (
+        await br._outlived(cancelled) is None
+    )  # cancelled itself (loop teardown): nothing to raise

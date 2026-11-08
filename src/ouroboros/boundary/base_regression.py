@@ -1301,14 +1301,24 @@ async def _throwaway(prefix: str) -> AsyncIterator[str]:
     """``tempfile.TemporaryDirectory(prefix=prefix)``, removed off the event loop.
 
     It holds a full checkout copy. Its ``cleanup`` runs where leaving a
-    ``with`` block would run it, and its errors propagate the same way; only
-    it runs in a worker thread (``_in_thread``).
+    ``with`` block would run it, only in a worker thread, and its error
+    propagates as from ``__exit__``: it replaces the exception in flight,
+    which becomes its ``__context__``. That holds for a cancellation that
+    arrives while the cleanup runs, too: the cleanup is waited for, and its
+    error, if any, propagates with the cancellation as its context.
     """
     work = tempfile.TemporaryDirectory(prefix=prefix)
     try:
         yield work.name
     finally:
-        await _in_thread(work.cleanup)
+        cleanup = asyncio.create_task(asyncio.to_thread(work.cleanup))
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            error = await _outlived(cleanup)
+            if error is not None:
+                raise error
+            raise
 
 
 async def _in_thread[**P, T](function: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs) -> T:
@@ -1318,16 +1328,27 @@ async def _in_thread[**P, T](function: Callable[P, T], /, *args: P.args, **kwarg
     into a throwaway copy would otherwise remove the directory under it (and
     a copy recreates its parent, leaving a checkout in the temp directory).
     The cancellation propagates once the thread has ended, however often it
-    is repeated; what the thread returned or raised is then dropped.
+    is repeated; what the thread returned or raised is retrieved and
+    dropped, as a cancelled ``to_thread`` drops it.
     """
     task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
-        while not task.done():
-            with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.wait((task,))
+        await _outlived(task)
         raise
+
+
+async def _outlived(task: asyncio.Task[object]) -> BaseException | None:
+    """Wait for ``task`` to end, through any cancellation; what it raised, or ``None``.
+
+    Its outcome is always retrieved, so it is never logged as an exception
+    nobody retrieved. ``None`` too when the task itself was cancelled.
+    """
+    while not task.done():
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait((task,))
+    return None if task.cancelled() else task.exception()
 
 
 async def _run_command(
