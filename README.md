@@ -266,8 +266,8 @@ the read-only command `git rev-parse --verify HEAD` in the project terminal. The
 worktree by default; a repository created with `git init` but no commit has no
 `HEAD` for that worktree ([MCP default](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/mcp/tools/execution_handlers.py#L1430),
 [worktree check](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/core/worktree.py#L371-L388)). If the check fails, review the repository and decide whether
-to make an initial commit before running; do not let the tool create a commit
-or change project files. This condition is specific to the standard MCP
+to make an initial commit and what to include. Do not let the tool create a
+commit or change project files during this preparation step. This condition is specific to the standard MCP
 worktree path; it does not establish behavior for non-Git projects,
 worktree-disabled runs, or OpenCode.
 
