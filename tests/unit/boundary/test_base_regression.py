@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 from dataclasses import replace
 import inspect
 from pathlib import Path
 import sys
+import tempfile
+import threading
 from typing import Any
 
 import pytest
@@ -1673,3 +1676,170 @@ async def test_the_pytest_run_counts_only_a_second_observed_failure(
     regression, _worker = await _checks(base).findings(candidate)
 
     assert (regression.outcome, regression.failed) == (expected, failed)
+
+
+# --------------------------------------------------------------------------
+# Throwaway copies: removed off the event loop, and never while a copy still runs
+
+
+@pytest.fixture
+def private_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The temp directory every throwaway copy of this test is made in."""
+    tmp = tmp_path / "tmp"
+    tmp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp))
+    return tmp
+
+
+def _spy_cleanups(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, bool]]:
+    """Each ``TemporaryDirectory.cleanup``: its directory's prefix, and whether it ran on a loop."""
+    seen: list[tuple[str, bool]] = []
+    real = tempfile.TemporaryDirectory.cleanup
+
+    def cleanup(self: tempfile.TemporaryDirectory[str]) -> None:
+        try:
+            asyncio.get_running_loop()
+            on_loop = True
+        except RuntimeError:
+            on_loop = False
+        seen.append((Path(self.name).name.rsplit("-", 1)[0] + "-", on_loop))
+        real(self)
+
+    monkeypatch.setattr(tempfile.TemporaryDirectory, "cleanup", cleanup)
+    return seen
+
+
+REGRESSION_COPY = ("ouroboros-regression-", False)
+"""A regression run's copy, removed off the event loop."""
+
+
+async def test_the_pytest_runs_remove_their_copies_off_the_event_loop(
+    trees: tuple[Path, Path], private_tmp: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, candidate = trees
+    (candidate / "calc/tests/test_new.py").write_text("def test_new():\n    pass\n")
+    # The added test file, then the base twice and the candidate.
+    monkeypatch.setattr(br, "_pytest", _Runner([_run(PASSING)] * 2, [_run(PASSING)] * 2))
+    cleanups = _spy_cleanups(monkeypatch)
+
+    regression, worker = await _checks(base).findings(candidate)
+
+    assert (regression.outcome, worker.outcome) == (Outcome.PASSED, Outcome.PASSED)
+    assert cleanups == [("ouroboros-worker-tests-", False), *[REGRESSION_COPY] * 3]
+    assert list(private_tmp.iterdir()) == []
+
+
+async def test_admission_and_command_runs_remove_their_copies_off_the_event_loop(
+    tmp_path: Path, private_tmp: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files = {**BASE_TREE, "bin/test": ""}  # a project runner: an admitted command decides
+    base = _tree(tmp_path / "base", files)
+    candidate = _tree(tmp_path / "work", files)
+    (candidate / "calc/ops.py").write_text("def add(a, b):\n    return a + b\n")
+    # Admission (two base passes, a failing canary), the candidate's failure, its rerun.
+    script = [br.CommandRun(code) for code in (0, 0, 1, 1, 1)]
+
+    async def run(*_args: Any, **_kwargs: Any) -> Any:
+        return script.pop(0)
+
+    monkeypatch.setattr(br, "_run_command", run)
+    cleanups = _spy_cleanups(monkeypatch)
+    checks = br.ArtifactChecks(
+        base=base,
+        base_digest=tree_digest(base),
+        interpreter=pin_interpreter(sys.executable, "test"),
+        timeout_seconds=30,
+        constructor_command="python -m unittest {module}",
+    )
+
+    regression, _worker = await checks.findings(candidate)
+
+    assert (regression.outcome, regression.failed) == (Outcome.REJECTED, (TEST_FILE,))
+    assert cleanups == [("ouroboros-admission-", False)] * 3 + [REGRESSION_COPY]
+    assert list(private_tmp.iterdir()) == []
+
+
+async def test_a_run_that_raises_still_removes_its_copy_off_the_event_loop(
+    trees: tuple[Path, Path], private_tmp: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, candidate = trees
+
+    async def runner(root: Path, *_args: Any, **_options: Any) -> Any:
+        if root.name == "candidate":
+            raise RuntimeError("the runner broke")
+        return _run(PASSING)
+
+    monkeypatch.setattr(br, "_pytest", runner)
+    cleanups = _spy_cleanups(monkeypatch)
+
+    regression, worker = await _checks(base).findings(candidate)
+
+    assert (regression.outcome, worker.outcome) == (Outcome.UNAVAILABLE,) * 2
+    assert cleanups == [REGRESSION_COPY] * 3
+    assert list(private_tmp.iterdir()) == []
+
+
+async def test_a_throwaway_directory_fails_as_a_temporary_directory_does(
+    private_tmp: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(ValueError, match="body"):
+        async with br._throwaway("ouroboros-regression-") as work:
+            (Path(work) / "file").write_text("x")
+            raise ValueError("body")
+    assert list(private_tmp.iterdir()) == []
+
+    # A cleanup that fails: its error propagates, with the body's as its context.
+    real = tempfile.TemporaryDirectory.cleanup
+
+    def failing(self: tempfile.TemporaryDirectory[str]) -> None:
+        real(self)
+        raise PermissionError("cleanup")
+
+    monkeypatch.setattr(tempfile.TemporaryDirectory, "cleanup", failing)
+    with pytest.raises(PermissionError) as plain:
+        with tempfile.TemporaryDirectory(prefix="ouroboros-regression-"):
+            raise ValueError("body")
+    with pytest.raises(PermissionError) as throwaway:
+        async with br._throwaway("ouroboros-regression-"):
+            raise ValueError("body")
+    assert isinstance(plain.value.__context__, ValueError)
+    assert isinstance(throwaway.value.__context__, ValueError)
+    with pytest.raises(PermissionError):
+        async with br._throwaway("ouroboros-regression-"):
+            pass
+
+
+async def test_a_cancelled_check_removes_its_copy_once_the_copy_has_ended(
+    trees: tuple[Path, Path], private_tmp: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, candidate = trees
+    monkeypatch.setattr(br, "_pytest", _Runner([], []))  # never reached
+    entered, release, ended = threading.Event(), threading.Event(), threading.Event()
+    real_copy = br.copy_checkout
+
+    def copy(source: Path, destination: Path, **options: Any) -> None:
+        try:
+            entered.set()
+            release.wait(30)
+            real_copy(source, destination, **options)  # creates its parent if it is gone
+        finally:
+            ended.set()
+
+    monkeypatch.setattr(br, "copy_checkout", copy)
+    cleanups = _spy_cleanups(monkeypatch)
+    task = asyncio.create_task(_checks(base).findings(candidate))
+    assert await asyncio.to_thread(entered.wait, 30)
+
+    task.cancel()
+    first, _ = await asyncio.wait({task}, timeout=0.2)
+    task.cancel()  # cancelled again: still waits for the copy
+    second, _ = await asyncio.wait({task}, timeout=0.2)
+    # The copy thread is blocked, so the cancelled check cannot have ended yet.
+    assert not first and not second and cleanups == []
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert ended.is_set()  # the copy ended before its directory was removed
+    assert cleanups == [REGRESSION_COPY]
+    assert list(private_tmp.iterdir()) == []

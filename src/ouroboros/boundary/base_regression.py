@@ -81,16 +81,17 @@ directory, outside the copy. Per-test outcomes come from the runner's JUnit
 XML report, never from its console text. A report is written by code the
 candidate controls, so a forged report can only hide a failure; it can never
 fail a correct artifact that the base's own tests do not. Every tree walk,
-copy and diff runs off the event loop.
+copy, diff and removal of a copy runs off the event loop.
 """
 
 from __future__ import annotations
 
 import ast
 import asyncio
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Collection, Iterable, Mapping, Sequence
 from configparser import ConfigParser
 from configparser import Error as ConfigError
+import contextlib
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 import json
@@ -1061,10 +1062,10 @@ class ArtifactChecks:
             return side.outcome, (), {}
         watched = changed.functions if changed.functions and not changed.outside_functions else None
         restored = (*selected, *_conftests_above(selected, self._base_manifest))
-        with tempfile.TemporaryDirectory(prefix="ouroboros-regression-") as work:
+        async with _throwaway("ouroboros-regression-") as work:
             copy_root = Path(work) / "candidate"
-            await asyncio.to_thread(copy_checkout, candidate, copy_root)
-            prepared = await asyncio.to_thread(
+            await _in_thread(copy_checkout, candidate, copy_root)
+            prepared = await _in_thread(
                 _prepare_candidate_copy, copy_root, base, self._base_manifest, manifest, restored
             )
             if not prepared:
@@ -1105,7 +1106,7 @@ class ArtifactChecks:
             ):
                 if not tests:
                     continue
-                await asyncio.to_thread(restore_base_bytes, copy_root, base, restored)
+                await _in_thread(restore_base_bytes, copy_root, base, restored)
                 rerun = await _pytest(
                     copy_root,
                     files,
@@ -1139,10 +1140,10 @@ class ArtifactChecks:
             return cached
         runs = []
         for canary in (False, False, True):
-            with tempfile.TemporaryDirectory(prefix="ouroboros-admission-") as work:
+            async with _throwaway("ouroboros-admission-") as work:
                 copy_root = Path(work) / "base"
-                await asyncio.to_thread(copy_checkout, base, copy_root)
-                if canary and not await asyncio.to_thread(_write_canary, copy_root, target):
+                await _in_thread(copy_checkout, base, copy_root)
+                if canary and not await _in_thread(_write_canary, copy_root, target):
                     runs.append(CommandRun(None, unavailable=True))
                     continue
                 runs.append(
@@ -1169,13 +1170,13 @@ class ArtifactChecks:
         """
         assert self._base_manifest is not None and admission.command is not None
         restored = (*selected, *_conftests_above(selected, self._base_manifest))
-        with tempfile.TemporaryDirectory(prefix="ouroboros-regression-") as work:
+        async with _throwaway("ouroboros-regression-") as work:
             copy_root = Path(work) / "candidate"
-            await asyncio.to_thread(copy_checkout, candidate, copy_root)
-            prepared = await asyncio.to_thread(
+            await _in_thread(copy_checkout, candidate, copy_root)
+            prepared = await _in_thread(
                 _prepare_candidate_copy, copy_root, base, self._base_manifest, manifest, restored
             )
-            if not prepared or not await asyncio.to_thread(
+            if not prepared or not await _in_thread(
                 restore_runner_config, copy_root, base, self._base_manifest, admission.command
             ):
                 return ArtifactCheckOutcome.UNAVAILABLE, ()
@@ -1203,8 +1204,8 @@ class ArtifactChecks:
                         regressed = (target,) if run.exit_code != 0 else ()
                     if not regressed:
                         break
-                    await asyncio.to_thread(restore_base_bytes, copy_root, base, restored)
-                    await asyncio.to_thread(
+                    await _in_thread(restore_base_bytes, copy_root, base, restored)
+                    await _in_thread(
                         restore_runner_config,
                         copy_root,
                         base,
@@ -1243,9 +1244,9 @@ class ArtifactChecks:
         """Two runs of ``selected`` on fresh base copies; a test must pass on both."""
         runs = []
         for _ in range(2):
-            with tempfile.TemporaryDirectory(prefix="ouroboros-regression-") as work:
+            async with _throwaway("ouroboros-regression-") as work:
                 copy_root = Path(work) / "base"
-                await asyncio.to_thread(copy_checkout, base, copy_root)
+                await _in_thread(copy_checkout, base, copy_root)
                 runs.append(
                     await _pytest(
                         copy_root,
@@ -1275,9 +1276,9 @@ class ArtifactChecks:
         failed: list[str] = []
         unobserved: list[ArtifactCheckOutcome] = []
         for path in files:
-            with tempfile.TemporaryDirectory(prefix="ouroboros-worker-tests-") as work:
+            async with _throwaway("ouroboros-worker-tests-") as work:
                 copy_root = Path(work) / "candidate"
-                await asyncio.to_thread(copy_checkout, candidate, copy_root)
+                await _in_thread(copy_checkout, candidate, copy_root)
                 run = await _pytest(copy_root, (path,), self._interpreter, self._timeout)
             if run.unavailable:
                 unobserved.append(ArtifactCheckOutcome.UNAVAILABLE)
@@ -1293,6 +1294,40 @@ class ArtifactChecks:
             return ArtifactFinding(check, ArtifactCheckOutcome.REJECTED, tuple(failed), files)
         outcome = unobserved[0] if unobserved else ArtifactCheckOutcome.PASSED
         return ArtifactFinding(check, outcome, selected=files)
+
+
+@contextlib.asynccontextmanager
+async def _throwaway(prefix: str) -> AsyncIterator[str]:
+    """``tempfile.TemporaryDirectory(prefix=prefix)``, removed off the event loop.
+
+    It holds a full checkout copy. Its ``cleanup`` runs where leaving a
+    ``with`` block would run it, and its errors propagate the same way; only
+    it runs in a worker thread (``_in_thread``).
+    """
+    work = tempfile.TemporaryDirectory(prefix=prefix)
+    try:
+        yield work.name
+    finally:
+        await _in_thread(work.cleanup)
+
+
+async def _in_thread[**P, T](function: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs) -> T:
+    """``asyncio.to_thread``; cancelled, it first waits for the thread to end.
+
+    A thread cannot be stopped: a caller cancelled while its thread writes
+    into a throwaway copy would otherwise remove the directory under it (and
+    a copy recreates its parent, leaving a checkout in the temp directory).
+    The cancellation propagates once the thread has ended, however often it
+    is repeated; what the thread returned or raised is then dropped.
+    """
+    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait((task,))
+        raise
 
 
 async def _run_command(
