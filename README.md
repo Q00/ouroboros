@@ -213,8 +213,13 @@ ooo setup
 Answer the setup questions and finish setup before starting the Interview.
 
 **Codex plugin:** In the new Codex session, check that the plugin is enabled and
-its Ouroboros MCP tools are available. If they are missing, follow
-[installation troubleshooting](./docs/getting-started.md#troubleshooting).
+its MCP server is active. In a Codex CLI/TUI conversation, enter `/mcp` and
+check whether an Ouroboros-related server appears in the active server list.
+The displayed name can vary by plugin and server version; seeing it listed does
+not prove that its tools work. If the server is missing or shows a connection
+error, follow [installation troubleshooting](./docs/getting-started.md#troubleshooting).
+This CLI/TUI check does not imply that Codex Desktop has the same command or UI;
+see the [official Codex MCP CLI guide](https://learn.chatgpt.com/docs/extend/mcp?surface=cli#configure-with-the-cli).
 The `ooo setup` skill is for Claude Code; standalone CLI setup is a separate
 terminal flow described above.
 
