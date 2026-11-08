@@ -17,10 +17,17 @@ so a reader who types the alias can find it. In the other direction, a heading
 that is a single code span naming a command (``### `init start` ``) must name
 a registered one.
 
-**Flags.** Every ``ouroboros ...`` invocation in a fenced block or an inline
-code span, and every flag in the first column of an options table, is resolved
-against the tree. A table row belongs to the nearest enclosing command
-heading, or to ``ouroboros`` itself when there is none. Subcommands resolve as
+**Reading the doc.** Headings, tables, code spans, and code blocks are what a
+CommonMark renderer with GFM tables (``markdown-it-py``) makes of the text, not
+what a line prefix suggests: a styled, indented, or pipe-less table row is a
+row, a code span may wrap across lines, and a fence inside a block quote is a
+code block. The shared corpus reader still decides which lines are checkable.
+
+**Flags.** Every ``ouroboros ...`` invocation in a code block or a code span,
+and every flag in the first cell of an options-table row (a row whose first
+cell starts with a code span that starts with ``-``), is resolved against the
+tree. A table row belongs to the nearest enclosing command heading, or to
+``ouroboros`` itself when there is none. Subcommands resolve as
 Click resolves them: a default-subcommand group (``run``, ``init``, ``zcode``)
 is asked which subcommand it dispatches the remaining words to, so
 ``ouroboros run seed.yaml --debug`` reaches ``run workflow`` while
@@ -34,9 +41,9 @@ Non-goals: option values and positional arguments are not validated, and a
 word under a group that names no subcommand (a metavar such as ``COMMAND``, or
 a plugin name) leaves the invocation at that group. Flags in prose outside an
 invocation or an options table are not bound to a command. Combined short
-flags (``-abc``) and an inline code span broken across two lines are not
-checked. A fenced command continued with a trailing ``\\`` is joined and
-reported at its first line. A missing section has no line of its own and is
+flags (``-abc``) are not checked. A line that is not a table to the renderer
+(no delimiter row) is not an options row. A code-block command continued with a
+trailing ``\\`` is joined and reported at its first line. A missing section has no line of its own and is
 reported at line 1. Other docs in the corpus are out of scope for this module.
 
 Related, not duplicated: ``tests/unit/test_cli_surface_docs_contract.py``
@@ -54,6 +61,9 @@ import re
 import shlex
 from typing import Annotated, Any
 
+from markdown_it import MarkdownIt, rules_inline
+from markdown_it.rules_inline import StateInline
+from markdown_it.token import Token
 import pytest
 import typer
 import typer.core
@@ -64,16 +74,27 @@ from tests.unit.docs._corpus import REPO_ROOT, DocLine, corpus_files, iter_lines
 CLI_REFERENCE = "docs/cli-reference.md"
 PROGRAM = "ouroboros"
 
-_HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
-_CODE_SPAN = re.compile(r"`([^`]+)`")
+
+def _backticks_with_offset(state: StateInline, silent: bool) -> bool:
+    """The parser's own code-span rule, recording where each span starts."""
+    start, first_new = state.pos, len(state.tokens)
+    if not rules_inline.backtick(state, silent):
+        return False
+    for token in state.tokens[first_new:]:
+        if token.type == "code_inline":
+            token.meta["offset"] = start
+    return True
+
+
+_MARKDOWN = MarkdownIt("commonmark").enable("table")
+# Inline tokens carry no positions; this lets a span that follows a wrapped
+# span still report its own line.
+_MARKDOWN.inline.ruler.at("backticks", _backticks_with_offset)
 # ``<plugin|subprocess>``, ``<session_id>``: a placeholder, not shell syntax.
 _PLACEHOLDER = re.compile(r"<[A-Za-z][^<>]*>")
 _LONG_FLAG = re.compile(r"--[A-Za-z0-9][A-Za-z0-9-]*")
 _SHORT_FLAG = re.compile(r"-[A-Za-z]")
 _TABLE_FLAG = re.compile(r"(?<![\w-])(--[A-Za-z0-9][A-Za-z0-9-]*|-[A-Za-z])(?![\w-])")
-# A blockquoted fence (``> ```bash``) is not a fence to the corpus reader.
-_QUOTED_FENCE = re.compile(r"^\s*(?:>\s*)+(?:```|~~~)")
-_QUOTE_PREFIX = re.compile(r"^\s*(?:>\s*)+")
 _SHELL_PUNCTUATION = frozenset("();<>|&")
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 # Programs that run the program named later on their command line.
@@ -264,54 +285,125 @@ def invocations_in(fragment: str) -> Iterator[tuple[str, ...]]:
             yield tuple(rest[rest.index(PROGRAM) + 1 :])
 
 
-def _code_fragments(lines: Iterable[DocLine]) -> Iterator[tuple[DocLine, str]]:
-    """Each fenced-code command, and each inline code span of a prose line.
+@dataclass(frozen=True)
+class _Code:
+    """One piece of code a reader sees: a code span, or a command in a code block."""
 
-    A fenced line ending in ``\\`` continues on the next line; the joined
-    command is reported at its first line.
-    """
-    in_quoted_fence = False
-    pending: tuple[DocLine, str] | None = None
-    for line in lines:
-        if not line.in_code_block and _QUOTED_FENCE.match(line.text):
-            in_quoted_fence = not in_quoted_fence
-            continue
-        if line.in_code_block or in_quoted_fence:
-            text = line.text if line.in_code_block else _QUOTE_PREFIX.sub("", line.text)
-            start, joined = pending if pending else (line, "")
-            joined += text
-            if joined.rstrip().endswith("\\"):
-                pending = (start, joined.rstrip()[:-1] + " ")
-                continue
+    lineno: int
+    text: str
+
+
+@dataclass(frozen=True)
+class _Heading:
+    lineno: int
+    level: int
+    #: The heading's code spans, and whether the heading is exactly one of them.
+    spans: tuple[str, ...]
+    only_code: bool
+
+
+@dataclass(frozen=True)
+class _Row:
+    """A table row, and the code spans in its first cell."""
+
+    lineno: int
+    first_cell: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _Outline:
+    path: str
+    code: tuple[_Code, ...]
+    #: Headings and table rows, in document order.
+    blocks: tuple[_Heading | _Row, ...]
+
+
+def _join_continuations(numbered: Iterable[tuple[int, str]]) -> Iterator[_Code]:
+    """Code-block lines as commands: a line ending in ``\\`` continues on the next."""
+    pending: tuple[int, str] | None = None
+    previous = 0
+    for lineno, text in sorted(numbered):
+        if pending and lineno != previous + 1:  # the block ended mid-continuation
+            yield _Code(*pending)
             pending = None
-            yield start, joined
+        start, joined = pending if pending else (lineno, "")
+        joined += text
+        previous = lineno
+        if joined.rstrip().endswith("\\"):
+            pending = (start, joined.rstrip()[:-1] + " ")
             continue
-        if pending:  # a continuation that ran into the closing fence
-            yield pending
-            pending = None
-        for match in _CODE_SPAN.finditer(line.text):
-            yield line, match.group(1)
+        pending = None
+        yield _Code(start, joined)
     if pending:
-        yield pending
+        yield _Code(*pending)
 
 
-def _heading(line: DocLine) -> tuple[int, str] | None:
-    if line.in_code_block:
-        return None
-    match = _HEADING.match(line.text)
-    return (len(match.group(1)), match.group(2)) if match else None
+def _inline_code(inline: Token) -> Iterator[tuple[int, str]]:
+    """``(line, content)`` of each code span in an inline token."""
+    assert inline.map is not None
+    for child in inline.children or ():
+        if child.type == "code_inline":
+            before = inline.content[: child.meta["offset"]]
+            yield inline.map[0] + 1 + before.count("\n"), child.content
 
 
-def _heading_command(root: Any, text: str) -> tuple[str, ...] | None:
+def outline(lines: Iterable[DocLine]) -> _Outline:
+    """What a CommonMark renderer with GFM tables shows for one doc's ``lines``.
+
+    The corpus reader decides what is checkable: its fenced blocks arrive as
+    ``in_code_block`` lines and its ignored lines not at all. Everything else is
+    put back at its own line number and handed to ``markdown-it-py`` (the
+    parser ``rich`` already depends on), so headings, tables, code spans, and
+    code blocks inside block quotes are what the renderer makes of them, not
+    what a line prefix suggests.
+    """
+    lines = list(lines)
+    paths = {line.path for line in lines}
+    if len(paths) > 1:
+        raise ValueError(f"outline() takes one doc at a time, got {sorted(paths)}")
+    path = paths.pop() if paths else ""
+    prose = {line.lineno: line.text for line in lines if not line.in_code_block}
+    block_code = [(line.lineno, line.text) for line in lines if line.in_code_block]
+    last = max((line.lineno for line in lines), default=0)
+    tokens = _MARKDOWN.parse("\n".join(prose.get(n, "") for n in range(1, last + 1)))
+
+    spans: list[_Code] = []
+    blocks: list[_Heading | _Row] = []
+    for index, token in enumerate(tokens):
+        if token.type == "inline":
+            spans.extend(_Code(lineno, text) for lineno, text in _inline_code(token))
+        elif token.type in ("fence", "code_block") and token.map is not None:
+            first = token.map[0] + (2 if token.type == "fence" else 1)
+            block_code += [(first + k, text) for k, text in enumerate(token.content.splitlines())]
+        elif token.type == "heading_open" and token.map is not None:
+            inline = tokens[index + 1]
+            children = [c for c in inline.children or () if c.type != "text" or c.content.strip()]
+            blocks.append(
+                _Heading(
+                    token.map[0] + 1,
+                    int(token.tag[1]),
+                    tuple(text for _, text in _inline_code(inline)),
+                    len(children) == 1 and children[0].type == "code_inline",
+                )
+            )
+        elif token.type == "tr_open" and token.map is not None:
+            first_cell = tokens[index + 2]  # tr_open, th_open/td_open, inline
+            blocks.append(
+                _Row(token.map[0] + 1, tuple(text for _, text in _inline_code(first_cell)))
+            )
+    code = sorted([*spans, *_join_continuations(block_code)], key=lambda c: c.lineno)
+    return _Outline(path, tuple(code), tuple(blocks))
+
+
+def _heading_command(root: Any, heading: _Heading) -> tuple[str, ...] | None:
     """The command path a heading such as ``### `init start` `` is the section for.
 
     Only a heading that is one code span starting with ``ouroboros`` or with a
     registered top-level name counts; ``### Global Options`` returns ``None``.
     """
-    match = re.fullmatch(r"`([^`]+)`", text.strip())
-    if not match:
+    if not heading.only_code:
         return None
-    words = next(_segments(match.group(1)))
+    words = next(_segments(heading.spans[0]))
     if words[:1] == [PROGRAM]:
         words = words[1:]
     elif words[:1] and words[0] not in _subcommands(root):
@@ -319,69 +411,54 @@ def _heading_command(root: Any, text: str) -> tuple[str, ...] | None:
     return tuple(word for word in words if not word.startswith("-"))
 
 
-def _first_cell(row: str) -> str:
-    """The first cell of a table row; a ``|`` inside a code span does not end it."""
-    in_code = False
-    for index, char in enumerate(row[1:], start=1):
-        if char == "`":
-            in_code = not in_code
-        elif char == "|" and not in_code and row[index - 1] != "\\":
-            return row[1:index]
-    return row[1:]
-
-
-def _sections(lines: Sequence[DocLine]) -> dict[str, list[DocLine]]:
-    """Top-level name -> the lines of its ``ouroboros <name>`` heading's section."""
-    sections: dict[str, list[DocLine]] = {}
-    current: str | None = None
-    current_level = 0
-    for line in lines:
-        heading = _heading(line)
-        if heading:
-            level, text = heading
-            if current is not None and level <= current_level:
-                current = None
-            for span in _CODE_SPAN.findall(text):
-                for words in invocations_in(span):
-                    if words and current is None:
-                        current, current_level = words[0], level
-                        sections.setdefault(current, [])
+def _sections(doc: _Outline) -> dict[str, tuple[int, float]]:
+    """Top-level name -> the line range of its ``ouroboros <name>`` heading's section."""
+    headings = [block for block in doc.blocks if isinstance(block, _Heading)]
+    sections: dict[str, tuple[int, float]] = {}
+    for position, heading in enumerate(headings):
+        name = next(
+            (words[0] for span in heading.spans for words in invocations_in(span) if words),
+            None,
+        )
+        if name is None or name in sections:
             continue
-        if current is not None:
-            sections[current].append(line)
+        end = next(
+            (later.lineno for later in headings[position + 1 :] if later.level <= heading.level),
+            float("inf"),
+        )
+        sections[name] = (heading.lineno, end)
     return sections
 
 
 def documented_invocations(root: Any, lines: Iterable[DocLine]) -> Iterator[Invocation]:
-    """Every invocation, and every options-table row as one, in ``lines``."""
-    lines = list(lines)
-    for line, fragment in _code_fragments(lines):
-        for words in invocations_in(fragment):
-            yield Invocation(line.where(), words)
+    """Every invocation, and every options-table flag as one, in one doc's ``lines``."""
+    doc = outline(lines)
+    for code in doc.code:
+        for words in invocations_in(code.text):
+            yield Invocation(f"{doc.path}:{code.lineno}", words)
 
     # The nearest enclosing command heading owns a table row. A sub-heading
     # that is not a command (``### Brownfield Subcommands``) keeps the
     # enclosing one; a heading naming an unregistered command owns its rows so
     # they are not misattributed (``coverage_violations`` reports the heading).
+    # A row is an options row when its first cell's first code span is a flag.
     stack: list[tuple[int, tuple[str, ...] | None]] = []
-    for line in lines:
-        heading = _heading(line)
-        if heading:
-            level, text = heading
-            while stack and stack[-1][0] >= level:
+    for block in doc.blocks:
+        if isinstance(block, _Heading):
+            while stack and stack[-1][0] >= block.level:
                 stack.pop()
-            stack.append((level, _heading_command(root, text)))
+            stack.append((block.level, _heading_command(root, block)))
             continue
-        if line.in_code_block or not line.text.startswith("| `-"):
+        if not block.first_cell or not block.first_cell[0].startswith("-"):
             continue
         owner = next((command for _, command in reversed(stack) if command is not None), ())
         if resolve(root, owner).path != owner:
             continue
         # One invocation per flag: in ``-o, --output TEXT`` the second flag is
         # not the value of the first.
-        for span in _CODE_SPAN.findall(_first_cell(line.text)):
+        for span in block.first_cell:
             for flag in _TABLE_FLAG.findall(span):
-                yield Invocation(line.where(), (*owner, flag))
+                yield Invocation(f"{doc.path}:{block.lineno}", (*owner, flag))
 
 
 # --------------------------------------------------------------------------
@@ -389,20 +466,19 @@ def documented_invocations(root: Any, lines: Iterable[DocLine]) -> Iterator[Invo
 
 
 def coverage_violations(
-    root: Any, aliases: Mapping[str, str], lines: Iterable[DocLine], doc: str
+    root: Any, aliases: Mapping[str, str], lines: Iterable[DocLine], doc_name: str
 ) -> list[str]:
     """Commands with no section, aliases their section omits, unregistered headings."""
-    lines = list(lines)
-    sections = _sections(lines)
+    doc = outline(lines)
+    sections = _sections(doc)
     violations: list[str] = []
 
-    for line in lines:
-        heading = _heading(line)
-        command = _heading_command(root, heading[1]) if heading else None
+    for block in doc.blocks:
+        command = _heading_command(root, block) if isinstance(block, _Heading) else None
         if command is not None and resolve(root, command).path != command:
             shown = " ".join((PROGRAM, *command))
             violations.append(
-                f"{line.where()}: `{shown}` — heading names a command that is not "
+                f"{doc.path}:{block.lineno}: `{shown}` — heading names a command that is not "
                 f"registered; rename it to the command `{PROGRAM} --help` lists, or remove it"
             )
 
@@ -413,19 +489,21 @@ def coverage_violations(
         if canonical is None:
             if name not in sections:
                 violations.append(
-                    f"{doc}:1: `{PROGRAM} {name}` — registered command has no section; add "
-                    f"a `## \\`{PROGRAM} {name}\\`` section written from "
+                    f"{doc_name}:1: `{PROGRAM} {name}` — registered command has no section; "
+                    f"add a `## \\`{PROGRAM} {name}\\`` section written from "
                     f"`{PROGRAM} {name} --help`"
                 )
             continue
+        start, end = sections.get(canonical, (0, 0))
         shows_alias = any(
             words[:1] == (name,)
-            for _, fragment in _code_fragments(sections.get(canonical, []))
-            for words in invocations_in(fragment)
+            for code in doc.code
+            if start < code.lineno < end
+            for words in invocations_in(code.text)
         )
         if not shows_alias:
             violations.append(
-                f"{doc}:1: `{PROGRAM} {name}` — alias of `{PROGRAM} {canonical}` that its "
+                f"{doc_name}:1: `{PROGRAM} {name}` — alias of `{PROGRAM} {canonical}` that its "
                 f"section never shows; show `{PROGRAM} {name}` in the "
                 f"`{PROGRAM} {canonical}` section"
             )
@@ -724,17 +802,22 @@ def test_options_tables_bind_to_the_enclosing_command(synthetic, tmp_path) -> No
 |---|---|
 | `-f, --fast` | ok |
 | `--cache/--no-cache` | ok |
-| `--out [dist|build]` | ok: a pipe inside code does not end the cell |
+| `--out [dist\\|build]` | ok: an escaped pipe does not end the cell |
 | `-o, --oops TEXT` | `-o` takes a value, but `--oops` is still checked |
 | `--slow` | unknown |
+| `OUROBOROS_X` | not an options row |
 
 ### `init start`
 
+| Option | Description |
+|---|---|
 | `--resume TEXT` | ok |
 | `--fast` | belongs to build |
 
 ### `init frobnicate`
 
+| Option | Description |
+|---|---|
 | `--anything` | under an unregistered heading: reported by coverage instead |
 """
     violations = _flags(synthetic, tmp_path, text)
@@ -743,8 +826,72 @@ def test_options_tables_bind_to_the_enclosing_command(synthetic, tmp_path) -> No
         ["6", " `--fast`"],
         ["17", " `--oops`"],
         ["18", " `--slow`"],
-        ["23", " `--fast`"],
+        ["26", " `--fast`"],
     ]
+
+
+def test_options_rows_are_found_however_the_markdown_is_written(synthetic, tmp_path) -> None:
+    # Each row renders as a table row, so each first-cell flag is checked.
+    text = """\
+## `ouroboros build`
+
+Option | Description
+--- | ---
+**`--bold`** | styled first cell
+   | `--indented` | indented row
+`--no-pipes` | no leading pipe
+|`--tight`|no padding|
+| *`-z`*, `--fast` | short flag in emphasis, then a valid one |
+
+| `--not-a-table` | no delimiter row, so this is a paragraph, not a row |
+"""
+    violations = _flags(synthetic, tmp_path, text)
+
+    assert [v.split(" — ")[0].rsplit(":", 2)[1:] for v in violations] == [
+        ["5", " `--bold`"],
+        ["6", " `--indented`"],
+        ["7", " `--no-pipes`"],
+        ["8", " `--tight`"],
+        ["9", " `-z`"],
+    ]
+
+
+def test_flags_in_any_code_the_renderer_shows(synthetic, tmp_path) -> None:
+    text = """\
+Run `ouroboros build
+--wrapped` or ``ouroboros build --doubled``.
+
+    ouroboros build --indented-code
+
+> Note:
+>
+> ```bash
+> ouroboros build --quoted
+> ```
+"""
+    violations = _flags(synthetic, tmp_path, text)
+
+    assert [v.split(" — ")[0].rsplit(":", 2)[1:] for v in violations] == [
+        ["1", " `--wrapped`"],
+        ["2", " `--doubled`"],
+        ["4", " `--indented-code`"],
+        ["9", " `--quoted`"],
+    ]
+
+
+def test_corpus_ignore_markers_still_apply(synthetic, tmp_path) -> None:
+    text = """\
+## `ouroboros build`
+
+<!-- docs-drift: ignore-start -->
+| Option | Description |
+|---|---|
+| `--legacy` | a deliberate counter-example |
+<!-- docs-drift: ignore-end -->
+
+`ouroboros build --gone` <!-- docs-drift: ignore -->
+"""
+    assert _flags(synthetic, tmp_path, text) == []
 
 
 def test_flags_follow_line_continuations(synthetic, tmp_path) -> None:
