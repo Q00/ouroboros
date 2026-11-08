@@ -20,6 +20,13 @@ import time
 _CACHE_DIR = Path.home() / ".ouroboros"
 _CACHE_FILE = _CACHE_DIR / "version-check-cache.json"
 _CACHE_TTL = 86400  # 24 hours
+# Wall-clock bound on one PyPI fetch. SessionStart's host timeout is 5 s
+# (hooks/hooks.json); giving up at 2.5 s leaves the rest for interpreter start
+# and the cache writes, so a failure is recorded instead of the hook being killed.
+_FETCH_DEADLINE = 2.5
+# After a failed fetch, later sessions skip PyPI for this long instead of each
+# paying the deadline again.
+_FAILURE_BACKOFF = 3600  # 1 hour
 
 
 @contextmanager
@@ -148,7 +155,7 @@ def _get_latest_from_pypi(
         return None
 
     resp = urllib.request.urlopen(  # noqa: S310
-        "https://pypi.org/pypi/ouroboros-ai/json", timeout=5, context=ctx
+        "https://pypi.org/pypi/ouroboros-ai/json", timeout=_FETCH_DEADLINE, context=ctx
     )
     data = json.loads(resp.read())
 
@@ -165,11 +172,82 @@ def _get_latest_from_pypi(
     return max(candidates)[1]
 
 
+def _get_latest_within_deadline(*, include_prerelease: bool) -> str | None:
+    """Run ``_get_latest_from_pypi`` with a wall-clock bound.
+
+    urllib's ``timeout`` bounds each socket operation, not the request: name
+    resolution is unbounded and every resolved address (pypi.org has four) gets
+    its own connect timeout. The fetch runs on a daemon thread that is abandoned
+    at ``_FETCH_DEADLINE``; it only fetches, so it never writes the cache.
+    """
+    import threading
+
+    outcome: dict = {}
+
+    def _fetch() -> None:
+        try:
+            outcome["latest"] = _get_latest_from_pypi(include_prerelease=include_prerelease)
+        except BaseException as exc:  # re-raised in the calling thread below
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=_fetch, name="ouroboros-version-check", daemon=True)
+    worker.start()
+    worker.join(_FETCH_DEADLINE)
+    if "latest" in outcome:
+        return outcome["latest"]
+    if "error" in outcome:
+        raise outcome["error"]
+    raise TimeoutError(f"PyPI did not answer within {_FETCH_DEADLINE} s")
+
+
+def _failure_is_recent(stamp: object) -> bool:
+    """True when *stamp* is a failed-fetch time within ``_FAILURE_BACKOFF``."""
+    if not isinstance(stamp, (int, float)):
+        return False
+    return 0 <= time.time() - stamp < _FAILURE_BACKOFF
+
+
+def _record_fetch_failure(cache_key: str) -> None:
+    """Stamp a failed fetch of *cache_key*, keeping every other cache entry.
+
+    Only ``<cache_key>_failed_at`` is written: no version value and no
+    ``*_checked_at``/``timestamp`` freshness stamp, so no reader can mistake a
+    failure for a fresh result.
+    """
+    try:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        with _cache_write_lock():
+            cache: dict = {}
+            try:
+                if _CACHE_FILE.exists():
+                    loaded = json.loads(_CACHE_FILE.read_text())
+                    if isinstance(loaded, dict):
+                        cache = loaded
+            except Exception:
+                pass
+            cache[f"{cache_key}_failed_at"] = time.time()
+            payload = json.dumps(cache)
+            fd, tmp_path = tempfile.mkstemp(dir=_CACHE_DIR, suffix=".tmp")
+            try:
+                with open(fd, "w") as handle:
+                    handle.write(payload)
+                Path(tmp_path).replace(_CACHE_FILE)
+            except Exception:
+                Path(tmp_path).unlink(missing_ok=True)
+                raise
+    except Exception:
+        print("ouroboros: failed to write version cache", file=sys.stderr)
+
+
 def get_latest_version(*, current: str | None = None) -> str | None:
     """Fetch the latest version from PyPI, with 24h cache.
 
     If the currently installed version is a pre-release, also check for
     newer pre-releases (PyPI info.version only returns latest stable).
+
+    The fetch is bounded by ``_FETCH_DEADLINE``. A failed fetch returns None
+    and is stamped per channel, and PyPI is not asked again for that channel
+    until ``_FAILURE_BACKOFF`` has passed or a fresh value is cached.
     """
     include_pre = False
     if current:
@@ -197,12 +275,16 @@ def get_latest_version(*, current: str | None = None) -> str | None:
                 cached = cache.get(cache_key)
                 if cached:
                     return cached
+            # A recent failure for this channel: skip PyPI rather than pay
+            # the fetch deadline again on every session start.
+            if _failure_is_recent(cache.get(f"{cache_key}_failed_at")):
+                return None
     except Exception:
         pass
 
     # Fetch from PyPI
     try:
-        latest = _get_latest_from_pypi(include_prerelease=include_pre)
+        latest = _get_latest_within_deadline(include_prerelease=include_pre)
 
         # Cache the result (atomic write to avoid race conditions)
         try:
@@ -239,6 +321,7 @@ def get_latest_version(*, current: str | None = None) -> str | None:
 
         return latest
     except Exception:
+        _record_fetch_failure(cache_key)
         return None
 
 
