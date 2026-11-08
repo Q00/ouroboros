@@ -1665,6 +1665,43 @@ class TestEventStoreReplay:
             "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
         ]
 
+    async def test_replay_event_types_equals_full_replay_filtered_in_python(
+        self, event_store: EventStore
+    ) -> None:
+        """The SQL type filter keeps the exact ``(timestamp, id)`` order of a full replay."""
+        base = datetime(2026, 11, 1, tzinfo=UTC)
+        types = ["test.started", "test.progress", "test.done", "test.other"]
+        events = [
+            BaseEvent(
+                # Ids and timestamps are scrambled against insertion (rowid) order,
+                # with many timestamp ties so the id tie-break is exercised too.
+                id=f"{(index * 37) % 101:04d}-filtered",
+                type=types[index % len(types)],
+                aggregate_type="test",
+                aggregate_id="agg-filter",
+                timestamp=base + timedelta(seconds=(index * 7) % 10),
+                data={"index": index},
+            )
+            for index in range(60)
+        ]
+        # The same event types on other aggregates must stay invisible.
+        events.append(BaseEvent(type="test.done", aggregate_type="test", aggregate_id="agg-x"))
+        events.append(BaseEvent(type="test.done", aggregate_type="x", aggregate_id="agg-filter"))
+        await event_store.append_batch(events)
+
+        full = await event_store.replay("test", "agg-filter")
+        assert len(full) == 60
+        for wanted in (
+            {"test.started", "test.done"},
+            frozenset({"test.progress"}),
+            {"test.done", "test.missing"},
+            set(types),
+            {"test.missing"},
+            set(),
+        ):
+            filtered = await event_store.replay("test", "agg-filter", event_types=wanted)
+            assert filtered == [event for event in full if event.type in wanted]
+
     async def test_replay_filters_by_aggregate_type(self, event_store: EventStore) -> None:
         """replay() only returns events for the specified aggregate type."""
         event1 = BaseEvent(
