@@ -729,7 +729,7 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         "subprocess.run",
         129,
         21,
-    ): "implicit inherit; `ps -p <pid> -o lstart=`.",
+    ): "os.environ copy with only LC_ALL=C added, so `ps -p <pid> -o lstart=` prints the C-locale date its strptime parses; literal argv, no shell; 3s timeout; failure returns None.",
     (
         "src/ouroboros/orchestrator/n_version_tournament.py",
         "RunWorktreeManager._git",

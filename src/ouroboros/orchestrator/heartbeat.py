@@ -131,6 +131,9 @@ def _get_process_start_time(pid: int) -> float | None:
                 capture_output=True,
                 text=True,
                 timeout=3,
+                # ps localizes lstart (e.g. "2026년 11월  9일 월요일 ..." under
+                # ko_KR); the strptime below needs the C-locale form.
+                env={**os.environ, "LC_ALL": "C"},
             )
             if result.returncode == 0 and result.stdout.strip():
                 from datetime import datetime
