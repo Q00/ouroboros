@@ -367,16 +367,48 @@ def _runtime_messages_support_file_claim(
         return False
     return any(
         message.tool_name in {"Edit", "Write", "NotebookEdit"}
-        and _runtime_message_has_success_evidence(
+        and _edit_tool_message_supports_path_claim(
+            raw_claim,
             message,
             messages=messages,
             index=index,
-        )
-        and any(
-            _file_claim_matches_runtime_path(raw_claim, path, task_cwd=None)
-            for path in _runtime_message_file_path_values(message)
+            task_cwd=None,
         )
         for index, message in enumerate(messages)
+    )
+
+
+def _edit_tool_message_supports_path_claim(
+    claim: str,
+    message: AgentMessage,
+    *,
+    messages: tuple[AgentMessage, ...],
+    index: int,
+    task_cwd: str | None,
+) -> bool:
+    """Return True when an edit tool call names ``claim`` and succeeded.
+
+    Both checks are pure, so their order cannot change the verdict. The path
+    comparison runs first because it reads only this message, while the
+    success check scans the whole transcript: checking success first made
+    every claim cost one transcript scan per edit call.
+    """
+    try:
+        names_claim = any(
+            _file_claim_matches_runtime_path(claim, path, task_cwd=task_cwd)
+            for path in _runtime_message_file_path_values(message)
+        )
+    except RecursionError:
+        # The path walk recurses into the tool input. Success used to be
+        # checked first, so an input nested past the recursion limit raised
+        # only when the call had succeeded; keep that.
+        if not _runtime_message_has_success_evidence(message, messages=messages, index=index):
+            return False
+        raise
+    return names_claim and _runtime_message_has_success_evidence(
+        message,
+        messages=messages,
+        index=index,
     )
 
 
@@ -413,13 +445,12 @@ def _runtime_message_supports_file_reference(
             index=index,
         ) and _runtime_message_has_success_evidence(message, messages=messages, index=index)
     if message.tool_name in {"Edit", "Write", "NotebookEdit"}:
-        return _runtime_message_has_success_evidence(
+        return _edit_tool_message_supports_path_claim(
+            reference,
             message,
             messages=messages,
             index=index,
-        ) and any(
-            _file_claim_matches_runtime_path(reference, path, task_cwd=task_cwd)
-            for path in _runtime_message_file_path_values(message)
+            task_cwd=task_cwd,
         )
     text = _runtime_message_file_proof_text(message)
     return _text_supports_file_mutation_reference(text, normalized_reference)
