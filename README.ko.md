@@ -575,6 +575,12 @@ Gen 3: {Task, Priority, Status, DueDate}     → similarity 1.00 → CONVERGED �
 > 호스트별 설정이며 MCP 등록 절차가 모든 호스트에서 동일한 것은 아닙니다. Claude Code
 > guided setup은 `ooo setup`, 다른 런타임 설정은 해당 CLI 절차를 사용하세요.
 
+> 표준 MCP 경로에서 Git 프로젝트에 `ooo run`을 요청하기 전, 프로젝트 터미널에서
+> 읽기 전용 `git rev-parse --verify HEAD`로 커밋이 있는지 확인하세요. 표준 MCP run은
+> 기본적으로 worktree를 요청하며, `git init`만 하고 커밋하지 않은 저장소에는 그
+> worktree를 만들 기준 `HEAD`가 없습니다 ([MCP 기본값](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/mcp/tools/execution_handlers.py#L1430),
+> [worktree 확인](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/core/worktree.py#L371-L388)). 새로 `git init`한 저장소에서 이 확인이 실패하면 파일을 검토하고 초기 커밋을 할지와 무엇을 포함할지 직접 판단하세요. 이 준비 단계에서 에이전트가 임의로 커밋하거나 파일을 바꾸게 하지 마세요. 이 조건은 표준 MCP worktree 경로에만 해당하며 standalone CLI, 비Git 프로젝트, worktree 비활성화, OpenCode에는 일반화하지 않습니다.
+
 | 명령어 | 기능 |
 |:--------|:-------------|
 | `ooo setup` | 호스트별 guided 설정; 다른 런타임은 해당 CLI 설정 절차 사용 |
