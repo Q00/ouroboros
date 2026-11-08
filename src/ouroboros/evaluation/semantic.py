@@ -11,6 +11,8 @@ The SemanticEvaluator uses the LiteLLM adapter for LLM calls.
 from dataclasses import dataclass, field
 import json
 import math
+import threading
+from typing import TYPE_CHECKING
 
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
@@ -28,10 +30,39 @@ from ouroboros.providers.base import CompletionConfig, LLMAdapter, Message, Mess
 
 # Default model for semantic evaluation (Standard tier)
 # Can be overridden via SemanticConfig.model
-DEFAULT_SEMANTIC_MODEL = get_llm_model_for_role(
-    "semantic_evaluation",
-    backend=get_llm_backend_for_role("semantic_evaluation"),
-)
+#
+# Resolved from configuration on first access rather than at import, so importing
+# this module (the CLI does at startup) parses no config.yaml. The first value is
+# kept for the rest of the process, like the import-time constant it replaces.
+if TYPE_CHECKING:
+    DEFAULT_SEMANTIC_MODEL: str
+
+_DEFAULT_SEMANTIC_MODEL_LOCK = threading.Lock()
+
+
+def _default_semantic_model() -> str:
+    with _DEFAULT_SEMANTIC_MODEL_LOCK:
+        namespace = globals()
+        if "DEFAULT_SEMANTIC_MODEL" not in namespace:
+            # Once bound, module attribute lookup no longer reaches __getattr__.
+            namespace["DEFAULT_SEMANTIC_MODEL"] = get_llm_model_for_role(
+                "semantic_evaluation",
+                backend=get_llm_backend_for_role("semantic_evaluation"),
+            )
+        value: str = namespace["DEFAULT_SEMANTIC_MODEL"]
+        return value
+
+
+if not TYPE_CHECKING:  # hidden from type checkers so unknown names stay errors
+
+    def __getattr__(name: str) -> str:
+        if name == "DEFAULT_SEMANTIC_MODEL":
+            return _default_semantic_model()
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    def __dir__() -> list[str]:
+        return sorted({*globals(), "DEFAULT_SEMANTIC_MODEL"})
+
 
 # JSON schema for structured semantic evaluation output
 SEMANTIC_RESULT_SCHEMA: dict[str, object] = {
