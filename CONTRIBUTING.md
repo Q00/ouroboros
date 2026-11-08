@@ -891,7 +891,11 @@ When a reviewer or contributor identifies a documentation problem, classify it b
 
 ### Documentation Decay Detection
 
-To catch doc drift during development, reviewers should check:
+Drift that can be detected mechanically is moving into pytest checks under
+`tests/unit/docs/`, which run in the required test job. The policy, the
+corpus they scan, and what to do when one fails are in
+[Docs Freshness](./docs/contributing/docs-freshness.md). Until a check below is
+automated there, reviewers should check it by hand:
 
 1. **Flag parity**: Run `ouroboros <cmd> --help` and compare every flag to `docs/cli-reference.md`. Any mismatch is a documentation bug.
 2. **Placeholder honesty**: If a command's implementation body is `# Placeholder implementation`, the corresponding doc entry must say `[Placeholder — not yet implemented]`.
@@ -911,9 +915,6 @@ uv run ouroboros status --help
 # Find stale config key references
 grep -r "opencode_permission_mode\|runtime_backend\|codex_cli_path" docs/
 
-# Find any 'opencode' reference in docs that lacks the [Not yet available] marker
-grep -rn "opencode" docs/ | grep -v "Not yet available" | grep -v "semantic-link-rot" | grep -v "cli-audit"
-
 # Check TUI key bindings are documented
 grep -rn "BINDINGS" src/ouroboros/tui/screens/ | grep -v "__pycache__"
 
@@ -932,6 +933,7 @@ ls skills/*.yaml 2>/dev/null || echo "No skill YAML files found"
 - [Key Patterns](./docs/contributing/key-patterns.md) - Core patterns with code examples
 - [CI Gates and Branch Protection](./docs/contributing/ci-gates.md) - What CI enforces, how to reproduce it locally, and how releases land
 - [Issue Reference Report](./docs/contributing/issue-reference-report.md) - Read-only, manually triggered evidence for issue review
+- [Docs Freshness](./docs/contributing/docs-freshness.md) - How docs drift is detected, and what to do when a docs check fails
 
 ---
 

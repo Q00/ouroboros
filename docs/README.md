@@ -72,6 +72,7 @@ replayable execution contract on your choice of runtime backend.
 - [The Development Loop](./contributing/developing.md) - Run your own code, not the published package: local MCP, config, state, fastest verification per change type
 - [Review Conventions](./contributing/review-conventions.md) - What the review bot demands, with evidence from real reviews
 - [CI Gates and Branch Protection](./contributing/ci-gates.md) - Required checks, local reproduction, release order
+- [Docs Freshness](./contributing/docs-freshness.md) - Verify, generate, trigger, quarantine: how docs drift is caught and what to do when a docs check fails
 - [Architecture for Contributors](./contributing/architecture-overview.md) - How modules connect
 - [Source Tour](./contributing/source-tour.md) - Three core mechanisms mapped to file:line coordinates, for teardown writers and reviewers
 - [Agent OS Kernel Terminology](./contributing/agent-os-kernel-terminology.md) - Locked vocabulary for `AgentRuntimeContext`, `ControlPlane`, `ControlContract`, `Directive`, `ControlBus`, and `IOJournal`
