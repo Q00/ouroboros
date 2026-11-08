@@ -401,7 +401,7 @@ async def test_calibration_turn_rephrase_failure_is_truthful(rephrase_result) ->
     # Create a fake state with a pending question
     mock_state = AsyncMock()
     mock_state.rounds = [
-        AsyncMock(question="What idempotency guarantee is required?", user_response=None)
+        AsyncMock(question="What idempotency guarantee is required?", user_response=None, batch_id=None)
     ]
     mock_state.interview_id = "test-session"
 
@@ -439,7 +439,7 @@ async def test_calibration_turn_rephrase_success_shows_plainer() -> None:
 
     mock_state = AsyncMock()
     mock_state.rounds = [
-        AsyncMock(question="What idempotency guarantee is required?", user_response=None)
+        AsyncMock(question="What idempotency guarantee is required?", user_response=None, batch_id=None)
     ]
     mock_state.interview_id = "test-session"
 
@@ -469,7 +469,7 @@ class _LegacyEngineWithoutRephrase:
     async def load_state(self, session_id: str) -> Any:
         mock_state = AsyncMock()
         mock_state.rounds = [
-            AsyncMock(question="What idempotency guarantee is required?", user_response=None)
+            AsyncMock(question="What idempotency guarantee is required?", user_response=None, batch_id=None)
         ]
         return Result.ok(mock_state)
 
@@ -490,7 +490,7 @@ async def test_calibration_turn_legacy_engine_without_rephrase_no_attributeerror
     # Create a fake state with a pending question
     mock_state = AsyncMock()
     mock_state.rounds = [
-        AsyncMock(question="What idempotency guarantee is required?", user_response=None)
+        AsyncMock(question="What idempotency guarantee is required?", user_response=None, batch_id=None)
     ]
 
     engine = _LegacyEngineWithoutRephrase()
@@ -527,7 +527,7 @@ async def test_calibration_turn_engine_with_rephrase_still_works() -> None:
 
     mock_state = AsyncMock()
     mock_state.rounds = [
-        AsyncMock(question="What idempotency guarantee is required?", user_response=None)
+        AsyncMock(question="What idempotency guarantee is required?", user_response=None, batch_id=None)
     ]
 
     mock_engine = AsyncMock()
@@ -561,7 +561,7 @@ async def test_calibration_turn_engine_rephrase_is_none_is_truthful() -> None:
 
     mock_state = AsyncMock()
     mock_state.rounds = [
-        AsyncMock(question="What PKCE flow variant do you need?", user_response=None)
+        AsyncMock(question="What PKCE flow variant do you need?", user_response=None, batch_id=None)
     ]
 
     mock_engine = AsyncMock()

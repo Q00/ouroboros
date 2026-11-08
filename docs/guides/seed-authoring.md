@@ -9,6 +9,25 @@ doc_metadata:
 
 The Seed is Ouroboros's immutable specification -- a "constitution" that drives execution, evaluation, and drift control. This guide covers the YAML structure, field semantics, and best practices for writing effective seeds.
 
+### Structured first question for MCP hosts
+
+An in-process MCP host may start `ouroboros_interview` with
+`structured_first_question: true`. The first response contains
+`meta.first_question_presentation`: one question, two to four suggested choices,
+and a direct-input label. These choices are hypotheses until the user selects
+one. To record an explicit choice, send `session_id` and the 1-based integer
+`selected_first_choice`, without `answer`. To record a different or numeric
+free-text answer, send `session_id` and `answer` instead. A plain text `"1"` is
+always an answer, not a selection. Ask the user when their intent is unclear.
+
+The same pending presentation is returned after a session resume. Invalid
+provider output is reported as an error without echoing it; no extra provider
+call is made to repair it. This experimental path covers only the first question
+and single selection in the in-process mode. Later questions use the existing
+text flow; OpenCode plugin mode, multiple selections, and mixed-version writers
+are not supported by this option. The ordinary interview path is unchanged when
+the option is omitted.
+
 ## Seed YAML Schema
 
 ```yaml

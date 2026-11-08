@@ -92,6 +92,67 @@ MCP generates the questions, keeps state, and scores ambiguity; it cannot read c
    ```
    Returns a session ID and the first question. `confused_terms` and `references` are structured adapter context, not requirements. They MUST NOT alter the first question; later, glossary help covers only explicitly confused terms and references serve only contrast questions. Do not infer them from vocabulary density or fetch referenced URLs/files. On a later answer, include them only when the user introduces a new reference or asks what a term means; product decisions stay in the answer.
 
+For an explicitly requested select-all decision, if the discovered tool schema supports
+both `structured_first_question` and `multi_select_first_question`, an in-process start
+may set both to true. Treat `meta.first_question_presentation.choices` as unconfirmed
+suggestions, never as the user's decisions. When `multi_select` is true, show the question
+and all choices in the user's language, explicitly explain that zero, one, or multiple may
+be selected, and preserve the direct-input escape. In text-only hosts label the choices
+`a`, `b`, `c`, `d` in their returned order; explicitly ask for comma-separated labels or
+`-` for none. Pass an exact confirmed label response in `selected_first_choices_text`,
+not in `answer`. For a native multi-select host, pass its confirmed 1-based indices in
+`selected_first_choices` (an empty array means none). Ordinary free text, including numeric
+or comma-containing text, goes in `answer` unchanged. Never infer a choice from an
+ambiguous response: ask the person to clarify. On resume use the persisted presentation
+returned by the server; do not invent or re-order choices. If the server does not support
+this opt-in or reports a normal text question, use the existing free-text path.
+
+**Optional first-question batch:** Only if the person explicitly asks for several
+questions at once, and the tool schema offers `structured_first_batch`, start in
+in-process mode with that flag. The response is a *proposal*, not established
+independence or user intent. Present every question, its a-d choices, direct-input
+escape and suggested answer as a hypothesis. Ask the person to confirm that the
+questions are independent; do not accept an approval inferred from the model or
+from silence. Where the host permits, collect that confirmation and their answers
+in the same user interaction. If they do not confirm, send `batch_reject: true` with the returned
+`session_id` and exact `batch_confirm_digest`, then resume the normal interview.
+When the host does not expose response metadata, take the labelled Session ID,
+Batch digest and question IDs from the server's text response instead.
+
+If a native host has a maximum number of questions per presentation, pass its
+capacity (1–5) as `batch_page_size` on start and repeat it on resume and answer
+calls. Display the returned `meta.question_pages` in order, without editing or
+dropping questions, and use each item's `batch_number` as its global number across
+all pages. A page is only a presentation group: show the entire batch before
+requesting independence confirmation, and retain the same batch digest and
+question IDs for all pages. If a native interface requires an answer before the
+entire batch can be reviewed, use the complete text fallback instead. Hosts
+without metadata can also display the complete text. On partial-answer resume,
+use `answered_question_ids` to identify already recorded items: show them as
+answered if needed for context, but do not ask the person to answer them again.
+
+After explicit confirmation, collect answers by question. In text mode display
+numbered questions with a-d options and accept `1: a / 2: a,c / 3: "free text"`;
+numeric choice labels are also accepted (for example `1: 2 / 2: 1,3`), as is
+unquoted descriptive free text. Quote free text as JSON when it is a choice label,
+a number, begins with a single letter or number followed by a comma, or contains a
+`/` followed by a question number and colon; otherwise it may be rejected or
+interpreted as a choice or another answer. Use `-` only for none on a
+multi-select question. Ask the person to clarify ambiguous or invalid input;
+never turn an out-of-range or mixed-format choice into an inferred answer.
+Send the exact input in `batch_answers_text`, together with the session ID, exact
+`batch_confirm_digest`, and `batch_independence_confirmed: true`. A native host
+can instead send `batch_answers` with stable `question_id` and exactly one of
+`answer` or `selected_choices`; never mix both formats or fabricate an answer.
+Partial answers are allowed. Resume the session to retrieve the same questions,
+IDs, digest and answered IDs. A repeat is safe only when the recorded answer is
+identical; on a conflict reload and ask the person. If the person discovers a
+dependency or wants to abandon pending questions, send `batch_reject: true` with
+the same digest. Already recorded answers remain, and unanswered proposals are
+discarded; resume normally. When `batch_complete` is true, resume to continue
+one question at a time. Editing a recorded batch answer is not supported by this
+partial protocol. If the schema or opt-in is unavailable, use the normal path.
+
 2. **Route each question** through the PATHs below. First check the response:
    - `meta.status="parent_question_required"` or `meta.ask_user_directly=true`: a normal turn, not a failure. Follow the response text: ask one Socratic question yourself, never mention MCP, provider failures, or `reason_code`, and send the user's answer with `last_question` set to the exact question you asked.
    - `meta.question_advisory_request`: run the question-first advisory fan-out below.

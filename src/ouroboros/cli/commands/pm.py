@@ -424,6 +424,11 @@ async def _run_pm_interview(
             print_error(f"Failed to resume session: {state_result.error}")
             raise typer.Exit(code=1)
         state = state_result.value
+        from ouroboros.interview_adapters.independent_batch import has_pending_batch
+
+        if has_pending_batch(state):
+            print_error("This interview has a pending question batch; resume it in the MCP host.")
+            raise typer.Exit(code=1)
 
         # Restore PM-specific metadata (deferred items, decide-later, etc.)
         data_dir = Path.home() / ".ouroboros" / "data"
@@ -538,7 +543,7 @@ async def _run_pm_interview(
         save_result = await engine.save_state(state)
         if isinstance(save_result, Result) and save_result.is_err:
             print_error(f"Failed to save state: {save_result.error}")
-            break
+            raise typer.Exit(code=1)
         _save_cli_pm_meta(state.interview_id, engine)
 
         user_response = await multiline_prompt_async("Your response")
@@ -561,7 +566,7 @@ async def _run_pm_interview(
             save_result = await engine.save_state(state)
             if save_result.is_err:
                 print_error(f"Failed to save completed state: {save_result.error}")
-                break
+                raise typer.Exit(code=1)
             _save_cli_pm_meta(state.interview_id, engine)
 
             decide_later_summary = engine.format_decide_later_summary()
@@ -595,7 +600,7 @@ async def _run_pm_interview(
             save_result = await engine.save_state(state)
             if isinstance(save_result, Result) and save_result.is_err:
                 print_error(f"Failed to save state: {save_result.error}")
-                break
+                raise typer.Exit(code=1)
             _save_cli_pm_meta(state.interview_id, engine)
             continue
         if classification == "deferred" and _lower in (
@@ -610,7 +615,7 @@ async def _run_pm_interview(
             save_result = await engine.save_state(state)
             if isinstance(save_result, Result) and save_result.is_err:
                 print_error(f"Failed to save state: {save_result.error}")
-                break
+                raise typer.Exit(code=1)
             _save_cli_pm_meta(state.interview_id, engine)
             continue
 
@@ -632,7 +637,7 @@ async def _run_pm_interview(
             save_result = await engine.save_state(state)
             if save_result.is_err:
                 print_error(f"Failed to save completed state: {save_result.error}")
-                break
+                raise typer.Exit(code=1)
             _save_cli_pm_meta(state.interview_id, engine)
 
             decide_later_summary = engine.format_decide_later_summary()
@@ -650,7 +655,7 @@ async def _run_pm_interview(
         save_result = await engine.save_state(state)
         if isinstance(save_result, Result) and save_result.is_err:
             print_error(f"Failed to save state: {save_result.error}")
-            break
+            raise typer.Exit(code=1)
         _save_cli_pm_meta(state.interview_id, engine)
 
     # Show decide-later summary at interview end

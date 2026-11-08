@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ouroboros.core.types import Result
+from ouroboros.interview_adapters.first_question import FirstQuestionPresentation
 from ouroboros.interview_calibration import infer_interview_calibration
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.types import (
@@ -53,6 +54,7 @@ async def handle_interview_calibration_turn(
     calibration = infer_interview_calibration(evidence)
     pending_question: str | None = None
     rephrased_question: str | None = None
+    pending_presentation: Any | None = None
     if isinstance(session_id, str) and session_id.strip():
         engine, _ = handler._create_interview_engine()
         try:
@@ -62,10 +64,23 @@ async def handle_interview_calibration_turn(
                     MCPToolError(str(load_result.error), tool_name="ouroboros_interview")
                 )
             state = load_result.value
+            from ouroboros.mcp.tools.interview_batch import pending_batch
+
+            if pending_batch(state):
+                return Result.err(
+                    MCPToolError(
+                        "Finish or discard the pending batch before calibration",
+                        tool_name="ouroboros_interview",
+                    )
+                )
             if state.rounds and state.rounds[-1].user_response is None:
                 pending_question = state.rounds[-1].question
+                candidate = getattr(state.rounds[-1], "first_question_presentation", None)
+                pending_presentation = (
+                    candidate if isinstance(candidate, FirstQuestionPresentation) else None
+                )
                 rephrase_method = getattr(engine, "rephrase_pending_question", None)
-                if callable(rephrase_method):
+                if pending_presentation is None and callable(rephrase_method):
                     try:
                         rephrase_result = await rephrase_method(pending_question, calibration)
                         if rephrase_result.is_ok and isinstance(rephrase_result.value, str):
@@ -83,7 +98,8 @@ async def handle_interview_calibration_turn(
                             error_type=type(exc).__name__,
                         )
         finally:
-            if handler._owns_event_store:
+            active_calls = getattr(handler, "_active_owned_calls", 0)
+            if handler._owns_event_store and not (isinstance(active_calls, int) and active_calls > 0):
                 await handler.close()
 
     unknown_terms = ", ".join(calibration.unknown_terms) or "none explicitly extracted"
@@ -108,7 +124,7 @@ async def handle_interview_calibration_turn(
                 [
                     "",
                     "Rephrasing was not available. The pending question is unchanged:",
-                    pending_question,
+                    pending_presentation.render() if pending_presentation else pending_question,
                 ]
             )
     else:
@@ -124,6 +140,8 @@ async def handle_interview_calibration_turn(
         meta["session_id"] = session_id.strip()
     if pending_question is not None:
         meta["pending_question"] = pending_question
+    if pending_presentation is not None:
+        meta["first_question_presentation"] = pending_presentation.model_dump(mode="json")
     if rephrased_question is not None:
         meta["rephrased_question"] = rephrased_question
     return Result.ok(
