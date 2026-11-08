@@ -31,9 +31,6 @@ Not tool references, by rule rather than by a list of names:
 * the distribution's normalized name (``ouroboros_ai`` in wheel and dist-info
   names), read from pyproject.toml.
 
-``*`` or a trailing ``_`` makes a token a pattern (``ouroboros_*``,
-``ouroboros_start_``), valid when a registered tool matches it.
-
 Agents and skills
 -----------------
 ``ouroboros:<name>`` must name a bundled agent (``src/ouroboros/agents/<name>.md``)
@@ -42,11 +39,18 @@ identifiers are the ones ``ouroboros.router.registry.SkillDispatchRegistry``
 resolves for ``/ouroboros:<identifier>`` from ``skills/``: the directory name,
 the frontmatter ``name`` (``ouroboros-run`` for skills/run), and the alias
 fields. Both plugin manifests (.claude-plugin and .codex-plugin) point
-``skills`` at ``./skills/`` without renaming anything.
-``<name>``, ``{persona}``, and ``*`` are placeholders, valid when some agent or
-skill matches. Not references: a bare ``/ouroboros:`` namespace prefix, and
-``ouroboros:`` right after ``:`` (``plugin:ouroboros:ouroboros``, the host's
-MCP server id).
+``skills`` at ``./skills/`` without renaming anything. Not references: a bare
+``/ouroboros:`` namespace prefix, and ``ouroboros:`` right after ``:``
+(``plugin:ouroboros:ouroboros``, the host's MCP server id).
+
+Placeholders
+------------
+Both checks accept the same placeholders, through one matcher
+(``name_is_known``), so the two rule sets cannot drift apart: ``*`` stands for
+any run of name characters, ``<x>`` or ``{x}`` for a non-empty run, and a
+trailing ``_`` makes the token a prefix (``ouroboros_start_``,
+``ouroboros:{persona}``, ``/ouroboros:ouroboros-<name>``). A token with a
+placeholder is valid when at least one known name matches it.
 """
 
 from __future__ import annotations
@@ -56,6 +60,8 @@ from functools import cache
 import re
 import tomllib
 
+import pytest
+
 from ouroboros.mcp.tool_manifest import BUILTIN_TOOL_NAMES
 from ouroboros.router.registry import SkillDispatchRegistry
 from tests.unit.docs._corpus import REPO_ROOT, DocLine, corpus_files, iter_lines
@@ -63,19 +69,29 @@ from tests.unit.docs._corpus import REPO_ROOT, DocLine, corpus_files, iter_lines
 AGENTS_DIR = REPO_ROOT / "src" / "ouroboros" / "agents"
 SKILLS_DIR = REPO_ROOT / "skills"
 
+# Placeholder syntax shared by both checks; ``name_is_known`` gives it meaning.
+_PLACEHOLDER_SRC = r"\*|<[A-Za-z0-9_-]+>|\{[A-Za-z0-9_-]+\}"
+_PLACEHOLDER = re.compile(_PLACEHOLDER_SRC)
+# A name character inside a placeholder pattern. Tool names never contain
+# ``-``, so allowing it here changes no tool result.
+_FILL = "[A-Za-z0-9_-]"
+# Token bodies differ only in name characters: tool names have no ``-``, so a
+# tool token stops there (``ouroboros_interview``-based is the tool name).
+_TOOL_PART = rf"(?:[A-Za-z0-9_]|{_PLACEHOLDER_SRC})"
+_NAMESPACED_PART = rf"(?:[A-Za-z0-9_-]|{_PLACEHOLDER_SRC})"
+
 _QUALIFIED_TOOL = re.compile(
-    r"(?<![A-Za-z0-9_])mcp__(?:ouroboros|plugin_ouroboros_ouroboros)__([A-Za-z0-9_*]+)"
+    rf"(?<![A-Za-z0-9_])mcp__(?:ouroboros|plugin_ouroboros_ouroboros)__({_TOOL_PART}+)"
 )
 # ``.`` in the lookbehind skips key paths; ``_`` skips the tail of a qualified name.
-_BARE_TOOL = re.compile(r"(?<![A-Za-z0-9_.])ouroboros_[A-Za-z0-9_*]*")
+_BARE_TOOL = re.compile(rf"(?<![A-Za-z0-9_.])ouroboros_{_TOOL_PART}*")
 # ``name() {`` or ``function name`` (shell), ``def name(`` (Python).
 _DEFINED_FUNCTION = re.compile(
     r"^\s*(?:function\s+(ouroboros_[A-Za-z0-9_]+)\b"
     r"|(ouroboros_[A-Za-z0-9_]+)\s*\(\)\s*\{"
     r"|def\s+(ouroboros_[A-Za-z0-9_]+)\s*\()"
 )
-_NAMESPACED = re.compile(r"(?<![A-Za-z0-9_:-])ouroboros:([A-Za-z0-9_<>{}*-]+)")
-_NAME_PLACEHOLDER = re.compile(r"\*|<[^<>]+>|\{[^{}]+\}")
+_NAMESPACED = re.compile(rf"(?<![A-Za-z0-9_:-])ouroboros:({_NAMESPACED_PART}+)")
 
 _DRIFT_HINT = "or add <!-- docs-drift: ignore --> if the line names it on purpose"
 
@@ -112,26 +128,29 @@ def defined_functions(lines: Iterable[DocLine]) -> frozenset[str]:
     return frozenset(names)
 
 
-def _matches_any(token: str, placeholder: re.Pattern[str], fill: str, known: Iterable[str]) -> bool:
+def placeholder_pattern(token: str) -> re.Pattern[str] | None:
+    """Regex a known name must fully match, or ``None`` when ``token`` has no placeholder."""
+    if not (token.endswith("_") or _PLACEHOLDER.search(token)):
+        return None
     parts: list[str] = []
     last = 0
-    for match in placeholder.finditer(token):
+    for match in _PLACEHOLDER.finditer(token):
         parts.append(re.escape(token[last : match.start()]))
-        parts.append(fill)
+        parts.append(f"{_FILL}*" if match.group(0) == "*" else f"{_FILL}+")
         last = match.end()
     parts.append(re.escape(token[last:]))
     if token.endswith("_"):
-        parts.append("[A-Za-z0-9_]*")
-    pattern = re.compile("".join(parts))
-    return any(pattern.fullmatch(name) for name in known)
+        parts.append(f"{_FILL}*")
+    return re.compile("".join(parts))
 
 
-def tool_is_known(token: str, tools: frozenset[str]) -> bool:
-    if token in tools:
+def name_is_known(token: str, known: Iterable[str]) -> bool:
+    """The one matcher both checks use: an exact name, or a placeholder that matches one."""
+    names = frozenset(known)
+    if token in names:
         return True
-    if "*" in token or token.endswith("_"):
-        return _matches_any(token, re.compile(r"\*"), "[A-Za-z0-9_]*", tools)
-    return False
+    pattern = placeholder_pattern(token)
+    return pattern is not None and any(pattern.fullmatch(name) for name in names)
 
 
 def find_tool_violations(
@@ -142,7 +161,7 @@ def find_tool_violations(
         tokens = [m.group(1) for m in _QUALIFIED_TOOL.finditer(line.text)]
         tokens += [m.group(0) for m in _BARE_TOOL.finditer(line.text)]
         for token in tokens:
-            if token in not_tools or tool_is_known(token, tools):
+            if token in not_tools or name_is_known(token, tools):
                 continue
             violations.append(
                 f"{line.where()}: {token} — not a registered MCP tool "
@@ -152,20 +171,12 @@ def find_tool_violations(
     return violations
 
 
-def namespaced_is_known(name: str, known: frozenset[str]) -> bool:
-    if name in known:
-        return True
-    if _NAME_PLACEHOLDER.search(name):
-        return _matches_any(name, _NAME_PLACEHOLDER, "[A-Za-z0-9_-]+", known)
-    return False
-
-
 def find_namespace_violations(lines: Iterable[DocLine], known: frozenset[str]) -> list[str]:
     violations: list[str] = []
     for line in lines:
         for match in _NAMESPACED.finditer(line.text):
             name = match.group(1)
-            if namespaced_is_known(name, known):
+            if name_is_known(name, known):
                 continue
             violations.append(
                 f"{line.where()}: ouroboros:{name} — no bundled agent "
@@ -260,6 +271,35 @@ def test_namespace_checker_reports_missing_names_and_accepts_existing_ones() -> 
         "skills/x.md:5: ouroboros:retired-skill",
         "skills/x.md:5: ouroboros:nope-<name>",
     ]
+
+
+@pytest.mark.parametrize(
+    ("token", "valid"),
+    [
+        ("foo_bar", True),
+        ("foo_", True),  # trailing ``_``: prefix
+        ("foo_*", True),
+        ("f*_bar", True),
+        ("foo_<x>", True),
+        ("foo_{x}", True),
+        ("foo_bar_", False),  # a prefix needs a known name that starts with it
+        ("baz_", False),
+        ("foo_<x>_qux", False),
+        ("foo_baz", False),
+    ],
+)
+def test_placeholder_rules_are_identical_for_tools_and_namespaced_names(
+    token: str, valid: bool
+) -> None:
+    assert name_is_known(token, frozenset({"foo_bar"})) is valid
+    tool_line = DocLine("docs/t.md", 1, f"`ouroboros_{token}`", False)
+    tool_violations = find_tool_violations(
+        [tool_line], frozenset({"ouroboros_foo_bar"}), frozenset()
+    )
+    namespaced_line = DocLine("docs/t.md", 1, f"`/ouroboros:{token}`", False)
+    namespaced_violations = find_namespace_violations([namespaced_line], frozenset({"foo_bar"}))
+    assert (tool_violations == []) is valid
+    assert (namespaced_violations == []) is valid
 
 
 def test_renaming_a_registered_tool_or_agent_is_caught_in_the_real_corpus() -> None:
