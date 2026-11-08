@@ -32,6 +32,7 @@ from ouroboros.mcp.tools.ac_tree_hud_handler import (
 from ouroboros.mcp.tools.attention_relay import (
     RELAY_SOURCE_EVENT_TYPES,
     classify_relay_events,
+    may_emit_relay,
 )
 from ouroboros.mcp.tools.job_wait_guard import (
     JOB_WAIT_GUARD_VERSION,
@@ -1751,7 +1752,10 @@ class JobWaitHandler:
             )
         stream_items = [_event_stream_item(event) for event in stream_events]
         relay_events: list[dict[str, object]] = []
-        if stream == "linked" and (stream_events or snapshot.is_terminal):
+        # A non-terminal page classifies to [] unless one of its events can source a relay.
+        if stream == "linked" and (
+            snapshot.is_terminal or any(may_emit_relay(event.type) for event in stream_events)
+        ):
             history_max_row_id = None if snapshot.is_terminal else snapshot.cursor
             history_events = await _query_linked_history_events(
                 self._event_store,

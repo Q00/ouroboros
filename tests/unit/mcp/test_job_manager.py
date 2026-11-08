@@ -4488,6 +4488,106 @@ class TestJobManager:
         finally:
             await store.close()
 
+    @pytest.mark.parametrize(
+        ("page_types", "expected_history_reads", "expects_relay"),
+        [
+            (("execution.tool.called",), 0, False),
+            (("execution.tool.called", "execution.subtask.updated", "mcp.job.updated"), 0, False),
+            (("execution.tool.called", "execution.plan.created"), 1, True),
+            (("control.session.signal.requested",), 1, True),
+        ],
+    )
+    async def test_job_wait_linked_stream_reads_history_only_for_relay_source_pages(
+        self, tmp_path, page_types, expected_history_reads, expects_relay
+    ) -> None:
+        """A non-terminal page without a relay-source event skips the history replay.
+
+        Forcing ``may_emit_relay`` to True restores the previous gate
+        (``stream_events or snapshot.is_terminal``) exactly, so both polls of the
+        same page must return the same result.
+        """
+        store = _build_store(tmp_path)
+        await store.initialize()
+        execution_id, session_id, job_id = "exec_relay_gate", "orch_relay_gate", "job_relay_gate"
+
+        def event(index: int, event_type: str) -> BaseEvent:
+            aggregate_type, aggregate_id = {
+                "control": ("session_signal", "sig_relay_gate"),
+                "mcp": ("job", job_id),
+            }.get(event_type.split(".", 1)[0], ("execution", execution_id))
+            return BaseEvent(
+                id=f"evt_relay_gate_{index}",
+                type=event_type,
+                timestamp=datetime(2026, 4, 22, tzinfo=UTC) + timedelta(seconds=index),
+                aggregate_type=aggregate_type,
+                aggregate_id=aggregate_id,
+                data={
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "orchestrator_session_id": session_id,
+                    "total_acs": 1,
+                    "semantic_ac_key": "ac_relay_gate",
+                    "model": "gpt-5",
+                },
+            )
+
+        try:
+            # Relay sources already delivered before the cursor: classifying them
+            # as new would emit, so they must stay out of any relay output.
+            for index, seen_type in enumerate(
+                ("execution.plan.created", "execution.ac.model_routed")
+            ):
+                await store.append(event(index, seen_type))
+            cursor = await store.get_current_rowid()
+            for index, page_type in enumerate(page_types, start=10):
+                await store.append(event(index, page_type))
+            snapshot = JobSnapshot(
+                job_id=job_id,
+                job_type="execute_seed",
+                status=JobStatus.RUNNING,
+                message="Running execute_seed",
+                created_at=datetime(2026, 4, 22, tzinfo=UTC),
+                updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+                cursor=cursor,
+                links=JobLinks(execution_id=execution_id, session_id=session_id),
+            )
+
+            class StaticJobManager:
+                async def wait_for_change(
+                    self, job_id: str, *, cursor: int, timeout_seconds: int
+                ) -> tuple[JobSnapshot, bool]:
+                    return snapshot, False
+
+            handler = JobWaitHandler(event_store=store, job_manager=StaticJobManager())
+
+            async def poll() -> tuple[MCPToolResult, int]:
+                with patch.object(
+                    job_handlers_module,
+                    "_query_linked_history_events",
+                    wraps=job_handlers_module._query_linked_history_events,
+                ) as history_read:
+                    result = await handler.handle(
+                        {"job_id": job_id, "stream": "linked", "cursor": cursor, "view": "summary"}
+                    )
+                assert result.is_ok
+                return result.value, history_read.await_count
+
+            gated, gated_reads = await poll()
+            with patch.object(job_handlers_module, "may_emit_relay", lambda _event_type: True):
+                ungated, ungated_reads = await poll()
+
+            assert [item["type"] for item in gated.meta["stream_events"]] == list(page_types)
+            assert (gated_reads, ungated_reads) == (expected_history_reads, 1)
+            assert gated.meta == ungated.meta
+            assert gated.text_content == ungated.text_content
+            assert bool(gated.meta["relay_events"]) is expects_relay
+            assert all(
+                relay["source_event_id"] not in {"evt_relay_gate_0", "evt_relay_gate_1"}
+                for relay in gated.meta["relay_events"]
+            )
+        finally:
+            await store.close()
+
     async def test_job_wait_uses_live_snapshot_without_long_polling(self, tmp_path) -> None:
         store = _build_store(tmp_path)
         snapshot = JobSnapshot(
