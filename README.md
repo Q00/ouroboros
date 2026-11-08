@@ -223,6 +223,17 @@ see the [official Codex MCP CLI guide](https://learn.chatgpt.com/docs/extend/mcp
 The `ooo setup` skill is for Claude Code; standalone CLI setup is a separate
 terminal flow described above.
 
+**Codex welcome notice:** In main `592c667f` and release `0.59.9`,
+`CODEX_SETUP_REQUIRED` checks saved runtime settings and the persistent
+`mcp_servers.ouroboros` entry in `$CODEX_HOME/config.toml` (default:
+`~/.codex/config.toml`); it does not test the plugin's bundled MCP server live.
+The plugin declares that server separately, so the notice can appear while its
+server is active. Check the current host session before
+repeating setup: `ouroboros setup --runtime codex` can change persistent runtime
+and MCP configuration. See the fixed [main readiness check](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/skills/welcome/SKILL.md#L498-L593),
+[release readiness check](https://github.com/Q00/ouroboros/blob/5f5fca90662861201ff0a26f502edd22b272c4c6/skills/welcome/SKILL.md#L498-L593),
+and [Codex plugin server descriptor](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/.mcp.codex.json).
+
 **Both plugin paths — enter in the host conversation:**
 
 ```text
