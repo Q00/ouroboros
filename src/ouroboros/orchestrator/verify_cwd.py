@@ -41,15 +41,20 @@ def _sole_node_manifest_directory(root: Path) -> Path | None:
     if (root / "package.json").is_file():
         return None
     candidates: list[Path] = []
-    for manifest in root.rglob("package.json"):
-        if (
-            any(part in _IGNORED_MANIFEST_DIRECTORIES for part in manifest.relative_to(root).parts)
-            or not manifest.is_file()
-        ):
-            continue
-        candidates.append(manifest.parent)
-        if len(candidates) > 1:
-            return None
+    # Ignored directories are pruned before they are listed, and symlinked
+    # directories are not entered. Names are matched as listed: exactly on
+    # POSIX, case-folded where the platform folds path case (Windows).
+    for directory, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = [name for name in dirnames if name not in _IGNORED_MANIFEST_DIRECTORIES]
+        for filename in filenames:
+            if os.path.normcase(filename) != "package.json":
+                continue
+            manifest = Path(directory, filename)
+            if not manifest.is_file():
+                continue
+            candidates.append(manifest.parent)
+            if len(candidates) > 1:
+                return None
     return candidates[0] if candidates else None
 
 
