@@ -822,7 +822,7 @@ Changes under `skills/` (YAML skill definitions used by Claude and Codex) or `sr
 
 | Source path | Must update |
 |-------------|-------------|
-| `skills/codex.md` | `docs/runtime-guides/codex.md` — if skill instructions change |
+| `src/ouroboros/codex/ouroboros.md` | `docs/runtime-guides/codex.md` — if the managed Codex rules (installed into `~/.codex/rules/`) change |
 | `skills/*.yaml`, `skills/*/SKILL.md`, or `src/ouroboros/agents/*.md` | `docs/` guide that describes the affected skill/agent behaviour; `docs/runtime-guides/skill-capability-guides.md` if required capabilities change |
 | `src/ouroboros/plugin/skills/executor.py` | `docs/architecture.md` — skill execution model |
 | `src/ouroboros/plugin/agents/registry.py` | `docs/architecture.md` — agent registry; `docs/runtime-capability-matrix.md` if supported agents change per runtime |

@@ -212,6 +212,7 @@ Open findings: [FIND-018](#find-018) *(high)*, [FIND-019](#find-019) *(high)*
 
 ## Findings Data (Machine-Parseable)
 
+<!-- docs-drift: ignore-start -->
 ```yaml
 findings:
 
@@ -811,7 +812,7 @@ findings:
       - docs/config-reference.md
       - docs/config-inventory.md
     code_deps:
-      - src/ouroboros/orchestrator/evolution/loop.py
+      - src/ouroboros/evolution/loop.py
       - src/ouroboros/mcp/tools/definitions.py
     resolution_ref: "contributing/config-doc-findings.md#FINDING-019; fixed: dual-usage note added to config-reference.md"
 
@@ -1129,6 +1130,8 @@ findings:
 | FIND-049 | **medium** | missing-content | resolved | `ouroboros tui` bare invocation launches monitor; not documented | `docs/cli-reference.md`, `docs/guides/cli-usage.md` |
 | FIND-050 | medium | misleading | resolved | `ooo update` CLI equivalent in `codex.md` omits version-check wrapper | `docs/runtime-guides/codex.md` |
 
+<!-- docs-drift: ignore-end -->
+
 ---
 
 ## Open Findings Detail
@@ -1160,7 +1163,7 @@ orchestrator CLI path. Fix is the same as FIND-018.
 
 ### FIND-044 — `ooo status` CLI equivalent wrong in `codex.md` (medium) — RESOLVED
 
-**Fixed in:** `docs/fix-audit-findings` branch. Updated `codex.md:96` to show both
+**Fixed in:** `docs/fix-audit-findings` branch. Updated `codex.md:96` to show both <!-- docs-drift: ignore -->
 `ouroboros status executions` (list all) and `ouroboros status execution <id>` (details),
 with note that drift-measurement is MCP-only.
 
@@ -1168,7 +1171,7 @@ with note that drift-measurement is MCP-only.
 
 ### FIND-045 — Runtime guides lack `credentials.yaml` cross-link (medium) — RESOLVED
 
-**Fixed in:** `docs/fix-audit-findings` branch. Added `credentials.yaml` cross-links
+**Fixed in:** `docs/fix-audit-findings` branch. Added `credentials.yaml` cross-links <!-- docs-drift: ignore -->
 to both `claude-code.md` and `codex.md` prerequisites sections.
 
 ---
