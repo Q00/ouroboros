@@ -47,6 +47,7 @@ from ouroboros.interview_adapters.first_question import (
     first_question_instruction,
     validate_stored_selection,
 )
+from ouroboros.interview_adapters.opening_interpretations import ProposedOpening
 from ouroboros.interview_calibration import InterviewCalibration
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -288,6 +289,7 @@ class InterviewState(BaseModel):
     interview_id: str
     persistence_revision: str = ""
     batch_confirmed_digest: str | None = None
+    proposed_opening: ProposedOpening | None = None
     _loaded_revision: str | None = PrivateAttr(default=None)
     status: InterviewStatus = InterviewStatus.IN_PROGRESS
     rounds: list[InterviewRound] = Field(default_factory=list)
