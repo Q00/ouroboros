@@ -29,9 +29,10 @@ Document side, in the reference:
   source spells as a complete string literal (an event type such as
   ``boundary.acceptance.reconciled``) is a code identifier, not a config key.
 
-One tokenizer (``scan`` and ``_inline``) decides fences and code spans by
-CommonMark rules, so every check reads the same document structure; the shared
-corpus helper decides only which lines the ignore markers hide.
+The page is read through ``markdown-it-py`` (CommonMark plus GFM tables, the
+parser ``rich`` already depends on), so fences, indented code, tables, headings
+and code spans are what a renderer makes of them, with the parser's line maps;
+the shared corpus helper decides only which lines the ignore markers hide.
 
 Checks: (a) every field has exactly one key-table row; (b) every key in a
 table, a YAML example, or a key reference exists in the models. Defaults, types
@@ -50,13 +51,16 @@ import re
 import types
 from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
+from markdown_it import MarkdownIt, rules_inline
+from markdown_it.rules_inline import StateInline
+from markdown_it.token import Token
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 import pytest
 import yaml
 from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 
 from ouroboros.config.models import OuroborosConfig
-from tests.unit.docs._corpus import REPO_ROOT, DocLine, corpus_files, iter_lines
+from tests.unit.docs._corpus import REPO_ROOT, corpus_files, iter_lines
 
 REFERENCE = "docs/config-reference.md"
 MODELS = "src/ouroboros/config/models.py"
@@ -68,8 +72,8 @@ _SEGMENT = r"[A-Za-z_][\w-]*(?:\[\])?"
 _DOTTED_KEY = rf"{_SEGMENT}(?:\.(?:{_SEGMENT}|\*))+"
 _KEY_REFERENCE = re.compile(rf"^(?P<key>{_DOTTED_KEY})(?:\s*:\s.*|\s*:)?$")
 _CONFIG_SET = re.compile(r"\bouroboros\s+config\s+set\b")
-_PLACEHOLDER = re.compile(r"[A-Z][A-Z0-9_]*|<[^>]*>")
-_SEPARATOR_ROW = re.compile(r"^\|?\s*:?-{3,}")
+# The shape of a dotted config key; a `config set` followed by anything else is prose.
+_CONFIG_KEY_SHAPE = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z0-9_*<>-]+)+")
 
 
 # --------------------------------------------------------------------------
@@ -244,214 +248,166 @@ def resolve(node: KeyNode, segments: Sequence[str]) -> KeyNode | None:
 
 
 # --------------------------------------------------------------------------
-# Document side: one Markdown tokenizer for fences, inline code and prose.
+# Document side: what a CommonMark renderer with GFM tables makes of the page.
 # --------------------------------------------------------------------------
 
-# A fence opener: three or more backticks or tildes (CommonMark section 4.5).
-# Any indentation is accepted, as in the corpus helper, so fences nested in list
-# items count. A backtick fence's info string may not contain a backtick (that
-# line is inline code, not a fence).
-_FENCE = re.compile(r"^\s*(?P<run>`{3,}|~{3,})(?P<info>.*)$")
-_QUOTE_MARKER = re.compile(r"^ {0,3}> ?")
+
+def _backticks_with_offsets(state: StateInline, silent: bool) -> bool:
+    """The parser's own code-span rule, recording where each span starts and ends."""
+    start, first_new = state.pos, len(state.tokens)
+    if not rules_inline.backtick(state, silent):
+        return False
+    for token in state.tokens[first_new:]:
+        if token.type == "code_inline":
+            token.meta["start"], token.meta["end"] = start, state.pos
+    return True
 
 
-@dataclass
-class _Block:
-    """A fenced code block; ``lines`` are its content lines with quote markers removed."""
-
-    info: str  # first word of the info string, lower-cased ("" if none)
-    start: int  # line number of the first content line
-    heading: str | None  # nearest heading above the opening fence
-    lines: list[str] = field(default_factory=list)
+_MARKDOWN = MarkdownIt("commonmark").enable("table")
+# Inline tokens carry no positions; the offsets give each span its own line.
+_MARKDOWN.inline.ruler.at("backticks", _backticks_with_offsets)
 
 
-def _strip_quotes(text: str, limit: int | None = None) -> tuple[int, str]:
-    """Remove leading blockquote markers; return ``(depth, rest)``."""
-    depth = 0
-    while limit is None or depth < limit:
-        match = _QUOTE_MARKER.match(text)
-        if match is None:
-            break
-        text = text[match.end() :]
-        depth += 1
-    return depth, text
+@dataclass(frozen=True)
+class _Run:
+    """A code span, or the prose between code spans and line breaks."""
+
+    lineno: int
+    code: bool
+    text: str
 
 
-def _inline(text: str) -> list[tuple[bool, str]]:
-    """Split one line into ``(is_code, text)`` runs (CommonMark code spans).
-
-    A backtick string opens a span that the next backtick string of the same
-    length closes; an unmatched one is literal text. A backslash escapes a
-    backtick outside a span. One leading and trailing space is stripped from
-    span content when both are present.
-    """
-    runs: list[tuple[bool, str]] = []
-    prose: list[str] = []
-    index = 0
-    while index < len(text):
-        char = text[index]
-        if char == "\\" and index + 1 < len(text):
-            prose.append(text[index : index + 2])
-            index += 2
-            continue
-        if char != "`":
-            prose.append(char)
-            index += 1
-            continue
-        rest = text[index:]
-        width = len(rest) - len(rest.lstrip("`"))
-        opener = text[index : index + width]
-        closer = re.compile(rf"(?<!`){opener}(?!`)")
-        found = closer.search(text, index + width)
-        if found is None:
-            prose.append(opener)
-            index += width
-            continue
-        content = text[index + width : found.start()]
-        if (
-            len(content) > 1
-            and content.startswith(" ")
-            and content.endswith(" ")
-            and content.strip()
-        ):
-            content = content[1:-1]
-        if prose:
-            runs.append((False, "".join(prose)))
-            prose = []
-        runs.append((True, content))
-        index = found.end()
-    if prose:
-        runs.append((False, "".join(prose)))
-    return runs
-
-
-def _only_code_span(text: str) -> str | None:
-    """The span content when ``text`` is exactly one code span, else ``None``."""
-    runs = [run for run in _inline(text.strip()) if run[0] or run[1].strip()]
-    return runs[0][1] if len(runs) == 1 and runs[0][0] else None
-
-
-def _heading(line: DocLine) -> str | None:
-    match = re.match(r"^#{1,6}\s+(.*?)\s*#*\s*$", line.text)
-    return match.group(1) if match else None
-
-
-def scan(rel_path: str) -> tuple[list[DocLine], list[_Block]]:
-    """Tokenize a reference into checkable lines and fenced blocks.
-
-    Which lines count is the corpus helper's decision (ignore markers); whether
-    a line is prose or code is decided here, by CommonMark fence rules: a fence
-    closes on a run of the same character at least as long as the opener, so a
-    shorter fence inside a longer one is content; an unclosed fence runs to the
-    end of the file; a fence inside a blockquote ends with the blockquote.
-    Fence lines themselves are not returned.
-    """
-    kept = {line.lineno for line in iter_lines([rel_path])}
-    raw = (REPO_ROOT / rel_path).read_text(encoding="utf-8").splitlines()
-    lines: list[DocLine] = []
-    blocks: list[_Block] = []
-    heading: str | None = None
-    fence: tuple[str, int, int] | None = None  # (char, width, quote depth)
-    for lineno, text in enumerate(raw, start=1):
-        if fence is not None:
-            char, width, depth = fence
-            found, body = _strip_quotes(text, depth)
-            if found < depth:
-                fence = None  # the enclosing blockquote ended
-            else:
-                stripped = body.strip()
-                if stripped and set(stripped) == {char} and len(stripped) >= width:
-                    fence = None
-                    continue
-                blocks[-1].lines.append(body if lineno in kept else "")
-                if lineno in kept:
-                    lines.append(DocLine(rel_path, lineno, text, in_code_block=True))
-                continue
-        depth, body = _strip_quotes(text)
-        opener = _FENCE.match(body)
-        if opener and not (opener["run"][0] == "`" and "`" in opener["info"]):
-            words = opener["info"].split()
-            blocks.append(_Block(words[0].lower() if words else "", lineno + 1, heading))
-            fence = (opener["run"][0], len(opener["run"]), depth)
-            continue
-        if lineno in kept:
-            line = DocLine(rel_path, lineno, text, in_code_block=False)
-            lines.append(line)
-            title = _heading(line)
-            if title is not None:
-                heading = title
-    return lines, blocks
-
-
-def _cells(text: str) -> list[str]:
-    body = text.strip()
-    body = body.removeprefix("|")
-    if body.endswith("|") and not body.endswith("\\|"):
-        body = body[:-1]
-    return [cell.strip() for cell in re.split(r"(?<!\\)\|", body)]
+@dataclass(frozen=True)
+class _Heading:
+    lineno: int
+    text: str  # plain text, code-span content included
+    key: str | None  # the content when the heading is exactly one code span
 
 
 @dataclass
 class _Table:
-    header: DocLine
-    rows: list[DocLine]
-    label: str | None  # nearest non-blank line above the header
-    heading: str | None  # nearest heading above the header
+    lineno: int
+    header: str  # plain text of the first header cell
+    rows: list[tuple[int, list[list[_Run]]]]  # (line, runs of each cell)
+    label: str | None  # the last paragraph since the last heading or table
+    heading: _Heading | None
 
 
-def _tables(lines: list[DocLine]) -> Iterator[_Table]:
-    prose = [line for line in lines if not line.in_code_block]
-    heading: str | None = None
-    previous: str | None = None
-    index = 0
-    while index < len(prose):
-        line = prose[index]
-        if line.text.lstrip().startswith("|"):
-            block = [line]
-            while (
-                index + 1 < len(prose)
-                and prose[index + 1].lineno == block[-1].lineno + 1
-                and prose[index + 1].text.lstrip().startswith("|")
-            ):
-                index += 1
-                block.append(prose[index])
-            rows = (
-                block[2:] if len(block) > 1 and _SEPARATOR_ROW.match(block[1].text.strip()) else []
-            )
-            yield _Table(header=block[0], rows=rows, label=previous, heading=heading)
-            previous = None
+@dataclass
+class _Block:
+    lineno: int  # first content line
+    info: str  # first word of a fence's info string, lower-cased; "" otherwise
+    lines: list[str]  # content, "" where an ignore marker hides the line
+    heading: _Heading | None
+
+
+@dataclass
+class _Doc:
+    runs: list[_Run] = field(default_factory=list)  # outside tables
+    tables: list[_Table] = field(default_factory=list)
+    blocks: list[_Block] = field(default_factory=list)
+
+
+def _runs(inline: Token) -> list[_Run]:
+    """The code spans and prose runs of one inline token, each with its line."""
+    assert inline.map is not None
+    first = inline.map[0] + 1
+    line, prose, prose_line = first, "", first
+    runs: list[_Run] = []
+    for child in inline.children or ():
+        if child.type == "text":
+            if not prose:
+                prose_line = line
+            prose += child.content
+            continue
+        if child.type not in ("code_inline", "softbreak", "hardbreak"):
+            continue  # emphasis and link markers; their text is in "text" children
+        if prose:
+            runs.append(_Run(prose_line, False, prose))
+            prose = ""
+        if child.type == "code_inline":
+            start = first + inline.content[: child.meta["start"]].count("\n")
+            runs.append(_Run(start, True, child.content))
+            line = first + inline.content[: child.meta["end"]].count("\n")
         else:
-            title = _heading(line)
-            if title is not None:
-                heading = title
-            if line.text.strip():
-                previous = line.text.strip()
-        index += 1
+            line += 1
+    if prose:
+        runs.append(_Run(prose_line, False, prose))
+    return runs
+
+
+def parse(rel_path: str) -> _Doc:
+    """Tables, code blocks and inline runs of one reference, by its parse tree.
+
+    Which lines count is the corpus helper's decision: a line its ignore
+    markers hide yields no run, row or code line, but stays in the parse, so
+    the page keeps the structure a reader sees.
+    """
+    kept = {line.lineno for line in iter_lines([rel_path])}
+    tokens = _MARKDOWN.parse((REPO_ROOT / rel_path).read_text(encoding="utf-8"))
+    doc = _Doc()
+    heading: _Heading | None = None
+    label: str | None = None
+    table: _Table | None = None
+    cells: list[list[_Run]] = []
+    for index, token in enumerate(tokens):
+        if token.type == "heading_open" and token.map is not None:
+            inline = tokens[index + 1]
+            parts = [c for c in inline.children or () if c.type != "text" or c.content.strip()]
+            only_span = len(parts) == 1 and parts[0].type == "code_inline"
+            text = "".join(c.content for c in inline.children or ())
+            heading = _Heading(token.map[0] + 1, text, parts[0].content if only_span else None)
+            label = None
+        elif token.type == "table_open" and token.map is not None:
+            table = _Table(token.map[0] + 1, "", [], label, heading)
+            label = None
+        elif token.type == "tr_open" and table is not None and token.map is not None:
+            cells = []
+            table.rows.append((token.map[0] + 1, cells))
+        elif token.type == "inline" and table is not None:
+            cells.append(_runs(token))
+        elif token.type == "table_close" and table is not None:
+            header, *rows = table.rows
+            table.header = "".join(run.text for run in header[1][0]).strip() if header[1] else ""
+            table.rows = [row for row in rows if row[0] in kept]
+            if table.lineno in kept:
+                doc.tables.append(table)
+            table = None
+        elif token.type == "inline":
+            doc.runs.extend(run for run in _runs(token) if run.lineno in kept)
+            if tokens[index - 1].type == "paragraph_open":
+                label = token.content.strip()
+        elif token.type in ("fence", "code_block") and token.map is not None:
+            first = token.map[0] + (2 if token.type == "fence" else 1)
+            body = token.content.splitlines()
+            lines = [text if first + k in kept else "" for k, text in enumerate(body)]
+            words = token.info.split() if token.type == "fence" else []
+            doc.blocks.append(_Block(first, words[0].lower() if words else "", lines, heading))
+    return doc
 
 
 def _config_set_keys(text: str) -> Iterator[str]:
     """Keys given to ``ouroboros config set`` in one run of text.
 
-    The run is a code span, a stretch of prose between code spans, or a code
-    line, so a command in a span never takes its argument from outside it.
-    Placeholders (``KEY``, ``<key>``) are skipped; options are passed over.
+    The run is a code span, a stretch of prose, or a code line, so a command in
+    a span never takes its argument from outside it. Only an argument shaped
+    like a dotted config key counts; any other next word (``to``, ``KEY``,
+    ``<key>``, ``--help``) is prose and names no key.
     """
     for match in _CONFIG_SET.finditer(text):
-        for word in text[match.end() :].split():
-            token = word.strip("\"'`").rstrip(".,;:!?)")
-            if not token or token.startswith("-"):
-                continue
-            if not _PLACEHOLDER.fullmatch(token):
-                yield token
-            break
+        words = text[match.end() :].split()
+        token = words[0].strip("\"'`").rstrip(".,;:!?)") if words else ""
+        if _CONFIG_KEY_SHAPE.fullmatch(token):
+            yield token
 
 
-def _documents_other_file(heading: str | None) -> bool:
-    names = [
-        Path(content).name
-        for is_code, content in _inline(heading or "")
-        if is_code and re.search(r"\.ya?ml$", content)
-    ]
+def _documents_other_file(heading: _Heading | None) -> bool:
+    """Whether the heading above a block names a YAML file other than config.yaml."""
+    names = (
+        [Path(name).name for name in re.findall(r"[\w.~/-]+\.ya?ml\b", heading.text)]
+        if heading
+        else []
+    )
     return bool(names) and "config.yaml" not in names
 
 
@@ -479,129 +435,127 @@ def check_reference(
 ) -> list[str]:
     """Every violation in one reference, as ``path:line: token — remedy`` lines."""
     tree = config_tree(root)
-    lines, blocks = scan(rel_path)
+    doc = parse(rel_path)
     violations: list[str] = []
-    documented: dict[int, DocLine] = {}
-    table_for: dict[int, DocLine] = {}
-    section_table: DocLine | None = None
+    documented: dict[int, str] = {}
+    table_for: dict[int, str] = {}
+    section_table: str | None = None
     nodes_by_class: dict[str, list[KeyNode]] = {}
     for node in _model_nodes(tree):
         for model in node.models:
             nodes_by_class.setdefault(model.__name__, []).append(node)
-    key_cells: set[int] = set()
+    reference_runs = list(doc.runs)
 
     # Key tables.
-    for table in _tables(lines):
-        first = _cells(table.header.text)[0]
-        if first == _SECTION_TABLE_HEADER:
+    for table in doc.tables:
+        where = f"{rel_path}:{table.lineno}"
+        anchors: list[KeyNode]
+        if table.header == _SECTION_TABLE_HEADER:
             anchors = [tree]
-            section_table = table.header
-        elif first in _KEY_TABLE_HEADERS:
+            section_table = where
+        elif table.header in _KEY_TABLE_HEADERS:
             label = _CLASS_LABEL.match(table.label or "")
-            heading = _only_code_span(table.heading or "")
+            heading_key = table.heading.key if table.heading else None
             if label:
                 anchors = nodes_by_class.get(label["cls"], [])
                 if not anchors:
                     violations.append(
-                        f"{table.header.where()}: {label['cls']} — the label names no model "
-                        f"in the config tree of {MODELS}; name the class whose fields the "
-                        "table lists"
+                        f"{where}: {label['cls']} — the label names no model in the config "
+                        f"tree of {MODELS}; name the class whose fields the table lists"
                     )
                     continue
-            elif heading:
-                anchor = resolve(tree, _segments(heading))
+            elif heading_key:
+                anchor = resolve(tree, _segments(heading_key))
                 if anchor is None or anchor.kind not in ("model", "map"):
                     violations.append(
-                        f"{table.header.where()}: {heading} — the heading above this "
-                        f"key table names no config section in {MODELS}; fix the heading"
+                        f"{where}: {heading_key} — the heading above this key table names no "
+                        f"config section in {MODELS}; fix the heading"
                     )
                     continue
                 anchors = [anchor.item if anchor.kind == "map" and anchor.item else anchor]
             else:
                 violations.append(
-                    f"{table.header.where()}: | {first} | — key table without a config "
-                    "path; put it under a heading that is one code span (## `section`) or "
-                    "label it **`ClassName` fields:**"
+                    f"{where}: | {table.header} | — key table without a config path; put it "
+                    "under a heading that is one code span (## `section`) or label it "
+                    "**`ClassName` fields:**"
                 )
                 continue
         else:
+            reference_runs += [run for _, cells in table.rows for cell in cells for run in cell]
             continue
         for anchor in anchors:
-            table_for.setdefault(id(anchor), table.header)
-        for row in table.rows:
-            key_cells.add(row.lineno)
-            cell = _cells(row.text)[0]
-            key = _only_code_span(cell)
-            if key is None:
+            table_for.setdefault(id(anchor), where)
+        for lineno, cells in table.rows:
+            row = f"{rel_path}:{lineno}"
+            reference_runs += [run for cell in cells[1:] for run in cell]
+            first = [run for run in cells[0] if run.code or run.text.strip()] if cells else []
+            if len(first) != 1 or not first[0].code:
+                shown = "".join(run.text for run in first) or "(empty)"
                 violations.append(
-                    f"{row.where()}: {cell or '(empty)'} — the first cell of a key-table row "
-                    "must be one `key` code span"
+                    f"{row}: {shown} — the first cell of a key-table row must be one `key` "
+                    "code span"
                 )
                 continue
+            key = first[0].text
             for anchor in anchors:
-                token = _join(anchor.path, key)
                 target = resolve(anchor, _segments(key))
                 if target is None:
                     violations.append(
-                        f"{row.where()}: {token} — documented, but {MODELS} has no such key; "
-                        "remove the row or rename it to the current key "
+                        f"{row}: {_join(anchor.path, key)} — documented, but {MODELS} has no "
+                        "such key; remove the row or rename it to the current key "
                         f"(git log -S'{_segments(key)[-1]}' -- {MODELS} finds a rename)"
                     )
                 elif target.is_field:
                     if id(target) in documented:
                         violations.append(
-                            f"{row.where()}: {target.path} — documented twice (also at "
-                            f"{documented[id(target)].where()}); keep one row"
+                            f"{row}: {target.path} — documented twice (also at "
+                            f"{documented[id(target)]}); keep one row"
                         )
                     else:
                         documented[id(target)] = row
 
     # Key references: dotted keys in code spans, and every `config set` argument
-    # (in a span, in prose, or on a code line).
-    for line in lines:
-        if line.in_code_block:
-            runs = [(True, line.text)]
-        elif line.lineno in key_cells:
-            runs = _inline("|".join(_cells(line.text)[1:]))
-        else:
-            runs = _inline(line.text)
-        # token -> whether a matching source string literal excuses it
-        tokens: dict[str, bool] = {}
-        for is_code, text in runs:
-            if is_code and not line.in_code_block:
-                match = _KEY_REFERENCE.match(text.strip())
-                if match and match["key"].split(".")[0] in tree.keys:
-                    tokens.setdefault(match["key"], True)
+    # in a span, in prose, or on a code line. Value: may a source literal excuse it?
+    found: dict[tuple[int, str], bool] = {}
+    for run in reference_runs:
+        if run.code:
+            match = _KEY_REFERENCE.match(run.text.strip())
+            if match and match["key"].split(".")[0] in tree.keys:
+                found.setdefault((run.lineno, match["key"]), True)
+        for key in _config_set_keys(run.text):
+            found[(run.lineno, key)] = False
+    for block in doc.blocks:
+        for offset, text in enumerate(block.lines):
             for key in _config_set_keys(text):
-                tokens[key] = False  # `config set` only ever takes a key
-        for token, may_be_identifier in tokens.items():
-            if resolve(tree, _segments(token)) is not None:
-                continue
-            if may_be_identifier and is_code_identifier(token):
-                continue
-            violations.append(
-                f"{line.where()}: {token} — not a config key in {MODELS}; correct the "
-                "reference (an event or record name must be spelled as a string literal "
-                "in src/ouroboros)"
-            )
+                found[(block.lineno + offset, key)] = False
+    for (lineno, token), may_be_identifier in sorted(found.items()):
+        if resolve(tree, _segments(token)) is not None:
+            continue
+        if may_be_identifier and is_code_identifier(token):
+            continue
+        violations.append(
+            f"{rel_path}:{lineno}: {token} — not a config key in {MODELS}; correct the "
+            "reference (an event or record name must be spelled as a string literal in "
+            "src/ouroboros)"
+        )
 
     # YAML examples of config.yaml.
-    for block in blocks:
+    for block in doc.blocks:
         if block.info not in ("yaml", "yml") or _documents_other_file(block.heading):
             continue
-        where = f"{rel_path}:{block.start}"
         try:
             document = yaml.compose("\n".join(block.lines), Loader=yaml.SafeLoader)
         except yaml.YAMLError as exc:
             problem = getattr(exc, "problem", None) or type(exc).__name__
             violations.append(
-                f"{where}: yaml example — does not parse ({problem}); fix the example"
+                f"{rel_path}:{block.lineno}: yaml example — does not parse ({problem}); fix "
+                "the example"
             )
             continue
-        for lineno, token in _yaml_unknown_keys(document, tree, block.start):
+        for lineno, token in _yaml_unknown_keys(document, tree, block.lineno):
             violations.append(
-                f"{rel_path}:{lineno}: {token} — YAML example key that {MODELS} does "
-                "not have (load_config ignores it silently); fix or remove it"
+                f"{rel_path}:{lineno}: {token} — YAML example key that {MODELS} does not "
+                "have (load_config ignores it silently); fix or remove it"
             )
 
     # Every field has a row.
@@ -612,18 +566,16 @@ def check_reference(
             parents[id(child.item)] = child
         if not child.needs_row or id(child) in documented:
             continue
-        anchor_line = None
+        location = None
         cursor: KeyNode | None = parent
-        while cursor is not None and anchor_line is None:
-            anchor_line = table_for.get(id(cursor))
+        while cursor is not None and location is None:
+            location = table_for.get(id(cursor))
             cursor = parents.get(id(cursor))
-        where = anchor_line or section_table or (lines[0] if lines else None)
-        location = where.where() if where else f"{rel_path}:1"
         owner = parent.path or "the top-level Section table"
         violations.append(
-            f"{location}: {child.path} — no key-table row documents it; add "
-            f"`{child.path.rsplit('.', 1)[-1]}` to the key table for {owner} with its "
-            f"type, default and meaning from {MODELS}"
+            f"{location or section_table or f'{rel_path}:1'}: {child.path} — no key-table "
+            f"row documents it; add `{child.path.rsplit('.', 1)[-1]}` to the key table for "
+            f"{owner} with its type, default and meaning from {MODELS}"
         )
     return violations
 
@@ -1013,11 +965,32 @@ def test_code_spans_of_any_width_are_key_references(tmp_path: Path, span: str) -
     ]
 
 
-def test_inline_tokenizer_runs() -> None:
-    assert _inline("a `b` c ``d`e`` \\`f` g") == [
-        (False, "a "),
-        (True, "b"),
-        (False, " c "),
-        (True, "d`e"),
-        (False, " \\`f` g"),
-    ]
+# Review round 2: forms that are valid inputs and name no stale key. The page is
+# read by its parse tree, so none of them may be reported.
+
+
+def test_config_set_followed_by_prose_names_no_key(tmp_path: Path) -> None:
+    assert _check(tmp_path, _VALID + "\nRun ouroboros config set to change a key.\n") == []
+
+
+def test_yaml_under_a_plain_heading_naming_another_file_is_skipped(tmp_path: Path) -> None:
+    text = _VALID + "\n## credentials.yaml\n\n```yaml\nproviders:\n  openai: {api_key: x}\n```\n"
+    assert _check(tmp_path, text) == []
+
+
+def test_indented_markdown_example_is_code_not_a_fence(tmp_path: Path) -> None:
+    text = _VALID + (
+        "\n### Examples\n\nA reference page may show:\n\n"
+        "    ```yaml\n    section: {nmae: x}\n    ```\n"
+    )
+    assert _check(tmp_path, text) == []
+
+
+def test_yaml_fence_in_a_list_item_is_checked(tmp_path: Path) -> None:
+    text = _VALID + "\n### Examples\n\n- Set it:\n\n  ```yaml\n  section: {nmae: x}\n  ```\n"
+    assert _violation_lines(tmp_path, text) == [_lineno(text, "nmae")]
+
+
+def test_config_set_in_indented_code_is_checked(tmp_path: Path) -> None:
+    text = _VALID + "\n### Examples\n\n    ouroboros config set section.nme y\n"
+    assert _violation_lines(tmp_path, text) == [_lineno(text, "section.nme")]
