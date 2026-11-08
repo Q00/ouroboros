@@ -131,9 +131,12 @@ codex plugin marketplace add Q00/ouroboros
 codex plugin add ouroboros@ouroboros
 ```
 
-Start a **new host session** after installing either plugin. If Ouroboros is
-not available there, follow [installation troubleshooting](./docs/getting-started.md#troubleshooting)
-before starting a task.
+Start a **new host session** after installing either plugin. If the Claude
+plugin is unavailable, follow [installation troubleshooting](./docs/getting-started.md#troubleshooting)
+before starting a task. For Codex, use the same-session checks below; the linked
+general troubleshooting page's `ouroboros mcp serve --runtime claude-cli`
+example starts a separate Claude-backed server and does not repair the Codex
+plugin connection.
 
 <details>
 <summary><strong>Standalone CLI and other installation methods</strong></summary>
@@ -217,7 +220,11 @@ its MCP server is active. In a Codex CLI/TUI conversation, enter `/mcp` and
 check whether an Ouroboros-related server appears in the active server list.
 The displayed name can vary by plugin and server version; seeing it listed does
 not prove that its tools work. If the server is missing or shows a connection
-error, follow [installation troubleshooting](./docs/getting-started.md#troubleshooting).
+error, inspect the plugin's startup error and the configured launcher command,
+arguments, and runtime in that same host session. Check that its executable is
+available to the host, and redact private paths or arguments before sharing.
+Do not start a separate `claude-cli` MCP server to repair the Codex plugin; it
+does not change that plugin's registration or connection.
 This CLI/TUI check does not imply that Codex Desktop has the same command or UI;
 see the [official Codex MCP CLI guide](https://learn.chatgpt.com/docs/extend/mcp?surface=cli#configure-with-the-cli).
 The `ooo setup` skill is for Claude Code; standalone CLI setup is a separate
