@@ -156,6 +156,33 @@ def _get_process_start_time(pid: int) -> float | None:
     return None
 
 
+# (pid, start time) of this process, recorded on macOS only. Keyed by PID so a
+# forked child, whose PID differs, never reuses its parent's value.
+_CURRENT_PROCESS_START_TIME: tuple[int, float] | None = None
+
+
+def _start_time_of(pid: int) -> float | None:
+    """``_get_process_start_time`` without re-spawning ``ps`` for this process.
+
+    On macOS every read spawns ``ps``, yet a live process's start time never
+    changes, and the hottest callers (owner-liveness checks on each job-wait
+    poll) ask about the current process. Only the current PID is cached, only
+    on Darwin, and only once a value was obtained; every other case reads
+    afresh exactly as before.
+    """
+    global _CURRENT_PROCESS_START_TIME
+    cached = _CURRENT_PROCESS_START_TIME
+    if cached is not None and cached[0] == pid and pid == os.getpid():
+        return cached[1]
+    start_time = _get_process_start_time(pid)
+    if start_time is not None:
+        import platform
+
+        if platform.system() == "Darwin" and pid == os.getpid():
+            _CURRENT_PROCESS_START_TIME = (pid, start_time)
+    return start_time
+
+
 def lock_path(session_id: str) -> Path:
     """Return a containment-safe lock path for a given session identifier."""
     if isinstance(session_id, str) and _SAFE_LOCK_SESSION_ID.fullmatch(session_id) is not None:
@@ -268,7 +295,7 @@ def acquire(session_id: str) -> None:
     and process start time for reliable liveness detection.
     """
     pid = os.getpid()
-    start_time = _get_process_start_time(pid)
+    start_time = _start_time_of(pid)
     payload = f"{pid}:{start_time}" if start_time else str(pid)
 
     path = lock_path(session_id)
@@ -444,7 +471,7 @@ def is_owned_by_current_process(session_id: str) -> bool:
             recorded_start = float(parts[1])
         except ValueError:
             return False
-        current_start = _get_process_start_time(pid)
+        current_start = _start_time_of(pid)
         if current_start is not None and abs(current_start - recorded_start) > 2.0:
             return False
 
@@ -454,12 +481,12 @@ def is_owned_by_current_process(session_id: str) -> bool:
 def current_process_identity() -> tuple[int, float | None]:
     """Return the current PID with its start time when the platform exposes it."""
     pid = os.getpid()
-    return pid, _get_process_start_time(pid)
+    return pid, _start_time_of(pid)
 
 
 def process_start_time(pid: int) -> float | None:
     """Return the start time of ``pid`` (epoch seconds) when the platform exposes it."""
-    return _get_process_start_time(pid)
+    return _start_time_of(pid)
 
 
 def _is_windows_process_alive(pid: int) -> bool:
@@ -530,7 +557,7 @@ def is_process_identity_alive(pid: int, start_time: float | None = None) -> bool
             pass
 
     if start_time is not None:
-        current_start = _get_process_start_time(pid)
+        current_start = _start_time_of(pid)
         if current_start is not None and abs(current_start - start_time) > 2.0:
             return False
     return True
