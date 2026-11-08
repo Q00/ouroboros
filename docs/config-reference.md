@@ -10,6 +10,8 @@ Complete reference for `~/.ouroboros/config.yaml` and all related environment va
 > **Source of truth:** `src/ouroboros/config/models.py` and `src/ouroboros/config/loader.py`
 >
 > Run `ouroboros config init` to generate defaults. Edit `~/.ouroboros/config.yaml` directly to apply changes.
+>
+> `tests/unit/docs/test_config_reference.py` fails when a key in the models has no row here, or when this page names a key the models do not have.
 
 ---
 
@@ -160,6 +162,8 @@ url = "http://127.0.0.1:12000/mcp"
 | `runtime_controls` | `RuntimeControlsConfig` | Long-running workflow liveness and progress controls |
 | `logging` | `LoggingConfig` | Log level, path, and verbosity |
 | `boundary` | `BoundaryConfig` | Check package boundary of `ooo run` (on by default) |
+| `seed` | `SeedConfig` | Seed-authoring gates applied before a Seed is executed |
+| `telemetry` | `TelemetryConfig` | Anonymous usage telemetry switch |
 
 ---
 
@@ -190,6 +194,8 @@ orchestrator:
 | `runtime_backend` | `"claude_mcp"` \| `"claude"` \| `"codex"` \| `"opencode"` \| `"hermes"` \| `"gemini"` \| `"kiro"` \| `"copilot"` \| `"pi"` \| `"omp"` \| `"gjc"` \| `"antigravity"` \| `"grok"` \| `"zcode"` | `"claude"` | The agent runtime backend used for workflow execution. `claude` is the default Agent SDK runtime in an MCP 1.x environment. `claude_mcp` is the explicit out-of-process CLI worker used by the isolated MCP 2 server. Overridable via `OUROBOROS_AGENT_RUNTIME`. See [runtime capability matrix](runtime-capability-matrix.md). |
 | `permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"acceptEdits"` | Stored permission preference. Runner-driven seed execution forces the native `bypassPermissions` equivalent for both fresh and resumed dispatches wherever the backend exposes an approval surface; persisted handles cannot downgrade it. Pi and GJC expose no separate approval flag and run headlessly without an approval dialogue. |
 | `opencode_permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"bypassPermissions"` | Permission mode when using the OpenCode runtime. Overridable via `OUROBOROS_OPENCODE_PERMISSION_MODE`. |
+| `opencode_mode` | `"plugin"` \| `"subprocess"` \| `null` | `null` | OpenCode integration mode, written by `ouroboros setup --opencode-mode`. With the OpenCode runtime, only `plugin` dispatches work to the OpenCode plugin as a child session; `subprocess` and `null` (installs that predate the setting) run in-process. No environment override. See [runtime capability matrix](runtime-capability-matrix.md). |
+| `opencode_stdout_idle_timeout_seconds` | `float > 0` \| `null` | `null` | Seconds the OpenCode runtime waits between successive stdout chunks before its stream guard stops waiting. `null` keeps the runtime default (600). `OUROBOROS_OPENCODE_STDOUT_IDLE_TIMEOUT` takes precedence; there a value of `0` or less disables the guard, leaving liveness to the orchestrator watchdog. |
 | `max_parallel_workers` | `int >= 1` | `3` | Maximum Acceptance Criteria workers the adaptive dispatch window may reach. Overridable via `OUROBOROS_MAX_PARALLEL_WORKERS`. Invalid explicit values fail instead of falling back to the default. The native Claude backend starts at this value and is paced by its RPM/TPM bucket. CLI runtimes whose underlying LLM limits are unknown (`hermes`, `codex`, `gemini`, `opencode`, ...) start at 1, halve the window on 429 pressure, honor `Retry-After`, and add one worker after sustained success until this ceiling. |
 | `cli_path` | `string \| null` | `null` | Absolute path to the Claude CLI binary (`~` is expanded). When `null`, the active Claude runtime resolves its normal CLI default. Overridable via `OUROBOROS_CLI_PATH`. |
 | `codex_cli_path` | `string \| null` | `null` | Absolute path to the Codex CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_CODEX_CLI_PATH`. |
@@ -199,12 +205,46 @@ orchestrator:
 | `copilot_acp_fallback` | `bool` | `true` | Permit fallback to legacy CLI only before prompt submission and for read-only/tool-less envelopes. Never fallback on auth failures or replay submitted prompts. Overridable via trusted `OUROBOROS_COPILOT_ACP_FALLBACK`. |
 | `pi_cli_path` | `string \| null` | `null` | Absolute path to the Pi CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_PI_CLI_PATH`. |
 | `omp_cli_path` | `string \| null` | `null` | Absolute path to the OMP (Oh My Pi) CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_OMP_CLI_PATH`. |
+| `hermes_cli_path` | `string \| null` | `null` | Absolute path to the Hermes CLI binary (`~` is expanded). When `null`, `hermes` is resolved from `PATH` at runtime. Overridable via `OUROBOROS_HERMES_CLI_PATH`. |
+| `gemini_cli_path` | `string \| null` | `null` | Absolute path to the Gemini CLI binary (`~` is expanded). When `null`, or when the value is not an executable, `gemini` is resolved from `PATH`. Overridable via `OUROBOROS_GEMINI_CLI_PATH`. |
+| `kiro_cli_path` | `string \| null` | `null` | Absolute path to the Kiro CLI binary (`~` is expanded). When `null`, or when the value is not an executable, `kiro-cli` is resolved from `PATH`. Overridable via `OUROBOROS_KIRO_CLI_PATH`. |
+| `goose_cli_path` | `string \| null` | `null` | Absolute path to the Goose CLI binary (`~` is expanded). When `null`, or when the value is not an executable, `goose` is resolved from `PATH`. Overridable via `OUROBOROS_GOOSE_CLI_PATH`. |
+| `gjc_cli_path` | `string \| null` | `null` | Absolute path to the GJC CLI binary (`~` is expanded). When `null`, `gjc` is resolved from `PATH` at runtime. Overridable via `OUROBOROS_GJC_CLI_PATH`. |
+| `antigravity_cli_path` | `string \| null` | `null` | Absolute path to the Antigravity CLI binary `agy` (`~` is expanded). When `null`, or when the value is not an executable, `agy` is resolved from `PATH`. Overridable via `OUROBOROS_ANTIGRAVITY_CLI_PATH`. |
+| `grok_cli_path` | `string \| null` | `null` | Absolute path to the Grok Build CLI binary `grok` (`~` is expanded). When `null`, or when the value is not an executable, `grok` is resolved from `PATH`. Overridable via `OUROBOROS_GROK_CLI_PATH`. |
 | `zcode_cli_path` | `string \| null` | `null` | Path to the Zcode app-bundle `zcode.cjs` script, a standalone script, or a directly executable `zcode` wrapper. Official app bundles use their bundled Electron/Node runtime. Resolution falls back to the macOS app bundle, then `PATH`. Overridable via `OUROBOROS_ZCODE_CLI_PATH`. |
 | `megacode_cli_path` | `string \| null` | `null` | Path to the megacode harness CLI (`harness`, `~` is expanded). Used by the `megacode` runtime and LLM backend; when `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_MEGACODE_CLI_PATH`. See [the megacode runtime guide](runtime-guides/megacode.md). |
 | `ourocode_cli_path` | `string \| null` | `null` | Absolute path to the ourocode CLI binary (`~` is expanded). Used by the LLM-only `ourocode` backend; when `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_OUROCODE_CLI_PATH`. |
 | `dsh_cli_path` | `string \| null` | `null` | Absolute path to the DeepSeek Harness ACP server binary `dsh-acp-demo` (`~` is expanded). Used by the LLM-only `dsh` backend; when `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_DSH_CLI_PATH`. |
 | `dsh_config_path` | `string \| null` | `null` | Absolute path to the trusted Cordis composition the `dsh` backend loads. Required for that backend — it fails closed rather than guessing, and a relative path is rejected because it would resolve against the untrusted project cwd. Overridable via `OUROBOROS_DSH_CONFIG_PATH`. See [the DeepSeek Harness guide](guides/deepseek-harness.md). |
+| `verify_bash_path` | `string \| null` | `null` | Bash used to run an acceptance criterion's `verify_command` (`~` is expanded). `OUROBOROS_VERIFY_BASH` takes precedence (not accepted from a project `.env`). A value that does not resolve to an absolute path of an executable is ignored, and resolution continues with `/bin/bash`, `/usr/bin/bash`, then `bash` on `PATH` (on Windows: Git for Windows' bash, then `bash` on `PATH`; the WSL launcher is never used). |
 | `default_max_turns` | `int >= 1` | `10` | Default maximum number of turns per agent execution task. |
+| `reasoning_effort` | `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `null` | `null` | Base reasoning-effort level for AC execution (RFC #1405). Enforced on runtimes with a native per-call setting (Claude Agent SDK, Codex) and advisory elsewhere; `null` leaves effort routing dormant. Codex-only `minimal` and Claude-only `max` are not accepted. Overridable via `OUROBOROS_AGENT_REASONING_EFFORT` (not accepted from a project `.env`); an invalid value there is ignored. |
+| `usage_limit_pause_hours` | `float > 0` | `5.0` | How long a run pauses when a provider reports a usage or quota window limit and its message gives no reset time (a duration in the message wins). At most 365 days; sealed in the run's execution semantics when it starts. Overridable via `OUROBOROS_USAGE_LIMIT_PAUSE_HOURS`. |
+| `runtime_profile` | object \| `string` \| `null` | `null` | Agent OS runtime profile: per-stage runtime routing and a backend-native profile name (fields below). A bare string is shorthand for `runtime_profile.backend_profile`. |
+| `use_worktrees` | `bool` | `true` | Run mutating workflows in a dedicated git worktree on an `ooo/*` branch under `worktree_root` instead of in the checkout itself. Needs Git 2.36.0 or newer; set `false` to run in the checkout. |
+| `worktree_root` | `string` | `"~/.ouroboros/worktrees"` | Root directory for managed task worktrees and their lock files (`~` is expanded). |
+| `worktree_cleanup` | `"keep"` \| `"remove"` \| `"prune-merged"` | `"prune-merged"` | What happens to a managed worktree when its session releases it: `keep` removes nothing; `prune-merged` removes the worktree and its `ooo/*` branch only when the branch is fully merged and the checkout is clean; `remove` removes clean worktrees and deletes the branch only when Git accepts a safe merged-branch delete. If the config cannot be loaded, `keep` applies. See [`ouroboros cleanup`](cli-reference.md). |
+| `worktree_lock_stale_after_minutes` | `int >= 1` | `60` | Age after which a task-worktree lock from another host (or one without a recorded PID) is treated as stale and may be taken over. A lock from this host is stale as soon as its process is gone. |
+| `pm_snapshot_worktrees` | `bool` | `true` | PM brownfield exploration reads from a detached worktree pinned to the remote default branch (`origin/HEAD`) instead of your live checkout. It is created once per repository and refreshed (fetch and hard reset) at each PM interview start. |
+| `pm_snapshot_root` | `string` | `"~/.ouroboros/pm-snapshots"` | Root directory for PM snapshot worktrees (`~` is expanded). |
+
+**`RuntimeProfileConfig` fields** (the value of `orchestrator.runtime_profile`):
+
+```yaml
+orchestrator:
+  runtime_profile:
+    backend_profile: worker   # backend-native profile name
+    default: claude           # any stage missing from stages
+    stages:
+      evaluate: antigravity   # interview | execute | evaluate | reflect
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `backend_profile` | `string \| null` | `null` | Backend-native profile name. Stage routing does not read it; backend adapters map it to their own profile mechanism, for Codex a `codex exec` profile (see [the Codex guide](runtime-guides/codex.md#worker-subprocess-isolation-agent-os-runtime_profile)). An empty value is rejected. Overridable via `OUROBOROS_RUNTIME_PROFILE`. |
+| `default` | `string \| null` | `null` | Runtime backend that serves any stage missing from `stages`. Must be a known runtime backend name. `null` keeps the existing selection: `runtime_backend` for agent work and, for internal LLM calls, an explicit `llm.backend` override first. |
+| `stages` | `dict[string, string]` | `{}` | Runtime backend per pipeline stage. Keys must be `interview`, `execute`, `evaluate`, or `reflect`, and each value a known runtime backend name; anything else fails config validation. The routing presets in the `ouroboros config` settings GUI write this map. |
 
 Copilot ACP deliberately caps runner-requested `bypassPermissions` to
 `acceptEdits`; it never enables unrestricted execution. Its exact tool envelope
@@ -326,7 +366,7 @@ or routing policy is explicitly requested.
 
 Common role keys include `clarification`, `seed_generation`, `assertion_extraction`, `qa`, `semantic_evaluation`, `wonder`, `reflect`, `consensus_vote`, `consensus_advocate`, `consensus_judge`, `dependency_analysis`, `context_compression`, `ontology_analysis`, and `mechanical_detection`.
 
-Profile fields:
+**`LLMTaskProfileConfig` fields** (one entry of `llm_profiles`):
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -338,7 +378,19 @@ Profile fields:
 | `reasoning_effort` | `"low" \| "medium" \| "high" \| null` | Portable effort dial for providers with native reasoning-effort support. A provider-specific mapping may additionally use Codex `xhigh`. |
 | `providers` | `dict` | Backend-specific overrides keyed by `codex`, `claude_code`, `gemini`, `opencode`, `litellm`, or provider aliases such as `openrouter`. |
 
-Provider-specific fields use the same keys plus `profile`. `profile` is currently backend-native metadata; Codex maps it to `codex exec --profile <name>`, while non-Codex adapters ignore it unless they add native profile support later. Role-based resolution uses these profile fields for model/native-profile routing, `max_turns`, and `reasoning_effort`; it intentionally preserves request-level `temperature`, `max_tokens`, and `top_p` so existing task-specific tuning does not change just because a role was annotated. Explicit `CompletionConfig.profile` requests use the profile's full sampling/token envelope. `ouroboros setup --runtime codex` installs missing default role mappings and preserves existing profile definitions, existing Codex provider model pins, and skips role mappings where explicit legacy model overrides are already configured.
+**`LLMProviderProfileConfig` fields** (one entry of a profile's `providers`):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `profile` | `string \| null` | Backend-native profile name (see below). |
+| `model` | `string \| null` | Model for this backend; overrides the profile's portable `model`. |
+| `temperature` | `float [0.0, 2.0] \| null` | Temperature for this backend. |
+| `max_tokens` | `int >= 1 \| null` | Token limit for this backend. |
+| `top_p` | `float [0.0, 1.0] \| null` | Nucleus sampling for this backend. |
+| `max_turns` | `int >= 1 \| null` | CLI-agent turn budget for this backend, where supported. |
+| `reasoning_effort` | `"low" \| "medium" \| "high" \| "xhigh" \| null` | Effort for this backend. `xhigh` is accepted only under a `codex` or `codex_cli` key; validation rejects it under any other provider. |
+
+Provider-specific fields are the portable keys plus `profile`. `profile` is currently backend-native metadata; Codex maps it to `codex exec --profile <name>`, while non-Codex adapters ignore it unless they add native profile support later. Role-based resolution uses these profile fields for model/native-profile routing, `max_turns`, and `reasoning_effort`; it intentionally preserves request-level `temperature`, `max_tokens`, and `top_p` so existing task-specific tuning does not change just because a role was annotated. Explicit `CompletionConfig.profile` requests use the profile's full sampling/token envelope. `ouroboros setup --runtime codex` installs missing default role mappings and preserves existing profile definitions, existing Codex provider model pins, and skips role mappings where explicit legacy model overrides are already configured.
 
 Codex agent-runtime tasks also use these mappings. Runtime handles with `session_role: implementation`, `coordinator`, `interview`, or `evaluation` resolve through `agent_runtime_<session_role>`; tasks without a role fall back to `agent_runtime`. Explicit runtime models still win and are passed with `--model` instead of `--profile`.
 
@@ -529,6 +581,12 @@ execution:
 | `auto_evaluate` | `bool` | `true` | Enqueue formal 3-stage evaluation after a completed background run has a session and artifact. This includes unsuccessful AC execution; handler-level failures without an evaluable run are excluded. Applies to MCP `ooo run` and to the terminal `ouroboros run`, which waits for the evaluation; `ouroboros run --auto-evaluate/--no-auto-evaluate` overrides it for one run. |
 | `auto_evolve` | `bool` | `true` | When formal evaluation returns an explicit rejection, seed a generation-1 lineage snapshot and enqueue a bounded Ralph continuation. Per-call `auto_evolve` overrides this setting. The terminal `ouroboros run` follows the same rule and waits for the Ralph job; `ouroboros run --auto-evolve/--no-auto-evolve` overrides it for one run. |
 | `auto_evolve_max_generations` | `int` | `3` | Maximum generations for automatically chained Ralph work. Values are clamped to Ralph's supported `1..10` range. |
+| `tui_autolaunch` | `bool` | `false` | Read by the `ooo run` skill, not by Python code: when `true`, the skill runs `ouroboros tui open` after starting a run instead of offering it. |
+| `ac_retry_attempts` | `int >= 0` | `2` | How many times a failed acceptance criterion is re-dispatched before it is marked FAILED; stall retries are not counted. Sealed when a run starts, so a resumed run keeps its value. |
+| `cross_harness_redispatch` | `bool` | `false` | **Not read.** Earlier releases wrote `true` into generated config files, so the stored value cannot show consent. Only `OUROBOROS_CROSS_HARNESS_REDISPATCH` (`1`, `true`, `on`, `yes`; not accepted from a project `.env`) enables cross-harness redispatch: a terminally failing criterion is re-dispatched once onto a different installed runtime before it is marked FAILED. |
+| `n_version_tournament` | `bool` | `false` | **Not wired.** The value validates and `OUROBOROS_N_VERSION_TOURNAMENT` overrides it, but no execution path consults it yet: the N-version tournament (a criterion that failed again after its cross-harness redispatch fanning out to other runtimes in parallel) ships as scaffolding only. |
+| `decomposition_mode` | `"bounce_only"` \| `"off"` | `"bounce_only"` | Where acceptance-criterion decomposition is allowed. `bounce_only` splits a criterion only after an evidence-backed too-big bounce; `off` disables decomposition. A stored legacy `preflight` value loads as `bounce_only`. Sealed when a run starts. |
+| `context_pack` | `bool` | `true` | Append a deterministic repository context pack (stack, verify commands, layout) to run worker system prompts. Overridable via `OUROBOROS_CONTEXT_PACK` (`1`/`true`/`on`/`yes` or `0`/`false`/`off`/`no`). |
 | `run_verify_commands` | `bool` | `true` | Check an AC's success contract (expected artifacts and `verify_command`) before accepting it. While on, the evidence verifier may also replay allowlisted commands the worker ran, in a copy of the workspace under the execution sandbox (writes only inside the copy, no network; nothing is replayed where the sandbox is unavailable), to corroborate `tests_passed` and `commands_run` claims the transcript alone cannot prove (see [Verifier Evidence Policy](contributing/verifier-evidence-policy.md#replay-first-corroboration)). Off: nothing is executed by the harness. |
 | `verify_command_timeout_seconds` | `int >= 1` | `600` | Timeout for each `verify_command` run and each replayed command. |
 | `exec_sandbox` | `bool` | `true` | Confine the commands the controller runs on its own authority (verifier replay) with the execution sandbox: writes (content, names and metadata) only beneath the workspace copy and a per-run temp directory, no non-loopback network, an allowlisted environment (`sandbox-exec` on macOS; Landlock plus read-only mounts and a seccomp metadata filter on Linux, where mode, timestamps and extended attributes inside the copy are read-only too only when no unprivileged mount namespace is available; a per-run AppContainer on Windows, where loopback reaches only the command's own processes, the `NUL` device is unavailable, batch files (`.cmd`, `.bat`) cannot run and are left indeterminate, and reads are limited to what is granted). On Windows the controller's interpreter and the live dependency trees a workspace copy links to are granted read and execute to one Ouroboros capability SID; that grant is persistent, is recorded in `~/.ouroboros/exec-sandbox/read-grants.jsonl`, and is removed with `python -c "from ouroboros.runtime.exec_sandbox import remove_persistent_read_grants as r; print(r())"` (run it while no Ouroboros command is running). Where no backend works, nothing is run and the outcome is indeterminate (`sandbox_unavailable`). **Unsafe when `false`:** those commands run unconfined, able to write anywhere the user can and to use the network. `OUROBOROS_EXEC_SANDBOX` overrides it; a project `.env` cannot. The effective value is sealed when a run starts, and resuming it with a different value is refused. |
@@ -986,6 +1044,36 @@ logging:
 
 ---
 
+## `seed`
+
+Seed-authoring gates applied before a Seed is executed.
+
+```yaml
+seed:
+  verify_command_gate: warn   # "warn" | "block"
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `verify_command_gate` | `"warn"` \| `"block"` | `"warn"` | How a run treats an acceptance criterion that declares neither a `verify_command` nor a `verify_exemption_reason`. `warn` reports it and continues; `block` refuses the run. If the config cannot be read, `warn` applies. |
+
+---
+
+## `telemetry`
+
+Anonymous usage telemetry. What is sent, and every way to turn it off, is in [TELEMETRY.md](../TELEMETRY.md).
+
+```yaml
+telemetry:
+  enabled: true
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | `bool` | `true` | Whether anonymous usage events may be sent. `DO_NOT_TRACK` or `OUROBOROS_TELEMETRY=0` disables telemetry whatever this says, `OUROBOROS_TELEMETRY=1` cannot turn it back on, and an unreadable or invalid config also disables it. |
+
+---
+
 ## `credentials.yaml`
 
 API keys are stored separately from the main config. This file is created with `chmod 600` permissions by `ouroboros config init`.
@@ -1265,7 +1353,9 @@ clarification:
   default_model: claude-opus-4.6           # example live-discovered Copilot ID
 ```
 
-The Copilot CLI runtime is unique in that `ouroboros setup --runtime copilot` **live-discovers the available models** from the GitHub Copilot models API at setup time. There is no `llm.default_model` contract: setup removes that key and writes the selected dotted Copilot ID into supported per-role fields that are absent or still carry shipped defaults, while preserving explicit user overrides. Re-run setup after GitHub publishes new models. Authentication uses `gh auth login`; no separate API key is required.
+The Copilot CLI runtime is unique in that `ouroboros setup --runtime copilot` **live-discovers the available models** from the GitHub Copilot models API at setup time.
+There is no `llm.default_model` contract: <!-- docs-drift: ignore -->
+setup removes that key and writes the selected dotted Copilot ID into supported per-role fields that are absent or still carry shipped defaults, while preserving explicit user overrides. Re-run setup after GitHub publishes new models. Authentication uses `gh auth login`; no separate API key is required.
 
 Model-ID normalization is catalog-gated. `map_to_copilot_model()` first accepts
 an exact Copilot ID, then removes the known `openrouter/anthropic/` prefix or
