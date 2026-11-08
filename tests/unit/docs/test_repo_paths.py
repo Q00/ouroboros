@@ -24,11 +24,14 @@ What is checked:
    footnote, not a definition. Raw HTML (inline tags and HTML blocks) goes
    to the standard library's ``html.parser``, which yields every ``href`` /
    ``src`` of every tag. An HTML block that ends inside an unclosed tag is
-   reported, together with the targets that tag already has. Skipped:
-   targets with a URL scheme (``https:``, ``mailto:``, ...),
-   protocol-relative ``//host`` targets, and pure ``#anchor`` targets. The
+   reported, together with the targets that tag already has. The
    ``#fragment``, a ``?query``, and a trailing ``:123`` / ``:123-130`` line
-   suffix (hyphen or en dash) are dropped and the rest is percent-decoded. A
+   suffix (hyphen or en dash) are dropped and the rest is percent-decoded.
+   Skipped after that: targets with a URL scheme (``https:``, ``mailto:``,
+   ``vscode:``, ...), protocol-relative ``//host`` targets, and pure
+   ``#anchor`` targets. A scheme is letters, digits, ``+``, and ``-`` before
+   the first ``:``; a prefix with a ``.`` or ``/`` is a file name
+   (``missing.md:123``), not a scheme. A
    relative target is resolved against the doc's own directory; a target
    starting with ``/`` is resolved against the repository root, which is how
    GitHub renders it. The result must exist and stay inside the repository.
@@ -141,7 +144,8 @@ REMEDY_MISSING_PATH = (
 )
 
 _LINK_ATTRIBUTES = frozenset({"href", "src"})
-_URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]+:")
+# A URL scheme. ``.`` is left out on purpose: ``missing.md:x`` names a file.
+_URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+-]+:")
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:[\\/]")
 _LINE_SUFFIX = re.compile(r":\d+(?:[-–]\d+)?$")
 _PLACEHOLDER = re.compile(r"[*?<>{}$\s]|\.\.\.|…")
@@ -349,11 +353,11 @@ def check_link_target(doc_path: str, target: str) -> str | None:
         return None
     if target.lower().startswith("file:") or _WINDOWS_DRIVE.match(unquote(target)):
         return REMEDY_ABSOLUTE
-    if _URL_SCHEME.match(target):
-        return None
+    # Drop the documented suffixes first, so ``missing.md:123`` is a file
+    # with a line number, not a ``missing.md:`` scheme.
     path = target.split("#", 1)[0].split("?", 1)[0]
     path = _LINE_SUFFIX.sub("", unquote(path))
-    if not path:
+    if not path or _URL_SCHEME.match(path):
         return None
     resolved = resolve_link(doc_path, path)
     if resolved is not None and exists_in_repo(resolved):
@@ -536,6 +540,14 @@ def test_accepts_existing_targets_in_every_supported_form() -> None:
     )
     lines += _doc("pytest tests/unit/docs/::x 'src/ouroboros/__init__.py:1'.", fenced=True)
     assert find_violations(lines, DIRS) == []
+
+
+def test_a_line_suffix_is_not_mistaken_for_a_url_scheme() -> None:
+    lines = _doc("[x](missing.md:123)", "[y](missing.md:123-130)", "[z](README:12)")
+    assert _tokens(lines) == ["missing.md:123", "missing.md:123-130", "README:12"]
+    # Real URLs, with or without a trailing ``:N``, are still skipped.
+    urls = _doc("[a](https://x/y:123) [b](mailto:a@b) [c](vscode:extension/x) [d](x-y+z:q)")
+    assert find_violations(urls, DIRS) == []
 
 
 def test_skips_urls_anchors_autolinks_and_non_repository_tokens() -> None:
