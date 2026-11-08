@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import posixpath
+import random
 import shlex
 import sys
 from typing import Any
@@ -147,6 +149,118 @@ def test_other_languages_pair_by_path_only() -> None:
         "web/widget.spec.js",
     )
     assert tc.changed_other_sources(["pkg/calc_test.go", "src/widget.test.ts"]) == ()
+
+
+def _paired_other_tests_before(base_paths: Any, source: str) -> tuple[str, ...]:
+    """``paired_other_tests`` before the one-pass selection, verbatim (the reference)."""
+    directory = posixpath.dirname(source)
+    stem, extension = posixpath.splitext(posixpath.basename(source))
+    out: set[str] = set()
+    for path in base_paths:
+        if not tc.is_paired_test(path):
+            continue
+        name = posixpath.basename(path)
+        test_stem, test_extension = posixpath.splitext(name)
+        if extension == ".go" and test_extension == ".go":
+            if posixpath.dirname(path) == directory and test_stem == f"{stem}_test":
+                out.add(path)
+        elif extension in tc._JS and test_extension in tc._JS:
+            if name.split(".")[0] == stem:
+                out.add(path)
+        elif extension in tc._JVM and test_extension in tc._JVM:
+            if test_stem in (f"{stem}Test", f"{stem}Tests"):
+                out.add(path)
+        elif extension == ".rs" and test_extension == ".rs":
+            if test_stem == stem:
+                out.add(path)
+    return tuple(sorted(out))
+
+
+def _select_other_tests_before(base_paths: Any, changed: Any) -> tuple[str, ...]:
+    """``select_other_tests`` before the one-pass selection, verbatim (the reference)."""
+    selected: set[str] = set()
+    for source in tc.changed_other_sources(changed):
+        selected.update(_paired_other_tests_before(base_paths, source))
+    return tuple(sorted(selected))
+
+
+_STEMS = ("calc", "widget", "Foo", "lib", "index", "a.b", "Foo_test", "x")
+_NAMES = (
+    "{s}.go",
+    "{s}_test.go",
+    "{s}.ts",
+    "{s}.test.ts",
+    "{s}.spec.jsx",
+    "{s}.test.mjs",
+    "{s}.cjs",
+    "{s}.tsx",
+    "{s}.java",
+    "{s}Test.java",
+    "{s}Tests.kt",
+    "{s}.rs",
+    "{s}.py",
+    "test_{s}.py",
+    "{s}.md",
+)
+_DIRECTORIES = (
+    "",
+    "pkg",
+    "other",
+    "src",
+    "src/__tests__",
+    "web",
+    "tests",
+    "tests/sub",
+    "src/main/java",
+    "src/test/java",
+    "node_modules/pkg/lib",
+    "node_modules/pkg/__tests__",
+    "node_modules/@scope/pkg/test",
+    "vendor/github.com/x/pkg",
+)
+
+
+def _generated(rng: random.Random, count: int) -> list[str]:
+    return [
+        posixpath.join(rng.choice(_DIRECTORIES), rng.choice(_NAMES).format(s=rng.choice(_STEMS)))
+        for _ in range(count)
+    ]
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_one_pass_pairing_selects_what_the_per_source_pairing_selected(seed: int) -> None:
+    rng = random.Random(seed)
+    base = _generated(rng, rng.randint(0, 400))
+    # Changed paths: some from the base (sources and tests), some it lacks.
+    changed = rng.sample(base, min(len(base), rng.randint(0, 12))) + _generated(rng, 4)
+    shapes: list[Any] = [base, set(base), dict.fromkeys(base, "digest")]
+
+    for shape in shapes:
+        assert tc.select_other_tests(shape, changed) == _select_other_tests_before(shape, changed)
+        for source in changed:
+            assert tc.paired_other_tests(shape, source) == _paired_other_tests_before(shape, source)
+
+
+def test_one_pass_pairing_checks_each_base_path_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    base = [f"node_modules/pkg{i}/lib/file{i}.js" for i in range(300)]
+    base += [f"node_modules/pkg{i}/test/x{i}.test.js" for i in range(30)]
+    base += [f"src/mod{i}.ts" for i in range(20)] + [f"src/mod{i}.test.ts" for i in range(20)]
+    changed = [f"src/mod{i}.ts" for i in range(8)] + ["README.md", "calc/ops.py"]
+    expected = _select_other_tests_before(base, changed)
+    calls: list[str] = []
+    original = tc.is_paired_test
+    monkeypatch.setattr(tc, "is_paired_test", lambda path: calls.append(path) or original(path))
+
+    assert tc.select_other_tests(base, changed) == expected
+    assert len(expected) == 8
+    # Once per base path, plus once per changed path with a source extension
+    # (``changed_other_sources``); the per-source pairing checked each base
+    # path once per changed source.
+    assert len(calls) == len(base) + 8
+
+    calls.clear()
+    assert tc.select_other_tests(base, ["README.md", "calc/ops.py"]) == ()
+    assert calls == []  # no non-Python source changed: the base is never scanned
 
 
 # --------------------------------------------------------------------------
