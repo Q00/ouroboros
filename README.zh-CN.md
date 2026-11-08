@@ -516,6 +516,12 @@ Ralph Cycle 3: evolve_step(lineage)       -> Gen 3 -> action=CONVERGED
 `ooo setup` 按宿主配置；MCP 注册流程并非所有宿主都相同。Claude Code 使用
 `ooo setup` guided 流程，其他运行时使用相应的 CLI 设置步骤。
 
+> 在标准 MCP 路径中对 Git 项目请求 `ooo run` 前，请在项目终端用只读命令
+> `git rev-parse --verify HEAD` 检查是否已有提交。标准 MCP run 默认请求 worktree；
+> 只执行 `git init`、尚无提交的仓库没有可供创建该 worktree 的 `HEAD`
+> ([MCP 默认值](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/mcp/tools/execution_handlers.py#L1430)，
+> [worktree 检查](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/core/worktree.py#L371-L388))。如果这是刚执行过 `git init`、尚无提交的仓库，请先审查文件，并由你自己决定是否以及提交哪些内容，再运行。不要让 agent 在此准备阶段擅自提交或修改项目文件。此条件仅适用于标准 MCP worktree 路径；不要泛化到 standalone CLI、非 Git 项目、关闭 worktree 或 OpenCode。
+
 | 技能（`ooo`）        | 等效 CLI                                                          | 作用                                                          |
 | :------------------- | :---------------------------------------------------------------- | :------------------------------------------------------------ |
 | `ooo setup`          | `ouroboros setup`                                                 | 按宿主配置；其他运行时使用相应 CLI 设置步骤                    |
