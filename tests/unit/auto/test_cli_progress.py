@@ -103,6 +103,7 @@ def test_cli_auto_help_documents_quiet_flag() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("auto_project_cwd")
 async def test_cli_run_auto_threads_progress_callback_to_pipeline(monkeypatch, tmp_path) -> None:
     captured: dict[str, object] = {}
 
@@ -233,6 +234,7 @@ def test_auto_interview_driver_swallows_callback_errors() -> None:
     driver._save(state)
 
 
+@pytest.mark.usefixtures("auto_project_cwd")
 def test_cli_auto_quiet_suppresses_progress_lines(monkeypatch, tmp_path) -> None:
     """End-to-end: --quiet must not stream progress lines to the user."""
     from ouroboros.auto.state import AutoStore

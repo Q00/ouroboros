@@ -455,6 +455,7 @@ def test_run_auto_passes_state_interview_timeout_to_driver(tmp_path) -> None:
     assert captured["driver_timeout_seconds"] == 175.0
 
 
+@pytest.mark.usefixtures("auto_project_cwd")
 def test_run_auto_uses_default_state_interview_timeout_for_new_sessions() -> None:
     """New sessions must inherit the 600s default from AutoPipelineState."""
     import asyncio
@@ -663,6 +664,7 @@ def test_auto_status_reports_subprocess_for_cli_demoted_session(tmp_path) -> Non
     assert "Run backend: opencode (subprocess)" in output
 
 
+@pytest.mark.usefixtures("auto_project_cwd")
 def test_auto_result_pipeline_carries_runtime_labels(tmp_path) -> None:
     """AutoPipelineResult propagates runtime_backend/opencode_mode for printing."""
     import asyncio
