@@ -239,9 +239,9 @@ command text a second way. The rules:
     it (pytest, unittest, Django-style runners, `bin/test`, jest, vitest,
     mocha, rspec, `go test`, phpunit), and nothing in the command narrows
     what the runner collects or selects (see "Narrowing" below). For example
-    `migrations (578 tests)` is linked to `python tests/runtests.py
-    migrations`, and `tests/test_x.py` is not linked to `sed -n 1,40p
-    tests/test_x.py` or to `pytest --ignore tests/test_x.py`.
+    `migrations (578 tests)` is linked to `python tests/runtests.py migrations`,
+    and `tests/test_x.py` is not linked to `sed -n 1,40p tests/test_x.py` or to <!-- docs-drift: ignore -->
+    `pytest --ignore tests/test_x.py`.
 
   A claim that merely contains a command (`make` inside `make test`) is not
   linked to it. The runner-output rules apply to a replayed run only under the
