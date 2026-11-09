@@ -452,8 +452,10 @@ These workflow instructions were checked against product source
 [`592c667f`](https://github.com/Q00/ouroboros/tree/592c667f076c3dad7ef68d7844e91480d80135d0)
 on 2026-11-07. The published [v0.59.9 release](https://github.com/Q00/ouroboros/releases/tag/v0.59.9)
 and a host's plugin skills or MCP process are separate version boundaries;
-matching version labels alone do not establish matching source. The plugin
-MCP descriptors in this source pin `ouroboros-ai[mcp]==0.59.9`. A terminal's
+matching version labels alone do not establish matching source. In this
+source, the Codex plugin descriptor (`.mcp.codex.json`) pins
+`ouroboros-ai[mcp]==0.59.9`, while the Claude plugin descriptor (`.mcp.json`)
+requests unpinned `ouroboros-ai[mcp]` via `uvx --isolated`. A terminal's
 `ouroboros --version` describes that CLI installation, not every host-managed
 server. Follow the installed help when it differs, and identify the mismatch
 before applying a recovery procedure.
