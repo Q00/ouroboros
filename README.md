@@ -294,10 +294,39 @@ commit or change project files during this preparation step. This condition is s
 worktree path; it does not establish behavior for non-Git projects,
 worktree-disabled runs, or OpenCode.
 
-In the **host conversation**, ask for `ooo run` and provide the reviewed Seed
-YAML or its actual file path. In a **terminal**, use
-`ouroboros run <seed-file>` with the actual generated path; replace the
-placeholder, including its angle brackets.
+In a **host conversation**, ask for `ooo run` and provide the reviewed Seed
+YAML or its actual file path. For standalone CLI, use the exact saved Seed path
+and intended project directory in one of the commands below. Replace both
+example paths with verified paths; do not run if the Seed file or path is
+missing.
+
+In fixed main `592c667f` and release `0.59.9`, standalone `init start` saves a
+generated Seed under the user's `~/.ouroboros/seeds/<seed_id>.yaml`, separate
+from the project. Accepting its immediate workflow passes the Interview's
+current directory as a fallback. For a later run of a Seed in that global
+store, if the Seed has no project target, the current directory is the fallback.
+For a Seed under a project's `.ouroboros/seeds/` tree, the CLI detects that
+project root. An ordinary Seed file outside the global and project-local Seed
+stores instead uses its containing directory as the fallback. Review any target
+recorded in the Seed before use.
+
+`--project-dir` explicitly selects the project directory for resolving
+Seed-relative paths and overrides the target inferred from the Seed. For an
+existing project, select its actual root and review uncommitted work before
+running. For a new project, select the directory intended for it. Never use the
+global Seed storage directory as the project target. This option does not create
+a missing Seed file. If YAML was returned without a saved file or path, follow
+the missing-file step above before running.
+
+```bash
+ouroboros run "/actual/path/to/seed.yaml" --project-dir "/actual/path/to/project"
+```
+
+Windows PowerShell, after installing the standalone CLI as described above:
+
+```powershell
+ouroboros run "C:\actual\path\to\seed.yaml" --project-dir "C:\actual\path\to\project"
+```
 
 Execution may start as a background job. Save its returned IDs and read the
 reported workspace: a job receipt does not prove completion, and an isolated
@@ -490,7 +519,7 @@ interchangeable syntax or identical implementations.
 | `ooo idk` | [Calibration contract](./docs/architecture.md#interview-calibration-control-turns) | Adjust interview explanations to your understanding |
 | `ooo seed` | [Seed skill](./skills/seed/SKILL.md); CLI interview's generation step | Turn agreed requirements into a specification |
 | `ooo auto` | `ouroboros auto` | Bounded interview, Seed repair, and execution handoff |
-| `ooo run` | `ouroboros run <seed-file>` | Execute an existing specification |
+| `ooo run` | `ouroboros run <seed-file> [--project-dir <project-directory>]` | Execute an existing specification |
 | `ooo evaluate` | [Evaluation skill](./skills/evaluate/SKILL.md) / MCP | Evaluate an execution against its criteria |
 | `ooo evolve`, `ooo ralph` | [Evolution and Ralph](./docs/guides/evolution-loop.md) / MCP | One evolutionary generation or a bounded loop |
 | `ooo status` | `ouroboros status` | Inspect sessions and progress; the skill also supports drift |
