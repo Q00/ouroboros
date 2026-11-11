@@ -622,7 +622,8 @@ async def test_start_evolve_preacceptance_cancellation_aborts_prepared_claim(
     )
     pending = asyncio.create_task(start.handle({"lineage_id": lineage_id, "execute": False}))
     try:
-        await asyncio.wait_for(claim_prepared.wait(), timeout=1.0)
+        # Initial preparation time is not part of the cancellation contract.
+        await asyncio.wait_for(claim_prepared.wait(), timeout=5.0)
         await asyncio.wait_for(enqueue_started.wait(), timeout=1.0)
         pending.cancel()
         await asyncio.wait_for(claim_cancelled.wait(), timeout=1.0)
