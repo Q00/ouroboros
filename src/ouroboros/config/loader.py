@@ -47,7 +47,11 @@ import yaml
 
 from ouroboros.backends import get_backend_capability
 from ouroboros.config.completion_backend_guard import guard_completion_backend
-from ouroboros.config.credential_errors import sanitize_credential_errors
+from ouroboros.config.credential_errors import (
+    safe_yaml_error_details,
+    sanitize_config_errors,
+    sanitize_credential_errors,
+)
 from ouroboros.config.model_selection import (
     backend_model_selection,
     pin_models_enabled,
@@ -341,15 +345,19 @@ def load_config(config_path: Path | None = None) -> OuroborosConfig:
             config_file=str(config_path),
         )
 
+    parse_failure = None
+    config_dict = None
     try:
         with config_path.open(encoding="utf-8") as f:
             config_dict = yaml.safe_load(f)
     except (UnicodeDecodeError, yaml.YAMLError) as e:
-        raise ConfigError(
-            f"Failed to parse configuration file: {e}",
+        parse_failure = ConfigError(
+            "Failed to parse configuration file",
             config_file=str(config_path),
-            details={"yaml_error": str(e)},
-        ) from e
+            details=safe_yaml_error_details(e),
+        )
+    if parse_failure is not None:
+        raise parse_failure
 
     if config_dict is None:
         config_dict = {}
@@ -357,28 +365,20 @@ def load_config(config_path: Path | None = None) -> OuroborosConfig:
     try:
         return OuroborosConfig.model_validate(config_dict)
     except PydanticValidationError as e:
-        # Format validation errors for clarity
-        validation_errors = e.errors()
-        error_messages = []
-        config_keys = []
-        for error in validation_errors:
-            loc = ".".join(str(x) for x in error["loc"])
-            msg = error["msg"]
-            error_messages.append(f"  - {loc}: {msg}")
-            if loc:
-                config_keys.append(loc)
-
+        validation_errors = sanitize_config_errors(e)
+        config_keys = [".".join(error["loc"]) for error in validation_errors if error["loc"]]
+        error_messages = [
+            f"  - {'.'.join(error['loc'])}: {error['msg']}" for error in validation_errors
+        ]
         config_key = config_keys[0] if len(validation_errors) == 1 and config_keys else None
-
-        raise ConfigError(
+        validation_failure = ConfigError(
             "Configuration validation failed:\n" + "\n".join(error_messages),
             config_key=config_key,
             config_file=str(config_path),
-            details={
-                "validation_errors": validation_errors,
-                "config_keys": config_keys,
-            },
-        ) from e
+            details={"validation_errors": validation_errors, "config_keys": config_keys},
+        )
+    # Leave the handler before raising: __context__ must not retain raw input.
+    raise validation_failure
 
 
 def load_credentials(credentials_path: Path | None = None) -> CredentialsConfig:
@@ -420,15 +420,10 @@ def load_credentials(credentials_path: Path | None = None) -> CredentialsConfig:
         with credentials_path.open(encoding="utf-8") as f:
             credentials_dict = yaml.safe_load(f)
     except (UnicodeDecodeError, yaml.YAMLError) as e:
-        # Parser exception chains and snippets may contain credential values.
-        # Keep the failure category and safe numeric location, not raw input.
-        mark = getattr(e, "problem_mark", None)
-        location = {"line": mark.line + 1, "column": mark.column + 1} if mark is not None else {}
-        category = "invalid_utf8" if isinstance(e, UnicodeDecodeError) else "invalid_yaml"
         parse_failure = ConfigError(
             "Failed to parse credentials file",
             config_file=str(credentials_path),
-            details={"yaml_error": category, **location},
+            details=safe_yaml_error_details(e),
         )
     if parse_failure is not None:
         # Raise after leaving the handler so __context__ does not retain input.

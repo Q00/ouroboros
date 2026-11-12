@@ -1255,7 +1255,7 @@ def validate() -> None:
         try:
             resolve_runtime_backend_name(str(backend_val))
         except ValueError:
-            issues.append(f"orchestrator.runtime_backend '{backend_val}' is not supported")
+            issues.append("orchestrator.runtime_backend is not supported")
 
     # Check CLI path exists
     capability = get_backend_capability(str(backend_val or ""))
