@@ -870,6 +870,7 @@ class TestCreateOuroborosServer:
         "ouroboros_start_evolve_step",
         "ouroboros_start_execute_seed",
         "ouroboros_start_ralph",
+        "ouroboros_start_qa",
         # Added in #1754. This set held the re-entry tool's ABSENCE in place:
         # `skills/interview/SKILL.md` documented the tool while this pin
         # asserted the shipped server did not have it, so the wiring gap had a
@@ -884,7 +885,7 @@ class TestCreateOuroborosServer:
         assert server.info.name == "ouroboros-mcp"
         assert server.info.version == __version__
         tool_names = {tool.name for tool in server.info.tools}
-        assert len(tool_names) == 36
+        assert len(tool_names) == 37
         assert tool_names == self.EXPECTED_OUROBOROS_SERVER_TOOLS
 
     def test_checklist_verify_reuses_the_registered_evaluator(self) -> None:
