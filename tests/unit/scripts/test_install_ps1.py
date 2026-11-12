@@ -1,12 +1,8 @@
-"""Windows installer (scripts/install.ps1) parity and syntax checks.
-
-The PowerShell installer cannot run in CI (no Windows runner), so these tests
-pin the two things that drift silently: the dependency pins it passes to
-`uv tool install` must equal install.sh's, and the file must still parse.
-"""
+"""Windows installer extras ownership, parity and syntax checks."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import re
 import shutil
@@ -14,36 +10,22 @@ import subprocess
 
 import pytest
 
-from tests.unit.scripts.test_install_runtime_selection import _expected_pins_for_extras
-
 REPO_ROOT = Path(__file__).resolve().parents[3]
 INSTALL_SH = REPO_ROOT / "scripts" / "install.sh"
 INSTALL_PS1 = REPO_ROOT / "scripts" / "install.ps1"
 
-_PIN_RE = re.compile(r"\b([A-Za-z0-9][A-Za-z0-9_.-]*==[0-9][0-9A-Za-z.]*)")
 
-
-def _pins(path: Path) -> set[str]:
-    return set(_PIN_RE.findall(path.read_text(encoding="utf-8")))
-
-
-def test_ps1_pins_match_install_sh() -> None:
-    sh_pins = _pins(INSTALL_SH)
-    ps1_pins = _pins(INSTALL_PS1)
-    assert sh_pins, "no pins found in install.sh — parity check inert"
-    assert ps1_pins == sh_pins, (
-        "install.ps1 pins drifted from install.sh.\n"
-        f"only in install.sh:  {sorted(sh_pins - ps1_pins)}\n"
-        f"only in install.ps1: {sorted(ps1_pins - sh_pins)}"
-    )
-
-
-def test_ps1_pins_match_pyproject() -> None:
+def test_installers_delegate_optional_versions_to_target_metadata() -> None:
+    for path in (INSTALL_SH, INSTALL_PS1):
+        text = path.read_text(encoding="utf-8")
+        assert not re.search(r"\b[\w.-]+==[0-9]", text), path
+    sh_text = INSTALL_SH.read_text(encoding="utf-8")
     ps1_text = INSTALL_PS1.read_text(encoding="utf-8")
-    expected = _expected_pins_for_extras("claude", "claude-sdk", "mcp", "tui", "litellm")
-    assert expected, "no pyproject pins discovered — parity check inert"
-    drifted = sorted(pin for pin in expected if pin not in ps1_text)
-    assert not drifted, f"install.ps1 is missing pyproject pins: {drifted}"
+    assert '"$INSTALL_SPEC" --with "$CLICK_SPEC"' in sh_text
+    assert "\"$PackageName$extrasLabel\", '--with', $ClickSpec" in ps1_text
+    for extras in ("claude,tui", "claude-sdk,tui", "mcp,tui", "all"):
+        assert f"[{extras}]" in sh_text
+        assert f"[{extras}]" in ps1_text
 
 
 def test_ps1_shares_python_and_click_contract_with_install_sh() -> None:
@@ -92,3 +74,69 @@ def test_ps1_parses_under_pwsh() -> None:
         timeout=60,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(shutil.which("pwsh") is None, reason="pwsh not installed")
+@pytest.mark.parametrize(
+    ("runtime", "extras"),
+    [
+        ("", "tui"),
+        ("claude", "claude,tui"),
+        ("claude-sdk", "claude-sdk,tui"),
+        ("claude-cli", "claude-cli,tui"),
+        ("hermes", "mcp,tui"),
+        ("all", "all"),
+    ],
+)
+@pytest.mark.parametrize("pre", [False, True])
+def test_ps1_install_phase_selects_target_metadata(runtime: str, extras: str, pre: bool) -> None:
+    """Execute the checked-in selection and argv code, stopping before setup."""
+    text = INSTALL_PS1.read_text(encoding="utf-8")
+    phase = text.split("# Map the backend", 1)[1].split("# Put the tool bin directory", 1)[0]
+    phase = "# Map the backend" + phase
+    constants = "\n".join(
+        line
+        for line in text.splitlines()
+        if line.startswith(
+            ("$PackageName =", "$ClickSpec =", "$DefaultPythonSpec =", "$LiteLLMPythonSpec =")
+        )
+    )
+    script = (
+        constants
+        + f"\n$selected = '{runtime}'\n$Pre = ${str(pre).lower()}\n"
+        + r"""
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version 2.0
+function Write-Ok { }
+function Write-Info { }
+function Write-Step { }
+function Write-Err { throw 'unexpected install failure' }
+function Invoke-Native([string]$Command, [string[]]$NativeArgs) {
+    $script:captured = @($Command) + $NativeArgs
+    return $true
+}
+"""
+        + phase
+        + "\nConvertTo-Json -Compress -InputObject @($script:captured)"
+    )
+    result = subprocess.run(
+        ["pwsh", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    args = json.loads(result.stdout)
+    assert args == [
+        "uv",
+        "tool",
+        "install",
+        "--upgrade",
+        "--python",
+        ">=3.12,<3.14" if runtime == "all" else ">=3.12",
+        f"ouroboros-ai[{extras}]",
+        "--with",
+        "click>=8.1.0,<9.0.0",
+        *(["--prerelease=allow"] if pre else []),
+    ]
