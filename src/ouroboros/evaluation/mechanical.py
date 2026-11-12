@@ -238,15 +238,19 @@ def parse_coverage_from_output(output: str) -> float | None:
     lcov = r"[ \t]*(?:(?:TN|SF|VER|FN|FNDA|FNF|FNH|BRDA|BRF|BRH|DA|LF|LH):.*|end_of_record)[ \t]*"
     # Cobertura XML is not interpreted as a supported aggregate.
     xml_coverage = r"<(?:[^\s<>/:]+:)?coverage(?:[ \t/>]|$)"
-    for row in output.splitlines():
+
+    def detection_text(row: str) -> str:
         # Remove decoration only for refusal detection, never positive proof.
         uncolored = re.sub(r"\x1b\[[0-9;]{0,32}m", "", row)
-        uncolored = "".join(
+        return "".join(
             char
             for char in uncolored
             if char in "\t\x1b"
             or (unicodedata.category(char) not in {"Cc", "Cf"} and char != "\ufffd")
         )
+
+    for row in output.splitlines():
+        uncolored = detection_text(row)
         if uncolored != row and (
             re.match(r"[ \t]*TOTAL\b", uncolored)
             or re.match(candidate_pattern, uncolored, re.IGNORECASE)
@@ -308,9 +312,10 @@ def parse_coverage_from_output(output: str) -> float | None:
         ):
             return None
         streams[package] = streams.get(package, "") + text
-        uncolored = re.sub(r"\x1b\[[0-9;]{0,32}m", "", streams[package])
-        if "\x1b" in uncolored or any(
-            re.match(r"[ \t]*TOTAL\b", line)
+        # Escapes can also conceal Cc/Cf or replacement characters until decoding.
+        if any(
+            "\x1b" in line
+            or re.match(r"[ \t]*TOTAL\b", line)
             or re.match(candidate_pattern, line, re.IGNORECASE)
             or re.match(go_coverage, line, re.IGNORECASE)
             or re.match(jest_coverage, line, re.IGNORECASE)
@@ -318,7 +323,7 @@ def parse_coverage_from_output(output: str) -> float | None:
             or re.fullmatch(bare_coverage, line)
             or re.fullmatch(lcov, line)
             or re.search(xml_coverage, line, re.IGNORECASE)
-            for line in uncolored.splitlines()
+            for line in (detection_text(row) for row in streams[package].splitlines())
         ):
             return None
     matches = [re.fullmatch(pattern, row) for row in total_rows]

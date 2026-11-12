@@ -1,6 +1,7 @@
 """Tests for Stage 1 mechanical verification."""
 
 import asyncio
+import json
 import sys
 from unittest.mock import AsyncMock, patch
 
@@ -1026,3 +1027,78 @@ async def test_disabled_coverage_threshold_preserves_exit_status(
     completed = next(e for e in result.events if e.type == "evaluation.stage1.completed")
     assert completed.data["passed"] is approved
     assert completed.data["coverage_score"] is None
+
+
+_JSON_TRANSPORT_OUTPUTS = {
+    **{
+        f"escaped-prefix-U+{ord(prefix):04X}": ([prefix + "TOTAL 10 8 20%\n"], True, False)
+        for prefix in [chr(n) for n in [*range(9), *range(14, 27), 31, 127]]
+        + ["\u200b", "\ufeff", "\u00ad", "\u200e", "\u2060", "\ufffd"]
+    },
+    "split-prefix": (["\u200b", "TOTAL 10 8 20%\n"], True, False),
+    "split-token": (["TO", "\x08TAL 10 8 20%\n"], True, False),
+    "split-SGR": (["\x1b[3", "1m\u200bTOTAL 10 8 20%\x1b[0m\n"], True, False),
+    "second-row": (["ordinary log\n�TOTAL 10 8 20%\n"], True, False),
+    "escaped-prose-0": (["ordinary log\n"], True, True),
+    "escaped-prose-1": (["검사 성공 ✓\n"], True, True),
+    "escaped-prose-2": (["\x08ordinary diagnostic\n"], True, True),
+    "escaped-prose-3": (["a\u200bb diagnostic\n"], True, True),
+    "escaped-prose-4": (["a�b diagnostic\n"], True, True),
+    "escaped-prose-5": (["emoji 👩\u200d💻 log\n"], True, True),
+    "escaped-prose-6": (["\x1b[32mTests passed\x1b[0m\n"], True, True),
+    "raw-json-prose-U+200D": (["ordinary \u200d diagnostic\n"], False, False),
+    "raw-json-prose-U+200F": (["ordinary \u200f diagnostic\n"], False, False),
+    "raw-json-prose-U+FFFD": (["ordinary � diagnostic\n"], False, False),
+    "supported-high": ([], True, True),
+    "decoded-low-TOTAL": (["TOTAL 10 8 20%\n"], True, False),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_passing_test", [False, True], ids=["alone", "with-test"])
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+@pytest.mark.parametrize(
+    ("payload", "approved"),
+    [
+        pytest.param(
+            "".join(
+                json.dumps({"Action": "output", "Package": "p", "Output": text}, ensure_ascii=ascii)
+                + "\n"
+                for text in texts
+            ),
+            approved,
+            id=name,
+        )
+        for name, (texts, ascii, approved) in _JSON_TRANSPORT_OUTPUTS.items()
+    ],
+)
+async def test_json_transport_coverage_evidence(
+    payload: str, approved: bool, stream: str, with_passing_test: bool
+) -> None:
+    """Decoded decoration never hides a TOTAL; ordinary escaped prose remains usable."""
+    stdout = "TOTAL 10 0 100%\n" + (payload if stream == "stdout" else "")
+    stderr = payload if stream == "stderr" else ""
+    command = (
+        sys.executable,
+        "-c",
+        f"import sys;sys.stdout.write({stdout!r});sys.stderr.write({stderr!r})",
+    )
+    result = await _evaluate_stage1_only(
+        MechanicalConfig(
+            coverage_threshold=0.7,
+            coverage_command=command,
+            test_command=_printing("1 passed") if with_passing_test else None,
+        )
+    )
+    stage1 = result.stage1_result
+    assert stage1 is not None
+    assert stage1.coverage_score == (1.0 if approved else None)
+    assert stage1.passed is approved
+    assert result.final_approved is approved
+    assert result.acceptance_state is (
+        AcceptanceState.APPROVED if approved else AcceptanceState.UNVERIFIED
+    )
+    coverage = next(c for c in stage1.checks if c.check_type is CheckType.COVERAGE)
+    assert coverage.executed is approved
+    if not approved:
+        assert coverage.details["coverage_unparsed"] is True
