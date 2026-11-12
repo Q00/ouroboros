@@ -440,7 +440,7 @@ class TestWorktreeHardening:
             )
         finally:
             if workspace is not None:
-                release_lock(workspace.lock_path)
+                release_lock(workspace.lock_path, workspace.lock_owner)
 
     def test_prune_merged_policy_removes_clean_worktree_branch_and_lock(
         self, tmp_path: Path
@@ -471,7 +471,7 @@ class TestWorktreeHardening:
 
         with patch("ouroboros.core.worktree._worktree_root", return_value=worktree_root):
             workspace = prepare_task_workspace(repo_root, "orch_test_stale_reg")
-            release_lock(workspace.lock_path)
+            release_lock(workspace.lock_path, workspace.lock_owner)
             # Simulate external deletion: directory gone, .git/worktrees
             # registration (and branch lock) left behind.
             _shutil.rmtree(workspace.worktree_path)
@@ -524,7 +524,7 @@ class TestWorktreeHardening:
             self._git(worktree_path, "commit", "-m", "feature")
 
             removed = cleanup_task_workspace(workspace, policy="remove")
-            release_lock(workspace.lock_path)
+            release_lock(workspace.lock_path, workspace.lock_owner)
 
         assert removed is True
         assert not Path(workspace.worktree_path).exists()
@@ -548,3 +548,108 @@ class TestWorktreeHardening:
         assert Path(workspace.worktree_path).exists()
         assert not Path(workspace.lock_path).exists()
         assert _branch_exists(repo_root, workspace.branch)
+
+
+@pytest.mark.parametrize("contents", ["{broken", "[]", "null", '"owner"'])
+def test_release_preserves_unverifiable_owner_lock(tmp_path: Path, contents: str) -> None:
+    lock_path = tmp_path / "task.json"
+    lock_path.write_text(contents, encoding="utf-8")
+    release_lock(str(lock_path))
+    assert lock_path.read_text(encoding="utf-8") == contents
+
+
+def test_corrupt_lock_stays_blocking_after_release_attempt(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    lock_path = Path(workspace.lock_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text("{not-json", encoding="utf-8")
+    release_lock(str(lock_path))
+    with pytest.raises(WorktreeError, match="Invalid task workspace lock file"):
+        _acquire_lock(lock_path, workspace)
+
+
+def test_unreadable_lock_is_not_deleted(tmp_path: Path) -> None:
+    lock_path = tmp_path / "task.json"
+    lock_path.write_text("secret owner", encoding="utf-8")
+    with patch.object(Path, "read_text", side_effect=PermissionError("cannot read")):
+        release_lock(str(lock_path))
+    assert lock_path.read_text(encoding="utf-8") == "secret owner"
+
+
+def test_release_waits_for_other_holder_and_preserves_unverifiable_lock(tmp_path: Path) -> None:
+    import threading
+
+    from ouroboros.core.file_lock import file_lock
+
+    lock_path = tmp_path / "task.json"
+    lock_path.write_text("{invalid", encoding="utf-8")
+    started = threading.Event()
+    finished = threading.Event()
+
+    def release() -> None:
+        started.set()
+        release_lock(str(lock_path))
+        finished.set()
+
+    with file_lock(lock_path):
+        thread = threading.Thread(target=release)
+        thread.start()
+        assert started.wait(2)
+        assert not finished.wait(0.1)
+    thread.join(2)
+    assert not thread.is_alive()
+    assert finished.is_set()
+    assert lock_path.read_text(encoding="utf-8") == "{invalid"
+
+
+def test_unknown_lock_object_cannot_be_acquired(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    lock_path = Path(workspace.lock_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text("{}", encoding="utf-8")
+    with pytest.raises(WorktreeError, match="Invalid task workspace lock file"):
+        _acquire_lock(lock_path, workspace)
+    assert lock_path.read_text(encoding="utf-8") == "{}"
+
+
+def test_release_cleanup_preserves_unknown_owner(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    worktree_root = tmp_path / "worktrees"
+    TestWorktreeHardening._init_repo(repo_root)
+    with (
+        patch("ouroboros.core.worktree._worktree_root", return_value=worktree_root),
+        patch("ouroboros.core.worktree._worktree_cleanup_policy", return_value="remove"),
+    ):
+        workspace = prepare_task_workspace(repo_root, "auto_unknown_owner")
+        Path(workspace.lock_path).write_text("{invalid", encoding="utf-8")
+        release_task_workspace(workspace, cleanup=True)
+    assert Path(workspace.worktree_path).exists()
+    assert Path(workspace.lock_path).read_text(encoding="utf-8") == "{invalid"
+
+
+def test_old_owner_cannot_release_new_lease_from_same_process(tmp_path: Path) -> None:
+    import json
+
+    workspace = _workspace(tmp_path)
+    lock_path = Path(workspace.lock_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    first = _acquire_lock(lock_path, workspace)
+    release_lock(str(lock_path), first)
+    second = _acquire_lock(lock_path, workspace)
+    assert first["lease_id"] != second["lease_id"]
+
+    release_lock(str(lock_path), first)
+    assert json.loads(lock_path.read_text())["lease_id"] == second["lease_id"]
+    release_lock(str(lock_path), second)
+    assert not lock_path.exists()
+
+
+def test_path_only_release_does_not_release_live_lease(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    lock_path = Path(workspace.lock_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    owner = _acquire_lock(lock_path, workspace)
+    release_lock(str(lock_path))
+    assert lock_path.exists()
+    release_lock(str(lock_path), owner)
+    assert not lock_path.exists()

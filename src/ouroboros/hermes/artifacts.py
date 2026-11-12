@@ -105,12 +105,12 @@ def _owned_backup_fingerprint(backup: Path) -> tuple[object, ...] | None:
 def _restore_owned_backup(backup: Path, target: Path) -> None:
     if target.exists() or target.is_symlink():
         raise OSError(f"Refusing to overwrite concurrent Hermes generation: {target}")
-    os.replace(backup, target)
+    _rename_no_replace(backup, target)
     try:
         _remove_target_path(target / _SWAP_MARKER)
     except BaseException:
         if target.exists() and not backup.exists():
-            os.replace(target, backup)
+            _rename_no_replace(target, backup)
         raise
 
 

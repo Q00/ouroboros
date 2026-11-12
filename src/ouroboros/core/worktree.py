@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 import json
 import os
 from pathlib import Path
@@ -11,6 +11,7 @@ import shutil
 import socket
 import subprocess
 from typing import Any
+import uuid
 
 import structlog
 
@@ -103,12 +104,6 @@ def _worktree_root() -> Path:
     config = _orchestrator_config()
     root = getattr(config, "worktree_root", "~/.ouroboros/worktrees")
     return Path(root).expanduser()
-
-
-def _stale_after() -> timedelta:
-    config = _orchestrator_config()
-    minutes = getattr(config, "worktree_lock_stale_after_minutes", 60)
-    return timedelta(minutes=minutes)
 
 
 def _worktrees_enabled() -> bool:
@@ -419,31 +414,22 @@ def _pid_is_alive(pid: int) -> bool:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    except PermissionError:
-        # Process exists but we lack permission to signal it — still alive.
+    except (PermissionError, OverflowError):
+        # An uncheckable process is not proof that the owner has exited.
         return True
     return True
 
 
 def _is_lock_stale(data: dict[str, Any]) -> bool:
-    host = str(data.get("host", ""))
+    host = data.get("host")
     pid = data.get("pid")
-    if host == socket.gethostname() and isinstance(pid, int):
+    if not isinstance(host, str) or not host or type(pid) is not int or pid <= 0:
+        return False
+    if host == socket.gethostname():
         return not _pid_is_alive(pid)
 
-    timestamp = data.get("updated_at") or data.get("created_at")
-    if not isinstance(timestamp, str):
-        return True
-
-    try:
-        seen = datetime.fromisoformat(timestamp)
-    except ValueError:
-        return True
-
-    if seen.tzinfo is None:
-        seen = seen.replace(tzinfo=UTC)
-
-    return datetime.now(UTC) - seen > _stale_after()
+    # An old heartbeat cannot establish that a remote process is dead.
+    return False
 
 
 def _acquire_lock(lock_path: Path, workspace: TaskWorkspace) -> dict[str, Any]:
@@ -451,12 +437,16 @@ def _acquire_lock(lock_path: Path, workspace: TaskWorkspace) -> dict[str, Any]:
         if lock_path.exists():
             try:
                 existing = json.loads(lock_path.read_text())
-            except (OSError, json.JSONDecodeError) as exc:
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
                 raise WorktreeError(
                     "Invalid task workspace lock file",
                     details={"lock_path": str(lock_path), "error": str(exc)},
                 ) from exc
-            if isinstance(existing, dict) and existing and not _is_lock_stale(existing):
+            if not isinstance(existing, dict) or not existing:
+                raise WorktreeError(
+                    "Invalid task workspace lock file", details={"lock_path": str(lock_path)}
+                )
+            if not _is_lock_stale(existing):
                 raise WorktreeError(
                     "Task already active",
                     details={
@@ -475,6 +465,7 @@ def _acquire_lock(lock_path: Path, workspace: TaskWorkspace) -> dict[str, Any]:
             "host": socket.gethostname(),
             "created_at": _now_iso(),
             "updated_at": _now_iso(),
+            "lease_id": uuid.uuid4().hex,
         }
         lock_path.write_text(json.dumps(owner, indent=2, sort_keys=True))
         return owner
@@ -498,22 +489,35 @@ def heartbeat_lock(lock_path: str) -> None:
         path.write_text(json.dumps(payload, indent=2, sort_keys=True))
 
 
-def release_lock(lock_path: str) -> None:
-    """Release a task lock if this process owns it."""
+def release_lock(lock_path: str, owner: dict[str, Any] | None = None) -> None:
+    """Release only the exact task lease supplied by its owner."""
     path = Path(lock_path)
     if not path.exists():
         return
     with file_lock(path):
         try:
             payload = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
-            path.unlink(missing_ok=True)
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            # Failure to read or decode is not proof that this process owns
+            # the lock. Preserve it for inspection instead of releasing it.
             return
         if not isinstance(payload, dict):
-            path.unlink(missing_ok=True)
             return
-        if payload.get("pid") == os.getpid() and payload.get("host") == socket.gethostname():
+        if _matches_lock_owner(payload, owner):
             path.unlink(missing_ok=True)
+
+
+def _matches_lock_owner(payload: object, owner: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict) or not owner:
+        return False
+    lease_id = owner.get("lease_id")
+    return (
+        isinstance(lease_id, str)
+        and bool(lease_id)
+        and payload.get("lease_id") == lease_id
+        and payload.get("pid") == owner.get("pid") == os.getpid()
+        and payload.get("host") == owner.get("host") == socket.gethostname()
+    )
 
 
 def cleanup_task_workspace(
@@ -583,19 +587,28 @@ def release_task_workspace(
     """
     if workspace is None:
         return
-    try:
-        if cleanup:
-            cleanup_task_workspace(workspace)
-    except WorktreeError as exc:
-        log.warning(
-            "worktree.cleanup_failed",
-            durable_id=workspace.durable_id,
-            worktree_path=workspace.worktree_path,
-            branch=workspace.branch,
-            error=str(exc),
-        )
-    finally:
-        release_lock(workspace.lock_path)
+    path = Path(workspace.lock_path)
+    with file_lock(path):
+        try:
+            current = json.loads(path.read_text())
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return
+        # A prior owner in this process must not remove a newer lease.
+        if not _matches_lock_owner(current, workspace.lock_owner):
+            return
+        try:
+            if cleanup:
+                cleanup_task_workspace(workspace)
+        except WorktreeError as exc:
+            log.warning(
+                "worktree.cleanup_failed",
+                durable_id=workspace.durable_id,
+                worktree_path=workspace.worktree_path,
+                branch=workspace.branch,
+                error=str(exc),
+            )
+        finally:
+            path.unlink(missing_ok=True)
 
 
 def managed_worktree_root() -> Path:
@@ -661,14 +674,16 @@ def checkpoint_managed_worktree(path: str | Path, *, message: str) -> str | None
 
 
 def lock_file_is_stale(lock_path: str | Path) -> bool:
-    """Return True when a task lock file is stale, corrupt, or unreadable."""
+    """Return true only for absent or positively stale locks, preserving unknown owners."""
     path = Path(lock_path)
     try:
         payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
+    except FileNotFoundError:
         return True
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
     if not isinstance(payload, dict) or not payload:
-        return True
+        return False
     return _is_lock_stale(payload)
 
 
@@ -730,10 +745,6 @@ def prepare_task_workspace(
     branch = _managed_branch_name(repo_root, durable_id)
     worktree_path = _worktree_root() / repo_name / durable_id
     effective_cwd = worktree_path / _relative_subdir(repo_root, source_path)
-    _ensure_worktree(repo_root, worktree_path, branch)
-    if not allow_dirty:
-        _ensure_clean_checkout(worktree_path)
-
     workspace = TaskWorkspace(
         durable_id=durable_id,
         repo_root=str(repo_root),
@@ -745,6 +756,13 @@ def prepare_task_workspace(
         lock_path=str(_lock_path(repo_name, durable_id)),
     )
     owner = _acquire_lock(Path(workspace.lock_path), workspace)
+    try:
+        _ensure_worktree(repo_root, worktree_path, branch)
+        if not allow_dirty:
+            _ensure_clean_checkout(worktree_path)
+    except BaseException:
+        release_lock(workspace.lock_path, owner)
+        raise
     return TaskWorkspace(
         durable_id=workspace.durable_id,
         repo_root=workspace.repo_root,
@@ -769,10 +787,14 @@ def restore_task_workspace(
     """Restore an existing task worktree or bootstrap it from fallback cwd."""
     if persisted is not None:
         worktree_path = Path(persisted.worktree_path)
-        if not worktree_path.exists():
-            repo_root = Path(persisted.repo_root)
-            _ensure_worktree(repo_root, worktree_path, persisted.branch)
         owner = _acquire_lock(Path(persisted.lock_path), persisted)
+        try:
+            if not worktree_path.exists():
+                repo_root = Path(persisted.repo_root)
+                _ensure_worktree(repo_root, worktree_path, persisted.branch)
+        except BaseException:
+            release_lock(persisted.lock_path, owner)
+            raise
         return TaskWorkspace(
             durable_id=persisted.durable_id,
             repo_root=persisted.repo_root,
@@ -837,6 +859,12 @@ def restore_task_workspace(
             lock_path=str(lock),
         )
         owner = _acquire_lock(lock, workspace)
+        if not worktree_path.exists():
+            release_lock(str(lock), owner)
+            raise WorktreeError(
+                "Managed task worktree disappeared during restore",
+                details={"worktree_path": str(worktree_path)},
+            )
         return TaskWorkspace(
             durable_id=workspace.durable_id,
             repo_root=workspace.repo_root,

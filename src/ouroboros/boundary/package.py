@@ -23,8 +23,10 @@ generated check code in a worker workspace or bundle.
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+import errno
 import hashlib
 import json
 import os
@@ -783,7 +785,25 @@ def _file_manifest(package: CheckPackage) -> tuple[set[str], list[dict[str, Any]
     ]
 
 
-_MAX_SCAN_ENTRIES = 200_000
+_DEFAULT_MAX_SCAN_ENTRIES = 2_000_000
+_SCAN_ENTRIES_ENV = "OUROBOROS_LEAK_SCAN_MAX_ENTRIES"
+
+
+def _scan_entries_budget() -> int:
+    """The scan budget: ``OUROBOROS_LEAK_SCAN_MAX_ENTRIES`` when it is a positive integer.
+
+    The default fits a JavaScript monorepo with an installed ``node_modules``
+    (a few hundred thousand entries); 200 000 refused every run in one.
+    """
+    raw = os.environ.get(_SCAN_ENTRIES_ENV, "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_MAX_SCAN_ENTRIES
+    return value if value > 0 else _DEFAULT_MAX_SCAN_ENTRIES
+
+
+_MAX_SCAN_ENTRIES = _scan_entries_budget()
 _MAX_SCAN_DEPTH = 64
 """Entries the scan reads through links that lead out of the workspace before it refuses."""
 
@@ -793,10 +813,21 @@ class _Scan:
 
     def __init__(self, paths: set[str], digests_by_size: dict[int, set[str]]) -> None:
         self.paths = paths
+        self.path_prefixes = {
+            path[:index] for path in paths for index, char in enumerate(path) if char == "/"
+        }
         self.digests_by_size = digests_by_size
         self.visited: set[tuple[int, int]] = set()
+        self.alias_visited: set[tuple[int, int, str]] = set()
         self.budget = _MAX_SCAN_ENTRIES
         self.leaks: list[str] = []
+        self.incomplete_reasons: set[str] = set()
+        self.limit = self.budget
+        self.confirmed = False
+
+    def incomplete(self, path: str, reason: str) -> None:
+        self.leaks.append(path)
+        self.incomplete_reasons.add(reason)
 
     def file(self, full: str, relative: str, size: int) -> None:
         """A regular file (reached directly or through a link): its bytes against the digests."""
@@ -809,25 +840,36 @@ class _Scan:
         except OSError:
             # A file of a package file's size that cannot be read cannot be
             # cleared: the start is refused.
-            self.leaks.append(relative)
+            self.incomplete(relative, "unreadable_file")
             return
         if sha256_bytes(data) in candidates:
+            self.confirmed = True
             self.leaks.append(relative)
 
-    def directory(self, directory: str, prefix: str, root: str, depth: int = 0) -> None:
+    def directory(
+        self, directory: str, prefix: str, root: str, depth: int = 0, *, alias_only: bool = False
+    ) -> None:
         if self.budget <= 0:
             return
         try:
             status = os.stat(directory)
         except OSError:
-            self.leaks.append(prefix.rstrip("/") or ".")
+            self.incomplete(prefix.rstrip("/") or ".", "unreadable_directory")
             return
         key = (status.st_dev, status.st_ino)
-        if key in self.visited:
-            return
-        self.visited.add(key)
+        if alias_only:
+            alias_key = (*key, prefix)
+            if alias_key in self.alias_visited:
+                return
+            self.alias_visited.add(alias_key)
+        else:
+            if key in self.visited:
+                if prefix.rstrip("/") in self.path_prefixes:
+                    self.incomplete(prefix.rstrip("/"), "alias_path_unchecked")
+                return
+            self.visited.add(key)
         if depth >= _MAX_SCAN_DEPTH:
-            self.leaks.append(prefix.rstrip("/") or ".")
+            self.incomplete(prefix.rstrip("/") or ".", "depth_limit")
             return
         try:
             entries = []
@@ -837,54 +879,92 @@ class _Scan:
                     if self.budget <= 0:
                         # Reaching the cap is itself indeterminate: stop before
                         # enumerating another entry and refuse the package run.
-                        self.leaks.append(prefix.rstrip("/") or ".")
+                        self.incomplete(prefix.rstrip("/") or ".", "entry_limit")
                         return
                     entries.append(entry)
         except OSError:
             # An unreadable directory may hide package material: refused.
-            self.leaks.append(prefix.rstrip("/") or ".")
+            self.incomplete(prefix.rstrip("/") or ".", "unreadable_directory")
             return
         for entry in entries:
             if self.budget <= 0:
                 return
             relative = prefix + entry.name
+            if alias_only and relative not in self.paths and relative not in self.path_prefixes:
+                continue
             if relative in self.paths:
+                self.confirmed = True
                 self.leaks.append(relative)
                 continue
-            self.entry(entry, relative, root, depth)
+            self.entry(entry, relative, root, depth, alias_only=alias_only)
 
-    def entry(self, entry: os.DirEntry[str], relative: str, root: str, depth: int) -> None:
-        if entry.is_symlink():
+    def entry(
+        self, entry: os.DirEntry[str], relative: str, root: str, depth: int, *, alias_only: bool
+    ) -> None:
+        try:
+            is_symlink = entry.is_symlink()
+        except OSError:
+            self.incomplete(relative, "unreadable_entry")
+            return
+        if is_symlink:
+            if alias_only:
+                # Do not follow another link while resolving a lexical alias:
+                # it may cross the workspace boundary or change concurrently.
+                self.incomplete(relative, "alias_symlink_unchecked")
+                return
             # Resolved, never trusted: the target is judged by what it is.
             try:
                 target = os.stat(entry.path)
-            except PermissionError:
-                self.leaks.append(relative)
-                return
-            except OSError:
-                return  # dangling or a loop: nothing to read through it
+            except OSError as exc:
+                if exc.errno not in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+                    self.incomplete(relative, "unreadable_entry")
+                return  # only known-dangling/loop targets are cleared
             if stat.S_ISDIR(target.st_mode):
                 resolved = os.path.realpath(entry.path)
                 if resolved == root or resolved.startswith(root + os.sep):
-                    return  # inside the workspace: scanned on its own path
+                    if relative in self.path_prefixes:
+                        self.directory(resolved, relative + "/", root, depth + 1, alias_only=True)
+                    return  # content is scanned on its own path
                 self.directory(resolved, relative + "/", root, depth + 1)
             elif stat.S_ISREG(target.st_mode):
                 self.file(entry.path, relative, target.st_size)
             return
         try:
             if entry.is_dir(follow_symlinks=False):
-                self.directory(entry.path, relative + "/", root, depth + 1)
+                self.directory(entry.path, relative + "/", root, depth + 1, alias_only=alias_only)
             elif entry.is_file(follow_symlinks=False):
                 self.file(entry.path, relative, entry.stat(follow_symlinks=False).st_size)
         except OSError:
-            self.leaks.append(relative)
+            self.incomplete(relative, "unreadable_entry")
 
 
-def find_workspace_leaks(
+@dataclass(frozen=True, slots=True)
+class WorkspaceLeakScan:
+    """Refusal paths and reasons a scan could not clear the workspace."""
+
+    paths: tuple[str, ...]
+    confirmed: bool
+    incomplete_reasons: tuple[str, ...]
+    entry_limit: int | None
+
+    def refusal(self) -> tuple[str, dict[str, Any]]:
+        """Describe the observed or indeterminate exposure without clearing either."""
+        details: dict[str, Any] = {"paths": list(self.paths)}
+        if not self.incomplete_reasons:
+            return "worker workspace contains generated check files", details
+        details["scan_reasons"] = list(self.incomplete_reasons)
+        if self.entry_limit is not None:
+            details["scan_limit"] = self.entry_limit
+        if self.confirmed:
+            return "worker workspace contains generated check files; scan incomplete", details
+        return "worker workspace scan incomplete; cannot rule out generated check files", details
+
+
+def scan_workspace_leaks(
     workspace: Path,
     packages: Iterable[CheckPackage],
-) -> tuple[str, ...]:
-    """Return workspace-relative paths that carry, or may carry, generated check files.
+) -> WorkspaceLeakScan:
+    """Scan workspace-relative paths that carry, or may carry, generated check files.
 
     A path leaks when it equals a package file path, or when the bytes it
     leads to hash to a package file digest (a renamed copy or a hard link).
@@ -908,7 +988,7 @@ def find_workspace_leaks(
         paths |= package_paths
         manifests.extend(entries)
     if not manifests:
-        return ()
+        return WorkspaceLeakScan((), False, (), None)
     harness = sha256_bytes(ORACLE_HARNESS_SOURCE.encode("utf-8"))
     digests_by_size: dict[int, set[str]] = {}
     for entry in manifests:
@@ -917,7 +997,17 @@ def find_workspace_leaks(
     root = os.path.realpath(workspace)
     scan = _Scan(paths, digests_by_size)
     scan.directory(root, "", root)
-    return tuple(sorted(set(scan.leaks)))
+    return WorkspaceLeakScan(
+        tuple(sorted(set(scan.leaks))),
+        scan.confirmed,
+        tuple(sorted(scan.incomplete_reasons)),
+        scan.limit if "entry_limit" in scan.incomplete_reasons else None,
+    )
+
+
+def find_workspace_leaks(workspace: Path, packages: Iterable[CheckPackage]) -> tuple[str, ...]:
+    """Return all paths that carry or may carry generated check material."""
+    return scan_workspace_leaks(workspace, packages).paths
 
 
 def find_text_leaks(text: str, packages: Iterable[CheckPackage]) -> tuple[str, ...]:
