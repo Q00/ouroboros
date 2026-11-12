@@ -11,6 +11,12 @@ Ouroboros는 **Claude Code**를 런타임 백엔드로 쓸 수 있습니다. **C
 
 > 설치와 첫 실행은 [Getting Started](../getting-started.md)(영문)를 보세요.
 
+온보딩 진입점인 `ooo` 스킬은 계속 사용할 수 있습니다. 일회성 `setup`,
+`tutorial`, `welcome` 스킬은 해당 frontmatter를 지원하는 Claude Code에서
+모델이 자동으로 호출하지 않습니다. 기존 흐름을 실행하려면 Claude Code 세션 안에서 각각
+`/ouroboros:setup`, `/ouroboros:tutorial`, `/ouroboros:welcome`을 명시적으로
+호출하세요.
+
 > **명령어를 어디서 치는지 구분하세요.** 이 문서에는 두 가지 맥락의 명령이 섞여 있습니다.
 >
 > - **터미널** — 평소 쓰는 셸(bash, zsh 등)에서 치는 명령
@@ -46,7 +52,7 @@ claude plugin install ouroboros@ouroboros
 그다음 **Claude Code 세션 안에서:**
 
 ```
-ooo setup
+/ouroboros:setup
 ooo help        # 설치 확인
 ```
 

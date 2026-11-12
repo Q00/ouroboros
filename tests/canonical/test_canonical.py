@@ -464,6 +464,11 @@ async def test_scenario_live_run_or_skip(
             f"{scenario.slug}: product_complete scenario must not stop at an "
             f"unverified run handoff: {tool_result.meta}"
         )
+        assert tool_result.meta.get("artifact_state") == "complete_verified", (
+            f"{scenario.slug}: product_complete scenario requires a verified artifact; "
+            f"got {tool_result.meta.get('artifact_state')!r}. "
+            f"Full envelope persisted at {evidence_path}."
+        )
     product_smoke_results = _run_product_reality_smoke_checks(scenario, workdir, tool_result.meta)
     if product_smoke_results:
         evidence_path = _persist_raw_evidence(
@@ -503,7 +508,7 @@ async def test_live_run_opt_in_invokes_auto_handler(
         meta = {
             "status": "complete",
             "phase": "done",
-            "product_status": "verified_complete",
+            "artifact_state": "complete_verified",
             "interview_closure_mode": "ledger_only",
         }
 
@@ -562,3 +567,61 @@ else:
     assert any(payload["product_reality"]["smoke_results"] for payload in evidence_payloads), (
         "expected product-reality smoke results in persisted evidence"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "artifact_state", [None, "complete_unverified", "partial_artifact_generated"]
+)
+async def test_live_product_gate_rejects_unverified_or_missing_artifact_state(
+    scenario: CanonicalScenario,
+    artifact_state: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+) -> None:
+    """A complete Seed or missing status is not verified product evidence."""
+    from types import SimpleNamespace
+
+    async def fake_invoke(_scenario: CanonicalScenario, _workdir: Path) -> Result[object, str]:
+        meta = {"status": "complete", "phase": "complete"}
+        if artifact_state is not None:
+            meta["artifact_state"] = artifact_state
+        return Result.ok(SimpleNamespace(is_error=False, content=[], meta=meta))
+
+    monkeypatch.setattr("tests.canonical.test_canonical._invoke_ouroboros_auto", fake_invoke)
+    with pytest.raises(AssertionError, match="requires a verified artifact"):
+        await test_scenario_live_run_or_skip(
+            scenario=scenario, live_run_enabled=True, tmp_path=tmp_path, request=request
+        )
+    assert list((tmp_path / scenario.slug / ".ooo-observability").glob("canonical-*.json"))
+
+
+@pytest.mark.asyncio
+async def test_live_product_gate_rejects_conflicting_unverified_handoff(
+    scenario: CanonicalScenario,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+) -> None:
+    """An explicit unverified handoff overrides a verified artifact label."""
+    from types import SimpleNamespace
+
+    async def fake_invoke(_scenario: CanonicalScenario, _workdir: Path) -> Result[object, str]:
+        return Result.ok(
+            SimpleNamespace(
+                is_error=False,
+                content=[],
+                meta={
+                    "status": "complete",
+                    "artifact_state": "complete_verified",
+                    "product_status": "not_verified_complete",
+                },
+            )
+        )
+
+    monkeypatch.setattr("tests.canonical.test_canonical._invoke_ouroboros_auto", fake_invoke)
+    with pytest.raises(AssertionError, match="unverified run handoff"):
+        await test_scenario_live_run_or_skip(
+            scenario=scenario, live_run_enabled=True, tmp_path=tmp_path, request=request
+        )
