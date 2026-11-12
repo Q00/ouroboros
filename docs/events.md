@@ -216,14 +216,15 @@ object for newly measured handler turns:
   parent session after a provider envelope violation.
 
 Historical rows written before phase timing was introduced may not contain
-`timings_ms`. A `null` phase in a new timing object means that phase did not
-execute during the measured turn; it does not mean zero milliseconds.
+`timings_ms`. A `null` phase means no separate duration was recorded for that
+phase; it does not mean zero milliseconds or prove that related work did not
+execute inside another measured phase.
 
 | `timings_ms` field | Type | Description |
 |--------------------|------|-------------|
 | `total` | `number?` | Monotonic server-side handler time through terminal event creation |
-| `ambiguity_scoring` | `number?` | Time spent in live ambiguity scoring |
-| `question_generation` | `number?` | Time spent awaiting `ask_next_question` |
+| `ambiguity_scoring` | `number?` | Time spent in a separately measured live ambiguity-scoring call |
+| `question_generation` | `number?` | Time spent awaiting question generation or atomic turn planning |
 | `advisory_build` | `number?` | Time spent preparing server-side advisory request metadata |
 
 `total` is not user-observed wall time. It excludes work performed by the host
@@ -231,6 +232,13 @@ after the MCP response returns. In particular, `advisory_build` does not
 measure execution of host-side advisory fan-out. `question_generation` may
 include adapter/client startup and provider latency because those operations
 remain inside the question-generation boundary.
+
+Once enough answers are available, the normal interview path uses an atomic
+turn planner to produce the next question and ambiguity assessment together.
+Its elapsed time is recorded under `question_generation`; `ambiguity_scoring`
+is `null` for that combined operation. The two costs cannot be recovered from
+this timing object, and a non-null planning duration alone does not prove that
+the ambiguity assessment succeeded.
 
 Event-specific fields remain additive. The benchmark exporter allowlists only
 the non-content metadata needed for phase analysis:

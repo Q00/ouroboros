@@ -21,8 +21,8 @@ The timing-bearing events are documented in `docs/events.md`.
 | Phase | Boundary |
 |-------|----------|
 | `total` | Server handler entry through terminal event creation |
-| `ambiguity_scoring` | Awaiting live ambiguity scoring |
-| `question_generation` | Awaiting `ask_next_question` |
+| `ambiguity_scoring` | Awaiting a separately timed live ambiguity-scoring call |
+| `question_generation` | Awaiting question generation or the combined score-and-question planner |
 | `advisory_build` | Preparing advisory request metadata in the server |
 
 The measurements do not separately identify subprocess startup, MCP startup,
@@ -30,6 +30,13 @@ network latency, or model execution inside `question_generation`. They also do
 not include host-side advisory execution after the MCP response returns.
 Measure client-observed wall time separately if that distinction is needed,
 and label it as client wall time rather than an EventStore phase.
+
+In the normal atomic turn-planning path, scoring and the next question share a
+single measured operation. Its duration appears under `question_generation`;
+`ambiguity_scoring` is `null` even when the planner assesses ambiguity. Do not
+infer a separate scoring duration or a successful assessment from that combined
+timing. Report `n=0` and unavailable percentiles when no standalone scoring
+spans were recorded.
 
 ## Fixed fixture
 
@@ -52,7 +59,8 @@ questions:
 3. `No network calls or source-file mutation are allowed; macOS and Linux are required.`
 4. `Success is identical output for identical inputs, tested error exits, and under two seconds for 1,000 small files on this machine.`
 
-The third and later recorded answers exercise the live ambiguity-scoring path.
+The third and later recorded answers exercise the live ambiguity-assessment path.
+With atomic turn planning, its timing is included in `question_generation`.
 If the interview completes before all four answers, record the completion event
 and do not invent an additional turn.
 
@@ -121,8 +129,13 @@ credentials, or environment values.
 ## Summary statistics
 
 Compute statistics independently for each condition, event type, and phase.
-Do not combine cold and warm samples or compare results produced by different
-commits/configurations as if they were one population.
+For question-bearing responses, also group by `response_kind` and
+`round_number`, with at most one observation per interview in each cell.
+Multiple turns from the same interview are not independent interview samples.
+Early completion can reduce the number of interviews represented in later
+rounds; report that reduced `n`. Do not combine cold and warm samples or
+compare results produced by different commits/configurations as if they were
+one population.
 
 For each cell report `n`, p50, and p95. With sorted values and sample count
 `n`, use nearest-rank percentiles: rank `ceil(0.50 * n)` for p50 and
@@ -131,12 +144,12 @@ Exclude `null` phases from that phase's sample count and report the reduced `n`.
 
 Recommended report table:
 
-| Condition | Event | Phase | n | p50 ms | p95 ms |
-|-----------|-------|-------|---|--------|--------|
-| cold | `interview.response.emitted` | `question_generation` | 20+ | | |
-| cold | `interview.response.emitted` | `ambiguity_scoring` | 20+ | | |
-| warm | `interview.response.emitted` | `question_generation` | 20+ | | |
-| warm | `interview.response.emitted` | `ambiguity_scoring` | 20+ | | |
+| Condition | Event | Response | Round | Phase | n | p50 ms | p95 ms |
+|-----------|-------|----------|-------|-------|---|--------|--------|
+| cold | `interview.response.emitted` | start | 1 | `question_generation` | as observed | | |
+| cold | `interview.response.emitted` | answer | 4 | `ambiguity_scoring` | as observed | | |
+| warm | `interview.response.emitted` | start | 1 | `question_generation` | as observed | | |
+| warm | `interview.response.emitted` | answer | 4 | `ambiguity_scoring` | as observed | | |
 
 An optional server remainder can be calculated as `total` minus the sum of
 non-null measured phases. Label it `unattributed_server_time`; it includes
