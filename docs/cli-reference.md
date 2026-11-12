@@ -297,7 +297,7 @@ Detect available runtime backends and configure Ouroboros for your environment.
 Ouroboros supports multiple runtime backends via a pluggable `AgentRuntime` protocol. The `setup` command auto-detects
 which runtimes are available (including Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Goose, Pi, GJC, Antigravity, Grok, and Zcode) and
 configures `orchestrator.runtime_backend` accordingly. Additional runtimes can be registered
-by implementing the protocol — see [Architecture](architecture.md#how-to-add-a-new-runtime-adapter).
+by implementing the protocol — see [Architecture](architecture.md#runtime-abstraction-layer).
 
 ```bash
 ouroboros setup [OPTIONS]
@@ -805,8 +805,10 @@ persist into `orchestrator.runtime_profile.stages`. The shipped presets:
 | `Frugal Mix`    | antigravity | grok    | antigravity | codex   | Cost/speed-leaning mix (Gemini Flash via `agy`, fast Grok)       |
 
 > The spine of these recommendations is **vendor diversity between the generate
-> stage (execute) and the verify stage (evaluate)** — the same principle Ouroboros
-> already encodes in `consensus.diversity_required`. A preset may reference a
+> stage (execute) and the verify stage (evaluate)**. The persisted
+> `consensus.diversity_required` setting is currently inert and does not enforce
+> provider diversity; verify the effective providers for your configuration.
+> A preset may reference a
 > backend whose CLI is not installed; staging still works and the per-card
 > warning flags it. Pick the preset closest to your subscriptions, then tune
 > individual cards. Model presets (Auto / Frugal / Standard / Frontier) sit in
@@ -1290,6 +1292,11 @@ record; malformed CLI limits or workspace values return exit code `64`.
 
 Check local system health. The command validates configuration, checks the configured database path, verifies the effective runtime CLI is reachable after applying `OUROBOROS_AGENT_RUNTIME` / `OUROBOROS_RUNTIME` and runtime-specific `OUROBOROS_*_CLI_PATH` overrides, and confirms that credentials for the active LLM provider are present without printing key material. CLI-authenticated backends such as Copilot are reported as local CLI authentication rather than requiring an API key.
 
+For file-backed credentials, `status health` reads `credentials.yaml` as UTF-8.
+Invalid UTF-8, invalid YAML, and read failures produce fixed diagnostics without
+including parser excerpts or the underlying read exception. A credential-presence
+check still does not verify authentication.
+
 ```bash
 ouroboros status health
 ```
@@ -1630,13 +1637,22 @@ ouroboros mcp doctor --probe-local-stdio
 The probe launches this installation's own server with the current Python
 interpreter in isolated mode, with a temporary home and working directory.
 It loads the production server composition directly, bypassing shell profiles,
-project dotenv files, update checks, and normal CLI startup. Network and child
-command execution are disabled inside the probe. It reports stable stages for local
-startup/stdio transport, protocol discovery, and expected tool recognition.
-It lists tools but never calls one. The child uses stdio only, has telemetry
-disabled, does not read configured MCP launch commands, and cannot modify the
-user's Ouroboros configuration, EventStore, or PID registry. The temporary
-child and its isolated state are cleaned up on both success and failure.
+project dotenv files, update checks, and normal CLI startup. The child installs
+a Python audit hook to reject network and command-execution events after the
+probe entrypoint starts. This is a best-effort restriction, not an operating
+system sandbox: Python startup hooks can run before the audit hook, and the
+hook does not establish that arbitrary installed code cannot access the network
+or user files. Run it only with a trusted Python environment.
+
+The ordinary doctor checks also run before the probe. They import installed
+backend packages, which can perform network requests during import; the complete
+`doctor --probe-local-stdio` command is therefore not guaranteed to be offline.
+The probe reports stable stages for local startup/stdio transport, protocol
+discovery, and expected tool recognition. It lists tools but never calls one.
+The child uses stdio only, disables telemetry, and uses temporary state instead
+of the normal Ouroboros configuration, EventStore, and PID registry in its
+intended path. The probe attempts to clean up its child and temporary state on
+both success and failure.
 Transport success is observed before protocol discovery, and a cleanup failure
 causes the probe to fail even when tool discovery succeeded. The three diagnostic
 stage results remain unchanged; teardown failures add a `local_stdio_cleanup`

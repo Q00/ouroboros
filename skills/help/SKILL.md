@@ -1,6 +1,6 @@
 ---
 name: ouroboros-help
-description: "Full reference guide for Ouroboros commands and agents"
+description: "Ouroboros command reference and troubleshooting guidance for installation, MCP, status, and recovery"
 ---
 
 # /ouroboros:ouroboros-help
@@ -13,6 +13,25 @@ Full reference guide for Ouroboros power users.
 ooo help
 /ouroboros:ouroboros-help
 ```
+
+## Troubleshooting
+
+When asked to diagnose an Ouroboros installation, MCP connection, stalled job,
+or unexpected result, read [TROUBLESHOOTING.md](TROUBLESHOOTING.md) in this
+skill directory first. Resolve that relative path from the directory containing
+this `SKILL.md`, even if that directory is hidden. If the skill was delivered
+as a standalone cached entrypoint without its sibling file, use the Python
+interpreter belonging to that same Ouroboros installation to read its packaged resource:
+
+```bash
+python -c 'from importlib.resources import files; print(files("ouroboros").joinpath("skills", "help", "TROUBLESHOOTING.md").read_text(encoding="utf-8"))'
+```
+
+`python` above must be that installation's interpreter, not an arbitrary shell
+Python. If it cannot be identified or the resource is unavailable, say so and
+use the installed version's help. Follow the installed version's help and preserve the
+user's data and running work. Do not claim a repair or successful run without
+evidence.
 
 ## What Is Ouroboros?
 
@@ -32,9 +51,9 @@ Each `ooo <name>` is also the skill `/ouroboros:<name>`, except `run`, `status`,
 
 | Command | Purpose | Needs |
 |---------|---------|-------|
-| `ooo` / `ooo welcome` | First-touch onboarding | none |
-| `ooo setup` | Claude Code setup wizard | none |
-| `ooo tutorial` | Interactive hands-on learning | none |
+| `/ouroboros:welcome` | First-touch onboarding | none |
+| `/ouroboros:setup` | Claude Code setup wizard | none |
+| `/ouroboros:tutorial` | Interactive hands-on learning | none |
 | `ooo help` | This reference | none |
 | `ooo interview` | Socratic interview that exposes hidden assumptions | MCP, in-session fallback |
 | `ooo idk` | Calibrate interview wording from stated familiarity | MCP, in-session fallback |
