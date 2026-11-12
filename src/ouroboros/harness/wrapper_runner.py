@@ -71,7 +71,11 @@ def _normalize_pytest_options(options: list[str]) -> list[str]:
 
 def _nonexecuting_pytest_mode(command: list[str], *, check_config: bool = True) -> bool:
     """Withhold proof for non-executing modes or unproven launcher context."""
-    context_changed = False
+    inherited = {
+        key.upper(): value
+        for key, value in _WRAPPER_VERIFY_SHELL.sanitized_verify_environment().items()
+    }
+    context_changed = bool(inherited.get("PYTHONINSPECT"))
 
     def executable_name(value: str) -> str:
         return Path(value).name.lower().removesuffix(".exe")
@@ -141,6 +145,8 @@ def _nonexecuting_pytest_mode(command: list[str], *, check_config: bool = True) 
         index = 0
         while index < len(args):
             value = args[index]
+            if executable == "py" and value in {"-0", "-0p", "--list", "--list-paths"}:
+                return True
             if value == "-m" and index + 1 < len(args):
                 return args[index + 1], args[index + 2 :]
             if value in {"-W", "-X", "--check-hash-based-pycs"}:
@@ -206,9 +212,8 @@ def _nonexecuting_pytest_mode(command: list[str], *, check_config: bool = True) 
                 index += 1
             return args[index:] or False
 
-        inherited = _WRAPPER_VERIFY_SHELL.sanitized_verify_environment()
         if any(
-            key.upper() in {"UV_ENV_FILE", "UV_WORKING_DIR", "UV_PROJECT", "UV_CONFIG_FILE"}
+            key in {"UV_ENV_FILE", "UV_WORKING_DIR", "UV_PROJECT", "UV_CONFIG_FILE"}
             for key in inherited
         ):
             context_changed = True
@@ -285,6 +290,8 @@ def _nonexecuting_pytest_mode(command: list[str], *, check_config: bool = True) 
         if isinstance(options, bool):
             return options
     elif re.fullmatch(r"(?:(?:pythonw?|pypy)(?:\d+(?:\.\d+)*)?|py)", executable):
+        if executable == "py" and "PYLAUNCHER_DRYRUN" in inherited:
+            context_changed = True
         module_call = python_module(command[1:])
         if isinstance(module_call, bool):
             return module_call
