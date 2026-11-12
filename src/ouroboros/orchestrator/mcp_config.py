@@ -317,8 +317,15 @@ def load_mcp_config(config_path: Path) -> Result[MCPClientConfig, ConfigError]:
 
     # Load YAML
     try:
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             raw_config = yaml.safe_load(f)
+    except UnicodeDecodeError as e:
+        return Result.err(
+            ConfigError(
+                f"Configuration file is not valid UTF-8: {e}",
+                config_path=str(config_path),
+            )
+        )
     except yaml.YAMLError as e:
         return Result.err(
             ConfigError(

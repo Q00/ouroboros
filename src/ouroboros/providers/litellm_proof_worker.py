@@ -22,6 +22,7 @@ from ouroboros.providers.litellm_adapter import (
     LiteLLMAdapter,
     _worker_runtime_authority,
 )
+from ouroboros.providers.openai_sampling import omit_openai_reasoning_sampling
 
 _MAX_INPUT_BYTES = 4 * 1024 * 1024
 _COMPLETION_KWARGS = frozenset(
@@ -83,6 +84,9 @@ def _valid_completion_kwargs(kwargs: dict[str, Any], config: CompletionConfig) -
             native = {"reasoning_effort": effort}
         allowed = allowed | frozenset(native)
         required = required | frozenset(native)
+    if omit_openai_reasoning_sampling(config.model, config.reasoning_effort):
+        allowed = allowed - {"temperature", "top_p"}
+        required = required - {"temperature"}
     return (
         required.issubset(kwargs)
         and set(kwargs).issubset(allowed)
