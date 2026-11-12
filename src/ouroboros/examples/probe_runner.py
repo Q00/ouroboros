@@ -223,6 +223,30 @@ def fits(deadline: float | None, timeout: int) -> bool:
     return deadline is None or time.monotonic() + timeout + REAP_MARGIN_SECONDS <= deadline
 
 
+async def _settle_owned[T](task: asyncio.Future[T]) -> T:
+    """Observe owned work to settlement, even through repeated cancellation.
+
+    File operations cannot be interrupted; settlement can outlast the deadline.
+    """
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            cancellation = cancellation or exc
+        except BaseException:
+            break
+    try:
+        result = task.result()
+    except BaseException as error:
+        if cancellation is not None:
+            raise cancellation from error
+        raise
+    if cancellation is not None:
+        raise cancellation
+    return result
+
+
 async def run_probe(
     probe: Probe,
     tree: Path,
@@ -240,14 +264,15 @@ async def run_probe(
     launched only when a full ``timeout`` still fits before it, checked
     immediately before the launch, after the copy and the command are ready
     (``fits``); otherwise nothing runs and the run is indeterminate
-    (``STEP_DEADLINE``).
+    (``STEP_DEADLINE``). Cancellation waits for copying and removal to settle;
+    these file operations are not deadline-preemptible.
     """
     probe_id = probe.probe_id
     run_dir = Path(tempfile.mkdtemp(prefix="probe-run-", dir=work_dir))
     try:
         copy = run_dir / "tree"
         try:
-            await asyncio.to_thread(copy_checkout, tree, copy)
+            await _settle_owned(asyncio.create_task(asyncio.to_thread(copy_checkout, tree, copy)))
         except (OSError, shutil.Error) as exc:
             return ProbeRun(
                 _not_run(probe_id, tree_id, repeat), f"{COPY_FAILED}:{type(exc).__name__}"
@@ -271,7 +296,7 @@ async def run_probe(
                 return ProbeRun(_not_run(probe_id, tree_id, repeat), STEP_DEADLINE)
             completed = await _run_in_environment(command, timeout)
     finally:
-        await asyncio.to_thread(shutil.rmtree, run_dir, True)
+        await _settle_owned(asyncio.create_task(asyncio.to_thread(shutil.rmtree, run_dir, True)))
     if completed.unavailable is not None:
         return ProbeRun(_not_run(probe_id, tree_id, repeat), completed.unavailable)
     if completed.launch_error is not None:
@@ -328,7 +353,8 @@ async def run_probe_pool(
     Copies and scratch directories are made in ``work_dir`` (default: a
     temporary directory, removed afterwards). The result satisfies
     ``examples.disagreement.find_disagreements``: exactly one record per
-    (probe, tree, repeat).
+    (probe, tree, repeat). On cancellation or a child failure, every run
+    settles before pool removal or return.
     """
     _check_trees(trees)
     if parallel < 1:
@@ -368,7 +394,14 @@ async def run_probe_pool(
             reasons.setdefault(probe_id, run.indeterminate)
 
     async def run_all(root: Path) -> None:
-        await asyncio.gather(*(run_cell(*cell, root) for cell in cells))
+        children = [asyncio.create_task(run_cell(*cell, root)) for cell in cells]
+        try:
+            await asyncio.gather(*children)
+        finally:
+            for child in children:
+                if not child.done():
+                    child.cancel()
+            await _settle_owned(asyncio.gather(*children, return_exceptions=True))
 
     if work_dir is not None:
         await run_all(work_dir)
@@ -377,7 +410,7 @@ async def run_probe_pool(
         try:
             await run_all(root)
         finally:
-            await asyncio.to_thread(shutil.rmtree, root, True)
+            await _settle_owned(asyncio.create_task(asyncio.to_thread(shutil.rmtree, root, True)))
     return _collect(cells, runs, reasons)
 
 
