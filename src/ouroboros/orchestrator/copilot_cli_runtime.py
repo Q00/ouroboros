@@ -49,6 +49,7 @@ from ouroboros.orchestrator.codex_cli_runtime import (
     SkillDispatchHandler,
     _CodexItemCorrelationScope,
 )
+from ouroboros.orchestrator.runtime_model_errors import UnsupportedModelOverrideError
 from ouroboros.providers.base import CompletionConfig
 from ouroboros.providers.profiles import resolve_completion_profile
 
@@ -199,6 +200,7 @@ class CopilotCliRuntime(CodexCliRuntime):
         prompt: str | None = None,
         runtime_handle: RuntimeHandle | None = None,
         reasoning_effort: str | None = None,
+        model: str | None = None,
     ) -> list[str]:
         """Build the Copilot CLI command for non-interactive execution.
 
@@ -229,7 +231,20 @@ class CopilotCliRuntime(CodexCliRuntime):
         ]
         command.extend(self._build_permission_args())
 
-        if self._copilot_agent:
+        if model is not None:
+            if self._copilot_agent:
+                raise UnsupportedModelOverrideError(
+                    "request-local model override is unsupported with a Copilot agent"
+                )
+            _, runtime_agent = self._resolve_runtime_copilot_config(runtime_handle)
+            if runtime_agent:
+                raise UnsupportedModelOverrideError(
+                    "request-local model override is unsupported with a Copilot agent"
+                )
+            normalized_request_model = self._normalize_model(model)
+            if normalized_request_model:
+                command.extend(["--model", map_to_copilot_model(normalized_request_model)])
+        elif self._copilot_agent:
             command.extend(["--agent", self._copilot_agent])
         else:
             normalized_model = self._normalize_model(self._model)
