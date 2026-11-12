@@ -82,31 +82,38 @@ class TestSaveStateUsesThread:
     """save_state must offload blocking I/O to a thread."""
 
     @pytest.mark.asyncio
-    async def test_save_state_calls_to_thread(self, tmp_path) -> None:
-        """save_state uses asyncio.to_thread for file write."""
+    async def test_save_state_offloads_write_from_event_loop_thread(self, tmp_path) -> None:
+        """The actual blocking snapshot write runs outside the event loop thread."""
+        import threading
+
+        from ouroboros.bigbang import interview as interview_module
+
         engine = _make_engine(tmp_path)
         state = _make_state()
+        event_loop_thread = threading.get_ident()
+        writer_threads = []
+        original_write = interview_module._write_interview_snapshot
 
-        with patch("asyncio.to_thread", new_callable=AsyncMock) as mock_to_thread:
-            # Make to_thread actually write so the result is ok
-            async def _run_sync(fn, *args, **kwargs):
-                return fn(*args, **kwargs)
+        def observe_thread(*args):
+            writer_threads.append(threading.get_ident())
+            return original_write(*args)
 
-            mock_to_thread.side_effect = _run_sync
+        with patch.object(interview_module, "_write_interview_snapshot", observe_thread):
             result = await engine.save_state(state)
 
         assert result.is_ok
-        mock_to_thread.assert_called_once()
-        # The saved file should exist on disk
-        saved_path = result.value
-        assert saved_path.exists()
+        assert len(writer_threads) == 1
+        assert writer_threads[0] != event_loop_thread
+        assert result.value.exists()
 
     @pytest.mark.asyncio
     async def test_save_state_preserves_existing_file_on_replace_failure(self, tmp_path) -> None:
         engine = _make_engine(tmp_path)
         state = _make_state()
         saved_path = engine._state_file_path(state.interview_id)
-        saved_path.write_text("original\n", encoding="utf-8")
+        assert (await engine.save_state(state)).is_ok
+        original = saved_path.read_text(encoding="utf-8")
+        state.initial_context = "updated"
 
         with (
             patch("os.open", wraps=os.open) as mock_open,
@@ -116,7 +123,7 @@ class TestSaveStateUsesThread:
             result = await engine.save_state(state)
 
         assert result.is_err
-        assert saved_path.read_text(encoding="utf-8") == "original\n"
+        assert saved_path.read_text(encoding="utf-8") == original
         temp_creations = [
             call
             for call in mock_open.call_args_list
@@ -129,6 +136,16 @@ class TestSaveStateUsesThread:
             saved_path.name,
             f"{saved_path.name}.lock",
         }
+
+    @pytest.mark.asyncio
+    async def test_save_state_does_not_overwrite_unreadable_existing_file(self, tmp_path) -> None:
+        engine = _make_engine(tmp_path)
+        state = _make_state()
+        saved_path = engine._state_file_path(state.interview_id)
+        saved_path.write_text("original\n", encoding="utf-8")
+        result = await engine.save_state(state)
+        assert result.is_err
+        assert saved_path.read_text(encoding="utf-8") == "original\n"
 
     @pytest.mark.asyncio
     async def test_save_state_closes_raw_fd_when_fdopen_fails(self, tmp_path) -> None:
@@ -161,7 +178,9 @@ class TestSaveStateUsesThread:
         engine = _make_engine(tmp_path)
         state = _make_state()
         saved_path = engine._state_file_path(state.interview_id)
-        saved_path.write_text("original\n", encoding="utf-8")
+        assert (await engine.save_state(state)).is_ok
+        original = saved_path.read_text(encoding="utf-8")
+        state.initial_context = "updated"
         real_fdopen = os.fdopen
 
         def _interrupting_fdopen(fd, *args, **kwargs):
@@ -173,7 +192,7 @@ class TestSaveStateUsesThread:
         ):
             await engine.save_state(state)
 
-        assert saved_path.read_text(encoding="utf-8") == "original\n"
+        assert saved_path.read_text(encoding="utf-8") == original
         assert {path.name for path in saved_path.parent.iterdir()} == {
             saved_path.name,
             f"{saved_path.name}.lock",
@@ -191,8 +210,9 @@ class TestSaveStateUsesThread:
         engine = _make_engine(tmp_path)
         state = _make_state()
         saved_path = engine._state_file_path(state.interview_id)
-        saved_path.write_text("original\n", encoding="utf-8")
+        assert (await engine.save_state(state)).is_ok
         saved_path.chmod(0o640)
+        state.initial_context = "updated"
 
         result = await engine.save_state(state)
 

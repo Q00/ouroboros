@@ -100,6 +100,7 @@ async def test_handler_builds_the_runner_without_decomposition_for_a_sourced_see
         worktree_path="/tmp/ouroboros-worktree",
         branch="ooo/test",
         lock_path="/tmp/ouroboros.lock",
+        lock_owner={},
     )
 
     class FakeSessionRepository:
