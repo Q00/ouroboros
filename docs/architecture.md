@@ -543,10 +543,12 @@ The orchestrator never inspects backend-specific internals — each adapter maps
 
 Codex CLI and OpenCode require an owned, captured process tree and confirmed
 leader exit before reporting successful termination. Copilot CLI, Gemini CLI,
-Goose CLI, Grok CLI, Megacode and Zcode inherit Codex CLI's `_terminate_process`
-and therefore share this stricter cleanup requirement. This scope concerns the
-CLI runtimes, including their timeout and cancellation paths; it does not extend
-to every provider adapter or the separate Copilot ACP implementation.
+Antigravity CLI, Goose CLI, Grok CLI, Megacode and Zcode inherit Codex CLI's
+`_terminate_process` and therefore share this stricter cleanup requirement.
+Copilot ACP's read-only CLI fallback also inherits it; the ACP transport's own
+termination path instead closes its client without this process-tree proof.
+This scope concerns those CLI timeout and cancellation paths, not every
+provider adapter.
 
 If cleanup cannot be confirmed, a live handle's `terminate()` returns false and
 observation reports `termination_unconfirmed`; this is not proof that the
