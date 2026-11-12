@@ -4468,7 +4468,7 @@ def _setup_opencode(opencode_path: str, mode: str = "plugin") -> bool:
     """
     if mode not in ("plugin", "subprocess"):
         raise ValueError(f"Invalid opencode mode: {mode!r} (expected 'plugin' or 'subprocess')")
-    if mode == "plugin" and (version_error := plugin_version_error(opencode_path)):
+    if mode == "plugin" and (version_error := plugin_version_error(opencode_path, print_warning)):
         print_error(version_error)
         return False
 

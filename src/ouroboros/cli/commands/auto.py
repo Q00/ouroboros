@@ -607,10 +607,6 @@ async def _run_auto(
             opencode_mode=runtime_plan.evaluate.opencode_mode,
         ),  # composition-root wiring; a hand-built stack dies on its first generation
     )
-    seed_qa = QAHandler(
-        agent_runtime_backend=runtime_plan.interview.runtime_backend,
-        opencode_mode=authoring_opencode_mode,
-    )
     # Parity with the MCP auto path (auto_handler.py): construct a
     # ``lateral_thinker`` so the interview safe-default escalation (Issue
     # #1248) and the EVALUATE → UNSTUCK_LATERAL path have the same lateral
@@ -632,6 +628,11 @@ async def _run_auto(
         )
     watchdog_event_store = EventStore()
     await watchdog_event_store.initialize()
+    seed_qa = QAHandler(
+        event_store=watchdog_event_store,
+        agent_runtime_backend=runtime_plan.interview.runtime_backend,
+        opencode_mode=authoring_opencode_mode,
+    )
     # AI answer refiner: upgrades generic deterministic auto-answers to concrete,
     # goal-specific ones so interview ambiguity actually converges. Best-effort —
     # any construction failure leaves the deterministic answerer untouched.

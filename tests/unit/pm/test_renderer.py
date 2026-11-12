@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from ouroboros.bigbang.interview import InterviewRound, InterviewState
 from ouroboros.bigbang.pm_seed import PMSeed, UserStory
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
@@ -202,15 +203,25 @@ class TestPMDocumentGeneratorGenerate:
         gen = PMDocumentGenerator(llm_adapter=adapter)
         seed = _make_seed()
 
-        mock_state = MagicMock()
-        mock_round = MagicMock()
-        mock_round.question = "What problem?"
-        mock_round.user_response = "Widget monitoring."
-        mock_state.rounds = [mock_round]
+        state = InterviewState(
+            interview_id=seed.interview_id,
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question="What problem?",
+                    user_response="Widget monitoring.",
+                )
+            ],
+        )
 
-        result = await gen.generate(seed, interview_state=mock_state)
+        result = await gen.generate(seed, interview_state=state)
 
         assert result.is_ok
+        adapter.complete.assert_awaited_once()
+        messages = adapter.complete.call_args[0][0]
+        user_msg = messages[1].content
+        assert "What problem?" in user_msg
+        assert "Widget monitoring." in user_msg
 
     @pytest.mark.asyncio
     async def test_generate_falls_back_to_template_on_llm_error(self):

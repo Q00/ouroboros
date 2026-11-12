@@ -1,7 +1,17 @@
 # Handoff — MCP 활성 사용자 → Ouroboros 제품 사용 전환
 
-> Last Updated: 2026-08-27
-> Status: 구현 진행 중 (instructions → tool descriptions → host routing)
+> Last reconciled: 2026-11-04
+> Status: 소스 구현은 [PR #2295](https://github.com/Q00/ouroboros/pull/2295)로 병합됨. 아래 구현 계획과 기준 수치는 2026-08-27 당시의 기록이며 현재 작업 지시가 아니다.
+
+## 현재 상태와 남은 확인
+
+[#2296의 병합 후 정리](https://github.com/Q00/ouroboros/issues/2296#issuecomment-5462638004)는 라우팅, 검증 실패 원인 분석, 사용 이벤트의 소스 구현이 병합됐다고 기록한다. 이후 릴리스에 포함됐지만, 이 문서는 대시보드 검증이나 활성화 효과를 증명하지 않는다. 남은 확인은 이슈를 기준으로 한다.
+
+- 대시보드 1985514의 service → product command 및 first product command 인사이트와 명령 집합을 검증한다.
+- `app_version`별 릴리스 전후 각 7일 코호트를 비교한다. 비교 근거 없이 전환율 상승을 주장하지 않는다.
+- `artifacts_missing_found_elsewhere`는 같은 bounded scan에서 중첩 파일과 디렉터리를 모두 진단한다. 무시 대상 디렉터리와 symlink는 건너뛰며, 이 분류는 검증 통과 여부를 바꾸지 않는다.
+
+아래는 원래 계획의 보존 기록이다. 파일 경로와 예시, 테스트 명령, 목표 수치는 당시 기준이며 현재 코드나 검증 완료를 나타내지 않는다.
 
 ## Goal
 
@@ -11,7 +21,7 @@ Ouroboros 진입 툴을 선제적으로 선택하도록 만든다.
 
 ## Evidence
 
-최근 30일 PostHog 실측:
+2026-08-27 기준 최근 30일 PostHog 실측:
 
 - MCP service 사용자: 2,086
 - 이후 `command_run` 도달 사용자: 807
@@ -43,7 +53,7 @@ Ouroboros 진입 툴을 선제적으로 선택하도록 만든다.
 이미 Seed가 있음                     → ouroboros_start_execute_seed
 ```
 
-## Implementation Plan
+## Historical Implementation Plan (2026-08-27)
 
 ### 1. MCP 공통 instructions를 outcome-first로 재배치
 
@@ -180,16 +190,9 @@ src/ouroboros/mcp/server/adapter.py
 - 툴 설명을 길게 만들어 context budget을 소비하지 않는다.
 - activation 개선을 증명하기 전에 전환율 상승을 주장하지 않는다.
 - 텔레메트리 볼륨 계약은 넓히지 않는다: 이벤트를 되살리더라도 사용자/일당
-  1행(daily dedupe)으로만 수집한다. #2278이 제거한 per-session 볼륨과
-  per-dispatch 상세 속성은 복원하지 않는다. (mcp_serve_started,
-  subagent_dispatch, install_started는 이 규칙 아래에서 의도적으로 복원됨 —
-  attached → used 퍼널과 User-lifecycle 시리즈에 필요.)
+  1행(daily dedupe)으로 수집한다. `install_started`는 설치 시도별 이벤트로
+  별도 처리한다. 세부 계약은 [TELEMETRY.md](TELEMETRY.md)를 따른다.
 
-## Next Session Start
+## 다음 확인
 
-1. 최신 `main`에서 새 브랜치 생성.
-2. 관련 GitHub issue 생성 후 PR에 연결.
-3. server instructions byte budget 테스트를 먼저 강화.
-4. instructions → tool descriptions → host routing 순서로 구현.
-5. 코드 배포 후 PostHog Insight 생성·검증.
-6. 7일 뒤 app_version cohort 전환율 비교.
+새 소스 구현을 반복하지 않는다. [#2296](https://github.com/Q00/ouroboros/issues/2296)의 남은 증거와 중첩 디렉터리 판정을 확인하고, 관측 결과가 한정된 결함을 보여줄 때만 후속 수정을 검토한다.

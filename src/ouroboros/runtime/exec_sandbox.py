@@ -696,7 +696,19 @@ def _probe_matrix(argv_prefix: Sequence[str] | None, root: Path) -> dict[str, An
             check=False,
         )
         report = json.loads(result.stdout) if result.returncode == 0 else None
+    except subprocess.TimeoutExpired:
+        log.info(
+            "exec_sandbox.probe_error",
+            phase="baseline" if argv_prefix is None else "confined",
+            reason="timeout",
+        )
+        return None
     except (OSError, subprocess.SubprocessError, ValueError):
+        log.info(
+            "exec_sandbox.probe_error",
+            phase="baseline" if argv_prefix is None else "confined",
+            reason="execution_or_output",
+        )
         return None
     if not isinstance(report, dict):
         log.info(

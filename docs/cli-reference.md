@@ -998,6 +998,24 @@ ouroboros qa ARTIFACT [OPTIONS]
 `ARTIFACT` may be literal text or a path to a file. `--reference` and
 `--seed-content` accept the same literal-or-file behavior.
 
+For an in-process QA evaluation, the returned QA session ID can be passed to
+`ouroboros_session_status` to read the last completed evaluation's score and
+verdict. That status describes the last completed evaluation, not an active or
+failed later attempt. The QA status record stores the score summary, not the
+artifact, reference, prompt, or model response. The `auto_` ID prefix is
+reserved for auto sessions; a QA ID that conflicts with another session is
+reported as an error. Plugin delegation retains its host-owned lifecycle.
+
+Standalone `ouroboros qa` writes its score summary to the configured default
+EventStore (`persistence.database_path`, with the existing legacy database
+fallback at `~/.ouroboros/ouroboros.db`). A failed write fails the command;
+a computed verdict alone is not a completed, queryable evaluation. Query the
+ID using a server connected to that same database. `mcp serve --db X` uses X
+for synchronous, background, and embedded post-execution QA. Embedded run,
+auto, and evolve QA reuse their owner's store without opening a second
+default database. The standalone command does not inherit another server's
+`--db` option.
+
 **Options:**
 
 | Option | Description |
@@ -1633,12 +1651,17 @@ ouroboros mcp doctor --probe-local-stdio
 The probe launches this installation's own server with the current Python
 interpreter in isolated mode, with a temporary home and working directory.
 It loads the production server composition directly, bypassing shell profiles,
-project dotenv files, update checks, and normal CLI startup. The child installs
-a Python audit hook to reject network and command-execution events after the
-probe entrypoint starts. This is a best-effort restriction, not an operating
-system sandbox: Python startup hooks can run before the audit hook, and the
-hook does not establish that arbitrary installed code cannot access the network
-or user files. Run it only with a trusted Python environment.
+project dotenv files, update checks, and normal CLI startup. The child starts
+with `-I -S -B`, creates the stdlib asyncio event loop, then installs its Python
+audit hook before `site.main()` runs `.pth` files and `sitecustomize`. The hook
+rejects events whose names start with `socket.`, plus `subprocess.Popen`,
+`os.system`, `os.exec`, `os.posix_spawn`, `os.fork`, and `os.forkpty`.
+This is a best-effort restriction, not an operating system sandbox. It does
+not block `os.spawn` or `os.startfile`, or every multiprocessing launch path
+(including direct `_posixsubprocess.fork_exec` calls without an audit event).
+Native code and ctypes can bypass the hook, and file writes are not blocked.
+The hook does not establish that arbitrary installed code cannot access the
+network or user files. Run it only with a trusted Python environment.
 
 The ordinary doctor checks also run before the probe. They import installed
 backend packages, which can perform network requests during import; the complete

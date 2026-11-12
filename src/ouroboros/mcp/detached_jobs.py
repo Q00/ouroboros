@@ -69,6 +69,7 @@ class DetachedJobRequest:
     llm_backend: str | None = None
     opencode_mode: str | None = None
     launch_token: str | None = None
+    project_dir: str | None = None
 
     @classmethod
     def from_json(cls, payload: dict[str, Any]) -> DetachedJobRequest:
@@ -91,6 +92,15 @@ class DetachedJobRequest:
         launch_token = payload.get("launch_token")
         if launch_token is not None and not _valid_launch_token(launch_token):
             raise ValueError("Detached job request has an invalid launch token")
+        project_dir = payload.get("project_dir")
+        if project_dir is not None and (
+            not isinstance(project_dir, str)
+            or not project_dir
+            or not Path(project_dir).is_absolute()
+        ):
+            raise ValueError("Detached job project_dir must be an absolute path")
+        if tool_name == "ouroboros_start_qa" and project_dir is None:
+            raise ValueError("Detached QA request requires project_dir")
         return cls(
             job_id=job_id,
             tool_name=tool_name,
@@ -101,6 +111,7 @@ class DetachedJobRequest:
             llm_backend=_optional_string(payload.get("llm_backend")),
             opencode_mode=_optional_string(payload.get("opencode_mode")),
             launch_token=launch_token,
+            project_dir=project_dir,
         )
 
 
