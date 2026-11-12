@@ -22,6 +22,7 @@ Usage:
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import json
 from pathlib import Path
 from typing import Annotated
@@ -29,6 +30,7 @@ from typing import Annotated
 import typer
 
 from ouroboros.cli.formatters.panels import print_info, print_success, print_warning
+from ouroboros.core.file_lock import file_lock
 from ouroboros.core.worktree import (
     TaskWorkspace,
     WorktreeError,
@@ -75,17 +77,19 @@ def _prune_workspaces(
         if not workspace.durable_id.startswith("auto_"):
             skipped.append(workspace)
             continue
-        if _workspace_is_active(workspace):
-            skipped.append(workspace)
-            continue
         try:
-            if cleanup_task_workspace(workspace, policy=policy, dry_run=dry_run):
-                if not dry_run:
-                    Path(workspace.lock_path).unlink(missing_ok=True)
-                removed.append(workspace)
-            else:
-                skipped.append(workspace)
-        except WorktreeError:
+            guard = nullcontext() if dry_run else file_lock(Path(workspace.lock_path))
+            with guard:
+                if _workspace_is_active(workspace):
+                    skipped.append(workspace)
+                    continue
+                if cleanup_task_workspace(workspace, policy=policy, dry_run=dry_run):
+                    if not dry_run:
+                        Path(workspace.lock_path).unlink(missing_ok=True)
+                    removed.append(workspace)
+                else:
+                    skipped.append(workspace)
+        except (OSError, WorktreeError):
             failed.append(workspace)
     return removed, skipped, failed
 
@@ -100,14 +104,17 @@ def _prune_stale_locks(workspaces_root: Path, *, dry_run: bool) -> list[Path]:
         if not repo_dir.is_dir():
             continue
         for lock_path in sorted(repo_dir.glob("auto_*.json")):
-            worktree_dir = workspaces_root / repo_dir.name / lock_path.stem
-            if worktree_dir.exists():
+            try:
+                guard = nullcontext() if dry_run else file_lock(lock_path)
+                with guard:
+                    worktree_dir = workspaces_root / repo_dir.name / lock_path.stem
+                    if worktree_dir.exists() or not lock_file_is_stale(lock_path):
+                        continue
+                    if not dry_run:
+                        lock_path.unlink(missing_ok=True)
+                    removed.append(lock_path)
+            except OSError:
                 continue
-            if not lock_file_is_stale(lock_path):
-                continue
-            if not dry_run:
-                lock_path.unlink(missing_ok=True)
-            removed.append(lock_path)
     return removed
 
 
