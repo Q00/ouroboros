@@ -90,10 +90,19 @@ def _nonexecuting_pytest_mode(command: list[str], *, check_config: bool = True) 
             "--debug",
             "--rcfile",
         }
+        long_options = {option for option in flags | valued if option.startswith("--")} | {
+            "--module",
+            "--help",
+        }
         is_module = False
         index = 0
         while index < len(args):
             value = args[index]
+            option, separator, attached = value.partition("=")
+            if option.startswith("--") and option != "--" and option not in long_options:
+                matches = [name for name in long_options if name.startswith(option)]
+                if len(matches) == 1:
+                    value = matches[0] + separator + attached
             if value in {"--h", "--he", "--hel", "--help"} or (
                 re.fullmatch(r"-[apLmh]+", value) and "h" in value
             ):
