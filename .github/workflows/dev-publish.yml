@@ -31,13 +31,13 @@ jobs:
 
       - name: Install uv
         if: steps.check.outputs.skip == 'false'
-        uses: astral-sh/setup-uv@v10.3.0
+        uses: astral-sh/setup-uv@v10.3.3
         with:
           version: "latest"
 
       - name: Set up Python
         if: steps.check.outputs.skip == 'false'
-        uses: actions/setup-python@v7.0.0
+        uses: actions/setup-python@v7.1.0
         with:
           python-version: "3.14"
 
