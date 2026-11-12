@@ -620,6 +620,35 @@ def test_frozen_wrapper_refuses_coverage_help_receipt(
     assert not marker.exists()
 
 
+@pytest.mark.parametrize("direct", [False, True])
+@pytest.mark.parametrize("mode", ["collect", "help", "execute"])
+@pytest.mark.parametrize("option", ["append", "module", "context", "data", "rcfile"])
+def test_frozen_wrapper_coverage_abbreviations_preserve_execution_evidence(
+    tmp_path: Path, direct: bool, mode: str, option: str
+) -> None:
+    test_path, marker = _make_pytest_contract(tmp_path, failing=False)
+    config = tmp_path / "coverage.ini"
+    config.write_text("[run]\n")
+    prefixes = {
+        "append": ["--app", "-m", "pytest"],
+        "module": ["--mod", "pytest"],
+        "context": ["--contex=contract", "-m", "pytest"],
+        "data": ["--data-f", str(tmp_path / ".coverage"), "-m", "pytest"],
+        "rcfile": ["--rcf", str(config), "-m", "pytest"],
+    }
+    coverage = Path(sys.executable).with_name("coverage.exe" if os.name == "nt" else "coverage")
+    command = [str(coverage)] if direct else [sys.executable, "-m", "coverage"]
+    options = {"collect": ["--co"], "help": ["--help"], "execute": []}[mode]
+    argv = _pytest_wrapper_argv(("receipt.json", "stdout.txt", "stderr.txt"), test_path)
+    argv[argv.index("--") + 1 :] = [*command, "run", *prefixes[option], *options, str(test_path)]
+    result = subprocess.run(argv, cwd=tmp_path, capture_output=True, check=False)
+    receipt = json.loads((tmp_path / "receipt.json").read_text())
+    assert receipt["inner_exit_status"] == 0
+    assert receipt["test_result"] == ("passed" if mode == "execute" else "failed")
+    assert result.returncode == receipt["outer_exit_status"] == (0 if mode == "execute" else 1)
+    assert marker.exists() is (mode == "execute")
+
+
 def test_frozen_wrapper_rejects_collection_from_nodeid_config(tmp_path: Path) -> None:
     sub = tmp_path / "sub"
     sub.mkdir()
