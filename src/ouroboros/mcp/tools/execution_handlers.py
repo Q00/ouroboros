@@ -767,7 +767,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 execution_id=execution_id,
             )
             return
-        release_lock(workspace.lock_path)
+        release_lock(workspace.lock_path, workspace.lock_owner)
 
     async def _release_terminal_process_local_owner(
         self,
@@ -2120,7 +2120,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                             execution_id=workspace_execution_id,
                         )
                     else:
-                        release_lock(workspace.lock_path)
+                        release_lock(workspace.lock_path, workspace.lock_owner)
                 if owns_event_store and (not launched or synchronous) and not retained_after_run:
                     try:
                         close_result = event_store.close()

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
+import socket
 from types import SimpleNamespace
 from typing import Any
 
@@ -79,6 +81,7 @@ def _patch_execute_path(
         worktree_path=str(repo),
         branch="ooo/test",
         lock_path=str(tmp_path / "lock"),
+        lock_owner={"pid": os.getpid(), "host": socket.gethostname(), "lease_id": "a" * 32},
     )
 
     class FakeSessionRepository:
@@ -339,6 +342,7 @@ async def test_the_public_background_receipt_reports_the_check_package_as_pendin
         worktree_path=str(repo),
         branch="ooo/test",
         lock_path=str(tmp_path / "lock"),
+        lock_owner={"pid": os.getpid(), "host": socket.gethostname(), "lease_id": "b" * 32},
     )
 
     class FakeRunner:

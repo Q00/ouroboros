@@ -3072,7 +3072,9 @@ async def test_workspace_lock_releases_after_last_runner_session_owner(tmp_path)
                 "session-workspace-second",
                 session_registered=False,
             )
-            release_lock_mock.assert_called_once_with("/tmp/workspace-users.lock")
+            release_lock_mock.assert_called_once_with(
+                "/tmp/workspace-users.lock", workspace.lock_owner
+            )
             assert not runner._task_workspace_users
 
             runner._cleanup_pre_execution_state(
@@ -3080,7 +3082,9 @@ async def test_workspace_lock_releases_after_last_runner_session_owner(tmp_path)
                 "session-workspace-second",
                 session_registered=False,
             )
-            release_lock_mock.assert_called_once_with("/tmp/workspace-users.lock")
+            release_lock_mock.assert_called_once_with(
+                "/tmp/workspace-users.lock", workspace.lock_owner
+            )
     finally:
         runner._retire_process_local_authority(
             session_id="session-workspace-first",
@@ -3148,7 +3152,9 @@ async def test_inflight_preparation_reserves_workspace_before_registration(tmp_p
                 "session-workspace-prepare-second",
                 session_registered=False,
             )
-            release_lock_mock.assert_called_once_with("/tmp/workspace-prepare-race.lock")
+            release_lock_mock.assert_called_once_with(
+                "/tmp/workspace-prepare-race.lock", workspace.lock_owner
+            )
     finally:
         release_build.set()
         runner._retire_process_local_authority(
@@ -3215,7 +3221,9 @@ async def test_resume_handoff_reserves_workspace_before_reclaim(tmp_path) -> Non
                 first.value.session_id,
                 session_registered=False,
             )
-            release_lock_mock.assert_called_once_with("/tmp/workspace-resume-race.lock")
+            release_lock_mock.assert_called_once_with(
+                "/tmp/workspace-resume-race.lock", workspace.lock_owner
+            )
     finally:
         runner._release_task_workspace_reservation(reservation)
         runner._retire_process_local_authority(
@@ -3261,7 +3269,9 @@ async def test_direct_cancel_of_already_terminal_owner_releases_workspace(tmp_pa
         assert (session_id, execution_id) not in runner._process_local_authorities
         assert not runner._task_workspace_users
         assert runner._task_workspace_lock_held is False
-        release_lock_mock.assert_called_once_with("/tmp/terminal-cancel-workspace.lock")
+        release_lock_mock.assert_called_once_with(
+            "/tmp/terminal-cancel-workspace.lock", workspace.lock_owner
+        )
     finally:
         runner._retire_process_local_authority(
             session_id=session_id,
@@ -5392,7 +5402,9 @@ async def test_running_cancellation_retry_claim_is_released_if_probe_task_is_can
     )
     contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
     runner._session_repo.reconstruct_session = AsyncMock(return_value=Result.ok(tracker))
-    runner._task_workspace = SimpleNamespace(lock_path="/tmp/cancelled-retry-probe.lock")
+    runner._task_workspace = SimpleNamespace(
+        lock_path="/tmp/cancelled-retry-probe.lock", lock_owner={}
+    )
     entered_check = asyncio.Event()
     never_finish = asyncio.Event()
 
@@ -5410,7 +5422,7 @@ async def test_running_cancellation_retry_claim_is_released_if_probe_task_is_can
             with pytest.raises(asyncio.CancelledError):
                 await retry
 
-        release_lock_mock.assert_called_once_with("/tmp/cancelled-retry-probe.lock")
+        release_lock_mock.assert_called_once_with("/tmp/cancelled-retry-probe.lock", {})
 
         generation, already_claimed = runner._claim_process_local_authority_generation(
             tracker.session_id,
@@ -5860,14 +5872,14 @@ async def test_prepare_cwd_drift_before_registration_releases_every_owner(tmp_pa
     assert not heartbeat.is_holder_alive(session_id)
     assert not runner._task_workspace_reservations
     assert not runner._task_workspace_users
-    release_lock_mock.assert_called_once_with(workspace.lock_path)
+    release_lock_mock.assert_called_once_with(workspace.lock_path, workspace.lock_owner)
 
 
 @pytest.mark.asyncio
 async def test_prepare_cancellation_discards_issuance_and_releases_workspace() -> None:
     """Cancellation before durable publication cannot leak a live generation."""
     runner = _runner()
-    workspace = SimpleNamespace(lock_path="/tmp/process-local-prepare-cancel.lock")
+    workspace = SimpleNamespace(lock_path="/tmp/process-local-prepare-cancel.lock", lock_owner={})
     runner._task_workspace = workspace
     issued_before = len(_PROCESS_LOCAL_AUTHORITY_REGISTRY._issued)
 
@@ -5886,7 +5898,7 @@ async def test_prepare_cancellation_discards_issuance_and_releases_workspace() -
         )
 
     assert len(_PROCESS_LOCAL_AUTHORITY_REGISTRY._issued) == issued_before
-    release_lock_mock.assert_called_once_with(workspace.lock_path)
+    release_lock_mock.assert_called_once_with(workspace.lock_path, workspace.lock_owner)
 
 
 @pytest.mark.asyncio
@@ -6050,7 +6062,7 @@ async def test_prepare_cancellation_after_publication_terminalizes_then_retires(
 async def test_prepare_unexpected_error_discards_issuance_and_releases_workspace() -> None:
     """Unexpected pre-registration errors follow the same fail-closed cleanup."""
     runner = _runner()
-    workspace = SimpleNamespace(lock_path="/tmp/process-local-prepare-error.lock")
+    workspace = SimpleNamespace(lock_path="/tmp/process-local-prepare-error.lock", lock_owner={})
     runner._task_workspace = workspace
     issued_before = len(_PROCESS_LOCAL_AUTHORITY_REGISTRY._issued)
 
@@ -6067,7 +6079,7 @@ async def test_prepare_unexpected_error_discards_issuance_and_releases_workspace
     assert result.is_err
     assert result.error.message == "Failed to prepare process-local execution authority"
     assert len(_PROCESS_LOCAL_AUTHORITY_REGISTRY._issued) == issued_before
-    release_lock_mock.assert_called_once_with(workspace.lock_path)
+    release_lock_mock.assert_called_once_with(workspace.lock_path, workspace.lock_owner)
 
 
 @pytest.mark.asyncio

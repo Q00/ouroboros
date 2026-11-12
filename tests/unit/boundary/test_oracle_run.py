@@ -543,7 +543,9 @@ async def test_a_target_defined_in_the_checkout_is_resolved(tmp_path: Path) -> N
 TOOL = "import sys\nprint(max(int(sys.argv[1]), int(sys.argv[2])))\n"
 
 
-def _cli_package(base: Path, symbol: str, *, named: bool = False):  # type: ignore[no-untyped-def]
+def _cli_package(  # type: ignore[no-untyped-def]
+    base: Path, symbol: str, *, named: bool = False, files: dict[str, str] | None = None
+):
     seed = _seed("the tool prints the larger of two numbers")
     spec = build_oracle_spec(
         seed,
@@ -558,6 +560,7 @@ def _cli_package(base: Path, symbol: str, *, named: bool = False):  # type: igno
                 "held_out": True,
                 "args": {"a": 3, "b": 8},
                 "expect": {"kind": "cli", "exit_code": 0, "stdout": "8"},
+                **({"files": files} if files is not None else {}),
             }
         ],
         target_named_in_criterion=named,
