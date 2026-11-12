@@ -594,3 +594,233 @@ def test_two_record_lines_or_a_wrong_nonce_give_no_record() -> None:
     assert wrapper_record(b"", "n0", ProbeKind.CALL, "p", "t", 0) is None
     crlf = f"n0 {body}\r\n".encode()
     assert wrapper_record(crlf, "n0", ProbeKind.CALL, "p", "t", 0) is not None
+
+
+# ------------------------------------------------------- owned file lifetimes
+
+
+@pytest.fixture
+async def file_lifetime(monkeypatch: pytest.MonkeyPatch):
+    """Hold real file writers/removal at observable ownership transitions."""
+    import asyncio
+    import threading
+
+    class FileLifetime:
+        def __init__(self):
+            self.release = threading.Event()
+            self.fail = threading.Event()
+            self.failed = threading.Event()
+            self.started = threading.Event()
+            self.finished = threading.Event()
+            self.removing = threading.Event()
+            self.removed = threading.Event()
+            self.lock = threading.Lock()
+            self.expected = 1
+            self.copies = 0
+            self.completed = 0
+            self.active = set()
+            self.roots = set()
+            self.overlaps = []
+            self.children = set()
+            self.fail_first = False
+            self.hold_removal = False
+            self.removal_prefix = "probe-run-"
+
+        def copy(self, source, destination):
+            with self.lock:
+                index = self.copies
+                self.copies += 1
+                self.active.add(destination)
+                self.roots.add(destination.parent.parent)
+                if self.copies >= self.expected:
+                    self.started.set()
+            try:
+                if self.fail_first and index == 0:
+                    assert self.fail.wait(5), "fixture failure barrier not released"
+                    self.failed.set()
+                    raise RuntimeError("owned copy failed")
+                assert self.release.wait(5), "fixture copy barrier not released"
+                real_copy(source, destination)
+                (destination / "last-write").write_text("copy finished", encoding="utf-8")
+            finally:
+                with self.lock:
+                    self.active.remove(destination)
+                    self.completed += 1
+                    if self.completed >= self.expected:
+                        self.finished.set()
+
+        def remove(self, path, *args, **kwargs):
+            path = Path(path)
+            with self.lock:
+                self.overlaps.extend(dest for dest in self.active if dest.is_relative_to(path))
+            # The copy's staging cleanup is a sibling of tree, not its owner.
+            if self.hold_removal and path.name.startswith(self.removal_prefix):
+                self.release.clear()
+                self.removing.set()
+                assert self.release.wait(5), "fixture removal barrier not released"
+                try:
+                    return real_remove(path, *args, **kwargs)
+                finally:
+                    self.removed.set()
+            return real_remove(path, *args, **kwargs)
+
+    state = FileLifetime()
+    real_copy = probe_runner.copy_checkout
+    real_remove = probe_runner.shutil.rmtree
+    original_run = probe_runner.run_probe
+
+    async def track_run(*args, **kwargs):
+        # Track only for safe teardown of a failing baseline test.
+        state.children.add(asyncio.current_task())
+        return await original_run(*args, **kwargs)
+
+    monkeypatch.setattr(probe_runner, "copy_checkout", state.copy)
+    monkeypatch.setattr(probe_runner.shutil, "rmtree", state.remove)
+    monkeypatch.setattr(probe_runner, "run_probe", track_run)
+    monkeypatch.setattr(
+        probe_runner, "check_command", lambda *_args, **_kwargs: CheckUnavailable("fixture_refusal")
+    )
+    yield state
+    state.release.set()
+    state.fail.set()
+    if state.children:
+        await asyncio.gather(*state.children, return_exceptions=True)
+    if state.copies:
+        assert await asyncio.to_thread(state.finished.wait, 5), "file writers did not settle"
+    if state.removing.is_set():
+        assert await asyncio.to_thread(state.removed.wait, 5), "file removal did not settle"
+
+
+async def test_cancelled_probe_settles_copy_before_deleting_or_returning(
+    tmp_path, python, file_lifetime
+):
+    import asyncio
+
+    state = file_lifetime
+    tree = _tree(tmp_path, "input", "value = 1\n")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "caller-file").write_text("keep", encoding="utf-8")
+    task = asyncio.create_task(
+        probe_runner.run_probe(
+            PARSE, tree, tree_id="candidate", repeat=0, interpreter=python, work_dir=work
+        )
+    )
+    try:
+        assert await asyncio.to_thread(state.started.wait, 5)
+        for _ in range(3):
+            task.cancel()
+            await asyncio.wait({task}, timeout=0.03)
+            assert not task.done(), "cancelled API returned while its copy could still write"
+            assert not state.overlaps, "cleanup deleted an active copy destination"
+        state.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        assert state.finished.is_set()
+        assert list(work.iterdir()) == [work / "caller-file"]
+        assert (work / "caller-file").read_text(encoding="utf-8") == "keep"
+    finally:
+        state.release.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("pool_root", [False, True])
+async def test_cancellation_settles_directory_removal_before_return(
+    tmp_path, python, file_lifetime, pool_root
+):
+    import asyncio
+
+    state = file_lifetime
+    state.release.set()
+    tree = _tree(tmp_path, "input", "value = 1\n")
+    work = tmp_path / "work"
+    work.mkdir()
+    state.hold_removal = True
+    if pool_root:
+        state.expected = 4
+        state.removal_prefix = "ouroboros-probes-"
+        operation = run_probe_pool(
+            [PARSE], {BASE_TREE_ID: tree, "candidate": tree}, interpreter=python, parallel=4
+        )
+    else:
+        operation = probe_runner.run_probe(
+            PARSE, tree, tree_id="candidate", repeat=0, interpreter=python, work_dir=work
+        )
+    task = asyncio.create_task(operation)
+    try:
+        assert await asyncio.to_thread(state.removing.wait, 5)
+        for _ in range(3):
+            task.cancel()
+            await asyncio.wait({task}, timeout=0.03)
+            assert not task.done(), "API returned before owned removal finished"
+        state.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        assert state.removed.is_set()
+        assert list(work.iterdir()) == []
+        if pool_root:
+            assert state.roots and all(not root.exists() for root in state.roots)
+    finally:
+        state.release.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("caller_work_dir", [True, False])
+@pytest.mark.parametrize("child_fails", [True, False])
+async def test_pool_joins_writers_and_sibling_cleanup_before_return(
+    tmp_path, python, file_lifetime, caller_work_dir, child_fails
+):
+    import asyncio
+
+    state = file_lifetime
+    state.expected = 4  # two trees, each repeated twice
+    state.fail_first = child_fails
+    trees = {
+        BASE_TREE_ID: _tree(tmp_path, "base", "value = 1\n"),
+        "candidate": _tree(tmp_path, "candidate", "value = 2\n"),
+    }
+    work = tmp_path / "caller-work"
+    work.mkdir()
+    sentinel = work / "caller-file"
+    sentinel.write_text("keep", encoding="utf-8")
+    task = asyncio.create_task(
+        run_probe_pool(
+            [PARSE],
+            trees,
+            interpreter=python,
+            parallel=4,
+            work_dir=work if caller_work_dir else None,
+        )
+    )
+    try:
+        assert await asyncio.to_thread(state.started.wait, 5)
+        if child_fails:
+            state.fail.set()
+            assert await asyncio.to_thread(state.failed.wait, 5)
+        else:
+            task.cancel()
+        await asyncio.wait({task}, timeout=0.05)
+        assert not task.done(), "pool returned with sibling file writers still active"
+        assert not state.overlaps, "pool/run deletion raced a sibling copy"
+        if not child_fails:
+            task.cancel()
+            await asyncio.wait({task}, timeout=0.03)
+            assert not task.done(), "repeated cancellation detached sibling cleanup"
+        state.release.set()
+        if child_fails:
+            with pytest.raises(RuntimeError, match="owned copy failed"):
+                await asyncio.wait_for(task, 5)
+        else:
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 5)
+        assert state.finished.is_set()
+        assert not state.active
+        assert not state.overlaps
+        assert sentinel.read_text(encoding="utf-8") == "keep"
+        assert list(work.iterdir()) == [sentinel]
+        if not caller_work_dir:
+            assert state.roots and all(not root.exists() for root in state.roots)
+    finally:
+        state.fail.set()
+        state.release.set()
+        await asyncio.gather(task, return_exceptions=True)
