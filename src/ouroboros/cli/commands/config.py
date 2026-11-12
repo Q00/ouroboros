@@ -1271,7 +1271,7 @@ def validate() -> None:
             except (OSError, ValueError, RuntimeError):
                 exists = False
             if not exists:
-                issues.append(f"{field} does not refer to an existing CLI path")
+                issues.append(f"{field} does not exist")
 
     # Try loading config through the validated schema
     try:
