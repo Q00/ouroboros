@@ -19,10 +19,10 @@ from ouroboros.persistence.qa_session_store import QA_EVALUATED
 from ouroboros.providers.base import CompletionResponse, UsageInfo
 
 
-@pytest.mark.parametrize("inject_handler_store", [True, False])
+@pytest.mark.parametrize("handler_owner", ["shared", "absent", "distinct"])
 @pytest.mark.parametrize("blocked_default", [True, False])
-async def test_evolve_qa_uses_loop_store_and_survives_reopen(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inject_handler_store, blocked_default
+async def test_evolve_qa_uses_effective_store_and_survives_reopen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, handler_owner, blocked_default
 ):
     """Run the public consumer and real evolution; replace only inference boundaries."""
     project = tmp_path / "project"
@@ -68,14 +68,18 @@ async def test_evolve_qa_uses_loop_store_and_survives_reopen(
     url = sqlite_database_url(tmp_path / "custom.sqlite")
     store = EventStore(url)
     await store.initialize()
+    handler_store = EventStore(sqlite_database_url(tmp_path / "handler.sqlite"))
+    effective_store = handler_store if handler_owner == "distinct" else store
+    await effective_store.initialize()
     loop = EvolutionaryLoop(event_store=store, executor=executor, evaluator=evaluator)
     server = MCPServerAdapter()
     server.register_tool(
         EvolveStepHandler(
-            evolutionary_loop=loop, event_store=store if inject_handler_store else None
+            evolutionary_loop=loop,
+            event_store=None if handler_owner == "absent" else effective_store,
         )
     )
-    server.register_tool(SessionStatusHandler(event_store=store))
+    server.register_tool(SessionStatusHandler(event_store=effective_store))
     try:
         result = await server.call_tool(
             "ouroboros_evolve_step",
@@ -90,14 +94,17 @@ async def test_evolve_qa_uses_loop_store_and_survives_reopen(
         assert status.is_ok, str(status.error) if status.is_err else status
         assert status.value.meta["score"] == 0.9
         assert status.value.meta["session_kind"] == "qa"
-        events = await store.query_events(event_type=QA_EVALUATED)
+        events = await effective_store.query_events(event_type=QA_EVALUATED)
         assert len(events) == 1
         assert events[0].aggregate_id == session_id
+        if handler_owner == "distinct":
+            assert await store.query_events(event_type=QA_EVALUATED) == []
     finally:
         await store.close()
+        await handler_store.close()
 
     # The caller's close must be enough; QA must not keep another connection alive.
-    reopened = EventStore(url)
+    reopened = EventStore(effective_store.database_url)
     try:
         status = await SessionStatusHandler(event_store=reopened).handle({"session_id": session_id})
         assert status.is_ok

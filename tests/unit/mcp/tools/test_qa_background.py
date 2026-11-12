@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.job_manager import JobManager
 from ouroboros.mcp.tools.job_handlers import JobResultHandler
 from ouroboros.mcp.tools.qa import QAHandler
@@ -267,8 +268,9 @@ async def test_sdk_call_returns_pollable_job_receipt(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(os.name != "posix", reason="fake executable uses a POSIX shebang")
+@pytest.mark.parametrize("later_events", [0, 60])
 async def test_external_cancel_stops_detached_qa_and_cli(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, later_events: int
 ) -> None:
     """A fresh controller can cancel a real worker while its fake CLI is running."""
     home = tmp_path / "home"
@@ -332,8 +334,14 @@ async def test_external_cancel_stops_detached_qa_and_cli(
         assert result.is_ok
         assert result.value.is_error
         assert result.value.meta["status"] == "cancelled"
-        events = await observer_store.query_events()
-        assert not any(event.type == QA_EVALUATED for event in events)
+        # A busy store may receive more than the default 50-event window
+        # after the cancelled worker settles. Its verdict must still be absent.
+        for _ in range(later_events):
+            await observer_store.append(
+                BaseEvent(type="test.activity", aggregate_type="test", aggregate_id="other")
+            )
+        events = await observer_store.query_events(event_type=QA_EVALUATED)
+        assert not events
         for _ in range(100):
             try:
                 os.kill(child_pid, 0)
