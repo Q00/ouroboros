@@ -931,6 +931,7 @@ ls skills/*.yaml 2>/dev/null || echo "No skill YAML files found"
 - [Review Conventions](./docs/contributing/review-conventions.md) - What the review bot demands, and how to preempt a round
 - [Key Patterns](./docs/contributing/key-patterns.md) - Core patterns with code examples
 - [CI Gates and Branch Protection](./docs/contributing/ci-gates.md) - What CI enforces, how to reproduce it locally, and how releases land
+- [Issue Reference Report](./docs/contributing/issue-reference-report.md) - Read-only, manually triggered evidence for issue review
 
 ---
 
