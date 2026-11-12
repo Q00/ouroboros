@@ -33,6 +33,8 @@ from ouroboros.bigbang.interview import (
     initial_context_summary_missing,
     prompt_safe_initial_context,
 )
+from ouroboros.bigbang.material_seed import attach_material_references
+from ouroboros.bigbang.opening_seed import anchor_opening_confirmations
 from ouroboros.bigbang.requirement_distillation import (
     anchor_promoted_requirements,
     apply_requirement_distillation,
@@ -1725,14 +1727,20 @@ class SeedGenerator:
             )
         state.requirement_distillation = distillation
         if reference_aware:
-            return Result.ok(
-                build_promoted_reference_seed(
-                    state,
-                    distillation,
-                    ambiguity_score=ambiguity_score.overall_score,
-                    gate_forced=force,
+            try:
+                return Result.ok(
+                    attach_material_references(
+                        build_promoted_reference_seed(
+                            state,
+                            distillation,
+                            ambiguity_score=ambiguity_score.overall_score,
+                            gate_forced=force,
+                        ),
+                        state,
+                    )
                 )
-            )
+            except ValueError:
+                return Result.err(ValidationError("Invalid local material evidence history"))
 
         # Extract structured requirements from interview
         extraction_result = await self._extract_requirements(state)
@@ -1773,7 +1781,9 @@ class SeedGenerator:
 
         # Build the seed
         try:
-            seed = self._build_seed(requirements, metadata)
+            seed = attach_material_references(
+                anchor_opening_confirmations(self._build_seed(requirements, metadata), state), state
+            )
 
             log.info(
                 "seed.generation.completed",
@@ -1836,6 +1846,7 @@ class SeedGenerator:
                 goal=reflect_output.refined_goal,
                 task_type=parent_seed.task_type,
                 brownfield_context=parent_seed.brownfield_context,
+                material_evidence_refs=parent_seed.material_evidence_refs,
                 constraints=reflect_output.refined_constraints,
                 ontology_schema=new_ontology,
                 evaluation_principles=parent_seed.evaluation_principles,

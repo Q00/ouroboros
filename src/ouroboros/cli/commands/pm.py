@@ -424,6 +424,11 @@ async def _run_pm_interview(
             print_error(f"Failed to resume session: {state_result.error}")
             raise typer.Exit(code=1)
         state = state_result.value
+        from ouroboros.interview_adapters.independent_batch import has_pending_batch
+
+        if has_pending_batch(state):
+            print_error("This interview has a pending question batch; resume it in the MCP host.")
+            raise typer.Exit(code=1)
 
         # Restore PM-specific metadata (deferred items, decide-later, etc.)
         data_dir = Path.home() / ".ouroboros" / "data"

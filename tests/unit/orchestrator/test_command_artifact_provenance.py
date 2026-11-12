@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -156,6 +157,7 @@ async def test_wrapper_receipt_proves_inner_test_through_journal(tmp_path: Path)
         "collect_only_override_equals",
         "collect_only_override_cluster",
         "collect_only_config",
+        "collect_only_exe",
         "fake_json",
         "source_substitution",
         "earlier_retry",
@@ -183,6 +185,14 @@ async def test_wrapper_receipt_real_dispatch_capture_to_verifier(tmp_path: Path,
             "collect_only_override_equals": ["-o=addopts=--collect-only"],
             "collect_only_override_cluster": ["-qo=addopts=--collect-only"],
         }[case]
+        outer = shlex.join(parts)
+        inner_command = shlex.join(parts[11:])
+    if case == "collect_only_exe":
+        alias = tmp_path / "pytest.exe"
+        launcher = Path(sys.executable).parent / ("pytest.exe" if os.name == "nt" else "pytest")
+        shutil.copy2(launcher, alias)
+        parts = shlex.split(outer)
+        parts[11:] = [str(alias), "--collect-only", "-q", "test_inner.py"]
         outer = shlex.join(parts)
         inner_command = shlex.join(parts[11:])
     if case == "collect_only_config":
@@ -246,6 +256,7 @@ async def test_wrapper_receipt_real_dispatch_capture_to_verifier(tmp_path: Path,
                     "collect_only_override_equals",
                     "collect_only_override_cluster",
                     "collect_only_config",
+                    "collect_only_exe",
                 }
             )
             if case in {
@@ -254,6 +265,7 @@ async def test_wrapper_receipt_real_dispatch_capture_to_verifier(tmp_path: Path,
                 "collect_only_override_equals",
                 "collect_only_override_cluster",
                 "collect_only_config",
+                "collect_only_exe",
             }:
                 assert (tmp_path / "inner-ran").exists() is (case == "valid")
                 receipt = json.loads((tmp_path / "receipt.json").read_text())

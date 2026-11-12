@@ -396,6 +396,9 @@ class OmpRuntime:
         invalid = (
             not isinstance(content, list)
             or not isinstance(details, dict)
+            # An asynchronous launch receipt is not a completed command,
+            # even if it contains an exit status or success-looking output.
+            or (isinstance(details, dict) and "async" in details)
             or any(type(flag) is not bool for flag in flags)
         )
         failed = any(flag is True for flag in flags)
@@ -731,7 +734,20 @@ class OmpRuntime:
                 await self._terminate_process(process)
             process_terminated = True
             if stderr_task is not None:
-                stderr_lines = await stderr_task
+                done, _ = await asyncio.wait(
+                    {stderr_task}, timeout=self._process_shutdown_timeout_seconds
+                )
+                if done:
+                    try:
+                        stderr_lines = stderr_task.result()
+                    except Exception:
+                        # A broken diagnostic stream must not replace the
+                        # stdout timeout with an unrelated reader exception.
+                        stderr_lines = []
+                else:
+                    # Another writer may keep stderr open after termination.
+                    stderr_task.cancel()
+                    stderr_lines = []
             else:
                 stderr_lines = []
             final_message = "\n".join(stderr_lines).strip() or str(e)

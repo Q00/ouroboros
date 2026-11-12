@@ -429,6 +429,10 @@ class AmbiguityScorer:
             rounds=len(state.rounds),
         )
 
+        from ouroboros.interview_adapters.independent_batch import has_pending_batch
+
+        if has_pending_batch(state):
+            return Result.err(ProviderError("Finish or discard the pending batch before scoring"))
         # Use brownfield flag from state if available
         is_brownfield = is_brownfield or getattr(state, "is_brownfield", False)
 
@@ -993,6 +997,10 @@ Additional context (intentional deferrals — do not penalise):
         :meth:`score`. Any dimension failure is fail-safe: the first error is
         returned so the caller falls back exactly as the combined path would.
         """
+        from ouroboros.interview_adapters.independent_batch import has_pending_batch
+
+        if has_pending_batch(state):
+            return Result.err(ProviderError("Finish or discard the pending batch before scoring"))
         is_brownfield = is_brownfield or getattr(state, "is_brownfield", False)
 
         if initial_context_summary_missing(state):
