@@ -14,6 +14,7 @@ import sys
 import pytest
 from textual.widgets import Collapsible, Input, OptionList, Select, Static, Switch
 
+from ouroboros.config.models import OrchestratorConfig, RuntimeProfileConfig
 from ouroboros.config_tui import persistence
 from ouroboros.config_tui.app import (
     CUSTOM_SENTINEL,
@@ -81,6 +82,27 @@ async def test_uninstalled_backend_option_is_badged(app_env) -> None:
         labels = {str(label) for label, _ in select._options}
         assert any("hermes" in label and INSTALL_REQUIRED_SUFFIX in label for label in labels)
         assert "claude" in labels  # installed backends carry no badge
+
+
+@pytest.mark.asyncio
+async def test_runtime_options_can_be_saved_as_global_and_stage_backends(app_env) -> None:
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        global_options = {
+            value
+            for _, value in pilot.app.query_one("#global-runtime", Select)._options
+            if value != Select.NULL
+        }
+        stage_options = {
+            value
+            for _, value in pilot.app.query_one("#stage-runtime-execute", Select)._options
+            if value not in (INHERIT_SENTINEL, Select.NULL)
+        }
+        assert "codex_mcp" not in global_options
+        assert global_options == stage_options
+        for backend in global_options:
+            OrchestratorConfig(runtime_backend=backend)
+            RuntimeProfileConfig(stages={"execute": backend})
 
 
 @pytest.mark.asyncio

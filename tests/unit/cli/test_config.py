@@ -14,7 +14,7 @@ import pytest
 from typer.testing import CliRunner, Result
 import yaml
 
-from ouroboros.cli.commands.config import _resolve_db_path, app
+from ouroboros.cli.commands.config import _INERT_SETTINGS, _resolve_db_path, app
 
 runner = CliRunner(env={"COLUMNS": "200"})
 
@@ -132,6 +132,91 @@ class TestConfigShow:
             result = runner.invoke(app, ["show", "orchestrator"])
         assert result.exit_code == 0
         assert "runtime_backend" in result.output
+
+    def test_show_evaluation_warns_about_persisted_inert_threshold(self, config_dir: Path) -> None:
+        path = config_dir / "config.yaml"
+        data = yaml.safe_load(path.read_text())
+        data["evaluation"] = {"satisfaction_threshold": 0.95}
+        path.write_text(yaml.safe_dump(data))
+        with patch("ouroboros.config.models.get_config_dir", return_value=config_dir):
+            result = runner.invoke(app, ["show", "evaluation"])
+        assert result.exit_code == 0
+        assert "satisfaction_threshold" in result.output
+        assert "does not affect" in result.output
+
+    def test_set_inert_threshold_warns_after_save(self, config_dir: Path) -> None:
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
+            patch("ouroboros.config.loader.get_config_dir", return_value=config_dir),
+        ):
+            result = runner.invoke(app, ["set", "evaluation.satisfaction_threshold", "0.95"])
+        assert result.exit_code == 0
+        assert "does not affect" in result.output
+        assert (
+            yaml.safe_load((config_dir / "config.yaml").read_text())["evaluation"][
+                "satisfaction_threshold"
+            ]
+            == 0.95
+        )
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("evaluation.stage1_enabled", "false"),
+            ("evaluation.stage2_enabled", "false"),
+            ("evaluation.stage3_enabled", "false"),
+            ("evaluation.satisfaction_threshold", "0.9"),
+            ("evaluation.uncertainty_threshold", "0.5"),
+            ("consensus.min_models", "4"),
+            ("consensus.threshold", "0.9"),
+            ("consensus.diversity_required", "false"),
+        ],
+    )
+    def test_each_documented_inert_field_warns_after_set(
+        self, config_dir: Path, key: str, value: str
+    ) -> None:
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
+            patch("ouroboros.config.loader.get_config_dir", return_value=config_dir),
+        ):
+            result = runner.invoke(app, ["set", key, value])
+        assert result.exit_code == 0
+        assert key in result.output
+        assert "does not affect" in result.output
+
+    def test_set_active_field_has_no_inert_warning(self, config_dir: Path) -> None:
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
+            patch("ouroboros.config.loader.get_config_dir", return_value=config_dir),
+        ):
+            result = runner.invoke(app, ["set", "logging.level", "debug"])
+        assert result.exit_code == 0
+        assert "does not affect" not in result.output
+
+    def test_summary_warns_for_saved_inert_keys_without_echoing_values(
+        self, config_dir: Path
+    ) -> None:
+        path = config_dir / "config.yaml"
+        data = yaml.safe_load(path.read_text())
+        data["consensus"] = {"threshold": "SYNTHETIC_PRIVATE_VALUE"}
+        path.write_text(yaml.safe_dump(data))
+        with patch("ouroboros.config.models.get_config_dir", return_value=config_dir):
+            result = runner.invoke(app, ["show"])
+        assert result.exit_code == 0
+        assert "consensus.threshold" in result.output
+        assert "does not affect" in result.output
+        assert "SYNTHETIC_PRIVATE_VALUE" not in result.output
+
+    def test_inert_warning_list_matches_documented_field_dispositions(self) -> None:
+        reference = (Path(__file__).resolve().parents[3] / "docs/config-reference.md").read_text(
+            encoding="utf-8"
+        )
+        for section, expected in _INERT_SETTINGS.items():
+            text = reference.split(f"## `{section}`", 1)[1].split("\n## ", 1)[0]
+            documented = set(
+                re.findall(r"^\| `([^`]+)` \|.*\*\*Currently inert", text, re.MULTILINE)
+            )
+            assert documented == expected
 
     def test_show_invalid_section(self, config_dir: Path) -> None:
         with patch("ouroboros.config.models.get_config_dir", return_value=config_dir):

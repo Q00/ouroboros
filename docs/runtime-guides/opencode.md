@@ -18,6 +18,13 @@ If setup cannot determine the CLI version, it warns that plugin compatibility
 is unverified and continues with the V1 bridge. Confirm the version before use;
 an unrecognized 2.x host cannot load that bridge.
 
+If you manually registered the bridge directory in V2's `plugins` list,
+`ouroboros uninstall` removes the entry for the current OpenCode config
+directory. It leaves entries for other directories alone. If a V2 config
+contains JSONC comments, trailing commas, or duplicate keys, uninstall leaves
+the OpenCode config and bridge directory intact and asks you to remove the
+Ouroboros entries manually, so those settings are not silently discarded.
+
 V2 uses directory plugin entries and a different setup, tool-hook, session
 permission, completion, and interruption API. Renaming the entry or adding a
 `setup` export alone does not establish compatibility; the remaining port is
