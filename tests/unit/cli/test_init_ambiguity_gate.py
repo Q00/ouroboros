@@ -374,3 +374,33 @@ async def test_no_scorer_keeps_legacy_prompt(prompts: list[str]) -> None:
 
     assert prompts == [_MORE_QUESTIONS_PROMPT]
     assert state.ambiguity_score is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["score", "clear"])
+async def test_seed_flow_stops_on_interview_save_failure(monkeypatch, tmp_path, failure_stage):
+    from unittest.mock import AsyncMock, MagicMock
+
+    import typer
+
+    from ouroboros.cli.commands import init as init_module
+    from ouroboros.core.errors import ValidationError
+
+    generator = MagicMock()
+    generator.generate = AsyncMock()
+    monkeypatch.setattr(init_module, "SeedGenerator", lambda *_args, **_kwargs: generator)
+    monkeypatch.setattr(init_module.Prompt, "ask", lambda *_args, **_kwargs: "1")
+    engine = MagicMock()
+    error = Result.err(ValidationError("stale revision"))
+    engine.save_state = AsyncMock(
+        side_effect=[error]
+        if failure_stage == "score"
+        else [Result.ok(tmp_path / "state.json"), error]
+    )
+    state = _state_at_confirmation_round()
+    with pytest.raises(typer.Exit) as exc:
+        await init_module._generate_seed_from_interview(
+            state, MagicMock(), engine=engine, approved_score=_score(0.15, clarity=0.5)
+        )
+    assert exc.value.exit_code == 1
+    generator.generate.assert_not_awaited()

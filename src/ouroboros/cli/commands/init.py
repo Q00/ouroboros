@@ -312,6 +312,8 @@ async def _refresh_ambiguity(
             interview_id=state.interview_id,
             error=str(save_result.error),
         )
+        print_error(f"Failed to save interview; reload before retrying: {save_result.error}")
+        raise typer.Exit(code=1)
 
     return None if score_result.is_err else score_result.value
 
@@ -424,7 +426,10 @@ async def _run_interview_loop(
         # Save state immediately after recording
         save_result = await engine.save_state(state)
         if save_result.is_err:
-            print_error(f"Warning: Failed to save state: {save_result.error.message}")
+            print_error(
+                f"Failed to save state; reload before retrying: {save_result.error.message}"
+            )
+            raise typer.Exit(code=1)
         elif not await _append_hitl_events(
             event_store,
             [
@@ -468,7 +473,12 @@ async def _run_interview_loop(
                 complete_result = await engine.complete_interview(state)
                 if complete_result.is_ok:
                     state = complete_result.value
-                await engine.save_state(state)
+                save_result = await engine.save_state(state)
+                if save_result.is_err:
+                    print_error(
+                        f"Failed to save state; reload before retrying: {save_result.error.message}"
+                    )
+                    raise typer.Exit(code=1)
                 break
 
     return InterviewLoopOutcome(
@@ -573,16 +583,17 @@ async def _run_interview(
                 console.print()
                 _raise_for_aborted_interview(state)
 
-            # Interview complete
+            # Save final state before reporting completion or generating Seed.
+            save_result = await engine.save_state(state)
+            if save_result.is_err:
+                print_error(f"Failed to save final interview state: {save_result.error.message}")
+                raise typer.Exit(code=1)
+
             console.print()
             print_success("Interview completed!")
             console.print(f"[muted]Total rounds: {len(state.rounds)}[/]")
             console.print(f"[muted]Interview ID: {state.interview_id}[/]")
-
-            # Save final state
-            save_result = await engine.save_state(state)
-            if save_result.is_ok:
-                console.print(f"[muted]State saved to: {save_result.value}[/]")
+            console.print(f"[muted]State saved to: {save_result.value}[/]")
 
             console.print()
 
@@ -617,7 +628,12 @@ async def _run_interview(
                 console.print()
                 print_info("Continuing interview to reduce ambiguity...")
                 state.status = InterviewStatus.IN_PROGRESS
-                await engine.save_state(state)  # Save status change immediately
+                save_result = await engine.save_state(state)
+                if save_result.is_err:
+                    print_error(
+                        f"Failed to save state; reload before retrying: {save_result.error.message}"
+                    )
+                    raise typer.Exit(code=1)
 
                 # Continue interview loop (reusing the same helper)
                 loop_event_store = (
@@ -708,7 +724,7 @@ async def _generate_seed_from_interview(
 
     # Persist the evaluation like the MCP path does (#1901): without this the
     # state file reads ambiguity_score: null and the score only survives in
-    # rotating logs. A save failure must never block seed generation.
+    # rotating logs. A failed save leaves this state unsafe for generation.
     state.store_ambiguity(
         score=ambiguity_score.overall_score,
         breakdown=ambiguity_score.breakdown.model_dump(mode="json"),
@@ -720,6 +736,10 @@ async def _generate_seed_from_interview(
             interview_id=state.interview_id,
             error=str(save_result.error),
         )
+        print_error(
+            f"Failed to save interview; reload before retrying: {save_result.error.message}"
+        )
+        raise typer.Exit(code=1)
 
     # One predicate for one decision. The loop's confirmation already asks
     # whether the interview is seed-ready using overall ambiguity *and* the
@@ -773,6 +793,10 @@ async def _generate_seed_from_interview(
                     interview_id=state.interview_id,
                     error=str(clear_result.error),
                 )
+                print_error(
+                    f"Failed to save interview; reload before retrying: {clear_result.error.message}"
+                )
+                raise typer.Exit(code=1)
             return None, SeedGenerationResult.CONTINUE_INTERVIEW
         elif choice == "3":
             return None, SeedGenerationResult.CANCELLED

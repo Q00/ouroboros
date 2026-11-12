@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Any
 
 from ouroboros.bigbang.ambiguity import AmbiguityScore, get_milestone
+from ouroboros.mcp.host_context import QuestionDeliveryCapability, current_mcp_host_context
 from ouroboros.mcp.tools.fanout import FanoutRegistry
 from ouroboros.mcp.tools.question_advisory import attach_question_advisory
 from ouroboros.mcp.tools.subagent import SubagentDispatchMode
@@ -112,6 +113,16 @@ def _attach_question_assist_requests(
     investigation request, which exists because in this interview a code fact
     may become the answer.
     """
+    if not question:
+        return
+    host = current_mcp_host_context()
+    if host.is_mcp_host and host.question_delivery is QuestionDeliveryCapability.QUESTION_ONLY:
+        # Do not register a fan-out that this host has explicitly declined to
+        # run. The question remains available without synchronous child work.
+        meta["question_advisory_recommended"] = True
+        meta["question_advisory_delivery_mode"] = "question_only_degraded"
+        meta["question_advisory_degradation_reason"] = "host_requested_question_only"
+        return
     code_request = _build_code_investigation_request(
         session_id=session_id,
         question=question,

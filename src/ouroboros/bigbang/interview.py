@@ -11,8 +11,9 @@ from enum import StrEnum
 import functools
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 import structlog
 
 from ouroboros.bigbang.answer_provenance import (
@@ -256,6 +257,8 @@ class InterviewState(BaseModel):
     """
 
     interview_id: str
+    persistence_revision: str = ""
+    _loaded_revision: str | None = PrivateAttr(default=None)
     status: InterviewStatus = InterviewStatus.IN_PROGRESS
     rounds: list[InterviewRound] = Field(default_factory=list)
     initial_context: str = ""
@@ -770,6 +773,77 @@ class PreparedInterviewQuestion:
     preserve_prefix_messages: int = 0
 
 
+def _write_interview_snapshot(file_path: Path, expected_revision: str | None, content: str) -> bool:
+    with _file_lock(file_path, exclusive=True):
+        if file_path.exists():
+            current = InterviewState.model_validate_json(file_path.read_text(encoding="utf-8"))
+            if expected_revision is None or current.persistence_revision != expected_revision:
+                raise ValueError("interview state changed; reload before retrying")
+        elif expected_revision is not None:
+            raise ValueError("interview state removed; reload before retrying")
+        return write_owner_only(file_path, content)
+
+
+def _interview_revision_matches(file_path: Path, revision: str) -> bool:
+    with _file_lock(file_path, exclusive=False):
+        if not file_path.exists():
+            return False
+        saved = InterviewState.model_validate_json(file_path.read_text(encoding="utf-8"))
+        return saved.persistence_revision == revision
+
+
+async def save_interview_state_checked(file_path: Path, state: InterviewState) -> bool:
+    """Save a snapshot with optimistic concurrency, under the shared lock."""
+    expected_revision = state._loaded_revision
+    new_revision = uuid4().hex
+    snapshot = state.model_copy(deep=True)
+    snapshot.persistence_revision = new_revision
+    content = snapshot.model_dump_json(indent=2)
+
+    async def settle(task: asyncio.Future[Any]) -> tuple[Any, bool, Exception | None]:
+        interrupted = False
+        while True:
+            try:
+                return await asyncio.shield(task), interrupted, None
+            except asyncio.CancelledError:
+                if task.cancelled():
+                    caller = asyncio.current_task()
+                    interrupted = interrupted or bool(caller and caller.cancelling())
+                    return (
+                        None,
+                        interrupted,
+                        OSError("interview save worker cancelled; outcome unknown; reload"),
+                    )
+                interrupted = True
+            except Exception as exc:
+                return None, interrupted, exc
+
+    loop = asyncio.get_running_loop()
+    commit = loop.run_in_executor(
+        None, _write_interview_snapshot, file_path, expected_revision, content
+    )
+    durability, cancelled, error = await settle(commit)
+    if error is not None:
+        # A writer can fail after replacement. Settle the revision read even
+        # if the caller repeats cancellation while it is running.
+        check = loop.run_in_executor(None, _interview_revision_matches, file_path, new_revision)
+        committed, check_cancelled, check_error = await settle(check)
+        cancelled = cancelled or check_cancelled
+        if check_error is None and committed:
+            state.persistence_revision = new_revision
+            state._loaded_revision = new_revision
+        if cancelled:
+            raise asyncio.CancelledError from None
+        if check_error is not None:
+            raise OSError("interview save outcome unknown; reload before retrying") from error
+        raise error
+    state.persistence_revision = new_revision
+    state._loaded_revision = new_revision
+    if cancelled:
+        raise asyncio.CancelledError
+    return bool(durability)
+
+
 @dataclass
 class InterviewEngine:
     """Engine for conducting interactive requirement interviews.
@@ -1281,14 +1355,7 @@ class InterviewEngine:
         try:
             file_path = self._state_file_path(state.interview_id)
             state.mark_updated()
-            # Serialize while still on the event-loop (CPU-bound, not I/O)
-            content = state.model_dump_json(indent=2)
-
-            def _sync_write() -> bool:
-                with _file_lock(file_path, exclusive=True):
-                    return write_owner_only(file_path, content)
-
-            durability_confirmed = await asyncio.to_thread(_sync_write)
+            durability_confirmed = await save_interview_state_checked(file_path, state)
 
             if not durability_confirmed:
                 log.warning(
@@ -1350,6 +1417,7 @@ class InterviewEngine:
             content = await asyncio.to_thread(_sync_read)
 
             state = InterviewState.model_validate_json(content)
+            state._loaded_revision = state.persistence_revision
             state.discard_stale_requirement_distillation()
 
             log.info(
