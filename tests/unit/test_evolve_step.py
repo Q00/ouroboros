@@ -4,7 +4,9 @@ import asyncio
 from dataclasses import fields, replace
 import inspect
 import json
+import os
 from pathlib import Path
+import socket
 import subprocess
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -4160,6 +4162,7 @@ class TestEvolveStepHandler:
         workspace = SimpleNamespace(
             effective_cwd=str(worktree_dir),
             lock_path=tmp_path / "task.lock",
+            lock_owner={"pid": os.getpid(), "host": socket.gethostname(), "lease_id": "c" * 32},
             worktree_path=str(worktree_dir),
             branch="codex/test-worktree",
         )

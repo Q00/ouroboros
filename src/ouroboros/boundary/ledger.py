@@ -133,8 +133,8 @@ from ouroboros.boundary.oracle import case_id_for
 from ouroboros.boundary.package import (
     CheckPackage,
     CheckRole,
-    find_workspace_leaks,
     mint_check_ids,
+    scan_workspace_leaks,
     script_assertion_id,
     validate_package_for_seed,
 )
@@ -1612,12 +1612,11 @@ class BoundaryLedger:
                     details={"boundary_id": boundary_id, "actor_id": actor_id},
                 )
         if workspace is not None:
-            leaks = find_workspace_leaks(workspace, live)
-            if leaks:
-                raise BoundaryLeakError(
-                    "worker workspace contains generated check files",
-                    details={"actor_id": actor_id, "paths": list(leaks)},
-                )
+            scan = scan_workspace_leaks(workspace, live)
+            if scan.paths:
+                message, details = scan.refusal()
+                details["actor_id"] = actor_id
+                raise BoundaryLeakError(message, details=details)
         await self._store.append_batch(started)
         return started
 

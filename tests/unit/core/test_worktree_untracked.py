@@ -38,7 +38,7 @@ def test_prepare_task_workspace_allows_only_untracked_source_artifacts(tmp_path:
         assert (evidence / "readback.md").read_text(encoding="utf-8") == "verified\n"
         assert not (Path(workspace.worktree_path) / "evidence").exists()
     finally:
-        release_lock(workspace.lock_path)
+        release_lock(workspace.lock_path, workspace.lock_owner)
 
 
 def test_prepare_task_workspace_rejects_tracked_changes_when_untracked_allowed(
@@ -94,4 +94,4 @@ def test_prepare_task_workspace_accepts_non_utf8_untracked_evidence(tmp_path: Pa
     ):
         workspace = prepare_task_workspace(repo, "orch_test", allow_untracked_evidence=True)
 
-    release_lock(workspace.lock_path)
+    release_lock(workspace.lock_path, workspace.lock_owner)
