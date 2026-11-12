@@ -541,6 +541,14 @@ Every runtime adapter satisfies the `AgentRuntime` protocol (defined in `src/our
 
 The orchestrator never inspects backend-specific internals — each adapter maps its native events into these shared types.
 
+For live Codex CLI and OpenCode process handles, a termination request reports
+success only when process-tree cleanup confirms that the recorded tree exited.
+If cleanup cannot be confirmed, `terminate()` returns false and observation
+reports `termination_unconfirmed`; this is not proof that the process is gone.
+If the leader has already exited without a confirmed tree receipt, the handle
+does not promise it can rediscover or terminate remaining descendants. This
+does not establish bounded termination for every runtime or execution path.
+
 ### Interview calibration control turns
 
 Unfamiliar terminology must not force a user to guess at a requirements decision.
