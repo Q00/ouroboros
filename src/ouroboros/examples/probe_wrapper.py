@@ -23,7 +23,7 @@ command <nonce> <path>
     Status ``not_run`` when it cannot be started (``OSError``, or
     ``ValueError`` for an argv item with a NUL byte); ``exited``
     otherwise, with its exit status and each complete output stream (up to
-    ``STREAM_LIMIT`` bytes), decoded as UTF-8 with backslash escapes.
+    ``STREAM_LIMIT`` bytes), decoded as strict UTF-8; undecodable output is indeterminate.
     A longer or unfinished stream is reported as incomplete. Once the
     command exits, its output is read for at most ``DRAIN_SECONDS`` more:
     a process it left behind that holds
