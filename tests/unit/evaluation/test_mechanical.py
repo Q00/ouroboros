@@ -1,6 +1,7 @@
 """Tests for Stage 1 mechanical verification."""
 
 import asyncio
+import json
 import sys
 from unittest.mock import AsyncMock, patch
 
@@ -44,6 +45,35 @@ class TestParseCoverageFromOutput:
     def test_parse_100_percent(self) -> None:
         """Parse 100% coverage."""
         output = "TOTAL   500   0   100%"
+        assert parse_coverage_from_output(output) == 1.0
+
+    def test_colored_non_table_prose_does_not_hide_supported_total(self) -> None:
+        assert parse_coverage_from_output("\x1b[32mTests passed\x1b[0m\nTOTAL 10 0 100%") == 1.0
+
+    def test_unrelated_lcov_like_words_preserve_supported_total(self) -> None:
+        output = "daily: checks passed\nSF builds passed\nTOTAL 10 0 100%"
+        assert parse_coverage_from_output(output) == 1.0
+
+    def test_unrelated_xml_element_preserves_supported_total(self) -> None:
+        assert (
+            parse_coverage_from_output(
+                "<coverage-example/><cov:coverage-example/>\nTOTAL 10 0 100%"
+            )
+            == 1.0
+        )
+
+    def test_unicode_non_control_prose_preserves_supported_total(self) -> None:
+        assert parse_coverage_from_output("검사 성공 ✓\nTOTAL 10 0 100%") == 1.0
+
+    def test_unrelated_go_json_output_does_not_hide_supported_total(self) -> None:
+        output = (
+            'TOTAL 10 0 100%\n{"Action":"output","Package":"p","Output":"ok\\n"}\n'
+            '{"Action":"output","Package":"q","Output":"pass\\n"}'
+        )
+        assert parse_coverage_from_output(output) == 1.0
+
+    def test_unrelated_non_output_json_without_package_preserves_total(self) -> None:
+        output = 'TOTAL 10 0 100%\n{"Action":"pass"}\n{"message":"unrelated"}'
         assert parse_coverage_from_output(output) == 1.0
 
     def test_parse_0_percent(self) -> None:
@@ -93,6 +123,10 @@ class TestParseCoverageFromOutput:
     def test_ambiguous_or_impossible_figures_are_unread(self, output: str) -> None:
         """A figure the output does not pin down is not a measurement."""
         assert parse_coverage_from_output(output) is None
+
+    def test_unrelated_go_json_output_does_not_mask_a_supported_total(self) -> None:
+        output = 'TOTAL 10 0 100%\n{"Action":"output","Package":"example.com/m","Output":"PASS\\n"}'
+        assert parse_coverage_from_output(output) == 1.0
 
     @pytest.mark.parametrize(
         "output",
@@ -478,9 +512,163 @@ _UNPARSED_COVERAGE_OUTPUTS = {
     ),
     "pytest-cov precision=2": "TOTAL   100   85   15.00%",
     "go test -cover": "ok  \texample.com/m\t0.002s\tcoverage: 15.0% of statements",
+    "colored TOTAL conflicting with TOTAL": ("TOTAL 10 0 100%\n\x1b[31mTOTAL 10 8 20%\x1b[0m"),
+    "split SGR TOTAL conflicting with TOTAL": ("TOTAL 10 0 100%\nTO\x1b[31mTAL 10 8 20%\x1b[0m"),
+    "go json coverage conflicting with TOTAL": (
+        "TOTAL 10 0 100%\n"
+        '{"Action":"output","Package":"example.com/m",'
+        '"Output":"coverage: 15.0% of statements\\n"}'
+    ),
+    "go json TOTAL conflicting with TOTAL": (
+        'TOTAL 10 0 100%\n{"Action":"output","Package":"p","Output":"TOTAL 10 8 20%\\n"}'
+    ),
+    "go json TOTAL without package": (
+        'TOTAL 10 0 100%\n{"Action":"output","Output":"TOTAL 10 8 20%\\n"}'
+    ),
+    "go json TOTAL null package": (
+        'TOTAL 10 0 100%\n{"Action":"output","Package":null,"Output":"TOTAL 10 8 20%\\n"}'
+    ),
+    "split go json TOTAL without package": (
+        'TOTAL 10 0 100%\n{"Action":"output","Output":"TO"}\n'
+        '{"Action":"output","Output":"TAL 10 8 20%\\n"}'
+    ),
+    "go json output missing text": 'TOTAL 10 0 100%\n{"Action":"output","Package":"p"}',
+    "split go json TOTAL conflicting with TOTAL": (
+        'TOTAL 10 0 100%\n{"Action":"output","Package":"p","Output":"TO"}\n'
+        '{"Action":"output","Package":"p","Output":"TAL 10 8 20%\\n"}'
+    ),
+    "colored go json TOTAL conflicting with TOTAL": (
+        'TOTAL 10 0 100%\n{"Action":"output","Package":"p",'
+        '"Output":"\\u001b[31mTOTAL 10 8 20%\\u001b[0m\\n"}'
+    ),
+    "go json package summary conflicting with TOTAL": (
+        "TOTAL 10 0 100%\n"
+        '{"Action":"output","Package":"example.com/m",'
+        '"Output":"ok\\texample.com/m\\t0.002s\\tcoverage: 15.0% of statements\\n"}'
+    ),
+    "split go json conflicting with TOTAL": (
+        'TOTAL 10 0 100%\n{"Action":"output","Package":"p","Output":"cover"}\n'
+        '{"Action":"output","Package":"p","Output":"age: 15% of statements\\n"}'
+    ),
+    "colored go json conflicting with TOTAL": (
+        'TOTAL 10 0 100%\n{"Action":"output","Package":"p",'
+        '"Output":"\\u001b[31mcoverage: 15% of statements\\u001b[0m\\n"}'
+    ),
+    "colored go plain conflicting with TOTAL": (
+        "TOTAL 10 0 100%\n\x1b[31mok p 0.1s coverage: 15% of statements\x1b[0m"
+    ),
+    "unknown escape before go report": (
+        "TOTAL 10 0 100%\n\x1b[?25lok p 0.1s coverage: 15% of statements"
+    ),
+    "c1 csi before go report": ("TOTAL 10 0 100%\n\x9b?25lok p 0.1s coverage: 15% of statements"),
+    "c1 sgr before go report": ("TOTAL 10 0 100%\n\x9b31mok p 0.1s coverage: 15% of statements"),
+    "escaped c1 inside go json": (
+        'TOTAL 10 0 100%\n{"Action":"output","Package":"p",'
+        '"Output":"\\u009b?25lok p 0.1s coverage: 15% of statements\\n"}'
+    ),
+    "go conflicting with TOTAL": (
+        "TOTAL 10 0 100%\nok  \texample.com/m\t0.002s\tcoverage: 15.0% of statements"
+    ),
+    "lowercase coverage conflicting with TOTAL": "TOTAL 10 0 100%\ncoverage: 15% of statements",
+    "capitalized go coverage conflict": (
+        "TOTAL 10 0 100%\nok example.com/m (cached) Coverage: 15% of statements"
+    ),
     "jest --coverage": "All files |   15.2 |   10.1 |   12.3 |   15.2 |",
+    "node spec coverage conflicting with TOTAL": (
+        "TOTAL 10 0 100%\nℹ all files | 12.50 | 66.67 | 100.00 |"
+    ),
+    "node tap coverage conflicting with TOTAL": (
+        "TOTAL 10 0 100%\n# all files | 12.50 | 66.67 | 100.00 |"
+    ),
+    "jest conflicting with TOTAL": (
+        "TOTAL 10 0 100%\nAll files |   15.2 |   10.1 |   12.3 |   15.2 |"
+    ),
+    "colored jest conflicting with TOTAL": (
+        "TOTAL 10 0 100%\n\x1b[31mAll files\x1b[0m | 15.2 | 10.1 | 12.3 | 15.2 |"
+    ),
+    "malformed ANSI table beside TOTAL": (
+        "TOTAL 10 0 100%\n\x1b[" + "3" * 33 + "mAll files | 15.2 | 10.1 | 12.3 | 15.2 |"
+    ),
+    # Exceed the explicit row limit rather than depending on the interpreter's
+    # JSON recursion limit, which differs across Python versions.
+    "oversized deep JSON beside TOTAL": "TOTAL 10 0 100%\n" + '{"x":' * 11000 + "0" + "}" * 11000,
+    "malformed JSON beside TOTAL": 'TOTAL 10 0 100%\n{"Action":"output",',
+    "excess JSON events beside TOTAL": (
+        "TOTAL 10 0 100%\n" + '{"Action":"output","Package":"p","Output":"x"}\n' * 257
+    ),
+    "coverage.py XML conflicting with TOTAL": (
+        'TOTAL 10 0 100%\n<?xml version="1.0" ?>\n'
+        '<coverage version="7.13.5" line-rate="0.8">\n</coverage>\n'
+    ),
+    "inline XML declaration and coverage": (
+        'TOTAL 10 0 100%\n<?xml version="1.0"?><coverage line-rate="0.8"/>\n'
+    ),
+    "nested coverage XML element": (
+        'TOTAL 10 0 100%\n<report><coverage line-rate="0.8"/></report>\n'
+    ),
+    "partial embedded coverage element": "TOTAL 10 0 100%\n<report><coverage\n",
+    "namespaced coverage XML conflicting with TOTAL": (
+        'TOTAL 10 0 100%\n<cov:coverage xmlns:cov="urn:cov" line-rate="0.8"/>\n'
+    ),
+    "unicode namespaced coverage XML": (
+        'TOTAL 10 0 100%\n<보고:coverage xmlns:보고="urn:cov" line-rate="0.8"/>\n'
+    ),
+    "colored namespaced coverage XML": (
+        'TOTAL 10 0 100%\n\x1b[31m<cov:coverage line-rate="0.8"/>\x1b[0m\n'
+    ),
+    "namespaced coverage XML split across go events": (
+        'TOTAL 10 0 100%\n{"Action":"output","Package":"p","Output":"<cov:cov"}\n'
+        '{"Action":"output","Package":"p","Output":"erage/>\\n"}'
+    ),
+    "colored coverage XML conflicting with TOTAL": (
+        'TOTAL 10 0 100%\n\x1b[32m<coverage line-rate="0.8">\x1b[0m\n'
+    ),
+    "coverage XML split across go events": (
+        'TOTAL 10 0 100%\n{"Action":"output","Package":"p","Output":"<cover"}\n'
+        '{"Action":"output","Package":"p","Output":"age line-rate=\\"0.8\\">\\n"}'
+    ),
+    "node lcov conflicting with TOTAL": (
+        "TOTAL 10 0 100%\nTN:\nSF:src/subject.js\nDA:1,1\nDA:2,0\nLH:1\nLF:2\nend_of_record\n"
+    ),
+    "colored lcov source beside TOTAL": ("TOTAL 10 0 100%\n\x1b[32mSF:src/subject.js\x1b[0m\n"),
+    "lcov counters beside TOTAL": "TOTAL 10 0 100%\nLH:1\nLF:2\n",
+    **{
+        f"lcov {name} partial record": f"TOTAL 10 0 100%\n{row}\n"
+        for name, row in {
+            "line": "DA:1,0",
+            "branch": "BRDA:12,0,1,0",
+            "function": "FN:7,foo",
+            "function-hit": "FNDA:0,foo",
+            "test-name": "TN:",
+            "version": "VER:123",
+            "truncated-line": "DA:",
+            "truncated-source": "SF:",
+            "truncated-count": "LF:",
+            "record-end": "end_of_record",
+        }.items()
+    },
+    "lcov output split across go events": (
+        'TOTAL 10 0 100%\n{"Action":"output","Package":"p","Output":"SF"}\n'
+        '{"Action":"output","Package":"p","Output":":src/x.js\\n"}'
+    ),
     "cargo tarpaulin": "15.00% coverage, 15/100 lines covered",
+    "tarpaulin conflicting with TOTAL": "TOTAL 10 0 100%\n15.00% coverage, 15/100 lines covered",
+    "colored tarpaulin conflicting with TOTAL": (
+        "TOTAL 10 0 100%\n\x1b[31m15.00% coverage, 15/100 lines covered\x1b[0m"
+    ),
+    "tarpaulin output split across go events": (
+        'TOTAL 10 0 100%\n{"Action":"output","Package":"p","Output":"15.00% cov"}\n'
+        '{"Action":"output","Package":"p","Output":"erage, 15/100 lines covered\\n"}'
+    ),
     "coverage report --format=total": "15",
+    "bare total conflicting with TOTAL": "TOTAL 10 0 100%\n15\n",
+    "bare decimal conflicting with TOTAL": "TOTAL 10 0 100%\n15.00\n",
+    "bare percentage conflicting with TOTAL": "TOTAL 10 0 100%\n15%\n",
+    "colored bare percentage conflicting with TOTAL": "TOTAL 10 0 100%\n\x1b[31m15%\x1b[0m\n",
+    "bare total split across go events": (
+        'TOTAL 10 0 100%\n{"Action":"output","Package":"p","Output":"1"}\n'
+        '{"Action":"output","Package":"p","Output":"5\\n"}'
+    ),
     "no output": "",
     "requirement beside decimal TOTAL": "Required Coverage: 70%\nTOTAL   100   85   15.00%",
     "coverage over 100%": "Coverage: 999%",
@@ -564,6 +752,131 @@ async def _evaluate_stage1_only(config: MechanicalConfig) -> EvaluationResult:
 
 class TestUnparsedCoverageIsNotEvidence:
     """A coverage command that exits 0 without a readable figure decides nothing."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("with_passing_test", [False, True], ids=["alone", "with-test"])
+    @pytest.mark.parametrize("stream", ["stdout", "stderr"])
+    @pytest.mark.parametrize(
+        "prefix",
+        [chr(n) for n in [*range(9), *range(14, 27), 31, 127]]
+        + ["\u200b", "\ufeff", "\u00ad", "\u200e", "\u2060", "\ufffd"],
+        ids=lambda prefix: f"U+{ord(prefix):04X}",
+    )
+    async def test_hidden_prefix_total_is_not_approved(
+        self, prefix: str, stream: str, with_passing_test: bool
+    ) -> None:
+        low = prefix + "TOTAL 10 8 20%\n"
+        stdout = "TOTAL 10 0 100%\n" + (low if stream == "stdout" else "")
+        stderr = low if stream == "stderr" else ""
+        command = (
+            sys.executable,
+            "-c",
+            f"import sys; sys.stdout.write({stdout!r}); sys.stderr.write({stderr!r})",
+        )
+        result = await _evaluate_stage1_only(
+            MechanicalConfig(
+                coverage_command=command,
+                test_command=_printing("1 passed") if with_passing_test else None,
+            )
+        )
+        assert result.stage1_result is not None
+        assert result.stage1_result.coverage_score is None
+        assert result.final_approved is False
+        assert result.acceptance_state is AcceptanceState.UNVERIFIED
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("with_passing_test", [False, True], ids=["alone", "with-test"])
+    @pytest.mark.parametrize("stream", ["stdout", "stderr"])
+    @pytest.mark.parametrize(
+        "low",
+        [
+            b"\xffTOTAL 10 8 20%\n",
+            b'\x1b[0m{"Action":"output","Package":"p","Output":"TOTAL 10 8 20%\\n"}\n',
+            b"\x1b[31mTOTAL 10 8 20%\x1b[0m\n",
+            b"\x1b[31mTOTAL 10 0 100%\x1b[0m\n",
+        ],
+        ids=["invalid-utf8", "ansi-prefix-go-json", "colored-total", "matching-colored-total"],
+    )
+    async def test_decorated_coverage_is_not_approved(
+        self, low: bytes, stream: str, with_passing_test: bool
+    ) -> None:
+        stdout = b"TOTAL 10 0 100%\n" + (low if stream == "stdout" else b"")
+        stderr = low if stream == "stderr" else b""
+        command = (
+            sys.executable,
+            "-c",
+            f"import sys; sys.stdout.buffer.write({stdout!r}); sys.stderr.buffer.write({stderr!r})",
+        )
+        result = await _evaluate_stage1_only(
+            MechanicalConfig(
+                coverage_command=command,
+                test_command=_printing("1 passed") if with_passing_test else None,
+            )
+        )
+        assert result.stage1_result is not None
+        assert result.stage1_result.coverage_score is None
+        assert result.final_approved is False
+        assert result.acceptance_state is AcceptanceState.UNVERIFIED
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "prose",
+        [
+            "a\u200bb diagnostic",
+            "\x08ordinary diagnostic",
+            "a\ufffdb diagnostic",
+            "\x1b[32m검사 성공 ✓\x1b[0m",
+        ],
+    )
+    async def test_decorated_ordinary_prose_preserves_supported_report(self, prose: str) -> None:
+        result = await _evaluate_stage1_only(
+            MechanicalConfig(coverage_command=_printing(prose + "\nTOTAL 10 0 100%\n"))
+        )
+        assert result.final_approved is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("with_passing_test", [False, True])
+    async def test_conflicting_stderr_coverage_is_not_ignored(
+        self, with_passing_test: bool
+    ) -> None:
+        command = (
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.write('TOTAL 10 0 100%\\n'); "
+            "sys.stderr.write('TOTAL 100 85 15%\\n')",
+        )
+        result = await _evaluate_stage1_only(
+            MechanicalConfig(
+                coverage_threshold=0.7,
+                coverage_command=command,
+                test_command=_printing("1 passed") if with_passing_test else None,
+            )
+        )
+        assert result.final_approved is False
+        assert result.acceptance_state is AcceptanceState.UNVERIFIED
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("stdout", "stderr", "approved"),
+        [
+            ("TOTAL 10 0 100%\n", "warning: ordinary diagnostic\n", True),
+            ("TOTAL 10 0 100%\n", "TOTAL 10 0 100%\n", True),
+            ("nothing\n", "TOTAL 10 0 100%\n", False),
+            ("TOTAL 10 0 100%\n", "coverage: 15% of statements\n", False),
+        ],
+    )
+    async def test_stderr_cross_check_preserves_stdout_evidence_contract(
+        self, stdout: str, stderr: str, approved: bool
+    ) -> None:
+        command = (
+            sys.executable,
+            "-c",
+            f"import sys; sys.stdout.write({stdout!r}); sys.stderr.write({stderr!r})",
+        )
+        result = await _evaluate_stage1_only(
+            MechanicalConfig(coverage_threshold=0.7, coverage_command=command)
+        )
+        assert result.final_approved is approved
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("with_passing_test", [False, True], ids=["alone", "with-test"])
@@ -714,3 +1027,82 @@ async def test_disabled_coverage_threshold_preserves_exit_status(
     completed = next(e for e in result.events if e.type == "evaluation.stage1.completed")
     assert completed.data["passed"] is approved
     assert completed.data["coverage_score"] is None
+
+
+_JSON_TRANSPORT_OUTPUTS = {
+    **{
+        f"escaped-prefix-U+{ord(prefix):04X}": ([prefix + "TOTAL 10 8 20%\n"], True, False)
+        for prefix in [chr(n) for n in [*range(9), *range(14, 27), 31, 127]]
+        + ["\u200b", "\ufeff", "\u00ad", "\u200e", "\u2060", "\ufffd"]
+    },
+    "split-prefix": (["\u200b", "TOTAL 10 8 20%\n"], True, False),
+    "split-token": (["TO", "\x08TAL 10 8 20%\n"], True, False),
+    "split-SGR": (["\x1b[3", "1m\u200bTOTAL 10 8 20%\x1b[0m\n"], True, False),
+    "second-row": (["ordinary log\n�TOTAL 10 8 20%\n"], True, False),
+    "escaped-prose-0": (["ordinary log\n"], True, True),
+    "escaped-prose-1": (["검사 성공 ✓\n"], True, True),
+    "escaped-prose-2": (["\x08ordinary diagnostic\n"], True, True),
+    "escaped-prose-3": (["a\u200bb diagnostic\n"], True, True),
+    "escaped-prose-4": (["a�b diagnostic\n"], True, True),
+    "escaped-prose-5": (["emoji 👩\u200d💻 log\n"], True, True),
+    "escaped-prose-6": (["\x1b[32mTests passed\x1b[0m\n"], True, True),
+    "raw-json-prose-U+200D": (["ordinary \u200d diagnostic\n"], False, False),
+    "raw-json-prose-U+200F": (["ordinary \u200f diagnostic\n"], False, False),
+    "raw-json-prose-U+FFFD": (["ordinary � diagnostic\n"], False, False),
+    "supported-high": ([], True, True),
+    "decoded-low-TOTAL": (["TOTAL 10 8 20%\n"], True, False),
+    "decoded_boundary_total_suffix": (["TOTAL\u200bS 10 8 20%\n"], True, False),
+    "decoded_boundary_total_number": (["TOTAL\b10 8 20%\n"], True, False),
+    "decoded_boundary_coverage_suffix": (["Coverage\u200babc\n"], True, False),
+    "decoded_boundary_go_module": (["ok \u200b 0.1s coverage: 15.0%\n"], True, False),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_passing_test", [False, True], ids=["alone", "with-test"])
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+@pytest.mark.parametrize(
+    ("payload", "approved"),
+    [
+        pytest.param(
+            "".join(
+                json.dumps({"Action": "output", "Package": "p", "Output": text}, ensure_ascii=ascii)
+                + "\n"
+                for text in texts
+            ),
+            approved,
+            id=name,
+        )
+        for name, (texts, ascii, approved) in _JSON_TRANSPORT_OUTPUTS.items()
+    ],
+)
+async def test_json_transport_coverage_evidence(
+    payload: str, approved: bool, stream: str, with_passing_test: bool
+) -> None:
+    """Decoded decoration never hides a TOTAL; ordinary escaped prose remains usable."""
+    stdout = "TOTAL 10 0 100%\n" + (payload if stream == "stdout" else "")
+    stderr = payload if stream == "stderr" else ""
+    command = (
+        sys.executable,
+        "-c",
+        f"import sys;sys.stdout.write({stdout!r});sys.stderr.write({stderr!r})",
+    )
+    result = await _evaluate_stage1_only(
+        MechanicalConfig(
+            coverage_threshold=0.7,
+            coverage_command=command,
+            test_command=_printing("1 passed") if with_passing_test else None,
+        )
+    )
+    stage1 = result.stage1_result
+    assert stage1 is not None
+    assert stage1.coverage_score == (1.0 if approved else None)
+    assert stage1.passed is approved
+    assert result.final_approved is approved
+    assert result.acceptance_state is (
+        AcceptanceState.APPROVED if approved else AcceptanceState.UNVERIFIED
+    )
+    coverage = next(c for c in stage1.checks if c.check_type is CheckType.COVERAGE)
+    assert coverage.executed is approved
+    if not approved:
+        assert coverage.details["coverage_unparsed"] is True
