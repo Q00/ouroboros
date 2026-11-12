@@ -9546,7 +9546,9 @@ class TestOpenCodeMCPSetup:
 
 @pytest.fixture
 def opencode_setup_version_probe(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("ouroboros.cli.commands.setup.plugin_version_error", lambda _path: None)
+    monkeypatch.setattr(
+        "ouroboros.cli.commands.setup.plugin_version_error", lambda _path, _warn=None: None
+    )
 
 
 @pytest.mark.usefixtures("opencode_setup_version_probe")
