@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+import os
 from pathlib import Path
 import subprocess
+import sys
 from unittest.mock import patch
 
-from ouroboros.core.pm_snapshot import refresh_pm_snapshot_worktrees
+import pytest
+
+from ouroboros.core.pm_snapshot import _resolve_repo_root, refresh_pm_snapshot_worktrees
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -190,6 +194,34 @@ class TestRefreshPMSnapshotWorktrees:
         assert snapshot != repo
         assert (snapshot / "a.txt").read_text() == "v1\n"
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Windows cannot create this directory name")
+    def test_non_utf8_checkout_snapshots_and_non_repo_falls_back(self, tmp_path: Path) -> None:
+        """A non-UTF-8 checkout path must snapshot, not abort the whole refresh.
+
+        The path is renamed after init so the helpers above never decode the
+        raw bytes themselves. The second entry is a non-git directory with a
+        non-UTF-8 name: the documented fallback must return it unchanged.
+        """
+        _init_repo(tmp_path / "repo")
+        raw_repo = Path(os.fsdecode(os.path.join(os.fsencode(tmp_path), b"pm-\xff-repo")))
+        os.rename(tmp_path / "repo", raw_repo)
+        raw_plain = Path(os.fsdecode(os.path.join(os.fsencode(tmp_path), b"pm-\xff-plain")))
+        os.mkdir(raw_plain)
+        repos = [
+            {"path": str(raw_repo), "name": "raw"},
+            {"path": str(raw_plain), "name": "plain"},
+        ]
+        root_patch, enabled_patch = _patched_env(tmp_path)
+
+        with root_patch, enabled_patch:
+            result = refresh_pm_snapshot_worktrees(repos)
+
+        snapshot = Path(result[0]["path"])
+        assert snapshot != raw_repo
+        assert result[0]["source_path"] == str(raw_repo)
+        assert (snapshot / "a.txt").read_text() == "v1\n"
+        assert result[1] == repos[1]
+
     def test_stale_snapshot_dir_is_recreated(self, tmp_path: Path) -> None:
         """A leftover plain directory at the snapshot path is replaced."""
         _, _, local = _make_remote_and_stale_clone(tmp_path)
@@ -212,3 +244,19 @@ class TestRefreshPMSnapshotWorktrees:
         assert Path(second[0]["path"]) == snapshot
         assert (snapshot / "a.txt").read_text() == "v2\n"
         assert not (snapshot / "leftover.txt").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows cannot create this file name")
+def test_resolve_repo_root_keeps_a_path_git_reports_as_raw_bytes(tmp_path: Path) -> None:
+    """A checkout path that is not valid UTF-8 must resolve, not raise.
+
+    ``git rev-parse --show-toplevel`` prints the path verbatim, so decoding it
+    with the process code page raised ``UnicodeDecodeError`` and the snapshot
+    refresh fell back to the original path for that repository.
+    """
+    _init_repo(tmp_path / "repo")
+    # Rename after init so the test helpers never decode the raw path themselves.
+    repo = Path(os.fsdecode(os.path.join(os.fsencode(tmp_path), b"pm-\xff-repo")))
+    os.rename(tmp_path / "repo", repo)
+
+    assert _resolve_repo_root(repo) == repo.resolve()
