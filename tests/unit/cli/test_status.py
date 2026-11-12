@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+import os
 from pathlib import Path
 import sqlite3
+import subprocess
+import sys
 
 import pytest
 from typer.testing import CliRunner
@@ -1419,3 +1422,41 @@ def test_health_does_not_print_credentials_read_error(monkeypatch, tmp_path: Pat
     row = _check_credentials({"llm": {"backend": "claude_code"}}, tmp_path / "config.yaml")
     assert row["status"] == "error"
     assert "SYNTHETIC_PRIVATE_VALUE" not in str(row)
+
+
+@pytest.mark.parametrize("utf8_mode", ["0", "1"])
+def test_health_accepts_utf8_credentials_under_c_locale(
+    monkeypatch, tmp_path: Path, utf8_mode: str
+) -> None:
+    _clear_auth_env(monkeypatch)
+    home = tmp_path / "home"
+    config_dir = home / ".ouroboros"
+    (config_dir / "data").mkdir(parents=True)
+    cli = _make_cli(tmp_path / "bin" / "claude")
+    _write_config(config_dir, cli_path=cli)
+    (config_dir / "credentials.yaml").write_text(
+        "# 한국어 中文 café\nproviders:\n  anthropic:\n    api_key: synthetic-키\n",
+        encoding="utf-8",
+    )
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "LC_ALL": "C",
+        "PYTHONUTF8": utf8_mode,
+        "PYTHONCOERCECLOCALE": "0",
+        "PYTHONIOENCODING": "utf-8",
+    }
+
+    result = subprocess.run(
+        [sys.executable, "-m", "ouroboros", "status", "health"],
+        env=env,
+        capture_output=True,
+        encoding="utf-8",
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Credentials: ok - anthropic key present" in result.stdout
+    assert "synthetic-키" not in result.stdout + result.stderr
