@@ -157,6 +157,7 @@ class TestExecuteSeedHandler:
             worktree_path="/tmp/ouroboros-worktree",
             branch="ooo/test",
             lock_path="/tmp/ouroboros.lock",
+            lock_owner={},
         )
 
         class FakeSessionRepository:
@@ -293,6 +294,7 @@ class TestExecuteSeedHandler:
             worktree_path="/tmp/ouroboros-worktree",
             branch="ooo/test",
             lock_path="/tmp/ouroboros.lock",
+            lock_owner={},
         )
 
         class FakeSessionRepository:
@@ -381,6 +383,7 @@ class TestExecuteSeedHandler:
             worktree_path="/tmp/ouroboros-worktree",
             branch="ooo/test",
             lock_path="/tmp/ouroboros.lock",
+            lock_owner={},
         )
 
         class FakeSessionRepository:
