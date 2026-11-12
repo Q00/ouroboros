@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+import os
 from pathlib import Path
 import sqlite3
+import subprocess
+import sys
 
 import pytest
 from typer.testing import CliRunner
@@ -1363,3 +1366,97 @@ def test_health_missing_store_is_not_created_or_counted(monkeypatch, tmp_path: P
     assert "missing" in result.output
     assert "events persisted" not in result.output
     assert not db_path.exists()
+
+
+def test_health_does_not_print_malformed_credential_contents(monkeypatch, tmp_path: Path) -> None:
+    _clear_auth_env(monkeypatch)
+    config_dir = tmp_path / "config"
+    (config_dir / "data").mkdir(parents=True)
+    cli = _make_cli(tmp_path / "bin" / "claude")
+    (config_dir / "data" / "ouroboros.db").write_text("")
+    _write_config(config_dir, cli_path=cli)
+    (config_dir / "credentials.yaml").write_text(
+        "providers:\n  anthropic:\n    api_key: SYNTHETIC_PRIVATE_VALUE: x\n"
+    )
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    result = runner.invoke(app, ["health"])
+
+    assert result.exit_code == 1
+    assert "Credentials" in result.output
+    assert "SYNTHETIC_PRIVATE_VALUE" not in result.output
+
+
+def test_health_reports_invalid_utf8_credentials_without_crashing(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _clear_auth_env(monkeypatch)
+    config_dir = tmp_path / "config"
+    (config_dir / "data").mkdir(parents=True)
+    cli = _make_cli(tmp_path / "bin" / "claude")
+    (config_dir / "data" / "ouroboros.db").write_text("")
+    _write_config(config_dir, cli_path=cli)
+    (config_dir / "credentials.yaml").write_bytes(b"\xff")
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    result = runner.invoke(app, ["health"])
+
+    assert result.exit_code == 1
+    assert "credentials.yaml is not valid UTF-8" in result.output
+
+
+def test_health_does_not_print_credentials_read_error(monkeypatch, tmp_path: Path) -> None:
+    from ouroboros.cli.commands.status import _check_credentials
+
+    _clear_auth_env(monkeypatch)
+    credentials = tmp_path / "credentials.yaml"
+    credentials.write_text("{}", encoding="utf-8")
+    original_read = Path.read_text
+
+    def read_text(path: Path, *args, **kwargs):
+        if path == credentials:
+            raise OSError("SYNTHETIC_PRIVATE_VALUE")
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    row = _check_credentials({"llm": {"backend": "claude_code"}}, tmp_path / "config.yaml")
+    assert row["status"] == "error"
+    assert "SYNTHETIC_PRIVATE_VALUE" not in str(row)
+
+
+@pytest.mark.parametrize("utf8_mode", ["0", "1"])
+def test_health_accepts_utf8_credentials_under_c_locale(
+    monkeypatch, tmp_path: Path, utf8_mode: str
+) -> None:
+    _clear_auth_env(monkeypatch)
+    home = tmp_path / "home"
+    config_dir = home / ".ouroboros"
+    (config_dir / "data").mkdir(parents=True)
+    cli = _make_cli(tmp_path / "bin" / "claude")
+    _write_config(config_dir, cli_path=cli)
+    (config_dir / "credentials.yaml").write_text(
+        "# 한국어 中文 café\nproviders:\n  anthropic:\n    api_key: synthetic-키\n",
+        encoding="utf-8",
+    )
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "LC_ALL": "C",
+        "PYTHONUTF8": utf8_mode,
+        "PYTHONCOERCECLOCALE": "0",
+        "PYTHONIOENCODING": "utf-8",
+    }
+
+    result = subprocess.run(
+        [sys.executable, "-m", "ouroboros", "status", "health"],
+        env=env,
+        capture_output=True,
+        encoding="utf-8",
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Credentials: ok - anthropic key present" in result.stdout
+    assert "synthetic-키" not in result.stdout + result.stderr
