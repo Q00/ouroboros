@@ -813,8 +813,12 @@ class _Scan:
 
     def __init__(self, paths: set[str], digests_by_size: dict[int, set[str]]) -> None:
         self.paths = paths
+        self.path_prefixes = {
+            path[:index] for path in paths for index, char in enumerate(path) if char == "/"
+        }
         self.digests_by_size = digests_by_size
         self.visited: set[tuple[int, int]] = set()
+        self.alias_visited: set[tuple[int, int, str]] = set()
         self.budget = _MAX_SCAN_ENTRIES
         self.leaks: list[str] = []
         self.incomplete_reasons: set[str] = set()
@@ -842,7 +846,9 @@ class _Scan:
             self.confirmed = True
             self.leaks.append(relative)
 
-    def directory(self, directory: str, prefix: str, root: str, depth: int = 0) -> None:
+    def directory(
+        self, directory: str, prefix: str, root: str, depth: int = 0, *, alias_only: bool = False
+    ) -> None:
         if self.budget <= 0:
             return
         try:
@@ -851,9 +857,17 @@ class _Scan:
             self.incomplete(prefix.rstrip("/") or ".", "unreadable_directory")
             return
         key = (status.st_dev, status.st_ino)
-        if key in self.visited:
-            return
-        self.visited.add(key)
+        if alias_only:
+            alias_key = (*key, prefix)
+            if alias_key in self.alias_visited:
+                return
+            self.alias_visited.add(alias_key)
+        else:
+            if key in self.visited:
+                if prefix.rstrip("/") in self.path_prefixes:
+                    self.incomplete(prefix.rstrip("/"), "alias_path_unchecked")
+                return
+            self.visited.add(key)
         if depth >= _MAX_SCAN_DEPTH:
             self.incomplete(prefix.rstrip("/") or ".", "depth_limit")
             return
@@ -876,19 +890,28 @@ class _Scan:
             if self.budget <= 0:
                 return
             relative = prefix + entry.name
+            if alias_only and relative not in self.paths and relative not in self.path_prefixes:
+                continue
             if relative in self.paths:
                 self.confirmed = True
                 self.leaks.append(relative)
                 continue
-            self.entry(entry, relative, root, depth)
+            self.entry(entry, relative, root, depth, alias_only=alias_only)
 
-    def entry(self, entry: os.DirEntry[str], relative: str, root: str, depth: int) -> None:
+    def entry(
+        self, entry: os.DirEntry[str], relative: str, root: str, depth: int, *, alias_only: bool
+    ) -> None:
         try:
             is_symlink = entry.is_symlink()
         except OSError:
             self.incomplete(relative, "unreadable_entry")
             return
         if is_symlink:
+            if alias_only:
+                # Do not follow another link while resolving a lexical alias:
+                # it may cross the workspace boundary or change concurrently.
+                self.incomplete(relative, "alias_symlink_unchecked")
+                return
             # Resolved, never trusted: the target is judged by what it is.
             try:
                 target = os.stat(entry.path)
@@ -899,14 +922,16 @@ class _Scan:
             if stat.S_ISDIR(target.st_mode):
                 resolved = os.path.realpath(entry.path)
                 if resolved == root or resolved.startswith(root + os.sep):
-                    return  # inside the workspace: scanned on its own path
+                    if relative in self.path_prefixes:
+                        self.directory(resolved, relative + "/", root, depth + 1, alias_only=True)
+                    return  # content is scanned on its own path
                 self.directory(resolved, relative + "/", root, depth + 1)
             elif stat.S_ISREG(target.st_mode):
                 self.file(entry.path, relative, target.st_size)
             return
         try:
             if entry.is_dir(follow_symlinks=False):
-                self.directory(entry.path, relative + "/", root, depth + 1)
+                self.directory(entry.path, relative + "/", root, depth + 1, alias_only=alias_only)
             elif entry.is_file(follow_symlinks=False):
                 self.file(entry.path, relative, entry.stat(follow_symlinks=False).st_size)
         except OSError:

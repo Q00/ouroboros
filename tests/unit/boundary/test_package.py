@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import os
 from pathlib import Path
 import sys
@@ -179,6 +180,115 @@ def test_workspace_leaks_by_path_and_by_renamed_content(tmp_path: Path, package)
     # or size to scan for: it is refused, never scanned for nothing.
     with pytest.raises(CheckPackageError, match="live"):
         find_workspace_leaks(workspace, [package.manifest_summary()])  # type: ignore[list-item]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
+def test_package_path_reachable_through_internal_directory_symlink(tmp_path: Path, package) -> None:
+    workspace = tmp_path / "workspace"
+    real = workspace / "real"
+    real.mkdir(parents=True)
+    (real / "test_add.py").write_text("unrelated\n")
+    (workspace / "probe").symlink_to(real, target_is_directory=True)
+
+    assert "probe/test_add.py" in find_workspace_leaks(workspace, [package])
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
+def test_internal_alias_without_package_path_is_not_a_leak(tmp_path: Path, package) -> None:
+    workspace = tmp_path / "workspace"
+    real = workspace / "real"
+    real.mkdir(parents=True)
+    (workspace / "probe").symlink_to(real, target_is_directory=True)
+
+    assert find_workspace_leaks(workspace, [package]) == ()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
+def test_internal_alias_scan_obeys_existing_entry_budget(
+    tmp_path: Path, package, monkeypatch
+) -> None:
+    import ouroboros.boundary.package as package_module
+
+    workspace = tmp_path / "workspace"
+    real = workspace / "real"
+    real.mkdir(parents=True)
+    (real / "test_add.py").write_text("unrelated\n")
+    (workspace / "probe").symlink_to(real, target_is_directory=True)
+    monkeypatch.setattr(package_module, "_MAX_SCAN_ENTRIES", 2)
+
+    scan = package_module.scan_workspace_leaks(workspace, [package])
+    assert "entry_limit" in scan.incomplete_reasons
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
+def test_internal_alias_to_root_remains_bounded_and_finds_path(tmp_path: Path, package) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "test_add.py").write_text("unrelated\n")
+    (workspace / "probe").symlink_to(workspace, target_is_directory=True)
+
+    assert "probe/test_add.py" in find_workspace_leaks(workspace, [package])
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
+def test_internal_alias_does_not_rescan_external_directory(
+    tmp_path: Path, package, monkeypatch
+) -> None:
+    import ouroboros.boundary.package as package_module
+
+    workspace = tmp_path / "workspace"
+    real = workspace / "real"
+    outside = tmp_path / "outside"
+    real.mkdir(parents=True)
+    outside.mkdir()
+    (outside / "test.py").write_text("unrelated\n")
+    (real / "deep").symlink_to(outside, target_is_directory=True)
+    (workspace / "probe").symlink_to(real, target_is_directory=True)
+    package = package.model_copy(
+        update={"files": (PackageFile.from_content("probe/deep/test.py", "private"),)}
+    )
+    original_scandir = os.scandir
+    outside_visits = []
+
+    def record_scandir(path):
+        if os.fspath(path) == str(outside):
+            outside_visits.append(path)
+        return original_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", record_scandir)
+    scan = package_module.scan_workspace_leaks(workspace, [package])
+    assert "alias_symlink_unchecked" in scan.incomplete_reasons
+    assert len(outside_visits) <= 1  # only the original content scan may visit it
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
+def test_external_duplicate_alias_refuses_unchecked_package_path(
+    tmp_path: Path, package, monkeypatch
+) -> None:
+    import ouroboros.boundary.package as package_module
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "test_add.py").write_text("unrelated\n")
+    (workspace / "first").symlink_to(outside, target_is_directory=True)
+    (workspace / "probe").symlink_to(outside, target_is_directory=True)
+    original_scandir = os.scandir
+    outside_visits = []
+
+    @contextmanager
+    def ordered_scandir(path):
+        if os.fspath(path) == str(outside):
+            outside_visits.append(path)
+        with original_scandir(path) as entries:
+            yield iter(sorted(entries, key=lambda entry: entry.name))
+
+    monkeypatch.setattr(os, "scandir", ordered_scandir)
+    scan = package_module.scan_workspace_leaks(workspace, [package])
+    assert "alias_path_unchecked" in scan.incomplete_reasons
+    assert "probe" in scan.paths
+    assert len(outside_visits) == 1
 
 
 def test_text_leaks(package) -> None:

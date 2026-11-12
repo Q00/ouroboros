@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+import sys
 from typing import Any
 
 from pydantic import ValidationError
@@ -165,6 +166,26 @@ async def test_workspace_with_generated_check_code_is_refused(
         await ledger.record_actor_started(
             "actor-1", ["task-1/V1"], workspace=workspace, packages=[package]
         )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
+async def test_actor_start_refuses_package_path_behind_internal_symlink(
+    store, tmp_path: Path, package, admission
+) -> None:
+    ledger = BoundaryLedger(store)
+    await ledger.record_package_frozen("task-1/V1", package, seed=seed_for(package))
+    await ledger.record_admission("task-1/V1", admission)
+    workspace = tmp_path / "worker"
+    real = workspace / "real"
+    real.mkdir(parents=True)
+    (real / "test_add.py").write_text("unrelated\n")
+    (workspace / "probe").symlink_to(real, target_is_directory=True)
+
+    with pytest.raises(BoundaryLeakError):
+        await ledger.record_actor_started(
+            "actor-1", ["task-1/V1"], workspace=workspace, packages=[package]
+        )
+    assert not any(event.type == ACTOR_STARTED for event in await ledger.events("task-1/V1"))
 
 
 async def test_candidate_verification_cites_the_frozen_package(
