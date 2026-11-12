@@ -10,11 +10,11 @@ Privacy contract — see TELEMETRY.md at the repository root:
   No PII, no machine fingerprinting.
 - Opt out any time: ``DO_NOT_TRACK=1``, ``OUROBOROS_TELEMETRY=0``, or
   ``telemetry.enabled: false`` in ``~/.ouroboros/config.yaml``.
-- Fire-and-forget: events go through a bounded queue drained by a daemon
-  thread using stdlib urllib. Telemetry never raises, never blocks the
-  caller, and silently drops events on any failure. The worker thread is a
-  daemon, so process exit never waits on it either: events still queued or
-  in flight when the process terminates are dropped, not delivered.
+- Ordinary capture queues events asynchronously for a daemon thread using
+  stdlib urllib, without waiting for delivery. Explicit exit flushes may
+  delay CLI return by up to 1.5 seconds or detached worker exit by up to
+  5 seconds. These waits are best effort, not delivery guarantees; events
+  still queued or in flight when the process exits may be dropped.
 """
 
 from __future__ import annotations
@@ -1019,21 +1019,14 @@ def _ensure_worker() -> None:
 def flush(timeout: float = 1.5) -> None:
     """Best-effort wait for queued events to be sent (bounded, never raises).
 
-    Not called automatically at process exit — the worker thread is a daemon,
-    so the process can terminate with events still queued or in flight, and
-    those are silently dropped. Callers that need delivery before exiting
-    (e.g. a short-lived script that wants its one event to land) may call
-    this explicitly.
+    Ordinary capture is asynchronous. This explicit call may delay command
+    return or process exit while waiting up to ``timeout`` seconds for the
+    queue. CLI run exit paths use the default 1.5 seconds after user-facing
+    output; ``mcp/detached_worker.py``'s ``main()`` uses 5 seconds before exit.
 
-    The one production caller is ``mcp/detached_worker.py``'s ``main()``: a
-    detached job worker is a short-lived background process, not an
-    interactive command, and its terminal ``workflow_outcome`` event is the
-    only event the published counting rule (TELEMETRY.md) reads. Without an
-    explicit flush before that process exits, the queued event would be
-    dropped along with everything else still in flight, silently
-    undercounting every detached run. A bounded exit delay there does not
-    violate the "never blocks a command" contract above -- there is no
-    interactive command left to block by the time this runs.
+    There is no automatic exit flush: the worker thread is a daemon. A
+    timeout, offline transport or process termination can leave queued or
+    in-flight events undelivered. This wait does not guarantee delivery.
     """
     try:
         deadline = time.monotonic() + timeout
