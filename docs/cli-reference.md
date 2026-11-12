@@ -914,6 +914,10 @@ Boolean settings accept `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`,
 and values with surrounding whitespace, are rejected with a nonzero exit code;
 the configuration file and any existing undo backup remain unchanged.
 
+A successful save keeps the previous configuration file as `config.yaml.bak`.
+Use `ouroboros config undo` to restore it. Rejected values and recoverable
+write failures preserve the current configuration and the existing backup.
+
 **Examples:**
 
 ```bash
@@ -928,6 +932,17 @@ ouroboros config set models.default frontier
 
 # Run the per-role model ids saved in config (research and reproducibility)
 ouroboros config set models.pin true
+```
+
+### `config undo`
+
+Restore the configuration before the last successful settings GUI save or
+`config set`. This is a one-step history: run the same command again to redo.
+The backup must pass configuration validation before it can be restored.
+
+```bash
+ouroboros config undo   # Restore the previous configuration
+ouroboros config undo   # Redo the change
 ```
 
 ### `config validate`
