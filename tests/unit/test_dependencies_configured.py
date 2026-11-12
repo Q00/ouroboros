@@ -164,8 +164,8 @@ def test_mcp_claude_cli_and_sdk_profiles_have_explicit_contracts():
 
     assert optional_deps["mcp"] == ["mcp==2.3.0"]
     sdk_pins = [
-        "claude-agent-sdk==0.2.168",
-        "anthropic==1.15.0",
+        "claude-agent-sdk==0.2.176",
+        "anthropic==2.3.0",
         # SDK 0.2.144 dropped its own MCP 1.x ceiling; the profile contract
         # keeps the 1.x graph through this explicit pin.
         "mcp==1.28.1",
@@ -539,3 +539,22 @@ def test_claude_sdk_ci_verifies_declared_pins() -> None:
         name, version = pin.split("==")
         if name != "mcp":
             assert asserted_versions.get(name) == version, pin
+
+
+def test_claude_profile_pins_agree_with_installers_ci_and_lockfile():
+    """A metadata bump must reach every supported installation surface."""
+    root = Path(__file__).resolve().parents[2]
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    lock = tomllib.loads((root / "uv.lock").read_text(encoding="utf-8"))
+    pins = project["project"]["optional-dependencies"]["claude"]
+    assert project["project"]["optional-dependencies"]["claude-sdk"] == pins
+    bash = (root / "scripts" / "install.sh").read_text(encoding="utf-8")
+    powershell = (root / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    ci = (root / ".github" / "workflows" / "test.yml").read_text(encoding="utf-8")
+    for pin in pins:
+        name, version = pin.split("==")
+        assert f'--with "{pin}"' in bash, pin
+        assert powershell.count(f"'{pin}'") == 3, pin
+        assert any(p["name"] == name and p["version"] == version for p in lock["package"]), pin
+        if name != "mcp":
+            assert f'assert version("{name}") == "{version}"' in ci, pin

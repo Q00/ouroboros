@@ -106,6 +106,58 @@ def _write_executable(path: Path, content: str) -> None:
     path.symlink_to(_cached_executable(content))
 
 
+_INSTALLER_SYSTEM_BIN: Path | None = None
+
+
+def _installer_system_path() -> str:
+    global _INSTALLER_SYSTEM_BIN
+    if _INSTALLER_SYSTEM_BIN is None:
+        _INSTALLER_SYSTEM_BIN = Path(tempfile.mkdtemp(prefix="install-sh-system-"))
+        atexit.register(shutil.rmtree, _INSTALLER_SYSTEM_BIN, ignore_errors=True)
+        for name in (
+            "bash",
+            "sh",
+            "cat",
+            "chmod",
+            "cp",
+            "cut",
+            "date",
+            "dirname",
+            "env",
+            "find",
+            "git",
+            "grep",
+            "head",
+            "hostname",
+            "id",
+            "ln",
+            "mkdir",
+            "mktemp",
+            "mv",
+            "printf",
+            "pwd",
+            "python3",
+            "readlink",
+            "realpath",
+            "rm",
+            "sed",
+            "sleep",
+            "sort",
+            "tail",
+            "tee",
+            "tr",
+            "uname",
+            "uniq",
+            "wc",
+            "which",
+            "xargs",
+        ):
+            executable = shutil.which(name, path="/usr/bin:/bin")
+            if executable is not None:
+                (_INSTALLER_SYSTEM_BIN / name).symlink_to(executable)
+    return str(_INSTALLER_SYSTEM_BIN)
+
+
 def _run_installer(
     tmp_path: Path,
     *,
@@ -150,6 +202,8 @@ exit 0
         for name in ("python3.14", "python3.13", "python3.12", "python3", "python"):
             _write_executable(bin_dir / name, "#!/bin/sh\nexit 1\n")
 
+    _write_executable(bin_dir / "curl", "#!/bin/sh\nexit 1\n")
+
     if fake_commands:
         for name, content in fake_commands.items():
             _write_executable(bin_dir / name, content)
@@ -166,7 +220,7 @@ exit 0
     run_env.update(
         {
             "HOME": str(tmp_path / "home"),
-            "PATH": f"{bin_dir}:/usr/bin:/bin",
+            "PATH": f"{bin_dir}:{_installer_system_path()}",
             CALLS_LOG_VAR: str(calls),
             TOOL_BIN_VAR: str(tool_bin_dir),
             OUROBOROS_STUB_VAR: str(_cached_executable(_OUROBOROS_STUB)),
@@ -2164,8 +2218,8 @@ def test_all_runtime_uv_install_uses_litellm_python_range(tmp_path: Path) -> Non
     assert ("uv tool install --upgrade --python >=3.12,<3.14 . --with click>=8.1.0,<9.0.0") in calls
     assert "--with litellm==1.91.0" in calls
 
-    assert "--with claude-agent-sdk==0.2.168" in calls
-    assert "--with anthropic==1.15.0" in calls
+    assert "--with claude-agent-sdk==0.2.176" in calls
+    assert "--with anthropic==2.3.0" in calls
 
 
 def test_non_litellm_uv_install_retains_python_312_floor(tmp_path: Path) -> None:
@@ -2558,8 +2612,8 @@ def test_install_all_extras_match_pyproject_pins(tmp_path: Path) -> None:
 
     _assert_calls_include_pyproject_pins(calls, *_ALL_AGGREGATED_EXTRAS)
     assert "--with mcp==2.0.0" not in calls
-    assert "--with claude-agent-sdk==0.2.168" in calls
-    assert "--with anthropic==1.15.0" in calls
+    assert "--with claude-agent-sdk==0.2.176" in calls
+    assert "--with anthropic==2.3.0" in calls
 
 
 _DSH_STUB = f"""#!/bin/sh
