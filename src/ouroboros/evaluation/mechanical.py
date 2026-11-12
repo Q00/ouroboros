@@ -241,7 +241,8 @@ def parse_coverage_from_output(output: str) -> float | None:
         # Strip bounded terminal SGR sequences only for detection, not proof.
         uncolored = re.sub(r"\x1b\[[0-9;]{0,32}m", "", row)
         if uncolored != row and (
-            re.match(candidate_pattern, uncolored, re.IGNORECASE)
+            re.match(r"[ \t]*TOTAL\b", uncolored)
+            or re.match(candidate_pattern, uncolored, re.IGNORECASE)
             or re.match(go_coverage, uncolored, re.IGNORECASE)
         ):
             return None

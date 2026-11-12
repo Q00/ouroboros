@@ -511,6 +511,8 @@ _UNPARSED_COVERAGE_OUTPUTS = {
     ),
     "pytest-cov precision=2": "TOTAL   100   85   15.00%",
     "go test -cover": "ok  \texample.com/m\t0.002s\tcoverage: 15.0% of statements",
+    "colored TOTAL conflicting with TOTAL": ("TOTAL 10 0 100%\n\x1b[31mTOTAL 10 8 20%\x1b[0m"),
+    "split SGR TOTAL conflicting with TOTAL": ("TOTAL 10 0 100%\nTO\x1b[31mTAL 10 8 20%\x1b[0m"),
     "go json coverage conflicting with TOTAL": (
         "TOTAL 10 0 100%\n"
         '{"Action":"output","Package":"example.com/m",'
