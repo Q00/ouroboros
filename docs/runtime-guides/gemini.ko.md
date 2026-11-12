@@ -68,6 +68,11 @@ Ouroboros가 특정 Gemini 버전을 대신 지정하지 않습니다.
 Ouroboros 호출 단계에서 고른 `auto`는 역할 해석기가 `default`로 바꾸므로
 CLI에 직접 전달하는 `auto` 별칭과 구분됩니다.
 
+완료 응답은 CLI가 제공하는 `result.stats` 토큰 수를 보고합니다. Batch JSON 통계는
+보고된 모델별 값을 합산합니다. 공급자가 보고한 전체 토큰 중 프롬프트와 완료
+토큰으로 배분되지 않은 양은 `unallocated_tokens`로 보존합니다. 캐시 수와 모델별
+스트리밍 세부 수치는 중복 합산하지 않습니다.
+
 완료 응답에는 CLI의 `init` 이벤트가 보고한 모델을 사용합니다. 모델을 명시하지
 않았고 해당 이벤트에도 모델이 없다면 구체적인 ID를 추측하지 않고
 `default`를 보고합니다. 이 완료 요청의 동작이 워크플로 런타임의 작업별 적응형
@@ -120,14 +125,17 @@ Gemini에서는 대화형 Ouroboros의 `default` 권한 모드를 `acceptEdits`�
 | Gemini 이벤트 | Ouroboros 메시지 |
 |---|---|
 | `init` | 세션 메타데이터만 기록하며 메시지는 생성하지 않습니다. |
-| `message` / `text` | `assistant` 메시지 |
+| `message` / `text` | assistant 내용. 네이티브 `role=user` 에코는 생략하고 `delta=true` 청크는 그대로 이어 붙입니다. |
 | `thinking` | `data.thinking`이 포함된 `assistant` |
 | `tool_use` | `tool_name`과 `data.tool_input`이 포함된 `assistant` |
 | `tool_result` | `data.is_error`가 포함된 `tool` 메시지 |
 | `error` | `data.is_error=True`인 `system` 메시지 |
 | `result` | **최종** `assistant` 메시지. 중간 `message` 이벤트가 없을 때 Gemini는 이 이벤트에 최종 응답을 담습니다. |
 
-최종 `result` 이벤트는 중요합니다. Gemini가 스트림 중간에 `message`를 내보내지 않으면 최종 답변이 오케스트레이터에 도달하는 유일한 경로입니다. 이전 프로토타입은 이 이벤트를 버려 최종 답변이 유실됐습니다. 현재 런타임은 `data.terminal=True`와 함께 명시적으로 전달합니다.
+네이티브 assistant `message`에서 `delta=true`인 청크는 공백을 삽입하지 않고 이어
+붙입니다. CLI의 상태·통계 전용 `result`는 이렇게 스트리밍된 답변을 유지합니다.
+`result.response`를 포함하는 호환 출력에서는 비어 있지 않은 전체 응답이 누적된
+청크를 대체합니다. LLM 어댑터는 이전 `role=model` 완료 메시지도 지원합니다.
 
 ## 기능
 
