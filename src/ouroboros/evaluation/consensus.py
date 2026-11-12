@@ -20,6 +20,7 @@ ensuring root cause resolution is important.
 import asyncio
 from dataclasses import dataclass, field
 import json
+import math
 import os
 
 from ouroboros.config import (
@@ -190,6 +191,23 @@ def build_consensus_prompt(context: EvaluationContext) -> str:
 Cast your vote as a JSON object with: approved (boolean), confidence (0-1), and reasoning."""
 
 
+class _InvalidConfidence(ValueError):
+    """A present confidence is not a finite numeric value."""
+
+
+def _parse_confidence(value: object) -> float:
+    """Accept finite numeric confidence without coercing booleans or NaNs."""
+    if isinstance(value, bool):
+        raise _InvalidConfidence("confidence must be a finite number")
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise _InvalidConfidence("confidence must be a finite number") from exc
+    if not math.isfinite(number):
+        raise _InvalidConfidence("confidence must be a finite number")
+    return max(0.0, min(1.0, number))
+
+
 def parse_vote_response(response_text: str, model: str) -> Result[Vote, ValidationError]:
     """Parse LLM response into Vote.
 
@@ -242,7 +260,7 @@ def parse_vote_response(response_text: str, model: str) -> Result[Vote, Validati
         )
 
     try:
-        confidence = max(0.0, min(1.0, float(data.get("confidence", 0.5))))
+        confidence = _parse_confidence(data.get("confidence", 0.5))
         return Result.ok(
             Vote(
                 model=model,
@@ -250,6 +268,10 @@ def parse_vote_response(response_text: str, model: str) -> Result[Vote, Validati
                 confidence=confidence,
                 reasoning=str(data.get("reasoning", "No reasoning provided")),
             )
+        )
+    except _InvalidConfidence as e:
+        return Result.err(
+            ValidationError(f"Invalid confidence in vote from {model}: {e}", field="confidence")
         )
     except (TypeError, ValueError) as e:
         return Result.err(
@@ -388,6 +410,8 @@ class ConsensusEvaluator:
                 errors.append(f"{model}: {result}")
                 continue
             if result.is_err:
+                if isinstance(result.error, ValidationError) and result.error.field == "confidence":
+                    return Result.err(result.error)
                 errors.append(f"{model}: {result.error.message}")
                 continue
             votes.append(result.value)
@@ -445,6 +469,8 @@ class ConsensusEvaluator:
                 errors.append(f"{label}: {result}")
                 continue
             if result.is_err:
+                if isinstance(result.error, ValidationError) and result.error.field == "confidence":
+                    return Result.err(result.error)
                 errors.append(f"{label}: {result.error.message}")
                 continue
             votes.append(result.value)
@@ -700,7 +726,7 @@ def _parse_judgment_response(
         )
 
     try:
-        confidence = max(0.0, min(1.0, float(data.get("confidence", 0.5))))
+        confidence = _parse_confidence(data.get("confidence", 0.5))
         conditions = data.get("conditions")
         if conditions is not None:
             conditions = tuple(str(c) for c in conditions)
@@ -712,6 +738,10 @@ def _parse_judgment_response(
                 reasoning=str(data.get("reasoning", "No reasoning provided")),
                 conditions=conditions,
             )
+        )
+    except _InvalidConfidence as e:
+        return Result.err(
+            ValidationError(f"Invalid confidence in judgment from {model}: {e}", field="confidence")
         )
     except (TypeError, ValueError) as e:
         return Result.err(
