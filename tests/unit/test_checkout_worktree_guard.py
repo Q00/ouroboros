@@ -8,8 +8,10 @@ checkout.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import subprocess
+import sys
 
 import pytest
 
@@ -160,3 +162,33 @@ def test_auto_project_cwd_keeps_the_coding_profile_without_creating_a_worktree(
         "managed_worktree": None,
         "cwd": str(auto_project_cwd),
     }
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="non-UTF-8 filename probes require Linux")
+@pytest.mark.parametrize("inside_root", [False, True])
+def test_non_utf8_worktree_paths_are_attributed_by_root(
+    checkout: Path, tmp_path: Path, inside_root: bool
+) -> None:
+    root = tmp_path / "home"
+    parent = root if inside_root else tmp_path / "other-process"
+    path = parent / os.fsdecode(b"auto_\xff")
+    registry = checkout_worktree_registry(checkout)
+    assert registry is not None
+    before = registered_worktree_names(registry)
+    _add_worktree(checkout, path, "ooo/non-utf8")
+
+    leaks = leaked_worktrees(registry, before, [root])
+
+    assert [leak.path for leak in leaks] == ([path.resolve()] if inside_root else [])
+    assert path.exists()
+    assert _git(checkout, "show-ref", "--verify", "refs/heads/ooo/non-utf8")
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="non-UTF-8 filename probes require Linux")
+def test_registry_is_found_from_a_non_utf8_linked_checkout(checkout: Path, tmp_path: Path) -> None:
+    renamed = checkout.with_name(os.fsdecode(b"checkout_\xff"))
+    checkout.rename(renamed)
+    linked = tmp_path / "linked"
+    _add_worktree(renamed, linked, "linked")
+
+    assert checkout_worktree_registry(linked) == renamed / ".git" / "worktrees"

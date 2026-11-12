@@ -51,13 +51,13 @@ def checkout_worktree_registry(repo_root: Path) -> Path | None:
             ["git", "rev-parse", "--git-common-dir"],
             cwd=repo_root,
             capture_output=True,
-            text=True,
             timeout=_GIT_TIMEOUT_SECONDS,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    common_dir = result.stdout.strip()
+    # Git paths use filesystem encoding, including non-UTF-8 byte names on POSIX.
+    common_dir = os.fsdecode(result.stdout.rstrip(b"\n"))
     if result.returncode != 0 or not common_dir:
         return None
     # ``--git-common-dir`` may print a path relative to ``cwd`` on older git.
@@ -75,7 +75,7 @@ def registered_worktree_names(registry: Path) -> frozenset[str]:
 
 def _read_entry_file(entry: Path, name: str) -> str | None:
     try:
-        return (entry / name).read_text(encoding="utf-8").strip()
+        return os.fsdecode((entry / name).read_bytes().rstrip(b"\n"))
     except OSError:
         return None
 
