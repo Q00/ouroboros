@@ -142,6 +142,9 @@ async def test_plan_returns_question_when_score_fields_are_invalid(tmp_path) -> 
 async def test_interview_handler_uses_one_atomic_completion_after_three_answers(tmp_path) -> None:
     adapter = MagicMock()
     adapter.complete = AsyncMock(return_value=Result.ok(_response(_payload())))
+    event_store = MagicMock()
+    event_store.initialize = AsyncMock()
+    event_store.append = AsyncMock()
     engine = InterviewEngine(llm_adapter=adapter, state_dir=tmp_path, model="test-model")
     state = InterviewState(
         interview_id="interview_atomic_handler",
@@ -157,6 +160,7 @@ async def test_interview_handler_uses_one_atomic_completion_after_three_answers(
         interview_engine=engine,
         llm_adapter=adapter,
         data_dir=tmp_path,
+        event_store=event_store,
     )
 
     result = await handler.handle({"session_id": state.interview_id, "answer": "No network calls"})
@@ -165,6 +169,12 @@ async def test_interview_handler_uses_one_atomic_completion_after_three_answers(
     assert "What observable result proves this is complete?" in result.value.text_content
     assert result.value.meta["ambiguity_score"] == 0.29
     adapter.complete.assert_awaited_once()
+    await handler.close()
+    events = [call.args[0] for call in event_store.append.await_args_list]
+    response = next(event for event in events if event.type == "interview.response.emitted")
+    timings = response.data["timings_ms"]
+    assert timings["ambiguity_scoring"] is None
+    assert timings["question_generation"] is not None
 
 
 async def test_immediate_adapter_question_still_scores_once(tmp_path) -> None:
