@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import os
 import subprocess
+import sys
+
+import pytest
 
 from ouroboros.auto.checkpoint_commits import checkpoint_final_auto, checkpoint_passed_ac
 from ouroboros.auto.ledger import SeedDraftLedger
@@ -192,6 +196,36 @@ def test_checkpoint_passed_ac_gracefully_skips_non_repo(tmp_path) -> None:
     assert result.status == "skipped"
     assert result.reason == "not_git_repo"
     assert state.checkpoint_commits == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows cannot create this file name")
+def test_checkpoint_passed_ac_commits_a_path_git_reports_as_raw_bytes(tmp_path) -> None:
+    """A path that is not valid UTF-8 must not abort the checkpoint.
+
+    ``git status -z`` prints path bytes verbatim. Decoding that output through
+    the process code page raised ``UnicodeDecodeError``, so a single file whose
+    name is not valid UTF-8 aborted the whole checkpoint and kept verified work
+    uncommitted.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    # 0xFF is not valid UTF-8 in any position, so this input fails the default
+    # decode regardless of the locale the test runs under.
+    (repo / os.fsdecode(b"caf\xff.txt")).write_text("print('ok')\n", encoding="utf-8")
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(repo))
+    state.commit_policy = AutoCommitPolicy.AC_CHECKPOINT
+
+    result = checkpoint_passed_ac(
+        state,
+        repo_cwd=repo,
+        ac_id="AC-6",
+        ac_text="Commits a path Git prints as raw bytes",
+    )
+
+    assert result.status == "committed"
+    assert result.commit
+    assert state.checkpoint_commits[0]["ac_id"] == "AC-6"
+    assert _git(repo, "status", "--porcelain") == ""
 
 
 def test_checkpoint_final_auto_commits_once_for_final_only_policy(tmp_path) -> None:
