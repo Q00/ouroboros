@@ -291,27 +291,55 @@ async def test_a_child_holding_the_pipes_cannot_turn_an_exit_into_a_timeout(
         "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(8)'])\n"
         "print('done')\n"
     )
-    record = await _once(command(PY, "-c", script), trees["cand-a"], python, tmp_path, timeout=4)
-    assert record.status is ProbeStatus.EXITED
-    assert record.fields["exit_code"] == 0
-    assert record.fields["stdout"].strip() == "done"
+    run = await run_probe(
+        command(PY, "-c", script),
+        trees["cand-a"],
+        tree_id="cand",
+        repeat=0,
+        interpreter=python,
+        work_dir=tmp_path,
+        timeout=4,
+    )
+    assert run.indeterminate == "output_incomplete"
+    assert run.record.status is ProbeStatus.NOT_RUN
 
 
 async def test_command_output_is_cut_at_the_stream_limit(
     trees: dict[str, Path], python: CheckInterpreter, tmp_path: Path
 ) -> None:
     probe = command(PY, "-c", f"import sys; sys.stdout.write('z' * {STREAM_LIMIT * 3})")
-    record = await _once(probe, trees["cand-a"], python, tmp_path)
-    assert record.fields["exit_code"] == 0
-    assert record.fields["stdout"] == "z" * STREAM_LIMIT
+    run = await run_probe(
+        probe, trees["cand-a"], tree_id="cand", repeat=0, interpreter=python, work_dir=tmp_path
+    )
+    assert run.indeterminate == "output_incomplete"
+    assert run.record.status is ProbeStatus.NOT_RUN
 
 
-async def test_undecodable_output_is_escaped(
-    trees: dict[str, Path], python: CheckInterpreter, tmp_path: Path
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+async def test_undecodable_output_cannot_collide_with_literal_escape(
+    stream: str, trees: dict[str, Path], python: CheckInterpreter, tmp_path: Path
 ) -> None:
-    probe = command(PY, "-c", "import sys; sys.stdout.buffer.write(b'a\\xffb')")
-    record = await _once(probe, trees["cand-a"], python, tmp_path)
-    assert record.fields["stdout"] == "a\\xffb"
+    invalid = command(PY, "-c", f"import sys; sys.{stream}.buffer.write(bytes([255]))")
+    literal = command(PY, "-c", f"import sys; sys.{stream}.buffer.write(b'\\\\xff')")
+    run = await run_probe(
+        invalid, trees["cand-a"], tree_id="cand", repeat=0, interpreter=python, work_dir=tmp_path
+    )
+    valid = await _once(literal, trees["cand-a"], python, tmp_path)
+    assert run.indeterminate == "output_undecodable"
+    assert run.record.status is ProbeStatus.NOT_RUN
+    assert valid.status is ProbeStatus.EXITED
+    assert valid.fields[stream] == r"\xff"
+
+
+async def test_undecodable_candidate_output_makes_the_pool_indeterminate(
+    trees: dict[str, Path], python: CheckInterpreter
+) -> None:
+    trees["cand-a"].joinpath("mod.py").write_text("value = bytes([255])\n")
+    trees["cand-b"].joinpath("mod.py").write_text("value = b'\\\\xff'\n")
+    probe = command(PY, "-c", "import mod, sys; sys.stdout.buffer.write(mod.value)")
+    pool = await run_probe_pool([probe], trees, interpreter=python)
+    assert pool.indeterminate == {probe.probe_id: "output_undecodable"}
+    assert all(record.status is ProbeStatus.NOT_RUN for record in pool.records)
 
 
 # ------------------------------------------------------------- indeterminate
@@ -594,6 +622,37 @@ def test_two_record_lines_or_a_wrong_nonce_give_no_record() -> None:
     assert wrapper_record(b"", "n0", ProbeKind.CALL, "p", "t", 0) is None
     crlf = f"n0 {body}\r\n".encode()
     assert wrapper_record(crlf, "n0", ProbeKind.CALL, "p", "t", 0) is not None
+
+
+async def test_output_cut_at_limit_is_indeterminate_for_entire_probe(
+    trees: dict[str, Path], python: CheckInterpreter
+) -> None:
+    probe = command(
+        PY,
+        "-c",
+        f"import sys; sys.stdout.write('x' * {STREAM_LIMIT} + open('mod.py').read())",
+    )
+    run = await run_probe_pool([probe], trees, interpreter=python, parallel=1)
+    assert run.indeterminate == {probe.probe_id: "output_incomplete"}
+    assert {item.status for item in run.records} == {ProbeStatus.NOT_RUN}
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+@pytest.mark.parametrize("extra", [0, 1])
+async def test_command_stream_limit_boundary(
+    stream: str, extra: int, trees: dict[str, Path], python: CheckInterpreter, tmp_path: Path
+) -> None:
+    probe = command(PY, "-c", f"import sys; sys.{stream}.write('x' * {STREAM_LIMIT + extra})")
+    run = await run_probe(
+        probe, trees["cand-a"], tree_id="cand", repeat=0, interpreter=python, work_dir=tmp_path
+    )
+    if extra:
+        assert run.indeterminate == "output_incomplete"
+        assert run.record.status is ProbeStatus.NOT_RUN
+    else:
+        assert run.indeterminate is None
+        assert run.record.status is ProbeStatus.EXITED
+        assert run.record.fields[stream] == "x" * STREAM_LIMIT
 
 
 # ------------------------------------------------------- owned file lifetimes

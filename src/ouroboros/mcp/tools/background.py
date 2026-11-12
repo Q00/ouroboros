@@ -154,6 +154,7 @@ async def start_background_tool_job(
     runtime_backend: str | None = None,
     llm_backend: str | None = None,
     opencode_mode: str | None = None,
+    project_dir: str | None = None,
     on_detaching: Callable[[], Awaitable[None]] | None = None,
     on_started: Callable[[JobSnapshot], Awaitable[None]] | None = None,
     on_enqueue_failure: Callable[[BaseException], Awaitable[None]] | None = None,
@@ -184,6 +185,8 @@ async def start_background_tool_job(
         runtime_backend: Runtime override reproduced in the worker composition.
         llm_backend: LLM override reproduced in the worker composition.
         opencode_mode: OpenCode integration mode reproduced in the worker.
+        project_dir: Optional effective project directory for worker composition.
+            The worker process still starts in the original launcher directory.
         on_detaching: Optional hook invoked only in the accepting process just
             before ownership is transferred. Auto uses it to release its
             parent-owned pending lease so the worker can reserve/claim one.
@@ -253,6 +256,7 @@ async def start_background_tool_job(
                 runtime_backend=runtime_backend,
                 llm_backend=llm_backend,
                 opencode_mode=opencode_mode,
+                project_dir=project_dir,
             )
             if on_detaching is not None:
                 await on_detaching()

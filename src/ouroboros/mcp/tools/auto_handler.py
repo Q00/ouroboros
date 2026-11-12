@@ -580,6 +580,7 @@ class AutoHandler:
         # plugin-skipped based on the resolved EVALUATE stage, not the default
         # runtime, so explicit non-plugin stage overrides remain consumable.
         seed_qa_handler = QAHandler(
+            event_store=runtime_event_store,
             llm_backend=self.llm_backend,
             agent_runtime_backend=runtime_plan.interview.runtime_backend,
             opencode_mode=authoring_opencode_mode,

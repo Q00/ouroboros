@@ -676,7 +676,22 @@ class PiRuntime:
                 await self._terminate_process(process)
             process_terminated = True
             if stderr_task is not None:
-                stderr_lines = await stderr_task
+                done, _ = await asyncio.wait(
+                    {stderr_task}, timeout=self._process_shutdown_timeout_seconds
+                )
+                if done:
+                    try:
+                        stderr_lines = stderr_task.result()
+                    except Exception:
+                        # A broken diagnostic stream must not replace the
+                        # stdout timeout with an unrelated reader exception.
+                        stderr_lines = []
+                else:
+                    # Another writer may still hold stderr open even after the
+                    # runtime was terminated. Do not hide the stdout timeout
+                    # forever while waiting for that pipe to reach EOF.
+                    stderr_task.cancel()
+                    stderr_lines = []
             else:
                 stderr_lines = []
             final_message = "\n".join(stderr_lines).strip() or str(e)

@@ -547,6 +547,11 @@ async def _run_interview(
             print_error(f"Failed to load interview: {state_result.error.message}")
             raise typer.Exit(code=1)
         state = state_result.value
+        from ouroboros.interview_adapters.independent_batch import has_pending_batch
+
+        if has_pending_batch(state):
+            print_error("This interview has a pending question batch; resume it in the MCP host.")
+            raise typer.Exit(code=1)
     else:
         print_info("Starting new interview session...")
         state_result = await engine.start_interview(initial_context)

@@ -67,6 +67,7 @@ from ouroboros.mcp.server.spec_verification_adapter import (
 from ouroboros.mcp.server.spec_verification_adapter import (
     evaluation_summary_from_spec_verification as _evaluation_summary_from_spec_verification,
 )
+from ouroboros.mcp.server.tool_arguments import int_argument, string_argument
 from ouroboros.mcp.telemetry_boundary import observe_adapter_tool_call, stamp_backend_context
 from ouroboros.mcp.types import (
     MCPCapabilities,
@@ -284,24 +285,6 @@ def _default_interview_state_dir() -> Path:
     from ouroboros.config.models import get_config_dir
 
     return get_config_dir() / "data"
-
-
-def _string_argument(arguments: dict[str, Any], *names: str) -> str | None:
-    """Return the first non-empty string argument among *names*."""
-    for name in names:
-        value = arguments.get(name)
-        if isinstance(value, str) and value:
-            return value
-    return None
-
-
-def _int_argument(arguments: dict[str, Any], *names: str) -> int | None:
-    """Return the first integer argument among *names*."""
-    for name in names:
-        value = arguments.get(name)
-        if isinstance(value, int):
-            return value
-    return None
 
 
 def validate_transport(transport: str) -> str:
@@ -1466,11 +1449,11 @@ class MCPServerAdapter:
         if event_store is None:
             return None
 
-        session_id = _string_argument(arguments, "session_id", "qa_session_id")
-        execution_id = _string_argument(arguments, "execution_id")
-        lineage_id = _string_argument(arguments, "lineage_id")
-        generation_number = _int_argument(arguments, "generation_number", "generation")
-        phase = _string_argument(arguments, "phase", "current_phase")
+        session_id = string_argument(arguments, "session_id", "qa_session_id")
+        execution_id = string_argument(arguments, "execution_id")
+        lineage_id = string_argument(arguments, "lineage_id")
+        generation_number = int_argument(arguments, "generation_number", "generation")
+        phase = string_argument(arguments, "phase", "current_phase")
 
         if execution_id is not None:
             target_type = "execution"
@@ -1618,7 +1601,7 @@ def create_ouroboros_server(
     from ouroboros.mcp.tools.evaluation_composition import create_shared_evaluation_handlers
     from ouroboros.mcp.tools.fanout import FanoutRegistry
     from ouroboros.mcp.tools.fanout_composition import create_fanout_wiring
-    from ouroboros.mcp.tools.qa import QAHandler
+    from ouroboros.mcp.tools.qa_background import create_qa_handlers
     from ouroboros.mcp.tools.registry import ToolRegistry
     from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
     from ouroboros.mcp.tools.synapse_handler import SynapseSignalHandler, SynapseTargetsHandler
@@ -2529,12 +2512,14 @@ def create_ouroboros_server(
         ACTreeHUDHandler(
             event_store=event_store,
         ),
-        QAHandler(
+        *create_qa_handlers(
             llm_adapter=evaluation_llm_adapter,
             llm_backend=evaluate_llm_backend,
             event_store=event_store,
+            job_manager=job_manager,
             agent_runtime_backend=evaluate_runtime_backend,
             opencode_mode=opencode_mode,
+            project_dir=str(effective_cwd),
         ),
         CancelExecutionHandler(
             event_store=event_store,

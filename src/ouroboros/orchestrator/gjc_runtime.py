@@ -181,8 +181,7 @@ class GjcRuntime:
         )
         try:
             await client.connect()
-            await client.stop_session(session_id)
-            return True
+            return await self._stop_session_bounded(client, session_id)
         except GjcCoordinatorError as exc:
             log.warning(
                 f"{self._log_namespace}.terminate_failed",
@@ -195,6 +194,29 @@ class GjcRuntime:
                 await client.close()
             except GjcCoordinatorError:
                 pass
+
+    async def _stop_session_bounded(self, client: GjcCoordinatorClient, session_id: str) -> bool:
+        """Try to reap an exact session; never present an uncertain stop as confirmed."""
+        # The coordinator's stop operation is keyed by session identity and
+        # resumes an already-recorded deletion if a response was lost. Retry
+        # only transient or explicitly pending outcomes, never authorization
+        # or stale-owner failures. The bound prevents an infinite cleanup loop.
+        retryable = {"timeout", "unavailable", "delivery_pending"}
+        for attempt in range(2):
+            try:
+                await client.stop_session(session_id)
+                return True
+            except GjcCoordinatorError as exc:
+                if attempt == 0 and exc.code in retryable:
+                    continue
+                log.warning(
+                    f"{self._log_namespace}.cleanup_unconfirmed",
+                    session_id=session_id,
+                    code=exc.code,
+                    attempts=attempt + 1,
+                )
+                return False
+        return False
 
     @staticmethod
     def _compose_prompt(prompt: str, tools: list[str] | None, system_prompt: str | None) -> str:
@@ -245,7 +267,7 @@ class GjcRuntime:
         session_id: str | None = requested_session_id
         client: GjcCoordinatorClient | None = None
         keep_session_for_resume = False
-        session_stopped = False
+        session_cleanup_attempted = False
         handle = resume_handle
         metadata = resume_handle.metadata if resume_handle else {}
         phase = metadata.get("gjc_operation_phase")
@@ -398,11 +420,8 @@ class GjcRuntime:
             # stops iterating at the terminal message (or never closes the
             # generator) cannot leave the session running. Question turns and
             # coordinator errors keep the session alive for resume.
-            session_stopped = True
-            try:
-                await client.stop_session(session_id)
-            except GjcCoordinatorError:
-                pass
+            cleanup_confirmed = await self._stop_session_bounded(client, session_id)
+            session_cleanup_attempted = True
             if not turn.succeeded:
                 yield AgentMessage(
                     type="result",
@@ -411,6 +430,7 @@ class GjcRuntime:
                         "subtype": "error",
                         "error_type": "GjcTurnError",
                         "status": turn.status,
+                        **({} if cleanup_confirmed else {"cleanup_unconfirmed": True}),
                     },
                     resume_handle=handle,
                 )
@@ -418,7 +438,11 @@ class GjcRuntime:
             yield AgentMessage(
                 type="result",
                 content=content or "GJC task completed.",
-                data={"subtype": "success", "transport": "gjc-coordinator-mcp"},
+                data={
+                    "subtype": "success",
+                    "transport": "gjc-coordinator-mcp",
+                    **({} if cleanup_confirmed else {"cleanup_unconfirmed": True}),
+                },
                 resume_handle=handle,
             )
         except GjcCoordinatorError as exc:
@@ -445,12 +469,9 @@ class GjcRuntime:
                     if (
                         session_id is not None
                         and not keep_session_for_resume
-                        and (not session_stopped)
+                        and (not session_cleanup_attempted)
                     ):
-                        try:
-                            await client.stop_session(session_id)
-                        except GjcCoordinatorError:
-                            pass
+                        await self._stop_session_bounded(client, session_id)
                     try:
                         await client.close()
                     except GjcCoordinatorError:
