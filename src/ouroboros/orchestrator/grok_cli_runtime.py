@@ -219,6 +219,7 @@ class GrokCliRuntime(CodexCliRuntime):
         # reasoning_effort_support=IGNORED, so it is surfaced as advised).
         # Wiring native support is a planned follow-up.
         reasoning_effort: str | None = None,
+        model: str | None = None,
     ) -> list[str]:
         """Build the Grok Build CLI command for non-interactive execution.
 
@@ -227,7 +228,8 @@ class GrokCliRuntime(CodexCliRuntime):
         - ``--output-format streaming-json`` emits NDJSON events parsed by the
           normalizer (keeps the idle watchdog fed during long reasoning).
         - ``--permission-mode`` forwards the resolved non-blocking mode.
-        - ``-m`` is forwarded only for an explicit, non-sentinel model id.
+        - ``-m`` uses the request-local model when supplied; otherwise it uses
+          the constructor default. Sentinel/empty values omit the override.
         """
         self._reconcile_cli_executable_identity()
         del output_last_message_path, resume_session_id, runtime_handle, reasoning_effort
@@ -241,7 +243,8 @@ class GrokCliRuntime(CodexCliRuntime):
             "--permission-mode",
             self._permission_mode,
         ]
-        normalized_model = self._normalize_model(self._model)
+        # Keep request-local selection separate from the shared runtime default.
+        normalized_model = self._normalize_model(model if model is not None else self._model)
         if normalized_model and normalized_model != _SENTINEL_MODEL:
             command.extend(["-m", normalized_model])
         return command
