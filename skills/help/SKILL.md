@@ -51,9 +51,9 @@ Each `ooo <name>` is also the skill `/ouroboros:<name>`, except `run`, `status`,
 
 | Command | Purpose | Needs |
 |---------|---------|-------|
-| `ooo` / `ooo welcome` | First-touch onboarding | none |
-| `ooo setup` | Claude Code setup wizard | none |
-| `ooo tutorial` | Interactive hands-on learning | none |
+| `/ouroboros:welcome` | First-touch onboarding | none |
+| `/ouroboros:setup` | Claude Code setup wizard | none |
+| `/ouroboros:tutorial` | Interactive hands-on learning | none |
 | `ooo help` | This reference | none |
 | `ooo interview` | Socratic interview that exposes hidden assumptions | MCP, in-session fallback |
 | `ooo idk` | Calibrate interview wording from stated familiarity | MCP, in-session fallback |

@@ -610,7 +610,7 @@ Gen 3: {Task, Priority, Status, DueDate}     → similarity 1.00 → CONVERGED �
 | `ooo status` | 드리프트 감지 + 세션 추적 |
 | `ooo resume-session` | 실행 중인 세션 목록과 재연결 명령 확인 |
 | `ooo ralph` | 검증될 때까지 계속 도는 루프 |
-| `ooo tutorial` | 대화형 실습 |
+| `/ouroboros:tutorial` | 대화형 실습 |
 | `ooo help` | 전체 참조 |
 | `ooo pm` | PM 인터뷰 + PRD 생성 |
 | `ooo qa` | 범용 QA 판정 |

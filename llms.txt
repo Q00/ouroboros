@@ -36,7 +36,7 @@ architecture -- a different project with a different design, no shared code.
 
 ## Two CLI Paths
 
-- `ooo` (Claude Code): Slash-command skills invoked inside a Claude Code session. Primary recommended path. Commands: `ooo setup`, `ooo interview "idea"`, `ooo run`, `ooo evaluate`, `ooo evolve`, `ooo status`, `ooo unstuck`, `ooo cancel`.
+- `ooo` (Claude Code): Skills invoked inside a Claude Code session. Primary recommended path. Invoke setup explicitly with `/ouroboros:setup`; other commands include `ooo interview "idea"`, `ooo run`, `ooo evaluate`, `ooo evolve`, `ooo status`, `ooo unstuck`, `ooo cancel`.
 - `ouroboros` (Typer CLI): Standalone CLI installed via `pip install ouroboros-ai`. Fallback path. Subcommands: `ouroboros interview`, `ouroboros run`, `ouroboros config`, `ouroboros status`, `ouroboros cancel`, `ouroboros setup`, `ouroboros tui`, `ouroboros mcp`.
 
 ## Commands / Skills

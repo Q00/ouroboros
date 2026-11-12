@@ -548,7 +548,7 @@ Ralph Cycle 3: evolve_step(lineage)       -> Gen 3 -> action=CONVERGED
 | `ooo resume-session` | `ouroboros resume`                                                | 列出进行中的会话并给出重新接入命令                            |
 | `ooo cancel`         | `ouroboros cancel execution [<id>\|--all]`                        | 取消卡住或孤儿态的执行                                        |
 | `ooo ralph`          | *(经由 MCP)*                                                      | 持续循环直到通过验证                                          |
-| `ooo tutorial`       | *(交互式)*                                                        | 交互式动手学习                                                |
+| `/ouroboros:tutorial` | *(交互式)*                                                        | 交互式动手学习                                                |
 | `ooo help`           | `ouroboros --help`                                                | 完整命令参考                                                  |
 | `ooo pm`             | *(经由 MCP)*                                                      | 面向 PM 的访谈 + PRD 生成                                     |
 | `ooo qa`             | *(经由 skill)*                                                    | 通用 QA 评判，可用于任意产物                                  |
