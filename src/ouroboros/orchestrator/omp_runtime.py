@@ -396,6 +396,9 @@ class OmpRuntime:
         invalid = (
             not isinstance(content, list)
             or not isinstance(details, dict)
+            # An asynchronous launch receipt is not a completed command,
+            # even if it contains an exit status or success-looking output.
+            or (isinstance(details, dict) and "async" in details)
             or any(type(flag) is not bool for flag in flags)
         )
         failed = any(flag is True for flag in flags)
