@@ -71,10 +71,7 @@ def _normalize_pytest_options(options: list[str]) -> list[str]:
 
 def _nonexecuting_pytest_mode(command: list[str], *, check_config: bool = True) -> bool:
     """Withhold proof for non-executing modes or unproven launcher context."""
-    inherited = {
-        key.upper(): value
-        for key, value in _WRAPPER_VERIFY_SHELL.sanitized_verify_environment().items()
-    }
+    inherited = _WRAPPER_VERIFY_SHELL.sanitized_verify_environment()
     context_changed = bool(inherited.get("PYTHONINSPECT"))
 
     def executable_name(value: str) -> str:
