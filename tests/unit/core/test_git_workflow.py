@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import subprocess
+import sys
 from unittest.mock import patch
+
+import pytest
 
 from ouroboros.core.git_workflow import (
     GitWorkflowConfig,
@@ -229,3 +233,42 @@ class TestIsOnProtectedBranch:
             result = is_on_protected_branch(tmp_path, config)
 
         assert result is True
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows cannot create this branch name")
+def test_non_utf8_branch_name_does_not_abort_the_check(tmp_path: Path) -> None:
+    """A branch name Git prints as raw bytes must not raise UnicodeDecodeError.
+
+    The guard documents that it fails closed, but decoding Git's raw output
+    with the process code page raised first, so the caller crashed instead of
+    declining the commit.
+    """
+    subprocess.run(
+        ["git", "init", "-q", "-b", "main", "."], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "checkout", "-q", "-b", os.fsdecode(b"feat-\xff")],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    config = GitWorkflowConfig(use_branches=True, protected_branches=("main", "master"))
+
+    assert is_on_protected_branch(tmp_path, config) is False

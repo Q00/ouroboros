@@ -83,13 +83,18 @@ on `main`; a historical failure note is not permission to ignore a regression.
 test collection. This covers import-time configuration, database defaults, and
 logging paths that resolve through `Path.home()` or `expanduser("~")`; child
 processes inherit that home. `UV_CACHE_DIR` retains an explicit cache location
-so packaging tests can use uv without relying on the real home.
+so packaging tests can use uv without relying on the real home. On Windows,
+`USERPROFILE` is also redirected because Python resolves the home from it.
+An inherited `CODEX_HOME` is removed before collection so Codex setup tests
+cannot use the invoking session's configuration directory.
 
 The autouse `isolate_ouroboros_home` fixture gives each test another temporary
 home. Tests needing a specific location may override `HOME` with `monkeypatch`
-after that fixture. Do not restore the developer's home to make a test pass.
-This contract describes the HOME-based paths; it does not claim isolation of
-every platform-specific profile variable or external credential store.
+after that fixture, or explicitly set a temporary `CODEX_HOME`. On Windows the
+fixture also redirects `USERPROFILE`; tests that override the home there must
+update `USERPROFILE` too for `Path.home()` and `expanduser` to follow it. Do not
+restore the developer's home to make a test pass. This does not claim isolation
+of every platform-specific profile variable or external credential store.
 
 Parallel execution is opt-in locally with pytest-xdist. Each worker runs the
 collection-time isolation and per-test fixtures independently. The
