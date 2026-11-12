@@ -672,7 +672,7 @@ class TestSeedGenerationPersistsAmbiguity:
         engine.save_state.assert_awaited_once_with(state)
 
     @pytest.mark.asyncio
-    async def test_persistence_failure_is_nonfatal(self) -> None:
+    async def test_persistence_failure_prevents_seed_generation(self) -> None:
         state = InterviewState(
             interview_id="interview_persist_warn",
             initial_context="Build a CLI",
@@ -692,13 +692,13 @@ class TestSeedGenerationPersistsAmbiguity:
         with (
             patch("ouroboros.cli.commands.init.AmbiguityScorer", return_value=mock_scorer),
             patch("ouroboros.cli.commands.init.SeedGenerator", return_value=mock_generator),
+            pytest.raises(typer.Exit) as exc,
         ):
-            seed_path, result = await _generate_seed_from_interview(
-                state, MagicMock(), engine=engine
-            )
+            await _generate_seed_from_interview(state, MagicMock(), engine=engine)
 
-        assert result == SeedGenerationResult.SUCCESS
-        assert seed_path is not None
+        assert exc.value.exit_code == 1
+        mock_generator.generate.assert_not_awaited()
+        mock_generator.save_seed.assert_not_awaited()
         assert state.ambiguity_score == pytest.approx(0.05)
 
     @pytest.mark.asyncio
