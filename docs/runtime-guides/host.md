@@ -5,6 +5,34 @@ of spawning an external CLI. It is intended for hosts such as DeepSeek Harness
 that can spawn their own subagents but do not expose an installable execution
 runtime.
 
+## Interview hosts without background advisory delivery
+
+An MCP SDK host that cannot keep an interview question visible while running
+advisory lanes can explicitly request question-only delivery during client
+initialization:
+
+```python
+ClientSession(
+    read_stream,
+    write_stream,
+    extensions={"io.ouroboros/question-delivery": {"mode": "question_only_degraded"}},
+)
+```
+
+For in-process interview questions, the response then carries
+`question_advisory_delivery_mode: question_only_degraded` and
+`question_advisory_degradation_reason: host_requested_question_only` in its
+metadata. The server omits advisory payloads and does not register a fan-out;
+the host can ask the question without waiting for those lanes. This explicitly
+skips advisory assistance for that turn. Unspecified or unrecognized modes
+retain existing behavior; native subagent parallelism alone does not declare
+question-delivery capability. Plugin-rendered interview subagent handoffs and
+other required work, such as milestone lateral review, are unchanged. This
+option does not add background delivery, late-result handling, or change PM and
+other fan-outs. It is available to MCP
+clients that can set initialization extensions; it is not a claim that stock
+Codex, Claude, or OpenCode clients advertise this option.
+
 ## Enable the runtime
 
 ```bash
