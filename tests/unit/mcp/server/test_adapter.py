@@ -3369,11 +3369,14 @@ class TestServeTransport:
         assert mock_fastmcp_cls.call_args.args == (adapter,)
         assert mock_fastmcp_cls.call_args.kwargs["version"] == __version__
         extensions = mock_fastmcp_cls.call_args.kwargs["extensions"]
-        assert len(extensions) == 1
-        assert extensions[0].identifier == "io.ouroboros/subagents"
-        assert extensions[0].settings()["undeclaredBehavior"] == (
+        by_id = {extension.identifier: extension for extension in extensions}
+        assert set(by_id) == {"io.ouroboros/subagents", "io.ouroboros/question-delivery"}
+        assert by_id["io.ouroboros/subagents"].settings()["undeclaredBehavior"] == (
             "parallel_preferred_sequential_fallback"
         )
+        assert by_id["io.ouroboros/question-delivery"].settings()["modes"] == [
+            "question_only_degraded"
+        ]
         mock_instance.run_sse_async.assert_awaited_once()
         run_args = mock_instance.run_sse_async.await_args.kwargs
         assert run_args["host"] == "127.0.0.1"

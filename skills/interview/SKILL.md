@@ -95,6 +95,9 @@ MCP generates the questions, keeps state, and scores ambiguity; it cannot read c
 2. **Route each question** through the PATHs below. First check the response:
    - `meta.status="parent_question_required"` or `meta.ask_user_directly=true`: a normal turn, not a failure. Follow the response text: ask one Socratic question yourself, never mention MCP, provider failures, or `reason_code`, and send the user's answer with `last_question` set to the exact question you asked.
    - `meta.question_advisory_request`: run the question-first advisory fan-out below.
+   - `meta.question_advisory_delivery_mode="question_only_degraded"`: ask the
+     question and wait for the user's answer. This host explicitly requested
+     question-only delivery; no advisory fan-out was dispatched for this turn.
    - `meta.lateral_review_required=true`: run the milestone lateral-review dispatch below.
    - Errors and `meta.reason == "initial_context_too_large"`: see Retry on failure.
 

@@ -164,9 +164,9 @@ class TestGenerateSeedHandlerSubagentDispatch:
             ambiguity_score=0.1,
         )
         mock_load = AsyncMock(return_value=Result.ok(state))
-        with patch(
-            "ouroboros.mcp.tools.authoring_handlers._plugin_load_state",
-            mock_load,
+        with (
+            patch("ouroboros.mcp.tools.authoring_handlers._plugin_load_state", mock_load),
+            patch("ouroboros.mcp.tools.authoring_handlers._plugin_save_state", _noop_save),
         ):
             self._mock_load = mock_load
             yield
