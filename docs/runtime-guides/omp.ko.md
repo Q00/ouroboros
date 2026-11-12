@@ -201,16 +201,16 @@ OMP가 Seed 작업을 실행해야 한다면 런타임 백엔드로 사용하세
 
 ## 문제 해결
 
-**`OMP not found`**  
+**`OMP not found`**
 Oh My Pi를 설치해 `omp`가 `PATH`에 있도록 하거나 `OUROBOROS_OMP_CLI_PATH` / `orchestrator.omp_cli_path`를 설정하세요.
 
-**`--tools`가 CLI 사용 오류를 보고함**  
+**`--tools`가 CLI 사용 오류를 보고함**
 OMP는 시작 시 실제로 알 수 없는 도구 이름을 거부합니다. 요청한 이름이 OMP 내장 도구(`read`, `write`, `edit`, `bash`, `grep`, `glob`, `find`, `lsp`), `mcp__*` 같은 확장 도구 또는 Ouroboros가 매핑하는 Claude 형식 이름(`Read`, `Glob`, `LS` 등)인지 확인하세요. `ls` 내장 도구는 없으며 디렉터리 열거에는 `glob`을 사용합니다.
 
-**모델이 잘못됐거나 무시되는 것 같음**  
+**모델이 잘못됐거나 무시되는 것 같음**
 OMP는 자체 모델 역할(`smol`/`slow`/`plan`) 설정으로 모델을 선택하고 `--model`을 유사 매칭합니다. Ouroboros는 범용 `default` 센티널을 생략합니다. 모델을 고정하려는 경우에만 명시적 모델을 전달하세요.
 
-**OMP 안에서 `ooo ...`가 일반 채팅으로 모델에 전달됨**  
+**OMP 안에서 `ooo ...`가 일반 채팅으로 모델에 전달됨**
 `ouroboros setup --runtime omp`를 실행한 뒤 OMP를 재시작하세요. `~/.omp/agent/extensions/ouroboros-ooo-bridge.ts`가 존재하는지, 디스패치 시간 제한 환경 변수 `OUROBOROS_OMP_BRIDGE_TIMEOUT_MS`가 사용할 수 없는 값으로 설정되지 않았는지 확인하세요.
 
 ## Active Conductor와 Synapse

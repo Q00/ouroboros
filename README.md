@@ -56,7 +56,7 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | iex
 ```
 
-<p align="center"><sub>One command installs it. Then run <code>ooo setup</code> once inside your coding agent — details in <a href="#quick-start">Quick Start</a>.</sub></p>
+<p align="center"><sub>One command installs it. Use your host’s setup instructions — details in <a href="#quick-start">Quick Start</a>.</sub></p>
 
 Demo videos for each runtime.
 
@@ -159,21 +159,32 @@ lets uv download its own Python, then installs `ouroboros-ai` and wires the
 host it finds. Native Windows is experimental and Codex CLI needs WSL 2; see
 [platform support](./docs/platform-support.md).
 
-**First command** — open your AI coding agent and run these in order:
+**First command** — in Claude Code, explicitly invoke `/ouroboros:setup` and
+finish its questions. Then send the interview request as a separate message:
 
 ```
-> ooo setup
-> ooo interview "I want to build a task management CLI"
+ooo interview "I want to build a task management CLI"
 ```
 
-`ooo setup` is a one-time configuration step. `ooo interview` is the first
-workflow command and starts the Socratic interview. After setup, Codex follows
-its currently selected model and Claude Code starts with its recommended model
-settings. Choose **Directly configure models** only when you want to pin a
-stage to a specific model; it opens the local settings screen in your browser.
-You can return to those settings any time with `ooo config`.
+Codex plugin installation registers its bundled MCP server. In a new Codex
+session, check the plugin and its MCP tools before requesting the interview;
+the Claude Code setup wizard is not a required Codex step. Other hosts use
+their [runtime setup instructions](./docs/README.md#runtime-guides).
+
+After the Interview confirms the agreed goal, request `ooo seed` and inspect
+the returned YAML before execution. Interview completion alone does not prove
+that a Seed exists. The standalone CLI and Auto have separate generation flows.
+See the [Interview](./skills/interview/SKILL.md) and [Seed](./skills/seed/SKILL.md)
+skills. Use `ooo config` when you want to review model settings.
 
 Or from a plain terminal, without an agent host:
+
+This path calls models and can execute commands and change project files.
+To inspect the generated Seed first, answer `n` to `Start workflow now?`, whose
+default is Yes. Some Codex execution paths request
+`--dangerously-bypass-approvals-and-sandbox`; a worktree is not OS isolation.
+See [permission scope](./skills/help/TROUBLESHOOTING.md#permission-scope) before
+running an untrusted project.
 
 ```
 $ ouroboros init start --orchestrator "I want to build a task management CLI tool"
@@ -207,16 +218,22 @@ codex plugin marketplace add Q00/ouroboros
 codex plugin add ouroboros@ouroboros
 ```
 
-Start a new Codex session, then run these commands in order:
+Start a new Codex session and check the plugin's MCP server and tools. In the
+Codex CLI TUI, `/mcp` shows active servers; a listing alone does not prove a
+tool call succeeds. Then request:
 
 ```
-ooo setup
 ooo interview "Build a task management CLI"
 ```
 
-`ooo setup` is the one-time runtime preparation. Once ready, Ouroboros follows
-Codex's current default model; choose **Directly configure models** only when
-you want to pin a specific model for a pipeline stage.
+The plugin's skill discovery and bundled MCP server are separate capabilities.
+An absent entry in `codex mcp list`, or a `CODEX_SETUP_REQUIRED` welcome notice,
+does not by itself establish that the plugin server is broken. Inspect the
+current host session first; see [connection troubleshooting](./skills/help/TROUBLESHOOTING.md#mcp-connection-or-authentication-fails).
+For separate CLI setup, use `ouroboros setup --runtime codex` in an environment
+with Ouroboros, an authenticated Codex CLI, and an MCP launcher such as `uvx`.
+Windows PowerShell installation does not prepare WSL automatically. See
+[platform support](./docs/platform-support.md) for native Windows limitations.
 
 </details>
 
@@ -272,7 +289,7 @@ Python >= 3.12 fallback):
 ```bash
 claude plugin marketplace add Q00/ouroboros && claude plugin install ouroboros@ouroboros
 ```
-Then run `ooo setup` inside a Claude Code session.
+Then explicitly invoke `/ouroboros:setup` inside a Claude Code session.
 
 **pip / uv / pipx**:
 ```bash

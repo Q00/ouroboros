@@ -111,7 +111,7 @@ Components:
   bigbang/ambiguity.py      Ambiguity score calculation
   bigbang/seed_generator.py Seed generation from interview results
 
-Process:
+Engine generation flow (the host Interview skill separately suggests ooo seed):
   1. User provides initial context/idea
   2. Engine asks clarifying questions (up to MAX_INTERVIEW_ROUNDS)
   3. Ambiguity score calculated after each response

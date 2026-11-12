@@ -50,7 +50,7 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | iex
 ```
 
-<p align="center"><sub>설치는 위 한 줄입니다. Claude Code에서는 <code>ooo setup</code>으로 설정할 수 있고, Codex 등 다른 호스트는 각 런타임 설정 절차를 따르세요. 자세한 내용은 <a href="#빠른-시작">빠른 시작</a>에 있습니다.</sub></p>
+<p align="center"><sub>설치는 위 한 줄입니다. Claude Code에서는 <code>/ouroboros:setup</code>으로 설정할 수 있고, Codex 등 다른 호스트는 각 런타임 설정 절차를 따르세요. 자세한 내용은 <a href="#빠른-시작">빠른 시작</a>에 있습니다.</sub></p>
 
 <p align="center"><sub><b>서로 다른 일곱 번의 실행, 일곱 개의 호스트. 과제가 다른 건 의도한 것입니다 — 공유되는 건 엔진이지 프롬프트가 아닙니다</b></sub></p>
 
@@ -166,7 +166,7 @@ Windows 설치 스크립트는 Git과 uv가 없으면 winget으로 설치하고,
 **첫 명령** — Claude Code에서는 대화에서 setup을 시작하세요:
 
 ```
-ooo setup
+/ouroboros:setup
 ```
 
 setup이 묻는 질문에 답하고 설정을 마친 다음, **같은 대화의 다음 메시지**로
@@ -178,15 +178,15 @@ ooo interview "I want to build a task management CLI"
 ```
 
 이 guided setup 절차는 Claude Code용입니다. Codex 플러그인은 플러그인 설치로 MCP
-서버를 등록하므로 `ooo setup`을 공통 필수 단계로 반복하지 마세요. Codex CLI를
+서버를 등록하므로 `/ouroboros:setup`을 공통 필수 단계로 반복하지 마세요. Codex CLI를
 별도로 설정할 때는 macOS/Linux/WSL 2 터미널에서 실행하세요. 해당 환경에 Ouroboros와
-인증된 Codex CLI가 각각 준비되어 있어야 합니다. Windows PowerShell 설치는 WSL에 자동으로
+인증된 Codex CLI, `uvx` 같은 MCP launcher가 각각 준비되어 있어야 합니다. Windows PowerShell 설치는 WSL에 자동으로
 공유되지 않습니다. 네이티브 Windows의 `auto` 설정은 성공을 표시해도 새 MCP 항목을
 등록하지 않을 수 있습니다. Desktop HTTP 설정은 별도 서버 등록 방식입니다.
 `ouroboros setup --runtime codex`를 실행하세요.
 다른 호스트는 [런타임 가이드 색인](./docs/README.md#runtime-guides)에서 해당 절차를 확인하세요.
 
-`ooo setup`은 Claude Code에서 한 번 하는 guided 설정이고, `ooo interview`가
+`/ouroboros:setup`은 Claude Code에서 한 번 하는 guided 설정이고, `ooo interview`가
 설치 후 처음 실행할 워크플로우 명령입니다. 설정이 끝나면 Codex는 현재 선택한 모델을
 따르고, Claude Code는 권장 기본 모델 설정으로 시작합니다. 특정 단계의 모델을
 고정하고 싶을 때만 **직접 모델 설정하기**를 선택하세요. 내 컴퓨터의 브라우저에
@@ -251,7 +251,7 @@ codex plugin add ouroboros@ouroboros
 새 Codex 세션에서 설치된 플러그인과 MCP 연결을 확인한 뒤, 대화의 다음 메시지로
 첫 인터뷰를 요청하세요. 플러그인 설치가 Codex MCP 서버를 등록하므로 Claude Code용
 guided setup을 필수로 반복하지 않습니다. Codex CLI를 별도로 구성하는 경우에는
-macOS/Linux/WSL 2 터미널에서, 그 환경에 Ouroboros와 인증된 Codex CLI가 준비되어 있는지
+macOS/Linux/WSL 2 터미널에서, 그 환경에 Ouroboros, 인증된 Codex CLI, `uvx` 같은 MCP launcher가 준비되어 있는지
 확인한 뒤 실행하세요. Windows PowerShell 설치는 WSL에 자동 공유되지 않습니다. 네이티브
 Windows의 `auto`는 성공을 표시해도 새 MCP 항목을 등록하지 않을 수 있으며, Desktop HTTP는
 별도 서버 등록 방식입니다. `ouroboros setup --runtime codex`를 실행하세요.
@@ -337,7 +337,7 @@ Copilot CLI 세션을 다시 시작한 뒤 세션 안에서 `ooo` 명령어를 �
 ```bash
 claude plugin marketplace add Q00/ouroboros && claude plugin install ouroboros@ouroboros
 ```
-Claude Code 세션 안에서 `ooo setup` 실행.
+Claude Code 세션 안에서 `/ouroboros:setup` 실행.
 
 **pip / uv / pipx** — 위의 프로필 경고를 읽고, 새 격리 환경에서 아래 선택지
 중 하나만 설치하세요. 해당 설치 명령을 여러 개 이어서 복사하지 마세요.
@@ -583,9 +583,9 @@ Gen 3: {Task, Priority, Status, DueDate}     → similarity 1.00 → CONVERGED �
 
 ## 명령어
 
-> `ooo` 스킬은 지원되는 AI 코딩 에이전트 세션 안에서 실행됩니다. `ooo setup`은
+> `ooo` 스킬은 지원되는 AI 코딩 에이전트 세션 안에서 실행됩니다. `/ouroboros:setup`은
 > 호스트별 설정이며 MCP 등록 절차가 모든 호스트에서 동일한 것은 아닙니다. Claude Code
-> guided setup은 `ooo setup`, 다른 런타임 설정은 해당 CLI 절차를 사용하세요.
+> guided setup은 `/ouroboros:setup`, 다른 런타임 설정은 해당 CLI 절차를 사용하세요.
 
 > 표준 MCP 경로에서 Git 프로젝트에 `ooo run`을 요청하기 전, 프로젝트 터미널에서
 > 읽기 전용 `git rev-parse --verify HEAD`로 커밋이 있는지 확인하세요. 표준 MCP run은
@@ -595,7 +595,7 @@ Gen 3: {Task, Priority, Status, DueDate}     → similarity 1.00 → CONVERGED �
 
 | 명령어 | 기능 |
 |:--------|:-------------|
-| `ooo setup` | 호스트별 guided 설정; 다른 런타임은 해당 CLI 설정 절차 사용 |
+| `/ouroboros:setup` | 호스트별 guided 설정; 다른 런타임은 해당 CLI 설정 절차 사용 |
 | `ooo interview` | 소크라테스식 질문 → 숨겨진 가정 드러내기 |
 | `ooo idk` | 주제별 이해 수준에 맞춰 인터뷰 설명 난이도 조절 |
 | `ooo auto` | 목표 하나에서 A-grade Seed까지 자동 수렴 후 실행 시작 |

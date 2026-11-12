@@ -55,7 +55,7 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | iex
 ```
 
-<p align="center"><sub>一行命令完成安装。Claude Code 可用 <code>ooo setup</code> 配置；Codex 等其他宿主请按各自的运行时设置流程操作。详见<a href="#快速开始">快速开始</a>。</sub></p>
+<p align="center"><sub>一行命令完成安装。Claude Code 可用 <code>/ouroboros:setup</code> 配置；Codex 等其他宿主请按各自的运行时设置流程操作。详见<a href="#快速开始">快速开始</a>。</sub></p>
 
 <p align="center"><sub><b>七次各自独立的运行，七个宿主。任务不同是故意的——共享的是引擎，不是提示词</b></sub></p>
 
@@ -145,7 +145,7 @@ Windows 安装脚本会在缺少 Git 和 uv 时通过 winget 安装它们，Pyth
 **第一条命令** —— 在 Claude Code 中先开始 guided setup：
 
 ```
-ooo setup
+/ouroboros:setup
 ```
 
 回答 setup 提出的问题并完成配置后，再在**同一对话的下一条消息**中请求 Interview。
@@ -157,14 +157,14 @@ ooo interview "I want to build a task management CLI"
 ```
 
 这里的 guided setup 流程适用于 Claude Code。Codex 插件会在安装时注册 MCP server，
-因此不要把 `ooo setup` 当作所有宿主都必须重复运行的步骤。单独配置 Codex CLI 时，
-请在 macOS/Linux/WSL 2 终端运行；该环境中必须分别准备好 Ouroboros 和已认证的 Codex CLI。
+因此不要把 `/ouroboros:setup` 当作所有宿主都必须重复运行的步骤。单独配置 Codex CLI 时，
+请在 macOS/Linux/WSL 2 终端运行；该环境中必须分别准备好 Ouroboros、已认证的 Codex CLI 和 `uvx` 等 MCP launcher。
 Windows PowerShell 中的安装不会自动安装或配置到 WSL。原生 Windows 的 `auto` 即使显示成功，
 也可能没有注册新的 MCP 条目。Desktop HTTP 是单独的 server 注册方式。运行
 `ouroboros setup --runtime codex`。其他宿主请从[运行时指南索引](./docs/README.md#runtime-guides)
 选择对应步骤。
 
-`ooo setup` 是 Claude Code 中一次性的 guided 配置；`ooo interview` 才是安装后
+`/ouroboros:setup` 是 Claude Code 中一次性的 guided 配置；`ooo interview` 才是安装后
 启动第一个工作流的命令，它会开启苏格拉底式访谈。配置完成后，Codex 会沿用
 它当前选中的模型，Claude Code 则使用推荐的模型设置。只有需要把某个阶段
 固定到特定模型时，才选择**直接配置模型**——它会在浏览器里打开本地设置
@@ -229,7 +229,7 @@ codex plugin add ouroboros@ouroboros
 打开新的 Codex 会话后，先确认插件已安装且 MCP 连接可用，然后在对话的下一条消息中
 请求首次 Interview。安装插件会注册 Codex 使用的 MCP server，不必重复运行 Claude Code
 的 guided setup。若要单独配置 Codex CLI，请在 macOS/Linux/WSL 2 终端中，先确认该环境
-已分别准备好 Ouroboros 和已认证的 Codex CLI，再运行 `ouroboros setup --runtime codex`。
+已分别准备好 Ouroboros、已认证的 Codex CLI 和 `uvx` 等 MCP launcher，再运行 `ouroboros setup --runtime codex`。
 Windows PowerShell 中的安装不会自动共享到 WSL；原生 Windows 的 `auto` 即使显示成功，
 也可能未注册新的 MCP 条目。Desktop HTTP 是单独的 server 注册方式。也可参见
 [main setup skill](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/skills/setup/SKILL.md)：
@@ -312,7 +312,7 @@ Python >= 3.12。兼容的全局 `python3` 或 `python` 只是可选的快速路
 ```bash
 claude plugin marketplace add Q00/ouroboros && claude plugin install ouroboros@ouroboros
 ```
-然后在 Claude Code 会话里跑一次 `ooo setup`。
+然后在 Claude Code 会话里跑一次 `/ouroboros:setup`。
 
 **pip / uv / pipx** —— 阅读上方 profile 警告，并在新的隔离环境中只选择
 下面的一种安装方式。不要连续复制多个 profile 命令。
@@ -522,8 +522,8 @@ Ralph Cycle 3: evolve_step(lineage)       -> Gen 3 -> action=CONVERGED
 ## 命令
 
 在支持的 AI 编码 agent 会话里使用 `ooo <cmd>` 技能，在终端里使用 `ouroboros` CLI。
-`ooo setup` 按宿主配置；MCP 注册流程并非所有宿主都相同。Claude Code 使用
-`ooo setup` guided 流程，其他运行时使用相应的 CLI 设置步骤。
+`/ouroboros:setup` 按宿主配置；MCP 注册流程并非所有宿主都相同。Claude Code 使用
+`/ouroboros:setup` guided 流程，其他运行时使用相应的 CLI 设置步骤。
 
 > 在标准 MCP 路径中对 Git 项目请求 `ooo run` 前，请在项目终端用只读命令
 > `git rev-parse --verify HEAD` 检查是否已有提交。标准 MCP run 默认请求 worktree；
@@ -533,7 +533,7 @@ Ralph Cycle 3: evolve_step(lineage)       -> Gen 3 -> action=CONVERGED
 
 | 技能（`ooo`）        | 等效 CLI                                                          | 作用                                                          |
 | :------------------- | :---------------------------------------------------------------- | :------------------------------------------------------------ |
-| `ooo setup`          | `ouroboros setup`                                                 | 按宿主配置；其他运行时使用相应 CLI 设置步骤                    |
+| `/ouroboros:setup`          | `ouroboros setup`                                                 | 按宿主配置；其他运行时使用相应 CLI 设置步骤                    |
 | `ooo interview`      | `ouroboros init start`                                            | 苏格拉底式提问 —— 把隐藏假设挖出来                            |
 | `ooo idk`            | *(经由 skill)*                                                    | 按用户对当前主题的理解调整访谈表述难度                        |
 | `ooo auto`           | `ouroboros auto`                                                  | 从一个目标 → A 级 Seed → 在有界循环里完成执行交接             |

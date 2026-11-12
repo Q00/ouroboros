@@ -297,7 +297,7 @@ Detect available runtime backends and configure Ouroboros for your environment.
 Ouroboros supports multiple runtime backends via a pluggable `AgentRuntime` protocol. The `setup` command auto-detects
 which runtimes are available (including Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Goose, Pi, GJC, Antigravity, Grok, and Zcode) and
 configures `orchestrator.runtime_backend` accordingly. Additional runtimes can be registered
-by implementing the protocol — see [Architecture](architecture.md#how-to-add-a-new-runtime-adapter).
+by implementing the protocol — see [Architecture](architecture.md#runtime-abstraction-layer).
 
 ```bash
 ouroboros setup [OPTIONS]
