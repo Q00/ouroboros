@@ -724,6 +724,7 @@ Changes under `src/ouroboros/orchestrator/` affect runtime behavior documentatio
 | `runner.py` (`OrchestratorRunner`) | `docs/architecture.md` — orchestration lifecycle; `docs/getting-started.md` — session ID output, resume flow |
 | `runner_factory.py` | `docs/architecture.md` — shared runner assembly for CLI, MCP, and evolution |
 | `cancellation.py` (`CancellationLifecycle`) | `docs/architecture.md` — cancellation lifecycle and runner delegation |
+| `process_local_authority.py` (`ProcessLocalAuthorityLifecycle`) | `docs/architecture.md` — authority lifecycle and runner delegation |
 | `project_anchor.py` (`ProjectAnchor`) | `docs/architecture.md` — project/workspace identity, proof and legacy representations, and resolver error ownership; `docs/getting-started.md` — resume workspace identity compatibility |
 | `parallel_executor.py` | `docs/cli-reference.md` — `--sequential` flag behavior; `docs/architecture.md` — parallel execution strategy |
 | `coordinator.py` (`LevelCoordinator`) | `docs/architecture.md` — inter-level conflict resolution and coordinator review gate |
@@ -931,6 +932,7 @@ ls skills/*.yaml 2>/dev/null || echo "No skill YAML files found"
 - [Review Conventions](./docs/contributing/review-conventions.md) - What the review bot demands, and how to preempt a round
 - [Key Patterns](./docs/contributing/key-patterns.md) - Core patterns with code examples
 - [CI Gates and Branch Protection](./docs/contributing/ci-gates.md) - What CI enforces, how to reproduce it locally, and how releases land
+- [Issue Reference Report](./docs/contributing/issue-reference-report.md) - Read-only, manually triggered evidence for issue review
 
 ---
 
