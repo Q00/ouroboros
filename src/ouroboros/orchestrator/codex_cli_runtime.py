@@ -76,6 +76,7 @@ from ouroboros.orchestrator.interview_session import (
     interview_transition_digest,
 )
 from ouroboros.orchestrator.runtime_drift import DRIFT_EPOCH_UNKNOWN, RuntimeDriftLedger
+from ouroboros.orchestrator.runtime_model_errors import safe_retry_metadata
 from ouroboros.orchestrator.skill_tool_mapping import discover_skill_tool_mappings
 from ouroboros.orchestrator.tooling_guidance import render_tooling_guidance
 from ouroboros.providers.base import CompletionConfig
@@ -3681,7 +3682,9 @@ class CodexCliRuntime:
                 data={
                     "subtype": "error",
                     "error_type": type(e).__name__,
-                    **self._build_resume_retry_metadata(attempted_resume_session_id),
+                    **safe_retry_metadata(
+                        e, self._build_resume_retry_metadata(attempted_resume_session_id)
+                    ),
                 },
                 resume_handle=current_handle,
             )
