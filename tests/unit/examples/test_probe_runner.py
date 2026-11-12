@@ -624,7 +624,6 @@ def test_two_record_lines_or_a_wrong_nonce_give_no_record() -> None:
     assert wrapper_record(crlf, "n0", ProbeKind.CALL, "p", "t", 0) is not None
 
 
-<<<<<<< HEAD
 async def test_output_cut_at_limit_is_indeterminate_for_entire_probe(
     trees: dict[str, Path], python: CheckInterpreter
 ) -> None:
@@ -654,7 +653,8 @@ async def test_command_stream_limit_boundary(
         assert run.indeterminate is None
         assert run.record.status is ProbeStatus.EXITED
         assert run.record.fields[stream] == "x" * STREAM_LIMIT
-=======
+
+
 # ------------------------------------------------------- owned file lifetimes
 
 
@@ -883,4 +883,3 @@ async def test_pool_joins_writers_and_sibling_cleanup_before_return(
         state.fail.set()
         state.release.set()
         await asyncio.gather(task, return_exceptions=True)
->>>>>>> 48f8efd4050451a1125a747e987cdf11edc48553
