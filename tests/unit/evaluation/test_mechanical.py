@@ -753,6 +753,87 @@ class TestUnparsedCoverageIsNotEvidence:
     """A coverage command that exits 0 without a readable figure decides nothing."""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("with_passing_test", [False, True], ids=["alone", "with-test"])
+    @pytest.mark.parametrize("stream", ["stdout", "stderr"])
+    @pytest.mark.parametrize(
+        "prefix",
+        [chr(n) for n in [*range(9), *range(14, 27), 31, 127]]
+        + ["\u200b", "\ufeff", "\u00ad", "\u200e", "\u2060", "\ufffd"],
+        ids=lambda prefix: f"U+{ord(prefix):04X}",
+    )
+    async def test_hidden_prefix_total_is_not_approved(
+        self, prefix: str, stream: str, with_passing_test: bool
+    ) -> None:
+        low = prefix + "TOTAL 10 8 20%\n"
+        stdout = "TOTAL 10 0 100%\n" + (low if stream == "stdout" else "")
+        stderr = low if stream == "stderr" else ""
+        command = (
+            sys.executable,
+            "-c",
+            f"import sys; sys.stdout.write({stdout!r}); sys.stderr.write({stderr!r})",
+        )
+        result = await _evaluate_stage1_only(
+            MechanicalConfig(
+                coverage_command=command,
+                test_command=_printing("1 passed") if with_passing_test else None,
+            )
+        )
+        assert result.stage1_result is not None
+        assert result.stage1_result.coverage_score is None
+        assert result.final_approved is False
+        assert result.acceptance_state is AcceptanceState.UNVERIFIED
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("with_passing_test", [False, True], ids=["alone", "with-test"])
+    @pytest.mark.parametrize("stream", ["stdout", "stderr"])
+    @pytest.mark.parametrize(
+        "low",
+        [
+            b"\xffTOTAL 10 8 20%\n",
+            b'\x1b[0m{"Action":"output","Package":"p","Output":"TOTAL 10 8 20%\\n"}\n',
+            b"\x1b[31mTOTAL 10 8 20%\x1b[0m\n",
+            b"\x1b[31mTOTAL 10 0 100%\x1b[0m\n",
+        ],
+        ids=["invalid-utf8", "ansi-prefix-go-json", "colored-total", "matching-colored-total"],
+    )
+    async def test_decorated_coverage_is_not_approved(
+        self, low: bytes, stream: str, with_passing_test: bool
+    ) -> None:
+        stdout = b"TOTAL 10 0 100%\n" + (low if stream == "stdout" else b"")
+        stderr = low if stream == "stderr" else b""
+        command = (
+            sys.executable,
+            "-c",
+            f"import sys; sys.stdout.buffer.write({stdout!r}); sys.stderr.buffer.write({stderr!r})",
+        )
+        result = await _evaluate_stage1_only(
+            MechanicalConfig(
+                coverage_command=command,
+                test_command=_printing("1 passed") if with_passing_test else None,
+            )
+        )
+        assert result.stage1_result is not None
+        assert result.stage1_result.coverage_score is None
+        assert result.final_approved is False
+        assert result.acceptance_state is AcceptanceState.UNVERIFIED
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "prose",
+        [
+            "a\u200bb diagnostic",
+            "\x08ordinary diagnostic",
+            "a\ufffdb diagnostic",
+            "\x1b[32m검사 성공 ✓\x1b[0m",
+        ],
+    )
+    async def test_decorated_ordinary_prose_preserves_supported_report(self, prose: str) -> None:
+        result = await _evaluate_stage1_only(
+            MechanicalConfig(coverage_command=_printing(prose + "\nTOTAL 10 0 100%\n"))
+        )
+        assert result.final_approved is True
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("with_passing_test", [False, True])
     async def test_conflicting_stderr_coverage_is_not_ignored(
         self, with_passing_test: bool

@@ -188,6 +188,7 @@ def parse_coverage_from_output(output: str) -> float | None:
     """
     # Look for "TOTAL ... XX%" pattern
     import re
+    import unicodedata
 
     # C1 control characters include the single-character CSI (U+009B).
     # Do not interpret terminal control semantics when approving evidence.
@@ -238,12 +239,19 @@ def parse_coverage_from_output(output: str) -> float | None:
     # Cobertura XML is not interpreted as a supported aggregate.
     xml_coverage = r"<(?:[^\s<>/:]+:)?coverage(?:[ \t/>]|$)"
     for row in output.splitlines():
-        # Strip bounded terminal SGR sequences only for detection, not proof.
+        # Remove decoration only for refusal detection, never positive proof.
         uncolored = re.sub(r"\x1b\[[0-9;]{0,32}m", "", row)
+        uncolored = "".join(
+            char
+            for char in uncolored
+            if char in "\t\x1b"
+            or (unicodedata.category(char) not in {"Cc", "Cf"} and char != "\ufffd")
+        )
         if uncolored != row and (
             re.match(r"[ \t]*TOTAL\b", uncolored)
             or re.match(candidate_pattern, uncolored, re.IGNORECASE)
             or re.match(go_coverage, uncolored, re.IGNORECASE)
+            or uncolored.lstrip().startswith("{")
         ):
             return None
         if (
