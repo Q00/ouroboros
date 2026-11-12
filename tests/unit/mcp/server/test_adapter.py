@@ -4591,7 +4591,7 @@ class TestCreateOuroborosServerCwdFallback:
             "ouroboros.mcp.tools.brownfield_handler.BrownfieldHandler": _mock_handler(
                 "ouroboros_brownfield"
             ),
-            "ouroboros.mcp.tools.qa.QAHandler": _mock_handler("ouroboros_qa"),
+            "ouroboros.mcp.tools.qa_background.QAHandler": _mock_handler("ouroboros_qa"),
             "ouroboros.mcp.tools.qa_background.StartQAHandler": _mock_handler("ouroboros_start_qa"),
             "ouroboros.mcp.tools.registry.ToolRegistry": MagicMock(),
             "ouroboros.config.get_clarification_model": MagicMock(return_value="test-model"),
@@ -4689,7 +4689,7 @@ class TestCreateOuroborosServerOpenCodeMode:
             "ouroboros_ralph": "ouroboros.mcp.tools.definitions.RalphHandler",
             "ouroboros_start_ralph": "ouroboros.mcp.tools.definitions.StartRalphHandler",
             "ouroboros_pm_interview": "ouroboros.mcp.tools.fanout_composition.PMInterviewHandler",
-            "ouroboros_qa": "ouroboros.mcp.tools.qa.QAHandler",
+            "ouroboros_qa": "ouroboros.mcp.tools.qa_background.QAHandler",
             "ouroboros_start_qa": "ouroboros.mcp.tools.qa_background.StartQAHandler",
         }
 
@@ -4893,7 +4893,7 @@ class TestCreateOuroborosServerBrownfieldStore:
                 "ouroboros_pm_interview"
             ),
             "ouroboros.mcp.tools.brownfield_handler.BrownfieldHandler": _BrownfieldHandler,
-            "ouroboros.mcp.tools.qa.QAHandler": _simple_mock_handler("ouroboros_qa"),
+            "ouroboros.mcp.tools.qa_background.QAHandler": _simple_mock_handler("ouroboros_qa"),
             "ouroboros.mcp.tools.qa_background.StartQAHandler": _simple_mock_handler(
                 "ouroboros_start_qa"
             ),

@@ -18,6 +18,7 @@ from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolDefinition, MCPToolResult
 from ouroboros.persistence.event_store import EventStore
+from ouroboros.providers.base import LLMAdapter
 
 
 @dataclass
@@ -120,3 +121,33 @@ class StartQAHandler:
                 structured_content=dict(meta),
             )
         )
+
+
+def create_qa_handlers(
+    *,
+    llm_adapter: LLMAdapter | None,
+    event_store: EventStore,
+    job_manager: JobManager,
+    llm_backend: str | None,
+    agent_runtime_backend: str | None,
+    opencode_mode: str | None,
+    project_dir: str,
+) -> tuple[QAHandler, StartQAHandler]:
+    """Compose synchronous and durable QA with the same factory-owned backend."""
+    qa = QAHandler(
+        llm_adapter=llm_adapter,
+        event_store=event_store,
+        llm_backend=llm_backend,
+        agent_runtime_backend=agent_runtime_backend,
+        opencode_mode=opencode_mode,
+    )
+    return qa, StartQAHandler(
+        qa_handler=qa,
+        event_store=event_store,
+        job_manager=job_manager,
+        llm_backend=llm_backend,
+        agent_runtime_backend=agent_runtime_backend,
+        opencode_mode=opencode_mode,
+        project_dir=project_dir,
+        reconstructible_backend=True,
+    )
