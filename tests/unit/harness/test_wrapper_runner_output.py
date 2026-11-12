@@ -601,6 +601,25 @@ def test_python_option_boundaries(arguments: list[str], expected: bool) -> None:
     )
 
 
+@pytest.mark.parametrize("direct", [False, True])
+@pytest.mark.parametrize("help_option", ["--help", "--he", "--h", "-h", "-mh", "-ph"])
+@pytest.mark.parametrize("trailing", [[], ["-m", "pytest", "--collect-only"]])
+def test_frozen_wrapper_refuses_coverage_help_receipt(
+    tmp_path: Path, direct: bool, help_option: str, trailing: list[str]
+) -> None:
+    test_path, marker = _make_pytest_contract(tmp_path, failing=False)
+    argv = _pytest_wrapper_argv(("receipt.json", "stdout.txt", "stderr.txt"), test_path)
+    coverage = Path(sys.executable).with_name("coverage.exe" if os.name == "nt" else "coverage")
+    command = [str(coverage)] if direct else [sys.executable, "-m", "coverage"]
+    argv[argv.index("--") + 1 :] = [*command, "run", help_option, *trailing]
+    result = subprocess.run(argv, cwd=tmp_path, capture_output=True, check=False)
+    receipt = json.loads((tmp_path / "receipt.json").read_text())
+    assert receipt["inner_exit_status"] == 0
+    assert receipt["test_result"] == "failed"
+    assert result.returncode == receipt["outer_exit_status"] == 1
+    assert not marker.exists()
+
+
 def test_frozen_wrapper_rejects_collection_from_nodeid_config(tmp_path: Path) -> None:
     sub = tmp_path / "sub"
     sub.mkdir()
