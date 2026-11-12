@@ -1240,6 +1240,32 @@ class TestOpenCodeV2BridgeRemoval:
         assert json.loads(config.read_text())["plugins"] == [unrelated]
         assert not plugin_dir.exists()
 
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permits literal backslashes in names")
+    @pytest.mark.parametrize("kind", ["path", "uri", "object_path", "object_uri"])
+    def test_public_cli_preserves_distinct_literal_backslash_plugin(
+        self, tmp_path: Path, kind: str
+    ) -> None:
+        config_dir = tmp_path / "opencode"
+        plugin_dir = config_dir / "plugins" / "ouroboros-bridge"
+        plugin_dir.mkdir(parents=True)
+        foreign_dir = config_dir / "plugins\\ouroboros-bridge"
+        foreign_dir.mkdir()
+        value = foreign_dir.as_uri() if kind.endswith("uri") else str(foreign_dir)
+        foreign = {"package": value} if kind.startswith("object") else value
+        config = config_dir / "opencode.json"
+        config.write_text(json.dumps({"plugins": [plugin_dir.as_uri(), foreign]}))
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("pathlib.Path.cwd", return_value=tmp_path),
+            patch("ouroboros.cli.commands.uninstall.opencode_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.opencode_config.opencode_config_dir", return_value=config_dir),
+        ):
+            result = runner.invoke(app, ["--keep-data", "-y"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(config.read_text())["plugins"] == [foreign]
+        assert foreign_dir.is_dir()
+        assert not plugin_dir.exists()
+
     def test_file_uri_decodes_once_and_preserves_distinct_percent_path(
         self, tmp_path: Path
     ) -> None:
