@@ -67,6 +67,7 @@ jobs:
           uv run --python 3.12 --no-sync pytest \
             tests/unit/providers/test_anthropic_sdk_transport_contract.py \
             tests/unit/providers/test_claude_sdk_types_contract.py \
+            tests/unit/scripts/test_install_target_metadata.py \
             -n 0 -q --junitxml=sdk-contracts.xml
           uv run --python 3.12 --no-sync python - <<'PY'
           import xml.etree.ElementTree as ET
@@ -221,6 +222,9 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path $env:HOME | Out-Null
           .venv/Scripts/python.exe -m pytest tests/unit/cli/test_codex_plugin.py tests/unit/cli/test_update_plugin_version.py -n 0 -q -W error::pytest.PytestUnhandledThreadExceptionWarning
+
+      - name: Verify PowerShell installer target extras
+        run: uv run --python 3.12 --no-sync pytest tests/unit/scripts/test_install_ps1.py -n 0 -q
 
       - name: Run native Windows heartbeat lease tests
         # Serial: the native regression hands a real lease between processes.

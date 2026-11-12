@@ -541,20 +541,16 @@ def test_claude_sdk_ci_verifies_declared_pins() -> None:
             assert asserted_versions.get(name) == version, pin
 
 
-def test_claude_profile_pins_agree_with_installers_ci_and_lockfile():
-    """A metadata bump must reach every supported installation surface."""
+def test_claude_profile_pins_agree_with_ci_and_lockfile():
+    """Source CI and lockfile validate the source distribution's declared pins."""
     root = Path(__file__).resolve().parents[2]
     project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     lock = tomllib.loads((root / "uv.lock").read_text(encoding="utf-8"))
     pins = project["project"]["optional-dependencies"]["claude"]
     assert project["project"]["optional-dependencies"]["claude-sdk"] == pins
-    bash = (root / "scripts" / "install.sh").read_text(encoding="utf-8")
-    powershell = (root / "scripts" / "install.ps1").read_text(encoding="utf-8")
     ci = (root / ".github" / "workflows" / "test.yml").read_text(encoding="utf-8")
     for pin in pins:
         name, version = pin.split("==")
-        assert f'--with "{pin}"' in bash, pin
-        assert powershell.count(f"'{pin}'") == 3, pin
         assert any(p["name"] == name and p["version"] == version for p in lock["package"]), pin
         if name != "mcp":
             assert f'assert version("{name}") == "{version}"' in ci, pin

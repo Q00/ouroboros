@@ -1325,49 +1325,19 @@ fi
 _step "3/4  Installing Ouroboros" "Package: ${INSTALL_SPEC}"
 _say "Installing ${INSTALL_SPEC} ..."
 
-# 3. Install (or upgrade if already installed)
-# uv tool install has issues with [extras] syntax — use --with for reliability.
+# 3. Install (or upgrade if already installed).
+# Resolve optional dependencies from the selected distribution, not this
+# installer's checkout: PyPI may still serve an older compatible release.
 INSTALL_METHOD=""
 if [ "$HAS_UV" = true ]; then
   INSTALL_METHOD="uv"
   _info "Install method: uv tool install"
-  # `click` is also declared in pyproject, but keep this explicit so the
-  # installer can repair already-published wheels whose metadata missed it.
-  UV_ARGS=(tool install --upgrade --python "$INSTALL_PYTHON_SPEC" "$PACKAGE_NAME" --with "$CLICK_SPEC")
+  # Keep the bounded Click repair for older wheels that omitted its metadata.
+  # The target's extras own SDK/MCP/TUI pins and Python/platform markers.
+  UV_ARGS=(tool install --upgrade --python "$INSTALL_PYTHON_SPEC" "$INSTALL_SPEC" --with "$CLICK_SPEC")
   if [ -n "$PRE_FLAG" ]; then
     UV_ARGS+=(--prerelease=allow)
   fi
-  # Map extras to explicit --with flags for uv.
-  # NOTE: Pin specs MUST mirror [project.optional-dependencies] in
-  # pyproject.toml. tests/unit/scripts/test_install_runtime_selection.py
-  # asserts `[all]` covers every compatible extra while MCP stays in its
-  # isolated profile, so silent drift is caught in CI rather than discovered
-  # by a user with a conflicting tool environment.
-  case "$EXTRAS" in
-    "[claude,tui]" | "[claude-sdk,tui]")
-      UV_ARGS+=(
-        --with "claude-agent-sdk==0.2.176"
-        --with "anthropic==2.3.0"
-        --with "mcp==1.28.1"
-      )
-      ;;
-    "[mcp,tui]")
-      UV_ARGS+=(--with "mcp==2.3.0")
-      ;;
-    "[all]")
-      UV_ARGS+=(
-        --with "claude-agent-sdk==0.2.176"
-        --with "anthropic==2.3.0"
-        --with "mcp==1.28.1"
-        --with "litellm==1.91.0"
-      )
-      ;;
-  esac
-  # Every install ships the settings GUI (`ouroboros config`).
-  UV_ARGS+=(
-    --with "textual==8.2.8"
-    --with "textual-serve==1.1.3"
-  )
   uv "${UV_ARGS[@]}"
 elif [ "$HAS_PIPX" = true ]; then
   INSTALL_METHOD="pipx"

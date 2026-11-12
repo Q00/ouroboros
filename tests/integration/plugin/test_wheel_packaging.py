@@ -76,9 +76,14 @@ def test_built_wheel_sdk_profiles_run_installed_contracts(
             "import pathlib, sys, anthropic, claude_agent_sdk, ouroboros; "
             "from ouroboros.cli import entrypoint; "
             "from importlib.metadata import version; "
+            "from importlib.metadata import requires; "
+            "from packaging.requirements import Requirement; "
             "modules = (anthropic, claude_agent_sdk, ouroboros, entrypoint); "
             "assert all(pathlib.Path(m.__file__).resolve().is_relative_to(sys.prefix) for m in modules); "
             "assert version('mcp').startswith('1.'); "
+            f"requirements = [Requirement(raw) for raw in requires('ouroboros-ai')]; extra = {profile!r}; "
+            "selected = [r for r in requirements if r.marker is None or r.marker.evaluate({'extra': extra})]; "
+            "assert all(version(r.name) in r.specifier for r in selected), selected; "
             "print({m.__name__: m.__file__ for m in modules})",
         ],
         [
