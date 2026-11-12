@@ -61,6 +61,50 @@ async def test_real_adapter_teardown_failure_cannot_return_passing_probe():
     client.__aexit__.assert_awaited_once()
 
 
+@pytest.mark.parametrize("entry_cancelled", [False, True])
+@pytest.mark.parametrize("explicit_cause", [False, True])
+async def test_real_adapter_cleanup_cancellation_does_not_echo_its_cause(
+    entry_cancelled, explicit_cause
+):
+    cancellation = anyio.get_cancelled_exc_class()("cleanup cancelled")
+    cancellation.add_note("existing cancellation note")
+
+    async def cancel_cleanup(*_args):
+        try:
+            raise RuntimeError("SYNTHETIC_PRIVATE_CLEANUP_VALUE")
+        except RuntimeError as error:
+            if explicit_cause:
+                raise cancellation from error
+            raise cancellation
+
+    client = MagicMock()
+    entry_error = (
+        anyio.get_cancelled_exc_class()("caller cancelled")
+        if entry_cancelled
+        else RuntimeError("connection failed")
+    )
+    client.__aenter__ = AsyncMock(side_effect=entry_error)
+    client.__aexit__ = AsyncMock(side_effect=cancel_cleanup)
+    with (
+        patch(
+            "ouroboros.mcp.client.adapter.build_sdk_client",
+            return_value=SDKClientResources(
+                client, transport_lifecycle=TransportLifecycle(entered=True)
+            ),
+        ),
+        patch("ouroboros.mcp.client.adapter.log.warning") as warning,
+    ):
+        with pytest.raises(type(cancellation)) as caught:
+            await _probe_local_stdio()
+    assert caught.value is cancellation
+    assert "existing cancellation note" in cancellation.__notes__
+    assert "SYNTHETIC_PRIVATE_CLEANUP_VALUE" not in "".join(
+        traceback.format_exception(caught.value)
+    )
+    assert "SYNTHETIC_PRIVATE_CLEANUP_VALUE" not in str(warning.call_args_list)
+    client.__aexit__.assert_awaited_once()
+
+
 async def test_discovery_and_teardown_failure_preserve_separate_stage_results():
     client = MagicMock()
     client.__aenter__ = AsyncMock(side_effect=RuntimeError("discovery rejected"))

@@ -274,6 +274,8 @@ class MCPClientAdapter:
                         include_details=self._include_cleanup_error_details,
                     )
                     if isinstance(cleanup_error, CONTROL_FLOW_EXCEPTIONS):
+                        if not self._include_cleanup_error_details:
+                            raise cleanup_error from None
                         raise
             raise
         except Exception as primary_error:
@@ -290,6 +292,8 @@ class MCPClientAdapter:
                         include_details=self._include_cleanup_error_details,
                     )
                     if isinstance(cleanup_exc, CONTROL_FLOW_EXCEPTIONS):
+                        if not self._include_cleanup_error_details:
+                            raise cleanup_exc from None
                         raise
             raise
 

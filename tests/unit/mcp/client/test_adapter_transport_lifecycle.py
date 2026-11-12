@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+import traceback
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -46,6 +47,29 @@ def _entered_client(*, enter_error: Exception | None = None, exit_error: Excepti
     client.instructions = None
     client.session = MagicMock(discover_result=None)
     return client
+
+
+async def test_default_adapter_preserves_cleanup_cancellation_cause():
+    cancellation = asyncio.CancelledError("cleanup cancelled")
+
+    async def cancel_cleanup(*_args):
+        try:
+            raise RuntimeError("cleanup diagnostic")
+        except RuntimeError as error:
+            raise cancellation from error
+
+    client = _entered_client(enter_error=RuntimeError("connection failed"))
+    client.__aexit__.side_effect = cancel_cleanup
+    with patch(
+        "ouroboros.mcp.client.adapter.build_sdk_client",
+        return_value=SDKClientResources(client),
+    ):
+        adapter = MCPClientAdapter(max_retries=1)
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await adapter.connect(_config())
+    assert caught.value is cancellation
+    assert "cleanup diagnostic" in "".join(traceback.format_exception(caught.value))
+    client.__aexit__.assert_awaited_once()
 
 
 class TestLifecycle:
