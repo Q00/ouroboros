@@ -70,12 +70,13 @@ def _normalize_pytest_options(options: list[str]) -> list[str]:
 
 
 def _nonexecuting_pytest_mode(command: list[str], *, check_config: bool = True) -> bool:
-    """Reject pytest's reporting/collection modes, including addopts overrides."""
+    """Withhold proof for non-executing modes or unproven launcher context."""
+    context_changed = False
 
     def executable_name(value: str) -> str:
         return Path(value).name.lower().removesuffix(".exe")
 
-    def coverage_pytest_options(args: list[str]) -> list[str] | None:
+    def coverage_pytest_options(args: list[str]) -> list[str] | bool:
         # Coverage options end at the target; never interpret target arguments
         # as launcher options. Unknown options are not guessed.
         flags = {"-a", "--append", "--branch", "-L", "--pylib", "-p", "--parallel-mode", "--timid"}
@@ -106,7 +107,7 @@ def _nonexecuting_pytest_mode(command: list[str], *, check_config: bool = True) 
             if value in {"--h", "--he", "--hel", "--help"} or (
                 re.fullmatch(r"-[apLmh]+", value) and "h" in value
             ):
-                return ["--help"]
+                return True
             if value == "--":
                 index += 1
                 break
@@ -119,21 +120,24 @@ def _nonexecuting_pytest_mode(command: list[str], *, check_config: bool = True) 
             elif value in valued:
                 index += 1
                 if index >= len(args):
-                    return None
+                    return False
             elif "=" in value and value.split("=", 1)[0] in valued:
                 pass
             elif value.startswith("-"):
-                return None
+                return False
             else:
                 break
             index += 1
+        if index >= len(args):
+            return True
         if is_module and args[index : index + 1] == ["pytest"]:
             return args[index + 1 :]
         if not is_module and args[index:] and executable_name(args[index]) in {"pytest", "py.test"}:
             return args[index + 1 :]
-        return None
+        return False
 
-    def python_module(args: list[str]) -> tuple[str, list[str]] | None:
+    def python_module(args: list[str]) -> tuple[str, list[str]] | bool:
+        nonlocal context_changed
         index = 0
         while index < len(args):
             value = args[index]
@@ -142,56 +146,155 @@ def _nonexecuting_pytest_mode(command: list[str], *, check_config: bool = True) 
             if value in {"-W", "-X", "--check-hash-based-pycs"}:
                 index += 1
                 if index >= len(args):
-                    return None
-            elif (
-                value in {"-", "--"}
-                or re.match(r"-[bBdEhiIOPqRsSuvVx]*c", value)
-                or not value.startswith("-")
-            ):
-                return None
+                    return False
+            elif value in {"-", "--"} or not value.startswith("-"):
+                return False
+            elif value.startswith("--help") or value == "--version":
+                return True
+            elif not value.startswith(("--", "-V:")):
+                for flag in value[1:]:
+                    if flag in {"c", "m"}:
+                        return False
+                    if flag in {"W", "X"}:
+                        break
+                    if flag in {"h", "?", "V"}:
+                        return True
+                    if flag == "i":
+                        context_changed = True
             # Other interpreter/launcher flags must not hide a later -m pytest.
             # Invalid flags still fail in the inner process; script, stdin and
             # -c arguments remain outside the module command.
             index += 1
-        return None
+        return False
+
+    def launched_command(argv: list[str]) -> list[str] | bool:
+        nonlocal context_changed
+        launcher, args = executable_name(argv[0]), argv[1:]
+        index = 0
+        if launcher == "env":
+            while index < len(args):
+                value = args[index]
+                if value == "--":
+                    index += 1
+                    break
+                if value in {"-", "-i", "--ignore-environment"}:
+                    context_changed = True
+                elif value in {"-u", "--unset"}:
+                    index += 1
+                    if index >= len(args):
+                        return True
+                    context_changed = True
+                elif value.startswith("--unset=") or (value.startswith("-u") and len(value) > 2):
+                    context_changed = True
+                elif value.startswith("-"):
+                    return True
+                else:
+                    break
+                index += 1
+            while index < len(args) and "=" in args[index]:
+                context_changed = True
+                index += 1
+            return args[index:] or False
+
+        inherited = _WRAPPER_VERIFY_SHELL.sanitized_verify_environment()
+        if any(
+            key.upper() in {"UV_ENV_FILE", "UV_WORKING_DIR", "UV_PROJECT", "UV_CONFIG_FILE"}
+            for key in inherited
+        ):
+            context_changed = True
+        flags = {
+            "--offline",
+            "--no-config",
+            "--no-cache",
+            "-n",
+            "--no-progress",
+            "--no-python-downloads",
+            "--quiet",
+            "--verbose",
+            "--no-project",
+            "--no-sync",
+            "--no-env-file",
+            "--frozen",
+            "--locked",
+        }
+        mode = "tool" if launcher == "uvx" else None
+        module = False
+        while index < len(args):
+            value = args[index]
+            option, separator, attached = value.partition("=")
+            if mode is None and value == "run":
+                mode = "run"
+            elif mode is None and args[index : index + 2] == ["tool", "run"]:
+                mode = "tool"
+                index += 1
+            elif value == "--":
+                if mode is None:
+                    return True
+                index += 1
+                break
+            elif mode == "run" and value in {"-m", "--module"}:
+                module = True
+            elif value in flags or re.fullmatch(r"-[qv]+", value):
+                pass
+            elif option in {"--python", "-p"} or (mode == "tool" and option == "--from"):
+                if not separator:
+                    index += 1
+                    attached = args[index] if index < len(args) else ""
+                if not attached or attached.startswith("-"):
+                    return True
+            elif value.startswith("-"):
+                return True
+            elif mode is None:
+                return False
+            else:
+                break
+            index += 1
+        child = args[index:]
+        if not child:
+            return True
+        if module:
+            return ["python", "-m", *child]
+        if mode == "tool":
+            name = re.split(r"[@=<>!~\[;]", child[0], maxsplit=1)[0]
+            if not name:
+                return True
+            child = [name, *child[1:]]
+        return child
+
+    while executable_name(command[0]) in {"env", "uv", "uvx"}:
+        child = launched_command(command)
+        if isinstance(child, bool):
+            return child
+        command = child
 
     executable = executable_name(command[0])
     if executable in {"pytest", "py.test"}:
         options = command[1:]
-    elif executable in {"uv", "uvx"} and any(
-        executable_name(part) in {"pytest", "py.test"} for part in command[1:]
-    ):
-        index = next(
-            index
-            for index, part in enumerate(command)
-            if executable_name(part) in {"pytest", "py.test"}
-        )
-        options = command[index + 1 :]
     elif re.fullmatch(r"coverage(?:-?\d+(?:\.\d+)*)?", executable) and command[1:2] == ["run"]:
         options = coverage_pytest_options(command[2:])
-        if options is None:
-            return False
-    elif (
-        re.fullmatch(r"(?:(?:pythonw?|pypy)(?:\d+(?:\.\d+)*)?|py)", executable)
-        and (module_call := python_module(command[1:])) is not None
-    ):
+        if isinstance(options, bool):
+            return options
+    elif re.fullmatch(r"(?:(?:pythonw?|pypy)(?:\d+(?:\.\d+)*)?|py)", executable):
+        module_call = python_module(command[1:])
+        if isinstance(module_call, bool):
+            return module_call
         module, module_args = module_call
         if module == "pytest":
             options = module_args
         elif module == "coverage" and module_args[:1] == ["run"]:
             options = coverage_pytest_options(module_args[1:])
-            if options is None:
-                return False
+            if isinstance(options, bool):
+                return options
         else:
             return False
-    elif re.fullmatch(r"(?:(?:pythonw?|pypy)(?:\d+(?:\.\d+)*)?|py)", executable):
-        return False
     elif "-m" in command and command[command.index("-m") + 1 :][:1] == ["pytest"]:
-        # Preserve existing handling for host launchers such as env and custom
-        # Python aliases; their command contracts are not parsed here.
+        # Preserve conservative refusal for custom aliases, without granting
+        # a guarantee about their command contracts.
         options = command[command.index("-m") + 2 :]
     else:
         return False
+    if context_changed:
+        return True
     options = _normalize_pytest_options(options)
     nonexecuting = {
         "--collect-only",
