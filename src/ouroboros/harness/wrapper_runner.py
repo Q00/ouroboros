@@ -94,6 +94,10 @@ def _nonexecuting_pytest_mode(command: list[str], *, check_config: bool = True) 
         index = 0
         while index < len(args):
             value = args[index]
+            if value in {"--h", "--he", "--hel", "--help"} or (
+                re.fullmatch(r"-[apLmh]+", value) and "h" in value
+            ):
+                return ["--help"]
             if value == "--":
                 index += 1
                 break
