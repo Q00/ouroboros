@@ -955,6 +955,36 @@ def test_health_exits_nonzero_on_config_load_failure(monkeypatch, tmp_path: Path
     assert "Invalid config section" in result.output
 
 
+@pytest.mark.parametrize(
+    "invalid_config",
+    [
+        {"orchestrator": {"runtime_profile": {"stages": {"synthetic-secret": "codex"}}}},
+        {"evaluation": {"satisfaction_threshold": "synthetic-secret"}},
+        {"orchestrator": {"runtime_backend": "synthetic-secret"}},
+    ],
+)
+def test_health_config_validation_does_not_echo_user_controlled_input(
+    monkeypatch, tmp_path: Path, invalid_config: dict
+) -> None:
+    _clear_auth_env(monkeypatch)
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        yaml.safe_dump(invalid_config),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    result = runner.invoke(app, ["health"])
+
+    assert result.exit_code == 1
+    assert "Configuration" in result.output
+    assert "error" in result.output
+    assert "synthetic-secret" not in result.output
+    assert "configuration validation failed" in result.output
+    assert "configuration unavailable" in result.output
+
+
 def test_health_exits_nonzero_when_runtime_cli_missing(monkeypatch, tmp_path: Path) -> None:
     _clear_auth_env(monkeypatch)
     config_dir = tmp_path / "config"
