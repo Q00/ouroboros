@@ -2589,6 +2589,19 @@ def test_auto_artifact_state_preserves_verified_ralph_completion_with_stale_hand
     )
 
 
+@pytest.mark.parametrize("handoff", [None, "attached", "started"])
+def test_seed_qa_pass_does_not_verify_the_product(handoff) -> None:
+    from ouroboros.auto.pipeline import _has_verified_product_completion
+    from ouroboros.auto.state import AutoPipelineState
+
+    state = AutoPipelineState(goal="example", cwd=".")
+    state.phase = AutoPhase.COMPLETE
+    state.run_handoff_status = handoff
+    state.execution_id = "exec_example"
+    state.last_qa_passed = True
+    assert not _has_verified_product_completion(state)
+
+
 def test_auto_artifact_state_marks_blocked_seed_as_partial_artifact() -> None:
     from ouroboros.auto.pipeline import _artifact_state_for_result
 
@@ -2707,4 +2720,25 @@ def test_auto_artifact_state_still_verifies_a_completed_run() -> None:
             product_verified=True,
         )
         == "complete_verified"
+    )
+
+
+@pytest.mark.parametrize("handoff", [None, "attached", "unknown_no_handle", "started"])
+@pytest.mark.parametrize("handle", ["execution_id", "job_id", "run_session_id"])
+def test_auto_artifact_state_requires_verification_not_just_a_handle(handoff, handle) -> None:
+    from ouroboros.auto.artifact_state import artifact_state_for_result
+
+    handles = {"execution_id": None, "job_id": None, "run_session_id": None}
+    handles[handle] = "some-handle"
+    assert (
+        artifact_state_for_result(
+            status="complete",
+            phase=AutoPhase.COMPLETE,
+            seed_path=None,
+            partial_product=False,
+            run_handoff_status=handoff,
+            product_verified=False,
+            **handles,
+        )
+        == "complete_unverified"
     )
