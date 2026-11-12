@@ -37,6 +37,8 @@ jobs:
         run: |
           uv run --python 3.12 --no-sync python - <<'PY'
           from importlib.metadata import version
+          import subprocess
+          import sys
 
           import claude_agent_sdk
           import mcp
@@ -46,8 +48,8 @@ jobs:
           assert version("claude-agent-sdk") == "0.2.176"
           assert version("anthropic") == "2.3.0"
           assert version("mcp").split(".", maxsplit=1)[0] == "1"
+          subprocess.run(["uv", "pip", "check", "--python", sys.executable], check=True)
           PY
-          uv pip check
 
       - name: Exercise installed SDK contracts without providers
         run: |
