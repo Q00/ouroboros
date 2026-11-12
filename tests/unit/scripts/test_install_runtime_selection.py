@@ -140,6 +140,7 @@ def _installer_system_path() -> str:
             "readlink",
             "realpath",
             "rm",
+            "rmdir",
             "sed",
             "sleep",
             "sort",
@@ -148,6 +149,7 @@ def _installer_system_path() -> str:
             "tr",
             "uname",
             "uniq",
+            "uuidgen",
             "wc",
             "which",
             "xargs",
@@ -1251,6 +1253,7 @@ def test_installer_repaired_telemetry_json_matches_fresh_install_shape(tmp_path:
         fake_commands=_telemetry_fake_commands(),
     )
     assert repaired_result.returncode == 0, repaired_result.stderr
+    assert not (state_dir / "telemetry.json.repair.lock").exists()
     repaired_text = corrupt_state.read_text(encoding="utf-8")
     assert _TELEMETRY_SHAPE_RE.match(repaired_text), repaired_text
     json.loads(repaired_text)

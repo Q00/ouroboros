@@ -1,5 +1,10 @@
-"""Exercise installed SDK serialization and parsing without a provider connection."""
+"""Exercise SDK serialization and parsing without a provider connection.
 
+These shape assertions preserve existing caller behavior, including combinations
+that the service may reject; a synthetic response does not prove API acceptance.
+"""
+
+from functools import partial
 import json
 
 import pytest
@@ -12,10 +17,11 @@ httpx2 = pytest.importorskip("httpx2")
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("model", ["claude-sonnet-4-6", "claude-sonnet-5-5"])
+@pytest.mark.parametrize("model", ["claude-sonnet-4-6", "claude-sonnet-5-5", "claude-fable-5"])
+@pytest.mark.parametrize("effort", [None, "low"])
 @pytest.mark.parametrize("structured", [False, True])
 async def test_installed_sdk_preserves_completion_wire_contract(
-    model: str, structured: bool
+    model: str, structured: bool, effort: str | None, monkeypatch
 ) -> None:
     requests = []
     text = '"ok": true}' if structured and model == "claude-sonnet-4-6" else '{"ok": true}'
@@ -37,11 +43,11 @@ async def test_installed_sdk_preserves_completion_wire_contract(
         )
 
     async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as http_client:
-        async with anthropic.AsyncAnthropic(
-            api_key="synthetic-not-a-credential", http_client=http_client, max_retries=0
-        ) as client:
-            adapter = AnthropicAdapter(api_key="synthetic-not-a-credential")
-            adapter._client = client
+        monkeypatch.setattr(
+            anthropic, "AsyncAnthropic", partial(anthropic.AsyncAnthropic, http_client=http_client)
+        )
+        adapter = AnthropicAdapter(api_key="synthetic-not-a-credential", max_retries=0)
+        async with adapter._get_client():
             result = await adapter.complete(
                 [
                     Message(role=MessageRole.SYSTEM, content="synthetic instruction"),
@@ -50,7 +56,9 @@ async def test_installed_sdk_preserves_completion_wire_contract(
                 CompletionConfig(
                     model=model,
                     max_tokens=32,
-                    reasoning_effort="low",
+                    temperature=0.25,
+                    top_p=0.8,
+                    reasoning_effort=effort,
                     response_format={"type": "json_object"} if structured else None,
                 ),
             )
@@ -64,15 +72,23 @@ async def test_installed_sdk_preserves_completion_wire_contract(
     assert len(requests) == 1
     request = requests[0]
     assert request.url.path == "/v1/messages"
+    assert request.headers["anthropic-version"] == "2023-06-01"
     body = json.loads(request.content)
     assert body["model"] == model
     assert body["max_tokens"] == 32
     assert body["messages"][0] == {"role": "user", "content": "synthetic input"}
     assert body["system"].startswith("synthetic instruction")
-    assert body["output_config"] == {"effort": "low"}
+    if effort:
+        assert body["output_config"] == {"effort": effort}
+        if model == "claude-fable-5":
+            assert "thinking" not in body
+        else:
+            assert body["thinking"] == {"type": "adaptive"}
+    else:
+        assert "output_config" not in body and "thinking" not in body
     if model == "claude-sonnet-4-6":
-        assert body["thinking"] == {"type": "adaptive"}
-        assert "temperature" in body and "top_p" in body
+        assert body["temperature"] == 0.25
+        assert body["top_p"] == 0.8
         if structured:
             assert body["messages"][-1] == {"role": "assistant", "content": "{"}
     else:
@@ -84,7 +100,7 @@ async def test_installed_sdk_preserves_completion_wire_contract(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [401, 429, 500])
-async def test_installed_sdk_errors_reach_public_provider_error(status: int) -> None:
+async def test_installed_sdk_errors_reach_public_provider_error(status: int, monkeypatch) -> None:
     def respond(request):
         return httpx2.Response(
             status,
@@ -93,11 +109,11 @@ async def test_installed_sdk_errors_reach_public_provider_error(status: int) -> 
         )
 
     async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as http_client:
-        async with anthropic.AsyncAnthropic(
-            api_key="synthetic-not-a-credential", http_client=http_client, max_retries=0
-        ) as client:
-            adapter = AnthropicAdapter(api_key="synthetic-not-a-credential")
-            adapter._client = client
+        monkeypatch.setattr(
+            anthropic, "AsyncAnthropic", partial(anthropic.AsyncAnthropic, http_client=http_client)
+        )
+        adapter = AnthropicAdapter(api_key="synthetic-not-a-credential", max_retries=0)
+        async with adapter._get_client():
             result = await adapter.complete(
                 [Message(role=MessageRole.USER, content="synthetic input")],
                 CompletionConfig(model="claude-sonnet-5-5", max_tokens=32),

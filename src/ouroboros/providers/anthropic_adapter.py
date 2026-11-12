@@ -209,6 +209,11 @@ class AnthropicAdapter:
                 api_key=self._api_key,
                 timeout=self._timeout,
                 max_retries=self._max_retries,
+                # SDK 2 defaults to 2026-10-21, which rejects sampling even
+                # through extra_body. Keep the existing CompletionConfig
+                # semantics rather than silently dropping callers' settings.
+                # https://platform.claude.com/docs/en/api/migration-2026-10-21
+                default_headers={"anthropic-version": "2023-06-01"},
             )
         return self._client
 
