@@ -183,3 +183,67 @@ async def test_a_bare_executable_target_is_not_provable(tmp_path: Path) -> None:
     admission = await admit_check_package(_cli_package(base, "tool"), base)
     assert _oracle_result(admission.checks[0])["resolve"] == "unprovable"
     assert admission.check_tiers == {"oracle_1": "U"}
+
+
+@pytest.mark.parametrize(
+    ("target", "symbol"),
+    [
+        ("src/pkg.py", "-m pkg"),
+        ("src/pkg/__init__.py", "-m pkg"),
+        ("src/pkg/mod.py", "-m pkg.mod"),
+    ],
+)
+async def test_src_layout_is_not_misreported_as_a_missing_cli_module(
+    tmp_path: Path, target: str, symbol: str
+) -> None:
+    # src alone does not prove the interpreter's import path, but it prevents
+    # an authoritative claim that the module is absent from this checkout.
+    base = _repo(tmp_path / "base", {target: "raise AssertionError('must not run')\n"})
+    package = _cli_package(base, symbol, named=True, files={"input.txt": "example"})
+    admission = await admit_check_package(package, base)
+    (check,) = admission.checks
+    assert _oracle_result(check)["resolve"] == "unprovable"
+    assert admission.check_tiers == {"oracle_1": "U"}
+    run = await _run(base, symbol, on_base=True)
+    assert run.return_code == 3
+    assert "src_import_origin_unverified" in run.output
+
+
+async def test_checkout_root_module_retains_precedence_over_src_candidate(tmp_path: Path) -> None:
+    root = _repo(tmp_path / "base", {"pkg.py": RIGHT, "src/pkg.py": WRONG})
+    run = await _run(root, "-m pkg", on_base=True)
+    assert run.result is not None and run.result["resolve"] == "ok"
+    assert run.return_code == 0
+
+
+def test_root_package_missing_main_does_not_fall_back_to_src(tmp_path: Path) -> None:
+    root = _repo(tmp_path / "base", {"pkg/__init__.py": "", "src/pkg/__init__.py": ""})
+    result = oracle_run._cli_target_files(root, "-m pkg")
+    assert isinstance(result, oracle_run._NotProven)
+    assert result.resolve == "missing"
+    assert "pkg/__main__.py: missing" in result.reason
+
+
+async def test_src_symlink_is_not_executed_as_a_proven_module(tmp_path: Path) -> None:
+    root = _repo(tmp_path / "base", {"README.md": "x"})
+    outside = _repo(tmp_path / "outside", {"pkg.py": RIGHT})
+    (root / "src").symlink_to(outside, target_is_directory=True)
+    run = await _run(root, "-m pkg", on_base=True)
+    assert run.return_code == 3
+    assert run.result is not None and run.result["resolve"] == "unprovable"
+
+
+def test_src_candidate_is_not_read_into_controller_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repo(tmp_path / "base", {"src/pkg.py": "x"})
+    resolve = oracle_run.resolve_checkout_file
+
+    def no_src_read(cwd: Path, relative: str) -> Any:
+        assert not relative.startswith("src/")
+        return resolve(cwd, relative)
+
+    monkeypatch.setattr(oracle_run, "resolve_checkout_file", no_src_read)
+    result = oracle_run._cli_target_files(root, "-m pkg")
+    assert isinstance(result, oracle_run._NotProven)
+    assert result.resolve == "unprovable"

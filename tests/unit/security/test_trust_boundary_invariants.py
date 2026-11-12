@@ -657,14 +657,14 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         "src/ouroboros/core/worktree.py",
         "_run_git_process",
         "subprocess.run",
-        133,
+        128,
         15,
     ): "implicit inherit; `git worktree add/remove/status`. GIT_* is denied from the untrusted .env by the loader.",
     (
         "src/ouroboros/core/worktree.py",
         "_run_git_bytes",
         "subprocess.run",
-        162,
+        157,
         17,
     ): "implicit inherit; git plumbing with bytes output. GIT_* is denied from the untrusted .env by the loader.",
     (
