@@ -225,6 +225,8 @@ codex --version
 
 `~/.codex/config.toml`은 **Ouroboros 스테이지 모델 핀을 둘 자리가 아닙니다.** 설정 UI나 그에 대응하는 `~/.ouroboros/config.yaml` 값을 쓰고, 명시적인 `--profile`이 필요할 때만 사용자가 관리하는 네이티브 Codex 프로파일을 유지하세요. 장기 실행 URL 기반 Ouroboros MCP 서버를 직접 운영한다면 그 URL 항목을 `~/.codex/config.toml`에 그대로 두면 됩니다. `ouroboros setup --runtime codex`가 기본적으로 보존합니다. 지원되는 호스트에서 setup이 그 항목을 관리형 command-spawn 서버로 **바꾸길 원할 때만** `--mcp-mode stdio`를 쓰세요. 네이티브 Windows에서는 앱 서버 종료 위험 때문에 이 방식을 거절합니다. 대신 `--mcp-mode http`를 명시하고, 안내된 loopback MCP 서버를 직접 실행·관리하세요.
 
+HTTP 시작 프로그램에서 빈 콘솔 창이 나타나면 [문제 해결 안내](#빈-powershell-또는-windows-terminal-창)를 참고하세요.
+
 ### 워커 서브프로세스 격리 (Agent OS `runtime_profile`)
 
 대화형 `codex` 세션과 Ouroboros가 띄우는 워커 서브프로세스는 서로 다른 기본값을 원할 때가 있습니다. 모델, 샌드박스, notify 훅 같은 것들이요. 오케스트레이터 수준의 런타임 프로파일을 `worker`로 두면, Ouroboros가 띄우는 모든 `codex exec` 호출이 관리형 `~/.codex/ouroboros-worker.config.toml` 프로파일을 쓰게 됩니다.
@@ -392,11 +394,37 @@ uv run ouroboros run workflow --runtime codex --resume <session_id> ~/.ouroboros
 > `ouroboros auto`는 실행 중에 readiness를 다시 보긴 하지만 **조건부이고, 억제되는 두 경우의 결과가 정반대입니다** ([`auto/grading.py:225-226`](../../src/ouroboros/auto/grading.py)):
 >
 > - **ledger 닫힘**(`closure_mode`가 `ledger_only`·`safe_default`이고 degraded가 아닐 때): **ledger의 구조적 완결성이 수용 신호이고 LLM이 매긴 점수는 설계상 낡은 값**이라, 0.2를 크게 웃도는 Seed도 A 등급을 받고 **실행됩니다.** 나머지 채점 축은 그대로 적용됩니다.
-> - **degraded Seed**: 블로커가 억제되는 건 **부분 산출물을 내보내기 위해서일 뿐입니다.** 블로커가 없는 degraded Seed는 **등급이나 `may_run`과 무관하게** 곧바로 partial-product 종단으로 갑니다([`auto/pipeline.py`](../../src/ouroboros/auto/pipeline.py)). **RUN에는 절대 도달하지 않으며**, 세션은 `degraded_seed_not_executed` 사유로 `AutoPhase.BLOCKED`에서 멈춥니다. `COMPLETE`가 아닙니다. 남아 있는 블로커는 하드 안전 블로커라 그대로 실행을 종료시킵니다.
+> - **degraded Seed**(인터뷰 기한 초과): 해결되지 않은 항목은 finding으로 보고되어 등급을 A 미만으로 유지하므로, 높은 모호도 블로커와 등급 및 `may_run` 기준을 이 경우에는 억제합니다. 블로커가 없고 사용자의 목표가 기록된 `sourced_scope`가 있는 degraded Seed는 다른 auto Seed처럼 **실행됩니다**. 워커의 실행 목표는 기록된 사용자 목표이며, 해결되지 않은 항목은 Seed와 결과에 남습니다([`auto/grade_gate_terminals.py`](../../src/ouroboros/auto/grade_gate_terminals.py)). 기록된 목표가 없으면 RUN에 도달하지 않고, 세션은 `degraded_seed_not_executed` 사유로 `AutoPhase.BLOCKED`에서 멈춥니다. `COMPLETE`가 아닙니다. 남아 있는 하드 안전 블로커는 그대로 실행을 중단시킵니다.
 >
 > 실무적으로: 손으로 쓴 seed에 높은 `ambiguity_score`를 박아도 `ouroboros run workflow`가 막지는 않습니다. 이 값은 **강제 차단 장치가 아니라 출처 기록(provenance)**입니다.
 
 ## 문제 해결
+
+### 빈 PowerShell 또는 Windows Terminal 창
+
+빈 창만으로 HTTP MCP 서버 시작이 실패했다고 판단할 수는 없습니다. 서버가 작업을 받기 전에 사용자의 시작 스크립트나 예약 작업이 연 창과 MCP가 시작한 분리 워커 창은 서로 다른 경로입니다([워커 콘솔 수정 #2523](https://github.com/Q00/ouroboros/pull/2523)).
+
+시작 프로그램의 실행 파일과 인자를 확인하세요. Windows Terminal을 기본 터미널로 쓰면 `powershell.exe -WindowStyle Hidden`으로도 창이 보일 수 있습니다([Windows Terminal #12464](https://github.com/microsoft/terminal/issues/12464)). Ouroboros setup은 사용자가 관리하는 시작 스크립트나 예약 작업을 만들거나 복구하지 않습니다. [HTTP 설정](#명령-표면-command-surface)에서는 서버 시작을 사용자가 관리합니다.
+
+서버를 새로 시작하기 전에 PowerShell에서 설정된 엔드포인트의 리스너를 확인하세요. 다음은 읽기 전용 예시이며 URL이 다른 포트를 쓰면 `$mcpPort`를 바꾸세요.
+
+```powershell
+$mcpPort = 8765
+$listeners = @(Get-NetTCPConnection -State Listen |
+    Where-Object LocalPort -eq $mcpPort)
+if ($listeners.Count -eq 0) {
+    "No TCP listener found on port $mcpPort."
+}
+$listeners | Select-Object LocalAddress, LocalPort, OwningProcess
+$listeners | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object {
+    Get-CimInstance Win32_Process -Filter "ProcessId = $_" |
+        Select-Object ProcessId, ParentProcessId, ExecutablePath, CommandLine
+}
+```
+
+프로세스의 명령줄을 서버 시작 프로그램과 비교하세요. 포트가 수신 중이라는 사실만으로 MCP 연결이 정상이라고 보장할 수는 없습니다. MCP 클라이언트를 통한 도구 호출도 성공하는지 확인하세요. 시작 프로그램이 stdout/stderr를 리디렉션한다면 설정된 출력 파일에서 시작 오류를 확인하세요. 빈 콘솔은 표시할 출력이 없기 때문일 수도 있습니다.
+
+이미 해당 엔드포인트를 쓰는 서버가 없다면 HTTP setup이 출력한 명령을 포그라운드 터미널에서 실행하고 출력을 보면서 진단하세요. 확인된 서버는 해당 서버를 관리하는 시작 프로그램으로 재시작하세요. 창을 숨기려고 전체 프로세스 트리를 종료하지 마세요. 지속형 백그라운드 작업은 MCP 서버보다 오래 실행될 수 있습니다. 작업을 중지하려는 경우 작업 취소 기능을 사용하세요.
 
 ### Codex CLI를 못 찾을 때
 
