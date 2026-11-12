@@ -75,17 +75,11 @@ uv run pytest
 Run `ruff format` **before** pushing, not after CI complains: the format check
 is a required gate and a formatting-only failure costs a full CI round trip.
 
-> **Local test caveat (shared worktrees).** A full `tests/unit/mcp` run has
-> leaked to the real server and the real `~/.ouroboros` state in the past. When
-> iterating locally inside a shared worktree, scope the run:
->
-> ```bash
-> uv run pytest tests/ --ignore=tests/unit/mcp --ignore=tests/integration/mcp \
->   --ignore=tests/e2e -n auto --dist worksteal
-> ```
->
-> CI runs the full suite in a clean container — that is where `tests/unit/mcp`
-> belongs. See [Testing Guide](./testing-guide.md).
+For the test dependency profiles, HOME isolation limits, and current
+CI-equivalent test commands, see the [Testing Guide](./testing-guide.md).
+Before running tests against a shared worktree, check inherited `CODEX_HOME`
+and platform-specific profile variables separately. HOME isolation alone does
+not establish that every user configuration path is isolated.
 
 ### Issue link present (`pr-hygiene.yml`)
 

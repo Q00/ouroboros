@@ -74,6 +74,7 @@ def test_pipeline_result_direct_when_no_provenance() -> None:
     assert result.provenance is None
 
 
+@pytest.mark.usefixtures("auto_project_cwd")
 def test_cli_renders_invoked_by_for_gateway_runs(monkeypatch) -> None:
     captured: dict = {}
     payload = {"source": "discord", "rewrite": True, "channel_id_hash": "abcdef"}
@@ -105,6 +106,7 @@ def test_cli_renders_invoked_by_for_gateway_runs(monkeypatch) -> None:
     assert "abcdef" not in out
 
 
+@pytest.mark.usefixtures("auto_project_cwd")
 def test_cli_escapes_rich_markup_in_source(monkeypatch) -> None:
     """A crafted source that looks like Rich markup must render as literal text."""
 
@@ -131,6 +133,7 @@ def test_cli_escapes_rich_markup_in_source(monkeypatch) -> None:
     assert "[bold]X[/]" in out
 
 
+@pytest.mark.usefixtures("auto_project_cwd")
 def test_cli_omits_invoked_by_for_direct_runs(monkeypatch) -> None:
     async def fake_run(state):
         return AutoPipelineResult(
