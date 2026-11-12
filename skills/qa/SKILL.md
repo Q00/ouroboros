@@ -25,7 +25,7 @@ The QA Judge scores the artifact against a quality bar on Correctness, Completen
 
 ### Loading MCP tools (deferred-schema guard)
 
-Ouroboros tools may be deferred, and a schema loaded on one turn can unload by the next. Immediately before each `ouroboros_*` call, load it with the active runtime's tool-discovery capability: `"+ouroboros qa"` for `ouroboros_qa`. A call whose schema is not loaded fails with "Invalid tool parameters". If the tool is already callable, discovery is a no-op and an empty result is expected. Use the fallback only when the tool is genuinely absent; this skill works without MCP setup.
+Ouroboros tools may be deferred, and a schema loaded on one turn can unload by the next. Immediately before each `ouroboros_*` call, load it with the active runtime's tool-discovery capability: `"+ouroboros qa"` for `ouroboros_qa`, and discover `ouroboros_start_qa`, `ouroboros_job_wait`, and `ouroboros_job_result` before using the background path. A call whose schema is not loaded fails with "Invalid tool parameters". If the tool is already callable, discovery is a no-op and an empty result is expected. Use the fallback only when the tool is genuinely absent; this skill works without MCP setup.
 
 ### QA steps
 
@@ -35,7 +35,16 @@ Ouroboros tools may be deferred, and a schema loaded on one turn can unload by t
 
 3.5. **Acting verification fan-out** (behavior-bearing artifacts): a text judge can be fooled by a hopeful log line. Use the active runtime's `orchestrate_subagents` capability to launch, together, one probe child per acting modality the runtime exposes: a process probe (`run_shell`: run the command or app or smoke commands with bounded timeouts, capture exit codes and real output), a browser probe (HTTP services and web UIs: load them, exercise the primary flows, capture rendering and console/network errors), a computer-use probe (GUI/TUI: drive it like a user, screenshot observed states), and an artifact probe (`inspect_code`: declared files exist with real content, not placeholders). Each probe returns structured evidence only (commands, observed effects, screenshots/paths, pass/fail per behavior) and covers the applicable adversarial classes the QA tool lists. Skip a modality only when its tools are absent or it is meaningless for the artifact, and say which were skipped and why. Await all probes and pass the merged evidence as `reference`; prefer observed behavior over source text as the `artifact` when they disagree.
 
-4. **Call the tool**:
+4. **Call the tool**: When a durable subprocess-backed server exposes
+   `ouroboros_start_qa`, use it to avoid host tool-call timeouts. The QA verdict
+   is stored in the server's local job event store and may repeat artifact text.
+   Poll the returned `job_id` with `ouroboros_job_wait` and retrieve the verdict
+   with `ouroboros_job_result`. A nonterminal result is not a verdict: wait
+   until the job is terminal, and report failed, cancelled, or interrupted
+   states as such. A pending or ambiguous acceptance is not a
+   failure: follow its status receipt and do not start a duplicate. If the tool
+   is absent or explicitly rejects an unsupported host/plugin or non-durable
+   backend before accepting work, use `ouroboros_qa` instead:
    ```
    Tool: ouroboros_qa
    Arguments:

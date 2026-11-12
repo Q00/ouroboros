@@ -854,6 +854,8 @@ class TestSessionStatusHandler:
 
         mock_event_store = AsyncMock()
         mock_event_store.initialize = AsyncMock()
+        mock_event_store.get_events_after = AsyncMock(return_value=([], 0))
+        mock_event_store.query_events = AsyncMock(return_value=[])
 
         handler = SessionStatusHandler(event_store=mock_event_store)
         handler._initialized = True

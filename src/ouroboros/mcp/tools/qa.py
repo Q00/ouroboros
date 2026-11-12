@@ -220,7 +220,15 @@ def _is_finite_number(value: object) -> bool:
 _LINE_DECORATION_RE = re.compile(r"^\s*(?:[-*]\s+|\d+[.)]\s+)")
 _BOLD_RE = re.compile(r"\*{1,2}([^*]+)\*{1,2}")
 _KV_RE = re.compile(r"(?im)^(\w[\w ]*?)[ \t]*[:=\-][ \t]*(.+)$")
-_SCORE_FALLBACK_RE = re.compile(r"(?im)\bscore\b[ \t]*(?:is|-)[ \t]*([0-9]*\.?[0-9]+)")
+# Unicode whitespace is allowed within a line, but never cross a line break.
+_HSPACE = r"[^\S\r\n\v\f\x85\u2028\u2029]"
+_SCORE_FIELD_RE = re.compile(rf"(?im)^{_HSPACE}*score{_HSPACE}*[:=\-]{_HSPACE}*([^\r\n]*)$")
+_SCORE_FALLBACK_RE = re.compile(rf"(?im)\bscore\b{_HSPACE}*(?:is\b|-){_HSPACE}*([^\r\n]*)")
+_PLAIN_SCORE_RE = re.compile(
+    r"\s*([0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)\s*"
+    r"(?:/\s*1(?:\.0+)?\s*)?(?:\[(?:pass|revise|fail)\]\s*)?",
+    re.IGNORECASE,
+)
 
 
 def _strip_line_decorations(text: str) -> str:
@@ -252,13 +260,20 @@ def _parse_non_json_qa_response(response_text: str) -> dict[str, Any] | None:
     cleaned = _strip_line_decorations(response_text)
     fields = _extract_kv_fields(cleaned)
 
-    raw_score = fields.get("score")
-    if raw_score:
-        score_num = re.match(r"([0-9]*\.?[0-9]+)", raw_score)
-    else:
-        # Fallback: "score is 0.85" / "score - 0.85" (word-bounded, not in KV)
-        score_num = _SCORE_FALLBACK_RE.search(cleaned)
-
+    # Multiple score statements have no authoritative winner. In particular,
+    # retaining only the first key can turn a later correction into a pass.
+    key_matches = list(_SCORE_FIELD_RE.finditer(cleaned))
+    score_values = [m.group(1).strip() for m in key_matches]
+    for match in _SCORE_FALLBACK_RE.finditer(cleaned):
+        # ``Score - 0.85`` is also a key/value match, not a second statement.
+        if not any(m.start() <= match.start() < m.end() for m in key_matches):
+            score_values.append(match.group(1).strip())
+    if len(score_values) != 1:
+        return None
+    raw_score = score_values[0]
+    # Consume the complete score expression: accepting a numeric prefix turns
+    # 0.9e-2 or 0.9/10 into a false passing score of 0.9.
+    score_num = _PLAIN_SCORE_RE.fullmatch(raw_score) if raw_score else None
     if not score_num:
         return None
     try:
@@ -575,6 +590,11 @@ def _format_verdict_text(
     return "\n".join(lines)
 
 
+def _reject_json_constant(value: str) -> None:
+    """Reject NaN and infinities, which are not JSON values."""
+    raise ValueError(f"Invalid JSON constant: {value}")
+
+
 @dataclass
 class QAHandler:
     """Handler for the ouroboros_qa tool.
@@ -667,7 +687,20 @@ class QAHandler:
             ),
         )
         schema = definition.to_input_schema()
-        schema["properties"]["pass_threshold"].update(minimum=0.0, maximum=1.0)
+        threshold_schema = schema["properties"]["pass_threshold"]
+        threshold_schema.pop("type")
+        threshold_schema["anyOf"] = [
+            {"type": "number", "minimum": 0.0, "maximum": 1.0},
+            {
+                "type": "string",
+                "pattern": r"^[ \t\r\n]*-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?[ \t\r\n]*$",
+            },
+        ]
+        threshold_schema["description"] += " A JSON-encoded number is also accepted."
+        history_schema = schema["properties"]["iteration_history"]
+        history_schema.pop("type")
+        history_schema["anyOf"] = [{"type": "array"}, {"type": "string"}]
+        history_schema["description"] += " A JSON-encoded array is also accepted."
         return replace(definition, input_schema=schema)
 
     async def handle(
@@ -696,6 +729,11 @@ class QAHandler:
         artifact_type = arguments.get("artifact_type", "code")
         reference = arguments.get("reference")
         threshold = arguments.get("pass_threshold", DEFAULT_PASS_THRESHOLD)
+        if isinstance(threshold, str):
+            try:
+                threshold = json.loads(threshold, parse_constant=_reject_json_constant)
+            except (ValueError, RecursionError):
+                threshold = None
         if not _is_finite_number(threshold) or not 0.0 <= threshold <= 1.0:
             return Result.err(
                 MCPToolError(
@@ -704,8 +742,32 @@ class QAHandler:
                 )
             )
         pass_threshold = float(threshold)
-        qa_session_id = arguments.get("qa_session_id") or f"qa-{uuid.uuid4().hex[:8]}"
+        plugin_dispatch = should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode)
+        qa_session_id = arguments.get("qa_session_id")
+        if not qa_session_id:
+            random_id = uuid.uuid4().hex
+            qa_session_id = f"qa-{random_id[:8]}" if plugin_dispatch else f"qa-{random_id}"
         iteration_history = arguments.get("iteration_history")
+        if isinstance(iteration_history, str):
+            try:
+                iteration_history = json.loads(
+                    iteration_history, parse_constant=_reject_json_constant
+                )
+            except (ValueError, RecursionError):
+                return Result.err(
+                    MCPToolError(
+                        "iteration_history must be a list of objects",
+                        tool_name="ouroboros_qa",
+                    )
+                )
+            # A serialized null is not an omitted optional parameter.
+            if iteration_history is None:
+                return Result.err(
+                    MCPToolError(
+                        "iteration_history must be a list of objects",
+                        tool_name="ouroboros_qa",
+                    )
+                )
         if iteration_history is None:
             iteration_history = []
         if not isinstance(iteration_history, list) or not all(
@@ -740,7 +802,7 @@ class QAHandler:
             iteration_history=iteration_history,
             seed_content=seed_content,
         )
-        if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+        if plugin_dispatch:
             return await dispatch_plugin_terminal(
                 self.event_store,
                 session_id=qa_session_id,
@@ -754,6 +816,19 @@ class QAHandler:
             )
 
         # Fall-through: real in-process QA LLM call (subprocess / non-opencode runtimes).
+
+        if (
+            not isinstance(qa_session_id, str)
+            or not qa_session_id.strip()
+            or qa_session_id != qa_session_id.strip()
+            or qa_session_id.startswith("auto_")
+        ):
+            return Result.err(
+                MCPToolError(
+                    "qa_session_id must be a nonblank session ID outside the auto_ namespace",
+                    tool_name="ouroboros_qa",
+                )
+            )
 
         try:
             from ouroboros.providers.base import CompletionConfig, Message, MessageRole
@@ -842,6 +917,12 @@ class QAHandler:
                 "reasoning": verdict.reasoning,
                 "iteration_entry": iteration_entry,
             }
+
+            # Persist only completed in-process evaluations before reporting
+            # success; session status fails closed if ownership later conflicts.
+            from ouroboros.mcp.tools.qa_session import record_qa_evaluation
+
+            await record_qa_evaluation(self.event_store, qa_session_id, meta)
 
             return Result.ok(
                 MCPToolResult(
