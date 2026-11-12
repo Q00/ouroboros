@@ -435,9 +435,16 @@ Ralph Cycle 3: evolve_step(lineage)       -> Gen 3 -> action=CONVERGED
 
 Inside AI coding agent sessions, use `ooo <cmd>` skills. From the terminal, use the `ouroboros` CLI.
 
+Before requesting `ooo run` for a Git project through the standard MCP worktree
+path, check `git rev-parse --verify HEAD` in the project terminal. A repository
+with no commits has no HEAD from which to create that worktree. Review the files
+and decide what to commit before running; this prerequisite does not apply to
+every CLI, non-Git, worktree-disabled, or OpenCode path. See the
+[worktree check](./src/ouroboros/core/worktree.py).
+
 | Skill (`ooo`)    | CLI equivalent                                                    | What It Does                                                 |
 | :--------------- | :---------------------------------------------------------------- | :----------------------------------------------------------- |
-| `ooo setup`      | `ouroboros setup`                                                 | Register runtime and configure project (one-time)            |
+| `/ouroboros:setup` | `ouroboros setup`                                                 | Claude Code guided setup (explicit invocation)            |
 | `ooo interview`  | `ouroboros init start`                                            | Socratic questioning -- expose hidden assumptions            |
 | `ooo idk`        | *(via skill)*                                                     | Calibrate interview wording to your topic knowledge           |
 | `ooo auto`       | `ouroboros auto`                                                  | Goal → A-grade Seed → execution handoff with bounded loops   |
@@ -450,7 +457,7 @@ Inside AI coding agent sessions, use `ooo <cmd>` skills. From the terminal, use 
 | `ooo resume-session` | `ouroboros resume`                                           | List in-flight sessions and re-attach commands              |
 | `ooo cancel`     | `ouroboros cancel execution [<id>\|--all]`                        | Cancel stuck or orphaned executions                          |
 | `ooo ralph`      | *(via MCP)*                                                       | Persistent loop until verified                               |
-| `ooo tutorial`   | *(interactive)*                                                   | Interactive hands-on learning                                |
+| `/ouroboros:tutorial`   | *(interactive)*                                                   | Interactive hands-on learning                                |
 | `ooo help`       | `ouroboros --help`                                                | Full reference                                               |
 | `ooo pm`         | *(via MCP)*                                                       | PM-focused interview + PRD generation                        |
 | `ooo qa`         | *(via skill)*                                                     | General-purpose QA verdict for any artifact                  |

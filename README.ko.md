@@ -194,7 +194,7 @@ ooo interview "I want to build a task management CLI"
 
 에이전트 호스트 없이 터미널에서 바로 쓸 수도 있습니다:
 
-> **실행 전 안전 확인:** `--orchestrator`는 인터뷰에 Claude Code(Max Plan)를
+> **실행 전 안전 확인:** `--orchestrator`는 인터뷰에 Claude Code를
 > 사용합니다. Seed 생성과 이후 실행은 모델을 호출해 사용량이나 비용이 발생할 수
 > 있고, 실행 단계는 프로젝트 파일을 바꾸거나 명령을 실행할 수 있습니다.
 > workflow runtime이 Codex이면 OrchestratorRunner가 runner 권한을
@@ -231,10 +231,8 @@ $ ouroboros init start --orchestrator "I want to build a task management CLI too
 > 설치하지 마세요. `[all,mcp]` 조합은 지원되지 않습니다. MCP 프로필과 호환되는
 > 다른 extras는 함께 선택할 수 있습니다. 플러그인의 MCP 2
 > launcher와 독립 Claude SDK 환경도 별도 프로세스/환경으로 유지하세요.
-> [고정 main 592의 extra 정의](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/pyproject.toml#L73-L90)은
-> MCP 2를 `mcp==2.3.0`, MCP 1을 `mcp==1.28.1`로 고정합니다. PyPI 명령에
-> 이런 pin을 쓰지 않으면 설치본의 정확한 버전이 이 소스 스냅샷과 같다고
-> 보장되지 않습니다. 0.59.9 릴리스 소스의 MCP 2 pin은 `mcp==2.2.0`입니다.
+> 정확한 의존성 버전은 사용하려는 버전의 `pyproject.toml`을 확인하세요.
+> [현재 소스의 extra 정의](./pyproject.toml)가 PyPI 설치본과 같다고 보장되지는 않습니다.
 
 <details>
 <summary><strong>Codex 플러그인 빠른 시작</strong></summary>
@@ -260,6 +258,11 @@ Windows의 `auto`는 성공을 표시해도 새 MCP 항목을 등록하지 않�
 ```
 ooo interview "Build a task management CLI"
 ```
+
+Codex CLI TUI의 `/mcp`로 현재 서버와 도구를 확인하세요. `codex mcp list`에
+항목이 없거나 welcome이 `CODEX_SETUP_REQUIRED`를 반환해도 플러그인 서버의
+실패를 뜻하지는 않습니다. 현재 세션을 먼저 확인하세요.
+[연결 문제 해결](./skills/help/TROUBLESHOOTING.md#mcp-connection-or-authentication-fails)을 참고하세요.
 
 런타임 설정을 했다면 준비가 끝난 뒤 Codex의 현재
 기본 모델을 따릅니다. 특정 단계의 모델을 고정하고 싶을 때만 **직접 모델
@@ -357,7 +360,7 @@ pip install 'ouroboros-ai[mcp]'
 MCP 2와 TUI:
 
 ```bash
-pip install 'ouroboros-ai[mcp,tui]'
+pip install 'ouroboros-ai[mcp,tui]' && ouroboros setup --runtime claude-cli
 ```
 
 독립 Claude Agent SDK 프로필(MCP 1.x):

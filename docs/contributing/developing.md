@@ -226,6 +226,12 @@ profile, HOME isolation and the `loadgroup` scheduling required for tests that
 share the `built_wheel` fixture. Before running tests, check any inherited
 `CODEX_HOME` and platform-specific profile variables separately; redirecting
 `HOME` alone does not establish isolation for every user configuration path.
+The unit suite also reports new checkout worktree registrations under that
+pytest process's temporary roots. This guard only reads the registry; it does
+not clean up worktrees or provide OS isolation. Tests that start Auto should
+use `auto_project_cwd` or a temporary repository, rather than the checkout cwd.
+See the [guard](../../tests/_checkout_worktree_guard.py) and
+[unit fixtures](../../tests/unit/conftest.py).
 
 
 ## Before you open the PR

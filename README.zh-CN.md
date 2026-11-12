@@ -172,7 +172,7 @@ Windows PowerShell 中的安装不会自动安装或配置到 WSL。原生 Windo
 
 也可以不经过 agent 宿主，直接在终端里跑：
 
-> **运行前安全检查：**`--orchestrator` 会用 Claude Code（Max Plan）进行访谈。
+> **运行前安全检查：**`--orchestrator` 会用 Claude Code进行访谈。
 > Seed 生成和后续执行可能调用模型、产生用量或费用；执行步骤也可能修改项目文件
 > 或运行命令。如果工作流运行时选择为 Codex，OrchestratorRunner 会强制将 runner
 > 权限设为 `bypassPermissions`，Codex 可能以同时绕过审批和 sandbox 的
@@ -207,15 +207,17 @@ $ ouroboros init start --orchestrator "I want to build a task management CLI too
 > `[all]` 一起安装；`[all,mcp]` 不受支持。与所选 MCP profile 兼容的其他
 > extras 可以一起安装。插件的 MCP 2 launcher 与独立
 > Claude SDK 环境也应保持为不同进程/环境。
-> [固定 main 592 的 extra 定义](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/pyproject.toml#L73-L90)
-> 将 MCP 2 固定为 `mcp==2.3.0`，将 MCP 1 固定为 `mcp==1.28.1`。如果 PyPI
-> 安装命令没有指定这些版本，不能保证安装结果与此源码快照中的精确版本相同。
-> 0.59.9 release 源码中的 MCP 2 pin 是 `mcp==2.2.0`。
+> 精确依赖版本请查阅所用版本的 `pyproject.toml`。
+> [当前源码的 extra 定义](./pyproject.toml)不保证与 PyPI 安装版本一致。
 
 > **DeepSeek 支持。** Ouroboros 与 DeepSeek 有两种接法。把访谈 / Seed / QA 流水线指向 DeepSeek 自家的模型：用 `--llm-backend dsh`（`ouroboros mcp serve --runtime claude-cli --llm-backend dsh`，或 `OUROBOROS_LLM_BACKEND=dsh`）——底层驱动的是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的 ACP server。反过来也可以：安装 [`dsh-ouroboros` 插件](./integrations/dsh-plugin)（`dsh plugin --profile <your-profile> add "github:Q00/ouroboros#main&path:integrations/dsh-plugin"`），然后在 DeepSeek Harness 的聊天里直接输入 `ooo interview` / `ooo auto`——同一套 `ouroboros_interview` / `ouroboros_auto` 工具在它内部原生运行，苏格拉底式提问一应俱全。两个方向的完整说明，包括 `dsh` 后端除了这一个环境变量之外还需要什么，都在 [DeepSeek Harness 指南](./docs/guides/deepseek-harness.md)。
 
 <details>
 <summary><strong>Codex 插件快速开始</strong></summary>
+
+用 Codex CLI TUI 的 `/mcp` 检查当前服务器与工具。`codex mcp list` 中没有条目，
+或 welcome 返回 `CODEX_SETUP_REQUIRED`，都不能单独证明插件服务器失败。
+先检查当前会话，参见[连接排查](./skills/help/TROUBLESHOOTING.md#mcp-connection-or-authentication-fails)。
 
 需要 `codex` 在 `PATH` 中，并且主机上有 `uvx`（插件的 MCP 描述符用它启动
 server）。可用 `pipx install uv`、`pip install --user uv` 或 `brew install uv`
@@ -332,7 +334,7 @@ pip install 'ouroboros-ai[mcp]'
 MCP 2 与 TUI：
 
 ```bash
-pip install 'ouroboros-ai[mcp,tui]'
+pip install 'ouroboros-ai[mcp,tui]' && ouroboros setup --runtime claude-cli
 ```
 
 独立 Claude Agent SDK profile（MCP 1.x）：

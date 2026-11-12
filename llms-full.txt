@@ -31,7 +31,7 @@ Two command surfaces exist. They are NOT a 1:1 mapping.
 
 ### ooo (Claude Code skills — run inside a Claude Code session)
 
-  ooo setup          Register MCP server, configure project (one-time)
+  /ouroboros:setup    Claude Code guided setup (explicit invocation)
   ooo interview      Socratic questioning — expose hidden assumptions
   ooo seed           Generate a Seed from interview results or agreed context; inspect the returned YAML
   ooo run            Execute via Double Diamond decomposition
@@ -42,8 +42,8 @@ Two command surfaces exist. They are NOT a 1:1 mapping.
   ooo status         Drift detection + session tracking
   ooo ralph          Persistent loop until verified
   ooo update         Update to latest version
-  ooo tutorial       Interactive hands-on learning
-  ooo welcome        Onboarding guide
+  /ouroboros:tutorial Interactive hands-on learning (explicit invocation)
+  /ouroboros:welcome  Onboarding guide (explicit invocation)
   ooo help           Full reference
 
 ### ouroboros (Typer CLI — any terminal)

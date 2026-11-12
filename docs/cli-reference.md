@@ -1274,6 +1274,11 @@ record; malformed CLI limits or workspace values return exit code `64`.
 
 Check local system health. The command validates configuration, checks the configured database path, verifies the effective runtime CLI is reachable after applying `OUROBOROS_AGENT_RUNTIME` / `OUROBOROS_RUNTIME` and runtime-specific `OUROBOROS_*_CLI_PATH` overrides, and confirms that credentials for the active LLM provider are present without printing key material. CLI-authenticated backends such as Copilot are reported as local CLI authentication rather than requiring an API key.
 
+For file-backed credentials, `status health` reads `credentials.yaml` as UTF-8.
+Invalid UTF-8, invalid YAML, and read failures produce fixed diagnostics without
+including parser excerpts or the underlying read exception. A credential-presence
+check still does not verify authentication.
+
 ```bash
 ouroboros status health
 ```
