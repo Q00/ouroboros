@@ -541,13 +541,30 @@ Every runtime adapter satisfies the `AgentRuntime` protocol (defined in `src/our
 
 The orchestrator never inspects backend-specific internals — each adapter maps its native events into these shared types.
 
-For live Codex CLI and OpenCode process handles, a termination request reports
-success only when process-tree cleanup confirms that the recorded tree exited.
-If cleanup cannot be confirmed, `terminate()` returns false and observation
-reports `termination_unconfirmed`; this is not proof that the process is gone.
+Codex CLI and OpenCode require an owned, captured process tree and confirmed
+leader exit before reporting successful termination. Copilot CLI, Gemini CLI,
+Goose CLI, Grok CLI, Megacode and Zcode inherit Codex CLI's `_terminate_process`
+and therefore share this stricter cleanup requirement. This scope concerns the
+CLI runtimes, including their timeout and cancellation paths; it does not extend
+to every provider adapter or the separate Copilot ACP implementation.
+
+If cleanup cannot be confirmed, a live handle's `terminate()` returns false and
+observation reports `termination_unconfirmed`; this is not proof that the
+process is gone. Rebinding an OpenCode handle refreshes its live lifecycle
+state without replacing a terminal state or an unconfirmed cleanup receipt.
 If the leader has already exited without a confirmed tree receipt, the handle
 does not promise it can rediscover or terminate remaining descendants. This
 does not establish bounded termination for every runtime or execution path.
+
+Native Windows currently has no supported process-table ownership proof in
+`worker_process_tree`: non-POSIX capture produces no owned members. These
+strict cleanup paths therefore cannot confirm termination on native Windows,
+even if best-effort cleanup stops the leader. Timeouts report
+`termination_confirmed: false`, and bound handle observations retain
+`termination_unconfirmed`. This conservative result does not mean cleanup
+necessarily failed; it means tree ownership and exit were not proved. Native
+Windows termination has not been verified by the POSIX tests, and confirmation
+must not be weakened to treat an empty capture as success.
 
 ### Interview calibration control turns
 

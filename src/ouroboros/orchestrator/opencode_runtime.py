@@ -1006,6 +1006,21 @@ class OpenCodeRuntime:
         if handle is None:
             return None
 
+        if (
+            control_state.get("returncode") is None
+            and control_state.get("terminated") is not True
+            and control_state.get("runtime_status")
+            not in {
+                "cancelled",
+                "completed",
+                "failed",
+                "terminated",
+                "terminating",
+                "termination_unconfirmed",
+            }
+        ):
+            control_state["runtime_status"] = handle.lifecycle_state
+
         async def _observe(_handle: RuntimeHandle) -> dict[str, Any]:
             snapshot = _handle.snapshot()
             pid = control_state.get("process_id")
