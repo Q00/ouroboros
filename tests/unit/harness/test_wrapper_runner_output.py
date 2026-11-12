@@ -965,3 +965,10 @@ def test_wrapper_py_version_tag_preserves_context_guard(variable: str, monkeypat
     assert wrapper_runner._nonexecuting_pytest_mode(
         ["py.exe", "-3.12-arm64", "-m", "pytest", "test_inner.py"]
     )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX environment names are case-sensitive")
+def test_wrapper_preserves_distinct_environment_variable_names(monkeypatch) -> None:
+    monkeypatch.setenv("PYTHONINSPECT", "1")
+    monkeypatch.setenv("pythoninspect", "")
+    assert wrapper_runner._nonexecuting_pytest_mode(["python", "-m", "pytest"])
