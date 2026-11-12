@@ -392,6 +392,10 @@ class MCPClientAdapter:
             await self._reset_connection_state()
             log.info("mcp.disconnected", server=server_name or "unknown")
             return Result.ok(None)
+        except CONTROL_FLOW_EXCEPTIONS as exc:
+            if not self._include_cleanup_error_details:
+                raise exc from None
+            raise
         except Exception as exc:
             self._cleanup_error = MCPClientError.from_exception(exc, server_name=server_name)
             return Result.err(self._cleanup_error)
