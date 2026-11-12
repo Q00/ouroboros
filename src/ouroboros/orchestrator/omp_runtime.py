@@ -738,7 +738,12 @@ class OmpRuntime:
                     {stderr_task}, timeout=self._process_shutdown_timeout_seconds
                 )
                 if done:
-                    stderr_lines = stderr_task.result()
+                    try:
+                        stderr_lines = stderr_task.result()
+                    except Exception:
+                        # A broken diagnostic stream must not replace the
+                        # stdout timeout with an unrelated reader exception.
+                        stderr_lines = []
                 else:
                     # Another writer may keep stderr open after termination.
                     stderr_task.cancel()
