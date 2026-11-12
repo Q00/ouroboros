@@ -551,3 +551,11 @@ harness changes, attention, and terminal assurance. The user can keep talking in
 the main session; it semantically selects the affected AC and never asks for
 internal IDs. English is the canonical guidance language, while the host phrases
 these facts naturally in the user's current conversation language.
+
+## Checking the Codex MCP connection
+
+Run `ouroboros codex doctor --live-mcp` to launch the configured stdio server and
+check its MCP initialization and tool list. The diagnostic reports failure
+categories, but omits server stderr and JSON-RPC error text because these may
+contain credentials. Treat any additional server logs as sensitive before sharing
+them. HTTP MCP configurations cannot be checked by this live stdio probe.

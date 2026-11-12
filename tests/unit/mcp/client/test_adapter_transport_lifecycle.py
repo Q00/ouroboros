@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+import traceback
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -46,6 +47,37 @@ def _entered_client(*, enter_error: Exception | None = None, exit_error: Excepti
     client.instructions = None
     client.session = MagicMock(discover_result=None)
     return client
+
+
+@pytest.mark.parametrize("connection_succeeds", [False, True])
+async def test_default_adapter_preserves_cleanup_cancellation_cause(connection_succeeds):
+    cancellation = asyncio.CancelledError("cleanup cancelled")
+
+    async def cancel_cleanup(*_args):
+        try:
+            raise RuntimeError("cleanup diagnostic")
+        except RuntimeError as error:
+            raise cancellation from error
+
+    client = _entered_client(
+        enter_error=None if connection_succeeds else RuntimeError("connection failed")
+    )
+    client.__aexit__.side_effect = cancel_cleanup
+    with patch(
+        "ouroboros.mcp.client.adapter.build_sdk_client",
+        return_value=SDKClientResources(client),
+    ):
+        adapter = MCPClientAdapter(max_retries=1)
+        if connection_succeeds:
+            assert (await adapter.connect(_config())).is_ok
+        with pytest.raises(asyncio.CancelledError) as caught:
+            if connection_succeeds:
+                await adapter.disconnect()
+            else:
+                await adapter.connect(_config())
+    assert caught.value is cancellation
+    assert "cleanup diagnostic" in "".join(traceback.format_exception(caught.value))
+    client.__aexit__.assert_awaited_once()
 
 
 class TestLifecycle:
@@ -284,3 +316,14 @@ async def test_context_exit_preserves_body_error_when_baseexception_cleanup_fail
 
     assert caught.value is original
     assert any("SystemExit): 73" in note for note in original.__notes__)
+
+
+def test_cleanup_note_details_remain_enabled_by_default():
+    from ouroboros.mcp.client.adapter import _record_cleanup_failure
+
+    original = RuntimeError("primary")
+    cleanup = RuntimeError("synthetic cleanup detail")
+    with patch("ouroboros.mcp.client.adapter.log.warning") as warning:
+        _record_cleanup_failure(original, cleanup)
+    assert "synthetic cleanup detail" in str(original.__notes__)
+    assert warning.call_args.kwargs["error"] is cleanup

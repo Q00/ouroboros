@@ -531,7 +531,7 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         "src/ouroboros/cli/commands/codex.py",
         "_list_stdio_mcp_tool_names_with_framing",
         "asyncio.create_subprocess_exec",
-        962,
+        982,
         17,
     ): "os.environ.copy()+server env from $CODEX_HOME/config.toml (denied root); doctor probe.",
     (
@@ -559,7 +559,7 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         "src/ouroboros/cli/commands/mcp_doctor.py",
         "_pid_is_alive",
         "subprocess.run",
-        697,
+        710,
         25,
     ): "implicit inherit; Windows `tasklist /FI` liveness probe.",
     (
@@ -615,7 +615,7 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         "src/ouroboros/cli/opencode_config.py",
         "_debug_paths_config_dir",
         "subprocess.run",
-        91,
+        107,
         17,
     ): "Operator configuration resolves the OpenCode executable; literal debug paths argv and no shell. Inherits operator profile/config after project .env PATH, OPENCODE_CONFIG(_DIR), HOME and loader controls are denied. 5s timeout; unavailable/nonzero/unparseable config returns None for deterministic fallback.",
     (
@@ -853,14 +853,14 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         "src/ouroboros/runtime/exec_sandbox.py",
         "_unshare_prefix",
         "subprocess.run",
-        814,
+        826,
         17,
     ): "Sandbox capability probe uses fixed _bootstrap_environment (os.defpath plus serialized command environment), not inherited loaders.",
     (
         "src/ouroboros/runtime/exec_sandbox.py",
         "_private_mounts_unshare",
         "subprocess.run",
-        882,
+        894,
         17,
     ): "Sandbox capability probe uses fixed _bootstrap_environment (os.defpath plus serialized command environment), not inherited loaders.",
     (
@@ -916,9 +916,9 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         "src/ouroboros/cli/opencode_config.py",
         "plugin_version_error",
         "subprocess.run",
-        22,
+        33,
         17,
-    ): "Operator/config-selected OpenCode CLI with literal --version, no shell; inherits trusted operator profile after project .env PATH, OpenCode config and loader controls are denied. 5s timeout; unavailable/nonzero/unparseable version returns None (no compatibility diagnosis), never authorizes a security action.",
+    ): "Operator/config-selected OpenCode CLI with literal --version, no shell; inherits trusted operator profile after project .env PATH, OpenCode config and loader controls are denied. 5s timeout; unavailable/nonzero/unparseable version returns None and warns that compatibility is unknown, never authorizes a security action.",
 }
 
 

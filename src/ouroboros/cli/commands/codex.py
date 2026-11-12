@@ -880,7 +880,7 @@ def _check_codex_runtime_env(
         if key in _CODEX_RUNTIME_SELECTOR_ENV_KEYS and value != "codex"
     }
     if hostile:
-        rendered = ", ".join(f"{key}={value!r}" for key, value in sorted(hostile.items()))
+        rendered = ", ".join(sorted(hostile))
         failures.append("Codex MCP runtime environment contains conflicting selectors: " + rendered)
 
     if not required:
@@ -912,7 +912,27 @@ def _check_live_mcp_tool_exposure(
             )
         )
     except Exception as exc:
-        failures.append(f"Codex MCP stdio initialize/list_tools failed: {exc}")
+        # The server controls stderr and JSON-RPC errors and may echo credentials.
+        # Report only fixed categories, never arbitrary exception text.
+        if isinstance(exc, TimeoutError):
+            detail = "timed out waiting for the server"
+        elif isinstance(exc, FileNotFoundError):
+            detail = "configured launcher was not found"
+        elif isinstance(exc, PermissionError):
+            detail = "permission denied when starting the configured launcher"
+        elif isinstance(
+            exc, (json.JSONDecodeError, UnicodeDecodeError, asyncio.IncompleteReadError)
+        ):
+            detail = "server returned malformed or incomplete MCP data"
+        elif isinstance(exc, RuntimeError) and str(exc).startswith(
+            "MCP stdio process exited before response"
+        ):
+            detail = "server exited before responding"
+        elif isinstance(exc, OSError):
+            detail = "could not start or communicate with the configured launcher"
+        else:
+            detail = "server rejected the request or returned an invalid response"
+        failures.append(f"Codex MCP stdio initialize/list_tools failed: {detail}")
         return
 
     missing_tools = sorted(_REQUIRED_CODEX_AUTO_TOOLS - tool_names)

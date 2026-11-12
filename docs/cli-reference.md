@@ -1651,12 +1651,17 @@ ouroboros mcp doctor --probe-local-stdio
 The probe launches this installation's own server with the current Python
 interpreter in isolated mode, with a temporary home and working directory.
 It loads the production server composition directly, bypassing shell profiles,
-project dotenv files, update checks, and normal CLI startup. The child installs
-a Python audit hook to reject network and command-execution events after the
-probe entrypoint starts. This is a best-effort restriction, not an operating
-system sandbox: Python startup hooks can run before the audit hook, and the
-hook does not establish that arbitrary installed code cannot access the network
-or user files. Run it only with a trusted Python environment.
+project dotenv files, update checks, and normal CLI startup. The child starts
+with `-I -S -B`, creates the stdlib asyncio event loop, then installs its Python
+audit hook before `site.main()` runs `.pth` files and `sitecustomize`. The hook
+rejects events whose names start with `socket.`, plus `subprocess.Popen`,
+`os.system`, `os.exec`, `os.posix_spawn`, `os.fork`, and `os.forkpty`.
+This is a best-effort restriction, not an operating system sandbox. It does
+not block `os.spawn` or `os.startfile`, or every multiprocessing launch path
+(including direct `_posixsubprocess.fork_exec` calls without an audit event).
+Native code and ctypes can bypass the hook, and file writes are not blocked.
+The hook does not establish that arbitrary installed code cannot access the
+network or user files. Run it only with a trusted Python environment.
 
 The ordinary doctor checks also run before the probe. They import installed
 backend packages, which can perform network requests during import; the complete
