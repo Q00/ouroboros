@@ -227,8 +227,6 @@ def is_v2_bridge_plugin_entry(entry: object, config_dir: Path, config_parent: Pa
                 actual = url2pathname(uri.path)
         else:
             actual = entry
-        # Support Windows separators while keeping unrelated paths untouched.
-        actual = actual.replace("\\", "/")
         path = Path(actual)
         if not path.is_absolute():
             path = config_parent / path
