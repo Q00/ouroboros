@@ -36,24 +36,71 @@ architecture -- a different project with a different design, no shared code.
 
 ## Two CLI Paths
 
-- `ooo` (Claude Code): Skills invoked inside a Claude Code session. Primary recommended path. Invoke setup explicitly with `/ouroboros:setup`; other commands include `ooo interview "idea"`, `ooo run`, `ooo evaluate`, `ooo evolve`, `ooo status`, `ooo unstuck`, `ooo cancel`.
-- `ouroboros` (Typer CLI): Standalone CLI installed via `pip install ouroboros-ai`. Fallback path. Subcommands: `ouroboros interview`, `ouroboros run`, `ouroboros config`, `ouroboros status`, `ouroboros cancel`, `ouroboros setup`, `ouroboros tui`, `ouroboros mcp`.
+- `ooo` (Claude Code): Skills invoked inside a Claude Code session. Primary recommended path. Invoke setup explicitly with `/ouroboros:setup`; other commands include `ooo interview "idea"`, `ooo run`, `ooo evaluate`, `ooo evolve`, `ooo status`, `ooo unstuck`, `ooo cancel`. Every skill is listed under Commands / Skills below.
+- `ouroboros` (Typer CLI): Standalone CLI installed via `pip install ouroboros-ai`. Fallback path. Subcommands: see CLI Commands below.
+
+## CLI Commands
+
+Every top-level command `ouroboros --help` lists; `ouroboros <command> --help` shows its options. Rendered from the CLI registry by `scripts/gen-llms-catalog.py`.
+
+<!-- generated:cli-commands begin -->
+- `ouroboros artifacts`: Fetch, replay, and conservatively prune Disposable Memory artifacts.
+- `ouroboros auto`: Run bounded full-quality ooo auto pipeline.
+- `ouroboros cancel`: Cancel stuck or orphaned executions.
+- `ouroboros cleanup`: Prune leftover auto-session worktrees, branches, locks, and state files.
+- `ouroboros codex`: Manage Ouroboros Codex CLI integration artifacts.
+- `ouroboros config`: Manage Ouroboros configuration.
+- `ouroboros detect`: Generate .ouroboros/mechanical.toml via one AI call.
+- `ouroboros doctor`: Run read-only diagnostics for Ouroboros installations.
+- `ouroboros harness`: Inspect A2 interview traces (list/show/trace/diff/frontier).
+- `ouroboros init`: Start interactive interview to refine requirements.
+- `ouroboros interview`: Alias of `ouroboros init`.
+- `ouroboros job`: Inspect background Ouroboros jobs.
+- `ouroboros mcp`: MCP (Model Context Protocol) server commands.
+- `ouroboros plugin`: Manage UserLevel plugins (#725).
+- `ouroboros pm`: Generate a Product Requirements Document through guided interview.
+- `ouroboros qa`: General-purpose QA verdict for any artifact.
+- `ouroboros resume`: List in-flight sessions and re-attach after MCP disconnect.
+- `ouroboros run`: Execute Ouroboros workflows.
+- `ouroboros seed`: Generate a Seed YAML specification from an interview.
+- `ouroboros setup`: Set up Ouroboros for your environment.
+- `ouroboros status`: Check Ouroboros system status.
+- `ouroboros tui`: Interactive TUI monitor for Ouroboros workflows.
+- `ouroboros uninstall`: Cleanly remove Ouroboros from your system.
+- `ouroboros update`: Update Ouroboros to the latest version.
+- `ouroboros workflow-ir`: Inspect read-only Workflow IR projections.
+- `ouroboros zcode`: Convenience commands that use Zcode automatically.
+<!-- generated:cli-commands end -->
 
 ## Commands / Skills
 
-- setup: Guided onboarding wizard. Configures runtime backend and project settings.
-- interview (aliases: socratic): Clarify vague requirements through Socratic questioning. After closure checks and goal confirmation, the host skill suggests `ooo seed`.
-- seed (aliases: crystallize): Generate a Seed from interview results or already-agreed context. Request `ooo seed` in the host-skill flow and inspect the returned YAML. Calling the skill is distinct from manually authoring YAML, which is an advanced workflow.
-- ouroboros-run (invoked as `ooo run`, alias: execute): Execute a seed specification through the workflow engine. Decomposes ACs into tasks and runs them via the configured backend.
-- evaluate (aliases: eval): Three-stage verification pipeline. Runs mechanical checks, LLM review, and consensus gating against acceptance criteria.
-- evolve: Start or monitor an evolutionary development loop. Iterates on evaluation findings.
-- ouroboros-status (invoked as `ooo status`, alias: drift): Check session status and measure goal drift against the seed spec.
-- unstuck (aliases: stuck, lateral): Break through stagnation with lateral thinking personas.
-- cancel (aliases: kill, abort): Cancel stuck or orphaned executions.
-- ouroboros-config (invoked as `ooo config`): Open the Ouroboros settings UI.
-- ouroboros-help (invoked as `ooo help`): Show available commands and usage.
-- welcome: First-run welcome message and orientation.
-- tutorial: Interactive tutorial walkthrough.
+A skill runs as `ooo <name>` (or `/ouroboros:<name>`), and an alias works the same way; a skill marked "invoke as `/ouroboros:<name>`" runs only when that command is typed explicitly. Rendered from `skills/*/SKILL.md` by `scripts/gen-llms-catalog.py`.
+
+<!-- generated:skills begin -->
+- `auto`: Use when the work spans several files or replaces a framework, language, auth, storage, or API layer (rewrites and migrations included), and the user wants it to end up working and tested. Asks only what is missing, writes a spec with acceptance criteria, then runs and verifies it in the background. Not for questions, small edits, or an existing Seed (use run).
+- `brownfield`: Scan and manage brownfield repository/worktree defaults for interviews
+- `cancel` (aliases: `kill`, `abort`): Cancel stuck or orphaned executions
+- `config` (aliases: `ouroboros-config`): Open or drive the Ouroboros settings GUI (browser, TUI, or conversational fallback)
+- `evaluate` (aliases: `eval`): Use when the user wants proof that finished work meets its acceptance criteria, not just that tests pass: 'verify it is actually done', 'check it against the spec', 'evaluate the run'. Runs mechanical checks, a semantic review per criterion, and multi-model consensus when uncertain. With execution.auto_evolve on (the default), a rejected result with a Seed continues into a Ralph fix loop; pass auto_evolve: false to verify only.
+- `evolve`: Start or monitor an evolutionary development loop
+- `help` (aliases: `ouroboros-help`): Ouroboros command reference and troubleshooting guidance for installation, MCP, status, and recovery
+- `idk` (aliases: `dont-know`, `calibrate`): Calibrate interview explanations from the user's stated understanding
+- `interview` (aliases: `socratic`): Use when the user wants to build or change something but the request is vague or open-ended: 'help me figure out what to build', 'I'm not sure what it should do', 'add X' with no details, or no clear definition of done. Runs a short Socratic interview that turns the idea into goals, constraints, and acceptance criteria before any code is written. Not for simple questions, small clear edits, or an existing Seed.
+- `ooo`: Start Ouroboros onboarding. Use when the user sends bare `ooo`, asks to start Ouroboros, or is using Ouroboros for the first time.
+- `pm`: Use when the user wants product requirements rather than code: 'write a PRD', 'product requirements', 'spec this feature for the team', 'ooo pm'. Runs a PM-focused interview with automatic question classification and produces a PRD/PM document. Not for implementation requests.
+- `publish`: Publish Seed specification as GitHub Issues for team-based project management
+- `qa`: General-purpose QA verdict for any artifact type
+- `ralph`: MCP-owned Ralph loop around background evolve_step jobs
+- `resume-session`: List in-flight Ouroboros sessions and show the commands needed to re-attach after MCP disconnect
+- `run` (aliases: `ouroboros-run`, `execute`): Use when an Ouroboros Seed (a spec file with a goal and acceptance criteria, such as *.seed.yaml) already exists and the user wants it executed: 'run the seed', 'execute this spec', 'ooo run'. Executes it and verifies every acceptance criterion. Not for raw requests without a Seed (use interview or auto).
+- `seed` (aliases: `crystallize`): Use when goal, constraints, and success criteria are already settled and the user wants them frozen into a formal spec an agent can execute and verify: 'turn this into a spec', 'write it up as a Seed', or right after an interview. Returns an immutable Seed with acceptance criteria. Not for vague requests (use interview first).
+- `setup` (invoke as `/ouroboros:setup`): Guided onboarding wizard for Ouroboros setup
+- `status` (aliases: `ouroboros-status`, `drift`): Check session status and measure goal drift
+- `tutorial` (invoke as `/ouroboros:tutorial`): Interactive tutorial teaching Ouroboros hands-on
+- `unstuck` (aliases: `stuck`, `lateral`): Use when the user is stuck or going in circles: the same fix failed twice or more, 'nothing works', 'I've tried everything', or a consequential choice with no clear winner that is hard to undo or splits the team (which database, which architecture). Brings hacker, researcher, simplifier, architect, and contrarian perspectives and converges on one recommendation. Not for a first error or normal progress.
+- `update`: Check for updates and upgrade Ouroboros to the latest version
+- `welcome` (invoke as `/ouroboros:welcome`): First-touch experience for new Ouroboros users
+<!-- generated:skills end -->
 
 ## Key File Structure
 
@@ -62,7 +109,7 @@ ouroboros/
   skills/             # Skill implementations (*/SKILL.md)
   src/ouroboros/
     cli/              # Typer CLI entry point and command groups
-      main.py         # App definition, registers: init, run, config, status, cancel, mcp, setup, tui
+      main.py         # App definition; registers every command under CLI Commands
       commands/       # CLI command implementations
       formatters/     # Rich console output (tables, panels, progress)
     core/             # Seed spec, lineage, file locking, text utilities
