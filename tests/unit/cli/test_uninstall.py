@@ -1003,6 +1003,23 @@ class TestConfigEncodingLocaleIndependence:
 
 
 class TestOpenCodeV2BridgeRemoval:
+    @pytest.mark.parametrize(
+        "foreign",
+        ["file://[x/y", "bad\x00path", {"package": "file://[x/y"}, {"package": "bad\x00path"}],
+    )
+    def test_malformed_foreign_entry_does_not_abort_removal(self, tmp_path: Path, foreign) -> None:
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir()
+        config = config_dir / "opencode.json"
+        target = str(config_dir / "plugins" / "ouroboros-bridge")
+        config.write_text(json.dumps({"plugins": [foreign, target]}), encoding="utf-8")
+        with (
+            patch("ouroboros.cli.commands.uninstall.opencode_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.opencode_config.opencode_config_dir", return_value=config_dir),
+        ):
+            assert _remove_opencode_bridge_plugin(dry_run=False)
+        assert json.loads(config.read_text(encoding="utf-8"))["plugins"] == [foreign]
+
     def test_removes_v2_directory_entry_and_preserves_other_entries(self, tmp_path: Path) -> None:
         config_dir = tmp_path / "opencode"
         config_dir.mkdir()
