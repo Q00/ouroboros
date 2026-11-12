@@ -444,3 +444,50 @@ class TestForceAuditLogging:
             if call.args and call.args[0] == "mcp.tool.generate_seed.force_bypass"
         ]
         assert bypass_calls == []
+
+
+@pytest.mark.asyncio
+async def test_plugin_seed_does_not_dispatch_after_state_save_conflict() -> None:
+    state = _state_with_persisted_score(session_id="sess-conflict", score=0.1, completed=True)
+    handler = GenerateSeedHandler(agent_runtime_backend="opencode", opencode_mode="plugin")
+    with (
+        patch(
+            "ouroboros.mcp.tools.authoring_handlers._plugin_load_state",
+            AsyncMock(return_value=Result.ok(state)),
+        ),
+        patch(
+            "ouroboros.mcp.tools.authoring_handlers._plugin_save_state",
+            AsyncMock(return_value=Result.err("state conflict")),
+        ),
+        patch(
+            "ouroboros.mcp.tools.authoring_handlers.dispatch_plugin_terminal", AsyncMock()
+        ) as dispatch,
+    ):
+        result = await handler.handle({"session_id": state.interview_id})
+    assert result.is_err
+    assert "state conflict" in str(result.error)
+    dispatch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_inprocess_seed_does_not_generate_after_state_save_conflict() -> None:
+    state = InterviewState(
+        interview_id="sess-conflict", initial_context="ctx", status=InterviewStatus.COMPLETED
+    )
+    engine = _InterviewEngineStub(state)
+    spy = _GeneratorSpy()
+    handler = GenerateSeedHandler(interview_engine=engine, seed_generator=spy, llm_adapter=object())
+    score_state = _stored_ambiguity_state(session_id="score", score=0.1)
+    from ouroboros.mcp.tools.authoring_handlers import _load_state_ambiguity_score
+
+    score = _load_state_ambiguity_score(score_state)
+    assert score is not None
+    with (
+        patch.object(engine, "save_state", AsyncMock(return_value=Result.err("state conflict"))),
+        patch("ouroboros.mcp.tools.authoring_handlers.AmbiguityScorer") as scorer_type,
+    ):
+        scorer_type.return_value.score = AsyncMock(return_value=Result.ok(score))
+        result = await handler.handle({"session_id": state.interview_id})
+    assert result.is_err
+    assert "state conflict" in str(result.error)
+    assert spy.calls == []

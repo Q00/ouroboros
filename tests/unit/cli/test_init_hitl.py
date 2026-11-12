@@ -389,3 +389,31 @@ async def test_interview_loop_records_and_saves_answer_when_hitl_append_fails(
     assert engine.recorded == [(1, "Useful answer", "What should it do?")]
     assert engine.saved == [final_state]
     assert final_state.is_complete
+
+
+@pytest.mark.asyncio
+async def test_final_interview_save_failure_stops_before_success_or_seed(monkeypatch) -> None:
+    from ouroboros.cli.commands import init as init_module
+
+    state = InterviewState(interview_id="interview_save_fail", status=InterviewStatus.COMPLETED)
+    engine = Mock()
+    engine.start_interview = AsyncMock(return_value=Result.ok(state))
+    engine.save_state = AsyncMock(return_value=Result.err(ValidationError("disk conflict")))
+    monkeypatch.setattr(init_module, "_get_adapter", Mock())
+    monkeypatch.setattr(init_module, "InterviewEngine", Mock(return_value=engine))
+    monkeypatch.setattr(init_module, "AmbiguityScorer", Mock())
+    monkeypatch.setattr(init_module, "_get_init_event_store", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        init_module,
+        "_run_interview_loop",
+        AsyncMock(return_value=init_module.InterviewLoopOutcome(state=state)),
+    )
+    success = Mock(side_effect=AssertionError("success before final save"))
+    monkeypatch.setattr(init_module, "print_success", success)
+    seed = AsyncMock()
+    monkeypatch.setattr(init_module, "_generate_seed_from_interview", seed)
+    with pytest.raises(typer.Exit) as exc:
+        await init_module._run_interview("Build a CLI")
+    assert exc.value.exit_code == 1
+    success.assert_not_called()
+    seed.assert_not_awaited()

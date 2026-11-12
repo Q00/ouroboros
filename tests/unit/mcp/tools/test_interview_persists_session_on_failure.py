@@ -837,3 +837,85 @@ async def test_plugin_path_writes_state_into_engine_state_dir(tmp_path: Path, mo
     assert saved.parent == engine_dir, (
         f"plugin save must land in engine.state_dir; saw {saved.parent}"
     )
+
+
+@pytest.mark.asyncio
+async def test_start_pending_question_save_failure_is_visible(tmp_path: Path) -> None:
+    from unittest.mock import MagicMock
+
+    engine = _FakeInterviewEngine(state_dir=tmp_path)
+    with (
+        patch.object(
+            engine.__class__, "ask_next_question", AsyncMock(return_value=Result.ok("What next?"))
+        ),
+        patch.object(
+            engine.__class__,
+            "save_state",
+            AsyncMock(
+                side_effect=[
+                    Result.ok(tmp_path / "initial"),
+                    Result.err(MCPServerError("conflict")),
+                ]
+            ),
+        ),
+    ):
+        handler = InterviewHandler(
+            interview_engine=engine, llm_adapter=MagicMock(), data_dir=tmp_path
+        )
+        handler._emit_event_bg = MagicMock()
+        outcome = await handler.handle({"initial_context": "Build a CLI", "cwd": str(tmp_path)})
+    assert outcome.is_err
+    assert "conflict" in str(outcome.error)
+    assert "interview_persistfail_001" in str(outcome.error)
+    handler._emit_event_bg.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_answer_pending_question_save_failure_is_visible(tmp_path: Path) -> None:
+    from unittest.mock import MagicMock
+
+    sid = "interview_0123456789abcdef"
+    state = InterviewState(
+        interview_id=sid,
+        initial_context="Build a CLI",
+        rounds=[InterviewRound(round_number=1, question="Q?", user_response=None)],
+    )
+    engine = _FakeInterviewEngine(state_dir=tmp_path, states={sid: state})
+    with (
+        patch.object(
+            engine.__class__, "ask_next_question", AsyncMock(return_value=Result.ok("Next?"))
+        ),
+        patch.object(
+            engine.__class__,
+            "save_state",
+            AsyncMock(
+                side_effect=[Result.ok(tmp_path / "answer"), Result.err(MCPServerError("conflict"))]
+            ),
+        ),
+    ):
+        handler = InterviewHandler(
+            interview_engine=engine, llm_adapter=MagicMock(), data_dir=tmp_path
+        )
+        outcome = await handler.handle({"session_id": sid, "answer": "Make it accessible"})
+    assert outcome.is_err
+    assert "conflict" in str(outcome.error)
+
+
+@pytest.mark.asyncio
+async def test_completion_save_failure_does_not_report_success_or_emit_completion(
+    tmp_path: Path,
+) -> None:
+    from unittest.mock import MagicMock
+
+    sid = "interview_0123456789abcdef"
+    state = InterviewState(interview_id=sid, status=InterviewStatus.COMPLETED)
+    engine = MagicMock()
+    engine.complete_interview = AsyncMock(return_value=Result.ok(state))
+    engine.save_state = AsyncMock(return_value=Result.err(MCPServerError("disk conflict")))
+    handler = InterviewHandler(interview_engine=engine, data_dir=tmp_path)
+    handler._emit_event_bg = MagicMock()
+    outcome = await handler._complete_interview_response(engine, state, sid)
+    assert outcome.is_err
+    assert "disk conflict" in str(outcome.error)
+    assert sid in str(outcome.error)
+    handler._emit_event_bg.assert_not_called()
