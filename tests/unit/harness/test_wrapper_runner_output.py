@@ -674,6 +674,9 @@ def test_frozen_wrapper_nested_launcher_execution_evidence(
             sys.executable,
             coverage,
         ]
+        original = repr(os.environ["PATH"])
+        activated = repr(str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"])
+        test_path.write_text(test_path.read_text().replace(original, activated, 1))
     else:
         shim = tmp_path / "uvx"
         shim.write_text(
@@ -770,6 +773,25 @@ def test_frozen_wrapper_withholds_interactive_failure_receipt(tmp_path: Path) ->
     assert marker.exists()
     assert receipt["test_result"] == "failed"
     assert result.returncode == receipt["outer_exit_status"] == 1
+
+
+@pytest.mark.parametrize(
+    "prefix", [["-bW", "ignore", "-m", "pytest"], ["-bm", "pytest"], ["-mpytest"]]
+)
+@pytest.mark.parametrize("collect_only", [True, False])
+def test_frozen_wrapper_interpreter_clusters_preserve_test_execution(
+    tmp_path: Path, prefix: list[str], collect_only: bool
+) -> None:
+    test_path, marker = _make_pytest_contract(tmp_path, failing=False)
+    argv = _pytest_wrapper_argv(("receipt.json", "stdout.txt", "stderr.txt"), test_path)
+    options = ["--co"] if collect_only else []
+    argv[argv.index("--") + 1 :] = [sys.executable, *prefix, *options, str(test_path)]
+    result = subprocess.run(argv, cwd=tmp_path, capture_output=True, check=False)
+    receipt = json.loads((tmp_path / "receipt.json").read_text())
+    assert receipt["inner_exit_status"] == 0
+    assert receipt["test_result"] == ("failed" if collect_only else "passed")
+    assert result.returncode == receipt["outer_exit_status"] == (1 if collect_only else 0)
+    assert marker.exists() is not collect_only
 
 
 def test_frozen_wrapper_rejects_collection_from_nodeid_config(tmp_path: Path) -> None:
