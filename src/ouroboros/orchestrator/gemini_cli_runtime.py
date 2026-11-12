@@ -277,6 +277,7 @@ class GeminiCLIRuntime(CodexCliRuntime):
         # the Gemini CLI exposes no per-invocation effort flag (capabilities
         # declares reasoning_effort_support=IGNORED, so it is surfaced as advised).
         reasoning_effort: str | None = None,
+        model: str | None = None,
     ) -> list[str]:
         """Build the Gemini CLI command arguments for non-interactive execution.
 
@@ -314,7 +315,7 @@ class GeminiCLIRuntime(CodexCliRuntime):
             # checks are explicitly skipped. Ouroboros task worktrees are often
             # freshly created and therefore absent from Gemini's trust registry.
             command.append("--skip-trust")
-        normalized_model = self._normalize_model(self._model)
+        normalized_model = self._normalize_model(model if model is not None else self._model)
         if normalized_model:
             command.extend(["--model", normalized_model])
         return command

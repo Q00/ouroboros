@@ -325,3 +325,63 @@ async def test_execute_task_to_result_accumulates_streamed_text() -> None:
 
     assert result.is_ok
     assert result.value.final_message == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_request_local_model_reaches_real_execute_task(tmp_path: Path) -> None:
+    """A model request reaches Grok without mutating the runtime's default."""
+    runtime = GrokCliRuntime(cli_path=_test_cli_path(), cwd=str(tmp_path), model="grok-base")
+    commands: list[tuple[str, ...]] = []
+
+    async def fake_exec(*command: str, **kwargs: object) -> _FakeProcess:
+        del kwargs
+        commands.append(command)
+        return _FakeProcess(stdout_lines=[json.dumps({"type": "end", "stopReason": "EndTurn"})])
+
+    with patch(
+        "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+        side_effect=fake_exec,
+    ):
+        messages = [message async for message in runtime.execute_task("test", model="grok-request")]
+
+    assert commands, [message.content for message in messages]
+    assert commands[0][commands[0].index("-m") + 1] == "grok-request"
+    assert runtime._model == "grok-base"
+
+
+@pytest.mark.parametrize(
+    ("requested", "expected"),
+    [(None, "grok-base"), ("grok-request", "grok-request"), ("default", None), ("", None)],
+)
+def test_request_model_precedence(requested: str | None, expected: str | None) -> None:
+    runtime = GrokCliRuntime(cli_path=_test_cli_path(), model="grok-base")
+    command = runtime._build_command("/tmp/unused", prompt="test", model=requested)
+    assert (command[command.index("-m") + 1] if "-m" in command else None) == expected
+    assert runtime._model == "grok-base"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_requests_do_not_share_model_override(tmp_path: Path) -> None:
+    import asyncio
+
+    runtime = GrokCliRuntime(cli_path=_test_cli_path(), cwd=str(tmp_path), model="grok-base")
+    commands: list[tuple[str, ...]] = []
+
+    async def fake_exec(*command: str, **kwargs: object) -> _FakeProcess:
+        del kwargs
+        await asyncio.sleep(0)
+        commands.append(command)
+        return _FakeProcess(stdout_lines=[json.dumps({"type": "end", "stopReason": "EndTurn"})])
+
+    async def run(model: str) -> list[AgentMessage]:
+        return [message async for message in runtime.execute_task("test", model=model)]
+
+    with patch(
+        "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+        side_effect=fake_exec,
+    ):
+        results = await asyncio.gather(run("grok-one"), run("grok-two"))
+
+    assert len(commands) == 2, [[message.content for message in result] for result in results]
+    assert {command[command.index("-m") + 1] for command in commands} == {"grok-one", "grok-two"}
+    assert runtime._model == "grok-base"
