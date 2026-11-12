@@ -9544,6 +9544,12 @@ class TestOpenCodeMCPSetup:
         assert data["mcp"]["ouroboros"]["command"] == ["ouroboros", "mcp", "serve"]
 
 
+@pytest.fixture
+def opencode_setup_version_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("ouroboros.cli.commands.setup.plugin_version_error", lambda _path: None)
+
+
+@pytest.mark.usefixtures("opencode_setup_version_probe")
 class TestOpenCodeSetupConfigYaml:
     """Tests for _setup_opencode config.yaml shape handling."""
 
@@ -9772,6 +9778,7 @@ class TestOpenCodeSetupConfigYaml:
         assert "Setup complete!" not in result.output
 
 
+@pytest.mark.usefixtures("opencode_setup_version_probe")
 class TestOpenCodeModePersisted:
     """_setup_opencode persists orchestrator.opencode_mode in both branches."""
 
