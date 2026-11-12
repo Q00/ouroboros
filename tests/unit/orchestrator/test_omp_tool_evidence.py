@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from ouroboros.events.base import BaseEvent
 from ouroboros.harness.deliver_gate import _event_has_explicit_tool_success
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.evidence.verification import (
@@ -242,3 +243,39 @@ async def test_pending_tool_inputs_do_not_leak_between_runtime_tasks(tmp_path: P
         second = [message async for message in runtime.execute_task("second")]
     assert first[0].data["tool_input"]["command"] == "pytest -q"
     assert "tool_input" not in second[0].data
+
+
+@pytest.mark.parametrize(
+    "async_value",
+    [
+        {"state": "running", "jobId": "bg_1", "type": "bash"},
+        {"state": "completed", "jobId": "bg_1", "type": "bash"},
+        None,
+        False,
+        "running",
+        {},
+        [],
+    ],
+)
+async def test_background_launch_with_zero_exit_is_not_completed_test_proof(
+    tmp_path: Path, async_value: Any
+) -> None:
+    completion = _end("tests", "1 passed in 0.01s\n")
+    completion["result"]["details"] = {
+        "exitCode": 0,
+        "async": async_value,
+    }
+    messages = await _messages([_start("tests", "pytest -q"), completion], tmp_path)
+    assert not _test_verdict(messages).passed
+    result = next(message for message in messages if message.type == "tool_result")
+    assert result.data["is_error_invalid"] is True
+    assert result.data["tool_result"]["is_error_invalid"] is True
+    assert not _event_has_explicit_tool_success(
+        BaseEvent(
+            type="execution.tool.completed",
+            aggregate_type="execution",
+            aggregate_id="test",
+            data=result.data,
+        ),
+        require_command_verdict=True,
+    )
