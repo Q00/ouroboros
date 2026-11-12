@@ -152,10 +152,20 @@ def _nonexecuting_pytest_mode(command: list[str], *, check_config: bool = True) 
             elif value.startswith("--help") or value == "--version":
                 return True
             elif not value.startswith(("--", "-V:")):
-                for flag in value[1:]:
-                    if flag in {"c", "m"}:
+                for position, flag in enumerate(value[1:], start=1):
+                    if flag == "c":
+                        return False
+                    if flag == "m":
+                        if position + 1 < len(value):
+                            return value[position + 1 :], args[index + 1 :]
+                        if index + 1 < len(args):
+                            return args[index + 1], args[index + 2 :]
                         return False
                     if flag in {"W", "X"}:
+                        if position + 1 == len(value):
+                            index += 1
+                            if index >= len(args):
+                                return False
                         break
                     if flag in {"h", "?", "V"}:
                         return True
