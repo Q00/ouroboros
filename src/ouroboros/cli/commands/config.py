@@ -1248,7 +1248,8 @@ def validate() -> None:
     issues: list[str] = []
 
     # Check runtime backend
-    backend_val = data.get("orchestrator", {}).get("runtime_backend")
+    orchestrator = data.get("orchestrator") or {}
+    backend_val = orchestrator.get("runtime_backend")
     if not backend_val:
         issues.append("orchestrator.runtime_backend is not set")
     else:
@@ -1260,9 +1261,17 @@ def validate() -> None:
     # Check CLI path exists
     capability = get_backend_capability(str(backend_val or ""))
     if capability is not None and capability.cli_config_key:
-        cli = data.get("orchestrator", {}).get(capability.cli_config_key)
-        if cli and not Path(cli).exists():
-            issues.append(f"{capability.name} CLI path does not exist: {cli}")
+        cli = orchestrator.get(capability.cli_config_key)
+        field = f"orchestrator.{capability.cli_config_key}"
+        if cli is not None and not isinstance(cli, str):
+            issues.append(f"{field} must be a string")
+        elif cli:
+            try:
+                exists = Path(cli).exists()
+            except (OSError, ValueError, RuntimeError):
+                exists = False
+            if not exists:
+                issues.append(f"{field} does not refer to an existing CLI path")
 
     # Try loading config through the validated schema
     try:
