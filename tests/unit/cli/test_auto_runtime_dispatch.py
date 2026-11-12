@@ -56,6 +56,7 @@ async def _noop_run(self, state):  # noqa: ARG001
     "runtime",
     ["claude", "codex", "hermes", "gemini", "kiro", "copilot"],
 )
+@pytest.mark.usefixtures("auto_project_cwd")
 def test_run_auto_keeps_authoring_in_process_for_non_opencode_runtimes(
     runtime: str,
 ) -> None:
@@ -97,6 +98,7 @@ def test_run_auto_keeps_authoring_in_process_for_non_opencode_runtimes(
     assert should_dispatch_via_plugin(runtime, None) is False
 
 
+@pytest.mark.usefixtures("auto_project_cwd")
 def test_run_auto_wires_answer_refiner_factory_result_into_driver() -> None:
     """The CLI ``_run_auto`` consumer must pass ``build_answer_refiner()``'s
     result into the driver — symmetric to the MCP path.
@@ -144,6 +146,7 @@ def test_run_auto_wires_answer_refiner_factory_result_into_driver() -> None:
     assert pipeline.interview_driver.answer_refiner is sentinel_refiner
 
 
+@pytest.mark.usefixtures("auto_project_cwd")
 def test_run_auto_wires_repo_investigator_into_driver() -> None:
     """The CLI ``_run_auto`` passes ``build_repo_investigator()``'s result, built
     for the interview stage runtime, into the driver.
@@ -190,6 +193,7 @@ def test_run_auto_wires_repo_investigator_into_driver() -> None:
 
 
 @pytest.mark.parametrize(("runtime", "expected"), [("codex", "codex"), ("gemini", "gemini")])
+@pytest.mark.usefixtures("auto_project_cwd")
 def test_run_auto_gives_every_runtime_an_investigator(runtime: str, expected: str | None) -> None:
     """The real ``build_repo_investigator`` on the CLI path: Codex (read-only
     sandbox) and Gemini (no read-only mode; it reads a throwaway copy) both get
@@ -288,6 +292,7 @@ def test_run_auto_demotes_persisted_opencode_plugin_to_subprocess(tmp_path) -> N
     assert should_dispatch_via_plugin("opencode", "subprocess") is False
 
 
+@pytest.mark.usefixtures("auto_project_cwd")
 def test_run_auto_demotes_fresh_session_opencode_plugin_to_subprocess(tmp_path) -> None:
     """Fresh `--runtime opencode` session with `get_opencode_mode() == "plugin"` is demoted.
 
