@@ -145,6 +145,9 @@ def _nonexecuting_pytest_mode(command: list[str], *, check_config: bool = True) 
         index = 0
         while index < len(args):
             value = args[index]
+            if executable == "py" and index == 0 and value.startswith(("-2", "-3", "-V:")):
+                index += 1
+                continue
             if executable == "py" and value in {"-0", "-0p", "--list", "--list-paths"}:
                 return True
             if value == "-m" and index + 1 < len(args):
