@@ -1429,7 +1429,8 @@ def test_seed_repairer_converge_returns_latest_repair_when_high_findings_repeat(
 
 
 @pytest.mark.asyncio
-async def test_pipeline_skip_run_stops_after_a_grade_seed(tmp_path) -> None:
+@pytest.mark.parametrize("use_seed_qa", [False, True])
+async def test_pipeline_skip_run_stops_after_a_grade_seed(tmp_path, use_seed_qa: bool) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         return InterviewTurn("What should we verify?", "interview_1")
 
@@ -1439,6 +1440,9 @@ async def test_pipeline_skip_run_stops_after_a_grade_seed(tmp_path) -> None:
     async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
         return _seed()
 
+    async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
+        return EvaluateResult(passed=True, score=0.95, verdict="pass")
+
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
     ledger = SeedDraftLedger.from_goal(state.goal)
     _fill_ready(ledger)
@@ -1446,13 +1450,22 @@ async def test_pipeline_skip_run_stops_after_a_grade_seed(tmp_path) -> None:
     driver = AutoInterviewDriver(
         FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=1
     )
-    pipeline = AutoPipeline(driver, generate_seed, store=AutoStore(tmp_path), skip_run=True)
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        store=AutoStore(tmp_path),
+        skip_run=True,
+        seed_qa_evaluator=seed_qa if use_seed_qa else None,
+    )
 
     result = await pipeline.run(state)
 
     assert result.status == "complete"
     assert result.grade == "A"
     assert result.job_id is None
+    assert result.artifact_state == "complete_unverified"
+    if use_seed_qa:
+        assert state.last_qa_passed is True
 
 
 @pytest.mark.asyncio
@@ -1798,8 +1811,7 @@ async def test_a_failed_evaluator_never_republishes_the_previous_verdict(
 
     ``state.last_qa_*`` is durable, so a resumed session carrying a prior pass
     would otherwise publish ``verdict="pass"`` inside an evaluator-failure
-    advisory event — and a persisted ``last_qa_passed=True`` alone makes a
-    skip-run terminal report ``artifact_state="complete_verified"``.
+    advisory event and its completion state.
     """
 
     async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
@@ -5713,6 +5725,8 @@ async def test_pipeline_attaches_run_handle_after_unknown_handoff_without_restar
     state.transition(AutoPhase.RUN, "run")
     state.run_start_attempted = True
     state.run_handoff_status = "unknown_no_handle"
+    # Seed QA can have passed before the run is attached; it is not product QA.
+    state.last_qa_passed = True
     state.mark_blocked("Run starter returned no tracking handle", tool_name="run_starter")
 
     driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
@@ -5733,6 +5747,12 @@ async def test_pipeline_attaches_run_handle_after_unknown_handoff_without_restar
     assert result.attached_run_handle == "exec_existing"
     assert result.attached_run_source == "operator"
     assert result.attached_at is not None
+    # A handle confirms where a run can be tracked, not that its product passed.
+    assert result.artifact_state == "complete_unverified"
+    from ouroboros.mcp.tools.auto_handler import _format_result, _result_meta
+
+    assert _result_meta(result)["artifact_state"] == "complete_unverified"
+    assert "Artifact state: complete_unverified" in _format_result(result)
     assert state.run_start_attempted is True
     assert state.execution_id == "exec_existing"
 
