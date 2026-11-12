@@ -61,10 +61,10 @@ async def test_real_adapter_teardown_failure_cannot_return_passing_probe():
     client.__aexit__.assert_awaited_once()
 
 
-@pytest.mark.parametrize("entry_cancelled", [False, True])
+@pytest.mark.parametrize("entry_outcome", ["success", "error", "cancelled"])
 @pytest.mark.parametrize("explicit_cause", [False, True])
 async def test_real_adapter_cleanup_cancellation_does_not_echo_its_cause(
-    entry_cancelled, explicit_cause
+    entry_outcome, explicit_cause
 ):
     cancellation = anyio.get_cancelled_exc_class()("cleanup cancelled")
     cancellation.add_note("existing cancellation note")
@@ -80,10 +80,20 @@ async def test_real_adapter_cleanup_cancellation_does_not_echo_its_cause(
     client = MagicMock()
     entry_error = (
         anyio.get_cancelled_exc_class()("caller cancelled")
-        if entry_cancelled
+        if entry_outcome == "cancelled"
         else RuntimeError("connection failed")
+        if entry_outcome == "error"
+        else None
     )
-    client.__aenter__ = AsyncMock(side_effect=entry_error)
+    client.__aenter__ = AsyncMock(return_value=client, side_effect=entry_error)
+    client.protocol_version = "2026-07-28"
+    client.server_info = None
+    client.server_capabilities = SimpleNamespace(
+        tools=None, resources=None, prompts=None, logging=None, extensions=None
+    )
+    client.instructions = None
+    client.session = SimpleNamespace(discover_result=None)
+    client.list_tools = AsyncMock(return_value=SimpleNamespace(tools=[]))
     client.__aexit__ = AsyncMock(side_effect=cancel_cleanup)
     with (
         patch(

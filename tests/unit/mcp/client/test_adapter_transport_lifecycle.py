@@ -49,7 +49,8 @@ def _entered_client(*, enter_error: Exception | None = None, exit_error: Excepti
     return client
 
 
-async def test_default_adapter_preserves_cleanup_cancellation_cause():
+@pytest.mark.parametrize("connection_succeeds", [False, True])
+async def test_default_adapter_preserves_cleanup_cancellation_cause(connection_succeeds):
     cancellation = asyncio.CancelledError("cleanup cancelled")
 
     async def cancel_cleanup(*_args):
@@ -58,15 +59,22 @@ async def test_default_adapter_preserves_cleanup_cancellation_cause():
         except RuntimeError as error:
             raise cancellation from error
 
-    client = _entered_client(enter_error=RuntimeError("connection failed"))
+    client = _entered_client(
+        enter_error=None if connection_succeeds else RuntimeError("connection failed")
+    )
     client.__aexit__.side_effect = cancel_cleanup
     with patch(
         "ouroboros.mcp.client.adapter.build_sdk_client",
         return_value=SDKClientResources(client),
     ):
         adapter = MCPClientAdapter(max_retries=1)
+        if connection_succeeds:
+            assert (await adapter.connect(_config())).is_ok
         with pytest.raises(asyncio.CancelledError) as caught:
-            await adapter.connect(_config())
+            if connection_succeeds:
+                await adapter.disconnect()
+            else:
+                await adapter.connect(_config())
     assert caught.value is cancellation
     assert "cleanup diagnostic" in "".join(traceback.format_exception(caught.value))
     client.__aexit__.assert_awaited_once()
