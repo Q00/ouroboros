@@ -1573,6 +1573,7 @@ class TestBackgroundJobPath:
         assert "user_preferences" not in runner_args
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("auto_project_cwd")
     async def test_mcp_plugin_mode_wires_seed_qa_with_demoted_authoring_handler(
         self, event_store, tmp_path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1621,6 +1622,7 @@ class TestBackgroundJobPath:
         assert "evaluator" not in kwargs
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("auto_project_cwd")
     async def test_auto_never_suppresses_the_run_job_successors(
         self, event_store, tmp_path
     ) -> None:
