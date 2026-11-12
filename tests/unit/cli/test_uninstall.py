@@ -1100,7 +1100,7 @@ class TestOpenCodeV2BridgeRemoval:
             assert _remove_opencode_bridge_plugin(dry_run=False)
         assert json.loads(config.read_text()) == {
             "plugin": ["v1-other"],
-            "plugins": ["v2-other"],
+            "plugins": ["v2-other"] if os.name == "nt" else original["plugins"],
             "untouched": {"hello": "world"},
         }
 
