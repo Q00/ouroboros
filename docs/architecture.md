@@ -265,6 +265,7 @@ independently-verifiable units.
 - `orchestrator/parallel_executor.py` - Live recursive AC executor (dependency-staged fan-out, profile-based decomposition, evidence-gated delivery)
 - `orchestrator/decomposition_params.py` - Profile-driven decomposition prompts (axis / `min_unit` / branching)
 - `orchestrator/runner.py` - Orchestration entry point and dependency analysis
+- `orchestrator/process_local_authority.py` - Runner-owned process-local authority lifecycle, including liveness leases and retry retention
 
 **Dependency planning:**
 
