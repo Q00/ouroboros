@@ -323,7 +323,8 @@ def parse_coverage_from_output(output: str) -> float | None:
             or re.fullmatch(bare_coverage, line)
             or re.fullmatch(lcov, line)
             or re.search(xml_coverage, line, re.IGNORECASE)
-            for line in (detection_text(row) for row in streams[package].splitlines())
+            for row in streams[package].splitlines()
+            for line in (re.sub(r"\x1b\[[0-9;]{0,32}m", "", row), detection_text(row))
         ):
             return None
     matches = [re.fullmatch(pattern, row) for row in total_rows]

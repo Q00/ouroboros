@@ -1051,6 +1051,10 @@ _JSON_TRANSPORT_OUTPUTS = {
     "raw-json-prose-U+FFFD": (["ordinary � diagnostic\n"], False, False),
     "supported-high": ([], True, True),
     "decoded-low-TOTAL": (["TOTAL 10 8 20%\n"], True, False),
+    "decoded_boundary_total_suffix": (["TOTAL\u200bS 10 8 20%\n"], True, False),
+    "decoded_boundary_total_number": (["TOTAL\b10 8 20%\n"], True, False),
+    "decoded_boundary_coverage_suffix": (["Coverage\u200babc\n"], True, False),
+    "decoded_boundary_go_module": (["ok \u200b 0.1s coverage: 15.0%\n"], True, False),
 }
 
 
