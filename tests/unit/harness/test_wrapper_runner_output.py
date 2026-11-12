@@ -649,6 +649,89 @@ def test_frozen_wrapper_coverage_abbreviations_preserve_execution_evidence(
     assert marker.exists() is (mode == "execute")
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX env and controlled launcher executable")
+@pytest.mark.parametrize("launcher", ["env", "uv", "controlled_uvx"])
+@pytest.mark.parametrize("mode", ["help", "collect", "execute"])
+def test_frozen_wrapper_nested_launcher_execution_evidence(
+    tmp_path: Path, launcher: str, mode: str
+) -> None:
+    test_path, marker = _make_pytest_contract(tmp_path, failing=False)
+    coverage = str(Path(sys.executable).with_name("coverage"))
+    if launcher == "env":
+        prefix = ["env", "-u", "UNUSED", "PROBE=1", coverage]
+    elif launcher == "uv":
+        uv = shutil.which("uv")
+        if uv is None:
+            pytest.skip("real uv is unavailable; parent also runs a separate offline uv proof")
+        prefix = [
+            uv, "run", "--offline", "--no-config", "--no-project", "--no-env-file",
+            "--python", sys.executable, coverage,
+        ]
+    else:
+        shim = tmp_path / "uvx"
+        shim.write_text(
+            f"#!{sys.executable}\nimport os, sys\n"
+            "assert sys.argv[1:4] == ['--from', 'coverage', 'coverage']\n"
+            f"os.execv({coverage!r}, [{coverage!r}, *sys.argv[4:]])\n"
+        )
+        shim.chmod(0o700)
+        prefix = [str(shim), "--from", "coverage", "coverage"]
+    before_target = ["-h"] if mode == "help" else []
+    pytest_options = ["--co"] if mode == "collect" else []
+    argv = _pytest_wrapper_argv(("receipt.json", "stdout.txt", "stderr.txt"), test_path)
+    argv[argv.index("--") + 1 :] = [
+        *prefix, "run", *before_target, "-m", "pytest", *pytest_options, str(test_path),
+    ]
+    result = subprocess.run(argv, cwd=tmp_path, capture_output=True, check=False)
+    receipt = json.loads((tmp_path / "receipt.json").read_text())
+    assert receipt["inner_exit_status"] == 0
+    assert receipt["test_result"] == ("passed" if mode == "execute" else "failed")
+    assert result.returncode == receipt["outer_exit_status"] == (0 if mode == "execute" else 1)
+    assert marker.exists() is (mode == "execute")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX env execution")
+@pytest.mark.parametrize("change", ["addopts", "cwd"])
+def test_frozen_wrapper_withholds_changed_launcher_context(
+    tmp_path: Path, change: str
+) -> None:
+    target = tmp_path / "sub" if change == "cwd" else tmp_path
+    target.mkdir(exist_ok=True)
+    test_path, marker = _make_pytest_contract(target, failing=False)
+    if change == "cwd":
+        (target / "pytest.ini").write_text("[pytest]\naddopts = --collect-only\n")
+        prefix = ["env", "-C", str(target)]
+    else:
+        prefix = ["env", "PYTEST_ADDOPTS=--collect-only"]
+    argv = _pytest_wrapper_argv(("receipt.json", "stdout.txt", "stderr.txt"), test_path)
+    argv[argv.index("--") + 1 :] = [*prefix, sys.executable, "-m", "pytest", test_path.name]
+    result = subprocess.run(argv, cwd=tmp_path, capture_output=True, check=False)
+    receipt = json.loads((tmp_path / "receipt.json").read_text())
+    assert receipt["inner_exit_status"] == 0
+    assert receipt["test_result"] == "failed"
+    assert result.returncode == receipt["outer_exit_status"] == 1
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("collect_only", [True, False])
+def test_frozen_wrapper_withholds_coverage_config_target(
+    tmp_path: Path, collect_only: bool
+) -> None:
+    test_path, marker = _make_pytest_contract(tmp_path, failing=False)
+    options = "--collect-only " if collect_only else ""
+    (tmp_path / ".coveragerc").write_text(
+        f"[run]\ncommand_line = -m pytest {options}{test_path.name}\n"
+    )
+    argv = _pytest_wrapper_argv(("receipt.json", "stdout.txt", "stderr.txt"), test_path)
+    argv[argv.index("--") + 1 :] = [sys.executable, "-m", "coverage", "run"]
+    result = subprocess.run(argv, cwd=tmp_path, capture_output=True, check=False)
+    receipt = json.loads((tmp_path / "receipt.json").read_text())
+    assert receipt["inner_exit_status"] == 0
+    assert receipt["test_result"] == "failed"
+    assert result.returncode == receipt["outer_exit_status"] == 1
+    assert marker.exists() is not collect_only
+
+
 def test_frozen_wrapper_rejects_collection_from_nodeid_config(tmp_path: Path) -> None:
     sub = tmp_path / "sub"
     sub.mkdir()
