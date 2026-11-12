@@ -35,7 +35,6 @@ from ouroboros.core.conductor import (
 from ouroboros.core.errors import ConfigError, ValidationError
 from ouroboros.core.execution_preferences import (
     ResolvedExecutionPreferences,
-    execution_preferences_from_contract,
     resolve_execution_preferences,
 )
 from ouroboros.core.project_paths import resolve_seed_project_path
@@ -55,6 +54,7 @@ from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.tools._dashboard import resolve_dashboard_run_url
 from ouroboros.mcp.tools.background import job_work_error, start_background_tool_job
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
+from ouroboros.mcp.tools.execution_preferences import persisted_execution_preferences
 from ouroboros.mcp.tools.job_observer import (
     append_job_observer_inline_handoff,
     build_job_observer_contract,
@@ -262,22 +262,6 @@ def _resolve_execution_preferences_request(
         raw_efficiency if isinstance(raw_efficiency, str) else None,
         raw_assurance if isinstance(raw_assurance, str) else None,
     )
-
-
-def _persisted_execution_preferences(progress: Mapping[str, Any]) -> ResolvedExecutionPreferences:
-    """Read the immutable preference contract used by a resumed session."""
-    raw_contract = progress.get("execution_contract")
-    if raw_contract is None:
-        return resolve_execution_preferences(None, None)
-    if not isinstance(raw_contract, Mapping):
-        raise ValueError("Persisted execution_contract is invalid")
-    raw_preferences = raw_contract.get("execution_preferences")
-    preferences = execution_preferences_from_contract(raw_preferences)
-    if preferences is None:
-        if raw_preferences is None:
-            return resolve_execution_preferences(None, None)
-        raise ValueError("Persisted execution preferences are invalid")
-    return preferences
 
 
 async def _prepare_conductor_successor_seed(
@@ -1192,6 +1176,8 @@ class ExecuteSeedHandler(BridgeAwareMixin):
         session_id_override: str | None = None,
         synchronous: bool = False,
         check_package: CheckPackageRun | None = None,
+        _preference_snapshot: tuple[ResolvedExecutionPreferences, str | None, str | None]
+        | None = None,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Handle a seed execution request.
 
@@ -1266,7 +1252,9 @@ class ExecuteSeedHandler(BridgeAwareMixin):
         )
         try:
             execution_preferences, raw_efficiency_mode, raw_frugality_assurance = (
-                _resolve_execution_preferences_request(arguments, is_resume=is_resume)
+                _preference_snapshot
+                if _preference_snapshot is not None and not is_resume
+                else _resolve_execution_preferences_request(arguments, is_resume=is_resume)
             )
         except ValueError as exc:
             return Result.err(MCPToolError(str(exc), tool_name="ouroboros_execute_seed"))
@@ -1450,7 +1438,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     workspace_session_id = tracker.session_id
                     workspace_execution_id = tracker.execution_id
                     try:
-                        execution_preferences = _persisted_execution_preferences(tracker.progress)
+                        execution_preferences = persisted_execution_preferences(tracker.progress)
                     except ValueError as exc:
                         return Result.err(launch_error("launch_resume_blocked", str(exc)))
                     if tracker.status in (
@@ -2039,7 +2027,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     f"Runtime Backend: {effective_runtime_backend}\n"
                     f"LLM Backend: {resolved_llm_backend}\n"
                     f"Efficiency Mode: {execution_preferences.efficiency_mode.value}"
-                    f"{policy_notice(arguments)}\n"
+                    f"{policy_notice(arguments, resolved_efficiency_mode=execution_preferences.efficiency_mode.value)}\n"
                     "Frugality Assurance: "
                     f"{execution_preferences.frugality_assurance.value}\n"
                 )
@@ -2576,7 +2564,7 @@ class StartExecuteSeedHandler:
                     )
                 )
             try:
-                execution_preferences = _persisted_execution_preferences(resumed_tracker.progress)
+                execution_preferences = persisted_execution_preferences(resumed_tracker.progress)
             except ValueError as exc:
                 return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_execute_seed"))
         seed_parse = _parse_seed_yaml_for_execution_mode(
@@ -2709,13 +2697,8 @@ class StartExecuteSeedHandler:
                 response_shape=response_shape,
             )
 
-        # Fall-through: real background job path (subprocess / non-opencode
-        # runtimes).  No subagent payload is built here — the background job
-        # re-invokes ExecuteSeedHandler.handle() via ``_runner`` below, which
-        # constructs and consumes its own payload internally.  The only payload
-        # consumer in this handler is the plugin branch above; an earlier
-        # background-path ``build_execute_subagent`` here was orphaned by commit
-        # 3c393c98 (its result was never referenced) and has been removed.
+        # Background execution re-enters ExecuteSeedHandler through _runner
+        # in the owning process; only the plugin branch consumes a subagent payload.
         await self._event_store.initialize()
 
         session_id = arguments.get("session_id")
@@ -2748,6 +2731,11 @@ class StartExecuteSeedHandler:
                 session_id_override=new_session_id,
                 synchronous=True,
                 check_package=check_package,
+                _preference_snapshot=(
+                    (execution_preferences, _raw_efficiency_mode, _raw_frugality_assurance)
+                    if not is_resume
+                    else None
+                ),
             )
             if result.is_err:
                 raise job_work_error(result.error)
@@ -2789,7 +2777,13 @@ class StartExecuteSeedHandler:
             work_fn=_runner,
             cancelled_text="Seed execution cancelled before restart work began.",
             detached_tool_name="ouroboros_start_execute_seed",
-            detached_arguments=arguments,
+            # Freeze the accepted mode across worker config reloads. Resume
+            # must omit overrides so its persisted execution contract wins.
+            detached_arguments=(
+                arguments
+                if is_resume
+                else {**arguments, "efficiency_mode": execution_preferences.efficiency_mode.value}
+            ),
             runtime_backend=self.agent_runtime_backend,
             llm_backend=self._execute_handler.llm_backend,
             opencode_mode=self.opencode_mode,
@@ -2830,7 +2824,8 @@ class StartExecuteSeedHandler:
             f"Execution ID: {snapshot.links.execution_id or 'pending'}\n\n"
             f"Runtime Backend: {runtime_backend}\n"
             f"LLM Backend: {llm_backend}\n"
-            f"Efficiency Mode: {execution_preferences.efficiency_mode.value}{policy_notice(arguments)}\n"
+            f"Efficiency Mode: {execution_preferences.efficiency_mode.value}"
+            f"{policy_notice(arguments, resolved_efficiency_mode=execution_preferences.efficiency_mode.value)}\n"
             "Frugality Assurance: "
             f"{execution_preferences.frugality_assurance.value}\n"
             f"{dashboard_line}\n"

@@ -18,6 +18,7 @@ from ouroboros.boundary.events import (
     BOUNDARY_AGGREGATE_TYPE,
     PACKAGE_FROZEN,
 )
+from ouroboros.core.execution_preferences import ResolvedExecutionPreferences
 from ouroboros.core.types import Result
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler
 from ouroboros.orchestrator.session import SessionStatus, SessionTracker
@@ -417,6 +418,8 @@ class _TerminalFirstExecuteHandler:
         session_id_override: str | None = None,
         synchronous: bool = False,
         check_package: Any = None,
+        _preference_snapshot: tuple[ResolvedExecutionPreferences, str | None, str | None]
+        | None = None,
     ) -> Result:
         from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 

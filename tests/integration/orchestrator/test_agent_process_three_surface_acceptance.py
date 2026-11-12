@@ -24,6 +24,7 @@ from uuid import uuid4
 
 import pytest
 
+from ouroboros.core.execution_preferences import ResolvedExecutionPreferences
 from ouroboros.core.types import Result
 from ouroboros.mcp.job_manager import JobLinks, JobManager, JobStatus
 from ouroboros.mcp.tools.evolution_handlers import StartEvolveStepHandler
@@ -291,6 +292,8 @@ class _FakeExecuteHandler:
         session_id_override: str | None = None,
         synchronous: bool = False,
         check_package: Any = None,  # noqa: ARG002 - protocol fixture
+        _preference_snapshot: tuple[ResolvedExecutionPreferences, str | None, str | None]
+        | None = None,
     ):
         assert synchronous is True
         meta = {
@@ -326,6 +329,8 @@ class _BlockingExecuteHandler:
         session_id_override: str | None = None,  # noqa: ARG002 - protocol fixture
         synchronous: bool = False,  # noqa: ARG002 - protocol fixture
         check_package: Any = None,  # noqa: ARG002 - protocol fixture
+        _preference_snapshot: tuple[ResolvedExecutionPreferences, str | None, str | None]
+        | None = None,
     ):
         self.started.set()
         try:

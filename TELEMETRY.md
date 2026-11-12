@@ -224,7 +224,10 @@ Notes:
   Anything else folds to `unknown` before serialization. A job that fails
   before its work function returns (pre-launch rejection, or a run whose
   terminal is recovered from linked execution evidence after a restart)
-  carries the same closed values; a background `evaluate` job that fails
+  carries the same closed values. A CLI run rejected while preparing or restoring
+  its task workspace also emits `launch_workspace_unavailable`; malformed Seed
+  YAML and Seed model validation failures emit `launch_seed_invalid`. Other
+  CLI pre-launch failures are not covered by that event. A background `evaluate` job that fails
   carries only the branch-level `failure_reason_code` its handler already
   reports on the direct path (`validation`/`config`/`auth`/`timeout`/`model`),
   never a `failure_cause`.
@@ -243,8 +246,11 @@ Notes:
 - PostHog may derive coarse country from the request IP for the country
   aggregate. Ouroboros does not include the IP address in event properties.
 - Events use a public write-only project key and a fire-and-forget worker.
-  Telemetry never blocks a command and silently drops events when offline.
-  Detached job workers flush their terminal `workflow_outcome` before exit.
+  Event capture queues without waiting for delivery and silently drops events
+  when offline. Explicit exit flushes may delay return: CLI run exit paths
+  wait up to 1.5 seconds after user-facing output; detached job workers wait
+  up to 5 seconds for their terminal `workflow_outcome` before exit. These
+  waits are best effort and do not guarantee delivery.
 
 ## Where the code lives
 

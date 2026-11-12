@@ -620,6 +620,45 @@ class TestBackgroundJobPath:
         assert result.value.meta["frugality_assurance"] == "observe"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("selected_mode", "later_default", "notice_expected"),
+        [("adaptive", "quality_first", False), ("quality_first", "adaptive", True)],
+    )
+    async def test_receipt_uses_started_policy_if_config_changes(
+        self, event_store, fake_inner_auto, tmp_path, selected_mode, later_default, notice_expected
+    ) -> None:
+        job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
+        snapshot = MagicMock()
+        snapshot.job_id = "job_auto_policy_snapshot"
+
+        async def _start_job(*, runner, **_):
+            if inspect.iscoroutine(runner):
+                runner.close()
+            return snapshot
+
+        job_manager.start_job = AsyncMock(side_effect=_start_job)
+        h = StartAutoHandler(
+            event_store=event_store, job_manager=job_manager, store=AutoStore(tmp_path)
+        )
+        h._inner_auto = fake_inner_auto
+        with (
+            patch(
+                "ouroboros.mcp.tools.auto_handler.default_execution_efficiency_mode",
+                return_value=selected_mode,
+            ),
+            patch(
+                "ouroboros.config.policy_notice.default_execution_efficiency_mode",
+                return_value=later_default,
+            ),
+        ):
+            result = await h.handle({"goal": "build a CLI"})
+
+        assert result.is_ok
+        assert result.value.meta["efficiency_mode"] == selected_mode
+        assert ("(default;" in result.value.text_content) is notice_expected
+
+    @pytest.mark.asyncio
     async def test_now_binds_durable_job_scoped_cancel_key(
         self, event_store, fake_inner_auto, tmp_path, monkeypatch
     ) -> None:
