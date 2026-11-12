@@ -1090,3 +1090,126 @@ class TestRunDeliberativeEvaluation:
         assert result.is_ok
         deliberation, _ = result.value
         assert deliberation.approved is True
+
+
+@pytest.mark.parametrize(
+    "value", ["true", "false", "NaN", "Infinity", "-Infinity", '"NaN"', '"Infinity"', "1e400"]
+)
+@pytest.mark.parametrize("kind", ["vote", "judgment"])
+def test_consensus_rejects_nonfinite_or_boolean_confidence(value: str, kind: str) -> None:
+    """Malformed confidence is not promoted to a confident decision."""
+    if kind == "vote":
+        result = parse_vote_response('{"approved": true, "confidence": ' + value + "}", "model")
+    else:
+        result = _parse_judgment_response(
+            '{"verdict": "approved", "confidence": ' + value + "}", "model"
+        )
+    assert result.is_err
+
+
+@pytest.mark.parametrize("kind", ["vote", "judgment"])
+def test_consensus_rejects_overflow_confidence(kind: str) -> None:
+    value = "9" * 400
+    if kind == "vote":
+        result = parse_vote_response('{"approved": true, "confidence": ' + value + "}", "model")
+    else:
+        result = _parse_judgment_response(
+            '{"verdict": "approved", "confidence": ' + value + "}", "model"
+        )
+    assert result.is_err
+
+
+@pytest.mark.parametrize("kind", ["vote", "judgment"])
+@pytest.mark.parametrize(("value", "expected"), [('"0.7"', 0.7), ("1.5", 1.0), ("-1", 0.0)])
+def test_consensus_preserves_finite_confidence_compatibility(
+    value: str, expected: float, kind: str
+) -> None:
+    if kind == "vote":
+        result = parse_vote_response('{"approved": true, "confidence": ' + value + "}", "model")
+    else:
+        result = _parse_judgment_response(
+            '{"verdict": "approved", "confidence": ' + value + "}", "model"
+        )
+    assert result.is_ok
+    assert result.value.confidence == expected
+
+
+@pytest.mark.asyncio
+async def test_invalid_dissent_confidence_does_not_create_consensus_approval() -> None:
+    responses = (
+        '{"approved": true, "confidence": 0.8}',
+        '{"approved": true, "confidence": 0.8}',
+        '{"approved": false, "confidence": 0.8}',
+        '{"approved": false, "confidence": NaN}',
+    )
+    adapter = AsyncMock()
+    adapter.complete.side_effect = [
+        Result.ok(CompletionResponse(content=value, model="model", usage=UsageInfo(0, 0, 0)))
+        for value in responses
+    ]
+    evaluator = ConsensusEvaluator(adapter, ConsensusConfig(models=("a", "b", "c", "d")))
+    context = EvaluationContext(execution_id="e", seed_id="s", current_ac="x", artifact="y")
+    result = await evaluator.evaluate(context)
+    assert result.is_err or not result.value[0].approved
+
+
+@pytest.mark.asyncio
+async def test_invalid_perspective_dissent_does_not_create_consensus_approval() -> None:
+    responses = (
+        '{"approved": true, "confidence": 0.8}',
+        '{"approved": true, "confidence": 0.8}',
+        '{"approved": false, "confidence": NaN}',
+    )
+    adapter = AsyncMock()
+    adapter.complete.side_effect = [
+        Result.ok(CompletionResponse(content=value, model="model", usage=UsageInfo(0, 0, 0)))
+        for value in responses
+    ]
+    evaluator = ConsensusEvaluator(
+        adapter, ConsensusConfig(models=("a", "b", "c"), majority_threshold=0.75)
+    )
+    context = EvaluationContext(execution_id="e", seed_id="s", current_ac="x", artifact="y")
+    result = await evaluator._evaluate_single_model(context, "test")
+    assert result.is_err
+    assert result.error.field == "confidence"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_with_invalid_dissent_confidence_cannot_approve() -> None:
+    from ouroboros.evaluation.models import CheckResult, CheckType, MechanicalResult, SemanticResult
+    from ouroboros.evaluation.pipeline import EvaluationPipeline, PipelineConfig
+
+    responses = (
+        '{"approved": true, "confidence": 0.8}',
+        '{"approved": true, "confidence": 0.8}',
+        '{"approved": false, "confidence": 0.8}',
+        '{"approved": false, "confidence": NaN}',
+    )
+    adapter = AsyncMock()
+    adapter.complete.side_effect = [
+        Result.ok(CompletionResponse(content=value, model="model", usage=UsageInfo(0, 0, 0)))
+        for value in responses
+    ]
+    pipeline = EvaluationPipeline(
+        adapter, PipelineConfig(stage1_enabled=False, stage2_enabled=True)
+    )
+    semantic = SemanticResult(
+        score=0.9,
+        ac_compliance=True,
+        goal_alignment=0.9,
+        drift_score=0.1,
+        uncertainty=0.1,
+        reasoning="ok",
+    )
+    pipeline._semantic.evaluate = AsyncMock(return_value=Result.ok((semantic, [])))
+    pipeline._consensus = ConsensusEvaluator(adapter, ConsensusConfig(models=("a", "b", "c", "d")))
+    context = EvaluationContext(
+        execution_id="e", seed_id="s", current_ac="x", artifact="y", trigger_consensus=True
+    )
+    stage1 = MechanicalResult(
+        passed=True,
+        checks=(CheckResult(check_type=CheckType.TEST, passed=True, message="ok", executed=True),),
+    )
+    result = await pipeline.evaluate(context, stage1_result=stage1)
+    assert result.is_err
+    assert result.error.field == "confidence"

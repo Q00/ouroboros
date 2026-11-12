@@ -47,6 +47,11 @@ import yaml
 
 from ouroboros.backends import get_backend_capability
 from ouroboros.config.completion_backend_guard import guard_completion_backend
+from ouroboros.config.credential_errors import (
+    safe_yaml_error_details,
+    sanitize_config_errors,
+    sanitize_credential_errors,
+)
 from ouroboros.config.model_selection import (
     backend_model_selection,
     pin_models_enabled,
@@ -315,6 +320,27 @@ def create_default_config(
     return config_path, credentials_path
 
 
+def _read_yaml_file(path: Path, *, description: str = "configuration") -> Any:
+    """Read YAML without retaining input-bearing parser or filesystem errors."""
+    failure = None
+    try:
+        with path.open(encoding="utf-8") as stream:
+            return yaml.safe_load(stream)
+    except (UnicodeDecodeError, yaml.YAMLError) as exc:
+        failure = ConfigError(
+            f"Failed to parse {description} file",
+            config_file=str(path),
+            details=safe_yaml_error_details(exc),
+        )
+    except OSError as exc:
+        failure = ConfigError(
+            f"Failed to read {description} file",
+            config_file=str(path),
+            details={"error_type": type(exc).__name__},
+        )
+    raise failure
+
+
 def load_config(config_path: Path | None = None) -> OuroborosConfig:
     """Load configuration from YAML file.
 
@@ -340,44 +366,27 @@ def load_config(config_path: Path | None = None) -> OuroborosConfig:
             config_file=str(config_path),
         )
 
-    try:
-        with config_path.open(encoding="utf-8") as f:
-            config_dict = yaml.safe_load(f)
-    except (UnicodeDecodeError, yaml.YAMLError) as e:
-        raise ConfigError(
-            f"Failed to parse configuration file: {e}",
-            config_file=str(config_path),
-            details={"yaml_error": str(e)},
-        ) from e
-
+    config_dict = _read_yaml_file(config_path)
     if config_dict is None:
         config_dict = {}
 
     try:
         return OuroborosConfig.model_validate(config_dict)
     except PydanticValidationError as e:
-        # Format validation errors for clarity
-        validation_errors = e.errors()
-        error_messages = []
-        config_keys = []
-        for error in validation_errors:
-            loc = ".".join(str(x) for x in error["loc"])
-            msg = error["msg"]
-            error_messages.append(f"  - {loc}: {msg}")
-            if loc:
-                config_keys.append(loc)
-
+        validation_errors = sanitize_config_errors(e)
+        config_keys = [".".join(error["loc"]) for error in validation_errors if error["loc"]]
+        error_messages = [
+            f"  - {'.'.join(error['loc'])}: {error['msg']}" for error in validation_errors
+        ]
         config_key = config_keys[0] if len(validation_errors) == 1 and config_keys else None
-
-        raise ConfigError(
+        validation_failure = ConfigError(
             "Configuration validation failed:\n" + "\n".join(error_messages),
             config_key=config_key,
             config_file=str(config_path),
-            details={
-                "validation_errors": validation_errors,
-                "config_keys": config_keys,
-            },
-        ) from e
+            details={"validation_errors": validation_errors, "config_keys": config_keys},
+        )
+    # Leave the handler before raising: __context__ must not retain raw input.
+    raise validation_failure
 
 
 def load_credentials(credentials_path: Path | None = None) -> CredentialsConfig:
@@ -413,33 +422,23 @@ def load_credentials(credentials_path: Path | None = None) -> CredentialsConfig:
         # We don't raise an error, but this could be logged
         pass
 
-    try:
-        with credentials_path.open(encoding="utf-8") as f:
-            credentials_dict = yaml.safe_load(f)
-    except (UnicodeDecodeError, yaml.YAMLError) as e:
-        raise ConfigError(
-            f"Failed to parse credentials file: {e}",
-            config_file=str(credentials_path),
-            details={"yaml_error": str(e)},
-        ) from e
-
+    credentials_dict = _read_yaml_file(credentials_path, description="credentials")
     if credentials_dict is None:
         credentials_dict = {}
 
     try:
         return CredentialsConfig.model_validate(credentials_dict)
     except PydanticValidationError as e:
-        error_messages = []
-        for error in e.errors():
-            loc = ".".join(str(x) for x in error["loc"])
-            msg = error["msg"]
-            error_messages.append(f"  - {loc}: {msg}")
-
-        raise ConfigError(
+        safe_errors = sanitize_credential_errors(e)
+        error_messages = [f"  - {'.'.join(error['loc'])}: {error['msg']}" for error in safe_errors]
+        validation_failure = ConfigError(
             "Credentials validation failed:\n" + "\n".join(error_messages),
             config_file=str(credentials_path),
-            details={"validation_errors": e.errors()},
-        ) from e
+            details={"validation_errors": safe_errors},
+        )
+    # Raise outside the handler so the input-bearing validation error is not
+    # retained as __context__ on this public exception.
+    raise validation_failure
 
 
 def config_exists() -> bool:
@@ -492,21 +491,24 @@ def _parse_runtime_control_number(
 ) -> int | float:
     """Parse a runtime-control value from an environment variable."""
     candidate = raw_value.strip()
+    failure = None
     try:
         parsed = float(candidate) if allow_float else int(candidate)
-    except ValueError as exc:
-        raise ConfigError(
+    except ValueError:
+        failure = ConfigError(
             f"{config_key} must be a {'positive number' if allow_float else 'non-negative integer'}",
             config_key=config_key,
-            details={"value": raw_value},
-        ) from exc
+            details={"value_type": type(raw_value).__name__},
+        )
+    if failure is not None:
+        raise failure
 
     if allow_float:
         if parsed < 0 or (not allow_zero and parsed == 0):
             raise ConfigError(
                 f"{config_key} must be {'greater than 0' if not allow_zero else 'greater than or equal to 0'}",
                 config_key=config_key,
-                details={"value": raw_value},
+                details={"value_type": type(raw_value).__name__},
             )
         return parsed
 
@@ -514,7 +516,7 @@ def _parse_runtime_control_number(
         raise ConfigError(
             f"{config_key} must be greater than or equal to 0",
             config_key=config_key,
-            details={"value": raw_value},
+            details={"value_type": type(raw_value).__name__},
         )
     return parsed
 
@@ -792,37 +794,40 @@ def _parse_max_parallel_workers(value: Any, *, config_key: str) -> int:
         raise ConfigError(
             f"{config_key} must be a positive integer",
             config_key=config_key,
-            details={"value": value},
+            details={"value_type": type(value).__name__},
         )
 
+    failure = None
     try:
         parsed = int(value)
-    except (OverflowError, TypeError, ValueError) as exc:
-        raise ConfigError(
+    except (OverflowError, TypeError, ValueError):
+        failure = ConfigError(
             f"{config_key} must be a positive integer",
             config_key=config_key,
-            details={"value": value},
-        ) from exc
+            details={"value_type": type(value).__name__},
+        )
+    if failure is not None:
+        raise failure
 
     if isinstance(value, float) and not value.is_integer():
         raise ConfigError(
             f"{config_key} must be a positive integer",
             config_key=config_key,
-            details={"value": value},
+            details={"value_type": type(value).__name__},
         )
 
     if not math.isfinite(parsed):
         raise ConfigError(
             f"{config_key} must be finite",
             config_key=config_key,
-            details={"value": value},
+            details={"value_type": type(value).__name__},
         )
 
     if parsed <= 0:
         raise ConfigError(
             f"{config_key} must be greater than 0",
             config_key=config_key,
-            details={"value": value},
+            details={"value_type": type(value).__name__},
         )
 
     return parsed
@@ -834,30 +839,33 @@ def _parse_positive_float(value: Any, *, config_key: str) -> float:
         raise ConfigError(
             f"{config_key} must be a positive number",
             config_key=config_key,
-            details={"value": value},
+            details={"value_type": type(value).__name__},
         )
 
+    failure = None
     try:
         parsed = float(value)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ConfigError(
+    except (TypeError, ValueError, OverflowError):
+        failure = ConfigError(
             f"{config_key} must be a positive number",
             config_key=config_key,
-            details={"value": value},
-        ) from exc
+            details={"value_type": type(value).__name__},
+        )
+    if failure is not None:
+        raise failure
 
     if not math.isfinite(parsed):
         raise ConfigError(
             f"{config_key} must be finite",
             config_key=config_key,
-            details={"value": value},
+            details={"value_type": type(value).__name__},
         )
 
     if parsed <= 0:
         raise ConfigError(
             f"{config_key} must be greater than 0",
             config_key=config_key,
-            details={"value": value},
+            details={"value_type": type(value).__name__},
         )
 
     return parsed
@@ -871,7 +879,6 @@ def _bounded_usage_limit_pause_seconds(hours: float, *, config_key: str) -> int:
             f"{config_key} must not exceed 365 days",
             config_key=config_key,
             details={
-                "value": hours,
                 "max_seconds": MAX_USAGE_LIMIT_PAUSE_SECONDS,
             },
         )
@@ -902,21 +909,7 @@ def get_usage_limit_pause_seconds() -> int:
         # No config file means no pause-window override; use the built-in default.
         return int(_DEFAULT_USAGE_LIMIT_PAUSE_HOURS * _SECONDS_PER_HOUR)
 
-    try:
-        with config_path.open(encoding="utf-8") as f:
-            config_dict = yaml.safe_load(f)
-    except (UnicodeDecodeError, yaml.YAMLError) as e:
-        raise ConfigError(
-            f"Failed to parse configuration file: {e}",
-            config_file=str(config_path),
-            details={"yaml_error": str(e)},
-        ) from e
-    except OSError as e:
-        raise ConfigError(
-            f"Failed to read configuration file: {e}",
-            config_file=str(config_path),
-            details={"os_error": str(e), "error_type": type(e).__name__},
-        ) from e
+    config_dict = _read_yaml_file(config_path)
 
     if config_dict is None:
         # Empty config means no pause-window override; use the built-in default.
@@ -937,7 +930,7 @@ def get_usage_limit_pause_seconds() -> int:
             "orchestrator must be a mapping",
             config_key="orchestrator",
             config_file=str(config_path),
-            details={"value": orchestrator_config},
+            details={"value_type": type(orchestrator_config).__name__},
         )
     if "usage_limit_pause_hours" not in orchestrator_config:
         # Missing pause-window key means no override; invalid values still raise below.
@@ -973,21 +966,7 @@ def get_max_parallel_workers() -> int:
         # No config file means no worker-cap override; use the built-in default.
         return _DEFAULT_MAX_PARALLEL_WORKERS
 
-    try:
-        with config_path.open(encoding="utf-8") as f:
-            config_dict = yaml.safe_load(f)
-    except (UnicodeDecodeError, yaml.YAMLError) as e:
-        raise ConfigError(
-            f"Failed to parse configuration file: {e}",
-            config_file=str(config_path),
-            details={"yaml_error": str(e)},
-        ) from e
-    except OSError as e:
-        raise ConfigError(
-            f"Failed to read configuration file: {e}",
-            config_file=str(config_path),
-            details={"os_error": str(e), "error_type": type(e).__name__},
-        ) from e
+    config_dict = _read_yaml_file(config_path)
 
     if config_dict is None:
         # Empty config means no worker-cap override; use the built-in default.
@@ -1008,7 +987,7 @@ def get_max_parallel_workers() -> int:
             "orchestrator must be a mapping",
             config_key="orchestrator",
             config_file=str(config_path),
-            details={"value": orchestrator_config},
+            details={"value_type": type(orchestrator_config).__name__},
         )
     if "max_parallel_workers" not in orchestrator_config:
         # Missing worker-cap key means no override; invalid values still raise below.
