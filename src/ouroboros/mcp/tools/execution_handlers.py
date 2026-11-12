@@ -35,7 +35,6 @@ from ouroboros.core.conductor import (
 from ouroboros.core.errors import ConfigError, ValidationError
 from ouroboros.core.execution_preferences import (
     ResolvedExecutionPreferences,
-    execution_preferences_from_contract,
     resolve_execution_preferences,
 )
 from ouroboros.core.project_paths import resolve_seed_project_path
@@ -55,6 +54,7 @@ from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.tools._dashboard import resolve_dashboard_run_url
 from ouroboros.mcp.tools.background import job_work_error, start_background_tool_job
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
+from ouroboros.mcp.tools.execution_preferences import persisted_execution_preferences
 from ouroboros.mcp.tools.job_observer import (
     append_job_observer_inline_handoff,
     build_job_observer_contract,
@@ -262,22 +262,6 @@ def _resolve_execution_preferences_request(
         raw_efficiency if isinstance(raw_efficiency, str) else None,
         raw_assurance if isinstance(raw_assurance, str) else None,
     )
-
-
-def _persisted_execution_preferences(progress: Mapping[str, Any]) -> ResolvedExecutionPreferences:
-    """Read the immutable preference contract used by a resumed session."""
-    raw_contract = progress.get("execution_contract")
-    if raw_contract is None:
-        return resolve_execution_preferences(None, None)
-    if not isinstance(raw_contract, Mapping):
-        raise ValueError("Persisted execution_contract is invalid")
-    raw_preferences = raw_contract.get("execution_preferences")
-    preferences = execution_preferences_from_contract(raw_preferences)
-    if preferences is None:
-        if raw_preferences is None:
-            return resolve_execution_preferences(None, None)
-        raise ValueError("Persisted execution preferences are invalid")
-    return preferences
 
 
 async def _prepare_conductor_successor_seed(
@@ -1454,7 +1438,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     workspace_session_id = tracker.session_id
                     workspace_execution_id = tracker.execution_id
                     try:
-                        execution_preferences = _persisted_execution_preferences(tracker.progress)
+                        execution_preferences = persisted_execution_preferences(tracker.progress)
                     except ValueError as exc:
                         return Result.err(launch_error("launch_resume_blocked", str(exc)))
                     if tracker.status in (
@@ -2579,7 +2563,7 @@ class StartExecuteSeedHandler:
                     )
                 )
             try:
-                execution_preferences = _persisted_execution_preferences(resumed_tracker.progress)
+                execution_preferences = persisted_execution_preferences(resumed_tracker.progress)
             except ValueError as exc:
                 return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_execute_seed"))
         seed_parse = _parse_seed_yaml_for_execution_mode(
