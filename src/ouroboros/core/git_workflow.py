@@ -154,6 +154,12 @@ def is_on_protected_branch(project_root: Path, config: GitWorkflowConfig) -> boo
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             capture_output=True,
             text=True,
+            # Branch names are Git-owned bytes; decoding them with the process
+            # code page raised UnicodeDecodeError and escaped this guard
+            # instead of failing closed. ``surrogateescape`` keeps unusual
+            # names representable without changing how ASCII names match.
+            encoding="utf-8",
+            errors="surrogateescape",
             cwd=project_root,
             timeout=5,
         )
