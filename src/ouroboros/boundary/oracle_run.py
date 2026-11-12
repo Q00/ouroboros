@@ -105,6 +105,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 import hashlib
 from importlib.machinery import EXTENSION_SUFFIXES
@@ -148,6 +149,7 @@ from ouroboros.boundary.oracle import (
 from ouroboros.core.filesystem_capability import (
     CheckoutFileRefusal,
     RegularFile,
+    open_directory_anchor,
     resolve_checkout_file,
 )
 
@@ -638,6 +640,39 @@ def _module_files(cwd: Path, dotted: str) -> tuple[str, ...] | _NotProven:
     return tuple(files)
 
 
+def _src_module_may_exist(cwd: Path, dotted: str) -> bool:
+    """Whether a src-layout target prevents proving the module is absent.
+
+    This is only a reason to decline a verdict.  Finding a file under src
+    does not prove the pinned interpreter imports it: editable installations,
+    other search roots, and import hooks can change the origin and precedence.
+    """
+
+    def may_exist(relative: str) -> bool:
+        # Only inspect metadata.  A source candidate may be arbitrarily large,
+        # and it is never read or run to make this conservative determination.
+        with ExitStack() as held:
+            chain = None
+            try:
+                chain = open_directory_anchor(cwd)
+                held.callback(chain.close)
+                parts = relative.split("/")
+                for part in parts[:-1]:
+                    chain = chain.descend(part)
+                    held.callback(chain.close)
+                chain.status(parts[-1])
+            except FileNotFoundError:
+                # Refuse to prove absence if a directory moved during the walk.
+                return chain is None or not chain.postvalidate()
+            except (OSError, ValueError):
+                # A link, inaccessible path, or unsupported host remains unknown.
+                return True
+            return True
+
+    relative = "src/" + dotted.replace(".", "/")
+    return may_exist(relative + ".py") or may_exist(relative + "/__init__.py")
+
+
 def _cli_target_files(cwd: Path, symbol: str) -> _NotProven | tuple[tuple[str, RegularFile], ...]:
     """The CLI target's code as proven regular checkout files: each path and its identity.
 
@@ -659,11 +694,28 @@ def _cli_target_files(cwd: Path, symbol: str) -> _NotProven | tuple[tuple[str, R
     else:
         return _NotProven("unprovable", f"{symbol}: not_a_python_target")
     if isinstance(files, _NotProven):
+        root_names = _names(cwd, "") if symbol.startswith("-m ") else None
+        top = symbol[3:].split(".")[0] if symbol.startswith("-m ") else ""
+        if (
+            root_names is not None
+            and files.reason == "namespace_package"
+            and top not in root_names
+            and top + ".py" not in root_names
+            and _src_module_may_exist(cwd, symbol[3:])
+        ):
+            return _NotProven("unprovable", f"{symbol}: src_import_origin_unverified")
         return _NotProven(files.resolve, f"{symbol}: {files.reason}")
-    proven = []
+    proven: list[tuple[str, RegularFile]] = []
     for relative in files:
         proof = resolve_checkout_file(cwd, relative)
         if isinstance(proof, CheckoutFileRefusal):
+            if (
+                symbol.startswith("-m ")
+                and proof is CheckoutFileRefusal.MISSING
+                and not proven
+                and _src_module_may_exist(cwd, symbol[3:])
+            ):
+                return _NotProven("unprovable", f"{symbol}: src_import_origin_unverified")
             resolve = "missing" if proof in _NOT_CHECKOUT_CODE else "unprovable"
             return _NotProven(resolve, f"{symbol}: {relative}: {proof.value}")
         proven.append((relative, proof))
