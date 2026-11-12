@@ -544,7 +544,7 @@ def test_frozen_wrapper_rejects_collection_with_python_flags(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="controlled POSIX launcher, not native py.exe")
-@pytest.mark.parametrize("selector", ["-V:3.12", "-3.12-64"])
+@pytest.mark.parametrize("selector", ["-V:3.12", "-3.12-64", "-3.12-arm64"])
 def test_frozen_wrapper_rejects_collection_with_windows_python_selectors(
     tmp_path: Path, selector: str
 ) -> None:
@@ -957,3 +957,11 @@ def test_wrapper_withholds_py_launcher_dryrun(value: str, monkeypatch) -> None:
 def test_wrapper_inherited_inspect_keeps_generic_script_boundary(monkeypatch) -> None:
     monkeypatch.setenv("PYTHONINSPECT", "1")
     assert not wrapper_runner._nonexecuting_pytest_mode(["python", "script.py", "-m", "pytest"])
+
+
+@pytest.mark.parametrize("variable", ["PYTHONINSPECT", "PYLAUNCHER_DRYRUN"])
+def test_wrapper_py_version_tag_preserves_context_guard(variable: str, monkeypatch) -> None:
+    monkeypatch.setenv(variable, "1")
+    assert wrapper_runner._nonexecuting_pytest_mode(
+        ["py.exe", "-3.12-arm64", "-m", "pytest", "test_inner.py"]
+    )
