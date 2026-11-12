@@ -247,6 +247,15 @@ SkillExecutionCapability(
 - Regenerate or update setup-owned instruction artifacts when rendered guide output changes
 - Follow `docs/runtime-guides/skill-capability-guides.md` before merging capability changes
 
+## 9. Bundled Scripts in Skills
+
+A model cannot run Markdown, so a program written inside a `SKILL.md` is
+retyped as tool input on every run. Put any longer program in the skill's
+`scripts/` directory and have `SKILL.md` run it with one command, resolving the
+path from the directory that contains `SKILL.md`; see `skills/welcome/scripts/`.
+`tests/unit/skills/test_skill_inline_programs.py` fails on a fenced `bash`,
+`sh`, `shell` or `python` block longer than 25 lines in any `skills/*/SKILL.md`.
+
 ## Summary Table
 
 | Pattern | When to Use | Key File |

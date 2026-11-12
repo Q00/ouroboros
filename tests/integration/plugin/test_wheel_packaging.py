@@ -174,6 +174,41 @@ def test_built_wheel_preserves_packaging_contracts(built_wheel: Path, tmp_path: 
         )
         assert set(wheel_resolvers.values()) == {source_resolver}, wheel_resolvers
 
+        # The welcome skill runs bundled scripts from the directory of its
+        # SKILL.md, so the wheel must ship them beside it, once each.
+        source_scripts = PROJECT_ROOT / "skills" / "welcome" / "scripts"
+        script_names = sorted(path.name for path in source_scripts.glob("*.py"))
+        assert "welcome_state.py" in script_names
+        wheel_scripts = sorted(
+            name.removeprefix("ouroboros/skills/welcome/scripts/")
+            for name in names
+            if name.startswith("ouroboros/skills/welcome/scripts/")
+        )
+        assert wheel_scripts == script_names, wheel_scripts
+        installed_welcome = tmp_path / "wheel-welcome"
+        for name in ["SKILL.md", *(f"scripts/{script}" for script in script_names)]:
+            data = archive.read(f"ouroboros/skills/welcome/{name}")
+            if name != "SKILL.md":
+                assert data == (source_scripts / name.removeprefix("scripts/")).read_bytes()
+            target = installed_welcome / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+
+    home = tmp_path / "home"
+    (home / ".ouroboros").mkdir(parents=True)
+    (home / ".ouroboros" / "config.yaml").write_text(
+        "orchestrator:\n  runtime_backend: claude_mcp\nllm:\n  backend: claude\n", encoding="utf-8"
+    )
+    gate = subprocess.run(
+        [sys.executable, "-", "setup-gate", str(home)],
+        input=(installed_welcome / "scripts" / "welcome_state.py").read_text(encoding="utf-8"),
+        capture_output=True,
+        text=True,
+        env={"HOME": str(home), "PATH": os.defpath},
+        check=True,
+    )
+    assert gate.stdout == "SETUP_READY\n"
+
     assert {"claude", "claude-cli", "claude-sdk", "mcp", "all"} <= provided_extras
     sdk_requirements = [
         requirement
