@@ -279,3 +279,55 @@ def test_probe_guards_fork_before_venv_sitecustomize(tmp_path, monkeypatch):
     )
     assert result.returncode == 0, result.stderr
     assert marker.read_text() == "blocked"
+
+
+def test_probe_site_hooks_use_temporary_working_directory(tmp_path, monkeypatch):
+    """Installed startup hooks observe the isolated home, never the launch directory."""
+    import venv
+
+    venv_dir = tmp_path / "venv"
+    venv.EnvBuilder(with_pip=False).create(venv_dir)
+    executable = venv_dir / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+    purelib = subprocess.check_output(
+        [str(executable), "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+        text=True,
+        timeout=15,
+    ).strip()
+    marker = tmp_path / "site-hook-cwd"
+    (Path(purelib) / "doctor-test-site-path.pth").write_text(
+        f"import sys; sys.path.insert(0, {purelib!r})\n"
+    )
+    (Path(purelib) / "sitecustomize.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text(str(Path.cwd()), encoding='utf-8')\n"
+        "Path('site-hook-relative-write').write_text('local', encoding='utf-8')\n"
+    )
+    trusted = tmp_path / "trusted"
+    package = trusted / "ouroboros" / "cli" / "commands"
+    package.mkdir(parents=True)
+    for directory in (trusted / "ouroboros", trusted / "ouroboros" / "cli", package):
+        (directory / "__init__.py").write_text("")
+    entry = package / "mcp_doctor.py"
+    entry.write_text("async def _serve_local_stdio_probe():\n    pass\n")
+    home = tmp_path / "home"
+    home.mkdir()
+    launcher = tmp_path / "caller-project"
+    launcher.mkdir()
+    sentinel = launcher / "keep"
+    sentinel.write_bytes(b"caller state")
+    monkeypatch.setattr(mcp_doctor, "__file__", str(entry))
+    monkeypatch.setattr(mcp_doctor.sys, "executable", str(executable))
+    config = mcp_doctor._local_stdio_probe_config(home)
+    result = subprocess.run(
+        [config.command, *config.args],
+        env=config.env,
+        cwd=launcher,
+        text=True,
+        capture_output=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+    assert Path(marker.read_text(encoding="utf-8")) == home.resolve()
+    assert (home / "site-hook-relative-write").read_text(encoding="utf-8") == "local"
+    assert sorted(path.name for path in launcher.iterdir()) == ["keep"]
+    assert sentinel.read_bytes() == b"caller state"
