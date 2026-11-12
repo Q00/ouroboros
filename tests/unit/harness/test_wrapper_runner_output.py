@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -360,7 +361,18 @@ def test_wrapper_rejects_collection_from_config(
     assert receipt["test_result"] == "failed"
 
 
-@pytest.mark.parametrize("mode", ["--collect-only", "--setup-plan", "--setup-only", "--cache-show"])
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "--collect-only",
+        "--collectonly",
+        "--setup-plan",
+        "--setupplan",
+        "--setup-only",
+        "--setuponly",
+        "--cache-show",
+    ],
+)
 def test_frozen_wrapper_rejects_nonexecuting_pytest_modes(mode: str, tmp_path: Path) -> None:
     test_path, marker = _make_pytest_contract(tmp_path, failing=False)
     argv = _pytest_wrapper_argv(
@@ -373,6 +385,124 @@ def test_frozen_wrapper_rejects_nonexecuting_pytest_modes(mode: str, tmp_path: P
     receipt = json.loads((tmp_path / "receipt.json").read_text())
     assert receipt["inner_exit_status"] == 0
     assert receipt["test_result"] == "failed"
+
+
+@pytest.mark.parametrize("module_option", ["-m", "-pm"])
+@pytest.mark.parametrize("python_option", [None, "-I", "-IB"])
+def test_frozen_wrapper_rejects_coverage_collection_only(
+    tmp_path: Path, module_option: str, python_option: str | None
+) -> None:
+    test_path, marker = _make_pytest_contract(tmp_path, failing=False)
+    argv = _pytest_wrapper_argv(("receipt.json", "stdout.txt", "stderr.txt"), test_path)
+    index = argv.index("pytest")
+    argv[index:index] = ["coverage", "run", module_option]
+    if python_option:
+        argv.insert(argv.index("--") + 2, python_option)
+    argv.insert(-1, "--collect-only")
+    result = subprocess.run(argv, cwd=tmp_path, capture_output=True, check=False)
+    assert result.returncode != 0
+    assert not marker.exists()
+    receipt = json.loads((tmp_path / "receipt.json").read_text())
+    assert receipt["inner_exit_status"] == 0
+    assert receipt["test_result"] == "failed"
+
+
+def test_frozen_wrapper_accepts_executed_coverage_pytest(tmp_path: Path) -> None:
+    test_path, marker = _make_pytest_contract(tmp_path, failing=False)
+    argv = _pytest_wrapper_argv(("receipt.json", "stdout.txt", "stderr.txt"), test_path)
+    index = argv.index("pytest")
+    argv[index:index] = ["coverage", "run", "-m"]
+    result = subprocess.run(argv, cwd=tmp_path, capture_output=True, check=False)
+    assert result.returncode == 0
+    assert marker.exists()
+    receipt = json.loads((tmp_path / "receipt.json").read_text())
+    assert receipt["test_result"] == "passed"
+
+
+def test_frozen_wrapper_keeps_coverage_script_arguments(tmp_path: Path) -> None:
+    script = tmp_path / "script.py"
+    marker = tmp_path / "script-ran"
+    script.write_text(f"from pathlib import Path\nPath({str(marker)!r}).touch()\n")
+    argv = _pytest_wrapper_argv(("receipt.json", "stdout.txt", "stderr.txt"), script)
+    index = argv.index("pytest")
+    argv[index:] = ["coverage", "run", str(script), "-m", "pytest", "--collect-only"]
+    result = subprocess.run(argv, cwd=tmp_path, capture_output=True, check=False)
+    assert result.returncode == 0
+    assert marker.exists()
+    receipt = json.loads((tmp_path / "receipt.json").read_text())
+    assert receipt["test_result"] == "passed"
+
+
+def test_frozen_wrapper_rejects_coverage_pytest_script_version(tmp_path: Path) -> None:
+    test_path, marker = _make_pytest_contract(tmp_path, failing=False)
+    argv = _pytest_wrapper_argv(("receipt.json", "stdout.txt", "stderr.txt"), test_path)
+    index = argv.index("pytest")
+    argv[index:] = ["coverage", "run", str(Path(sys.executable).with_name("pytest")), "--version"]
+    result = subprocess.run(argv, cwd=tmp_path, capture_output=True, check=False)
+    assert result.returncode != 0
+    assert not marker.exists()
+    receipt = json.loads((tmp_path / "receipt.json").read_text())
+    assert receipt["inner_exit_status"] == 0
+    assert receipt["test_result"] == "failed"
+
+
+@pytest.mark.parametrize(
+    "coverage_name", ["coverage3", f"coverage-{sys.version_info.major}.{sys.version_info.minor}"]
+)
+def test_frozen_wrapper_rejects_versioned_coverage_collection(
+    tmp_path: Path, coverage_name: str
+) -> None:
+    coverage_path = Path(sys.executable).with_name(coverage_name)
+    if not coverage_path.is_file():
+        pytest.skip(f"{coverage_name} entrypoint is not installed")
+    test_path, marker = _make_pytest_contract(tmp_path, failing=False)
+    argv = _pytest_wrapper_argv(("receipt.json", "stdout.txt", "stderr.txt"), test_path)
+    index = argv.index("--")
+    argv[index + 1 :] = [
+        str(coverage_path),
+        "run",
+        "-m",
+        "pytest",
+        "--collect-only",
+        str(test_path),
+    ]
+    result = subprocess.run(argv, cwd=tmp_path, capture_output=True, check=False)
+    assert result.returncode != 0
+    assert not marker.exists()
+    receipt = json.loads((tmp_path / "receipt.json").read_text())
+    assert receipt["inner_exit_status"] == 0
+    assert receipt["test_result"] == "failed"
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        (["coverage", "run", "-m", "pytest", "--collect-only"], True),
+        (["coverage", "run", "-pm", "pytest", "--collect-only"], True),
+        (["coverage3", "run", "-m", "pytest", "--collect-only"], True),
+        (["coverage-3.13", "run", "-m", "pytest", "--collect-only"], True),
+        # Existing generic launcher fallback remains conservative for custom names.
+        (["coverage-report", "run", "-m", "pytest", "--collect-only"], True),
+        (["coverage", "run", "/venv/bin/pytest", "--version"], True),
+        (["python", "-m", "coverage", "run", "-m", "pytest", "--collect-only"], True),
+        (["python3.13", "-m", "coverage", "run", "--module", "pytest", "--co"], True),
+        (["python", "-I", "-m", "coverage", "run", "-m", "pytest", "--co"], True),
+        (["python", "-IB", "-m", "coverage", "run", "-m", "pytest", "--co"], True),
+        (["python", "-W", "ignore", "-m", "coverage", "run", "-m", "pytest", "--co"], True),
+        (["coverage", "run", "--context", "abc", "-m", "pytest", "--co"], True),
+        (["python", "-m", "coverage", "run", "-m", "pytest", "test_file.py"], False),
+        (["python", "-m", "other", "-m", "pytest", "--collect-only"], False),
+        (["coverage", "run", "script.py", "-m", "pytest", "--collect-only"], False),
+        (["python", "script.py", "-m", "pytest", "--collect-only"], False),
+        (["env", "python", "-m", "pytest", "--collect-only"], True),
+        (["py.exe", "-3", "-m", "pytest", "--collect-only"], True),
+        (["pythonw.exe", "-m", "pytest", "--collect-only"], True),
+        (["custom-python", "-m", "pytest", "--collect-only"], True),
+        (["echo", "-m", "coverage", "run", "-m", "pytest", "--collect-only"], False),
+    ],
+)
+def test_nonexecuting_coverage_pytest_command(command: list[str], expected: bool) -> None:
+    assert wrapper_runner._nonexecuting_pytest_mode(command, check_config=False) is expected
 
 
 def test_frozen_wrapper_rejects_collection_from_nodeid_config(tmp_path: Path) -> None:
@@ -395,6 +525,8 @@ def test_frozen_wrapper_rejects_collection_from_nodeid_config(tmp_path: Path) ->
     [
         ["uv", "run", "pytest", "-o", "addopts=--collect-only", "test_inner.py"],
         ["uvx", "pytest", "--override-ini=addopts=--co", "test_inner.py"],
+        ["uv.exe", "run", "pytest.exe", "--collect-only", "test_inner.py"],
+        ["UVX.EXE", "py.test.EXE", "--setup-plan", "test_inner.py"],
     ],
 )
 def test_wrapper_recognizes_pytest_launcher_nonexecuting_mode(command: list[str]) -> None:
@@ -419,6 +551,9 @@ def test_wrapper_withholds_authority_for_pytest_argument_file(tmp_path: Path) ->
     "options",
     [
         ["-o", "addopts=--collect-only"],
+        ["-o", "addopts=--collectonly"],
+        ["-o", "addopts=--setupplan"],
+        ["-o", "addopts=--setuponly"],
         ["-oaddopts=--collect-only"],
         ["-o=addopts=--collect-only"],
         ["--override-ini", "addopts=--collect-only"],
@@ -488,3 +623,18 @@ def test_frozen_wrapper_preserves_executing_option_values(
     assert result.returncode == receipt["inner_exit_status"] == receipt["outer_exit_status"] == 0
     assert receipt["test_result"] == "passed"
     assert marker.read_text() == "ran"
+
+
+def test_frozen_wrapper_rejects_pytest_exe_collection(tmp_path: Path) -> None:
+    launcher = Path(sys.executable).parent / ("pytest.exe" if os.name == "nt" else "pytest")
+    alias = tmp_path / "pytest.exe"
+    shutil.copy2(launcher, alias)
+    test_path, marker = _make_pytest_contract(tmp_path, failing=False)
+    argv = _pytest_wrapper_argv(("receipt.json", "stdout.txt", "stderr.txt"), test_path)
+    argv[-5:] = [str(alias), "--collect-only", "-q", str(test_path)]
+    result = subprocess.run(argv, cwd=tmp_path, capture_output=True, check=False)
+    receipt = json.loads((tmp_path / "receipt.json").read_text())
+    assert receipt["inner_exit_status"] == 0
+    assert not marker.exists()
+    assert result.returncode != 0
+    assert receipt["test_result"] == "failed"
