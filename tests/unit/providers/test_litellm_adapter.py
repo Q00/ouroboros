@@ -254,6 +254,58 @@ class TestLiteLLMAdapterBuildCompletionKwargs:
 
         assert kwargs["response_format"] == {"type": "json_object"}
 
+    def test_wraps_bare_json_schema_response_format(self) -> None:
+        """A bare json_schema is sent in the name/schema wrapper LiteLLM expects."""
+        adapter = LiteLLMAdapter()
+        messages = [Message(role=MessageRole.USER, content="Hello")]
+        schema = {"type": "object", "properties": {"approved": {"type": "boolean"}}}
+        response_format = {"type": "json_schema", "json_schema": schema}
+        config = CompletionConfig(model="gpt-4", response_format=response_format)
+
+        with patch.dict("os.environ", {}, clear=True):
+            kwargs = adapter._build_completion_kwargs(messages, config)
+
+        assert kwargs["response_format"] == {
+            "type": "json_schema",
+            "json_schema": {"name": "response", "schema": schema},
+        }
+        # The caller's dict is left as it was.
+        assert response_format == {"type": "json_schema", "json_schema": schema}
+
+    def test_keeps_wrapped_json_schema_response_format(self) -> None:
+        """An already wrapped json_schema, with its name and strict flag, is unchanged."""
+        adapter = LiteLLMAdapter()
+        messages = [Message(role=MessageRole.USER, content="Hello")]
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "vote",
+                "strict": True,
+                "schema": {"type": "object", "properties": {}},
+            },
+        }
+        config = CompletionConfig(model="gpt-4", response_format=response_format)
+
+        with patch.dict("os.environ", {}, clear=True):
+            kwargs = adapter._build_completion_kwargs(messages, config)
+
+        assert kwargs["response_format"] == response_format
+
+    def test_claude_5_5_json_schema_uses_instruction_not_response_format(self) -> None:
+        """The Claude 5.5 instruction path is not affected by the wrapper."""
+        adapter = LiteLLMAdapter()
+        messages = [Message(role=MessageRole.USER, content="Hello")]
+        config = CompletionConfig(
+            model="anthropic/claude-sonnet-5-5",
+            response_format={"type": "json_schema", "json_schema": {"type": "object"}},
+        )
+
+        with patch.dict("os.environ", {}, clear=True):
+            kwargs = adapter._build_completion_kwargs(messages, config)
+
+        assert "response_format" not in kwargs
+        assert kwargs["messages"][-1]["role"] == "system"
+
     def test_omits_response_format_when_none(self) -> None:
         """Does not include response_format when not set."""
         adapter = LiteLLMAdapter()
@@ -785,3 +837,26 @@ class TestReasoningEffortPassthrough:
             CompletionConfig(model="claude-sonnet-4-6"),
         )
         assert "reasoning_effort" not in kwargs
+
+
+@pytest.mark.parametrize(
+    ("model", "effort", "omit"),
+    [
+        ("openai/o3", None, True),
+        ("o4-mini", None, True),
+        ("openai/gpt-5-mini", None, True),
+        ("openai/gpt-5.4", "high", True),
+        ("openai/gpt-5.4", None, False),
+        ("openai/gpt-5.4", "none", False),
+        ("openai/gpt-4o", "high", False),
+        ("openai/gpt-5-chat-latest", "high", False),
+        ("openai/gpt-5.2-chat-latest", "high", False),
+        ("openrouter/openai/o3", "high", False),
+    ],
+)
+def test_openai_reasoning_sampling_kwargs(model: str, effort: str | None, omit: bool) -> None:
+    config = CompletionConfig(model=model, reasoning_effort=effort)
+    kwargs = LiteLLMAdapter()._build_completion_kwargs([], config)
+    assert ("temperature" not in kwargs) is omit
+    assert ("top_p" not in kwargs) is omit
+    assert kwargs.get("reasoning_effort") == effort

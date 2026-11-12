@@ -45,6 +45,7 @@ from ouroboros.providers.frugality_attestation import (
     credential_authority_digest,
     effective_completion_request,
 )
+from ouroboros.providers.openai_sampling import omit_openai_reasoning_sampling
 from ouroboros.providers.profiles import resolve_completion_profile_result
 
 _MINIMAX_MODEL_COST_OVERRIDES = {
@@ -1179,13 +1180,14 @@ class LiteLLMAdapter:
             kwargs["max_retries"] = _PROOF_LITELLM_MAX_RETRIES
 
         # Anthropic models don't accept both temperature and top_p together
-        # Other providers (OpenAI, OpenRouter) support both
+        # Direct OpenAI reasoning routes may also reject sampling controls.
         model_lower = config.model.lower()
         claude_5_5 = is_claude_5_5(config.model)
         openrouter_5_5 = claude_5_5 and model_lower.startswith("openrouter/")
-        if not claude_5_5:
+        omit_sampling = omit_openai_reasoning_sampling(config.model, config.reasoning_effort)
+        if not claude_5_5 and not omit_sampling:
             kwargs["temperature"] = config.temperature
-        if not ("anthropic" in model_lower or "claude" in model_lower):
+        if not omit_sampling and not ("anthropic" in model_lower or "claude" in model_lower):
             kwargs["top_p"] = config.top_p
 
         if config.stop:
@@ -1207,7 +1209,7 @@ class LiteLLMAdapter:
                     },
                 ]
             else:
-                kwargs["response_format"] = config.response_format
+                kwargs["response_format"] = _litellm_response_format(config.response_format)
 
         # Effort-first investment dial (RFC #1405). LiteLLM forwards
         # ``reasoning_effort`` to each provider's native knob (Anthropic's
@@ -1489,3 +1491,27 @@ class LiteLLMAdapter:
         if model.startswith("gemini"):
             return "google"
         return "unknown"
+
+
+# ``json_schema.name`` used when a caller passes a bare schema.
+_DEFAULT_JSON_SCHEMA_NAME = "response"
+
+
+def _litellm_response_format(response_format: dict[str, Any]) -> dict[str, Any]:
+    """Return ``response_format`` in the wrapped form LiteLLM forwards to providers.
+
+    Callers may pass ``json_schema`` as the bare schema or as an OpenAI-style
+    wrapper holding it under ``schema`` (see ``providers.response_format``).
+    LiteLLM expects the wrapper, so a bare schema is wrapped with a default
+    ``name``. Wrapped values and other formats are returned unchanged, and the
+    caller's dict is never mutated.
+    """
+    if response_format.get("type") != "json_schema":
+        return response_format
+    schema = response_format.get("json_schema")
+    if not isinstance(schema, dict) or isinstance(schema.get("schema"), dict):
+        return response_format
+    return {
+        **response_format,
+        "json_schema": {"name": _DEFAULT_JSON_SCHEMA_NAME, "schema": schema},
+    }

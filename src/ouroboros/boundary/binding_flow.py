@@ -31,7 +31,6 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import json
 from pathlib import Path
-import shutil
 from typing import Any, Literal
 
 from ouroboros.boundary.acceptance import rerunnable_checks
@@ -58,12 +57,16 @@ BASE_SNAPSHOT_DIR = "base_snapshot"
 
 
 def snapshot_base(base: Path, store_dir: Path) -> Path:
-    """Copy the base checkout under ``store_dir`` (for the base run of a declared binding)."""
+    """Copy the base checkout under ``store_dir`` (for the base run of a declared binding).
+
+    The snapshot is published only once the copy is complete, and an earlier
+    snapshot is replaced only then: a checkout that is written to during the
+    copy leaves the previous snapshot usable instead of a partial baseline
+    (#2808).
+    """
     snapshot = store_dir / BASE_SNAPSHOT_DIR
-    if snapshot.exists():
-        shutil.rmtree(snapshot)
     store_dir.mkdir(parents=True, exist_ok=True)
-    copy_checkout(base.resolve(), snapshot)
+    copy_checkout(base.resolve(), snapshot, replace=True)
     return snapshot
 
 

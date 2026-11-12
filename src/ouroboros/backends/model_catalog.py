@@ -470,7 +470,7 @@ def configured_default_model(backend: str) -> str | None:
             config_path = Path.home() / ".hermes" / "config.yaml"
             if not config_path.exists():
                 return None
-            data = yaml.safe_load(config_path.read_text()) or {}
+            data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
             model = data.get("model")
             if isinstance(model, dict):
                 value = model.get("default")
@@ -482,7 +482,7 @@ def configured_default_model(backend: str) -> str | None:
             config_path = resolve_codex_home() / "config.toml"
             if not config_path.exists():
                 return None
-            data = tomllib.loads(config_path.read_text())
+            data = tomllib.loads(config_path.read_text(encoding="utf-8"))
             value = data.get("model")
             return str(value) if value else None
     except Exception:  # noqa: BLE001 - a hint must never break the caller
