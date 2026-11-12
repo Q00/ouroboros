@@ -22,10 +22,11 @@ command <nonce> <path>
     without a shell, in the copy, with ``stdin`` on its standard input.
     Status ``not_run`` when it cannot be started (``OSError``, or
     ``ValueError`` for an argv item with a NUL byte); ``exited``
-    otherwise, with its exit status and the first ``STREAM_LIMIT`` bytes of
-    each output stream, decoded as UTF-8 with backslash escapes (longer
-    output is cut at the limit). Once the command exits, its output is read
-    for at most ``DRAIN_SECONDS`` more: a process it left behind that holds
+    otherwise, with its exit status and each complete output stream (up to
+    ``STREAM_LIMIT`` bytes), decoded as UTF-8 with backslash escapes.
+    A longer or unfinished stream is reported as incomplete. Once the
+    command exits, its output is read for at most ``DRAIN_SECONDS`` more:
+    a process it left behind that holds
     its pipes open cannot turn a finished command into a timeout. The
     command stays in this process's group, so the controller's deadline
     ends it with this process.
@@ -77,6 +78,7 @@ STREAM_LIMIT = 64 * 1024
 DRAIN_SECONDS = 1.0
 _CHUNK = 65536
 PROBE_MODULE = "ouroboros_probe"
+INCOMPLETE_OUTPUT = "ouroboros.examples.probe_wrapper.IncompleteOutput"
 
 
 def _type_name(value: Any) -> str:
@@ -195,7 +197,7 @@ def _call(nonce: str, path: str) -> None:
     os._exit(0)
 
 
-def _drain(stream: Any, kept: List[bytes]) -> None:
+def _drain(stream: Any, kept: List[bytes], incomplete: List[bool]) -> None:
     """Read ``stream`` to its end; keep its first ``STREAM_LIMIT`` bytes.
 
     ``os.read`` returns what has arrived; a buffered ``read(n)`` would wait
@@ -203,14 +205,20 @@ def _drain(stream: Any, kept: List[bytes]) -> None:
     held back by a process that keeps the pipe open.
     """
     size = 0
-    while True:
-        chunk = os.read(stream.fileno(), _CHUNK)
-        if not chunk:
-            break
-        if size < STREAM_LIMIT:
-            kept.append(chunk[: STREAM_LIMIT - size])
-            size += len(kept[-1])
-    stream.close()
+    try:
+        while True:
+            chunk = os.read(stream.fileno(), _CHUNK)
+            if not chunk:
+                break
+            if len(chunk) > STREAM_LIMIT - size:
+                incomplete[0] = True
+            if size < STREAM_LIMIT:
+                kept.append(chunk[: STREAM_LIMIT - size])
+                size += len(kept[-1])
+    except OSError:
+        incomplete[0] = True
+    finally:
+        stream.close()
 
 
 def _feed(stream: Any, data: bytes) -> None:
@@ -246,10 +254,12 @@ def _command(nonce: str, path: str) -> None:
         os._exit(0)
     out = []  # type: List[bytes]
     err = []  # type: List[bytes]
+    out_incomplete = [False]
+    err_incomplete = [False]
     threads = [
         threading.Thread(target=_feed, args=(process.stdin, spec["stdin"].encode("utf-8"))),
-        threading.Thread(target=_drain, args=(process.stdout, out)),
-        threading.Thread(target=_drain, args=(process.stderr, err)),
+        threading.Thread(target=_drain, args=(process.stdout, out, out_incomplete)),
+        threading.Thread(target=_drain, args=(process.stderr, err, err_incomplete)),
     ]
     for thread in threads:
         thread.daemon = True
@@ -260,6 +270,17 @@ def _command(nonce: str, path: str) -> None:
     limit = time.monotonic() + DRAIN_SECONDS
     for thread in threads:
         thread.join(max(limit - time.monotonic(), 0))
+    if out_incomplete[0] or err_incomplete[0] or any(t.is_alive() for t in threads[1:]):
+        _report(
+            channel,
+            nonce,
+            {
+                "status": "not_run",
+                "exception_type": INCOMPLETE_OUTPUT,
+                "message": "command output incomplete",
+            },
+        )
+        os._exit(0)
     record = {
         "status": "exited",
         "exit_code": code,
