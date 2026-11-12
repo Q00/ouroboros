@@ -88,9 +88,9 @@ def test_the_next_generation_starts_from_this_generations_work(
             assert (lineage_dir / "added.py").exists()
             assert _git(lineage_dir, "rev-parse", "HEAD") == commit
         finally:
-            release_lock(lineage.lock_path)
+            release_lock(lineage.lock_path, lineage.lock_owner)
     finally:
-        release_lock(generation.lock_path)
+        release_lock(generation.lock_path, generation.lock_owner)
     # The user's checkout is unchanged: no commit, no change.
     assert _git(repo, "log", "--format=%s") == "initial"
     assert (repo / "product.py").read_text(encoding="utf-8") == "VALUE = 1\n"
@@ -116,7 +116,7 @@ def test_a_clean_managed_worktree_needs_no_checkpoint(tmp_path: Path, worktrees:
             checkpoint_managed_worktree(generation.worktree_path, message="ooo: checkpoint") is None
         )
     finally:
-        release_lock(generation.lock_path)
+        release_lock(generation.lock_path, generation.lock_owner)
 
 
 def test_a_path_outside_any_repository_is_left_alone(tmp_path: Path, worktrees: Path) -> None:
@@ -149,7 +149,7 @@ def test_a_managed_worktree_on_another_branch_is_never_committed(
         assert checkpoint_managed_worktree(gen_dir, message="ooo: checkpoint") is None
         assert _git(gen_dir, "log", "--format=%s") == "initial"
     finally:
-        release_lock(generation.lock_path)
+        release_lock(generation.lock_path, generation.lock_owner)
 
 
 def test_a_worktree_someone_else_created_in_the_managed_shape_is_never_committed(
@@ -181,7 +181,7 @@ def test_no_git_hook_runs_for_a_checkpoint(tmp_path: Path, worktrees: Path) -> N
         assert checkpoint_managed_worktree(gen_dir, message="ooo: checkpoint") is not None
         assert not ran.exists()
     finally:
-        release_lock(generation.lock_path)
+        release_lock(generation.lock_path, generation.lock_owner)
 
 
 @pytest.mark.parametrize(
@@ -219,7 +219,7 @@ def test_a_missing_identity_field_is_filled_and_a_configured_one_kept(
         assert _git(gen_dir, "log", "-1", "--format=%an <%ae>") == expected
         assert _git(gen_dir, "log", "-1", "--format=%cn <%ce>") == expected
     finally:
-        release_lock(generation.lock_path)
+        release_lock(generation.lock_path, generation.lock_owner)
 
 
 def test_a_later_generation_resumes_the_lineage_worktree_from_the_task_worktree(
@@ -247,7 +247,7 @@ def test_a_later_generation_resumes_the_lineage_worktree_from_the_task_worktree(
         lineage_dir = Path(second.worktree_path)
         # Generation 2 works in the lineage worktree and leaves it uncommitted.
         (lineage_dir / "product.py").write_text("VALUE = 3\n", encoding="utf-8")
-        release_lock(second.lock_path)
+        release_lock(second.lock_path, second.lock_owner)
 
         third = maybe_restore_task_workspace(
             "lineage_a", None, fallback_source_cwd=gen_dir, allow_untracked_evidence=True
@@ -258,6 +258,6 @@ def test_a_later_generation_resumes_the_lineage_worktree_from_the_task_worktree(
             assert Path(third.effective_cwd) == lineage_dir
             assert (lineage_dir / "product.py").read_text(encoding="utf-8") == "VALUE = 3\n"
         finally:
-            release_lock(third.lock_path)
+            release_lock(third.lock_path, third.lock_owner)
     finally:
-        release_lock(generation.lock_path)
+        release_lock(generation.lock_path, generation.lock_owner)

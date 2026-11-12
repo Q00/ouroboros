@@ -5024,7 +5024,9 @@ class TestOrchestratorRunner:
             result = await runner.execute_seed(sample_seed)
 
         assert result.is_err
-        release_lock_mock.assert_called_once_with(task_workspace.lock_path)
+        release_lock_mock.assert_called_once_with(
+            task_workspace.lock_path, task_workspace.lock_owner
+        )
 
     @pytest.mark.asyncio
     async def test_execute_seed_start_event_failure_cleans_up_workspace_lock(
@@ -5079,7 +5081,9 @@ class TestOrchestratorRunner:
             tracker.session_id,
             release_liveness_lease=False,
         )
-        release_lock_mock.assert_called_once_with(task_workspace.lock_path)
+        release_lock_mock.assert_called_once_with(
+            task_workspace.lock_path, task_workspace.lock_owner
+        )
         runner._retire_process_local_authority(
             session_id=tracker.session_id,
             execution_id="exec_setup",
@@ -5127,7 +5131,9 @@ class TestOrchestratorRunner:
 
         assert result.is_err
         unregister_mock.assert_called_once_with("exec_tools", tracker.session_id)
-        release_lock_mock.assert_called_once_with(task_workspace.lock_path)
+        release_lock_mock.assert_called_once_with(
+            task_workspace.lock_path, task_workspace.lock_owner
+        )
 
     @pytest.mark.asyncio
     async def test_resume_session_already_completed(
@@ -5187,7 +5193,9 @@ class TestOrchestratorRunner:
             result = await runner.resume_session("sess_123", sample_seed)
 
         assert result.is_err
-        release_lock_mock.assert_called_once_with(task_workspace.lock_path)
+        release_lock_mock.assert_called_once_with(
+            task_workspace.lock_path, task_workspace.lock_owner
+        )
 
     @pytest.mark.asyncio
     async def test_resume_is_blocked_before_ungated_direct_execution(
@@ -5358,7 +5366,9 @@ class TestOrchestratorRunner:
 
         assert result.is_err
         unregister_mock.assert_called_once_with("exec_resume", "sess_resume_tool_setup")
-        release_lock_mock.assert_called_once_with(task_workspace.lock_path)
+        release_lock_mock.assert_called_once_with(
+            task_workspace.lock_path, task_workspace.lock_owner
+        )
 
     @pytest.mark.asyncio
     async def test_resume_session_not_found(
