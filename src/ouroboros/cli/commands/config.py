@@ -188,11 +188,6 @@ def _database_file_path(data: dict, config_path: Path) -> Path:
     return event_store_path_from_config(data, config_path)
 
 
-def _save_config(data: dict, path: Path) -> None:
-    """Write config dict back to YAML."""
-    path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False), encoding="utf-8")
-
-
 def _resolve_cli_path(data: dict) -> str | None:
     """Return the effective CLI path based on env-aware runtime selection."""
     from ouroboros.config_tui.fields import GLOBAL_RUNTIME_FIELD, get_value
@@ -1185,18 +1180,14 @@ def set_value(
         print_error(f"Invalid value — not saved.\n{exc}")
         raise typer.Exit(1) from None
 
-    original_bytes = config_path.read_bytes()
-    _save_config(data, config_path)
+    from ouroboros.config_tui.persistence import ConfigWriteError, save_config_with_backup
+    from ouroboros.core.errors import ConfigError
 
-    # Validate the written config loads without errors
     try:
-        from ouroboros.config.loader import load_config
-
-        load_config()
-    except Exception as exc:
-        # Preserve the original encoding, BOM, and line endings on rollback.
-        config_path.write_bytes(original_bytes)
-        print_error(f"Invalid value — rolled back.\n{exc}")
+        save_config_with_backup(data, config_path)
+    except (ConfigWriteError, OSError) as exc:
+        reason = "Invalid value." if isinstance(exc.__cause__, ConfigError) else "Save failed."
+        print_error(f"{reason}\n{exc}")
         raise typer.Exit(1) from None
 
     if old_value is not None:
@@ -1209,7 +1200,7 @@ def set_value(
 def undo() -> None:
     """Restore the configuration saved before the last settings change.
 
-    Every successful save (GUI or `config set` via the settings layer)
+    Every successful settings GUI save or `config set`
     keeps the previous file as config.yaml.bak; undo swaps it back in,
     so running undo twice redoes the change.
     """
