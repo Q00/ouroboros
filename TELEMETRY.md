@@ -246,8 +246,11 @@ Notes:
 - PostHog may derive coarse country from the request IP for the country
   aggregate. Ouroboros does not include the IP address in event properties.
 - Events use a public write-only project key and a fire-and-forget worker.
-  Telemetry never blocks a command and silently drops events when offline.
-  Detached job workers flush their terminal `workflow_outcome` before exit.
+  Event capture queues without waiting for delivery and silently drops events
+  when offline. Explicit exit flushes may delay return: CLI run exit paths
+  wait up to 1.5 seconds after user-facing output; detached job workers wait
+  up to 5 seconds for their terminal `workflow_outcome` before exit. These
+  waits are best effort and do not guarantee delivery.
 
 ## Where the code lives
 

@@ -793,9 +793,9 @@ async def _run_orchestrator(
     try:
         seed = Seed.from_dict(seed_data)
     except Exception as e:
+        print_error(f"Invalid seed format: {e}")
         if isinstance(e, ValidationError):
             _record_cli_prelaunch_failure("launch_seed_invalid", "validation")
-        print_error(f"Invalid seed format: {e}")
         raise typer.Exit(1) from e
 
     resolved_max_decomposition_depth = _resolve_max_decomposition_depth(
@@ -881,8 +881,8 @@ async def _run_orchestrator(
             execution_id = f"exec_{uuid4().hex[:12]}"
             workspace = maybe_prepare_task_workspace(project_dir, session_id_for_run)
     except WorktreeError as e:
-        _record_cli_prelaunch_failure("launch_workspace_unavailable", "config")
         print_error(f"Task workspace error: {e.message}")
+        _record_cli_prelaunch_failure("launch_workspace_unavailable", "config")
         raise typer.Exit(1) from e
 
     if workspace is not None:
@@ -1096,7 +1096,7 @@ async def _run_orchestrator(
         # right after the outcome was queued would end the process before the
         # event is posted, so failed runs would be dropped while successful
         # ones (which keep going through QA) survive. The run is over, so a
-        # bounded wait here blocks no command (see ``telemetry.flush``).
+        # best-effort exit flush may wait up to 1.5 seconds after output.
         usage_telemetry.flush()
 
     if start_new_attempt:

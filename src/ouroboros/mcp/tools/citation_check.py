@@ -329,7 +329,7 @@ def audit_citations(
     Returns ``{"checked": n, "urls": {url: verdict}, "unverified_present":
     bool}`` where each verdict is one of ``verified`` / ``unreachable`` /
     ``invalid`` (malformed, non-http(s), or oversized URL — never fetched) / ``unchecked``
-    (budget or count cap reached before this URL's turn). Never raises.
+    (bare-only citation, or budget/count cap reached before its turn). Never raises.
     """
     all_urls: list[str] = []
     all_seen: set[str] = set()

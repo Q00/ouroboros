@@ -352,7 +352,9 @@ async def test_tally_read_failure_preserves_cli_outcome_and_check_package() -> N
 
 
 @pytest.mark.asyncio
-async def test_workspace_rejection_records_and_flushes_cli_outcome(tmp_path: Path) -> None:
+async def test_workspace_rejection_records_and_flushes_cli_outcome(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     """A workspace preparation failure contributes the same cause as an MCP run."""
     import subprocess
 
@@ -365,13 +367,18 @@ async def test_workspace_rejection_records_and_flushes_cli_outcome(tmp_path: Pat
     seed_file = tmp_path / "seed.yaml"
     seed_file.write_text("goal: ignored\n", encoding="utf-8")
 
+    visible_before_flush = []
+
+    def flush_after_error() -> None:
+        visible_before_flush.append("Task workspace error:" in capsys.readouterr().out)
+
     with (
         patch("ouroboros.cli.commands.run._load_seed_from_yaml", return_value=VALID_SEED_DATA),
         patch("ouroboros.core.worktree._worktrees_enabled", return_value=True),
         patch("ouroboros.core.worktree._require_managed_identity_git"),
         patch("ouroboros.persistence.event_store.EventStore") as store,
         patch("ouroboros.telemetry.capture_job_outcome") as capture,
-        patch("ouroboros.telemetry.flush") as flush,
+        patch("ouroboros.telemetry.flush", side_effect=flush_after_error) as flush,
         pytest.raises(typer.Exit) as exc,
     ):
         store.return_value.initialize = AsyncMock()
@@ -389,6 +396,7 @@ async def test_workspace_rejection_records_and_flushes_cli_outcome(tmp_path: Pat
         },
     )
     flush.assert_called_once()
+    assert visible_before_flush == [True]
     assert tracked.read_text(encoding="utf-8") == "preserve me\n"
 
 
@@ -431,16 +439,23 @@ async def test_resume_workspace_failure_records_one_private_outcome(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_invalid_seed_records_private_prelaunch_outcome(tmp_path: Path) -> None:
+async def test_invalid_seed_records_private_prelaunch_outcome(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     """A malformed Seed emits a closed cause without its content or path."""
     from ouroboros.telemetry import capture_job_outcome
 
     seed_file = tmp_path / "private-seed.yaml"
     seed_file.write_text("goal: private-content\n", encoding="utf-8")
+    visible_before_flush = []
+
+    def flush_after_error() -> None:
+        visible_before_flush.append("Invalid seed format:" in capsys.readouterr().out)
+
     with (
         patch("ouroboros.telemetry.capture_job_outcome", wraps=capture_job_outcome) as capture,
         patch("ouroboros.telemetry.capture") as emit,
-        patch("ouroboros.telemetry.flush") as flush,
+        patch("ouroboros.telemetry.flush", side_effect=flush_after_error) as flush,
         pytest.raises(typer.Exit) as exc,
     ):
         await _run_orchestrator(seed_file)
@@ -457,6 +472,7 @@ async def test_invalid_seed_records_private_prelaunch_outcome(tmp_path: Path) ->
         },
     )
     flush.assert_called_once()
+    assert visible_before_flush == [True]
     emit.assert_called_once()
     _, properties = emit.call_args.args
     assert properties["failure_cause"] == "launch_seed_invalid"

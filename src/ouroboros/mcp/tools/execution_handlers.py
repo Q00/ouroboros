@@ -2696,13 +2696,8 @@ class StartExecuteSeedHandler:
                 response_shape=response_shape,
             )
 
-        # Fall-through: real background job path (subprocess / non-opencode
-        # runtimes).  No subagent payload is built here — the background job
-        # re-invokes ExecuteSeedHandler.handle() via ``_runner`` below, which
-        # constructs and consumes its own payload internally.  The only payload
-        # consumer in this handler is the plugin branch above; an earlier
-        # background-path ``build_execute_subagent`` here was orphaned by commit
-        # 3c393c98 (its result was never referenced) and has been removed.
+        # Background execution re-enters ExecuteSeedHandler through _runner
+        # in the owning process; only the plugin branch consumes a subagent payload.
         await self._event_store.initialize()
 
         session_id = arguments.get("session_id")
@@ -2781,7 +2776,13 @@ class StartExecuteSeedHandler:
             work_fn=_runner,
             cancelled_text="Seed execution cancelled before restart work began.",
             detached_tool_name="ouroboros_start_execute_seed",
-            detached_arguments=arguments,
+            # Freeze the accepted mode across worker config reloads. Resume
+            # must omit overrides so its persisted execution contract wins.
+            detached_arguments=(
+                arguments
+                if is_resume
+                else {**arguments, "efficiency_mode": execution_preferences.efficiency_mode.value}
+            ),
             runtime_backend=self.agent_runtime_backend,
             llm_backend=self._execute_handler.llm_backend,
             opencode_mode=self.opencode_mode,
