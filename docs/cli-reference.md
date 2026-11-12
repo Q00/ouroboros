@@ -990,6 +990,16 @@ artifact, reference, prompt, or model response. The `auto_` ID prefix is
 reserved for auto sessions; a QA ID that conflicts with another session is
 reported as an error. Plugin delegation retains its host-owned lifecycle.
 
+Standalone `ouroboros qa` writes its score summary to the configured default
+EventStore (`persistence.database_path`, with the existing legacy database
+fallback at `~/.ouroboros/ouroboros.db`). A failed write fails the command;
+a computed verdict alone is not a completed, queryable evaluation. Query the
+ID using a server connected to that same database. `mcp serve --db X` uses X
+for synchronous, background, and embedded post-execution QA. Embedded run,
+auto, and evolve QA reuse their owner's store without opening a second
+default database. The standalone command does not inherit another server's
+`--db` option.
+
 **Options:**
 
 | Option | Description |

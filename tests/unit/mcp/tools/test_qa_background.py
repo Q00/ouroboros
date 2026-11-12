@@ -15,6 +15,7 @@ from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.qa_background import StartQAHandler
 from ouroboros.mcp.tools.query_handlers import SessionStatusHandler
 from ouroboros.persistence.event_store import EventStore
+from ouroboros.persistence.qa_session_store import QA_EVALUATED
 
 
 @pytest.mark.asyncio
@@ -332,7 +333,7 @@ async def test_external_cancel_stops_detached_qa_and_cli(
         assert result.value.is_error
         assert result.value.meta["status"] == "cancelled"
         events = await observer_store.query_events()
-        assert not any(event.type == "qa.evaluated" for event in events)
+        assert not any(event.type == QA_EVALUATED for event in events)
         for _ in range(100):
             try:
                 os.kill(child_pid, 0)

@@ -94,6 +94,7 @@ def qa_command(
     if seed_content is not None:
         args["seed_content"] = _read_text_or_literal(seed_content)
 
+    # Standalone QA owns the configured default store through QAHandler.
     result = asyncio.run(QAHandler().handle(args))
     if result.is_err:
         console.print(f"[red]QA failed:[/] {result.error}")

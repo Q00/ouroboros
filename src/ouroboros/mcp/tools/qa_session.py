@@ -19,7 +19,9 @@ async def record_qa_evaluation(
 
     Only the public score summary is retained, not artifacts, prompts or model
     text.  Session status checks the same stream for collisions, including a
-    concurrent claim by another session type.
+    concurrent claim by another session type. Embedded callers must inject
+    their owner's store. None deliberately opens and closes the configured
+    default store for standalone QA; a failed write cannot report success.
     """
     owns_store = event_store is None
     store = event_store or EventStore()

@@ -1077,7 +1077,7 @@ class EvolveStepHandler(BridgeAwareMixin):
 
             assert artifact is not None
             assert reference is not None
-            qa_handler = QAHandler()
+            qa_handler = QAHandler(event_store=self.evolutionary_loop.event_store)
             ac_lines = [f"- {ac}" for ac in ac_texts(gen.seed.acceptance_criteria)]
             quality_bar = "The execution must satisfy all acceptance criteria:\n" + "\n".join(
                 ac_lines

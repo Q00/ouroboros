@@ -3957,6 +3957,9 @@ class TestEvolveStepHandler:
             return None
 
         class _CountingQAHandler:
+            def __init__(self, **_kwargs):
+                pass
+
             async def handle(self, _arguments):  # noqa: ANN001
                 nonlocal qa_calls
                 qa_calls += 1
@@ -4085,6 +4088,9 @@ class TestEvolveStepHandler:
         handler = EvolveStepHandler(evolutionary_loop=make_loop(store, gen_result=gen_result))
 
         class _FailingQAHandler:
+            def __init__(self, **_kwargs):
+                pass
+
             async def handle(self, _arguments):  # noqa: ANN001
                 return Result.err(ProviderError(message="unparseable QA response"))
 
@@ -4166,6 +4172,9 @@ class TestEvolveStepHandler:
         order: list[str] = []
 
         class _CapturingQAHandler:
+            def __init__(self, **_kwargs):
+                pass
+
             async def handle(self, arguments):  # type: ignore[no-untyped-def]
                 order.append("qa")
                 captured.update(arguments)
