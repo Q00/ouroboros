@@ -171,6 +171,9 @@ def test_probe_guards_network_before_venv_sitecustomize(tmp_path, monkeypatch):
         text=True,
         timeout=15,
     ).strip()
+    (Path(purelib) / "doctor-test-site-path.pth").write_text(
+        f"import sys; sys.path.insert(0, {purelib!r})\n"
+    )
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen()
@@ -237,6 +240,9 @@ def test_probe_guards_fork_before_venv_sitecustomize(tmp_path, monkeypatch):
         text=True,
         timeout=15,
     ).strip()
+    (Path(purelib) / "doctor-test-site-path.pth").write_text(
+        f"import sys; sys.path.insert(0, {purelib!r})\n"
+    )
     marker = tmp_path / "fork-result"
     (Path(purelib) / "sitecustomize.py").write_text(
         "import os\n"
