@@ -190,8 +190,9 @@ async def test_execution_caller_owns_post_run_qa(caller, ownership, monkeypatch,
         seed_file = tmp_path / "seed.yaml"
         seed_file.write_text(yaml.safe_dump(seed.to_dict()), encoding="utf-8")
         # _run_orchestrator imports this dependency locally. QA's default-store
-        # reference is already bound to the real class, so omission still writes
-        # to the forbidden default database and is caught by the sentinel.
+        # reference must stay bound to the real class even when its module is
+        # imported lazily; omission then writes to the forbidden default DB.
+        monkeypatch.setattr("ouroboros.mcp.tools.qa_session.EventStore", EventStore)
         monkeypatch.setattr("ouroboros.persistence.event_store.EventStore", lambda: custom)
         await _run_orchestrator(seed_file, runtime_backend="codex", check_package=False)
     await assert_owned_verdict(custom, default, sentinel)
