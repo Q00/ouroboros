@@ -132,9 +132,14 @@ def _is_git_repo(repo: Path) -> bool:
 
 
 def _changed_paths(repo: Path) -> list[str]:
-    output = _git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    # ``-z`` prints each path as raw bytes, and Git for Windows emits them as
+    # UTF-8 regardless of the console code page. Decode the bytes ourselves:
+    # reading the NUL-delimited stream through ``text=True`` raised
+    # ``UnicodeDecodeError`` for a path that is not valid UTF-8 and aborted the
+    # checkpoint, and ``surrogateescape`` keeps such paths round-trippable for
+    # the later ``git add``.
+    entries = _git_path_bytes(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all")
     paths: list[str] = []
-    entries = output.split("\0")
     index = 0
     while index < len(entries):
         entry = entries[index]
@@ -156,6 +161,8 @@ def _staged_changes(repo: Path, paths: list[str]) -> bool:
         cwd=repo,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=30,
         check=False,
     )
@@ -169,12 +176,45 @@ def _summarize_ac(ac_text: str) -> str:
     return summary
 
 
+def _git_path_bytes(repo: Path, *args: str) -> list[str]:
+    """Run a NUL-delimited git query and split its raw path bytes.
+
+    Paths are decoded as UTF-8 with ``surrogateescape`` so unusual byte
+    sequences survive the round trip back into ``git add``; ``strip`` is
+    deliberately not applied because it would also trim legitimate leading or
+    trailing spaces from a path.
+    """
+    result = subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"git {' '.join(args)} failed: "
+            f"{result.stderr.decode('utf-8', errors='replace').strip()}"
+        )
+    return [
+        entry
+        for entry in result.stdout.decode("utf-8", errors="surrogateescape").split("\0")
+        if entry
+    ]
+
+
 def _git(repo: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", *args],
         cwd=repo,
         capture_output=True,
         text=True,
+        # Git for Windows emits UTF-8 even when the ANSI code page is not
+        # UTF-8; decoding with the locale raised UnicodeDecodeError and
+        # aborted the checkpoint, e.g. while the commit echoed a non-ASCII
+        # subject.
+        encoding="utf-8",
+        errors="replace",
         timeout=30,
         check=False,
     )
