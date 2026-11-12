@@ -5,14 +5,29 @@ doc_metadata:
 
 # OpenCode에서 Ouroboros 실행하기
 
+OpenCode 1.x LLM 완료 응답은 네이티브 `step_finish` 이벤트의 토큰 사용량을
+보고하며, 각 단계 파트의 마지막 보고를 한 번씩 집계합니다. 네이티브 출력
+수에는 이미 원시 출력 토큰이 포함되므로 추론 토큰을 다시 더하지 않습니다.
+별도로 합산되는 캐시 그룹과 보고된 전체 토큰 중 남은 양은
+`unallocated_tokens`로 보존합니다.
+
+**OpenCode 2.x 플러그인 모드는 아직 지원하지 않습니다.** 설정 과정에서
+2.x CLI를 감지하면 V1 브리지 설치와 설정 기록 전에 거부합니다. 기존 하위
+프로세스 경로를 사용하려면 `ouroboros setup --runtime opencode --opencode-mode subprocess`를
+실행하세요. 이 경로는 호스트 내 자식 Task 전달을 활성화하지 않습니다.
+
+V2는 디렉터리 플러그인 항목과 다른 setup, tool-hook, session permission,
+completion, interruption API를 사용합니다. 항목 이름을 바꾸거나 `setup` export만
+추가해도 호환되는 것은 아닙니다. 남은 포팅 작업은 [#2529](https://github.com/Q00/ouroboros/issues/2529)에서 추적합니다.
+
 > 설치 및 첫 실행 안내는 [시작하기](../getting-started.md)를 참고하세요.
 
 Ouroboros는 오픈소스 멀티 공급자 AI 코딩 에이전트인 **OpenCode**([opencode.ai](https://opencode.ai))와 두 가지 경로로 통합됩니다.
 
-1. **서브에이전트 브리지 플러그인(주 경로, 권장):** 대화형 OpenCode 세션 안에서 실행됩니다. `_subagent` 봉투를 반환하는 Ouroboros MCP 도구(예: `ouroboros_qa`, `ouroboros_lateral_think persona="all"`)는 OpenCode 기본 **Task 패널**로 분기합니다. 서브에이전트마다 자식 세션 하나를 만들고 도구 호출 아래에 인라인으로 표시합니다. 세션 선택기에 불필요한 세션이 쌓이지 않고, 여러 페르소나에 병렬 전달하며 각 자식에 새 LLM 문맥을 제공합니다.
+1. **서브에이전트 브리지 플러그인(OpenCode 1.x 경로):** 대화형 OpenCode 세션 안에서 실행됩니다. `_subagent` 봉투를 반환하는 Ouroboros MCP 도구(예: `ouroboros_qa`, `ouroboros_lateral_think persona="all"`)는 OpenCode 기본 **Task 패널**로 분기합니다. 서브에이전트마다 자식 세션 하나를 만들고 도구 호출 아래에 인라인으로 표시합니다. 세션 선택기에 불필요한 세션이 쌓이지 않고, 여러 페르소나에 병렬 전달하며 각 자식에 새 LLM 문맥을 제공합니다.
 2. **하위 프로세스 런타임(대체 경로, 헤드리스/CI):** Ouroboros가 작업마다 `opencode run --format json`을 비대화형 하위 프로세스로 시작합니다. CLI 워크플로, 일괄 실행, 연결된 OpenCode 세션이 없는 환경에 적합합니다.
 
-두 경로는 명세 우선 하네스(Seed, 완료 기준, 평가 원칙, 결정론적 종료 조건)를 공유합니다. 일상적인 대화형 작업에는 플러그인을, 자동화에는 하위 프로세스 런타임을 선택하세요. 기본 `ouroboros-ai` 패키지 외에 Python SDK는 필요하지 않습니다.
+두 경로는 명세 우선 하네스(Seed, 완료 기준, 평가 원칙, 결정론적 종료 조건)를 공유합니다. 지원되는 OpenCode 1.x의 대화형 작업에는 플러그인을, 자동화에는 하위 프로세스 런타임을 선택하세요. 기본 `ouroboros-ai` 패키지 외에 Python SDK는 필요하지 않습니다.
 
 > **모델 권장 사항:** OpenCode는 설정한 공급자가 지원하는 모든 모델을 사용할 수 있습니다. 여러 단계의 에이전트 코딩 작업을 잘 처리하는 최상위 모델(Claude Opus, GPT-5.4 또는 동급 모델)을 권장합니다.
 
@@ -102,7 +117,7 @@ ouroboros setup --runtime opencode --non-interactive            # accepts defaul
 
 OpenCode 기반 워크플로의 모델은 `config.yaml`이 아니라 OpenCode 자체에서 선택합니다.
 
-## 경로 1 — 서브에이전트 브리지 플러그인 [권장]
+## 경로 1 — 서브에이전트 브리지 플러그인 [OpenCode 1.x]
 
 플러그인은 OpenCode의 `tool.execute.after` 이벤트에 연결됩니다. Ouroboros MCP 도구가 `_subagent` / `_subagents` 봉투를 반환하면 다음과 같이 처리합니다.
 

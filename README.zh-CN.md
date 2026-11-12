@@ -55,7 +55,7 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | iex
 ```
 
-<p align="center"><sub>一行命令完成安装。然后在你的编码 agent 里运行一次 <code>ooo setup</code>，详见<a href="#快速开始">快速开始</a>。</sub></p>
+<p align="center"><sub>一行命令完成安装。Claude Code 可用 <code>/ouroboros:setup</code> 配置；Codex 等其他宿主请按各自的运行时设置流程操作。详见<a href="#快速开始">快速开始</a>。</sub></p>
 
 <p align="center"><sub><b>七次各自独立的运行，七个宿主。任务不同是故意的——共享的是引擎，不是提示词</b></sub></p>
 
@@ -142,20 +142,45 @@ Windows 安装脚本会在缺少 Git 和 uv 时通过 winget 安装它们，Pyth
 然后安装 `ouroboros-ai` 并接入检测到的宿主。原生 Windows 仍是实验性支持，Codex CLI
 需要 WSL 2，详见[平台支持](./docs/platform-support.md)。
 
-**第一条命令** —— 打开你的 AI 编码 agent，按顺序运行：
+**第一条命令** —— 在 Claude Code 中先开始 guided setup：
 
 ```
-> ooo setup
-> ooo interview "I want to build a task management CLI"
+/ouroboros:setup
 ```
 
-`ooo setup` 只需运行一次，用来配置运行环境；`ooo interview` 才是安装后
+回答 setup 提出的问题并完成配置后，再在**同一对话的下一条消息**中请求 Interview。
+参见 [main setup skill](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/skills/setup/SKILL.md)
+和 [Interview skill](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/skills/interview/SKILL.md)：
+
+```
+ooo interview "I want to build a task management CLI"
+```
+
+这里的 guided setup 流程适用于 Claude Code。Codex 插件会在安装时注册 MCP server，
+因此不要把 `/ouroboros:setup` 当作所有宿主都必须重复运行的步骤。单独配置 Codex CLI 时，
+请在 macOS/Linux/WSL 2 终端运行；该环境中必须分别准备好 Ouroboros、已认证的 Codex CLI 和 `uvx` 等 MCP launcher。
+Windows PowerShell 中的安装不会自动安装或配置到 WSL。原生 Windows 的 `auto` 即使显示成功，
+也可能没有注册新的 MCP 条目。Desktop HTTP 是单独的 server 注册方式。运行
+`ouroboros setup --runtime codex`。其他宿主请从[运行时指南索引](./docs/README.md#runtime-guides)
+选择对应步骤。
+
+`/ouroboros:setup` 是 Claude Code 中一次性的 guided 配置；`ooo interview` 才是安装后
 启动第一个工作流的命令，它会开启苏格拉底式访谈。配置完成后，Codex 会沿用
 它当前选中的模型，Claude Code 则使用推荐的模型设置。只有需要把某个阶段
 固定到特定模型时，才选择**直接配置模型**——它会在浏览器里打开本地设置
 界面。之后随时可以用 `ooo config` 回到这些设置。
 
 也可以不经过 agent 宿主，直接在终端里跑：
+
+> **运行前安全检查：**`--orchestrator` 会用 Claude Code进行访谈。
+> Seed 生成和后续执行可能调用模型、产生用量或费用；执行步骤也可能修改项目文件
+> 或运行命令。如果工作流运行时选择为 Codex，OrchestratorRunner 会强制将 runner
+> 权限设为 `bypassPermissions`，Codex 可能以同时绕过审批和 sandbox 的
+> `--dangerously-bypass-approvals-and-sandbox` 启动。此说明仅适用于 Codex runner
+> 路径，不应泛化到所有 CLI 路径。不要在不可信项目中直接运行；先确认独立 OS
+> 账户、VM 或 container 的文件和网络隔离策略。要先检查 Seed，请不要接受
+> `Start workflow now?` 的默认 yes，回答 `n`，再检查 YAML 和保存路径。
+> [CLI `--orchestrator` backend](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/cli/commands/init.py#L1046-L1053) · [CLI Seed/执行确认](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/cli/commands/init.py#L594-L607) · [`Start workflow now?` 的默认值](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/cli/commands/init.py#L644-L654) · [runner 权限设置](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/orchestrator/runner.py#L879-L879) · [强制指定权限模式](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/orchestrator/runner.py#L5190-L5207) · [Codex 权限映射](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/codex_permissions.py#L22-L50)
 
 ```
 $ ouroboros init start --orchestrator "I want to build a task management CLI tool"
@@ -175,10 +200,24 @@ $ ouroboros init start --orchestrator "I want to build a task management CLI too
 
 > 支持 Claude Code、Codex CLI、GitHub Copilot CLI、OpenCode、Hermes、Gemini、Kiro CLI、Pi CLI、OMP CLI、Zcode、Goose、GJC、Antigravity CLI 和 Grok Build CLI。安装程序会自动检测可用的运行时，并在宿主支持的情况下注册 MCP server。如需显式选择运行时，安装后执行 `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi|omp|zcode|goose|gjc|antigravity|grok>`。Copilot CLI 运行时会通过 GitHub Copilot models API 实时获取模型列表，并在配置过程中让你选择默认模型；Kiro 的设置选择器则用 `kiro-cli chat --listmodels -f json` 查询已认证的 CLI，所以账号和企业白名单的变动会直接反映出来，不需要硬编码的模型表。
 
+> **MCP profile 不能混装。** 每个新隔离环境选择一个 MCP profile。
+> `[mcp]` 使用 MCP 2；`[claude]` 和 `[claude-sdk]` 使用 Claude Agent SDK 的 MCP 1；
+> `[all]` 是 MCP 1.x 应用包。
+> 不要在同一 Python 环境中把 `[mcp]` 与 `[claude]`、`[claude-sdk]` 或
+> `[all]` 一起安装；`[all,mcp]` 不受支持。与所选 MCP profile 兼容的其他
+> extras 可以一起安装。插件的 MCP 2 launcher 与独立
+> Claude SDK 环境也应保持为不同进程/环境。
+> 精确依赖版本请查阅所用版本的 `pyproject.toml`。
+> [当前源码的 extra 定义](./pyproject.toml)不保证与 PyPI 安装版本一致。
+
 > **DeepSeek 支持。** Ouroboros 与 DeepSeek 有两种接法。把访谈 / Seed / QA 流水线指向 DeepSeek 自家的模型：用 `--llm-backend dsh`（`ouroboros mcp serve --runtime claude-cli --llm-backend dsh`，或 `OUROBOROS_LLM_BACKEND=dsh`）——底层驱动的是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的 ACP server。反过来也可以：安装 [`dsh-ouroboros` 插件](./integrations/dsh-plugin)（`dsh plugin --profile <your-profile> add "github:Q00/ouroboros#main&path:integrations/dsh-plugin"`），然后在 DeepSeek Harness 的聊天里直接输入 `ooo interview` / `ooo auto`——同一套 `ouroboros_interview` / `ouroboros_auto` 工具在它内部原生运行，苏格拉底式提问一应俱全。两个方向的完整说明，包括 `dsh` 后端除了这一个环境变量之外还需要什么，都在 [DeepSeek Harness 指南](./docs/guides/deepseek-harness.md)。
 
 <details>
 <summary><strong>Codex 插件快速开始</strong></summary>
+
+用 Codex CLI TUI 的 `/mcp` 检查当前服务器与工具。`codex mcp list` 中没有条目，
+或 welcome 返回 `CODEX_SETUP_REQUIRED`，都不能单独证明插件服务器失败。
+先检查当前会话，参见[连接排查](./skills/help/TROUBLESHOOTING.md#mcp-connection-or-authentication-fails)。
 
 需要 `codex` 在 `PATH` 中，并且主机上有 `uvx`（插件的 MCP 描述符用它启动
 server）。可用 `pipx install uv`、`pip install --user uv` 或 `brew install uv`
@@ -189,14 +228,19 @@ codex plugin marketplace add Q00/ouroboros
 codex plugin add ouroboros@ouroboros
 ```
 
-打开一个新的 Codex 会话，按顺序运行：
+打开新的 Codex 会话后，先确认插件已安装且 MCP 连接可用，然后在对话的下一条消息中
+请求首次 Interview。安装插件会注册 Codex 使用的 MCP server，不必重复运行 Claude Code
+的 guided setup。若要单独配置 Codex CLI，请在 macOS/Linux/WSL 2 终端中，先确认该环境
+已分别准备好 Ouroboros、已认证的 Codex CLI 和 `uvx` 等 MCP launcher，再运行 `ouroboros setup --runtime codex`。
+Windows PowerShell 中的安装不会自动共享到 WSL；原生 Windows 的 `auto` 即使显示成功，
+也可能未注册新的 MCP 条目。Desktop HTTP 是单独的 server 注册方式。也可参见
+[main setup skill](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/skills/setup/SKILL.md)：
 
 ```
-ooo setup
 ooo interview "Build a task management CLI"
 ```
 
-`ooo setup` 只需运行一次，用来准备运行环境。准备就绪后，它会沿用 Codex
+完成运行时设置后，Ouroboros 会沿用 Codex
 当前的默认模型；只有在需要为某个流水线阶段固定特定模型时，才选择**直接配置模型**。
 
 </details>
@@ -205,13 +249,23 @@ ooo interview "Build a task management CLI"
 <summary><strong>Kiro CLI 快速开始</strong></summary>
 
 ```bash
-pipx install 'ouroboros-ai[mcp]'       # 或者：uv tool install 'ouroboros-ai[mcp]'
-ouroboros setup --runtime kiro         # 检测 Kiro CLI、注册 MCP server，并把
-                                        # OUROBOROS_RUNTIME=kiro 写入
-                                        # ~/.kiro/settings/mcp.json（受信任的、由
-                                        # setup 管理的位置——项目内的 .env 属于不受信任
-                                        # 输入，这个键在那里会被忽略）
+pipx install 'ouroboros-ai[mcp]'       # 或者选择下方的 uv tool 命令
 ```
+
+或者：
+
+```bash
+uv tool install 'ouroboros-ai[mcp]'
+```
+
+安装后再单独配置 runtime：
+
+```bash
+ouroboros setup --runtime kiro
+```
+
+Kiro setup 会将 `OUROBOROS_RUNTIME=kiro` 写入受信任的 setup 管理位置
+`~/.kiro/settings/mcp.json`；项目内的 `.env` 被视为不可信输入，其中的这个键会被忽略。
 
 之后就可以在 Kiro CLI 会话中使用 `ooo` 命令。
 
@@ -222,10 +276,27 @@ ouroboros setup --runtime kiro         # 检测 Kiro CLI、注册 MCP server，�
 
 ```bash
 gh auth login                                # 一次性 GitHub 认证（用于实时获取模型列表）
-pipx install 'ouroboros-ai[mcp]'             # 或者：uv tool install 'ouroboros-ai[mcp]'
-ouroboros setup --runtime copilot            # 实时获取模型列表并选择默认模型，
-                                             # 在 ~/.copilot/mcp-config.json 中注册 MCP server
 ```
+
+选择一个隔离 launcher：
+
+```bash
+pipx install 'ouroboros-ai[mcp]'
+```
+
+或者：
+
+```bash
+uv tool install 'ouroboros-ai[mcp]'
+```
+
+安装后再单独配置 runtime：
+
+```bash
+ouroboros setup --runtime copilot
+```
+
+setup 会实时查询模型并选择默认值，然后在 `~/.copilot/mcp-config.json` 中注册 MCP server。
 
 重新启动 Copilot CLI 会话后，即可在会话中使用 `ooo` 命令。模型 ID 映射由发现到的目录把关：当前 direct 与 OpenRouter 的 Opus 默认值都会解析为 Copilot 已发布的 `claude-opus-5`；旧版 Anthropic 版本只转换末尾的数字版本分隔符，且仅当发现到的目录里确实存在该候选 ID 时才转换。未知 ID 会原样保留，让 Copilot 明确报出模型不可用，而不是悄悄换成一个不同的模型。请让各角色模型保持未设置，由 setup 写入发现到的 ID；或显式设置一个 Copilot 可用的 ID。参见 [Copilot 运行时指南](./docs/runtime-guides/copilot.md)。
 
@@ -243,19 +314,80 @@ Python >= 3.12。兼容的全局 `python3` 或 `python` 只是可选的快速路
 ```bash
 claude plugin marketplace add Q00/ouroboros && claude plugin install ouroboros@ouroboros
 ```
-然后在 Claude Code 会话里跑一次 `ooo setup`。
+然后在 Claude Code 会话里跑一次 `/ouroboros:setup`。
 
-**pip / uv / pipx**：
+**pip / uv / pipx** —— 阅读上方 profile 警告，并在新的隔离环境中只选择
+下面的一种安装方式。不要连续复制多个 profile 命令。
+
+基础包：
+
 ```bash
-pip install 'ouroboros-ai[mcp,tui]' && ouroboros setup --runtime claude-cli  # 推荐的 MCP v2 默认组合
-pip install 'ouroboros-ai[claude]'      # Claude Agent SDK profile（MCP 1.x，需隔离）
-pip install 'ouroboros-ai[claude-cli]'  # 不引入额外依赖的 Claude CLI worker
-pip install 'ouroboros-ai[claude-sdk]'  # Claude SDK profile 的显式别名
-pip install 'ouroboros-ai[litellm]'     # + LiteLLM 多 provider；Python 3.12-3.13
-pip install 'ouroboros-ai[mcp]'         # 不带 GUI 的 MCP v2 server / client
-pip install 'ouroboros-ai[tui]'         # 仅设置界面
-pip install 'ouroboros-ai[all]'         # MCP 1.x 应用包；按设计不含 MCP 2
-ouroboros setup                         # 配置运行时
+pip install ouroboros-ai
+```
+
+MCP 2 server/client：
+
+```bash
+pip install 'ouroboros-ai[mcp]'
+```
+
+MCP 2 与 TUI：
+
+```bash
+pip install 'ouroboros-ai[mcp,tui]' && ouroboros setup --runtime claude-cli
+```
+
+独立 Claude Agent SDK profile（MCP 1.x）：
+
+```bash
+pip install 'ouroboros-ai[claude]'
+```
+
+同一 SDK profile 的显式别名：
+
+```bash
+pip install 'ouroboros-ai[claude-sdk]'
+```
+
+Claude + LiteLLM + TUI 应用包（MCP 1.x，不含 MCP 2）：
+
+```bash
+pip install 'ouroboros-ai[all]'
+```
+
+Claude CLI worker（无额外依赖）：
+
+```bash
+pip install 'ouroboros-ai[claude-cli]'
+```
+
+LiteLLM：
+
+```bash
+pip install 'ouroboros-ai[litellm]'
+```
+
+Textual UI：
+
+```bash
+pip install 'ouroboros-ai[tui]'
+```
+
+安装这些 extra 时也请核对 MCP 1/MCP 2 边界和 Python 版本支持。
+
+安装后、运行 workflow 前，先通过 setup 检查并配置 runtime。自动检测或交互选择：
+
+```bash
+ouroboros setup
+```
+
+若要明确选择 runtime，请在 setup 命令中指定。Codex CLI 命令应在 macOS/Linux/WSL 2
+终端运行，且 Ouroboros 与已认证的 Codex CLI 都必须在该环境中准备好。Windows PowerShell
+中的安装不会自动共享到 WSL。原生 Windows 的 `auto` 即使显示成功，也可能未注册新的 MCP
+条目；Desktop HTTP 是单独的 server 注册方式。例如：
+
+```bash
+ouroboros setup --runtime codex
 ```
 
 `[claude]` 与 `[mcp]` 必须保持隔离：Claude Agent SDK 使用 MCP 1.x，而协议 server 使用 MCP 2。需要 MCP 的 host 应通过 `uvx --isolated --python '>=3.12' --from 'ouroboros-ai[mcp]' ...` 或 `pipx run --spec 'ouroboros-ai[mcp]' ...` 启动独立进程，不要把两个 extra 安装到同一环境。
@@ -272,9 +404,14 @@ ouroboros setup                         # 配置运行时
 ```bash
 brew tap q00/tap
 brew install ouroboros-ai
-ouroboros setup                         # 配置运行时
 ```
 自托管 tap，尚未进入 homebrew-core。安装的是与 PyPI 相同的包。
+
+安装后、运行 workflow 前先配置 runtime：
+
+```bash
+ouroboros setup
+```
 
 各运行时指南：[Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md) · [Hermes](./docs/runtime-guides/hermes.md) · [OpenCode](./docs/runtime-guides/opencode.md) · [Kiro CLI](./docs/runtime-guides/kiro.md) · [Gemini CLI](./docs/runtime-guides/gemini.md) · [GitHub Copilot CLI](./docs/runtime-guides/copilot.md) · [Zcode](./docs/runtime-guides/zcode.md) · [Pi JSON mode](https://pi.dev/docs/latest/json) · [OMP（Oh My Pi）](./docs/runtime-guides/omp.md) · [Goose](./docs/runtime-guides/goose.md) · [GJC](./docs/runtime-guides/gjc.md) · [Antigravity CLI](./docs/runtime-guides/antigravity.md) · [Grok Build CLI](./docs/runtime-guides/grok.md)
 
@@ -386,11 +523,19 @@ Ralph Cycle 3: evolve_step(lineage)       -> Gen 3 -> action=CONVERGED
 
 ## 命令
 
-在 AI 编码 agent 会话里用 `ooo <cmd>` 技能，在终端里用 `ouroboros` CLI。
+在支持的 AI 编码 agent 会话里使用 `ooo <cmd>` 技能，在终端里使用 `ouroboros` CLI。
+`/ouroboros:setup` 按宿主配置；MCP 注册流程并非所有宿主都相同。Claude Code 使用
+`/ouroboros:setup` guided 流程，其他运行时使用相应的 CLI 设置步骤。
+
+> 在标准 MCP 路径中对 Git 项目请求 `ooo run` 前，请在项目终端用只读命令
+> `git rev-parse --verify HEAD` 检查是否已有提交。标准 MCP run 默认请求 worktree；
+> 只执行 `git init`、尚无提交的仓库没有可供创建该 worktree 的 `HEAD`
+> ([MCP 默认值](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/mcp/tools/execution_handlers.py#L1430)，
+> [worktree 检查](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/core/worktree.py#L371-L388))。如果这是刚执行过 `git init`、尚无提交的仓库，请先审查文件，并由你自己决定是否以及提交哪些内容，再运行。不要让 agent 在此准备阶段擅自提交或修改项目文件。此条件仅适用于标准 MCP worktree 路径；不要泛化到 standalone CLI、非 Git 项目、关闭 worktree 或 OpenCode。
 
 | 技能（`ooo`）        | 等效 CLI                                                          | 作用                                                          |
 | :------------------- | :---------------------------------------------------------------- | :------------------------------------------------------------ |
-| `ooo setup`          | `ouroboros setup`                                                 | 注册运行时并配置项目（一次性）                                |
+| `/ouroboros:setup`          | `ouroboros setup`                                                 | 按宿主配置；其他运行时使用相应 CLI 设置步骤                    |
 | `ooo interview`      | `ouroboros init start`                                            | 苏格拉底式提问 —— 把隐藏假设挖出来                            |
 | `ooo idk`            | *(经由 skill)*                                                    | 按用户对当前主题的理解调整访谈表述难度                        |
 | `ooo auto`           | `ouroboros auto`                                                  | 从一个目标 → A 级 Seed → 在有界循环里完成执行交接             |
@@ -403,7 +548,7 @@ Ralph Cycle 3: evolve_step(lineage)       -> Gen 3 -> action=CONVERGED
 | `ooo resume-session` | `ouroboros resume`                                                | 列出进行中的会话并给出重新接入命令                            |
 | `ooo cancel`         | `ouroboros cancel execution [<id>\|--all]`                        | 取消卡住或孤儿态的执行                                        |
 | `ooo ralph`          | *(经由 MCP)*                                                      | 持续循环直到通过验证                                          |
-| `ooo tutorial`       | *(交互式)*                                                        | 交互式动手学习                                                |
+| `/ouroboros:tutorial` | *(交互式)*                                                        | 交互式动手学习                                                |
 | `ooo help`           | `ouroboros --help`                                                | 完整命令参考                                                  |
 | `ooo pm`             | *(经由 MCP)*                                                      | 面向 PM 的访谈 + PRD 生成                                     |
 | `ooo qa`             | *(经由 skill)*                                                    | 通用 QA 评判，可用于任意产物                                  |
