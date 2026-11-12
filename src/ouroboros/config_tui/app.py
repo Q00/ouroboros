@@ -8,7 +8,7 @@ that lets ourocode embed the settings screen without the monitor TUI.
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, get_args
 
 from textual import work
 from textual.app import App, ComposeResult
@@ -43,7 +43,7 @@ from ouroboros.backends.model_catalog import (
     uses_default_model_sentinel,
 )
 from ouroboros.config.model_selection import AUTO_MODEL, TIERS
-from ouroboros.config.models import OuroborosConfig, get_config_dir
+from ouroboros.config.models import OrchestratorConfig, OuroborosConfig, get_config_dir
 from ouroboros.config_tui import persistence
 from ouroboros.config_tui.fields import (
     ADVANCED_MODEL_FIELDS,
@@ -334,7 +334,10 @@ class SettingsApp(App[None]):
         options: list[tuple[str, str]] = []
         if include_inherit:
             options.append(("(inherit default)", INHERIT_SENTINEL))
+        allowed = get_args(OrchestratorConfig.model_fields["runtime_backend"].annotation)
         for name in runtime_backend_choices():
+            if name not in allowed:
+                continue
             if self._installed.get(name):
                 options.append((name, name))
             else:
