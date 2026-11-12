@@ -78,10 +78,11 @@ os.environ["OUROBOROS_TELEMETRY"] = "0"
 # ── Hermetic home isolation (before collection) ──────────────────────────────
 # Ouroboros resolves its state root two ways: ``Path.home()`` AND
 # ``os.path.expanduser("~")`` (e.g. cli/commands/{cancel,run,job,resume,tui}.py
-# build the default ``EventStore`` DB path via ``expanduser``). ``$HOME`` is the
-# single chokepoint both go through — ``Path.home()`` calls ``expanduser("~")``
-# internally — so redirecting ``$HOME`` isolates config, the default DB, logs,
-# and dynamically resolved CLI persistence defaults in one move, and
+# build the default ``EventStore`` DB path via ``expanduser``). ``Path.home()``
+# calls ``expanduser("~")`` internally; redirect HOME and, on Windows,
+# USERPROFILE to isolate home-based config, default DB, logs, and CLI paths.
+#
+# With these paths redirected,
 # subprocesses spawned by tests inherit the isolated home instead of the real
 # one. We set it at conftest import — *before* collection — so it also covers
 # effects the per-test fixture cannot reach (module-level constants, a logging
@@ -97,6 +98,14 @@ _SESSION_HOME = Path(tempfile.mkdtemp(prefix="ouroboros-test-home-"))
 atexit.register(shutil.rmtree, _SESSION_HOME, ignore_errors=True)
 os.environ.setdefault("UV_CACHE_DIR", str(_REAL_HOME / ".cache" / "uv"))
 os.environ["HOME"] = str(_SESSION_HOME)
+# On Windows pathlib and expanduser use USERPROFILE rather than HOME.
+if sys.platform == "win32":
+    os.environ["USERPROFILE"] = str(_SESSION_HOME)
+# Codex's explicit configuration directory overrides HOME.  Inheriting it from
+# an interactive Codex session would let setup/uninstall tests modify the
+# developer's actual configuration. Individual tests can explicitly opt in to
+# a temporary CODEX_HOME after collection.
+os.environ.pop("CODEX_HOME", None)
 # Exposed so tests can assert import-time constants were captured under the
 # isolated home rather than the developer's real ``~``.
 os.environ["_OUROBOROS_TEST_SESSION_HOME"] = str(_SESSION_HOME)
@@ -124,6 +133,8 @@ def isolate_ouroboros_home(tmp_path_factory, monkeypatch):
     """
     home = tmp_path_factory.mktemp("home")
     monkeypatch.setenv("HOME", str(home))
+    if sys.platform == "win32":
+        monkeypatch.setenv("USERPROFILE", str(home))
 
 
 @pytest.fixture(scope="session", autouse=True)
