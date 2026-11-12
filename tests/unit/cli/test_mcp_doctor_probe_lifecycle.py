@@ -81,7 +81,9 @@ async def test_real_adapter_cleanup_cancellation_does_not_echo_its_cause(
     entry_error = (
         anyio.get_cancelled_exc_class()("caller cancelled")
         if entry_outcome == "cancelled"
-        else RuntimeError("connection failed") if entry_outcome == "error" else None
+        else RuntimeError("connection failed")
+        if entry_outcome == "error"
+        else None
     )
     client.__aenter__ = AsyncMock(return_value=client, side_effect=entry_error)
     client.protocol_version = "2026-07-28"
