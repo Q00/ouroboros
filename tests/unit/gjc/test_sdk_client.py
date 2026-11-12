@@ -255,3 +255,116 @@ def test_current_gjc_exposes_coordinator_mcp_when_installed() -> None:
     assert payload["server"]["name"] == "gjc-coordinator-mcp"
     assert "gjc_coordinator_start_session" in payload["tools"]
     assert "gjc_coordinator_await_turn" in payload["tools"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["not_found", "resource_gone"])
+async def test_stop_session_does_not_claim_missing_session_was_reaped(
+    reason: str, tmp_path: Path
+) -> None:
+    adapter = _FakeAdapter([{"ok": False, "error": {"code": reason, "message": "gone"}}])
+    client = GjcCoordinatorClient(cli_path="gjc", cwd=tmp_path, adapter_factory=_factory(adapter))
+    async with client:
+        with pytest.raises(GjcCoordinatorError, match="gone") as error:
+            await client.stop_session("session-1")
+        assert error.value.code == reason
+    assert len(adapter.calls) == 1
+    assert adapter.calls[0][1]["session_id"] == "session-1"
+
+
+@pytest.mark.asyncio
+async def test_runtime_retry_reuses_exact_session_after_pending_stop(tmp_path: Path) -> None:
+    from ouroboros.orchestrator.gjc_runtime import GjcRuntime
+
+    adapter = _FakeAdapter(
+        [
+            {"ok": False, "reason": "delivery_pending"},
+            {"ok": True, "session_id": "session-1", "closed": True},
+        ]
+    )
+    client = GjcCoordinatorClient(cli_path="gjc", cwd=tmp_path, adapter_factory=_factory(adapter))
+    runtime = GjcRuntime(cwd=tmp_path)
+    async with client:
+        assert await runtime._stop_session_bounded(client, "session-1")
+    assert adapter.calls == [
+        (
+            "gjc_coordinator_stop_session",
+            {"session_id": "session-1", "force": True, "allow_mutation": True},
+        ),
+        (
+            "gjc_coordinator_stop_session",
+            {"session_id": "session-1", "force": True, "allow_mutation": True},
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"ok": True, "session_id": "session-1", "closed": False},
+        {"ok": True, "session_id": "session-1"},
+        {"ok": True, "session_id": "different", "closed": True},
+        {"ok": True, "closed": True},
+    ],
+)
+async def test_runtime_does_not_confirm_unproven_stop_response(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    from ouroboros.orchestrator.gjc_runtime import GjcRuntime
+
+    adapter = _FakeAdapter([payload])
+    client = GjcCoordinatorClient(cli_path="gjc", cwd=tmp_path, adapter_factory=_factory(adapter))
+    runtime = GjcRuntime(cwd=tmp_path)
+    async with client:
+        assert not await runtime._stop_session_bounded(client, "session-1")
+    assert len(adapter.calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"ok": True, "session_id": "session-1", "closed": False},
+        {"ok": True, "session_id": "different", "closed": True},
+        {"ok": False, "reason": "resource_gone"},
+    ],
+)
+async def test_runtime_surfaces_unconfirmed_stop_through_actual_client(
+    response: dict[str, Any], tmp_path: Path
+) -> None:
+    from ouroboros.orchestrator.gjc_runtime import GjcRuntime
+
+    adapter = _FakeAdapter(
+        [
+            {"ok": True, "session": {"session_id": "session-1"}, "turn_id": "turn-1"},
+            {"ok": True, "turn": {"status": "completed", "final_response": {"text": "done"}}},
+            response,
+        ]
+    )
+
+    def factory(**kwargs: Any) -> GjcCoordinatorClient:
+        return GjcCoordinatorClient(**kwargs, adapter_factory=_factory(adapter))
+
+    runtime = GjcRuntime(cwd=tmp_path, coordinator_client_factory=factory)
+    final = [message async for message in runtime.execute_task("Do it")][-1]
+    assert final.data["subtype"] == "success"
+    assert final.data["cleanup_unconfirmed"] is True
+    assert adapter.disconnected
+    assert [name for name, _ in adapter.calls].count("gjc_coordinator_stop_session") == 1
+
+
+@pytest.mark.asyncio
+async def test_terminate_handle_reports_false_when_stop_is_not_proven(tmp_path: Path) -> None:
+    from ouroboros.orchestrator.adapter import RuntimeHandle
+    from ouroboros.orchestrator.gjc_runtime import GjcRuntime
+
+    adapter = _FakeAdapter([{"ok": True, "session_id": "session-1", "closed": False}])
+
+    def factory(**kwargs: Any) -> GjcCoordinatorClient:
+        return GjcCoordinatorClient(**kwargs, adapter_factory=_factory(adapter))
+
+    runtime = GjcRuntime(cwd=tmp_path, coordinator_client_factory=factory)
+    handle = RuntimeHandle(backend="gjc", kind="agent_runtime", native_session_id="session-1")
+    assert not await runtime._terminate_session(handle)
+    assert adapter.disconnected
