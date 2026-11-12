@@ -128,3 +128,41 @@ async def test_run_pm_interview_done_path_persists_stored_ambiguity(tmp_path: Pa
     printed = "\n".join(str(call.args[0]) for call in mock_print.call_args_list if call.args)
     assert "Interview complete. Session ID: sess-123" in printed
     assert "Ambiguity score: 0.34" in printed
+
+
+@pytest.mark.asyncio
+async def test_completion_save_failure_cannot_generate_pm(tmp_path: Path) -> None:
+    import typer
+
+    from ouroboros.core.errors import ValidationError
+
+    state = _resume_state()
+    answered = InterviewRound(round_number=1, question="Current question?", user_response="Answer")
+    completed_state = SimpleNamespace(
+        **{**state.__dict__, "is_complete": True, "rounds": [answered]}
+    )
+    engine = MagicMock()
+    engine.load_state = AsyncMock(return_value=Result.ok(state))
+    engine.complete_interview = AsyncMock(return_value=Result.ok(completed_state))
+    engine.check_completion = AsyncMock(return_value=None)
+    engine.save_state = AsyncMock(
+        side_effect=[
+            Result.ok(tmp_path / "state.json"),
+            Result.err(ValidationError("stale revision")),
+        ]
+    )
+    engine.generate_pm_seed = AsyncMock(return_value=Result.err(ValidationError("should not run")))
+    engine.format_decide_later_summary.return_value = ""
+    engine._install_pm_steering = MagicMock()
+    with (
+        patch("ouroboros.cli.commands.pm.create_llm_adapter", return_value=object()),
+        patch("ouroboros.bigbang.pm_interview.PMInterviewEngine.create", return_value=engine),
+        patch("ouroboros.cli.commands.pm.multiline_prompt_async", AsyncMock(return_value="done")),
+        patch("ouroboros.cli.commands.pm._save_cli_pm_meta"),
+        pytest.raises(typer.Exit) as exc,
+    ):
+        await _run_pm_interview(
+            resume_id="sess-123", model="test-model", backend="codex", debug=False
+        )
+    assert exc.value.exit_code == 1
+    engine.generate_pm_seed.assert_not_awaited()
