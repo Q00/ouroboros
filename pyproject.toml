@@ -165,7 +165,8 @@ dev = [
     "ouroboros-ai[tui]",
     "mypy>=1.19.1",
     "pre-commit>=4.5.1",
-    "pytest>=9.0.2",
+    # xdist 3.8 loadgroup writes _nodeid; pytest 9.2 reads the new _id instead.
+    "pytest>=9.0.2,<9.2",
     "pytest-asyncio>=1.3.0",
     "pytest-cov>=7.0.0",
     "pytest-xdist>=3.6",
