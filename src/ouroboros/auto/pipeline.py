@@ -2744,8 +2744,8 @@ def _has_verified_product_completion(state: AutoPipelineState) -> bool:
         return False
     if state.ralph_job_status == "completed":
         return True
-    if state.last_qa_passed is True:
-        return True
+    # last_qa_passed is Seed QA, which runs before the product execution.
+    # It is not proof that the product or an attached run was verified.
     return state.run_handoff_status == "completed"
 
 
