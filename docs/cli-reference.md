@@ -752,7 +752,21 @@ ouroboros cleanup [OPTIONS]
 
 Safety rules:
 
-- Worktrees with a live (non-stale) lock are never touched — running sessions are safe.
+- Cleanup retains worktrees with a live or unverifiable task lock. This relies on
+  participants using compatible lock-aware versions, reliable filesystem locking,
+  and unique hostnames across machines that share the worktree root. In particular,
+  two different machines with the same hostname cannot safely share that root.
+- A remote-host lock is retained even if its heartbeat is old; a timestamp cannot
+  prove the remote owner exited. The legacy `worktree_lock_stale_after_minutes`
+  setting no longer authorizes remote lock recovery. Verify remote ownership and
+  resolve abandoned locks manually before retrying cleanup.
+- A hostname change (including a container or network-dependent hostname change)
+  makes an earlier lock appear to belong to another host. It is retained without
+  automatic reclamation, even on the same machine. Investigate the recorded
+  owner and confirm it is no longer active before manually resolving the lock.
+- Empty, damaged, or unreadable lock records are also retained. Investigate the
+  workspace and its possible owners before manually resolving such a lock;
+  an unreadable record is not evidence that the workspace is idle.
 - Dirty worktrees are never removed, even with `--force`.
 - Branches are only deleted via safe `git branch -d` (fully merged); unmerged branches always survive.
 - Without `--force`, only worktrees whose branch is fully merged are removed.
@@ -1712,6 +1726,7 @@ The table below covers the most commonly used variables. For the full list — i
 | `OUROBOROS_MODEL_TIER_ROUTING` | — | Model-tier routing is enabled by default. Set to `0`, `off`, or `false` (case- and whitespace-insensitive) to disable it completely |
 | `OUROBOROS_SHADOW_REPLAY` | — | Arms the opt-in shadow-baseline experiment only for `1`, `true`, or `on`. Current live decompositions are quarantined before baseline model dispatch because they lack deterministic MECE attestation; bundled runtimes also lack the required isolation attestation |
 | `OUROBOROS_MAX_PARALLEL_WORKERS` | `orchestrator.max_parallel_workers` | Maximum concurrent Acceptance Criteria workers for parallel execution |
+| `OUROBOROS_LEAK_SCAN_MAX_ENTRIES` | — | Entry budget for the pre-worker check-package leak scan. Default: `2000000`. A positive integer overrides it; empty, invalid, zero, and negative values use the default. Read when the module is imported; set before starting the process. Exhaustion refuses worker start as an incomplete scan. This is a traversal budget, not a performance guarantee |
 | `OUROBOROS_LLM_BACKEND` | `llm.backend` | Override the LLM-only flow backend |
 | `OUROBOROS_CLI_PATH` | `orchestrator.cli_path` | Path to the Claude CLI binary |
 | `OUROBOROS_CODEX_CLI_PATH` | `orchestrator.codex_cli_path` | Path to the Codex CLI binary |
