@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from ouroboros.core.execution_preferences import ResolvedExecutionPreferences
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPToolError
 from ouroboros.mcp.job_manager import JobManager, JobSnapshot, JobStatus
@@ -185,6 +186,8 @@ class _SuccessfulExecuteHandler:
         session_id_override: str | None = None,
         synchronous: bool = False,
         check_package: Any = None,
+        _preference_snapshot: tuple[ResolvedExecutionPreferences, str | None, str | None]
+        | None = None,
     ) -> Result[MCPToolResult, Any]:
         assert synchronous is True
         session_id = session_id_override or arguments.get("session_id") or "orch_fake"
@@ -223,6 +226,8 @@ class _FailedExecuteHandler(_SuccessfulExecuteHandler):
         session_id_override: str | None = None,
         synchronous: bool = False,
         check_package: Any = None,
+        _preference_snapshot: tuple[ResolvedExecutionPreferences, str | None, str | None]
+        | None = None,
     ) -> Result[MCPToolResult, Any]:
         result = await super().handle(
             arguments,
@@ -230,6 +235,7 @@ class _FailedExecuteHandler(_SuccessfulExecuteHandler):
             session_id_override=session_id_override,
             synchronous=synchronous,
             check_package=check_package,
+            _preference_snapshot=_preference_snapshot,
         )
         assert result.is_ok
         meta = {**result.value.meta, "success": False, "status": "failed"}
