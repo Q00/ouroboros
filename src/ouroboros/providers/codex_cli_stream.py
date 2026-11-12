@@ -303,8 +303,9 @@ async def terminate_runtime_process(
     terminate_process_group: bool = False,
     process_group_id: int | None = None,
     workspace: str | None = None,
+    require_owned_tree: bool = False,
 ) -> bool:
-    """Shut down a runtime subprocess and wait for its whole process tree.
+    """Shut down a runtime subprocess and wait for its recorded process tree.
 
     The worker's descendants are recorded before any signal, because tool
     commands can run in their own sessions where a process group signal does
@@ -316,12 +317,18 @@ async def terminate_runtime_process(
     stale ``.git/index.lock`` that the tree held is removed after the tree
     exits; any other lock is left in place with a structured warning.
 
-    Returns ``True`` when the whole tree is confirmed gone.
+    With ``require_owned_tree``, success additionally requires a captured,
+    owned leader and an observed leader return code. An unavailable process
+    scan, non-child or PID-less process is not a termination receipt.
     """
     pgid = _resolve_process_group_id(process, terminate_process_group, process_group_id)
     # Capture stops every member and the next call resumes them with SIGTERM
     # pending; neither awaits, so no cancellation can land in between.
     tree = await capture_worker_tree(process, process_group_id=pgid, workspace=workspace)
+    leader_pid = getattr(process, "pid", None)
+    owned_tree_captured = (
+        isinstance(leader_pid, int) and leader_pid in tree.members and not tree.scan_failed
+    )
     terminate_frozen_tree(tree)
     started_at = asyncio.get_running_loop().time()
     cancelled: asyncio.CancelledError | None = None
@@ -354,6 +361,12 @@ async def terminate_runtime_process(
     )
     if cancelled is not None:
         raise cancelled
+    if require_owned_tree:
+        return (
+            tree_exited
+            and owned_tree_captured
+            and isinstance(getattr(process, "returncode", None), int)
+        )
     return tree_exited
 
 
