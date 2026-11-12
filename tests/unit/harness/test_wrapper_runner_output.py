@@ -927,3 +927,33 @@ def test_frozen_wrapper_rejects_pytest_exe_collection(tmp_path: Path) -> None:
     assert not marker.exists()
     assert result.returncode != 0
     assert receipt["test_result"] == "failed"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["python", "-m", "pytest", "test_inner.py"],
+        ["coverage", "run", "-m", "pytest", "test_inner.py"],
+        ["env", "python", "-m", "pytest", "test_inner.py"],
+        ["uv", "run", "python", "-m", "pytest", "test_inner.py"],
+    ],
+)
+def test_wrapper_withholds_inherited_interactive_test_status(command, monkeypatch) -> None:
+    monkeypatch.setenv("PYTHONINSPECT", "1")
+    assert wrapper_runner._nonexecuting_pytest_mode(command)
+
+
+@pytest.mark.parametrize("flag", ["-0", "-0p", "--list", "--list-paths"])
+def test_wrapper_withholds_py_launcher_inventory(flag: str) -> None:
+    assert wrapper_runner._nonexecuting_pytest_mode(["py.exe", flag, "-m", "pytest"])
+
+
+@pytest.mark.parametrize("value", ["", "1"])
+def test_wrapper_withholds_py_launcher_dryrun(value: str, monkeypatch) -> None:
+    monkeypatch.setenv("PYLAUNCHER_DRYRUN", value)
+    assert wrapper_runner._nonexecuting_pytest_mode(["py.exe", "-3", "-m", "pytest"])
+
+
+def test_wrapper_inherited_inspect_keeps_generic_script_boundary(monkeypatch) -> None:
+    monkeypatch.setenv("PYTHONINSPECT", "1")
+    assert not wrapper_runner._nonexecuting_pytest_mode(["python", "script.py", "-m", "pytest"])
