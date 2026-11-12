@@ -42,6 +42,13 @@ class HostSubagentCapability(StrEnum):
     UNDECLARED = "undeclared"
 
 
+class QuestionDeliveryCapability(StrEnum):
+    """A host's explicit question-delivery choice, independent of fan-out."""
+
+    QUESTION_ONLY = "question_only_degraded"
+    UNDECLARED = "undeclared"
+
+
 class HostCapabilitySource(StrEnum):
     MCP_EXTENSION = "mcp_extension"
     TRUSTED_SERVER_OPTION = "trusted_server_option"
@@ -56,6 +63,7 @@ class DispatchAuthority(StrEnum):
 
 
 SUBAGENT_CAPABILITY_EXTENSION = "io.ouroboros/subagents"
+QUESTION_DELIVERY_EXTENSION = "io.ouroboros/question-delivery"
 _CAPABILITY_MODES = frozenset(item.value for item in HostSubagentCapability)
 
 
@@ -73,6 +81,7 @@ class MCPHostContext:
     subagent_capability: HostSubagentCapability = HostSubagentCapability.UNDECLARED
     capability_source: HostCapabilitySource = HostCapabilitySource.NONE
     dispatch_authority: DispatchAuthority = DispatchAuthority.INTERNAL_RUNTIME
+    question_delivery: QuestionDeliveryCapability = QuestionDeliveryCapability.UNDECLARED
 
     @property
     def is_mcp_host(self) -> bool:
@@ -150,6 +159,21 @@ def _extension_mode(
     return None
 
 
+def _question_delivery_mode(capabilities: Any) -> QuestionDeliveryCapability:
+    """Accept only the explicit supported fallback; unknown modes do not opt in."""
+    for field_name in ("extensions", "experimental"):
+        raw = getattr(capabilities, field_name, None)
+        if not isinstance(raw, Mapping):
+            continue
+        value = raw.get(QUESTION_DELIVERY_EXTENSION)
+        if (
+            isinstance(value, Mapping)
+            and value.get("mode") == QuestionDeliveryCapability.QUESTION_ONLY
+        ):
+            return QuestionDeliveryCapability.QUESTION_ONLY
+    return QuestionDeliveryCapability.UNDECLARED
+
+
 def from_sdk_context(context: Any) -> MCPHostContext:
     """Normalize an MCP SDK ``Context`` without retaining raw client data."""
     if context is None:
@@ -172,6 +196,7 @@ def from_sdk_context(context: Any) -> MCPHostContext:
                 else HostCapabilitySource.NONE
             ),
             dispatch_authority=DispatchAuthority.MCP_HOST,
+            question_delivery=_question_delivery_mode(capabilities),
         )
     except (AttributeError, TypeError):
         return MCPHostContext(
@@ -258,7 +283,13 @@ def subagent_capability_extensions() -> list[Any] | None:
                 "undeclaredBehavior": "parallel_preferred_sequential_fallback",
             }
 
-    return [SubagentCapabilityExtension()]
+    class QuestionDeliveryExtension(Extension):
+        identifier = QUESTION_DELIVERY_EXTENSION
+
+        def settings(self) -> dict[str, Any]:
+            return {"modes": ["question_only_degraded"], "undeclaredBehavior": "unchanged"}
+
+    return [SubagentCapabilityExtension(), QuestionDeliveryExtension()]
 
 
 def render_lateral_host_banner(
