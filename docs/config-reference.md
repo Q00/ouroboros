@@ -865,6 +865,9 @@ Controls Phase 5 — multi-model consensus voting and deliberation.
 > `uncertainty_threshold`. In `consensus`: `min_models`, `threshold`, and
 > `diversity_required`. Each is marked in its field table below with what actually
 > controls the behaviour instead. The model fields in both sections **are** wired.
+> The CLI warns after saving one of these keys and when displaying a section or
+> summary containing them. The `config show --json` summary does not include
+> these section values or these warnings.
 
 ```yaml
 consensus:
