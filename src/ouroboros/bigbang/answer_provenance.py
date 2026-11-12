@@ -183,7 +183,23 @@ def extraction_rounds(state: InterviewState) -> list[ExtractionRound]:
     An assumption's answer renders as :data:`WITHHELD_ASSUMPTION_NOTE` for the
     same reason: only a decision may become a requirement.
     """
+    from ouroboros.interview_adapters.independent_batch import has_pending_batch
+
+    if has_pending_batch(state):
+        raise ValueError("Pending batch questions cannot be projected into a Seed")
     projected: list[ExtractionRound] = []
+    from ouroboros.interview_adapters.opening_interpretations import confirmed_opening_events
+
+    confirmed = confirmed_opening_events(state.proposed_opening, state.opening_decisions)
+    for _item, event in confirmed:
+        projected.append(
+            ExtractionRound(
+                round_number=0,
+                question=event.presented_prompt,
+                answer=event.user_response,
+                withheld=False,
+            )
+        )
     for round_data in state.rounds:
         withheld = bool(round_data.user_response) and round_data.provenance in WITHHELD_PROVENANCES
         note = _WITHHELD_NOTES.get(round_data.provenance, WITHHELD_ANSWER_NOTE)
