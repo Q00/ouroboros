@@ -146,3 +146,34 @@ def test_internal_plugin_passive_remains_server_owned() -> None:
         resolve_request_subagent_dispatch("opencode", "plugin")
         is SubagentDispatchMode.PLUGIN_PASSIVE
     )
+
+
+def test_question_delivery_is_independent_of_subagent_parallelism() -> None:
+    from ouroboros.mcp.host_context import QuestionDeliveryCapability
+
+    context = from_sdk_context(
+        _sdk_context(
+            name="codex",
+            extensions={
+                "io.ouroboros/subagents": {"mode": "parallel"},
+                "io.ouroboros/question-delivery": {"mode": "question_only_degraded"},
+            },
+        )
+    )
+    assert context.subagent_capability is HostSubagentCapability.PARALLEL
+    assert context.question_delivery is QuestionDeliveryCapability.QUESTION_ONLY
+
+
+def test_unknown_question_delivery_never_claims_question_only() -> None:
+    from ouroboros.mcp.host_context import QuestionDeliveryCapability
+
+    for value in (
+        {"mode": "live_background"},
+        {"mode": True},
+        {},
+        {"mode": "QUESTION_ONLY_DEGRADED"},
+    ):
+        context = from_sdk_context(
+            _sdk_context(extensions={"io.ouroboros/question-delivery": value})
+        )
+        assert context.question_delivery is QuestionDeliveryCapability.UNDECLARED
