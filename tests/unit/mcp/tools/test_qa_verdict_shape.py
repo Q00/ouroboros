@@ -727,3 +727,33 @@ async def test_numeric_atom_boundary_preserves_complete_candidate_relationships(
     else:
         assert result.is_err
         assert "no single unambiguous verdict object" in str(result.error)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    ["Score: 0.9e-2\nVerdict: fail", "Score: 0.9/10\nVerdict: fail"],
+)
+async def test_plain_score_suffix_cannot_mint_a_pass(body: str) -> None:
+    result = await _handler(body).handle(dict(_ARGS))
+    assert result.is_err or result.value.meta.get("passed") is not True
+
+
+async def test_later_plain_score_correction_does_not_mint_a_pass() -> None:
+    result = await _handler("Score: 0.9\nScore: 0.1\nVerdict: fail").handle(dict(_ARGS))
+    assert result.is_err
+
+
+async def test_empty_later_score_is_does_not_mint_a_pass() -> None:
+    result = await _handler("Score: 0.9\nscore is\nVerdict: fail").handle(dict(_ARGS))
+    assert result.is_err
+
+
+async def test_indented_later_score_does_not_mint_a_pass() -> None:
+    result = await _handler("Score: 0.9\n  Score: 0.1\nVerdict: fail").handle(dict(_ARGS))
+    assert result.is_err
+
+
+async def test_unicode_indented_later_score_does_not_mint_a_pass() -> None:
+    result = await _handler("Score: 0.9\r\n\u00a0Score: 0.1\r\nVerdict: fail").handle(dict(_ARGS))
+    assert result.is_err

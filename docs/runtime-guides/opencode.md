@@ -14,6 +14,9 @@ OpenCode 2.x plugin mode is not yet supported. Setup rejects a detected 2.x
 CLI before installing the V1 bridge or writing configuration. Use
 `ouroboros setup --runtime opencode --opencode-mode subprocess` for the existing
 subprocess path. This does not enable in-host child Task dispatch.
+If setup cannot determine the CLI version, it warns that plugin compatibility
+is unverified and continues with the V1 bridge. Confirm the version before use;
+an unrecognized 2.x host cannot load that bridge.
 
 If you manually registered the bridge directory in V2's `plugins` list,
 `ouroboros uninstall` removes the entry for the current OpenCode config

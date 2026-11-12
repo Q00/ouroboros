@@ -1850,6 +1850,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                             from ouroboros.mcp.tools.qa import QAHandler
 
                             qa_handler = QAHandler(
+                                event_store=_event_store,
                                 llm_adapter=self.llm_adapter,
                                 llm_backend=self.llm_backend,
                             )

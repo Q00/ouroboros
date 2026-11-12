@@ -44,16 +44,26 @@ RETRIABLE_EXCEPTIONS = (TimeoutError, ConnectionError, OSError)
 CONTROL_FLOW_EXCEPTIONS = (asyncio.CancelledError, KeyboardInterrupt, GeneratorExit)
 
 
-def _record_cleanup_failure(primary: BaseException, cleanup: BaseException) -> None:
+def _record_cleanup_failure(
+    primary: BaseException, cleanup: BaseException, *, include_details: bool = True
+) -> None:
     """Record secondary teardown failure without replacing the primary error."""
     try:
-        primary.add_note(f"MCP cleanup also failed ({type(cleanup).__name__}): {cleanup}")
+        note = (
+            f"MCP cleanup also failed ({type(cleanup).__name__}): {cleanup}"
+            if include_details
+            else "MCP cleanup also failed"
+        )
+        primary.add_note(note)
     except (asyncio.CancelledError, KeyboardInterrupt, GeneratorExit):
         raise
     except BaseException:
         pass
     try:
-        log.warning("mcp.cleanup_during_exception_failed", error=cleanup)
+        if include_details:
+            log.warning("mcp.cleanup_during_exception_failed", error=cleanup)
+        else:
+            log.warning("mcp.cleanup_during_exception_failed")
     except (asyncio.CancelledError, KeyboardInterrupt, GeneratorExit):
         raise
     except BaseException:
@@ -123,7 +133,9 @@ class MCPClientAdapter:
         max_retries: int = 3,
         retry_wait_initial: float = 1.0,
         retry_wait_max: float = 10.0,
+        include_cleanup_error_details: bool = True,
     ) -> None:
+        self._include_cleanup_error_details = include_cleanup_error_details
         self._max_retries = max_retries
         self._retry_wait_initial = retry_wait_initial
         self._retry_wait_max = retry_wait_max
@@ -151,11 +163,15 @@ class MCPClientAdapter:
         except BaseException as cleanup_error:
             if exc_val is None:
                 raise
-            _record_cleanup_failure(exc_val, cleanup_error)
+            _record_cleanup_failure(
+                exc_val, cleanup_error, include_details=self._include_cleanup_error_details
+            )
             return None
         if result.is_err:
             if exc_val is not None:
-                _record_cleanup_failure(exc_val, result.error)
+                _record_cleanup_failure(
+                    exc_val, result.error, include_details=self._include_cleanup_error_details
+                )
             else:
                 raise result.error
 
@@ -252,8 +268,14 @@ class MCPClientAdapter:
                     await self._reset_connection_state()
                 except BaseException as cleanup_error:
                     self._cleanup_error = _cleanup_client_error(cleanup_error, config.name)
-                    _record_cleanup_failure(primary_error, cleanup_error)
+                    _record_cleanup_failure(
+                        primary_error,
+                        cleanup_error,
+                        include_details=self._include_cleanup_error_details,
+                    )
                     if isinstance(cleanup_error, CONTROL_FLOW_EXCEPTIONS):
+                        if not self._include_cleanup_error_details:
+                            raise cleanup_error from None
                         raise
             raise
         except Exception as primary_error:
@@ -264,8 +286,14 @@ class MCPClientAdapter:
                     await self._reset_connection_state()
                 except BaseException as cleanup_exc:
                     self._cleanup_error = _cleanup_client_error(cleanup_exc, config.name)
-                    _record_cleanup_failure(primary_error, cleanup_exc)
+                    _record_cleanup_failure(
+                        primary_error,
+                        cleanup_exc,
+                        include_details=self._include_cleanup_error_details,
+                    )
                     if isinstance(cleanup_exc, CONTROL_FLOW_EXCEPTIONS):
+                        if not self._include_cleanup_error_details:
+                            raise cleanup_exc from None
                         raise
             raise
 
@@ -296,7 +324,11 @@ class MCPClientAdapter:
             if control_flow_error is not None:
                 for error in errors:
                     if error is not control_flow_error:
-                        _record_cleanup_failure(control_flow_error, error)
+                        _record_cleanup_failure(
+                            control_flow_error,
+                            error,
+                            include_details=self._include_cleanup_error_details,
+                        )
             raise control_flow_error or errors[0]
 
     @staticmethod

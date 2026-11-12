@@ -37,11 +37,22 @@ from ouroboros.interview_adapters import (
     ReferenceCue,
     ReferenceResolutionStatus,
     build_reference_contrast_question,
-    detect_explicit_confusion_terms,
     next_unresolved_reference,
     normalized_question_key,
     reference_question_anchor,
     select_glossary_injection,
+)
+from ouroboros.interview_adapters.first_question import (
+    FirstQuestionPresentation,
+    first_question_instruction,
+    validate_stored_selection,
+)
+from ouroboros.interview_adapters.inline_materials import InlineMaterial
+from ouroboros.interview_adapters.opening_interpretations import (
+    OpeningDecisionEvent,
+    ProposedOpening,
+    confirmed_interpretations,
+    opening_fingerprint_payload,
 )
 from ouroboros.interview_calibration import InterviewCalibration
 from ouroboros.providers.base import (
@@ -203,6 +214,13 @@ class InterviewRound(BaseModel):
 
     round_number: int = Field(ge=1)  # No upper limit - user decides when to stop
     question: str
+    first_question_presentation: FirstQuestionPresentation | None = None
+    first_question_selected_indices: tuple[int, ...] | None = None
+    batch_id: str | None = None
+    batch_selected_indices: tuple[int, ...] | None = None
+    question_id: str | None = None
+    ambiguity_dimension: str | None = None
+    recommended_index: int | None = None
     user_response: str | None = None
     provenance: AnswerProvenance = "user"
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -220,6 +238,24 @@ class InterviewRound(BaseModel):
         A declared provenance (``"assumption"``, ``"requester"``) is not derived
         from the answer, so it is kept as recorded rather than re-derived.
         """
+        if (
+            self.first_question_presentation is not None
+            and self.first_question_presentation.question != self.question
+        ):
+            raise ValueError("structured presentation does not match the recorded question")
+        validate_stored_selection(
+            self.first_question_presentation,
+            self.first_question_selected_indices,
+            self.user_response,
+        )
+        from ouroboros.interview_adapters.independent_batch import validate_batch_selection
+
+        validate_batch_selection(
+            self.batch_id,
+            self.first_question_presentation,
+            self.batch_selected_indices,
+            self.user_response,
+        )
         if self.user_response is not None and self.provenance not in DECLARED_PROVENANCES:
             answer_for_classification = self.user_response
             # PM interviews before #1823 decorated reframed answers after the
@@ -258,6 +294,10 @@ class InterviewState(BaseModel):
 
     interview_id: str
     persistence_revision: str = ""
+    inline_material: InlineMaterial | None = None
+    batch_confirmed_digest: str | None = None
+    proposed_opening: ProposedOpening | None = None
+    opening_decisions: tuple[OpeningDecisionEvent, ...] = ()
     _loaded_revision: str | None = PrivateAttr(default=None)
     status: InterviewStatus = InterviewStatus.IN_PROGRESS
     rounds: list[InterviewRound] = Field(default_factory=list)
@@ -278,10 +318,15 @@ class InterviewState(BaseModel):
     requirement_input_revision: int = Field(default=0, ge=0)
     requirement_distillation: RequirementDistillation | None = None
 
+    @model_validator(mode="after")
+    def validate_opening_history(self) -> "InterviewState":
+        confirmed_interpretations(self.proposed_opening, self.opening_decisions)
+        return self
+
     @property
     def current_round_number(self) -> int:
         """Get the current round number (1-based)."""
-        return len(self.rounds) + 1
+        return max((round_data.round_number for round_data in self.rounds), default=0) + 1
 
     @property
     def is_complete(self) -> bool:
@@ -347,6 +392,7 @@ class InterviewState(BaseModel):
         return compute_requirement_input_fingerprint(
             {
                 "initial_context": self.initial_context,
+                **opening_fingerprint_payload(self.proposed_opening, self.opening_decisions),
                 "rounds": [
                     {
                         "round_number": round_data.round_number,
@@ -471,57 +517,13 @@ class InterviewState(BaseModel):
         self.mark_updated()
         return question
 
-    def record_answer(self, question: str, answer: str) -> InterviewRound:
-        """Attach ``answer`` to the interview, deciding its provenance once.
+    def record_answer(
+        self, question: str, answer: str, *, question_id: str | None = None
+    ) -> InterviewRound:
+        """Record an answer to a pending round, optionally by stable batch ID."""
+        from ouroboros.bigbang.interview_answer_recording import record_interview_answer
 
-        Every transport funnels through here. That matters because a round is
-        not always born whole: the MCP transports persist a round carrying only
-        its question and fill the answer on a later call, so provenance decided
-        at construction would be decided on a round that has no answer yet.
-        Deciding it where the answer *arrives* covers both shapes — the trailing
-        question-only round is filled, anything else appends.
-
-        Returns the round the answer landed on.
-        """
-        provenance = classify_answer_provenance(answer)
-
-        stored_question = ""
-        if self.rounds and self.rounds[-1].user_response is None:
-            # A round persisted question-only. Refresh the question text when a
-            # caller supplies one, since the stored copy can be a placeholder
-            # from a partial persistence. The engine-persisted copy is still
-            # kept as a matching candidate below: for reference contrasts it is
-            # the authoritative text, and letting a host-rendered echo replace
-            # it silently used to break resolution matching.
-            round_data = self.rounds[-1]
-            stored_question = round_data.question
-            if question:
-                round_data.question = question
-            round_data.user_response = answer
-            round_data.provenance = provenance
-        else:
-            round_data = InterviewRound(
-                round_number=self.current_round_number,
-                question=question,
-                user_response=answer,
-                provenance=provenance,
-            )
-            self.rounds.append(round_data)
-
-        self.record_adapter_answer(round_data.question, answer, stored_question=stored_question)
-        detected_terms = detect_explicit_confusion_terms(answer)
-        if detected_terms:
-            self.merge_turn_context(InterviewTurnContext(confused_terms=detected_terms))
-        self.invalidate_requirement_distillation()
-        # The ambiguity snapshot is derived from the answered rounds, exactly
-        # like the distillation above, so it dies where its inputs change
-        # rather than at each call site that remembers to clear it. Leaving it
-        # to callers let a durable save land rounds from revision N+1 next to a
-        # score from revision N: an interrupted process then resumed with a
-        # score that _select_perspectives reads as current.
-        self.clear_stored_ambiguity()
-        self.mark_updated()
-        return round_data
+        return record_interview_answer(self, question, answer, question_id)
 
     def record_adapter_answer(
         self, question: str, answer: str, *, stored_question: str = ""
@@ -1019,6 +1021,10 @@ class InterviewEngine:
         the long-context, glossary, reference, and PM-steering behavior already
         owned by :class:`InterviewEngine`.
         """
+        from ouroboros.interview_adapters.independent_batch import has_pending_batch
+
+        if has_pending_batch(state):
+            return Result.err(ValidationError("Finish or discard the pending batch first"))
         if state.is_complete and state.needs_initial_context_summary:
             return Result.ok(
                 PreparedInterviewQuestion(immediate_question=self._INITIAL_CONTEXT_SUMMARY_QUESTION)
@@ -1155,6 +1161,44 @@ class InterviewEngine:
         )
         return Result.ok(question)
 
+    async def ask_structured_first_question(
+        self,
+        state: InterviewState,
+        *,
+        language_calibration: InterviewCalibration | None = None,
+        multi_select: bool = False,
+    ) -> Result[FirstQuestionPresentation | None, ProviderError | ValidationError]:
+        """Generate the opt-in first presentation with a single provider call.
+
+        None means the existing deterministic length-guard question must be used.
+        Malformed provider output is an error, rather than user-visible JSON.
+        """
+        if state.rounds or self.question_candidate_panel:
+            return Result.err(ValidationError("Structured first question is unavailable"))
+        prepared_result = self.prepare_next_question(
+            state, language_calibration=language_calibration
+        )
+        if prepared_result.is_err:
+            return Result.err(prepared_result.error)
+        prepared = prepared_result.value
+        if prepared.immediate_question is not None:
+            return Result.ok(None)
+        assert prepared.config is not None
+        messages = list(prepared.messages)
+        messages.append(
+            Message(role=MessageRole.USER, content=first_question_instruction(multi_select))
+        )
+        result = await self._require_llm_adapter().complete(messages, prepared.config)
+        if result.is_err:
+            return Result.err(result.error)
+        try:
+            presentation = FirstQuestionPresentation.model_validate_json(result.value.content)
+        except ValueError:
+            return Result.err(ValidationError("Invalid structured first question"))
+        if presentation.multi_select != multi_select:
+            return Result.err(ValidationError("Invalid structured first question"))
+        return Result.ok(presentation)
+
     async def rephrase_pending_question(
         self,
         question: str,
@@ -1282,7 +1326,12 @@ class InterviewEngine:
         return [candidate for candidate in results if candidate is not None]
 
     async def record_response(
-        self, state: InterviewState, user_response: str, question: str
+        self,
+        state: InterviewState,
+        user_response: str,
+        question: str,
+        *,
+        question_id: str | None = None,
     ) -> Result[InterviewState, ValidationError]:
         """Record the user's response to the current question.
 
@@ -1325,7 +1374,10 @@ class InterviewEngine:
                 prior_completion_candidate_streak=prior_streak,
             )
 
-        round_data = state.record_answer(question, user_response)
+        try:
+            round_data = state.record_answer(question, user_response, question_id=question_id)
+        except ValueError as exc:
+            return Result.err(ValidationError(str(exc), field="question_id"))
 
         log.info(
             "interview.response_recorded",
@@ -1372,17 +1424,9 @@ class InterviewEngine:
 
             return Result.ok(file_path)
         except (OSError, ValueError) as e:
-            log.exception(
-                "interview.state_save_failed",
-                interview_id=state.interview_id,
-                error=str(e),
-            )
-            return Result.err(
-                ValidationError(
-                    f"Failed to save interview state: {e}",
-                    details={"interview_id": state.interview_id},
-                )
-            )
+            from ouroboros.bigbang.interview_state_errors import save_error
+
+            return save_error(e, state.interview_id)
 
     async def load_state(self, interview_id: str) -> Result[InterviewState, ValidationError]:
         """Load interview state from disk.
@@ -1428,19 +1472,9 @@ class InterviewEngine:
 
             return Result.ok(state)
         except (OSError, ValueError) as e:
-            log.exception(
-                "interview.state_load_failed",
-                interview_id=interview_id,
-                error=str(e),
-            )
-            return Result.err(
-                ValidationError(
-                    f"Failed to load interview state: {e}",
-                    field="interview_id",
-                    value=interview_id,
-                    details={"file_path": str(file_path)},
-                )
-            )
+            from ouroboros.bigbang.interview_state_errors import load_error
+
+            return load_error(e, interview_id, file_path)
 
     def _build_system_prompt(
         self,
@@ -1933,11 +1967,9 @@ class InterviewEngine:
                     }
                 )
             except (OSError, ValueError) as e:
-                log.warning(
-                    "interview.list_failed_for_file",
-                    file_path=str(file_path),
-                    error=str(e),
-                )
+                from ouroboros.bigbang.interview_state_errors import list_error
+
+                list_error(e, file_path)
                 continue
 
         return sorted(interviews, key=lambda x: x["updated_at"], reverse=True)

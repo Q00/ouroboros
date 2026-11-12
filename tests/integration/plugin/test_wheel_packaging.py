@@ -40,6 +40,80 @@ def _extract_python_resolver(contents: str) -> str:
 
 
 @pytest.mark.slow
+@pytest.mark.parametrize("profile", ["claude", "claude-sdk", "all"])
+def test_built_wheel_sdk_profiles_run_installed_contracts(
+    built_wheel: Path, tmp_path: Path, profile: str
+) -> None:
+    """Exercise the shipped adapter and real SDKs, without running a provider."""
+    import shutil
+
+    venv = tmp_path / "venv"
+    python = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+    commands = [
+        ["uv", "venv", "--python", sys.executable, str(venv)],
+        [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            str(python),
+            f"{built_wheel}[{profile}]",
+            "pytest",
+            "pytest-asyncio",
+        ],
+        ["uv", "pip", "check", "--python", str(python)],
+    ]
+    contract_dir = tmp_path / "contracts"
+    contract_dir.mkdir()
+    for name in ("test_anthropic_sdk_transport_contract.py", "test_claude_sdk_types_contract.py"):
+        shutil.copyfile(PROJECT_ROOT / "tests/unit/providers" / name, contract_dir / name)
+    report = tmp_path / "sdk-contracts.xml"
+    commands += [
+        [
+            str(python),
+            "-I",
+            "-c",
+            "import pathlib, sys, anthropic, claude_agent_sdk, ouroboros; "
+            "from ouroboros.cli import entrypoint; "
+            "from importlib.metadata import version; "
+            "from importlib.metadata import requires; "
+            "from packaging.requirements import Requirement; "
+            "modules = (anthropic, claude_agent_sdk, ouroboros, entrypoint); "
+            "assert all(pathlib.Path(m.__file__).resolve().is_relative_to(sys.prefix) for m in modules); "
+            "assert version('mcp').startswith('1.'); "
+            f"requirements = [Requirement(raw) for raw in requires('ouroboros-ai')]; extra = {profile!r}; "
+            "selected = [r for r in requirements if r.marker is None or r.marker.evaluate({'extra': extra})]; "
+            "assert all(version(r.name) in r.specifier for r in selected), selected; "
+            "print({m.__name__: m.__file__ for m in modules})",
+        ],
+        [
+            str(python),
+            "-I",
+            "-m",
+            "pytest",
+            str(contract_dir),
+            "--confcutdir",
+            str(tmp_path),
+            "-q",
+            "-o",
+            "asyncio_default_fixture_loop_scope=function",
+            "--junitxml",
+            str(report),
+        ],
+    ]
+    for command in commands:
+        result = subprocess.run(
+            command, cwd=tmp_path, capture_output=True, text=True, timeout=180, check=False
+        )
+        print(command, result.stdout, result.stderr)
+        assert result.returncode == 0, result.stdout + result.stderr
+    import xml.etree.ElementTree as ET
+
+    cases = list(ET.parse(report).iter("testcase"))
+    assert cases and all(case.find("skipped") is None for case in cases)
+
+
+@pytest.mark.slow
 def test_built_wheel_preserves_packaging_contracts(built_wheel: Path, tmp_path: Path) -> None:
     """Build the wheel and verify schema assets plus dependency markers.
 

@@ -37,17 +37,45 @@ jobs:
         run: |
           uv run --python 3.12 --no-sync python - <<'PY'
           from importlib.metadata import version
+          import subprocess
+          import sys
 
           import claude_agent_sdk
           import mcp
 
           assert claude_agent_sdk is not None
           assert mcp is not None
-          assert version("claude-agent-sdk") == "0.2.168"
-          assert version("anthropic") == "1.15.0"
+          assert version("claude-agent-sdk") == "0.2.176"
+          assert version("anthropic") == "2.3.0"
           assert version("mcp").split(".", maxsplit=1)[0] == "1"
+          subprocess.run(["uv", "pip", "check", "--python", sys.executable], check=True)
           PY
-          uv pip check
+
+      - name: Exercise installed SDK contracts without providers
+        run: |
+          TEST_HOME="$(mktemp -d)"
+          export HOME="$TEST_HOME" USERPROFILE="$TEST_HOME"
+          export CODEX_HOME="$TEST_HOME/codex" XDG_CONFIG_HOME="$TEST_HOME/config"
+          export OPENCODE_CONFIG_DIR="$TEST_HOME/opencode" APPDATA="$TEST_HOME/appdata"
+          export OUROBOROS_TELEMETRY=0 OUROBOROS_DASHBOARD=0
+          mkdir -p "$CODEX_HOME" "$XDG_CONFIG_HOME" "$OPENCODE_CONFIG_DIR" "$APPDATA" "$TEST_HOME/bin"
+          for provider in claude codex opencode; do
+            printf '#!/bin/sh\nexit 127\n' > "$TEST_HOME/bin/$provider"
+            chmod +x "$TEST_HOME/bin/$provider"
+          done
+          export PATH="$TEST_HOME/bin:$PATH"
+          uv run --python 3.12 --no-sync pytest \
+            tests/unit/providers/test_anthropic_sdk_transport_contract.py \
+            tests/unit/providers/test_claude_sdk_types_contract.py \
+            tests/unit/scripts/test_install_target_metadata.py \
+            -n 0 -q --junitxml=sdk-contracts.xml
+          uv run --python 3.12 --no-sync python - <<'PY'
+          import xml.etree.ElementTree as ET
+
+          cases = list(ET.parse("sdk-contracts.xml").iter("testcase"))
+          assert cases, "SDK contracts were not collected"
+          assert all(case.find("skipped") is None for case in cases), "SDK contracts must not skip"
+          PY
 
   test:
     name: Test Python ${{ matrix.python-version }}
@@ -194,6 +222,9 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path $env:HOME | Out-Null
           .venv/Scripts/python.exe -m pytest tests/unit/cli/test_codex_plugin.py tests/unit/cli/test_update_plugin_version.py -n 0 -q -W error::pytest.PytestUnhandledThreadExceptionWarning
+
+      - name: Verify PowerShell installer target extras
+        run: uv run --python 3.12 --no-sync pytest tests/unit/scripts/test_install_ps1.py -n 0 -q
 
       - name: Run native Windows heartbeat lease tests
         # Serial: the native regression hands a real lease between processes.

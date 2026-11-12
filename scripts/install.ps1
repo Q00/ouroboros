@@ -17,7 +17,7 @@
 #      does not need one.
 #   2. Picks a backend the same way install.sh does: explicit > saved config >
 #      single detected CLI > prompt.
-#   3. `uv tool install ouroboros-ai` with the same pins as install.sh.
+#   3. `uv tool install` with the selected distribution's own extras, like install.sh.
 #   4. `ouroboros setup --runtime <backend> --non-interactive`, `setup refresh`,
 #      and the Claude Code plugin when `claude` is on PATH.
 #
@@ -36,8 +36,8 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 
-# NOTE: pin specs MUST mirror scripts/install.sh and [project.optional-dependencies]
-# in pyproject.toml. tests/unit/scripts/test_install_ps1.py fails on drift.
+# Dependency versions belong to the selected distribution's extras. Do not
+# override an older PyPI release with optional pins from this installer.
 $PackageName = 'ouroboros-ai'
 $ClickSpec = 'click>=8.1.0,<9.0.0'
 $DefaultPythonSpec = '>=3.12'
@@ -305,20 +305,18 @@ if ($selected -eq 'codex') {
     Write-Warn 'Codex CLI is not supported on native Windows. Setup will not register a persistent MCP server here; use WSL 2 for Codex.'
 }
 
-# Map the backend to the uv --with pins. `tui` ships with every selection so
+# Map the backend to the target distribution's extras. `tui` ships with every selection so
 # `ouroboros config` works out of the box; `[all]` stays on the MCP 1.x bundle.
-$extraPins = @()
 $extrasLabel = '[tui]'
 $setupRuntime = $selected
 $pythonSpec = $DefaultPythonSpec
 switch ($selected) {
-    'claude' { $extrasLabel = '[claude,tui]'; $extraPins = @('claude-agent-sdk==0.2.168', 'anthropic==1.15.0', 'mcp==1.28.1') }
-    'claude-sdk' { $extrasLabel = '[claude-sdk,tui]'; $extraPins = @('claude-agent-sdk==0.2.168', 'anthropic==1.15.0', 'mcp==1.28.1') }
+    'claude' { $extrasLabel = '[claude,tui]' }
+    'claude-sdk' { $extrasLabel = '[claude-sdk,tui]' }
     'claude-cli' { $extrasLabel = '[claude-cli,tui]' }
-    'hermes' { $extrasLabel = '[mcp,tui]'; $extraPins = @('mcp==2.3.0') }
+    'hermes' { $extrasLabel = '[mcp,tui]' }
     'all' {
         $extrasLabel = '[all]'
-        $extraPins = @('claude-agent-sdk==0.2.168', 'anthropic==1.15.0', 'mcp==1.28.1', 'litellm==1.91.0')
         $pythonSpec = $LiteLLMPythonSpec
         $setupRuntime = ''
     }
@@ -332,10 +330,8 @@ else { Write-Info 'Selected backend: none yet' }
 
 Write-Step '3/4  Installing Ouroboros' "Package: $PackageName$extrasLabel via uv tool install (uv downloads Python $pythonSpec itself)"
 
-$uvArgs = @('tool', 'install', '--upgrade', '--python', $pythonSpec, $PackageName, '--with', $ClickSpec)
+$uvArgs = @('tool', 'install', '--upgrade', '--python', $pythonSpec, "$PackageName$extrasLabel", '--with', $ClickSpec)
 if ($Pre) { $uvArgs += '--prerelease=allow' }
-foreach ($pin in $extraPins) { $uvArgs += @('--with', $pin) }
-$uvArgs += @('--with', 'textual==8.2.8', '--with', 'textual-serve==1.1.3')
 
 Write-Info "Running: uv $($uvArgs -join ' ')"
 if (-not (Invoke-Native 'uv' $uvArgs)) {

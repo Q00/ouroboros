@@ -162,6 +162,8 @@ class TestPMDocumentGeneratorGenerate:
 
         # Mock InterviewState with rounds
         mock_state = MagicMock()
+        mock_state.proposed_opening = None
+        mock_state.opening_decisions = ()
         mock_round1 = MagicMock()
         mock_round1.question = "What problem?"
         mock_round1.user_response = "Task tracking."
@@ -188,6 +190,8 @@ class TestPMDocumentGeneratorGenerate:
         seed = _make_seed()
 
         mock_state = MagicMock()
+        mock_state.proposed_opening = None
+        mock_state.opening_decisions = ()
         mock_round = MagicMock()
         mock_round.question = "State question"
         mock_round.user_response = "State answer"
@@ -475,6 +479,8 @@ class TestPMDocumentGeneratorGenerateAndSave:
         seed = _make_seed()
 
         mock_state = MagicMock()
+        mock_state.proposed_opening = None
+        mock_state.opening_decisions = ()
         mock_round = MagicMock()
         mock_round.question = "What problem?"
         mock_round.user_response = "Tracking."

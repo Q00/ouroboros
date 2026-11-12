@@ -71,6 +71,7 @@ _TOOL_FUNNEL: dict[str, str] = {
     "ouroboros_evaluate": "evaluate",
     "ouroboros_start_evaluate": "evaluate",
     "ouroboros_qa": "qa",
+    "ouroboros_start_qa": "qa",
     "ouroboros_ralph": "ralph",
     "ouroboros_start_ralph": "ralph",
     "ouroboros_lateral_think": "unstuck",
@@ -142,6 +143,7 @@ _ASYNC_SUBMISSION_TOOLS = frozenset(
         "ouroboros_start_evolve_step",
         "ouroboros_start_auto",
         "ouroboros_start_evaluate",
+        "ouroboros_start_qa",
         "ouroboros_start_ralph",
     }
 )
@@ -200,6 +202,7 @@ _CANONICAL_TOOL_NAMES = frozenset(
         "ouroboros_session_status",
         "ouroboros_start_auto",
         "ouroboros_start_evaluate",
+        "ouroboros_start_qa",
         "ouroboros_start_evolve_step",
         "ouroboros_start_execute_seed",
         "ouroboros_start_ralph",
@@ -213,6 +216,7 @@ _JOB_FUNNEL: dict[str, str] = {
     "evolve_step": "evolve",
     "auto": "auto",
     "evaluate": "evaluate",
+    "qa": "qa",
     "ralph": "ralph",
 }
 

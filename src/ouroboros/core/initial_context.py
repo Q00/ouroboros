@@ -124,7 +124,12 @@ def load_pm_seed_as_context(seed_path: Path) -> Result[str, ValidationError]:
     if validation_result.is_err:
         return validation_result
 
-    pm_seed = PMSeed.from_dict(raw_data)
+    try:
+        pm_seed = PMSeed.from_dict(raw_data)
+    except (TypeError, ValueError):
+        return Result.err(
+            ValidationError("Invalid PM seed fields", field="initial_context", value=str(seed_path))
+        )
     context = pm_seed.to_initial_context()
     is_valid, error_message = InputValidator.validate_initial_context(context)
     if not is_valid:

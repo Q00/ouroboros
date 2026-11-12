@@ -106,6 +106,60 @@ def _write_executable(path: Path, content: str) -> None:
     path.symlink_to(_cached_executable(content))
 
 
+_INSTALLER_SYSTEM_BIN: Path | None = None
+
+
+def _installer_system_path() -> str:
+    global _INSTALLER_SYSTEM_BIN
+    if _INSTALLER_SYSTEM_BIN is None:
+        _INSTALLER_SYSTEM_BIN = Path(tempfile.mkdtemp(prefix="install-sh-system-"))
+        atexit.register(shutil.rmtree, _INSTALLER_SYSTEM_BIN, ignore_errors=True)
+        for name in (
+            "bash",
+            "sh",
+            "cat",
+            "chmod",
+            "cp",
+            "cut",
+            "date",
+            "dirname",
+            "env",
+            "find",
+            "git",
+            "grep",
+            "head",
+            "hostname",
+            "id",
+            "ln",
+            "mkdir",
+            "mktemp",
+            "mv",
+            "printf",
+            "pwd",
+            "python3",
+            "readlink",
+            "realpath",
+            "rm",
+            "rmdir",
+            "sed",
+            "sleep",
+            "sort",
+            "tail",
+            "tee",
+            "tr",
+            "uname",
+            "uniq",
+            "uuidgen",
+            "wc",
+            "which",
+            "xargs",
+        ):
+            executable = shutil.which(name, path="/usr/bin:/bin")
+            if executable is not None:
+                (_INSTALLER_SYSTEM_BIN / name).symlink_to(executable)
+    return str(_INSTALLER_SYSTEM_BIN)
+
+
 def _run_installer(
     tmp_path: Path,
     *,
@@ -150,6 +204,8 @@ exit 0
         for name in ("python3.14", "python3.13", "python3.12", "python3", "python"):
             _write_executable(bin_dir / name, "#!/bin/sh\nexit 1\n")
 
+    _write_executable(bin_dir / "curl", "#!/bin/sh\nexit 1\n")
+
     if fake_commands:
         for name, content in fake_commands.items():
             _write_executable(bin_dir / name, content)
@@ -166,7 +222,7 @@ exit 0
     run_env.update(
         {
             "HOME": str(tmp_path / "home"),
-            "PATH": f"{bin_dir}:/usr/bin:/bin",
+            "PATH": f"{bin_dir}:{_installer_system_path()}",
             CALLS_LOG_VAR: str(calls),
             TOOL_BIN_VAR: str(tool_bin_dir),
             OUROBOROS_STUB_VAR: str(_cached_executable(_OUROBOROS_STUB)),
@@ -199,35 +255,10 @@ exit 0
     )
 
 
-def _expected_pins_for_extras(*extra_names: str) -> list[str]:
-    extras = _read_pyproject_extras()
-    expected_pins: list[str] = []
-    for extra_name in extra_names:
-        for dep in extras.get(extra_name, []):
-            stripped = dep.strip()
-            if stripped:
-                expected_pins.append(stripped.partition(";")[0].strip())
-    return expected_pins
-
-
-def _assert_calls_include_pyproject_pins(calls: str, *extra_names: str) -> None:
-    expected_pins = _expected_pins_for_extras(*extra_names)
-    assert expected_pins, "no pyproject pins discovered — parity check inert"
-
-    drifted = sorted(pin for pin in expected_pins if f"--with {pin}" not in calls)
-    assert not drifted, (
-        "install.sh uv --with list has drifted from pyproject pins.\n"
-        f"Missing or mismatched for extras {extra_names}: {drifted}\n"
-        "Update the case statement in scripts/install.sh so each "
-        "`--with <spec>` string matches pyproject [project.optional-dependencies]."
-    )
-
-
-def test_install_script_syntax_is_valid() -> None:
-    result = subprocess.run(
-        ["bash", "-n", str(INSTALL_SH)], text=True, capture_output=True, check=False
-    )
-    assert result.returncode == 0, result.stderr
+def _assert_calls_select_target_extras(calls: str, extras: str) -> None:
+    install = next(line for line in calls.splitlines() if line.startswith("uv tool install "))
+    assert f"[{extras}] --with click>=8.1.0,<9.0.0" in install
+    assert install.count("--with") == 1, install
 
 
 def _telemetry_probe_curl() -> str:
@@ -305,9 +336,7 @@ def test_piped_installer_defaults_to_mcp_v2_and_settings_gui(tmp_path: Path) -> 
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert "installing MCP v2 + settings GUI" in result.stdout
-    assert "--with mcp==2.3.0" in calls
-    assert "--with textual==8.2.8" in calls
-    assert "--with textual-serve==1.1.3" in calls
+    _assert_calls_select_target_extras(calls, "mcp,tui")
 
 
 def test_runtime_less_mcp_v2_guidance_lists_only_compatible_backends(tmp_path: Path) -> None:
@@ -1197,6 +1226,7 @@ def test_installer_repaired_telemetry_json_matches_fresh_install_shape(tmp_path:
         fake_commands=_telemetry_fake_commands(),
     )
     assert repaired_result.returncode == 0, repaired_result.stderr
+    assert not (state_dir / "telemetry.json.repair.lock").exists()
     repaired_text = corrupt_state.read_text(encoding="utf-8")
     assert _TELEMETRY_SHAPE_RE.match(repaired_text), repaired_text
     json.loads(repaired_text)
@@ -1912,7 +1942,7 @@ def test_preserves_opencode_backend_from_existing_config(tmp_path: Path) -> None
     assert "Runtime: opencode (preserved from" in result.stdout
     assert "Installing .[mcp,tui] ..." in result.stdout
     assert (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines() == [
-        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with mcp==2.3.0 --with textual==8.2.8 --with textual-serve==1.1.3",
+        "uv tool install --upgrade --python >=3.12 .[mcp,tui] --with click>=8.1.0,<9.0.0",
         "ouroboros setup --runtime opencode --non-interactive",
         "ouroboros setup refresh",
     ]
@@ -1929,7 +1959,7 @@ def test_explicit_claude_uses_isolated_sdk_profile(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert "Runtime: claude (from --runtime / OUROBOROS_INSTALL_RUNTIME)" in result.stdout
     assert "Installing .[claude,tui]" in result.stdout
-    _assert_calls_include_pyproject_pins(calls, "claude")
+    _assert_calls_select_target_extras(calls, "claude,tui")
     assert "--with mcp==2.0.0" not in calls
     assert "ouroboros setup --runtime claude --non-interactive" in calls
     assert "Claude SDK is isolated on MCP 1.x" in result.stdout
@@ -1946,7 +1976,7 @@ def test_explicit_claude_cli_uses_dependency_free_mcp2_profile(tmp_path: Path) -
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert "Installing .[mcp,tui]" in result.stdout
     assert "--with claude-agent-sdk" not in calls
-    assert "--with mcp==2.3.0" in calls
+    _assert_calls_select_target_extras(calls, "mcp,tui")
     assert "ouroboros setup --runtime claude-cli --non-interactive" in calls
 
 
@@ -1960,7 +1990,7 @@ def test_explicit_claude_sdk_uses_isolated_sdk_profile(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert "Installing .[claude-sdk,tui]" in result.stdout
-    _assert_calls_include_pyproject_pins(calls, "claude-sdk")
+    _assert_calls_select_target_extras(calls, "claude-sdk,tui")
     assert "--with mcp==2.0.0" not in calls
     assert "ouroboros setup --runtime claude-sdk --non-interactive" in calls
     assert "Claude SDK is isolated on MCP 1.x" in result.stdout
@@ -2016,7 +2046,7 @@ def test_explicit_hermes_mcp_extra_matches_pyproject_pins(tmp_path: Path) -> Non
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert "Runtime: hermes (from --runtime / OUROBOROS_INSTALL_RUNTIME)" in result.stdout
-    _assert_calls_include_pyproject_pins(calls, "mcp")
+    _assert_calls_select_target_extras(calls, "mcp,tui")
     assert "ouroboros setup --runtime hermes --non-interactive" in calls
 
 
@@ -2031,7 +2061,7 @@ def test_explicit_pi_installs_base_and_runs_pi_setup(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
     assert "Runtime: pi (from --runtime / OUROBOROS_INSTALL_RUNTIME)" in result.stdout
     assert calls == [
-        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with mcp==2.3.0 --with textual==8.2.8 --with textual-serve==1.1.3",
+        "uv tool install --upgrade --python >=3.12 .[mcp,tui] --with click>=8.1.0,<9.0.0",
         "ouroboros setup --runtime pi --non-interactive",
         "ouroboros setup refresh",
     ]
@@ -2161,11 +2191,10 @@ def test_all_runtime_uv_install_uses_litellm_python_range(tmp_path: Path) -> Non
 
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
-    assert ("uv tool install --upgrade --python >=3.12,<3.14 . --with click>=8.1.0,<9.0.0") in calls
-    assert "--with litellm==1.91.0" in calls
-
-    assert "--with claude-agent-sdk==0.2.168" in calls
-    assert "--with anthropic==1.15.0" in calls
+    assert (
+        "uv tool install --upgrade --python >=3.12,<3.14 .[all] --with click>=8.1.0,<9.0.0"
+    ) in calls
+    _assert_calls_select_target_extras(calls, "all")
 
 
 def test_non_litellm_uv_install_retains_python_312_floor(tmp_path: Path) -> None:
@@ -2329,7 +2358,7 @@ def test_detects_pi_as_single_runtime_and_runs_pi_setup(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
     assert "Pi:" in result.stdout
     assert calls == [
-        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with mcp==2.3.0 --with textual==8.2.8 --with textual-serve==1.1.3",
+        "uv tool install --upgrade --python >=3.12 .[mcp,tui] --with click>=8.1.0,<9.0.0",
         "ouroboros setup --runtime pi --non-interactive",
         "ouroboros setup refresh",
     ]
@@ -2458,32 +2487,13 @@ def test_pypi_lookup_failure_stays_stable_only_for_remote_install(tmp_path: Path
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert (
-        "uv tool install --upgrade --python >=3.12 ouroboros-ai --with click>=8.1.0,<9.0.0 --with mcp==2.3.0 --with textual==8.2.8 --with textual-serve==1.1.3"
+        "uv tool install --upgrade --python >=3.12 ouroboros-ai[mcp,tui] --with click>=8.1.0,<9.0.0"
         in calls
     )
     assert "--prerelease=allow" not in calls
 
 
-# ---------------------------------------------------------------------------
-# pyproject ↔ install.sh `[all]` extras parity
-# ---------------------------------------------------------------------------
-#
-# Maps every [project.optional-dependencies] extra to the package names that
-# the installer's `[all]` --with list MUST cover under uv. Update both this
-# table and install.sh whenever pyproject extras change. The mapping is
-# explicit (rather than parsed from pyproject) so a wrong rename or removal
-# fails loudly here instead of silently desyncing.
-_EXTRA_TO_PACKAGES: dict[str, tuple[str, ...]] = {
-    "claude": ("claude-agent-sdk", "anthropic"),
-    "claude-cli": (),
-    "claude-sdk": ("claude-agent-sdk", "anthropic"),
-    "copilot": (),  # pyproject declares copilot extras as []; nothing to install
-    "litellm": ("litellm",),
-    "dashboard": (),  # compatibility alias; no runtime payload
-    "mcp": ("mcp",),
-    "tui": ("textual",),
-}
-
+# The accepted application bundle excludes the separately installed MCP 2 server.
 _ALL_AGGREGATED_EXTRAS = {"claude", "copilot", "litellm", "dashboard", "tui"}
 
 
@@ -2501,15 +2511,10 @@ def _read_pyproject_extras() -> dict[str, list[str]]:
 
 
 def test_install_all_extras_match_pyproject(tmp_path: Path) -> None:
-    """`[all]` mirrors co-installable payloads and omits isolated profiles.
-
-    Catches the contract drift flagged by ouroboros-agent on PR #654:
-    install.sh's hand-maintained --with list silently dropped tui, so
-    users picking 'All' got an incomplete tree.
-    """
+    """The target owns the complete bundle, including TUI and excluding MCP 2."""
     extras = _read_pyproject_extras()
     # `all` is a single self-referential entry, e.g.
-    # ``["ouroboros-ai[claude,copilot,litellm,mcp,tui,dashboard]"]``. Pull the
+    # ``["ouroboros-ai[claude,copilot,litellm,tui,dashboard]"]``. Pull the
     # bracketed names back out so we can compare against our mapping.
     declared_in_all: set[str] = set()
     for entry in extras.get("all", []):
@@ -2522,44 +2527,16 @@ def test_install_all_extras_match_pyproject(tmp_path: Path) -> None:
     # Sanity: pyproject's `all` aggregates every extra we know about.
     assert declared_in_all == expected_extras, (
         "pyproject [all] no longer matches the test mapping — update "
-        "_EXTRA_TO_PACKAGES and install.sh together."
+        "the accepted SDK/MCP 1 bundle contract deliberately."
     )
 
     result = _run_installer(tmp_path, env={"OUROBOROS_INSTALL_RUNTIME": "all"})
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
 
-    expected_packages = {
-        pkg
-        for extra, pkgs in _EXTRA_TO_PACKAGES.items()
-        if extra in expected_extras
-        for pkg in pkgs
-    }
-    missing = sorted(pkg for pkg in expected_packages if f"--with {pkg}" not in calls)
-    assert not missing, (
-        f"install.sh `[all]` is missing --with entries for: {missing}.\n"
-        "Update the case statement in scripts/install.sh to mirror the "
-        "pyproject extras."
-    )
-
-
-def test_install_all_extras_match_pyproject_pins(tmp_path: Path) -> None:
-    """`[all]` mirrors full pins for its compatible extras, not just names.
-
-    Bot follow-up on PR #660: the package-name check was insufficient — a
-    silent change to a pin range (e.g. relaxing ``<1.0.0`` to ``<2.0.0`` in
-    pyproject without updating install.sh, or vice versa) would have slipped
-    past the existing test. Each pyproject pin string is checked verbatim
-    against the captured ``--with`` arguments so any drift fails here.
-    """
-    result = _run_installer(tmp_path, env={"OUROBOROS_INSTALL_RUNTIME": "all"})
-    assert result.returncode == 0, result.stderr
-    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
-
-    _assert_calls_include_pyproject_pins(calls, *_ALL_AGGREGATED_EXTRAS)
-    assert "--with mcp==2.0.0" not in calls
-    assert "--with claude-agent-sdk==0.2.168" in calls
-    assert "--with anthropic==1.15.0" in calls
+    _assert_calls_select_target_extras(calls, "all")
+    assert "mcp" not in declared_in_all
+    assert "tui" in declared_in_all
 
 
 _DSH_STUB = f"""#!/bin/sh

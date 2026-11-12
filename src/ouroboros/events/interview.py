@@ -43,6 +43,9 @@ def interview_response_recorded(
     round_number: int,
     question_preview: str,
     response_preview: str,
+    *,
+    question_id: str | None = None,
+    ambiguity_dimension: str | None = None,
 ) -> BaseEvent:
     """Create event when a user response is recorded."""
     return BaseEvent(
@@ -53,6 +56,12 @@ def interview_response_recorded(
             "round_number": round_number,
             "question_preview": question_preview[:200],
             "response_preview": response_preview[:200],
+            **({"question_id": question_id} if question_id is not None else {}),
+            **(
+                {"ambiguity_dimension": ambiguity_dimension}
+                if ambiguity_dimension is not None
+                else {}
+            ),
         },
     )
 

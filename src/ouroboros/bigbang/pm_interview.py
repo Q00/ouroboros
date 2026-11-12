@@ -1303,6 +1303,17 @@ Apply this canonical PM routing policy:
                 )
             )
 
+        from ouroboros.interview_adapters.opening_interpretations import opening_revision
+
+        opening_before = (
+            opening_revision(state.proposed_opening, state.opening_decisions)
+            if state.proposed_opening is not None
+            else None
+        )
+        persisted_before = state.persistence_revision
+        loaded_before = state._loaded_revision
+        status_before = state.status
+        input_before = state.requirement_input_fingerprint()
         context = self._build_interview_context(state, withhold_observations=True)
 
         messages = [
@@ -1327,11 +1338,42 @@ Apply this canonical PM routing policy:
         if result.is_err:
             return Result.err(result.error)
 
+        opening_after = (
+            opening_revision(state.proposed_opening, state.opening_decisions)
+            if state.proposed_opening is not None
+            else None
+        )
+        if (
+            opening_after != opening_before
+            or state.requirement_input_fingerprint() != input_before
+            or state.status != status_before
+            or state.persistence_revision != persisted_before
+            or state._loaded_revision != loaded_before
+        ):
+            return Result.err(
+                ValidationError(
+                    "Interview changed during PM Seed generation; reload and retry",
+                    field="interview_id",
+                )
+            )
+        if loaded_before is not None:
+            current = await self.inner.load_state(state.interview_id)
+            if current.is_err or current.value.persistence_revision != persisted_before:
+                return Result.err(
+                    ValidationError(
+                        "Interview changed during PM Seed generation; reload and retry",
+                        field="interview_id",
+                    )
+                )
+
         try:
             seed = self._parse_pm_seed(
                 result.value.content,
                 interview_id=state.interview_id,
             )
+            from ouroboros.bigbang.pm_opening import anchor_pm_opening
+
+            seed = anchor_pm_opening(seed, state)
             log.info(
                 "pm.seed_generated",
                 pm_id=seed.pm_id,
@@ -1440,6 +1482,16 @@ Apply this canonical PM routing policy:
             rendered = [(item.question, item.answer) for item in extraction_rounds(state)]
         else:
             rendered = [(r.question, r.user_response) for r in state.rounds]
+            from ouroboros.interview_adapters.opening_interpretations import (
+                confirmed_opening_events,
+            )
+
+            rendered = [
+                (event.presented_prompt, event.user_response)
+                for _item, event in confirmed_opening_events(
+                    state.proposed_opening, state.opening_decisions
+                )
+            ] + rendered
 
         for question, answer in rendered:
             if question == INITIAL_CONTEXT_SUMMARY_QUESTION:

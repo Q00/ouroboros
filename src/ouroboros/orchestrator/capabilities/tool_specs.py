@@ -43,6 +43,7 @@ _OUROBOROS_COMPANION_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "ouroboros_start_auto",
             "ouroboros_start_execute_seed",
             "ouroboros_start_evaluate",
+            "ouroboros_start_qa",
             "ouroboros_start_evolve_step",
             "ouroboros_start_ralph",
             "ouroboros_job_status",
@@ -78,6 +79,7 @@ _OUROBOROS_COMPANION_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "ouroboros_checklist_verify",
             "ouroboros_measure_drift",
             "ouroboros_qa",
+            "ouroboros_start_qa",
         ),
     ),
     (
@@ -105,6 +107,7 @@ _OUROBOROS_BACKGROUND_TOOLS = frozenset(
         "ouroboros_start_auto",
         "ouroboros_start_execute_seed",
         "ouroboros_start_evaluate",
+        "ouroboros_start_qa",
         "ouroboros_start_evolve_step",
         "ouroboros_ralph",
         "ouroboros_start_ralph",
@@ -973,6 +976,19 @@ _OUROBOROS_TOOL_CAPABILITY_SPECS: Mapping[str, _OuroborosToolCapabilitySpec] = {
         retry=_OUROBOROS_DEFAULT_RETRY_METADATA,
         interrupt=_OUROBOROS_BLOCKING_INTERRUPT_METADATA,
     ),
+    "ouroboros_start_qa": _OuroborosToolCapabilitySpec(
+        execution_mode="background",
+        companions=(
+            "ouroboros_qa",
+            "ouroboros_job_status",
+            "ouroboros_job_wait",
+            "ouroboros_job_result",
+            "ouroboros_cancel_job",
+        ),
+        side_effects=("background_job_start", "event_store_write"),
+        retry=_OUROBOROS_JOB_POLL_RETRY_METADATA,
+        interrupt=_OUROBOROS_BACKGROUND_INTERRUPT_METADATA,
+    ),
 }
 
 _OUROBOROS_CANCEL_METADATA: Mapping[str, Mapping[str, Any]] = {
@@ -1003,6 +1019,7 @@ _OUROBOROS_CANCEL_METADATA: Mapping[str, Mapping[str, Any]] = {
     "ouroboros_session_status": _OUROBOROS_UNSUPPORTED_CANCEL_METADATA,
     "ouroboros_start_auto": _OUROBOROS_BACKGROUND_JOB_CANCEL_METADATA,
     "ouroboros_start_evaluate": _OUROBOROS_BACKGROUND_JOB_CANCEL_METADATA,
+    "ouroboros_start_qa": _OUROBOROS_BACKGROUND_JOB_CANCEL_METADATA,
     "ouroboros_start_evolve_step": _OUROBOROS_BACKGROUND_JOB_CANCEL_METADATA,
     "ouroboros_start_execute_seed": _OUROBOROS_BACKGROUND_JOB_CANCEL_METADATA,
     "ouroboros_start_ralph": _OUROBOROS_BACKGROUND_JOB_CANCEL_METADATA,
@@ -1013,6 +1030,7 @@ _OUROBOROS_CANCEL_METADATA: Mapping[str, Mapping[str, Any]] = {
 _OUROBOROS_BACKGROUND_BLOCKING_COMPANIONS: Mapping[str, str] = {
     "ouroboros_start_auto": "ouroboros_auto",
     "ouroboros_start_evaluate": "ouroboros_evaluate",
+    "ouroboros_start_qa": "ouroboros_qa",
     "ouroboros_start_evolve_step": "ouroboros_evolve_step",
     "ouroboros_start_execute_seed": "ouroboros_execute_seed",
 }

@@ -1034,7 +1034,7 @@ async def _run_orchestrator(
                     from ouroboros.mcp.tools.qa import QAHandler
 
                     print_info("Running post-execution QA...")
-                    qa_handler = QAHandler()
+                    qa_handler = QAHandler(event_store=event_store)
                     quality_bar = _derive_quality_bar(seed)
                     execution_artifact = _get_verification_artifact(res.summary, res.final_message)
                     verification_working_dir = (

@@ -10,8 +10,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+import re
 from typing import Any
 from uuid import uuid4
+
+from ouroboros.bigbang.pm_opening import PMOpeningConfirmation
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,9 +94,16 @@ class PMSeed:
     serialized via that; dicts and strings are passed through as-is.
     """
     referenced_repos: tuple[dict[str, str], ...] = ()
+    opening_confirmations: tuple[PMOpeningConfirmation, ...] = ()
+    opening_state_revision: str = ""
 
     def __post_init__(self) -> None:
         """Merge deprecated fields into their canonical counterparts."""
+        if not isinstance(self.opening_state_revision, str) or (
+            self.opening_state_revision
+            and not re.fullmatch(r"[0-9a-f]{32}", self.opening_state_revision)
+        ):
+            raise ValueError("invalid opening state revision")
         # Merge deferred_items and deferred_decisions → decide_later_items
         if self.deferred_items or self.deferred_decisions:
             combined = list(self.decide_later_items)
@@ -143,6 +153,23 @@ class PMSeed:
             "brownfield_repos": [dict(r) for r in self.brownfield_repos],
             "created_at": self.created_at,
         }
+        if self.opening_confirmations:
+            d["opening_confirmation_notice"] = (
+                "These records are a snapshot and may have changed since generation. "
+                "They claim to be host-reported; the server cannot verify their source "
+                "or whether the person saw or answered them."
+            )
+            d["opening_state_revision"] = self.opening_state_revision or None
+            d["opening_confirmations"] = [
+                {
+                    "event_id": item.event_id,
+                    "item_id": item.item_id,
+                    "question": item.question,
+                    "answer": item.answer,
+                    "source": item.source,
+                }
+                for item in self.opening_confirmations
+            ]
         # Preserve legacy seed for round-trip safety.
         # Handles Seed objects (via to_dict()), raw dicts, and strings.
         # Explicit None check: falsey-but-present values ({}, 0) are preserved.
@@ -204,6 +231,10 @@ class PMSeed:
             success_criteria=tuple(data.get("success_criteria", [])),
             decide_later_items=tuple(decide_later),
             assumptions=tuple(data.get("assumptions", [])),
+            opening_confirmations=tuple(
+                PMOpeningConfirmation(**item) for item in data.get("opening_confirmations", [])
+            ),
+            opening_state_revision=data.get("opening_state_revision") or "",
             interview_id=data.get("interview_id", ""),
             codebase_context=data.get("codebase_context", ""),
             brownfield_repos=tuple(dict(r) for r in brownfield_raw),

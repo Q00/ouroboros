@@ -36,10 +36,76 @@ _IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
 _POSIX_ONLY = pytest.mark.skipif(_WINDOWS, reason="POSIX file modes, shells or the POSIX helper")
 
 
+@pytest.mark.parametrize("confined", [False, True])
+def test_probe_timeout_reports_only_phase_and_category(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, confined: bool
+) -> None:
+    from structlog.testing import capture_logs
+
+    def timeout(*args: object, **kwargs: object) -> None:
+        raise subprocess.TimeoutExpired(
+            cmd="synthetic-secret", timeout=10, output=b"synthetic-secret"
+        )
+
+    monkeypatch.setattr(exec_sandbox.subprocess, "run", timeout)
+    with capture_logs() as events:
+        result = exec_sandbox._probe_matrix(("launcher",) if confined else None, tmp_path)
+    assert result is None
+    assert events == [
+        {
+            "event": "exec_sandbox.probe_error",
+            "phase": "confined" if confined else "baseline",
+            "reason": "timeout",
+            "log_level": "info",
+        }
+    ]
+
+
 def _require_backend(*, deny_network: bool = False) -> None:
-    reason = exec_sandbox.sandbox_unavailable_reason(deny_network=deny_network)
+    if _WINDOWS and os.environ.get("GITHUB_ACTIONS") == "true":
+        from structlog.testing import capture_logs
+
+        # Capture the first (cached) probe's bounded diagnostic without dumping
+        # subprocess output, environment, or temporary paths into public CI.
+        with capture_logs() as events:
+            reason = exec_sandbox.sandbox_unavailable_reason(deny_network=deny_network)
+        if reason is SandboxUnavailableReason.SANDBOX_UNAVAILABLE:
+            diagnostics = [
+                (event.get("phase"), event.get("reason"))
+                for event in events
+                if event.get("event") == "exec_sandbox.probe_error"
+            ]
+            pytest.fail(f"execution sandbox unavailable on CI: {reason.value}; probe={diagnostics}")
+    else:
+        reason = exec_sandbox.sandbox_unavailable_reason(deny_network=deny_network)
     if reason is not None:
         pytest.skip(f"execution sandbox unavailable on this host: {reason.value}")
+
+
+def test_windows_ci_failure_includes_safe_probe_diagnostic(monkeypatch: pytest.MonkeyPatch) -> None:
+    def unavailable(*, deny_network: bool) -> SandboxUnavailableReason:
+        exec_sandbox.log.info("exec_sandbox.probe_error", phase="confined", reason="timeout")
+        return SandboxUnavailableReason.SANDBOX_UNAVAILABLE
+
+    monkeypatch.setitem(globals(), "_WINDOWS", True)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setattr(exec_sandbox, "sandbox_unavailable_reason", unavailable)
+    with pytest.raises(pytest.fail.Exception, match="confined.*timeout"):
+        _require_backend()
+
+
+def test_windows_ci_failure_without_captured_probe_is_honest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(globals(), "_WINDOWS", True)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setattr(
+        exec_sandbox,
+        "sandbox_unavailable_reason",
+        lambda **_kwargs: SandboxUnavailableReason.SANDBOX_UNAVAILABLE,
+    )
+    with pytest.raises(pytest.fail.Exception, match=r"probe=\[\]"):
+        _require_backend()
 
 
 def _run(command: ConfinedCommand) -> subprocess.CompletedProcess[str]:
