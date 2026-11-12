@@ -379,6 +379,63 @@ class TestLoadMCPConfig:
         assert result.value.connection.retry_attempts == 3
 
 
+class TestLoadMCPConfigEncoding:
+    """The YAML file is user-written, so it is read as UTF-8 on every locale."""
+
+    @pytest.fixture(params=["cp949", "cp950", "cp1252"])
+    def windows_locale(
+        self, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Make an encoding-less text ``open()`` in the module decode like Windows does."""
+        import builtins
+
+        import ouroboros.orchestrator.mcp_config as mcp_config_module
+
+        real_open = builtins.open
+
+        def open_(file, mode="r", buffering=-1, encoding=None, *args, **kwargs):  # type: ignore[no-untyped-def]
+            if "b" not in mode and encoding is None:
+                encoding = request.param
+            return real_open(file, mode, buffering, encoding, *args, **kwargs)
+
+        monkeypatch.setattr(mcp_config_module, "open", open_, raising=False)
+
+    def test_load_utf8_config_with_non_ascii_under_windows_locale(
+        self, tmp_path: Path, windows_locale: None
+    ) -> None:
+        """Non-ASCII comments and values survive a non-UTF-8 locale."""
+        config_file = tmp_path / "mcp.yaml"
+        config_file.write_text(
+            "# 파일 시스템 서버 (檔案系統, café)\n"
+            "mcp_servers:\n"
+            "  - name: filesystem\n"
+            "    transport: stdio\n"
+            "    command: npx\n"
+            '    args: ["C:/Users/José/노트"]\n',
+            encoding="utf-8",
+        )
+        config_file.chmod(0o600)
+
+        result = load_mcp_config(config_file)
+
+        assert result.is_ok
+        assert result.value.servers[0].args == ("C:/Users/José/노트",)
+
+    def test_load_non_utf8_config_returns_config_error(self, tmp_path: Path) -> None:
+        """A file saved in a legacy code page is reported, not raised."""
+        config_file = tmp_path / "mcp.yaml"
+        config_file.write_bytes(
+            "# 파일 시스템 서버\nmcp_servers:\n  - name: filesystem\n".encode("cp949")
+        )
+        config_file.chmod(0o600)
+
+        result = load_mcp_config(config_file)
+
+        assert result.is_err
+        assert isinstance(result.error, ConfigError)
+        assert "UTF-8" in str(result.error)
+
+
 class TestMCPClientConfig:
     """Tests for MCPClientConfig dataclass."""
 

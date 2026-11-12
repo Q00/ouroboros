@@ -78,10 +78,11 @@ os.environ["OUROBOROS_TELEMETRY"] = "0"
 # ── Hermetic home isolation (before collection) ──────────────────────────────
 # Ouroboros resolves its state root two ways: ``Path.home()`` AND
 # ``os.path.expanduser("~")`` (e.g. cli/commands/{cancel,run,job,resume,tui}.py
-# build the default ``EventStore`` DB path via ``expanduser``). ``$HOME`` is the
-# single chokepoint both go through — ``Path.home()`` calls ``expanduser("~")``
-# internally — so redirecting ``$HOME`` isolates config, the default DB, logs,
-# and dynamically resolved CLI persistence defaults in one move, and
+# build the default ``EventStore`` DB path via ``expanduser``). ``Path.home()``
+# calls ``expanduser("~")`` internally; redirect HOME and, on Windows,
+# USERPROFILE to isolate home-based config, default DB, logs, and CLI paths.
+#
+# With these paths redirected,
 # subprocesses spawned by tests inherit the isolated home instead of the real
 # one. We set it at conftest import — *before* collection — so it also covers
 # effects the per-test fixture cannot reach (module-level constants, a logging
@@ -97,6 +98,14 @@ _SESSION_HOME = Path(tempfile.mkdtemp(prefix="ouroboros-test-home-"))
 atexit.register(shutil.rmtree, _SESSION_HOME, ignore_errors=True)
 os.environ.setdefault("UV_CACHE_DIR", str(_REAL_HOME / ".cache" / "uv"))
 os.environ["HOME"] = str(_SESSION_HOME)
+# On Windows pathlib and expanduser use USERPROFILE rather than HOME.
+if sys.platform == "win32":
+    os.environ["USERPROFILE"] = str(_SESSION_HOME)
+# Codex's explicit configuration directory overrides HOME.  Inheriting it from
+# an interactive Codex session would let setup/uninstall tests modify the
+# developer's actual configuration. Individual tests can explicitly opt in to
+# a temporary CODEX_HOME after collection.
+os.environ.pop("CODEX_HOME", None)
 # Exposed so tests can assert import-time constants were captured under the
 # isolated home rather than the developer's real ``~``.
 os.environ["_OUROBOROS_TEST_SESSION_HOME"] = str(_SESSION_HOME)
@@ -124,6 +133,8 @@ def isolate_ouroboros_home(tmp_path_factory, monkeypatch):
     """
     home = tmp_path_factory.mktemp("home")
     monkeypatch.setenv("HOME", str(home))
+    if sys.platform == "win32":
+        monkeypatch.setenv("USERPROFILE", str(home))
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -194,8 +205,19 @@ def render_logged_exceptions_with_plain_tracebacks():
         obs_logging._get_console_processors = original_get_console_processors
 
 
+def _is_explicit_live_canonical_test(request: pytest.FixtureRequest) -> bool:
+    """Only the opt-in canonical live test may use production LLM dependencies."""
+    enabled = os.environ.get("OUROBOROS_RUN_CANONICAL", "").strip().lower() in {"1", "true", "yes"}
+    canonical_test = Path(__file__).resolve().parent / "canonical" / "test_canonical.py"
+    return (
+        enabled
+        and request.node.path.resolve() == canonical_test
+        and getattr(request.node, "originalname", None) == "test_scenario_live_run_or_skip"
+    )
+
+
 @pytest.fixture(autouse=True)
-def block_runner_real_llm_adapter(monkeypatch):
+def block_runner_real_llm_adapter(monkeypatch, request):
     """Block execute_seed's dependency analysis from spawning real agent CLIs.
 
     ``OrchestratorRunner._build_dependency_analyzer`` resolves an LLM adapter
@@ -214,6 +236,8 @@ def block_runner_real_llm_adapter(monkeypatch):
     Gated on sys.modules so tests that never import the orchestrator don't
     pay the import cost.
     """
+    if _is_explicit_live_canonical_test(request):
+        return
     runner_mod = sys.modules.get("ouroboros.orchestrator.runner")
     if runner_mod is not None:
 
@@ -228,7 +252,7 @@ def block_runner_real_llm_adapter(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def block_interview_answer_refiner_cli_spawn(monkeypatch):
+def block_interview_answer_refiner_cli_spawn(monkeypatch, request):
     """Stop the auto interview's answer refiner from spawning real agent CLIs.
 
     ``build_answer_refiner()`` builds an ``LLMAnswerRefiner`` from the configured
@@ -247,6 +271,8 @@ def block_interview_answer_refiner_cli_spawn(monkeypatch):
     Patched in the consuming modules (where the name is bound at import) and
     gated on sys.modules so tests that never import them don't pay.
     """
+    if _is_explicit_live_canonical_test(request):
+        return
     for mod_name in ("ouroboros.mcp.tools.auto_handler", "ouroboros.cli.commands.auto"):
         mod = sys.modules.get(mod_name)
         if mod is not None and hasattr(mod, "build_answer_refiner"):
@@ -254,7 +280,7 @@ def block_interview_answer_refiner_cli_spawn(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def block_interview_investigator_cli_spawn(monkeypatch):
+def block_interview_investigator_cli_spawn(monkeypatch, request):
     """Stop the auto self-answer investigator from spawning real agent CLIs.
 
     ``build_repo_investigator()`` returns a ``RepoInvestigator`` that builds an
@@ -263,6 +289,8 @@ def block_interview_investigator_cli_spawn(monkeypatch):
     machine without any agent CLI. Tests that exercise the investigator inject
     one directly or re-patch after this fixture and win.
     """
+    if _is_explicit_live_canonical_test(request):
+        return
     for mod_name in ("ouroboros.mcp.tools.auto_handler", "ouroboros.cli.commands.auto"):
         mod = sys.modules.get(mod_name)
         if mod is not None and hasattr(mod, "build_repo_investigator"):

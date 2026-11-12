@@ -690,3 +690,37 @@ class TestAgentRegistryParseAgentMd:
 
         with pytest.raises(FileNotFoundError):
             await registry._parse_agent_md(Path("/nonexistent/file.md"))
+
+
+class TestAgentRegistryDiscoverCustomEncoding:
+    """Custom agent files are user-written, so they are read as UTF-8 on every locale."""
+
+    @pytest.fixture(params=["cp949", "cp950", "cp1252"])
+    def windows_locale(
+        self, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Make an encoding-less ``Path.read_text()`` decode like Windows does."""
+        original_read_text = Path.read_text
+
+        def read_text(path: Path, encoding=None, errors=None, **kwargs):  # type: ignore[no-untyped-def]
+            if encoding in (None, "locale"):
+                encoding = request.param
+            return original_read_text(path, encoding=encoding, errors=errors, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", read_text)
+
+    async def test_discover_custom_loads_non_ascii_agent_under_windows_locale(
+        self, tmp_path: Path, windows_locale: None
+    ) -> None:
+        """A non-ASCII agent file is loaded, not skipped as a parse failure."""
+        registry = AgentRegistry()
+        registry.AGENT_DIR = tmp_path
+        (tmp_path / "reviewer.md").write_text(
+            "# reviewer\n\n## Role\n당신은 코드 리뷰어입니다. 你是審查員, café.\n",
+            encoding="utf-8",
+        )
+
+        discovered = await registry.discover_custom()
+
+        assert list(discovered) == ["reviewer"]
+        assert discovered["reviewer"].description == "당신은 코드 리뷰어입니다. 你是審查員, café."

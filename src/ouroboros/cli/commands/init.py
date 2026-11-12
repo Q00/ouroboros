@@ -914,7 +914,7 @@ def _display_pm_seed_info(seed_path: Path) -> dict[str, str]:
         Falls back to defaults if the file is malformed.
     """
     try:
-        with open(seed_path) as f:
+        with open(seed_path, encoding="utf-8") as f:
             data = yaml.safe_load(f)
         if not isinstance(data, dict):
             raise ValueError("PM seed file is not a YAML mapping")

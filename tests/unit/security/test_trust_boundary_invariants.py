@@ -454,14 +454,21 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         "src/ouroboros/auto/checkpoint_commits.py",
         "_staged_changes",
         "subprocess.run",
-        154,
+        159,
         13,
     ): "implicit inherit; `git diff --cached`. GIT_* is denied from the untrusted .env by the loader.",
     (
         "src/ouroboros/auto/checkpoint_commits.py",
+        "_git_path_bytes",
+        "subprocess.run",
+        187,
+        13,
+    ): "implicit inherit; `git status --porcelain -z` path listing. GIT_* is denied from the untrusted .env by the loader.",
+    (
+        "src/ouroboros/auto/checkpoint_commits.py",
         "_git",
         "subprocess.run",
-        173,
+        207,
         13,
     ): "implicit inherit; `git add/commit`. GIT_* is denied from the untrusted .env by the loader.",
     (
@@ -825,7 +832,7 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         "src/ouroboros/providers/litellm_adapter.py",
         "LiteLLMAdapter._run_isolated_completion",
         "asyncio.create_subprocess_exec",
-        988,
+        989,
         28,
     ): "explicit two-key literal env (PYTHONIOENCODING/PYTHONUTF8) and `-I`; reference pattern.",
     (

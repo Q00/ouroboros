@@ -86,6 +86,7 @@ def _spy_handler_constructions(monkeypatch: pytest.MonkeyPatch) -> dict[str, lis
     "runtime",
     ["claude", "codex", "opencode", "hermes", "gemini", "copilot", "kiro"],
 )
+@pytest.mark.usefixtures("auto_project_cwd")
 def test_run_auto_threads_runtime_through_all_four_handlers(
     runtime: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

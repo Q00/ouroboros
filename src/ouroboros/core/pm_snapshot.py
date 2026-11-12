@@ -65,6 +65,12 @@ def _run_git(args: list[str], cwd: Path, *, timeout: int = _GIT_TIMEOUT) -> str:
             cwd=cwd,
             capture_output=True,
             text=True,
+            # Git for Windows reports repository paths as UTF-8 whatever the
+            # console code page is. Decoding them with the locale raised
+            # UnicodeDecodeError for a checkout path that is not valid UTF-8;
+            # ``surrogateescape`` keeps such paths round-trippable.
+            encoding="utf-8",
+            errors="surrogateescape",
             timeout=timeout,
             check=False,
         )
@@ -85,7 +91,14 @@ def _snapshot_dir(source_root: Path) -> Path:
 
     The path digest disambiguates repos that share a directory name.
     """
-    digest = hashlib.sha1(str(source_root).encode("utf-8")).hexdigest()[:8]
+    # A path decoded from Git (or from os.fsdecode) can carry surrogate escapes
+    # for bytes that are not valid UTF-8. ``surrogateescape`` maps them back to
+    # their original bytes instead of raising UnicodeEncodeError; plain paths
+    # hash exactly as before, so existing snapshot directories keep their name.
+    # This is the same path-hashing precedent as plugin/digest.py and
+    # codex/artifacts.py.
+    encoded_path = str(source_root).encode("utf-8", errors="surrogateescape")
+    digest = hashlib.sha1(encoded_path).hexdigest()[:8]
     return snapshot_root() / f"{source_root.name}-{digest}"
 
 
