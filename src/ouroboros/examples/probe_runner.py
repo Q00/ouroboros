@@ -28,8 +28,9 @@ A run the controller could not make is indeterminate: the sandbox or the
 interpreter pin refused the command (``check_env.CheckUnavailable``), the
 process could not be launched, the tree could not be copied, or the step's
 deadline left no room for a full per-run timeout. A command stream exceeding
-the capture limit or not reaching EOF is also indeterminate: the observed
-prefix alone cannot represent its full output. One indeterminate run makes the whole probe
+the capture limit, not reaching EOF, or containing non-UTF-8 bytes is also
+indeterminate: a truncated or lossy text representation cannot represent the
+full output. One indeterminate run makes the whole probe
 indeterminate: its remaining runs are skipped, every one of its records is
 ``not_run`` with no fields (so ``examples.disagreement`` drops it as not
 run), and its reason is reported in ``ProbePoolRun.indeterminate``. There is
@@ -84,6 +85,9 @@ STEP_DEADLINE = "step_deadline"
 OUTPUT_INCOMPLETE = "output_incomplete"
 """A command output stream exceeded the limit or did not finish draining."""
 _INCOMPLETE_OUTPUT = "ouroboros.examples.probe_wrapper.IncompleteOutput"
+OUTPUT_UNDECODABLE = "output_undecodable"
+"""A command output stream is not valid UTF-8 and cannot be compared as text."""
+_UNDECODABLE_OUTPUT = "ouroboros.examples.probe_wrapper.UndecodableOutput"
 
 
 class ProbeKind(StrEnum):
@@ -292,6 +296,13 @@ async def run_probe(
         and record.fields.get("exception_type") == _INCOMPLETE_OUTPUT
     ):
         return ProbeRun(_not_run(probe_id, tree_id, repeat), OUTPUT_INCOMPLETE)
+    if (
+        record is not None
+        and probe.kind is ProbeKind.COMMAND
+        and record.status is ProbeStatus.NOT_RUN
+        and record.fields.get("exception_type") == _UNDECODABLE_OUTPUT
+    ):
+        return ProbeRun(_not_run(probe_id, tree_id, repeat), OUTPUT_UNDECODABLE)
     if record is None:
         fields = {"exit_code": completed.return_code}
         record = OutcomeRecord(probe_id, tree_id, repeat, ProbeStatus.EXITED, fields)
@@ -412,6 +423,7 @@ __all__ = [
     "DEFAULT_PARALLEL_RUNS",
     "LAUNCH_FAILED",
     "OUTPUT_INCOMPLETE",
+    "OUTPUT_UNDECODABLE",
     "PROBE_TIMEOUT_SECONDS",
     "PROBE_WRAPPER_SOURCE",
     "STEP_DEADLINE",

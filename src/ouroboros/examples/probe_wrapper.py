@@ -233,7 +233,7 @@ def _feed(stream: Any, data: bytes) -> None:
 
 
 def _decoded(chunks: List[bytes]) -> str:
-    return b"".join(chunks).decode("utf-8", "backslashreplace")
+    return b"".join(chunks).decode("utf-8")
 
 
 def _command(nonce: str, path: str) -> None:
@@ -281,11 +281,26 @@ def _command(nonce: str, path: str) -> None:
             },
         )
         os._exit(0)
+    try:
+        stdout, stderr = _decoded(list(out)), _decoded(list(err))
+    except UnicodeDecodeError:
+        # A replacement escape can also occur in valid output, so it is not
+        # an injective representation of the command's actual bytes.
+        _report(
+            channel,
+            nonce,
+            {
+                "status": "not_run",
+                "exception_type": "ouroboros.examples.probe_wrapper.UndecodableOutput",
+                "message": "command output is not UTF-8",
+            },
+        )
+        os._exit(0)
     record = {
         "status": "exited",
         "exit_code": code,
-        "stdout": _decoded(list(out)),
-        "stderr": _decoded(list(err)),
+        "stdout": stdout,
+        "stderr": stderr,
     }
     _report(channel, nonce, record)
     os._exit(0)
