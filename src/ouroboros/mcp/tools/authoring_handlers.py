@@ -79,6 +79,7 @@ from ouroboros.mcp.tools.question_advisory import (
     build_question_advisory_request,
     required_advisory_personas,
 )
+from ouroboros.mcp.tools.seed_parameters import CLIENT_GATES_DESCRIPTION
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
     FanoutRegistry,
@@ -1207,14 +1208,7 @@ class GenerateSeedHandler:
                 MCPToolParameter(
                     name="client_gates",
                     type=ToolInputType.ARRAY,
-                    description=(
-                        "Caller-reported client-side interview gate acknowledgements. "
-                        "These names are not server-verified proof that a gate ran or "
-                        "that a person approved it. Evaluated only for the interview "
-                        "session_id path, not the interview-less session_context path. "
-                        "Expected values include seed_ready_acceptance_guard and "
-                        "restate_goal_approved."
-                    ),
+                    description=CLIENT_GATES_DESCRIPTION,
                     required=False,
                     items={"type": "string"},
                 ),
