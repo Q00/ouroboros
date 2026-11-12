@@ -142,6 +142,14 @@ model IDs; availability varies by version, account, and plan. Antigravity is
 a **sentinel-model backend** — by default Ouroboros lets `agy` pick its own
 configured model and only forwards `--model` when you set an explicit id.
 
+Direct `AntigravityCLIRuntime.execute_task(..., model=...)` calls forward the
+request-local ID to that invocation, including a requested conversation resume;
+the shared runtime's constructor model is unchanged. This only describes the
+CLI argument: it does not establish account availability, the model selected
+by the provider, or automatic tier routing. Automatic tier routing is not wired
+for this backend; the native ladder and durable replay contract remain to be
+implemented.
+
 ## Capabilities
 
 | Capability               | Status                                                |
