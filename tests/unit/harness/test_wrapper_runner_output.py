@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 
@@ -503,6 +504,101 @@ def test_frozen_wrapper_rejects_versioned_coverage_collection(
 )
 def test_nonexecuting_coverage_pytest_command(command: list[str], expected: bool) -> None:
     assert wrapper_runner._nonexecuting_pytest_mode(command, check_config=False) is expected
+
+
+def _run_python_flag_wrapper(argv: list[str], cwd: Path) -> subprocess.CompletedProcess[bytes]:
+    with subprocess.Popen(
+        argv,
+        cwd=cwd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=os.name != "nt",
+    ) as process:
+        try:
+            stdout, stderr = process.communicate(input=b"", timeout=15)
+        except subprocess.TimeoutExpired:
+            if os.name != "nt":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+            process.communicate()
+            raise
+        return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+
+
+@pytest.mark.parametrize("python_option", ["-R", "-d", "-x", "-i", "-V", "-Ri"])
+def test_frozen_wrapper_rejects_collection_with_python_flags(
+    tmp_path: Path, python_option: str
+) -> None:
+    test_path, marker = _make_pytest_contract(tmp_path, failing=False)
+    argv = _pytest_wrapper_argv(("receipt.json", "stdout.txt", "stderr.txt"), test_path)
+    argv.insert(argv.index("--") + 2, python_option)
+    argv.insert(-1, "--collect-only")
+    result = _run_python_flag_wrapper(argv, tmp_path)
+    receipt = json.loads((tmp_path / "receipt.json").read_text())
+    assert receipt["inner_exit_status"] == 0, result.stderr
+    assert not marker.exists()
+    assert result.returncode == receipt["outer_exit_status"] == 1
+    assert receipt["test_result"] == "failed"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="controlled POSIX launcher, not native py.exe")
+@pytest.mark.parametrize("selector", ["-V:3.12", "-3.12-64"])
+def test_frozen_wrapper_rejects_collection_with_windows_python_selectors(
+    tmp_path: Path, selector: str
+) -> None:
+    test_path, marker = _make_pytest_contract(tmp_path, failing=False)
+    launcher = tmp_path / "py.exe"
+    launcher.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys\n"
+        f"assert sys.argv[1] == {selector!r}\n"
+        f"os.execv({sys.executable!r}, [{sys.executable!r}, *sys.argv[2:]])\n"
+    )
+    launcher.chmod(0o700)
+    argv = _pytest_wrapper_argv(("receipt.json", "stdout.txt", "stderr.txt"), test_path)
+    index = argv.index("--") + 1
+    argv[index] = str(launcher)
+    argv.insert(index + 1, selector)
+    argv.insert(-1, "--collect-only")
+    result = _run_python_flag_wrapper(argv, tmp_path)
+    receipt = json.loads((tmp_path / "receipt.json").read_text())
+    assert receipt["inner_exit_status"] == 0, result.stderr
+    assert not marker.exists()
+    assert result.returncode == receipt["outer_exit_status"] == 1
+    assert receipt["test_result"] == "failed"
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        (["--future-python-flag", "-m", "pytest", "--co"], True),
+        (["-R", "-m", "coverage", "run", "-m", "pytest", "--co"], True),
+        (["-R", "-m", "pytest", "test_file.py"], False),
+        (["-R", "script.py", "-m", "pytest", "--co"], False),
+        (["-R", "-c", "pass", "-m", "pytest", "--co"], False),
+        (["-R", "-cpass", "-m", "pytest", "--co"], False),
+        (["-Rcpass", "-m", "pytest", "--co"], False),
+        (["-Bicpass", "-m", "pytest", "--co"], False),
+        (["-R", "--", "-m", "pytest", "--co"], False),
+        (["-R", "-", "-m", "pytest", "--co"], False),
+        (["-W", "-m", "pytest", "--co"], False),
+        (["-X", "-m", "pytest", "--co"], False),
+        (["--check-hash-based-pycs", "-m", "pytest", "--co"], False),
+        (["-m", "other", "-m", "pytest", "--co"], False),
+        (["-R", "-m", "other", "-m", "pytest", "--co"], False),
+        (["-R", "-m"], False),
+        (["-W"], False),
+        (["-X"], False),
+        (["--check-hash-based-pycs"], False),
+    ],
+)
+def test_python_option_boundaries(arguments: list[str], expected: bool) -> None:
+    assert (
+        wrapper_runner._nonexecuting_pytest_mode(["python", *arguments], check_config=False)
+        is expected
+    )
 
 
 def test_frozen_wrapper_rejects_collection_from_nodeid_config(tmp_path: Path) -> None:

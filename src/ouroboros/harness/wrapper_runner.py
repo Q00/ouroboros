@@ -120,8 +120,7 @@ def _nonexecuting_pytest_mode(command: list[str], *, check_config: bool = True) 
             return args[index + 1 :]
         return None
 
-    def python_module(args: list[str], *, windows_launcher: bool) -> tuple[str, list[str]] | None:
-        flags = {"-B", "-E", "-I", "-O", "-OO", "-P", "-S", "-s", "-u", "-q", "-v", "-b", "-bb"}
+    def python_module(args: list[str]) -> tuple[str, list[str]] | None:
         index = 0
         while index < len(args):
             value = args[index]
@@ -132,14 +131,14 @@ def _nonexecuting_pytest_mode(command: list[str], *, check_config: bool = True) 
                 if index >= len(args):
                     return None
             elif (
-                value in flags
-                or re.fullmatch(r"-[bBEIOPqSsuv]+", value)
-                or (windows_launcher and re.fullmatch(r"-\d+(?:\.\d+)*", value))
-                or (value.startswith(("-W", "-X")) and len(value) > 2)
+                value in {"-", "--"}
+                or re.match(r"-[bBdEhiIOPqRsSuvVx]*c", value)
+                or not value.startswith("-")
             ):
-                pass
-            else:
                 return None
+            # Other interpreter/launcher flags must not hide a later -m pytest.
+            # Invalid flags still fail in the inner process; script, stdin and
+            # -c arguments remain outside the module command.
             index += 1
         return None
 
@@ -161,8 +160,7 @@ def _nonexecuting_pytest_mode(command: list[str], *, check_config: bool = True) 
             return False
     elif (
         re.fullmatch(r"(?:(?:pythonw?|pypy)(?:\d+(?:\.\d+)*)?|py)", executable)
-        and (module_call := python_module(command[1:], windows_launcher=executable == "py"))
-        is not None
+        and (module_call := python_module(command[1:])) is not None
     ):
         module, module_args = module_call
         if module == "pytest":
