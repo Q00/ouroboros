@@ -56,7 +56,7 @@ verify gate（[#1591](https://github.com/Q00/ouroboros/issues/1591)）、run→e
 
 - **幂等与持久性**：谱系标识使用完整规范元组 `(seed_id, session_id)` 的 SHA-256 的 120 位，产生 36 字符的键以适配生产事件 schema。第 1 代发布使用持久化的谱系认领加上原子 `append_batch`；并发的 Ralph 入队使用独立的持久化单胜者认领，其回执发布权威的 `job_id`。
 - **诚实的评估深度**：多 AC 元数据记录每条 AC 流水线完成的最高阶段（保守聚合），第 1 代投影该值而不是虚构一个固定的拒绝阶段。
-- **不递归**：演化世代在进程内评估（绝不经由 `StartEvaluateHandler`），外加 `delegation_depth` 拒绝。
+- **评估链路不递归**：演化世代在进程内评估，不经由 `StartEvaluateHandler`。Ralph handler 只有在调用参数中的 `delegation_depth` 为真值时才会拒绝（按 Python 真值判断，而非类型校验）；该字段未在公开 MCP 工具 schema 中声明，因此这不是对 schema 驱动客户端或所有运行时的可信子会话隔离保证。OpenCode bridge 只在其存活的子会话注册表及标准服务器名等既定范围内拦截嵌套 Ralph（参见 #2439）；跨运行时来源验证仍未解决。
 - **auto 流水线保护**：`ooo auto` 以 `auto_evolve: false` 派发执行——auto 拥有自己的 RALPH_HANDOFF 谱系；没有这个保护，auto 会话内一次失败的链式评估会与另一条谱系上的第二个 Ralph 循环竞争。
 - **降级**：单 AC 评估（无清单）以空 `ac_results` 继续（只有一条 AC 时冻结没有意义）。seed 无法解析则 fail-closed 跳过 Ralph 链（第 2 代重建必须依赖 `seed_json`）。
 - **修复静默的评估丢失**：`evolution/loop.py` 的裸 `except`（三条静默通往 `evaluation_summary=None` 的路径）现在会记录一份带失败原因的 rejected summary，既保持 fail-closed 的焦点语义，又让失败成为持久化的事实。

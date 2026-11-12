@@ -50,7 +50,7 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | iex
 ```
 
-<p align="center"><sub>설치는 위 한 줄입니다. 이후 코딩 에이전트 안에서 <code>ooo setup</code>을 한 번 실행하세요. 자세한 내용은 <a href="#빠른-시작">빠른 시작</a>에 있습니다.</sub></p>
+<p align="center"><sub>설치는 위 한 줄입니다. Claude Code에서는 <code>/ouroboros:setup</code>으로 설정할 수 있고, Codex 등 다른 호스트는 각 런타임 설정 절차를 따르세요. 자세한 내용은 <a href="#빠른-시작">빠른 시작</a>에 있습니다.</sub></p>
 
 <p align="center"><sub><b>서로 다른 일곱 번의 실행, 일곱 개의 호스트. 과제가 다른 건 의도한 것입니다 — 공유되는 건 엔진이지 프롬프트가 아닙니다</b></sub></p>
 
@@ -163,20 +163,48 @@ Windows 설치 스크립트는 Git과 uv가 없으면 winget으로 설치하고,
 네이티브 Windows는 실험 단계이고 Codex CLI는 WSL 2가 필요합니다.
 [플랫폼 지원](./docs/platform-support.md)을 참고하세요.
 
-**첫 명령** — AI 코딩 에이전트를 열고 아래 두 명령을 순서대로 입력하세요:
+**첫 명령** — Claude Code에서는 대화에서 setup을 시작하세요:
 
 ```
-> ooo setup
-> ooo interview "I want to build a task management CLI"
+/ouroboros:setup
 ```
 
-`ooo setup`은 한 번만 하는 실행 환경 설정이고, `ooo interview`가 설치 후
-처음 실행할 워크플로우 명령입니다. 설정이 끝나면 Codex는 현재 선택한 모델을
+setup이 묻는 질문에 답하고 설정을 마친 다음, **같은 대화의 다음 메시지**로
+인터뷰를 요청하세요. [main setup skill](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/skills/setup/SKILL.md)
+과 [Interview skill](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/skills/interview/SKILL.md) 참고:
+
+```
+ooo interview "I want to build a task management CLI"
+```
+
+이 guided setup 절차는 Claude Code용입니다. Codex 플러그인은 플러그인 설치로 MCP
+서버를 등록하므로 `/ouroboros:setup`을 공통 필수 단계로 반복하지 마세요. Codex CLI를
+별도로 설정할 때는 macOS/Linux/WSL 2 터미널에서 실행하세요. 해당 환경에 Ouroboros와
+인증된 Codex CLI, `uvx` 같은 MCP launcher가 각각 준비되어 있어야 합니다. Windows PowerShell 설치는 WSL에 자동으로
+공유되지 않습니다. 네이티브 Windows의 `auto` 설정은 성공을 표시해도 새 MCP 항목을
+등록하지 않을 수 있습니다. Desktop HTTP 설정은 별도 서버 등록 방식입니다.
+`ouroboros setup --runtime codex`를 실행하세요.
+다른 호스트는 [런타임 가이드 색인](./docs/README.md#runtime-guides)에서 해당 절차를 확인하세요.
+
+`/ouroboros:setup`은 Claude Code에서 한 번 하는 guided 설정이고, `ooo interview`가
+설치 후 처음 실행할 워크플로우 명령입니다. 설정이 끝나면 Codex는 현재 선택한 모델을
 따르고, Claude Code는 권장 기본 모델 설정으로 시작합니다. 특정 단계의 모델을
 고정하고 싶을 때만 **직접 모델 설정하기**를 선택하세요. 내 컴퓨터의 브라우저에
 로컬 설정 화면이 열립니다. 나중에 `ooo config`로 언제든 다시 바꿀 수 있습니다.
 
 에이전트 호스트 없이 터미널에서 바로 쓸 수도 있습니다:
+
+> **실행 전 안전 확인:** `--orchestrator`는 인터뷰에 Claude Code를
+> 사용합니다. Seed 생성과 이후 실행은 모델을 호출해 사용량이나 비용이 발생할 수
+> 있고, 실행 단계는 프로젝트 파일을 바꾸거나 명령을 실행할 수 있습니다.
+> workflow runtime이 Codex이면 OrchestratorRunner가 runner 권한을
+> `bypassPermissions`로 강제하고, Codex는 승인과 sandbox를 모두 우회하는
+> `--dangerously-bypass-approvals-and-sandbox`로 실행될 수 있습니다. 이는
+> Codex runner 경로에 대한 설명이며 모든 CLI 경로에 일반화되지 않습니다.
+> 신뢰하지 않는 프로젝트는 실행하지 말고, 별도 OS 계정·VM·container의 파일 및
+> 네트워크 격리 정책을 먼저 확인하세요. Seed를 검토하려면 `Start workflow now?`에
+> 기본값 yes를 그대로 수락하지 말고 `n`으로 답한 뒤 YAML과 저장 경로를 확인하세요.
+> [`--orchestrator` backend](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/cli/commands/init.py#L1046-L1053) · [Seed/실행 확인 질문](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/cli/commands/init.py#L594-L607) · [워크플로 시작 기본값](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/cli/commands/init.py#L644-L654) · [runner 권한 적용](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/orchestrator/runner.py#L879-L879) · [권한 모드 강제 지정](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/orchestrator/runner.py#L5190-L5207) · [Codex 우회 권한 매핑](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/codex_permissions.py#L22-L50)
 
 ```
 $ ouroboros init start --orchestrator "I want to build a task management CLI tool"
@@ -196,6 +224,16 @@ $ ouroboros init start --orchestrator "I want to build a task management CLI too
 
 > Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, Hermes, Gemini, Kiro CLI, Pi CLI, OMP CLI, Zcode, Goose, GJC, Antigravity CLI, Grok Build CLI를 지원합니다. 설치 프로그램은 사용 가능한 런타임을 자동으로 감지하고 호스트가 지원하는 경우 MCP 서버를 등록합니다. 런타임을 명시적으로 선택하려면 설치 후 `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi|omp|zcode|goose|gjc|antigravity|grok>`를 실행하세요. Copilot CLI 런타임은 GitHub Copilot models API를 통해 모델 카탈로그를 실시간으로 검색하고 설정 중 기본값을 선택할 수 있습니다.
 
+> **MCP 프로필은 서로 바꿔 끼우는 설치 옵션입니다.** 새 격리 환경에서 MCP
+> 프로필 하나를 선택하세요. `[mcp]`는 MCP 2를, `[claude]`와 `[claude-sdk]`는
+> Claude Agent SDK의 MCP 1을 사용하며 `[all]`은 MCP 1.x 앱 묶음입니다.
+> `[mcp]`를 `[claude]`, `[claude-sdk]` 또는 `[all]`과 같은 Python 환경에
+> 설치하지 마세요. `[all,mcp]` 조합은 지원되지 않습니다. MCP 프로필과 호환되는
+> 다른 extras는 함께 선택할 수 있습니다. 플러그인의 MCP 2
+> launcher와 독립 Claude SDK 환경도 별도 프로세스/환경으로 유지하세요.
+> 정확한 의존성 버전은 사용하려는 버전의 `pyproject.toml`을 확인하세요.
+> [현재 소스의 extra 정의](./pyproject.toml)가 PyPI 설치본과 같다고 보장되지는 않습니다.
+
 <details>
 <summary><strong>Codex 플러그인 빠른 시작</strong></summary>
 
@@ -208,14 +246,25 @@ codex plugin marketplace add Q00/ouroboros
 codex plugin add ouroboros@ouroboros
 ```
 
-새 Codex 세션을 연 뒤 아래 명령을 순서대로 입력하세요:
+새 Codex 세션에서 설치된 플러그인과 MCP 연결을 확인한 뒤, 대화의 다음 메시지로
+첫 인터뷰를 요청하세요. 플러그인 설치가 Codex MCP 서버를 등록하므로 Claude Code용
+guided setup을 필수로 반복하지 않습니다. Codex CLI를 별도로 구성하는 경우에는
+macOS/Linux/WSL 2 터미널에서, 그 환경에 Ouroboros, 인증된 Codex CLI, `uvx` 같은 MCP launcher가 준비되어 있는지
+확인한 뒤 실행하세요. Windows PowerShell 설치는 WSL에 자동 공유되지 않습니다. 네이티브
+Windows의 `auto`는 성공을 표시해도 새 MCP 항목을 등록하지 않을 수 있으며, Desktop HTTP는
+별도 서버 등록 방식입니다. `ouroboros setup --runtime codex`를 실행하세요.
+[main setup skill](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/skills/setup/SKILL.md)도 참고하세요:
 
 ```
-ooo setup
 ooo interview "Build a task management CLI"
 ```
 
-`ooo setup`은 한 번만 하는 실행 환경 설정입니다. 준비가 끝나면 Codex의 현재
+Codex CLI TUI의 `/mcp`로 현재 서버와 도구를 확인하세요. `codex mcp list`에
+항목이 없거나 welcome이 `CODEX_SETUP_REQUIRED`를 반환해도 플러그인 서버의
+실패를 뜻하지는 않습니다. 현재 세션을 먼저 확인하세요.
+[연결 문제 해결](./skills/help/TROUBLESHOOTING.md#mcp-connection-or-authentication-fails)을 참고하세요.
+
+런타임 설정을 했다면 준비가 끝난 뒤 Codex의 현재
 기본 모델을 따릅니다. 특정 단계의 모델을 고정하고 싶을 때만 **직접 모델
 설정하기**를 선택하세요.
 
@@ -225,13 +274,24 @@ ooo interview "Build a task management CLI"
 <summary><strong>Kiro CLI 빠른 시작</strong></summary>
 
 ```bash
-pipx install 'ouroboros-ai[mcp]'       # 또는: uv tool install 'ouroboros-ai[mcp]'
-ouroboros setup --runtime kiro         # Kiro CLI 감지, MCP 서버 등록과 함께
-                                        # OUROBOROS_RUNTIME=kiro 를
-                                        # ~/.kiro/settings/mcp.json (setup이 관리하는
-                                        # 신뢰된 위치)에 기록합니다 — 프로젝트 .env는
-                                        # 신뢰되지 않는 입력이라 이 키는 거기서 무시됩니다
+pipx install 'ouroboros-ai[mcp]'       # 또는 아래의 uv tool 선택
 ```
+
+또는:
+
+```bash
+uv tool install 'ouroboros-ai[mcp]'
+```
+
+설치가 끝난 뒤 런타임을 별도로 설정하세요:
+
+```bash
+ouroboros setup --runtime kiro
+```
+
+Kiro 설정은 `OUROBOROS_RUNTIME=kiro`를 setup이 관리하는 신뢰된 위치인
+`~/.kiro/settings/mcp.json`에 기록합니다. 프로젝트 `.env`는 신뢰되지 않는
+입력이므로 이 키는 거기서 무시됩니다.
 
 이후 Kiro CLI 세션에서 `ooo` 명령어를 사용합니다.
 
@@ -242,10 +302,28 @@ ouroboros setup --runtime kiro         # Kiro CLI 감지, MCP 서버 등록과 �
 
 ```bash
 gh auth login                                # 최초 1회 GitHub 인증(실시간 모델 검색에 사용)
-pipx install 'ouroboros-ai[mcp]'             # 또는: uv tool install 'ouroboros-ai[mcp]'
-ouroboros setup --runtime copilot            # 모델 실시간 검색 및 기본값 선택,
-                                             # ~/.copilot/mcp-config.json에 MCP 서버 등록
 ```
+
+격리 launcher를 하나 선택하세요:
+
+```bash
+pipx install 'ouroboros-ai[mcp]'
+```
+
+또는:
+
+```bash
+uv tool install 'ouroboros-ai[mcp]'
+```
+
+설치가 끝난 뒤 런타임을 별도로 설정하세요:
+
+```bash
+ouroboros setup --runtime copilot
+```
+
+setup은 모델을 검색·선택하고 `~/.copilot/mcp-config.json`에 MCP server를
+등록합니다.
 
 Copilot CLI 세션을 다시 시작한 뒤 세션 안에서 `ooo` 명령어를 사용합니다. **모델 ID 변환 범위는 생각보다 좁습니다.** 정적 맵은 `claude-opus-4-6`과 `claude-sonnet-4-5`까지 커버하고, `.`이 이미 들어간 ID는 그대로 통과하며, 하이픈-점 폴백은 **하이픈을 전부** 바꾸기 때문에 현재 기본값 `claude-opus-4-8`은 `claude.opus.4.8`이 되어 매칭에 실패합니다. 역할별 모델을 비워 두어 setup이 발견한 ID를 쓰게 하거나, 점 표기 Copilot ID를 명시하세요. [#1995](https://github.com/Q00/ouroboros/issues/1995)와 [Copilot 런타임 가이드](./docs/runtime-guides/copilot.ko.md) 참고.
 
@@ -262,17 +340,82 @@ Copilot CLI 세션을 다시 시작한 뒤 세션 안에서 `ooo` 명령어를 �
 ```bash
 claude plugin marketplace add Q00/ouroboros && claude plugin install ouroboros@ouroboros
 ```
-Claude Code 세션 안에서 `ooo setup` 실행.
+Claude Code 세션 안에서 `/ouroboros:setup` 실행.
 
-**pip / uv / pipx**:
+**pip / uv / pipx** — 위의 프로필 경고를 읽고, 새 격리 환경에서 아래 선택지
+중 하나만 설치하세요. 해당 설치 명령을 여러 개 이어서 복사하지 마세요.
+
+기본 패키지:
+
 ```bash
-pip install ouroboros-ai                # 기본
-pip install 'ouroboros-ai[claude]'        # + 독립 Claude SDK 프로필(MCP 1.x 기반)
-pip install 'ouroboros-ai[litellm]'       # + LiteLLM 멀티 프로바이더; Python 3.12-3.13
-pip install 'ouroboros-ai[mcp]'           # + MCP 서버/클라이언트 지원
-pip install 'ouroboros-ai[tui]'           # + Textual 터미널 UI
-pip install 'ouroboros-ai[all]'           # Claude + LiteLLM + TUI; MCP 2 제외
-ouroboros setup                         # 런타임 설정
+pip install ouroboros-ai
+```
+
+MCP 2 서버/클라이언트:
+
+```bash
+pip install 'ouroboros-ai[mcp]'
+```
+
+MCP 2와 TUI:
+
+```bash
+pip install 'ouroboros-ai[mcp,tui]' && ouroboros setup --runtime claude-cli
+```
+
+독립 Claude Agent SDK 프로필(MCP 1.x):
+
+```bash
+pip install 'ouroboros-ai[claude]'
+```
+
+같은 SDK 프로필의 명시적 별칭:
+
+```bash
+pip install 'ouroboros-ai[claude-sdk]'
+```
+
+Claude + LiteLLM + TUI 앱 묶음(MCP 1.x, MCP 2 제외):
+
+```bash
+pip install 'ouroboros-ai[all]'
+```
+
+Claude CLI worker (추가 의존성 없음):
+
+```bash
+pip install 'ouroboros-ai[claude-cli]'
+```
+
+LiteLLM:
+
+```bash
+pip install 'ouroboros-ai[litellm]'
+```
+
+Textual UI:
+
+```bash
+pip install 'ouroboros-ai[tui]'
+```
+
+각 extra를 설치할 때도 MCP 1/MCP 2 경계와 Python 지원 버전을 확인하세요.
+
+패키지를 설치한 뒤, workflow를 실행하기 전에 setup으로 사용할 런타임을
+확인하고 구성하세요. 자동 감지/대화형 선택을 사용하려면:
+
+```bash
+ouroboros setup
+```
+
+특정 런타임을 선택하려면 setup을 실행할 때 명시하세요. Codex CLI는 macOS/Linux/WSL 2
+터미널에서, 해당 환경에 Ouroboros와 인증된 Codex CLI가 준비된 뒤 설정해야 합니다.
+Windows PowerShell 설치는 WSL에 자동 공유되지 않습니다. 네이티브 Windows `auto`는 성공을
+표시해도 MCP 항목을 등록하지 않을 수 있고, Desktop HTTP는 별도 서버 등록 방식입니다.
+예를 들어:
+
+```bash
+ouroboros setup --runtime codex
 ```
 
 기본 및 비-LiteLLM 설치는 Python 3.12-3.14를 지원합니다. LiteLLM 포함 설치(`[litellm]`, `[all]`, source `--all-extras`)는 Python 3.12-3.13을 지원하며, 현재 예시는 Python 3.13을 권장합니다. 자세한 내용은 [Platform Support](./docs/platform-support.md#python-profile-matrix)를 참고하세요.
@@ -287,11 +430,17 @@ ouroboros setup                         # 런타임 설정
 ```bash
 brew tap q00/tap
 brew install ouroboros-ai
-ouroboros setup                         # 런타임 설정
 ```
 homebrew-core에는 아직 등록되지 않은 자가 호스팅 탭입니다. PyPI에 게시된 것과 동일한 패키지를 설치합니다.
 
-런타임별 가이드: [Claude Code](./docs/runtime-guides/claude-code.ko.md) · [Codex CLI](./docs/runtime-guides/codex.ko.md) · [Hermes](./docs/runtime-guides/hermes.ko.md) · [OpenCode](./docs/runtime-guides/opencode.ko.md) · [Kiro CLI](./docs/runtime-guides/kiro.ko.md) · [Gemini CLI](./docs/runtime-guides/gemini.ko.md) · [GitHub Copilot CLI](./docs/runtime-guides/copilot.ko.md) · [Zcode](./docs/runtime-guides/zcode.ko.md) · [Pi JSON mode](https://pi.dev/docs/latest/json) · [OMP (Oh My Pi)](./docs/runtime-guides/omp.md) · [Goose](./docs/runtime-guides/goose.ko.md) · [GJC](./docs/runtime-guides/gjc.ko.md) · [Antigravity CLI](./docs/runtime-guides/antigravity.ko.md) · [Grok Build CLI](./docs/runtime-guides/grok.ko.md)
+설치 후 workflow를 실행하기 전에 runtime을 설정하세요:
+
+```bash
+ouroboros setup
+```
+
+런타임별 가이드: [Claude Code](./docs/runtime-guides/claude-code.ko.md) · [Codex CLI](./docs/runtime-guides/codex.ko.md) · [Hermes](./docs/runtime-guides/hermes.ko.md) · [OpenCode](./docs/runtime-guides/opencode.ko.md) · [Kiro CLI](./docs/runtime-guides/kiro.ko.md) · [Gemini CLI](./docs/runtime-guides/gemini.ko.md) · [GitHub Copilot CLI](./docs/runtime-guides/copilot.ko.md) · [Zcode](./docs/runtime-guides/zcode.ko.md) · [Pi CLI](./docs/runtime-guides/pi.ko.md) ([Pi JSON mode](https://pi.dev/docs/latest/json)) · [OMP (Oh My Pi)](./docs/runtime-guides/omp.ko.md) · [Goose](./docs/runtime-guides/goose.ko.md) · [GJC](./docs/runtime-guides/gjc.ko.md) · [Antigravity CLI](./docs/runtime-guides/antigravity.ko.md) · [Grok Build CLI](./docs/runtime-guides/grok.ko.md) · [Megacode harness](./docs/runtime-guides/megacode.ko.md) · [호스트 주도 실행](./docs/runtime-guides/host.ko.md)
+
 
 </details>
 
@@ -437,12 +586,19 @@ Gen 3: {Task, Priority, Status, DueDate}     → similarity 1.00 → CONVERGED �
 
 ## 명령어
 
-> 모든 `ooo` 명령어는 AI 코딩 에이전트(Claude Code, Codex CLI 등) 세션 안에서 실행됩니다.
-> 설치 후 `ooo setup`을 실행하여 MCP 서버를 등록(1회)하고, 프로젝트 설정과 통합할 수 있습니다.
+> `ooo` 스킬은 지원되는 AI 코딩 에이전트 세션 안에서 실행됩니다. `/ouroboros:setup`은
+> 호스트별 설정이며 MCP 등록 절차가 모든 호스트에서 동일한 것은 아닙니다. Claude Code
+> guided setup은 `/ouroboros:setup`, 다른 런타임 설정은 해당 CLI 절차를 사용하세요.
+
+> 표준 MCP 경로에서 Git 프로젝트에 `ooo run`을 요청하기 전, 프로젝트 터미널에서
+> 읽기 전용 `git rev-parse --verify HEAD`로 커밋이 있는지 확인하세요. 표준 MCP run은
+> 기본적으로 worktree를 요청하며, `git init`만 하고 커밋하지 않은 저장소에는 그
+> worktree를 만들 기준 `HEAD`가 없습니다 ([MCP 기본값](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/mcp/tools/execution_handlers.py#L1430),
+> [worktree 확인](https://github.com/Q00/ouroboros/blob/592c667f076c3dad7ef68d7844e91480d80135d0/src/ouroboros/core/worktree.py#L371-L388)). 새로 `git init`한 저장소에서 이 확인이 실패하면 파일을 검토하고 초기 커밋을 할지와 무엇을 포함할지 직접 판단하세요. 이 준비 단계에서 에이전트가 임의로 커밋하거나 파일을 바꾸게 하지 마세요. 이 조건은 표준 MCP worktree 경로에만 해당하며 standalone CLI, 비Git 프로젝트, worktree 비활성화, OpenCode에는 일반화하지 않습니다.
 
 | 명령어 | 기능 |
 |:--------|:-------------|
-| `ooo setup` | MCP 서버 등록 (1회) |
+| `/ouroboros:setup` | 호스트별 guided 설정; 다른 런타임은 해당 CLI 설정 절차 사용 |
 | `ooo interview` | 소크라테스식 질문 → 숨겨진 가정 드러내기 |
 | `ooo idk` | 주제별 이해 수준에 맞춰 인터뷰 설명 난이도 조절 |
 | `ooo auto` | 목표 하나에서 A-grade Seed까지 자동 수렴 후 실행 시작 |
@@ -454,7 +610,7 @@ Gen 3: {Task, Priority, Status, DueDate}     → similarity 1.00 → CONVERGED �
 | `ooo status` | 드리프트 감지 + 세션 추적 |
 | `ooo resume-session` | 실행 중인 세션 목록과 재연결 명령 확인 |
 | `ooo ralph` | 검증될 때까지 계속 도는 루프 |
-| `ooo tutorial` | 대화형 실습 |
+| `/ouroboros:tutorial` | 대화형 실습 |
 | `ooo help` | 전체 참조 |
 | `ooo pm` | PM 인터뷰 + PRD 생성 |
 | `ooo qa` | 범용 QA 판정 |
