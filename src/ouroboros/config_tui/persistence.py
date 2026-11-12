@@ -1,11 +1,8 @@
-"""Validated batch writes for the settings GUI.
+"""Validated settings writes shared by the GUI and ``config set``.
 
-Writes go through the exact contract `ouroboros config set` enforces: the
-schema key-path validator is shared (imported from the CLI command module,
-not duplicated), the YAML serialization options match ``_save_config``, and
-the post-write ``load_config()`` check rolls the whole batch back on any
-Pydantic validation failure — the settings app never becomes a second,
-unvalidated write path to ``~/.ouroboros/config.yaml``.
+Both callers validate key paths before saving. The shared write path checks
+the resulting configuration before publishing its one-step Undo backup and
+restores the previous configuration on recoverable save failures.
 """
 
 from __future__ import annotations
@@ -57,7 +54,6 @@ def apply_config_values(values: Mapping[str, Any]) -> None:
     from ouroboros.cli.commands.config import _validate_key_path
 
     config_path = get_config_dir() / "config.yaml"
-    original_bytes = config_path.read_bytes() if config_path.exists() else None
     data = load_raw_config()
 
     for key, value in values.items():
@@ -80,6 +76,17 @@ def apply_config_values(values: Mapping[str, Any]) -> None:
         else:
             target[keys[-1]] = value
 
+    save_config_with_backup(data, config_path)
+
+
+def save_config_with_backup(data: dict[str, Any], config_path: Path) -> None:
+    """Save a config and retain its previous bytes for one-step Undo.
+
+    Callers validate changed key paths before calling this function. Only a
+    fully validated save advances the backup; recoverable failures restore
+    the original configuration without replacing the previous backup.
+    """
+    original_bytes = config_path.read_bytes() if config_path.exists() else None
     config_path.parent.mkdir(parents=True, exist_ok=True)
     backup_temp: Path | None = None
     try:
@@ -88,7 +95,7 @@ def apply_config_values(values: Mapping[str, Any]) -> None:
         )
         from ouroboros.config.loader import load_config
 
-        load_config()
+        load_config(config_path)
         if original_bytes is not None:
             # Preserve the previous Undo snapshot until validation and the
             # complete backup write succeed. Close before replacing on Windows.
@@ -115,4 +122,4 @@ def apply_config_values(values: Mapping[str, Any]) -> None:
                 backup_temp.unlink(missing_ok=True)
 
 
-__all__ = ["ConfigWriteError", "apply_config_values", "load_raw_config"]
+__all__ = ["ConfigWriteError", "apply_config_values", "load_raw_config", "save_config_with_backup"]
