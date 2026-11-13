@@ -462,6 +462,93 @@ terminate an entire process tree just to hide a window: durable background jobs
 can outlive the MCP server. Use the job cancellation controls when you intend to
 stop that work.
 
+### Diagnose an unexpected Windows HTTP server exit
+
+If an HTTP MCP server previously worked and is now unreachable, first use the
+[listener check above](#blank-powershell-or-windows-terminal-window). Before
+restarting the server, record the last successful connection and when you first
+observed the connection failure, including the time zone. Preserve the launcher's
+stdout and stderr logs.
+
+If you use Task Scheduler to start the server, inspect that existing task from
+Windows PowerShell 5.1 or PowerShell 7. Replace the name and path below with your
+task's values. A task in a subfolder uses a path such as `\My Tasks\`.
+
+```powershell
+$taskName = 'Your MCP task name'
+$taskPath = '\'
+$tasks = @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
+	$_.TaskName -eq $taskName -and $_.TaskPath -eq $taskPath
+})
+if ($tasks.Count -ne 1) {
+	throw 'Expected one task. Check its exact name, path, and your access.'
+}
+$task = $tasks[0]
+$task | Select-Object TaskPath, TaskName, State
+$task | Get-ScheduledTaskInfo -ErrorAction Stop |
+	Format-List LastRunTime, LastTaskResult, NumberOfMissedRuns
+$task.Settings | Select-Object RestartCount, RestartInterval, ExecutionTimeLimit
+```
+
+Read `State` alongside `LastTaskResult`, which can contain a scheduler status
+or an action result. A nonzero value can mean the task is still running. If the
+action is a wrapper, the result alone does not identify the MCP process's exit
+code or cause. Retry settings describe the policy. Use execution history to
+check whether retries occurred.
+
+Check whether Task Scheduler records execution history:
+
+```powershell
+$logName = 'Microsoft-Windows-TaskScheduler/Operational'
+Get-WinEvent -ListLog $logName -ErrorAction Stop |
+	Select-Object IsEnabled, LogMode, MaximumSizeInBytes, RecordCount
+```
+
+If `IsEnabled` is false and you want to record future runs, open Task Scheduler
+as administrator and choose **Enable All Tasks History**. This enables logging
+for all scheduled tasks. It does not change their triggers or retry settings,
+and it cannot recover events from before logging was enabled. Record any access
+error instead of treating the log as empty.
+
+In the same PowerShell session, read retained events for this task. Adjust the
+four-hour window to include the incident and the task's start:
+
+```powershell
+$since = (Get-Date).AddHours(-4)
+$taskFullName = $task.TaskPath + $task.TaskName
+try {
+	$taskEvents = @(Get-WinEvent -FilterHashtable @{
+		LogName = $logName
+		StartTime = $since
+	} -ErrorAction Stop | Where-Object {
+		$eventXml = [xml]$_.ToXml()
+		$taskField = $eventXml.Event.EventData.Data |
+			Where-Object { $_.Name -eq 'TaskName' }
+		$taskField.'#text' -eq $taskFullName
+	})
+} catch {
+	if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') { throw }
+	$taskEvents = @()
+}
+$taskEvents | Sort-Object TimeCreated |
+	Format-List TimeCreated, Id, RecordId, Message
+if ($taskEvents.Count -eq 0) {
+	'No retained events for this task in the selected time window.'
+}
+```
+
+Match the execution instance IDs and process IDs in the event messages with
+the launcher and server logs. Separate task start, action start, completion,
+termination, and retry records. A task's action PID may belong to its wrapper,
+so use the process relationship from the listener check when the server is
+still running. A log file's last write time is not a process exit time.
+
+No matching events can mean the time window is wrong, history was disabled,
+or older records have been overwritten. An enabled log or retry policy alone
+does not explain a past exit. If the records do not identify a cause, report
+the cause as unknown. Before sharing evidence, remove credentials and personal
+information from command lines, paths, and log messages.
+
 ### Codex CLI not found
 
 Ensure `codex` or `codex-cli` is installed and available on your `PATH`:
