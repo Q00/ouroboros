@@ -10,8 +10,11 @@ new command or option is picked up without editing a list here.
 **Coverage.** Every top-level command ``ouroboros --help`` lists (every
 non-hidden one) has a heading containing the code span ``ouroboros <name>``,
 as in ``## `ouroboros auto` ``. An *alias*
-is a top-level name registered from the same Typer app or callback as an
-earlier name (``interview`` is ``init``). It needs no heading of its own;
+is a top-level name that registers the same target as an earlier name
+(``interview`` is ``init``): the same Typer app or callback for an eager
+``app.add_typer`` / ``app.command`` registration, or the same module and
+attribute for an entry of the lazy ``ouroboros.cli.main._COMMANDS`` table. It
+needs no heading of its own;
 instead the canonical command's section must show it as ``ouroboros <alias>``,
 so a reader who types the alias can find it. In the other direction, a heading
 that is a single code span naming a command (``### `init start` ``) must name
@@ -53,7 +56,7 @@ checks the ``--llm-backend`` value lists.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -154,25 +157,33 @@ def registered_cli() -> Any:
 
 @cache
 def registered_aliases() -> dict[str, str]:
-    from ouroboros.cli.main import app
+    from ouroboros.cli import main
 
-    return top_level_aliases(app)
+    return top_level_aliases(main.app, main._COMMANDS)
 
 
-def top_level_aliases(app: typer.Typer) -> dict[str, str]:
-    """Alias -> canonical name, for names registered from an earlier name's target."""
-    registrations: list[tuple[str, object]] = [
-        (info.name, info.typer_instance) for info in app.registered_groups if info.name
+def top_level_aliases(app: typer.Typer, lazy: Iterable[Any] = ()) -> dict[str, str]:
+    """Alias -> canonical name, for names that register an earlier name's target.
+
+    ``app.add_typer`` / ``app.command`` register an object, so their target is
+    that object. ``lazy`` holds lazy registrations (``_Group`` / ``_Command``
+    entries of ``ouroboros.cli.main._COMMANDS``), which name their target by
+    ``module`` and ``attribute`` and import it only when Click looks it up; that
+    pair is their target. Eager registrations come first, as in the root table.
+    """
+    registrations: list[tuple[str, Hashable]] = [
+        (info.name, id(info.typer_instance)) for info in app.registered_groups if info.name
     ]
     registrations += [
-        (info.name or typer.main.get_command_name(info.callback.__name__), info.callback)
+        (info.name or typer.main.get_command_name(info.callback.__name__), id(info.callback))
         for info in app.registered_commands
         if info.callback is not None
     ]
-    first_by_target: dict[int, str] = {}
+    registrations += [(entry.name, (entry.module, entry.attribute)) for entry in lazy]
+    first_by_target: dict[Hashable, str] = {}
     aliases: dict[str, str] = {}
     for name, target in registrations:
-        canonical = first_by_target.setdefault(id(target), name)
+        canonical = first_by_target.setdefault(target, name)
         if canonical != name:
             aliases[name] = canonical
     return aliases
@@ -656,6 +667,30 @@ _FULL_COVERAGE = """\
 
 def test_alias_detection_reads_the_typer_registry() -> None:
     assert top_level_aliases(_synthetic_app()) == {"interview": "init"}
+
+
+def test_alias_detection_reads_the_lazy_registry() -> None:
+    from ouroboros.cli.main import _Command, _Group
+
+    lazy = (
+        _Group("init", "pkg.init"),
+        _Command("seed", "pkg.seed", "seed_command"),
+        _Group("interview", "pkg.init"),
+        # Same module, another attribute; same attribute, another module.
+        _Group("tools", "pkg.init", "tools_app"),
+        _Group("other", "pkg.other"),
+        _Command("again", "pkg.seed", "seed_command", hidden=True),
+    )
+
+    assert top_level_aliases(typer.Typer(), lazy) == {"interview": "init", "again": "seed"}
+
+
+def test_real_lazy_registry_aliases_interview_to_init() -> None:
+    from ouroboros.cli import main
+
+    # ``main.app`` registers nothing eagerly, so the aliases come from the table.
+    assert not main.app.registered_groups and not main.app.registered_commands
+    assert registered_aliases() == {"interview": "init"}
 
 
 def test_coverage_accepts_a_reference_with_every_command(synthetic, tmp_path) -> None:

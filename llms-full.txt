@@ -491,6 +491,7 @@ Ouroboros is an MCP Hub (both client and server).
     ouroboros_start_evaluate
     ouroboros_start_evolve_step
     ouroboros_start_execute_seed
+    ouroboros_start_qa
     ouroboros_start_ralph
     ouroboros_submit_fanout_results
 <!-- generated:mcp-tools end -->

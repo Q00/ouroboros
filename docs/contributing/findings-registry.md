@@ -1072,7 +1072,6 @@ findings:
       recommended fix: add footnote clarifying that the CLI command upgrades
       directly without the version-check wrapper the skill provides
 ```
-<!-- docs-drift: ignore-end -->
 
 ---
 
