@@ -5,6 +5,8 @@ import errno
 import os
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 
 import pytest
 
@@ -1312,6 +1314,39 @@ class TestInstallCodexSkills:
         assert f"{CODEX_SKILL_NAMESPACE}setup" in installed_names
         assert f"{CODEX_SKILL_NAMESPACE}run" in installed_names
         assert all(path.joinpath("SKILL.md").is_file() for path in installed_paths)
+
+    def test_installs_welcome_scripts_beside_its_skill(self, tmp_path: Path) -> None:
+        """Whole bundles are copied: welcome's scripts run from the Codex install."""
+        source = Path(__file__).resolve().parents[2] / "skills" / "welcome"
+        install_codex_skills(codex_dir=tmp_path / ".codex", skills_dir=source.parent)
+        installed = tmp_path / ".codex" / "skills" / f"{CODEX_SKILL_NAMESPACE}welcome"
+        scripts = sorted(path.name for path in (source / "scripts").glob("*.py"))
+
+        assert "welcome_state.py" in scripts
+        assert sorted(path.name for path in (installed / "scripts").iterdir()) == scripts
+        for name in scripts:
+            assert (installed / "scripts" / name).read_bytes() == (
+                source / "scripts" / name
+            ).read_bytes()
+        skill = installed.joinpath("SKILL.md").read_text(encoding="utf-8")
+        assert f"`../{CODEX_SKILL_NAMESPACE}setup/SKILL.md`" in skill
+        assert 'ouroboros_python - precheck "$HOME" "${CODEX_HOME:-$HOME/.codex}"' in skill
+
+        home = tmp_path / "home"
+        (home / ".ouroboros").mkdir(parents=True)
+        (home / ".ouroboros" / "config.yaml").write_text(
+            "orchestrator:\n  runtime_backend: claude\nllm:\n  backend: claude\n",
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [sys.executable, "-", "setup-gate", str(home)],
+            input=(installed / "scripts" / "welcome_state.py").read_text(encoding="utf-8"),
+            capture_output=True,
+            text=True,
+            env={"HOME": str(home), "PATH": os.defpath},
+            check=True,
+        )
+        assert result.stdout == "SETUP_READY\n"
 
     def test_refresh_does_not_prune_removed_namespaced_skills_by_default(
         self, tmp_path: Path
