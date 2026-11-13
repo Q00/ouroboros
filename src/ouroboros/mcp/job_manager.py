@@ -1955,24 +1955,26 @@ class JobManager:
         self._fold_cache[job_id] = fold
         return await self._finalize_fold_snapshot(job_id, fold)
 
-    async def _get_snapshot_tail(self, job_id: str) -> JobSnapshot:
+    async def _get_snapshot_tail(self, job_id: str, *, exact: bool = False) -> JobSnapshot:
         """``get_snapshot`` variant for polling loops: fold only new events.
 
-        Resumes the cached fold at its rowid cursor instead of replaying the
-        job's whole stream every tick. Falls back to a full replay when no
-        fold is cached yet. The derived reconcilers still run on every call —
-        only the per-tick replay cost drops to O(new events).
+        Resumes the cached fold at its rowid cursor instead of replaying the job's
+        whole stream; falls back to that replay when no fold is cached yet. With
+        ``exact`` the result and side effects equal ``get_snapshot``'s: it also
+        replays when the fold may differ (``JobEventFold.replay_equivalent``).
         """
         await self._ensure_initialized()
         await self._maybe_cleanup_expired()
         fold = self._fold_cache.get(job_id)
-        if fold is None:
+        if fold is not None:
+            events, cursor = await self._event_store.get_events_after(
+                "job", job_id, last_row_id=fold.cursor
+            )
+            fold = fold_job_events(fold, events, cursor=cursor)  # no-op for an empty page
+        if fold is None or (exact and not fold.replay_equivalent):
             return await self.get_snapshot(job_id)
-        events, cursor = await self._event_store.get_events_after(
-            "job", job_id, last_row_id=fold.cursor
-        )
-        if events:
-            fold = fold_job_events(fold, events, cursor=cursor)
+        if exact:
+            self.pending_receipts.discard(job_id)
         return await self._finalize_fold_snapshot(job_id, fold)
 
     async def _finalize_fold_snapshot(self, job_id: str, fold: JobEventFold) -> JobSnapshot:
@@ -2338,11 +2340,9 @@ class JobManager:
 
         while True:
             events, new_cursor = await self._event_store.get_events_after("job", job_id, cursor)
+            snapshot = await self._get_snapshot_tail(job_id, exact=bool(events))
             if events:
-                snapshot = await self.get_snapshot(job_id)
                 return replace(snapshot, cursor=new_cursor), True
-
-            snapshot = await self._get_snapshot_tail(job_id)
             if snapshot.is_terminal or asyncio.get_running_loop().time() >= deadline:
                 return snapshot, False
 
