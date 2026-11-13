@@ -1,3 +1,12 @@
+> [!WARNING]
+> **Immutable historical snapshot — non-normative and superseded.**
+>
+> - Snapshot date: 2026-05-09
+> - Source commit: [`9686d867a5e2d8cfb90be192fd04cf881ce14a69`](https://github.com/Q00/ouroboros/commit/9686d867a5e2d8cfb90be192fd04cf881ce14a69)
+>
+> The original analysis and draft copy below are retained verbatim for
+> traceability. They must not be treated as current repository guidance.
+
 # `ooo auto` — 분석 노트 및 마케팅 카피
 
 > 작업 일자: 2026-05-09

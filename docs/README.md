@@ -89,9 +89,13 @@ These documents preserve point-in-time evidence and work orders. They are
 immutable, non-normative history; use [#961](https://github.com/Q00/ouroboros/issues/961)
 for current AgentOS sequencing.
 
+- [`ooo auto` Analysis Notes (2026-05-09)](./history/ooo-auto-analysis.md) - Historical walkthrough of the `ooo auto` mechanism plus LinkedIn announcement copy (Korean)
+- [`ooo auto` Evolution Plan (2026-05-09)](./history/ooo-auto-evolution-plan.md) - Phased plan behind RFC [#809](https://github.com/Q00/ouroboros/issues/809) (Korean)
 - [AgentOS Release Readiness (2026-05-29)](./history/agentos/release-readiness.md) - Historical release triage and verification snapshot
 - [AgentOS Issue Sequencing Graph (2026-05-29)](./history/agentos/issue-sequencing-graph.md) - Historical issue-state and work-order snapshot
 - [Master Roadmap 2026-07](./history/master-roadmap-2026-07.md) - Superseded PR-A through PR-K execution plan with final dispositions
+- [Run Meta-Harness Plan 2026-07](./history/run-metaharness-plan-2026-07.md) - Proposed verify-by-default, context-pack, and cross-harness plan (companion to the master roadmap)
+- [Contract-AC Grounding Handoff 2026-07](./history/handoff-auto-contract-ac-grounding-2026-07.md) - Implementer handoff for grounding contract-AC evaluation so `ooo auto` completes on Codex
 
 
 ## Key Concepts

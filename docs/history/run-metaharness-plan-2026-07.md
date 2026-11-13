@@ -1,9 +1,19 @@
+> [!WARNING]
+> **Immutable historical snapshot — non-normative and superseded.**
+>
+> - Snapshot date: 2026-07-02
+> - Source commit: [`bcbef8d681c59b26fe910d5be4151449ff8b7eed`](https://github.com/Q00/ouroboros/commit/bcbef8d681c59b26fe910d5be4151449ff8b7eed)
+> - Repository baseline captured by the plan: `7bc011dc`
+>
+> The original plan below is retained verbatim for traceability. It must not
+> be executed or treated as current repository guidance.
+
 # Run Meta-Harness Plan 2026-07 — Verify-by-Default → Context Pack → Cross-Harness Supremacy
 
 > Status: PROPOSED PLAN (2026-07-02). Baseline: `main` @ `7bc011dc`.
 > Origin: 6-agent fan-out audit (run failure modes, injection points, brownfield gap,
 > dashboard overlap, meta-harness brainstorm, external harness-landscape research).
-> Companion to the [historical master roadmap](./history/master-roadmap-2026-07.md)
+> Companion to the [historical master roadmap](./master-roadmap-2026-07.md)
 > snapshot — this plan BUILDS ON PR-E/F/G/H
 > (AC success contract) and PR-D (run→eval chain); it does not replace them.
 
