@@ -1,3 +1,13 @@
+> [!WARNING]
+> **Immutable historical snapshot — non-normative and superseded.**
+>
+> - Snapshot date: 2026-05-09
+> - Source commit: [`9686d867a5e2d8cfb90be192fd04cf881ce14a69`](https://github.com/Q00/ouroboros/commit/9686d867a5e2d8cfb90be192fd04cf881ce14a69)
+> - Follow-up RFC: [GitHub issue #809](https://github.com/Q00/ouroboros/issues/809) (closed)
+>
+> The original plan below is retained verbatim for traceability. It must not
+> be executed or treated as current repository guidance.
+
 # `ooo auto` Evolution Plan
 
 > 작업 일자: 2026-05-09
