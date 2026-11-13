@@ -105,10 +105,11 @@ def test_architecture_runtime_factory_precedence_matches_source(
     assert get_agent_runtime_backend() == "goose"
 
 
-def test_readme_runtime_summary_defers_to_canonical_registry() -> None:
-    readme = Path("README.md").read_text(encoding="utf-8")
+def test_architecture_runtime_summary_defers_to_canonical_registry() -> None:
+    # The "Under the hood" summary moved from README.md to this page.
+    how_it_works = Path("docs/how-ouroboros-works.md").read_text(encoding="utf-8")
     summary = next(
-        line for line in readme.splitlines() if line.startswith("- **Runtime backends**")
+        line for line in how_it_works.splitlines() if line.startswith("- **Runtime backends**")
     )
 
     # The public summary deliberately names the registry as the exhaustive
@@ -120,17 +121,17 @@ def test_readme_runtime_summary_defers_to_canonical_registry() -> None:
 
 
 def test_repository_inventory_docs_derive_counts_from_the_checkout() -> None:
-    readme_ko = Path("README.ko.md").read_text(encoding="utf-8")
+    # The source/test inventory note moved from README.ko.md's "Under the hood"
+    # section to the English architecture overview.
+    how_it_works = Path("docs/how-ouroboros-works.md").read_text(encoding="utf-8")
     backlog = Path("backlog.md").read_text(encoding="utf-8")
 
-    inventory_summary = next(
-        line
-        for line in readme_ko.splitlines()
-        if line.startswith("<summary><strong>") and "Python 3.12+" in line
+    under_the_hood = how_it_works.split("\n## Under the hood\n", 1)[1].split("\n## ", 1)[0]
+    assert not re.search(
+        r"\d+ (?:tracked )?(?:Python )?modules|\d+ test files", under_the_hood, re.IGNORECASE
     )
-    assert not re.search(r"\d+개 (?:tracked Python )?모듈|\d+개 테스트 파일", inventory_summary)
-    assert "git ls-files ':(glob)src/ouroboros/**/*.py'" in readme_ko
-    assert "git ls-files ':(glob)tests/**/test_*.py'" in readme_ko
+    assert "git ls-files ':(glob)src/ouroboros/**/*.py'" in under_the_hood
+    assert "git ls-files ':(glob)tests/**/test_*.py'" in under_the_hood
     assert "live tracked-module counts are intentionally omitted" in backlog
     assert not re.search(r"\d+ tracked Python modules", backlog)
 
