@@ -9,11 +9,17 @@ sees which paths it cannot use (``unreadable_paths``). Paths whose components ma
 an unprotected name (by default version-control metadata and regenerable
 interpreter or tool caches) are left out: running a test legitimately rewrites
 them, and flagging them would make every run look like a mutation.
+
+Every function here blocks for as long as the tree takes to read or copy;
+async code calls them through ``run_off_loop``.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+import asyncio
+from collections.abc import Callable, Iterable, Mapping
+import contextvars
+import functools
 import hashlib
 import os
 from pathlib import Path
@@ -237,3 +243,31 @@ def copy_checkout(
         # A failed rollback leaves the baseline at the path reported by _publish_over.
         if not (previous.exists() or previous.is_symlink()):
             _discard(staging)
+
+
+async def run_off_loop[**P, T](func: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs) -> T:
+    """Run a blocking tree call (a copy, a digest) in the default executor, never orphaned.
+
+    Digesting or copying a whole checkout takes seconds; on the event loop it
+    freezes every other coroutine of the process (MCP requests, job monitors)
+    for that long. As ``asyncio.to_thread`` (same executor, same context
+    variables), the result or the exception of ``func`` is propagated
+    unchanged. A cancelled caller, though, is cancelled only once the thread
+    has finished (a thread cannot be stopped), so nothing it cleans up or
+    reports afterwards races a copy that is still writing; further
+    cancellations during that wait are absorbed into the one re-raised. The
+    wait is bounded by ``func`` itself, which a call made on the loop also had
+    to finish before anything else ran.
+    """
+    loop = asyncio.get_running_loop()
+    call = functools.partial(contextvars.copy_context().run, func, *args, **kwargs)
+    future = loop.run_in_executor(None, call)
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError:
+        while not future.done():
+            try:
+                await asyncio.wait((future,))
+            except asyncio.CancelledError:
+                continue
+        raise
