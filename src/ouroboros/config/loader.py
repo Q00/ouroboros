@@ -46,6 +46,7 @@ from pydantic import ValidationError as PydanticValidationError
 import yaml
 
 from ouroboros.backends import get_backend_capability
+from ouroboros.config._parse_cache import safe_load_yaml_file
 from ouroboros.config.completion_backend_guard import guard_completion_backend
 from ouroboros.config.credential_errors import (
     safe_yaml_error_details,
@@ -320,10 +321,16 @@ def create_default_config(
     return config_path, credentials_path
 
 
-def _read_yaml_file(path: Path, *, description: str = "configuration") -> Any:
-    """Read YAML without retaining input-bearing parser or filesystem errors."""
+def _read_yaml_file(path: Path, *, description: str = "configuration", cached: bool = False) -> Any:
+    """Read YAML without retaining input-bearing parser or filesystem errors.
+
+    ``cached`` reuses the parse of unchanged bytes (same results and errors);
+    the cache keeps successful parses only, so every failure is redacted here.
+    """
     failure = None
     try:
+        if cached:
+            return safe_load_yaml_file(path)
         with path.open(encoding="utf-8") as stream:
             return yaml.safe_load(stream)
     except (UnicodeDecodeError, yaml.YAMLError) as exc:
@@ -366,7 +373,7 @@ def load_config(config_path: Path | None = None) -> OuroborosConfig:
             config_file=str(config_path),
         )
 
-    config_dict = _read_yaml_file(config_path)
+    config_dict = _read_yaml_file(config_path, cached=True)
     if config_dict is None:
         config_dict = {}
 
