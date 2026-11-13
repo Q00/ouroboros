@@ -109,15 +109,19 @@ class TestImportReadsNoConfig:
         assert out["reference"] == "custom-semantic-model"
 
     @pytest.mark.parametrize("unopenable", ["directory", "mode_000"])
-    def test_observable_difference_unopenable_config_no_longer_breaks_import(
+    def test_unopenable_config_does_not_break_import_and_access_matches_the_getter(
         self, tmp_path: Path, unopenable: str
     ) -> None:
-        """Pins the one deliberate difference from import-time resolution.
+        """An existing but unopenable config.yaml: import succeeds, access is the getter.
 
-        ``main`` ran the reference expression while importing ``semantic``, so an
-        existing but unopenable config.yaml made ``import ouroboros.evaluation``
-        raise. Now the import succeeds and the first access raises that same
-        exception type and message (and is retried, not cached).
+        The import reads no config, so it succeeds whatever config.yaml is. Each
+        access gives exactly what the reference expression gives in the same
+        process, a value or the same exception type and message, and only a
+        value is cached. Since #2968 the config getters treat an unreadable
+        config.yaml like an invalid one and return their defaults, so both
+        sides give the default model; before it, both raised the ``OSError``,
+        and evaluating the constant at import made the import raise. A failing
+        resolution is pinned by ``test_failed_resolution_propagates_and_is_retried``.
         """
         _write_home(tmp_path, None)
         config = tmp_path / ".ouroboros" / "config.yaml"
@@ -134,32 +138,31 @@ class TestImportReadsNoConfig:
                 """
     import json
 
-    def failure(read):
+    def outcome(read):
         try:
-            read()
+            return ["value", read()]
         except Exception as e:
-            return [type(e).__name__, str(e)]
-        return None
+            return ["error", type(e).__name__, str(e)]
 
-    import ouroboros.evaluation  # raised here on main
+    import ouroboros.evaluation
     from ouroboros.evaluation import semantic
     imported = True
 
     accesses = [
-        failure(lambda: ouroboros.evaluation.DEFAULT_SEMANTIC_MODEL),
-        failure(lambda: semantic.DEFAULT_SEMANTIC_MODEL),
+        outcome(lambda: ouroboros.evaluation.DEFAULT_SEMANTIC_MODEL),
+        outcome(lambda: semantic.DEFAULT_SEMANTIC_MODEL),
     ]
 
-    # The statement main executed at module level in semantic.py.
+    # The expression the constant evaluated at import before it became lazy.
     from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
-    main_import_error = failure(lambda: get_llm_model_for_role(
+    reference = outcome(lambda: get_llm_model_for_role(
         "semantic_evaluation", backend=get_llm_backend_for_role("semantic_evaluation")
     ))
     print(json.dumps({
         "imported": imported,
         "accesses": accesses,
-        "main_import_error": main_import_error,
-        "cached": "DEFAULT_SEMANTIC_MODEL" in vars(semantic),
+        "reference": reference,
+        "cached": vars(semantic).get("DEFAULT_SEMANTIC_MODEL"),
     }))
     """,
             )
@@ -167,13 +170,12 @@ class TestImportReadsNoConfig:
             if unopenable == "mode_000":
                 config.chmod(0o600)
 
-        expected_type = "IsADirectoryError" if unopenable == "directory" else "PermissionError"
         assert out["imported"] is True
-        assert out["main_import_error"] is not None
-        assert out["main_import_error"][0] == expected_type
-        assert str(config) in out["main_import_error"][1]
-        assert out["accesses"] == [out["main_import_error"]] * 2
-        assert out["cached"] is False
+        assert out["accesses"] == [out["reference"]] * 2
+        if out["reference"][0] == "value":
+            assert out["cached"] == out["reference"][1]
+        else:
+            assert out["cached"] is None
 
 
 @pytest.fixture

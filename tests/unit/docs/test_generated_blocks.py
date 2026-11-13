@@ -173,6 +173,29 @@ def test_cli_entries_list_visible_commands_and_aliases(gen: ModuleType) -> None:
     ]
 
 
+def test_aliases_are_read_from_the_lazy_registry(gen: ModuleType) -> None:
+    from ouroboros.cli.main import _Command, _Group
+
+    lazy = (
+        _Group("init", "pkg.init"),
+        _Command("seed", "pkg.seed", "seed_command"),
+        _Group("interview", "pkg.init"),
+        # Same module, another attribute; same attribute, another module.
+        _Group("tools", "pkg.init", "tools_app"),
+        _Group("other", "pkg.other"),
+        _Command("again", "pkg.seed", "seed_command", hidden=True),
+    )
+
+    assert gen._top_level_aliases(typer.Typer(), lazy) == {"interview": "init", "again": "seed"}
+
+
+def test_real_catalog_renders_the_lazily_registered_alias(gen: ModuleType) -> None:
+    entries = {entry.name: entry.text for entry in gen.cli_entries()}
+
+    assert entries["ouroboros interview"] == "Alias of `ouroboros init`."
+    assert entries["ouroboros init"] != entries["ouroboros interview"]
+
+
 def _skill(root: Path, directory: str, frontmatter: str) -> None:
     (root / directory).mkdir(parents=True)
     (root / directory / "SKILL.md").write_text(f"---\n{frontmatter}\n---\n\n# Body\n")
