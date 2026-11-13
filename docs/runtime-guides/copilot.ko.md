@@ -183,7 +183,7 @@ copilot --no-color --log-level none \
 ## 문제 해결
 
 **`Model "claude-opus-4-6" from --model flag is not available.`**
-하이픈 ID를 점 표기 Copilot 형식으로 자동 변환하지 못하는 옛 Ouroboros 빌드입니다. 모델 발견 모듈이 포함된 릴리스로 올리거나, `ouroboros setup --runtime copilot`을 다시 돌려 실시간 목록에서 점 표기 ID를 고르세요. **`OUROBOROS_DEFAULT_MODEL` 환경변수는 없습니다.** 역할별 오버라이드는 각자의 변수를 씁니다(예: `OUROBOROS_CLARIFICATION_MODEL`).
+하이픈 ID를 점 표기 Copilot 형식으로 자동 변환하지 못하는 옛 Ouroboros 빌드입니다. 모델 발견 모듈이 포함된 릴리스로 올리거나, `ouroboros setup --runtime copilot`을 다시 돌려 실시간 목록에서 점 표기 ID를 고르세요. **`OUROBOROS_DEFAULT_MODEL` 환경변수는 없습니다.** 역할별 오버라이드는 각자의 변수를 씁니다(예: `OUROBOROS_CLARIFICATION_MODEL`). <!-- docs-drift: ignore -->
 
 **`copilot CLI not found.`**
 GitHub 문서를 따라 Copilot CLI를 설치한 뒤, setup이 자동 탐지하게 두거나 `OUROBOROS_COPILOT_CLI_PATH=/abs/path/to/copilot`을 설정하세요.

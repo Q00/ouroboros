@@ -779,7 +779,7 @@ Changes under `src/ouroboros/config/` affect configuration reference documentati
 
 When a **new config key** is added to any model class, check `README.md` and `docs/getting-started.md` for any sample `config.yaml` snippets that may need updating.
 
-**`config/loader.py`**: If the config file search path, environment variable names (e.g., `OUROBOROS_CONFIG`), or YAML loading logic change, update:
+**`config/loader.py`**: If the config file search path, environment variable names (e.g., `OUROBOROS_AGENT_RUNTIME`), or YAML loading logic change, update:
 - `docs/getting-started.md` — config file location instructions
 - `docs/config-reference.md` — environment variable overrides section
 - `README.md` — any config bootstrap snippet
@@ -870,8 +870,8 @@ When a reviewer or contributor identifies a documentation problem, classify it b
 | `docs/cli-reference.md` lists `--foo` flag that does not exist in the source | Critical | User runs the command and gets "no such option" |
 | `docs/getting-started.md` omits `uv sync` before `uv run ouroboros` | Critical | User's first command fails with ModuleNotFoundError |
 | `opencode` listed as a working `--runtime` value without `[Not yet available]` | High | User configures `--runtime opencode` and gets a confusing `NotImplementedError` |
-| `OUROBOROS_AGENT_RUNTIME` written as `OUROBOROS_RUNTIME_BACKEND` in one file | High | User sets the wrong env var and the setting silently has no effect |
-| Docs recommend `export OUROBOROS_MAX_PARALLEL=2` but the variable does not exist | High | User sets the variable; parallelism is not actually limited (false expectation) |
+| `OUROBOROS_AGENT_RUNTIME` written as `OUROBOROS_RUNTIME_BACKEND` in one file | High | User sets the wrong env var and the setting silently has no effect <!-- docs-drift: ignore --> |
+| Docs recommend `export OUROBOROS_MAX_PARALLEL=2` but the variable does not exist | High | User sets the variable; parallelism is not actually limited (false expectation) <!-- docs-drift: ignore --> |
 | A major config section (`economics:`, `evaluation:`) entirely absent from docs | High | User who needs non-default configuration for that section has no documentation to follow; they omit a required step |
 | `claude-code` vs `claude_code` used interchangeably across different docs files | Medium | Minor confusion; both forms resolve correctly in the CLI |
 | Section headings use Title Case in some files and Sentence case in others | Medium | Style inconsistency; no functional impact |
