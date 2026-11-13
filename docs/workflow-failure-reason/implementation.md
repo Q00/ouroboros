@@ -70,7 +70,7 @@ Broader MCP/Ralph/telemetry verification:
 2190 passed, 1 skipped, 2 pre-existing failures
 ```
 
-The two failures are in `tests/unit/mcp/test_routing_snapshot.py`; they use
+The two failures are in `tests/unit/mcp/test_routing_snapshot.py`; they use <!-- docs-drift: ignore -->
 the pre-existing unsupported `MCPServerAdapter(enable_routing_receipts=True)`
 constructor argument and are unrelated to this feature. Ruff and mypy pass on
 the changed source and tests.

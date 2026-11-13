@@ -27,7 +27,7 @@ architecture -- a different project with a different design, no shared code.
 - Orchestrator: Coordinates execution strategy, manages level context, routes tasks to appropriate backends. Located in `src/ouroboros/orchestrator/`.
 - Evaluation: Three-stage pipeline (mechanical, LLM, consensus), artifact collection, language-specific checks. Located in `src/ouroboros/evaluation/`.
 - Execution: Subagent management for parallel AC execution. Located in `src/ouroboros/execution/`.
-- Routing: Complexity analysis, task routing, model escalation/downgrade. Located in `src/ouroboros/routing/`.
+- Routing: PAL router — picks a model tier per unit of work and escalates it on retry (no complexity scoring, no downgrade). Located in `src/ouroboros/orchestrator/model_routing.py` and `src/ouroboros/orchestrator/route_escalation.py`.
 - Persistence: SQLAlchemy-based event store with migration support. Located in `src/ouroboros/persistence/`.
 - Presentation: Textual TUI (dashboard, execution, logs, debug, lineage screens) and Typer CLI. Located in `src/ouroboros/tui/` and `src/ouroboros/cli/`.
 - MCP: Model Context Protocol server/client for tool integration. Located in `src/ouroboros/mcp/`.

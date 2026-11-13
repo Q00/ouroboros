@@ -78,7 +78,7 @@ command text a second way. The rules:
   calls, never text from a claim. Runtime shell wrappers (`/bin/zsh -lc '...'`)
   are peeled. Commands linked to an unproven claim come first, then recognized
   test runs that the runner-output rules judge (for example a
-  `pytest tests/test_a.py` run behind a `tests/test_a.py::test_x` claim). At
+  `pytest tests/test_a.py` run behind a `tests/test_a.py::test_x` claim). At <!-- docs-drift: ignore -->
   most 3 per criterion. The most recent run of a command decides: every
   record of that run counts (the call and each correlated completion), and a
   failure in any of them (a non-zero or non-integer exit code, `is_error`, a
@@ -239,9 +239,9 @@ command text a second way. The rules:
     it (pytest, unittest, Django-style runners, `bin/test`, jest, vitest,
     mocha, rspec, `go test`, phpunit), and nothing in the command narrows
     what the runner collects or selects (see "Narrowing" below). For example
-    `migrations (578 tests)` is linked to `python tests/runtests.py
-    migrations`, and `tests/test_x.py` is not linked to `sed -n 1,40p
-    tests/test_x.py` or to `pytest --ignore tests/test_x.py`.
+    `migrations (578 tests)` is linked to `python tests/runtests.py migrations`,
+    and `tests/test_x.py` is not linked to `sed -n 1,40p tests/test_x.py` or to <!-- docs-drift: ignore -->
+    `pytest --ignore tests/test_x.py`.
 
   A claim that merely contains a command (`make` inside `make test`) is not
   linked to it. The runner-output rules apply to a replayed run only under the
@@ -307,7 +307,7 @@ command text a second way. The rules:
   pytest-xdist `-n`, `cargo test -j`. An option set to its documented default
   does not narrow either. The one such default recognized is Django's
   `tests/runtests.py --settings test_sqlite` (also `--settings=test_sqlite`,
-  and the script reached as `./tests/runtests.py`, `python tests/runtests.py`
+  and the script reached as `./tests/runtests.py`, `python tests/runtests.py` <!-- docs-drift: ignore -->
   or `cd tests && python runtests.py`): `runtests.py` runs
   `os.environ.setdefault("DJANGO_SETTINGS_MODULE", "test_sqlite")` when no
   `--settings` is given, and its `--settings` help says "either the
@@ -359,7 +359,7 @@ rules and failure classes below. Two of those rules follow the same
 principle: a claimed test file backed by a transcript run links only as an
 executed operand of a runner that nothing narrows (not
 `pytest --ignore tests/x.py`), a bare-word claim (`test_add`) links only as a
-whole word of the command (not inside `tests/test_address.py`), the
+whole word of the command (not inside `tests/test_address.py`), the <!-- docs-drift: ignore -->
 functional tier does not accept a
 recorded exit that belongs to a pipeline without `pipefail`
 (`./run_tests.sh | tail -5`), since it is the last stage's status, and an
