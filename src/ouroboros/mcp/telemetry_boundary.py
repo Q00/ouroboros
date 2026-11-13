@@ -295,12 +295,15 @@ async def call_sdk_tool(
     registered = False
     safe_name = _UNKNOWN_TOOL_NAME
     try:
-        definition = next(
-            (item for item in await adapter.list_tools() if item.name == name),
-            None,
-        )
-        if definition is None:
+        # Resolve from the registry _call_tool_impl dispatches through, keyed by
+        # definition name at registration, instead of list_tools(), which
+        # rebuilt every tool's definition to find this one. A non-str name
+        # can match no key; keep it on the "Tool not found" path rather than
+        # letting an unhashable one raise TypeError from the dict lookup.
+        handler = adapter._tool_handlers.get(name) if isinstance(name, str) else None
+        if handler is None:
             raise RuntimeError(f"Tool not found: {name}")
+        definition = handler.definition
         registered = True
         safe_name = name
         if set(arguments) == {"kwargs"} and isinstance(arguments.get("kwargs"), dict):
