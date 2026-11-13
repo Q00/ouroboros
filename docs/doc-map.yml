@@ -67,6 +67,16 @@
   docs: [docs/cli-reference.md, docs/guides/tui-usage.md]
   note: "cli-reference.md: `tui` command section."
 
+- sources: [src/ouroboros/cli/commands/gui.py, src/ouroboros/cli/commands/service.py]
+  docs: [docs/cli-reference.md, docs/guides/console.md]
+  note: >-
+    cli-reference.md: `gui` and `service` command sections (their options
+    tables are checked against `--help`). console.md: the commands and the
+    login service.
+- sources: [src/ouroboros/gui/**, gui/src/**]
+  docs: [docs/guides/console.md]
+  note: Pages, security, the shared MCP server and its wiring, building the page.
+
 - sources: [src/ouroboros/cli/commands/cancel.py]
   docs: [docs/cli-reference.md]
   note: "`cancel` command section."

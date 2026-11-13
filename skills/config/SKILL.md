@@ -28,7 +28,7 @@ Pick the branch by one question: **can the user open a browser pointed at this m
    fi
    ```
 
-   In a non-interactive context it serves the settings app on a local web server and opens the browser. The `uvx` fallback covers a plugin-only install where `ouroboros` is not on `PATH`; in a development checkout use `uv run ouroboros config`.
+   In a non-interactive context it opens the Ouroboros console (`ouroboros gui`) on its Agents & models page in the browser, reusing a console that is already running. The `uvx` fallback covers a plugin-only install where `ouroboros` is not on `PATH`; in a development checkout use `uv run ouroboros config`.
 
 2. Relay the `http://localhost:<port>` line in case the browser did not open.
 

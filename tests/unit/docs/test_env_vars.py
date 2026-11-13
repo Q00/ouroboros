@@ -47,6 +47,7 @@ from tests.unit.docs._corpus import REPO_ROOT, DocLine, corpus_files, iter_lines
 KNOWN_NAME_SOURCES: tuple[str, ...] = (
     "src/**/*.py",
     "src/**/*.ts",  # OpenCode bridge plugin
+    "gui/vite.config.ts",  # console front end's dev-server proxy target
     "scripts/**/*",  # includes install.sh and install.ps1
     "hooks/**/*",
     "crates/**/*.rs",

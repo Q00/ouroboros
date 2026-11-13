@@ -47,6 +47,8 @@ ouroboros [OPTIONS] COMMAND [ARGS]...
 | `cancel` | Cancel stuck or orphaned executions |
 | `cleanup` | Prune leftover auto-session worktrees, branches, locks, and state files |
 | `config` | Manage Ouroboros configuration (show, switch backend, set values) |
+| `gui` | Open the browser console: connect tools, agents & models, providers, runs, chat |
+| `service` | Run the console and its shared MCP server at login (launchd / systemd) |
 | `uninstall` | Cleanly remove all Ouroboros configuration from your system |
 | `update` | Update Ouroboros to the latest version (package + runtime integration) |
 | `status` | Check Ouroboros system status |
@@ -1035,12 +1037,78 @@ ended before this policy existed, were cancelled, or ran with `keep`.
 
 ---
 
+## `ouroboros gui`
+
+Serve the Ouroboros console, a local web app for connecting tools, agents and
+models, providers, runs and chat, and open it in the browser. If a console is
+already running, a second invocation opens that one instead of starting
+another. See the [console guide](guides/console.md).
+
+```bash
+ouroboros gui [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `-p, --port INTEGER` | Port to serve on (default `10300`, or any free port when 10300 is busy) |
+| `--host TEXT` | Bind address (default `127.0.0.1`). A non-loopback address such as `0.0.0.0` makes the console reachable from other machines; the printed URL then carries the access token |
+| `--no-browser` | Print the URL without opening a browser |
+| `--page TEXT` | Page to open, e.g. `models`, `integrations`, `chat` |
+
+**Examples:**
+
+```bash
+# Open the console
+ouroboros gui
+
+# Open the Agents & models page
+ouroboros gui --page models
+
+# Serve on another port without opening a browser
+ouroboros gui --port 10400 --no-browser
+```
+
+## `ouroboros service`
+
+Run the console, and the shared `streamable-http` MCP server it supervises,
+at login: a launchd agent on macOS or a systemd user unit on Linux.
+
+```bash
+ouroboros service COMMAND [OPTIONS]
+```
+
+| Command | Description |
+|---------|-------------|
+| `install` | Install and start the login service |
+| `uninstall` | Stop and remove the login service |
+| `status` | Show whether the login service is installed and running |
+
+### `service install`
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `-p, --port INTEGER` | Console port (default `10300`) |
+
+**Examples:**
+
+```bash
+ouroboros service install
+ouroboros service status
+ouroboros service uninstall
+```
+
 ## `ouroboros config`
 
 Manage Ouroboros configuration.
 
-Running `ouroboros config` with no subcommand opens the settings GUI, which
-includes one-click **routing presets** — multi-LLM stage-routing recommendations
+Running `ouroboros config` with no subcommand opens the settings GUI — the
+terminal settings app in a real terminal, or the browser console's **Agents &
+models** page (`ouroboros gui`, see the [console guide](guides/console.md))
+inside an agent session or with `--web`. Both include one-click **routing presets** — multi-LLM stage-routing recommendations
 that stage which agent runs each pipeline stage (interview → execute → evaluate
 → reflect). Click a preset, review the per-stage Agent cards, then **Save** to
 persist into `orchestrator.runtime_profile.stages`. The shipped presets:

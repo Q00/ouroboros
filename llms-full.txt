@@ -71,6 +71,7 @@ Two command surfaces exist. They are NOT a 1:1 mapping.
   ouroboros config       Manage Ouroboros configuration.
   ouroboros detect       Generate .ouroboros/mechanical.toml via one AI call.
   ouroboros doctor       Run read-only diagnostics for Ouroboros installations.
+  ouroboros gui          Open the Ouroboros console in your browser (connect tools, settings, runs, chat).
   ouroboros harness      Inspect A2 interview traces (list/show/trace/diff/frontier).
   ouroboros init         Start interactive interview to refine requirements.
   ouroboros interview    Alias of `ouroboros init`.
@@ -82,6 +83,7 @@ Two command surfaces exist. They are NOT a 1:1 mapping.
   ouroboros resume       List in-flight sessions and re-attach after MCP disconnect.
   ouroboros run          Execute Ouroboros workflows.
   ouroboros seed         Generate a Seed YAML specification from an interview.
+  ouroboros service      Run the Ouroboros console (and its shared MCP server) in the background at login.
   ouroboros setup        Set up Ouroboros for your environment.
   ouroboros status       Check Ouroboros system status.
   ouroboros tui          Interactive TUI monitor for Ouroboros workflows.

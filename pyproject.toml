@@ -269,6 +269,9 @@ known-first-party = ["ouroboros"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ARG001", "ARG002", "E402"]
+# Console API handlers share one (state, *path, query, body) signature so the
+# router can call any of them; most use only some of those arguments.
+"src/ouroboros/gui/api.py" = ["ARG001"]
 # Executed by the task's own interpreter, down to Python 3.5: evaluated
 # annotations must use typing generics, and no f-strings are allowed
 # (boundary/harness.py docstring).
