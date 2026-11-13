@@ -338,7 +338,7 @@ metadata:
 When ACs have dependencies, Ouroboros automatically detects them and schedules independent ACs in parallel. To help the dependency analyzer:
 
 1. **Mention dependencies explicitly**: "depends on AC1's config module" helps the analyzer
-2. **Name shared files**: "Both AC2 and AC3 modify `src/config.py`" signals potential conflicts
+2. **Name shared files**: "Both AC2 and AC3 modify `src/config.py`" signals potential conflicts <!-- docs-drift: ignore -->
 3. **Order by dependency**: List foundation ACs first, integration ACs last
 
 ```yaml

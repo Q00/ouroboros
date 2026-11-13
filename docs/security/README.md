@@ -19,10 +19,12 @@ without crossing a trust check. Two things keep that class from recurring:
 2. **`THREAT_MODEL.md`**, the scope for the vendored skills in
    `.claude/skills/` (see its README):
 
+   <!-- docs-drift: ignore-start -->
    ```
    /vuln-scan src/ouroboros --extra .claude/scan-extras.txt
    /triage docs/security/VULN-FINDINGS.json --repo . --fp-rules .claude/fp-rules.txt
    ```
+   <!-- docs-drift: ignore-end -->
 
    Scan and triage output contain exploit detail for unfixed paths; keep them
    out of public commits until the fix lands (`SECURITY.md` asks the same of
