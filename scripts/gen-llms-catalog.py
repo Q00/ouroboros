@@ -21,8 +21,10 @@ Each block is rendered from the registry the code itself uses:
 ``cli-commands``
     The Click tree Typer builds from ``ouroboros.cli.main.app``: every top-level
     command ``ouroboros --help`` lists (hidden ones are left out) with its short
-    help. A name registered from the same Typer app as an earlier one is
-    rendered as that command's alias.
+    help. A name that registers the same target as an earlier one is rendered
+    as that command's alias: the same Typer app or callback for an eager
+    registration, the same module and attribute for an entry of the lazy
+    ``ouroboros.cli.main._COMMANDS`` table.
 ``skills``
     The ``SKILL.md`` bundles under ``skills/``, through
     ``ouroboros.router.registry.SkillDispatchRegistry``: each skill's name, the
@@ -48,7 +50,7 @@ the clock, the environment, or the installed version.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 import difflib
 from functools import cache
@@ -86,15 +88,21 @@ class Entry:
 # Registries.
 
 
-def cli_entries(app: Any = None) -> list[Entry]:
-    """Top-level ``ouroboros`` commands, from the Click tree of ``app``."""
+def cli_entries(app: Any = None, lazy: Iterable[Any] = ()) -> list[Entry]:
+    """Top-level ``ouroboros`` commands, from the Click tree of ``app``.
+
+    ``lazy`` is the lazy registration table behind ``app``. Without an ``app``,
+    both come from ``ouroboros.cli.main``.
+    """
     import typer.main
 
     if app is None:
-        from ouroboros.cli.main import app
+        from ouroboros.cli import main as cli_main
+
+        app, lazy = cli_main.app, cli_main._COMMANDS
 
     root = typer.main.get_command(app)
-    aliases = _top_level_aliases(app)
+    aliases = _top_level_aliases(app, lazy)
     entries = []
     for name, command in sorted(root.commands.items()):
         if command.hidden:
@@ -107,22 +115,30 @@ def cli_entries(app: Any = None) -> list[Entry]:
     return entries
 
 
-def _top_level_aliases(app: Any) -> dict[str, str]:
-    """Alias -> canonical name for names registered from an earlier name's target."""
+def _top_level_aliases(app: Any, lazy: Iterable[Any] = ()) -> dict[str, str]:
+    """Alias -> canonical name for names that register an earlier name's target.
+
+    ``app.add_typer`` / ``app.command`` register an object, so their target is
+    that object. ``lazy`` holds lazy registrations (``_Group`` / ``_Command``
+    entries of ``ouroboros.cli.main._COMMANDS``), which name their target by
+    ``module`` and ``attribute`` and import it only when Click looks it up; that
+    pair is their target. Eager registrations come first, as in the root table.
+    """
     import typer.main
 
-    registrations: list[tuple[str, object]] = [
-        (info.name, info.typer_instance) for info in app.registered_groups if info.name
+    registrations: list[tuple[str, Hashable]] = [
+        (info.name, id(info.typer_instance)) for info in app.registered_groups if info.name
     ]
     registrations += [
-        (info.name or typer.main.get_command_name(info.callback.__name__), info.callback)
+        (info.name or typer.main.get_command_name(info.callback.__name__), id(info.callback))
         for info in app.registered_commands
         if info.callback is not None
     ]
-    first: dict[int, str] = {}
+    registrations += [(entry.name, (entry.module, entry.attribute)) for entry in lazy]
+    first: dict[Hashable, str] = {}
     aliases: dict[str, str] = {}
     for name, target in registrations:
-        canonical = first.setdefault(id(target), name)
+        canonical = first.setdefault(target, name)
         if canonical != name:
             aliases[name] = canonical
     return aliases
