@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import os
 from pathlib import Path
 import shutil
 import sys
+import threading
 
 import pytest
 
@@ -396,3 +399,116 @@ def test_copy_creates_missing_destination_parents(tmp_path: Path) -> None:
 
     assert (destination / "code.py").read_text() == "code\n"
     assert list(destination.parent.iterdir()) == [destination]
+
+
+# ``run_off_loop``: a blocking tree call in a thread, never orphaned by a cancellation.
+
+_WAIT = 10.0
+"""Upper bound for every wait on a worker thread below (never reached when the tests pass)."""
+
+
+def _on_loop() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+async def _until(event: threading.Event) -> None:
+    assert await asyncio.to_thread(event.wait, _WAIT), "the worker thread never started"
+
+
+async def test_run_off_loop_calls_in_a_thread_with_its_arguments_and_context() -> None:
+    variable: contextvars.ContextVar[str] = contextvars.ContextVar("tree_test", default="unset")
+    variable.set("caller")
+
+    def work(a: int, *, b: int) -> tuple[bool, str, int]:
+        return _on_loop(), variable.get(), a + b
+
+    assert await tree.run_off_loop(work, 2, b=3) == (False, "caller", 5)
+
+
+async def test_run_off_loop_raises_the_very_exception_a_direct_call_raises() -> None:
+    error = CheckoutCopyError("copy")
+
+    def work() -> None:
+        raise error
+
+    with pytest.raises(CheckoutCopyError) as raised:
+        await tree.run_off_loop(work)
+    assert raised.value is error
+
+
+@pytest.mark.parametrize("cancellations", [1, 3])
+async def test_a_cancelled_caller_waits_for_the_thread_before_it_is_cancelled(
+    cancellations: int,
+) -> None:
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    def work() -> str:
+        started.set()
+        assert release.wait(_WAIT)
+        finished.set()
+        return "done"
+
+    task = asyncio.create_task(tree.run_off_loop(work))
+    await _until(started)
+    for _ in range(cancellations):
+        # Each cancellation reaches the waiting caller; none may end it early.
+        task.cancel()
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, _WAIT)
+    assert finished.is_set()
+
+
+async def test_a_cancelled_caller_runs_its_cleanup_only_after_the_thread() -> None:
+    started, release = threading.Event(), threading.Event()
+    order: list[str] = []
+
+    def work() -> None:
+        started.set()
+        assert release.wait(_WAIT)
+        order.append("work")
+
+    async def caller() -> None:
+        try:
+            await tree.run_off_loop(work)
+        finally:
+            order.append("cleanup")
+
+    task = asyncio.create_task(caller())
+    await _until(started)
+    task.cancel()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, _WAIT)
+    assert order == ["work", "cleanup"]
+
+
+async def test_a_timeout_around_run_off_loop_is_still_a_timeout() -> None:
+    started, release = threading.Event(), threading.Event()
+
+    def work() -> None:
+        started.set()
+        assert release.wait(_WAIT)
+
+    async def bounded() -> None:
+        async with asyncio.timeout(0.01):
+            await tree.run_off_loop(work)
+
+    task = asyncio.create_task(bounded())
+    await _until(started)
+    async with asyncio.timeout(_WAIT):
+        while not task.cancelling():  # the deadline fired while the thread still runs
+            await asyncio.sleep(0.005)
+    assert not task.done()
+    release.set()
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(task, _WAIT)

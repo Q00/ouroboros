@@ -51,7 +51,7 @@ from ouroboros.boundary.receipts import (
     CandidateVerification,
     CheckStatus,
 )
-from ouroboros.boundary.tree import copy_checkout, tree_digest
+from ouroboros.boundary.tree import copy_checkout, run_off_loop, tree_digest
 
 BASE_SNAPSHOT_DIR = "base_snapshot"
 
@@ -139,7 +139,9 @@ async def validate_declared_binding(
     )
     if not validation.valid or validation.binding is None:
         return DeclaredBindingResult(validation)
-    if expected_base_digest is not None and tree_digest(base) != expected_base_digest:
+    if expected_base_digest is not None and (
+        await run_off_loop(tree_digest, base) != expected_base_digest
+    ):
         return DeclaredBindingResult(
             validation.model_copy(
                 update={

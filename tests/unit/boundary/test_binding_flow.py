@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
 import re
+import threading
 from typing import Any
 
 import pytest
@@ -928,3 +930,296 @@ def test_snapshot_base_keeps_the_previous_snapshot_when_the_copy_fails(
 
     assert (snapshot / "code.py").read_text() == "x = 1\n", "the published baseline survives"
     assert sorted(path.name for path in store.iterdir()) == [BASE_SNAPSHOT_DIR]
+
+
+# The run wiring copies and digests whole checkouts off the event loop; what it
+# decides from them is unchanged.
+
+
+def _on_loop() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+def _spy(calls: list[bool], real: Any) -> Any:
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        calls.append(_on_loop())
+        return real(*args, **kwargs)
+
+    return spy
+
+
+async def _on_loop_reference(func: Any, /, *args: Any, **kwargs: Any) -> Any:
+    """The previous behavior: the very same call, made synchronously on the event loop."""
+    return func(*args, **kwargs)
+
+
+def _candidate_unchanged_reference(digest: str, verification: Any, candidate: Path, digest_of: Any):
+    """``run_wiring._candidate_unchanged`` as it was, digesting on the event loop."""
+    if verification is None:
+        return True
+    return (
+        verification.artifact_tree_digest == digest
+        and verification.artifact_tree_digest_after == digest
+        and digest_of(candidate) == digest
+    )
+
+
+def _failed_construction() -> Any:
+    class _Failing:
+        async def construct(self, seed: Seed, base: Path, *, feedback=()) -> ConstructionOutcome:
+            return ConstructionOutcome(None, "constructor_failed", "1" * 64, "fake")
+
+    return _Failing()
+
+
+async def _prepare_unadmitted(store: EventStore, repo: Path, tmp_path: Path):
+    return await prepare_check_package(
+        _seed(),
+        event_store=store,
+        constructor=_failed_construction(),
+        execution_id="exec_unadmitted",
+        base_checkout=repo,
+        worker_workspace=repo,
+        runtime_label="test",
+        settings=CheckPackageSettings(True, max_construction_attempts=1),
+        store_dir=tmp_path / "store",
+    )
+
+
+async def test_preparation_snapshots_the_base_off_the_event_loop(
+    store: EventStore, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ouroboros.boundary import binding_flow, run_wiring
+
+    copies: list[bool] = []
+    digests: list[bool] = []
+    monkeypatch.setattr(binding_flow, "copy_checkout", _spy(copies, binding_flow.copy_checkout))
+    monkeypatch.setattr(run_wiring, "tree_digest", _spy(digests, run_wiring.tree_digest))
+
+    _, state = await _prepare(store, repo, tmp_path)
+
+    assert state.admitted and state.base_snapshot is not None
+    assert copies == [False]
+    # The admission's base digest pins this snapshot: nothing more to digest.
+    assert digests == [] and state.base_snapshot_digest is None
+
+
+async def test_a_run_without_admission_pins_its_snapshot_off_the_event_loop(
+    store: EventStore, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ouroboros.boundary import binding_flow, run_wiring
+    from ouroboros.boundary.tree import tree_digest
+
+    copies: list[bool] = []
+    digests: list[bool] = []
+    monkeypatch.setattr(binding_flow, "copy_checkout", _spy(copies, binding_flow.copy_checkout))
+    monkeypatch.setattr(run_wiring, "tree_digest", _spy(digests, run_wiring.tree_digest))
+
+    state = await _prepare_unadmitted(store, repo, tmp_path)
+
+    assert not state.admitted and state.base_snapshot is not None
+    assert copies == [False] and digests == [False]
+    assert state.base_snapshot_digest == tree_digest(state.base_snapshot)
+
+
+async def test_verification_digests_the_candidate_and_the_base_off_the_event_loop(
+    store: EventStore, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ouroboros.boundary import binding_flow, run_wiring
+
+    seed, state = await _prepare(store, repo, tmp_path)
+    _write(repo, {"mathutils.py": FIXED + "\ndef lerp(a, b, t):\n    return a + (b - a) * t\n"})
+    candidate: list[bool] = []
+    base: list[bool] = []
+    monkeypatch.setattr(run_wiring, "tree_digest", _spy(candidate, run_wiring.tree_digest))
+    monkeypatch.setattr(binding_flow, "tree_digest", _spy(base, binding_flow.tree_digest))
+    keys = seed_criterion_keys(seed)
+
+    verdict = await verify_check_package(
+        state,
+        event_store=store,
+        candidate_checkout=repo,
+        declared_entry_points={keys[1]: [{"symbol": "mathutils.lerp"}]},
+    )
+
+    assert verdict.artifact_verdict is ArtifactVerdict.PASS
+    # The candidate before the verification and again after it.
+    assert candidate == [False, False]
+    # The pinned base, for the one declared binding.
+    assert base == [False]
+
+
+async def test_a_preparation_cancelled_during_the_snapshot_waits_for_the_copy(
+    store: EventStore, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The copy runs in a worker thread that cannot be stopped: the cancelled
+    # preparation returns only once it has finished, so nothing is still
+    # writing into the store when the caller sees the cancellation.
+    from ouroboros.boundary import binding_flow
+
+    started, release, copied = threading.Event(), threading.Event(), threading.Event()
+    real_copy = binding_flow.copy_checkout
+
+    def blocking_copy(source: Path, destination: Path, **kwargs: Any) -> None:
+        started.set()
+        assert release.wait(30)
+        real_copy(source, destination, **kwargs)
+        copied.set()
+
+    monkeypatch.setattr(binding_flow, "copy_checkout", blocking_copy)
+    task = asyncio.ensure_future(_prepare(store, repo, tmp_path))
+    assert await asyncio.to_thread(started.wait, 30)
+
+    task.cancel()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert not task.done()  # still waiting for the copy
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 30)
+
+    assert copied.is_set()
+    assert [p.name for p in (tmp_path / "store").iterdir() if p.name.startswith(".")] == []
+    assert ACTOR_STARTED not in await _types(store, "exec_flow/check_package/v1")
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "edit"),
+    [
+        (None, None, False),
+        ("other", "same", False),
+        ("same", "other", False),
+        ("same", "same", False),
+        ("same", "same", True),
+    ],
+    ids=["no_verification", "before_differs", "after_differs", "unchanged", "edited_since"],
+)
+async def test_candidate_identity_matches_the_synchronous_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, before, after, edit: bool
+) -> None:
+    from types import SimpleNamespace
+
+    from ouroboros.boundary import run_wiring
+    from ouroboros.boundary.tree import tree_digest
+
+    candidate = _repo(tmp_path / "cand", {"mathutils.py": FIXED})
+    digest = tree_digest(candidate)
+    names = {"same": digest, "other": "0" * 64}
+    verification = (
+        None
+        if before is None
+        else SimpleNamespace(
+            artifact_tree_digest=names[before], artifact_tree_digest_after=names[after]
+        )
+    )
+    if edit:
+        _write(candidate, {"mathutils.py": BUGGY})
+    old_calls: list[bool] = []
+    new_calls: list[bool] = []
+    expected = _candidate_unchanged_reference(
+        digest, verification, candidate, _spy(old_calls, tree_digest)
+    )
+    monkeypatch.setattr(run_wiring, "tree_digest", _spy(new_calls, tree_digest))
+
+    assert await run_wiring._candidate_unchanged(digest, verification, candidate) is expected
+    # Same short-circuit: the tree is digested only when both receipts match.
+    assert len(new_calls) == len(old_calls)
+    assert not any(new_calls)
+
+
+def _comparable_verdict(verdict: Any) -> dict[str, Any]:
+    summary = verdict.summary()
+    # A fresh opaque package id per run, and receipts under each run's own store.
+    summary.pop("package_id")
+    summary.pop("receipt_path")
+    return {
+        "summary": summary,
+        "verdicts": {
+            key: (item.status, item.tier, item.reason) for key, item in verdict.verdicts.items()
+        },
+        "bindings": {key: item.to_dict() for key, item in verdict.binding_results.items()},
+    }
+
+
+@pytest.mark.parametrize("scenario", ["declared", "snapshot_tampered", "candidate_edited"])
+async def test_run_wiring_matches_the_synchronous_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str
+) -> None:
+    from ouroboros.boundary import binding_flow, run_wiring
+
+    real_verify = run_wiring.verify_with_bindings
+
+    async def outcome(root: Path) -> Any:
+        event_store = EventStore("sqlite+aiosqlite:///:memory:")
+        await event_store.initialize()
+        try:
+            repo = _repo(root / "repo", {"mathutils.py": BUGGY})
+            seed, state = await _prepare(event_store, repo, root)
+            _write(
+                repo, {"mathutils.py": FIXED + "\ndef lerp(a, b, t):\n    return a + (b - a) * t\n"}
+            )
+            if scenario == "snapshot_tampered":
+                (state.base_snapshot / "extra.py").write_text("x = 1\n")
+
+            async def verify_then_edit(*args: Any, **kwargs: Any) -> Any:
+                bound = await real_verify(*args, **kwargs)
+                if scenario == "candidate_edited":
+                    (repo / "late.py").write_text("x = 1\n")
+                return bound
+
+            monkeypatch.setattr(run_wiring, "verify_with_bindings", verify_then_edit)
+            verdict = await verify_check_package(
+                state,
+                event_store=event_store,
+                candidate_checkout=repo,
+                declared_entry_points={
+                    seed_criterion_keys(seed)[1]: [{"symbol": "mathutils.lerp"}]
+                },
+            )
+            return _comparable_verdict(verdict), state.base_snapshot_digest
+        finally:
+            await event_store.close()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(run_wiring, "run_off_loop", _on_loop_reference)
+        patch.setattr(binding_flow, "run_off_loop", _on_loop_reference)
+        expected = await outcome(tmp_path / "reference")
+    assert await outcome(tmp_path / "off_loop") == expected
+    # Each scenario reaches the branch it names.
+    keys = seed_criterion_keys(_seed())
+    compared = expected[0]
+    assert (
+        compared["summary"]["verdict"],
+        compared["bindings"]["oracle_2"]["reason"],
+        compared["verdicts"][keys[0]][2],
+    ) == {
+        "declared": ("pass", "binding_admitted_on_base", "passed"),
+        "snapshot_tampered": ("indeterminate", "base_snapshot_mismatch", "passed"),
+        "candidate_edited": ("indeterminate", "binding_admitted_on_base", "verification_untrusted"),
+    }[scenario]
+
+
+async def test_an_unadmitted_preparation_matches_the_synchronous_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ouroboros.boundary import run_wiring
+
+    async def outcome(root: Path) -> tuple[str | None, str | None]:
+        event_store = EventStore("sqlite+aiosqlite:///:memory:")
+        await event_store.initialize()
+        try:
+            repo = _repo(root / "repo", {"mathutils.py": BUGGY})
+            state = await _prepare_unadmitted(event_store, repo, root)
+            return state.failure_reason, state.base_snapshot_digest
+        finally:
+            await event_store.close()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(run_wiring, "run_off_loop", _on_loop_reference)
+        expected = await outcome(tmp_path / "reference")
+    assert await outcome(tmp_path / "off_loop") == expected
+    assert expected[1] is not None  # no admission: the snapshot is pinned as taken
