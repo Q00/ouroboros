@@ -8,6 +8,10 @@ Used by: session-start.py (auto-check on session start)
          skills/update/SKILL.md (manual update command)
 """
 
+# SessionStart runs this under the first ``python3`` on the host PATH, which on
+# macOS is the system Python 3.9: annotations must stay unevaluated there.
+from __future__ import annotations
+
 from contextlib import contextmanager
 import json
 import os
