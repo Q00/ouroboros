@@ -1994,130 +1994,75 @@ class EventStore:
                 operation="get_session_activity_snapshots",
             )
 
-        status_expr = func.coalesce(
-            func.json_extract(events_table.c.payload, "$.progress.runtime_status"),
-            func.json_extract(events_table.c.payload, "$.runtime_status"),
+        # Probe each session through the (aggregate_type, aggregate_id[,
+        # timestamp]) indexes, so the cost is linear in session rows; three
+        # window subqueries joined by nested scans grew quadratically with the
+        # session count. Picks keep the (timestamp, id) tie-break, and explicit
+        # terminal lifecycle stays absorbing: a delayed progress checkpoint may
+        # be newer in wall-clock order, but it cannot revive a completed/failed/
+        # cancelled session in the snapshot path used for orphan cleanup.
+        # ``+e.event_type`` keeps the probes off ix_events_event_type.
+        status = (
+            "coalesce(json_extract({t}.payload, '$.progress.runtime_status'), "
+            "json_extract({t}.payload, '$.runtime_status'))"
         )
-
-        first_session_event_ranked = (
-            select(
-                events_table.c.aggregate_id.label("session_id"),
-                func.json_extract(events_table.c.payload, "$.execution_id").label("execution_id"),
-                func.json_extract(events_table.c.payload, "$.seed_id").label("seed_id"),
-                func.coalesce(
-                    func.json_extract(events_table.c.payload, "$.start_time"),
-                    events_table.c.timestamp,
-                ).label("start_time"),
-                func.row_number()
-                .over(
-                    partition_by=events_table.c.aggregate_id,
-                    order_by=(events_table.c.timestamp.asc(), events_table.c.id.asc()),
-                )
-                .label("rn"),
-            )
-            .where(events_table.c.aggregate_type == "session")
-            .subquery()
+        probe = (
+            "(SELECT e.rowid FROM events AS e WHERE e.aggregate_type = 'session' AND "
+            "e.aggregate_id = s.session_id {where} ORDER BY e.timestamp {o}, e.id {o} LIMIT 1)"
         )
-
-        latest_activity_ranked = (
-            select(
-                events_table.c.aggregate_id.label("session_id"),
-                events_table.c.timestamp.label("last_activity"),
-                func.row_number()
-                .over(
-                    partition_by=events_table.c.aggregate_id,
-                    order_by=(events_table.c.timestamp.desc(), events_table.c.id.desc()),
-                )
-                .label("rn"),
-            )
-            .where(events_table.c.aggregate_type == "session")
-            .subquery()
+        terminal = ", ".join(f"'{name}'" for name in sorted(_SESSION_TERMINAL_EVENT_TYPES))
+        paused = "'orchestrator.session.paused'"
+        progress = "'orchestrator.progress.updated', 'workflow.progress.updated'"
+        fallback = (
+            f"AND (+e.event_type = {paused} OR (+e.event_type IN ({progress}) "
+            f"AND {status.format(t='e')} IS NOT NULL))"
         )
-
-        latest_status_ranked = (
-            select(
-                events_table.c.aggregate_id.label("session_id"),
-                events_table.c.event_type.label("status_event_type"),
-                status_expr.label("runtime_status"),
-                func.row_number()
-                .over(
-                    partition_by=events_table.c.aggregate_id,
-                    order_by=(
-                        # Explicit terminal lifecycle is absorbing. A delayed
-                        # progress checkpoint may be newer in wall-clock order,
-                        # but it cannot revive a completed/failed/cancelled
-                        # session in the snapshot path used for orphan cleanup.
-                        case(
-                            (
-                                events_table.c.event_type.in_(_SESSION_TERMINAL_EVENT_TYPES),
-                                0,
-                            ),
-                            else_=1,
-                        ),
-                        events_table.c.timestamp.desc(),
-                        events_table.c.id.desc(),
-                    ),
-                )
-                .label("rn"),
+        # The window form evaluated these json_extract calls on every session
+        # row, so a payload SQLite cannot parse failed the whole call;
+        # ``payloads_checked`` keeps that error contract.
+        query = text(
+            f"""
+            WITH picks AS (
+                SELECT s.session_id,
+                    {probe.format(where="", o="ASC")} AS first_rowid,
+                    {probe.format(where="", o="DESC")} AS last_rowid,
+                    coalesce(
+                        {probe.format(where=f"AND +e.event_type IN ({terminal})", o="DESC")},
+                        {probe.format(where=fallback, o="DESC")}
+                    ) AS status_rowid
+                FROM (
+                    SELECT DISTINCT aggregate_id AS session_id
+                    FROM events WHERE aggregate_type = 'session'
+                ) AS s
             )
-            .where(events_table.c.aggregate_type == "session")
-            .where(
-                or_(
-                    events_table.c.event_type.in_(
-                        (
-                            "orchestrator.session.completed",
-                            "orchestrator.session.failed",
-                            "orchestrator.session.paused",
-                            "orchestrator.session.cancelled",
-                        )
-                    ),
-                    and_(
-                        events_table.c.event_type.in_(
-                            (
-                                "orchestrator.progress.updated",
-                                "workflow.progress.updated",
-                            )
-                        ),
-                        status_expr.is_not(None),
-                    ),
-                )
-            )
-            .subquery()
+            SELECT p.session_id,
+                json_extract(f.payload, '$.execution_id') AS execution_id,
+                json_extract(f.payload, '$.seed_id') AS seed_id,
+                coalesce(json_extract(f.payload, '$.start_time'), f.timestamp) AS start_time,
+                l.timestamp AS last_activity,
+                st.event_type AS status_event_type,
+                {status.format(t="st")} AS runtime_status,
+                (
+                    SELECT count(json_extract(payload, '$.execution_id'))
+                        + count(json_extract(payload, '$.seed_id'))
+                        + count(json_extract(payload, '$.start_time'))
+                        + count(CASE WHEN event_type IN ({terminal}, {paused}, {progress})
+                            THEN {status.format(t="events")} END)
+                    FROM events WHERE aggregate_type = 'session'
+                ) AS payloads_checked
+            FROM picks AS p
+            JOIN events AS f ON f.rowid = p.first_rowid
+            JOIN events AS l ON l.rowid = p.last_rowid
+            LEFT JOIN events AS st ON st.rowid = p.status_rowid
+            ORDER BY p.session_id ASC
+            """
+        ).columns(
+            start_time=events_table.c.timestamp.type,
+            last_activity=events_table.c.timestamp.type,
         )
 
         try:
             async with self._engine.begin() as conn:
-                query = (
-                    select(
-                        first_session_event_ranked.c.session_id,
-                        first_session_event_ranked.c.execution_id,
-                        first_session_event_ranked.c.seed_id,
-                        first_session_event_ranked.c.start_time,
-                        latest_activity_ranked.c.last_activity,
-                        latest_status_ranked.c.status_event_type,
-                        latest_status_ranked.c.runtime_status,
-                    )
-                    .select_from(first_session_event_ranked)
-                    .join(
-                        latest_activity_ranked,
-                        and_(
-                            latest_activity_ranked.c.session_id
-                            == first_session_event_ranked.c.session_id,
-                            latest_activity_ranked.c.rn == 1,
-                        ),
-                    )
-                    .outerjoin(
-                        latest_status_ranked,
-                        and_(
-                            latest_status_ranked.c.session_id
-                            == first_session_event_ranked.c.session_id,
-                            latest_status_ranked.c.rn == 1,
-                        ),
-                    )
-                    .where(first_session_event_ranked.c.rn == 1)
-                    .order_by(first_session_event_ranked.c.session_id.asc())
-                )
-
                 result = await conn.execute(query)
                 rows = result.mappings().all()
                 return [
