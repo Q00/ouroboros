@@ -649,24 +649,74 @@ def _correlated_tool_result_name(
     Claude ToolResultBlock carries ``tool_use_id`` but no tool name. Missing ids,
     duplicate ids with different names, and otherwise ambiguous histories fail
     closed so a completion event can never be attached to the wrong mutation.
+    The prior history is ``messages[:-1]``. A stream resolving many results
+    keeps one :class:`_ToolCallNameIndex` instead of calling this per result.
     """
-    result_call_id = _runtime_message_tool_call_id(result_message)
-    if result_call_id is None or _runtime_message_has_conflicting_tool_call_ids(result_message):
-        return None
-    if any(
-        _runtime_message_has_conflicting_tool_call_ids(message)
-        and result_call_id in _runtime_message_tool_call_ids(message)
-        for message in messages[:-1]
-    ):
-        return None
-    names = {
-        message.tool_name
-        for message in messages[:-1]
-        if message.tool_name is not None
-        and not _runtime_message_is_tool_completion(message)
-        and _runtime_message_tool_call_id(message) == result_call_id
-    }
-    return next(iter(names)) if len(names) == 1 else None
+    return _ToolCallNameIndex().result_name(messages, result_message)
+
+
+class _ToolCallNameIndex:
+    """Tool names by call id over one append-only transcript list.
+
+    The answer for a result depends only on the set of prior messages, so each
+    message is folded in once: the call names a sole id carries, and every id
+    named by a message whose aliases conflict. A watermark advances over the
+    list; the index rebuilds if it is given another list, the list became
+    shorter than the watermark, or the last indexed entry was replaced.
+    """
+
+    __slots__ = ("_conflicting", "_indexed", "_last", "_names", "_source")
+
+    def __init__(self) -> None:
+        self._reset(None)
+
+    def _reset(self, source: list[AgentMessage] | None) -> None:
+        self._source = source
+        self._indexed = 0
+        self._last: AgentMessage | None = None
+        self._names: dict[str, set[str]] = {}
+        self._conflicting: set[str] = set()
+
+    def result_name(
+        self,
+        messages: list[AgentMessage],
+        result_message: AgentMessage,
+    ) -> str | None:
+        """Return :func:`_correlated_tool_result_name` for ``messages``."""
+        # ``None`` also when the result's own aliases conflict.
+        result_call_id = _runtime_message_tool_call_id(result_message)
+        if result_call_id is None:
+            return None
+        self._advance(messages, max(len(messages) - 1, 0))
+        if result_call_id in self._conflicting:
+            return None
+        names = self._names.get(result_call_id, ())
+        return next(iter(names)) if len(names) == 1 else None
+
+    def _advance(self, messages: list[AgentMessage], end: int) -> None:
+        if (
+            messages is not self._source
+            or end < self._indexed
+            or (self._indexed and messages[self._indexed - 1] is not self._last)
+        ):
+            self._reset(messages)
+        for position in range(self._indexed, end):
+            self._observe(messages[position])
+        if end > self._indexed:
+            self._indexed = end
+            self._last = messages[end - 1]
+
+    def _observe(self, message: AgentMessage) -> None:
+        call_ids = _runtime_message_tool_call_ids(message)
+        if len(call_ids) > 1:
+            self._conflicting.update(call_ids)
+        elif (
+            call_ids
+            and message.tool_name is not None
+            and not _runtime_message_is_tool_completion(message)
+        ):
+            (call_id,) = call_ids
+            self._names.setdefault(call_id, set()).add(message.tool_name)
 
 
 class LeafDispatcher:
@@ -708,6 +758,7 @@ class LeafDispatcher:
         )
         lifecycle_emitted = False
         emitted_recovery_turn_ids: set[str] = set()
+        tool_call_names = _ToolCallNameIndex()
         task_cwd = executor._task_cwd or executor._adapter.working_directory
 
         # Stall detection: CancelScope with resettable deadline (RC6)
@@ -887,7 +938,7 @@ class LeafDispatcher:
                     )
 
                 if projected.message_type == "tool_result":
-                    completed_tool_name = projected.tool_name or _correlated_tool_result_name(
+                    completed_tool_name = projected.tool_name or tool_call_names.result_name(
                         state.messages,
                         message,
                     )
