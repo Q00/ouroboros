@@ -38,9 +38,11 @@ module never reads reference patches, private tests, or grader outputs.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+import contextvars
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+import functools
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -116,6 +118,34 @@ class _Completed:
     output_overflow: bool = False
     unavailable: str | None = None
     """Set when nothing ran (``check_env.CheckUnavailable``): an indeterminate check."""
+
+
+async def _run_off_loop[**P, T](func: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs) -> T:
+    """Run a blocking checkout call (copy, manifest, removal) in the default executor.
+
+    A checkout copy or manifest takes seconds; on the event loop it freezes
+    every other coroutine of the process (MCP requests, job monitors) for that
+    long. As ``asyncio.to_thread`` (same executor, same context variables), the
+    result or the exception of ``func`` is propagated unchanged. A cancelled
+    caller, though, is cancelled only once the thread has finished (a thread
+    cannot be stopped): otherwise its ``finally`` would remove the run's root
+    while a copy still writes into it, and the copy would recreate it and
+    leave a whole checkout behind. Further cancellations during that wait are
+    absorbed into the one re-raised. The wait is bounded by ``func`` itself,
+    which a call made on the loop also had to finish before anything else ran.
+    """
+    loop = asyncio.get_running_loop()
+    call = functools.partial(contextvars.copy_context().run, func, *args, **kwargs)
+    future = loop.run_in_executor(None, call)
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError:
+        while not future.done():
+            try:
+                await asyncio.wait((future,))
+            except asyncio.CancelledError:
+                continue
+        raise
 
 
 CANDIDATE_UNREADABLE = "candidate_unreadable"
@@ -420,8 +450,8 @@ async def _execute_check(
     footprint: OracleFootprint | None = None,
 ) -> CheckExecution:
     try:
-        copy_checkout(source, copy_root)
-        protected = tree_manifest(copy_root, unprotected_names=unprotected)
+        await _run_off_loop(copy_checkout, source, copy_root)
+        protected = await _run_off_loop(tree_manifest, copy_root, unprotected_names=unprotected)
     except (OSError, shutil.Error) as exc:
         if on_base:
             raise
@@ -485,7 +515,7 @@ async def _execute_check(
             scratch_parent=copy_root.parent,
             writable_root=copy_root,
         )
-    after = tree_manifest(copy_root, unprotected_names=unprotected)
+    after = await _run_off_loop(tree_manifest, copy_root, unprotected_names=unprotected)
     mutated_paths = changed_paths(protected, after)
     new_paths = added_paths(protected, after)
     scratch = tuple(p for p in new_paths if any(_is_under(p, s) for s in package.scratch_paths))
@@ -603,7 +633,9 @@ async def _run_package(
     if not source.is_dir():
         raise FileNotFoundError(f"checkout not found: {source}")
     started_at = datetime.now(UTC)
-    source_manifest = tree_manifest(source, unprotected_names=unprotected_names)
+    source_manifest = await _run_off_loop(
+        tree_manifest, source, unprotected_names=unprotected_names
+    )
     source_before = manifest_digest(source_manifest)
     unreadable = unreadable_paths(source_manifest)
     if unreadable and on_base:
@@ -669,11 +701,13 @@ async def _run_package(
                     )
                 finally:
                     if not keep_copies:
-                        shutil.rmtree(copy_root, ignore_errors=True)
+                        await _run_off_loop(shutil.rmtree, copy_root, ignore_errors=True)
     finally:
         if owned_work_dir and not keep_copies:
-            shutil.rmtree(root, ignore_errors=True)
-    source_after = manifest_digest(tree_manifest(source, unprotected_names=unprotected_names))
+            await _run_off_loop(shutil.rmtree, root, ignore_errors=True)
+    source_after = manifest_digest(
+        await _run_off_loop(tree_manifest, source, unprotected_names=unprotected_names)
+    )
     return _Run(
         checks=tuple(executions),
         preconditions=preconditions,
@@ -938,7 +972,9 @@ async def admit_binding(
     base = base_checkout.resolve()
     root = Path(tempfile.mkdtemp(prefix="ouroboros-binding-"))
     try:
-        base_digest = manifest_digest(tree_manifest(base, unprotected_names=unprotected_names))
+        base_digest = manifest_digest(
+            await _run_off_loop(tree_manifest, base, unprotected_names=unprotected_names)
+        )
         execution = await _execute_check(
             package,
             check,
@@ -954,7 +990,7 @@ async def admit_binding(
             include_held_out=include_held_out,
         )
     finally:
-        shutil.rmtree(root, ignore_errors=True)
+        await _run_off_loop(shutil.rmtree, root, ignore_errors=True)
     if execution.status is CheckStatus.EXPECTED:
         valid, indeterminate, reason = True, False, "binding_admitted_on_base"
     elif execution.timed_out:
