@@ -99,6 +99,8 @@ _COMMANDS: tuple[_Group | _Command, ...] = (
     _Group("setup", f"{_COMMANDS_PACKAGE}.setup"),
     _Group("detect", f"{_COMMANDS_PACKAGE}.detect"),
     _Group("tui", f"{_COMMANDS_PACKAGE}.tui"),
+    _Group("gui", f"{_COMMANDS_PACKAGE}.gui"),
+    _Group("service", f"{_COMMANDS_PACKAGE}.service"),
     _Group("pm", f"{_COMMANDS_PACKAGE}.pm"),
     _Command(
         "qa",

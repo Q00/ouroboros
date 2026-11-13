@@ -443,6 +443,38 @@ def _discover_spawn_sites(root: Path) -> tuple[SpawnSite, ...]:
 #: "parameter" = env passed in by the caller. A justification must name why
 #: inheriting is acceptable so the allowlist never silently absorbs a finding.
 SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
+    # Ouroboros console (`ouroboros gui`): every child is a code-owned argv run on
+    # the user's behalf from the local console, so it needs the user's PATH/HOME
+    # and agent logins exactly as a terminal invocation would.
+    ("src/ouroboros/gui/clients.py", "_run_quiet", "subprocess.run", 402, 15): (
+        "implicit inherit; `claude auth status` / `codex login status` read-only probes."
+    ),
+    ("src/ouroboros/gui/daemon.py", "count_stdio_servers", "subprocess.run", 248, 14): (
+        "implicit inherit; read-only `ps -eo command` process count."
+    ),
+    ("src/ouroboros/gui/daemon.py", "SharedMcp._supervise", "subprocess.Popen", 178, 27): (
+        "os.environ + NO_COLOR; the shared `ouroboros mcp serve` must see the same "
+        "config and agent logins as a host-launched stdio server."
+    ),
+    ("src/ouroboros/gui/harness.py", "_workspace_problem.git", "subprocess.run", 854, 15): (
+        "implicit inherit; read-only `git rev-parse` checks."
+    ),
+    ("src/ouroboros/gui/harness.py", "_run_result", "subprocess.run", 882, 18): (
+        "implicit inherit; read-only `git worktree list`."
+    ),
+    ("src/ouroboros/gui/harness.py", "_run_result.git", "subprocess.run", 902, 15): (
+        "implicit inherit; read-only `git diff --name-only` / `git status`."
+    ),
+    ("src/ouroboros/gui/jobs.py", "JobRegistry._run", "subprocess.Popen", 137, 19): (
+        "_child_env = os.environ + plain-text output vars; runs `ouroboros setup|auto` "
+        "or a fixed vendor installer the user confirmed in the console."
+    ),
+    ("src/ouroboros/gui/launcher.py", "serve", "os.execv", 152, 8): (
+        "implicit inherit; re-execs this same console (restart after installing a component)."
+    ),
+    ("src/ouroboros/gui/service.py", "_run", "subprocess.run", 72, 15): (
+        "implicit inherit; fixed `launchctl` / `systemctl --user` calls."
+    ),
     (
         "src/ouroboros/copilot/acp_client.py",
         "CopilotAcpClient.__aenter__",
@@ -629,7 +661,7 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         "src/ouroboros/config_tui/launcher.py",
         "_relaunch_with_tui_profile",
         "os.execvpe",
-        70,
+        65,
         4,
     ): "os.environ.copy()+bootstrap marker; `uvx --isolated` relaunch of ourselves. XDG_DATA_HOME (uv resolution) is an open question in THREAT_MODEL.md.",
     (

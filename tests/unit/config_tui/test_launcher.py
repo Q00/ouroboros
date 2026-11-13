@@ -52,82 +52,46 @@ def test_launch_settings_routes_to_web_in_harness(monkeypatch) -> None:
     assert calls == ["web"]
 
 
-def test_launch_web_serves_and_opens_browser(monkeypatch) -> None:
+def _capture_console(monkeypatch, *, url: str = "http://localhost:10300/#models", reused=False):
     served: dict[str, object] = {}
 
-    class _FakeServer:
-        def __init__(self, command, host="localhost", port=8000, title=None) -> None:
-            served.update(command=command, host=host, port=port, title=title)
+    def fake_serve(**kwargs: object) -> None:
+        served.update(kwargs)
+        on_ready = kwargs.get("on_ready")
+        if callable(on_ready):
+            on_ready(url, reused)
 
-        def serve(self) -> None:
-            served["serving"] = True
+    monkeypatch.setattr(launcher, "_console_serve", fake_serve)
+    return served
 
-    opened: list[str] = []
 
-    class _ImmediateTimer:
-        def __init__(self, interval, function, args=()) -> None:
-            self._function = function
-            self._args = args
-
-        def start(self) -> None:
-            self._function(*self._args)
-
-    monkeypatch.setattr(launcher, "_import_server", lambda: _FakeServer)
-    monkeypatch.setattr(launcher, "_free_port", lambda: 50123)
-    monkeypatch.setattr(launcher.threading, "Timer", _ImmediateTimer)
-    monkeypatch.setattr(launcher.webbrowser, "open", lambda url: opened.append(url))
+def test_launch_web_opens_console_settings_page(monkeypatch, capsys) -> None:
+    served = _capture_console(monkeypatch)
 
     launcher._launch_web()
 
-    assert served["serving"] is True
-    assert served["port"] == 50123
-    assert "ouroboros.config_tui" in str(served["command"])
-    assert opened == ["http://localhost:50123"]
+    assert served["page"] == "models"
+    assert served["open_browser"] is True
+    assert served["host"] == "127.0.0.1"
+    assert served["port"] is None
+    assert "Ouroboros Settings" in capsys.readouterr().out
 
 
-def test_launch_web_treats_zero_port_as_free_port(monkeypatch) -> None:
-    served: dict[str, object] = {}
-
-    class _FakeServer:
-        def __init__(self, command, host="localhost", port=8000, title=None) -> None:
-            served.update(host=host, port=port)
-
-        def serve(self) -> None:
-            served["serving"] = True
-
-    monkeypatch.setattr(launcher, "_import_server", lambda: _FakeServer)
-    monkeypatch.setattr(launcher, "_free_port", lambda: 50125)
+def test_launch_web_treats_zero_port_as_default(monkeypatch) -> None:
+    served = _capture_console(monkeypatch)
 
     launcher._launch_web(port=0, open_browser=False)
 
-    assert served == {"host": "localhost", "port": 50125, "serving": True}
+    assert served["port"] is None
+    assert served["open_browser"] is False
 
 
-def test_launch_web_without_textual_serve_prints_hint(monkeypatch, capsys) -> None:
-    monkeypatch.setattr(launcher, "_import_server", lambda: None)
-    monkeypatch.setattr(launcher, "_relaunch_with_tui_profile", lambda: False)
-    with pytest.raises(SystemExit):
-        launcher._launch_web()
-    # Rich panels add ANSI styling and box borders; strip both before matching.
-    import re
-
-    output = re.sub(r"\x1b\[[0-9;]*m", "", capsys.readouterr().out)
-    flattened = "".join(line.strip("│╭╮╰╯─ ") for line in output.splitlines())
-    assert "ouroboros-ai[tui]" in flattened
-
-
-def test_missing_web_dependencies_relaunch_with_default_profile(monkeypatch) -> None:
-    calls: list[str] = []
-    monkeypatch.setattr(launcher, "_import_server", lambda: None)
-    monkeypatch.setattr(
-        launcher,
-        "_relaunch_with_tui_profile",
-        lambda: calls.append("bootstrap") or True,
-    )
+def test_launch_web_reports_reused_console(monkeypatch, capsys) -> None:
+    _capture_console(monkeypatch, reused=True)
 
     launcher._launch_web()
 
-    assert calls == ["bootstrap"]
+    assert "open in the console" in capsys.readouterr().out
 
 
 def test_bootstrap_uses_published_mcp_v2_and_tui_profile(monkeypatch) -> None:
@@ -183,26 +147,13 @@ def test_is_remote_session(monkeypatch, env_vars, expected_remote) -> None:
 def test_remote_web_mode_prints_url_instead_of_opening_browser(monkeypatch, capsys) -> None:
     """On a remote host (hermes box driven from Discord/SSH), a browser
     opened locally is useless — print a reachable URL + tunnel hint."""
-    served: dict[str, object] = {}
-
-    class _FakeServer:
-        def __init__(self, command, host="localhost", port=8000, title=None) -> None:
-            served.update(host=host, port=port)
-
-        def serve(self) -> None:
-            served["serving"] = True
-
-    opened: list[str] = []
     monkeypatch.setenv("CLAUDECODE", "1")
     monkeypatch.setenv("SSH_CONNECTION", "10.0.0.1 22 10.0.0.2 22")
-    monkeypatch.setattr(launcher, "_import_server", lambda: _FakeServer)
-    monkeypatch.setattr(launcher, "_free_port", lambda: 50124)
-    monkeypatch.setattr(launcher.webbrowser, "open", lambda url: opened.append(url))
+    served = _capture_console(monkeypatch, url="http://localhost:50124/#models")
 
     launcher.launch_settings()
 
-    assert served["serving"] is True
-    assert opened == []  # never opened on the wrong machine
+    assert served["open_browser"] is False  # never opened on the wrong machine
     import re
 
     output = re.sub(r"\x1b\[[0-9;]*m", "", capsys.readouterr().out)
@@ -210,30 +161,13 @@ def test_remote_web_mode_prints_url_instead_of_opening_browser(monkeypatch, caps
 
 
 def test_force_web_with_host_and_port(monkeypatch) -> None:
-    served: dict[str, object] = {}
-
-    class _FakeServer:
-        def __init__(self, command, host="localhost", port=8000, title=None) -> None:
-            served.update(host=host, port=port)
-
-        def serve(self) -> None:
-            served["serving"] = True
-
     monkeypatch.delenv("CLAUDECODE", raising=False)
     monkeypatch.delenv("SSH_CONNECTION", raising=False)
     monkeypatch.delenv("SSH_TTY", raising=False)
-    # force_web bypasses TTY detection entirely — no stdout fake needed
-    # (rich's console must keep a real write()able stream).
-    monkeypatch.setattr(launcher, "_import_server", lambda: _FakeServer)
-    monkeypatch.setattr(launcher.webbrowser, "open", lambda _url: None)
-
-    class _NoopTimer:
-        def __init__(self, *_args, **_kwargs) -> None: ...
-
-        def start(self) -> None: ...
-
-    monkeypatch.setattr(launcher.threading, "Timer", _NoopTimer)
+    served = _capture_console(monkeypatch)
 
     launcher.launch_settings(force_web=True, host="0.0.0.0", port=8765, open_browser=False)
 
-    assert served == {"host": "0.0.0.0", "port": 8765, "serving": True}
+    assert served["host"] == "0.0.0.0"
+    assert served["port"] == 8765
+    assert served["open_browser"] is False

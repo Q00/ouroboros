@@ -1,7 +1,7 @@
-"""Run the settings app directly: ``python -m ouroboros.config_tui``.
+"""Run the terminal settings app directly: ``python -m ouroboros.config_tui``.
 
-This entry point is what the web mode serves (textual-serve runs it as a
-subprocess), and it doubles as a debugging convenience.
+A debugging convenience; ``ouroboros config`` runs the same app in a terminal
+and opens the browser console's settings page everywhere else.
 """
 
 from ouroboros.config_tui.app import SettingsApp

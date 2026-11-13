@@ -1,0 +1,32 @@
+{
+  "name": "ouroboros-console",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "license": "MIT",
+  "description": "Web front end of the Ouroboros console (ouroboros gui).",
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "notices": "node scripts/notices.mjs"
+  },
+  "dependencies": {
+    "@radix-ui/react-dialog": "1.3.1",
+    "@radix-ui/react-select": "2.4.1",
+    "@radix-ui/react-switch": "1.4.1",
+    "@radix-ui/react-tooltip": "1.4.1",
+    "lucide-react": "1.72.0",
+    "motion": "14.13.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.3.0",
+    "typescript": "7.0.2",
+    "vite": "8.3.8"
+  }
+}

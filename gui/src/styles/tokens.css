@@ -1,0 +1,139 @@
+/*
+ * Ouroboros console design tokens.
+ *
+ * Neutral only: true white and pure grays in light, near-black in dark. No
+ * hue in any surface, border or text color. Color appears only as status
+ * (green, amber, red) and one blue for links and focus. Every text pair
+ * meets WCAG AA (4.5:1) on the surface it sits on.
+ */
+
+:root {
+  /* Type. System stacks: nothing to download, and Korean falls to the
+     platform's own gothic (Pretendard when the reader has it). */
+  --font-sans:
+    "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI",
+    "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", system-ui, Roboto, "Helvetica Neue", sans-serif;
+  --font-mono:
+    ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, "D2Coding", "Noto Sans Mono CJK KR",
+    monospace;
+
+  --text-2xs: 0.6875rem;
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-md: 0.875rem;
+  --text-lg: 0.9375rem;
+  --text-xl: 1.25rem;
+
+  /* Shape and rhythm. */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-pill: 999px;
+  --gap-1: 4px;
+  --gap-2: 8px;
+  --gap-3: 12px;
+  --gap-4: 16px;
+  --gap-5: 24px;
+  --gap-6: 32px;
+  --side: 232px;
+  --side-slim: 56px;
+  --bar: 40px;
+
+  /* Motion. */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in: cubic-bezier(0.5, 0, 0.75, 0);
+  --ease-swap: cubic-bezier(0.65, 0, 0.35, 1);
+  --fast: 120ms;
+  --base: 200ms;
+  --slow: 320ms;
+
+  /* Light. */
+  --bg: #ffffff;
+  --side-bg: #fafafa;
+  --card: #f5f5f5;
+  --card-line: transparent;
+  --raised: #ffffff;
+  --sunk: #ededed;
+  --hover: #ececec;
+  --line: #e5e5e5;
+  --line-strong: #d4d4d4;
+  --text: #171717;
+  --text-soft: #404040;
+  --text-mute: #666666;
+  --primary: #171717;
+  --primary-hover: #333333;
+  --primary-ink: #ffffff;
+  --link: #0b5fc4;
+  --info-soft: #efefef;
+  --ok: #08774f;
+  --ok-dot: #10a370;
+  --ok-soft: #e3f5ec;
+  --warn: #8a5a00;
+  --warn-dot: #d99a00;
+  --warn-soft: #fbf1d3;
+  --fail: #c81e1e;
+  --fail-dot: #dc2626;
+  --fail-soft: #fde8e8;
+  --scrim: rgb(0 0 0 / 0.32);
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.05);
+  --shadow-2: 0 8px 24px -6px rgb(0 0 0 / 0.14), 0 2px 6px rgb(0 0 0 / 0.05);
+  --shadow-3: 0 24px 64px -12px rgb(0 0 0 / 0.26), 0 4px 12px rgb(0 0 0 / 0.06);
+  --focus: #0b5fc4;
+  --log-bg: #111111;
+  --log-text: #e5e5e5;
+  --log-mute: #8f8f8f;
+  --log-accent: #ffffff;
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --bg: #0a0a0a;
+  --side-bg: #0d0d0d;
+  --card: #141414;
+  --card-line: #232323;
+  --raised: #1a1a1a;
+  --sunk: #050505;
+  --hover: #1f1f1f;
+  --line: #232323;
+  --line-strong: #363636;
+  --text: #fafafa;
+  --text-soft: #cfcfcf;
+  --text-mute: #9a9a9a;
+  --primary: #fafafa;
+  --primary-hover: #dcdcdc;
+  --primary-ink: #0a0a0a;
+  --link: #6eabff;
+  --info-soft: #1c1c1c;
+  --ok: #34d399;
+  --ok-dot: #34d399;
+  --ok-soft: #0c2a1f;
+  --warn: #fbbf24;
+  --warn-dot: #fbbf24;
+  --warn-soft: #2c2307;
+  --fail: #f87171;
+  --fail-dot: #f87171;
+  --fail-soft: #2f1212;
+  --scrim: rgb(0 0 0 / 0.64);
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.5);
+  --shadow-2: 0 10px 28px -6px rgb(0 0 0 / 0.7), 0 2px 6px rgb(0 0 0 / 0.4);
+  --shadow-3: 0 28px 72px -12px rgb(0 0 0 / 0.85), 0 4px 12px rgb(0 0 0 / 0.5);
+  --focus: #6eabff;
+  --log-bg: #050505;
+  --log-text: #dedede;
+  --log-mute: #858585;
+  --log-accent: #ffffff;
+  color-scheme: dark;
+}
+
+/* Han-first stacks, so shared code points take the right regional shapes. */
+:root:lang(ja) {
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Noto Sans JP",
+    Meiryo, system-ui, sans-serif;
+}
+
+:root:lang(zh-CN) {
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC",
+    "Source Han Sans SC", system-ui, sans-serif;
+}

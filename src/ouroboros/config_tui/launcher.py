@@ -3,21 +3,16 @@
 A bare ``ouroboros config`` cannot host a full-screen TUI everywhere it is
 typed. In a real terminal the Textual app runs in-place; inside an AI
 harness session (Claude Code / Codex), the Bash tool captures output and
-owns the screen, so the same app is served over a local web server
-(textual-serve) and the browser is opened instead. Browser *cockpit*
-dashboards remain ourocode territory per the transparency RFC (#1392) —
-this web mode is a thin transport for the identical settings app, not a
-separate web UI.
+owns the screen, so the browser console (``ouroboros gui``) opens on its
+Agents & models page instead. That page saves through the same validated,
+undoable write path as the terminal app (``config_tui.persistence``).
 """
 
 from __future__ import annotations
 
 import os
 import shutil
-import socket
 import sys
-import threading
-import webbrowser
 
 from ouroboros.cli.formatters.panels import print_error, print_info
 
@@ -120,19 +115,11 @@ def _launch_inline() -> None:
     SettingsApp().run()
 
 
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+def _console_serve(**kwargs: object) -> None:
+    """Serve the browser console (indirection so tests can replace it)."""
+    from ouroboros.gui.launcher import serve
 
-
-def _import_server() -> type | None:
-    """Import textual-serve's Server, or ``None`` when the extra is missing."""
-    try:
-        from textual_serve.server import Server
-    except ImportError:
-        return None
-    return Server
+    serve(**kwargs)  # type: ignore[arg-type]
 
 
 def _launch_web(
@@ -141,37 +128,34 @@ def _launch_web(
     port: int | None = None,
     open_browser: bool = True,
 ) -> None:
-    server_cls = _import_server()
-    if server_cls is None:
-        if _relaunch_with_tui_profile():
-            return
-        print_error(_TUI_INSTALL_HINT)
-        print_info("Manual fallback: install [bold]ouroboros-ai\\[tui][/] in this environment.")
-        raise SystemExit(1)
+    """Open the console's Agents & models page (reusing a running console)."""
+    bind = "127.0.0.1" if host == "localhost" else host
 
-    if port in (None, 0):
-        port = _free_port()
-    display_host = "localhost" if host in ("localhost", "127.0.0.1", "0.0.0.0") else host
-    url = f"http://{display_host}:{port}"
-    if open_browser:
-        print_info(
-            f"Serving Ouroboros Settings at [bold]{url}[/] — opening your browser.\n"
-            "Press Ctrl+C to stop."
-        )
-        # serve() blocks; open the browser once the server has had a beat to bind.
-        threading.Timer(1.0, webbrowser.open, args=(url,)).start()
-    else:
-        # Remote/agent host: a browser opened *here* would be on the wrong
-        # machine. Hand the user a reachable URL instead.
+    def ready(url: str, reused: bool) -> None:
+        if reused:
+            print_info(f"Ouroboros Settings are open in the console at [bold]{url}[/].")
+            return
+        if open_browser:
+            print_info(
+                f"Serving Ouroboros Settings at [bold]{url}[/] — opening your browser.\n"
+                "Press Ctrl+C to stop."
+            )
+            return
+        shown_port = url.split("://", 1)[-1].split("/", 1)[0].rsplit(":", 1)[-1]
         print_info(
             f"Serving Ouroboros Settings at [bold]{url}[/] (no browser on this host).\n"
             "From your own machine, open the URL directly, or tunnel first:\n"
-            f"  ssh -L {port}:localhost:{port} <this-host>\n"
+            f"  ssh -L {shown_port}:localhost:{shown_port} <this-host>\n"
             "Press Ctrl+C to stop."
         )
-    command = f"{sys.executable} -m ouroboros.config_tui"
-    server = server_cls(command, host=host, port=port, title="Ouroboros Settings")
-    server.serve()
+
+    _console_serve(
+        host=bind,
+        port=None if port in (None, 0) else port,
+        open_browser=open_browser,
+        page="models",
+        on_ready=ready,
+    )
 
 
 __all__ = ["is_harness_context", "is_remote_session", "launch_settings"]

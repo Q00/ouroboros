@@ -88,6 +88,37 @@ jobs:
         run: bun test
         working-directory: src/ouroboros/opencode/plugin
 
+  console-page:
+    name: Console page
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7.0.1
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+        working-directory: gui
+
+      - name: Type check and build
+        run: bun run build
+        working-directory: gui
+
+      - name: Committed page matches its source
+        # `ouroboros gui` serves src/ouroboros/gui/static; rebuild it after editing gui/.
+        run: |
+          changes="$(git status --porcelain -- src/ouroboros/gui/static)"
+          if [ -n "$changes" ]; then
+            echo "Rebuild the console page (cd gui && bun run build) and commit:"
+            echo "$changes"
+            exit 1
+          fi
+
   native-tui:
     name: Native TUI (Rust)
     runs-on: ubuntu-latest
