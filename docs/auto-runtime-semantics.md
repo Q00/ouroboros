@@ -17,7 +17,7 @@ before reporting an "interview is too slow" issue saves a round-trip.
 | `INTERVIEW` (`interview.start`, `interview.answer`, `interview.resume`) | Socratic question generation through `InterviewHandler` | **In-process** authoring handler (same Python process as `ooo auto`) | `--runtime` selects the backend the in-process handler talks to. There is **no plugin/subagent dispatch** for the first question, regardless of which backend you pick. |
 | `SEED_GENERATION` | `GenerateSeedHandler` | **In-process** authoring handler | Same as above. |
 | `REVIEW` / `REPAIR` | `SeedReviewer` + `SeedRepairer` | In-process; backend choice is forwarded so review/repair can call out for analysis | Bound to `state.runtime_backend`. |
-| `RUN` (handoff) | `StartExecuteSeedHandler` via `HandlerRunStarter` | Dispatches to the configured runtime; for `opencode` plugin mode this is a true subagent dispatch, for other runtimes this is the executor adapter that owns long-running execution | `--runtime` + (for opencode) `OUROBOROS_OPENCODE_MODE=plugin` |
+| `RUN` (handoff) | `StartExecuteSeedHandler` via `HandlerRunStarter` | Dispatches to the configured runtime; for `opencode` plugin mode this is a true subagent dispatch, for other runtimes this is the executor adapter that owns long-running execution | `--runtime` + (for opencode) `orchestrator.opencode_mode: plugin`, written by `ouroboros setup --opencode-mode plugin` |
 
 ## What the flag does NOT mean
 
