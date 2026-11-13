@@ -52,27 +52,39 @@ ouroboros_python() {
 ```
 <!-- ouroboros-python-resolver:end -->
 
-### Pre-Check: Already Completed?
+### Bundled Scripts
 
-Run the resolver, this section's blocks, and the migration check below in one
-shell call, then print the result with
-`printf 'completed=%s setup=%s codex=%s migration=%s\n' "$WELCOME_COMPLETED" "${SETUP_READY:-}" "${CODEX_READY:-}" "${LEGACY_CODEX_MODEL_MIGRATION_REQUIRED:-}"`.
-
-Read the completion marker (legacy `welcomeShown: true` also counts):
+This skill's programs are files in `scripts/` next to this `SKILL.md`. Run
+them with the commands below; never retype, rewrite or edit them. Resolve
+`scripts/` from the directory containing this `SKILL.md`, even if that
+directory is hidden, and set `WELCOME_DIR` to that directory's absolute path in
+the same shell call as the resolver:
 
 ```bash
-WELCOME_COMPLETED=$(ouroboros_python - <<'PY'
-import json, os
-try:
-    prefs = json.load(open(os.path.expanduser('~/.ouroboros/prefs.json'), encoding='utf-8'))
-except Exception:
-    prefs = {}
-if not isinstance(prefs, dict):
-    prefs = {}
-print(prefs.get('welcomeCompleted') or ('legacy-welcomeShown' if prefs.get('welcomeShown') else ''))
-PY
-)
+WELCOME_DIR='<absolute path of the directory containing this SKILL.md>'
 ```
+
+Every command below runs after the resolver and that line, in one shell call.
+Type the arguments exactly as shown: the shell expands `"$HOME"` and the other
+variables, and the scripts take those values from their arguments.
+If a script is missing, tell the user the installed Ouroboros skill files are
+incomplete and that reinstalling or updating Ouroboros restores them; do not
+reconstruct the program.
+
+### Pre-Check: Already Completed?
+
+Run the readiness check:
+
+```bash
+ouroboros_python - precheck "$HOME" "${CODEX_HOME:-$HOME/.codex}" "${SETUP_READY:-}" "${CODEX_READY:-}" "${LEGACY_CODEX_MODEL_MIGRATION_REQUIRED:-}" < "$WELCOME_DIR/scripts/welcome_state.py" || printf 'completed= setup= codex= migration=\n'
+```
+
+It prints one line, `completed=... setup=... codex=... migration=...` (the
+fallback is the line it printed when no Python 3.12+ or uv is available).
+`completed` is the completion marker `WELCOME_COMPLETED` (legacy
+`welcomeShown: true` also counts). `setup`, `codex` and `migration` are `true`
+when `SETUP_READY`, `CODEX_READY` and `LEGACY_CODEX_MODEL_MIGRATION_REQUIRED`
+hold; the sections below use those names.
 
 Before honoring that completion marker, determine whether setup is ready for
 the active runtime.
@@ -82,237 +94,21 @@ chose **나중에** or whose setup was later removed.
 Claude Code is ready when `~/.ouroboros/config.yaml` has
 `orchestrator.runtime_backend` in `{claude, claude_mcp}` and `llm.backend:
 claude`. The marketplace plugin owns its MCP registration, so host-owned
-`~/.claude/mcp.json` is never part of readiness:
-
-```bash
-if ouroboros_python - "$HOME/.ouroboros/config.yaml" <<'PY'
-import sys
-from pathlib import Path
-
-try:
-    import yaml
-except ModuleNotFoundError:
-    yaml = None
-
-
-def scalar(raw: str) -> str:
-    return raw.strip().split(" #", 1)[0].strip().rstrip(",}").strip().strip("'\"")
-
-
-def load_yaml(path: str) -> dict:
-    source = Path(path).read_text(encoding="utf-8")
-    if yaml is not None:
-        loaded = yaml.safe_load(source) or {}
-        return loaded if isinstance(loaded, dict) else {}
-    parsed: dict[str, dict[str, str]] = {}
-    section = None
-    for line in source.splitlines():
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        key, separator, value = line.strip().partition(":")
-        if not separator:
-            continue
-        key = key.strip("'\"")
-        if not line[0].isspace():
-            section = key
-            parsed[section] = {}
-            flow = value.strip().split(" #", 1)[0].strip()
-            if flow.startswith("{") and flow.endswith("}"):
-                for part in flow[1:-1].split(","):
-                    field, separator, field_value = part.partition(":")
-                    if separator:
-                        parsed[section][field.strip().strip("'\"")] = scalar(field_value)
-        elif section is not None:
-            parsed[section][key] = scalar(value)
-    return parsed
-
-
-try:
-    config = load_yaml(sys.argv[1])
-except (OSError, ValueError):
-    raise SystemExit(1)
-orchestrator, llm = config.get("orchestrator"), config.get("llm")
-ready = (
-    isinstance(orchestrator, dict)
-    and orchestrator.get("runtime_backend") in {"claude", "claude_mcp"}
-    and isinstance(llm, dict)
-    and llm.get("backend") == "claude"
-)
-raise SystemExit(0 if ready else 1)
-PY
-then
-  SETUP_READY="true"
-fi
-```
+`~/.claude/mcp.json` is never part of readiness.
 
 If `SETUP_READY` is not true, check Codex. It is ready when both backends are
 `codex`, the Codex CLI (`OUROBOROS_CODEX_CLI_PATH`, else
 `orchestrator.codex_cli_path`, else `codex` on PATH) is runnable, and
 `mcp_servers\.ouroboros` in `$CODEX_HOME/config.toml` (any TOML key spelling)
-has a runnable `command` or a non-blank `url`:
-
-```bash
-CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
-case "$CODEX_HOME_DIR" in
-  "~") CODEX_HOME_DIR="$HOME" ;;
-  "~/"*) CODEX_HOME_DIR="$HOME/${CODEX_HOME_DIR#"~/"}" ;;
-esac
-if ouroboros_python - "$HOME/.ouroboros/config.yaml" "$CODEX_HOME_DIR/config.toml" <<'PY'
-import os
-import shutil
-import sys
-import tomllib
-from pathlib import Path
-
-try:
-    import yaml
-except ModuleNotFoundError:
-    yaml = None
-
-
-def scalar(raw: str) -> str:
-    return raw.strip().split(" #", 1)[0].strip().rstrip(",}").strip().strip("'\"")
-
-
-def load_yaml(path: str) -> dict:
-    source = Path(path).read_text(encoding="utf-8")
-    if yaml is not None:
-        loaded = yaml.safe_load(source) or {}
-        return loaded if isinstance(loaded, dict) else {}
-    parsed: dict[str, dict[str, str]] = {}
-    section = None
-    for line in source.splitlines():
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        key, separator, value = line.strip().partition(":")
-        if not separator:
-            continue
-        key = key.strip("'\"")
-        if not line[0].isspace():
-            section = key
-            parsed[section] = {}
-            flow = value.strip().split(" #", 1)[0].strip()
-            if flow.startswith("{") and flow.endswith("}"):
-                for part in flow[1:-1].split(","):
-                    field, separator, field_value = part.partition(":")
-                    if separator:
-                        parsed[section][field.strip().strip("'\"")] = scalar(field_value)
-        elif section is not None:
-            parsed[section][key] = scalar(value)
-    return parsed
-
-
-def runnable(candidate: str) -> bool:
-    value = candidate.strip()
-    if not value:
-        return False
-    if "/" not in value:
-        return shutil.which(value) is not None
-    path = Path(value).expanduser()
-    return path.is_file() and os.access(path, os.X_OK)
-
-
-def mcp_ready(entry: object) -> bool:
-    if not isinstance(entry, dict):
-        return False
-    command, url = entry.get("command"), entry.get("url")
-    if isinstance(command, str) and command.strip():
-        return runnable(command)
-    return isinstance(url, str) and bool(url.strip())
-
-
-try:
-    config = load_yaml(sys.argv[1])
-    codex_config = tomllib.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
-except (OSError, ValueError):
-    raise SystemExit(1)
-orchestrator, llm = config.get("orchestrator"), config.get("llm")
-servers = codex_config.get("mcp_servers")
-cli_path = os.environ.get("OUROBOROS_CODEX_CLI_PATH")
-if not cli_path and isinstance(orchestrator, dict):
-    cli_path = orchestrator.get("codex_cli_path")
-if not isinstance(cli_path, str) or not cli_path.strip():
-    cli_path = "codex"
-ready = (
-    isinstance(orchestrator, dict)
-    and orchestrator.get("runtime_backend") == "codex"
-    and isinstance(llm, dict)
-    and llm.get("backend") == "codex"
-    and runnable(cli_path)
-    and mcp_ready(servers.get("ouroboros") if isinstance(servers, dict) else None)
-)
-raise SystemExit(0 if ready else 1)
-PY
-then
-  CODEX_READY="true"
-fi
-```
+has a runnable `command` or a non-blank `url`.
 
 ### Legacy Codex Model Migration
 
 Older configurations saved `gpt-5` into all four stage-model fields. That is
 now an explicit pin that stops Codex App/CLI model changes from taking effect.
-Never rewrite a possible user pin silently. When Codex is ready, detect that
-exact legacy shape (or an interrupted migration) once:
-
-```bash
-if ouroboros_python - "$HOME/.ouroboros/config.yaml" "$HOME/.ouroboros/prefs.json" <<'PY'
-from __future__ import annotations
-
-import json
-import sys
-from pathlib import Path
-
-config_path, prefs_path = map(Path, sys.argv[1:])
-
-def yaml_mapping(source: str) -> dict[str, dict[str, str]]:
-    parsed: dict[str, dict[str, str]] = {}
-    section: str | None = None
-    for raw_line in source.splitlines():
-        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
-            continue
-        indent = len(raw_line) - len(raw_line.lstrip())
-        key, separator, raw_value = raw_line.strip().partition(":")
-        if not separator:
-            continue
-        value = raw_value.strip().split(" #", 1)[0].strip().strip("'\"")
-        if indent == 0:
-            section = key.strip("'\"")
-            parsed.setdefault(section, {})
-        elif section is not None:
-            parsed[section][key.strip("'\"")] = value
-    return parsed
-
-try:
-    config = yaml_mapping(config_path.read_text(encoding="utf-8"))
-except OSError:
-    raise SystemExit(1)
-try:
-    prefs = json.loads(prefs_path.read_text(encoding="utf-8"))
-except (OSError, ValueError):
-    prefs = {}
-if not isinstance(prefs, dict):
-    prefs = {}
-
-stage_values = (
-    config.get("clarification", {}).get("default_model"),
-    config.get("execution", {}).get("default_model"),
-    config.get("evaluation", {}).get("semantic_model"),
-    config.get("resilience", {}).get("reflect_model"),
-)
-legacy_gpt5 = all(value == "gpt-5" for value in stage_values)
-partial_automatic_migration = (
-    any(value == "gpt-5" for value in stage_values)
-    and any(value == "default" for value in stage_values)
-    and all(value in {"gpt-5", "default"} for value in stage_values)
-)
-handled = prefs.get("codexModelMigration") in {"automatic-v1", "kept-gpt-5-v1"}
-raise SystemExit(0 if (legacy_gpt5 or partial_automatic_migration) and not handled else 1)
-PY
-then
-  LEGACY_CODEX_MODEL_MIGRATION_REQUIRED="true"
-fi
-```
+Never rewrite a possible user pin silently. When Codex is ready, the Pre-Check's
+`migration` field detects that exact legacy shape (or an interrupted migration)
+once.
 
 If `CODEX_READY` and `LEGACY_CODEX_MODEL_MIGRATION_REQUIRED` are both true, ask
 "현재 설정은 모든 단계에서 gpt-5를 고정해 두고 있어요. Codex에서 선택한 모델을 자동으로 사용하도록 바꿀까요?"
@@ -322,60 +118,7 @@ If `CODEX_READY` and `LEGACY_CODEX_MODEL_MIGRATION_REQUIRED` are both true, ask
   Atomically rewrite the four pins:
 
 ```bash
-ouroboros_python - "$HOME/.ouroboros/config.yaml" <<'PY'
-from __future__ import annotations
-
-import os
-import sys
-import tempfile
-from pathlib import Path
-
-path = Path(sys.argv[1])
-original = path.read_text(encoding="utf-8")
-replacements = {
-    ("clarification", "default_model"): "default",
-    ("execution", "default_model"): "default",
-    ("evaluation", "semantic_model"): "default",
-    ("resilience", "reflect_model"): "default",
-}
-seen: set[tuple[str, str]] = set()
-section: str | None = None
-output: list[str] = []
-for line in original.splitlines(keepends=True):
-    stripped = line.strip()
-    indent = len(line) - len(line.lstrip())
-    key = stripped.split(":", 1)[0].strip("'\"") if ":" in stripped else ""
-    if indent == 0 and ":" in stripped:
-        section = key
-    target = (section or "", key)
-    if indent > 0 and target in replacements:
-        newline = "\n" if line.endswith("\n") else ""
-        prefix = line[:indent]
-        comment = ""
-        value_part = line.strip().split(":", 1)[1]
-        if " #" in value_part:
-            comment = " #" + value_part.split(" #", 1)[1].rstrip("\n")
-        output.append(f"{prefix}{key}: {replacements[target]}{comment}{newline}")
-        seen.add(target)
-    else:
-        output.append(line)
-missing = set(replacements) - seen
-if missing:
-    raise SystemExit(f"Cannot migrate Codex model pins; missing keys: {sorted(missing)}")
-updated = "".join(output)
-fd, tmp_name = tempfile.mkstemp(prefix=".config.yaml.", dir=str(path.parent))
-try:
-    with os.fdopen(fd, "w", encoding="utf-8") as tmp:
-        tmp.write(updated)
-        tmp.flush()
-        os.fsync(tmp.fileno())
-    os.replace(tmp_name, path)
-finally:
-    try:
-        os.unlink(tmp_name)
-    except FileNotFoundError:
-        pass
-PY
+ouroboros_python - "$HOME/.ouroboros/config.yaml" < "$WELCOME_DIR/scripts/migrate_codex_models.py"
 ```
 
   `default` sends no model pin to Codex; it is not a model named "default".
@@ -389,21 +132,7 @@ For either choice, merge exactly one `codexModelMigration` marker into
 `~/.ouroboros/prefs.json`, keeping existing keys:
 
 ```bash
-ouroboros_python - "automatic-v1" <<'PY'
-import json, os, sys
-path = os.path.expanduser('~/.ouroboros/prefs.json')
-try:
-    prefs = json.load(open(path, encoding='utf-8'))
-except Exception:
-    prefs = {}
-if not isinstance(prefs, dict):
-    prefs = {}
-prefs['codexModelMigration'] = sys.argv[1]
-os.makedirs(os.path.dirname(path), exist_ok=True)
-with open(path, 'w', encoding='utf-8') as f:
-    json.dump(prefs, f, indent=2)
-    f.write('\n')
-PY
+ouroboros_python - "automatic-v1" < "$WELCOME_DIR/scripts/record_codex_model_migration.py"
 ```
 
 Pass `kept-gpt-5-v1` instead of `automatic-v1` for the keep choice. If welcome
@@ -429,168 +158,14 @@ setup run (or when the Pre-Check did not run), use these standalone gates,
 which print their verdict. Claude Code:
 
 ```bash
-if ouroboros_python - "$HOME/.ouroboros/config.yaml" <<'PY'
-import sys
-from pathlib import Path
-
-try:
-    import yaml
-except ModuleNotFoundError:
-    yaml = None
-
-
-def scalar(raw: str) -> str:
-    return raw.strip().split(" #", 1)[0].strip().rstrip(",}").strip().strip("'\"")
-
-
-def load_yaml(path: str) -> dict:
-    source = Path(path).read_text(encoding="utf-8")
-    if yaml is not None:
-        loaded = yaml.safe_load(source) or {}
-        return loaded if isinstance(loaded, dict) else {}
-    parsed: dict[str, dict[str, str]] = {}
-    section = None
-    for line in source.splitlines():
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        key, separator, value = line.strip().partition(":")
-        if not separator:
-            continue
-        key = key.strip("'\"")
-        if not line[0].isspace():
-            section = key
-            parsed[section] = {}
-            flow = value.strip().split(" #", 1)[0].strip()
-            if flow.startswith("{") and flow.endswith("}"):
-                for part in flow[1:-1].split(","):
-                    field, separator, field_value = part.partition(":")
-                    if separator:
-                        parsed[section][field.strip().strip("'\"")] = scalar(field_value)
-        elif section is not None:
-            parsed[section][key] = scalar(value)
-    return parsed
-
-
-try:
-    config = load_yaml(sys.argv[1])
-except (OSError, ValueError):
-    raise SystemExit(1)
-orchestrator, llm = config.get("orchestrator"), config.get("llm")
-ready = (
-    isinstance(orchestrator, dict)
-    and orchestrator.get("runtime_backend") in {"claude", "claude_mcp"}
-    and isinstance(llm, dict)
-    and llm.get("backend") == "claude"
-)
-raise SystemExit(0 if ready else 1)
-PY
-then
-  echo "SETUP_READY"
-else
-  echo "SETUP_REQUIRED"
-fi
+ouroboros_python - setup-gate "$HOME" < "$WELCOME_DIR/scripts/welcome_state.py" || echo SETUP_REQUIRED
 ```
 
 If that printed `SETUP_READY`, skip the Codex gate and continue to Step 1.
 Otherwise check Codex:
 
 ```bash
-CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
-case "$CODEX_HOME_DIR" in
-  "~") CODEX_HOME_DIR="$HOME" ;;
-  "~/"*) CODEX_HOME_DIR="$HOME/${CODEX_HOME_DIR#"~/"}" ;;
-esac
-if ouroboros_python - "$HOME/.ouroboros/config.yaml" "$CODEX_HOME_DIR/config.toml" <<'PY'
-import os
-import shutil
-import sys
-import tomllib
-from pathlib import Path
-
-try:
-    import yaml
-except ModuleNotFoundError:
-    yaml = None
-
-
-def scalar(raw: str) -> str:
-    return raw.strip().split(" #", 1)[0].strip().rstrip(",}").strip().strip("'\"")
-
-
-def load_yaml(path: str) -> dict:
-    source = Path(path).read_text(encoding="utf-8")
-    if yaml is not None:
-        loaded = yaml.safe_load(source) or {}
-        return loaded if isinstance(loaded, dict) else {}
-    parsed: dict[str, dict[str, str]] = {}
-    section = None
-    for line in source.splitlines():
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        key, separator, value = line.strip().partition(":")
-        if not separator:
-            continue
-        key = key.strip("'\"")
-        if not line[0].isspace():
-            section = key
-            parsed[section] = {}
-            flow = value.strip().split(" #", 1)[0].strip()
-            if flow.startswith("{") and flow.endswith("}"):
-                for part in flow[1:-1].split(","):
-                    field, separator, field_value = part.partition(":")
-                    if separator:
-                        parsed[section][field.strip().strip("'\"")] = scalar(field_value)
-        elif section is not None:
-            parsed[section][key] = scalar(value)
-    return parsed
-
-
-def runnable(candidate: str) -> bool:
-    value = candidate.strip()
-    if not value:
-        return False
-    if "/" not in value:
-        return shutil.which(value) is not None
-    path = Path(value).expanduser()
-    return path.is_file() and os.access(path, os.X_OK)
-
-
-def mcp_ready(entry: object) -> bool:
-    if not isinstance(entry, dict):
-        return False
-    command, url = entry.get("command"), entry.get("url")
-    if isinstance(command, str) and command.strip():
-        return runnable(command)
-    return isinstance(url, str) and bool(url.strip())
-
-
-try:
-    config = load_yaml(sys.argv[1])
-    codex_config = tomllib.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
-except (OSError, ValueError):
-    raise SystemExit(1)
-orchestrator, llm = config.get("orchestrator"), config.get("llm")
-servers = codex_config.get("mcp_servers")
-cli_path = os.environ.get("OUROBOROS_CODEX_CLI_PATH")
-if not cli_path and isinstance(orchestrator, dict):
-    cli_path = orchestrator.get("codex_cli_path")
-if not isinstance(cli_path, str) or not cli_path.strip():
-    cli_path = "codex"
-ready = (
-    isinstance(orchestrator, dict)
-    and orchestrator.get("runtime_backend") == "codex"
-    and isinstance(llm, dict)
-    and llm.get("backend") == "codex"
-    and runnable(cli_path)
-    and mcp_ready(servers.get("ouroboros") if isinstance(servers, dict) else None)
-)
-raise SystemExit(0 if ready else 1)
-PY
-then
-  echo "CODEX_READY"
-else
-  echo "CODEX_SETUP_REQUIRED"
-fi
+ouroboros_python - codex-gate "$HOME" "${CODEX_HOME:-$HOME/.codex}" < "$WELCOME_DIR/scripts/welcome_state.py" || echo CODEX_SETUP_REQUIRED
 ```
 
 If neither is ready (`SETUP_REQUIRED` and `CODEX_SETUP_REQUIRED`, including a
@@ -675,28 +250,7 @@ existing keys. Prefix the command with `STAR_ASKED=true` when the star question
 was asked, so it is never repeated:
 
 ```bash
-ouroboros_python - <<'PY'
-import json, os
-from datetime import UTC, datetime
-path = os.path.expanduser('~/.ouroboros/prefs.json')
-os.makedirs(os.path.dirname(path), exist_ok=True)
-try:
-    with open(path, encoding='utf-8') as f:
-        prefs = json.load(f)
-    if not isinstance(prefs, dict):
-        prefs = {}
-except Exception:
-    prefs = {}
-prefs.update({
-    'welcomeShown': True,
-    'welcomeCompleted': datetime.now(UTC).isoformat(),
-})
-if os.environ.get('STAR_ASKED') == 'true':
-    prefs['star_asked'] = True
-with open(path, 'w', encoding='utf-8') as f:
-    json.dump(prefs, f, indent=2)
-    f.write('\n')
-PY
+ouroboros_python - < "$WELCOME_DIR/scripts/record_welcome_completed.py"
 ```
 
 Before the handoff, mention that phrases like "interview me", "I'm stuck", or "evaluate this" also

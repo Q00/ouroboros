@@ -83,6 +83,37 @@ def test_skills_are_copied_into_folders_named_by_frontmatter(
     assert "../ouroboros-run/SKILL.md" in (root / "seed" / "SKILL.md").read_text()
 
 
+def test_welcome_scripts_are_copied_beside_its_skill(tmp_path: Path) -> None:
+    """The harness resolves skill-relative paths against the skill folder."""
+    source_skills_dir = Path(__file__).resolve().parents[3] / "skills"
+    installed = install_megacode_skills(tmp_path / "cfg", skills_dir=source_skills_dir) / "welcome"
+    source = source_skills_dir / "welcome"
+    scripts = sorted(path.name for path in (source / "scripts").glob("*.py"))
+
+    assert "welcome_state.py" in scripts
+    assert sorted(path.name for path in (installed / "scripts").iterdir()) == scripts
+    for name in scripts:
+        assert (installed / "scripts" / name).read_bytes() == (
+            source / "scripts" / name
+        ).read_bytes()
+    assert 'ouroboros_python - precheck "$HOME" "${CODEX_HOME:-$HOME/.codex}"' in (
+        installed / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+    home = tmp_path / "home"
+    (home / ".ouroboros").mkdir(parents=True)
+    (home / ".ouroboros" / "prefs.json").write_text('{"welcomeShown": true}\n', encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, "-", "precheck", str(home), str(home / ".codex"), "", "", ""],
+        input=(installed / "scripts" / "welcome_state.py").read_text(encoding="utf-8"),
+        capture_output=True,
+        text=True,
+        env={"HOME": str(home), "PATH": "/nonexistent"},
+        check=True,
+    )
+    assert result.stdout == "completed=legacy-welcomeShown setup= codex= migration=\n"
+
+
 def test_skill_reinstall_replaces_the_managed_root(tmp_path: Path, packaged_skills: Path) -> None:
     root = install_megacode_skills(tmp_path / "cfg", skills_dir=packaged_skills)
     (root / "stale").mkdir()

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -411,19 +413,79 @@ def test_first_use_onboarding_has_host_specific_model_settings_handoffs() -> Non
     )
 
 
-def _run_setup_gate(
+_WELCOME_SKILL_DIR = Path(__file__).resolve().parents[3] / "skills" / "welcome"
+# The one-line commands skills/welcome/SKILL.md documents for its bundled
+# scripts. test_welcome_skill_documents_exactly_these_script_commands keeps
+# this table and the SKILL.md in step.
+_WELCOME_COMMANDS = {
+    "precheck": (
+        'ouroboros_python - precheck "$HOME" "${CODEX_HOME:-$HOME/.codex}"'
+        ' "${SETUP_READY:-}" "${CODEX_READY:-}" "${LEGACY_CODEX_MODEL_MIGRATION_REQUIRED:-}"'
+        ' < "$WELCOME_DIR/scripts/welcome_state.py"'
+        " || printf 'completed= setup= codex= migration=\\n'"
+    ),
+    "setup_gate": (
+        'ouroboros_python - setup-gate "$HOME" < "$WELCOME_DIR/scripts/welcome_state.py"'
+        " || echo SETUP_REQUIRED"
+    ),
+    "codex_gate": (
+        'ouroboros_python - codex-gate "$HOME" "${CODEX_HOME:-$HOME/.codex}"'
+        ' < "$WELCOME_DIR/scripts/welcome_state.py"'
+        " || echo CODEX_SETUP_REQUIRED"
+    ),
+    "migrate_codex_models": (
+        'ouroboros_python - "$HOME/.ouroboros/config.yaml"'
+        ' < "$WELCOME_DIR/scripts/migrate_codex_models.py"'
+    ),
+    "record_codex_model_migration": (
+        'ouroboros_python - "automatic-v1" < "$WELCOME_DIR/scripts/record_codex_model_migration.py"'
+    ),
+    "record_welcome_completed": (
+        'ouroboros_python - < "$WELCOME_DIR/scripts/record_welcome_completed.py"'
+    ),
+}
+
+
+def _welcome_command(name: str, skill_dir: Path = _WELCOME_SKILL_DIR) -> str:
+    """Return one documented welcome command, after the WELCOME_DIR line the skill asks for."""
+    return f"WELCOME_DIR={shlex.quote(str(skill_dir))}\n{_WELCOME_COMMANDS[name]}"
+
+
+def _precheck_fields(line: str) -> dict[str, str]:
+    match = re.fullmatch(r"completed=(.*) setup=(.*) codex=(.*) migration=(.*)", line)
+    assert match is not None, line
+    return dict(zip(("completed", "setup", "codex", "migration"), match.groups(), strict=True))
+
+
+def _run_welcome_shell(
     script: str,
     *,
     home: Path,
     codex_home: Path | str | None = None,
     extra_env: dict[str, str] | None = None,
-) -> str:
-    """Run the packaged setup gate exactly as a host executes its Markdown snippet."""
-    python_bin = home / ".test-python-bin"
+    with_python: bool = True,
+    unexported: dict[str, str] | None = None,
+    interpreter_home: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run welcome commands exactly as a host runs them: resolver first, one shell.
+
+    ``unexported`` names shell variables that are set but not exported, so
+    only the shell sees them. ``interpreter_home`` gives the Python process a
+    HOME of its own, which tells apart values the shell expands from values
+    the program reads from its environment, without reaching the real home.
+    """
+    python_bin = home / (".test-python-bin" if interpreter_home is None else ".test-python-env")
     python_bin.mkdir(exist_ok=True)
     python3 = python_bin / "python3"
-    if not python3.exists():
-        python3.symlink_to(sys.executable)
+    if with_python and not python3.exists():
+        if interpreter_home is None:
+            python3.symlink_to(sys.executable)
+        else:
+            _write_executable(
+                python3,
+                f"#!/bin/sh\nHOME={shlex.quote(str(interpreter_home))}; export HOME\n"
+                f'exec {shlex.quote(sys.executable)} "$@"\n',
+            )
     env = {
         "HOME": str(home),
         "PATH": str(python_bin),
@@ -435,18 +497,34 @@ def _run_setup_gate(
         if "PATH" in extra_env:
             extra_env = {**extra_env, "PATH": f"{python_bin}:{extra_env['PATH']}"}
         env.update(extra_env)
+    prelude = ""
+    for name, value in (unexported or {}).items():
+        env.pop(name, None)
+        prelude += f"{name}={shlex.quote(value)}; export -n {name}\n"
     return subprocess.run(
-        ["/bin/bash", "-c", f"{_python_resolver_code()}\n{script}"],
-        check=True,
+        ["/bin/bash", "-c", f"{_python_resolver_code()}\n{prelude}{script}"],
+        check=False,
         capture_output=True,
         text=True,
         env=env,
-    ).stdout.strip()
+    )
+
+
+def _run_setup_gate(
+    script: str,
+    *,
+    home: Path,
+    codex_home: Path | str | None = None,
+    extra_env: dict[str, str] | None = None,
+) -> str:
+    """Run a welcome command and return its stdout; the command must succeed."""
+    result = _run_welcome_shell(script, home=home, codex_home=codex_home, extra_env=extra_env)
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
 
 
 def test_codex_setup_gate_accepts_reordered_yaml_and_quoted_toml_mcp_key(tmp_path: Path) -> None:
     """The first-use gate reads structures, not nearby lines or one TOML spelling."""
-    repo_root = Path(__file__).resolve().parents[3]
     codex_home = tmp_path / "alternate-codex-home"
     config_path = tmp_path / ".ouroboros" / "config.yaml"
     config_path.parent.mkdir()
@@ -459,17 +537,13 @@ def test_codex_setup_gate_accepts_reordered_yaml_and_quoted_toml_mcp_key(tmp_pat
         f"""[mcp_servers]\n\"ouroboros\" = {{ command = \"{sys.executable}\" }}\n""",
         encoding="utf-8",
     )
-    skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
-    setup_gate_start = skill.index("### Setup Gate: First Use")
-    start = skill.index("CODEX_HOME_DIR=", setup_gate_start)
-    gate = skill[start : skill.index("\n```", start)]
+    gate = _welcome_command("codex_gate")
 
     assert _run_setup_gate(gate, home=tmp_path, codex_home=codex_home) == "CODEX_READY"
 
 
 def test_codex_setup_gate_accepts_yaml_flow_mappings(tmp_path: Path) -> None:
     """Valid YAML flow mappings should not force completed Codex users through setup."""
-    repo_root = Path(__file__).resolve().parents[3]
     codex_home = tmp_path / "alternate-codex-home"
     config_path = tmp_path / ".ouroboros" / "config.yaml"
     config_path.parent.mkdir()
@@ -482,17 +556,13 @@ def test_codex_setup_gate_accepts_yaml_flow_mappings(tmp_path: Path) -> None:
         f'[mcp_servers.ouroboros]\ncommand = "{sys.executable}"\n',
         encoding="utf-8",
     )
-    skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
-    setup_gate_start = skill.index("### Setup Gate: First Use")
-    start = skill.index("CODEX_HOME_DIR=", setup_gate_start)
-    gate = skill[start : skill.index("\n```", start)]
+    gate = _welcome_command("codex_gate")
 
     assert _run_setup_gate(gate, home=tmp_path, codex_home=codex_home) == "CODEX_READY"
 
 
 def test_codex_setup_gate_rejects_unavailable_mcp_command(tmp_path: Path) -> None:
     """A configured but missing MCP launcher must force setup repair."""
-    repo_root = Path(__file__).resolve().parents[3]
     codex_home = tmp_path / "alternate-codex-home"
     config_path = tmp_path / ".ouroboros" / "config.yaml"
     config_path.parent.mkdir()
@@ -506,17 +576,13 @@ def test_codex_setup_gate_rejects_unavailable_mcp_command(tmp_path: Path) -> Non
         '[mcp_servers.ouroboros]\ncommand = "/definitely/missing/uvx"\n',
         encoding="utf-8",
     )
-    skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
-    setup_gate_start = skill.index("### Setup Gate: First Use")
-    start = skill.index("CODEX_HOME_DIR=", setup_gate_start)
-    gate = skill[start : skill.index("\n```", start)]
+    gate = _welcome_command("codex_gate")
 
     assert _run_setup_gate(gate, home=tmp_path, codex_home=codex_home) == ("CODEX_SETUP_REQUIRED")
 
 
 def test_codex_setup_gate_expands_tilde_codex_home(tmp_path: Path) -> None:
     """CODEX_HOME may use shell-style ~/ paths and still point at the active config."""
-    repo_root = Path(__file__).resolve().parents[3]
     codex_home = tmp_path / "codex-alt"
     config_path = tmp_path / ".ouroboros" / "config.yaml"
     config_path.parent.mkdir()
@@ -529,17 +595,13 @@ def test_codex_setup_gate_expands_tilde_codex_home(tmp_path: Path) -> None:
         f'[mcp_servers.ouroboros]\ncommand = "{sys.executable}"\n',
         encoding="utf-8",
     )
-    skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
-    setup_gate_start = skill.index("### Setup Gate: First Use")
-    start = skill.index("CODEX_HOME_DIR=", setup_gate_start)
-    gate = skill[start : skill.index("\n```", start)]
+    gate = _welcome_command("codex_gate")
 
     assert _run_setup_gate(gate, home=tmp_path, codex_home="~/codex-alt") == "CODEX_READY"
 
 
 def test_codex_setup_gate_rejects_stale_configured_cli_path(tmp_path: Path) -> None:
     """A stale explicit Codex CLI override must not be reported as ready."""
-    repo_root = Path(__file__).resolve().parents[3]
     codex_home = tmp_path / "alternate-codex-home"
     config_path = tmp_path / ".ouroboros" / "config.yaml"
     config_path.parent.mkdir()
@@ -556,17 +618,13 @@ def test_codex_setup_gate_rejects_stale_configured_cli_path(tmp_path: Path) -> N
         f'[mcp_servers.ouroboros]\ncommand = "{sys.executable}"\n',
         encoding="utf-8",
     )
-    skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
-    setup_gate_start = skill.index("### Setup Gate: First Use")
-    start = skill.index("CODEX_HOME_DIR=", setup_gate_start)
-    gate = skill[start : skill.index("\n```", start)]
+    gate = _welcome_command("codex_gate")
 
     assert _run_setup_gate(gate, home=tmp_path, codex_home=codex_home) == "CODEX_SETUP_REQUIRED"
 
 
 def test_codex_setup_gate_rejects_missing_default_cli_candidate(tmp_path: Path) -> None:
     """Config plus MCP is not ready when no Codex executable candidate exists."""
-    repo_root = Path(__file__).resolve().parents[3]
     codex_home = tmp_path / "alternate-codex-home"
     config_path = tmp_path / ".ouroboros" / "config.yaml"
     config_path.parent.mkdir()
@@ -579,17 +637,13 @@ def test_codex_setup_gate_rejects_missing_default_cli_candidate(tmp_path: Path) 
         '[mcp_servers.ouroboros]\ncommand = "ouroboros"\n',
         encoding="utf-8",
     )
-    skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
-    setup_gate_start = skill.index("### Setup Gate: First Use")
-    start = skill.index("CODEX_HOME_DIR=", setup_gate_start)
-    gate = skill[start : skill.index("\n```", start)]
+    gate = _welcome_command("codex_gate")
 
     assert _run_setup_gate(gate, home=tmp_path, codex_home=codex_home) == "CODEX_SETUP_REQUIRED"
 
 
 def test_codex_setup_gate_rejects_app_only_default_cli_candidate(tmp_path: Path) -> None:
     """The gate must match runtime launch semantics: no implicit App fallback."""
-    repo_root = Path(__file__).resolve().parents[3]
     codex_home = tmp_path / "alternate-codex-home"
     app_cli = tmp_path / "ChatGPT.app" / "Contents" / "Resources" / "codex"
     config_path = tmp_path / ".ouroboros" / "config.yaml"
@@ -606,10 +660,7 @@ def test_codex_setup_gate_rejects_app_only_default_cli_candidate(tmp_path: Path)
         '[mcp_servers.ouroboros]\ncommand = "ouroboros"\n',
         encoding="utf-8",
     )
-    skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
-    setup_gate_start = skill.index("### Setup Gate: First Use")
-    start = skill.index("CODEX_HOME_DIR=", setup_gate_start)
-    gate = skill[start : skill.index("\n```", start)]
+    gate = _welcome_command("codex_gate")
 
     assert (
         _run_setup_gate(
@@ -629,7 +680,6 @@ def test_codex_completed_welcome_precheck_accepts_yaml_flow_mappings(
     tmp_path: Path,
 ) -> None:
     """The completed-welcome shortcut must use the same YAML shape as the setup gate."""
-    repo_root = Path(__file__).resolve().parents[3]
     codex_home = tmp_path / "alternate-codex-home"
     config_path = tmp_path / ".ouroboros" / "config.yaml"
     config_path.parent.mkdir()
@@ -646,17 +696,18 @@ def test_codex_completed_welcome_precheck_accepts_yaml_flow_mappings(
         f'[mcp_servers.ouroboros]\ncommand = "{sys.executable}"\n',
         encoding="utf-8",
     )
-    skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
-    precheck_context = skill.index("Before honoring that completion marker")
-    start = skill.index("CODEX_HOME_DIR=", precheck_context)
-    precheck = skill[start : skill.index("\n```", start)] + '\nprintf "$CODEX_READY"\n'
+    precheck = _welcome_command("precheck")
 
-    assert _run_setup_gate(precheck, home=tmp_path, codex_home=codex_home) == "true"
+    assert _precheck_fields(_run_setup_gate(precheck, home=tmp_path, codex_home=codex_home)) == {
+        "completed": "2026-07-27",
+        "setup": "",
+        "codex": "true",
+        "migration": "",
+    }
 
 
 def test_codex_setup_gate_rejects_empty_mcp_server_mapping(tmp_path: Path) -> None:
     """The gate must not bypass setup for an unusable empty MCP entry."""
-    repo_root = Path(__file__).resolve().parents[3]
     codex_home = tmp_path / "alternate-codex-home"
     config_path = tmp_path / ".ouroboros" / "config.yaml"
     config_path.parent.mkdir()
@@ -666,17 +717,13 @@ def test_codex_setup_gate_rejects_empty_mcp_server_mapping(tmp_path: Path) -> No
         encoding="utf-8",
     )
     (codex_home / "config.toml").write_text("[mcp_servers.ouroboros]\n", encoding="utf-8")
-    skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
-    setup_gate_start = skill.index("### Setup Gate: First Use")
-    start = skill.index("CODEX_HOME_DIR=", setup_gate_start)
-    gate = skill[start : skill.index("\n```", start)]
+    gate = _welcome_command("codex_gate")
 
     assert _run_setup_gate(gate, home=tmp_path, codex_home=codex_home) == "CODEX_SETUP_REQUIRED"
 
 
 def test_codex_setup_gate_rejects_blank_mcp_endpoint_values(tmp_path: Path) -> None:
     """A present but blank command/url is not a usable Codex MCP endpoint."""
-    repo_root = Path(__file__).resolve().parents[3]
     codex_home = tmp_path / "alternate-codex-home"
     config_path = tmp_path / ".ouroboros" / "config.yaml"
     config_path.parent.mkdir()
@@ -685,10 +732,7 @@ def test_codex_setup_gate_rejects_blank_mcp_endpoint_values(tmp_path: Path) -> N
         "orchestrator:\n  runtime_backend: codex\nllm:\n  backend: codex\n",
         encoding="utf-8",
     )
-    skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
-    setup_gate_start = skill.index("### Setup Gate: First Use")
-    start = skill.index("CODEX_HOME_DIR=", setup_gate_start)
-    gate = skill[start : skill.index("\n```", start)]
+    gate = _welcome_command("codex_gate")
 
     for toml in (
         '[mcp_servers.ouroboros]\ncommand = ""\n',
@@ -987,12 +1031,10 @@ def test_first_run_preference_write_works_through_uv_only_path(
 ) -> None:
     repo_root = Path(__file__).resolve().parents[3]
     skill_path = repo_root / relative_path
-    needle = (
-        "    'welcomeShown': True,"
-        if relative_path.parts[-2] == "welcome"
-        else "prefs['star_asked'] = True"
-    )
-    snippet = _bash_block_containing(skill_path, needle)
+    if relative_path.parts[-2] == "welcome":
+        snippet = _welcome_command("record_welcome_completed")
+    else:
+        snippet = _bash_block_containing(skill_path, "prefs['star_asked'] = True")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     _install_uv_fallback(bin_dir / "uv")
@@ -1018,46 +1060,27 @@ def test_codex_legacy_gpt5_migration_gate_targets_legacy_and_partial_migration(
     tmp_path: Path,
 ) -> None:
     """The gate should recover interrupted automatic migration, but not custom pins."""
-    repo_root = Path(__file__).resolve().parents[3]
     config_path = tmp_path / ".ouroboros" / "config.yaml"
     config_path.parent.mkdir()
     config_path.write_text(
         """clarification:\n  default_model: gpt-5\nexecution:\n  default_model: gpt-5\nevaluation:\n  semantic_model: gpt-5\nresilience:\n  reflect_model: gpt-5\n""",
         encoding="utf-8",
     )
-    skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
-    migration_start = skill.index("### Legacy Codex Model Migration")
-    start = skill.index('if ouroboros_python - "$HOME/.ouroboros/config.yaml"', migration_start)
-    gate = skill[start : skill.index("\n```", start)]
+    precheck = _welcome_command("precheck")
 
-    assert (
-        _run_setup_gate(
-            f'{gate}\nprintf "%s" "${{LEGACY_CODEX_MODEL_MIGRATION_REQUIRED:-}}"', home=tmp_path
-        )
-        == "true"
-    )
+    assert _precheck_fields(_run_setup_gate(precheck, home=tmp_path))["migration"] == "true"
 
     config_path.write_text(
         """clarification:\n  default_model: default\nexecution:\n  default_model: gpt-5\nevaluation:\n  semantic_model: default\nresilience:\n  reflect_model: gpt-5\n""",
         encoding="utf-8",
     )
-    assert (
-        _run_setup_gate(
-            f'{gate}\nprintf "%s" "${{LEGACY_CODEX_MODEL_MIGRATION_REQUIRED:-}}"', home=tmp_path
-        )
-        == "true"
-    )
+    assert _precheck_fields(_run_setup_gate(precheck, home=tmp_path))["migration"] == "true"
 
     config_path.write_text(
         """clarification:\n  default_model: default\nexecution:\n  default_model: gpt-5\nevaluation:\n  semantic_model: custom-model\nresilience:\n  reflect_model: gpt-5\n""",
         encoding="utf-8",
     )
-    assert (
-        _run_setup_gate(
-            f'{gate}\nprintf "%s" "${{LEGACY_CODEX_MODEL_MIGRATION_REQUIRED:-}}"', home=tmp_path
-        )
-        == ""
-    )
+    assert _precheck_fields(_run_setup_gate(precheck, home=tmp_path))["migration"] == ""
 
     prefs_path = tmp_path / ".ouroboros" / "prefs.json"
     prefs_path.write_text('{"codexModelMigration": "automatic-v1"}', encoding="utf-8")
@@ -1065,27 +1088,18 @@ def test_codex_legacy_gpt5_migration_gate_targets_legacy_and_partial_migration(
         """clarification:\n  default_model: gpt-5\nexecution:\n  default_model: gpt-5\nevaluation:\n  semantic_model: gpt-5\nresilience:\n  reflect_model: gpt-5\n""",
         encoding="utf-8",
     )
-    assert (
-        _run_setup_gate(
-            f'{gate}\nprintf "%s" "${{LEGACY_CODEX_MODEL_MIGRATION_REQUIRED:-}}"', home=tmp_path
-        )
-        == ""
-    )
+    assert _precheck_fields(_run_setup_gate(precheck, home=tmp_path))["migration"] == ""
 
 
 def test_claude_setup_gate_accepts_default_sdk_without_host_mcp_file(tmp_path: Path) -> None:
     """Default SDK setup is ready without the host-owned Claude MCP file."""
-    repo_root = Path(__file__).resolve().parents[3]
     config_path = tmp_path / ".ouroboros" / "config.yaml"
     config_path.parent.mkdir()
     config_path.write_text(
         """llm:\n  qa_model: claude\n  backend: claude\norchestrator:\n  retries: 3\n  timeout: 20\n  runtime_backend: claude\n""",
         encoding="utf-8",
     )
-    skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
-    setup_gate_start = skill.index("### Setup Gate: First Use")
-    start = skill.index('if ouroboros_python - "$HOME/.ouroboros/config.yaml"', setup_gate_start)
-    gate = skill[start : skill.index("\n```", start)]
+    gate = _welcome_command("setup_gate")
 
     assert _run_setup_gate(gate, home=tmp_path) == "SETUP_READY"
 
@@ -1095,17 +1109,13 @@ def test_claude_setup_gate_accepts_yaml_flow_mappings_without_host_mcp_file(
     tmp_path: Path, runtime_backend: str
 ) -> None:
     """Both shipped Claude profiles are ready from durable config alone."""
-    repo_root = Path(__file__).resolve().parents[3]
     config_path = tmp_path / ".ouroboros" / "config.yaml"
     config_path.parent.mkdir()
     config_path.write_text(
         f"orchestrator: {{runtime_backend: {runtime_backend}}}\nllm: {{backend: claude}}\n",
         encoding="utf-8",
     )
-    skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
-    setup_gate_start = skill.index("### Setup Gate: First Use")
-    start = skill.index('if ouroboros_python - "$HOME/.ouroboros/config.yaml"', setup_gate_start)
-    gate = skill[start : skill.index("\n```", start)]
+    gate = _welcome_command("setup_gate")
 
     assert _run_setup_gate(gate, home=tmp_path) == "SETUP_READY"
 
@@ -1114,7 +1124,6 @@ def test_claude_completed_welcome_precheck_is_idempotent_without_host_mcp_file(
     tmp_path: Path,
 ) -> None:
     """A completed SDK setup does not reopen onboarding when mcp.json is absent."""
-    repo_root = Path(__file__).resolve().parents[3]
     config_path = tmp_path / ".ouroboros" / "config.yaml"
     config_path.parent.mkdir()
     (tmp_path / ".ouroboros" / "prefs.json").write_text(
@@ -1124,12 +1133,14 @@ def test_claude_completed_welcome_precheck_is_idempotent_without_host_mcp_file(
         "orchestrator:\n  runtime_backend: claude\nllm:\n  backend: claude\n",
         encoding="utf-8",
     )
-    skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
-    precheck_context = skill.index("Before honoring that completion marker")
-    start = skill.index('if ouroboros_python - "$HOME/.ouroboros/config.yaml"', precheck_context)
-    gate = skill[start : skill.index("\n```", start)] + '\nprintf "%s" "${SETUP_READY:-}"\n'
+    precheck = _welcome_command("precheck")
 
-    assert _run_setup_gate(gate, home=tmp_path) == "true"
+    assert _precheck_fields(_run_setup_gate(precheck, home=tmp_path)) == {
+        "completed": "2026-08-09",
+        "setup": "true",
+        "codex": "",
+        "migration": "",
+    }
 
 
 @pytest.mark.parametrize(
@@ -1142,14 +1153,10 @@ def test_claude_completed_welcome_precheck_is_idempotent_without_host_mcp_file(
 )
 def test_claude_setup_gate_rejects_incomplete_runtime_config(tmp_path: Path, config: str) -> None:
     """Removing the MCP-file requirement does not accept unrelated config."""
-    repo_root = Path(__file__).resolve().parents[3]
     config_path = tmp_path / ".ouroboros" / "config.yaml"
     config_path.parent.mkdir()
     config_path.write_text(config, encoding="utf-8")
-    skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
-    setup_gate_start = skill.index("### Setup Gate: First Use")
-    start = skill.index('if ouroboros_python - "$HOME/.ouroboros/config.yaml"', setup_gate_start)
-    gate = skill[start : skill.index("\n```", start)]
+    gate = _welcome_command("setup_gate")
 
     assert _run_setup_gate(gate, home=tmp_path) == "SETUP_REQUIRED"
 
@@ -1162,6 +1169,398 @@ def test_welcome_surfaces_describe_default_claude_sdk_profile() -> None:
     assert expected in content
     assert "Ordinary Claude setup uses the dependency-free CLI profile" not in content
     assert 'python3 - "$HOME/.ouroboros/config.yaml" "$HOME/.claude/mcp.json"' not in content
+
+
+def test_welcome_skill_documents_exactly_these_script_commands() -> None:
+    """Each bundled script runs from one documented line; no program is inlined."""
+    skill = (_WELCOME_SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+    bash_lines = [
+        line
+        for block in re.findall(r"(?ms)^```bash\n(.*?)^```", skill)
+        for line in block.splitlines()
+    ]
+
+    assert sorted(line for line in bash_lines if line.startswith("ouroboros_python ")) == sorted(
+        _WELCOME_COMMANDS.values()
+    )
+    assert "WELCOME_DIR='<absolute path of the directory containing this SKILL.md>'" in bash_lines
+    assert "files in `scripts/` next to this `SKILL.md`" in skill
+    assert "<<'PY'" not in skill
+    referenced = set(re.findall(r"\$WELCOME_DIR/scripts/([\w.]+)", skill))
+    assert referenced == {path.name for path in (_WELCOME_SKILL_DIR / "scripts").glob("*.py")}
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        [],
+        ["--gate", "setup"],
+        ["precheck", "/h", "/h/.codex", "", ""],
+        ["precheck", "/h", "/h/.codex", "", "", "", "extra"],
+        ["setup-gate"],
+        ["setup-gate", "/h", "extra"],
+        ["codex-gate", "/h"],
+        ["claude-gate", "/h"],
+    ],
+)
+def test_welcome_state_rejects_unknown_arguments(tmp_path: Path, args: list[str]) -> None:
+    result = subprocess.run(
+        [sys.executable, "-", *args],
+        input=(_WELCOME_SKILL_DIR / "scripts" / "welcome_state.py").read_text(encoding="utf-8"),
+        capture_output=True,
+        text=True,
+        env={"HOME": str(tmp_path), "PATH": os.defpath},
+        check=False,
+    )
+
+    assert (result.returncode, result.stdout) == (2, "")
+    assert result.stderr.startswith("usage: welcome_state.py precheck HOME CODEX_HOME_DIR ")
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("precheck", "completed= setup= codex= migration=\n"),
+        ("setup_gate", "SETUP_REQUIRED\n"),
+        ("codex_gate", "CODEX_SETUP_REQUIRED\n"),
+    ],
+)
+def test_welcome_readiness_commands_fail_closed_without_python_or_uv(
+    tmp_path: Path, command: str, expected: str
+) -> None:
+    """Without an interpreter the commands print what the inline checks printed."""
+    result = _run_welcome_shell(_welcome_command(command), home=tmp_path, with_python=False)
+
+    assert (result.returncode, result.stdout) == (0, expected)
+    assert "require Python >= 3.12 or uv on PATH" in result.stderr
+
+
+def test_welcome_precheck_isolates_each_check(tmp_path: Path) -> None:
+    """A check that raises reports not-ready and leaves the other fields intact."""
+    config_path = tmp_path / ".ouroboros" / "config.yaml"
+    config_path.parent.mkdir()
+    config_path.write_text(
+        "orchestrator:\n  runtime_backend: claude\nllm:\n  backend: claude\n"
+        "clarification:\n  default_model: gpt-5\nexecution:\n  default_model: gpt-5\n"
+        "evaluation:\n  semantic_model: gpt-5\nresilience:\n  reflect_model: gpt-5\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".ouroboros" / "prefs.json").write_text(
+        '{"welcomeCompleted": "2026-09-01", "codexModelMigration": ["automatic-v1"]}\n',
+        encoding="utf-8",
+    )
+
+    result = _run_welcome_shell(_welcome_command("precheck"), home=tmp_path)
+
+    assert (result.returncode, result.stdout) == (
+        0,
+        "completed=2026-09-01 setup=true codex= migration=\n",
+    )
+    assert "TypeError: unhashable type: 'list'" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("prefs", "completed", "stderr_fragment"),
+    [
+        ('{"welcomeCompleted": "2026-07-27\\n\\n"}', "2026-07-27", ""),
+        ('{"welcomeCompleted": 12}', "12", ""),
+        ('{"welcomeCompleted": "", "welcomeShown": true}', "legacy-welcomeShown", ""),
+        ("[1, 2]", "", ""),
+        ("{not json", "", ""),
+        ('{"welcomeCompleted": "\\ud800"}', "", "UnicodeEncodeError"),
+    ],
+)
+def test_welcome_precheck_reports_the_marker_as_command_substitution_did(
+    tmp_path: Path, prefs: str, completed: str, stderr_fragment: str
+) -> None:
+    """The marker keeps $(print ...) semantics: str(), trailing newlines dropped, and a
+    value stdout cannot encode becomes empty without losing the readiness fields."""
+    config_path = tmp_path / ".ouroboros" / "config.yaml"
+    config_path.parent.mkdir()
+    config_path.write_text(
+        "orchestrator:\n  runtime_backend: claude\nllm:\n  backend: claude\n", encoding="utf-8"
+    )
+    (tmp_path / ".ouroboros" / "prefs.json").write_text(prefs, encoding="utf-8")
+
+    result = _run_welcome_shell(_welcome_command("precheck"), home=tmp_path)
+
+    assert (result.returncode, result.stdout) == (
+        0,
+        f"completed={completed} setup=true codex= migration=\n",
+    )
+    assert stderr_fragment in result.stderr
+    if not stderr_fragment:
+        assert result.stderr == ""
+
+
+@pytest.mark.parametrize("exported", [True, False], ids=["exported", "unexported"])
+def test_welcome_precheck_shows_shell_flags_as_the_shell_expansion_did(
+    tmp_path: Path, exported: bool
+) -> None:
+    """The inline Pre-Check printed "${SETUP_READY:-}" and friends, which were set
+    only on success, so a value the shell already held showed through, exported
+    or not."""
+    flags = {
+        "SETUP_READY": "true",
+        "CODEX_READY": "yes",
+        "LEGACY_CODEX_MODEL_MIGRATION_REQUIRED": "1",
+        "WELCOME_COMPLETED": "ignored",
+    }
+    result = _run_welcome_shell(
+        _welcome_command("precheck"),
+        home=tmp_path,
+        extra_env=flags if exported else None,
+        unexported=None if exported else flags,
+    )
+
+    assert result.stdout == "completed= setup=true codex=yes migration=1\n"
+
+
+def _write_codex_ready_home(home: Path, codex_home: Path) -> None:
+    (home / ".ouroboros").mkdir(parents=True, exist_ok=True)
+    (home / ".ouroboros" / "config.yaml").write_text(
+        f"orchestrator: {{runtime_backend: codex, codex_cli_path: {sys.executable}}}\n"
+        "llm: {backend: codex}\n",
+        encoding="utf-8",
+    )
+    codex_home.mkdir(parents=True, exist_ok=True)
+    (codex_home / "config.toml").write_text(
+        f'[mcp_servers.ouroboros]\ncommand = "{sys.executable}"\n', encoding="utf-8"
+    )
+
+
+def test_welcome_gates_read_home_from_the_shell_when_it_is_not_exported(tmp_path: Path) -> None:
+    """The inline gates were passed "$HOME/..." paths, which the shell expands
+    from a HOME it never exported; the interpreter sees no HOME at all."""
+    claude_home = tmp_path / "claude-home"
+    (claude_home / ".ouroboros").mkdir(parents=True)
+    (claude_home / ".ouroboros" / "config.yaml").write_text(
+        "orchestrator:\n  runtime_backend: claude\nllm:\n  backend: claude\n", encoding="utf-8"
+    )
+    codex_home = tmp_path / "codex-home"
+    _write_codex_ready_home(codex_home, codex_home / ".codex")
+
+    setup = _run_welcome_shell(
+        _welcome_command("setup_gate")
+        + "\nouroboros_python -c 'import os; print(\"HOME\" in os.environ)'",
+        home=claude_home,
+        unexported={"HOME": str(claude_home)},
+    )
+    codex = _run_welcome_shell(
+        _welcome_command("codex_gate"),
+        home=codex_home,
+        unexported={"HOME": str(codex_home)},
+    )
+
+    assert setup.stdout.splitlines() == ["SETUP_READY", "False"]
+    assert codex.stdout == "CODEX_READY\n"
+
+
+def test_welcome_precheck_reads_config_from_the_shell_home_and_the_marker_from_its_own(
+    tmp_path: Path,
+) -> None:
+    """Config paths come from the shell's $HOME; the completion marker came from
+    the interpreter's own HOME through expanduser, and still does."""
+    shell_home = tmp_path / "shell-home"
+    (shell_home / ".ouroboros").mkdir(parents=True)
+    (shell_home / ".ouroboros" / "config.yaml").write_text(
+        "orchestrator:\n  runtime_backend: claude\nllm:\n  backend: claude\n"
+        "clarification:\n  default_model: gpt-5\nexecution:\n  default_model: gpt-5\n"
+        "evaluation:\n  semantic_model: gpt-5\nresilience:\n  reflect_model: gpt-5\n",
+        encoding="utf-8",
+    )
+    (shell_home / ".ouroboros" / "prefs.json").write_text(
+        '{"welcomeCompleted": "from-shell-home"}\n', encoding="utf-8"
+    )
+    interpreter_home = tmp_path / "interpreter-home"
+    (interpreter_home / ".ouroboros").mkdir(parents=True)
+    (interpreter_home / ".ouroboros" / "config.yaml").write_text("llm: {backend: none}\n")
+    (interpreter_home / ".ouroboros" / "prefs.json").write_text(
+        '{"welcomeCompleted": "from-interpreter-home", "codexModelMigration": "automatic-v1"}\n',
+        encoding="utf-8",
+    )
+
+    result = _run_welcome_shell(
+        _welcome_command("precheck"),
+        home=shell_home,
+        unexported={"HOME": str(shell_home)},
+        interpreter_home=interpreter_home,
+    )
+
+    assert result.stdout == ("completed=from-interpreter-home setup=true codex= migration=true\n")
+
+
+@pytest.mark.parametrize("exported", [True, False], ids=["exported", "unexported"])
+def test_welcome_codex_checks_read_codex_home_from_the_shell(
+    tmp_path: Path, exported: bool
+) -> None:
+    """CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}" was a shell expansion."""
+    alternate = tmp_path / "alternate-codex-home"
+    _write_codex_ready_home(tmp_path, alternate)
+    commands = _welcome_command("codex_gate") + "\n" + _WELCOME_COMMANDS["precheck"]
+
+    result = _run_welcome_shell(
+        commands,
+        home=tmp_path,
+        codex_home=alternate if exported else None,
+        unexported=None if exported else {"CODEX_HOME": str(alternate)},
+    )
+
+    assert result.stdout == "CODEX_READY\ncompleted= setup= codex=true migration=\n"
+
+
+@pytest.mark.parametrize(
+    ("exported", "expected"),
+    [(True, "CODEX_READY"), (False, "CODEX_SETUP_REQUIRED")],
+    ids=["exported", "unexported"],
+)
+def test_welcome_codex_gate_reads_the_cli_override_from_its_environment(
+    tmp_path: Path, exported: bool, expected: str
+) -> None:
+    """The inline Codex gate read OUROBOROS_CODEX_CLI_PATH with os.environ, so an
+    unexported value never reached it; that stays true."""
+    _write_codex_ready_home(tmp_path, tmp_path / ".codex")
+    (tmp_path / ".ouroboros" / "config.yaml").write_text(
+        "orchestrator: {runtime_backend: codex}\nllm: {backend: codex}\n", encoding="utf-8"
+    )
+    override = {"OUROBOROS_CODEX_CLI_PATH": sys.executable}
+
+    result = _run_welcome_shell(
+        _welcome_command("codex_gate"),
+        home=tmp_path,
+        extra_env=override if exported else None,
+        unexported=None if exported else override,
+    )
+
+    assert result.stdout == f"{expected}\n"
+
+
+def test_welcome_codex_model_migration_rewrites_the_four_pins(tmp_path: Path) -> None:
+    config_path = tmp_path / ".ouroboros" / "config.yaml"
+    config_path.parent.mkdir()
+    original = (
+        "orchestrator:\n  runtime_backend: codex\n"
+        "clarification:\n  default_model: gpt-5  # pinned by setup\n"
+        "execution:\n  default_model: gpt-5\n"
+        "evaluation:\n  semantic_model: 'gpt-5'\n  other: keep\n"
+        "resilience:\n  reflect_model: gpt-5"
+    )
+    config_path.write_text(original, encoding="utf-8")
+    (tmp_path / ".ouroboros" / "prefs.json").write_text('{"keep": 1}\n', encoding="utf-8")
+
+    precheck = _welcome_command("precheck")
+    assert _precheck_fields(_run_setup_gate(precheck, home=tmp_path))["migration"] == "true"
+    _run_setup_gate(
+        _welcome_command("migrate_codex_models")
+        + "\n"
+        + _welcome_command("record_codex_model_migration"),
+        home=tmp_path,
+    )
+
+    assert config_path.read_text(encoding="utf-8") == (
+        "orchestrator:\n  runtime_backend: codex\n"
+        "clarification:\n  default_model: default # pinned by setup\n"
+        "execution:\n  default_model: default\n"
+        "evaluation:\n  semantic_model: default\n  other: keep\n"
+        "resilience:\n  reflect_model: default"
+    )
+    assert sorted(path.name for path in config_path.parent.iterdir()) == [
+        "config.yaml",
+        "prefs.json",
+    ]
+    assert json.loads((tmp_path / ".ouroboros" / "prefs.json").read_text(encoding="utf-8")) == {
+        "keep": 1,
+        "codexModelMigration": "automatic-v1",
+    }
+    assert _precheck_fields(_run_setup_gate(precheck, home=tmp_path))["migration"] == ""
+
+
+def test_welcome_codex_model_migration_refuses_a_config_missing_a_pin(tmp_path: Path) -> None:
+    config_path = tmp_path / ".ouroboros" / "config.yaml"
+    config_path.parent.mkdir()
+    original = (
+        "clarification:\n  default_model: gpt-5\nexecution:\n  default_model: gpt-5\n"
+        "evaluation:\n  semantic_model: gpt-5\n"
+    )
+    config_path.write_text(original, encoding="utf-8")
+
+    result = _run_welcome_shell(_welcome_command("migrate_codex_models"), home=tmp_path)
+
+    assert (result.returncode, result.stdout) == (1, "")
+    assert result.stderr == (
+        "Cannot migrate Codex model pins; missing keys: [('resilience', 'reflect_model')]\n"
+    )
+    assert config_path.read_text(encoding="utf-8") == original
+    assert [path.name for path in config_path.parent.iterdir()] == ["config.yaml"]
+
+
+def test_welcome_prefs_records_merge_into_existing_keys(tmp_path: Path) -> None:
+    prefs_path = tmp_path / ".ouroboros" / "prefs.json"
+    prefs_path.parent.mkdir()
+    prefs_path.write_text('{"keep": 1}\n', encoding="utf-8")
+    keep_marker = _welcome_command("record_codex_model_migration").replace(
+        '"automatic-v1"', '"kept-gpt-5-v1"'
+    )
+
+    _run_setup_gate(keep_marker, home=tmp_path)
+    _run_setup_gate(_welcome_command("record_welcome_completed"), home=tmp_path)
+    unstarred = json.loads(prefs_path.read_text(encoding="utf-8"))
+    _run_setup_gate(
+        _welcome_command("record_welcome_completed").replace(
+            "ouroboros_python", "STAR_ASKED=true ouroboros_python", 1
+        ),
+        home=tmp_path,
+    )
+    starred = json.loads(prefs_path.read_text(encoding="utf-8"))
+
+    assert list(unstarred) == ["keep", "codexModelMigration", "welcomeShown", "welcomeCompleted"]
+    assert unstarred["codexModelMigration"] == "kept-gpt-5-v1"
+    assert unstarred["welcomeShown"] is True
+    assert datetime.fromisoformat(unstarred["welcomeCompleted"]).utcoffset() == timedelta(0)
+    assert starred["star_asked"] is True
+    assert prefs_path.read_text(encoding="utf-8").endswith("}\n")
+
+
+@pytest.mark.parametrize(
+    ("selected_runtime", "expected_calls"),
+    [
+        ("python3", ["python3", "python3"] * 2),
+        ("python", ["old-python3", "python", "python"] * 2),
+        ("uv", None),
+    ],
+)
+def test_welcome_scripts_run_through_every_resolver_path(
+    tmp_path: Path, selected_runtime: str, expected_calls: list[str] | None
+) -> None:
+    """The scripts reach the interpreter on stdin through each resolver branch."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    if selected_runtime == "python3":
+        _install_direct_python(bin_dir / "python3", "python3")
+    elif selected_runtime == "python":
+        _install_old_python(bin_dir / "python3", "old-python3")
+        _install_direct_python(bin_dir / "python", "python")
+    _install_uv_fallback(bin_dir / "uv")
+    config_path = tmp_path / ".ouroboros" / "config.yaml"
+    config_path.parent.mkdir()
+    config_path.write_text(
+        "orchestrator:\n  runtime_backend: claude\nllm:\n  backend: claude\n", encoding="utf-8"
+    )
+
+    result = _run_resolver(
+        _welcome_command("precheck") + "\n" + _welcome_command("record_welcome_completed"),
+        path=bin_dir,
+        extra_env={"PYTHONHOME": str(tmp_path / "missing-python-home")},
+    )
+
+    assert result.stdout == "completed= setup=true codex= migration=\n"
+    assert json.loads((tmp_path / ".ouroboros" / "prefs.json").read_text())["welcomeShown"] is True
+    if expected_calls is None:
+        assert not (tmp_path / "python-calls.log").exists()
+        assert (tmp_path / "uv-calls.log").read_text().count("--python\n>=3.12\npython\n-\n") == 2
+    else:
+        assert (tmp_path / "python-calls.log").read_text().splitlines() == expected_calls
+        assert not (tmp_path / "uv-calls.log").exists()
 
 
 def test_resolve_packaged_skills_dir_falls_back_to_repo_root_bundle_when_package_is_stub(
