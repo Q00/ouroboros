@@ -23,7 +23,7 @@ from ouroboros.boundary.acceptance import (
 from ouroboros.boundary.base_regression import ArtifactCheckOutcome as Outcome
 from ouroboros.boundary.binding import CheckTier
 from ouroboros.boundary.check_env import pin_interpreter
-from ouroboros.boundary.tree import tree_digest
+from ouroboros.boundary.tree import changed_paths, tree_digest, tree_manifest
 
 BASE_FILES = [
     "pkg/__init__.py",
@@ -81,6 +81,61 @@ def test_a_package_init_selects_only_the_tests_that_import_the_package_itself() 
         "pkg/tests/test_relative.py",
         "pkg/tests/test_tree.py",
     )
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        ["pkg/export.py"],
+        ["pkg/__init__.py"],
+        ["src/_pytest/logging.py", "pkg/export.py"],
+        ["README.md"],
+        [],
+    ],
+)
+def test_a_kept_name_map_selects_what_a_fresh_call_selects_without_rereading(
+    changed: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    names: dict[str, frozenset[str]] = {}
+    warm = br.select_tests(BASE_FILES, ["pkg/export.py"], TEXT, names=names)
+    assert warm == br.select_tests(BASE_FILES, ["pkg/export.py"], TEXT)
+    assert set(names) == set(br.base_test_files(BASE_FILES))
+    parsed: list[str] = []
+    original = br.imported_names
+    monkeypatch.setattr(
+        br, "imported_names", lambda text, path: parsed.append(path) or original(text, path)
+    )
+
+    kept = br.select_tests(BASE_FILES, changed, TEXT, names=names)
+
+    assert parsed == []  # every base test file was read by the first call only
+    fresh = br.select_tests(BASE_FILES, changed, TEXT)
+    assert kept == fresh == _select_tests_before(BASE_FILES, changed, TEXT, parse=original)
+    # Without the map a call reads every test file again (none with no changed source).
+    assert len(parsed) == (len(names) if br.changed_sources(changed) else 0)
+
+
+def _select_tests_before(
+    base_paths: Any,
+    changed: Any,
+    read_base_text: Any = None,
+    *,
+    base_root: Path | None = None,
+    parse: Any,
+) -> tuple[str, ...]:
+    """``select_tests`` before it could keep a name map, verbatim: every call reads every file."""
+    tests = br.base_test_files(base_paths)
+    sources = br.changed_sources(changed)
+    selected: set[str] = set()
+    names: dict[str, frozenset[str]] = {}
+    for source in sources:
+        selected.update(br.paired_tests(tests, source))
+        for path in tests:
+            if path not in names:
+                names[path] = parse(br._text(path, read_base_text, base_root), path)
+            if br.imports_module(names[path], source):
+                selected.add(path)
+    return tuple(sorted(selected))
 
 
 def test_added_files_and_edited_tests_select_nothing() -> None:
@@ -319,6 +374,56 @@ async def test_the_base_runs_once_per_selection_across_attempts(
 
     assert first.outcome is again.outcome is repaired.outcome is Outcome.PASSED
     assert [call[0] for call in runner.calls] == ["base", "base", "candidate", "candidate"]
+
+
+async def test_the_base_test_files_are_parsed_once_across_candidates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files = {
+        **BASE_TREE,
+        "calc/more.py": "def mul(a, b):\n    return a * b\n",
+        "calc/tests/test_more.py": "from calc.more import mul\n",
+        "calc/tests/test_patched.py": "import mock\n@mock.patch('calc.ops.add')\ndef test_p(a): ...\n",
+        "tests/test_readme.py": "import pathlib\n",
+    }
+    base = _tree(tmp_path / "base", files)
+    candidates = []
+    for name, (source, text) in {
+        "ops": ("calc/ops.py", "def add(a, b):\n    return a + b\n"),
+        "more": ("calc/more.py", "def mul(a, b):\n    return a ** b\n"),
+    }.items():
+        candidates.append(_tree(tmp_path / name, files))
+        (candidates[-1] / source).write_text(text)
+
+    async def passing(root: Path, *_args: Any, **_options: Any) -> Any:
+        return _run({})
+
+    monkeypatch.setattr(br, "_pytest", passing)
+    parsed: list[str] = []
+    original = br.imported_names
+    monkeypatch.setattr(
+        br, "imported_names", lambda text, path: parsed.append(path) or original(text, path)
+    )
+    checks = _checks(base)
+    base_manifest = tree_manifest(base)
+    tests = br.base_test_files(base_manifest)
+
+    selected, reads = [], []
+    for candidate in candidates:
+        parsed.clear()
+        regression, _worker = await checks.findings(candidate)
+        reads.append(len(parsed))
+        selected.append(regression.selected)
+        changed = changed_paths(base_manifest, tree_manifest(candidate))
+        assert regression.selected == _select_tests_before(
+            base_manifest, changed, base_root=base, parse=original
+        )
+
+    assert reads == [len(tests), 0]  # the second candidate reads no base test file
+    assert selected == [
+        ("calc/tests/test_ops.py", "calc/tests/test_patched.py"),
+        ("calc/tests/test_more.py",),
+    ]
 
 
 @pytest.mark.parametrize(

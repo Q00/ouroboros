@@ -405,16 +405,21 @@ def select_tests(
     read_base_text: Mapping[str, str] | None = None,
     *,
     base_root: Path | None = None,
+    names: dict[str, frozenset[str]] | None = None,
 ) -> tuple[str, ...]:
     """The base test files this diff selects: paired with, or importing, a changed module.
 
     The text of a test file comes from ``read_base_text`` or, for a real
     snapshot, from ``base_root``; a file that cannot be read imports nothing.
+    ``names`` keeps each test file's ``imported_names`` across calls on one
+    unchanging base: a file it lacks is read and added, one it holds is not
+    read again. Without it every call reads every test file.
     """
     tests = base_test_files(base_paths)
     sources = changed_sources(changed)
     selected: set[str] = set()
-    names: dict[str, frozenset[str]] = {}
+    if names is None:
+        names = {}
     for source in sources:
         selected.update(paired_tests(tests, source))
         for path in tests:
@@ -819,6 +824,9 @@ class ArtifactChecks:
             tuple[str, tuple[str, ...]], tuple[ArtifactFinding, ArtifactFinding]
         ] = {}
         self._changed: dict[str, ChangedCode] = {}
+        # Each base test file's imported names (``select_tests``), read once:
+        # the base is pinned by its digest, as the base runs' cache relies on.
+        self._base_names: dict[str, frozenset[str]] = {}
         self._lock = asyncio.Lock()
 
     async def changed_functions(self, candidate: Path) -> frozenset[FunctionKey] | None:
@@ -969,7 +977,13 @@ class ArtifactChecks:
         base_manifest = self._base_manifest
         assert base_manifest is not None
         paths = changed_paths(base_manifest, manifest)
-        python = await asyncio.to_thread(select_tests, base_manifest, paths, base_root=base)
+        # The worker thread fills a copy: one a cancelled call leaves running
+        # never writes the shared map outside the lock.
+        names = dict(self._base_names)
+        python = await asyncio.to_thread(
+            select_tests, base_manifest, paths, base_root=base, names=names
+        )
+        self._base_names = names
         others = select_other_tests(base_manifest, paths)
         selected = tuple(sorted({*python, *others}))
         if not selected:
