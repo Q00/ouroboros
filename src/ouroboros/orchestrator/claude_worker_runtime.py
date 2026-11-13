@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
+import json
 import os
 from pathlib import Path
 
@@ -57,6 +58,17 @@ _RECURSION_GUARD_DISALLOWED_TOOLS: tuple[str, ...] = (
     "mcp__ouroboros",
     "mcp__plugin_ouroboros_ouroboros",
 )
+
+# Plugins switched off for the worker session (``--settings`` enabledPlugins).
+# Denying the tools alone still starts the plugin's MCP server: an ``uvx`` +
+# Python pair that connects and stays up for the whole worker run, although
+# every one of its tools is denied (checked against Claude Code 2.1.323). The key
+# is the one the documented install writes (``claude plugin install
+# ouroboros@ouroboros``). ``--settings`` is applied per plugin key over the
+# user/project/local files, so the user's other plugins and MCP servers still
+# load; the flag writes nothing to disk. This also drops the plugin's hooks and
+# skills from the worker, which nothing in the worker flow uses.
+_RECURSION_GUARD_DISABLED_PLUGINS: tuple[str, ...] = ("ouroboros@ouroboros",)
 
 # Cap on the number of ``--add-dir`` grants emitted for a worker so a seed with
 # many ``context_references`` cannot blow up the argv. The pack (C2) already
@@ -163,6 +175,10 @@ class ClaudeWorkerTransport:
             # Space-separated list per `claude --disallowedTools` semantics; denies
             # the ouroboros MCP tools so the worker cannot re-enter the orchestrator.
             command.extend(["--disallowedTools", " ".join(self._disallowed_tools)])
+            # ...and keeps the plugin's MCP server from starting at all, so a
+            # running worker does not hold an ouroboros server it cannot call.
+            disabled = dict.fromkeys(_RECURSION_GUARD_DISABLED_PLUGINS, False)
+            command.extend(["--settings", json.dumps({"enabledPlugins": disabled})])
         for add_dir in self._add_dirs:
             # Native passthrough grants read access to referenced brownfield
             # dirs outside cwd. No-op when there are no context_references.
