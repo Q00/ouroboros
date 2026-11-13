@@ -10,6 +10,9 @@
 #   OUROBOROS_INSTALL_RUNTIME       claude|claude-sdk|claude-cli|codex|opencode|hermes|gemini|goose|kiro|copilot|pi|gjc|all
 #   OUROBOROS_INSTALL_RECONFIGURE   set to 1 to ignore the runtime saved in ~/.ouroboros/config.yaml
 #   OUROBOROS_INSTALL_PRE           set to 1 to allow pre-release versions
+#   OUROBOROS_NO_CONSOLE            set to 1 to skip starting the Ouroboros console (same as -NoConsole)
+#
+# Parameters: -Runtime <name>, -Reconfigure, -Pre, -NoConsole
 #
 # What it does, in order:
 #   1. Git >= 2.36 and uv: installed through winget when missing (uv falls back
@@ -20,6 +23,11 @@
 #   3. `uv tool install` with the selected distribution's own extras, like install.sh.
 #   4. `ouroboros setup --runtime <backend> --non-interactive`, `setup refresh`,
 #      and the Claude Code plugin when `claude` is on PATH.
+#   5. When the installed release ships `ouroboros gui` and this is an
+#      interactive desktop session (no CI variable, console input not
+#      redirected, not an SSH session), starts the Ouroboros console in a
+#      hidden background process, which opens it in the browser. Otherwise it
+#      only prints the command. -NoConsole / OUROBOROS_NO_CONSOLE=1 skip this.
 #
 # This installer emits no installer events of its own (no install_started /
 # install_completed). The `ouroboros` CLI it invokes for setup follows the normal
@@ -30,7 +38,8 @@
 param(
     [string]$Runtime = $env:OUROBOROS_INSTALL_RUNTIME,
     [switch]$Reconfigure,
-    [switch]$Pre
+    [switch]$Pre,
+    [switch]$NoConsole
 )
 
 $ErrorActionPreference = 'Stop'
@@ -445,3 +454,175 @@ Write-Info 'Inside your AI agent: > ooo config   (opens in your browser)'
 Write-Info 'From this terminal:  ouroboros config   (full-screen TUI; use Windows Terminal, not cmd.exe)'
 Write-Host ''
 Write-Host 'Like Ouroboros? Star the repo: https://github.com/Q00/ouroboros'
+
+# --- Ouroboros console ------------------------------------------------------------
+# Once the install is done, start the browser console so a new user lands in a
+# guided UI. It runs in a hidden background process: the installer returns,
+# never waits on it beyond a bounded readiness check, and never fails because
+# of it. Releases without `ouroboros gui` get no console output at all.
+# Mirrors the same step at the end of scripts/install.sh.
+
+# -NoConsole or OUROBOROS_NO_CONSOLE=1 skips this step. The variable takes a
+# closed set of values; anything else is reported and treated as an opt-out,
+# because not starting a background server is the safe reading.
+function Test-ConsoleOptOut([bool]$Flag, [string]$Value) {
+    if ($Flag) { return $true }
+    $normalized = ''
+    if ($Value) { $normalized = $Value.Trim().ToLowerInvariant() }
+    if (@('', '0', 'false', 'no', 'off') -contains $normalized) { return $false }
+    if (@('1', 'true', 'yes', 'on') -contains $normalized) { return $true }
+    Write-Warn 'OUROBOROS_NO_CONSOLE has an unrecognized value (expected 1 or 0); not starting the console.'
+    return $true
+}
+
+# `ouroboros gui --help` exits 0 only on a release that ships the console; older
+# ones fail with "No such command". Telemetry is off for the probe since it is
+# not a real use. A probe that outlives the timeout is killed and counts as no.
+function Test-ConsoleCommand([string]$Exe, [int]$TimeoutMs) {
+    try {
+        $info = New-Object System.Diagnostics.ProcessStartInfo
+        $info.FileName = $Exe
+        $info.Arguments = 'gui --help'
+        $info.UseShellExecute = $false
+        $info.CreateNoWindow = $true
+        $info.RedirectStandardInput = $true
+        $info.RedirectStandardOutput = $true
+        $info.RedirectStandardError = $true
+        $info.EnvironmentVariables['OUROBOROS_TELEMETRY'] = '0'
+        $info.EnvironmentVariables['DO_NOT_TRACK'] = '1'
+        $probe = [System.Diagnostics.Process]::Start($info)
+        $probe.StandardInput.Close()
+        # Drain both pipes so a chatty help screen cannot block the child.
+        $null = $probe.StandardOutput.ReadToEndAsync()
+        $null = $probe.StandardError.ReadToEndAsync()
+        if (-not $probe.WaitForExit($TimeoutMs)) {
+            # Kill is SIGKILL / TerminateProcess, which a child cannot ignore;
+            # reaping it is bounded too, so the probe returns within the
+            # timeout plus 2 s.
+            try { $probe.Kill() } catch { }
+            try { $null = $probe.WaitForExit(2000) } catch { }
+            return $false
+        }
+        return ($probe.ExitCode -eq 0)
+    } catch {
+        return $false
+    }
+}
+
+# A logon session with a desktop: services are not user-interactive, and an SSH
+# session's browser would open on this machine, not for the person connected.
+function Test-ConsoleDesktop {
+    if (-not [Environment]::UserInteractive) { return $false }
+    if ($env:SSH_CONNECTION -or $env:SSH_CLIENT -or $env:SSH_TTY) { return $false }
+    return $true
+}
+
+# Turn the console's state file (~/.ouroboros/gui/server.json, written by
+# `ouroboros gui` once it listens) into the loopback URL it serves. Only a
+# well-formed JSON object counts (ConvertFrom-Json rejects trailing text), and
+# only its own top-level `host` (a loopback name) and `port` (an integer in
+# 1-65535) are read. Returns $null otherwise.
+function ConvertTo-ConsoleUrl([string]$Text) {
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    # ConvertFrom-Json unrolls a one-element array into its element; the
+    # state must be an object itself.
+    if (-not $Text.TrimStart(" `t`r`n".ToCharArray()).StartsWith('{')) { return $null }
+    try { $state = ConvertFrom-Json -InputObject $Text } catch { return $null }
+    if ($null -eq $state) { return $null }
+    $names = @($state.PSObject.Properties | ForEach-Object { $_.Name })
+    if (($names -notcontains 'port') -or ($names -notcontains 'host')) { return $null }
+    $port = $state.port
+    if (-not (($port -is [int]) -or ($port -is [long]))) { return $null }
+    if ($port -lt 1 -or $port -gt 65535) { return $null }
+    if (@('127.0.0.1', 'localhost', '0.0.0.0') -cnotcontains [string]$state.host) { return $null }
+    return "http://localhost:$port/"
+}
+
+function Read-ConsoleState([string]$Path) {
+    try { return [System.IO.File]::ReadAllText($Path) } catch { return '' }
+}
+
+# Start `ouroboros gui` hidden and wait at most $WaitMs for it to report its
+# address; every check in the wait is in-process, so the deadline holds. A
+# console that is already running is reused by `ouroboros gui`, which then only
+# opens the browser and exits 0. The logs get no explicit ACL: they inherit the
+# per-user %USERPROFILE%\.ouroboros\gui directory's permissions.
+function Start-ConsoleDetached([string]$Exe, [int]$WaitMs) {
+    $dir = Join-Path (Join-Path $env:USERPROFILE '.ouroboros') 'gui'
+    $statePath = Join-Path $dir 'server.json'
+    $log = Join-Path $dir 'console.log'
+    $errLog = Join-Path $dir 'console.err.log'
+    try {
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        $before = Read-ConsoleState $statePath
+        $process = Start-Process -FilePath $Exe -ArgumentList 'gui' -WindowStyle Hidden `
+            -RedirectStandardOutput $log -RedirectStandardError $errLog -PassThru
+        # Windows PowerShell 5.1 reports no ExitCode unless the handle was taken.
+        $null = $process.Handle
+    } catch {
+        Write-Warn "The Ouroboros console did not start: $($_.Exception.Message). The installation itself is complete."
+        Write-Info 'Start it any time with: ouroboros gui'
+        return
+    }
+
+    $url = $null
+    $exitCode = $null
+    $last = $before
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($WaitMs)
+    while ($true) {
+        if ($process.HasExited) { $exitCode = $process.ExitCode; break }
+        $current = Read-ConsoleState $statePath
+        if ($current -and ($current -ne $last)) {
+            $last = $current
+            $url = ConvertTo-ConsoleUrl $current
+            if ($url) { break }
+        }
+        if ([DateTime]::UtcNow -ge $deadline) { break }
+        Start-Sleep -Milliseconds 100
+    }
+
+    if ($url) {
+        Write-Ok "The Ouroboros console is running in the background at $url"
+        Write-Info 'It opens in your browser. Stop it with "Stop console" at the bottom of its sidebar.'
+        Write-Info 'Reopen it any time with: ouroboros gui'
+        Write-Info "Log: $log"
+    } elseif ($exitCode -eq 0) {
+        $url = ConvertTo-ConsoleUrl (Read-ConsoleState $statePath)
+        if ($url) {
+            Write-Ok "The Ouroboros console is already running at $url; opened it in your browser."
+            Write-Info 'Reopen it any time with: ouroboros gui'
+        } else {
+            Write-Warn 'Could not confirm that the Ouroboros console started.'
+            Write-Info "Log: $log"
+            Write-Info 'Start it any time with: ouroboros gui'
+        }
+    } elseif ($null -ne $exitCode) {
+        Write-Warn "The Ouroboros console did not start (exit $exitCode). The installation itself is complete."
+        Write-Info "Log: $errLog"
+        Write-Info 'Start it any time with: ouroboros gui'
+    } else {
+        Write-Info 'The Ouroboros console is still starting in the background; it opens in your browser when ready.'
+        Write-Info 'Stop it with "Stop console" at the bottom of its sidebar. Reopen it any time with: ouroboros gui'
+        Write-Info "Log: $log"
+    }
+}
+
+function Invoke-ConsoleAfterInstall([string]$Exe, [bool]$OptOut) {
+    if ($OptOut -or -not $Exe) { return }
+    if (-not (Test-ConsoleCommand $Exe 15000)) { return }
+    if ((Test-Path Env:CI) -or -not (Test-Interactive) -or -not (Test-ConsoleDesktop)) {
+        Write-Host ''
+        Write-Host 'Next: open the Ouroboros console in your browser with: ouroboros gui'
+        return
+    }
+    Write-Host ''
+    Write-Host '  Ouroboros console' -ForegroundColor Blue
+    Start-ConsoleDetached $Exe 20000
+}
+
+try {
+    Invoke-ConsoleAfterInstall $ouroborosExe (Test-ConsoleOptOut ([bool]$NoConsole) $env:OUROBOROS_NO_CONSOLE)
+} catch {
+    Write-Warn "Could not start the Ouroboros console: $($_.Exception.Message)"
+    Write-Info 'Start it any time with: ouroboros gui'
+}

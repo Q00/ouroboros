@@ -263,6 +263,15 @@ launcher is available.
 curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | OUROBOROS_INSTALL_REF=docs-getting-started bash
 ```
 
+Installer flags: `--runtime <name>`, `--reconfigure`, and `--no-console`. Through
+the pipe, pass them after `bash -s --` (for example `... | bash -s -- --no-console`).
+When the installed release includes the Ouroboros console (`ouroboros gui`) and
+the install finishes in an interactive desktop session, the installer starts the
+console in the background and opens it in your browser. In CI, without a
+terminal, without a display, or over SSH without a display, it only prints the
+command. Skip this step with `--no-console` or `OUROBOROS_NO_CONSOLE=1` (set it
+on the `bash` side of the pipe).
+
 ### Option 3: From Source (Contributors)
 
 ```bash
@@ -308,11 +317,17 @@ irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | i
 
 Options go through environment variables, same names as `install.sh`
 (`OUROBOROS_INSTALL_RUNTIME`, `OUROBOROS_INSTALL_RECONFIGURE`,
-`OUROBOROS_INSTALL_PRE`), or bind the script and pass parameters:
+`OUROBOROS_INSTALL_PRE`, `OUROBOROS_NO_CONSOLE`), or bind the script and pass
+parameters (`-Runtime`, `-Reconfigure`, `-Pre`, `-NoConsole`):
 
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1))) -Runtime claude -Reconfigure
 ```
+
+As with `install.sh`, a release that includes the Ouroboros console starts it in
+a hidden background process at the end of an interactive install and opens it in
+your browser; in CI, over SSH, or with redirected input it only prints
+`ouroboros gui`. `-NoConsole` or `OUROBOROS_NO_CONSOLE=1` skips this step.
 
 Open a new PowerShell window afterwards so the PATH change applies. Use
 Windows Terminal for `ouroboros config` (the TUI needs ANSI support; `cmd.exe`

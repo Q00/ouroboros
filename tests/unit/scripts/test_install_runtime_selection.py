@@ -160,6 +160,19 @@ def _installer_system_path() -> str:
     return str(_INSTALLER_SYSTEM_BIN)
 
 
+# Runs a command with a fresh pseudo-terminal as its controlling terminal, so
+# `/dev/tty` opens in the installer even when stdin is the `curl | bash` pipe.
+# setsid + TIOCSCTTY is what a terminal emulator does for its shell.
+_WITH_CONTROLLING_TTY = """
+import fcntl, os, sys, termios
+os.setsid()
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_NOCTTY)
+fcntl.ioctl(fd, termios.TIOCSCTTY, 0)
+os.close(fd)
+os.execvp(sys.argv[2], sys.argv[2:])
+"""
+
+
 def _run_installer(
     tmp_path: Path,
     *,
@@ -169,7 +182,16 @@ def _run_installer(
     env: dict[str, str] | None = None,
     drop_env: tuple[str, ...] = (),
     fake_commands: dict[str, str] | None = None,
+    args: tuple[str, ...] = (),
+    terminal: bool | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    """Run install.sh against stub commands under a temporary HOME.
+
+    ``terminal`` controls whether the installer can reach a terminal through
+    ``/dev/tty``: True gives it a fresh pseudo-terminal, False starts it in a
+    new session without one, and None inherits pytest's (the historical
+    behavior; such tests keep the console step off via OUROBOROS_NO_CONSOLE).
+    """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     tool_bin_dir = tmp_path / "uv-tool-bin"
@@ -231,6 +253,11 @@ exit 0
             # install. Off by default here so no test reaches the network by
             # accident; the bootstrap tests below opt back in with a fake curl.
             "OUROBOROS_INSTALL_BOOTSTRAP_UV": "0",
+            # The final console step would add an `ouroboros gui --help` probe
+            # to every call log and, from a developer's terminal, start the
+            # stub console. Tests of that step drop this (see
+            # test_install_console_start.py).
+            "OUROBOROS_NO_CONSOLE": "1",
         }
     )
     if env:
@@ -242,17 +269,49 @@ exit 0
     for key in drop_env:
         run_env.pop(key, None)
 
-    command = ["bash"] if piped else ["bash", str(install_sh)]
-    return subprocess.run(
-        command,
-        cwd=cwd,
-        env=run_env,
-        input=install_sh.read_text(encoding="utf-8") if piped else None,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=30,
-    )
+    command = ["bash", "-s", "--", *args] if piped else ["bash", str(install_sh), *args]
+    stdin_text = install_sh.read_text(encoding="utf-8") if piped else None
+    if terminal is None:
+        return subprocess.run(
+            command,
+            cwd=cwd,
+            env=run_env,
+            input=stdin_text,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+    if not terminal:
+        return subprocess.run(
+            command,
+            cwd=cwd,
+            env=run_env,
+            input=stdin_text,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=30,
+            start_new_session=True,
+        )
+    import pty
+
+    primary, secondary = pty.openpty()
+    try:
+        return subprocess.run(
+            [sys.executable, "-c", _WITH_CONTROLLING_TTY, os.ttyname(secondary), *command],
+            cwd=cwd,
+            env=run_env,
+            input=stdin_text,
+            stdin=None if piped else subprocess.DEVNULL,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+    finally:
+        os.close(primary)
+        os.close(secondary)
 
 
 def _assert_calls_select_target_extras(calls: str, extras: str) -> None:

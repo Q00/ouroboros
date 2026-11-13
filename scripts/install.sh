@@ -13,6 +13,16 @@
 # When no usable installer is present, uv is fetched from astral.sh because it
 # carries its own Python. Set OUROBOROS_INSTALL_BOOTSTRAP_UV=0 to decline that
 # and get installation instructions instead.
+#
+# Flags: --runtime <name>, --reconfigure, --no-console
+#   (through a pipe: curl -fsSL <url> | bash -s -- --no-console)
+#
+# Console: when the installed release ships `ouroboros gui` and the install
+# finishes in an interactive desktop session (a reachable terminal, no CI
+# variable, macOS or a Linux/WSL display or WSL browser bridge, and not an
+# SSH session without a display), the Ouroboros console starts in the
+# background and opens in the browser. Otherwise only the command is printed.
+# Skip it with --no-console or OUROBOROS_NO_CONSOLE=1.
 set -euo pipefail
 
 PACKAGE_NAME="ouroboros-ai"
@@ -24,6 +34,7 @@ IS_LOCAL=false
 RECONFIGURE="${OUROBOROS_INSTALL_RECONFIGURE:-}"
 EXPLICIT_RUNTIME="${OUROBOROS_INSTALL_RUNTIME:-}"
 BOOTSTRAP_UV="${OUROBOROS_INSTALL_BOOTSTRAP_UV:-1}"
+NO_CONSOLE_FLAG=""
 
 if [ -z "${NO_COLOR:-}" ] && { [ -t 1 ] || [ -n "${FORCE_COLOR:-}" ]; } && { [ "${TERM:-}" != "dumb" ] || [ -n "${FORCE_COLOR:-}" ]; }; then
   BOLD="$(printf '\033[1m')"
@@ -833,11 +844,15 @@ print(json.dumps(
 }
 # ---------------------------------------------------------------------------
 
-# Parse simple flags: --reconfigure, --runtime <name>
+# Parse simple flags: --reconfigure, --runtime <name>, --no-console
 while [ $# -gt 0 ]; do
   case "$1" in
     --reconfigure)
       RECONFIGURE="1"
+      shift
+      ;;
+    --no-console)
+      NO_CONSOLE_FLAG="1"
       shift
       ;;
     --runtime)
@@ -1613,3 +1628,290 @@ fi
 _blank
 _say "${BOLD}Like Ouroboros?${RESET}"
 _info "Give the repo a star on GitHub: https://github.com/Q00/ouroboros"
+
+# 7. Ouroboros console. Once the install is done, start the browser console so
+# a new user lands in a guided UI. It runs detached: the installer returns the
+# terminal, never waits on it beyond bounded checks, and never fails because of
+# it. Releases without `ouroboros gui` get no console output at all.
+
+# --no-console or OUROBOROS_NO_CONSOLE=1 skips this step. The variable takes a
+# closed set of values; anything else is reported and treated as an opt-out,
+# because not starting a background server is the safe reading.
+_console_opted_out() {
+  local value
+  [ -z "$NO_CONSOLE_FLAG" ] || return 0
+  value=$(printf '%s' "${OUROBOROS_NO_CONSOLE:-}" | tr '[:upper:]' '[:lower:]')
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  case "$value" in
+    '' | 0 | false | no | off) return 1 ;;
+    1 | true | yes | on) return 0 ;;
+    *)
+      _warn "OUROBOROS_NO_CONSOLE has an unrecognized value (expected 1 or 0); not starting the console."
+      return 0
+      ;;
+  esac
+}
+
+# Stop a background child within a fixed bound: SIGTERM, up to 1 s to exit,
+# then SIGKILL and up to 1 s more. Its status is collected only once it is
+# gone, so this never blocks on a child that refuses to die.
+_console_stop_child() {
+  local pid="$1" ticks=10
+  kill -TERM "$pid" 2>/dev/null || true
+  while [ "$ticks" -gt 0 ] && kill -0 "$pid" 2>/dev/null; do
+    ticks=$((ticks - 1))
+    sleep 0.1
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    ticks=10
+    while [ "$ticks" -gt 0 ] && kill -0 "$pid" 2>/dev/null; do
+      ticks=$((ticks - 1))
+      sleep 0.1
+    done
+  fi
+  if ! kill -0 "$pid" 2>/dev/null; then
+    wait "$pid" 2>/dev/null || true
+  fi
+}
+
+# Run a command with stdin closed and stderr discarded (stdout is the
+# caller's), giving it <ticks> tenths of a second. On timeout it is stopped
+# with _console_stop_child and the status is 124, so the whole call returns
+# within its limit plus 2 s.
+_console_run_bounded() {
+  local ticks="$1" pid
+  shift
+  "$@" </dev/null 2>/dev/null &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$ticks" -le 0 ]; then
+      _console_stop_child "$pid"
+      return 124
+    fi
+    ticks=$((ticks - 1))
+    sleep 0.1
+  done
+  wait "$pid"
+}
+
+# `ouroboros gui --help` exits 0 only on a release that ships the console;
+# older ones fail with "No such command". Telemetry is off for the probe since
+# it is not a real use.
+_console_supported() {
+  _console_run_bounded "$2" env OUROBOROS_TELEMETRY=0 DO_NOT_TRACK=1 "$1" gui --help >/dev/null
+}
+
+# Under `curl | bash` stdin is the pipe carrying this script, so a terminal is
+# reached through /dev/tty rather than fd 0.
+_console_has_terminal() {
+  { : </dev/tty; } 2>/dev/null
+}
+
+_console_is_wsl() {
+  if [ -n "${WSL_DISTRO_NAME:-}" ] || [ -n "${WSL_INTEROP:-}" ]; then
+    return 0
+  fi
+  grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null
+}
+
+# A browser can only be opened on this machine's screen: macOS, or Linux/WSL
+# with an X11/Wayland display, or WSL with a bridge to the Windows browser
+# (wslview, or BROWSER set). An SSH session without a display has none of these
+# for the person at the other end; on macOS the browser would open on the
+# remote Mac's screen even with X11 forwarding.
+_console_has_desktop() {
+  local ssh=false
+  if [ -n "${SSH_CONNECTION:-}${SSH_CLIENT:-}${SSH_TTY:-}" ]; then
+    ssh=true
+  fi
+  if [ "$(uname -s 2>/dev/null || true)" = "Darwin" ]; then
+    [ "$ssh" = false ]
+    return
+  fi
+  if [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    return 0
+  fi
+  [ "$ssh" = false ] || return 1
+  _console_is_wsl || return 1
+  [ -n "${BROWSER:-}" ] || command -v wslview >/dev/null 2>&1
+}
+
+# A Python to parse the console's JSON state with: the interpreter `ouroboros`
+# itself runs on (an absolute `#!/.../python*` shebang, as uv, pipx and pip
+# entry points have), else python3 on PATH. Nothing but a python-named
+# interpreter is ever run with the check, and a candidate counts only if it
+# imports json in isolated mode within the bound. Prints nothing and fails when
+# there is none.
+_console_json_python() {
+  local cmd="$1" path shebang candidate
+  path=$(command -v "$cmd" 2>/dev/null || true)
+  if [ -n "$path" ] && [ -f "$path" ] && [ -r "$path" ]; then
+    shebang=$(head -n 1 "$path" 2>/dev/null || true)
+    case "$shebang" in
+      '#!'/*)
+        candidate=${shebang#'#!'}
+        case "$candidate" in
+          *[[:space:]]*) ;;
+          */python | */python3 | */python3.[0-9]*)
+            if [ -x "$candidate" ] && _console_run_bounded 50 "$candidate" -I -c 'import json' >/dev/null; then
+              printf '%s' "$candidate"
+              return 0
+            fi
+            ;;
+        esac
+        ;;
+    esac
+  fi
+  candidate=$(command -v python3 2>/dev/null || true)
+  if [ -n "$candidate" ] && _console_run_bounded 50 "$candidate" -I -c 'import json' >/dev/null; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+  return 1
+}
+
+# Reads ~/.ouroboros/gui/server.json, written by `ouroboros gui` once it
+# listens, as JSON: only a well-formed top-level object whose own `host` is a
+# loopback name and whose own `port` is an integer in 1-65535 yields a URL.
+_CONSOLE_STATE_PARSER='
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        state = json.load(fh)
+except Exception:
+    sys.exit(1)
+if not isinstance(state, dict):
+    sys.exit(1)
+port = state.get("port")
+if state.get("host") not in ("127.0.0.1", "localhost", "0.0.0.0"):
+    sys.exit(1)
+if type(port) is not int or not 1 <= port <= 65535:
+    sys.exit(1)
+print("http://localhost:%d/" % port)
+'
+
+# Print the console URL from <state file> using <python>; fail closed (print
+# nothing) without a parser, for a file that is not a regular file, or for
+# anything the parser rejects. Bounded like every other child here.
+_console_state_url() {
+  local py="$1" state="$2"
+  [ -n "$py" ] || return 1
+  [ -f "$state" ] || return 1
+  _console_run_bounded 30 "$py" -I -c "$_CONSOLE_STATE_PARSER" "$state"
+}
+
+_console_next_hint() {
+  _blank
+  _say "${BOLD}Next:${RESET} open the Ouroboros console in your browser with: ouroboros gui"
+}
+
+_console_log_hint() {
+  [ "$1" = /dev/null ] || _info "Log: $1"
+}
+
+# Start `ouroboros gui` detached and wait until <seconds> have passed for it to
+# report its address (each check is itself bounded, so the wait ends within
+# <seconds> plus one parser bound). Ignoring SIGHUP (what nohup does) and,
+# where available, setsid keep it alive after this terminal closes. A console
+# that is already running is reused by `ouroboros gui`, which then only opens
+# the browser and exits 0.
+_console_start() {
+  local cmd="$1" seconds="$2" dir="$HOME/.ouroboros/gui" state log py before current last url="" pid status="" deadline
+  state="$dir/server.json"
+  log="$dir/console.log"
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    log=/dev/null
+  elif [ -L "$log" ] || { [ -e "$log" ] && [ ! -f "$log" ]; }; then
+    log=/dev/null # never follow a link or write into a FIFO or device
+  elif [ -e "$log" ] && ! chmod 600 "$log" 2>/dev/null; then
+    log=/dev/null # an existing log stays private, or is not used at all
+  fi
+  py=$(_console_json_python "$cmd" || true)
+  if [ -z "$py" ]; then
+    # Without a parser the URL cannot be confirmed; only watch for an
+    # immediate failure, then hand over to the reopen hint.
+    [ "$seconds" -le 3 ] || seconds=3
+  fi
+  before=""
+  if [ -f "$state" ]; then
+    before=$(cat "$state" 2>/dev/null || true)
+  fi
+  last="$before"
+  (
+    trap '' HUP
+    umask 077
+    # Python's webbrowser does not know wslview; point it there when WSL has
+    # no browser configured, which is the bridge _console_has_desktop found.
+    if _console_is_wsl && [ -z "${BROWSER:-}" ] && command -v wslview >/dev/null 2>&1; then
+      export BROWSER=wslview
+    fi
+    if command -v setsid >/dev/null 2>&1; then
+      exec setsid "$cmd" gui </dev/null >>"$log" 2>&1
+    fi
+    exec "$cmd" gui </dev/null >>"$log" 2>&1
+  ) &
+  pid=$!
+  deadline=$((SECONDS + seconds))
+
+  while :; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      if wait "$pid" 2>/dev/null; then status=0; else status=$?; fi
+      break
+    fi
+    if [ -f "$state" ]; then
+      current=$(cat "$state" 2>/dev/null || true)
+      if [ -n "$current" ] && [ "$current" != "$last" ]; then
+        last="$current"
+        url=$(_console_state_url "$py" "$state" || true)
+        [ -z "$url" ] || break
+      fi
+    fi
+    [ "$SECONDS" -lt "$deadline" ] || break
+    sleep 0.1
+  done
+
+  if [ -n "$url" ]; then
+    _ok "The Ouroboros console is running in the background at $url"
+    _info "It opens in your browser. Stop it with \"Stop console\" at the bottom of its sidebar."
+    _info "Reopen it any time with: ouroboros gui"
+    _console_log_hint "$log"
+  elif [ "$status" = 0 ]; then
+    url=$(_console_state_url "$py" "$state" || true)
+    if [ -n "$url" ]; then
+      _ok "The Ouroboros console is already running at $url; opened it in your browser."
+      _info "Reopen it any time with: ouroboros gui"
+    else
+      _warn "Could not confirm that the Ouroboros console started."
+      _console_log_hint "$log"
+      _info "Start it any time with: ouroboros gui"
+    fi
+  elif [ -n "$status" ]; then
+    _warn "The Ouroboros console did not start (exit $status). The installation itself is complete."
+    _console_log_hint "$log"
+    _info "Start it any time with: ouroboros gui"
+  else
+    _info "The Ouroboros console is still starting in the background; it opens in your browser when ready."
+    _info "Stop it with \"Stop console\" at the bottom of its sidebar. Reopen it any time with: ouroboros gui"
+    _console_log_hint "$log"
+  fi
+}
+
+_console_after_install() {
+  local cmd="$1"
+  if _console_opted_out; then
+    return 0
+  fi
+  [ -n "$cmd" ] || return 0
+  _console_supported "$cmd" 150 || return 0
+  if [ -n "${CI+x}" ] || ! _console_has_terminal || ! _console_has_desktop; then
+    _console_next_hint
+    return 0
+  fi
+  _blank
+  _say "${BLUE}◆${RESET} ${BOLD}Ouroboros console${RESET}"
+  _console_start "$cmd" 20
+}
+
+_console_after_install "${OUROBOROS_SETUP_CMD:-}" || true
