@@ -1,0 +1,284 @@
+# Which docs describe which source files.
+#
+# When a pull request changes a file matched by an entry's `sources`, the
+# advisory `doc-impact (advisory)` job lists each of that entry's `docs` the
+# pull request did not also change, so a reviewer can check whether the prose
+# still holds. It never blocks a merge. Tracking issue: Q00/ouroboros#2921 (D9).
+#
+# Schema: a list of entries, each with
+#   sources: [glob, ...]   repository-relative; `*` and `?` stay inside one path
+#                          segment, `**` spans any number of segments
+#   docs:    [path, ...]   repository-relative files, no globs
+#   note:    string        optional; what to look at in those docs
+#
+# Check it locally:
+#   uv run python3 scripts/check-doc-impact.py --validate
+#   uv run python3 scripts/check-doc-impact.py --base origin/main
+#
+# This is the single source for the "Doc Mapping" sections of CONTRIBUTING.md.
+# Keep the groups below in the order of those sections.
+
+# --- CLI Commands -------------------------------------------------------------
+
+- sources: [src/ouroboros/cli/commands/init.py]
+  docs: [docs/cli-reference.md, docs/getting-started.md]
+  note: >-
+    cli-reference.md: `init` command section (flags, examples).
+    getting-started.md: interview workflow, introductory `ooo init` /
+    `ouroboros init` examples, onboarding flow.
+- sources: [src/ouroboros/cli/commands/init.py]
+  docs: [docs/runtime-guides/claude-code.md, docs/runtime-guides/codex.md]
+  note: Only if `--orchestrator` or `--runtime` behavior changes.
+
+- sources: [src/ouroboros/cli/commands/run.py]
+  docs: [docs/cli-reference.md, docs/getting-started.md]
+  note: >-
+    cli-reference.md: `run` command section (flags, examples, defaults).
+    getting-started.md: execution workflow, `ooo run` / `ouroboros run` examples.
+- sources: [src/ouroboros/cli/commands/run.py]
+  docs: [docs/runtime-guides/claude-code.md, docs/runtime-guides/codex.md]
+  note: Only if `--runtime` semantics change.
+- sources: [src/ouroboros/cli/commands/run.py]
+  docs: [docs/runtime-capability-matrix.md]
+  note: Only if a runtime backend is added or removed.
+
+- sources: [src/ouroboros/cli/commands/config.py]
+  docs: [docs/cli-reference.md, docs/getting-started.md]
+  note: >-
+    cli-reference.md: `config` command section, which is authoritative for the
+    implemented subcommands. getting-started.md: configuration management.
+
+- sources: [src/ouroboros/cli/commands/status.py]
+  docs: [docs/cli-reference.md]
+  note: >-
+    `status` command section. Mark only the placeholder subcommands
+    (`executions`, `execution`, `health`) `[Placeholder — not yet implemented]`;
+    `auto` and `run` are implemented.
+
+- sources: [src/ouroboros/cli/commands/mcp.py]
+  docs: [docs/cli-reference.md, docs/api/mcp.md]
+  note: "cli-reference.md: `mcp` command section. api/mcp.md: MCP server/client configuration."
+
+- sources: [src/ouroboros/cli/commands/setup.py]
+  docs: [docs/cli-reference.md, docs/getting-started.md]
+  note: "cli-reference.md: `setup` command section. getting-started.md: setup step in onboarding."
+
+- sources: [src/ouroboros/cli/commands/tui.py]
+  docs: [docs/cli-reference.md, docs/guides/tui-usage.md]
+  note: "cli-reference.md: `tui` command section."
+
+- sources: [src/ouroboros/cli/commands/cancel.py]
+  docs: [docs/cli-reference.md]
+  note: "`cancel` command section."
+
+# --- Orchestrator -------------------------------------------------------------
+
+- sources: [src/ouroboros/orchestrator/runtime_factory.py]
+  docs:
+    - docs/runtime-capability-matrix.md
+    - docs/runtime-guides/claude-code.md
+    - docs/runtime-guides/codex.md
+  note: If a backend is added, removed, or changes its `NotImplementedError` status.
+- sources: [src/ouroboros/orchestrator/adapter.py]
+  docs: [docs/runtime-guides/claude-code.md]
+  note: "`ClaudeAgentAdapter`: permission modes, session flow."
+- sources: [src/ouroboros/orchestrator/codex_cli_runtime.py]
+  docs: [docs/runtime-guides/codex.md]
+  note: "`CodexCliRuntime`: permission modes, `--runtime codex` behavior."
+- sources: [src/ouroboros/orchestrator/copilot_acp_runtime.py]
+  docs:
+    - docs/runtime-guides/copilot-acp.md
+    - docs/runtime-guides/copilot.md
+    - docs/runtime-capability-matrix.md
+  note: "`CopilotAcpRuntime`: transport selection, streaming, permissions, fallback."
+- sources: [src/ouroboros/orchestrator/runtime_message_projection.py]
+  docs: [docs/architecture.md]
+  note: Normalized progress, delta persistence and replay metadata.
+- sources: [src/ouroboros/orchestrator/opencode_runtime.py]
+  docs: [docs/runtime-capability-matrix.md, docs/runtime-guides/opencode.md]
+  note: "`OpenCodeRuntime`: permission modes, `--runtime opencode` behavior."
+- sources: [src/ouroboros/orchestrator/runner.py]
+  docs: [docs/architecture.md, docs/getting-started.md]
+  note: >-
+    `OrchestratorRunner`. architecture.md: orchestration lifecycle.
+    getting-started.md: session ID output, resume flow.
+- sources: [src/ouroboros/orchestrator/runner_factory.py]
+  docs: [docs/architecture.md]
+  note: Shared runner assembly for CLI, MCP, and evolution.
+- sources: [src/ouroboros/orchestrator/cancellation.py]
+  docs: [docs/architecture.md]
+  note: "`CancellationLifecycle`: cancellation lifecycle and runner delegation."
+- sources: [src/ouroboros/orchestrator/process_local_authority.py]
+  docs: [docs/architecture.md]
+  note: "`ProcessLocalAuthorityLifecycle`: authority lifecycle and runner delegation."
+- sources: [src/ouroboros/orchestrator/project_anchor.py]
+  docs: [docs/architecture.md, docs/getting-started.md]
+  note: >-
+    `ProjectAnchor`. architecture.md: project/workspace identity, proof and
+    legacy representations, resolver error ownership. getting-started.md:
+    resume workspace identity compatibility.
+- sources: [src/ouroboros/orchestrator/parallel_executor.py]
+  docs: [docs/cli-reference.md, docs/architecture.md]
+  note: "cli-reference.md: `--sequential` flag behavior. architecture.md: parallel execution strategy."
+- sources: [src/ouroboros/orchestrator/coordinator.py]
+  docs: [docs/architecture.md]
+  note: "`LevelCoordinator`: inter-level conflict resolution and coordinator review gate."
+- sources: [src/ouroboros/orchestrator/session.py]
+  docs: [docs/cli-reference.md]
+  note: Session ID format, resume semantics.
+- sources: [src/ouroboros/orchestrator/workflow_state.py]
+  docs: [docs/architecture.md, docs/guides/tui-usage.md]
+  note: >-
+    architecture.md: AC state machine, `ActivityType` values. tui-usage.md: if
+    activity display changes.
+- sources: [src/ouroboros/orchestrator/dependency_analyzer.py]
+  docs: [docs/architecture.md]
+  note: Dependency level computation.
+- sources: [src/ouroboros/orchestrator/execution_strategy.py]
+  docs: [docs/architecture.md, docs/guides/seed-authoring.md]
+  note: >-
+    architecture.md: execution strategy types (`code`, `research`,
+    `analysis`). seed-authoring.md: if strategy selection is user-facing.
+- sources:
+    - src/ouroboros/orchestrator/mcp_config.py
+    - src/ouroboros/orchestrator/mcp_tools.py
+  docs: [docs/api/mcp.md]
+  note: MCP config YAML schema.
+- sources: [src/ouroboros/orchestrator/command_dispatcher.py]
+  docs: [docs/architecture.md]
+  note: Command dispatch model.
+- sources: [src/ouroboros/orchestrator/level_context.py]
+  docs: [docs/architecture.md]
+  note: Level context.
+- sources: [src/ouroboros/orchestrator/evidence/command_replay.py]
+  docs: [docs/contributing/verifier-evidence-policy.md]
+  note: Replay selection, isolation, output-filter pipelines, claim linkage and the denylist.
+- sources: [src/ouroboros/orchestrator/evidence/replay_policy.py]
+  docs: [docs/contributing/verifier-evidence-policy.md]
+  note: >-
+    The replay allowlist, wrapper and launcher resolution, test-target linkage
+    and configuration narrowing.
+- sources:
+    - src/ouroboros/runtime/exec_sandbox.py
+    - src/ouroboros/runtime/_confine_exec.py
+    - src/ouroboros/runtime/_sandbox_probe.py
+  docs: [docs/contributing/verifier-evidence-policy.md]
+  note: >-
+    The `exec_sandbox` module docstring is the contract (writable roots,
+    metadata, network, environment, backends, probe, unavailable reasons);
+    callers document their use of it, here verifier replay.
+
+# --- Capability Graph ---------------------------------------------------------
+
+- sources: [skills/*/SKILL.md]
+  docs: [docs/runtime-guides/skill-capability-guides.md]
+  note: >-
+    If `required_capabilities` changes or the skill depends on a new abstract
+    runtime action.
+- sources: [src/ouroboros/backends/capabilities.py]
+  docs: [docs/runtime-guides/skill-capability-guides.md]
+  note: >-
+    Also update the renderer/package snapshot tests for Codex, Hermes, Claude,
+    and setup-owned runtime artifacts.
+- sources: [src/ouroboros/backends/capabilities.py]
+  docs: [.claude-plugin/SKILL_CAPABILITY_GUIDE.md]
+  note: >-
+    Packaged guide snapshot: update when
+    `render_backend_skill_capability_guide(<backend>)` output changes.
+- sources: [src/ouroboros/runtime_instruction_artifacts.py]
+  docs: [docs/runtime-guides/skill-capability-guides.md, docs/cli-reference.md]
+  note: "cli-reference.md: `setup` section, if install paths or managed surfaces change."
+
+# --- Configuration ------------------------------------------------------------
+
+- sources: [src/ouroboros/config/models.py]
+  docs: [docs/config-reference.md]
+  note: The configuration reference documents every key of the config models.
+- sources: [src/ouroboros/config/models.py]
+  docs: [docs/cli-reference.md, README.md]
+  note: "`OrchestratorConfig` (`orchestrator.*`): cli-reference.md `--runtime` flag; README.md config snippet."
+- sources: [src/ouroboros/config/models.py]
+  docs: [docs/architecture.md, docs/api/core.md]
+  note: "`LLMConfig` (`llm.*`): model defaults."
+- sources: [src/ouroboros/config/models.py]
+  docs: [docs/architecture.md]
+  note: >-
+    `EconomicsConfig` / `TierConfig` (`economics.*`): tier descriptions.
+    `ExecutionConfig` (`execution.*`): iteration limits. `ResilienceConfig`
+    (`resilience.*`): stagnation/lateral thinking. `EvaluationConfig`
+    (`evaluation.*`): three-stage evaluation. `ConsensusConfig`
+    (`consensus.*`): Stage 3 consensus. `DriftConfig` (`drift.*`): drift
+    monitoring thresholds.
+- sources: [src/ouroboros/config/models.py]
+  docs: [docs/guides/seed-authoring.md]
+  note: "`ClarificationConfig` (`clarification.*`): ambiguity threshold."
+- sources: [src/ouroboros/config/models.py]
+  docs: [docs/getting-started.md, README.md]
+  note: >-
+    `PersistenceConfig` (`persistence.*`): getting-started.md database path.
+    For a new config key, check both for sample `config.yaml` snippets.
+- sources: [src/ouroboros/config/loader.py]
+  docs: [docs/getting-started.md, docs/config-reference.md, README.md]
+  note: >-
+    If the config file search path, environment variable names, or YAML
+    loading change. getting-started.md: config file location.
+    config-reference.md: environment variable overrides. README.md: any
+    config bootstrap snippet.
+
+# --- Evaluation Pipeline ------------------------------------------------------
+
+- sources: [src/ouroboros/evaluation/pipeline.py]
+  docs: [docs/architecture.md, docs/guides/evaluation-pipeline.md]
+  note: "architecture.md: Stage 1 Mechanical, Stage 2 Semantic, Stage 3 Consensus descriptions."
+- sources: [src/ouroboros/evaluation/trigger.py]
+  docs: [docs/architecture.md, docs/guides/evaluation-pipeline.md]
+  note: >-
+    architecture.md: consensus trigger thresholds. evaluation-pipeline.md:
+    when Stage 3 is invoked.
+- sources: [src/ouroboros/evaluation/mechanical.py]
+  docs: [docs/guides/evaluation-pipeline.md]
+  note: Stage 1 check list.
+- sources: [src/ouroboros/evaluation/models.py]
+  docs: [docs/api/core.md]
+  note: Evaluation result types.
+- sources: [src/ouroboros/evaluation/artifact_collector.py]
+  docs: [docs/architecture.md]
+  note: Artifact collection.
+
+# --- TUI Source ---------------------------------------------------------------
+
+- sources: [src/ouroboros/tui/screens/*.py]
+  docs: [docs/guides/tui-usage.md]
+  note: >-
+    Key bindings (`BINDINGS = [...]`) are user-facing and must be listed;
+    dashboard layout (`dashboard_v3.py`), lineage navigation
+    (`lineage_selector.py`, `lineage_detail.py`); a new screen needs a new
+    section.
+- sources: [src/ouroboros/tui/screens/*.py]
+  docs: [docs/cli-reference.md]
+  note: Only if a new key binding or `tui` sub-command is introduced.
+- sources: [src/ouroboros/tui/widgets/ac_tree.py]
+  docs: [docs/guides/tui-usage.md, docs/architecture.md]
+  note: "tui-usage.md: AC tree display. architecture.md: if AC state rendering changes."
+- sources: [src/ouroboros/tui/widgets/phase_progress.py]
+  docs: [docs/guides/tui-usage.md]
+  note: Phase progress bar.
+
+# --- Skills / Plugin ----------------------------------------------------------
+
+- sources: [src/ouroboros/codex/ouroboros.md]
+  docs: [docs/runtime-guides/codex.md]
+  note: If the managed Codex rules (installed into `~/.codex/rules/`) change.
+- sources: [skills/*/SKILL.md, src/ouroboros/agents/*.md]
+  docs: [docs/runtime-guides/skill-capability-guides.md]
+  note: >-
+    If required capabilities change. Also update the `docs/` guide that
+    describes the affected skill or agent behavior.
+- sources: [src/ouroboros/plugin/skills/executor.py]
+  docs: [docs/architecture.md]
+  note: Skill execution model.
+- sources: [src/ouroboros/plugin/agents/registry.py]
+  docs: [docs/architecture.md, docs/runtime-capability-matrix.md]
+  note: >-
+    architecture.md: agent registry. runtime-capability-matrix.md: if
+    supported agents change per runtime.

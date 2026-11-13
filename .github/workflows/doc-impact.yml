@@ -1,0 +1,46 @@
+name: doc-impact
+
+# Advisory: lists, in the job summary, the docs that `docs/doc-map.yml` maps to
+# files this pull request changes, when the pull request does not change those
+# docs (Q00/ouroboros#2921, item D9). Prose about behavior cannot be verified
+# mechanically, so this only points a reviewer at it.
+#
+# Not a required status check, and findings never fail the job. The job fails
+# only when the map itself is broken (a mapped doc that is not tracked, a glob
+# that matches nothing, malformed YAML) or git fails. Whether it should ever
+# block is a maintainer decision, to be made after it has produced data.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  doc-impact:
+    name: doc-impact (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          # The report diffs against the merge base with the PR's base
+          # commit, so the history between them must be present.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install PyYAML
+        # Same version as uv.lock; the script needs nothing else.
+        run: python3 -m pip install --disable-pip-version-check "pyyaml==6.0.3"
+
+      - name: Validate docs/doc-map.yml
+        run: python3 scripts/check-doc-impact.py --validate
+
+      - name: Report mapped docs this PR does not change
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 scripts/check-doc-impact.py --base "${BASE_SHA}"

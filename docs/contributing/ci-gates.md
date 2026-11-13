@@ -63,6 +63,7 @@ defect, not as noise.
 | enforce-module-size | — | `module-size.yml` | every `src/ouroboros/**/*.py` |
 | enforce-envelope | — | `max-turns-envelope.yml` | any call passing `max_turns=1` |
 | enforce-perf-budget | — | `auto-perf-budget.yml` | PRs touching `src/ouroboros/auto/` |
+| doc-impact (advisory) | — | `doc-impact.yml` | every PR to `main`; reports only, never fails on findings |
 
 ### Reproduce the required checks locally
 
@@ -166,6 +167,28 @@ Two behaviors worth knowing:
   passing. A red gate here is not always about your table.
 - Keep metric-shaped prose out of the surrounding text — the parser locks onto
   the first matching line.
+
+### doc-impact (advisory) (`doc-impact.yml`)
+
+Lists, in the job summary and as `::notice` annotations, every doc that
+[`docs/doc-map.yml`](../doc-map.yml) maps to a file the PR changes, when the PR
+does not change that doc. It points a reviewer at prose that may have gone
+stale; it does not judge it. Findings never fail the job, and it is not a
+required check; whether it should ever block is a maintainer decision
+([#2921](https://github.com/Q00/ouroboros/issues/2921)).
+
+```bash
+uv run python3 scripts/check-doc-impact.py --validate
+uv run python3 scripts/check-doc-impact.py --base origin/main
+```
+
+The job goes red only when the map itself is broken or git fails:
+`--validate` exits 1 when a mapped doc is not a tracked file, a source glob
+matches no tracked file, or the YAML is malformed, and 3 when git fails.
+`tests/unit/scripts/test_check_doc_impact.py` runs `--validate` against the
+real map inside the required `Test Python 3.12` job, so a rename that strands
+an entry is caught there. When you add, move, or remove a mapped source or doc,
+update the map in the same PR.
 
 ## Releases
 
