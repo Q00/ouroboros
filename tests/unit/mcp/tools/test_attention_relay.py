@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import ast
 from datetime import UTC, datetime, timedelta
+import inspect
+import re
 from typing import Any, cast
 
 import pytest
 
 from ouroboros.events.base import BaseEvent
-from ouroboros.mcp.tools.attention_relay import classify_relay_events
+from ouroboros.events.session_signal import SESSION_SIGNAL_EVENT_TYPES
+from ouroboros.mcp.tools import attention_relay
+from ouroboros.mcp.tools.attention_relay import (
+    RELAY_SOURCE_EVENT_TYPES,
+    classify_relay_events,
+    may_emit_relay,
+)
 from ouroboros.persistence.event_store import acceptance_generation_id_for_session
 
 _BASE = datetime(2026, 7, 13, tzinfo=UTC)
@@ -660,3 +669,167 @@ def test_malformed_evidence_fails_closed() -> None:
     relays = classify_relay_events([malformed], job_id="job_1")
 
     assert not any(relay.get("trigger") == "deliver_verdict_rejected_streak" for relay in relays)
+
+
+# --- may_emit_relay drift guard -------------------------------------------
+#
+# ``JobWaitHandler`` skips the linked-history read for a non-terminal page
+# unless ``may_emit_relay`` holds for one of the page's event types.  The guard
+# below derives the emitting types from the classifier itself, so a new
+# classifier branch whose source type the predicate misses fails here instead
+# of silently losing relays.
+
+_DOTTED = re.compile(r"[a-z_]+(?:\.[a-z_]+)+\.?")
+_EMITTING_FUNCTIONS = ("_proactive_relays", "classify_relay_events")
+
+
+def _dotted_literals(tree: ast.AST) -> set[str]:
+    return {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and _DOTTED.fullmatch(node.value)
+    }
+
+
+def _candidate_event_types() -> set[str]:
+    """Every event type the classifier module names, plus every SessionSignal state."""
+    literals = _dotted_literals(ast.parse(inspect.getsource(attention_relay)))
+    candidates = {literal for literal in literals if not literal.endswith(".")}
+    candidates |= {prefix + "future_state" for prefix in literals if prefix.endswith(".")}
+    candidates |= set(SESSION_SIGNAL_EVENT_TYPES.values())
+    candidates |= {
+        "execution.tool.called",
+        "execution.subtask.updated",
+        "workflow.progress.updated",
+        "mcp.job.updated",
+    }
+    return candidates
+
+
+# Payload shapes, taken from the fixtures above, that reach every data-dependent
+# emitting branch when paired with the matching event type.
+_PAYLOADS: tuple[dict[str, object], ...] = (
+    {},
+    {
+        "semantic_ac_key": "ac_0123456789abcdef",
+        "root_ac_index": 0,
+        "model_tier": "frontier",
+        "model": "gpt-5.5",
+        "model_escalated": True,
+        "retry_attempt": 2,
+        "traceguard_verdict": "rejected",
+        "rejected_reasons": ["missing repository evidence"],
+        "status": "fail_no_frugality",
+        "reason": "bounded reason",
+    },
+    {
+        "root_ac_index": 0,
+        "observation": {"route_id": "cheap", "failure_class": "EVIDENCE_MISSING"},
+        "decision": {
+            "action": "escalate_route",
+            "selected_route": {"route_id": "standard"},
+            "reason": "classified_failure",
+        },
+        "human_handoff_required": False,
+    },
+    {
+        "root_ac_index": 0,
+        "observation": {"route_id": "frontier", "failure_class": "EVIDENCE_MISSING"},
+        "decision": {"action": "blocked", "reason": "routes_exhausted"},
+        "human_handoff_required": True,
+    },
+    {
+        "root_ac_index": 0,
+        "final_retry_attempt": 0,
+        "accepted": True,
+        "acceptance_generation_id": acceptance_generation_id_for_session("orch_1", "exec_1"),
+        "outcome": "succeeded",
+        "disposition": "accepted",
+        "terminal_status": "completed",
+    },
+)
+
+
+def _emitting_source_types() -> set[str]:
+    """Run the classifier over synthetic histories and return every relay's source type."""
+    emitting: set[str] = set()
+    for event_type in sorted(_candidate_event_types()):
+        for payload in _PAYLOADS:
+            single = [_event(1, event_type, payload)]
+            # Streak branches need the same type twice in a row.
+            streak = [*single, _event(2, event_type, payload)]
+            for history in (single, streak):
+                by_id = {event.id: event for event in history}
+                for session_id in (None, "orch_1"):
+                    for relay in classify_relay_events(
+                        history, job_id="job_1", session_id=session_id
+                    ):
+                        emitting.add(by_id[cast(str, relay["source_event_id"])].type)
+    return emitting
+
+
+def test_may_emit_relay_covers_every_type_the_classifier_emits_for() -> None:
+    emitting = _emitting_source_types()
+
+    # The fixtures above must reach every declared source branch; otherwise this
+    # guard would pass vacuously for a branch it never exercised.
+    assert sorted(RELAY_SOURCE_EVENT_TYPES - emitting) == []
+    # SessionSignal lifecycle states outside the set are relayed too.
+    assert {
+        "control.session.signal.requested",
+        "control.session.signal.accepted",
+        "control.session.signal.delivering",
+    } <= emitting - RELAY_SOURCE_EVENT_TYPES
+    assert sorted(t for t in emitting if not may_emit_relay(t)) == []
+
+
+def test_may_emit_relay_covers_every_type_named_in_emitting_branches() -> None:
+    """Static half of the guard: data-dependent branches a payload might miss."""
+    tree = ast.parse(inspect.getsource(attention_relay))
+    named: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name in _EMITTING_FUNCTIONS:
+            named |= _dotted_literals(node)
+    assert named, "emitting functions not found; update _EMITTING_FUNCTIONS"
+    for literal in sorted(named):
+        probe = literal + "future_state" if literal.endswith(".") else literal
+        assert may_emit_relay(probe), literal
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        "execution.tool.called",
+        "execution.subtask.updated",
+        "workflow.progress.updated",
+        "mcp.job.updated",
+        "execution.session.started",
+    ],
+)
+def test_page_without_relay_source_classifies_to_nothing(event_type: str) -> None:
+    """What the handler skip relies on: such a page yields no relay at all."""
+    history = [
+        _event(index, candidate, payload)
+        for index, (candidate, payload) in enumerate(
+            (
+                (candidate, payload)
+                for candidate in sorted(RELAY_SOURCE_EVENT_TYPES)
+                for payload in _PAYLOADS
+            ),
+            start=1,
+        )
+    ]
+    page_event = _event(len(history) + 1, event_type, _PAYLOADS[1])
+    assert not may_emit_relay(event_type)
+    for session_id in (None, "orch_1"):
+        assert (
+            classify_relay_events(
+                [*history, page_event],
+                new_event_ids={page_event.id},
+                job_id="job_1",
+                session_id=session_id,
+            )
+            == []
+        )
