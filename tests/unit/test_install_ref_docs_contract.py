@@ -18,14 +18,15 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# Each surface may carry more than one one-liner (#2122 added a hero copy above
-# the demo table). Every occurrence is checked, not just the first: a `search`
-# that stops at the first match is how the hero copy landed without this
-# contract noticing it at all.
+# A surface may carry more than one one-liner (#2122 once added a hero copy
+# above the demo table; the simplified READMEs went back to a single Install
+# block). Every occurrence is checked, not just the first: a `search` that
+# stops at the first match is how the hero copy landed without this contract
+# noticing it at all.
 DOC_SURFACES = {
-    "README.md": ("readme", "readme-hero"),
-    "README.ko.md": ("readme-ko", "readme-hero-ko"),
-    "README.zh-CN.md": ("readme-zh", "readme-hero-zh"),
+    "README.md": ("readme",),
+    "README.ko.md": ("readme-ko",),
+    "README.zh-CN.md": ("readme-zh",),
     "docs/getting-started.md": ("docs-getting-started",),
 }
 

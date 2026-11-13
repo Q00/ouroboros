@@ -393,7 +393,10 @@ def test_installer_old_schema_without_telemetry_fails_closed(tmp_path: Path) -> 
 def test_readme_mcp_v2_default_selects_claude_cli_worker() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     assert "pip install 'ouroboros-ai[mcp,tui]' && ouroboros setup --runtime claude-cli" in readme
-    assert "ouroboros-ai[claude]" in readme
+    # The full profile list, including the isolated MCP 1.x Claude SDK profile,
+    # lives in the onboarding guide that the README links to.
+    getting_started = (REPO_ROOT / "docs" / "getting-started.md").read_text(encoding="utf-8")
+    assert "ouroboros-ai[claude]" in getting_started
 
 
 def test_copied_installer_dangling_config_symlink_fails_closed(tmp_path: Path) -> None:

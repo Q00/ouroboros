@@ -65,6 +65,15 @@ ooo run
 > **Directly configure models** to select a model for each pipeline stage. You
 > can reopen those settings any time with `ooo config`.
 
+> **Explicit setup and the Seed check.** In Claude Code you can invoke setup
+> explicitly as `/ouroboros:setup`; finish its questions, then send the
+> interview request as a separate message. After the Interview confirms the
+> agreed goal, request `ooo seed` and inspect the returned YAML before
+> execution. Interview completion alone does not prove that a Seed exists, and
+> the standalone CLI and Auto have separate generation flows. See the
+> [Interview](../skills/interview/SKILL.md) and [Seed](../skills/seed/SKILL.md)
+> skills.
+
 ---
 
 ### Alternative: Standalone CLI (`ouroboros`)
@@ -90,6 +99,21 @@ After the interview produces a Seed, run it with:
 ouroboros run ~/.ouroboros/seeds/seed_abc123.yaml
 ```
 
+To have Claude Code drive the interview from a plain terminal, without an agent
+host session (the [terminal CLI recording](how-ouroboros-works.md#see-it-on-each-host)
+shows this exact command):
+
+```bash
+ouroboros init start --orchestrator "I want to build a task management CLI tool"
+```
+
+> **Before you run it.** This path calls models and can execute commands and
+> change project files. To inspect the generated Seed first, answer `n` to
+> `Start workflow now?`, whose default is Yes. Some Codex execution paths
+> request `--dangerously-bypass-approvals-and-sandbox`; a worktree is not OS
+> isolation. See [permission scope](../skills/help/TROUBLESHOOTING.md#permission-scope)
+> before running an untrusted project.
+
 ### Codex first use
 
 For the Codex plugin, add the marketplace and install Ouroboros. This needs
@@ -114,6 +138,16 @@ ooo interview "Build a task management CLI"
 current default model automatically. Choose **Directly configure models** only
 when you want to choose or pin a model for a pipeline stage; in Codex this
 opens the local settings UI in your browser at a temporary `localhost` address.
+
+> **Checking the plugin.** In the Codex CLI TUI, `/mcp` shows active servers; a
+> listing alone does not prove a tool call succeeds. The plugin's skill
+> discovery and its bundled MCP server are separate capabilities, so an absent
+> entry in `codex mcp list` or a `CODEX_SETUP_REQUIRED` welcome notice does not
+> by itself establish that the plugin server is broken. Inspect the current
+> host session first; see
+> [connection troubleshooting](../skills/help/TROUBLESHOOTING.md#mcp-connection-or-authentication-fails).
+> Windows PowerShell installation does not prepare WSL automatically; see
+> [platform support](platform-support.md) for native Windows limitations.
 
 For a standalone Codex CLI installation without the plugin, prepare the
 integration once:
@@ -210,6 +244,20 @@ ouroboros --version
 > Core and non-LiteLLM installs support Python 3.12-3.14. See the [Python profile matrix](platform-support.md#python-profile-matrix).
 > Legacy note: `ouroboros-ai[dashboard]` is still accepted as a compatibility alias/no-op and does not install dashboard runtime payload; `[all]` includes that no-op alias only for compatibility.
 
+Other MCP v2-compatible runtimes you can pass instead of `claude-cli` include
+`codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, and
+`gjc`.
+
+`pip install 'ouroboros-ai[mcp]'` is valid for embedding the MCP client/server
+library in an already isolated Python environment, but host registration
+requires `uvx --isolated --python '>=3.12'` or `pipx`. Use
+`pipx install 'ouroboros-ai[mcp]'` or `uv tool install 'ouroboros-ai[mcp]'`
+before `ouroboros setup --runtime <claude-cli|codex|opencode|hermes|gemini|goose|kiro|copilot|pi|gjc>`;
+setup exits without changing runtime configuration when neither isolated
+launcher is available.
+
+> **Installing as an MCP server: use 0.51.1 or later.** Earlier versions can fail at startup with `Failed to reconnect to plugin:ouroboros:ouroboros: -32000` when an existing environment shadows the `[mcp]` profile ([#2012](https://github.com/Q00/ouroboros/issues/2012)). This matters if you install through a downstream package rather than PyPI, since those can lag.
+
 **One-liner alternative** (auto-detects your runtime and installs matching extras):
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | OUROBOROS_INSTALL_REF=docs-getting-started bash
@@ -235,6 +283,16 @@ uv run --python 3.13 pytest tests/unit/ -q
 ```
 
 > See [CONTRIBUTING.md](../CONTRIBUTING.md) for the full contributor setup (linting, testing, pre-commit hooks).
+
+### Option 4: Homebrew (macOS/Linux)
+
+```bash
+brew tap q00/tap
+brew install ouroboros-ai
+ouroboros setup                         # configure runtime
+```
+
+Self-hosted tap, not yet in homebrew-core. Installs the same package published to PyPI.
 
 ### Windows users
 
@@ -278,11 +336,29 @@ installation fails, see
 | Standalone CLI (`ouroboros`) | Python >= 3.12, API key (Anthropic or OpenAI) |
 | Codex CLI backend | Python >= 3.12, `npm install -g @openai/codex`, and a signed-in Codex CLI account with access to a Codex-supported model |
 | OpenCode backend | Python >= 3.12, `opencode` on PATH, provider configured in OpenCode |
-| Kiro CLI backend | Python >= 3.12, `kiro-cli` on PATH (signed in to Kiro), plus `pipx install 'ouroboros-ai[mcp]'` or `uv tool install 'ouroboros-ai[mcp]'`. Then `ouroboros setup --runtime kiro` registers the isolated Ouroboros MCP server in `~/.kiro/settings/mcp.json` |
+| Kiro CLI backend | Python >= 3.12, `kiro-cli` on PATH (signed in to Kiro), plus `pipx install 'ouroboros-ai[mcp]'` or `uv tool install 'ouroboros-ai[mcp]'`. Then `ouroboros setup --runtime kiro` registers the isolated Ouroboros MCP server in `~/.kiro/settings/mcp.json` and writes `OUROBOROS_RUNTIME=kiro` there (the trusted, setup-managed location; a project `.env` is untrusted input and this key is ignored there) |
 | GitHub Copilot CLI backend | Python >= 3.12, `copilot` on PATH, `gh` on PATH (`gh auth login`), plus `pipx install 'ouroboros-ai[mcp]'` or `uv tool install 'ouroboros-ai[mcp]'`. Then `ouroboros setup --runtime copilot` live-discovers available models, picks a default, and registers the Ouroboros MCP server in `~/.copilot/mcp-config.json` |
 | GitHub Copilot ACP transport (experimental) | Same `copilot` backend and setup, plus a Copilot version supporting `--acp --stdio` (Linux smoke-tested with CLI 1.0.83) and working Copilot account authorization. Opt in with `ouroboros config set orchestrator.copilot_transport acp` for live tool/text events. No GUI or network listener is required. Native resume is not implemented; history/replay remains available. See [the ACP guide](runtime-guides/copilot-acp.md). |
 | Pi CLI backend | Python >= 3.12, `pi` on PATH or `orchestrator.pi_cli_path` configured. Use `runtime_backend: pi` for workflow execution. Use `llm.backend: pi` only when authoring/evaluation flows can accept Pi's adapter-level JSON extraction and schema validation rather than native `--output-schema` enforcement |
 | OMP CLI backend | Python >= 3.12, `omp` on PATH or `orchestrator.omp_cli_path` configured. Use `runtime_backend: omp` for workflow execution; OMP resumes sessions with its native `--resume` flag and picks its own configured model (roles `smol`/`slow`/`plan`) unless an explicit `--model` override is passed. `ouroboros setup --runtime omp` also installs the interactive `ooo` bridge into `~/.omp/agent/extensions/` |
+
+### Uninstall
+
+```bash
+ouroboros uninstall
+```
+
+Removes Ouroboros configuration, MCP registrations, and the data directory
+(`~/.ouroboros/`). It does not remove the Python package or the Claude Code
+plugin; finish with:
+
+```bash
+uv tool uninstall ouroboros-ai            # or: pip uninstall ouroboros-ai
+claude plugin uninstall ouroboros         # if using Claude Code plugin
+```
+
+See [UNINSTALL.md](../UNINSTALL.md) for details, including what stays in place
+after a Windows install.
 
 ---
 
@@ -470,9 +546,63 @@ ooo run
 
 ---
 
+## Commands
+
+Inside AI coding agent sessions, use `ooo <cmd>` skills. From the terminal, use the `ouroboros` CLI.
+
+Before requesting `ooo run` for a Git project through the standard MCP worktree
+path, check `git rev-parse --verify HEAD` in the project terminal. A repository
+with no commits has no HEAD from which to create that worktree. Review the files
+and decide what to commit before running; this prerequisite does not apply to
+every CLI, non-Git, worktree-disabled, or OpenCode path. See the
+[worktree check](../src/ouroboros/core/worktree.py).
+
+| Skill (`ooo`)    | CLI equivalent                                                    | What It Does                                                 |
+| :--------------- | :---------------------------------------------------------------- | :----------------------------------------------------------- |
+| `/ouroboros:setup` | `ouroboros setup`                                                 | Claude Code guided setup (explicit invocation)            |
+| `ooo interview`  | `ouroboros init start`                                            | Socratic questioning -- expose hidden assumptions            |
+| `ooo idk`        | *(via skill)*                                                     | Calibrate interview wording to your topic knowledge           |
+| `ooo auto`       | `ouroboros auto`                                                  | Goal → A-grade Seed → execution handoff with bounded loops   |
+| `ooo seed`       | *(generated by interview)*                                        | Crystallize into immutable spec                              |
+| `ooo run`        | `ouroboros run seed.yaml`                                         | Execute the seed's acceptance criteria                       |
+| `ooo evaluate`   | *(via MCP)*                                                       | 3-stage verification gate                                    |
+| `ooo evolve`     | *(via MCP)*                                                       | Evolutionary loop until ontology converges                   |
+| `ooo unstuck`    | *(via MCP)*                                                       | 5 lateral thinking personas when you are stuck               |
+| `ooo status`     | `ouroboros status executions` / `ouroboros status execution <id>` | Session tracking + (MCP-only) drift detection                |
+| `ooo resume-session` | `ouroboros resume`                                           | List in-flight sessions and re-attach commands              |
+| `ooo cancel`     | `ouroboros cancel execution [<id>\|--all]`                        | Cancel stuck or orphaned executions                          |
+| `ooo ralph`      | *(via MCP)*                                                       | Persistent loop until verified                               |
+| `/ouroboros:tutorial`   | *(interactive)*                                                   | Interactive hands-on learning                                |
+| `ooo help`       | `ouroboros --help`                                                | Full reference                                               |
+| `ooo pm`         | *(via MCP)*                                                       | PM-focused interview + PRD generation                        |
+| `ooo qa`         | *(via skill)*                                                     | General-purpose QA verdict for any artifact                  |
+| `ooo update`     | `ouroboros update`                                                | Check for updates + upgrade to latest                        |
+| `ooo config`     | `ouroboros gui` / `ouroboros config`                              | Console: connect tools, agents & models, providers, chat     |
+| `ooo brownfield` | *(via skill)*                                                     | Scan and manage brownfield repo/worktree defaults            |
+| `ooo publish`    | *(skill/runtime surface; uses `gh` CLI)*                          | Publish a Seed as GitHub Epic/Task issues for team workflows |
+
+`ooo idk` adjusts interview wording in the active conversation without answering
+the pending question or lowering requirements rigor. It works with the Claude
+skill relay and intercepted interviews on Codex, Copilot, Gemini, OpenCode,
+Hermes, Pi, OMP, GJC, and Kiro. Calibration is not saved: run `ooo idk` again
+after reopening a saved session. See the [calibration contract](architecture.md#interview-calibration-control-turns).
+
+> Not all skills have direct CLI equivalents. Some (`evaluate`, `evolve`, `unstuck`, `ralph`, `publish`) are available through agent skills, runtime rules, or MCP tools rather than a direct `ouroboros <subcommand>` shell command.
+> `/resume` is reserved for Claude Code's built-in session picker; use `ooo resume-session` for Ouroboros in-flight sessions.
+> Claude Code also reserves `/run`, `/status`, `/help`, and `/config`. The safe
+> direct skill forms are `/ouroboros:ouroboros-run`,
+> `/ouroboros:ouroboros-status`, `/ouroboros:ouroboros-help`, and
+> `/ouroboros:ouroboros-config`; the familiar `ooo run`, `ooo status`,
+> `ooo help`, and `ooo config` phrases remain supported.
+
+See the [CLI reference](cli-reference.md) for full details, and the
+[console guide](guides/console.md) for the web console that `ouroboros gui` opens.
+
+---
+
 ## Choosing a Runtime Backend
 
-Ouroboros delegates code execution to a pluggable runtime backend. Three ship out of the box:
+Ouroboros delegates code execution to a pluggable runtime backend. Three are compared below; [every supported host](#every-supported-host) is listed after the table.
 
 | | Claude Code | Codex CLI | OpenCode |
 |---|---|---|---|
@@ -492,6 +622,24 @@ For backend-specific configuration:
 - [Pi CLI runtime guide](runtime-guides/pi.md)
 - [OMP CLI runtime guide](runtime-guides/omp.md)
 - [Pi JSON mode documentation](https://pi.dev/docs/latest/json)
+
+### Every supported host
+
+Works with Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, Hermes, Gemini, Kiro CLI, Pi CLI, OMP CLI, Zcode, Goose, GJC, Antigravity CLI, and Grok Build CLI. The installer detects available runtimes and registers the MCP server where the host supports it. For explicit selection, run `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi|omp|zcode|goose|gjc|antigravity|grok>` after installation. Copilot live-discovers its subscription catalog via the GitHub Copilot models API; Kiro's settings picker queries the authenticated CLI with `kiro-cli chat --listmodels -f json`, so account and enterprise allow-list changes appear without a hardcoded model table.
+
+<p align="center">
+  <img src="images/ooo-setup-refresh.gif" width="760" alt="Terminal recording of ouroboros setup refresh installing Codex rules and skills, Hermes skills, the OpenCode plugin and instruction guide, and the Pi and GJC bridges, ending with the line Refreshed runtime artifacts: codex, hermes, opencode, pi, gjc">
+</p>
+
+<p align="center">
+  <sub><code>ouroboros setup refresh</code> on one machine. It installs into the hosts that machine actually has, each in the shape that host expects: rules and skills for Codex, skills for Hermes, a plugin and an <code>AGENTS.md</code> for OpenCode, bridges for Pi and GJC. Your machine will show whichever of the thirteen you have installed.</sub>
+</p>
+
+DeepSeek works in both directions: as the LLM backend for the interview, Seed
+and QA pipeline, and as a host through the installable `dsh-ouroboros` plugin.
+See the [DeepSeek Harness guide](guides/deepseek-harness.md).
+
+The other runtime guides: [Hermes](runtime-guides/hermes.md) · [Gemini CLI](runtime-guides/gemini.md) · [Zcode](runtime-guides/zcode.md) · [Goose](runtime-guides/goose.md) · [GJC](runtime-guides/gjc.md) · [Antigravity CLI](runtime-guides/antigravity.md) · [Grok Build CLI](runtime-guides/grok.md) · [GitHub Copilot ACP](runtime-guides/copilot-acp.md) · [Megacode harness](runtime-guides/megacode.md) · [Host-driven execution](runtime-guides/host.md)
 
 ---
 

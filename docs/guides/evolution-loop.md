@@ -55,13 +55,14 @@ Similarity = 0.5 * name_overlap + 0.3 * type_match + 0.2 * exact_match
 
 ### Termination Signals
 
-The `ConvergenceCriteria` checks four signals (any one triggers termination):
+The `ConvergenceCriteria` checks five signals (any one triggers termination):
 
 | Signal | Condition | Default |
 |--------|-----------|---------|
 | **Ontology stability** | `similarity(Oₙ, Oₙ₋₁) >= threshold` | >= 0.95 |
 | **Stagnation** | Similarity >= threshold for N consecutive gens | 3 gens |
 | **Oscillation** | Gen N ≈ Gen N-2 (period-2 cycle) | Enabled |
+| **Repetitive feedback** | At least 70% of the latest Wonder questions repeat in 2 of the last 3 completed generations | Checked from 3 completed gens |
 | **Hard cap** | Max generations reached | 30 |
 
 A minimum of 2 generations must complete before convergence signals 1-3 are checked.
@@ -137,4 +138,4 @@ The first gate prevents premature execution. The second prevents premature termi
 
 ---
 
-> See [Architecture](../architecture.md) for the full system design, and the [README philosophy sections](../../README.md#from-wonder-to-ontology) for the Socratic and ontological foundations.
+> See [Architecture](../architecture.md) for the full system design, and [From wonder to ontology](../how-ouroboros-works.md#from-wonder-to-ontology) for the Socratic and ontological foundations.

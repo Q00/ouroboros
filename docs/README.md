@@ -13,6 +13,8 @@ replayable execution contract on your choice of runtime backend.
 
 - **[Getting Started Guide](./getting-started.md)** - **Single source of truth for onboarding**: installation, configuration, first-run flow, and troubleshooting
 - [Platform Support](./platform-support.md) - Python versions, OS compatibility, and supported runtime backends
+- [Console Guide](./guides/console.md) - The `ouroboros gui` web console: connect agent tools, pick agents and models, chat, and follow runs
+- [How Ouroboros Works](./how-ouroboros-works.md) - The loop, the agents, the ambiguity gate, the Agent OS stack, architecture, and the philosophy behind it
 
 ### Runtime Guides
 
