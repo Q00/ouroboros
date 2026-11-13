@@ -2405,11 +2405,11 @@ class EventStore:
 
         try:
             async with self._engine.begin() as conn:
-                query = (
-                    select(events_table)
-                    .where(events_table.c.aggregate_type == "execution")
-                    .where(or_(*conditions))
-                )
+                # Unary + (no-op on TEXT) lets typed queries use ix_events_event_type.
+                aggregate_type: ColumnClause[Any] = events_table.c.aggregate_type
+                if event_type:
+                    aggregate_type = literal_column("+events.aggregate_type")
+                query = select(events_table).where(aggregate_type == "execution", or_(*conditions))
 
                 query = query.order_by(
                     *(
