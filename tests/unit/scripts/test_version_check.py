@@ -5,6 +5,8 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import sys
+import tempfile
 import threading
 import time
 from unittest.mock import MagicMock, patch
@@ -466,3 +468,586 @@ class TestKeywordDetector:
         result = detector.detect_keywords("ooo upgrade")
         assert result["detected"] is True
         assert result["suggested_skill"] == "/ouroboros:update"
+
+
+_HOOKS_PATH = _SCRIPT_PATH.parent.parent / "hooks" / "hooks.json"
+_TIME_KEYS = ("_checked_at", "_failed_at", "_notified_at", "timestamp")
+
+
+def _reference_get_latest_version(*, current: str | None = None) -> str | None:
+    """``get_latest_version`` as it was before the failure backoff (#2928 E24).
+
+    Copied from ``main`` at 592c667f with comments dropped and module globals read
+    through ``vc``, to compare the new implementation against.
+    """
+    vc = version_check
+    include_pre = False
+    if current:
+        include_pre = vc._is_prerelease(current)
+    cache_key = "latest_version_pre" if include_pre else "latest_version"
+    try:
+        if vc._CACHE_FILE.exists():
+            cache = json.loads(vc._CACHE_FILE.read_text())
+            stamp = cache.get(f"{cache_key}_checked_at")
+            if stamp is None:
+                stamped_keys = ("latest_version", "latest_version_pre")
+                if any(cache.get(f"{key}_checked_at") is not None for key in stamped_keys):
+                    stamp = 0
+                else:
+                    stamp = cache.get("timestamp", 0)
+            age = time.time() - stamp
+            if 0 <= age < vc._CACHE_TTL:
+                cached = cache.get(cache_key)
+                if cached:
+                    return cached
+    except Exception:
+        pass
+    try:
+        latest = vc._get_latest_from_pypi(include_prerelease=include_pre)
+        try:
+            vc._CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            with vc._cache_write_lock():
+                existing_cache: dict = {}
+                try:
+                    if vc._CACHE_FILE.exists():
+                        loaded_cache = json.loads(vc._CACHE_FILE.read_text())
+                        if isinstance(loaded_cache, dict):
+                            existing_cache = loaded_cache
+                except Exception:
+                    pass
+                now = time.time()
+                existing_cache[cache_key] = latest
+                existing_cache[f"{cache_key}_checked_at"] = now
+                existing_cache["timestamp"] = now
+                cache_content = json.dumps(existing_cache)
+                fd, tmp_path = tempfile.mkstemp(dir=vc._CACHE_DIR, suffix=".tmp")
+                try:
+                    with open(fd, "w") as f:
+                        f.write(cache_content)
+                    Path(tmp_path).replace(vc._CACHE_FILE)
+                except Exception:
+                    Path(tmp_path).unlink(missing_ok=True)
+                    raise
+        except Exception:
+            print("ouroboros: failed to write version cache", file=sys.stderr)
+        return latest
+    except Exception:
+        return None
+
+
+def _pypi_response(payload: dict) -> MagicMock:
+    response = MagicMock()
+    response.read.return_value = json.dumps(payload).encode()
+    return response
+
+
+def _normalized_cache(cache_file: Path) -> object:
+    """The persisted cache with time stamps reduced to their presence."""
+    if not cache_file.exists():
+        return None
+    try:
+        payload = json.loads(cache_file.read_text())
+    except ValueError:
+        return cache_file.read_text()
+    if not isinstance(payload, dict):
+        return payload
+    return {
+        key: "<time>" if key.endswith(_TIME_KEYS) and isinstance(value, float) else value
+        for key, value in payload.items()
+    }
+
+
+def _run(implementation, tmp_path: Path, initial: str | None, current: str | None, urlopen):
+    cache_dir = tmp_path / ".ouroboros"
+    cache_dir.mkdir(parents=True)
+    cache_file = cache_dir / "version-check-cache.json"
+    if initial is not None:
+        cache_file.write_text(initial)
+    with (
+        patch.object(version_check, "_CACHE_FILE", cache_file),
+        patch.object(version_check, "_CACHE_DIR", cache_dir),
+        patch("urllib.request.urlopen", urlopen),
+    ):
+        result = implementation(current=current)
+    return result, urlopen.call_count, _normalized_cache(cache_file)
+
+
+_NOW = time.time()
+_STABLE = {"info": {"version": "2.0.0"}}
+_WITH_PRERELEASES = {
+    "info": {"version": "2.0.0"},
+    "releases": {"2.0.0": [{}], "2.1.0b2": [{}], "2.1.0b3": []},
+}
+# (initial cache text, installed version, PyPI payload) for fetches that succeed
+# or are answered from the cache. A recent failure stamp appears only next to a
+# fresh value, where it is never consulted: beside a stale value it is the new
+# behavior, covered by TestFetchFailureBackoff.
+_SUCCESS_CASES = {
+    "no cache": (None, "1.0.0", _STABLE),
+    "fresh shared timestamp": (
+        json.dumps({"latest_version": "1.2.3", "timestamp": _NOW}),
+        None,
+        _STABLE,
+    ),
+    "fresh channel stamp": (
+        json.dumps(
+            {"latest_version": "1.2.3", "latest_version_checked_at": _NOW, "timestamp": _NOW}
+        ),
+        "1.0.0",
+        _STABLE,
+    ),
+    "expired": (
+        json.dumps({"latest_version": "0.1.0", "timestamp": _NOW - 100000}),
+        "1.0.0",
+        _STABLE,
+    ),
+    "future stamp": (
+        json.dumps({"latest_version": "9.9.9", "latest_version_checked_at": _NOW + 10**9}),
+        "1.0.0",
+        _STABLE,
+    ),
+    "prerelease channel unstamped": (
+        json.dumps(
+            {
+                "latest_version": "2.0.0",
+                "latest_version_checked_at": _NOW,
+                "latest_version_pre": "2.0.0b1",
+            }
+        ),
+        "2.0.0b1",
+        _WITH_PRERELEASES,
+    ),
+    "fresh value without content": (
+        json.dumps({"latest_version": None, "latest_version_checked_at": _NOW}),
+        "1.0.0",
+        _STABLE,
+    ),
+    "list json": ("[]", "1.0.0", _STABLE),
+    "corrupt": ("{not json", "1.0.0", _STABLE),
+    "stale failure stamp kept": (
+        json.dumps(
+            {
+                "latest_version": "0.1.0",
+                "latest_version_checked_at": _NOW - 100000,
+                "latest_version_failed_at": _NOW - 7200,
+                "latest_version_notified_at": _NOW - 100000,
+            }
+        ),
+        "1.0.0",
+        _STABLE,
+    ),
+    "fresh value beats a recent failure stamp": (
+        json.dumps(
+            {
+                "latest_version": "1.2.3",
+                "latest_version_checked_at": _NOW,
+                "latest_version_failed_at": _NOW,
+            }
+        ),
+        "1.0.0",
+        _STABLE,
+    ),
+    "malformed channel stamp": (
+        json.dumps({"latest_version": "1.2.3", "latest_version_checked_at": "invalid"}),
+        "1.0.0",
+        _STABLE,
+    ),
+    "oversized channel stamp": (
+        json.dumps({"latest_version": "1.2.3", "latest_version_checked_at": 10**400}),
+        "1.0.0",
+        _STABLE,
+    ),
+    "malformed shared timestamp": (
+        json.dumps({"latest_version": "1.2.3", "timestamp": [1]}),
+        "1.0.0",
+        _STABLE,
+    ),
+}
+
+# Every other key get_latest_version reads, with values that make the freshness
+# calculation raise or come out stale. Beside a recent, valid failure stamp none
+# of them may cause a fetch (#2948 review round 1).
+_MALFORMED_COMPANIONS = [
+    ("1.0.0", "latest_version_checked_at", "invalid"),
+    ("1.0.0", "latest_version_checked_at", [1]),
+    ("1.0.0", "latest_version_checked_at", {"at": 1}),
+    ("1.0.0", "latest_version_checked_at", True),
+    ("1.0.0", "latest_version_checked_at", float("nan")),
+    ("1.0.0", "latest_version_checked_at", 10**400),
+    ("1.0.0", "latest_version_pre_checked_at", "invalid"),
+    ("1.0.0", "timestamp", "invalid"),
+    ("1.0.0", "timestamp", 10**400),
+    ("1.0.0", "latest_version", ["2.0.0"]),
+    ("2.1.0b1", "latest_version_pre_checked_at", "invalid"),
+    ("2.1.0b1", "latest_version_pre_checked_at", 10**400),
+    ("2.1.0b1", "latest_version_checked_at", "invalid"),
+    ("2.1.0b1", "timestamp", [1]),
+]
+
+
+class TestFetchFailureBackoffEquivalence:
+    """Every outcome but a failed fetch is identical to the previous implementation."""
+
+    @pytest.mark.parametrize("case", sorted(_SUCCESS_CASES))
+    def test_success_and_cache_paths_match_previous_implementation(
+        self, case: str, tmp_path: Path
+    ) -> None:
+        initial, current, payload = _SUCCESS_CASES[case]
+        old = _run(
+            _reference_get_latest_version,
+            tmp_path / "old",
+            initial,
+            current,
+            MagicMock(return_value=_pypi_response(payload)),
+        )
+        new = _run(
+            version_check.get_latest_version,
+            tmp_path / "new",
+            initial,
+            current,
+            MagicMock(return_value=_pypi_response(payload)),
+        )
+        assert new == old
+
+    def test_missing_ssl_bundle_matches_previous_implementation(self, tmp_path: Path) -> None:
+        with patch("ssl.create_default_context", side_effect=OSError("no bundle")):
+            old = _run(_reference_get_latest_version, tmp_path / "old", None, "1.0.0", MagicMock())
+            new = _run(
+                version_check.get_latest_version, tmp_path / "new", None, "1.0.0", MagicMock()
+            )
+        assert (
+            new
+            == old
+            == (
+                None,
+                0,
+                {
+                    "latest_version": None,
+                    **dict.fromkeys(("latest_version_checked_at", "timestamp"), "<time>"),
+                },
+            )
+        )
+
+    @pytest.mark.parametrize(
+        ("initial", "current", "failed_key"),
+        [
+            (None, "1.0.0", "latest_version_failed_at"),
+            (None, "1.1.0rc1", "latest_version_pre_failed_at"),
+            (
+                json.dumps({"latest_version": "0.1.0", "timestamp": _NOW - 100000, "other": 1}),
+                "1.0.0",
+                "latest_version_failed_at",
+            ),
+        ],
+        ids=["no cache", "no cache prerelease", "expired cache kept"],
+    )
+    def test_failed_fetch_differs_only_by_the_channel_stamp(
+        self, initial: str | None, current: str, failed_key: str, tmp_path: Path
+    ) -> None:
+        old = _run(
+            _reference_get_latest_version,
+            tmp_path / "old",
+            initial,
+            current,
+            MagicMock(side_effect=TimeoutError),
+        )
+        new = _run(
+            version_check.get_latest_version,
+            tmp_path / "new",
+            initial,
+            current,
+            MagicMock(side_effect=TimeoutError),
+        )
+        assert new[:2] == old[:2] == (None, 1)
+        assert new[2] == {**(old[2] or {}), failed_key: "<time>"}
+
+    def test_base_exception_still_propagates_without_a_stamp(self, tmp_path: Path) -> None:
+        """Only ``Exception`` was ever turned into None; the worker thread keeps that."""
+        for implementation, name in (
+            (_reference_get_latest_version, "old"),
+            (version_check.get_latest_version, "new"),
+        ):
+            with pytest.raises(SystemExit):
+                _run(
+                    implementation,
+                    tmp_path / name,
+                    None,
+                    "1.0.0",
+                    MagicMock(side_effect=SystemExit),
+                )
+            assert not (tmp_path / name / ".ouroboros" / "version-check-cache.json").exists()
+
+
+class TestFetchFailureBackoff:
+    """A failed fetch is stamped, and the stamp spares later sessions the wait."""
+
+    @staticmethod
+    def _paths(tmp_path: Path):
+        cache_file = tmp_path / "version-check-cache.json"
+        return (
+            patch.object(version_check, "_CACHE_FILE", cache_file),
+            patch.object(version_check, "_CACHE_DIR", tmp_path),
+            cache_file,
+        )
+
+    def test_failure_writes_only_the_channel_stamp(self, tmp_path: Path) -> None:
+        file_patch, dir_patch, cache_file = self._paths(tmp_path)
+        before = time.time()
+        with file_patch, dir_patch, patch("urllib.request.urlopen", side_effect=OSError("down")):
+            assert version_check.get_latest_version(current="1.0.0") is None
+        payload = json.loads(cache_file.read_text())
+        assert list(payload) == ["latest_version_failed_at"]
+        assert before <= payload["latest_version_failed_at"] <= time.time()
+
+    def test_second_call_inside_the_window_does_not_call_urlopen(self, tmp_path: Path) -> None:
+        file_patch, dir_patch, _cache_file = self._paths(tmp_path)
+        urlopen = MagicMock(side_effect=TimeoutError)
+        with file_patch, dir_patch, patch("urllib.request.urlopen", urlopen):
+            assert version_check.get_latest_version(current="1.0.0") is None
+            assert version_check.get_latest_version(current="1.0.0") is None
+            assert version_check.check_update()["latest"] is None
+        assert urlopen.call_count == 1
+
+    @pytest.mark.parametrize(
+        ("age", "fetches"),
+        [
+            (0, 0),
+            (version_check._FAILURE_BACKOFF - 60, 0),
+            (version_check._FAILURE_BACKOFF + 1, 1),
+            (-60, 1),  # a future stamp (clock rollback) is not trusted
+        ],
+    )
+    def test_window_bounds(self, age: float, fetches: int, tmp_path: Path) -> None:
+        file_patch, dir_patch, cache_file = self._paths(tmp_path)
+        cache_file.write_text(json.dumps({"latest_version_failed_at": time.time() - age}))
+        urlopen = MagicMock(return_value=_pypi_response(_STABLE))
+        with file_patch, dir_patch, patch("urllib.request.urlopen", urlopen):
+            result = version_check.get_latest_version(current="1.0.0")
+        assert urlopen.call_count == fetches
+        assert result == ("2.0.0" if fetches else None)
+
+    def test_after_the_window_a_success_caches_as_before(self, tmp_path: Path) -> None:
+        file_patch, dir_patch, cache_file = self._paths(tmp_path)
+        stale = time.time() - version_check._FAILURE_BACKOFF - 1
+        cache_file.write_text(json.dumps({"latest_version_failed_at": stale}))
+        with (
+            file_patch,
+            dir_patch,
+            patch("urllib.request.urlopen", return_value=_pypi_response(_STABLE)),
+        ):
+            assert version_check.get_latest_version(current="1.0.0") == "2.0.0"
+        payload = json.loads(cache_file.read_text())
+        assert payload["latest_version"] == "2.0.0"
+        assert payload["latest_version_failed_at"] == stale
+        assert set(payload) == {
+            "latest_version",
+            "latest_version_checked_at",
+            "latest_version_failed_at",
+            "timestamp",
+        }
+        with (
+            file_patch,
+            dir_patch,
+            patch("urllib.request.urlopen", side_effect=AssertionError("cached")),
+        ):
+            assert version_check.get_latest_version(current="1.0.0") == "2.0.0"
+
+    @pytest.mark.parametrize(
+        "stamp",
+        ["recent", None, True, False, [1], float("nan"), float("inf"), 10**400, -(10**400)],
+        ids=["str", "null", "true", "false", "list", "nan", "inf", "huge", "-huge"],
+    )
+    @pytest.mark.parametrize(
+        "companion",
+        [{}, {"latest_version_checked_at": "invalid"}],
+        ids=["alone", "beside malformed freshness"],
+    )
+    def test_malformed_stamp_does_not_skip_the_fetch(
+        self, stamp: object, companion: dict, tmp_path: Path
+    ) -> None:
+        file_patch, dir_patch, cache_file = self._paths(tmp_path)
+        cache_file.write_text(json.dumps({**companion, "latest_version_failed_at": stamp}))
+        urlopen = MagicMock(return_value=_pypi_response(_STABLE))
+        with file_patch, dir_patch, patch("urllib.request.urlopen", urlopen):
+            assert version_check.get_latest_version(current="1.0.0") == "2.0.0"
+        assert urlopen.call_count == 1
+
+    @pytest.mark.parametrize(
+        ("current", "key", "value"),
+        _MALFORMED_COMPANIONS,
+        ids=[
+            f"{current}-{key}-{type(value).__name__}"
+            for current, key, value in _MALFORMED_COMPANIONS
+        ],
+    )
+    def test_recent_stamp_skips_pypi_whatever_the_other_keys_hold(
+        self, current: str, key: str, value: object, tmp_path: Path
+    ) -> None:
+        file_patch, dir_patch, cache_file = self._paths(tmp_path)
+        channel = (
+            "latest_version_pre" if version_check._is_prerelease(current) else "latest_version"
+        )
+        cache_file.write_text(json.dumps({key: value, f"{channel}_failed_at": time.time()}))
+        urlopen = MagicMock(return_value=_pypi_response(_WITH_PRERELEASES))
+        with file_patch, dir_patch, patch("urllib.request.urlopen", urlopen):
+            assert version_check.get_latest_version(current=current) is None
+        assert urlopen.call_count == 0
+
+    def test_stamp_is_per_channel(self, tmp_path: Path) -> None:
+        file_patch, dir_patch, cache_file = self._paths(tmp_path)
+        cache_file.write_text(json.dumps({"latest_version_failed_at": time.time()}))
+        urlopen = MagicMock(return_value=_pypi_response(_WITH_PRERELEASES))
+        with file_patch, dir_patch, patch("urllib.request.urlopen", urlopen):
+            assert version_check.get_latest_version(current="2.1.0b1") == "2.1.0b2"
+            assert version_check.get_latest_version(current="2.0.0") is None
+        assert urlopen.call_count == 1
+
+    def test_failure_stamp_keeps_other_entries_and_replaces_malformed_caches(
+        self, tmp_path: Path
+    ) -> None:
+        file_patch, dir_patch, cache_file = self._paths(tmp_path)
+        others = {
+            "latest_version_pre": "2.1.0b2",
+            "latest_version_pre_checked_at": 1.0,
+            "latest_version_notified_at": 2.0,
+            "timestamp": 3.0,
+        }
+        for initial, expected_others in (
+            (json.dumps(others), others),
+            ("{not json", {}),
+            ("[]", {}),
+        ):
+            cache_file.write_text(initial)
+            with file_patch, dir_patch, patch("urllib.request.urlopen", side_effect=TimeoutError):
+                assert version_check.get_latest_version(current="1.0.0") is None
+            payload = json.loads(cache_file.read_text())
+            assert payload.pop("latest_version_failed_at") > 0
+            assert payload == expected_others
+
+    def test_unwritable_stamp_is_reported_not_raised(self, tmp_path: Path, capsys) -> None:
+        file_patch, dir_patch, cache_file = self._paths(tmp_path)
+        with (
+            file_patch,
+            dir_patch,
+            patch("urllib.request.urlopen", side_effect=TimeoutError),
+            patch.object(version_check.tempfile, "mkstemp", side_effect=OSError("read-only")),
+        ):
+            assert version_check.get_latest_version(current="1.0.0") is None
+        assert "ouroboros: failed to write version cache" in capsys.readouterr().err
+        assert not cache_file.exists()
+        assert list(tmp_path.glob("*.tmp")) == []
+
+    def test_failure_stamp_is_written_under_the_shared_lock(self, tmp_path: Path) -> None:
+        """A concurrent MCP channel refresh and a hook failure both survive."""
+        file_patch, dir_patch, cache_file = self._paths(tmp_path)
+        barrier = threading.Barrier(2)
+
+        def _hook_fetch(*, include_prerelease: bool = False) -> str:
+            barrier.wait()
+            raise TimeoutError
+
+        def _mcp_fetch(*, include_prerelease: bool) -> str:
+            barrier.wait()
+            return "2.1.0b2"
+
+        with (
+            file_patch,
+            dir_patch,
+            patch.object(version_check, "_get_latest_from_pypi", _hook_fetch),
+            patch.object(update_notice, "_CACHE_FILE", cache_file),
+            patch.object(update_notice.metadata, "version", return_value="2.1.0b1"),
+            patch.object(update_notice, "_fetch_latest_from_pypi", _mcp_fetch),
+        ):
+            hook = threading.Thread(target=version_check.get_latest_version)
+            mcp = threading.Thread(target=update_notice._refresh_cache_now)
+            hook.start()
+            mcp.start()
+            hook.join(timeout=5)
+            mcp.join(timeout=5)
+
+        assert not hook.is_alive()
+        assert not mcp.is_alive()
+        payload = json.loads(cache_file.read_text())
+        assert payload["latest_version_pre"] == "2.1.0b2"
+        assert "latest_version_pre_checked_at" in payload
+        assert "latest_version_failed_at" in payload
+
+    def test_mcp_reader_ignores_the_failure_stamp(self, tmp_path: Path) -> None:
+        cache_file = tmp_path / "version-check-cache.json"
+        fresh = {"latest_version": "999.0.0", "latest_version_checked_at": time.time()}
+        notices = []
+        for payload in (
+            fresh,
+            {**fresh, "latest_version_failed_at": time.time()},
+            {},
+            {"latest_version_failed_at": time.time()},
+        ):
+            cache_file.write_text(json.dumps(payload))
+            with (
+                patch.object(update_notice, "_CACHE_FILE", cache_file),
+                patch.object(update_notice.metadata, "version", return_value="1.0.0"),
+            ):
+                notices.append(update_notice.cached_update_notice())
+        assert notices[0] is not None
+        assert notices[1] == notices[0]
+        assert notices[2] is None
+        assert notices[3] is None
+
+
+class TestFetchDeadline:
+    """The fetch is bounded in wall-clock time, below the hook's host timeout."""
+
+    def test_deadline_is_well_below_the_session_start_host_timeout(self) -> None:
+        manifest = json.loads(_HOOKS_PATH.read_text(encoding="utf-8"))
+        (entry,) = manifest["hooks"]["SessionStart"]
+        (hook,) = entry["hooks"]
+        host_timeout = hook["timeout"]
+        assert host_timeout >= 2 * version_check._FETCH_DEADLINE
+
+    def test_urlopen_gets_the_deadline_as_its_socket_timeout(self) -> None:
+        urlopen = MagicMock(return_value=_pypi_response(_STABLE))
+        with patch("urllib.request.urlopen", urlopen):
+            assert version_check._get_latest_from_pypi() == "2.0.0"
+        assert urlopen.call_args.kwargs["timeout"] == version_check._FETCH_DEADLINE
+
+    def test_a_fetch_past_the_deadline_is_abandoned_and_stamped(self, tmp_path: Path) -> None:
+        cache_file = tmp_path / "version-check-cache.json"
+        started = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        def _hanging_fetch(*, include_prerelease: bool = False) -> str:
+            calls.append(threading.current_thread())
+            started.set()
+            release.wait(timeout=30)
+            return "2.0.0"
+
+        try:
+            with (
+                patch.object(version_check, "_CACHE_FILE", cache_file),
+                patch.object(version_check, "_CACHE_DIR", tmp_path),
+                patch.object(version_check, "_FETCH_DEADLINE", 0.05),
+                patch.object(version_check, "_get_latest_from_pypi", _hanging_fetch),
+            ):
+                assert version_check.get_latest_version(current="1.0.0") is None
+        finally:
+            release.set()
+        assert started.wait(timeout=5)
+        (worker,) = calls
+        assert worker is not threading.main_thread()
+        assert worker.daemon
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+        # The abandoned worker only fetched: its late answer never reaches the cache.
+        assert list(json.loads(cache_file.read_text())) == ["latest_version_failed_at"]
+
+    @pytest.mark.parametrize(
+        "error", [TimeoutError("slow"), ValueError("bad json"), KeyError("info")]
+    )
+    def test_worker_errors_reach_the_caller_unchanged(self, error: Exception) -> None:
+        with (
+            patch.object(version_check, "_get_latest_from_pypi", side_effect=error),
+            pytest.raises(type(error)) as raised,
+        ):
+            version_check._get_latest_within_deadline(include_prerelease=False)
+        assert raised.value is error
