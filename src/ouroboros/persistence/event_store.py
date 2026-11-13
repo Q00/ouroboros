@@ -7,7 +7,7 @@ with aiosqlite backend.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import Callable, Coroutine, Mapping, Set
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
@@ -1681,20 +1681,15 @@ class EventStore:
                     },
                 ) from e
 
-    async def replay(self, aggregate_type: str, aggregate_id: str) -> list[BaseEvent]:
-        """Replay all events for a specific aggregate.
+    async def replay(
+        self, aggregate_type: str, aggregate_id: str, *, event_types: Set[str] | None = None
+    ) -> list[BaseEvent]:
+        """Replay one aggregate's events in ``(timestamp, id)`` order, in one transaction.
 
-        The operation uses a transaction for read consistency.
-
-        Args:
-            aggregate_type: The type of aggregate (e.g., "seed", "execution").
-            aggregate_id: The unique identifier of the aggregate.
-
-        Returns:
-            List of events for the aggregate, ordered by timestamp.
-
-        Raises:
-            PersistenceError: If the replay operation fails.
+        ``event_types``, when given, keeps only rows of those types and applies
+        that filter in SQL under the same ordering, so the result equals a full
+        replay filtered in Python while only the matching rows are deserialized.
+        Raises :class:`PersistenceError` if the store is uninitialized or the read fails.
         """
         if self._engine is None:
             raise PersistenceError(
@@ -1703,16 +1698,18 @@ class EventStore:
             )
 
         try:
+            query = (
+                select(events_table)
+                .where(events_table.c.aggregate_type == aggregate_type)
+                .where(events_table.c.aggregate_id == aggregate_id)
+                # Order by timestamp + id for deterministic replay when
+                # multiple events share the same timestamp resolution.
+                .order_by(events_table.c.timestamp, events_table.c.id)
+            )
+            if event_types is not None:
+                query = query.where(events_table.c.event_type.in_(sorted(event_types)))
             async with self._engine.begin() as conn:
-                result = await conn.execute(
-                    select(events_table)
-                    .where(events_table.c.aggregate_type == aggregate_type)
-                    .where(events_table.c.aggregate_id == aggregate_id)
-                    # Order by timestamp + id for deterministic replay when
-                    # multiple events share the same timestamp resolution.
-                    .order_by(events_table.c.timestamp, events_table.c.id)
-                )
-                rows = result.mappings().all()
+                rows = (await conn.execute(query)).mappings().all()
                 return [BaseEvent.from_db_row(dict(row)) for row in rows]
         except Exception as e:
             raise PersistenceError(

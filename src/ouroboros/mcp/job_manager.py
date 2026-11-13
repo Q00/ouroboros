@@ -1299,7 +1299,16 @@ class JobManager:
         if not session_id or not execution_id:
             return None
 
-        session_events = await self._event_store.replay("session", session_id)
+        terminal_statuses = {
+            "orchestrator.session.completed": "completed",
+            "orchestrator.session.failed": "failed",
+            "orchestrator.session.cancelled": "cancelled",
+        }
+        # Only the first start and the last terminal row are read below, so the
+        # replay skips the session's progress rows (same order, fewer rows).
+        session_events = await self._event_store.replay(
+            "session", session_id, event_types={"orchestrator.session.started", *terminal_statuses}
+        )
         start_event = next(
             (event for event in session_events if event.type == "orchestrator.session.started"),
             None,
@@ -1315,16 +1324,7 @@ class JobManager:
         current_format = ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY in start_event.data
 
         terminal_event = next(
-            (
-                event
-                for event in reversed(session_events)
-                if event.type
-                in {
-                    "orchestrator.session.completed",
-                    "orchestrator.session.failed",
-                    "orchestrator.session.cancelled",
-                }
-            ),
+            (event for event in reversed(session_events) if event.type in terminal_statuses),
             None,
         )
         if terminal_event is None:
@@ -1343,11 +1343,7 @@ class JobManager:
                     details={"session_id": session_id, "execution_id": execution_id},
                 )
             return None
-        terminal_status = {
-            "orchestrator.session.completed": "completed",
-            "orchestrator.session.failed": "failed",
-            "orchestrator.session.cancelled": "cancelled",
-        }[terminal_event.type]
+        terminal_status = terminal_statuses[terminal_event.type]
         raw_plan = terminal_event.data.get("acceptance_finalizations")
         if not isinstance(raw_plan, list):
             raise PersistenceError(
