@@ -31,6 +31,8 @@ Classes:
     PipelineConfig: Pipeline configuration
 """
 
+from typing import TYPE_CHECKING
+
 from ouroboros.evaluation.consensus import (
     ConsensusConfig,
     ConsensusEvaluator,
@@ -76,7 +78,6 @@ from ouroboros.evaluation.pipeline import (
     run_evaluation_pipeline,
 )
 from ouroboros.evaluation.semantic import (
-    DEFAULT_SEMANTIC_MODEL,
     SemanticConfig,
     SemanticEvaluator,
     run_semantic_evaluation,
@@ -89,6 +90,9 @@ from ouroboros.evaluation.trigger import (
     TriggerType,
     check_consensus_trigger,
 )
+
+if TYPE_CHECKING:
+    from ouroboros.evaluation.semantic import DEFAULT_SEMANTIC_MODEL
 
 __all__ = [
     # Models
@@ -141,3 +145,18 @@ __all__ = [
     "PipelineConfig",
     "run_evaluation_pipeline",
 ]
+
+
+if not TYPE_CHECKING:  # hidden from type checkers so unknown names stay errors
+
+    def __getattr__(name: str) -> str:
+        # Forwarded so importing the package does not resolve the default model;
+        # ``semantic`` resolves it on first access and keeps that value.
+        if name == "DEFAULT_SEMANTIC_MODEL":
+            from ouroboros.evaluation import semantic
+
+            return semantic.DEFAULT_SEMANTIC_MODEL
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    def __dir__() -> list[str]:
+        return sorted({*globals(), "DEFAULT_SEMANTIC_MODEL"})
