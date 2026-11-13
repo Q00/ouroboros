@@ -272,33 +272,10 @@ async def _query_recent_execution_progress_events(
     )
 
 
-async def _query_execution_progress_at_cursor(
-    event_store: EventStore,
-    execution_id: str,
-    *,
-    cursor: int | None = None,
-) -> tuple[dict[str, Any], int]:
-    """Return execution progress visible at ``cursor`` and the latest rowid read."""
-    events, event_cursor = await _query_recent_execution_progress_events(
-        event_store,
-        execution_id,
-        cursor=cursor,
-    )
-    progress = dict(_EMPTY_PROGRESS)
-    workflow_event = next(
-        (event for event in reversed(events) if event.type == "workflow.progress.updated"),
-        None,
-    )
-    subtask_events = [
-        event
-        for event in events
-        if event.type
-        in {
-            "execution.node.created",
-            "execution.node.updated",
-            "execution.subtask.updated",
-        }
-    ]
+def _apply_execution_progress(
+    progress: dict[str, Any], workflow_event: BaseEvent | None, subtask_events: list[Any]
+) -> tuple[dict[str, Any], str | None]:
+    """Fold subtask then workflow progress into ``progress``; return the subtask summary."""
     subtask_summary = summarize_subtask_events(subtask_events)
     subtask_progress = format_subtask_progress_summary(subtask_summary)
     if subtask_summary:
@@ -323,6 +300,49 @@ async def _query_execution_progress_at_cursor(
                 "activity": data.get("activity_detail") or data.get("activity") or "running",
             }
         )
+    return subtask_summary, subtask_progress
+
+
+async def _query_execution_progress_at_cursor(
+    event_store: EventStore,
+    execution_id: str,
+    *,
+    cursor: int | None = None,
+    previous: tuple[dict[str, Any], int] | None = None,
+) -> tuple[dict[str, Any], int]:
+    """Return execution progress visible at ``cursor`` and the latest rowid read.
+
+    ``previous`` (an earlier uncursored result) is reused while the newest progress
+    row is still the one it ended at: event rows are append-only, so the window is too.
+    """
+    getter = getattr(event_store, "get_recent_aggregate_events", None)
+    if previous is not None and cursor is None and getter is not None:
+        _head, head_cursor = await getter(
+            "execution", execution_id, event_types=_JOB_PROGRESS_EVENT_TYPES, limit=1
+        )
+        if head_cursor == previous[1]:
+            return dict(previous[0]), head_cursor
+    events, event_cursor = await _query_recent_execution_progress_events(
+        event_store,
+        execution_id,
+        cursor=cursor,
+    )
+    progress = dict(_EMPTY_PROGRESS)
+    workflow_event = next(
+        (event for event in reversed(events) if event.type == "workflow.progress.updated"),
+        None,
+    )
+    subtask_events = [
+        event
+        for event in events
+        if event.type
+        in {
+            "execution.node.created",
+            "execution.node.updated",
+            "execution.subtask.updated",
+        }
+    ]
+    _apply_execution_progress(progress, workflow_event, subtask_events)
     return progress, event_cursor
 
 
@@ -954,30 +974,9 @@ async def _render_job_snapshot_inner(
         subtask_events = await _query_all_execution_subtask_events(
             event_store, snapshot.links.execution_id
         )
-        subtask_summary = summarize_subtask_events(subtask_events)
-        subtask_progress = format_subtask_progress_summary(subtask_summary)
-        if subtask_summary:
-            progress.update(
-                {
-                    "current_phase": "Sub-AC work",
-                    "activity": subtask_progress or "running",
-                    "sub_ac_completed": subtask_summary.get("completed_count"),
-                    "sub_ac_total": subtask_summary.get("total_count"),
-                    "sub_ac_executing": subtask_summary.get("executing_count"),
-                    "sub_ac_pending": subtask_summary.get("pending_count"),
-                    "sub_ac_failed": subtask_summary.get("failed_count"),
-                }
-            )
-        if workflow_event is not None:
-            data = workflow_event.data
-            progress.update(
-                {
-                    "ac_completed": data.get("completed_count"),
-                    "ac_total": data.get("total_count"),
-                    "current_phase": data.get("current_phase") or "Working",
-                    "activity": data.get("activity_detail") or data.get("activity") or "running",
-                }
-            )
+        subtask_summary, subtask_progress = _apply_execution_progress(
+            progress, workflow_event, subtask_events
+        )
         if workflow_event is not None or subtask_summary:
             lines.extend(
                 [
@@ -1915,6 +1914,7 @@ class JobWaitHandler:
         """Long-poll until a filtered progress signal or terminal job status."""
         deadline = asyncio.get_running_loop().time() + timeout_seconds
         baseline_progress: dict[str, Any] | None = None
+        latest: tuple[dict[str, Any], int] | None = None
         latest_execution_cursor = cursor
 
         while True:
@@ -1934,13 +1934,10 @@ class JobWaitHandler:
                         snapshot.links.execution_id,
                         cursor=cursor,
                     )
-                (
-                    latest_progress,
-                    latest_execution_cursor,
-                ) = await _query_execution_progress_at_cursor(
-                    self._event_store,
-                    snapshot.links.execution_id,
+                latest = await _query_execution_progress_at_cursor(
+                    self._event_store, snapshot.links.execution_id, previous=latest
                 )
+                latest_progress, latest_execution_cursor = latest
                 execution_changed = _job_wait_progress_changed(
                     baseline_progress,
                     latest_progress,
@@ -1971,6 +1968,7 @@ class JobWaitHandler:
         """Long-poll job plus linked child/session event streams."""
         deadline = asyncio.get_running_loop().time() + timeout_seconds
         baseline_progress: dict[str, Any] | None = None
+        latest: tuple[dict[str, Any], int] | None = None
         while True:
             snapshot, changed = await self._job_manager.wait_for_change(
                 job_id,
@@ -1991,13 +1989,10 @@ class JobWaitHandler:
                         snapshot.links.execution_id,
                         cursor=cursor,
                     )
-                (
-                    latest_progress,
-                    _latest_execution_cursor,
-                ) = await _query_execution_progress_at_cursor(
-                    self._event_store,
-                    snapshot.links.execution_id,
+                latest = await _query_execution_progress_at_cursor(
+                    self._event_store, snapshot.links.execution_id, previous=latest
                 )
+                latest_progress = latest[0]
                 progress_changed = _job_wait_progress_changed(
                     baseline_progress,
                     latest_progress,
