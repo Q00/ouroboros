@@ -54,6 +54,20 @@ PROACTIVE_SOURCE_EVENT_TYPES = frozenset(
 
 RELAY_SOURCE_EVENT_TYPES = ATTENTION_SOURCE_EVENT_TYPES | PROACTIVE_SOURCE_EVENT_TYPES
 
+
+def may_emit_relay(event_type: str) -> bool:
+    """Return whether ``classify_relay_events`` can emit a relay sourced from this type.
+
+    Every relay is sourced from an event in ``new_event_ids`` whose type is a
+    relay source or any SessionSignal lifecycle type (``requested``,
+    ``accepted`` and ``delivering`` are relayed but are not in the set).  A
+    page without such an event therefore classifies to ``[]``.
+    """
+    return event_type in RELAY_SOURCE_EVENT_TYPES or event_type.startswith(
+        "control.session.signal."
+    )
+
+
 _MAX_RELAY_EVENTS = 20
 _MAX_EVIDENCE_EVENT_IDS = 8
 _MAX_TEXT = 320
@@ -1007,4 +1021,5 @@ __all__ = [
     "PROACTIVE_SOURCE_EVENT_TYPES",
     "RELAY_SOURCE_EVENT_TYPES",
     "classify_relay_events",
+    "may_emit_relay",
 ]
