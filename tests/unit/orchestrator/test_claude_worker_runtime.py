@@ -1012,3 +1012,58 @@ class TestRecursionHardening:
         assert "CLAUDECODE" not in env
         # Depth guard incremented (0 → 1).
         assert env["_OUROBOROS_DEPTH"] == "1"
+
+
+_DISABLE_OUROBOROS_PLUGIN = {"enabledPlugins": {"ouroboros@ouroboros": False}}
+
+
+def _settings_values(command: list[str]) -> list[dict[str, object]]:
+    return [json.loads(command[i + 1]) for i, tok in enumerate(command) if tok == "--settings"]
+
+
+class TestWorkerDoesNotStartOuroborosMcp:
+    """Denying the tools alone still started the plugin's MCP server per worker.
+
+    The override names only the ouroboros plugin key, so the user's other
+    ``enabledPlugins`` entries keep their file values.
+    """
+
+    def test_base_command_disables_ouroboros_plugin_for_the_worker(self) -> None:
+        command = ClaudeWorkerTransport(cli_path="claude")._base_command(cwd="/tmp")
+        assert _settings_values(command) == [_DISABLE_OUROBOROS_PLUGIN]
+        assert "--disallowedTools" in command
+
+    def test_no_plugin_override_without_the_recursion_guard(self) -> None:
+        command = ClaudeWorkerTransport(cli_path="claude", disallowed_tools=())._base_command(
+            cwd="/tmp"
+        )
+        assert "--settings" not in command
+
+    def test_factory_runtime_disables_the_plugin(self, tmp_path: Path) -> None:
+        rt = build_claude_worker_runtime(cwd=str(tmp_path))
+        command = rt._transport._base_command(cwd=str(tmp_path))
+        assert _settings_values(command) == [_DISABLE_OUROBOROS_PLUGIN]
+
+    @pytest.mark.asyncio
+    async def test_spawn_emits_the_override_exactly_once(self) -> None:
+        transport = ClaudeWorkerTransport(cli_path="claude")
+        command = await _capture_spawn(
+            transport,
+            cwd="/tmp",
+            system_prompt="sys",
+            permission_mode="bypassPermissions",
+            model="claude-haiku-4-5",
+        )
+        assert _settings_values(command) == [_DISABLE_OUROBOROS_PLUGIN]
+
+    @pytest.mark.asyncio
+    async def test_persisted_fork_spawn_and_resume_emit_the_override_exactly_once(
+        self,
+    ) -> None:
+        transport = ClaudeWorkerTransport(cli_path="claude", persist_sessions=True)
+        spawn_command = await _capture_spawn(
+            transport, cwd="/tmp", fork_from_session_id="parent-live", label="ooo: x"
+        )
+        resume_command = await _capture_resume(transport, session_id="s1")
+        assert _settings_values(spawn_command) == [_DISABLE_OUROBOROS_PLUGIN]
+        assert _settings_values(resume_command) == [_DISABLE_OUROBOROS_PLUGIN]
