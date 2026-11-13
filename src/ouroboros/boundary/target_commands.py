@@ -347,12 +347,15 @@ def paired_other_tests(base_paths: Collection[str], source: str) -> tuple[str, .
     extension); ``Foo.java`` with ``FooTest.java`` or ``FooTests.java``;
     ``src/foo.rs`` with ``tests/foo.rs``.
     """
+    return _paired_with(source, [path for path in base_paths if is_paired_test(path)])
+
+
+def _paired_with(source: str, tests: Iterable[str]) -> tuple[str, ...]:
+    """The ``tests`` (paths ``is_paired_test`` already accepted) paired with ``source``."""
     directory = posixpath.dirname(source)
     stem, extension = posixpath.splitext(posixpath.basename(source))
     out: set[str] = set()
-    for path in base_paths:
-        if not is_paired_test(path):
-            continue
+    for path in tests:
         name = posixpath.basename(path)
         test_stem, test_extension = posixpath.splitext(name)
         if extension == ".go" and test_extension == ".go":
@@ -371,10 +374,17 @@ def paired_other_tests(base_paths: Collection[str], source: str) -> tuple[str, .
 
 
 def select_other_tests(base_paths: Collection[str], changed: Iterable[str]) -> tuple[str, ...]:
-    """The non-Python base test files a change selects, by path pairing."""
+    """The non-Python base test files a change selects, by path pairing.
+
+    The base paths are filtered to test files once, however many sources changed.
+    """
+    sources = changed_other_sources(changed)
+    if not sources:
+        return ()
+    tests = [path for path in base_paths if is_paired_test(path)]
     selected: set[str] = set()
-    for source in changed_other_sources(changed):
-        selected.update(paired_other_tests(base_paths, source))
+    for source in sources:
+        selected.update(_paired_with(source, tests))
     return tuple(sorted(selected))
 
 
