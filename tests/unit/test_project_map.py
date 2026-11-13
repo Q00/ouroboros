@@ -540,10 +540,12 @@ async def test_related_lifecycle_read_failure_aborts_the_projection(
     with pytest.raises(ProjectProjectionError, match="reconstruct"):
         await ProjectMapBuilder(event_store).build(project)
 
+    session_rows = await event_store.replay("session", "related-read-session")
     query_related.assert_awaited_once_with(
         session_id="related-read-session",
         execution_id="related-read-execution",
         limit=None,
+        exclude_event_ids=frozenset(event.id for event in session_rows),
     )
 
 

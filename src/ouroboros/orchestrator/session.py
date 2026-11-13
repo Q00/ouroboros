@@ -1366,6 +1366,9 @@ class SessionRepository:
                         session_id=session_id,
                         execution_id=execution_id or None,
                         limit=None,
+                        # ``events`` already holds these rows; the merge below
+                        # would drop the related copies by id, so skip reading them.
+                        exclude_event_ids=frozenset(event.id for event in events),
                     )
                     if not isinstance(related_events, list):
                         if strict_related_events:

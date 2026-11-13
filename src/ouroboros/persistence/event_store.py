@@ -2282,6 +2282,7 @@ class EventStore:
         event_type: str | None = None,
         limit: int | None = 50,
         offset: int = 0,
+        exclude_event_ids: frozenset[str] = frozenset(),
     ) -> list[BaseEvent]:
         """Query events across the session aggregate and related parallel scopes.
 
@@ -2304,6 +2305,7 @@ class EventStore:
             event_type: Optional event-type filter.
             limit: Maximum number of events to return. ``None`` returns all.
             offset: Number of events to skip for pagination.
+            exclude_event_ids: Ids of rows the caller already holds, omitted in SQL.
 
         Returns:
             Matching events ordered by timestamp descending.
@@ -2338,14 +2340,12 @@ class EventStore:
 
                 if event_type:
                     query = query.where(events_table.c.event_type == event_type)
+                if exclude_event_ids:
+                    ids = func.json_each(json.dumps(sorted(exclude_event_ids)))
+                    query = query.where(events_table.c.id.not_in(select(ids.table_valued("value"))))
 
-                if limit is not None:
-                    query = query.limit(limit).offset(offset)
-                elif offset:
-                    query = query.offset(offset)
-
-                result = await conn.execute(query)
-                rows = result.mappings().all()
+                query = query.limit(limit).offset(offset or None)
+                rows = (await conn.execute(query)).mappings().all()
                 return [BaseEvent.from_db_row(dict(row)) for row in rows]
         except Exception as e:
             raise PersistenceError(
