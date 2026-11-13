@@ -59,11 +59,14 @@ def is_git_ignored_path(relative: Path, *, ignored_paths: frozenset[Path] | None
     itself declared as non-source. A verify command that refreshes them is
     still an observer of the acceptance-relevant workspace, and a sibling
     worker that regenerates them has not changed acceptance evidence.
+
+    Membership is a hash lookup of ``relative`` and each of its parents, so
+    the cost follows the path depth instead of the size of the ignore set.
     """
     return bool(
         ignored_paths is not None
         and relative.parts
-        and any(relative == ignored or ignored in relative.parents for ignored in ignored_paths)
+        and (relative in ignored_paths or not ignored_paths.isdisjoint(relative.parents))
     )
 
 
