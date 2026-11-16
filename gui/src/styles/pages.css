@@ -1457,6 +1457,33 @@
   gap: 2px;
 }
 
+.project-choice {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+}
+
+.project-choice-lead {
+  color: var(--text-mute);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+.composer-correcting {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 8px 0 13px;
+  color: var(--text-mute);
+  font-size: var(--text-xs);
+}
+
+.composer-correcting span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .starters {
   display: flex;
   flex-wrap: wrap;
@@ -1598,6 +1625,41 @@
   color: var(--text-mute);
 }
 
+.readiness {
+  border-bottom: 1px solid var(--line);
+}
+
+.readiness .ambiguity {
+  border-bottom: 0;
+}
+
+.readiness-dims {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  padding: 0 16px 8px;
+  color: var(--text-mute);
+  font-size: var(--text-2xs);
+}
+
+.readiness-dims li {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.readiness-dims li[data-met] {
+  color: var(--text-soft);
+}
+
+.readiness-dims li[data-met] svg {
+  color: var(--ok);
+}
+
+.readiness-dim-value {
+  font-variant-numeric: tabular-nums;
+}
+
 .thread-scroll {
   flex: 1;
   min-height: 0;
@@ -1665,6 +1727,31 @@
   color: var(--text-mute);
   font-size: var(--text-2xs);
   font-weight: 650;
+}
+
+.bubble-via {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin-top: 6px;
+  font-size: var(--text-2xs);
+  opacity: 0.85;
+}
+
+.bubble-via-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 650;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
 }
 
 .bubble-model {

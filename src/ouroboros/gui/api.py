@@ -473,8 +473,14 @@ def delete_chat_session(
 def post_chat_message(
     state: ConsoleState, session_id: str, *, query: dict[str, str], body: Any
 ) -> dict[str, Any]:
+    payload = body or {}
+    corrects = payload.get("corrects")
+    if corrects is not None and not isinstance(corrects, str):
+        raise ApiError(400, "corrects must be a message id", "bad_corrects")
     try:
-        return state.harness.send(session_id, str((body or {}).get("text") or ""))
+        return state.harness.send(
+            session_id, str(payload.get("text") or ""), corrects=corrects or None
+        )
     except KeyError:
         raise ApiError(404, "Conversation not found", "not_found") from None
     except ValueError as exc:

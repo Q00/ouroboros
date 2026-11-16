@@ -8,8 +8,11 @@ import {
   CircleX,
   FileText,
   Folder,
+  FolderGit2,
+  FolderPlus,
   GitBranch,
   MessagesSquare,
+  Pencil,
   Play,
   Plus,
   Send,
@@ -17,6 +20,7 @@ import {
   Sprout,
   Square,
   Trash2,
+  X,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type { FormEvent, KeyboardEvent, ReactNode } from "react";
@@ -29,7 +33,7 @@ import { backendName, shortPath, timeAgo } from "../core/format";
 import { invalidate, useResource } from "../core/resource";
 import { href, navigate } from "../core/router";
 import { useSnapshotStream } from "../core/stream";
-import type { BackendChoice, ChatDefaults, ChatMessage, ChatMode, ChatSession, ChatSessionRow, ChatSessionsView, ChatStatus, RunTile } from "../core/types";
+import type { BackendChoice, ChatDefaults, ChatMessage, ChatMode, ChatProject, ChatSession, ChatSessionRow, ChatSessionsView, ChatStatus, Readiness, RunTile } from "../core/types";
 import type { Tone } from "../ui/bits";
 import { Chip, CopyButton, Empty, Field, LoadError, LogView, Notice, Skeleton } from "../ui/bits";
 import { Button, IconButton } from "../ui/Button";
@@ -41,7 +45,6 @@ import { Progress, RunStatus } from "./Runs";
 import { GLIDE, SETTLE } from "../core/motion";
 
 const FOLLOW = "__settings__";
-const READY_AT = 0.2;
 
 const STATUS_TONE: Record<ChatStatus, Tone> = {
   thinking: "muted",
@@ -70,6 +73,9 @@ function NewChat({ defaults }: { defaults: ChatDefaults | undefined }) {
   const ids = useId();
   const [goal, setGoal] = useState("");
   const [mode, setMode] = useState<ChatMode>("interview");
+  // A new project by default: the console's launch folder says nothing about
+  // what the user is building, so reading it as the project must be a choice.
+  const [project, setProject] = useState<ChatProject>("new");
   const [cwd, setCwd] = useState("");
   const [backend, setBackend] = useState(FOLLOW);
   const [model, setModel] = useState("");
@@ -90,6 +96,7 @@ function NewChat({ defaults }: { defaults: ChatDefaults | undefined }) {
         goal,
         mode,
         cwd,
+        ...(mode === "interview" ? { project } : {}),
         backend: backend === FOLLOW ? "" : backend,
         model: mode === "ask" ? model : "",
       });
@@ -168,9 +175,27 @@ function NewChat({ defaults }: { defaults: ChatDefaults | undefined }) {
           ))}
         </div>
       ) : null}
+      {mode === "interview" ? (
+        <div className="project-choice">
+          <Segmented<ChatProject>
+            label={t("chat.new.project")}
+            value={project}
+            onChange={setProject}
+            options={[
+              { value: "new", label: t("chat.new.project.new"), icon: <FolderPlus size={14} aria-hidden /> },
+              { value: "existing", label: t("chat.new.project.existing"), icon: <FolderGit2 size={14} aria-hidden /> },
+            ]}
+          />
+          <p className="project-choice-lead">{project === "existing" ? t("chat.new.project.existingLead", { folder: shortPath(cwd) || "…" }) : t("chat.new.project.newLead")}</p>
+        </div>
+      ) : null}
       <div className="composer-options">
         {mode !== "ask" ? (
-          <Field label={t("chat.new.folder")} htmlFor={`${ids}-cwd`} hint={t("chat.new.folder.hint")}>
+          <Field
+            label={mode === "interview" && project === "new" ? t("chat.new.runFolder") : t("chat.new.folder")}
+            htmlFor={`${ids}-cwd`}
+            hint={mode === "interview" && project === "new" ? t("chat.new.runFolder.hint") : t("chat.new.folder.hint")}
+          >
             <div className="input-icon">
               <Folder size={15} aria-hidden />
               <input id={`${ids}-cwd`} className="input input-mono" value={cwd} spellCheck={false} autoComplete="off" onChange={(event) => setCwd(event.target.value)} />
@@ -388,7 +413,27 @@ function ResultCard({ message }: { message: ChatMessage }) {
   );
 }
 
-function MessageView({ message, running, questionNumber }: { message: ChatMessage; running: boolean; questionNumber: number }) {
+/** How Ouroboros drafted a user answer from the repository, and how to correct an auto-confirmed one. */
+function AnswerProvenance({ message, onCorrect }: { message: ChatMessage; onCorrect?: (message: ChatMessage) => void }) {
+  const { t } = useT();
+  if (message.corrects) return <span className="bubble-via">{t("chat.answer.correction")}</span>;
+  if (message.via !== "auto_confirmed" && message.via !== "repo_confirmed") return null;
+  const auto = message.via === "auto_confirmed";
+  return (
+    <div className="bubble-via">
+      <span>{auto ? t("chat.answer.autoConfirmed", { source: message.source ?? "" }) : t("chat.answer.repoConfirmed")}</span>
+      {auto && message.corrected ? <span>· {t("chat.answer.corrected")}</span> : null}
+      {auto && !message.corrected && onCorrect ? (
+        <button type="button" className="bubble-via-action" onClick={() => onCorrect(message)}>
+          <Pencil size={12} aria-hidden />
+          {t("chat.answer.correct")}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function MessageView({ message, running, questionNumber, onCorrect }: { message: ChatMessage; running: boolean; questionNumber: number; onCorrect?: (message: ChatMessage) => void }) {
   const { t } = useT();
   let body: ReactNode;
   let shape = "left";
@@ -434,9 +479,10 @@ function MessageView({ message, running, questionNumber }: { message: ChatMessag
     default:
       shape = message.role === "user" ? "right" : "left";
       body = (
-        <div className={`bubble ${message.role === "user" ? "bubble-user" : "bubble-assistant"}`} data-local={message.id.startsWith("local-") || undefined}>
+        <div className={`bubble ${message.role === "user" ? "bubble-user" : "bubble-assistant"}`} data-local={message.id.startsWith("local-") || undefined} data-via={message.via}>
           <p>{message.text}</p>
           {message.model ? <span className="bubble-model">{message.model}</span> : null}
+          {message.role === "user" ? <AnswerProvenance message={message} onCorrect={onCorrect} /> : null}
         </div>
       );
   }
@@ -453,20 +499,46 @@ function MessageView({ message, running, questionNumber }: { message: ChatMessag
   );
 }
 
-/** How far the interview is from "clear enough": the gate sits at 0.2. */
-function AmbiguityMeter({ value }: { value: number }) {
-  const { t } = useT();
-  const clamped = Math.min(Math.max(value, 0), 1);
-  const ready = clamped <= READY_AT;
+/**
+ * The interview's completion gate as the server reports it: the ambiguity score
+ * against the server's gate, each area against its floor, and the streak of
+ * qualifying answers the server waits for before it completes on its own.
+ */
+function ReadinessMeter({ readiness }: { readiness: Readiness }) {
+  const { t, tx } = useT();
+  const clamp = (value: number) => Math.min(Math.max(value, 0), 1);
+  const score = clamp(readiness.score);
+  const threshold = readiness.threshold.toFixed(2);
+  let goal: string;
+  if (readiness.complete) goal = t("chat.readiness.complete");
+  else if (readiness.qualified) goal = t("chat.readiness.confirming", { streak: readiness.streak, required: readiness.streak_required });
+  else if (readiness.score_ok) goal = t("chat.readiness.floors", { threshold });
+  else goal = t("chat.readiness.open", { threshold });
+  const ready = readiness.complete || readiness.qualified === true;
   return (
-    <div className="ambiguity" data-ready={ready || undefined}>
-      <span className="ambiguity-label">{t("chat.ambiguity")}</span>
-      <div className="ambiguity-track" role="meter" aria-label={t("chat.ambiguity")} aria-valuemin={0} aria-valuemax={1} aria-valuenow={Number(clamped.toFixed(2))} aria-valuetext={t("chat.ambiguity.text", { value: clamped.toFixed(2) })}>
-        <motion.span className="ambiguity-fill" animate={{ width: `${clamped * 100}%` }} transition={GLIDE} />
-        <span className="ambiguity-gate" style={{ left: `${READY_AT * 100}%` }} aria-hidden />
+    <div className="readiness">
+      <div className="ambiguity" data-ready={ready || undefined}>
+        <span className="ambiguity-label">{t("chat.ambiguity")}</span>
+        <div className="ambiguity-track" role="meter" aria-label={t("chat.ambiguity")} aria-valuemin={0} aria-valuemax={1} aria-valuenow={Number(score.toFixed(2))} aria-valuetext={t("chat.ambiguity.text", { value: score.toFixed(2) })}>
+          <motion.span className="ambiguity-fill" animate={{ width: `${score * 100}%` }} transition={GLIDE} />
+          <span className="ambiguity-gate" style={{ left: `${clamp(readiness.threshold) * 100}%` }} aria-hidden />
+        </div>
+        <span className="ambiguity-value">{score.toFixed(2)}</span>
+        <span className="ambiguity-goal">{goal}</span>
       </div>
-      <span className="ambiguity-value">{clamped.toFixed(2)}</span>
-      <span className="ambiguity-goal">{ready ? t("chat.ambiguity.ready") : t("chat.ambiguity.goal")}</span>
+      {readiness.dimensions.length > 0 ? (
+        <ul className="readiness-dims" aria-label={t("chat.readiness.dims")}>
+          {readiness.dimensions.map((dimension) => (
+            <li key={dimension.key} data-met={dimension.met || undefined}>
+              {dimension.met ? <Check size={11} aria-hidden /> : <CircleDashed size={11} aria-hidden />}
+              <span>{tx(`chat.readiness.dim.${dimension.key}`, dimension.label)}</span>
+              <span className="readiness-dim-value">
+                {t("chat.readiness.dim.value", { value: dimension.clarity === null ? "–" : dimension.clarity.toFixed(2), floor: dimension.floor.toFixed(2) })}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
     </div>
   );
 }
@@ -519,6 +591,12 @@ function ContextPane({ session }: { session: ChatSession }) {
             <dt>{t("chat.mode")}</dt>
             <dd>{t(`chat.mode.${session.mode}`)}</dd>
           </div>
+          {session.project ? (
+            <div>
+              <dt>{t("chat.new.project")}</dt>
+              <dd>{t(`chat.new.project.${session.project}`)}</dd>
+            </div>
+          ) : null}
           <div>
             <dt>{t("models.agent")}</dt>
             <dd>{session.backend ? backendName(session.backend) : t("chat.new.followPlain")}</dd>
@@ -597,6 +675,8 @@ function Thread({ id }: { id: string }) {
   const stream = useSnapshotStream<ChatSession>(`${path}/stream`);
   const [session, setSession] = useState<ChatSession | undefined>(loaded.data);
   const [draft, setDraft] = useState("");
+  // The auto-confirmed answer the next message corrects, if the user asked to correct one.
+  const [correcting, setCorrecting] = useState<ChatMessage | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
@@ -619,7 +699,7 @@ function Thread({ id }: { id: string }) {
   }, [count, tailSize, session?.status, session?.suggestion?.pending, session?.suggestion?.text]);
 
   const [send, sending] = useAction(
-    async (text: string) => {
+    async (text: string, corrects?: string) => {
       const before = session;
       // Show the message at once; the server's snapshot replaces it.
       setSession((current) =>
@@ -633,9 +713,10 @@ function Thread({ id }: { id: string }) {
           : current,
       );
       setDraft("");
+      setCorrecting(null);
       pinned.current = true;
       try {
-        const next = await post<ChatSession>(`${path}/messages`, { text });
+        const next = await post<ChatSession>(`${path}/messages`, corrects ? { text, corrects } : { text });
         setSession(next);
       } catch (failure) {
         setSession(before);
@@ -646,8 +727,9 @@ function Thread({ id }: { id: string }) {
     { tx, failTitle: t("chat.sendFailed") },
   );
 
+  type Action = "seed" | "run" | "suggest" | "accept" | "dismiss" | "stop";
   const [act, acting] = useAction(
-    async (action: "seed" | "run" | "suggest" | "stop", extra: Record<string, unknown> = {}) => {
+    async (action: Action, extra: Record<string, unknown> = {}) => {
       const next = await post<ChatSession>(`${path}/actions`, { action, ...extra });
       setSession(next);
       if (action === "run") invalidate("/api/runs", "/api/overview");
@@ -655,7 +737,7 @@ function Thread({ id }: { id: string }) {
     { tx, failTitle: t("chat.actionFailed") },
   );
   const [lastAction, setLastAction] = useState<string>("");
-  const run = (action: "seed" | "run" | "suggest" | "stop", extra?: Record<string, unknown>) => {
+  const run = (action: Action, extra?: Record<string, unknown>) => {
     setLastAction(action);
     return act(action, extra);
   };
@@ -710,7 +792,7 @@ function Thread({ id }: { id: string }) {
   function submit(event?: FormEvent) {
     event?.preventDefault();
     const text = draft.trim();
-    if (text && canType && !sending) void send(text);
+    if (text && canType && !sending) void send(text, correcting?.id);
   }
 
   function onKey(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -731,6 +813,7 @@ function Thread({ id }: { id: string }) {
           <h1>{session.title}</h1>
           <p>
             <Chip>{t(`chat.mode.${mode}`)}</Chip>
+            {session.project ? <Chip>{t(`chat.new.project.${session.project}`)}</Chip> : null}
             {session.backend ? <Chip tone="info">{backendName(session.backend)}</Chip> : null}
             {session.model ? <Chip>{session.model}</Chip> : null}
             {!ask ? (
@@ -750,7 +833,7 @@ function Thread({ id }: { id: string }) {
         </IconButton>
       </header>
 
-      {mode === "interview" && typeof session.ambiguity === "number" ? <AmbiguityMeter value={session.ambiguity} /> : null}
+      {mode === "interview" && session.readiness ? <ReadinessMeter readiness={session.readiness} /> : null}
 
       <div
         className="thread-scroll"
@@ -763,7 +846,18 @@ function Thread({ id }: { id: string }) {
         <ol className="thread" aria-live="polite" aria-label={t("chat.thread")}>
           {session.messages.map((message) => {
             if (message.kind === "question") questionNumber += 1;
-            return <MessageView key={message.id} message={message} running={status === "running"} questionNumber={questionNumber} />;
+            return (
+              <MessageView
+                key={message.id}
+                message={message}
+                running={status === "running"}
+                questionNumber={questionNumber}
+                onCorrect={canType ? (target) => {
+                  setCorrecting(target);
+                  inputRef.current?.focus();
+                } : undefined}
+              />
+            );
           })}
           <AnimatePresence>
             {status === "thinking" ? (
@@ -785,7 +879,7 @@ function Thread({ id }: { id: string }) {
             <motion.div key="suggestion" className="suggestion" initial={{ opacity: 0, y: 12, height: 0 }} animate={{ opacity: 1, y: 0, height: "auto" }} exit={{ opacity: 0, height: 0 }} transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}>
               {suggestion.pending ? (
                 <p className="suggestion-pending" role="status">
-                  <Spinner size={14} /> {t("chat.suggest.pending")}
+                  <Spinner size={14} /> {suggestion.auto ? t("chat.suggest.autoPending") : t("chat.suggest.pending")}
                 </p>
               ) : suggestion.error ? (
                 <Notice tone="warn" title={t("chat.suggest.failed")}>
@@ -795,7 +889,7 @@ function Thread({ id }: { id: string }) {
                 <>
                   <div className="suggestion-head">
                     <Sparkles size={14} aria-hidden />
-                    <strong>{t("chat.suggest.title")}</strong>
+                    <strong>{suggestion.source === "repo" ? t("chat.suggest.repoTitle") : t("chat.suggest.title")}</strong>
                     <Chip tone={suggestion.source === "repo" ? "ok" : "muted"}>{suggestion.source === "repo" ? t("chat.suggest.fromRepo") : t("chat.suggest.fromModel")}</Chip>
                   </div>
                   <p className="suggestion-text">{suggestion.text}</p>
@@ -809,6 +903,9 @@ function Thread({ id }: { id: string }) {
                     </ul>
                   ) : null}
                   <div className="suggestion-actions">
+                    <Button size="sm" variant="ghost" icon={<X size={14} aria-hidden />} pending={busyAction("dismiss")} onClick={() => void run("dismiss")}>
+                      {t("chat.suggest.reject")}
+                    </Button>
                     <Button
                       size="sm"
                       onClick={() => {
@@ -818,8 +915,8 @@ function Thread({ id }: { id: string }) {
                     >
                       {t("chat.suggest.edit")}
                     </Button>
-                    <Button size="sm" variant="primary" pending={sending} icon={<Check size={14} aria-hidden />} onClick={() => suggestion.text && void send(suggestion.text)}>
-                      {t("chat.suggest.send")}
+                    <Button size="sm" variant="primary" pending={busyAction("accept")} icon={<Check size={14} aria-hidden />} onClick={() => void run("accept")}>
+                      {suggestion.source === "repo" ? t("chat.suggest.confirm") : t("chat.suggest.send")}
                     </Button>
                   </div>
                 </>
@@ -878,6 +975,15 @@ function Thread({ id }: { id: string }) {
 
         {mode !== "auto" && !(mode === "interview" && (session.seed_yaml || status === "seed_ready_to_write")) ? (
           <form className="composer-box composer-inline" onSubmit={submit} data-disabled={!canType || undefined}>
+            {correcting ? (
+              <div className="composer-correcting">
+                <Pencil size={13} aria-hidden />
+                <span>{t("chat.correcting", { question: correcting.question ?? "", answer: correcting.text })}</span>
+                <IconButton label={t("chat.correcting.cancel")} onClick={() => setCorrecting(null)}>
+                  <X size={14} aria-hidden />
+                </IconButton>
+              </div>
+            ) : null}
             <label className="sr-only" htmlFor="thread-input">
               {ask ? t("chat.input.ask") : t("chat.input.answer")}
             </label>

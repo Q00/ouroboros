@@ -338,7 +338,15 @@ export interface ChatMessage {
   text: string;
   ts: number;
   ambiguity?: number | null;
-  ready?: boolean;
+  /** How a user answer was given, when Ouroboros drafted it from the repository or a default. */
+  via?: "auto_confirmed" | "repo_confirmed" | "suggested";
+  /** For an auto-confirmed answer: the manifest or config file it was read from. */
+  source?: string;
+  evidence?: string[];
+  /** The question an auto-confirmed or confirmed answer answered. */
+  question?: string;
+  corrected?: boolean;
+  corrects?: string;
   model?: string | null;
   acceptance_criteria?: string[];
   constraints?: string[];
@@ -363,7 +371,34 @@ export interface Suggestion {
   source?: "repo" | "model";
   evidence?: string[];
   error?: string;
+  /** Started by Ouroboros for a question the server marked as answerable from code. */
+  auto?: boolean;
+  repo_checked?: boolean;
 }
+
+/** One per-dimension floor of the server's completion gate. */
+export interface ReadinessDimension {
+  key: string;
+  label: string;
+  floor: number;
+  clarity: number | null;
+  met: boolean;
+}
+
+/** The interview's completion gate as the server evaluates it. The page holds no thresholds. */
+export interface Readiness {
+  score: number;
+  threshold: number;
+  score_ok: boolean | null;
+  dimensions: ReadinessDimension[];
+  qualified: boolean | null;
+  streak: number;
+  streak_required: number;
+  complete: boolean;
+  brownfield: boolean;
+}
+
+export type ChatProject = "new" | "existing";
 
 export interface ChatSessionRow {
   id: string;
@@ -381,7 +416,9 @@ export interface ChatSession extends ChatSessionRow {
   goal: string;
   version: number;
   messages: ChatMessage[];
+  project?: ChatProject | null;
   ambiguity?: number | null;
+  readiness?: Readiness | null;
   seed_ready?: boolean;
   last_question?: string | null;
   interview_session_id?: string;
