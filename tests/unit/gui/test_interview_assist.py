@@ -93,6 +93,92 @@ def test_an_answer_that_does_not_state_the_cited_value_is_not_exact(tmp_path: Pa
     assert interview_assist.auto_confirm_source(inferred, tmp_path) is None
 
 
+# A cited value only grounds an answer that names what the value describes: the
+# dependency or tool the line declares (its key, or the name it versions).
+
+
+@pytest.mark.parametrize(
+    ("path", "quote", "answer"),
+    [
+        ("package.json", '"react": "18"', "This project uses React 18."),
+        ("package.json", '"react": "18"', "this project uses REACT 18."),
+        ("package.json", '"react": "18"', "This project uses React."),
+        ("package.json", '"react": "^18.2.0"', "The front end is react@18."),
+        ("package.json", '"@types/node": "^20.11.0"', "Node types come from @types/node 20."),
+        ("package.json", '"@types/node": "^20.11.0"', "Node types come from @Types/Node."),
+        ("package.json", '"node": ">=20"', "The project needs Node.js 20 or newer."),
+        ("pyproject.toml", '"click>=8.1",', "Click."),
+        ("pyproject.toml", 'fastapi = { version = "^0.110", extras = ["all"] }', "FastAPI 0.110."),
+        ("package.json", '"test": "vitest run"', "Tests run with Vitest."),
+        ("compose.yaml", "    image: postgres:16", "The database is Postgres 16."),
+        ("Dockerfile", "FROM python:3.12-slim AS build", "The build stage uses Python 3.12."),
+        (
+            ".github/workflows/ci.yml",
+            '        python-version: ["3.11", "3.12"]',
+            "CI tests Python version 3.11 or 3.12.",
+        ),
+        (
+            "pyproject.toml",
+            '[project]\nrequires-python = ">=3.12"',
+            "The project requires Python 3.12 or newer.",
+        ),
+    ],
+)
+def test_the_answer_names_what_the_cited_value_describes(
+    tmp_path: Path, path: str, quote: str, answer: str
+) -> None:
+    assert (
+        interview_assist.auto_confirm_source(_found(_span(path, quote), answer=answer), tmp_path)
+        == path
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "quote", "answer"),
+    [
+        # The value matches, but the answer says it describes something else.
+        ("package.json", '"react": "18"', "This project uses Vue 18."),
+        ("package.json", '"react": "18"', "This project uses Preact 18."),
+        ("package.json", '"react-dom": "18"', "This project uses React 18."),
+        ("package.json", '"@types/node": "^20.11.0"', "The project runs on Node 20."),
+        ("pyproject.toml", '"typer>=0.12",', "The CLI is built with Click 0.12."),
+        ("pyproject.toml", 'requires-python = ">=3.12"', "The project requires Node 3.12."),
+        ("Dockerfile", "FROM python:3.12-slim", "The image is based on Ruby 3.12."),
+        ("Dockerfile", "FROM python:3.12-slim AS build", "The build stage uses Node."),
+        ("compose.yaml", "    image: postgres:16", "The database is MySQL 16."),
+        ("package.json", '"test": "vitest run --coverage"', "Tests run with Jest and coverage."),
+        # A metadata field's value is not a named dependency.
+        ("package.json", '"version": "1.2.0"', "This project uses Vue version 1.2.0."),
+        # A version the citation contradicts, or one no citation holds.
+        ("package.json", '"react": "^18.2.0"', "This project uses React 17."),
+        ("package.json", '"react": "18"', "This project uses React 18.2."),
+        ("package.json", '"react": "^18.2.0"', "React 18 and TypeScript 5."),
+        ("package.json", '"react": "18"', "This project uses React and Vue 18."),
+        ("package.json", '"react": "18"', "This project uses Vue 18, not React."),
+        ("pyproject.toml", '"typer",', "The CLI is built with Typer 0.12."),
+        # A version with nothing on the line naming what it versions.
+        (".python-version", "3.11", "The project uses Ruby 3.11."),
+    ],
+)
+def test_a_citation_that_does_not_support_the_answer_is_not_auto_confirmed(
+    tmp_path: Path, path: str, quote: str, answer: str
+) -> None:
+    found = _found(_span(path, quote), answer=answer)
+    assert interview_assist.auto_confirm_source(found, tmp_path) is None
+
+
+def test_each_version_belongs_to_the_dependency_it_follows(tmp_path: Path) -> None:
+    spans = (_span("package.json", '"react": "^18.2.0",'), _span("package.json", '"node": ">=20"'))
+    assert (
+        interview_assist.auto_confirm_source(
+            _found(*spans, answer="React 18 on Node 20."), tmp_path
+        )
+        == "package.json"
+    )
+    swapped = _found(*spans, answer="React 20 on Node 18.")
+    assert interview_assist.auto_confirm_source(swapped, tmp_path) is None
+
+
 @pytest.mark.parametrize(
     "investigation",
     [

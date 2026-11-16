@@ -284,6 +284,58 @@ def test_an_exact_manifest_answer_is_auto_confirmed_with_a_visible_note(
     assert session["assisted_in_a_row"] == 1
 
 
+@pytest.mark.parametrize(
+    ("answer", "auto_confirmed"),
+    [("This project uses React 18.", True), ("This project uses Vue 18.", False)],
+)
+def test_a_manifest_value_auto_confirms_only_the_dependency_it_belongs_to(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answer: str, auto_confirmed: bool
+) -> None:
+    repo = _git_repo(
+        tmp_path / "app", {"package.json": '{\n  "dependencies": {\n    "react": "18"\n  }\n}\n'}
+    )
+    reply = json.dumps(
+        {
+            "kind": "current_behavior",
+            "status": "found",
+            "answer": answer,
+            "evidence": [
+                {"path": "package.json", "start_line": 3, "end_line": 3, "quote": '"react": "18"'}
+            ],
+        }
+    )
+    # The real investigator: the citation passes its evidence check either way.
+    investigator = RepoInvestigator(
+        runtime_backend="codex", runtime_factory=lambda **_: _CodexShapedRuntime(reply)
+    )
+    question = "Which UI framework does the project use?"
+    h = harness.Harness()
+    chat_id, scripted = _chat(
+        h,
+        [Step(question, question), Step("Next?", "Next?", False)],
+        repo,
+        investigator=investigator,
+        monkeypatch=monkeypatch,
+    )
+    if auto_confirmed:
+        session = _wait(h, chat_id, lambda s: _idle(s) and len(scripted.answers()) == 1)
+        assert scripted.answers() == [(f"[from-code][auto-confirmed] {answer}", question)]
+        note = next(m for m in session["messages"] if m.get("via") == "auto_confirmed")
+        assert note["source"] == "package.json"
+        return
+    session = _wait(h, chat_id, lambda s: _idle(s) and (s.get("suggestion") or {}).get("text"))
+    assert scripted.answers() == []  # nothing sent without the human
+    assert not any(m.get("via") == "auto_confirmed" for m in session["messages"])
+    suggestion = session["suggestion"]
+    assert suggestion["text"] == answer
+    assert suggestion["source"] == "repo" and suggestion["auto"] is True
+    assert suggestion["evidence"] == ['package.json:3 "react": "18"']
+
+    h.action(chat_id, "accept", {})  # still one click away
+    _wait(h, chat_id, lambda s: _idle(s) and s["last_question"] == "Next?")
+    assert scripted.answers() == [(f"[from-code] {answer}", question)]
+
+
 def test_an_inferred_answer_waits_for_one_click(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
