@@ -219,9 +219,17 @@ async def start_batch(
         return recoverable_batch_error(
             state.interview_id, "Batch could not be saved. Resume the session to inspect its state."
         )
+    from ouroboros.bigbang.interview_closure import surface_fields
     from ouroboros.events.interview import interview_started
+    from ouroboros.mcp.host_context import current_mcp_host_context
 
-    handler._emit_event_bg(interview_started(state.interview_id, resolved.value))
+    handler._emit_event_bg(
+        interview_started(
+            state.interview_id,
+            resolved.value,
+            **surface_fields(current_mcp_host_context()),
+        )
+    )
     return Result.ok(batch_view(state, arguments.get("batch_page_size")))
 
 
@@ -394,6 +402,7 @@ async def answer_batch(
         if saved.is_err:
             return batch_error("Batch changed or could not be saved; reload before retrying")
         state = working
+        from ouroboros.bigbang.interview_closure import answer_source
         from ouroboros.events.interview import interview_response_recorded
 
         for old_round, answer, _selected in normalized:
@@ -405,6 +414,7 @@ async def answer_batch(
                     answer,
                     question_id=old_round.question_id,
                     ambiguity_dimension=old_round.ambiguity_dimension,
+                    answer_source=answer_source(answer, arguments),
                 )
             )
         if new_material:

@@ -83,7 +83,7 @@ class _Loop:
         self.thread.start()
 
     def submit(self, coro: Coroutine[Any, Any, Any]) -> Any:
-        return asyncio.run_coroutine_threadsafe(coro, self.loop)
+        return asyncio.run_coroutine_threadsafe(_as_console_surface(coro), self.loop)
 
 
 class _Handlers:
@@ -1297,6 +1297,20 @@ def _board_summary(board: dict[str, Any], events: list[dict[str, Any]]) -> dict[
         "activity": activity,
         "key": json.dumps([status, counts, phase, activity], sort_keys=True, default=str),
     }
+
+
+async def _as_console_surface(coro: Coroutine[Any, Any, Any]) -> Any:
+    """Run console work under the ``console`` interview surface label.
+
+    Every coroutine the console runs goes through :meth:`_Loop.submit`, so the
+    interviews it starts or answers are labeled ``console`` in the event store
+    (``ouroboros.bigbang.interview_closure``). The import stays lazy to keep
+    this module light at console start-up.
+    """
+    from ouroboros.bigbang.interview_closure import InterviewSurface, use_interview_surface
+
+    with use_interview_surface(InterviewSurface.CONSOLE):
+        return await coro
 
 
 __all__ = ["Harness", "chats_dir"]

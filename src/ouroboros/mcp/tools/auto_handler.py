@@ -71,6 +71,7 @@ from ouroboros.auto.worktree import (
     ensure_auto_worktree,
     release_auto_worktree,
 )
+from ouroboros.bigbang.interview_closure import InterviewSurface, use_interview_surface
 from ouroboros.config import default_execution_efficiency_mode, get_opencode_mode, policy_notice
 from ouroboros.core.execution_preferences import resolve_execution_preferences
 from ouroboros.core.file_lock import file_lock
@@ -627,7 +628,8 @@ class AutoHandler:
         )
         result: AutoPipelineResult | None = None
         try:
-            result = await pipeline.run(state)
+            with use_interview_surface(InterviewSurface.AUTO):
+                result = await pipeline.run(state)
             return result
         finally:
             release_auto_worktree(

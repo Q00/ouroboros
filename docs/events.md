@@ -253,6 +253,73 @@ the non-content metadata needed for phase analysis:
 Use `scripts/export_interview_latency.py` when sharing benchmark evidence. The
 exporter excludes failure text and all non-allowlisted payload fields.
 
+### Interview closure fields
+
+These additive fields record how many questions an interview asks and why it
+does or does not close, by calling surface. Every value is a number or a label
+from a closed set; none carries question, answer or justification text. They are
+labels only and grant nothing: no code reads them to authorize, route or relax
+an interview. They stay in the local EventStore. `ouroboros.telemetry` sends no
+interview event, and `scripts/export_interview_latency.py` does not export these
+fields. Rows written before these fields existed omit them; readers must treat a
+missing field as unknown. `ouroboros init list --summary` reads them.
+
+| Event | Field | Type | Description |
+|-------|-------|------|-------------|
+| `interview.started` | `surface` | `string?` | `console`, `mcp`, `cli_init`, `auto`, or `unknown` |
+| `interview.started` | `host` | `string?` | For a start inside an MCP request: the host family the server normalized from `clientInfo.name` (`claude_code`, `codex`, `opencode`, `other_known`, `unknown`); absent otherwise |
+| `interview.response.recorded` | `answer_source` | `string?` | `from_user`, `from_code`, `auto_confirmed`, `from_research`, `from_auto`, or `unknown` |
+| `interview.response.recorded` | `closure` | `object?` | CLI `init` only: the closure snapshot after scoring this answer |
+| `interview.response.emitted` | `closure` | `object?` | `start` and `answer` responses: the snapshot that led to asking this question instead of closing |
+| `interview.completed` | `closure` | `object?` | The snapshot that closed the interview |
+
+`surface` comes from the caller. The console back end and `ooo auto` (CLI and
+MCP) set it for the interviews they drive, and CLI `init` passes it directly.
+A start made inside an MCP request with no caller label is `mcp`. `host` reuses
+the server's existing normalization of `clientInfo.name`
+(`ouroboros.mcp.host_context`): a name outside the ones it recognizes records
+`other_known`, and a host that sends no name records `unknown`. The raw client
+name is never stored.
+
+`answer_source` comes from a declared `answer_provenance` (`requester` is
+`from_user`, `repo_fact` is `from_code`, `assumption` is `from_auto`), then from
+the advertised prefix: `[from-code][auto-confirmed]` is `auto_confirmed`,
+`[from-code]` or `[from-repo]` is `from_code`, `[from-research]` is
+`from_research`, `[from-user]` or `[from-auto][requester]` is `from_user`, and
+`[from-auto]`, `[from-safe-default]`, `[from-assumption]` or `[from-inference]`
+is `from_auto`. An unprefixed answer is `from_user` on the console and in CLI
+`init`, where a person types it, and `unknown` elsewhere.
+
+The `closure` snapshot:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `answered_rounds` | `int` | Answered rounds when the snapshot was taken |
+| `is_brownfield` | `bool` | Whether the context-clarity floor applies |
+| `threshold` | `number` | The ambiguity threshold the gate used (`0.2`) |
+| `ambiguity_score` | `number?` | Overall ambiguity, rounded to 4 places; `null` when the turn was not scored |
+| `clarity` | `object?` | Per-dimension clarity: `goal_clarity`, `constraint_clarity`, `success_criteria_clarity`, and `context_clarity` for brownfield; `null` when unscored |
+| `floors_passed` | `object?` | The same keys, `true` when that dimension meets its completion floor; `null` when unscored |
+| `streak` | `int` | Consecutive qualifying turns (`completion_candidate_streak`) |
+| `streak_required` | `int` | Qualifying turns the gate needs to close (`2`) |
+| `verdict` | `string` | `unscored`, `above_threshold`, `floors_unmet`, `qualified` (score and floors pass; streak not met), `passed`, or `safe_default` (closed by `ooo auto`'s audited safe-default synthesis) |
+
+CLI `init` closes on the user's confirmation, not on the streak, so its
+qualifying snapshots read `qualified`.
+
+### interview.seed_forced
+
+Emitted after a Seed is generated with `force` set, bypassing the closure gate:
+the console's "Write the spec now", `ouroboros_generate_seed(force=true)` on the
+in-process path, `ooo auto`'s ledger-evidence close, or CLI "Generate Seed
+anyway". Aggregate type `interview`; aggregate id the interview session id.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `answered_rounds` | `int` | Answered rounds when the Seed was forced |
+| `interview_completed` | `bool` | Whether the interview was already marked completed |
+| `closure` | `object` | The closure snapshot of the score the Seed was stamped with |
+
 ### workflow.run.created / completed / failed / cancelled
 
 Durable lifecycle events for #956 Workflow IR runs. All events share the

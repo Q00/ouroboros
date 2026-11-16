@@ -661,6 +661,11 @@ class EventStore:
         """Whether another process can observe this store's event stream."""
         return self.sqlite_path() is not None
 
+    @property
+    def is_initialized(self) -> bool:
+        """Whether the store is open for ``append_durable`` (initialized, not closed)."""
+        return self._initialized and self._engine is not None
+
     def _raise_invalid_append_input(
         self,
         event: object,

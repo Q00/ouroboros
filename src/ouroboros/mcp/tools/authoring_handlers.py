@@ -40,6 +40,7 @@ from ouroboros.bigbang.interview import (
     InterviewState,
     InterviewStatus,
 )
+from ouroboros.bigbang.interview_closure import answer_source, closure_snapshot, surface_fields
 from ouroboros.bigbang.requirement_distillation import (
     build_promoted_reference_seed,
     build_requirement_distillation,
@@ -61,7 +62,7 @@ from ouroboros.interview_adapters.first_question import (
 )
 from ouroboros.interview_calibration import normalize_interview_calibration
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
-from ouroboros.mcp.host_context import resolve_request_subagent_dispatch
+from ouroboros.mcp.host_context import current_mcp_host_context, resolve_request_subagent_dispatch
 from ouroboros.mcp.tools import interview_opening_decisions as opening_decisions
 from ouroboros.mcp.tools import interview_refused_close as refused_close
 from ouroboros.mcp.tools.advisory_dispatch import (
@@ -117,6 +118,7 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
+from ouroboros.observability.interview_closure_summary import record_forced_seed
 from ouroboros.orchestrator.capabilities.question_text import (
     format_question_with_ambiguity as _format_question_with_ambiguity,
 )
@@ -1320,6 +1322,7 @@ class GenerateSeedHandler:
                 )
 
             seed = seed_result.value
+            await record_forced_seed(self.event_store, state, ambiguity_score, force=force)
             # Convert seed to YAML
             seed_dict = seed.to_dict()
             seed_yaml = yaml.dump(
@@ -1707,6 +1710,7 @@ class InterviewHandler:
                 ambiguity_scoring_duration_ms=ambiguity_scoring_duration_ms,
                 question_generation_duration_ms=question_generation_duration_ms,
                 advisory_build_duration_ms=advisory_build_duration_ms,
+                closure=closure_snapshot(state, score, safe_default=seed_ready_override is True),
             )
         )
 
@@ -2571,6 +2575,7 @@ class InterviewHandler:
                     interview_started(
                         state.interview_id,
                         resolved_context.value,
+                        **surface_fields(current_mcp_host_context()),
                     )
                 )
 
@@ -2656,6 +2661,7 @@ class InterviewHandler:
                         ambiguity_scoring_duration_ms=None,
                         question_generation_duration_ms=question_generation_duration_ms,
                         advisory_build_duration_ms=advisory_build_duration_ms,
+                        closure=closure_snapshot(state, live_score),
                     )
                 )
                 return Result.ok(
@@ -3102,6 +3108,7 @@ class InterviewHandler:
                     round_number=state.rounds[-1].round_number if state.rounds else 0,
                     question_preview=pending_question,
                     response_preview=answer,
+                    answer_source=answer_source(answer, arguments),
                 )
             )
 
@@ -3693,6 +3700,7 @@ class InterviewHandler:
                 ambiguity_scoring_duration_ms=ambiguity_scoring_duration_ms,
                 question_generation_duration_ms=question_generation_duration_ms,
                 advisory_build_duration_ms=advisory_build_duration_ms,
+                closure=closure_snapshot(state, live_score),
             )
         )
         from ouroboros.mcp.tools.interview_materials import material_content

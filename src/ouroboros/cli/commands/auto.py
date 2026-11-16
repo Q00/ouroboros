@@ -66,6 +66,7 @@ from ouroboros.auto.worktree import (
     ensure_auto_worktree,
     release_auto_worktree,
 )
+from ouroboros.bigbang.interview_closure import InterviewSurface, use_interview_surface
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import (
     print_error,
@@ -687,7 +688,8 @@ async def _run_auto(
     )
     result: AutoPipelineResult | None = None
     try:
-        result = await pipeline.run(state)
+        with use_interview_surface(InterviewSurface.AUTO):
+            result = await pipeline.run(state)
         if wait and _is_run_handoff_only_completion(result) and result.job_id:
             # Direct CLI mode has no long-lived owner for the in-process job:
             # once _run_auto returns, ``asyncio.run`` teardown cancels the
