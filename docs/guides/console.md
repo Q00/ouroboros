@@ -22,7 +22,7 @@ settings app.
 | --- | --- |
 | Home | Version, default agent, connected tools, recent runs, a setup checklist. |
 | Health | `ouroboros doctor install` checks, and one-click installs of the optional components (`[claude]`, `[litellm]`, `[mcp]`, `[tui]`) pinned to this release. |
-| Chat | Interview, Auto and Ask modes with an agent/provider + model picker. *Suggest an answer* drafts a reply from the repository (or a default when the code can't settle it). *Hand off to agents* starts the run and follows it live, then shows the run's worktree, branch and changed files. |
+| Chat | Interview, Auto and Ask modes with an agent/provider + model picker. *Suggest an answer* drafts a reply from the repository (or a default when the code can't settle it). *Hand off to agents* starts the run and follows it live, then shows the run's worktree, branch and changed files. See [Interview chats](#interview-chats). |
 | Connect | Install agent CLIs with their published installers and run `ouroboros setup --runtime <tool>` per tool, optionally keeping the current default agent. |
 | Runs | Every execution from the EventStore with a live board per run. |
 | Agents & models | Default agent, per-stage agents and models, routing presets. Saves through the same validated, undoable path as `ouroboros config set`; `ouroboros config undo` reverts the last save. |
@@ -31,6 +31,30 @@ settings app.
 
 The interface is available in English, Korean, Simplified Chinese, Japanese
 and Spanish (side rail → language).
+
+## Interview chats
+
+- **New project or existing project.** A new Interview chat starts as a
+  **new project**: the interview reads no folder, whatever directory the
+  console was launched from. Pick **Existing project** to have it read the
+  folder you choose (a git repository or a folder with a project manifest);
+  only then is the interview a brownfield one. Either way, *Hand off to agents*
+  runs in a git worktree of the chosen folder.
+- **Code facts come from the repository.** In an existing project, each
+  question the server marks as answerable from code goes to the repository
+  investigator first (the one *Suggest an answer* and `ooo auto` use). A found
+  answer is shown with its evidence for one-click *Confirm*, *Edit first* or
+  *Not right*. An exact match in a manifest, lock file or CI config
+  (`pyproject.toml`, `package.json`, `go.mod`, `Dockerfile`, …), all from one
+  file, is sent at once and marked *Auto-confirmed from <file>*; *Correct it*
+  sends a correction. After three answers in a row that nobody typed, the next
+  question goes to you. Questions about what to build (goals, acceptance
+  criteria, preferences) always do.
+- **The meter is the server's gate.** It shows the ambiguity score against the
+  server's threshold, each area against the floor the server requires, and the
+  streak of qualifying answers it waits for before it completes the interview.
+  *Write the spec* becomes the next step when the server completes it; *Write
+  the spec now* skips the remaining questions at any time.
 
 ## Background service and the shared MCP server
 

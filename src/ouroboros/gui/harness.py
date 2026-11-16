@@ -5,6 +5,11 @@ A conversation is the Ouroboros pipeline told as a chat:
 * **Interview** mode asks Socratic questions in the thread (``ouroboros_interview``),
   writes the spec when you are ready (``ouroboros_generate_seed``), then runs it
   (``ouroboros_start_execute_seed``) and follows the run's board until it ends.
+  It is a brownfield interview only when the chat was started for an existing
+  project folder. Then each question the server marks as answerable from code
+  goes to the repository investigator first, and the answer comes back for
+  one-click confirmation, or is sent at once when the skill's PATH 1a allows it
+  (``gui/interview_assist.py``).
 * **Auto** mode hands the goal to ``ouroboros auto`` and streams its output.
 
 The handlers are the same objects the CLI and MCP server build, called in-process
@@ -21,13 +26,22 @@ import contextlib
 import json
 import os
 from pathlib import Path
+import tempfile
 import threading
 import time
-from typing import Any
+from typing import Any, cast
 import uuid
 
 import yaml
 
+from ouroboros.gui.interview_assist import (
+    AUTO_CONFIRMED_PREFIX,
+    CONFIRMED_PREFIX,
+    MAX_ASSISTED_IN_A_ROW,
+    RecordingInterviewHandler,
+    auto_confirm_source,
+    load_interview_view,
+)
 from ouroboros.gui.jobs import JobRegistry, ouroboros_command
 
 _MAX_LOG_LINES = 400
@@ -103,8 +117,10 @@ class _Handlers:
 
         backend = effective_runtime(self.backend)
         llm = self.backend if self.backend and _supports_llm(self.backend) else None
-        self.interview_handler = InterviewHandler(llm_backend=llm, agent_runtime_backend=backend)
-        self.interview = HandlerInterviewBackend(self.interview_handler, cwd=os.getcwd())
+        self.interview_handler = RecordingInterviewHandler(
+            InterviewHandler(llm_backend=llm, agent_runtime_backend=backend)
+        )
+        self.interview = HandlerInterviewBackend(cast(Any, self.interview_handler), cwd=os.getcwd())
         self.seed = HandlerSeedGenerator(
             GenerateSeedHandler(llm_backend=llm, agent_runtime_backend=backend)
         )
@@ -120,6 +136,18 @@ class _Handlers:
     def run_starter(self, cwd: str) -> Any:
         self.ensure()
         return self._run_starter(self.start_handler, cwd=cwd)
+
+    def code_request(self, interview_session_id: str) -> dict[str, Any] | None:
+        """The server's code-fact request on this interview's latest question, if any."""
+        return self.interview_handler.code_request(interview_session_id) if self._built else None
+
+    def interview_view(self, interview_session_id: str) -> tuple[dict[str, Any] | None, str | None]:
+        """The completion gate and the issued question, as the server persisted them."""
+        if not self._built:
+            return None, None
+        return load_interview_view(
+            self.interview_handler.resolved_state_dir(), interview_session_id
+        )
 
 
 def effective_runtime(backend: str | None, *, public: bool = False) -> str | None:
@@ -177,6 +205,9 @@ class Harness:
         self._changed = threading.Condition(self._lock)
         self._loop: _Loop | None = None
         self._handlers: dict[str, _Handlers] = {}
+        # One repository investigator per chat, so its call cap and the answers
+        # it already found carry across the chat's questions.
+        self._investigators: dict[str, Any] = {}
         self._jobs = JobRegistry()
         self._load_all()
 
@@ -279,6 +310,7 @@ class Harness:
     def delete(self, session_id: str) -> None:
         with self._lock:
             self._sessions.pop(session_id, None)
+            self._investigators.pop(session_id, None)
             with contextlib.suppress(OSError):
                 (chats_dir() / f"{session_id}.json").unlink()
             self._changed.notify_all()
@@ -292,6 +324,7 @@ class Harness:
         if not Path(cwd).is_dir():
             raise ValueError(f"Folder not found: {cwd}")
         mode = payload.get("mode") if payload.get("mode") in ("auto", "ask") else "interview"
+        project = _interview_project(payload.get("project"), cwd) if mode == "interview" else None
         backend = str(payload.get("backend") or "").strip() or None
         model = str(payload.get("model") or "").strip() or None
         if backend:
@@ -303,6 +336,7 @@ class Harness:
             "goal": goal,
             "cwd": cwd,
             "mode": mode,
+            "project": project,
             "backend": backend,
             "model": model,
             "status": "thinking",
@@ -322,7 +356,8 @@ class Harness:
             self._spawn(session_id, self._interview_start(session_id))
         return self.get(session_id) or session
 
-    def send(self, session_id: str, text: str) -> dict[str, Any]:
+    def send(self, session_id: str, text: str, *, corrects: str | None = None) -> dict[str, Any]:
+        """Send what the user typed. ``corrects`` names an auto-confirmed answer it corrects."""
         text = text.strip()
         if not text:
             raise ValueError("Type an answer first.")
@@ -334,13 +369,21 @@ class Harness:
             )
             if session.get("status") not in ready:
                 raise ValueError("Ouroboros is not waiting for a message right now.")
-            session["messages"].append(_msg("user", "text", text))
+            payload = text
+            extra: dict[str, Any] = {}
+            if corrects and not ask:
+                payload = _correction_payload(session, corrects, text)
+                extra["corrects"] = corrects
+            session["messages"].append(_msg("user", "text", text, **extra))
             session["status"] = "thinking"
+            session["suggestion"] = {"pending": False}
+            # A human answer resets the skill's Dialectic Rhythm Guard.
+            session["assisted_in_a_row"] = 0
             self._touch(session)
         if ask:
             self._spawn(session_id, self._ask(session_id))
         else:
-            self._spawn(session_id, self._interview_answer(session_id, text))
+            self._spawn(session_id, self._interview_answer(session_id, payload))
         return self.get(session_id) or {}
 
     def action(self, session_id: str, action: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -370,12 +413,65 @@ class Harness:
             elif action == "suggest":
                 if status != "waiting_answer" or not session.get("last_question"):
                     raise ValueError("There is no open question to answer.")
-                if session.get("suggestion", {}).get("pending"):
+                current = session.get("suggestion") or {}
+                if current.get("pending"):
                     raise ValueError("A suggestion is already being drafted.")
                 question = str(session["last_question"])
+                # A new project has no repository to read, and a question the
+                # repository was already checked for gets the default at once.
+                use_repo = session.get("project") != "new" and not (
+                    current.get("repo_checked") and current.get("question") == question
+                )
                 session["suggestion"] = {"pending": True, "question": question}
                 self._touch(session)
-                self._spawn_quiet(session_id, self._suggest(session_id, question))
+                self._spawn_quiet(session_id, self._suggest(session_id, question, use_repo))
+                return self.get(session_id) or {}
+            elif action == "accept":
+                suggestion = session.get("suggestion") or {}
+                question = session.get("last_question")
+                if (
+                    status != "waiting_answer"
+                    or suggestion.get("pending")
+                    or not suggestion.get("text")
+                    or suggestion.get("question") != question
+                ):
+                    raise ValueError("There is no suggested answer to send.")
+                text = str(suggestion["text"])
+                repo = suggestion.get("source") == "repo"
+                session["messages"].append(
+                    _msg(
+                        "user",
+                        "text",
+                        text,
+                        via="repo_confirmed" if repo else "suggested",
+                        evidence=list(suggestion.get("evidence") or []),
+                        question=question,
+                    )
+                )
+                session["status"] = "thinking"
+                session["suggestion"] = {"pending": False}
+                # Accepting a repository fact is not a judgment; picking a
+                # drafted answer to a product question is.
+                session["assisted_in_a_row"] = (
+                    int(session.get("assisted_in_a_row") or 0) + 1 if repo else 0
+                )
+                self._touch(session)
+                coro = self._interview_answer(
+                    session_id, f"{CONFIRMED_PREFIX} {text}" if repo else text
+                )
+            elif action == "dismiss":
+                suggestion = session.get("suggestion") or {}
+                if not suggestion.get("text") or suggestion.get("question") != session.get(
+                    "last_question"
+                ):
+                    raise ValueError("There is no suggested answer to dismiss.")
+                session["suggestion"] = {
+                    "pending": False,
+                    "question": suggestion.get("question"),
+                    "repo_checked": bool(suggestion.get("repo_checked"))
+                    or suggestion.get("source") == "repo",
+                }
+                self._touch(session)
                 return self.get(session_id) or {}
             elif action == "stop":
                 job_id = session.get("auto_job_id")
@@ -462,32 +558,69 @@ class Harness:
 
     # interview ---------------------------------------------------------
 
-    def _apply_turn(self, session_id: str, turn: Any) -> None:
+    def _apply_turn(
+        self,
+        session_id: str,
+        turn: Any,
+        readiness: dict[str, Any] | None = None,
+        code_request: dict[str, Any] | None = None,
+        issued: str | None = None,
+    ) -> tuple[str, int] | None:
+        """Show the server's turn; return the question to investigate and its turn, if due.
+
+        Ready means what the server decided: it completed the interview. The
+        readiness view carries the gate it applies (score, per-dimension floors,
+        streak) for the meter; nothing here compares a score with a threshold.
+        ``issued`` is the pending question exactly as the server stored it; the
+        answer echoes it back, never the decorated text the thread shows.
+        """
+        investigate: tuple[str, int] | None = None
+
         def apply(session: dict[str, Any]) -> None:
+            nonlocal investigate
             session["interview_session_id"] = turn.session_id
-            ready = bool(turn.seed_ready or turn.completed)
+            # Numbers each server turn, so late work for an earlier one is dropped
+            # even when the server asks the same question again.
+            session["turn_seq"] = int(session.get("turn_seq") or 0) + 1
+            ready = bool(turn.completed or (readiness or {}).get("complete"))
             if turn.ambiguity_score is not None:
                 session["ambiguity"] = turn.ambiguity_score
-                ready = ready or turn.ambiguity_score <= 0.2
+            session["readiness"] = readiness
             if turn.question and not turn.completed:
                 session["messages"].append(
-                    _msg(
-                        "assistant",
-                        "question",
-                        turn.question,
-                        ambiguity=turn.ambiguity_score,
-                        ready=ready,
-                    )
+                    _msg("assistant", "question", turn.question, ambiguity=turn.ambiguity_score)
                 )
             session["last_question"] = turn.question
+            session["issued_question"] = issued
             session["seed_ready"] = ready
             session["status"] = "seed_ready_to_write" if turn.completed else "waiting_answer"
+            session["suggestion"] = {"pending": False}
+            if (
+                turn.question
+                and not turn.completed
+                and code_request is not None
+                and session.get("project") == "existing"
+                and int(session.get("assisted_in_a_row") or 0) < MAX_ASSISTED_IN_A_ROW
+            ):
+                session["suggestion"] = {"pending": True, "question": turn.question, "auto": True}
+                asked = str(issued or code_request.get("question") or turn.question)
+                investigate = (asked, session["turn_seq"])
             if turn.completed:
                 session["messages"].append(
                     _msg("assistant", "note", "The interview is complete. Write the spec next.")
                 )
 
         self._update(session_id, apply)
+        return investigate
+
+    async def _after_turn(self, session_id: str, handlers: _Handlers, turn: Any) -> None:
+        readiness, issued = await asyncio.to_thread(handlers.interview_view, turn.session_id)
+        due = self._apply_turn(
+            session_id, turn, readiness, handlers.code_request(turn.session_id), issued
+        )
+        if due is not None:
+            asked, turn_seq = due
+            self._spawn_quiet(session_id, self._auto_investigate(session_id, turn_seq, asked))
 
     def _handlers_for(self, session: dict[str, Any]) -> _Handlers:
         key = session.get("backend") or ""
@@ -502,17 +635,27 @@ class Harness:
         session = self.get(session_id) or {}
         handlers = self._handlers_for(session)
         await asyncio.to_thread(handlers.ensure)
-        turn = await handlers.interview.start(session["goal"], cwd=session["cwd"])
-        self._apply_turn(session_id, turn)
+        if session.get("project") == "existing":
+            turn = await handlers.interview.start(session["goal"], cwd=session["cwd"])
+        else:
+            # The interview detects brownfield from the folder it is given, and
+            # a new project has none: give it an empty one, so the launch
+            # directory (often a git repository) cannot make it brownfield.
+            with tempfile.TemporaryDirectory(prefix="ouroboros-new-project-") as blank:
+                turn = await handlers.interview.start(session["goal"], cwd=blank)
+        await self._after_turn(session_id, handlers, turn)
 
     async def _interview_answer(self, session_id: str, text: str) -> None:
         session = self.get(session_id) or {}
         handlers = self._handlers_for(session)
         await asyncio.to_thread(handlers.ensure)
+        # Echo the question exactly as the server issued it. Without one (the
+        # state could not be read) send none: the server then records the
+        # answer against the question it is waiting on.
         turn = await handlers.interview.answer(
-            session["interview_session_id"], text, last_question=session.get("last_question")
+            session["interview_session_id"], text, last_question=session.get("issued_question")
         )
-        self._apply_turn(session_id, turn)
+        await self._after_turn(session_id, handlers, turn)
 
     async def _write_seed(self, session_id: str, *, force: bool) -> None:
         session = self.get(session_id) or {}
@@ -653,24 +796,95 @@ class Harness:
 
         future.add_done_callback(done)
 
-    async def _suggest(self, session_id: str, question: str) -> None:
-        """Draft an answer: from the repository when it settles the question, else a default."""
-        session = self.get(session_id) or {}
-        backend = session.get("backend") or None
-        suggestion: dict[str, Any] = {"pending": False, "question": question}
-        investigation = None
+    async def _repo_investigator(self, session: dict[str, Any]) -> Any | None:
+        """This chat's repository investigator (the one ``ooo auto`` uses), or ``None``."""
+        with self._lock:
+            if session["id"] in self._investigators:
+                return self._investigators[session["id"]]
+        investigator = None
         try:
             from ouroboros.auto.investigator import build_repo_investigator
             from ouroboros.config.loader import get_agent_runtime_backend
 
-            runtime = backend or await asyncio.to_thread(get_agent_runtime_backend)
+            runtime = session.get("backend") or await asyncio.to_thread(get_agent_runtime_backend)
             investigator = build_repo_investigator(runtime)
-            if investigator is not None:
-                investigation = await investigator.investigate(
-                    session["goal"], question, Path(session["cwd"])
-                )
         except Exception:
-            investigation = None
+            investigator = None
+        with self._lock:
+            return self._investigators.setdefault(session["id"], investigator)
+
+    async def _investigate(self, session: dict[str, Any], question: str) -> Any | None:
+        investigator = await self._repo_investigator(session)
+        if investigator is None:
+            return None
+        try:
+            return await investigator.investigate(session["goal"], question, Path(session["cwd"]))
+        except Exception:
+            return None
+
+    async def _auto_investigate(self, session_id: str, turn_seq: int, asked: str) -> None:
+        """Answer a code-fact question from the repository before the human has to.
+
+        A found answer is offered for one-click confirmation; one PATH 1a allows
+        (an exact manifest or config match) is sent at once with a visible
+        "auto-confirmed" note the user can correct. A question the repository
+        does not settle, or a product decision, stays with the human.
+        """
+        session = self.get(session_id) or {}
+        investigation = await self._investigate(session, asked)
+        found = bool(investigation is not None and investigation.found and investigation.answer)
+        workspace = Path(str(session.get("cwd") or "."))
+        source = await asyncio.to_thread(auto_confirm_source, investigation, workspace)
+        submit: str | None = None
+
+        def apply(s: dict[str, Any]) -> None:
+            nonlocal submit
+            if s.get("turn_seq") != turn_seq or s.get("status") != "waiting_answer":
+                return  # the user answered first, or the interview moved on
+            shown = s.get("last_question")
+            if not found:
+                s["suggestion"] = {"pending": False, "question": shown, "repo_checked": True}
+                return
+            answer = str(investigation.answer).strip()
+            evidence = [_span_text(span) for span in investigation.checked][:5]
+            assisted = int(s.get("assisted_in_a_row") or 0)
+            if source is None or assisted >= MAX_ASSISTED_IN_A_ROW:
+                s["suggestion"] = {
+                    "pending": False,
+                    "question": shown,
+                    "text": answer,
+                    "source": "repo",
+                    "evidence": evidence,
+                    "auto": True,
+                    "repo_checked": True,
+                }
+                return
+            s["messages"].append(
+                _msg(
+                    "user",
+                    "text",
+                    answer,
+                    via="auto_confirmed",
+                    source=source,
+                    evidence=evidence,
+                    question=shown,
+                )
+            )
+            s["suggestion"] = {"pending": False}
+            s["status"] = "thinking"
+            s["assisted_in_a_row"] = assisted + 1
+            submit = f"{AUTO_CONFIRMED_PREFIX} {answer}"
+
+        self._update(session_id, apply)
+        if submit is not None:
+            self._spawn(session_id, self._interview_answer(session_id, submit))
+
+    async def _suggest(self, session_id: str, question: str, use_repo: bool = True) -> None:
+        """Draft an answer: from the repository when it settles the question, else a default."""
+        session = self.get(session_id) or {}
+        suggestion: dict[str, Any] = {"pending": False, "question": question}
+        asked = str(session.get("issued_question") or question)
+        investigation = await self._investigate(session, asked) if use_repo else None
         if investigation is not None and investigation.found and investigation.answer:
             suggestion.update(
                 text=investigation.answer,
@@ -844,6 +1058,51 @@ class Harness:
         job = self._jobs.get(job_id)
         if job is not None:
             job.cancel()
+
+
+def _interview_project(choice: object, cwd: str) -> str:
+    """``existing`` only when the user chose it for a folder the interview can read.
+
+    The default is a new project: the console is usually launched from wherever
+    it was installed or from a login service, so its launch directory says
+    nothing about what the user is building. An omitted choice is that default;
+    any other value than ``new`` or ``existing`` is refused, not guessed.
+    """
+    if choice is None or choice == "" or choice == "new":
+        return "new"
+    if choice != "existing":
+        raise ValueError(f"Unknown project kind: {choice!r}. Use 'new' or 'existing'.")
+    from ouroboros.bigbang.explore import detect_brownfield
+
+    if not detect_brownfield(cwd):
+        raise ValueError(
+            f"{cwd} has no git repository or project manifest, so the interview cannot "
+            "read it as an existing project. Choose the project's folder, or start a new project."
+        )
+    return "existing"
+
+
+def _correction_payload(session: dict[str, Any], message_id: str, text: str) -> str:
+    """The interview answer that corrects an earlier auto-confirmed one."""
+    target = next(
+        (
+            m
+            for m in session.get("messages", [])
+            if m.get("id") == message_id and m.get("via") == "auto_confirmed"
+        ),
+        None,
+    )
+    if target is None:
+        raise ValueError("Only an auto-confirmed answer can be corrected.")
+    target["corrected"] = True
+    return (
+        "[from-user] Correction: an earlier answer was auto-confirmed from the repository "
+        f"({target.get('source')}) and is wrong.\n"
+        f"Earlier question: {target.get('question')}\n"
+        f"Auto-confirmed answer: {target.get('text')}\n"
+        f"Correct answer: {text}\n"
+        "This corrects the earlier answer; it does not answer the current question."
+    )
 
 
 def _workspace_problem(cwd: str) -> str | None:

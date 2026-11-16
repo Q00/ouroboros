@@ -296,12 +296,30 @@ class AmbiguityScore:
         return self.overall_score <= AMBIGUITY_THRESHOLD
 
 
-def get_completion_floor_failures(
+@dataclass(frozen=True, slots=True)
+class CompletionFloorCheck:
+    """One per-dimension floor of the auto-completion gate, checked against a score.
+
+    ``clarity`` is ``None`` when the score has no component for the dimension
+    (which fails the floor).
+    """
+
+    key: str
+    label: str
+    floor: float
+    clarity: float | None
+
+    @property
+    def met(self) -> bool:
+        return self.clarity is not None and not self.clarity < self.floor
+
+
+def completion_floor_checks(
     score: AmbiguityScore,
     *,
     is_brownfield: bool,
-) -> list[str]:
-    """Return any unmet component floors for interview auto-completion."""
+) -> list[CompletionFloorCheck]:
+    """Check every component floor the auto-completion gate requires, in order."""
     required_components: list[tuple[str, str, float]] = [
         ("goal_clarity", "Goal Clarity", GOAL_CLARITY_FLOOR),
         ("constraint_clarity", "Constraint Clarity", CONSTRAINT_CLARITY_FLOOR),
@@ -312,14 +330,34 @@ def get_completion_floor_failures(
             ("context_clarity", "Context Clarity", BROWNFIELD_CONTEXT_CLARITY_FLOOR)
         )
 
-    failures: list[str] = []
+    checks: list[CompletionFloorCheck] = []
     for attribute_name, label, minimum_clarity in required_components:
         component = getattr(score.breakdown, attribute_name)
-        if component is None:
-            failures.append(f"{label} missing (< {minimum_clarity:.2f})")
+        checks.append(
+            CompletionFloorCheck(
+                key=attribute_name,
+                label=label,
+                floor=minimum_clarity,
+                clarity=None if component is None else component.clarity_score,
+            )
+        )
+    return checks
+
+
+def get_completion_floor_failures(
+    score: AmbiguityScore,
+    *,
+    is_brownfield: bool,
+) -> list[str]:
+    """Return any unmet component floors for interview auto-completion."""
+    failures: list[str] = []
+    for check in completion_floor_checks(score, is_brownfield=is_brownfield):
+        if check.met:
             continue
-        if component.clarity_score < minimum_clarity:
-            failures.append(f"{label} {component.clarity_score:.2f} < {minimum_clarity:.2f}")
+        if check.clarity is None:
+            failures.append(f"{check.label} missing (< {check.floor:.2f})")
+        else:
+            failures.append(f"{check.label} {check.clarity:.2f} < {check.floor:.2f}")
 
     return failures
 
