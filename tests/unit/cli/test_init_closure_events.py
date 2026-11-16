@@ -308,15 +308,19 @@ def _ago(event: BaseEvent, hours: float) -> BaseEvent:
 
 @pytest.fixture
 def console_width(monkeypatch: pytest.MonkeyPatch):
-    """Pin the shared CLI console's width.
+    """Pin the shared CLI console's size.
 
     The console is created once at import, and ``COLUMNS`` is read then if it
     is set, so a ``CliRunner`` env cannot be relied on to change its width.
+    Rich honors a fixed width only when the height is fixed too: otherwise a
+    dumb terminal (``TERM=dumb``) still renders at 80 columns.
     """
     from ouroboros.cli.formatters import console
 
     def pin(width: int) -> None:
         monkeypatch.setattr(console, "_width", width)
+        monkeypatch.setattr(console, "_height", 25)
+        assert (console.size.width, console.size.height) == (width, 25)
 
     return pin
 
