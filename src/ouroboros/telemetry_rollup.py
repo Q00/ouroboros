@@ -8,8 +8,9 @@ Invariants, each covered by ``tests/unit/test_telemetry_rollup.py``:
 
 - Every read-modify-write holds an exclusive lock on
   ``telemetry-usage.lock`` (``fcntl.flock``, or ``msvcrt.locking`` on
-  Windows), waited for at most ``LOCK_TIMEOUT_SECONDS``. A caller that cannot
-  get it skips the update instead of blocking.
+  Windows) and the in-process thread lock. A caller waits at most
+  ``LOCK_TIMEOUT_SECONDS`` for both together; one that cannot get them skips
+  the update instead of blocking.
 - Writes go to a same-directory temp file, are fsynced, then replace the
   file, so a crash leaves either the old or the new file, never a torn one.
   An unreadable, oversized or malformed file is treated as empty.
@@ -44,6 +45,7 @@ LOCK_FILENAME = "telemetry-usage.lock"
 SCHEMA_VERSION = 1
 
 LOCK_TIMEOUT_SECONDS = 0.5
+_LOCK_POLL_SECONDS = 0.005
 LEASE_SECONDS = 120.0
 MAX_BUCKETS = 32
 MAX_KEYS = 96
@@ -96,18 +98,24 @@ def _unlock(fd: int) -> None:
 
 @contextmanager
 def _locked(state_dir: Path) -> Iterator[None]:
-    """Hold the cross-process rollup lock, or raise ``LockUnavailable``."""
-    if not _thread_lock.acquire(timeout=LOCK_TIMEOUT_SECONDS):
+    """Hold the cross-process rollup lock, or raise ``LockUnavailable``.
+
+    One deadline, set on entry, bounds the wait for the in-process thread lock
+    and the file lock together, so a caller waits at most
+    ``LOCK_TIMEOUT_SECONDS`` in total, however the wait is split between them.
+    """
+    deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
+    if not _thread_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
         raise LockUnavailable
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
         fd = os.open(state_dir / LOCK_FILENAME, os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
             while not _try_lock(fd):
-                if time.monotonic() >= deadline:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     raise LockUnavailable
-                time.sleep(0.005)
+                time.sleep(min(_LOCK_POLL_SECONDS, remaining))
             try:
                 yield
             finally:

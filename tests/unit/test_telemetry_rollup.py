@@ -229,6 +229,80 @@ class TestLocking:
         rollup.record(tmp_path, DAY1, {"cmd_run": 1}, DIMS)
         assert _state(tmp_path)["days"][DAY1]["counts"] == {"cmd_run": 1}
 
+    @pytest.mark.parametrize("operation", ["record", "claim_due", "settle"])
+    @pytest.mark.parametrize("thread_wait", [0.0, 0.3, 0.5])
+    def test_one_deadline_bounds_the_thread_and_file_lock_waits_together(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        operation: str,
+        thread_wait: float,
+    ) -> None:
+        # Another thread holds the in-process lock for ``thread_wait`` seconds,
+        # then every file-lock attempt fails. On a fake clock the whole wait
+        # must fit one LOCK_TIMEOUT_SECONDS budget, not one budget per lock.
+        clock = _FakeClock(start=1000.0)
+        acquire_timeouts: list[float] = []
+        attempts: list[int] = []
+
+        class _BusyThreadLock:
+            def acquire(self, timeout: float) -> bool:
+                acquire_timeouts.append(timeout)
+                clock.now += min(thread_wait, timeout)
+                return thread_wait <= timeout
+
+            def release(self) -> None:
+                pass
+
+        def _file_lock_busy(fd: int) -> bool:
+            attempts.append(fd)
+            return False
+
+        monkeypatch.setattr(rollup, "time", clock)
+        monkeypatch.setattr(rollup, "_thread_lock", _BusyThreadLock())
+        monkeypatch.setattr(rollup, "_try_lock", _file_lock_busy)
+        calls = {
+            "record": lambda: rollup.record(tmp_path, DAY1, {"cmd_run": 1}, DIMS),
+            "claim_due": lambda: rollup.claim_due(tmp_path, DAY2, 0.0),
+            "settle": lambda: rollup.settle(tmp_path, "id", delivered=True),
+        }
+
+        with pytest.raises(rollup.LockUnavailable):
+            calls[operation]()
+
+        assert acquire_timeouts == [pytest.approx(rollup.LOCK_TIMEOUT_SECONDS)]
+        assert clock.now - 1000.0 == pytest.approx(rollup.LOCK_TIMEOUT_SECONDS)
+        # The file lock is still tried with whatever budget is left, at least once.
+        assert attempts
+        assert not (tmp_path / rollup.ROLLUP_FILENAME).exists()
+
+    def test_a_held_thread_lock_and_a_busy_file_lock_share_one_real_budget(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The same contention on the real clock and the real thread lock: the
+        # caller waits about 0.3 s for the thread lock, then only the remaining
+        # 0.2 s for the file lock (two separate budgets would take ~0.8 s).
+        monkeypatch.setattr(rollup, "_try_lock", lambda _fd: False)
+        held = threading.Event()
+
+        def hold_thread_lock() -> None:
+            with rollup._thread_lock:
+                held.set()
+                time.sleep(0.3)
+
+        holder = threading.Thread(target=hold_thread_lock)
+        holder.start()
+        try:
+            assert held.wait(timeout=5)
+            started = time.monotonic()
+            with pytest.raises(rollup.LockUnavailable):
+                rollup.record(tmp_path, DAY1, {"cmd_run": 1}, DIMS)
+            elapsed = time.monotonic() - started
+        finally:
+            holder.join(timeout=5)
+        assert rollup.LOCK_TIMEOUT_SECONDS <= elapsed < rollup.LOCK_TIMEOUT_SECONDS + 0.15
+        assert not (tmp_path / rollup.ROLLUP_FILENAME).exists()
+
     def test_threads_in_one_process_do_not_lose_counts(self, tmp_path: Path) -> None:
         def work() -> None:
             for _ in range(25):
@@ -279,6 +353,20 @@ class TestLocking:
         state = _state(tmp_path)
         assert state["days"][DAY2]["counts"] == {"cmd_run": 120}
         assert list(state["sending"]) == claimed
+
+
+class _FakeClock:
+    """Stands in for the ``time`` module inside ``telemetry_rollup``."""
+
+    def __init__(self, start: float) -> None:
+        self.now = start
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        assert seconds >= 0
+        self.now += seconds
 
 
 def _child_env() -> dict[str, str]:
