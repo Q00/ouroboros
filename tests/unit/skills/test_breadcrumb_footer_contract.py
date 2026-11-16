@@ -12,7 +12,7 @@ def test_all_bundled_skills_define_breadcrumb_footer_contract() -> None:
     assert skill_paths
     for skill_path in skill_paths:
         text = skill_path.read_text(encoding="utf-8")
-        assert "## RFC #1392 State Breadcrumb Footer" in text, skill_path
+        assert "## State Breadcrumb Footer" in text, skill_path
         assert "◆ <current state> → next: <recommended action>" in text, skill_path
         assert "session state via `ouroboros_session_status`" in text, skill_path
         assert "Never use a linear `Step N of M` footer" in text, skill_path

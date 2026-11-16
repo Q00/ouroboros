@@ -106,6 +106,6 @@ Group the acceptance criteria into logical implementation units (by feature area
 
 Show `Published to <TARGET_REPO>:` with the Epic and its Tasks as a tree (`#<n> [Epic|Task] <title>`) and the link `https://github.com/<TARGET_REPO>/issues/<epic>`. Suggest next steps: assign tasks, track on a GitHub Projects board, run `ooo run` for AI-assisted implementation of individual tasks.
 
-## RFC #1392 State Breadcrumb Footer
+## State Breadcrumb Footer
 
 End the final response with exactly one line `◆ <current state> → next: <recommended action>`. Derive the state from live session state via `ouroboros_session_status` when available, otherwise from this skill's actual outcome. Never use a linear `Step N of M` footer; when the next step is a real choice, list 2-3 options.

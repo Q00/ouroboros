@@ -9,9 +9,9 @@ Read `../welcome/SKILL.md` and follow its instructions exactly. This is the
 explicit Marketplace-plugin entry point for a bare `ooo` message before any
 runtime-specific setup has run.
 
-## RFC #1392 State Breadcrumb Footer
+## State Breadcrumb Footer
 
-Your final response MUST end with exactly one breadcrumb footer line:
+End the final response with exactly one breadcrumb footer line:
 
 ```
 ◆ <current state> → next: <recommended action>

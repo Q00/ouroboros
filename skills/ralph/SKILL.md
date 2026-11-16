@@ -81,6 +81,6 @@ For `attention_required`, use at most one short-lived read-only verifier. If the
 
 These are English canonical host instructions. Render them, and every relay, naturally in the user's conversation language.
 
-## RFC #1392 State Breadcrumb Footer
+## State Breadcrumb Footer
 
 End the final response with exactly one line `◆ <current state> → next: <recommended action>`. Derive the state from live session state via `ouroboros_session_status` when available, otherwise from this skill's actual outcome. Never use a linear `Step N of M` footer; when the next step is a real choice, list 2-3 options.

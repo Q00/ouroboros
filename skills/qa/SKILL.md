@@ -79,6 +79,6 @@ else `src/ouroboros/agents/qa-judge.md` in a source checkout.
 
 If none is reachable, judge on the dimensions and thresholds above and label the verdict as an unaligned fallback. Run the step 3.5 probes first for behavior-bearing artifacts, render the verdict in the same shape the MCP tool returns (score, verdict, threshold, dimensions, differences, suggestions, reasoning, loop action), and keep the iterative contract with a `qa-<uuid4_short>` session id and an iteration count held in the conversation.
 
-## RFC #1392 State Breadcrumb Footer
+## State Breadcrumb Footer
 
 End the final response with exactly one line `◆ <current state> → next: <recommended action>`. Derive the state from live session state via `ouroboros_session_status` when available, otherwise from this skill's actual outcome. Never use a linear `Step N of M` footer; when the next step is a real choice, list 2-3 options.

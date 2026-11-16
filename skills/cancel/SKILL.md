@@ -41,6 +41,6 @@ Relay any other error verbatim. Then suggest `ooo status` to verify or `ooo run`
 
 When the cancel tools are genuinely absent and the active runtime has `run_shell`, use the CLI, which writes cancellation events straight to the event store: `ouroboros cancel execution --list` (prints active executions without prompting; then ask with `ask_user`), `ouroboros cancel execution <session_id>`, or `ouroboros cancel execution --all`. Add `--reason "<text>"` to record why, and report what it printed (`Cancelled execution: <id>`, `Cancellation requested for execution: <id>`, or `No active executions found.`) with any warning verbatim. Without `run_shell`, tell the user cancellation needs the Ouroboros MCP server (`ooo setup`) or a shell.
 
-## RFC #1392 State Breadcrumb Footer
+## State Breadcrumb Footer
 
 End the final response with exactly one line `◆ <current state> → next: <recommended action>`. Derive the state from live session state via `ouroboros_session_status` when available, otherwise from this skill's actual outcome. Never use a linear `Step N of M` footer; when the next step is a real choice, list 2-3 options.
