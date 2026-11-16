@@ -818,38 +818,27 @@ async def test_a_decided_run_reports_what_the_artifact_checks_observed_once(
     from ouroboros import telemetry
     from ouroboros.boundary.run_control import CheckPackageRun
 
-    captured: list[tuple[str, dict[str, Any]]] = []
-    monkeypatch.setattr(
-        telemetry, "capture", lambda event, properties=None: captured.append((event, properties))
-    )
+    sent: list[str] = []
+    monkeypatch.setattr(telemetry, "capture", lambda event, _properties=None: sent.append(event))
     seed, authority = await _calc_authority(store, tmp_path, monkeypatch)
     _result, parallel = _succeeded()
     await authority(seed=seed, execution_id="exec_regression", parallel_result=parallel)
     run = CheckPackageRun(authority.settings, state=authority.state, authority=authority)
     run.attempted, run.runtime_backend = True, "codex"
 
-    run.finish("failed", surface="cli_run")
-    run.finish("failed", surface="cli_run")
+    tally = telemetry.new_outcome_tally()
+    with telemetry.outcome_scope(tally):
+        run.finish("failed", surface="cli_run")
+        run.finish("failed", surface="cli_run")
 
-    rows = [props for event, props in captured if event == "acceptance_artifact_checks"]
-    assert rows == [
-        {
-            "base_regression": "rejected",
-            "worker_tests": "no_selected_files",
-            "failed_criteria": 1,
-            "criterion_count": 1,
-            "repairs": 0,
-            "exemption": "no_passing_oracle",
-            "exempted_tests": 0,
-            "base_regression_mode": "decide",
-            "worker_test_gate_mode": "record",
-            "base_regression_effect": "decided",
-            "worker_tests_effect": "none",
-            "would_fail_criteria": 0,
-            "surface": "cli_run",
-            "runtime_backend": "codex",
-        }
-    ]
+    # Folded into the run's workflow_outcome, once; no event of its own.
+    outcome = tally.drain()
+    assert {key: outcome[key] for key in ("base_regression", "worker_tests")} == {
+        "base_regression": "rejected",
+        "worker_tests": "no_selected_files",
+    }
+    assert outcome["artifact_failed_criteria"] == 1
+    assert sent == []
 
 
 async def test_an_added_test_file_that_cannot_be_collected_is_no_test_result(

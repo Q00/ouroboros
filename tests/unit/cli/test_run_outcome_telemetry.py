@@ -555,3 +555,38 @@ async def test_invalid_yaml_records_private_prelaunch_outcome(tmp_path: Path) ->
     properties = emit.call_args.args[1]
     assert "private-content" not in str(properties)
     assert "private-seed.yaml" not in str(properties)
+
+
+def test_ooo_run_folds_its_verify_rejections_into_its_one_outcome(tmp_path: Path) -> None:
+    """The run's verify-gate observations ride on its workflow_outcome: the
+    command binds an outcome tally around the orchestrator, and the outcome
+    recorded at the end of the run drains it."""
+    from typer.testing import CliRunner
+
+    from ouroboros import telemetry
+    from ouroboros.cli.main import app
+
+    seed_file = tmp_path / "seed.yaml"
+    seed_file.write_text("goal: test\nacceptance_criteria:\n  - criterion: test\n")
+
+    async def fake_orchestrator(*_args: object, **_kwargs: object) -> None:
+        telemetry.capture_ac_verify_failed("artifacts_missing")
+        telemetry.capture_ac_verify_failed("artifacts_missing")
+        telemetry.capture_job_outcome("exec-x:1", "run", terminal_status="failed")
+
+    sent: list[tuple[str, dict[str, object]]] = []
+    with (
+        patch("ouroboros.cli.commands.run._run_orchestrator", new=fake_orchestrator),
+        patch.object(
+            telemetry,
+            "capture",
+            side_effect=lambda event, properties=None: sent.append((event, properties or {})),
+        ),
+    ):
+        result = CliRunner().invoke(app, ["run", str(seed_file)])
+
+    assert result.exit_code == 0, result.output
+    ((event, props),) = sent
+    assert event == "workflow_outcome"
+    assert (props["verify_rejections"], props["verify_top_cause"]) == (2, "artifacts_missing")
+    assert telemetry._OUTCOME_TALLY.get() is None

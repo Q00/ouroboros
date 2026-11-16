@@ -465,9 +465,10 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
     ("src/ouroboros/gui/harness.py", "_run_result.git", "subprocess.run", 1161, 15): (
         "implicit inherit; read-only `git diff --name-only` / `git status`."
     ),
-    ("src/ouroboros/gui/jobs.py", "JobRegistry._run", "subprocess.Popen", 137, 19): (
-        "_child_env = os.environ + plain-text output vars; runs `ouroboros setup|auto` "
-        "or a fixed vendor installer the user confirmed in the console."
+    ("src/ouroboros/gui/jobs.py", "JobRegistry._run", "subprocess.Popen", 139, 19): (
+        "_child_env = os.environ + plain-text output vars + the console telemetry "
+        "surface marker; runs `ouroboros setup|auto` or a fixed vendor installer the "
+        "user confirmed in the console."
     ),
     ("src/ouroboros/gui/launcher.py", "serve", "os.execv", 152, 8): (
         "implicit inherit; re-execs this same console (restart after installing a component)."
@@ -1298,6 +1299,7 @@ LOADER_KEY_CATALOG_DENIED: tuple[str, ...] = (
     "OUROBOROS_EXECUTION_MODEL",
     "OUROBOROS_EXEC_SANDBOX",
     "OUROBOROS_FIRST_COMMAND_SURFACE",
+    "_OUROBOROS_TELEMETRY_SURFACE",
     "OUROBOROS_GEMINI_CLI_PATH",
     "OUROBOROS_GJC_CLI_PATH",
     "OUROBOROS_GOOSE_CLI_PATH",

@@ -245,6 +245,59 @@ class TestJobManager:
             await _cancel_manager_tasks(manager)
             await store.close()
 
+    async def test_each_job_outcome_carries_only_its_own_run_observations(self, tmp_path) -> None:
+        """Verify-gate and acceptance observations made inside a job's runner
+        (and the tasks it starts) fold into that job's workflow_outcome; a
+        concurrent job's outcome stays clean."""
+        from ouroboros import telemetry as usage_telemetry
+
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        release = asyncio.Event()
+
+        async def verify_in_subtask() -> None:
+            usage_telemetry.capture_ac_verify_failed("exit_nonzero")
+
+        async def rejected_run() -> MCPToolResult:
+            usage_telemetry.capture_ac_verify_failed("timeout")
+            await asyncio.create_task(verify_in_subtask())
+            await asyncio.create_task(verify_in_subtask())
+            await release.wait()
+            return MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text="done"),), is_error=False
+            )
+
+        async def clean_run() -> MCPToolResult:
+            await release.wait()
+            return MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text="done"),), is_error=False
+            )
+
+        sent: list[dict] = []
+        try:
+            with patch(
+                "ouroboros.mcp.telemetry_boundary.usage_telemetry.capture",
+                side_effect=lambda _event, properties=None: sent.append(properties or {}),
+            ):
+                rejected = await manager.start_job(
+                    job_type="execute_seed", initial_message="queued", runner=rejected_run()
+                )
+                clean = await manager.start_job(
+                    job_type="execute_seed", initial_message="queued", runner=clean_run()
+                )
+                release.set()
+                await _wait_for_job_status(manager, rejected.job_id, JobStatus.COMPLETED)
+                await _wait_for_job_status(manager, clean.job_id, JobStatus.COMPLETED)
+
+            assert len(sent) == 2
+            by_job = {props.get("verify_rejections"): props for props in sent if props}
+            assert set(by_job) == {3, None}
+            assert by_job[3]["verify_top_cause"] == "exit_nonzero"
+            assert manager._telemetry._tallies == {}
+        finally:
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
     async def test_durable_failed_terminal_emits_one_failed_outcome(self, tmp_path) -> None:
         store = _build_store(tmp_path)
         manager = JobManager(store)

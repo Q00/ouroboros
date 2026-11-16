@@ -2703,20 +2703,20 @@ class TestMCPServerAdapterTools:
         assert capture.call_args.kwargs["ok"] is True
 
     async def test_call_tool_registered_extension_success_is_not_collected(self) -> None:
-        """Successful non-product extension calls do not consume telemetry volume.
+        """Successful non-product extension calls are not counted as usage.
 
-        The real telemetry sink is patched so this proves the canonical folding
-        boundary drops successful non-lifecycle extension calls entirely.
+        The real usage recorder is patched so this proves the boundary records
+        nothing for a successful call to a tool outside the counted set.
         """
         adapter = MCPServerAdapter()
         extension_name = "custom_tool"
         adapter.register_tool(MockToolHandler(extension_name))
 
-        with patch("ouroboros.telemetry.capture") as capture:
+        with patch("ouroboros.telemetry._record_usage") as record_usage:
             result = await adapter.call_tool(extension_name, {"input": "safe"})
 
         assert result.is_ok
-        capture.assert_called_once_with("service_active", {"service": "mcp"})
+        record_usage.assert_not_called()
 
     async def test_call_tool_non_prefixed_extension_failure_is_folded(self) -> None:
         adapter = MCPServerAdapter()
@@ -2724,20 +2724,12 @@ class TestMCPServerAdapterTools:
         handler.handle_mock.return_value = Result.err(MCPServerError("failed"))
         adapter.register_tool(handler)
 
-        with patch("ouroboros.telemetry.capture") as capture:
+        with patch("ouroboros.telemetry._record_usage") as record_usage:
             result = await adapter.call_tool("custom_tool", {"input": "safe"})
 
         assert result.is_err
-        assert capture.call_args_list[0].args == ("service_active", {"service": "mcp"})
-        assert capture.call_args_list[1].args == (
-            "command_run",
-            {
-                "command": "extension_tool",
-                "service": "mcp",
-                "status": "failed",
-                "error_type": "MCPServerError",
-            },
-        )
+        # Only the error count: the extension's name never becomes a key.
+        record_usage.assert_called_once_with({"mcp_tool_errors": 1})
 
     async def test_call_tool_non_prefixed_extension_logical_block_is_folded(self) -> None:
         adapter = MCPServerAdapter()
@@ -2750,20 +2742,12 @@ class TestMCPServerAdapterTools:
         )
         adapter.register_tool(handler)
 
-        with patch("ouroboros.telemetry.capture") as capture:
+        with patch("ouroboros.telemetry._record_usage") as record_usage:
             result = await adapter.call_tool("custom_tool", {"input": "safe"})
 
         assert result.is_ok
-        assert capture.call_args_list[0].args == ("service_active", {"service": "mcp"})
-        assert capture.call_args_list[1].args == (
-            "command_run",
-            {
-                "command": "extension_tool",
-                "service": "mcp",
-                "status": "blocked",
-                "error_type": None,
-            },
-        )
+        # A logical block (input_required) is not an error and not usage.
+        record_usage.assert_not_called()
 
     async def test_call_tool_logical_error_response_counts_as_not_ok(self) -> None:
         """A built-in handler returning Result.ok(MCPToolResult(is_error=True))
@@ -3074,12 +3058,11 @@ class TestMCPServerAdapterTools:
 class TestCanonicalToolNameSyncGuard:
     """Guard the SSOT pairing between the shipped tool registry and telemetry.
 
-    telemetry.py's capture_tool_call folds any non-canonical (including a
-    genuinely registered but unaudited extension) tool name to the fixed
-    ``ouroboros_extension_tool`` literal. If a future built-in tool ships
-    without a matching entry in ``_CANONICAL_TOOL_NAMES``, it would silently
-    report as an anonymous extension tool -- losing its real funnel step --
-    instead of failing loudly. This test makes that omission fail CI.
+    telemetry.py's capture_tool_call counts a call only when the tool is in
+    ``_USAGE_TOOLS``; every name in ``_CANONICAL_TOOL_NAMES`` is classified as
+    counted or ``_UNCOUNTED_TOOLS`` (tests/unit/test_telemetry.py). If a future
+    built-in tool ships without a matching entry, its usage would silently go
+    uncounted instead of failing loudly. This test makes that omission fail CI.
     """
 
     def test_every_shipped_tool_is_in_the_canonical_set(self) -> None:
@@ -3091,8 +3074,8 @@ class TestCanonicalToolNameSyncGuard:
 
         assert not missing, (
             f"Shipped tool(s) missing from telemetry._CANONICAL_TOOL_NAMES: "
-            f"{sorted(missing)} -- add them or they will silently report as "
-            f"ouroboros_extension_tool in telemetry."
+            f"{sorted(missing)} -- add them, and classify each as counted usage "
+            f"(_USAGE_TOOLS) or not (_UNCOUNTED_TOOLS)."
         )
 
 
@@ -3905,7 +3888,7 @@ class TestServeTransport:
             assert "private-project" not in str(value)
 
     async def test_sdk_call_tool_registered_extension_success_is_not_collected(self) -> None:
-        """Successful non-product extension calls emit service activity only."""
+        """Successful non-product extension calls are not counted as usage."""
         pytest.importorskip("mcp.server")
         from ouroboros.mcp.telemetry_boundary import call_sdk_tool
 
@@ -3913,10 +3896,10 @@ class TestServeTransport:
         extension_name = "custom_tool"
         adapter.register_tool(MockToolHandler(extension_name))
 
-        with patch("ouroboros.telemetry.capture") as capture:
+        with patch("ouroboros.telemetry._record_usage") as record_usage:
             await call_sdk_tool(adapter, extension_name, {"input": "safe"})
 
-        capture.assert_called_once_with("service_active", {"service": "mcp"})
+        record_usage.assert_not_called()
 
     async def test_sdk_non_prefixed_extension_failure_is_folded(self) -> None:
         pytest.importorskip("mcp.server")
@@ -3927,20 +3910,11 @@ class TestServeTransport:
         handler.handle_mock.return_value = Result.err(MCPServerError("failed"))
         adapter.register_tool(handler)
 
-        with patch("ouroboros.telemetry.capture") as capture:
+        with patch("ouroboros.telemetry._record_usage") as record_usage:
             with pytest.raises(RuntimeError, match="failed"):
                 await call_sdk_tool(adapter, "custom_tool", {"input": "safe"})
 
-        assert capture.call_args_list[0].args == ("service_active", {"service": "mcp"})
-        assert capture.call_args_list[1].args == (
-            "command_run",
-            {
-                "command": "extension_tool",
-                "service": "mcp",
-                "status": "failed",
-                "error_type": "MCPServerError",
-            },
-        )
+        record_usage.assert_called_once_with({"mcp_tool_errors": 1})
 
     async def test_sdk_non_prefixed_extension_logical_block_is_folded(self) -> None:
         pytest.importorskip("mcp.server")
@@ -3956,19 +3930,10 @@ class TestServeTransport:
         )
         adapter.register_tool(handler)
 
-        with patch("ouroboros.telemetry.capture") as capture:
+        with patch("ouroboros.telemetry._record_usage") as record_usage:
             await call_sdk_tool(adapter, "custom_tool", {"input": "safe"})
 
-        assert capture.call_args_list[0].args == ("service_active", {"service": "mcp"})
-        assert capture.call_args_list[1].args == (
-            "command_run",
-            {
-                "command": "extension_tool",
-                "service": "mcp",
-                "status": "blocked",
-                "error_type": None,
-            },
-        )
+        record_usage.assert_not_called()
 
     async def test_sdk_call_tool_logical_error_response_counts_as_not_ok(self) -> None:
         """SDK-path companion to the typed-adapter logical-error test."""

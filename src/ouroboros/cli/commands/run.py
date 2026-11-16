@@ -645,8 +645,9 @@ async def _record_cli_run_outcome(
     outcome id is fresh per invocation because ``--resume`` reuses the
     execution id and each attempt is its own outcome. ``check_package_run``
     (``boundary/run_control.py``) closes its record at the same terminal
-    status and sends only its anonymous no-evidence count
-    (``acceptance_no_evidence``). Never raises.
+    status first, so its no-evidence count and artifact-check outcomes are in
+    the run's outcome tally (bound by ``workflow``) when this event drains
+    it. Never raises.
     """
     from ouroboros.mcp.tools.run_ac_tally import derive_run_ac_tally
     from ouroboros.mcp.tools.run_failure_meta import derive_run_failure_meta
@@ -1397,7 +1398,12 @@ def workflow(
                 "Enabling orchestrator mode.[/yellow]"
             )
         try:
-            with model_options(model, pin_models):
+            # The run's verify-gate and acceptance observations are folded
+            # into its one workflow_outcome (see _record_cli_run_outcome).
+            with (
+                model_options(model, pin_models),
+                usage_telemetry.outcome_scope(usage_telemetry.new_outcome_tally()),
+            ):
                 asyncio.run(
                     _run_orchestrator(
                         seed_file,

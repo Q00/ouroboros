@@ -101,16 +101,19 @@ async def start_managed_job(
     # succeeds or is durably terminalized as a definitive zero-runner failure.
     manager._started_job_ids.add(job_id)
     try:
-        if isinstance(runner, asyncio.Task):
-            runner_task = runner
-        elif inspect.iscoroutine(runner):
-            runner_task = _create_task(runner)
-        else:
+        # The runner task copies the job's telemetry tally binding, so its
+        # verify-gate and acceptance observations land on this job's outcome.
+        with manager._telemetry.runner_scope(job_id):
+            if isinstance(runner, asyncio.Task):
+                runner_task = runner
+            elif inspect.iscoroutine(runner):
+                runner_task = _create_task(runner)
+            else:
 
-            async def _await_runner(_awaitable: Any = runner) -> Any:
-                return await _awaitable
+                async def _await_runner(_awaitable: Any = runner) -> Any:
+                    return await _awaitable
 
-            runner_task = _create_task(_await_runner())
+                runner_task = _create_task(_await_runner())
     except BaseException as registration_error:
         if inspect.iscoroutine(runner):
             runner.close()

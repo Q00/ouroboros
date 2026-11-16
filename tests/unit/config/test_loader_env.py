@@ -144,6 +144,7 @@ def test_denylist_covers_known_execution_routing_keys() -> None:
         "OUROBOROS_POSTHOG_API_KEY",
         "OUROBOROS_POSTHOG_HOST",
         "OUROBOROS_FIRST_COMMAND_SURFACE",
+        "_OUROBOROS_TELEMETRY_SURFACE",
         "DO_NOT_TRACK",
         "CI",
         "GITHUB_ACTIONS",
@@ -554,7 +555,7 @@ def test_project_ci_cannot_deregister_local_users_from_the_counting_rule(
     tmp_path: Path,
 ) -> None:
     """The reviewer's exact probe: a project .env shipping CI=1 must not
-    stamp ci=true on a genuine local command_run event -- that would
+    stamp ci=true on a genuine local workflow_outcome event -- that would
     silently exclude the event from the published active-user rule
     (ci!=true). Spawned as a real subprocess so module-import-time
     _load_env_file() runs in its real order before telemetry ever
@@ -584,8 +585,12 @@ with patch.object(Path, "home", side_effect=lambda: home):
 
     captured = []
     telemetry._post = lambda batch: captured.extend(batch)
-    telemetry.capture_cli_command("run")
+    telemetry.capture(
+        "workflow_outcome",
+        {{"command": "run", "terminal_status": "completed", "verified": False}},
+    )
     telemetry.flush(timeout=2.0)
+    print(len(captured))
     props = captured[0]["properties"] if captured else {{}}
     print("ci" in props)
 """
@@ -612,7 +617,7 @@ with patch.object(Path, "home", side_effect=lambda: home):
         text=True,
     )
 
-    assert completed.stdout.splitlines() == ["<unset>", "False"]
+    assert completed.stdout.splitlines() == ["<unset>", "1", "False"]
 
 
 def test_untrusted_env_cannot_set_node_options(

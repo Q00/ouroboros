@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import builtins
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
+from contextlib import contextmanager
 import json
 import time
 from typing import TYPE_CHECKING, Any
@@ -35,14 +36,10 @@ _TERMINAL_JOB_EVENTS = frozenset(
     }
 )
 
-# capture_tool_call() derives both "tool" and "command" from whatever name
-# reaches it, so a caller-controlled unregistered name (e.g. a filesystem
-# path smuggled in as a tool call) must never be queued verbatim -- that
-# would leak arbitrary caller-controlled strings into telemetry despite
-# TELEMETRY.md promising file paths are never collected. Every unregistered
-# lookup is folded to this fixed literal instead. It keeps the "ouroboros_"
-# prefix so capture_tool_call's existing funnel gate still records it (as
-# command="unknown_tool", is_funnel=False).
+# A caller-controlled unregistered name (e.g. a filesystem path smuggled in as
+# a tool call) must never reach telemetry verbatim, even though
+# capture_tool_call() only counts names from its static usage table: every
+# unregistered lookup is folded to this fixed literal first.
 _UNKNOWN_TOOL_NAME = "ouroboros_unknown_tool"
 
 # error_type is a plain exception-class name, so it is just as capable of
@@ -483,16 +480,32 @@ def stamp_backend_context(
 
 
 class JobTelemetryBoundary:
-    """Remember privacy-safe job classes and observe durable terminal appends."""
+    """Remember privacy-safe job classes and observe durable terminal appends.
+
+    Each job started in this process gets its own ``OutcomeTally``: the
+    runner task is created inside ``runner_scope`` and so reports its verify
+    gate, acceptance and runtime-drift observations into it, and the job's
+    terminal ``workflow_outcome`` carries what the tally collected.
+    """
 
     def __init__(self) -> None:
         self._job_types: dict[str, str] = {}
+        self._tallies: dict[str, usage_telemetry.OutcomeTally] = {}
 
     def remember(self, job_id: str, data: dict[str, Any]) -> None:
         self._job_types[job_id] = str(data.get("job_type", "unknown"))
 
     def forget(self, job_id: str) -> None:
         self._job_types.pop(job_id, None)
+        self._tallies.pop(job_id, None)
+
+    @contextmanager
+    def runner_scope(self, job_id: str) -> Iterator[None]:
+        """Bind a fresh tally for ``job_id`` while its runner task is created."""
+        tally = usage_telemetry.new_outcome_tally()
+        self._tallies[job_id] = tally
+        with usage_telemetry.outcome_scope(tally):
+            yield
 
     def observe(self, event_type: str, job_id: str, data: dict[str, Any]) -> None:
         if event_type == "mcp.job.created":
@@ -502,14 +515,17 @@ class JobTelemetryBoundary:
         status = data.get("status")
         if not isinstance(status, str):
             status = event_type.removeprefix("mcp.job.")
-        usage_telemetry.capture_job_outcome(
-            job_id,
-            self._job_types.get(job_id, "unknown"),
-            terminal_status=status,
-            result_meta=(
-                data.get("result_meta") if isinstance(data.get("result_meta"), dict) else None
-            ),
-        )
+        # Bind exactly this job's tally, or none: a job started from inside
+        # another job's runner must not drain the outer job's observations.
+        with usage_telemetry.outcome_scope(self._tallies.pop(job_id, None)):
+            usage_telemetry.capture_job_outcome(
+                job_id,
+                self._job_types.get(job_id, "unknown"),
+                terminal_status=status,
+                result_meta=(
+                    data.get("result_meta") if isinstance(data.get("result_meta"), dict) else None
+                ),
+            )
 
 
 __all__ = [
