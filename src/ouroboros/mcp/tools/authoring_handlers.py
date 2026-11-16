@@ -63,6 +63,7 @@ from ouroboros.interview_calibration import normalize_interview_calibration
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.host_context import resolve_request_subagent_dispatch
 from ouroboros.mcp.tools import interview_opening_decisions as opening_decisions
+from ouroboros.mcp.tools import interview_refused_close as refused_close
 from ouroboros.mcp.tools.advisory_dispatch import (
     append_question_advisory_dispatch,
     echo_carries_dispatch,
@@ -1619,11 +1620,12 @@ class InterviewHandler:
                 content=(
                     MCPContentItem(
                         type=ContentType.TEXT,
-                        text=(
+                        text=refused_close.with_pending_question(
                             f"Cannot complete yet — {gate_reason}. "
                             f"Current ambiguity: {score_display}. "
                             f"Please answer a few more questions to "
-                            f"clarify remaining areas."
+                            f"clarify remaining areas.",
+                            state,
                         ),
                     ),
                 ),
@@ -2866,12 +2868,11 @@ class InterviewHandler:
                             turn_started_at=turn_started_at,
                             ambiguity_scoring_duration_ms=ambiguity_scoring_duration_ms,
                         )
-                    # Streak advanced but still short of the
-                    # threshold — persist the advance and invite the
-                    # user to confirm again or answer the pending
-                    # question. The pending round is intentionally
-                    # preserved so "answer another question to
-                    # update the score" remains truthful.
+                    # Streak advanced but still short of the threshold —
+                    # persist the advance and invite the user to confirm
+                    # again or answer the pending question. The pending
+                    # round is intentionally preserved and re-presented so
+                    # "answer the pending question" remains truthful.
                     #
                     # Persistence is load-bearing on this branch:
                     # the next 'done' must see the advanced streak
@@ -2907,7 +2908,7 @@ class InterviewHandler:
                             content=(
                                 MCPContentItem(
                                     type=ContentType.TEXT,
-                                    text=(
+                                    text=refused_close.with_pending_question(
                                         f"Ambiguity looks low "
                                         f"(score={exit_score.overall_score:.2f}). "
                                         f"Stability check: "
@@ -2915,7 +2916,8 @@ class InterviewHandler:
                                         f"/{AUTO_COMPLETE_STREAK_REQUIRED}. "
                                         f"Type 'done' once more to confirm "
                                         f"({streak_shortfall} more signal(s) needed), "
-                                        f"{answer_hint}"
+                                        f"{answer_hint}",
+                                        state,
                                     ),
                                 ),
                             ),
@@ -2936,9 +2938,8 @@ class InterviewHandler:
                             },
                         )
                     )
-                # Ambiguity too high — refuse completion. Keep any
-                # pending round in place so the user can still
-                # answer it directly.
+                # Ambiguity too high — refuse completion. Keep any pending
+                # round in place; the refusal re-presents it to answer.
                 #
                 # Persistence is load-bearing on this branch too:
                 # ``_score_interview_state(reset_on_failure=True)``
@@ -3025,7 +3026,7 @@ class InterviewHandler:
                 presentation = state.rounds[-1].first_question_presentation
                 if state.proposed_opening is not None and (
                     arguments.get("opening_user_followup_question") is not None
-                    or (last_question is not None and last_question != issued)
+                    or refused_close.echo_differs_from_pending(last_question, issued, state)
                 ):
                     return Result.err(
                         MCPToolError(
@@ -3035,12 +3036,11 @@ class InterviewHandler:
                     )
                 pending_question = (
                     issued
-                    if presentation or state.proposed_opening is not None
-                    else (
-                        issued
-                        if echo_carries_dispatch(last_question)
-                        else (last_question or issued)
-                    )
+                    if presentation
+                    or state.proposed_opening is not None
+                    or echo_carries_dispatch(last_question)
+                    or refused_close.echo_carries_pending(last_question, issued)
+                    else (last_question or issued)
                 )
             else:
                 from ouroboros.mcp.tools.interview_opening import validate_reopen_question
