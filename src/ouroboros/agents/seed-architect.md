@@ -110,7 +110,7 @@ separators, argument orders, or byte-for-byte freezes of behavior the context
 does not ask to keep: a criterion that pins one example's spelling rejects the
 general fix the request is about. Put any such form in ASSUMPTIONS instead.
 
-**Granularity contract (read carefully):**
+**Granularity contract:**
 
 An acceptance criterion names a **state of the finished work** that a user can see is true. An implementation step names a **means of reaching that state**. These are different categories, and only the first belongs here — deciding means is the execution engine's work at runtime, and it decides them better with the outcome in hand than with your guess at the path.
 

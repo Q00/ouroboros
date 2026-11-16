@@ -1406,8 +1406,8 @@ class TestInterviewEngineSystemPrompt:
         prompt = engine._build_system_prompt(state)
 
         assert "### seed-closer" in prompt
-        assert 'NEVER say "I will implement X"' in prompt
-        assert "NEVER promise to build demos" in prompt
+        assert "You are the interviewer: you gather requirements by asking questions." in prompt
+        assert "so do not announce, offer, or promise implementation" in prompt
 
     def test_system_prompt_omits_seed_closer_when_closure_mode_is_inactive(self) -> None:
         """High ambiguity should keep the closure perspective disabled."""
