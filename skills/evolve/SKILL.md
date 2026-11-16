@@ -60,6 +60,6 @@ Never launch a full-graph control arm on your own: it would consume the savings 
 
 Explain the evolutionary loop and suggest installing the MCP server (see [Getting Started](https://github.com/Q00/ouroboros/blob/main/docs/getting-started.md)), then running `ouroboros mcp serve --runtime claude-cli` and adding it to the runtime's MCP configuration.
 
-## RFC #1392 State Breadcrumb Footer
+## State Breadcrumb Footer
 
 End the final response with exactly one line `◆ <current state> → next: <recommended action>`. Derive the state from live session state via `ouroboros_session_status` when available, otherwise from this skill's actual outcome. Never use a linear `Step N of M` footer; when the next step is a real choice, list 2-3 options.

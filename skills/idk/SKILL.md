@@ -112,9 +112,9 @@ If `ooo idk` is invoked while an interview question is pending:
   rephrase before asking for a decision. Do not count “I don't know that term”
   as an answer to the underlying interview question.
 
-## RFC #1392 State Breadcrumb Footer
+## State Breadcrumb Footer
 
-Your final response MUST end with exactly one breadcrumb footer line:
+End the final response with exactly one breadcrumb footer line:
 
 ```
 ◆ <current state> → next: <recommended action>

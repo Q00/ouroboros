@@ -28,6 +28,6 @@ The native command is the single source of truth. Run it with the active runtime
 
 The updater replays the environment's install receipt, so the Claude SDK and MCP 2 profiles are never combined or substituted. Other options: `--dry-run`, `--prerelease`; see `ouroboros update --help`.
 
-## RFC #1392 State Breadcrumb Footer
+## State Breadcrumb Footer
 
 End the final response with exactly one line `◆ <current state> → next: <recommended action>`. Derive the state from live session state via `ouroboros_session_status` when available, otherwise from this skill's actual outcome. Never use a linear `Step N of M` footer; when the next step is a real choice, list 2-3 options.

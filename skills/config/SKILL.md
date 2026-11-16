@@ -68,6 +68,6 @@ Do not start a server nobody can reach. Drive the same settings in chat:
 
 Relay any rejected `set` validation error or missing-dependency hint (`pip install 'ouroboros-ai[tui]'`) verbatim. `ouroboros config undo` restores the configuration saved before the last change.
 
-## RFC #1392 State Breadcrumb Footer
+## State Breadcrumb Footer
 
 End the final response with exactly one line `◆ <current state> → next: <recommended action>`. Derive the state from live session state via `ouroboros_session_status` when available, otherwise from this skill's actual outcome. Never use a linear `Step N of M` footer; when the next step is a real choice, list 2-3 options.

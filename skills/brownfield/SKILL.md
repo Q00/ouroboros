@@ -101,6 +101,6 @@ Name the new defaults and that they will be used as interview context; for "none
 
   Print the resulting toml so the user can confirm or edit it. If detect reports "could not propose any verifiable commands", surface the reason (no manifests, LLM unavailable, every proposal dropped) and suggest a minimal hand-written toml; one entry such as `test = "pytest -q"` opts that check back in to Stage 1.
 
-## RFC #1392 State Breadcrumb Footer
+## State Breadcrumb Footer
 
 End the final response with exactly one line `◆ <current state> → next: <recommended action>`. Derive the state from live session state via `ouroboros_session_status` when available, otherwise from this skill's actual outcome. Never use a linear `Step N of M` footer; when the next step is a real choice, list 2-3 options.

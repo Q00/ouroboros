@@ -362,6 +362,6 @@ partial protocol. If the schema or opt-in is unavailable, use the normal path.
 5. Apply the Refine gate to free-text answers, the Seed-ready Acceptance Guard before closure, and the Restate gate before suggesting `ooo seed`. With no MCP state, apply Restate corrections to your local ledger and goal line, rerun the guard locally, and ask the Restate gate again.
 6. Results live only in the conversation (not persisted).
 
-## RFC #1392 State Breadcrumb Footer
+## State Breadcrumb Footer
 
 End the final response with exactly one line `◆ <current state> → next: <recommended action>`. Derive the state from live session state via `ouroboros_session_status` when available, otherwise from this skill's actual outcome. Never use a linear `Step N of M` footer; when the next step is a real choice, list 2-3 options.

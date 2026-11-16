@@ -67,6 +67,6 @@ most use: `ooo interview`, `ooo seed`, `ooo run`.
 The tutorial is done when the user has experienced the interview, understands
 what a Seed is, and has chosen a next step.
 
-## RFC #1392 State Breadcrumb Footer
+## State Breadcrumb Footer
 
 End the final response with exactly one line `◆ <current state> → next: <recommended action>`. Derive the state from live session state via `ouroboros_session_status` when available, otherwise from this skill's actual outcome. Never use a linear `Step N of M` footer; when the next step is a real choice, list 2-3 options.

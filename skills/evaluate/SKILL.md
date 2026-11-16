@@ -66,6 +66,6 @@ else `src/ouroboros/agents/evaluator.md` in a source checkout.
 
 Give a qualitative, advisory evaluation against the Seed (no numerical scoring and no approval authority without the Python core).
 
-## RFC #1392 State Breadcrumb Footer
+## State Breadcrumb Footer
 
 End the final response with exactly one line `◆ <current state> → next: <recommended action>`. Derive the state from live session state via `ouroboros_session_status` when available, otherwise from this skill's actual outcome. Never use a linear `Step N of M` footer; when the next step is a real choice, list 2-3 options.

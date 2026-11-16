@@ -125,6 +125,6 @@ In unstuck mode, present options, not a verdict:
 
 In both modes the choice is the user's: never auto-progress to the next workflow step on their behalf.
 
-## RFC #1392 State Breadcrumb Footer
+## State Breadcrumb Footer
 
 End the final response with exactly one line `◆ <current state> → next: <recommended action>`. Derive the state from live session state via `ouroboros_session_status` when available, otherwise from this skill's actual outcome. Never use a linear `Step N of M` footer; when the next step is a real choice, list 2-3 options.

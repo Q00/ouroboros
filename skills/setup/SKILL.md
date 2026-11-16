@@ -115,8 +115,9 @@ Prefer package managers for uv: `pipx install uv`, `pip install --user uv`, or
 `brew install uv`; the vendor one-liner
 `curl -LsSf https://astral.sh/uv/install.sh | sh` is the last resort.
 
-**IMPORTANT**: Never install `[mcp,claude]`, `[mcp,claude-sdk]`, or `[all,mcp]`
-together and never write a direct
+Never install `[mcp,claude]`, `[mcp,claude-sdk]`, or `[all,mcp]` together: the
+Claude SDK extras pin MCP 1.x, `[mcp]` pins MCP 2, and the two cannot share one
+interpreter. Never write a direct
 `ouroboros` or `python -m ouroboros` MCP fallback. MCP 2 launchers must use an
 isolated `uvx --isolated --python '>=3.12' --from 'ouroboros-ai[mcp]' ...` or
 `pipx run --spec 'ouroboros-ai[mcp]' ...` process. Only `[mcp,claude-cli]` is
@@ -348,6 +349,6 @@ confirmed:
   isolated MCP 2 server worker. Never combine `[claude]`, `[claude-sdk]`, or
   `[all]` with `[mcp]`.
 
-## RFC #1392 State Breadcrumb Footer
+## State Breadcrumb Footer
 
 End the final response with exactly one line `◆ <current state> → next: <recommended action>`. Derive the state from live session state via `ouroboros_session_status` when available, otherwise from this skill's actual outcome. Never use a linear `Step N of M` footer; when the next step is a real choice, list 2-3 options.

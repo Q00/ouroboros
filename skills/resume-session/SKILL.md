@@ -43,6 +43,6 @@ ooo resume-session [--all]
 
 If it reports "No in-flight sessions found", the execution completed, failed, or was cancelled, or the EventStore was never created; `ouroboros tui monitor` browses past sessions.
 
-## RFC #1392 State Breadcrumb Footer
+## State Breadcrumb Footer
 
 End the final response with exactly one line `◆ <current state> → next: <recommended action>`. Derive the state from live session state via `ouroboros_session_status` when available, otherwise from this skill's actual outcome. Never use a linear `Step N of M` footer; when the next step is a real choice, list 2-3 options.

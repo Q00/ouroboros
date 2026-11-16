@@ -49,6 +49,6 @@ Ouroboros tools may be deferred, and a schema loaded on one turn can unload by t
 
 Tell the user session tracking needs the Ouroboros MCP server (`ooo setup`), and that without it they can compare the implementation against the Seed by hand.
 
-## RFC #1392 State Breadcrumb Footer
+## State Breadcrumb Footer
 
 End the final response with exactly one line `◆ <current state> → next: <recommended action>`. Derive the state from live session state via `ouroboros_session_status` when available, otherwise from this skill's actual outcome. Never use a linear `Step N of M` footer; when the next step is a real choice, list 2-3 options.
