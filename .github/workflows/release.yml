@@ -4,6 +4,15 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  # Finishes the distribution of a release that already exists: rebuilds and
+  # attaches the TUI binaries and bumps the Homebrew formula. It never creates
+  # a GitHub Release and never publishes to PyPI (PyPI rejects a re-upload).
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to finish, e.g. v0.60.0"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -11,6 +20,8 @@ permissions:
 jobs:
   release:
     name: Create Release
+    # Tag pushes only: a dispatch finishes a release that already exists.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
 
     steps:
@@ -102,16 +113,83 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  dispatch-preflight:
+    name: Resolve Dispatched Tag
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      sha: ${{ steps.resolve.outputs.sha }}
+
+    steps:
+      - name: Resolve tag, release and commit
+        id: resolve
+        env:
+          TAG: ${{ inputs.tag }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The shape the push trigger accepts (v*.*.*), checked before the
+          # value reaches an API path. The raw input is never echoed back.
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.]*$ ]]; then
+            echo "tag must look like v1.2.3 or v1.2.3b1" >&2
+            exit 1
+          fi
+
+          # Only published releases resolve here. Without this check the attach
+          # step would create a new release, and a new tag, for a mistyped tag.
+          if ! gh api "repos/$REPO/releases/tags/$TAG" --jq .id >/dev/null; then
+            echo "$TAG has no published GitHub Release; this run only finishes an existing one" >&2
+            exit 1
+          fi
+
+          # A stable tag (the homebrew job's own test) must be the latest
+          # release: finishing an older one would move the formula backwards.
+          if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            LATEST="$(gh api "repos/$REPO/releases/latest" --jq .tag_name)"
+            if [[ "$LATEST" != "$TAG" ]]; then
+              echo "$TAG is not the latest release ($LATEST); refusing to downgrade the Homebrew formula" >&2
+              exit 1
+            fi
+          fi
+
+          # Resolve once so every job builds the same commit, even if the tag
+          # is moved while this run is in flight.
+          SHA="$(gh api "repos/$REPO/commits/refs/tags/$TAG" --jq .sha)"
+          if [[ ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "could not resolve $TAG to a commit" >&2
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Finishing $TAG at $SHA"
+
   build-tui:
     name: Build TUI (${{ matrix.target }})
-    needs: release
+    needs: [release, dispatch-preflight]
+    # Exactly one of the two needs runs per event; the other is skipped, so the
+    # implicit success() would skip this job. Test the trigger's own job.
+    if: >-
+      ${{ !cancelled() && (
+      (github.event_name == 'push' && needs.release.result == 'success') ||
+      (github.event_name == 'workflow_dispatch' && needs.dispatch-preflight.result == 'success')) }}
     runs-on: ${{ matrix.runner }}
     strategy:
+      # Every leg runs to the end: attach-tui-binaries ships whatever built.
+      fail-fast: false
       matrix:
         include:
           - runner: macos-latest
             target: aarch64-apple-darwin
-          - runner: macos-14
+          # Cross-compiled on Apple silicon, as it already was on macos-14
+          # (also arm64) until that image was retired. The toolchain step adds
+          # the rustup target, and every path below is keyed on matrix.target.
+          - runner: macos-latest
             target: x86_64-apple-darwin
           - runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
@@ -119,8 +197,12 @@ jobs:
             target: x86_64-pc-windows-msvc
 
     steps:
+      # A dispatch builds the tag's commit. On a tag push the ref is empty,
+      # which actions/checkout treats as unset: the pushed tag, as before.
       - name: Checkout code
         uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && needs.dispatch-preflight.outputs.sha || '' }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -153,7 +235,16 @@ jobs:
   attach-tui-binaries:
     name: Attach TUI Binaries to Release
     runs-on: ubuntu-latest
-    needs: [release, build-tui]
+    needs: [release, dispatch-preflight, build-tui]
+    # Attach whatever legs built, even when one failed. The release and the
+    # PyPI package are already public by now, so holding back working binaries
+    # does not make the release atomic; it leaves every platform without one.
+    # A failed leg still fails the run, fail_on_unmatched_files fails this job
+    # when no leg built, and re-dispatching the tag rebuilds and replaces all.
+    if: >-
+      ${{ !cancelled() && (
+      (github.event_name == 'push' && needs.release.result == 'success') ||
+      (github.event_name == 'workflow_dispatch' && needs.dispatch-preflight.result == 'success')) }}
 
     steps:
       - name: Download all artifacts
@@ -165,7 +256,11 @@ jobs:
       - name: Attach binaries to release
         uses: softprops/action-gh-release@v3.0.3
         with:
+          # Unset, the action uses github.ref_name, which on a dispatch is the
+          # branch: it would create a release named after it.
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && needs.dispatch-preflight.outputs.tag || github.ref_name }}
           files: ouroboros-tui-*
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -173,7 +268,9 @@ jobs:
     name: Publish to PyPI
     runs-on: ubuntu-latest
     needs: release
-    if: success()
+    # Tag pushes only. A dispatch finishes a release whose package is already
+    # on PyPI, which rejects a re-upload of the same version.
+    if: ${{ github.event_name == 'push' && success() }}
 
     steps:
       - name: Checkout code
@@ -237,17 +334,24 @@ jobs:
   homebrew:
     name: Bump Homebrew Formula
     runs-on: macos-latest
-    needs: publish
-    if: success()
+    # The formula builds from the PyPI sdist, not the TUI binaries, so this job
+    # does not wait for them on either trigger.
+    needs: [publish, dispatch-preflight]
+    if: >-
+      ${{ !cancelled() && (
+      (github.event_name == 'push' && needs.publish.result == 'success') ||
+      (github.event_name == 'workflow_dispatch' && needs.dispatch-preflight.result == 'success')) }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && needs.dispatch-preflight.outputs.sha || '' }}
 
       - name: Resolve release channel
         id: gate
         env:
-          REF_NAME: ${{ github.ref_name }}
+          REF_NAME: ${{ github.event_name == 'workflow_dispatch' && needs.dispatch-preflight.outputs.tag || github.ref_name }}
         run: |
           VERSION="${REF_NAME#v}"
           # The tap tracks stable only; `v*.*.*` also matches a 0.52.0b1 tag.
@@ -277,6 +381,11 @@ jobs:
           VERSION: ${{ steps.gate.outputs.version }}
         run: |
           brew tap Q00/tap
+          # Homebrew 6+ refuses to load a formula from a non-official tap until
+          # it is trusted (https://docs.brew.sh/Tap-Trust). Trust this formula,
+          # not the whole tap. The entry persists in the runner's home, so it
+          # also covers the audit, install and test in "Verify formula".
+          brew trust --formula Q00/tap/ouroboros-ai
           echo "TAP_DIR=$(brew --repository Q00/tap)" >> "$GITHUB_ENV"
           ./scripts/bump-homebrew-formula.sh "$VERSION" Q00/tap/ouroboros-ai
 

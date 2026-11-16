@@ -217,6 +217,28 @@ Version numbers come from git tags via `hatch-vcs`; `__init__.py` is never
 hand-edited. Pushes to `main` between tags publish dev builds through
 `dev-publish.yml`.
 
+### Finishing a release whose TUI or Homebrew job failed
+
+The TUI builds and the Homebrew bump run after the GitHub Release and the PyPI
+upload, so they can fail on a release that is already public. Do not re-push
+the tag. Once the fix is on `main`, dispatch the workflow for the existing tag:
+
+```bash
+gh workflow run release.yml -f tag=vX.Y.Z
+```
+
+A dispatch runs only `Resolve Dispatched Tag`, `Build TUI`, `Attach TUI
+Binaries to Release` and `Bump Homebrew Formula`, using the workflow on `main`
+and building the tag's commit. It never runs `Create Release` or `Publish to
+PyPI`. The preflight refuses a tag without a published GitHub Release, and a
+stable tag that is not the latest release, since finishing an older one would
+move the formula backwards. A second dispatch is safe: attaching replaces
+binaries that are already attached, and the Homebrew job pushes only when the
+regenerated formula differs from the one in the tap.
+
+If one TUI build leg fails, the other binaries are still attached and the run
+stays red. Dispatch the tag again to fill in the missing one.
+
 ### Homebrew formula
 
 After the PyPI publish, the `Bump Homebrew Formula` job updates
@@ -243,6 +265,13 @@ Two things this job needs, and how it fails without them:
 - A green `brew audit`, `brew install --build-from-source` and `brew test`,
   which run **before** the push. A formula that cannot build is worse than one
   that is a release behind, and the tap has no CI of its own.
+
+Since Homebrew 6.0.0, Homebrew refuses to load a formula from a non-official tap
+until that formula is trusted ([Tap Trust](https://docs.brew.sh/Tap-Trust)).
+The job runs `brew trust --formula Q00/tap/ouroboros-ai` right after
+`brew tap`. That trusts this one formula, not the whole tap. A maintainer
+running `scripts/bump-homebrew-formula.sh` locally needs the same trust entry
+first.
 
 Pre-release tags are skipped: the tap tracks stable only, and `v*.*.*` also
 matches `v0.52.0b1`.

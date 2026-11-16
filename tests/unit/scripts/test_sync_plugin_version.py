@@ -1772,7 +1772,8 @@ def test_release_workflow_checks_tag_metadata_before_build() -> None:
     assert validation < build
     assert build < package_identity
     assert workflow.count("zipfile.ZipFile") == 2
-    assert "needs: release" in tui_job
+    assert "needs: [release, dispatch-preflight]" in tui_job
+    assert "github.event_name == 'push' && needs.release.result == 'success'" in tui_job
 
 
 def test_main_write_rolls_back_when_marker_update_reports_no_change(
