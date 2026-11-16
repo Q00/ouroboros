@@ -22,7 +22,7 @@ jobs:
     name: doc-impact (advisory)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@v7
         with:
           # The report diffs against the merge base with the PR's base
           # commit, so the history between them must be present.

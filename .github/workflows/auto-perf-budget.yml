@@ -23,7 +23,7 @@ jobs:
   enforce-perf-budget:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@v7
         with:
           # Need full history so the script can diff against origin/main
           # to enumerate changed paths.
