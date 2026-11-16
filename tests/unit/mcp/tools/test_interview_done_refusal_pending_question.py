@@ -10,22 +10,37 @@ question the server issued, not against the refusal text.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from ouroboros.auto.adapters import HandlerInterviewBackend
 from ouroboros.bigbang.ambiguity import AmbiguityScore, ComponentScore, ScoreBreakdown
-from ouroboros.bigbang.interview import InterviewEngine
+from ouroboros.bigbang.interview import InterviewEngine, InterviewRound, InterviewState
 from ouroboros.core.types import Result
 from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
-from ouroboros.mcp.tools.interview_refused_close import echo_carries_pending
+from ouroboros.mcp.tools.interview_refused_close import (
+    echo_carries_pending,
+    echo_differs_from_pending,
+    echo_is_refused_close,
+    with_pending_question,
+)
 from ouroboros.providers.base import CompletionResponse, UsageInfo
 
 FIRST_QUESTION = "Which tasks should the tool track first?"
 NEXT_QUESTION = "How should finished tasks be shown?"
 ANSWER = "Personal chores and errands"
 SCORER = "ouroboros.mcp.tools.authoring_handlers.AmbiguityScorer"
+OPENING = json.dumps(
+    {
+        "interpretations": [
+            {"interpretation": "SENTINEL_ALPHA", "evidence": "todo CLI", "uncertainty": "Who?"},
+            {"interpretation": "SENTINEL_BETA", "evidence": "todo CLI", "uncertainty": "Shared?"},
+        ]
+    }
+)
+UNRELATED = "Which database should it use?"
 
 
 def _score(value: float) -> AmbiguityScore:
@@ -185,3 +200,97 @@ def test_echo_carries_pending_only_for_a_re_presentation() -> None:
     assert not echo_carries_pending(f"{FIRST_QUESTION}\n\nMore context.", FIRST_QUESTION)
     assert not echo_carries_pending(None, FIRST_QUESTION)
     assert not echo_carries_pending("Anything\n\n", "")
+
+
+async def _refuse_done_with_opening(tmp_path):
+    """Start with opening interpretations, refuse ``done``, return the refusal and display."""
+    engine, handler = _wire(tmp_path, OPENING, NEXT_QUESTION)
+    started = await handler.handle(
+        {
+            "initial_context": "Build a small todo CLI",
+            "cwd": str(tmp_path),
+            "propose_opening_interpretations": True,
+        }
+    )
+    session_id = started.value.meta["session_id"]
+    refused = await handler.handle({"session_id": session_id, "answer": "done"})
+    state = (await engine.load_state(session_id)).value
+    display = state.proposed_opening.render(state.rounds[0].question, state.opening_decisions)
+    return engine, handler, session_id, refused.value.content[0].text, display
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("score", "refusal_head"),
+    [(0.55, "Cannot complete yet"), (0.14, "Ambiguity looks low")],
+    ids=["ambiguity_gate", "stability_shortfall"],
+)
+async def test_whole_refusal_echo_passes_the_opening_guard(
+    tmp_path, score: float, refusal_head: str
+) -> None:
+    """With opening interpretations the refusal echo is still the server's own reply."""
+    with patch(SCORER, return_value=_scorer(_score(score))):
+        engine, handler, session_id, text, display = await _refuse_done_with_opening(tmp_path)
+        issued, pending = await _first_round(engine, session_id)
+        answered = await handler.handle(
+            {"session_id": session_id, "answer": ANSWER, "last_question": text}
+        )
+
+    assert pending is None
+    assert text.startswith(refusal_head)
+    assert text.endswith(f"\n\n{display}")
+    assert answered.is_ok, answered.error if answered.is_err else None
+    assert not answered.value.is_error
+    assert f"\n\n{NEXT_QUESTION}" in answered.value.content[0].text
+    assert await _first_round(engine, session_id) == (issued, ANSWER)
+    assert "SENTINEL_ALPHA" not in issued and "SENTINEL_BETA" not in issued
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "echo", ["unrelated", "opening_only", "foreign_head", "refusal_then_unrelated"]
+)
+async def test_opening_guard_still_rejects_other_echoes_after_refused_done(
+    tmp_path, echo: str
+) -> None:
+    """Only the refused-close reply itself gets through; every other differing echo fails."""
+    with patch(SCORER, return_value=_scorer(_score(0.55))):
+        engine, handler, session_id, text, display = await _refuse_done_with_opening(tmp_path)
+        explanation = text[: -len(display)].rstrip()
+        echoes = {
+            "unrelated": UNRELATED,
+            "opening_only": display,
+            "foreign_head": f"{UNRELATED}\n\n{display}",
+            "refusal_then_unrelated": f"{explanation}\n\n{UNRELATED}",
+        }
+        before = engine._state_file_path(session_id).read_bytes()
+        answered = await handler.handle(
+            {"session_id": session_id, "answer": ANSWER, "last_question": echoes[echo]}
+        )
+
+    assert answered.is_err
+    assert "Pending question differs" in str(answered.error)
+    assert engine._state_file_path(session_id).read_bytes() == before
+    assert (await _first_round(engine, session_id))[1] is None
+
+
+def test_echo_is_refused_close_only_for_this_rounds_refusal() -> None:
+    state = InterviewState(
+        interview_id="i", rounds=[InterviewRound(round_number=1, question=FIRST_QUESTION)]
+    )
+    gate = with_pending_question("Cannot complete yet — reason. Current ambiguity: 0.55.", state)
+    stability = with_pending_question("Ambiguity looks low (score=0.14). Stability check.", state)
+    assert echo_is_refused_close(gate, state)
+    assert echo_is_refused_close(f"  {stability}\n", state)
+    assert not echo_is_refused_close(None, state)
+    assert not echo_is_refused_close(FIRST_QUESTION, state)
+    assert not echo_is_refused_close(f"Cannot complete yet — a.\n\nb.\n\n{FIRST_QUESTION}", state)
+    assert not echo_is_refused_close(gate.replace(FIRST_QUESTION, NEXT_QUESTION), state)
+    # The opening guard's view: only these three shapes do not differ.
+    assert not echo_differs_from_pending(None, FIRST_QUESTION, state)
+    assert not echo_differs_from_pending(FIRST_QUESTION, FIRST_QUESTION, state)
+    assert not echo_differs_from_pending(gate, FIRST_QUESTION, state)
+    assert echo_differs_from_pending(UNRELATED, FIRST_QUESTION, state)
+    assert echo_differs_from_pending("", FIRST_QUESTION, state)
+    state.rounds[0].user_response = ANSWER  # No round pending: nothing to recognise.
+    assert not echo_is_refused_close(gate, state)

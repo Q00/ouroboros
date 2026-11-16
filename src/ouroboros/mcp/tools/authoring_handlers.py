@@ -63,6 +63,7 @@ from ouroboros.interview_calibration import normalize_interview_calibration
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.host_context import resolve_request_subagent_dispatch
 from ouroboros.mcp.tools import interview_opening_decisions as opening_decisions
+from ouroboros.mcp.tools import interview_refused_close as refused_close
 from ouroboros.mcp.tools.advisory_dispatch import (
     append_question_advisory_dispatch,
     echo_carries_dispatch,
@@ -85,7 +86,6 @@ from ouroboros.mcp.tools.interview_opening import opening_followup_parameters
 from ouroboros.mcp.tools.interview_owned_lifecycle import run_owned_interview_call
 from ouroboros.mcp.tools.interview_plugin_state import _plugin_load_state, _plugin_save_state
 from ouroboros.mcp.tools.interview_reasoning import _interview_reasoning_meta
-from ouroboros.mcp.tools.interview_refused_close import echo_carries_pending, with_pending_question
 from ouroboros.mcp.tools.interview_transcript import (
     _build_question_advisory_request as _build_question_advisory_request,
 )
@@ -1620,7 +1620,7 @@ class InterviewHandler:
                 content=(
                     MCPContentItem(
                         type=ContentType.TEXT,
-                        text=with_pending_question(
+                        text=refused_close.with_pending_question(
                             f"Cannot complete yet — {gate_reason}. "
                             f"Current ambiguity: {score_display}. "
                             f"Please answer a few more questions to "
@@ -2908,7 +2908,7 @@ class InterviewHandler:
                             content=(
                                 MCPContentItem(
                                     type=ContentType.TEXT,
-                                    text=with_pending_question(
+                                    text=refused_close.with_pending_question(
                                         f"Ambiguity looks low "
                                         f"(score={exit_score.overall_score:.2f}). "
                                         f"Stability check: "
@@ -3026,7 +3026,7 @@ class InterviewHandler:
                 presentation = state.rounds[-1].first_question_presentation
                 if state.proposed_opening is not None and (
                     arguments.get("opening_user_followup_question") is not None
-                    or (last_question is not None and last_question != issued)
+                    or refused_close.echo_differs_from_pending(last_question, issued, state)
                 ):
                     return Result.err(
                         MCPToolError(
@@ -3039,7 +3039,7 @@ class InterviewHandler:
                     if presentation
                     or state.proposed_opening is not None
                     or echo_carries_dispatch(last_question)
-                    or echo_carries_pending(last_question, issued)
+                    or refused_close.echo_carries_pending(last_question, issued)
                     else (last_question or issued)
                 )
             else:
