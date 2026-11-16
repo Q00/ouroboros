@@ -1397,34 +1397,39 @@ def _print_closure_summary() -> None:
         print_info(f"No interviews recorded in {db_path}.")
         return
 
-    table = create_table("Interview closure by surface")
-    for heading in (
-        "Surface",
-        "Started",
-        "Completed",
-        "Questions/completed (median, mean)",
-        "Forced early",
-        "Questions/forced (median)",
-        "Abandoned",
-        "Abandon rate",
-        "Open",
-    ):
-        table.add_column(heading, justify="left" if heading == "Surface" else "right")
+    # Two narrow tables instead of one nine-column table, so every header and
+    # value fits the default 80-column terminal (the wider one is 79 columns
+    # with the longest surface label). The surface label is the row key, so it
+    # never wraps or truncates; on a narrower terminal Rich narrows the count
+    # columns instead.
+    surface_width = max(len(row.surface) for row in summaries)
+    outcomes = create_table("Interview outcomes by surface")
+    questions = create_table("Questions per interview by surface")
+    for table in (outcomes, questions):
+        table.add_column("Surface", no_wrap=True, min_width=surface_width)
+    for heading in ("Started", "Completed", "Forced\nearly", "Abandoned", "Abandon\nrate", "Open"):
+        outcomes.add_column(heading, justify="right")
+    for heading in ("Completed\nmedian", "Completed\nmean", "Forced early\nmedian"):
+        questions.add_column(heading, justify="right")
     for row in summaries:
         rate = row.abandon_rate
-        table.add_row(
+        outcomes.add_row(
             row.surface,
             str(row.started),
             str(row.completed),
-            f"{_format_count(row.median_questions_completed)}, "
-            f"{_format_count(row.mean_questions_completed)}",
             str(row.forced_early),
-            _format_count(row.median_questions_forced),
             str(row.abandoned),
             "-" if rate is None else f"{rate:.0%}",
             str(row.open),
         )
-    print_table(table)
+        questions.add_row(
+            row.surface,
+            _format_count(row.median_questions_completed),
+            _format_count(row.mean_questions_completed),
+            _format_count(row.median_questions_forced),
+        )
+    print_table(outcomes)
+    print_table(questions)
     idle_hours = int(DEFAULT_IDLE_AFTER.total_seconds() // 3600)
     console.print(
         "[muted]Forced early: a Seed was generated with the closure gate bypassed. "

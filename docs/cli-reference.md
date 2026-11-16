@@ -504,13 +504,15 @@ ouroboros init list [OPTIONS]
 | `--summary` | Instead of listing sessions, print interview closure counts per calling surface from the local event store. Default: off. Cannot be combined with `--state-dir` |
 
 `--summary` reads the `interview.*` events in the local event store (the same
-database `ouroboros_query_events` reads) and prints one row per calling surface:
-`console`, `mcp:<host>` (for example `mcp:claude_code`), `cli_init`, `auto`, or
-`unrecorded` for interviews started before surfaces were recorded. For each it
-shows interviews started and completed, questions per completed interview
-(median and mean), early closes by a forced Seed ("Write the spec now",
-`force=true`, or "Generate Seed anyway"), abandoned interviews (no completion or
-forced Seed, and idle for 24 hours) with their rate, and interviews still open.
+database `ouroboros_query_events` reads) and prints two tables with one row per
+calling surface: `console`, `mcp:<host>` (for example `mcp:claude_code`),
+`cli_init`, `auto`, or `unrecorded` for interviews started before surfaces were
+recorded. The outcomes table shows interviews started and completed, early
+closes by a forced Seed ("Write the spec now", `force=true`, or "Generate Seed
+anyway"), abandoned interviews (no completion or forced Seed, and idle for 24
+hours) with their rate, and interviews still open. The questions table shows
+questions per completed interview (median and mean) and per forced-early
+interview (median).
 It reads counts and labels only, never question or answer text, and sends
 nothing off the machine. Field definitions are in
 [Event payload schema](./events.md#interview-closure-fields).

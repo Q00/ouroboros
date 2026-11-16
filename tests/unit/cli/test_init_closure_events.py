@@ -16,7 +16,11 @@ from typer.testing import CliRunner
 from ouroboros.auto.pipeline import AutoPipelineResult
 from ouroboros.bigbang.ambiguity import AmbiguityScore, ComponentScore, ScoreBreakdown
 from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
-from ouroboros.bigbang.interview_closure import InterviewSurface, current_interview_surface
+from ouroboros.bigbang.interview_closure import (
+    HOST_LABELS,
+    InterviewSurface,
+    current_interview_surface,
+)
 from ouroboros.cli.commands import init as init_module
 from ouroboros.cli.commands.init import (
     InterviewLoopOutcome,
@@ -32,6 +36,7 @@ from ouroboros.events.interview import (
     interview_seed_forced,
     interview_started,
 )
+from ouroboros.observability.interview_closure_summary import UNRECORDED_SURFACE
 from ouroboros.persistence.event_store import EventStore
 
 runner = CliRunner()
@@ -301,7 +306,39 @@ def _ago(event: BaseEvent, hours: float) -> BaseEvent:
     return event.model_copy(update={"timestamp": datetime.now(UTC) - timedelta(hours=hours)})
 
 
-def test_init_list_summary_prints_one_row_per_surface() -> None:
+@pytest.fixture
+def console_width(monkeypatch: pytest.MonkeyPatch):
+    """Pin the shared CLI console's width.
+
+    The console is created once at import, and ``COLUMNS`` is read then if it
+    is set, so a ``CliRunner`` env cannot be relied on to change its width.
+    """
+    from ouroboros.cli.formatters import console
+
+    def pin(width: int) -> None:
+        monkeypatch.setattr(console, "_width", width)
+
+    return pin
+
+
+def _summary_tables(output: str) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Return the outcome and question rows of ``init list --summary``, keyed by surface."""
+    outcomes, _, questions = output.partition("Questions per interview by surface")
+    assert questions, output
+
+    def rows(text: str) -> dict[str, list[str]]:
+        return {
+            cells[0]: cells[1:]
+            for line in text.splitlines()
+            if line.startswith("│")
+            and (cells := [cell.strip() for cell in line.strip().strip("│").split("│")])
+        }
+
+    return rows(outcomes), rows(questions)
+
+
+def test_init_list_summary_prints_one_row_per_surface(console_width) -> None:
+    console_width(80)
     _seed_default_store(
         [
             _ago(interview_started("c1", "ctx", surface="console"), 50),
@@ -315,22 +352,58 @@ def test_init_list_summary_prints_one_row_per_surface() -> None:
         ]
     )
 
-    result = runner.invoke(app, ["init", "list", "--summary"], env={"COLUMNS": "220"})
+    result = runner.invoke(app, ["init", "list", "--summary"])
 
     assert result.exit_code == 0, result.output
     output = _plain(result.output)
-    rows = {
-        cells[0]: cells[1:]
-        for line in output.splitlines()
-        if line.startswith("│")
-        and (cells := [cell.strip() for cell in line.strip().strip("│").split("│")])
-    }
-    # started, completed, questions/completed, forced, questions/forced,
-    # abandoned, abandon rate, open
-    assert rows["console"] == ["3", "1", "6, 6", "1", "4", "1", "33%", "0"]
-    assert rows["mcp:claude_code"] == ["1", "1", "9, 9", "0", "-", "0", "0%", "0"]
-    assert rows["unrecorded"] == ["1", "0", "-, -", "0", "-", "1", "100%", "0"]
+    outcomes, questions = _summary_tables(output)
+    # started, completed, forced early, abandoned, abandon rate, open
+    assert outcomes["console"] == ["3", "1", "1", "1", "33%", "0"]
+    assert outcomes["mcp:claude_code"] == ["1", "1", "0", "0", "0%", "0"]
+    assert outcomes["unrecorded"] == ["1", "0", "0", "1", "100%", "0"]
+    # questions per completed interview (median, mean), per forced one (median)
+    assert questions["console"] == ["6", "6", "4"]
+    assert questions["mcp:claude_code"] == ["9", "9", "-"]
+    assert questions["unrecorded"] == ["-", "-", "-"]
     assert "Forced early: a Seed was generated with the closure gate bypassed" in output
+
+
+def _closed_surface_labels() -> set[str]:
+    return (
+        {surface.value for surface in InterviewSurface}
+        | {f"mcp:{host}" for host in HOST_LABELS}
+        | {UNRECORDED_SURFACE}
+    )
+
+
+@pytest.mark.parametrize("width", [80, 60])
+def test_init_list_summary_keeps_every_surface_label_whole(console_width, width: int) -> None:
+    console_width(width)
+    events: list[BaseEvent] = []
+    for index, label in enumerate(sorted(_closed_surface_labels())):
+        interview_id = f"i{index}"
+        if label == UNRECORDED_SURFACE:
+            started = interview_started(interview_id, "ctx")
+        else:
+            surface, _, host = label.partition(":")
+            started = interview_started(interview_id, "ctx", surface=surface, host=host or None)
+        events.append(_ago(started, 50))
+        if index % 2:
+            events.append(_ago(interview_completed(interview_id, 12), 49))
+    _seed_default_store(events)
+
+    result = runner.invoke(app, ["init", "list", "--summary"])
+
+    assert result.exit_code == 0, result.output
+    output = _plain(result.output)
+    assert max(len(line) for line in output.splitlines()) <= width, output
+    for rows in _summary_tables(output):
+        # Every label is a whole first cell, and no count is cut short.
+        assert set(rows) == _closed_surface_labels(), output
+        assert not any("…" in cell for cells in rows.values() for cell in cells), output
+    if width == 80:
+        # At the default width, headers are whole too.
+        assert "…" not in output, output
 
 
 def test_init_list_summary_without_an_event_store_says_so() -> None:
