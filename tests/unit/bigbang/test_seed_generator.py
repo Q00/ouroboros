@@ -3195,8 +3195,8 @@ class TestAcceptanceCriteriaGranularityContract:
         from ouroboros.agents.loader import load_agent_prompt
 
         system_prompt = load_agent_prompt("seed-architect")
-        assert "**Granularity contract (read carefully):**" in system_prompt
-        contract = system_prompt.split("**Granularity contract (read carefully):**", 1)[1]
+        assert "**Granularity contract:**" in system_prompt
+        contract = system_prompt.split("**Granularity contract:**", 1)[1]
         contract = contract.split("### ", 1)[0].lower()
         assert "acceptance criterion" in contract
         assert "implementation step" in contract

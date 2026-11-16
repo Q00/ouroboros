@@ -209,7 +209,7 @@ class TestPMSteeringPromptBudget:
         assert self._INNER_JOB_MARKER in prompt
         panel = engine.inner._build_perspective_panel_prompt(state)
         assert panel and panel in prompt
-        role_section = self._agent_prompt_section("## CRITICAL ROLE BOUNDARIES")
+        role_section = self._agent_prompt_section("## ROLE BOUNDARIES")
         if role_section in unwrapped:
             assert role_section in prompt
         self._assert_steering_paragraphs_atomic(prompt, cap)
@@ -225,7 +225,7 @@ class TestPMSteeringPromptBudget:
         return next(s for s in sections if s.strip().startswith(heading))
 
     def test_default_cap_keeps_interviewer_boundary_sections(self, tmp_path: Path) -> None:
-        """The base prompt's CRITICAL ROLE BOUNDARIES and CONTEXT BOUNDARIES
+        """The base prompt's ROLE BOUNDARIES and CONTEXT BOUNDARIES
         sections — retained completely by the unwrapped default-cap build —
         must survive the steered build completely alongside the contract."""
         engine = self._steered_engine(tmp_path)
@@ -234,7 +234,7 @@ class TestPMSteeringPromptBudget:
             initial_context="Build a task manager",
         )
         prompt = engine.inner._build_system_prompt(state)
-        assert self._agent_prompt_section("## CRITICAL ROLE BOUNDARIES") in prompt
+        assert self._agent_prompt_section("## ROLE BOUNDARIES") in prompt
         assert self._agent_prompt_section("## CONTEXT BOUNDARIES") in prompt
         flat = " ".join(prompt.split())
         assert "contract between the PM and the developers" in flat
