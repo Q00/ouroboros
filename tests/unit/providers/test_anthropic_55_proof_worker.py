@@ -16,7 +16,7 @@ pytest.importorskip("openai")
 
 from ouroboros.providers import litellm_adapter
 from ouroboros.providers import litellm_proof_worker as worker
-from ouroboros.providers.anthropic_models import is_claude_5_5
+from ouroboros.providers.anthropic_models import is_claude_5_5, omit_claude_sampling
 from ouroboros.providers.base import CompletionConfig, Message, MessageRole
 
 
@@ -51,6 +51,7 @@ def _payload(model: str, effort: str | None, api_base: str) -> dict:
         "anthropic/claude-sonnet-5-5",
         "openrouter/anthropic/claude-opus-5.5",
         "claude-sonnet-4-6",
+        "claude-opus-4-8",
     ],
 )
 @pytest.mark.parametrize("effort", [None, "high"])
@@ -177,7 +178,11 @@ async def test_real_isolated_worker_dispatches_built_anthropic_arguments(
             assert "JSON" in json.dumps(request["system"])
             assert "tools" not in request
     else:
-        assert request["temperature"] == 0.2
+        if omit_claude_sampling(model):
+            # Opus 4.7 and later reject sampling; LiteLLM would refuse it too.
+            assert not {"temperature", "top_p", "top_k"} & request.keys()
+        else:
+            assert request["temperature"] == 0.2
         assert "top_p" not in request
         if effort:
             assert request["thinking"] == {"type": "adaptive"}

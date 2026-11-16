@@ -32,6 +32,7 @@ from ouroboros.core.types import Result
 from ouroboros.events.io_recorder import get_current_io_journal_recorder
 from ouroboros.providers.anthropic_models import (
     is_claude_5_5,
+    omit_claude_sampling,
     response_format_instruction,
 )
 from ouroboros.providers.base import (
@@ -1179,13 +1180,17 @@ class LiteLLMAdapter:
         if _sealed_dispatch is not None:
             kwargs["max_retries"] = _PROOF_LITELLM_MAX_RETRIES
 
-        # Anthropic models don't accept both temperature and top_p together
-        # Direct OpenAI reasoning routes may also reject sampling controls.
+        # Claude models outside the legacy families that accept sampling reject
+        # it with HTTP 400, and Claude 4.x rejects temperature with top_p, so
+        # Claude routes never get top_p. Direct OpenAI reasoning routes may
+        # also reject sampling controls.
         model_lower = config.model.lower()
         claude_5_5 = is_claude_5_5(config.model)
         openrouter_5_5 = claude_5_5 and model_lower.startswith("openrouter/")
-        omit_sampling = omit_openai_reasoning_sampling(config.model, config.reasoning_effort)
-        if not claude_5_5 and not omit_sampling:
+        omit_sampling = omit_claude_sampling(config.model) or omit_openai_reasoning_sampling(
+            config.model, config.reasoning_effort
+        )
+        if not omit_sampling:
             kwargs["temperature"] = config.temperature
         if not omit_sampling and not ("anthropic" in model_lower or "claude" in model_lower):
             kwargs["top_p"] = config.top_p
