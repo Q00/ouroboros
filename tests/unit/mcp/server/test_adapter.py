@@ -2738,6 +2738,7 @@ class TestMCPServerAdapterTools:
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text="input_required"),),
                 is_error=True,
+                meta={"status": "input_required"},
             )
         )
         adapter.register_tool(handler)
@@ -2748,6 +2749,44 @@ class TestMCPServerAdapterTools:
         assert result.is_ok
         # A logical block (input_required) is not an error and not usage.
         record_usage.assert_not_called()
+
+    async def test_call_tool_recoverable_interview_failure_counts_as_an_error(self) -> None:
+        """A recoverable interview failure is ``Result.ok(is_error=True)`` with
+        no input_required marker: a failure, so it adds ``mcp_tool_errors``."""
+        from ouroboros.mcp.tools.interview_batch import recoverable_batch_error
+
+        adapter = MCPServerAdapter()
+        handler = MockToolHandler("ouroboros_interview")
+        handler.handle_mock.return_value = recoverable_batch_error("sess_1", "Backend failed.")
+        adapter.register_tool(handler)
+
+        with patch("ouroboros.telemetry._record_usage") as record_usage:
+            result = await adapter.call_tool("ouroboros_interview", {"input": "safe"})
+
+        assert result.is_ok and result.value.is_error is True
+        record_usage.assert_called_once_with(
+            {"cmd_interview": 1, "surface_mcp": 1, "mcp_tool_errors": 1}
+        )
+
+    async def test_call_tool_ralph_input_required_is_not_an_error(self) -> None:
+        """The real ``ouroboros_ralph`` input-required response counts as usage only."""
+        from unittest.mock import MagicMock
+
+        from ouroboros.mcp.tools.ralph_handlers import RalphHandler
+
+        adapter = MCPServerAdapter()
+        adapter.register_tool(
+            RalphHandler(
+                evolve_handler=MagicMock(), event_store=MagicMock(), job_manager=MagicMock()
+            )
+        )
+
+        with patch("ouroboros.telemetry._record_usage") as record_usage:
+            result = await adapter.call_tool("ouroboros_ralph", {"lineage_id": "  "})
+
+        assert result.is_ok and result.value.is_error is True
+        assert result.value.meta["status"] == "input_required"
+        record_usage.assert_called_once_with({"cmd_ralph": 1, "surface_mcp": 1})
 
     async def test_call_tool_logical_error_response_counts_as_not_ok(self) -> None:
         """A built-in handler returning Result.ok(MCPToolResult(is_error=True))
@@ -3197,6 +3236,21 @@ class TestIsLogicalErrorDirect:
         from ouroboros.mcp.telemetry_boundary import _is_logical_error
 
         assert _is_logical_error(object()) is False
+
+    def test_only_the_explicit_marker_is_input_required(self) -> None:
+        """Anything but ``meta.status == "input_required"``, including a meta
+        that raises when read, is a failure (``mcp_tool_errors``)."""
+        from ouroboros.mcp.telemetry_boundary import _is_input_required
+
+        class _HostileMeta:
+            @property
+            def meta(self) -> dict[str, str]:
+                raise SystemExit("hostile")
+
+        assert _is_input_required(MCPToolResult(is_error=True, meta={"status": "input_required"}))
+        assert not _is_input_required(MCPToolResult(is_error=True, meta={"recoverable": True}))
+        assert not _is_input_required(MCPToolResult(is_error=True))
+        assert not _is_input_required(_HostileMeta())
 
 
 class TestMCPServerAdapterResources:
@@ -3926,6 +3980,7 @@ class TestServeTransport:
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text="input_required"),),
                 is_error=True,
+                meta={"status": "input_required"},
             )
         )
         adapter.register_tool(handler)
@@ -3934,6 +3989,48 @@ class TestServeTransport:
             await call_sdk_tool(adapter, "custom_tool", {"input": "safe"})
 
         record_usage.assert_not_called()
+
+    async def test_sdk_recoverable_interview_failure_counts_as_an_error(self) -> None:
+        """SDK-path companion: a recoverable interview failure adds ``mcp_tool_errors``."""
+        pytest.importorskip("mcp.server")
+        from ouroboros.mcp.telemetry_boundary import call_sdk_tool
+        from ouroboros.mcp.tools.interview_batch import recoverable_batch_error
+
+        adapter = MCPServerAdapter()
+        handler = MockToolHandler("ouroboros_interview")
+        handler.handle_mock.return_value = recoverable_batch_error("sess_1", "Backend failed.")
+        adapter.register_tool(handler)
+
+        with patch("ouroboros.telemetry._record_usage") as record_usage:
+            response = await call_sdk_tool(adapter, "ouroboros_interview", {"input": "safe"})
+
+        assert response.is_error is True
+        record_usage.assert_called_once_with(
+            {"cmd_interview": 1, "surface_mcp": 1, "mcp_tool_errors": 1}
+        )
+
+    async def test_sdk_ralph_input_required_is_not_an_error(self) -> None:
+        """SDK-path companion: the real Ralph input-required response is usage only."""
+        pytest.importorskip("mcp.server")
+        from unittest.mock import MagicMock
+
+        from ouroboros.mcp.telemetry_boundary import call_sdk_tool
+        from ouroboros.mcp.tools.ralph_handlers import RalphHandler
+
+        adapter = MCPServerAdapter()
+        adapter.register_tool(
+            RalphHandler(
+                evolve_handler=MagicMock(), event_store=MagicMock(), job_manager=MagicMock()
+            )
+        )
+
+        with patch("ouroboros.telemetry._record_usage") as record_usage:
+            # A blank lineage id passes the schema and reaches the handler's
+            # input-required branch.
+            response = await call_sdk_tool(adapter, "ouroboros_ralph", {"lineage_id": "  "})
+
+        assert response.is_error is True
+        record_usage.assert_called_once_with({"cmd_ralph": 1, "surface_mcp": 1})
 
     async def test_sdk_call_tool_logical_error_response_counts_as_not_ok(self) -> None:
         """SDK-path companion to the typed-adapter logical-error test."""

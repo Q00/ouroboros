@@ -39,9 +39,10 @@ process with the same content. Every send of a day carries the same event
 duplicates. A day is therefore reported on the next day Ouroboros runs, and a
 day after which Ouroboros never runs again is never reported. Polling and
 status tools (for example `ouroboros_job_wait`, `ouroboros_session_status`)
-are not counted at all. The file is bounded (at most 32 days, 96 counters per
-day) and is written atomically under a file lock, so concurrent processes
-neither overwrite each other's counts nor send a day twice. Once a day has
+are not counted as usage; only their errors add to `mcp_tool_errors`. The
+file is bounded (at most 32 days, 96 counters per day) and is written
+atomically under a file lock, so concurrent processes neither overwrite each
+other's counts nor send a day twice. Once a day has
 been picked up for sending, its row is fixed: a count that still arrives for
 that day (from a process that records just as UTC midnight passes, or after
 the system clock moved backwards) is dropped, not sent as a second row. A day
@@ -151,7 +152,9 @@ Notes:
   top of the attached → used funnel); a bind failure does not count.
   `subagent_dispatches` counts fan-out contracts handed to a host.
   `mcp_tool_errors` counts MCP requests, to any tool, that failed with an
-  error; a logical result such as `input_required` is not an error.
+  error or returned a result marked as an error (for example a recoverable
+  interview failure, or a status poll of a failed job). Only a result marked
+  `input_required`, a request for missing input, is not an error.
 - `seed_session_context` / `seed_session_context_gap` count
   `ouroboros_generate_seed` calls that took the interview-less path and
   produced a Seed / returned gap questions instead. It answers one adoption

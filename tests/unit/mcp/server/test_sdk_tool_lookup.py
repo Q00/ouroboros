@@ -125,7 +125,9 @@ async def _reference_call_sdk_tool(
         safe_name,
         ok=not logical_error,
         duration_ms=tb._duration_ms(started_at),
-        blocked=logical_error,
+        # Shared with call_sdk_tool: this reference pins the lookup, not the
+        # blocked classification.
+        blocked=logical_error and tb._is_input_required(value),
         registered=registered,
         origin=tb._seed_origin(safe_name, value),
     )

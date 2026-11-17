@@ -153,6 +153,23 @@ def _is_logical_error(value: object) -> bool:
         return False
 
 
+def _is_input_required(value: object) -> bool:
+    """Whether a logical-error result is a request for input, not a failure.
+
+    Only the explicit ``meta.status == "input_required"`` marker (e.g.
+    ``ouroboros_ralph`` called without a lineage id) qualifies. Every other
+    ``is_error`` result, such as a recoverable interview failure
+    (``meta.recoverable``), is a failure that counts toward
+    ``mcp_tool_errors``; anything unreadable counts as a failure too. Never
+    raises (see ``_is_logical_error``).
+    """
+    try:
+        meta = getattr(value, "meta", None)
+        return isinstance(meta, Mapping) and bool(meta.get("status") == "input_required")
+    except BaseException:  # noqa: BLE001 -- sanitization-only
+        return False
+
+
 _SEED_TOOL_NAME = "ouroboros_generate_seed"
 
 
@@ -204,7 +221,8 @@ async def observe_adapter_tool_call[T, E](
     e.g. a validation/input-required response). A logical error has no
     exception to name, so it carries ``error_type=None`` -- the request
     completed, the outcome was a logical error, and there is no dishonest
-    "unknown"/"none of the above" value to invent in its place.
+    "unknown"/"none of the above" value to invent in its place. It is passed
+    as ``blocked`` (not an error) only when ``_is_input_required`` says so.
     """
     safe_name = name if registered else _UNKNOWN_TOOL_NAME
     started_at = time.monotonic()
@@ -225,7 +243,7 @@ async def observe_adapter_tool_call[T, E](
         ok=result.is_ok and not logical_error,
         duration_ms=_duration_ms(started_at),
         error_type=_safe_error_type(result.error) if result.is_err else None,
-        blocked=logical_error,
+        blocked=logical_error and _is_input_required(result.value),
         registered=registered,
         origin=_seed_origin(safe_name, result.value) if result.is_ok else None,
     )
@@ -279,7 +297,8 @@ async def call_sdk_tool(
     validation/input-required payload returned as ``Result.ok``) counts as
     ``ok=False`` here too, matching :func:`observe_adapter_tool_call`. Its
     ``error_type`` stays ``None``: there is no exception to name, only a
-    completed request whose outcome was a logical error.
+    completed request whose outcome was a logical error. As there, only an
+    input-required result is passed as ``blocked``.
     """
     from jsonschema import Draft202012Validator
 
@@ -340,7 +359,7 @@ async def call_sdk_tool(
         safe_name,
         ok=not logical_error,
         duration_ms=_duration_ms(started_at),
-        blocked=logical_error,
+        blocked=logical_error and _is_input_required(value),
         registered=registered,
         origin=_seed_origin(safe_name, value),
     )
