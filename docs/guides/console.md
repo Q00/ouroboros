@@ -87,8 +87,10 @@ and Spanish (side rail → language).
     interview reports with a question (its `(ambiguity: 0.43)` prefix) is
     kept out of the question text; the card header shows the latest value
     with a small trend line, and each question's value is in its number's
-    tooltip. A chat saved by an older console is rebuilt from its progress
-    file when the console starts. Once the interview is over it folds to one line, which opens;
+    tooltip. A chat saved by an older console is brought to the current
+    shape when the console starts, losing nothing: its progress file is
+    folded again only when it still holds the whole saved history, and
+    otherwise the saved rounds are migrated in place. Once the interview is over it folds to one line, which opens;
   - the Seed card the interview uses, with its review grade, how the grade
     moved (for example B → A), the repair rounds, and what the review asked
     for;

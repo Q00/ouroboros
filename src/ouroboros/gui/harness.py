@@ -348,11 +348,15 @@ class Harness:
                     data["suggestion"] = {"pending": False}
                 view = data.get("auto")
                 if isinstance(view, dict) and view.get("v") != auto_progress.VIEW_VERSION:
-                    data["auto"] = auto_progress.upgrade_view(
+                    # An older view in the current shape, losing nothing; a view
+                    # this console cannot read safely is kept exactly as saved.
+                    upgraded = auto_progress.upgrade_view(
                         view, auto_progress.progress_file(chats_dir(), data["id"])
                     )
-                    with contextlib.suppress(OSError):
-                        self._save(data)  # once: the next load finds the current shape
+                    if upgraded is not None:
+                        data["auto"] = upgraded
+                        with contextlib.suppress(OSError):
+                            self._save(data)  # once: the next load finds the current shape
                 self._sessions[data["id"]] = data
 
     def _save(self, session: dict[str, Any]) -> None:

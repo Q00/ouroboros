@@ -349,27 +349,82 @@ def fold(view: dict[str, Any], event: dict[str, Any]) -> bool:
     return reload
 
 
-def upgrade_view(old: dict[str, Any], progress: Path) -> dict[str, Any]:
-    """The current shape of a view saved by an older console.
+def upgrade_view(old: dict[str, Any], progress: Path) -> dict[str, Any] | None:
+    """The current shape of a view saved by an older console, losing none of it.
 
-    The events are folded again from the chat's progress file, so the new
-    fold applies to every round (a v1 view kept the interview's
-    ``(ambiguity: …)`` prefix in the question). What the events do not carry
-    is kept from the old view. Without the file, the old rounds are migrated
-    in place: each question's prefix is split off into its ``ambiguity``.
+    The old rounds are always migrated in place first (each question's
+    ``(ambiguity: …)`` prefix becomes its ``ambiguity``), so every saved round,
+    phase, grade and fact is kept. The chat's progress file is then folded
+    again, and that replay is merged in only when it covers the saved history:
+    every saved phase and grade in order, every saved round with at least what
+    it had, and no fewer repairs or dropped rounds. A file that is empty,
+    unreadable, truncated or rotated cannot cover it, so the migrated view is
+    the answer. A merged replay only adds: a value the replay lacks is kept
+    from the saved view.
+
+    ``None`` when ``old`` is not a view this console can read safely (a newer
+    version, or entries of the wrong shape): the caller keeps it as saved.
     """
-    if progress.is_file():
-        view = new_view()
-        tail = ProgressTail(progress)
-        for event in tail.read(final=True):
-            fold(view, event)
-        view["skipped"] = tail.skipped
-        for key in _NOT_FROM_EVENTS:
-            if old.get(key) is not None:
-                view[key] = old[key]
-        return view
+    version = old.get("v")
+    if not isinstance(version, int) or isinstance(version, bool) or version >= VIEW_VERSION:
+        return None
+    if not _well_formed(old):
+        return None
+    migrated = _migrate_rounds(old)
+    if not progress.is_file():
+        return migrated
+    replay = new_view()
+    tail = ProgressTail(progress)
+    for event in tail.read(final=True):
+        fold(replay, event)
+    replay["skipped"] = tail.skipped
+    if not _replay_covers(migrated, replay):
+        return migrated
+    merged = dict(migrated)
+    for key, value in replay.items():
+        if key in _NOT_FROM_EVENTS or key in ("rounds", "ambiguity_trend"):
+            continue  # facts the events never carry stand; the two lists merge below
+        if value is None or value == [] or (key != "skipped" and value == 0):
+            continue  # nothing to add: keep what was saved
+        merged[key] = value
+    # Round by round, the replay adds to what was saved and never blanks it.
+    saved_rounds = {entry["round"]: entry for entry in migrated["rounds"]}
+    merged["rounds"] = [
+        {
+            **saved_rounds.get(entry["round"], {}),
+            **{key: value for key, value in entry.items() if value is not None},
+        }
+        for entry in replay["rounds"]
+    ]
+    points = {point["round"]: point for point in migrated["ambiguity_trend"]}
+    points.update({point["round"]: point for point in replay["ambiguity_trend"]})
+    merged["ambiguity_trend"] = [points[number] for number in sorted(points)][-MAX_ROUNDS:]
+    return merged
+
+
+def _well_formed(old: dict[str, Any]) -> bool:
+    """Whether the lists a migration and a replay compare are the shapes they expect."""
+    for name, field_name, kind in (
+        ("rounds", "round", int),
+        ("phases", "phase", str),
+        ("grades", "grade", str),
+    ):
+        entries = old.get(name, [])
+        if not isinstance(entries, list):
+            return False
+        for entry in entries:
+            if not isinstance(entry, dict):
+                return False
+            value = entry.get(field_name)
+            if not isinstance(value, kind) or isinstance(value, bool):
+                return False
+    return True
+
+
+def _migrate_rounds(old: dict[str, Any]) -> dict[str, Any]:
+    """``old`` in the current shape, with each round's prefix split into its ``ambiguity``."""
     view = {**new_view(), **old, "v": VIEW_VERSION, "ambiguity_trend": []}
-    rounds = [dict(entry) for entry in old.get("rounds") or [] if isinstance(entry, dict)]
+    rounds = [dict(entry) for entry in old.get("rounds") or []]
     view["rounds"] = rounds
     for entry in rounds:
         kept = entry.get("ambiguity")
@@ -379,9 +434,33 @@ def upgrade_view(old: dict[str, Any], progress: Path) -> dict[str, Any]:
             question, found = split_ambiguity(entry["question"])
             entry["question"] = question
             ambiguity = found if found is not None else ambiguity
-        if ambiguity is not None and isinstance(entry.get("round"), int):
+        if ambiguity is not None:
             _record_ambiguity(view, entry, ambiguity)
     return view
+
+
+def _replay_covers(saved: dict[str, Any], replay: dict[str, Any]) -> bool:
+    """Whether a replayed view holds at least everything ``saved`` holds from events."""
+    if saved.get("auto_session_id") and replay["auto_session_id"] != saved["auto_session_id"]:
+        return False  # another session's file, or none of it
+    for name, field_name in (("phases", "phase"), ("grades", "grade")):
+        kept = [entry[field_name] for entry in saved.get(name) or []]
+        again = [entry[field_name] for entry in replay[name]]
+        if again[: len(kept)] != kept:
+            return False
+    for name in ("repair_round", "rounds_dropped"):
+        if replay[name] < int(saved.get(name) or 0):
+            return False
+    by_round = {entry["round"]: entry for entry in replay["rounds"]}
+    for entry in saved.get("rounds") or []:
+        again = by_round.get(entry["round"])
+        if again is None:
+            return False
+        if any(
+            entry.get(key) and not again.get(key) for key in ("question", "answer", "answer_source")
+        ):
+            return False
+    return True
 
 
 def item_text(item: Any) -> str:

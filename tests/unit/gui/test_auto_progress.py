@@ -813,17 +813,145 @@ def test_a_v1_view_without_its_progress_file_is_migrated_in_place() -> None:
     assert rest == {k: v for k, v in _V1["view"].items() if k not in ("v", "rounds")}
 
 
-def test_a_current_view_is_loaded_as_saved_not_folded_again() -> None:
+_CLEAN_QUESTIONS = {
+    1: "word_count는 어떤 입력을 받나요?",
+    2: "세 가지 결정(구두점, 대소문자, 빈 입력)을 이렇게 확정해도 될까요?",
+    3: "CLI와 패키징은 범위 밖으로 둘까요?",
+}
+
+
+def _assert_nothing_saved_is_lost(view: dict[str, Any]) -> None:
+    """Every round, phase, grade and fact the v1 view held is still there."""
+    old = _V1["view"]
+    assert view["v"] == 2
+    rounds = {entry["round"]: entry for entry in view["rounds"]}
+    for entry in old["rounds"]:
+        kept = rounds[entry["round"]]
+        assert kept["question"] == _CLEAN_QUESTIONS[entry["round"]]
+        assert (kept["answer"], kept["answer_source"]) == (entry["answer"], entry["answer_source"])
+    assert [r["ambiguity"] for r in view["rounds"]][:3] == [None, 0.43, 0.38]
+    assert [p["phase"] for p in view["phases"]][: len(old["phases"])] == [
+        p["phase"] for p in old["phases"]
+    ]
+    assert [g["grade"] for g in view["grades"]][: len(old["grades"])] == [
+        g["grade"] for g in old["grades"]
+    ]
+    for key in (
+        "auto_session_id",
+        "grade",
+        "repair_round",
+        "max_rounds",
+        "max_repair_rounds",
+        "execution_id",
+        "seed_loaded",
+        "outcome",
+    ):
+        assert view[key] == old[key], key
+
+
+def _load_v1_with(chat_id: str, progress_text: str | None) -> tuple[dict[str, Any], Path]:
+    path = _write_v1(chat_id, with_progress=False)
+    if progress_text is not None:
+        progress = auto_progress.progress_file(harness.chats_dir(), chat_id)
+        progress.parent.mkdir(parents=True, exist_ok=True)
+        progress.write_text(progress_text, encoding="utf-8")
+    view = (harness.Harness(jobs.JobRegistry()).get(chat_id) or {})["auto"]
+    return view, path
+
+
+_FULL = "".join(_line(e) for e in _V1["events"])
+
+
+@pytest.mark.parametrize(
+    "progress_text",
+    [
+        pytest.param("", id="empty"),
+        pytest.param(
+            '{"auto_session_id": "auto_9495\nnot json at all\n[1, 2]\n{"kind"', id="garbage"
+        ),
+        pytest.param(
+            _FULL[: _FULL.index("\n") + 1] + _FULL[_FULL.index("\n") + 1 :][:40], id="partial"
+        ),
+        pytest.param("".join(_line(e) for e in _V1["events"][:4]), id="truncated"),
+        pytest.param("".join(_line(e) for e in _V1["events"][6:]), id="rotated"),
+        pytest.param(
+            "".join(_line({**e, "auto_session_id": "auto_other000001"}) for e in _V1["events"]),
+            id="another-session",
+        ),
+    ],
+)
+def test_a_progress_file_that_cannot_cover_the_saved_view_never_replaces_it(
+    progress_text: str,
+) -> None:
+    view, path = _load_v1_with("v1lossy00001", progress_text)
+
+    _assert_nothing_saved_is_lost(view)
+    # The migrated view is what was saved: nothing more, nothing less.
+    assert len(view["rounds"]) == len(_V1["view"]["rounds"])
+    assert len(view["phases"]) == len(_V1["view"]["phases"])
+    assert json.loads(path.read_text(encoding="utf-8"))["auto"] == view
+
+
+def test_a_full_progress_file_is_replayed_and_only_adds() -> None:
+    later = _event("phase", "ralph_handoff", "verifying the run", timestamp="t-later")
+    later["auto_session_id"] = _V1["view"]["auto_session_id"]
+
+    view, _ = _load_v1_with("v1replay0001", _FULL + _line(later))
+
+    _assert_nothing_saved_is_lost(view)
+    # The replay brought what the saved view missed, and replaced nothing.
+    assert [p["phase"] for p in view["phases"]][-1] == "ralph_handoff"
+    assert view["phase"] == "ralph_handoff"
+    assert view["ambiguity_trend"] == [{"round": 2, "value": 0.43}, {"round": 3, "value": 0.38}]
+
+
+@pytest.mark.parametrize("version", [3, "1", None, True])
+def test_a_view_this_console_cannot_read_safely_is_kept_exactly_as_saved(version: object) -> None:
+    chat = _v1_chat("vnewer000001")
+    chat["auto"]["v"] = version
+    path = harness.chats_dir() / "vnewer000001.json"
+    path.write_text(json.dumps(chat, ensure_ascii=False), encoding="utf-8")
+    before = path.read_text(encoding="utf-8")
+    progress = auto_progress.progress_file(harness.chats_dir(), "vnewer000001")
+    progress.parent.mkdir(parents=True, exist_ok=True)
+    progress.write_text("", encoding="utf-8")
+
+    view = (harness.Harness(jobs.JobRegistry()).get("vnewer000001") or {})["auto"]
+
+    assert view == chat["auto"]
+    assert path.read_text(encoding="utf-8") == before  # not saved over
+
+
+def test_a_v1_view_with_entries_of_the_wrong_shape_is_kept_as_saved() -> None:
+    chat = _v1_chat("vbroken00001")
+    chat["auto"]["rounds"].append("not a round")
+    path = harness.chats_dir() / "vbroken00001.json"
+    path.write_text(json.dumps(chat, ensure_ascii=False), encoding="utf-8")
+    before = path.read_text(encoding="utf-8")
+
+    view = (harness.Harness(jobs.JobRegistry()).get("vbroken00001") or {})["auto"]
+
+    assert view == chat["auto"]
+    assert path.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize("progress_text", ["", "".join(_line(e) for e in _V1["events"][:3]), _FULL])
+def test_a_current_view_is_loaded_as_saved_whatever_its_progress_file_holds(
+    progress_text: str,
+) -> None:
     chat = _v1_chat("v2chat000001")
     chat["auto"] = {**auto_progress.new_view(), "phase": "review", "grade": "B"}
-    (harness.chats_dir() / "v2chat000001.json").write_text(json.dumps(chat), encoding="utf-8")
+    path = harness.chats_dir() / "v2chat000001.json"
+    path.write_text(json.dumps(chat), encoding="utf-8")
+    before = path.read_text(encoding="utf-8")
     progress = auto_progress.progress_file(harness.chats_dir(), "v2chat000001")
     progress.parent.mkdir(parents=True, exist_ok=True)
-    progress.write_text("".join(_line(e) for e in _V1["events"]), encoding="utf-8")
+    progress.write_text(progress_text, encoding="utf-8")
 
     view = (harness.Harness(jobs.JobRegistry()).get("v2chat000001") or {})["auto"]
 
     assert view == chat["auto"]
+    assert path.read_text(encoding="utf-8") == before
 
 
 # ── how an Auto job ends ──────────────────────────────────────────────
