@@ -6,7 +6,14 @@ import { toast } from "./toast";
 
 /** The sentence to show for a failed call: a translated code, else the server's words. */
 export function explain(failure: unknown, tx: Translator["tx"]): string {
-  if (failure instanceof ApiFailure) return tx(`error.${failure.code}`, failure.message);
+  if (failure instanceof ApiFailure) {
+    // The values the server sent with the code fill the translated sentence.
+    const vars: Record<string, string | number> = {};
+    for (const [name, value] of Object.entries(failure.extra)) {
+      if (typeof value === "string" || typeof value === "number") vars[name] = value;
+    }
+    return tx(`error.${failure.code}`, failure.message, vars);
+  }
   return failure instanceof Error ? failure.message : String(failure);
 }
 

@@ -456,16 +456,18 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         "os.environ + NO_COLOR; the shared `ouroboros mcp serve` must see the same "
         "config and agent logins as a host-launched stdio server."
     ),
-    ("src/ouroboros/gui/harness.py", "_workspace_problem.git", "subprocess.run", 1113, 15): (
-        "implicit inherit; read-only `git rev-parse` checks."
-    ),
-    ("src/ouroboros/gui/harness.py", "_run_result", "subprocess.run", 1141, 18): (
+    ("src/ouroboros/gui/harness.py", "_run_result", "subprocess.run", 1332, 18): (
         "implicit inherit; read-only `git worktree list`."
     ),
-    ("src/ouroboros/gui/harness.py", "_run_result.git", "subprocess.run", 1161, 15): (
+    ("src/ouroboros/gui/harness.py", "_run_result.git", "subprocess.run", 1353, 19): (
         "implicit inherit; read-only `git diff --name-only` / `git status`."
     ),
-    ("src/ouroboros/gui/jobs.py", "JobRegistry._run", "subprocess.Popen", 139, 19): (
+    ("src/ouroboros/gui/workspace.py", "_git", "subprocess.run", 51, 11): (
+        "implicit inherit, stdin closed; read-only `git rev-parse` / `config --get` / "
+        "`status` checks, and, when the user clicks the hand-off offer, `git init` plus one "
+        "empty `git commit` in the chat's own project folder."
+    ),
+    ("src/ouroboros/gui/jobs.py", "JobRegistry._run", "subprocess.Popen", 162, 19): (
         "_child_env = os.environ + plain-text output vars + the console telemetry "
         "surface marker; runs `ouroboros setup|auto` or a fixed vendor installer the "
         "user confirmed in the console."

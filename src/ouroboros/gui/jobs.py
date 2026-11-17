@@ -62,6 +62,10 @@ class Job:
     status: str = "running"  # running | succeeded | failed
     lines: deque[str] = field(default_factory=lambda: deque(maxlen=_MAX_LINES))
     meta: dict[str, Any] = field(default_factory=dict)
+    # Patterns read from every output line as it arrives, and the last value
+    # each captured: kept apart from ``lines``, which drops its oldest lines.
+    watch: dict[str, re.Pattern[str]] = field(default_factory=dict)
+    found: dict[str, str] = field(default_factory=dict)
     _cursor: int = 0  # total lines ever appended, for incremental reads
     _proc: subprocess.Popen[str] | None = None
     cancelled: bool = False
@@ -89,11 +93,20 @@ class Job:
             "cursor": self._cursor,
             "lines": new_lines,
             "meta": self.meta,
+            "found": dict(self.found),
         }
 
     def append(self, line: str) -> None:
         self.lines.append(line)
         self._cursor += 1
+
+    def read_output(self, line: str) -> None:
+        """Keep one line the child printed, and what the watched patterns capture from it."""
+        for name, pattern in self.watch.items():
+            match = pattern.search(line)
+            if match:
+                self.found[name] = match.group(1)
+        self.append(line)
 
 
 class JobRegistry:
@@ -112,8 +125,18 @@ class JobRegistry:
         meta: dict[str, Any] | None = None,
         on_exit: Any = None,
         cwd: str | None = None,
+        watch: dict[str, re.Pattern[str]] | None = None,
     ) -> Job:
-        job = Job(id=uuid.uuid4().hex[:12], kind=kind, title=title, argv=argv, meta=meta or {})
+        """Start ``argv``. ``watch`` maps a name to a pattern whose first group is
+        recorded in ``found`` (and the snapshot) whenever an output line matches."""
+        job = Job(
+            id=uuid.uuid4().hex[:12],
+            kind=kind,
+            title=title,
+            argv=argv,
+            meta=meta or {},
+            watch=dict(watch or {}),
+        )
         with self._lock:
             self._jobs[job.id] = job
             self._trim()
@@ -155,8 +178,7 @@ class JobRegistry:
         job._proc = proc
         assert proc.stdout is not None
         for raw in proc.stdout:
-            line = _ANSI.sub("", raw.rstrip("\n"))
-            job.append(line)
+            job.read_output(_ANSI.sub("", raw.rstrip("\n")))
         job.exit_code = proc.wait()
         job._proc = None
         if job.cancelled:

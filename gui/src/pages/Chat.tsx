@@ -26,14 +26,16 @@ import { AnimatePresence, motion } from "motion/react";
 import type { FormEvent, KeyboardEvent, ReactNode } from "react";
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 
+import type { Key, Translator } from "../i18n";
 import { useT } from "../i18n";
 import { useAction } from "../core/action";
-import { del, post } from "../core/api";
+import { ApiFailure, del, get, post } from "../core/api";
 import { backendName, shortPath, timeAgo } from "../core/format";
+import { adoptRunningJobs } from "../core/jobs";
 import { invalidate, useResource } from "../core/resource";
 import { href, navigate } from "../core/router";
 import { useSnapshotStream } from "../core/stream";
-import type { BackendChoice, ChatDefaults, ChatMessage, ChatMode, ChatProject, ChatSession, ChatSessionRow, ChatSessionsView, ChatStatus, Readiness, RunTile } from "../core/types";
+import type { BackendChoice, ChatDefaults, ChatMessage, ChatMode, ChatProject, ChatSession, ChatSessionRow, ChatSessionsView, ChatStatus, FolderProbe, Readiness, RunTile } from "../core/types";
 import type { Tone } from "../ui/bits";
 import { Chip, CopyButton, Empty, Field, LoadError, LogView, Notice, Skeleton } from "../ui/bits";
 import { Button, IconButton } from "../ui/Button";
@@ -41,7 +43,7 @@ import { Spinner } from "../ui/Mark";
 import { Modal } from "../ui/Modal";
 import { Picker } from "../ui/Picker";
 import { Segmented } from "../ui/Segmented";
-import { Progress, RunStatus } from "./Runs";
+import { Progress, RunStatus, activityLabel, phaseLabel } from "./Runs";
 import { GLIDE, SETTLE } from "../core/motion";
 
 const FOLLOW = "__settings__";
@@ -66,7 +68,86 @@ function StatusChip({ status }: { status: ChatStatus }) {
   );
 }
 
+/** A sentence the server sent with a stable key, in the reader's language; else its English text. */
+function keyed(tx: Translator["tx"], prefix: string, message: ChatMessage): string {
+  return message.key ? tx(`${prefix}.${message.key}`, message.text, message.vars) : message.text;
+}
+
+/**
+ * The model a reply or chat used. The "default" sentinel means the agent CLI's
+ * own configured model: name it when its config says which, else say so.
+ */
+function modelText(t: Translator["t"], model: string, hint?: { backend?: string | null; configured?: string | null }): string {
+  if (model !== "default") return model;
+  if (hint?.configured) return t("chat.model.cliDefault", { agent: backendName(hint.backend), model: hint.configured });
+  return t("chat.model.agentDefault");
+}
+
 // ── New conversation ─────────────────────────────────────────────────
+
+/** Whether the folder typed into the new-chat form exists and is a git repository with a commit. */
+function useFolderProbe(path: string): FolderProbe | null {
+  const [probe, setProbe] = useState<FolderProbe | null>(null);
+  useEffect(() => {
+    const target = path.trim();
+    setProbe(null);
+    if (!target) return;
+    let live = true;
+    const timer = window.setTimeout(() => {
+      get<FolderProbe>(`/api/chat/folder?path=${encodeURIComponent(target)}`)
+        .then((result) => {
+          if (live) setProbe(result);
+        })
+        .catch(() => {
+          if (live) setProbe(null);
+        });
+    }, 350);
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+    };
+  }, [path]);
+  return probe;
+}
+
+/** One line under the folder field: what a hand-off (or Auto) will find there. */
+function FolderStatus({ probe, mode }: { probe: FolderProbe | null; mode: ChatMode }) {
+  const { t } = useT();
+  if (!probe) return null;
+  let tone: "ok" | "warn" | "fail" | "mute";
+  let text: string;
+  const repo = probe.git === "ready" || probe.git === "no_commits";
+  if (!probe.exists) {
+    tone = "fail";
+    text = t("chat.folder.missing");
+  } else if (probe.git === "unreadable") {
+    tone = "warn";
+    text = t("chat.folder.unreadable", { detail: probe.detail ?? "" });
+  } else if (mode === "auto") {
+    // Auto works in the folder itself; git only decides whether its changes can be listed.
+    tone = repo ? "mute" : "warn";
+    text = repo ? t("chat.folder.autoRepo") : t("chat.folder.autoPlain");
+  } else if (probe.git === "ready") {
+    tone = "ok";
+    text = t("chat.folder.ready");
+  } else if (probe.git === "no_commits") {
+    tone = "warn";
+    text = t("chat.folder.noCommits");
+  } else if (probe.git === "not_repo") {
+    tone = "warn";
+    text = t("chat.folder.notRepo");
+  } else {
+    tone = "warn";
+    text = t("chat.folder.noGit");
+  }
+  const Icon = tone === "ok" ? CircleCheck : tone === "mute" ? FolderGit2 : CircleAlert;
+  return (
+    <p className={`folder-status tone-${tone}`} role="status">
+      <Icon size={13} aria-hidden />
+      <span>{text}</span>
+    </p>
+  );
+}
 
 function NewChat({ defaults }: { defaults: ChatDefaults | undefined }) {
   const { t, tx } = useT();
@@ -80,6 +161,7 @@ function NewChat({ defaults }: { defaults: ChatDefaults | undefined }) {
   const [backend, setBackend] = useState(FOLLOW);
   const [model, setModel] = useState("");
   const goalRef = useRef<HTMLTextAreaElement>(null);
+  const probe = useFolderProbe(mode === "ask" ? "" : cwd);
 
   useEffect(() => {
     if (defaults && !cwd) setCwd(defaults.cwd);
@@ -101,6 +183,8 @@ function NewChat({ defaults }: { defaults: ChatDefaults | undefined }) {
         model: mode === "ask" ? model : "",
       });
       invalidate("/api/chat/sessions");
+      // Auto runs as a console job: list it in Activity with the others.
+      if (mode === "auto") void adoptRunningJobs();
       navigate("chat", session.id);
     },
     { tx, failTitle: t("chat.new.failed") },
@@ -194,12 +278,13 @@ function NewChat({ defaults }: { defaults: ChatDefaults | undefined }) {
           <Field
             label={mode === "interview" && project === "new" ? t("chat.new.runFolder") : t("chat.new.folder")}
             htmlFor={`${ids}-cwd`}
-            hint={mode === "interview" && project === "new" ? t("chat.new.runFolder.hint") : t("chat.new.folder.hint")}
+            hint={mode === "auto" ? t("chat.new.folder.autoHint") : mode === "interview" && project === "new" ? t("chat.new.runFolder.hint") : t("chat.new.folder.hint")}
           >
             <div className="input-icon">
               <Folder size={15} aria-hidden />
               <input id={`${ids}-cwd`} className="input input-mono" value={cwd} spellCheck={false} autoComplete="off" onChange={(event) => setCwd(event.target.value)} />
             </div>
+            <FolderStatus probe={probe} mode={mode} />
           </Field>
         ) : null}
         <Field label={mode === "ask" ? t("chat.new.backend") : t("chat.new.agent")} htmlFor={`${ids}-agent`} hint={mode === "ask" ? undefined : t("chat.new.agent.hint")}>
@@ -209,7 +294,8 @@ function NewChat({ defaults }: { defaults: ChatDefaults | undefined }) {
             onChange={setBackend}
             options={[
               { value: FOLLOW, label: followed ? t("chat.new.follow", { agent: backendName(followed) }) : t("chat.new.followPlain") },
-              ...pool.map((item) => ({ value: item.id, label: backendName(item.id), hint: item.installed ? undefined : t("models.notInstalled") })),
+              // An agent that is not installed cannot be picked; the server refuses it too.
+              ...pool.map((item) => ({ value: item.id, label: backendName(item.id), hint: item.installed ? undefined : t("models.notInstalled"), disabled: !item.installed })),
             ]}
           />
         </Field>
@@ -264,7 +350,7 @@ function RunCard({ message }: { message: ChatMessage }) {
       <div className="run-card-head">
         <strong>{t("chat.run.title")}</strong>
         <RunStatus status={status} />
-        {progress?.phase ? <Chip>{progress.phase}</Chip> : null}
+        {progress?.phase ? <Chip>{phaseLabel(t, progress.phase)}</Chip> : null}
         {message.execution_id ? (
           <a className="more-link" href={href("runs", message.execution_id)}>
             {t("chat.run.board")}
@@ -278,7 +364,7 @@ function RunCard({ message }: { message: ChatMessage }) {
             <Progress done={progress.done} total={progress.total} failed={progress.counts.failed} label={t("runs.progress")} />
             <span>{t("runs.count", { done: progress.done, total: progress.total })}</span>
           </div>
-          {progress.activity ? <p className="run-card-activity">{progress.activity}</p> : null}
+          {progress.activity ? <p className="run-card-activity">{activityLabel(t, progress.activity)}</p> : null}
           {progress.tiles.length > 0 ? (
             <ul className="tiles">
               {progress.tiles.map((tile) => (
@@ -356,9 +442,72 @@ function SeedCard({ message }: { message: ChatMessage }) {
   );
 }
 
+const OUTCOME: Record<NonNullable<ChatMessage["outcome"]>, { key: Key; tone: Tone }> = {
+  completed: { key: "chat.result.outcome.completed", tone: "ok" },
+  failed: { key: "chat.result.outcome.failed", tone: "fail" },
+  stopped: { key: "chat.result.outcome.stopped", tone: "warn" },
+  unverified: { key: "chat.result.outcome.unverified", tone: "warn" },
+};
+
+/** What an Auto chat left behind. Auto works in the project folder itself, not a worktree. */
+function AutoResultCard({ message }: { message: ChatMessage }) {
+  const { t } = useT();
+  const files = message.files ?? [];
+  const outcome = OUTCOME[message.outcome ?? "unverified"] ?? OUTCOME.unverified;
+  const count = message.file_count ?? files.length;
+  return (
+    <div className="bubble-card result-card">
+      <div className="seed-head">
+        <Folder size={16} aria-hidden />
+        <strong>{t("chat.result.title")}</strong>
+        <Chip tone={outcome.tone}>{t(outcome.key)}</Chip>
+        {message.execution_id ? (
+          <a className="more-link" href={href("runs", message.execution_id)}>
+            {t("chat.run.board")}
+            <ArrowRight size={13} aria-hidden />
+          </a>
+        ) : null}
+      </div>
+      {message.outcome === "unverified" ? <p className="section-note">{t("chat.result.unverifiedBody", { status: message.handoff_status ?? "–" })}</p> : null}
+      {message.folder ? (
+        <dl className="kv">
+          <div>
+            <dt>{t("chat.result.folder")}</dt>
+            <dd>
+              <code>{message.folder}</code>
+              <CopyButton text={message.folder} />
+            </dd>
+          </div>
+        </dl>
+      ) : null}
+      {message.in_repo ? (
+        <>
+          <h4>{t("chat.result.folderFiles", { count })}</h4>
+          {files.length > 0 ? (
+            <ul className="file-list">
+              {files.map((file) => (
+                <li key={file}>
+                  <code>{file}</code>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="section-note">{t("chat.result.noFiles")}</p>
+          )}
+          {count > files.length ? <p className="section-note">{t("chat.result.more", { count: count - files.length })}</p> : null}
+          <p className="section-note">{t("chat.result.folderNote")}</p>
+        </>
+      ) : (
+        <p className="section-note">{t("chat.result.notRepo")}</p>
+      )}
+    </div>
+  );
+}
+
 function ResultCard({ message }: { message: ChatMessage }) {
   const { t } = useT();
   const files = message.files ?? [];
+  if (message.source === "auto") return <AutoResultCard message={message} />;
   return (
     <div className="bubble-card result-card">
       <div className="seed-head">
@@ -434,7 +583,7 @@ function AnswerProvenance({ message, onCorrect }: { message: ChatMessage; onCorr
 }
 
 function MessageView({ message, running, questionNumber, onCorrect }: { message: ChatMessage; running: boolean; questionNumber: number; onCorrect?: (message: ChatMessage) => void }) {
-  const { t } = useT();
+  const { t, tx } = useT();
   let body: ReactNode;
   let shape = "left";
   switch (message.kind) {
@@ -448,12 +597,12 @@ function MessageView({ message, running, questionNumber, onCorrect }: { message:
       break;
     case "note":
       shape = "center";
-      body = <p className="bubble-note">{message.text}</p>;
+      body = <p className="bubble-note">{keyed(tx, "chat.note", message)}</p>;
       break;
     case "error":
       body = (
         <Notice tone="fail" icon={<CircleAlert size={16} aria-hidden />}>
-          {message.text}
+          {keyed(tx, "chat.note", message)}
         </Notice>
       );
       break;
@@ -481,7 +630,7 @@ function MessageView({ message, running, questionNumber, onCorrect }: { message:
       body = (
         <div className={`bubble ${message.role === "user" ? "bubble-user" : "bubble-assistant"}`} data-local={message.id.startsWith("local-") || undefined} data-via={message.via}>
           <p>{message.text}</p>
-          {message.model ? <span className="bubble-model">{message.model}</span> : null}
+          {message.model ? <span className="bubble-model">{modelText(t, message.model, { backend: message.model_backend, configured: message.model_default })}</span> : null}
           {message.role === "user" ? <AnswerProvenance message={message} onCorrect={onCorrect} /> : null}
         </div>
       );
@@ -567,6 +716,8 @@ function ContextPane({ session }: { session: ChatSession }) {
   const { t, locale } = useT();
   const seed = [...session.messages].reverse().find((message) => message.kind === "seed");
   const run = [...session.messages].reverse().find((message) => message.kind === "run");
+  const reply = [...session.messages].reverse().find((message) => message.kind === "text" && message.role === "assistant" && message.model);
+  const model = session.model || reply?.model;
   return (
     <aside className="chat-pane-side" aria-label={t("chat.pane.title")}>
       {session.mode === "interview" ? (
@@ -601,11 +752,11 @@ function ContextPane({ session }: { session: ChatSession }) {
             <dt>{t("models.agent")}</dt>
             <dd>{session.backend ? backendName(session.backend) : t("chat.new.followPlain")}</dd>
           </div>
-          {session.model ? (
+          {model ? (
             <div>
               <dt>{t("models.model")}</dt>
               <dd>
-                <code>{session.model}</code>
+                <code>{modelText(t, model, { backend: reply?.model_backend, configured: reply?.model_default })}</code>
               </dd>
             </div>
           ) : null}
@@ -727,12 +878,26 @@ function Thread({ id }: { id: string }) {
     { tx, failTitle: t("chat.sendFailed") },
   );
 
+  // Set when a hand-off was refused because the folder has no git repository or no commit.
+  const [gitOffer, setGitOffer] = useState<"not_repo" | "no_commits" | null>(null);
   type Action = "seed" | "run" | "suggest" | "accept" | "dismiss" | "stop";
   const [act, acting] = useAction(
     async (action: Action, extra: Record<string, unknown> = {}) => {
-      const next = await post<ChatSession>(`${path}/actions`, { action, ...extra });
-      setSession(next);
-      if (action === "run") invalidate("/api/runs", "/api/overview");
+      try {
+        const next = await post<ChatSession>(`${path}/actions`, { action, ...extra });
+        setSession(next);
+      } catch (failure) {
+        if (action === "run" && failure instanceof ApiFailure && failure.code === "needs_git") {
+          // Explained on the hand-off card, with a button that prepares the folder.
+          setGitOffer(failure.extra.reason === "no_commits" ? "no_commits" : "not_repo");
+          return;
+        }
+        throw failure;
+      }
+      if (action === "run") {
+        setGitOffer(null);
+        invalidate("/api/runs", "/api/overview");
+      }
     },
     { tx, failTitle: t("chat.actionFailed") },
   );
@@ -815,7 +980,7 @@ function Thread({ id }: { id: string }) {
             <Chip>{t(`chat.mode.${mode}`)}</Chip>
             {session.project ? <Chip>{t(`chat.new.project.${session.project}`)}</Chip> : null}
             {session.backend ? <Chip tone="info">{backendName(session.backend)}</Chip> : null}
-            {session.model ? <Chip>{session.model}</Chip> : null}
+            {session.model ? <Chip>{modelText(t, session.model)}</Chip> : null}
             {!ask ? (
               <span className="path" title={session.cwd}>
                 {shortPath(session.cwd)}
@@ -937,7 +1102,17 @@ function Thread({ id }: { id: string }) {
               </Button>
             </motion.div>
           ) : null}
-          {canRun ? (
+          {canRun && gitOffer ? (
+            <motion.div key="run-git" className="next-step" role="alert" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
+              <div>
+                <strong>{gitOffer === "no_commits" ? t("chat.git.noCommits.title") : t("chat.git.notRepo.title")}</strong>
+                <span>{gitOffer === "no_commits" ? t("chat.git.noCommits.body") : t("chat.git.notRepo.body")}</span>
+              </div>
+              <Button variant="primary" icon={<FolderGit2 size={15} aria-hidden />} pending={busyAction("run")} onClick={() => void run("run", { prepare_git: true })}>
+                {gitOffer === "no_commits" ? t("chat.git.prepare.noCommits") : t("chat.git.prepare.notRepo")}
+              </Button>
+            </motion.div>
+          ) : canRun ? (
             <motion.div key="run" className="next-step" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
               <div>
                 <strong>{t("chat.next.run.title")}</strong>
@@ -963,7 +1138,7 @@ function Thread({ id }: { id: string }) {
             <motion.div key="done" className="next-step next-step-done" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
               <div>
                 <strong>{t("chat.next.done.title")}</strong>
-                <span>{t("chat.next.done.body")}</span>
+                <span>{mode === "auto" ? t("chat.next.done.autoBody") : t("chat.next.done.body")}</span>
               </div>
               <a className="btn btn-secondary" href={href("chat")}>
                 <Plus size={15} aria-hidden />

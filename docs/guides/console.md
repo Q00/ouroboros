@@ -22,7 +22,7 @@ settings app.
 | --- | --- |
 | Home | Version, default agent, connected tools, recent runs, a setup checklist. |
 | Health | `ouroboros doctor install` checks, and one-click installs of the optional components (`[claude]`, `[litellm]`, `[mcp]`, `[tui]`) pinned to this release. |
-| Chat | Interview, Auto and Ask modes with an agent/provider + model picker. *Suggest an answer* drafts a reply from the repository (or a default when the code can't settle it). *Hand off to agents* starts the run and follows it live, then shows the run's worktree, branch and changed files. See [Interview chats](#interview-chats). |
+| Chat | Interview, Auto and Ask modes with an agent/provider + model picker. *Suggest an answer* drafts a reply from the repository (or a default when the code can't settle it). *Hand off to agents* starts the run and follows it live, then shows the run's worktree, branch and changed files. See [Interview chats](#interview-chats) and [Auto chats](#auto-chats). |
 | Connect | Install agent CLIs with their published installers and run `ouroboros setup --runtime <tool>` per tool, optionally keeping the current default agent. |
 | Runs | Every execution from the EventStore with a live board per run. |
 | Agents & models | Default agent, per-stage agents and models, routing presets. Saves through the same validated, undoable path as `ouroboros config set`; `ouroboros config undo` reverts the last save. |
@@ -39,7 +39,18 @@ and Spanish (side rail → language).
   console was launched from. Pick **Existing project** to have it read the
   folder you choose (a git repository or a folder with a project manifest);
   only then is the interview a brownfield one. Either way, *Hand off to agents*
-  runs in a git worktree of the chosen folder.
+  runs in a git worktree of the chosen folder, and the interview and Seed
+  agents run in that folder (so they load its `CLAUDE.md`, `AGENTS.md` and
+  agent settings, not those of the folder the console was started from).
+- **The folder must be a git repository with a commit.** The new-chat form says
+  under the folder field whether it is one. When it is not, *Hand off to
+  agents* explains why and offers *Make this folder a git repository and hand
+  off* (or *Add an empty first commit and hand off* for a repository with no
+  commits). That runs `git init` when the folder is not a repository, then one
+  empty commit, `Start Ouroboros project`; files you staged stay staged. The
+  commit uses your git identity, or `Ouroboros <ouroboros@localhost>` for that
+  one commit when git has none; no git config is written. A repository that
+  already has commits is never changed.
 - **Code facts come from the repository.** In an existing project, each
   question the server marks as answerable from code goes to the repository
   investigator first (the one *Suggest an answer* and `ooo auto` use). A found
@@ -50,11 +61,27 @@ and Spanish (side rail → language).
   sends a correction. After three answers in a row that nobody typed, the next
   question goes to you. Questions about what to build (goals, acceptance
   criteria, preferences) always do.
+- **Only installed agents can be picked.** The agent picker greys out agents
+  whose CLI is not installed, and the server refuses them before a chat starts,
+  with the command that installs them (the Connect page runs it).
 - **The meter is the server's gate.** It shows the ambiguity score against the
   server's threshold, each area against the floor the server requires, and the
   streak of qualifying answers it waits for before it completes the interview.
   *Write the spec* becomes the next step when the server completes it; *Write
   the spec now* skips the remaining questions at any time.
+
+## Auto chats
+
+- **Auto works in the folder itself.** `ouroboros auto` writes its changes
+  straight into the chosen folder; it does not use a worktree, and it needs no
+  git repository. Its job is listed in Activity with the console's other jobs.
+- **It ends with a result.** When the job ends the chat shows how it ended
+  (*Completed* only when its run reported completion; *Not verified* when the
+  job succeeded without that report), a link to the run board, the folder,
+  and the files `git status` reports as changed there. Those are all
+  uncommitted changes in the folder, including any made before Auto started.
+  In a folder that is not a git repository the console cannot list them, and
+  says so.
 
 ## Background service and the shared MCP server
 

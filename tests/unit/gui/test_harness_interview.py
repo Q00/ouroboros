@@ -145,7 +145,9 @@ def _chat(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[str, ScriptedHandlers]:
     scripted = ScriptedHandlers(steps)
-    h._handlers[""] = scripted  # type: ignore[assignment]
+    # Every chat of this harness gets the scripted server, whatever its agent or
+    # folder: the real handlers (and an agent CLI) are never reached.
+    monkeypatch.setattr(harness.Harness, "_handlers_for", lambda *_args: scripted)
 
     async def repo_investigator(self: harness.Harness, session: dict[str, Any]) -> Any:
         return investigator
