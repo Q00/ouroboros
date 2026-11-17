@@ -1620,15 +1620,25 @@ reported as `OK`, `WARN`, or `FAIL`, with its path, launcher, and a hint when
 one applies. A Codex or Claude Code plugin manifest whose version differs from
 the running package is a warning. The command exits with status 1 if any surface fails.
 
-For Codex, the doctor checks the newest versioned snapshot in
+For Codex, the doctor first queries the configured Codex CLI with
+`plugin list --marketplace ouroboros --json`, using the effective `CODEX_HOME`.
+The read-only query has a five-second timeout. When Codex reports an installed
+version, the doctor checks that version's snapshot in
 `$CODEX_HOME/plugins/cache/ouroboros/ouroboros` (default `~/.codex/plugins/cache/ouroboros/ouroboros`).
-It reads the snapshot's `.codex-plugin/plugin.json` and follows its relative
+It does not substitute a newer cached version when the installed snapshot is missing.
+Equivalent release spellings such as `v1.2.3` and `1.2.3` match.
+The doctor reads the snapshot's `.codex-plugin/plugin.json` and follows its relative
 `mcpServers` file path, such as `./.mcp.codex.json`; without that field it checks
 `.mcp.json`. A declared path must stay inside the plugin. A missing or invalid
 launcher is reported without falling back to another launcher or an older snapshot.
-When no official marketplace snapshot is found, the existing personal-plugin
-manifest and cache checks apply. These are filesystem observations, not proof
-that a running Codex session loaded that snapshot or can call its MCP tools.
+If Codex reports the plugin as uninstalled, or the query is unavailable, the
+doctor can still inspect cached files. Without a reported installation it
+chooses the newest snapshot containing a Codex manifest, or checks the legacy
+personal-plugin files if no official snapshot is found. Successful file checks
+remain warnings and say that installation is unconfirmed or reported absent.
+A reported disabled plugin is also a warning. Invalid files still fail.
+Installation metadata and file checks do not prove that a running Codex session
+loaded that snapshot or can call its MCP tools.
 The JSON surface names remain `codex_personal_plugin` and
 `codex_personal_plugin_launcher` for compatibility.
 

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
+from pathlib import Path
 import re
 import subprocess
 import sys
@@ -27,6 +29,7 @@ class CodexPluginVersion:
     status: Literal["installed", "not_installed", "unknown"]
     version: str | None = None
     reason: str | None = None
+    enabled: bool | None = None
 
 
 def _version_identity(version: str) -> tuple[object, ...] | None:
@@ -129,19 +132,26 @@ def _parse_inventory(output: str) -> CodexPluginVersion:
         or _RELEASE_VERSION.fullmatch(version) is None
     ):
         return CodexPluginVersion("unknown", reason="Codex did not report a release plugin version")
-    return CodexPluginVersion("installed", version=version)
+    enabled = entry.get("enabled")
+    if "enabled" in entry and not isinstance(enabled, bool):
+        return CodexPluginVersion("unknown", reason="Codex returned an invalid enabled flag")
+    return CodexPluginVersion("installed", version=version, enabled=enabled)
 
 
-def inspect_codex_plugin(codex_executable: str | None) -> CodexPluginVersion:
+def inspect_codex_plugin(
+    codex_executable: str | None, *, codex_home: Path | None = None
+) -> CodexPluginVersion:
     """Query installed metadata without changing marketplace refs or configuration.
 
-    The inherited environment preserves the caller's CODEX_HOME. Errors remain
+    An explicit codex_home overrides CODEX_HOME only in the child environment.
+    Otherwise the caller's environment is inherited. Errors remain
     advisory and contain no command output, which may include local paths or
     arbitrary plugin metadata. Available marketplace versions are not evidence
     of the installed plugin version.
     """
     if not codex_executable:
         return CodexPluginVersion("unknown", reason="Codex executable is unavailable")
+    environment = {**os.environ, "CODEX_HOME": str(codex_home)} if codex_home is not None else None
     try:
         result = subprocess.run(
             [codex_executable, "plugin", "list", "--marketplace", "ouroboros", "--json"],
@@ -149,6 +159,7 @@ def inspect_codex_plugin(codex_executable: str | None) -> CodexPluginVersion:
             capture_output=True,
             timeout=_QUERY_TIMEOUT_SECONDS,
             check=False,
+            env=environment,
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         )
     except subprocess.TimeoutExpired:

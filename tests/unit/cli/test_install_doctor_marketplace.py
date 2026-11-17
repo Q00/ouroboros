@@ -8,8 +8,21 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from ouroboros.cli import codex_plugin
 from ouroboros.cli.commands import doctor
 from ouroboros.cli.main import app
+
+
+@pytest.fixture(autouse=True)
+def installed_codex(monkeypatch):
+    monkeypatch.setattr(doctor, "detect_backend_cli", lambda _: "/fixture/codex")
+    monkeypatch.setattr(
+        codex_plugin,
+        "inspect_codex_plugin",
+        lambda *_args, **_kwargs: codex_plugin.CodexPluginVersion(
+            "installed", version="1.2.3", enabled=True
+        ),
+    )
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -75,6 +88,13 @@ def test_marketplace_cache_selects_version_order_and_reports_drift(
 ) -> None:
     monkeypatch.setattr(doctor, "__version__", "1.11.0")
     monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setattr(
+        codex_plugin,
+        "inspect_codex_plugin",
+        lambda *_args, **_kwargs: codex_plugin.CodexPluginVersion(
+            "unknown", reason="query unavailable"
+        ),
+    )
     _write_plugin(tmp_path / ".codex", "1.9.0")
     newest = _write_plugin(tmp_path / ".codex", "1.10.0")
 
@@ -83,7 +103,7 @@ def test_marketplace_cache_selects_version_order_and_reports_drift(
     assert surfaces["codex_personal_plugin"].status == "warn"
     assert surfaces["codex_personal_plugin"].version == "1.10.0"
     launcher = surfaces["codex_personal_plugin_launcher"]
-    assert launcher.status == "pass"
+    assert launcher.status == "warn"
     assert launcher.path == str(newest / ".mcp.codex.json")
 
 
@@ -179,6 +199,13 @@ def test_marketplace_unreadable_cache_does_not_report_legacy_success(
     monkeypatch, tmp_path: Path
 ) -> None:
     monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setattr(
+        codex_plugin,
+        "inspect_codex_plugin",
+        lambda *_args, **_kwargs: codex_plugin.CodexPluginVersion(
+            "unknown", reason="query unavailable"
+        ),
+    )
     _write_plugin(tmp_path / ".codex", "1.2.3")
     cache_root = tmp_path / ".codex/plugins/cache/ouroboros/ouroboros"
     original_iterdir = Path.iterdir
