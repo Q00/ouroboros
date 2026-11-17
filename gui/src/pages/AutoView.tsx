@@ -1,0 +1,540 @@
+// An Auto chat told as a live story: where the pipeline is (stepper), the
+// interview it runs with itself, the review of its spec, and what it is doing
+// now. The data is `session.auto`, folded on the server from the progress
+// events `ouroboros auto --progress-jsonl` writes (gui/auto_progress.py).
+
+import { Check, ChevronDown, CircleCheck, MessagesSquare, Minus, Pause, ScrollText, X } from "lucide-react";
+import { AnimatePresence, motion } from "motion/react";
+import type { ReactNode } from "react";
+import { useId, useState } from "react";
+
+import type { Key, Translator } from "../i18n";
+import { useT } from "../i18n";
+import { EASE_OUT, SETTLE } from "../core/motion";
+import type { AutoRound, AutoView, ChatMessage, ChatSession } from "../core/types";
+import type { Tone } from "../ui/bits";
+import { Chip, LogView } from "../ui/bits";
+import { Spinner } from "../ui/Mark";
+
+// ── Steps ────────────────────────────────────────────────────────────
+
+export type AutoStepId = "interview" | "spec" | "review" | "run" | "verify" | "result";
+export type AutoStepState = "done" | "current" | "todo" | "failed" | "stopped" | "warn";
+
+const STEP_IDS: AutoStepId[] = ["interview", "spec", "review", "run", "verify", "result"];
+
+// Pipeline phases (auto/state.py AutoPhase) on the six steps. Ralph, evaluation
+// and the lateral recovery all serve verifying the result, so they share a step.
+const PHASE_STEP: Record<string, number> = {
+  created: 0,
+  interview: 0,
+  seed_generation: 1,
+  review: 2,
+  repair: 2,
+  run: 3,
+  ralph_handoff: 4,
+  evaluate: 4,
+  unstuck_lateral: 4,
+};
+
+const RESULT_KEY: Record<NonNullable<AutoView["outcome"]>, Key> = {
+  completed: "chat.result.outcome.completed",
+  failed: "chat.result.outcome.failed",
+  stopped: "chat.result.outcome.stopped",
+  unverified: "chat.result.outcome.unverified",
+};
+
+export interface AutoStep {
+  id: AutoStepId;
+  state: AutoStepState;
+  caption: string | null;
+}
+
+function lastOf(messages: ChatMessage[], kind: ChatMessage["kind"]): ChatMessage | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].kind === kind) return messages[index];
+  }
+  return undefined;
+}
+
+function answeredCount(view: AutoView): number {
+  return view.rounds_dropped + view.rounds.filter((round) => round.answer).length;
+}
+
+/** The step the pipeline has reached: from the phases it entered, then the run it started. */
+function reachedStep(view: AutoView, run: ChatMessage | undefined): number {
+  let reached = 0;
+  for (const entry of view.phases) {
+    const step = PHASE_STEP[entry.phase];
+    if (step !== undefined) reached = Math.max(reached, step);
+  }
+  // `complete` is the pipeline handing the run off; the run itself goes on.
+  if (view.phases.some((entry) => entry.phase === "complete") && (view.execution_id || run)) reached = Math.max(reached, 3);
+  if (run?.run_status === "completed") reached = Math.max(reached, 4);
+  return reached;
+}
+
+export function autoSteps(session: ChatSession, view: AutoView, t: Translator["t"]): AutoStep[] {
+  const run = lastOf(session.messages, "run");
+  const seed = lastOf(session.messages, "seed");
+  const live = session.status === "running";
+  const reached = reachedStep(view, run);
+  const outcome = view.outcome;
+
+  const states: AutoStepState[] = STEP_IDS.map((_, index) => {
+    if (outcome === "completed") return "done";
+    if (outcome === "unverified") return index === 4 ? "warn" : index === 5 || index <= reached ? "done" : "todo";
+    if (index < reached) return "done";
+    if (index > reached) return "todo";
+    if (live) return "current";
+    if (outcome === "stopped") return "stopped";
+    if (outcome === "failed" || session.status === "failed") return "failed";
+    return "stopped"; // the console restarted under it
+  });
+
+  const captions: (string | null)[] = STEP_IDS.map((id, index) => {
+    const state = states[index];
+    if (state === "todo") return null;
+    switch (id) {
+      case "interview": {
+        const last = view.rounds[view.rounds.length - 1];
+        if (state === "current" && last) {
+          return view.max_rounds ? t("auto.caption.round", { n: last.round, max: view.max_rounds }) : t("auto.caption.roundOnly", { n: last.round });
+        }
+        const count = answeredCount(view);
+        return count ? t("auto.caption.questions", { count }) : null;
+      }
+      case "spec": {
+        const count = seed ? (seed.acceptance_total ?? seed.acceptance_criteria?.length ?? 0) : 0;
+        return count ? t("auto.caption.criteria", { count }) : null;
+      }
+      case "review":
+        if (state === "current" && view.phase === "repair") return t("auto.caption.repair", { n: Math.max(view.repair_round, 1) });
+        if (view.grade) return view.repair_round ? t("auto.caption.gradeRepaired", { grade: view.grade, count: view.repair_round }) : t("auto.caption.grade", { grade: view.grade });
+        return state === "current" ? t("auto.caption.reviewing") : null;
+      case "run":
+        if (run?.progress && run.progress.total) return t("auto.caption.criteriaDone", { done: run.progress.done, total: run.progress.total });
+        return state === "current" ? t("auto.caption.starting") : null;
+      case "verify":
+        if (state === "warn") return t("auto.caption.unverified");
+        if (state === "current") return view.phase === "unstuck_lateral" ? t("auto.caption.unstuck") : t("auto.caption.verifying");
+        return state === "done" ? t("auto.caption.verified") : null;
+      case "result":
+        return outcome ? t(RESULT_KEY[outcome]) : null;
+    }
+  });
+
+  return STEP_IDS.map((id, index) => ({ id, state: states[index], caption: captions[index] }));
+}
+
+const STEP_LABEL: Record<AutoStepId, Key> = {
+  interview: "auto.step.interview",
+  spec: "auto.step.spec",
+  review: "auto.step.review",
+  run: "auto.step.run",
+  verify: "auto.step.verify",
+  result: "auto.step.result",
+};
+
+const STATE_LABEL: Record<AutoStepState, Key> = {
+  done: "auto.state.done",
+  current: "auto.state.current",
+  todo: "auto.state.todo",
+  failed: "auto.state.failed",
+  stopped: "auto.state.stopped",
+  warn: "auto.state.warn",
+};
+
+function StepMark({ state, index }: { state: AutoStepState; index: number }) {
+  let inner: ReactNode = <span className="auto-step-num">{index + 1}</span>;
+  if (state === "done") inner = <Check size={12} strokeWidth={3} />;
+  else if (state === "current") inner = <span className="auto-step-live" />;
+  else if (state === "failed") inner = <X size={12} strokeWidth={3} />;
+  else if (state === "stopped") inner = <Pause size={10} strokeWidth={3} />;
+  else if (state === "warn") inner = <Minus size={12} strokeWidth={3} />;
+  return (
+    <span className="auto-step-mark" aria-hidden>
+      <AnimatePresence mode="popLayout" initial={false}>
+        <motion.span key={state} className="auto-step-glyph" initial={{ scale: 0.4, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.4, opacity: 0 }} transition={{ duration: 0.18 }}>
+          {inner}
+        </motion.span>
+      </AnimatePresence>
+    </span>
+  );
+}
+
+/** The six steps of an Auto chat, across the top of its thread. */
+export function AutoStepper({ session, view }: { session: ChatSession; view: AutoView }) {
+  const { t } = useT();
+  const steps = autoSteps(session, view, t);
+  // The step to name on a narrow window: where it is, else the last one it got to.
+  let nowIndex = steps.findIndex((step) => step.state === "current" || step.state === "failed" || step.state === "stopped");
+  if (nowIndex < 0) nowIndex = Math.max(steps.map((step) => step.state !== "todo").lastIndexOf(true), 0);
+  const now = steps[nowIndex];
+  return (
+    <nav className="auto-steps" aria-label={t("auto.steps")}>
+      <ol className="auto-steps-list">
+        {steps.map((step, index) => (
+          <li key={step.id} className="auto-step" data-state={step.state} data-next={steps[index + 1]?.state} aria-current={step.state === "current" ? "step" : undefined}>
+            <span className="auto-step-rail" aria-hidden>
+              <StepMark state={step.state} index={index} />
+              {index < steps.length - 1 ? <span className="auto-step-line" /> : null}
+            </span>
+            <span className="auto-step-text">
+              <strong>{t(STEP_LABEL[step.id])}</strong>
+              <AnimatePresence mode="wait" initial={false}>
+                {step.caption ? (
+                  <motion.span key={step.caption} className="auto-step-caption" initial={{ opacity: 0, y: 3 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -3 }} transition={{ duration: 0.16 }}>
+                    {step.caption}
+                  </motion.span>
+                ) : null}
+              </AnimatePresence>
+              <span className="sr-only">{t(STATE_LABEL[step.state])}</span>
+            </span>
+          </li>
+        ))}
+      </ol>
+      {/* Narrow windows show one line for where it is, instead of six labels. */}
+      <p className="auto-steps-now" aria-hidden>
+        <span className="auto-steps-count">{t("auto.steps.position", { n: nowIndex + 1, total: steps.length })}</span>
+        <strong>{t(STEP_LABEL[now.id])}</strong>
+        {now.caption ? <span>{now.caption}</span> : null}
+      </p>
+    </nav>
+  );
+}
+
+// ── Interview ────────────────────────────────────────────────────────
+
+// Where an answer came from (auto/answerer.py AutoAnswerSource). Grounded
+// answers read as settled; guesses are marked so they can be reviewed.
+const SOURCE: Record<string, { key: Key; tone: Tone }> = {
+  user_goal: { key: "auto.source.user_goal", tone: "ok" },
+  repo_fact: { key: "auto.source.repo_fact", tone: "ok" },
+  existing_convention: { key: "auto.source.existing_convention", tone: "ok" },
+  user_preference: { key: "auto.source.user_preference", tone: "ok" },
+  requester: { key: "auto.source.requester", tone: "ok" },
+  conservative_default: { key: "auto.source.conservative_default", tone: "warn" },
+  assumption: { key: "auto.source.assumption", tone: "warn" },
+  non_goal: { key: "auto.source.non_goal", tone: "muted" },
+  blocker: { key: "auto.source.blocker", tone: "fail" },
+};
+
+function SourceChip({ source, count }: { source: string | null; count?: number }) {
+  const { t } = useT();
+  if (!source) return null;
+  const known = SOURCE[source];
+  return (
+    <span className="auto-source" data-tone={known?.tone ?? "muted"}>
+      <span className="auto-source-dot" aria-hidden />
+      {known ? t(known.key) : source}
+      {count !== undefined ? <span className="auto-source-n">{count}</span> : null}
+    </span>
+  );
+}
+
+const score = (value: number) => value.toFixed(2);
+
+/** A few points as a line, scaled to their own range: a trend, not a gauge. */
+function Sparkline({ values }: { values: number[] }) {
+  const width = 40;
+  const height = 14;
+  const pad = 2;
+  const low = Math.min(...values);
+  const high = Math.max(...values);
+  const points = values.map((value, index) => [
+    pad + (index * (width - pad * 2)) / (values.length - 1),
+    high === low ? height / 2 : pad + ((high - value) / (high - low)) * (height - pad * 2),
+  ]);
+  const [lastX, lastY] = points[points.length - 1];
+  return (
+    <svg className="auto-spark" width={width} height={height} viewBox={`0 0 ${width} ${height}`} aria-hidden>
+      <polyline points={points.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ")} />
+      <circle cx={lastX} cy={lastY} r={2} />
+    </svg>
+  );
+}
+
+/** The ambiguity the interview reported: the latest value, and its trend once there are two. */
+function AmbiguityTrend({ view }: { view: AutoView }) {
+  const { t } = useT();
+  const values = (view.ambiguity_trend ?? []).map((point) => point.value);
+  if (values.length === 0) return null;
+  const latest = values[values.length - 1];
+  const many = values.length > 1;
+  return (
+    <span
+      className="auto-trend"
+      role="img"
+      aria-label={many ? t("auto.ambiguity.trend", { from: score(values[0]), to: score(latest), count: values.length }) : t("auto.ambiguity", { value: score(latest) })}
+      title={many ? `${score(values[0])} → ${score(latest)}` : undefined}
+    >
+      <span className="auto-trend-label">{t("chat.ambiguity")}</span>
+      {many ? <Sparkline values={values} /> : null}
+      <span className="auto-trend-value">{score(latest)}</span>
+    </span>
+  );
+}
+
+function Round({ round, pending }: { round: AutoRound; pending: boolean }) {
+  const { t } = useT();
+  return (
+    <motion.li className="auto-round" layout="position" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={SETTLE}>
+      <div className="auto-q">
+        <span className="auto-q-num" aria-hidden>
+          Q{round.round}
+        </span>
+        <p>
+          <span className="sr-only">{t("chat.question", { n: round.round })}: </span>
+          {round.question ?? "…"}
+        </p>
+        {typeof round.ambiguity === "number" ? <span className="auto-amb">{t("auto.ambiguity", { value: score(round.ambiguity) })}</span> : null}
+      </div>
+      <AnimatePresence mode="wait" initial={false}>
+        {round.answer ? (
+          <motion.div key="answer" className="auto-a" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22, ease: EASE_OUT }}>
+            <div className="auto-a-head">
+              <span className="auto-a-who">{t("auto.interview.answer")}</span>
+              <SourceChip source={round.answer_source} />
+            </div>
+            <p>{round.answer}</p>
+          </motion.div>
+        ) : pending ? (
+          <motion.p key="pending" className="auto-a auto-pending" role="status" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+            <Spinner size={13} /> {t("auto.interview.answering")}
+          </motion.p>
+        ) : (
+          <motion.p key="none" className="auto-a auto-unanswered" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+            {t("auto.interview.unanswered")}
+          </motion.p>
+        )}
+      </AnimatePresence>
+    </motion.li>
+  );
+}
+
+const SHOWN_WHILE_LIVE = 4;
+
+function sourceCounts(rounds: AutoRound[]): [string, number][] {
+  const counts = new Map<string, number>();
+  for (const round of rounds) {
+    if (round.answer && round.answer_source) counts.set(round.answer_source, (counts.get(round.answer_source) ?? 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]);
+}
+
+/** The interview Auto runs with itself: each question, the answer it chose, and where that came from. */
+export function AutoInterview({ view, live }: { view: AutoView; live: boolean }) {
+  const { t } = useT();
+  const ids = useId();
+  const interviewing = live && (view.phase === null || view.phase === "created" || view.phase === "interview");
+  const [open, setOpen] = useState(false);
+  const [earlier, setEarlier] = useState(false);
+  const rounds = view.rounds;
+  const last = rounds[rounds.length - 1];
+  const answered = answeredCount(view);
+
+  if (!interviewing) {
+    const counts = sourceCounts(rounds);
+    return (
+      <div className="bubble-card auto-card auto-interview" data-collapsed={!open || undefined}>
+        <button type="button" className="auto-summary" aria-expanded={open} aria-controls={`${ids}-rounds`} onClick={() => setOpen((value) => !value)} disabled={rounds.length === 0}>
+          <span className="auto-summary-icon" aria-hidden>
+            <CircleCheck size={16} />
+          </span>
+          <span className="auto-summary-text">
+            <strong>{answered ? t("auto.interview.summary", { count: answered }) : t("auto.interview.none")}</strong>
+            {counts.length > 0 ? (
+              <span className="auto-summary-sources">
+                {counts.slice(0, 4).map(([source, count]) => (
+                  <SourceChip key={source} source={source} count={count} />
+                ))}
+              </span>
+            ) : null}
+          </span>
+          <AmbiguityTrend view={view} />
+          {rounds.length > 0 ? <ChevronDown className="auto-chevron" size={16} aria-hidden /> : null}
+        </button>
+        <AnimatePresence initial={false}>
+          {open ? (
+            <motion.div id={`${ids}-rounds`} className="auto-collapse" initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.26, ease: EASE_OUT }}>
+              {view.rounds_dropped ? <p className="auto-note">{t("auto.interview.dropped", { count: view.rounds_dropped })}</p> : null}
+              <ol className="auto-rounds">
+                {rounds.map((round) => (
+                  <Round key={round.round} round={round} pending={false} />
+                ))}
+              </ol>
+            </motion.div>
+          ) : null}
+        </AnimatePresence>
+      </div>
+    );
+  }
+
+  const hidden = earlier ? 0 : Math.max(rounds.length - SHOWN_WHILE_LIVE, 0);
+  const shown = rounds.slice(hidden);
+  const waitingAnswer = !!last && !last.answer;
+  return (
+    <div className="bubble-card auto-card auto-interview" data-live="">
+      <div className="auto-card-head">
+        <MessagesSquare size={16} aria-hidden />
+        <strong>{t("auto.interview.title")}</strong>
+        <span className="auto-card-side">
+          <AmbiguityTrend view={view} />
+          {last ? (
+            <Chip pulse>{view.max_rounds ? t("auto.interview.counter", { n: last.round, max: view.max_rounds }) : t("auto.interview.counterOnly", { n: last.round })}</Chip>
+          ) : null}
+        </span>
+      </div>
+      <p className="auto-lead">{t("auto.interview.lead")}</p>
+      {hidden > 0 || (earlier && rounds.length > SHOWN_WHILE_LIVE) ? (
+        <button type="button" className="auto-earlier" aria-expanded={earlier} onClick={() => setEarlier((value) => !value)}>
+          <ChevronDown className="auto-chevron" size={14} aria-hidden data-open={earlier || undefined} />
+          {earlier ? t("auto.interview.hideEarlier") : t("auto.interview.earlier", { count: hidden + view.rounds_dropped })}
+        </button>
+      ) : null}
+      <ol className="auto-rounds" aria-live="polite" aria-relevant="additions text" aria-label={t("auto.interview.title")}>
+        {shown.map((round) => (
+          <Round key={round.round} round={round} pending={round === last && waitingAnswer} />
+        ))}
+        <AnimatePresence initial={false}>
+          {!waitingAnswer ? (
+            <motion.li key={`next-${last?.round ?? 0}`} className="auto-next" role="status" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, transition: { duration: 0.1 } }}>
+              <Spinner size={14} />
+              <span>{last ? t("auto.interview.thinking") : t("auto.interview.first")}</span>
+            </motion.li>
+          ) : null}
+        </AnimatePresence>
+      </ol>
+    </div>
+  );
+}
+
+// ── Review ───────────────────────────────────────────────────────────
+
+function gradeTone(grade: string | null): Tone {
+  if (!grade) return "muted";
+  if (grade === "A") return "ok";
+  return grade === "B" ? "warn" : "fail";
+}
+
+/** The Seed review: its grade (A runs), how the grade moved, and what the review asked for. */
+export function AutoReview({ view, live }: { view: AutoView; live: boolean }) {
+  const { t } = useT();
+  const repairing = live && view.phase === "repair";
+  const reviewing = live && !view.grade && (view.phase === "review" || view.phase === "seed_generation");
+  const history = view.grades.map((entry) => entry.grade);
+  const moved = history.length > 1 ? history.join(" → ") : null;
+  let title: string;
+  if (repairing) title = t("auto.review.repairing", { n: Math.max(view.repair_round, 1) });
+  else if (view.grade) title = view.grade === "A" ? t("auto.review.passed") : t("auto.review.grade", { grade: view.grade });
+  else if (reviewing) title = t("auto.review.pending");
+  else title = t("auto.review.none");
+  const detail: string[] = [];
+  if (moved) detail.push(moved);
+  if (view.repair_round) detail.push(t("auto.review.repairs", { count: view.repair_round, max: view.max_repair_rounds ?? "–" }));
+  if (view.grade && view.grade !== "A") detail.push(t("auto.review.required"));
+  const findings = view.grade !== "A" || repairing ? view.findings : [];
+  return (
+    <div className="auto-review" data-tone={repairing ? "muted" : gradeTone(view.grade)}>
+      <div className="auto-review-main">
+        <span className="auto-grade" aria-hidden>
+          <AnimatePresence mode="popLayout" initial={false}>
+            <motion.span key={repairing || reviewing ? "busy" : (view.grade ?? "none")} initial={{ scale: 0.5, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.5, opacity: 0 }} transition={SETTLE}>
+              {repairing || reviewing ? <Spinner size={14} /> : (view.grade ?? "–")}
+            </motion.span>
+          </AnimatePresence>
+        </span>
+        <div className="auto-review-text" role="status">
+          <strong>{title}</strong>
+          {detail.length > 0 ? <span>{detail.join(" · ")}</span> : null}
+        </div>
+      </div>
+      {findings.length > 0 ? (
+        <div className="auto-findings">
+          <h5>{t("auto.review.findings")}</h5>
+          <ul>
+            {findings.map((item, index) => (
+              <li key={index}>{item}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+// ── What it is doing now ─────────────────────────────────────────────
+
+/** The line under the thread saying what Auto is doing between the cards, or `null`. */
+export function autoActivity(session: ChatSession, view: AutoView): Key | null {
+  if (session.status !== "running") return null;
+  const run = lastOf(session.messages, "run");
+  const seed = lastOf(session.messages, "seed");
+  switch (view.phase) {
+    case "seed_generation":
+      return "auto.activity.seed";
+    case "review":
+    case "repair":
+      // The Seed card's review line says it, when there is a card.
+      return seed ? null : view.phase === "repair" ? "auto.activity.repair" : "auto.activity.review";
+    case "run":
+      return run ? null : "auto.activity.run";
+    case "complete":
+      if (!run) return "auto.activity.run";
+      return run.run_status === "completed" || run.run_status === "failed" ? "auto.activity.finishing" : null;
+    case "ralph_handoff":
+    case "evaluate":
+      return "auto.activity.verify";
+    case "unstuck_lateral":
+      return "auto.activity.unstuck";
+    default:
+      return null; // the interview card shows its own progress
+  }
+}
+
+// ── Raw output ───────────────────────────────────────────────────────
+
+// structlog's console lines: `2026-11-16T23:54:22.448527Z [info     ] event …`.
+const INTERNAL = /^\d{4}-\d{2}-\d{2}T\S+\s+\[\s*(debug|info|warning|warn|error|critical|exception)\s*\]/i;
+
+/** The job's own output, folded away; internal log lines stay hidden until asked for. */
+export function AutoLog({ message, live, view }: { message: ChatMessage; live: boolean; view: AutoView }) {
+  const { t } = useT();
+  const ids = useId();
+  const [open, setOpen] = useState(false);
+  const [all, setAll] = useState(false);
+  const lines = message.lines ?? [];
+  const internal = lines.filter((line) => INTERNAL.test(line)).length;
+  const shown = all ? lines : lines.filter((line) => !INTERNAL.test(line));
+  return (
+    <div className="auto-log">
+      <button type="button" className="auto-log-toggle" aria-expanded={open} aria-controls={`${ids}-log`} onClick={() => setOpen((value) => !value)}>
+        <ScrollText size={14} aria-hidden />
+        <span>{open ? t("auto.log.hide") : t("auto.log.show")}</span>
+        <span className="auto-log-count">{t("auto.log.lines", { count: lines.length })}</span>
+        <ChevronDown className="auto-chevron" size={14} aria-hidden data-open={open || undefined} />
+      </button>
+      <AnimatePresence initial={false}>
+        {open ? (
+          <motion.div id={`${ids}-log`} className="auto-collapse" initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.24, ease: EASE_OUT }}>
+            <div className="auto-log-body">
+              <div className="auto-log-tools">
+                <code>{message.text}</code>
+                {internal > 0 ? (
+                  <label className="auto-log-all">
+                    <input type="checkbox" checked={all} onChange={(event) => setAll(event.target.checked)} />
+                    {t("auto.log.all", { count: internal })}
+                  </label>
+                ) : null}
+              </div>
+              <LogView lines={shown} live={live} emptyText={t("jobs.waiting")} maxHeight={360} />
+              {view.skipped > 0 ? <p className="auto-note">{t("auto.log.skipped", { count: view.skipped })}</p> : null}
+              {view.read_error ? <p className="auto-note">{t("auto.log.readError", { error: view.read_error })}</p> : null}
+            </div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+    </div>
+  );
+}

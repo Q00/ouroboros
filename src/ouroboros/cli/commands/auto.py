@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from dataclasses import replace
+from dataclasses import asdict, replace
+import json
 import os
 from pathlib import Path
 import time
@@ -319,6 +320,19 @@ def auto_command(
             ),
         ),
     ] = None,
+    progress_jsonl: Annotated[
+        str | None,
+        typer.Option(
+            "--progress-jsonl",
+            metavar="PATH",
+            help=(
+                "Also append every live progress event (phase, grade, repair, interview "
+                "question and answer) to this file, one JSON object per line, flushed per "
+                "line. The text trace is unchanged and --quiet does not silence the file. "
+                "A write error never stops the pipeline: it is reported once on stderr."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Run an A-grade-gated auto pipeline.
 
@@ -359,6 +373,15 @@ def auto_command(
     except ValueError as exc:
         print_error(f"Invalid requester setting: {exc}")
         raise typer.Exit(1) from exc
+    progress_path: Path | None = None
+    if progress_jsonl is not None:
+        if not progress_jsonl.strip():
+            print_error("--progress-jsonl needs a file path")
+            raise typer.Exit(1)
+        progress_path = Path(progress_jsonl).expanduser()
+        if progress_path.is_dir():
+            print_error(f"--progress-jsonl must name a file, not a directory: {progress_path}")
+            raise typer.Exit(1)
     try:
         result = asyncio.run(
             _run_auto(
@@ -378,7 +401,11 @@ def auto_command(
                 domain=domain,
                 commit_policy=commit_policy,
                 worktree_policy=worktree_policy,
-                progress_callback=_make_progress_renderer(quiet=quiet),
+                progress_callback=_compose_progress_callbacks(
+                    _make_progress_jsonl_writer(progress_path) if progress_path else None,
+                    _make_progress_renderer(quiet=quiet),
+                ),
+                quiet=quiet,
                 wait=not no_wait,
                 requester=requester,
             )
@@ -435,9 +462,16 @@ async def _run_auto(
     commit_policy: str | None = None,
     worktree_policy: str | None = None,
     progress_callback: AutoProgressCallback | None = None,
+    quiet: bool | None = None,
     wait: bool = True,
     requester: Requester | None = None,
 ) -> AutoPipelineResult:
+    """Run the pipeline; ``quiet`` silences the run-handoff wait's text output.
+
+    ``quiet=None`` keeps the historical rule: quiet exactly when no progress
+    callback is wired. The CLI passes ``--quiet`` itself, because a
+    ``--progress-jsonl`` writer is a callback that must not turn the text on.
+    """
     store = AutoStore()
     runtime_override = runtime
     incoming_provenance = resolve_provenance()
@@ -701,7 +735,7 @@ async def _run_auto(
                 result,
                 job_manager=getattr(start_execute, "_job_manager", None),
                 event_store=getattr(start_execute, "_event_store", None),
-                quiet=progress_callback is None,
+                quiet=progress_callback is None if quiet is None else quiet,
                 # Bound the wait by the SAME top-level pipeline deadline the
                 # CLI --timeout contract advertises: the pipeline consumed
                 # part of the budget, the wait gets the remainder. When the
@@ -798,6 +832,54 @@ def _make_progress_renderer(*, quiet: bool) -> AutoProgressCallback | None:
         console.print(rf"[dim]\[auto][/] {label} — {event.message}")
 
     return render
+
+
+def _make_progress_jsonl_writer(path: Path) -> AutoProgressCallback:
+    """Build a callback that appends each event to ``path`` as one JSON line.
+
+    Every field of :class:`AutoProgressEvent` is written, one object per line,
+    and the line is flushed before the call returns, so a reader following the
+    file sees whole events as they happen. The file is opened for each event,
+    so nothing stays open across the run. A failed write never reaches the
+    pipeline: the first failure is reported on stderr, later events are still
+    attempted, and later failures stay quiet.
+    """
+    warned = False
+
+    def write(event: AutoProgressEvent) -> None:
+        nonlocal warned
+        try:
+            line = json.dumps(asdict(event), ensure_ascii=False) + "\n"
+            with path.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(line)
+                handle.flush()
+        except (OSError, TypeError, ValueError) as exc:
+            if not warned:
+                warned = True
+                typer.echo(
+                    f"Warning: could not write auto progress to {path}: {exc}. "
+                    "The pipeline continues; later events are still attempted.",
+                    err=True,
+                )
+
+    return write
+
+
+def _compose_progress_callbacks(
+    *callbacks: AutoProgressCallback | None,
+) -> AutoProgressCallback | None:
+    """One callback calling each given one in order, or ``None`` when none is given."""
+    active = [callback for callback in callbacks if callback is not None]
+    if not active:
+        return None
+    if len(active) == 1:
+        return active[0]
+
+    def fan_out(event: AutoProgressEvent) -> None:
+        for callback in active:
+            callback(event)
+
+    return fan_out
 
 
 def _print_status(state: AutoPipelineState) -> None:

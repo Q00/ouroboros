@@ -75,6 +75,28 @@ and Spanish (side rail → language).
 - **Auto works in the folder itself.** `ouroboros auto` writes its changes
   straight into the chosen folder; it does not use a worktree, and it needs no
   git repository. Its job is listed in Activity with the console's other jobs.
+- **It reads as a live view, not a terminal.** The console starts
+  `ouroboros auto` with `--progress-jsonl` (a file under
+  `~/.ouroboros/gui/chats/auto/`) and follows the events it writes:
+  - a stepper across the top: Interview, Spec, Review, Run, Verify, Result.
+    The Seed repair round shows on Review, and Ralph, evaluation and the
+    lateral recovery on Verify;
+  - the automatic interview: each question, the answer Auto chose, and where
+    the answer came from (the goal, the code, an existing convention, a safe
+    default, an assumption, out of scope, and so on). The ambiguity the
+    interview reports with a question (its `(ambiguity: 0.43)` prefix) shows
+    on that question, and the card header shows the latest value with a small
+    trend line. Once the interview is over it folds to one line, which opens;
+  - the Seed card the interview uses, with its review grade, how the grade
+    moved (for example B → A), the repair rounds, and what the review asked
+    for;
+  - the run card with its acceptance-criterion tiles, once the run has an
+    execution id.
+
+  The raw output stays under *Show detailed log*, with the structlog lines
+  hidden until asked for. The view is saved with the chat, and is bounded (the
+  last 60 rounds, cut texts). Auto chats started before this view existed show
+  their log as before.
 - **It ends with a result.** When the job ends the chat shows how it ended
   (*Completed* only when its run reported completion; *Not verified* when the
   job succeeded without that report), a link to the run board, the folder,

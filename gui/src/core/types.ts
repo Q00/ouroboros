@@ -355,8 +355,12 @@ export interface ChatMessage {
   model_backend?: string | null;
   model_default?: string | null;
   acceptance_criteria?: string[];
+  /** An Auto Seed: how many criteria it has, when the chat keeps only the first ones. */
+  acceptance_total?: number;
   constraints?: string[];
-  seed_yaml?: string;
+  /** `null` when the Seed was too large to keep in the chat; `seed_path` then names its file. */
+  seed_yaml?: string | null;
+  seed_path?: string | null;
   execution_id?: string | null;
   job_id?: string | null;
   run_status?: string;
@@ -373,6 +377,43 @@ export interface ChatMessage {
   handoff_status?: string | null;
   folder?: string;
   in_repo?: boolean;
+}
+
+/** One round of the interview Auto runs with itself, paired by round number. */
+export interface AutoRound {
+  round: number;
+  question: string | null;
+  answer: string | null;
+  /** auto/answerer.py AutoAnswerSource: user_goal, repo_fact, assumption, … */
+  answer_source: string | null;
+  /** The ambiguity the interview reported with this question, when it did. */
+  ambiguity?: number | null;
+}
+
+/** An Auto chat's structured view, folded from `ouroboros auto --progress-jsonl` (gui/auto_progress.py). */
+export interface AutoView {
+  v: number;
+  auto_session_id: string | null;
+  /** The auto pipeline phase (auto/state.py AutoPhase). */
+  phase: string | null;
+  message: string | null;
+  phases: { phase: string; at: string | null }[];
+  rounds: AutoRound[];
+  rounds_dropped: number;
+  /** One point per round that reported an ambiguity, in round order. */
+  ambiguity_trend?: { round: number; value: number }[];
+  max_rounds: number | null;
+  max_repair_rounds: number | null;
+  grade: string | null;
+  grades: { grade: string; repair_round: number; at: string | null }[];
+  review_message: string | null;
+  findings: string[];
+  repair_round: number;
+  execution_id: string | null;
+  seed_loaded: boolean;
+  outcome: "completed" | "failed" | "stopped" | "unverified" | null;
+  skipped: number;
+  read_error: string | null;
 }
 
 export type GitKind = "ready" | "no_commits" | "not_repo" | "unreadable" | "no_git";
@@ -446,6 +487,8 @@ export interface ChatSession extends ChatSessionRow {
   seed_yaml?: string;
   execution_id?: string | null;
   auto_job_id?: string;
+  /** Auto chats started since the structured view exists; older ones have only their log. */
+  auto?: AutoView | null;
   suggestion?: Suggestion;
   activity?: string[];
 }

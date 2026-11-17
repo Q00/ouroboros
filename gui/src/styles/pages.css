@@ -2094,6 +2094,694 @@
   flex: none;
 }
 
+/* ── Auto chats: the structured view ──────────────────────────────── */
+
+/* Six steps across the top of the thread, aligned with the thread column. */
+.auto-steps {
+  flex: none;
+  border-bottom: 1px solid var(--line);
+}
+
+.auto-steps-list {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  width: 100%;
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 12px 20px 11px;
+}
+
+.auto-step {
+  --mark-line: var(--line-strong);
+  --mark-bg: var(--bg);
+  --mark-ink: var(--text-mute);
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  min-width: 0;
+}
+
+.auto-step-rail {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.auto-step-mark {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border: 1.5px solid var(--mark-line);
+  border-radius: 50%;
+  background: var(--mark-bg);
+  color: var(--mark-ink);
+  transition:
+    background-color var(--base) ease,
+    border-color var(--base) ease,
+    color var(--base) ease;
+}
+
+.auto-step-glyph {
+  display: grid;
+  place-items: center;
+}
+
+.auto-step-num {
+  font-size: var(--text-2xs);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.auto-step-line {
+  flex: 1;
+  height: 2px;
+  margin: 0 6px;
+  border-radius: 1px;
+  background: var(--line);
+  transition: background-color var(--slow) ease;
+}
+
+.auto-step[data-state="done"] .auto-step-line,
+.auto-step[data-state="warn"] .auto-step-line {
+  background: var(--text);
+}
+
+/* The segment leaving the current step: work in flight. */
+@keyframes auto-flow {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+
+.auto-step[data-state="current"] .auto-step-line {
+  background: linear-gradient(90deg, var(--line) 0%, var(--text-mute) 50%, var(--line) 100%) 0 0 / 200% 100%;
+  animation: auto-flow 1.8s linear infinite;
+}
+
+.auto-step[data-state="done"] {
+  --mark-line: var(--primary);
+  --mark-bg: var(--primary);
+  --mark-ink: var(--primary-ink);
+}
+
+.auto-step[data-state="current"] {
+  --mark-line: var(--text);
+  --mark-ink: var(--text);
+}
+
+.auto-step[data-state="failed"] {
+  --mark-line: var(--fail-dot);
+  --mark-bg: var(--fail-soft);
+  --mark-ink: var(--fail);
+}
+
+.auto-step[data-state="stopped"],
+.auto-step[data-state="warn"] {
+  --mark-line: var(--warn-dot);
+  --mark-bg: var(--warn-soft);
+  --mark-ink: var(--warn);
+}
+
+@keyframes auto-live {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(0.62);
+    opacity: 0.55;
+  }
+}
+
+.auto-step-live {
+  display: block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text);
+  animation: auto-live 1.6s var(--ease-swap) infinite;
+}
+
+.auto-step-text {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+  padding-right: 8px;
+  line-height: 1.35;
+}
+
+.auto-step-text strong {
+  overflow: hidden;
+  color: var(--text-mute);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color var(--base) ease;
+}
+
+.auto-step:is([data-state="done"], [data-state="warn"]) .auto-step-text strong {
+  color: var(--text-soft);
+}
+
+.auto-step:is([data-state="current"], [data-state="failed"], [data-state="stopped"]) .auto-step-text strong {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.auto-step-caption {
+  overflow: hidden;
+  color: var(--text-mute);
+  font-size: var(--text-2xs);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.auto-step[data-state="failed"] .auto-step-caption {
+  color: var(--fail);
+}
+
+.auto-step:is([data-state="stopped"], [data-state="warn"]) .auto-step-caption {
+  color: var(--warn);
+}
+
+.auto-steps-now {
+  display: none;
+}
+
+/* Cards inside an Auto thread. */
+.auto-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.auto-card-head strong {
+  font-weight: 650;
+}
+
+.auto-card-side {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.auto-card-side .chip {
+  font-variant-numeric: tabular-nums;
+}
+
+/* The ambiguity the interview reports: latest value, and a trend line. */
+.auto-trend {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-mute);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.auto-trend-value {
+  color: var(--text-soft);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.auto-spark {
+  flex: none;
+  overflow: visible;
+}
+
+.auto-spark polyline {
+  fill: none;
+  stroke: var(--line-strong);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.auto-spark circle {
+  fill: var(--text-soft);
+}
+
+.auto-amb {
+  align-self: start;
+  margin-top: 1px;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--text-mute);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.auto-lead {
+  margin-top: -4px;
+  color: var(--text-mute);
+  font-size: var(--text-xs);
+}
+
+.auto-note {
+  color: var(--text-mute);
+  font-size: var(--text-2xs);
+}
+
+.auto-rounds {
+  display: grid;
+  gap: 14px;
+}
+
+.auto-round {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.auto-q {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+}
+
+.auto-q-num {
+  display: grid;
+  place-items: center;
+  height: 20px;
+  margin-top: 1px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  color: var(--text-soft);
+  font-size: var(--text-2xs);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+[data-theme="dark"] .auto-q-num {
+  background: var(--hover);
+}
+
+.auto-q p {
+  font-weight: 550;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.auto-a {
+  display: grid;
+  gap: 4px;
+  margin-left: 38px;
+  padding: 8px 12px 9px;
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px var(--line);
+  min-width: 0;
+}
+
+[data-theme="dark"] .auto-a {
+  background: var(--raised);
+}
+
+.auto-a p {
+  color: var(--text-soft);
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.auto-a-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+.auto-a-who {
+  color: var(--text-mute);
+  font-size: var(--text-2xs);
+  font-weight: 650;
+}
+
+.auto-pending,
+.auto-unanswered {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-mute);
+  font-size: var(--text-xs);
+}
+
+.auto-pending,
+[data-theme="dark"] .auto-pending {
+  background: transparent;
+  box-shadow: none;
+  outline: 1px dashed var(--line-strong);
+  outline-offset: -1px;
+}
+
+.auto-next {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 2px 0 0 38px;
+  color: var(--text-mute);
+  font-size: var(--text-xs);
+}
+
+/* Where an answer came from: a dot says settled, guessed, or left open. */
+.auto-source {
+  --src: var(--line-strong);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 18px;
+  padding: 0 7px 0 6px;
+  border-radius: var(--radius-pill);
+  background: var(--sunk);
+  color: var(--text-soft);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+[data-theme="dark"] .auto-source {
+  background: var(--hover);
+}
+
+.auto-source[data-tone="ok"] {
+  --src: var(--ok-dot);
+}
+
+.auto-source[data-tone="warn"] {
+  --src: var(--warn-dot);
+}
+
+.auto-source[data-tone="fail"] {
+  --src: var(--fail-dot);
+}
+
+.auto-source-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--src);
+}
+
+.auto-earlier {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px 3px 6px;
+  margin: -2px 0 -2px -6px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-soft);
+  font: inherit;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color var(--fast) ease;
+}
+
+.auto-earlier:hover {
+  background: var(--hover);
+}
+
+.auto-chevron {
+  flex: none;
+  color: var(--text-mute);
+  transition: transform var(--base) var(--ease-out);
+}
+
+.auto-chevron[data-open],
+[aria-expanded="true"] > .auto-chevron {
+  transform: rotate(180deg);
+}
+
+/* After the interview: one line that opens. */
+.auto-interview[data-collapsed] {
+  gap: 0;
+}
+
+.auto-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: calc(100% + 16px);
+  margin: -6px -8px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--fast) ease;
+}
+
+.auto-summary:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.auto-summary:disabled {
+  cursor: default;
+}
+
+.auto-summary-icon {
+  display: grid;
+  color: var(--ok);
+}
+
+.auto-summary-text {
+  flex: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  min-width: 0;
+}
+
+.auto-summary-text strong {
+  font-weight: 650;
+}
+
+.auto-summary-sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+}
+
+.auto-source-n {
+  margin-left: 1px;
+  color: var(--text-mute);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.auto-collapse {
+  overflow: hidden;
+}
+
+.auto-interview[data-collapsed] .auto-collapse > :first-child,
+.auto-collapse > .auto-rounds:first-child {
+  margin-top: 14px;
+}
+
+.auto-collapse > .auto-note + .auto-rounds {
+  margin-top: 10px;
+}
+
+/* The Seed's review, at the top of its card. */
+.auto-review {
+  --grade: var(--text-soft);
+  --grade-bg: var(--sunk);
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+[data-theme="dark"] .auto-review {
+  --grade-bg: var(--hover);
+  background: var(--raised);
+}
+
+.auto-review[data-tone="ok"] {
+  --grade: var(--ok);
+  --grade-bg: var(--ok-soft);
+}
+
+.auto-review[data-tone="warn"] {
+  --grade: var(--warn);
+  --grade-bg: var(--warn-soft);
+}
+
+.auto-review[data-tone="fail"] {
+  --grade: var(--fail);
+  --grade-bg: var(--fail-soft);
+}
+
+.auto-review-main {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+}
+
+.auto-grade {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-md);
+  background: var(--grade-bg);
+  color: var(--grade);
+  font-size: 0.9375rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  transition:
+    background-color var(--base) ease,
+    color var(--base) ease;
+}
+
+.auto-grade > span {
+  display: grid;
+  place-items: center;
+}
+
+.auto-review-text {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+  line-height: 1.4;
+}
+
+.auto-review-text strong {
+  font-size: var(--text-sm);
+  font-weight: 650;
+}
+
+.auto-review-text span {
+  color: var(--text-mute);
+  font-size: var(--text-2xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.auto-findings {
+  display: grid;
+  gap: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.auto-findings h5 {
+  margin: 0;
+  color: var(--text-mute);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+}
+
+.auto-findings ul {
+  display: grid;
+  gap: 3px;
+  padding-left: 16px;
+  list-style: disc;
+  color: var(--text-soft);
+  font-size: var(--text-xs);
+}
+
+/* The raw output, folded away at the end of the thread. */
+.auto-log {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+}
+
+.auto-log-toggle {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 9px 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--bg);
+  color: var(--text-soft);
+  font: inherit;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background-color var(--fast) ease,
+    border-color var(--fast) ease;
+}
+
+.auto-log-toggle:hover {
+  background: var(--hover);
+  border-color: var(--line-strong);
+}
+
+.auto-log-count {
+  color: var(--text-mute);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.auto-log-body {
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+}
+
+.auto-log-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 14px;
+  font-size: var(--text-xs);
+}
+
+.auto-log-tools code {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-mute);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.auto-log-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-soft);
+  cursor: pointer;
+}
+
+.auto-log-all input {
+  accent-color: var(--primary);
+}
+
 /* ── Narrower windows ─────────────────────────────────────────────── */
 
 @media (max-width: 1180px) {
@@ -2211,6 +2899,76 @@
   .next-step {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .auto-steps-list {
+    padding: 10px 12px;
+  }
+}
+
+@media (max-width: 640px) {
+  /* Marks only, and one line naming where it is. */
+  .auto-step-text {
+    display: none;
+  }
+
+  .auto-step-line {
+    margin: 0 4px;
+  }
+
+  .auto-step:last-child {
+    width: 22px;
+  }
+
+  .auto-steps-list {
+    grid-template-columns: repeat(5, minmax(0, 1fr)) auto;
+    padding-bottom: 6px;
+  }
+
+  .auto-steps-now {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 2px 8px;
+    padding: 0 12px 10px;
+    font-size: var(--text-xs);
+    line-height: 1.4;
+  }
+
+  .auto-steps-now strong {
+    font-weight: 700;
+  }
+
+  .auto-steps-now span {
+    color: var(--text-mute);
+  }
+
+  .auto-steps-count {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .auto-a,
+  .auto-next {
+    margin-left: 0;
+    padding-left: 12px;
+  }
+
+  .auto-q {
+    grid-template-columns: 30px minmax(0, 1fr);
+  }
+
+  .auto-amb {
+    grid-column: 2;
+    justify-self: start;
+    margin-top: -4px;
+  }
+
+  .auto-card-head {
+    flex-wrap: wrap;
+  }
+
+  .auto-next {
+    padding-left: 0;
   }
 }
 

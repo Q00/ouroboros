@@ -35,7 +35,7 @@ import { adoptRunningJobs } from "../core/jobs";
 import { invalidate, useResource } from "../core/resource";
 import { href, navigate } from "../core/router";
 import { useSnapshotStream } from "../core/stream";
-import type { BackendChoice, ChatDefaults, ChatMessage, ChatMode, ChatProject, ChatSession, ChatSessionRow, ChatSessionsView, ChatStatus, FolderProbe, Readiness, RunTile } from "../core/types";
+import type { AutoView, BackendChoice, ChatDefaults, ChatMessage, ChatMode, ChatProject, ChatSession, ChatSessionRow, ChatSessionsView, ChatStatus, FolderProbe, Readiness, RunTile } from "../core/types";
 import type { Tone } from "../ui/bits";
 import { Chip, CopyButton, Empty, Field, LoadError, LogView, Notice, Skeleton } from "../ui/bits";
 import { Button, IconButton } from "../ui/Button";
@@ -43,6 +43,7 @@ import { Spinner } from "../ui/Mark";
 import { Modal } from "../ui/Modal";
 import { Picker } from "../ui/Picker";
 import { Segmented } from "../ui/Segmented";
+import { AutoInterview, AutoLog, AutoReview, AutoStepper, autoActivity } from "./AutoView";
 import { Progress, RunStatus, activityLabel, phaseLabel } from "./Runs";
 import { GLIDE, SETTLE } from "../core/motion";
 
@@ -382,17 +383,19 @@ function RunCard({ message }: { message: ChatMessage }) {
   );
 }
 
-function SeedCard({ message }: { message: ChatMessage }) {
+function SeedCard({ message, review }: { message: ChatMessage; review?: ReactNode }) {
   const { t } = useT();
   const [yaml, setYaml] = useState(false);
   const criteria = message.acceptance_criteria ?? [];
   const constraints = message.constraints ?? [];
+  const more = (message.acceptance_total ?? criteria.length) - criteria.length;
   return (
     <div className="bubble-card seed-card">
       <div className="seed-head">
         <Sprout size={16} aria-hidden />
         <strong>{t("chat.seed.title")}</strong>
       </div>
+      {review}
       <p className="seed-goal">{message.text}</p>
       {criteria.length > 0 ? (
         <>
@@ -407,6 +410,7 @@ function SeedCard({ message }: { message: ChatMessage }) {
               </li>
             ))}
           </ol>
+          {more > 0 ? <p className="section-note">{t("chat.result.more", { count: more })}</p> : null}
         </>
       ) : null}
       {constraints.length > 0 ? (
@@ -437,6 +441,16 @@ function SeedCard({ message }: { message: ChatMessage }) {
             ) : null}
           </AnimatePresence>
         </>
+      ) : message.seed_path ? (
+        <dl className="kv">
+          <div>
+            <dt>{t("auto.seed.file")}</dt>
+            <dd>
+              <code>{message.seed_path}</code>
+              <CopyButton text={message.seed_path} />
+            </dd>
+          </div>
+        </dl>
       ) : null}
     </div>
   );
@@ -582,7 +596,7 @@ function AnswerProvenance({ message, onCorrect }: { message: ChatMessage; onCorr
   );
 }
 
-function MessageView({ message, running, questionNumber, onCorrect }: { message: ChatMessage; running: boolean; questionNumber: number; onCorrect?: (message: ChatMessage) => void }) {
+function MessageView({ message, running, questionNumber, onCorrect, auto }: { message: ChatMessage; running: boolean; questionNumber: number; onCorrect?: (message: ChatMessage) => void; auto?: AutoView | null }) {
   const { t, tx } = useT();
   let body: ReactNode;
   let shape = "left";
@@ -607,7 +621,7 @@ function MessageView({ message, running, questionNumber, onCorrect }: { message:
       );
       break;
     case "seed":
-      body = <SeedCard message={message} />;
+      body = <SeedCard message={message} review={auto && message.source === "auto" ? <AutoReview view={auto} live={running} /> : undefined} />;
       break;
     case "run":
       body = <RunCard message={message} />;
@@ -616,6 +630,12 @@ function MessageView({ message, running, questionNumber, onCorrect }: { message:
       body = <ResultCard message={message} />;
       break;
     case "log":
+      // An Auto chat with a structured view tells its story here; its raw log
+      // is folded away at the end of the thread.
+      if (auto) {
+        body = <AutoInterview view={auto} live={running} />;
+        break;
+      }
       body = (
         <div className="bubble-card">
           <div className="seed-head">
@@ -760,6 +780,14 @@ function ContextPane({ session }: { session: ChatSession }) {
               </dd>
             </div>
           ) : null}
+          {session.auto?.auto_session_id ? (
+            <div>
+              <dt>{t("auto.pane.session")}</dt>
+              <dd>
+                <code>{session.auto.auto_session_id}</code>
+              </dd>
+            </div>
+          ) : null}
           {session.mode !== "ask" ? (
             <div>
               <dt>{t("chat.new.folder")}</dt>
@@ -844,10 +872,13 @@ function Thread({ id }: { id: string }) {
   const count = session?.messages.length ?? 0;
   const tail = session?.messages[count - 1];
   const tailSize = (tail?.lines?.length ?? 0) + (tail?.progress?.tiles.length ?? 0);
+  // An Auto chat grows inside its cards (rounds, answers, phases), not only at the tail.
+  const autoRounds = session?.auto?.rounds;
+  const autoSize = autoRounds ? autoRounds.length * 2 + (autoRounds[autoRounds.length - 1]?.answer ? 1 : 0) + (session?.auto?.phases.length ?? 0) : 0;
   useLayoutEffect(() => {
     const element = scroller.current;
     if (element && pinned.current) element.scrollTo({ top: element.scrollHeight, behavior: count > 1 ? "smooth" : "auto" });
-  }, [count, tailSize, session?.status, session?.suggestion?.pending, session?.suggestion?.text]);
+  }, [count, tailSize, autoSize, session?.status, session?.suggestion?.pending, session?.suggestion?.text]);
 
   const [send, sending] = useAction(
     async (text: string, corrects?: string) => {
@@ -953,6 +984,9 @@ function Thread({ id }: { id: string }) {
   const canRun = mode === "interview" && !!session.seed_yaml && status !== "running" && status !== "thinking" && status !== "done";
   const busyAction = (name: string) => acting && lastAction === name;
   let questionNumber = 0;
+  const auto = mode === "auto" ? (session.auto ?? null) : null;
+  const autoLog = auto ? session.messages.find((message) => message.kind === "log") : undefined;
+  const autoNow = auto ? autoActivity(session, auto) : null;
 
   function submit(event?: FormEvent) {
     event?.preventDefault();
@@ -999,6 +1033,7 @@ function Thread({ id }: { id: string }) {
       </header>
 
       {mode === "interview" && session.readiness ? <ReadinessMeter readiness={session.readiness} /> : null}
+      {auto ? <AutoStepper session={session} view={auto} /> : null}
 
       <div
         className="thread-scroll"
@@ -1017,6 +1052,7 @@ function Thread({ id }: { id: string }) {
                 message={message}
                 running={status === "running"}
                 questionNumber={questionNumber}
+                auto={auto}
                 onCorrect={canType ? (target) => {
                   setCorrecting(target);
                   inputRef.current?.focus();
@@ -1024,6 +1060,21 @@ function Thread({ id }: { id: string }) {
               />
             );
           })}
+          <AnimatePresence>
+            {autoNow ? (
+              <motion.li key={autoNow} className="msg msg-left" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, transition: { duration: 0.1 } }}>
+                <div className="thinking" role="status">
+                  <Spinner size={16} />
+                  <span>{t(autoNow)}</span>
+                </div>
+              </motion.li>
+            ) : null}
+          </AnimatePresence>
+          {auto && autoLog ? (
+            <li className="msg">
+              <AutoLog message={autoLog} live={status === "running"} view={auto} />
+            </li>
+          ) : null}
           <AnimatePresence>
             {status === "thinking" ? (
               <motion.li key="thinking" className="msg msg-left" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, transition: { duration: 0.1 } }}>
