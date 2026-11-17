@@ -1256,7 +1256,9 @@ def test_welcome_precheck_isolates_each_check(tmp_path: Path) -> None:
         0,
         "completed=2026-09-01 setup=true codex= migration=\n",
     )
-    assert "TypeError: unhashable type: 'list'" in result.stderr
+    # Python 3.14 words this "cannot use 'list' as a … (unhashable type: 'list')".
+    assert "TypeError" in result.stderr
+    assert "unhashable type: 'list'" in result.stderr
 
 
 @pytest.mark.parametrize(
