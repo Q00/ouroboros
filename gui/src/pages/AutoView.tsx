@@ -3,7 +3,7 @@
 // now. The data is `session.auto`, folded on the server from the progress
 // events `ouroboros auto --progress-jsonl` writes (gui/auto_progress.py).
 
-import { Check, ChevronDown, CircleCheck, MessagesSquare, Minus, Pause, ScrollText, X } from "lucide-react";
+import { Check, ChevronDown, CircleCheck, CircleDashed, MessagesSquare, Minus, Pause, ScrollText, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type { ReactNode } from "react";
 import { useId, useState } from "react";
@@ -13,7 +13,8 @@ import { useT } from "../i18n";
 import { EASE_OUT, SETTLE } from "../core/motion";
 import type { AutoRound, AutoView, ChatMessage, ChatSession } from "../core/types";
 import type { Tone } from "../ui/bits";
-import { Chip, LogView } from "../ui/bits";
+import { LogView } from "../ui/bits";
+import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Mark";
 
 // ── Steps ────────────────────────────────────────────────────────────
@@ -48,6 +49,8 @@ export interface AutoStep {
   id: AutoStepId;
   state: AutoStepState;
   caption: string | null;
+  /** More than the caption has room for (the round ceiling, a clipped caption). */
+  title?: string;
 }
 
 function lastOf(messages: ChatMessage[], kind: ChatMessage["kind"]): ChatMessage | undefined {
@@ -77,6 +80,7 @@ function reachedStep(view: AutoView, run: ChatMessage | undefined): number {
 export function autoSteps(session: ChatSession, view: AutoView, t: Translator["t"]): AutoStep[] {
   const run = lastOf(session.messages, "run");
   const seed = lastOf(session.messages, "seed");
+  const result = lastOf(session.messages, "result");
   const live = session.status === "running";
   const reached = reachedStep(view, run);
   const outcome = view.outcome;
@@ -85,6 +89,8 @@ export function autoSteps(session: ChatSession, view: AutoView, t: Translator["t
     if (outcome === "completed") return "done";
     if (outcome === "unverified") return index === 4 ? "warn" : index === 5 || index <= reached ? "done" : "todo";
     if (index < reached) return "done";
+    // A failed or stopped run ends on the result step too, in the same state.
+    if (index === 5 && (outcome === "failed" || outcome === "stopped")) return outcome === "failed" ? "failed" : "stopped";
     if (index > reached) return "todo";
     if (live) return "current";
     if (outcome === "stopped") return "stopped";
@@ -97,10 +103,9 @@ export function autoSteps(session: ChatSession, view: AutoView, t: Translator["t
     if (state === "todo") return null;
     switch (id) {
       case "interview": {
+        // The limit is a ceiling, not a plan: the count shows alone.
         const last = view.rounds[view.rounds.length - 1];
-        if (state === "current" && last) {
-          return view.max_rounds ? t("auto.caption.round", { n: last.round, max: view.max_rounds }) : t("auto.caption.roundOnly", { n: last.round });
-        }
+        if (state === "current" && last) return t("auto.caption.roundOnly", { n: last.round });
         const count = answeredCount(view);
         return count ? t("auto.caption.questions", { count }) : null;
       }
@@ -110,7 +115,8 @@ export function autoSteps(session: ChatSession, view: AutoView, t: Translator["t
       }
       case "review":
         if (state === "current" && view.phase === "repair") return t("auto.caption.repair", { n: Math.max(view.repair_round, 1) });
-        if (view.grade) return view.repair_round ? t("auto.caption.gradeRepaired", { grade: view.grade, count: view.repair_round }) : t("auto.caption.grade", { grade: view.grade });
+        // The repair history is on the Seed card; the caption keeps to the grade.
+        if (view.grade) return t("auto.caption.grade", { grade: view.grade });
         return state === "current" ? t("auto.caption.reviewing") : null;
       case "run":
         if (run?.progress && run.progress.total) return t("auto.caption.criteriaDone", { done: run.progress.done, total: run.progress.total });
@@ -119,12 +125,27 @@ export function autoSteps(session: ChatSession, view: AutoView, t: Translator["t
         if (state === "warn") return t("auto.caption.unverified");
         if (state === "current") return view.phase === "unstuck_lateral" ? t("auto.caption.unstuck") : t("auto.caption.verifying");
         return state === "done" ? t("auto.caption.verified") : null;
-      case "result":
-        return outcome ? t(RESULT_KEY[outcome]) : null;
+      case "result": {
+        // Not verified is said once, on the verify step.
+        if (!outcome || outcome === "unverified") return null;
+        const files = result?.in_repo ? (result.file_count ?? 0) : 0;
+        return outcome === "completed" && files > 0 ? t("auto.caption.files", { count: files }) : t(RESULT_KEY[outcome]);
+      }
     }
   });
 
-  return STEP_IDS.map((id, index) => ({ id, state: states[index], caption: captions[index] }));
+  const live0 = states[0] === "current" && view.max_rounds;
+  return STEP_IDS.map((id, index) => ({
+    id,
+    state: states[index],
+    caption: captions[index],
+    title: index === 0 && live0 ? t("auto.interview.ceiling", { max: view.max_rounds ?? 0 }) : (captions[index] ?? undefined),
+  }));
+}
+
+/** The step a failed or stopped Auto chat ended on, for the footer that explains it. */
+export function autoEndStep(steps: AutoStep[]): AutoStep | undefined {
+  return steps.slice(0, 5).find((step) => step.state === "failed" || step.state === "stopped");
 }
 
 const STEP_LABEL: Record<AutoStepId, Key> = {
@@ -167,20 +188,22 @@ function StepMark({ state, index }: { state: AutoStepState; index: number }) {
 export function AutoStepper({ session, view }: { session: ChatSession; view: AutoView }) {
   const { t } = useT();
   const steps = autoSteps(session, view, t);
+  // The narrow line names the step where it ended, not the result step after it.
+  const ended = autoEndStep(steps);
   // The step to name on a narrow window: where it is, else the last one it got to.
-  let nowIndex = steps.findIndex((step) => step.state === "current" || step.state === "failed" || step.state === "stopped");
+  let nowIndex = ended ? steps.indexOf(ended) : steps.findIndex((step) => step.state === "current");
   if (nowIndex < 0) nowIndex = Math.max(steps.map((step) => step.state !== "todo").lastIndexOf(true), 0);
   const now = steps[nowIndex];
   return (
-    <nav className="auto-steps" aria-label={t("auto.steps")}>
+    <section className="auto-steps" aria-label={t("auto.steps")}>
       <ol className="auto-steps-list">
         {steps.map((step, index) => (
-          <li key={step.id} className="auto-step" data-state={step.state} data-next={steps[index + 1]?.state} aria-current={step.state === "current" ? "step" : undefined}>
+          <li key={step.id} className="auto-step" data-state={step.state} aria-current={step.state === "current" ? "step" : undefined}>
             <span className="auto-step-rail" aria-hidden>
               <StepMark state={step.state} index={index} />
               {index < steps.length - 1 ? <span className="auto-step-line" /> : null}
             </span>
-            <span className="auto-step-text">
+            <span className="auto-step-text" title={step.title}>
               <strong>{t(STEP_LABEL[step.id])}</strong>
               <AnimatePresence mode="wait" initial={false}>
                 {step.caption ? (
@@ -200,7 +223,7 @@ export function AutoStepper({ session, view }: { session: ChatSession; view: Aut
         <strong>{t(STEP_LABEL[now.id])}</strong>
         {now.caption ? <span>{now.caption}</span> : null}
       </p>
-    </nav>
+    </section>
   );
 }
 
@@ -235,16 +258,15 @@ function SourceChip({ source, count }: { source: string | null; count?: number }
 
 const score = (value: number) => value.toFixed(2);
 
-/** A few points as a line, scaled to their own range: a trend, not a gauge. */
+/** A few points as a line on a fixed scale from 0, so a small change draws small. */
 function Sparkline({ values }: { values: number[] }) {
-  const width = 40;
-  const height = 14;
+  const width = 48;
+  const height = 16;
   const pad = 2;
-  const low = Math.min(...values);
-  const high = Math.max(...values);
+  const high = Math.max(0.5, ...values);
   const points = values.map((value, index) => [
     pad + (index * (width - pad * 2)) / (values.length - 1),
-    high === low ? height / 2 : pad + ((high - value) / (high - low)) * (height - pad * 2),
+    pad + ((high - Math.max(value, 0)) / high) * (height - pad * 2),
   ]);
   const [lastX, lastY] = points[points.length - 1];
   return (
@@ -276,25 +298,32 @@ function AmbiguityTrend({ view }: { view: AutoView }) {
   );
 }
 
+// The interview's own prefix, for a view saved before the fold split it off.
+const AMBIGUITY_PREFIX = /^\(\s*ambiguity\s*:\s*[\d.]+\s*\)\s*/;
+
 function Round({ round, pending }: { round: AutoRound; pending: boolean }) {
   const { t } = useT();
+  const ambiguity = typeof round.ambiguity === "number" ? t("auto.ambiguity", { value: score(round.ambiguity) }) : undefined;
+  const question = round.question?.replace(AMBIGUITY_PREFIX, "") || round.question;
   return (
     <motion.li className="auto-round" layout="position" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={SETTLE}>
       <div className="auto-q">
-        <span className="auto-q-num" aria-hidden>
+        <span className="auto-q-num" aria-hidden title={ambiguity}>
           Q{round.round}
         </span>
         <p>
-          <span className="sr-only">{t("chat.question", { n: round.round })}: </span>
-          {round.question ?? "…"}
+          <span className="sr-only">
+            {t("chat.question", { n: round.round })}
+            {ambiguity ? ` (${ambiguity})` : ""}:{" "}
+          </span>
+          {question ?? "…"}
         </p>
-        {typeof round.ambiguity === "number" ? <span className="auto-amb">{t("auto.ambiguity", { value: score(round.ambiguity) })}</span> : null}
       </div>
       <AnimatePresence mode="wait" initial={false}>
         {round.answer ? (
           <motion.div key="answer" className="auto-a" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22, ease: EASE_OUT }}>
             <div className="auto-a-head">
-              <span className="auto-a-who">{t("auto.interview.answer")}</span>
+              <span className="sr-only">{t("auto.interview.answer")}</span>
               <SourceChip source={round.answer_source} />
             </div>
             <p>{round.answer}</p>
@@ -335,6 +364,23 @@ export function AutoInterview({ view, live }: { view: AutoView; live: boolean })
   const answered = answeredCount(view);
 
   if (!interviewing) {
+    // An interview that never asked anything and never handed over to the
+    // spec did not finish: say it stopped, without the finished check.
+    const passed = view.phases.some((entry) => entry.phase !== "created" && entry.phase !== "interview");
+    if (rounds.length === 0 && !passed) {
+      return (
+        <div className="bubble-card auto-card auto-interview" data-collapsed="">
+          <p className="auto-summary auto-summary-static">
+            <span className="auto-summary-icon" data-tone="muted" aria-hidden>
+              <CircleDashed size={16} />
+            </span>
+            <span className="auto-summary-text">
+              <strong>{t("auto.interview.notStarted")}</strong>
+            </span>
+          </p>
+        </div>
+      );
+    }
     const counts = sourceCounts(rounds);
     return (
       <div className="bubble-card auto-card auto-interview" data-collapsed={!open || undefined}>
@@ -364,6 +410,10 @@ export function AutoInterview({ view, live }: { view: AutoView; live: boolean })
                   <Round key={round.round} round={round} pending={false} />
                 ))}
               </ol>
+              <button type="button" className="auto-earlier auto-fold" onClick={() => setOpen(false)}>
+                <ChevronDown className="auto-chevron" size={14} aria-hidden data-open="" />
+                {t("auto.interview.fold")}
+              </button>
             </motion.div>
           ) : null}
         </AnimatePresence>
@@ -381,9 +431,6 @@ export function AutoInterview({ view, live }: { view: AutoView; live: boolean })
         <strong>{t("auto.interview.title")}</strong>
         <span className="auto-card-side">
           <AmbiguityTrend view={view} />
-          {last ? (
-            <Chip pulse>{view.max_rounds ? t("auto.interview.counter", { n: last.round, max: view.max_rounds }) : t("auto.interview.counterOnly", { n: last.round })}</Chip>
-          ) : null}
         </span>
       </div>
       <p className="auto-lead">{t("auto.interview.lead")}</p>
@@ -426,13 +473,13 @@ export function AutoReview({ view, live }: { view: AutoView; live: boolean }) {
   const history = view.grades.map((entry) => entry.grade);
   const moved = history.length > 1 ? history.join(" → ") : null;
   let title: string;
-  if (repairing) title = t("auto.review.repairing", { n: Math.max(view.repair_round, 1) });
+  if (repairing) title = t("auto.review.repairing", { n: Math.max(view.repair_round, 1), max: view.max_repair_rounds ?? "–" });
   else if (view.grade) title = view.grade === "A" ? t("auto.review.passed") : t("auto.review.grade", { grade: view.grade });
   else if (reviewing) title = t("auto.review.pending");
   else title = t("auto.review.none");
   const detail: string[] = [];
   if (moved) detail.push(moved);
-  if (view.repair_round) detail.push(t("auto.review.repairs", { count: view.repair_round, max: view.max_repair_rounds ?? "–" }));
+  if (view.repair_round && !repairing) detail.push(t("auto.review.repairs", { count: view.repair_round }));
   if (view.grade && view.grade !== "A") detail.push(t("auto.review.required"));
   const findings = view.grade !== "A" || repairing ? view.findings : [];
   return (
@@ -452,7 +499,7 @@ export function AutoReview({ view, live }: { view: AutoView; live: boolean }) {
       </div>
       {findings.length > 0 ? (
         <div className="auto-findings">
-          <h5>{t("auto.review.findings")}</h5>
+          <h4>{t("auto.review.findings")}</h4>
           <ul>
             {findings.map((item, index) => (
               <li key={index}>{item}</li>
@@ -493,6 +540,28 @@ export function autoActivity(session: ChatSession, view: AutoView): Key | null {
   }
 }
 
+// ── How it ended ─────────────────────────────────────────────────────
+
+/**
+ * The footer of an Auto chat that did not finish verified: what happened and
+ * where to look, or `null` while it runs or when it completed. A failed job's
+ * exit code is said here rather than as a notice in the thread.
+ */
+export function autoEnding(session: ChatSession, view: AutoView, t: Translator["t"]): { title: Key; body: string } | null {
+  if (session.status === "running" || view.outcome === "completed") return null;
+  if (view.outcome === "unverified") return { title: "auto.end.unverified.title", body: t("auto.end.unverified.body") };
+  if (session.status !== "failed" && session.status !== "interrupted") return null;
+  const ended = autoEndStep(autoSteps(session, view, t));
+  const step = ended ? t(STEP_LABEL[ended.id]) : null;
+  if (view.outcome === "stopped") return { title: "auto.end.stopped.title", body: step ? t("auto.end.stoppedAt", { step }) : "" };
+  if (!view.outcome && session.status === "interrupted") return { title: "auto.end.failed.title", body: t("auto.end.restarted") };
+  let body = ended?.id === "review" ? t("auto.end.review") : ended?.id === "run" ? t("auto.end.run") : t("auto.end.other");
+  const exited = [...session.messages].reverse().find((message) => message.kind === "error" && message.key === "auto_exited");
+  const code = exited?.vars?.code;
+  if (code !== undefined && code !== null) body = `${body} ${t("auto.end.code", { code })}`;
+  return { title: "auto.end.failed.title", body };
+}
+
 // ── Raw output ───────────────────────────────────────────────────────
 
 // structlog's console lines: `2026-11-16T23:54:22.448527Z [info     ] event …`.
@@ -509,15 +578,35 @@ export function AutoLog({ message, live, view }: { message: ChatMessage; live: b
   const shown = all ? lines : lines.filter((line) => !INTERNAL.test(line));
   return (
     <div className="auto-log">
-      <button type="button" className="auto-log-toggle" aria-expanded={open} aria-controls={`${ids}-log`} onClick={() => setOpen((value) => !value)}>
-        <ScrollText size={14} aria-hidden />
-        <span>{open ? t("auto.log.hide") : t("auto.log.show")}</span>
-        <span className="auto-log-count">{t("auto.log.lines", { count: lines.length })}</span>
-        <ChevronDown className="auto-chevron" size={14} aria-hidden data-open={open || undefined} />
-      </button>
+      <Button
+        size="sm"
+        variant="ghost"
+        className="auto-log-toggle"
+        icon={<ScrollText size={14} aria-hidden />}
+        trailing={<ChevronDown className="auto-chevron" size={14} aria-hidden data-open={open || undefined} />}
+        aria-expanded={open}
+        aria-controls={`${ids}-log`}
+        onClick={() => setOpen((value) => !value)}
+      >
+        {open ? t("auto.log.hide") : t("auto.log.show")}
+        <span className="auto-log-count">{t("auto.log.lines", { count: shown.length })}</span>
+      </Button>
       <AnimatePresence initial={false}>
         {open ? (
-          <motion.div id={`${ids}-log`} className="auto-collapse" initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.24, ease: EASE_OUT }}>
+          <motion.div
+            id={`${ids}-log`}
+            className="auto-collapse"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.24, ease: EASE_OUT }}
+            onAnimationComplete={(definition) => {
+              // Bring the opened log into view; closing leaves the scroll alone.
+              if (typeof definition === "object" && definition !== null && "height" in definition && definition.height === "auto") {
+                document.getElementById(`${ids}-log`)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+              }
+            }}
+          >
             <div className="auto-log-body">
               <div className="auto-log-tools">
                 <code>{message.text}</code>

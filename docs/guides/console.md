@@ -84,9 +84,13 @@ and Spanish (side rail → language).
   - the automatic interview: each question, the answer Auto chose, and where
     the answer came from (the goal, the code, an existing convention, a safe
     default, an assumption, out of scope, and so on). The ambiguity the
-    interview reports with a question (its `(ambiguity: 0.43)` prefix) shows
-    on that question, and the card header shows the latest value with a small
-    trend line. Once the interview is over it folds to one line, which opens;
+    interview reports with a question (its `(ambiguity: 0.43)` prefix) is
+    kept out of the question text; the card header shows the latest value
+    with a small trend line, and each question's value is in its number's
+    tooltip. A chat saved by an older console is brought to the current
+    shape when the console starts, losing nothing: its progress file is
+    folded again only when it still holds the whole saved history, and
+    otherwise the saved rounds are migrated in place. Once the interview is over it folds to one line, which opens;
   - the Seed card the interview uses, with its review grade, how the grade
     moved (for example B → A), the repair rounds, and what the review asked
     for;
@@ -103,7 +107,10 @@ and Spanish (side rail → language).
   and the files `git status` reports as changed there. Those are all
   uncommitted changes in the folder, including any made before Auto started.
   In a folder that is not a git repository the console cannot list them, and
-  says so.
+  says so. A chat you stop is shown as stopped, not failed. A stopped, failed
+  or unverified chat ends with a line saying where it stopped and where to
+  look: the board for a failed criterion, the detailed log for anything
+  else. A failed job's exit code is part of that line.
 
 ## Background service and the shared MCP server
 
