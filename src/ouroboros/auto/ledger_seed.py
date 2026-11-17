@@ -626,6 +626,16 @@ def ledger_sourced_scope(ledger: SeedDraftLedger) -> SourcedScope | None:
     )
 
 
+def ledger_non_goal_constraints(ledger: SeedDraftLedger) -> tuple[str, ...]:
+    """The ledger's binding non-goals as ``Non-goal:`` constraints, in ledger order.
+
+    The same split a ledger-synthesized Seed uses: only entries that bind
+    (``LedgerEntry.binds_seed``) qualify, so a defaulted guess stays an assumption.
+    """
+    non_goals = _lines_from_section(ledger, "non_goals", binding=True)
+    return tuple(f"Non-goal: {item}" for item in non_goals)
+
+
 def with_ledger_carryover(seed: Seed, ledger: SeedDraftLedger) -> Seed:
     """Carry the ledger's assumptions, requester answers, repo facts, open questions and sourced scope.
 
