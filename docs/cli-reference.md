@@ -95,8 +95,40 @@ ouroboros auto "Build a local-first habit tracker CLI"
 | `--status` | Print the persisted state for `--resume <id>` without running |
 | `--requester-command CMD` | Ask the requester instead of assuming (off by default; see below). Overrides `OUROBOROS_AUTO_REQUESTER_COMMAND` |
 | `--requester-timeout SECONDS` | Seconds to wait for one requester answer before keeping auto's draft (default 300). Overrides `OUROBOROS_AUTO_REQUESTER_TIMEOUT_SECONDS` |
+| `--progress-jsonl PATH` | Also append every live progress event to `PATH` as one JSON object per line (see [Machine-readable progress](#machine-readable-progress)). The text output is unchanged |
 
 Auto mode starts execution only after the generated Seed reaches A-grade. If a phase times out or hits a hard blocker, the command prints the auto session id and a resume command instead of hanging indefinitely.
+
+### Machine-readable progress
+
+`--progress-jsonl PATH` appends each live progress event to `PATH`, one JSON
+object per line, and flushes the line before the pipeline goes on. The text
+trace (the `[auto] …` lines) prints exactly as without the option, and
+`--quiet` silences only the text, not the file. The Ouroboros console uses this
+file to show an Auto chat as a live view.
+
+Each line has every field of an event:
+
+```json
+{"auto_session_id": "auto_8820ee51202b", "phase": "interview", "kind": "answer", "message": "answered round 6/50 from non_goal", "round": 6, "grade": null, "question": "Which parts are out of scope?", "answer": "CLI and packaging are non-goals.", "answer_source": "non_goal", "timestamp": "2026-11-16T23:54:22.448527+00:00"}
+```
+
+- `kind` is `phase` (the phase or its progress message changed), `grade` (a
+  Seed review produced a new grade), `repair` (the Seed repair round
+  advanced), `question` (the interview asked round `round`) or `answer` (auto
+  answered round `round`).
+- `phase` is the auto phase at that moment: `created`, `interview`,
+  `seed_generation`, `review`, `repair`, `run`, `ralph_handoff`, `evaluate`,
+  `unstuck_lateral`, `complete`, `blocked` or `failed`.
+- `answer_source` says where an answer came from: `user_goal`, `repo_fact`,
+  `existing_convention`, `user_preference`, `conservative_default`,
+  `assumption`, `non_goal`, `blocker` or `requester`.
+
+The file is appended to, never truncated, and is not created until the first
+event. Its directory must already exist. A write that fails (a missing
+directory, no permission, a full disk) does not stop the pipeline: the first
+failure prints one warning on stderr, and later events are still attempted.
+With `--status`, nothing runs and nothing is written.
 
 ### Asking the requester instead of assuming
 

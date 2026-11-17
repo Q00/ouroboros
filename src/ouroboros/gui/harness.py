@@ -10,7 +10,10 @@ A conversation is the Ouroboros pipeline told as a chat:
   goes to the repository investigator first, and the answer comes back for
   one-click confirmation, or is sent at once when the skill's PATH 1a allows it
   (``gui/interview_assist.py``).
-* **Auto** mode hands the goal to ``ouroboros auto`` and streams its output.
+* **Auto** mode hands the goal to ``ouroboros auto`` and follows it: the
+  progress events it writes (``--progress-jsonl``) become a structured view
+  (``gui/auto_progress.py``), its Seed and run are shown with the cards the
+  interview uses, and its raw output is kept as a log.
 
 The handlers are the same objects the CLI and MCP server build, called in-process
 on one background event loop, so every turn lands in the EventStore exactly as
@@ -28,6 +31,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 import tempfile
 import threading
 import time
@@ -36,7 +40,7 @@ import uuid
 
 import yaml
 
-from ouroboros.gui import workspace
+from ouroboros.gui import auto_progress, workspace
 from ouroboros.gui.interview_assist import (
     AUTO_CONFIRMED_PREFIX,
     CONFIRMED_PREFIX,
@@ -315,6 +319,9 @@ class Harness:
         # it already found carry across the chat's questions.
         self._investigators: dict[str, Any] = {}
         self._jobs = jobs if jobs is not None else JobRegistry()
+        # Where Auto chats read the auto session record (``None``: the default
+        # ``AutoStore``, which is where ``ouroboros auto`` saves it).
+        self._auto_store: Any = None
         self._load_all()
 
     # ── persistence ─────────────────────────────────────────────────
@@ -329,6 +336,14 @@ class Harness:
                 if data.get("status") in ("thinking", "running"):
                     # The process that owned this work is gone.
                     data["status"] = "interrupted"
+                    if isinstance(data.get("auto"), dict):
+                        # So is whatever followed its run: the card is not live.
+                        for message in data.get("messages") or []:
+                            if message.get("kind") == "run" and message.get("run_status") in (
+                                None,
+                                "running",
+                            ):
+                                message["run_status"] = "interrupted"
                 if isinstance(data.get("suggestion"), dict) and data["suggestion"].get("pending"):
                     data["suggestion"] = {"pending": False}
                 self._sessions[data["id"]] = data
@@ -419,6 +434,8 @@ class Harness:
             self._investigators.pop(session_id, None)
             with contextlib.suppress(OSError):
                 (chats_dir() / f"{session_id}.json").unlink()
+            with contextlib.suppress(OSError):
+                auto_progress.progress_file(chats_dir(), session_id).unlink()
             self._changed.notify_all()
 
     def create(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -873,8 +890,21 @@ class Harness:
                 self._follow_run, session_id, str(execution_id), str(job_id) if job_id else None
             )
 
-    def _follow_run(self, session_id: str, execution_id: str, job_id: str | None = None) -> None:
-        """Mirror the run's board into its chat card until the run or its job ends."""
+    def _follow_run(
+        self,
+        session_id: str,
+        execution_id: str,
+        job_id: str | None = None,
+        *,
+        auto_job_id: str | None = None,
+    ) -> None:
+        """Mirror the run's board into its chat card until the run or its job ends.
+
+        With ``auto_job_id`` the run belongs to that ``ouroboros auto`` job: only
+        the card is updated (the Auto job's end decides the chat's status and
+        result), and following stops when the Auto job ends, after one last
+        read. A run that had not ended by then is shown as interrupted.
+        """
         from ouroboros.dashboard_web.kanban import reduce_board
         from ouroboros.dashboard_web.reader import (
             EventTail,
@@ -890,11 +920,20 @@ class Harness:
             with self._lock:
                 if session_id not in self._sessions:
                     return
+            # Read the Auto job first: once it has ended, this read is the last.
+            auto_over = False
+            if auto_job_id is not None:
+                auto_job = self._jobs.get(auto_job_id)
+                auto_over = auto_job is None or auto_job.status != "running"
             try:
                 events.extend(tail.fetch_new())
             except PickerIndexContractError:
                 # The run's start row is indexed a moment after the job starts.
                 pass
+            except sqlite3.Error:
+                if auto_job_id is None:
+                    raise
+                # Auto's card reads again on the next poll; its loop ends with the job.
             board = reduce_board(events, execution_id=execution_id) if events else {}
             summary = _board_summary(board, events)
             job = _job_terminal(db_path, job_id) if job_id else None
@@ -909,6 +948,8 @@ class Harness:
                     "activity": job["message"],
                     "key": "job-failed",
                 }
+            if auto_over and summary["status"] not in _TERMINAL_RUN:
+                summary = {**summary, "status": "interrupted", "key": "auto-ended"}
             if summary["key"] != last_summary:
                 last_summary = summary["key"]
 
@@ -921,7 +962,7 @@ class Harness:
                             message["run_status"] = summary["status"]
                             message["progress"] = summary
                             break
-                    if summary["status"] in _TERMINAL_RUN:
+                    if auto_job_id is None and summary["status"] in _TERMINAL_RUN:
                         s["status"] = "done" if summary["status"] == "completed" else "failed"
                         if summary["status"] != "completed" and summary.get("activity"):
                             s["messages"].append(
@@ -932,7 +973,7 @@ class Harness:
                             s["messages"].append(_msg("assistant", "result", "", **result))
 
                 self._update(session_id, apply)
-            if summary["status"] in _TERMINAL_RUN:
+            if summary["status"] in _TERMINAL_RUN or auto_over:
                 return
             time.sleep(_RUN_POLL_SEC)
 
@@ -1147,6 +1188,10 @@ class Harness:
 
     def _start_auto(self, session_id: str) -> None:
         session = self.get(session_id) or {}
+        # A fresh file per job: ``ouroboros auto`` appends to it, never truncates.
+        progress = auto_progress.progress_file(chats_dir(), session_id)
+        progress.parent.mkdir(parents=True, exist_ok=True)
+        progress.unlink(missing_ok=True)
         job = self._jobs.start(
             kind="auto",
             title=session.get("title", "auto"),
@@ -1158,6 +1203,8 @@ class Harness:
                     if (runtime := effective_runtime(session.get("backend"), public=True))
                     else []
                 ),
+                "--progress-jsonl",
+                str(progress),
             ),
             meta={"key": session_id},
             cwd=session["cwd"],
@@ -1167,6 +1214,7 @@ class Harness:
         def apply(s: dict[str, Any]) -> None:
             s["auto_job_id"] = job.id
             s["status"] = "running"
+            s["auto"] = auto_progress.new_view()
             s["messages"].append(
                 _msg("assistant", "log", "ouroboros auto", lines=[], job_id=job.id)
             )
@@ -1177,7 +1225,20 @@ class Harness:
         ).start()
 
     def _follow_auto(self, session_id: str, job_id: str) -> None:
+        """Follow an Auto job: its output into the log, its progress events into ``auto``.
+
+        The events come from the ``--progress-jsonl`` file, read whole line by
+        whole line. The auto session record is read when an event says it
+        changed (the Seed, the run's execution id, the round limit), and every
+        ten polls while a started run has no execution id yet. A run card
+        follows the run as soon as its execution id is known.
+        """
         cursor = 0
+        tail = auto_progress.ProgressTail(auto_progress.progress_file(chats_dir(), session_id))
+        followed: str | None = None
+        run_job: str | None = None
+        polls = 0
+        trouble: tuple[int, str | None] = (0, None)  # what reading the file last reported
         while True:
             job = self._jobs.get(job_id)
             if job is None:
@@ -1186,25 +1247,112 @@ class Harness:
             running = job.status == "running"
             snap = job.snapshot(since=cursor)
             cursor = snap["cursor"]
-            if snap["lines"]:
+            events = tail.read(final=not running)
+            reload = False
+            reported = trouble != (tail.skipped, tail.error)
+            trouble = (tail.skipped, tail.error)
+            if snap["lines"] or events or reported:
 
                 def apply(
                     s: dict[str, Any],
                     lines: list[str] = snap["lines"],
                     found: dict[str, str] = snap["found"],
+                    events: list[dict[str, Any]] = events,
                 ) -> None:
-                    for message in reversed(s["messages"]):
-                        if message.get("kind") == "log" and message.get("job_id") == job_id:
-                            message["lines"] = (message.get("lines", []) + lines)[-_MAX_LOG_LINES:]
-                            break
+                    nonlocal reload
+                    if lines:
+                        for message in reversed(s["messages"]):
+                            if message.get("kind") == "log" and message.get("job_id") == job_id:
+                                message["lines"] = (message.get("lines", []) + lines)[
+                                    -_MAX_LOG_LINES:
+                                ]
+                                break
+                    view = s.get("auto")
+                    if isinstance(view, dict):
+                        for event in events:
+                            reload = auto_progress.fold(view, event) or reload
+                        view["skipped"] = tail.skipped
+                        view["read_error"] = tail.error
+                        if found.get("execution_id") and not view.get("execution_id"):
+                            view["execution_id"] = found["execution_id"]
                     if found.get("execution_id"):
                         s["execution_id"] = found["execution_id"]
 
                 self._update(session_id, apply)
+            polls += 1
+            known = self._auto_known(session_id)
+            if known is not None and known["auto_session_id"]:
+                waiting = known["phase"] == "run" and not known["execution_id"]
+                if reload or (waiting and polls % 10 == 0):
+                    facts = self._auto_facts(known["auto_session_id"])
+                    if facts is not None:
+                        run_job = facts.get("job_id") or run_job
+                        self._update(session_id, lambda s, f=facts: _apply_auto_facts(s, f))
+                        known = self._auto_known(session_id)
+            execution_id = known["execution_id"] if known else None
+            if execution_id and execution_id != followed:
+                followed = execution_id
+                self._follow_auto_run(session_id, execution_id, run_job, job_id)
             if not running:
                 self._finish_auto(session_id, snap, cancelled=job.cancelled)
+                with self._lock:
+                    gone = session_id not in self._sessions
+                if gone:  # deleted while running: the job may have written the file again
+                    with contextlib.suppress(OSError):
+                        tail.path.unlink()
                 return
             time.sleep(0.5)
+
+    def _auto_known(self, session_id: str) -> dict[str, Any] | None:
+        """The Auto view's session id, phase and execution id, read under the lock."""
+        with self._lock:
+            session = self._sessions.get(session_id)
+            view = session.get("auto") if session else None
+            if not isinstance(view, dict):
+                return None
+            return {
+                "auto_session_id": view.get("auto_session_id"),
+                "phase": view.get("phase"),
+                "execution_id": view.get("execution_id"),
+            }
+
+    def _auto_facts(self, auto_session_id: str) -> dict[str, Any] | None:
+        """The auto session record's facts, with the Seed already shaped as a message."""
+        facts = auto_progress.load_facts(auto_session_id, self._auto_store)
+        if facts is not None and facts.get("seed"):
+            facts["seed_message"] = auto_progress.seed_fields(facts["seed"], facts.get("seed_path"))
+        return facts
+
+    def _follow_auto_run(
+        self, session_id: str, execution_id: str, run_job: str | None, auto_job_id: str
+    ) -> None:
+        """Show the Auto run's card, and follow its board until the Auto job ends."""
+
+        def apply(s: dict[str, Any]) -> None:
+            if not any(
+                m.get("kind") == "run" and m.get("execution_id") == execution_id
+                for m in s["messages"]
+            ):
+                s["messages"].append(
+                    _msg(
+                        "assistant",
+                        "run",
+                        "Run started.",
+                        execution_id=execution_id,
+                        job_id=run_job,
+                        run_status="running",
+                        progress=None,
+                    )
+                )
+
+        self._update(session_id, apply)
+        threading.Thread(
+            target=self._follow_run,
+            args=(session_id, execution_id, run_job),
+            kwargs={"auto_job_id": auto_job_id},
+            name="gui-auto-run",
+            daemon=True,
+        ).start()
 
     def _finish_auto(self, session_id: str, snap: dict[str, Any], *, cancelled: bool) -> None:
         """End an Auto chat with what it produced: outcome, run board, folder and changes.
@@ -1238,13 +1386,17 @@ class Harness:
                 )
             if execution_id:
                 s["execution_id"] = execution_id
+            outcome = _auto_outcome(snap["status"], cancelled, handoff)
+            view = s.get("auto")
+            if isinstance(view, dict):
+                view["outcome"] = outcome
             s["messages"].append(
                 _msg(
                     "assistant",
                     "result",
                     "",
                     source="auto",
-                    outcome=_auto_outcome(snap["status"], cancelled, handoff),
+                    outcome=outcome,
                     handoff_status=handoff,
                     execution_id=execution_id,
                     folder=cwd,
@@ -1417,14 +1569,36 @@ def _span_text(span: Any) -> str:
     return f"{where} {quote}".strip()[:200] or str(span)[:200]
 
 
-def _item_text(item: Any) -> str:
-    """A spec item as one sentence (criteria may be strings or structured dicts)."""
-    if isinstance(item, dict):
-        for key in ("description", "text", "criterion", "content"):
-            value = item.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-    return str(item)
+_item_text = auto_progress.item_text
+
+
+def _apply_auto_facts(session: dict[str, Any], facts: dict[str, Any]) -> None:
+    """Put the auto session record's facts into an Auto chat.
+
+    The Seed is one ``seed`` message, the same kind the interview writes,
+    updated in place when a repair rewrites it.
+    """
+    view = session.get("auto")
+    if not isinstance(view, dict):
+        return
+    auto_progress.apply_facts(view, facts)
+    fields = facts.get("seed_message")
+    if fields:
+        current = next(
+            (
+                m
+                for m in session["messages"]
+                if m.get("kind") == "seed" and m.get("source") == "auto"
+            ),
+            None,
+        )
+        if current is None:
+            session["messages"].append(_msg("assistant", "seed", **fields))
+        else:
+            current.update(fields)
+        view["seed_loaded"] = True
+    if view.get("execution_id"):
+        session["execution_id"] = view["execution_id"]
 
 
 def _validate_backend(backend: str, mode: str) -> None:

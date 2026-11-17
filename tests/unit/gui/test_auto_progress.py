@@ -1,0 +1,609 @@
+"""An Auto chat as a structured view: ``--progress-jsonl`` events folded into ``session["auto"]``.
+
+No agent CLI runs: the ``ouroboros auto`` child is a scripted Python process
+that writes the progress file the way the CLI writes it, and the auto session
+record is an ``AutoStore`` the test fills.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import sys
+import time
+from typing import Any
+
+import pytest
+
+from ouroboros.auto.state import AutoPipelineState, AutoStore
+from ouroboros.core.seed import (
+    EvaluationPrinciple,
+    ExitCondition,
+    OntologyField,
+    OntologySchema,
+    Seed,
+    SeedMetadata,
+)
+from ouroboros.gui import auto_progress, harness, jobs
+
+SESSION = "auto_0123456789ab"
+EXECUTION = "exec_20e9d3785fd6"
+
+
+def _event(kind: str, phase: str, message: str = "", **extra: Any) -> dict[str, Any]:
+    return {
+        "auto_session_id": SESSION,
+        "phase": phase,
+        "kind": kind,
+        "message": message,
+        "round": None,
+        "grade": None,
+        "question": None,
+        "answer": None,
+        "answer_source": None,
+        "timestamp": "2026-11-17T00:00:00+00:00",
+        **extra,
+    }
+
+
+def _line(event: dict[str, Any]) -> str:
+    return json.dumps(event, ensure_ascii=False) + "\n"
+
+
+def _seed(criteria: tuple[str, ...] = ("is_palindrome ignores case", "pytest passes")) -> Seed:
+    return Seed(
+        goal="A palindrome checker with tests",
+        constraints=("Python 3.12 standard library only",),
+        acceptance_criteria=criteria,
+        ontology_schema=OntologySchema(
+            name="Palindrome",
+            description="One function",
+            fields=(OntologyField(name="text", field_type="string", description="Input"),),
+        ),
+        evaluation_principles=(EvaluationPrinciple(name="tested", description="Tests pass"),),
+        exit_conditions=(
+            ExitCondition(name="done", description="Tests pass", evaluation_criteria="pytest"),
+        ),
+        metadata=SeedMetadata(seed_id="seed_test", ambiguity_score=0.1),
+    )
+
+
+def _record(store: AutoStore, **fields: Any) -> AutoPipelineState:
+    state = AutoPipelineState(goal="palindrome", cwd="/tmp", auto_session_id=SESSION)
+    state.max_interview_rounds = 12
+    for name, value in fields.items():
+        setattr(state, name, value)
+    store.save(state)
+    return state
+
+
+# ── reading the file ──────────────────────────────────────────────────
+
+
+def test_a_line_still_being_written_waits_for_its_newline(tmp_path: Path) -> None:
+    path = tmp_path / "p.jsonl"
+    tail = auto_progress.ProgressTail(path)
+    assert tail.read() == []  # no file yet: nothing, and no error
+    assert tail.error is None
+
+    whole = _line(_event("phase", "interview", "interview round 1/12"))
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(whole[:25])
+    assert tail.read() == []
+    assert tail.offset == 0
+
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(whole[25:])
+    events = tail.read()
+    assert [e["message"] for e in events] == ["interview round 1/12"]
+    assert tail.offset == len(whole.encode("utf-8"))
+    assert tail.read() == []
+    assert tail.skipped == 0
+
+
+def test_after_the_writer_exits_a_last_line_without_newline_is_read_or_counted(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "p.jsonl"
+    path.write_text(_line(_event("phase", "interview")) + json.dumps(_event("phase", "review")))
+    tail = auto_progress.ProgressTail(path)
+    assert [e["phase"] for e in tail.read()] == ["interview"]
+    assert [e["phase"] for e in tail.read(final=True)] == ["review"]
+
+    broken = tmp_path / "broken.jsonl"
+    broken.write_text(_line(_event("phase", "interview")) + '{"auto_session_id": "auto_')
+    tail = auto_progress.ProgressTail(broken)
+    assert [e["phase"] for e in tail.read(final=True)] == ["interview"]
+    assert tail.skipped == 1  # cut off mid-line: counted, not guessed at
+
+
+def test_a_line_longer_than_one_read_is_skipped_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(auto_progress, "READ_BYTES", 512)
+    path = tmp_path / "p.jsonl"
+    long = _line(_event("question", "interview", round=1, question="x" * 3000))
+    short = _line(_event("phase", "review", "ok"))
+    path.write_text(long + short, encoding="utf-8")
+    tail = auto_progress.ProgressTail(path)
+
+    events = tail.read(final=True)
+
+    assert [e["phase"] for e in events] == ["review"]
+    assert tail.skipped == 1
+    assert tail.offset == path.stat().st_size
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "not json",
+        "[1, 2]",
+        json.dumps({**_event("phase", "interview"), "kind": "teleport"}),
+        json.dumps({**_event("phase", "Interview Phase")}),
+        json.dumps({**_event("question", "interview"), "round": "3"}),
+        json.dumps({**_event("question", "interview"), "round": True}),
+        json.dumps({**_event("answer", "interview"), "answer": 42}),
+        json.dumps({**_event("grade", "review"), "grade": "excellent"}),
+        json.dumps({**_event("phase", "interview"), "auto_session_id": None}),
+        json.dumps({**_event("phase", "interview"), "message": ["x"]}),
+    ],
+)
+def test_a_line_that_is_not_an_event_is_refused_not_converted(tmp_path: Path, line: str) -> None:
+    path = tmp_path / "p.jsonl"
+    path.write_text(line + "\n" + _line(_event("phase", "review")), encoding="utf-8")
+    tail = auto_progress.ProgressTail(path)
+
+    assert [e["phase"] for e in tail.read()] == ["review"]
+    assert tail.skipped == 1
+
+
+# ── folding events ────────────────────────────────────────────────────
+
+
+def test_rounds_pair_a_question_with_its_answer_whatever_arrives_first() -> None:
+    view = auto_progress.new_view()
+    events = [
+        _event("question", "interview", "question round 1/12", round=1, question="Q1?"),
+        # An answer whose question event never arrived still brings its question.
+        _event(
+            "answer", "interview", round=2, question="Q2?", answer="A2", answer_source="repo_fact"
+        ),
+        _event(
+            "answer", "interview", round=1, question="Q1?", answer="A1", answer_source="non_goal"
+        ),
+        _event("question", "interview", round=3, question="Q3?"),
+        _event("question", "interview", question="no round: not pairable"),
+    ]
+    for event in events:
+        auto_progress.fold(view, event)
+
+    assert view["rounds"] == [
+        {"round": 1, "question": "Q1?", "answer": "A1", "answer_source": "non_goal"},
+        {"round": 2, "question": "Q2?", "answer": "A2", "answer_source": "repo_fact"},
+        {"round": 3, "question": "Q3?", "answer": None, "answer_source": None},
+    ]
+
+
+def test_phases_grades_and_repairs_are_kept_in_order_with_their_times() -> None:
+    view = auto_progress.new_view()
+    flow = [
+        _event("phase", "interview", "interview round 1/12", timestamp="t1"),
+        _event("phase", "interview", "answered round 1/12 from assumption", timestamp="t2"),
+        _event("phase", "seed_generation", "generating Seed", timestamp="t3"),
+        _event("phase", "review", "reviewing Seed for required grade A", timestamp="t4"),
+        _event("grade", "review", "Seed grade B", grade="B", timestamp="t5"),
+        _event("repair", "repair", "repair round 1", round=1, timestamp="t6"),
+        _event("grade", "review", "Seed grade A", grade="A", timestamp="t7"),
+        _event("phase", "run", "starting execution", timestamp="t8"),
+        _event("phase", "complete", "execution started", timestamp="t9"),
+    ]
+    reloads = [auto_progress.fold(view, event) for event in flow]
+
+    assert [(p["phase"], p["at"]) for p in view["phases"]] == [
+        ("interview", "t1"),
+        ("seed_generation", "t3"),
+        ("review", "t4"),
+        ("repair", "t6"),
+        ("review", "t7"),
+        ("run", "t8"),
+        ("complete", "t9"),
+    ]
+    assert view["phase"] == "complete"
+    assert view["grade"] == "A"
+    assert [(g["grade"], g["repair_round"]) for g in view["grades"]] == [("B", 0), ("A", 1)]
+    assert view["repair_round"] == 1
+    assert view["review_message"] == "Seed grade A"
+    assert view["auto_session_id"] == SESSION
+    # The record is read for the first event, then only when it has news.
+    assert reloads == [True, False, True, True, True, True, True, True, True]
+
+
+def test_the_view_stays_bounded() -> None:
+    view = auto_progress.new_view()
+    total = auto_progress.MAX_ROUNDS + 25
+    for number in range(1, total + 1):
+        auto_progress.fold(
+            view, _event("question", "interview", round=number, question="질문 " * 1000)
+        )
+        auto_progress.fold(
+            view,
+            _event(
+                "answer", "interview", round=number, answer="a" * 5000, answer_source="assumption"
+            ),
+        )
+    for index in range(auto_progress.MAX_PHASES + 10):
+        auto_progress.fold(view, _event("phase", "review" if index % 2 else "repair"))
+    for _ in range(auto_progress.MAX_GRADES + 5):
+        auto_progress.fold(view, _event("grade", "review", grade="B"))
+
+    assert len(view["rounds"]) == auto_progress.MAX_ROUNDS
+    assert view["rounds_dropped"] == 25
+    assert view["rounds"][0]["round"] == 26 and view["rounds"][-1]["round"] == total
+    first = view["rounds"][0]
+    assert len(first["question"]) == auto_progress.MAX_TEXT and first["question"].endswith("…")
+    assert len(first["answer"]) == auto_progress.MAX_TEXT and first["answer"].endswith("…")
+    assert len(view["phases"]) == auto_progress.MAX_PHASES
+    assert len(view["grades"]) == auto_progress.MAX_GRADES
+    # A late event for a round already dropped does not come back.
+    auto_progress.fold(view, _event("answer", "interview", round=3, answer="late"))
+    assert len(view["rounds"]) == auto_progress.MAX_ROUNDS
+    assert all(entry["round"] != 3 for entry in view["rounds"])
+
+
+# ── the auto session record ───────────────────────────────────────────
+
+
+def test_the_record_gives_the_seed_execution_and_round_limit(tmp_path: Path) -> None:
+    store = AutoStore(tmp_path)
+    _record(
+        store,
+        seed_artifact=_seed().to_dict(),
+        seed_path="/seeds/seed_test.yaml",
+        execution_id=EXECUTION,
+        job_id="job_0123",
+        last_grade="A",
+        findings=[{"message": "Success criteria are vague"}, {"code": "no message"}],
+    )
+
+    facts = auto_progress.load_facts(SESSION, store)
+
+    assert facts is not None
+    assert (facts["max_rounds"], facts["execution_id"], facts["job_id"]) == (
+        12,
+        EXECUTION,
+        "job_0123",
+    )
+    assert facts["findings"] == ["Success criteria are vague"]
+    fields = auto_progress.seed_fields(facts["seed"], facts["seed_path"])
+    assert fields["text"] == "A palindrome checker with tests"
+    assert fields["acceptance_criteria"] == ["is_palindrome ignores case", "pytest passes"]
+    assert fields["constraints"] == ["Python 3.12 standard library only"]
+    assert fields["seed_yaml"].startswith("goal: A palindrome checker")
+    assert fields["seed_path"] == "/seeds/seed_test.yaml"
+    assert auto_progress.load_facts("auto_missing000", store) is None
+    assert auto_progress.load_facts("../escape", store) is None
+
+
+def test_a_seed_too_large_for_the_chat_keeps_its_path_not_its_yaml() -> None:
+    criteria = tuple(f"criterion {index} " + "x" * 2000 for index in range(60))
+    fields = auto_progress.seed_fields(_seed(criteria).to_dict(), "/seeds/big.yaml")
+
+    assert fields["seed_yaml"] is None
+    assert fields["seed_path"] == "/seeds/big.yaml"
+    assert len(fields["acceptance_criteria"]) == auto_progress.MAX_SEED_ITEMS
+    assert fields["acceptance_total"] == 60
+    assert all(len(c) <= auto_progress.MAX_SEED_ITEM for c in fields["acceptance_criteria"])
+
+
+# ── the harness, end to end ───────────────────────────────────────────
+
+_SCRIPT = """
+import json, sys, time
+path = sys.argv[sys.argv.index("--progress-jsonl") + 1]
+lines = json.loads({lines!r})
+for index, line in enumerate(lines):
+    with open(path, "a", encoding="utf-8") as handle:
+        if index == {split}:
+            # Half a line, then a pause longer than the console's poll.
+            handle.write(line[:30]); handle.flush(); time.sleep(0.8)
+            handle.write(line[30:])
+        else:
+            handle.write(line)
+    time.sleep(0.02)
+print("2026-11-17T00:00:00Z [info     ] structlog noise lineno=234")
+print("  Execution ID: {execution}")
+print("Run handoff status: completed")
+"""
+
+
+def _flow() -> list[dict[str, Any]]:
+    return [
+        _event("phase", "interview", "interview round 1/12"),
+        _event(
+            "question", "interview", "question round 1/12", round=1, question="구두점도 무시할까요?"
+        ),
+        _event(
+            "answer",
+            "interview",
+            round=1,
+            question="구두점도 무시할까요?",
+            answer="Ignore punctuation.",
+            answer_source="assumption",
+        ),
+        _event("question", "interview", round=2, question="Where do the tests live?"),
+        _event(
+            "answer",
+            "interview",
+            round=2,
+            question="Where do the tests live?",
+            answer="tests/test_palindrome.py",
+            answer_source="repo_fact",
+        ),
+        _event("phase", "seed_generation", "generating Seed from auto interview"),
+        _event("phase", "review", "reviewing Seed for required grade A"),
+        _event("grade", "review", "Seed grade B", grade="B"),
+        _event("repair", "repair", "repair round 1", round=1),
+        _event("grade", "review", "Seed grade A", grade="A"),
+        _event("phase", "run", "starting execution for grade A Seed"),
+        _event("phase", "complete", "execution started for grade A Seed"),
+    ]
+
+
+def _fake_auto(monkeypatch: pytest.MonkeyPatch, lines: list[str], split: int = -1) -> None:
+    script = _SCRIPT.format(lines=json.dumps(lines), split=split, execution=EXECUTION)
+    monkeypatch.setattr(
+        harness, "ouroboros_command", lambda *args: [sys.executable, "-c", script, *args]
+    )
+
+
+class _NoBoard:
+    """The run's event tail: this run never wrote a board row."""
+
+    def __init__(self, *_args: Any) -> None:
+        pass
+
+    def fetch_new(self) -> list[dict[str, Any]]:
+        return []
+
+
+def _wait(h: harness.Harness, chat_id: str, check: Any, timeout: float = 20.0) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        session = h.get(chat_id) or {}
+        if check(session):
+            return session
+        time.sleep(0.05)
+    raise AssertionError(f"timed out; last state: {json.dumps(h.get(chat_id), default=str)[:3000]}")
+
+
+def _run_card_settled(session: dict[str, Any]) -> bool:
+    return session.get("status") == "done" and any(
+        m.get("kind") == "run" and m.get("run_status") != "running"
+        for m in session.get("messages", [])
+    )
+
+
+@pytest.fixture
+def no_board(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ouroboros.dashboard_web import reader
+
+    monkeypatch.setattr(reader, "EventTail", _NoBoard)
+
+
+@pytest.mark.usefixtures("no_board")
+def test_an_auto_chat_becomes_a_structured_view_and_survives_a_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = AutoStore()  # the default store, under the isolated HOME
+    _record(
+        store,
+        seed_artifact=_seed().to_dict(),
+        execution_id=EXECUTION,
+        job_id="job_0123",
+        last_grade="A",
+    )
+    _fake_auto(monkeypatch, [_line(e) for e in _flow()], split=2)
+    h = harness.Harness(jobs.JobRegistry())
+
+    chat = h.create({"goal": "palindrome", "mode": "auto", "cwd": str(tmp_path)})
+    job = h._jobs.get(chat["auto_job_id"])
+    assert job is not None
+    progress = auto_progress.progress_file(harness.chats_dir(), chat["id"])
+    assert job.argv[-2:] == ["--progress-jsonl", str(progress)]
+
+    session = _wait(h, chat["id"], _run_card_settled)
+
+    view = session["auto"]
+    assert view["auto_session_id"] == SESSION
+    assert view["rounds"] == [
+        {
+            "round": 1,
+            "question": "구두점도 무시할까요?",
+            "answer": "Ignore punctuation.",
+            "answer_source": "assumption",
+        },
+        {
+            "round": 2,
+            "question": "Where do the tests live?",
+            "answer": "tests/test_palindrome.py",
+            "answer_source": "repo_fact",
+        },
+    ]
+    assert view["skipped"] == 0  # the half-written line was read once it was whole
+    assert [p["phase"] for p in view["phases"]] == [
+        "interview",
+        "seed_generation",
+        "review",
+        "repair",
+        "review",
+        "run",
+        "complete",
+    ]
+    assert (view["grade"], view["repair_round"], view["max_rounds"]) == ("A", 1, 12)
+    assert [g["grade"] for g in view["grades"]] == ["B", "A"]
+    assert (view["execution_id"], view["outcome"]) == (EXECUTION, "completed")
+
+    kinds = [m["kind"] for m in session["messages"]]
+    assert kinds == ["text", "log", "seed", "run", "note", "result"]
+    seed = session["messages"][2]
+    assert (seed["source"], seed["text"]) == ("auto", "A palindrome checker with tests")
+    assert seed["acceptance_criteria"] == ["is_palindrome ignores case", "pytest passes"]
+    run = session["messages"][3]
+    assert (run["execution_id"], run["job_id"]) == (EXECUTION, "job_0123")
+    # The run never reported an end before Auto did: it is not shown as running.
+    assert run["run_status"] == "interrupted"
+    log = session["messages"][1]
+    assert any("structlog noise" in line for line in log["lines"])  # the raw log is kept
+
+    # Saved with the chat: a new console reads back the same view and messages.
+    again = harness.Harness(jobs.JobRegistry()).get(chat["id"]) or {}
+    assert again["auto"] == view
+    assert again["messages"] == session["messages"]
+
+
+def test_a_restart_marks_a_running_auto_chat_and_its_run_card_interrupted() -> None:
+    chat = {
+        "id": "live00000001",
+        "title": "t",
+        "goal": "t",
+        "cwd": "/tmp",
+        "mode": "auto",
+        "status": "running",
+        "version": 7,
+        "auto": {**auto_progress.new_view(), "phase": "complete", "execution_id": EXECUTION},
+        "messages": [
+            {
+                "id": "r1",
+                "role": "assistant",
+                "kind": "run",
+                "text": "",
+                "ts": 0,
+                "execution_id": EXECUTION,
+                "run_status": "running",
+                "progress": None,
+            },
+        ],
+    }
+    (harness.chats_dir() / "live00000001.json").write_text(json.dumps(chat), encoding="utf-8")
+
+    loaded = harness.Harness(jobs.JobRegistry()).get("live00000001") or {}
+
+    assert loaded["status"] == "interrupted"
+    assert loaded["messages"][0]["run_status"] == "interrupted"
+    assert loaded["auto"] == chat["auto"]  # the story so far is kept as it was
+
+
+def test_an_old_auto_chat_without_a_view_loads_exactly_as_saved() -> None:
+    old = {
+        "id": "old000000001",
+        "title": "t",
+        "goal": "t",
+        "cwd": "/tmp",
+        "mode": "auto",
+        "status": "done",
+        "version": 3,
+        "messages": [
+            {"id": "m1", "role": "user", "kind": "text", "text": "t", "ts": 0},
+            {
+                "id": "m2",
+                "role": "assistant",
+                "kind": "log",
+                "text": "ouroboros auto",
+                "ts": 0,
+                "lines": ["[auto] interview — interview round 1/50"],
+                "job_id": "j",
+            },
+        ],
+    }
+    (harness.chats_dir() / "old000000001.json").write_text(json.dumps(old), encoding="utf-8")
+
+    loaded = harness.Harness(jobs.JobRegistry()).get("old000000001")
+
+    assert loaded == old
+    assert "auto" not in (loaded or {})
+
+
+@pytest.mark.usefixtures("no_board")
+def test_a_repaired_seed_replaces_the_card_rather_than_adding_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = AutoStore()
+    _record(store, seed_artifact=_seed(("first draft",)).to_dict(), last_grade="B")
+    h = harness.Harness(jobs.JobRegistry())
+    h._sessions["c1"] = {
+        "id": "c1",
+        "title": "t",
+        "goal": "t",
+        "cwd": str(tmp_path),
+        "mode": "auto",
+        "status": "running",
+        "version": 0,
+        "auto": auto_progress.new_view(),
+        "messages": [],
+    }
+    h._sessions["c1"]["auto"]["auto_session_id"] = SESSION
+
+    first = h._auto_facts(SESSION)
+    assert first is not None
+    h._update("c1", lambda s: harness._apply_auto_facts(s, first))
+    _record(store, seed_artifact=_seed(("repaired", "second")).to_dict(), last_grade="A")
+    second = h._auto_facts(SESSION)
+    assert second is not None
+    h._update("c1", lambda s: harness._apply_auto_facts(s, second))
+
+    seeds = [m for m in (h.get("c1") or {})["messages"] if m["kind"] == "seed"]
+    assert len(seeds) == 1
+    assert seeds[0]["acceptance_criteria"] == ["repaired", "second"]
+
+
+def test_the_auto_run_card_stops_with_the_auto_job_and_leaves_the_chat_to_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_board: None
+) -> None:
+    h = harness.Harness(jobs.JobRegistry())
+    job = jobs.Job(id="j-auto", kind="auto", title="t", argv=["ouroboros", "auto"])
+    job.status = "succeeded"
+    h._jobs._jobs[job.id] = job
+    h._sessions["c1"] = {
+        "id": "c1",
+        "title": "t",
+        "goal": "t",
+        "cwd": str(tmp_path),
+        "mode": "auto",
+        "status": "running",
+        "version": 0,
+        "auto": auto_progress.new_view(),
+        "messages": [
+            {
+                "id": "r1",
+                "role": "assistant",
+                "kind": "run",
+                "text": "",
+                "ts": 0,
+                "execution_id": EXECUTION,
+                "run_status": "running",
+                "progress": None,
+            },
+        ],
+    }
+
+    started = time.monotonic()
+    h._follow_run("c1", EXECUTION, None, auto_job_id=job.id)  # returns: the job has ended
+
+    assert time.monotonic() - started < 5
+    session = h.get("c1") or {}
+    assert session["status"] == "running"  # the Auto job's end decides this, not the card
+    assert [m["kind"] for m in session["messages"]] == ["run"]
+    assert session["messages"][0]["run_status"] == "interrupted"
+
+
+def test_deleting_an_auto_chat_removes_its_progress_file() -> None:
+    h = harness.Harness(jobs.JobRegistry())
+    h._sessions["c1"] = {"id": "c1", "mode": "auto", "messages": [], "version": 0}
+    progress = auto_progress.progress_file(harness.chats_dir(), "c1")
+    progress.parent.mkdir(parents=True, exist_ok=True)
+    progress.write_text(_line(_event("phase", "interview")), encoding="utf-8")
+
+    h.delete("c1")
+
+    assert not progress.exists()
