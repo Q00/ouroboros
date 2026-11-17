@@ -2750,6 +2750,21 @@ class TestMCPServerAdapterTools:
         # A logical block (input_required) is not an error and not usage.
         record_usage.assert_not_called()
 
+    async def test_call_tool_uncounted_success_still_runs_the_due_day_check(self) -> None:
+        """A successful status poll counts nothing but still sends finished days."""
+        adapter = MCPServerAdapter()
+        adapter.register_tool(MockToolHandler("ouroboros_job_wait"))
+
+        with (
+            patch("ouroboros.telemetry.note_activity") as note_activity,
+            patch("ouroboros.telemetry._record_usage") as record_usage,
+        ):
+            result = await adapter.call_tool("ouroboros_job_wait", {"input": "safe"})
+
+        assert result.is_ok
+        note_activity.assert_called_once_with()
+        record_usage.assert_not_called()
+
     async def test_call_tool_recoverable_interview_failure_counts_as_an_error(self) -> None:
         """A recoverable interview failure is ``Result.ok(is_error=True)`` with
         no input_required marker: a failure, so it adds ``mcp_tool_errors``."""
@@ -3988,6 +4003,23 @@ class TestServeTransport:
         with patch("ouroboros.telemetry._record_usage") as record_usage:
             await call_sdk_tool(adapter, "custom_tool", {"input": "safe"})
 
+        record_usage.assert_not_called()
+
+    async def test_sdk_uncounted_success_still_runs_the_due_day_check(self) -> None:
+        """SDK-path companion: a successful status poll still sends finished days."""
+        pytest.importorskip("mcp.server")
+        from ouroboros.mcp.telemetry_boundary import call_sdk_tool
+
+        adapter = MCPServerAdapter()
+        adapter.register_tool(MockToolHandler("ouroboros_job_wait"))
+
+        with (
+            patch("ouroboros.telemetry.note_activity") as note_activity,
+            patch("ouroboros.telemetry._record_usage") as record_usage,
+        ):
+            await call_sdk_tool(adapter, "ouroboros_job_wait", {"input": "safe"})
+
+        note_activity.assert_called_once_with()
         record_usage.assert_not_called()
 
     async def test_sdk_recoverable_interview_failure_counts_as_an_error(self) -> None:

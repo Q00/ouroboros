@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 import json
 import os
 from pathlib import Path
@@ -1855,6 +1856,45 @@ class TestNetworkEventSet:
         assert holders == {"telemetry.py"}
 
 
+# Every telemetry entry point that a process reaches when it does anything
+# (CLI command, MCP tool call of any kind, MCP server start, fan-out, run
+# observation, run outcome, console request via note_activity), called the
+# way that adds no count wherever such a way exists.
+_ACTIVITY_ENTRY_POINTS: dict[str, Callable[[], None]] = {
+    "capture": lambda: telemetry.capture("workflow_outcome", dict(_OUTCOME)),
+    "capture_ac_verify_failed": lambda: telemetry.capture_ac_verify_failed("unknown"),
+    "capture_acceptance_artifact_checks": lambda: telemetry.capture_acceptance_artifact_checks(
+        base_regression=None,
+        worker_tests=None,
+        failed_criteria=0,
+        criterion_count=0,
+        repairs=0,
+        surface=None,
+        runtime_backend=None,
+    ),
+    "capture_acceptance_no_evidence": lambda: telemetry.capture_acceptance_no_evidence(
+        [],
+        criterion_count=0,
+        verification_coverage=None,
+        surface=None,
+        check_package=None,
+        check_package_status=None,
+        runtime_backend=None,
+    ),
+    "capture_cli_command": lambda: telemetry.capture_cli_command("mcp"),
+    "capture_job_outcome": lambda: telemetry.capture_job_outcome(
+        "job_1", "run", terminal_status="completed"
+    ),
+    "capture_mcp_serve_started": lambda: telemetry.capture_mcp_serve_started("stdio"),
+    "capture_runtime_drift": lambda: telemetry.capture_runtime_drift("unknown"),
+    "capture_subagent_dispatch": lambda: telemetry.capture_subagent_dispatch(
+        {"phase": "submitted"}
+    ),
+    "capture_tool_call": lambda: telemetry.capture_tool_call("ouroboros_job_wait", ok=True),
+    "note_activity": lambda: telemetry.note_activity(),
+}
+
+
 class TestUsageRollup:
     """Commands are counted locally and sent as one usage_daily row per day."""
 
@@ -1949,6 +1989,87 @@ class TestUsageRollup:
         telemetry.flush(timeout=1.0)
         assert not _rollup_path().exists()
         assert posted == []
+
+    def test_a_server_up_past_midnight_sends_the_day_on_a_status_poll(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        # One MCP server process: a counted call on day 1, then only
+        # successful polls (counted as nothing) once the day is over.
+        _on_day(monkeypatch, "2026-11-16")
+        telemetry.capture_tool_call("ouroboros_interview", ok=True)
+        telemetry.flush(timeout=2.0)
+        _on_day(monkeypatch, "2026-11-17")
+        telemetry.capture_tool_call("ouroboros_job_wait", ok=True)
+        telemetry.capture_tool_call("ouroboros_session_status", ok=True)
+        telemetry.flush(timeout=2.0)
+
+        (row,) = sent
+        assert (row["event"], row["properties"]["day"]) == ("usage_daily", "2026-11-16")
+        assert row["properties"]["cmd_interview"] == 1
+        state = json.loads(_rollup_path().read_text(encoding="utf-8"))
+        assert (state["days"], state["sending"], state["sent"]) == ({}, {}, ["2026-11-16"])
+
+    def test_every_activity_entry_point_is_listed(self) -> None:
+        public = {name for name in telemetry.__all__ if name.startswith("capture")}
+        assert public | {"note_activity"} == set(_ACTIVITY_ENTRY_POINTS)
+
+    @pytest.mark.parametrize("entry", sorted(_ACTIVITY_ENTRY_POINTS))
+    def test_every_activity_entry_point_sends_a_finished_day_once(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]], entry: str
+    ) -> None:
+        _on_day(monkeypatch, "2026-11-16")
+        telemetry.capture_cli_command("run")
+        _next_process_on(monkeypatch, "2026-11-17")
+        _ACTIVITY_ENTRY_POINTS[entry]()
+        _ACTIVITY_ENTRY_POINTS[entry]()
+        telemetry.flush(timeout=2.0)
+
+        usage = [event for event in sent if event["event"] == "usage_daily"]
+        assert [(e["properties"]["day"], e["properties"]["cmd_run"]) for e in usage] == [
+            ("2026-11-16", 1)
+        ]
+
+    def test_activity_while_opted_out_sends_and_claims_nothing(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        _on_day(monkeypatch, "2026-11-16")
+        telemetry.capture_cli_command("run")
+        _next_process_on(monkeypatch, "2026-11-17")
+        monkeypatch.setenv("OUROBOROS_TELEMETRY", "0")
+        for entry in _ACTIVITY_ENTRY_POINTS.values():
+            entry()
+        telemetry.flush(timeout=2.0)
+
+        assert sent == []
+        state = json.loads(_rollup_path().read_text(encoding="utf-8"))
+        assert (list(state["days"]), state["sending"]) == (["2026-11-16"], {})
+
+    def test_polls_check_the_rollup_once_a_day_and_post_nothing_when_none_is_due(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        _on_day(monkeypatch, "2026-11-17")
+        claims: list[tuple[Any, ...]] = []
+        enabled_checks: list[bool] = []
+        real_claim, real_enabled = telemetry_rollup.claim_due, telemetry.is_enabled
+
+        def counting_claim(*args: Any) -> list[dict[str, Any]]:
+            claims.append(args)
+            return real_claim(*args)
+
+        def counting_enabled() -> bool:
+            enabled_checks.append(True)
+            return real_enabled()
+
+        monkeypatch.setattr(telemetry_rollup, "claim_due", counting_claim)
+        monkeypatch.setattr(telemetry, "is_enabled", counting_enabled)
+        for _ in range(50):
+            telemetry.capture_tool_call("ouroboros_job_wait", ok=True)
+        telemetry.flush(timeout=2.0)
+
+        # After the first poll of the day, a poll neither reads the
+        # configuration nor touches the rollup file.
+        assert (len(claims), len(enabled_checks)) == (1, 1)
+        assert sent == []
 
     def test_a_day_is_sent_once_after_it_ends(
         self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]

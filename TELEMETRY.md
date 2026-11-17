@@ -31,9 +31,10 @@ tool arguments, environment variables, account data, or project identifiers.
 **How daily usage is counted.** Commands, MCP server starts and fan-out
 dispatches are not sent as they happen. Each one adds to a counter for the
 current UTC day in `~/.ouroboros/telemetry-usage.json`, on this machine. The
-first Ouroboros process that runs on a later day sends each finished day as
-one `usage_daily` row, timestamped at noon UTC of the day it describes, and
-deletes it once the send succeeds. A failed send is retried by a later
+first Ouroboros process that does anything on a later day (any CLI command,
+any MCP request including a status poll, a console request, or a run event)
+sends each finished day as one `usage_daily` row, timestamped at noon UTC of
+the day it describes, and deletes it once the send succeeds. A failed send is retried by a later
 process with the same content. Every send of a day carries the same event
 `uuid`, derived from the anonymous ID and the day, which PostHog uses to drop
 duplicates. A day is therefore reported on the next day Ouroboros runs, and a

@@ -1111,6 +1111,28 @@ def _send_due_usage(today: str | None = None) -> None:
         _queue_usage_daily(bucket, resolved_id)
 
 
+def note_activity() -> None:
+    """Send finished rollup days on process activity that adds no count.
+
+    Every capture entry point that adds no count calls this (a successful
+    status poll, an internal CLI command, a console request, a run
+    observation), and every one that does goes through ``_record_usage``, so
+    any Ouroboros activity on a later day sends the days that are over. Once
+    this process has checked the rollup today it returns before reading the
+    configuration, so a hot polling path stays cheap. Respects every opt-out
+    (``is_enabled``), queues nothing when no day is due, and never raises.
+    """
+    try:
+        day = _utc_day()
+        with _lock:
+            if _rollup_checked_day == day:
+                return
+        if is_enabled():
+            _send_due_usage(day)
+    except Exception:
+        pass
+
+
 def _record_usage(counts: Mapping[str, int]) -> None:
     """Add closed-vocabulary counts to today's local rollup. Never raises.
 
@@ -1129,13 +1151,12 @@ def _record_usage(counts: Mapping[str, int]) -> None:
             for key, value in counts.items()
             if key in _USAGE_COUNT_KEYS and type(value) is int and value > 0
         }
-        if not clean:
-            return
         day = _utc_day()
-        try:
-            telemetry_rollup.record(_state_dir(), day, clean, _usage_dims())
-        except Exception:
-            pass
+        if clean:
+            try:
+                telemetry_rollup.record(_state_dir(), day, clean, _usage_dims())
+            except Exception:
+                pass
         _send_due_usage(day)
     except Exception:
         pass
@@ -1157,7 +1178,8 @@ def capture_tool_call(
     ``surface_mcp``; polling, status and other ``_UNCOUNTED_TOOLS`` add
     nothing. Any request that failed with an error (not a logical block such
     as ``input_required``) adds ``mcp_tool_errors``. ``origin`` is counted
-    only for ``command=seed`` and only from ``_SEED_CONTEXT_ORIGINS``.
+    only for ``command=seed`` and only from ``_SEED_CONTEXT_ORIGINS``. A call
+    that adds nothing still sends finished days (``note_activity``).
     """
     del duration_ms, error_type
     try:
@@ -1172,6 +1194,8 @@ def capture_tool_call(
             counts["mcp_tool_errors"] = 1
         if counts:
             _record_usage(counts)
+        else:
+            note_activity()
     except Exception:
         pass
 
@@ -1185,10 +1209,13 @@ def capture_cli_command(subcommand: str | None) -> None:
     unaudited value is counted as ``cmd_extension_command`` and never
     becomes a key -- see ``_CANONICAL_CLI_COMMANDS``. ``ouroboros gui`` and
     commands the console starts (``_SURFACE_ENV``) count as
-    ``surface_console``; everything else as ``surface_cli``.
+    ``surface_console``; everything else as ``surface_cli``. The internal
+    ``mcp``, ``job`` and ``dispatch`` commands count nothing but still send
+    finished days (``note_activity``).
     """
     try:
         if not subcommand or subcommand in _CLI_SKIP:
+            note_activity()
             return
         command = (
             _CLI_FUNNEL.get(subcommand, subcommand)
@@ -1212,6 +1239,8 @@ def capture_subagent_dispatch(properties: Mapping[str, Any]) -> None:
     try:
         if properties.get("phase") == "emitted":
             _record_usage({"subagent_dispatches": 1})
+        else:
+            note_activity()
     except Exception:
         pass
 
@@ -1333,6 +1362,7 @@ def capture_ac_verify_failed(cause: str | None) -> None:
     fixed ``unknown`` literal -- a future gate branch (or a replayed/spoofed
     value) is counted, never forwarded verbatim.
     """
+    note_activity()
     try:
         tally = _OUTCOME_TALLY.get()
         if tally is not None:
@@ -1343,6 +1373,7 @@ def capture_ac_verify_failed(cause: str | None) -> None:
 
 def capture_runtime_drift(kind: str | None) -> None:
     """Count one mid-run change of a frozen runtime authority input for this run."""
+    note_activity()
     try:
         tally = _OUTCOME_TALLY.get()
         if tally is not None:
@@ -1372,6 +1403,7 @@ def capture_acceptance_no_evidence(
     """
     del criterion_count, surface, check_package, check_package_status
     del runtime_backend, check_package_mode
+    note_activity()
     try:
         reasons = Counter(
             _fold(package_reason, _NO_EVIDENCE_PACKAGE_REASONS) for package_reason, _ in pairs
@@ -1410,6 +1442,7 @@ def capture_acceptance_artifact_checks(
     del criterion_count, repairs, surface, runtime_backend, exemption, exempted_tests
     del base_regression_mode, worker_test_gate_mode, base_regression_effect
     del worker_tests_effect, would_fail_criteria
+    note_activity()
     try:
         tally = _OUTCOME_TALLY.get()
         if tally is not None:
@@ -1632,6 +1665,7 @@ __all__ = [
     "flush",
     "is_enabled",
     "new_outcome_tally",
+    "note_activity",
     "outcome_scope",
     "set_context",
     "show_first_run_notice",
