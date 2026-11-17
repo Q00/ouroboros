@@ -19,6 +19,7 @@ from ouroboros.config.models import ModelConfig, OuroborosConfig
 from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
 from ouroboros.core.types import Result
 from ouroboros.mcp.tools.execution_handlers import _resolve_execution_preferences_request
+from ouroboros.orchestrator import model_routing
 from ouroboros.orchestrator.adapter import ClaudeAgentAdapter
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.orchestrator.model_routing import MODEL_TIER_LADDER, resolve_execute_model
@@ -374,11 +375,21 @@ async def test_old_sentinel_contract_resumes_as_advisory(
     sentinel_config = with_runtime_models(
         config, "openai", dict.fromkeys(MODEL_TIER_LADDER, "default")
     )
-    monkeypatch.setenv("OUROBOROS_MODEL_TIER_ROUTING", "1")
-    old = runner(CodexCliRuntime(cli_path=cli, cwd=tmp_path), sentinel_config)
-    persisted = await prepared_contract(old)
+    build_router = model_routing.build_model_router
+
+    def old_build_router(*args: Any, **kwargs: Any) -> Any:
+        # Old releases persisted this advisory-only router; new runs stay dormant.
+        kwargs.pop("require_enforceable", None)
+        return build_router(*args, **kwargs)
+
+    with monkeypatch.context() as old_release:
+        old_release.setenv("OUROBOROS_MODEL_TIER_ROUTING", "1")
+        old_release.setattr(model_routing, "build_model_router", old_build_router)
+        old = runner(CodexCliRuntime(cli_path=cli, cwd=tmp_path), sentinel_config)
+        persisted = await prepared_contract(old)
+    assert persisted["model_routing"]["enabled"] is True
+    assert set(persisted["model_routing"]["router"]["tier_models"].values()) == {"default"}
     assert set(persisted["model_routing"]["resolved_models"]["tiers"].values()) == {"default"}
-    monkeypatch.delenv("OUROBOROS_MODEL_TIER_ROUTING")
     resumed = runner(CodexCliRuntime(cli_path=cli, cwd=tmp_path), config)
 
     changed = resumed._restore_execution_contract(
@@ -418,17 +429,31 @@ async def test_codex_default_is_dormant_but_explicit_routing_has_distinct_tiers(
     )
 
     monkeypatch.setenv("OUROBOROS_MODEL_TIER_ROUTING", "1")
-    explicit = runner(CodexCliRuntime(cli_path=cli, cwd=tmp_path), config)
+    # The shipped Codex ladder names no model, so opting into routing still
+    # leaves Codex on its own configured model.
+    shipped = runner(CodexCliRuntime(cli_path=cli, cwd=tmp_path), config)
+    inherited = await prepared_contract(shipped)
+    assert shipped._model_router is None
+    assert inherited["model_routing"]["enabled"] is False
+    assert (
+        await shipped._route_call_effort(execution_id="native-exec", session_id="native-session")
+        == {}
+    )
+
+    configured = with_runtime_models(
+        config, "codex", {tier: f"proxy/{tier}" for tier in MODEL_TIER_LADDER}
+    )
+    explicit = runner(CodexCliRuntime(cli_path=cli, cwd=tmp_path), configured)
     enabled = await prepared_contract(explicit)
     assert enabled["model_routing"]["enabled"] is True
     assert dict(explicit._model_router.tier_models) == {
-        "frugal": "gpt-6-luna",
-        "standard": "gpt-6.1-sol",
-        "frontier": "gpt-6-astra",
+        "frugal": "proxy/frugal",
+        "standard": "proxy/standard",
+        "frontier": "proxy/frontier",
     }
     assert await explicit._route_call_effort(
         execution_id="native-exec", session_id="native-session"
-    ) == {"model": explicit._model_router.tier_models["standard"]}
+    ) == {"model": "proxy/standard"}
 
 
 _LEGACY_CODEX_MODELS = {
@@ -438,8 +463,18 @@ _LEGACY_CODEX_MODELS = {
 }
 
 
+_PREVIOUS_SHIPPED_CODEX_MODELS = {
+    "frugal": "gpt-6-luna",
+    "standard": "gpt-6.1-sol",
+    "frontier": "gpt-6-astra",
+}
+
+
 async def legacy_concrete_contract(
-    monkeypatch: pytest.MonkeyPatch, cli: str, root: Path
+    monkeypatch: pytest.MonkeyPatch,
+    cli: str,
+    root: Path,
+    models: dict[str, str] = _LEGACY_CODEX_MODELS,
 ) -> dict[str, Any]:
     """Prepare the actual old concrete ladder before the normalization bump.
 
@@ -447,7 +482,7 @@ async def legacy_concrete_contract(
     pre-upgrade resolution; all runner preparation, serialization, authority,
     seed and workspace contracts still execute normally.
     """
-    legacy_config = with_runtime_models(get_default_config(), "openai", _LEGACY_CODEX_MODELS)
+    legacy_config = with_runtime_models(get_default_config(), "openai", models)
     with monkeypatch.context() as old_release:
         old_release.setenv("OUROBOROS_MODEL_TIER_ROUTING", "1")
         old_release.setattr(
@@ -519,3 +554,89 @@ async def test_concrete_codex_replay_rejects_consistent_but_unauthorized_models(
             {EXECUTION_CONTRACT_PROGRESS_KEY: persisted}, seed=seed()
         )
     assert resumed._execution_contract is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "ladder",
+    [None, _PREVIOUS_SHIPPED_CODEX_MODELS, _LEGACY_CODEX_MODELS],
+    ids=["shipped", "previous-shipped", "older-shipped"],
+)
+async def test_codex_shipped_ladders_send_no_model_even_when_routing_is_requested(
+    ladder: dict[str, str] | None, monkeypatch: pytest.MonkeyPatch, cli: str, tmp_path: Path
+) -> None:
+    config = get_default_config()
+    if ladder is not None:
+        config = with_runtime_models(config, "openai", ladder)
+    monkeypatch.setenv("OUROBOROS_MODEL_TIER_ROUTING", "1")
+    runtime = CodexCliRuntime(cli_path=cli, cwd=tmp_path)
+    explicit = runner(runtime, config, base_model_tier="frontier")
+
+    persisted = await prepared_contract(explicit)
+
+    assert explicit._model_router is None
+    assert persisted["model_routing"]["enabled"] is False
+    assert persisted["model_routing"]["requested_model_tier"] is None
+    assert (
+        await explicit._route_call_effort(execution_id="native-exec", session_id="native-session")
+        == {}
+    )
+    assert "--model" not in runtime._build_command("/tmp/output", prompt="tier")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resume_config", ["shipped", "persisted"])
+async def test_previous_shipped_codex_contract_replays_its_concrete_models(
+    resume_config: str, monkeypatch: pytest.MonkeyPatch, cli: str, tmp_path: Path
+) -> None:
+    """A run that enforced the previous shipped ladder keeps it across this upgrade."""
+    persisted = await legacy_concrete_contract(
+        monkeypatch, cli, tmp_path, _PREVIOUS_SHIPPED_CODEX_MODELS
+    )
+    routing = persisted["model_routing"]
+    assert routing["router"]["tier_models"] == _PREVIOUS_SHIPPED_CODEX_MODELS
+    config = get_default_config()
+    if resume_config == "persisted":
+        config = with_runtime_models(config, "openai", _PREVIOUS_SHIPPED_CODEX_MODELS)
+    resumed = runner(CodexCliRuntime(cli_path=cli, cwd=tmp_path), config)
+
+    assert (
+        resumed._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted}, seed=seed()
+        )
+        is False
+    )
+
+    assert dict(resumed._model_router.tier_models) == _PREVIOUS_SHIPPED_CODEX_MODELS
+    assert resumed._execution_contract["model_routing"] == routing
+    assert await resumed._route_call_effort(
+        execution_id="native-exec", session_id="native-session"
+    ) == {"model": "gpt-6.1-sol"}
+
+
+@pytest.mark.asyncio
+async def test_previous_shipped_codex_replay_rejects_swapped_tiers(
+    monkeypatch: pytest.MonkeyPatch, cli: str, tmp_path: Path
+) -> None:
+    """Every shipped Codex id now resolves to ``default``; replay still checks its tier."""
+    persisted = await legacy_concrete_contract(
+        monkeypatch, cli, tmp_path, _PREVIOUS_SHIPPED_CODEX_MODELS
+    )
+    models = dict(_PREVIOUS_SHIPPED_CODEX_MODELS)
+    models["frugal"], models["frontier"] = models["frontier"], models["frugal"]
+    routing = persisted["model_routing"]
+    routing["router"]["tier_models"] = dict(models)
+    routing["resolved_models"]["tiers"] = dict(models)
+    projection = routing["route_compat"]["projection"]
+    tier_for_route = {entry["route_id"]: entry["tier"] for entry in projection["tier_route_ids"]}
+    for candidate in projection["registry"]["candidates"]:
+        candidate["model"] = models[tier_for_route[candidate["route_id"]]]
+    persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
+        routing
+    )
+    resumed = runner(CodexCliRuntime(cli_path=cli, cwd=tmp_path), get_default_config())
+
+    with pytest.raises(OrchestratorError, match="changed model-routing policy"):
+        resumed._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted}, seed=seed()
+        )

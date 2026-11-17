@@ -1845,19 +1845,64 @@ def _pre_upgrade_contract(contract: dict) -> dict:
     return legacy
 
 
+def _previous_release_config() -> OuroborosConfig:
+    """The config.yaml a release that shipped concrete Claude tier ids wrote."""
+    config = get_default_config()
+    tiers = {
+        name: tier.model_copy(
+            update={
+                "models": [
+                    entry.model_copy(update={"model": _CONCRETE_TIERS[name]})
+                    if entry.provider == "anthropic"
+                    else entry
+                    for entry in tier.models
+                ]
+            }
+        )
+        for name, tier in config.economics.tiers.items()
+    }
+    return config.model_copy(
+        update={"economics": config.economics.model_copy(update={"tiers": tiers})}
+    )
+
+
+@pytest.mark.parametrize("pinned_original", [False, True])
+def test_shipped_claude_ids_route_to_aliases_whether_or_not_pinned(
+    monkeypatch: pytest.MonkeyPatch, pinned_original: bool
+) -> None:
+    """A persisted shipped Claude ladder follows the alias default under ``models.pin``."""
+    if pinned_original:
+        monkeypatch.setenv("OUROBOROS_PIN_MODELS", "1")
+    else:
+        monkeypatch.delenv("OUROBOROS_PIN_MODELS", raising=False)
+    monkeypatch.setattr("ouroboros.config.load_config", _previous_release_config)
+
+    runner = _runner(constructor_model="sonnet")
+
+    assert runner._model_router is not None
+    assert dict(runner._model_router.tier_models) == _ALIAS_TIERS
+
+
 def test_pre_upgrade_concrete_contract_resumes_on_its_persisted_models(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A run started before ``auto`` replays its concrete ids instead of resolving again."""
     monkeypatch.setenv("OUROBOROS_PIN_MODELS", "1")
-    original = _runner(constructor_model=DEFAULT_SONNET_MODEL)
-    assert original._model_router is not None
-    assert dict(original._model_router.tier_models) == _CONCRETE_TIERS
-    persisted = _pre_upgrade_contract(
-        original._build_execution_contract(
-            project_identity=original._project_identity(), seed=_seed()
+    monkeypatch.setattr("ouroboros.config.load_config", _previous_release_config)
+    with monkeypatch.context() as old_release:
+        # That release enforced its shipped concrete ids verbatim.
+        old_release.setattr(
+            "ouroboros.orchestrator.model_routing.normalize_tier_model",
+            lambda model, **_kwargs: model,
         )
-    )
+        original = _runner(constructor_model=DEFAULT_SONNET_MODEL)
+        assert original._model_router is not None
+        assert dict(original._model_router.tier_models) == _CONCRETE_TIERS
+        persisted = _pre_upgrade_contract(
+            original._build_execution_contract(
+                project_identity=original._project_identity(), seed=_seed()
+            )
+        )
 
     monkeypatch.delenv("OUROBOROS_PIN_MODELS")
     resumed = _runner(constructor_model="sonnet")

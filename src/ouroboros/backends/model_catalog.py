@@ -34,6 +34,7 @@ from ouroboros.backends.capabilities import (
 )
 from ouroboros.codex.home import resolve_codex_home
 from ouroboros.config._model_defaults import (
+    CLAUDE_TIER_ALIASES,
     CODEX_TIER_MODELS,
     DEFAULT_HAIKU_MODEL,
     DEFAULT_OPUS_MODEL,
@@ -77,6 +78,13 @@ _DEFAULT_FIRST_MODEL_BACKENDS = frozenset(
 
 # The sentinel the loader maps Claude-incapable backends to.
 DEFAULT_MODEL_SENTINEL = "default"
+
+# Alias backends list the tier aliases first, strongest first: Claude Code
+# resolves each to the newest model of that class for its provider, so they never
+# go stale. Concrete ids follow for a user who wants an exact pin.
+_CLAUDE_ALIAS_CHOICES: tuple[str, ...] = tuple(
+    CLAUDE_TIER_ALIASES[tier] for tier in ("frontier", "standard", "frugal")
+)
 
 _LIST_COMMAND_TIMEOUT_SECONDS = 5.0
 
@@ -232,6 +240,8 @@ def _build_catalogs() -> dict[str, BackendModelCatalog]:
             models: tuple[str, ...] = (DEFAULT_MODEL_SENTINEL,)
         else:
             models = (DEFAULT_OPUS_MODEL, DEFAULT_SONNET_MODEL)
+        if name in _ALIAS_MODEL_BACKENDS:
+            models = _CLAUDE_ALIAS_CHOICES + models
         models = models + _EXTRA_KNOWN_MODELS.get(name, ())
         catalogs[name] = BackendModelCatalog(
             backend=name,

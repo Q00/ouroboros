@@ -24,17 +24,27 @@ HISTORICAL = [
 ]
 
 
-@pytest.mark.parametrize(("tier", "old", "current"), HISTORICAL)
+# Every shipped economics id, including the 5.5 pins the ladder held until it
+# moved to the Claude Code aliases.
+HISTORICAL_ECONOMICS = [*((tier, old) for tier, old, _ in HISTORICAL)] + [
+    ("frugal", "claude-haiku-5-5"),
+    ("standard", "claude-sonnet-5-5"),
+    ("frontier", "claude-opus-5-5"),
+]
+TIER_ALIASES = {"frugal": "haiku", "standard": "sonnet", "frontier": "opus"}
+
+
+@pytest.mark.parametrize(("tier", "old"), HISTORICAL_ECONOMICS)
 @pytest.mark.parametrize("provider", ["anthropic", "claude", "openai"])
 def test_historical_economics_refresh_only_under_original_provider(
-    tier: str, old: str, current: str, provider: str
+    tier: str, old: str, provider: str
 ) -> None:
     economics = EconomicsConfig(
         tiers={tier: TierConfig(cost_factor=3, models=[ModelConfig(provider=provider, model=old)])}
     )
     backend = "codex_cli" if provider == "openai" else "claude"
     assert configured_tier_models(economics, runtime_backend=backend) == {
-        tier: current if provider == "anthropic" else old
+        tier: TIER_ALIASES[tier] if provider == "anthropic" else old
     }
 
 
@@ -59,11 +69,7 @@ def test_persisted_role_default_refreshes_but_invocation_pin_stays_literal(old: 
 
 def test_new_economics_and_custom_values_keep_existing_shape_and_policy() -> None:
     config = get_default_config()
-    assert configured_tier_models(config.economics, runtime_backend="claude") == {
-        "frugal": "claude-haiku-5-5",
-        "standard": "claude-sonnet-5-5",
-        "frontier": "claude-opus-5-5",
-    }
+    assert configured_tier_models(config.economics, runtime_backend="claude") == TIER_ALIASES
     economics = EconomicsConfig(
         tiers={
             "standard": TierConfig(

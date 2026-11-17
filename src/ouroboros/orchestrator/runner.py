@@ -987,11 +987,9 @@ class OrchestratorRunner:
         )
         # ``None`` from get_execution_model() is not merely an absent pin for
         # Codex: it is the user's explicit "follow the model selected in Codex"
-        # choice.  A tier router would turn that sentinel into an OpenAI tier
-        # model and emit ``codex exec --model ...``, silently overriding Codex.
-        # Keep routing dormant for that automatic Codex path.  Explicit pins,
-        # explicit tier requests, and an explicit routing policy retain the
-        # advanced-routing behavior.
+        # choice, which a configured Codex tier model must not override with
+        # ``codex exec --model``. Keep routing dormant for that automatic path;
+        # explicit pins, tier requests and routing policy keep advanced routing.
         _codex_automatic_model_selection = (
             _runtime_backend in {"codex_cli", "codex_mcp"}
             and _model_pin is None
@@ -1083,9 +1081,11 @@ class OrchestratorRunner:
                 runtime_backend=getattr(adapter, "runtime_backend", None),
                 pinned_model=_model_pin,
                 base_tier_override=base_model_tier,
+                require_enforceable=True,
             )
         if self._model_router is None:
-            # A backend without a verified tier ladder (including GJC) cannot
+            # A backend without a verified tier ladder (including GJC), or whose
+            # every tier inherits its own model (shipped Codex ladder), cannot
             # enforce an explicit tier. Do not persist an advisory-only input as
             # a resume contract field that requires a router to restore.
             self._requested_model_tier = None

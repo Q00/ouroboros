@@ -528,7 +528,7 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         "src/ouroboros/backends/model_catalog.py",
         "refresh_models",
         "subprocess.run",
-        357,
+        367,
         21,
     ): "implicit inherit; `<cli> <list-args>` model listing with table-driven argv.",
     (

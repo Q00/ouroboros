@@ -19,8 +19,6 @@ ROOT: Final = Path(__file__).resolve().parents[3]
 TEST: Final = Path(__file__).relative_to(ROOT)
 DIRECT_TARGETS: Final = (
     ("### Portable Task Profiles", "llm_profiles.deep.providers.claude_code.model"),
-    ("## `economics`", "economics.tiers.frontier.models.anthropic.model"),
-    ("### Full Config Skeleton", "economics.tiers.frontier.models.anthropic.model"),
     ("### Full Config Skeleton", "clarification.default_model"),
     ("### Full Config Skeleton", "resilience.wonder_model"),
     ("### Full Config Skeleton", "resilience.reflect_model"),
@@ -32,6 +30,17 @@ PROVIDER_TARGETS: Final = (
     ("## `consensus`", "advocate_model"),
     ("### Full Config Skeleton", "consensus.models.1"),
     ("### Full Config Skeleton", "consensus.advocate_model"),
+)
+# The shipped tier ladder holds runtime defaults; regressing one to the concrete
+# id it replaced must fail.
+LADDER_TARGETS: Final = tuple(
+    (section, f"economics.tiers.{tier}.models.{provider}.model", current, previous)
+    for section in ("## `economics`", "### Full Config Skeleton")
+    for tier, provider, current, previous in (
+        ("frontier", "anthropic", "opus", DEFAULT_OPUS_MODEL),
+        ("standard", "openai", "default", "gpt-6.1-sol"),
+        ("frugal", "google", "flash", "gemini-2.0-flash"),
+    )
 )
 
 
@@ -100,7 +109,8 @@ def test_reference_matches_source_model_defaults(reference: str) -> None:
     + [
         (section, path, DEFAULT_CONSENSUS_OPUS_MODEL, DEFAULT_OPUS_MODEL)
         for section, path in PROVIDER_TARGETS
-    ],
+    ]
+    + list(LADDER_TARGETS),
 )
 @pytest.mark.parametrize("unrelated_example", [False, True])
 def test_each_model_identity_rejects_the_other_provider(

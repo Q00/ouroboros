@@ -5,14 +5,23 @@ from __future__ import annotations
 import pytest
 
 from ouroboros.config._model_defaults import (
+    _SHIPPED_TIER_HISTORY,
     DEFAULT_HAIKU_MODEL,
     DEFAULT_OPUS_MODEL,
     DEFAULT_SONNET_MODEL,
+    LEGACY_TIER_MODEL_PROVIDERS,
+    LEGACY_TIER_MODEL_TIERS,
+    LEGACY_TIER_MODELS,
+    SHIPPED_TIER_LADDER,
+    is_historical_tier_model,
+    normalize_tier_model,
 )
+from ouroboros.config.model_selection import CLAUDE_TIER_ALIASES
 from ouroboros.config.models import (
     EconomicsConfig,
     ModelConfig,
     TierConfig,
+    fresh_config_data,
     get_default_config,
 )
 from ouroboros.orchestrator.adapter import ParamSupport
@@ -139,23 +148,51 @@ class TestBuildModelRouter:
             "frontier": "opus-x",
         }
 
-    def test_codex_cli_backend_resolves_openai_tier_models(self) -> None:
-        # A codex runtime reports runtime_backend "codex_cli" -> openai provider.
+    @pytest.mark.parametrize("backend", ["codex_cli", "codex_mcp"])
+    def test_codex_shipped_ladder_inherits_the_codex_default(self, backend: str) -> None:
+        # A codex runtime reports "codex_cli"/"codex_mcp" -> openai provider. The
+        # shipped ladder names no model: Codex keeps its own configured model.
         economics = get_default_config().economics
-        router = build_model_router(economics, runtime_backend="codex_cli")
+        router = build_model_router(economics, runtime_backend=backend)
         assert router is not None
-        assert router.runtime_backend == "codex_cli"
-        assert router.tier_models == {
-            "frugal": "gpt-6-luna",
-            "standard": "gpt-6.1-sol",
-            "frontier": "gpt-6-astra",
-        }
+        assert router.runtime_backend == backend
+        assert router.tier_models == dict.fromkeys(MODEL_TIER_LADDER, "default")
+        # A starting run enforces nothing from that ladder, so it stays dormant.
+        assert (
+            build_model_router(economics, runtime_backend=backend, require_enforceable=True) is None
+        )
 
-    def test_codex_mcp_backend_resolves_openai_tier_models(self) -> None:
+    @pytest.mark.parametrize("backend", ["codex_cli", "codex_mcp"])
+    @pytest.mark.parametrize("provider", ["openai", "codex"])
+    def test_codex_explicit_custom_tier_is_enforced(self, backend: str, provider: str) -> None:
         economics = get_default_config().economics
-        router = build_model_router(economics, runtime_backend="codex_mcp")
+        frontier = economics.tiers["frontier"]
+        tiers = dict(economics.tiers)
+        tiers["frontier"] = frontier.model_copy(
+            update={
+                "models": [ModelConfig(provider=provider, model="proxy/large"), *frontier.models]
+            }
+        )
+        economics = economics.model_copy(update={"tiers": tiers})
+
+        router = build_model_router(economics, runtime_backend=backend, require_enforceable=True)
+
         assert router is not None
-        assert router.tier_models["standard"] == "gpt-6.1-sol"
+        assert router.tier_models == {
+            "frugal": "default",
+            "standard": "default",
+            "frontier": "proxy/large",
+        }
+        base = decide_model(ParamSupport.NATIVE, router=router, is_decomposed_child=False)
+        assert (base.tier, base.model, base.mode) == ("standard", "default", "advised")
+        escalated = decide_model(
+            ParamSupport.NATIVE, router=router, is_decomposed_child=False, retry_attempt=3
+        )
+        assert (escalated.tier, escalated.model, escalated.mode) == (
+            "frontier",
+            "proxy/large",
+            "enforced",
+        )
 
     def test_gemini_backend_builds_google_router(self) -> None:
         # Gemini has no frontier google model in the default config, so only the
@@ -241,15 +278,24 @@ class TestBuildModelRouter:
         assert router is not None
         assert router.escalation_retry_threshold == 3
 
-    def test_default_config_end_to_end(self) -> None:
-        # The shipped default: children run haiku, top-level ACs run sonnet.
+    @pytest.mark.parametrize("backend", ["claude", "claude_code", "claude_mcp"])
+    def test_default_config_end_to_end(self, backend: str) -> None:
+        # The shipped default: children run haiku, top-level ACs run sonnet, as
+        # Claude Code aliases it resolves for its own provider.
         economics = get_default_config().economics
-        router = build_model_router(economics, runtime_backend="claude")
+        router = build_model_router(economics, runtime_backend=backend, require_enforceable=True)
         assert router is not None
         assert router.child_tier == "frugal"
         assert router.base_tier == "standard"
-        assert router.tier_models["frugal"] == DEFAULT_HAIKU_MODEL
-        assert router.tier_models["standard"] == DEFAULT_SONNET_MODEL
+        assert router.tier_models == {"frugal": "haiku", "standard": "sonnet", "frontier": "opus"}
+        for retry_attempt, tier in ((0, "sonnet"), (2, "opus")):
+            decision = decide_model(
+                ParamSupport.NATIVE,
+                router=router,
+                is_decomposed_child=False,
+                retry_attempt=retry_attempt,
+            )
+            assert (decision.model, decision.mode) == (tier, "enforced")
 
 
 class TestDeserializeModelRouter:
@@ -336,45 +382,136 @@ def _legacy_persisted_economics() -> EconomicsConfig:
 
 
 class TestLegacyTierModelNormalization:
-    """A config persisted by an older release carries retired shipped tier ids.
+    """A config persisted by an older release carries the shipped tier ids of its time.
 
-    Model-tier routing must normalize those to the CURRENT shipped ids (the
-    persisted-config trap that made every AC fail with "unknown provider for model
-    gpt-4o"), while preserving a genuinely explicit user id verbatim — the same
-    precedent role models use in LEGACY_DEFAULT_MODELS (Q00/ouroboros#1324).
+    Model-tier routing must resolve those to each runtime's own default for the
+    tier (the persisted-config trap that made every AC fail with "unknown provider
+    for model gpt-4o"), while preserving a genuinely explicit user id verbatim —
+    the same precedent role models use in LEGACY_DEFAULT_MODELS
+    (Q00/ouroboros#1324).
     """
 
-    def test_claude_backend_resolves_current_ids(self) -> None:
-        router = build_model_router(_legacy_persisted_economics(), runtime_backend="claude")
+    @pytest.mark.parametrize("backend", ["claude", "claude_code", "claude_mcp"])
+    def test_claude_backends_route_legacy_ids_to_enforced_aliases(self, backend: str) -> None:
+        router = build_model_router(_legacy_persisted_economics(), runtime_backend=backend)
         assert router is not None
-        assert router.tier_models == {
-            "frugal": DEFAULT_HAIKU_MODEL,
-            "standard": DEFAULT_SONNET_MODEL,
-            "frontier": DEFAULT_OPUS_MODEL,
-        }
+        assert router.tier_models == {"frugal": "haiku", "standard": "sonnet", "frontier": "opus"}
+        decision, kwargs = resolve_execute_model(
+            _Adapter(ParamSupport.NATIVE, runtime_backend=backend),
+            router=router,
+            is_decomposed_child=False,
+        )
+        assert decision.mode == "enforced"
+        assert kwargs == {"model": "sonnet"}
 
-    def test_codex_cli_backend_resolves_current_ids(self) -> None:
-        router = build_model_router(_legacy_persisted_economics(), runtime_backend="codex_cli")
-        assert router is not None
-        assert router.tier_models == {
-            "frugal": "gpt-6-luna",
-            "standard": "gpt-6.1-sol",
-            "frontier": "gpt-6-astra",
-        }
-
-    def test_legacy_opus_4_6_normalizes_to_current(self) -> None:
-        # The later frontier default claude-opus-4-6 is also a legacy shipped id.
+    @pytest.mark.parametrize(
+        ("tier", "model", "alias"),
+        [
+            *(("frugal", m, "haiku") for m in ("claude-3-5-haiku", "claude-haiku-4-5")),
+            ("frugal", DEFAULT_HAIKU_MODEL, "haiku"),
+            *(("standard", m, "sonnet") for m in ("claude-sonnet-4-20250514", "claude-sonnet-4-6")),
+            ("standard", DEFAULT_SONNET_MODEL, "sonnet"),
+            *(
+                ("frontier", m, "opus")
+                for m in (
+                    "claude-opus-4-5-20251101",
+                    "claude-opus-4-6",
+                    "claude-opus-4-8",
+                    "claude-opus-5",
+                )
+            ),
+            ("frontier", DEFAULT_OPUS_MODEL, "opus"),
+        ],
+    )
+    def test_every_shipped_anthropic_id_routes_to_its_tier_alias(
+        self, tier: str, model: str, alias: str
+    ) -> None:
         economics = _economics(
             tiers={
-                "frontier": TierConfig(
-                    cost_factor=30,
-                    models=[ModelConfig(provider="anthropic", model="claude-opus-4-6")],
-                ),
+                tier: TierConfig(
+                    cost_factor=1, models=[ModelConfig(provider="anthropic", model=model)]
+                )
             }
         )
-        router = build_model_router(economics, runtime_backend="claude")
+        router = build_model_router(economics, runtime_backend="claude_code")
         assert router is not None
-        assert router.tier_models == {"frontier": DEFAULT_OPUS_MODEL}
+        assert router.tier_models == {tier: alias}
+
+    @pytest.mark.parametrize("backend", ["claude", "claude_code", "claude_mcp"])
+    @pytest.mark.parametrize("model", ["claude-opus-4-1", "us.anthropic.claude-opus-5-5-v1:0"])
+    def test_explicit_custom_claude_id_is_enforced_verbatim(self, backend: str, model: str) -> None:
+        economics = _economics(
+            tiers={
+                "standard": TierConfig(
+                    cost_factor=10, models=[ModelConfig(provider="anthropic", model=model)]
+                )
+            }
+        )
+        router = build_model_router(economics, runtime_backend=backend)
+        assert router is not None
+        assert router.tier_models == {"standard": model}
+        _decision, kwargs = resolve_execute_model(
+            _Adapter(ParamSupport.NATIVE, runtime_backend=backend),
+            router=router,
+            is_decomposed_child=False,
+        )
+        assert kwargs == {"model": model}
+
+    def test_runtime_namespace_keeps_a_shipped_looking_id_literal(self) -> None:
+        # A ``claude`` entry is an explicit runtime choice, never a vendor default.
+        economics = _economics(
+            tiers={
+                "standard": TierConfig(
+                    cost_factor=10,
+                    models=[
+                        ModelConfig(provider="claude", model=DEFAULT_SONNET_MODEL),
+                        ModelConfig(provider="anthropic", model=DEFAULT_SONNET_MODEL),
+                    ],
+                )
+            }
+        )
+        router = build_model_router(economics, runtime_backend="claude_code")
+        assert router is not None
+        assert router.tier_models == {"standard": DEFAULT_SONNET_MODEL}
+
+    @pytest.mark.parametrize("backend", ["codex_cli", "codex_mcp"])
+    @pytest.mark.parametrize(
+        "ladder",
+        [
+            ("gpt-4o-mini", "gpt-4o", "o3"),
+            ("gpt-5.1-codex-mini", "gpt-5-codex", "gpt-5.2"),
+            ("gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra"),
+        ],
+    )
+    def test_codex_backends_inherit_for_every_shipped_openai_ladder(
+        self, backend: str, ladder: tuple[str, str, str]
+    ) -> None:
+        economics = _economics(
+            tiers={
+                tier: TierConfig(cost_factor=1, models=[ModelConfig(provider="openai", model=m)])
+                for tier, m in zip(MODEL_TIER_LADDER, ladder, strict=True)
+            }
+        )
+        router = build_model_router(economics, runtime_backend=backend)
+        assert router is not None
+        assert router.tier_models == dict.fromkeys(MODEL_TIER_LADDER, "default")
+        for retry_attempt in (0, 5):
+            decision, kwargs = resolve_execute_model(
+                _Adapter(ParamSupport.NATIVE, runtime_backend=backend),
+                router=router,
+                is_decomposed_child=False,
+                retry_attempt=retry_attempt,
+            )
+            assert decision.mode == "advised"
+            assert kwargs == {}
+        assert (
+            build_model_router(economics, runtime_backend=backend, require_enforceable=True) is None
+        )
+
+    def test_gemini_legacy_api_ids_route_to_cli_aliases(self) -> None:
+        router = build_model_router(_legacy_persisted_economics(), runtime_backend="gemini_cli")
+        assert router is not None
+        assert router.tier_models == {"frugal": "flash", "standard": "pro"}
 
     def test_explicit_user_id_preserved_verbatim(self) -> None:
         # A never-shipped, proxy-specific id is a deliberate user choice — routing
@@ -407,6 +544,52 @@ class TestLegacyTierModelNormalization:
 
         assert router is not None
         assert router.tier_models == {"standard": "gpt-4o"}
+
+
+class TestShippedTierLadder:
+    """The shipped ladder holds each runtime's own default, never a concrete id."""
+
+    def test_default_config_ships_runtime_defaults_per_vendor(self) -> None:
+        tiers = get_default_config().economics.tiers
+        shipped = {
+            provider: {
+                tier: entry.model
+                for tier, config in tiers.items()
+                for entry in config.models
+                if entry.provider == provider
+            }
+            for provider in ("openai", "anthropic", "google")
+        }
+        assert shipped == {
+            "openai": dict.fromkeys(MODEL_TIER_LADDER, "default"),
+            "anthropic": {"frugal": "haiku", "standard": "sonnet", "frontier": "opus"},
+            "google": {"frugal": "flash", "standard": "pro"},
+        }
+        assert shipped == SHIPPED_TIER_LADDER
+        assert dict(CLAUDE_TIER_ALIASES) == SHIPPED_TIER_LADDER["anthropic"]
+
+    def test_fresh_config_writes_no_concrete_tier_id(self) -> None:
+        economics = fresh_config_data()["economics"]["tiers"]
+        written = {entry["model"] for tier in economics.values() for entry in tier["models"]}
+        assert written == {"default", "haiku", "sonnet", "opus", "flash", "pro"}
+        assert not written & set(LEGACY_TIER_MODELS)
+
+    def test_each_historical_id_belongs_to_one_provider_and_tier(self) -> None:
+        listed = [
+            model
+            for tiers in _SHIPPED_TIER_HISTORY.values()
+            for models in tiers.values()
+            for model in models
+        ]
+        assert len(listed) == len(set(listed)) == len(LEGACY_TIER_MODELS)
+        for model in listed:
+            provider = LEGACY_TIER_MODEL_PROVIDERS[model]
+            tier = LEGACY_TIER_MODEL_TIERS[model]
+            assert LEGACY_TIER_MODELS[model] == SHIPPED_TIER_LADDER[provider][tier]
+            assert is_historical_tier_model(model, provider=provider, tier=tier)
+            assert normalize_tier_model(model, provider=provider) == LEGACY_TIER_MODELS[model]
+            other = next(name for name in MODEL_TIER_LADDER if name != tier)
+            assert not is_historical_tier_model(model, provider=provider, tier=other)
 
 
 class TestDecideModel:
@@ -891,15 +1074,22 @@ class TestResolveRouteEconomics:
             "frontier": 30,
         }
 
-    @pytest.mark.parametrize("backend", ["codex_cli", "codex_mcp", "gemini_cli"])
-    def test_model_router_keeps_native_ladder_on_sentinel_backends(self, backend: str) -> None:
+    @pytest.mark.parametrize(
+        ("backend", "expected"),
+        [
+            ("codex_cli", dict.fromkeys(MODEL_TIER_LADDER, "default")),
+            ("codex_mcp", dict.fromkeys(MODEL_TIER_LADDER, "default")),
+            ("gemini_cli", {"frugal": "flash", "standard": "pro"}),
+        ],
+    )
+    def test_model_router_keeps_native_ladder_on_sentinel_backends(
+        self, backend: str, expected: dict[str, str]
+    ) -> None:
         shipped = get_default_config().economics
         resolved = resolve_route_economics(shipped, runtime_backend=backend, pinned=False)
 
         models = self._router_models(resolved, backend)
-        assert models
-        assert models == self._router_models(shipped, backend)
-        assert "default" not in models.values()
+        assert models == self._router_models(shipped, backend) == expected
 
     def test_auto_keeps_other_providers_entries(self) -> None:
         shipped = get_default_config().economics

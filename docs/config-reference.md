@@ -413,11 +413,11 @@ economics:
       intelligence_range: [9, 11]
       models:
         - provider: openai
-          model: gpt-6-luna
+          model: default
         - provider: google
-          model: gemini-2.0-flash
+          model: flash
         - provider: anthropic
-          model: claude-haiku-5-5
+          model: haiku
       use_cases:
         - routine_coding
         - log_analysis
@@ -427,11 +427,11 @@ economics:
       intelligence_range: [14, 16]
       models:
         - provider: openai
-          model: gpt-6.1-sol
+          model: default
         - provider: anthropic
-          model: claude-sonnet-5-5
+          model: sonnet
         - provider: google
-          model: gemini-2.5-pro
+          model: pro
       use_cases:
         - logic_design
         - stage2_evaluation
@@ -441,9 +441,9 @@ economics:
       intelligence_range: [18, 20]
       models:
         - provider: openai
-          model: gpt-6-astra
+          model: default
         - provider: anthropic
-          model: claude-opus-5-5
+          model: opus
       use_cases:
         - consensus
         - lateral_thinking
@@ -455,7 +455,7 @@ economics:
 | `default_tier` | `"frugal"` \| `"standard"` \| `"frontier"` | `"frugal"` | Sets the base tier, one tier above this value and capped at frontier: the shipped `frugal` gives `standard`, and both `standard` and `frontier` give `frontier`. Top-level and untrusted decomposed work start at the base tier. In adaptive efficiency mode a decomposed child with explicit trust authorization starts one tier lower, never below frugal, which equals this value except for `frontier` (then `standard`). |
 | `escalation_threshold` | `int >= 1` | `2` | Retry-count threshold used by `decide_model()` (`orchestrator/model_routing.py`). It does not apply to top-level ACs on the bounded route path, which escalate through `advance_route()` (`orchestrator/route_escalation.py`). Top-level and untrusted decomposed work start at the base tier. Only a decomposed child with explicit trust authorization starts one tier lower, so that trusted-child ladder may require one additional retry to reach the same frontier ceiling. Live decomposition issues that authorization when a generic split passes structural and semantic verification, and lowering applies only in adaptive efficiency mode. |
 | `downgrade_success_streak` | `int >= 1` | `5` | **Not read.** The field is accepted for config compatibility, but no code downgrades a tier after consecutive successes; tiers only escalate on retry. |
-| `tiers` | `dict[str, TierConfig]` | (see above) | Tier definitions keyed by name. Explicit tier selection and enabled per-AC routing use the active runtime's native model entries. Unpinned Claude vendor defaults use `haiku`/`sonnet`/`opus` aliases; explicit runtime-specific economics entries remain literal. A resumed run replays its resolved model ladder. |
+| `tiers` | `dict[str, TierConfig]` | (see above) | Tier definitions keyed by name. Explicit tier selection and enabled per-AC routing use the active runtime's native model entries. The shipped entries are each runtime's own default: `haiku`/`sonnet`/`opus` for Claude Code, `flash`/`pro` for Gemini CLI, and `default` for Codex, which sends no `--model`. A vendor entry still holding an id an earlier release shipped follows the same default. With `models.pin` off, every `anthropic` entry routes as its tier alias; explicit runtime-specific economics entries remain literal. A resumed run replays its resolved model ladder. |
 
 **`TierConfig` fields:**
 
@@ -501,21 +501,35 @@ economics:
         - {provider: codex, model: my-proxy/large-model}
 ```
 
-Use IDs accepted by your configured CLI/provider. The shipped Codex candidates
-are `gpt-6-luna`, `gpt-6.1-sol`, and `gpt-6-astra`, based on the
+Use IDs accepted by your configured CLI/provider. The shipped ladder names no
+Codex model: each `openai` tier is `default`, so Codex runs on the model it is
+configured with (including a custom `model_providers` entry or proxy) and no
+`--model` is sent. To route Codex tiers, set your own ids; the settings console
+suggests `gpt-6-luna`, `gpt-6.1-sol`, and `gpt-6-astra` from the
 [official model guide](https://developers.openai.com/codex/models/) checked
-2026-10-18. Availability depends on plan, client, workspace and rollout. A
+2026-10-18, but availability depends on plan, client, workspace and rollout. A
 catalog from another CLI does not prove an ID is supported in Codex.
 
-The Google API entries above remain API IDs. Only Gemini CLI translates the
-historically shipped `gemini-2.0-flash` / `gemini-2.5-pro` defaults to the native
-`flash` / `pro` aliases documented in its [model guide](https://geminicli.com/docs/cli/model/).
-Aliases follow the CLI's permitted current models; Gemini 3 preview access
-remains account-dependent. Use `provider: gemini` for an explicit native pin.
-Custom runtime-specific and cross-provider IDs stay literal.
+Claude Code tiers ship as the `haiku` / `sonnet` / `opus` aliases, which Claude
+Code resolves to the newest model of that class for its provider (Anthropic,
+Bedrock, Vertex, a gateway, or `ANTHROPIC_DEFAULT_*_MODEL`). Gemini CLI tiers
+ship as its `flash` / `pro` aliases from its
+[model guide](https://geminicli.com/docs/cli/model/); aliases follow the CLI's
+permitted current models, and Gemini 3 preview access remains account-dependent.
+
+A config written by an earlier release still holds the concrete ids it shipped
+(`claude-haiku-5-5` / `claude-sonnet-5-5` / `claude-opus-5-5` and older Claude
+pins, `gpt-6-luna` / `gpt-6.1-sol` / `gpt-6-astra` and older Codex ids,
+`gemini-2.0-flash` / `gemini-2.5-pro`). Under its original `anthropic`,
+`openai` or `google` entry such an id follows the runtime default above, even
+if you typed it on purpose: the config file cannot tell the two apart. To run
+one of those exact ids, put it under the runtime namespace (`provider: claude`,
+`codex` or `gemini`), which is never rewritten. Custom runtime-specific,
+never-shipped and cross-provider IDs stay literal.
 
 Explicit non-Claude tier choices (`models.default: frontier` or
-`--model frontier`) use the configured ladder even with `models.pin` off.
+`--model frontier`) use the configured ladder even with `models.pin` off; with
+the shipped ladder that is `default` on Codex and `flash` / `pro` on Gemini CLI.
 Claude role-level tier choices retain their existing `haiku` / `sonnet` /
 `opus` aliases; the per-AC economics router is a separate resolution path. Missing rungs select the
 nearest higher configured tier, then a lower tier only when no higher rung
@@ -524,8 +538,11 @@ exists. An absent model namespace returns `default`; unresolved
 Actual per-call support remains the runtime capability's contract.
 
 Plain automatic Codex execution continues using Codex's selected model. Set
-`OUROBOROS_MODEL_TIER_ROUTING=1` to opt into its adaptive concrete ladder.
-Explicit model pins take precedence, and `0` / `off` / `false` disables routing.
+`OUROBOROS_MODEL_TIER_ROUTING=1`, or request a tier, to route the Codex tier
+models you configured. A ladder where every tier is `default` (the shipped one)
+enforces nothing, so routing stays dormant for a new run and Codex keeps its
+selected model. Explicit model pins take precedence, and `0` / `off` / `false`
+disables routing.
 The router and Route B share model resolution. Same-runtime resume replays its
 validated frozen ladder, including a historical shipped pin in the same
 provider and tier; it never silently substitutes a newer model. If the runtime
@@ -1121,7 +1138,7 @@ All environment variables have higher priority than the corresponding `config.ya
 | `OUROBOROS_AGENT_PERMISSION_MODE` | `orchestrator.permission_mode` | Stored permission preference; runner-driven seed execution forces the native `bypassPermissions` equivalent for fresh and resumed dispatches on approval-aware backends. Pi and GJC have no separate approval flag. |
 | `OUROBOROS_OPENCODE_PERMISSION_MODE` | `orchestrator.opencode_permission_mode` | Stored OpenCode preference. Seed execution still forces `bypassPermissions`, translated to `--dangerously-skip-permissions`. |
 | `OUROBOROS_EXEC_SANDBOX` | `execution.exec_sandbox` | Execution sandbox for controller-run commands; on by default. `off` (or `0`, `false`, `no`) is **unsafe**: verifier replay then runs unconfined, able to write outside its workspace copy and to use the network. Honored only from trusted sources (process environment, `~/.ouroboros/.env`); a project `.env` cannot set it. |
-| `OUROBOROS_MODEL_TIER_ROUTING` | _(routing policy)_ | Routing is enabled by default where a native ladder is configured, except plain automatic Codex selection. Set `1` to opt Codex into its ladder; `0`, `off`, or `false` (case- and whitespace-insensitive) disables adaptive routing and its events. |
+| `OUROBOROS_MODEL_TIER_ROUTING` | _(routing policy)_ | Routing is enabled by default where a native ladder is configured, except plain automatic Codex selection. Set `1` to opt Codex into the tier models you configured (the shipped Codex ladder is `default`, so it changes nothing); `0`, `off`, or `false` (case- and whitespace-insensitive) disables adaptive routing and its events. |
 | `OUROBOROS_SHADOW_REPLAY` | _(experiment arm)_ | Default OFF. Only `1`, `true`, or `on` arms the opt-in shadow-baseline harness. Current live decompositions lack deterministic MECE attestation and are skipped before baseline model dispatch; bundled runtimes also lack the complete filesystem/external-effect isolation attestation, so production emits no shadow baseline today. |
 | `OUROBOROS_MAX_PARALLEL_WORKERS` | `orchestrator.max_parallel_workers` | Requested maximum concurrent Acceptance Criteria workers for parallel execution. Must be a positive integer. |
 | `OUROBOROS_MAX_CONCURRENCY` | _(initial fan-out estimate)_ | Overrides the backend-aware starting window. The legacy name is retained for compatibility; the value is no longer a permanent cap in runner-owned execution. Live 429/success feedback may shrink or grow the window, never above `OUROBOROS_MAX_PARALLEL_WORKERS`. Must be a positive integer; blank/invalid values are ignored. |
@@ -1433,31 +1450,31 @@ economics:
       intelligence_range: [9, 11]
       models:
         - provider: openai
-          model: gpt-6-luna
+          model: default
         - provider: google
-          model: gemini-2.0-flash
+          model: flash
         - provider: anthropic
-          model: claude-haiku-5-5
+          model: haiku
       use_cases: [routine_coding, log_analysis, stage1_fix]
     standard:
       cost_factor: 10
       intelligence_range: [14, 16]
       models:
         - provider: openai
-          model: gpt-6.1-sol
+          model: default
         - provider: anthropic
-          model: claude-sonnet-5-5
+          model: sonnet
         - provider: google
-          model: gemini-2.5-pro
+          model: pro
       use_cases: [logic_design, stage2_evaluation, refactoring]
     frontier:
       cost_factor: 30
       intelligence_range: [18, 20]
       models:
         - provider: openai
-          model: gpt-6-astra
+          model: default
         - provider: anthropic
-          model: claude-opus-5-5
+          model: opus
       use_cases: [consensus, lateral_thinking, big_bang]
 
 clarification:

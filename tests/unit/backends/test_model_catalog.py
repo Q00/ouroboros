@@ -55,11 +55,24 @@ def test_self_selecting_runtimes_offer_the_sentinel_not_claude_ids(backend: str)
     assert mc.uses_default_model_sentinel(backend) is True
 
 
-def test_claude_catalog_lists_shipped_defaults_first() -> None:
-    choices = mc.model_choices("claude")
-    assert choices[:2] == (DEFAULT_OPUS_MODEL, DEFAULT_SONNET_MODEL)
-    assert DEFAULT_HAIKU_MODEL in choices
-    assert "claude-haiku-4-5-20251001" not in choices
+@pytest.mark.parametrize("backend", ["claude", "claude_code", "claude_mcp"])
+def test_claude_catalog_lists_provider_resolved_aliases_first(backend: str) -> None:
+    """Claude Code resolves the aliases per provider; concrete ids stay as exact pins."""
+    catalog = mc.get_model_catalog(backend)
+    assert catalog.models[:3] == ("opus", "sonnet", "haiku")
+    assert catalog.default_model == "opus"
+    # Persisted concrete ids remain valid selections after the aliases.
+    assert catalog.models[3:5] == (DEFAULT_OPUS_MODEL, DEFAULT_SONNET_MODEL)
+    assert len(set(catalog.models)) == len(catalog.models)
+    assert "claude-haiku-4-5-20251001" not in catalog.models
+
+
+def test_claude_catalog_keeps_the_concrete_haiku_pin() -> None:
+    assert mc.model_choices("claude")[3:] == (
+        DEFAULT_OPUS_MODEL,
+        DEFAULT_SONNET_MODEL,
+        DEFAULT_HAIKU_MODEL,
+    )
 
 
 def test_codex_catalog_offers_known_models_after_sentinel() -> None:
