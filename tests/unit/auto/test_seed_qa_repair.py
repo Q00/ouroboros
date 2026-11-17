@@ -21,7 +21,7 @@ from ouroboros.auto.interview_driver import (
     InterviewTurn,
 )
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
-from ouroboros.auto.pipeline import AutoPipeline, _seed_with_seed_qa_feedback
+from ouroboros.auto.pipeline import AutoPipeline, _seed_with_repair_plan
 from ouroboros.auto.seed_qa_repair import (
     AMBIGUITY_INSTRUCTION,
     DIAGNOSTIC_PROSE_INSTRUCTION,
@@ -30,7 +30,7 @@ from ouroboros.auto.seed_qa_repair import (
     LEGACY_LATERAL_PLACEHOLDER,
     seed_qa_repair_plan,
 )
-from ouroboros.auto.state import AutoPipelineState, AutoStore
+from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 from ouroboros.core.seed import (
     EvaluationPrinciple,
     ExitCondition,
@@ -41,6 +41,7 @@ from ouroboros.core.seed import (
     ac_texts,
 )
 from ouroboros.events.base import BaseEvent
+from ouroboros.resilience.lateral import ThinkingPersona
 
 USER_CONSTRAINT = "Use existing project patterns"
 USER_NON_GOAL = "Non-goal: No cloud sync"
@@ -54,6 +55,12 @@ INSTRUCTIONS = (
     LEGACY_LATERAL_PLACEHOLDER,
 )
 NON_GOALS_MISSING = "non_goals are missing from executable constraints"
+NO_OP_MISSING = "missing explicit no-op scope"
+NO_OP_CONSTRAINT = "Define explicit no-op scope for supported command behavior."
+DECISION = (
+    "Use this bounded implementation approach to resolve Seed QA: "
+    "Decision: Count words by splitting on whitespace."
+)
 
 
 def _seed(*constraints: str) -> Seed:
@@ -127,6 +134,7 @@ def _pipeline(
     run_seed,
     lateral_thinker=None,
     event_store: _RecordingEventStore | None = None,
+    generate_seed=None,
 ) -> AutoPipeline:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         return InterviewTurn(
@@ -138,7 +146,7 @@ def _pipeline(
             "done", session_id, seed_ready=True, completed=True, ambiguity_score=0.12
         )
 
-    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+    async def default_generate_seed(session_id: str) -> Seed:  # noqa: ARG001
         return _seed()
 
     driver = AutoInterviewDriver(
@@ -149,7 +157,7 @@ def _pipeline(
     )
     return AutoPipeline(
         driver,
-        generate_seed,
+        generate_seed or default_generate_seed,
         run_starter=run_seed,
         store=AutoStore(tmp_path),
         seed_qa_evaluator=seed_qa,
@@ -303,12 +311,189 @@ def test_repair_drops_instruction_sentences_persisted_by_earlier_releases() -> N
         passed=False, score=0.5, verdict="revise", differences=("missing explicit no-op scope",)
     )
 
-    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+    repaired = _seed_with_repair_plan(seed, seed_qa_repair_plan(qa_result), ledger=None)
 
     assert repaired.constraints == (
         USER_CONSTRAINT,
         "Define explicit no-op scope for supported command behavior.",
     )
+
+
+def _judge_until(differences: tuple[str, ...], required: tuple[str, ...], calls: list[Seed]):
+    """Fail with ``differences`` until every ``required`` constraint is present."""
+
+    async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
+        calls.append(seed)
+        if all(item in seed.constraints for item in required):
+            return EvaluateResult(passed=True, score=0.9, verdict="pass")
+        return EvaluateResult(passed=False, score=0.5, verdict="revise", differences=differences)
+
+    return seed_qa
+
+
+@pytest.mark.parametrize(
+    ("differences", "brief", "expected"),
+    (
+        pytest.param(
+            (NO_OP_MISSING,),
+            (NO_OP_CONSTRAINT,),
+            (USER_CONSTRAINT, NO_OP_CONSTRAINT, DECISION),
+            id="product-constraint",
+        ),
+        pytest.param(
+            (NON_GOALS_MISSING,),
+            (LEDGER_PRESERVATION_INSTRUCTION,),
+            (USER_CONSTRAINT, USER_NON_GOAL, DECISION),
+            id="missing-non-goals",
+        ),
+        pytest.param(
+            (NO_OP_MISSING, NON_GOALS_MISSING),
+            (LEDGER_PRESERVATION_INSTRUCTION, NO_OP_CONSTRAINT),
+            (USER_CONSTRAINT, NO_OP_CONSTRAINT, USER_NON_GOAL, DECISION),
+            id="both",
+        ),
+    ),
+)
+@pytest.mark.asyncio
+async def test_lateral_decision_lands_on_top_of_the_mapped_plan(
+    tmp_path,
+    differences: tuple[str, ...],
+    brief: tuple[str, ...],
+    expected: tuple[str, ...],
+) -> None:
+    """A concrete persona decision adds to the deterministic repair, never replaces it."""
+    judged: list[Seed] = []
+    ran: list[Seed] = []
+    briefs: list[tuple[str, ...]] = []
+
+    async def lateral(*, persona, qa_differences, qa_suggestions, run_artifact) -> LateralResult:  # noqa: ARG001
+        briefs.append(tuple(qa_differences))
+        return LateralResult(
+            persona=persona.value,
+            approach_summary="",
+            text="Decision: Count words by splitting on whitespace.",
+        )
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
+        ran.append(seed)
+        return {"job_id": "job_3033_lateral_success"}
+
+    state = _state(tmp_path, _ledger(non_goal_binds=True))
+    pipeline = _pipeline(
+        tmp_path,
+        seed_qa=_judge_until(differences, expected, judged),
+        run_seed=run_seed,
+        lateral_thinker=lateral,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert briefs == [brief]
+    assert len(judged) == 2
+    for seed in (judged[1], ran[0], Seed.from_dict(state.seed_artifact)):
+        assert seed.constraints == expected  # stable order, no instruction sentence
+        assert seed.goal == GOAL
+        assert ac_texts(seed.acceptance_criteria) == (CRITERION,)
+
+
+@pytest.mark.asyncio
+async def test_exhausted_persona_chain_applies_the_mapped_plan(tmp_path) -> None:
+    async def lateral(**kwargs: Any) -> LateralResult:
+        raise AssertionError(f"every persona was already tried: {kwargs}")
+
+    pipeline = _pipeline(
+        tmp_path, seed_qa=_non_goal_judge([]), run_seed=None, lateral_thinker=lateral
+    )
+    state = _state(tmp_path, _ledger(non_goal_binds=True))
+    state.personas_invoked = [persona.value for persona in ThinkingPersona]
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=(NO_OP_MISSING, NON_GOALS_MISSING),
+    )
+
+    repaired = await pipeline._repair_seed_after_qa(
+        state, _seed(), qa_result, attempt=1, ledger=_ledger(non_goal_binds=True)
+    )
+
+    assert repaired.constraints == (USER_CONSTRAINT, NO_OP_CONSTRAINT, USER_NON_GOAL)
+
+
+@pytest.mark.parametrize(
+    ("text", "claims_lateral", "expected"),
+    (
+        pytest.param(
+            "Decision: Count words by splitting on whitespace.",
+            True,
+            (USER_CONSTRAINT, NO_OP_CONSTRAINT, DECISION),
+            id="decision",
+        ),
+        pytest.param(
+            "## Persona: Hacker\nMost recent run artifact: goal: bad yaml",
+            False,
+            (USER_CONSTRAINT, NO_OP_CONSTRAINT),
+            id="transcript-only",
+        ),
+    ),
+)
+@pytest.mark.asyncio
+async def test_lateral_repair_is_claimed_only_when_a_decision_lands(
+    tmp_path, text: str, claims_lateral: bool, expected: tuple[str, ...]
+) -> None:
+    async def lateral(*, persona, qa_differences, qa_suggestions, run_artifact) -> LateralResult:  # noqa: ARG001
+        return LateralResult(persona=persona.value, approach_summary="", text=text)
+
+    pipeline = _pipeline(
+        tmp_path, seed_qa=_non_goal_judge([]), run_seed=None, lateral_thinker=lateral
+    )
+    state = _state(tmp_path, _ledger(non_goal_binds=True))
+    state.last_progress_message = None
+    qa_result = EvaluateResult(
+        passed=False, score=0.5, verdict="revise", differences=(NO_OP_MISSING,)
+    )
+
+    repaired = await pipeline._repair_seed_after_qa(
+        state, _seed(), qa_result, attempt=1, ledger=_ledger(non_goal_binds=True)
+    )
+
+    assert repaired.constraints == expected
+    assert state.personas_invoked  # tried either way, so the next round moves on
+    claimed = (state.last_progress_message or "").startswith("Seed QA lateral repair via")
+    assert claimed is claims_lateral
+
+
+@pytest.mark.asyncio
+async def test_resumed_review_repairs_from_the_persisted_ledger(tmp_path) -> None:
+    """Resume re-enters the gate with the ledger rebuilt from ``state.ledger``."""
+    judged: list[Seed] = []
+    ran: list[Seed] = []
+
+    async def forbidden_generate_seed(session_id: str) -> Seed:
+        raise AssertionError(f"resume must reuse the persisted Seed, not regenerate {session_id}")
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
+        ran.append(seed)
+        return {"job_id": "job_3033_resume"}
+
+    state = _state(tmp_path, _ledger(non_goal_binds=True))
+    state.interview_completed = True
+    state.interview_session_id = "interview_3033"
+    state.phase = AutoPhase.REVIEW
+    state.seed_artifact = _seed().to_dict()
+    pipeline = _pipeline(
+        tmp_path,
+        seed_qa=_non_goal_judge(judged),
+        run_seed=run_seed,
+        generate_seed=forbidden_generate_seed,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert len(judged) == 2
+    _assert_user_contract_only(ran[0])
 
 
 @pytest.mark.parametrize(

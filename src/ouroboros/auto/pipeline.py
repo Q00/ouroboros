@@ -83,6 +83,7 @@ from ouroboros.auto.seed_qa_advisory import (
 )
 from ouroboros.auto.seed_qa_repair import (
     SeedQaRepairMappingError,
+    SeedQaRepairPlan,
     contains_seed_qa_repair_instruction,
     requests_seed_qa_ambiguity_repair,
     seed_qa_repair_plan,
@@ -2237,28 +2238,31 @@ class AutoPipeline:
 
         When a ``lateral_thinker`` is wired, brief a lateral persona with the
         mapped repair guidance (instructions included) and fold its *concrete
-        decision* into the Seed — this resolves substance blockers (e.g. "no
-        binding contract chosen; a section is missing") that the mechanical
-        feedback echo cannot, because the echo only restates the gap. Falls back when no
-        lateral handle is wired, the persona chain is exhausted, the lateral
-        attempt fails (timeout / transient / plugin-delegation), or the persona
-        returns no concrete decision, so prior behaviour and the ``seed_qa`` →
-        REVIEW resume contract are preserved. Repair instructions only steer;
-        they never become Seed constraints (#3033).
+        decision* into the Seed after the plan's own additions — this resolves
+        substance blockers (e.g. "no binding contract chosen; a section is
+        missing") that the mechanical feedback echo cannot, because the echo
+        only restates the gap. Every path writes through
+        :func:`_seed_with_repair_plan`, so the mapped product constraints and
+        restored ledger non-goals land whether or not the persona helps. Falls back when no
+        lateral handle is wired, the persona chain is exhausted, or the lateral
+        attempt fails (timeout / transient / plugin-delegation), so prior
+        behaviour and the ``seed_qa`` → REVIEW resume contract are preserved. A
+        persona answer with no concrete decision leaves only the plan's
+        additions. Repair instructions only steer; they never become Seed
+        constraints (#3033).
         """
+        plan = seed_qa_repair_plan(qa_result)
         if self.lateral_thinker is None:
-            return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt, ledger=ledger)
-
-        guidance = seed_qa_repair_plan(qa_result).guidance
+            return _seed_with_repair_plan(seed, plan, ledger=ledger)
 
         already_tried = tuple(ThinkingPersona(value) for value in state.personas_invoked)
         persona = select_persona_for_qa_failure(
-            guidance,
+            plan.guidance,
             (),
             already_tried_personas=already_tried,
         )
         if persona is None:
-            return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt, ledger=ledger)
+            return _seed_with_repair_plan(seed, plan, ledger=ledger)
 
         seed_yaml = yaml.dump(
             seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False
@@ -2269,7 +2273,7 @@ class AutoPipeline:
                 candidate = await asyncio.wait_for(
                     self.lateral_thinker(
                         persona=persona,
-                        qa_differences=guidance,
+                        qa_differences=plan.guidance,
                         qa_suggestions=(),
                         run_artifact=seed_yaml,
                     ),
@@ -2292,23 +2296,23 @@ class AutoPipeline:
                 if self._enforce_deadline(state):
                     raise TimeoutError
         if lateral_result is None:
-            return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt, ledger=ledger)
+            return _seed_with_repair_plan(seed, plan, ledger=ledger)
 
         state.last_lateral_persona = lateral_result.persona or persona.value
         state.last_lateral_approach_summary = lateral_result.approach_summary
         state.last_lateral_text = lateral_result.text
         if persona.value not in state.personas_invoked:
             state.personas_invoked.append(persona.value)
-        if not _normalized_seed_qa_lateral_feedback(lateral_result):
-            return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt, ledger=ledger)
-        state.mark_progress(
-            f"Seed QA lateral repair via {persona.value} (attempt {attempt})",
-            tool_name="seed_qa",
-        )
+        if _normalized_seed_qa_lateral_feedback(lateral_result):
+            state.mark_progress(
+                f"Seed QA lateral repair via {persona.value} (attempt {attempt})",
+                tool_name="seed_qa",
+            )
         return _seed_with_seed_qa_lateral_feedback(
             seed,
             lateral_result,
-            qa_result=qa_result,
+            plan=plan,
+            ledger=ledger,
             attempt=attempt,
         )
 
@@ -2910,54 +2914,49 @@ def _seed_with_seed_qa_lateral_feedback(
     seed: Seed,
     lateral_result: LateralResult,
     *,
-    qa_result: EvaluateResult,
+    plan: SeedQaRepairPlan,
+    ledger: SeedDraftLedger | None,
     attempt: int,
 ) -> Seed:
     """Return a Seed revised with a lateral persona's concrete QA resolution.
 
-    Unlike :func:`_seed_with_seed_qa_feedback` (which encodes mapped QA
-    feedback), this folds the lateral persona's *decision* into the Seed so the
-    re-judged Seed carries an actionable resolution of the gap (e.g. a chosen
-    binding contract) rather than a restatement of the gap. The text is
-    length-bounded so an overlong persona dump cannot bloat the Seed.
-    """
-    del attempt, qa_result
-    decisions = _normalized_seed_qa_lateral_feedback(lateral_result)
-    return _seed_with_repaired_constraints(seed, _repaired_constraints(seed, decisions))
-
-
-def _seed_with_seed_qa_feedback(
-    seed: Seed,
-    qa_result: EvaluateResult,
-    *,
-    attempt: int,
-    ledger: SeedDraftLedger | None = None,
-) -> Seed:
-    """Return a Seed revised with bounded pre-run Seed QA feedback.
-
-    Only the plan's product/runtime constraints and the ledger's own binding
-    non-goals are written; its Seed-authoring instructions direct this rebuild
-    and never reach the Seed (#3033). Feedback that maps only to instructions
-    and leaves the constraints unchanged raises :class:`SeedQaRepairMappingError`,
-    so the gate never re-judges an unchanged Seed as a repair.
+    The persona's *decision* is folded in after the plan's own additions, so
+    the re-judged Seed carries an actionable resolution of the gap (e.g. a
+    chosen binding contract) on top of the deterministic repair, never instead
+    of it. The text is length-bounded so an overlong persona dump cannot bloat
+    the Seed.
     """
     del attempt
-    plan = seed_qa_repair_plan(qa_result)
+    decisions = _normalized_seed_qa_lateral_feedback(lateral_result)
+    return _seed_with_repair_plan(seed, plan, ledger=ledger, decisions=decisions)
+
+
+def _seed_with_repair_plan(
+    seed: Seed,
+    plan: SeedQaRepairPlan,
+    *,
+    ledger: SeedDraftLedger | None,
+    decisions: tuple[str, ...] = (),
+) -> Seed:
+    """The single write point of a Seed QA repair (#3033).
+
+    Appends, in order and de-duplicated: the plan's product/runtime
+    constraints, the ledger's binding non-goals when the plan asks for them,
+    and the persona decisions accepted by
+    :func:`_normalized_seed_qa_lateral_feedback`. The plan's instructions
+    direct this rebuild and never reach the Seed; an existing constraint that
+    carries one, or diagnostic prose, is dropped. A plan with only
+    instructions and no decision that changes nothing raises
+    :class:`SeedQaRepairMappingError`, so the gate never re-judges an
+    unchanged Seed as a repair.
+    """
     restored: tuple[str, ...] = ()
     if plan.restore_ledger_non_goals and ledger is not None:
         restored = ledger_non_goal_constraints(ledger)
-    constraints = _repaired_constraints(seed, (*plan.constraints, *restored))
-    if not plan.constraints and constraints == seed.constraints:
-        raise SeedQaRepairMappingError(plan.feedback)
-    return _seed_with_repaired_constraints(seed, constraints)
-
-
-def _repaired_constraints(seed: Seed, additions: tuple[str, ...]) -> tuple[str, ...]:
     kept = (c for c in seed.constraints if not _is_seed_qa_diagnostic_constraint(c))
-    return tuple(dict.fromkeys((*kept, *additions)))
-
-
-def _seed_with_repaired_constraints(seed: Seed, constraints: tuple[str, ...]) -> Seed:
+    constraints = tuple(dict.fromkeys((*kept, *plan.constraints, *restored, *decisions)))
+    if not plan.constraints and not decisions and constraints == seed.constraints:
+        raise SeedQaRepairMappingError(plan.feedback)
     metadata_updates: dict[str, Any] = {
         "seed_id": f"seed_{uuid4().hex[:12]}",
         "created_at": datetime.now(UTC),

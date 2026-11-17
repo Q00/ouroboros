@@ -27,10 +27,11 @@ from ouroboros.auto.lateral_routing import (
 from ouroboros.auto.pipeline import (
     SeedQaRepairMappingError,
     _seed_with_recovery_constraint,
-    _seed_with_seed_qa_feedback,
+    _seed_with_repair_plan,
     _seed_with_seed_qa_lateral_feedback,
 )
 from ouroboros.auto.recovery_plan import AutoRecoveryPlan, RecoveryPlanAction
+from ouroboros.auto.seed_qa_repair import SeedQaRepairPlan, seed_qa_repair_plan
 from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
 from ouroboros.auto.state import (
     _ALLOWED_TRANSITIONS,
@@ -79,6 +80,17 @@ def _build_seed(seed_id: str = "seed_lateral_001") -> Seed:
     )
 
 
+# A plan with nothing mapped: isolates what the persona decision alone writes.
+_NO_PLAN = SeedQaRepairPlan(
+    feedback=(), guidance=(), constraints=(), restore_ledger_non_goals=False
+)
+
+
+def _seed_with_seed_qa_feedback(seed: Seed, qa_result: EvaluateResult) -> Seed:
+    """The deterministic repair: the mapped plan alone, without ledger evidence."""
+    return _seed_with_repair_plan(seed, seed_qa_repair_plan(qa_result), ledger=None)
+
+
 def test_seed_qa_feedback_does_not_pollute_constraints_with_diagnostics() -> None:
     seed = _build_seed().model_copy(
         update={
@@ -102,7 +114,7 @@ def test_seed_qa_feedback_does_not_pollute_constraints_with_diagnostics() -> Non
         ),
     )
 
-    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result)
     constraints = "\n".join(repaired.constraints)
 
     assert "# Lateral Thinking" not in constraints
@@ -131,7 +143,7 @@ def test_seed_qa_feedback_rejects_unmapped_reviewer_diagnostics() -> None:
     )
 
     with pytest.raises(SeedQaRepairMappingError) as exc_info:
-        _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+        _seed_with_seed_qa_feedback(seed, qa_result)
 
     assert exc_info.value.feedback == (
         "missing audit-log retention policy",
@@ -161,7 +173,7 @@ def test_seed_qa_feedback_rejects_unrepairable_exit_condition_feedback(
     )
 
     with pytest.raises(SeedQaRepairMappingError):
-        _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+        _seed_with_seed_qa_feedback(seed, qa_result)
 
 
 def test_seed_qa_lateral_feedback_does_not_trip_intent_guard_pollution() -> None:
@@ -187,7 +199,8 @@ def test_seed_qa_lateral_feedback_does_not_trip_intent_guard_pollution() -> None
     repaired = _seed_with_seed_qa_lateral_feedback(
         seed,
         lateral_result,
-        qa_result=EvaluateResult(passed=False, score=0.61, verdict="revise"),
+        plan=_NO_PLAN,
+        ledger=None,
         attempt=1,
     )
     constraints = "\n".join(repaired.constraints)
@@ -246,7 +259,8 @@ def test_seed_qa_lateral_feedback_does_not_fabricate_ambiguity_repair(difference
     repaired = _seed_with_seed_qa_lateral_feedback(
         seed,
         lateral_result,
-        qa_result=qa_result,
+        plan=seed_qa_repair_plan(qa_result),
+        ledger=None,
         attempt=1,
     )
 
@@ -282,11 +296,12 @@ def test_seed_qa_repairs_ignore_non_actionable_ambiguity_mentions(difference: st
         text="Treat every CSV cell as a string.",
     )
 
-    deterministic = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+    deterministic = _seed_with_seed_qa_feedback(seed, qa_result)
     lateral = _seed_with_seed_qa_lateral_feedback(
         seed,
         lateral_result,
-        qa_result=qa_result,
+        plan=seed_qa_repair_plan(qa_result),
+        ledger=None,
         attempt=1,
     )
 
@@ -308,10 +323,17 @@ def test_seed_qa_lateral_feedback_discards_persona_transcripts() -> None:
         ),
     )
 
+    no_op_plan = seed_qa_repair_plan(
+        EvaluateResult(
+            passed=False, score=0.61, verdict="revise", differences=("missing no-op scope",)
+        )
+    )
+
     repaired = _seed_with_seed_qa_lateral_feedback(
         seed,
         lateral_result,
-        qa_result=EvaluateResult(passed=False, score=0.61, verdict="revise"),
+        plan=no_op_plan,
+        ledger=None,
         attempt=1,
     )
     constraints = "\n".join(repaired.constraints)
@@ -321,9 +343,18 @@ def test_seed_qa_lateral_feedback_discards_persona_transcripts() -> None:
     assert "Most recent run artifact" not in constraints
     # #3033: a transcript-only persona answer yields no decision. The old
     # placeholder sentence is not a user requirement and is no longer written;
-    # the pipeline falls back to the deterministic repair instead.
+    # only the mapped plan lands.
     assert "without copying recovery persona prompts" not in constraints
-    assert repaired.constraints == ("Use existing project patterns",)
+    assert repaired.constraints == (
+        "Use existing project patterns",
+        "Define explicit no-op scope for supported command behavior.",
+    )
+    # With nothing mapped either, there is no repair to write: refuse rather
+    # than hand the gate an unchanged Seed as "repaired".
+    with pytest.raises(SeedQaRepairMappingError):
+        _seed_with_seed_qa_lateral_feedback(
+            seed, lateral_result, plan=_NO_PLAN, ledger=None, attempt=1
+        )
 
 
 def test_seed_qa_lateral_feedback_preserves_clean_summary_with_dirty_body() -> None:
@@ -343,7 +374,8 @@ def test_seed_qa_lateral_feedback_preserves_clean_summary_with_dirty_body() -> N
     repaired = _seed_with_seed_qa_lateral_feedback(
         seed,
         lateral_result,
-        qa_result=EvaluateResult(passed=False, score=0.61, verdict="revise"),
+        plan=_NO_PLAN,
+        ledger=None,
         attempt=1,
     )
     constraints = "\n".join(repaired.constraints)
@@ -371,7 +403,8 @@ def test_seed_qa_lateral_feedback_discards_problem_context_body() -> None:
     repaired = _seed_with_seed_qa_lateral_feedback(
         seed,
         lateral_result,
-        qa_result=EvaluateResult(passed=False, score=0.61, verdict="revise"),
+        plan=_NO_PLAN,
+        ledger=None,
         attempt=1,
     )
     constraints = "\n".join(repaired.constraints)
