@@ -2060,6 +2060,24 @@ class TestUsageRollup:
             telemetry_rollup.event_uuid(resolved, day) for day in sorted(rows)
         ]
 
+    def test_a_clock_40_days_behind_keeps_the_unsent_day(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        _on_day(monkeypatch, "2026-11-16")
+        telemetry.capture_cli_command("run")
+        _next_process_on(monkeypatch, "2026-10-07")  # a clock 40 days behind
+        telemetry.capture_cli_command("status")
+        _next_process_on(monkeypatch, "2026-11-17")
+        telemetry.capture_cli_command("status")
+        _next_process_on(monkeypatch, "2026-11-17")
+        telemetry.capture_cli_command("status")
+        telemetry.flush(timeout=2.0)
+
+        rows = [event for event in sent if event["event"] == "usage_daily"]
+        assert [(row["properties"]["day"], row["properties"]["cmd_run"]) for row in rows] == [
+            ("2026-11-16", 1)
+        ]
+
     def test_a_late_count_for_a_sent_day_never_makes_a_second_row(
         self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
     ) -> None:

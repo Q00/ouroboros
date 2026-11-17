@@ -27,7 +27,9 @@ Invariants, each covered by ``tests/unit/test_telemetry_rollup.py``:
   a clock that moved backwards, is kept and sent once that day is over.
 - Size is bounded: at most ``MAX_BUCKETS`` buckets, ``MAX_KEYS`` counters per
   bucket, each counter at most ``MAX_COUNT``, and buckets more than
-  ``MAX_AGE_DAYS`` from today are discarded unsent.
+  ``MAX_AGE_DAYS`` before today are discarded unsent. Age only counts
+  backwards: a bucket for a later day is never discarded by age, so a process
+  whose clock reads too early cannot delete the real days' buckets.
 """
 
 from __future__ import annotations
@@ -259,7 +261,11 @@ def _load(path: Path) -> dict[str, Any]:
 
 
 def _prune(state: dict[str, Any], today: str) -> None:
-    """Drop buckets too far from ``today`` and keep at most ``MAX_BUCKETS``."""
+    """Drop buckets more than ``MAX_AGE_DAYS`` before ``today``; keep ``MAX_BUCKETS``.
+
+    Only age before ``today`` counts. A process whose clock reads weeks early
+    sees every real bucket as a later day and must not delete it.
+    """
     today_ordinal = _day_ordinal(today)
     if today_ordinal is None:
         return
@@ -267,7 +273,7 @@ def _prune(state: dict[str, Any], today: str) -> None:
     for section in ("days", "sending"):
         for key, bucket in list(state[section].items()):
             ordinal = _day_ordinal(bucket["day"])
-            if ordinal is None or abs(ordinal - today_ordinal) > MAX_AGE_DAYS:
+            if ordinal is None or ordinal < today_ordinal - MAX_AGE_DAYS:
                 del state[section][key]
             else:
                 entries.append((ordinal, section, key))
@@ -277,7 +283,7 @@ def _prune(state: dict[str, Any], today: str) -> None:
     state["sent"] = [
         d
         for d in state["sent"]
-        if (ordinal := _day_ordinal(d)) is not None and abs(ordinal - today_ordinal) <= MAX_AGE_DAYS
+        if (ordinal := _day_ordinal(d)) is not None and ordinal >= today_ordinal - MAX_AGE_DAYS
     ]
 
 

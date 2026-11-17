@@ -79,6 +79,42 @@ class TestBounds:
         rollup.record(tmp_path, DAY3, {"cmd_run": 1}, DIMS)
         assert list(_state(tmp_path)["days"]) == [DAY3]
 
+    def test_a_clock_40_days_behind_never_discards_newer_buckets(self, tmp_path: Path) -> None:
+        rollup.record(tmp_path, DAY1, {"cmd_run": 1}, DIMS)
+        rollup.record(tmp_path, DAY2, {"cmd_seed": 1}, DIMS)
+        now = time.time()
+        (first,) = rollup.claim_due(tmp_path, DAY2, now)  # DAY1: leased, not delivered
+        # A process whose clock reads 40 days before DAY1 records and claims.
+        behind = "2026-10-06"
+        rollup.record(tmp_path, behind, {"cmd_run": 1}, DIMS)
+        assert rollup.claim_due(tmp_path, behind, now) == []
+        state = _state(tmp_path)
+        assert sorted(state["days"]) == [behind, DAY2]
+        assert [b["day"] for b in state["sending"].values()] == [DAY1]
+
+        # Back on the real clock (DAY1's claimer having died), each real day is
+        # still sent exactly once; the bucket dated 42 days back is the one
+        # discarded by age.
+        ready = rollup.claim_due(tmp_path, DAY3, now + rollup.LEASE_SECONDS + 1)
+        assert sorted((b["day"], b["counts"]) for b in ready) == [
+            (DAY1, {"cmd_run": 1}),
+            (DAY2, {"cmd_seed": 1}),
+        ]
+        for bucket in ready:
+            rollup.settle(tmp_path, bucket["id"], delivered=True)
+        assert first["id"] in {bucket["id"] for bucket in ready}
+        assert rollup.claim_due(tmp_path, DAY3, now + rollup.LEASE_SECONDS * 3) == []
+        assert _state(tmp_path)["sent"] == [DAY1, DAY2]
+
+    def test_a_clock_behind_keeps_delivered_days_closed(self, tmp_path: Path) -> None:
+        rollup.record(tmp_path, DAY1, {"cmd_run": 1}, DIMS)
+        (claimed,) = rollup.claim_due(tmp_path, DAY2, time.time())
+        rollup.settle(tmp_path, claimed["id"], delivered=True)
+        rollup.record(tmp_path, "2026-10-06", {"cmd_run": 1}, DIMS)
+        assert _state(tmp_path)["sent"] == [DAY1]
+        with pytest.raises(rollup.DayClosed):
+            rollup.record(tmp_path, DAY1, {"cmd_run": 1}, DIMS)
+
     def test_at_most_max_buckets_are_kept(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
