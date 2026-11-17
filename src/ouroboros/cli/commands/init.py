@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum, auto
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import click
 from rich.prompt import Confirm, Prompt
@@ -30,6 +30,7 @@ from ouroboros.bigbang.interview import (
     InterviewState,
     InterviewStatus,
 )
+from ouroboros.bigbang.interview_closure import InterviewSurface, answer_source, closure_snapshot
 from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
@@ -56,6 +57,15 @@ from ouroboros.events.hitl import (
     create_hitl_answered_event,
     create_hitl_requested_event,
 )
+from ouroboros.events.interview import (
+    interview_completed,
+    interview_response_recorded,
+    interview_started,
+)
+from ouroboros.observability.interview_closure_summary import (
+    record_forced_seed,
+    record_interview_event,
+)
 from ouroboros.package_profiles import (
     PublicAgentRuntimeBackend as AgentRuntimeBackend,
 )
@@ -64,6 +74,9 @@ from ouroboros.package_profiles import (
 )
 from ouroboros.providers import create_llm_adapter, resolve_llm_backend
 from ouroboros.providers.base import LLMAdapter
+
+if TYPE_CHECKING:
+    from ouroboros.persistence.event_store import EventStore
 
 log = structlog.get_logger(__name__)
 
@@ -446,9 +459,24 @@ async def _run_interview_loop(
 
         console.print()
 
-        # Tiered confirmation logic
+        score: AmbiguityScore | None = None
         if current_round >= MIN_ROUNDS_BEFORE_EARLY_EXIT:
             score = await _refresh_ambiguity(engine, state, scorer)
+        if event_store is not None:
+            await record_interview_event(
+                interview_response_recorded(
+                    state.interview_id,
+                    state.rounds[-1].round_number if state.rounds else current_round,
+                    question,
+                    response,
+                    answer_source=answer_source(response, surface=InterviewSurface.CLI_INIT),
+                    closure=closure_snapshot(state, score),
+                ),
+                event_store,
+            )
+
+        # Tiered confirmation logic
+        if current_round >= MIN_ROUNDS_BEFORE_EARLY_EXIT:
             if score is not None:
                 console.print(
                     f"[muted]Ambiguity score: {score.overall_score:.2f} "
@@ -479,6 +507,15 @@ async def _run_interview_loop(
                         f"Failed to save state; reload before retrying: {save_result.error.message}"
                     )
                     raise typer.Exit(code=1)
+                if complete_result.is_ok and event_store is not None:
+                    await record_interview_event(
+                        interview_completed(
+                            state.interview_id,
+                            total_rounds=len(state.rounds),
+                            closure=closure_snapshot(state, score),
+                        ),
+                        event_store,
+                    )
                 break
 
     return InterviewLoopOutcome(
@@ -570,6 +607,15 @@ async def _run_interview(
     # Run initial interview loop
     event_store = await _get_init_event_store()
     disabled_event_stores: set[int] = set()
+    if not resume_id and event_store is not None:
+        await record_interview_event(
+            interview_started(
+                state.interview_id,
+                initial_context,
+                surface=InterviewSurface.CLI_INIT.value,
+            ),
+            event_store,
+        )
 
     try:
         loop_event_store = None if event_store is None else event_store
@@ -626,6 +672,11 @@ async def _run_interview(
                 llm_backend,
                 engine=engine,
                 approved_score=outcome.approved_score,
+                event_store=(
+                    None
+                    if event_store is None or id(event_store) in disabled_event_stores
+                    else event_store
+                ),
             )
 
             if result == SeedGenerationResult.CONTINUE_INTERVIEW:
@@ -691,6 +742,7 @@ async def _generate_seed_from_interview(
     *,
     engine: InterviewEngine,
     approved_score: AmbiguityScore | None = None,
+    event_store: "EventStore | None" = None,
 ) -> tuple[Path | None, SeedGenerationResult]:
     """Generate Seed from completed interview.
 
@@ -702,6 +754,9 @@ async def _generate_seed_from_interview(
             the same answers. Reused instead of sampling a second score, which
             could disagree and drop the user into the "too ambiguous" menu right
             after they approved generation.
+        event_store: Where a forced Seed ("Generate Seed anyway") is recorded as
+            ``interview.seed_forced``. ``None`` opens the default store for that
+            one event.
 
     Returns:
         Tuple of (path to generated seed file or None, result status).
@@ -837,6 +892,7 @@ async def _generate_seed_from_interview(
         print_error(f"Failed to save Seed: {save_result.error.message}")
         return None, SeedGenerationResult.CANCELLED
 
+    await record_forced_seed(event_store, state, ambiguity_score, force=not seed_ready)
     print_success(f"Seed generated: {seed_path}")
     return seed_path, SeedGenerationResult.SUCCESS
 
@@ -1250,8 +1306,28 @@ def list_interviews(
             dir_okay=True,
         ),
     ] = None,
+    summary: Annotated[
+        bool,
+        typer.Option(
+            "--summary",
+            help=(
+                "Instead of listing sessions, print interview closure counts per calling "
+                "surface (started, completed, questions per completed interview, early "
+                "closes by a forced Seed, abandon rate) from the local event store."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """List all interview sessions."""
+    if summary:
+        if state_dir is not None:
+            raise typer.BadParameter(
+                "--summary reads the event store, not interview state files.",
+                param_hint="--state-dir",
+            )
+        _print_closure_summary()
+        return
+
     engine = InterviewEngine(
         state_dir=state_dir or Path.home() / ".ouroboros" / "data",
     )
@@ -1274,6 +1350,94 @@ def list_interviews(
         )
         console.print(f"  Updated: {interview['updated_at']}")
         console.print()
+
+
+def _format_count(value: float | None) -> str:
+    if value is None:
+        return "-"
+    return str(int(value)) if float(value).is_integer() else f"{value:.1f}"
+
+
+def _print_closure_summary() -> None:
+    """Print the per-surface interview closure summary from the local event store."""
+    from ouroboros.cli.formatters.tables import create_table, print_table
+    from ouroboros.config.models import resolve_event_store_path
+    from ouroboros.observability.interview_closure_summary import (
+        DEFAULT_IDLE_AFTER,
+        load_interview_events,
+        summarize_interview_closure,
+    )
+    from ouroboros.persistence.event_store import EventStore, sqlite_database_url
+
+    try:
+        db_path = resolve_event_store_path()
+    except ValueError as exc:
+        print_error(f"Cannot read the event store: {exc}")
+        raise typer.Exit(code=1) from exc
+    if not db_path.exists():
+        print_info(f"No interviews recorded yet (no event store at {db_path}).")
+        return
+
+    async def _load() -> list:
+        store = EventStore(sqlite_database_url(db_path), read_only=True)
+        try:
+            await store.initialize()
+            return await load_interview_events(store)
+        finally:
+            await store.close()
+
+    try:
+        events = asyncio.run(_load())
+    except Exception as exc:  # noqa: BLE001 - report any read failure, never a blank table
+        print_error(f"Cannot read interview events from {db_path}: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    summaries = summarize_interview_closure(events)
+    if not summaries:
+        print_info(f"No interviews recorded in {db_path}.")
+        return
+
+    # Two narrow tables instead of one nine-column table, so every header and
+    # value fits the default 80-column terminal (the wider one is 79 columns
+    # with the longest surface label). The surface label is the row key, so it
+    # never wraps or truncates; on a narrower terminal Rich narrows the count
+    # columns instead.
+    surface_width = max(len(row.surface) for row in summaries)
+    outcomes = create_table("Interview outcomes by surface")
+    questions = create_table("Questions per interview by surface")
+    for table in (outcomes, questions):
+        table.add_column("Surface", no_wrap=True, min_width=surface_width)
+    for heading in ("Started", "Completed", "Forced\nearly", "Abandoned", "Abandon\nrate", "Open"):
+        outcomes.add_column(heading, justify="right")
+    for heading in ("Completed\nmedian", "Completed\nmean", "Forced early\nmedian"):
+        questions.add_column(heading, justify="right")
+    for row in summaries:
+        rate = row.abandon_rate
+        outcomes.add_row(
+            row.surface,
+            str(row.started),
+            str(row.completed),
+            str(row.forced_early),
+            str(row.abandoned),
+            "-" if rate is None else f"{rate:.0%}",
+            str(row.open),
+        )
+        questions.add_row(
+            row.surface,
+            _format_count(row.median_questions_completed),
+            _format_count(row.mean_questions_completed),
+            _format_count(row.median_questions_forced),
+        )
+    print_table(outcomes)
+    print_table(questions)
+    idle_hours = int(DEFAULT_IDLE_AFTER.total_seconds() // 3600)
+    console.print(
+        "[muted]Forced early: a Seed was generated with the closure gate bypassed. "
+        f"Abandoned: neither, and idle for {idle_hours}h; newer ones are open. "
+        "Abandon rate = abandoned / (completed + forced early + abandoned). "
+        "Interviews started before surfaces were recorded show as 'unrecorded'.[/]",
+        highlight=False,
+    )
 
 
 __all__ = ["app"]
