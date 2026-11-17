@@ -1099,7 +1099,7 @@ def _send_due_usage(today: str | None = None) -> None:
     try:
         resolved_id = distinct_id()
         if resolved_id:
-            buckets = telemetry_rollup.claim_due(_state_dir(), day, time.time())
+            buckets = telemetry_rollup.claim_due(_state_dir(), day)
     except Exception:
         buckets = None
     if buckets is None:

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+from types import SimpleNamespace
 from typing import Any
 import uuid
 
@@ -60,7 +61,7 @@ class TestRecord:
         with pytest.raises(ValueError):
             rollup.record(tmp_path, day, {"cmd_run": 1}, DIMS)
         with pytest.raises(ValueError):
-            rollup.claim_due(tmp_path, day, time.time())
+            rollup.claim_due(tmp_path, day)
 
 
 class TestBounds:
@@ -83,11 +84,13 @@ class TestBounds:
         rollup.record(tmp_path, DAY1, {"cmd_run": 1}, DIMS)
         rollup.record(tmp_path, DAY2, {"cmd_seed": 1}, DIMS)
         now = time.time()
-        (first,) = rollup.claim_due(tmp_path, DAY2, now)  # DAY1: leased, not delivered
+        (first,) = rollup.claim_due(
+            tmp_path, DAY2, clock=lambda: now
+        )  # DAY1: leased, not delivered
         # A process whose clock reads 40 days before DAY1 records and claims.
         behind = "2026-10-06"
         rollup.record(tmp_path, behind, {"cmd_run": 1}, DIMS)
-        assert rollup.claim_due(tmp_path, behind, now) == []
+        assert rollup.claim_due(tmp_path, behind, clock=lambda: now) == []
         state = _state(tmp_path)
         assert sorted(state["days"]) == [behind, DAY2]
         assert [b["day"] for b in state["sending"].values()] == [DAY1]
@@ -95,7 +98,7 @@ class TestBounds:
         # Back on the real clock (DAY1's claimer having died), each real day is
         # still sent exactly once; the bucket dated 42 days back is the one
         # discarded by age.
-        ready = rollup.claim_due(tmp_path, DAY3, now + rollup.LEASE_SECONDS + 1)
+        ready = rollup.claim_due(tmp_path, DAY3, clock=lambda: now + rollup.LEASE_SECONDS + 1)
         assert sorted((b["day"], b["counts"]) for b in ready) == [
             (DAY1, {"cmd_run": 1}),
             (DAY2, {"cmd_seed": 1}),
@@ -103,12 +106,12 @@ class TestBounds:
         for bucket in ready:
             rollup.settle(tmp_path, bucket["id"], delivered=True)
         assert first["id"] in {bucket["id"] for bucket in ready}
-        assert rollup.claim_due(tmp_path, DAY3, now + rollup.LEASE_SECONDS * 3) == []
+        assert rollup.claim_due(tmp_path, DAY3, clock=lambda: now + rollup.LEASE_SECONDS * 3) == []
         assert _state(tmp_path)["sent"] == [DAY1, DAY2]
 
     def test_a_clock_behind_keeps_delivered_days_closed(self, tmp_path: Path) -> None:
         rollup.record(tmp_path, DAY1, {"cmd_run": 1}, DIMS)
-        (claimed,) = rollup.claim_due(tmp_path, DAY2, time.time())
+        (claimed,) = rollup.claim_due(tmp_path, DAY2)
         rollup.settle(tmp_path, claimed["id"], delivered=True)
         rollup.record(tmp_path, "2026-10-06", {"cmd_run": 1}, DIMS)
         assert _state(tmp_path)["sent"] == [DAY1]
@@ -132,7 +135,7 @@ class TestBounds:
             " " * (rollup.MAX_FILE_BYTES + 1),
         ):
             path.write_text(garbage, encoding="utf-8")
-            assert rollup.claim_due(tmp_path, DAY3, time.time()) == []
+            assert rollup.claim_due(tmp_path, DAY3) == []
             rollup.record(tmp_path, DAY1, {"cmd_run": 1}, DIMS)
             assert _state(tmp_path)["days"][DAY1]["counts"] == {"cmd_run": 1}
             path.unlink()
@@ -143,36 +146,36 @@ class TestClaimAndSettle:
         rollup.record(tmp_path, DAY1, {"cmd_run": 2}, DIMS)
         now = time.time()
 
-        assert rollup.claim_due(tmp_path, DAY1, now) == []
+        assert rollup.claim_due(tmp_path, DAY1, clock=lambda: now) == []
         rollup.record(tmp_path, DAY2, {"cmd_seed": 1}, DIMS)
-        (claimed,) = rollup.claim_due(tmp_path, DAY2, now)
+        (claimed,) = rollup.claim_due(tmp_path, DAY2, clock=lambda: now)
         assert (claimed["day"], claimed["counts"], claimed["dims"]) == (DAY1, {"cmd_run": 2}, DIMS)
         # Leased: a second process finds nothing to send.
-        assert rollup.claim_due(tmp_path, DAY2, now + 1) == []
+        assert rollup.claim_due(tmp_path, DAY2, clock=lambda: now + 1) == []
 
         rollup.settle(tmp_path, claimed["id"], delivered=True)
         state = _state(tmp_path)
         assert state["sending"] == {}
         assert list(state["days"]) == [DAY2]
         assert state["sent"] == [DAY1]
-        assert rollup.claim_due(tmp_path, DAY2, now + rollup.LEASE_SECONDS * 2) == []
+        assert rollup.claim_due(tmp_path, DAY2, clock=lambda: now + rollup.LEASE_SECONDS * 2) == []
 
     def test_an_undelivered_day_is_released_and_resent_under_the_same_id(
         self, tmp_path: Path
     ) -> None:
         rollup.record(tmp_path, DAY1, {"cmd_run": 1}, DIMS)
         now = time.time()
-        (first,) = rollup.claim_due(tmp_path, DAY2, now)
+        (first,) = rollup.claim_due(tmp_path, DAY2, clock=lambda: now)
         rollup.settle(tmp_path, first["id"], delivered=False)
-        (retry,) = rollup.claim_due(tmp_path, DAY2, now + 1)
+        (retry,) = rollup.claim_due(tmp_path, DAY2, clock=lambda: now + 1)
         assert retry["id"] == first["id"]
 
     def test_an_expired_lease_is_taken_over(self, tmp_path: Path) -> None:
         rollup.record(tmp_path, DAY1, {"cmd_run": 1}, DIMS)
         now = time.time()
-        (first,) = rollup.claim_due(tmp_path, DAY2, now)  # this process then dies
-        assert rollup.claim_due(tmp_path, DAY2, now + rollup.LEASE_SECONDS - 1) == []
-        (takeover,) = rollup.claim_due(tmp_path, DAY2, now + rollup.LEASE_SECONDS + 1)
+        (first,) = rollup.claim_due(tmp_path, DAY2, clock=lambda: now)  # this process then dies
+        assert rollup.claim_due(tmp_path, DAY2, clock=lambda: now + rollup.LEASE_SECONDS - 1) == []
+        (takeover,) = rollup.claim_due(tmp_path, DAY2, clock=lambda: now + rollup.LEASE_SECONDS + 1)
         assert takeover["id"] == first["id"]
 
     def test_a_claimed_day_never_gets_a_second_bucket(self, tmp_path: Path) -> None:
@@ -182,17 +185,17 @@ class TestClaimAndSettle:
         # refused (DayClosed) instead of starting a second bucket.
         rollup.record(tmp_path, DAY2, {"cmd_run": 1}, DIMS)
         now = time.time()
-        (claimed,) = rollup.claim_due(tmp_path, DAY3, now)
+        (claimed,) = rollup.claim_due(tmp_path, DAY3, clock=lambda: now)
         with pytest.raises(rollup.DayClosed):
             rollup.record(tmp_path, DAY2, {"cmd_run": 5}, DIMS)
-        assert rollup.claim_due(tmp_path, DAY3, now + 1) == []
+        assert rollup.claim_due(tmp_path, DAY3, clock=lambda: now + 1) == []
         assert list(_state(tmp_path)["sending"]) == [claimed["id"]]
 
         # The day stays closed after delivery, long after any lease.
         rollup.settle(tmp_path, claimed["id"], delivered=True)
         with pytest.raises(rollup.DayClosed):
             rollup.record(tmp_path, DAY2, {"cmd_run": 5}, DIMS)
-        assert rollup.claim_due(tmp_path, DAY3, now + rollup.LEASE_SECONDS * 2) == []
+        assert rollup.claim_due(tmp_path, DAY3, clock=lambda: now + rollup.LEASE_SECONDS * 2) == []
         state = _state(tmp_path)
         assert (state["days"], state["sending"], state["sent"]) == ({}, {}, [DAY2])
         assert claimed["counts"] == {"cmd_run": 1}
@@ -202,39 +205,95 @@ class TestClaimAndSettle:
     ) -> None:
         rollup.record(tmp_path, DAY2, {"cmd_run": 1}, DIMS)
         now = time.time()
-        (first,) = rollup.claim_due(tmp_path, DAY3, now)
+        (first,) = rollup.claim_due(tmp_path, DAY3, clock=lambda: now)
         rollup.settle(tmp_path, first["id"], delivered=False)
         with pytest.raises(rollup.DayClosed):
             rollup.record(tmp_path, DAY2, {"cmd_seed": 1}, DIMS)
         # A retry carries exactly what the first attempt carried, so a copy
         # PostHog already stored cannot differ from it.
-        (retry,) = rollup.claim_due(tmp_path, DAY3, now + 1)
+        (retry,) = rollup.claim_due(tmp_path, DAY3, clock=lambda: now + 1)
         assert retry == first
 
     def test_a_future_day_is_kept_until_it_is_over(self, tmp_path: Path) -> None:
         # A clock that moved back from DAY3 to DAY2 leaves a DAY3 bucket.
         rollup.record(tmp_path, DAY3, {"cmd_run": 1}, DIMS)
         now = time.time()
-        assert rollup.claim_due(tmp_path, DAY2, now) == []
+        assert rollup.claim_due(tmp_path, DAY2, clock=lambda: now) == []
         # Counts made on DAY3 itself join that bucket: one row for the day.
         rollup.record(tmp_path, DAY3, {"cmd_run": 2}, DIMS)
-        (claimed,) = rollup.claim_due(tmp_path, "2026-11-18", now)
+        (claimed,) = rollup.claim_due(tmp_path, "2026-11-18", clock=lambda: now)
         assert (claimed["day"], claimed["counts"]) == (DAY3, {"cmd_run": 3})
 
     def test_a_lease_from_a_clock_that_was_ahead_counts_as_expired(self, tmp_path: Path) -> None:
         rollup.record(tmp_path, DAY1, {"cmd_run": 1}, DIMS)
         now = time.time()
-        (first,) = rollup.claim_due(tmp_path, DAY2, now)
-        # The clock then jumps back a day: a lease further ahead than
-        # LEASE_SECONDS cannot be live, so the bucket is claimable again.
-        (again,) = rollup.claim_due(tmp_path, DAY2, now - 86_400)
+        (first,) = rollup.claim_due(tmp_path, DAY2, clock=lambda: now)
+        # The clock then jumps back a day: a lease that far ahead cannot be
+        # live, so the bucket is claimable again.
+        (again,) = rollup.claim_due(tmp_path, DAY2, clock=lambda: now - 86_400)
         assert again["id"] == first["id"]
+
+    def test_a_fresh_lease_is_kept_from_a_process_whose_reading_is_earlier(
+        self, tmp_path: Path
+    ) -> None:
+        # The CI interleaving (#3031): B's clock reads t and A's t + 0.3, but A
+        # gets the lock first and leases DAY1 until t + 0.3 + LEASE_SECONDS.
+        # B must not take that lease for one set by a clock that was ahead.
+        rollup.record(tmp_path, DAY1, {"cmd_run": 1}, DIMS)
+        t = 1_800_000_000.0
+        (first,) = rollup.claim_due(tmp_path, DAY2, clock=lambda: t + 0.3)
+        assert rollup.claim_due(tmp_path, DAY2, clock=lambda: t) == []
+        # Even a reading a full tolerance earlier leaves the lease alone.
+        earliest = t + 0.3 - rollup.CLOCK_AHEAD_TOLERANCE_SECONDS
+        assert rollup.claim_due(tmp_path, DAY2, clock=lambda: earliest) == []
+        assert [b["id"] for b in _state(tmp_path)["sending"].values()] == [first["id"]]
+
+    def test_a_lease_beyond_the_tolerance_counts_as_set_by_a_clock_ahead(
+        self, tmp_path: Path
+    ) -> None:
+        rollup.record(tmp_path, DAY1, {"cmd_run": 1}, DIMS)
+        t = 1_800_000_000.0
+        (first,) = rollup.claim_due(tmp_path, DAY2, clock=lambda: t)
+        edge = t - rollup.CLOCK_AHEAD_TOLERANCE_SECONDS  # lease ends a term + tolerance ahead
+        assert rollup.claim_due(tmp_path, DAY2, clock=lambda: edge) == []
+        (again,) = rollup.claim_due(tmp_path, DAY2, clock=lambda: edge - 1)
+        assert again["id"] == first["id"]
+
+    def test_the_clock_is_read_only_once_the_lock_is_held(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A reading taken before waiting for the lock is what let a contender
+        # judge a lease written while it waited. The default clock (what
+        # telemetry uses) must be read after the file lock is acquired.
+        rollup.record(tmp_path, DAY1, {"cmd_run": 1}, DIMS)
+        events: list[str] = []
+        real_try_lock = rollup._try_lock
+
+        def try_lock(fd: int) -> bool:
+            acquired = real_try_lock(fd)
+            if acquired:
+                events.append("locked")
+            return acquired
+
+        def wall_clock() -> float:
+            events.append("clock")
+            return time.time()
+
+        monkeypatch.setattr(rollup, "_try_lock", try_lock)
+        monkeypatch.setattr(
+            rollup,
+            "time",
+            SimpleNamespace(time=wall_clock, monotonic=time.monotonic, sleep=time.sleep),
+        )
+        (claimed,) = rollup.claim_due(tmp_path, DAY2)
+        assert events == ["locked", "clock"]
+        assert claimed["day"] == DAY1
 
     def test_a_file_with_a_second_bucket_for_a_closed_day_keeps_one(self, tmp_path: Path) -> None:
         rollup.record(tmp_path, DAY1, {"cmd_run": 1}, DIMS)
         rollup.record(tmp_path, DAY2, {"cmd_run": 1}, DIMS)
         now = time.time()
-        (claimed,) = rollup.claim_due(tmp_path, DAY2, now)
+        (claimed,) = rollup.claim_due(tmp_path, DAY2, clock=lambda: now)
         rollup.record(tmp_path, DAY3, {"cmd_run": 1}, DIMS)
         # Hand-craft what this module never writes: open buckets for a day
         # that is being sent (DAY1) and for one already delivered (DAY3).
@@ -254,12 +313,12 @@ class TestClaimAndSettle:
         assert state["sent"] == [DAY3]
         assert list(state["sending"]) == [claimed["id"]]
         # DAY1 is still leased, so only DAY2 is ready; nothing for DAY1 or DAY3.
-        ready = rollup.claim_due(tmp_path, "2026-11-18", now + 1)
+        ready = rollup.claim_due(tmp_path, "2026-11-18", clock=lambda: now + 1)
         assert [(b["day"], b["counts"]) for b in ready] == [(DAY2, {"cmd_run": 2})]
 
     def test_delivered_days_are_forgotten_outside_the_age_window(self, tmp_path: Path) -> None:
         rollup.record(tmp_path, DAY1, {"cmd_run": 1}, DIMS)
-        (claimed,) = rollup.claim_due(tmp_path, DAY2, time.time())
+        (claimed,) = rollup.claim_due(tmp_path, DAY2)
         rollup.settle(tmp_path, claimed["id"], delivered=True)
         assert _state(tmp_path)["sent"] == [DAY1]
         rollup.record(tmp_path, "2026-12-16", {"cmd_run": 1}, DIMS)  # 31 days later
@@ -381,7 +440,7 @@ class TestLocking:
         monkeypatch.setattr(rollup, "_try_lock", _file_lock_busy)
         calls = {
             "record": lambda: rollup.record(tmp_path, DAY1, {"cmd_run": 1}, DIMS),
-            "claim_due": lambda: rollup.claim_due(tmp_path, DAY2, 0.0),
+            "claim_due": lambda: rollup.claim_due(tmp_path, DAY2, clock=lambda: 0.0),
             "settle": lambda: rollup.settle(tmp_path, "id", delivered=True),
         }
 
@@ -447,7 +506,7 @@ class TestLocking:
             "claimed = []\n"
             "for _ in range(20):\n"
             f"    rollup.record(state_dir, {DAY2!r}, {{'cmd_run': 1}}, {{}})\n"
-            f"    claimed += rollup.claim_due(state_dir, {DAY2!r}, time.time())\n"
+            f"    claimed += rollup.claim_due(state_dir, {DAY2!r})\n"
             "print(json.dumps([bucket['id'] for bucket in claimed]))\n"
         )
         children = [
