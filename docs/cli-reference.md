@@ -1613,12 +1613,24 @@ diagnostics, see [`mcp doctor`](#mcp-doctor).
 ### `doctor install`
 
 Inspect the package, plugin, and MCP install surfaces without writing any
-file: the running package, the Codex personal plugin and its MCP launcher, the
+file: the running package, the Codex plugin and its MCP launcher, the
 Claude Code plugin and its MCP launcher, a user-level `ouroboros` entry in
 `~/.claude/mcp.json`, and the ZCode bridge plugin and launcher. Each surface is
 reported as `OK`, `WARN`, or `FAIL`, with its path, launcher, and a hint when
 one applies. A Codex or Claude Code plugin manifest whose version differs from
 the running package is a warning. The command exits with status 1 if any surface fails.
+
+For Codex, the doctor checks the newest versioned snapshot in
+`$CODEX_HOME/plugins/cache/ouroboros/ouroboros` (default `~/.codex/plugins/cache/ouroboros/ouroboros`).
+It reads the snapshot's `.codex-plugin/plugin.json` and follows its relative
+`mcpServers` file path, such as `./.mcp.codex.json`; without that field it checks
+`.mcp.json`. A declared path must stay inside the plugin. A missing or invalid
+launcher is reported without falling back to another launcher or an older snapshot.
+When no official marketplace snapshot is found, the existing personal-plugin
+manifest and cache checks apply. These are filesystem observations, not proof
+that a running Codex session loaded that snapshot or can call its MCP tools.
+The JSON surface names remain `codex_personal_plugin` and
+`codex_personal_plugin_launcher` for compatibility.
 
 ```bash
 ouroboros doctor install [OPTIONS]

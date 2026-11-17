@@ -286,6 +286,68 @@ def _resolve_install_codex_home(home: Path | None) -> Path:
     return resolve_codex_home()
 
 
+def _add_codex_marketplace_surfaces(
+    surfaces: list[InstallSurface], codex_home: Path, expected_version: str
+) -> bool:
+    """Inspect the official marketplace snapshot, keeping the existing surface IDs."""
+    cache_root = codex_home / "plugins" / "cache" / "ouroboros" / "ouroboros"
+    cache, error = _latest_versioned_child_with(cache_root, ".codex-plugin/plugin.json")
+    if cache is None and error is None:
+        return False
+
+    launcher_path = cache_root
+    if error is not None:
+        surfaces.append(
+            InstallSurface(
+                name="codex_personal_plugin",
+                status="fail",
+                message=f"could not inspect Codex marketplace cache: {error}",
+                path=str(cache_root),
+            )
+        )
+    else:
+        assert cache is not None
+        manifest = cache / ".codex-plugin" / "plugin.json"
+        _add_manifest_surface(
+            surfaces,
+            name="codex_personal_plugin",
+            path=manifest,
+            expected_version=expected_version,
+        )
+        parsed, error = _read_json(manifest)
+        launcher_path = manifest
+        if error is None:
+            reference = parsed.get("mcpServers", ".mcp.json") if parsed else ".mcp.json"
+            if not isinstance(reference, str) or not reference.strip():
+                error = "mcpServers must be a relative MCP config file path"
+            else:
+                launcher_path = cache / reference
+                try:
+                    if Path(reference).is_absolute() or not launcher_path.resolve().is_relative_to(
+                        cache.resolve()
+                    ):
+                        error = "mcpServers must refer to a file inside the plugin"
+                except (OSError, RuntimeError, ValueError):
+                    error = "mcpServers path could not be resolved"
+
+    if error is not None:
+        surfaces.append(
+            InstallSurface(
+                name="codex_personal_plugin_launcher",
+                status="fail",
+                message=f"could not inspect Codex MCP launcher: {error}",
+                path=str(launcher_path),
+            )
+        )
+    else:
+        _add_launcher_surface(
+            surfaces,
+            name="codex_personal_plugin_launcher",
+            path=launcher_path,
+        )
+    return True
+
+
 def collect_install_surfaces(home: Path | None = None) -> list[InstallSurface]:
     """Collect read-only installation diagnostics from known user-level locations."""
 
@@ -300,41 +362,42 @@ def collect_install_surfaces(home: Path | None = None) -> list[InstallSurface]:
         )
     ]
 
-    codex_manifest = resolved_home / "plugins" / "ouroboros" / ".codex-plugin" / "plugin.json"
-    _add_manifest_surface(
-        surfaces,
-        name="codex_personal_plugin",
-        path=codex_manifest,
-        expected_version=expected_version,
-    )
-
     codex_home = _resolve_install_codex_home(home)
-    codex_cache_root = codex_home / "plugins" / "cache" / "personal" / "ouroboros"
-    codex_cache, codex_cache_error = _latest_versioned_child_with(codex_cache_root, ".mcp.json")
-    if codex_cache_error is not None:
-        surfaces.append(
-            InstallSurface(
-                name="codex_personal_plugin_launcher",
-                status="fail",
-                message=f"could not inspect Codex personal plugin cache: {codex_cache_error}",
-                path=str(codex_cache_root),
-            )
-        )
-    elif codex_cache is None:
-        surfaces.append(
-            InstallSurface(
-                name="codex_personal_plugin_launcher",
-                status="warn",
-                message="Codex personal plugin cache launcher not found",
-                path=str(codex_cache_root),
-            )
-        )
-    else:
-        _add_launcher_surface(
+    if not _add_codex_marketplace_surfaces(surfaces, codex_home, expected_version):
+        codex_manifest = resolved_home / "plugins" / "ouroboros" / ".codex-plugin" / "plugin.json"
+        _add_manifest_surface(
             surfaces,
-            name="codex_personal_plugin_launcher",
-            path=codex_cache / ".mcp.json",
+            name="codex_personal_plugin",
+            path=codex_manifest,
+            expected_version=expected_version,
         )
+
+        codex_cache_root = codex_home / "plugins" / "cache" / "personal" / "ouroboros"
+        codex_cache, codex_cache_error = _latest_versioned_child_with(codex_cache_root, ".mcp.json")
+        if codex_cache_error is not None:
+            surfaces.append(
+                InstallSurface(
+                    name="codex_personal_plugin_launcher",
+                    status="fail",
+                    message=f"could not inspect Codex personal plugin cache: {codex_cache_error}",
+                    path=str(codex_cache_root),
+                )
+            )
+        elif codex_cache is None:
+            surfaces.append(
+                InstallSurface(
+                    name="codex_personal_plugin_launcher",
+                    status="warn",
+                    message="Codex personal plugin cache launcher not found",
+                    path=str(codex_cache_root),
+                )
+            )
+        else:
+            _add_launcher_surface(
+                surfaces,
+                name="codex_personal_plugin_launcher",
+                path=codex_cache / ".mcp.json",
+            )
 
     claude_manifest = (
         resolved_home
