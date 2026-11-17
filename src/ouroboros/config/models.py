@@ -30,12 +30,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator
 import yaml
 
-from ouroboros.config._model_defaults import (
-    CODEX_TIER_MODELS,
-    DEFAULT_HAIKU_MODEL,
-    DEFAULT_OPUS_MODEL,
-    DEFAULT_SONNET_MODEL,
-)
+from ouroboros.config._model_defaults import SHIPPED_TIER_LADDER
 from ouroboros.orchestrator_stage import VALID_STAGE_KEYS
 
 _SAFE_PROJECT_GUIDANCE_ID_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?$")
@@ -962,18 +957,26 @@ def get_default_config() -> OuroborosConfig:
     return OuroborosConfig(
         economics=EconomicsConfig(
             default_tier="frugal",
-            # openai entries are the currently documented Codex CLI model ids per
-            # tier (frugal/standard/frontier). Codex users on a custom
-            # model_providers config or a proxy should override economics.tiers or
-            # pin OUROBOROS_EXECUTION_MODEL, since those ids are not routable there.
+            # Each runtime runs its own default model for a tier
+            # (``SHIPPED_TIER_LADDER``): Claude Code gets ``haiku``/``sonnet``/
+            # ``opus`` and Gemini CLI ``flash``/``pro``, which each CLI resolves for
+            # its provider, and Codex's ``default`` sends no ``--model`` so Codex
+            # keeps its configured model. To route tiers to specific models, set
+            # them here (a ``codex``/``claude``/``gemini`` entry is never rewritten).
             tiers={
                 "frugal": TierConfig(
                     cost_factor=1,
                     intelligence_range=(9, 11),
                     models=[
-                        ModelConfig(provider="openai", model=CODEX_TIER_MODELS["frugal"]),
-                        ModelConfig(provider="google", model="gemini-2.0-flash"),
-                        ModelConfig(provider="anthropic", model=DEFAULT_HAIKU_MODEL),
+                        ModelConfig(
+                            provider="openai", model=SHIPPED_TIER_LADDER["openai"]["frugal"]
+                        ),
+                        ModelConfig(
+                            provider="google", model=SHIPPED_TIER_LADDER["google"]["frugal"]
+                        ),
+                        ModelConfig(
+                            provider="anthropic", model=SHIPPED_TIER_LADDER["anthropic"]["frugal"]
+                        ),
                     ],
                     use_cases=["routine_coding", "log_analysis", "stage1_fix"],
                 ),
@@ -981,9 +984,15 @@ def get_default_config() -> OuroborosConfig:
                     cost_factor=10,
                     intelligence_range=(14, 16),
                     models=[
-                        ModelConfig(provider="openai", model=CODEX_TIER_MODELS["standard"]),
-                        ModelConfig(provider="anthropic", model=DEFAULT_SONNET_MODEL),
-                        ModelConfig(provider="google", model="gemini-2.5-pro"),
+                        ModelConfig(
+                            provider="openai", model=SHIPPED_TIER_LADDER["openai"]["standard"]
+                        ),
+                        ModelConfig(
+                            provider="anthropic", model=SHIPPED_TIER_LADDER["anthropic"]["standard"]
+                        ),
+                        ModelConfig(
+                            provider="google", model=SHIPPED_TIER_LADDER["google"]["standard"]
+                        ),
                     ],
                     use_cases=["logic_design", "stage2_evaluation", "refactoring"],
                 ),
@@ -991,8 +1000,12 @@ def get_default_config() -> OuroborosConfig:
                     cost_factor=30,
                     intelligence_range=(18, 20),
                     models=[
-                        ModelConfig(provider="openai", model=CODEX_TIER_MODELS["frontier"]),
-                        ModelConfig(provider="anthropic", model=DEFAULT_OPUS_MODEL),
+                        ModelConfig(
+                            provider="openai", model=SHIPPED_TIER_LADDER["openai"]["frontier"]
+                        ),
+                        ModelConfig(
+                            provider="anthropic", model=SHIPPED_TIER_LADDER["anthropic"]["frontier"]
+                        ),
                     ],
                     use_cases=["consensus", "lateral_thinking", "big_bang"],
                 ),

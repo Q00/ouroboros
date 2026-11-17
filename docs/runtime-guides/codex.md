@@ -81,11 +81,17 @@ Use `~/.ouroboros/config.yaml` for Ouroboros runtime settings. For everyday mode
 
 Choose **Use Codex default model** to keep Codex's current default model. This is the recommended setting: Ouroboros passes only the role's reasoning effort to each Codex invocation, so a newer model selected in Codex App or CLI is used automatically. Choose a listed model or **Enter another model ID…** only when you deliberately want to pin a model for a stage, including Execute.
 
-Per-AC model-tier routing preserves this automatic path. To deliberately use a
-concrete ladder, request an explicit tier (for example `--model frontier`) or
-set `OUROBOROS_MODEL_TIER_ROUTING=1`. The router prefers `provider: codex`
-entries in `economics.tiers`, then falls back to `openai`; explicit model pins
-still take precedence. See [native ladder configuration](../config-reference.md#native-runtime-ladders).
+Per-AC model-tier routing preserves this automatic path. The shipped
+`economics.tiers` ladder names no Codex model (each `openai` tier is `default`),
+so Codex keeps its selected model even when a tier is requested; a config from
+an earlier release that still holds `gpt-6-luna` / `gpt-6.1-sol` /
+`gpt-6-astra` or older shipped ids is treated the same way. To route tiers to
+specific models, set your own ids, then request an explicit tier (for example
+`--model frontier`) or set `OUROBOROS_MODEL_TIER_ROUTING=1`. The router prefers
+`provider: codex` entries in `economics.tiers`, then falls back to `openai`;
+put an exact shipped-looking id under `provider: codex` to keep it literal.
+Explicit model pins still take precedence. See
+[native ladder configuration](../config-reference.md#native-runtime-ladders).
 
 The settings picker is a static catalog fallback, not a list guaranteed for
 your account. `codex-cli 0.160.0 --help` (checked 2026-10-18) confirms

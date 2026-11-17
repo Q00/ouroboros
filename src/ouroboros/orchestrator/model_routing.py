@@ -93,7 +93,14 @@ def tier_model_providers(runtime_backend: str) -> tuple[str, ...]:
 
 
 def configured_tier_models(economics: EconomicsConfig, *, runtime_backend: str) -> dict[str, str]:
-    """Resolve one native model per tier, identically for routing and replay."""
+    """Resolve one native model per tier, identically for routing and replay.
+
+    A vendor-namespace entry that still holds an id some release shipped
+    resolves to the runtime's own default for that tier (see
+    :func:`~ouroboros.config._model_defaults.normalize_tier_model`): the Claude
+    Code alias, the Gemini CLI alias, or ``"default"`` for Codex. Explicit
+    never-shipped ids and every runtime-namespace entry are returned exactly.
+    """
     providers = tier_model_providers(runtime_backend)
     models: dict[str, str] = {}
     for tier in MODEL_TIER_LADDER:
@@ -103,15 +110,18 @@ def configured_tier_models(economics: EconomicsConfig, *, runtime_backend: str) 
         for provider in providers:
             entry = next((entry for entry in config.models if entry.provider == provider), None)
             if entry is not None:
-                model = normalize_tier_model(entry.model, provider=provider)
-                # Gemini CLI owns evergreen model-class aliases. Historical
-                # shipped API pins are not a native CLI tier catalog; keep
-                # explicit runtime-specific and never-shipped custom ids exact.
-                if runtime_backend == "gemini_cli" and provider == "google":
-                    model = {"gemini-2.0-flash": "flash", "gemini-2.5-pro": "pro"}.get(model, model)
-                models[tier] = model
+                models[tier] = normalize_tier_model(entry.model, provider=provider)
                 break
     return models
+
+
+# Tier models that name no model: the runtime keeps its own configured model.
+_UNRESOLVED_TIER_MODELS = frozenset({"", "default", "auto", "current"})
+
+
+def is_enforceable_tier_model(model: str) -> bool:
+    """Whether a per-call override of ``model`` would select a specific model."""
+    return model.strip().lower() not in _UNRESOLVED_TIER_MODELS
 
 
 # ExecutionProfile SuggestedModelTier vocabulary -> internal tier names.
@@ -363,6 +373,7 @@ def build_model_router(
     runtime_backend: str | None,
     pinned_model: str | None = None,
     base_tier_override: str | None = None,
+    require_enforceable: bool = False,
 ) -> ModelRouter | None:
     """Derive the per-run :class:`ModelRouter`, or ``None`` to stay dormant.
 
@@ -377,24 +388,36 @@ def build_model_router(
             returns ``None`` and never overrides an explicit choice.
         base_tier_override: Force the top-level tier instead of deriving it from
             ``child_tier``.
+        require_enforceable: Stay dormant when no tier names a model a per-call
+            override could select (see below).
 
     Returns:
         A :class:`ModelRouter`, or ``None`` when routing must stay dormant: an
-        explicit pin is set, the backend has no verified tier ladder, or no tier
-        resolved to a runnable model.
+        explicit pin is set, the backend has no verified tier ladder, no tier
+        resolved to a runnable model, or (with ``require_enforceable``) every
+        tier inherits the runtime's own model.
 
     The persisted-config trap: ``economics.tiers`` is read from the user's
-    ``~/.ouroboros/config.yaml``, which a prior release wrote with the OLD shipped
-    tier defaults verbatim (the defaults ship as concrete ids, not a ``"default"``
-    sentinel). After a pin bump, an untouched shipped default in that persisted
-    config is indistinguishable from a deliberate override, so routing would
-    enforce a retired id (e.g. ``--model gpt-4o``) the current provider map cannot
-    run — failing every AC. Each tier model is therefore normalized through
+    ``~/.ouroboros/config.yaml``, which a prior release wrote with the shipped
+    tier ids of its time verbatim (concrete ids such as ``claude-opus-5-5`` or
+    ``gpt-6-astra``). An untouched shipped id in that persisted config is
+    indistinguishable from a deliberate override, so routing would enforce an id
+    the runtime's provider or account may not serve (``--model gpt-4o``, or an
+    Anthropic-direct id on Bedrock) — failing every AC. Each tier model is
+    therefore normalized through
     :func:`~ouroboros.config._model_defaults.normalize_tier_model`, the same
-    precedent role models use (Q00/ouroboros#1324): a legacy shipped id resolves
-    to its current replacement. Because the persisted schema has no provenance,
-    an explicit same-provider override equal to that legacy id is normalized as
-    well; cross-provider aliases and explicit never-shipped ids are preserved.
+    precedent role models use (Q00/ouroboros#1324): a historical shipped id
+    resolves to the runtime's own default for that tier. Because the persisted
+    schema has no provenance, an explicit same-provider override equal to that
+    historical id is normalized as well; runtime-namespace entries,
+    cross-provider aliases and explicit never-shipped ids are preserved.
+
+    ``require_enforceable`` is for a run that is starting: a ladder whose every
+    tier inherits the runtime's own model (the shipped Codex ladder) enforces
+    nothing, so routing stays dormant instead of persisting an advisory-only
+    router that resume would read as per-call model enforcement. Resume
+    validation rebuilds without it, so a historical contract of that shape still
+    compares equal to the router rebuilt here.
     """
     # An explicit user pin always wins — routing must not override it.
     if pinned_model:
@@ -411,6 +434,8 @@ def build_model_router(
 
     tier_models = configured_tier_models(economics, runtime_backend=runtime_backend)
     if not tier_models:
+        return None
+    if require_enforceable and not any(map(is_enforceable_tier_model, tier_models.values())):
         return None
 
     # Activates the previously-unconsumed ``default_tier`` field: the shipped
@@ -535,8 +560,7 @@ def decide_model(
 
     mode = (
         MODEL_MODE_ENFORCED
-        if model_override_support is ParamSupport.NATIVE
-        and model.strip().lower() not in {"", "default", "auto", "current"}
+        if model_override_support is ParamSupport.NATIVE and is_enforceable_tier_model(model)
         else MODEL_MODE_ADVISED
     )
     return ModelDecision(tier=resolved_tier, model=model, mode=mode)

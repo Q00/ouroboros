@@ -1,10 +1,12 @@
 """Resolve the model-tier ladder a run executes on, and replay it on resume.
 
 Automatic role selection follows CLI-owned defaults. The execution-time
-model router separately resolves the economics ladder: Claude uses current
-tier aliases unless pinned, and other supported runtimes keep their native
-configured models. Costs and sparse ladder shape remain configuration.
-Codex's automatic-role path stays dormant unless routing is explicitly enabled.
+model router separately resolves the economics ladder, whose shipped values
+are each runtime's own default: Claude tier aliases, Gemini CLI aliases, and
+``"default"`` (no ``--model``) for Codex. With ``models.pin`` off every Claude
+vendor tier runs its alias; otherwise explicit never-shipped ids stay literal.
+Costs and sparse ladder shape remain configuration. Codex's automatic-role path
+stays dormant unless routing is explicitly enabled.
 
 The runner resolves the ladder once into its economics snapshot, so the model
 router and every Route B projection built from that snapshot agree. A run
@@ -22,7 +24,11 @@ from collections.abc import Mapping
 import inspect
 from typing import TYPE_CHECKING, Any, cast
 
-from ouroboros.config._model_defaults import normalize_tier_model, recognized_shipped_defaults
+from ouroboros.config._model_defaults import (
+    is_historical_tier_model,
+    normalize_tier_model,
+    recognized_shipped_defaults,
+)
 from ouroboros.config.model_selection import (
     ROLE_TIERS,
     SHIPPED_TIER_MODELS,
@@ -150,22 +156,23 @@ def replay_route_economics(
         configured_models = _configured_models(configured, runtime_backend=backend) or {}
         candidates.append(dict.fromkeys(configured_models, "default"))
 
-    # A pin bump changes new runs, not a frozen run. Accept an old shipped
-    # id only in the same provider AND tier whose current authorized model
-    # it normalizes to; never admit a cross-tier or arbitrary custom value.
+    # A change of shipped ladder changes new runs, not a frozen run. Accept an
+    # old shipped id only in the same provider AND tier it shipped for, and only
+    # where that tier's current authorized model is the shipped value it now
+    # resolves to; never admit a cross-tier or arbitrary custom value. The
+    # shipped tier matters because several Codex ids now resolve to the same
+    # ``"default"``.
     def historically_authorized(candidate: Mapping[str, str] | None) -> bool:
         if candidate is None or set(candidate) != set(persisted_tiers):
             return False
-        for tier, model in persisted_tiers.items():
-            normalized = normalize_tier_model(model, provider=provider)
-            if backend == "gemini_cli" and provider == "google":
-                normalized = {
-                    "gemini-2.0-flash": "flash",
-                    "gemini-2.5-pro": "pro",
-                }.get(normalized, normalized)
-            if normalized != candidate[tier]:
-                return False
-        return True
+        return all(
+            model == candidate[tier]
+            or (
+                is_historical_tier_model(model, provider=provider, tier=tier)
+                and normalize_tier_model(model, provider=provider) == candidate[tier]
+            )
+            for tier, model in persisted_tiers.items()
+        )
 
     legacy_match = False
     family = {"codex_mcp": "codex", "claude_mcp": "claude"}.get(backend)

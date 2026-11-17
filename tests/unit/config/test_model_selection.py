@@ -32,11 +32,14 @@ from ouroboros.config.model_selection import (
 from ouroboros.config.models import (
     ClarificationConfig,
     ConsensusConfig,
+    EconomicsConfig,
     EvaluationConfig,
     ExecutionConfig,
     LLMConfig,
+    ModelConfig,
     ModelsConfig,
     OuroborosConfig,
+    TierConfig,
 )
 from ouroboros.config.untrusted_env import is_untrusted_env_denied_key
 from ouroboros.core.errors import ConfigError
@@ -293,7 +296,34 @@ class TestInvocationAndGlobalDefault:
 
     def test_invocation_tier_name_maps_through_the_tier_table(self) -> None:
         assert _resolve("qa", "claude", invocation_model="frontier").model == "opus"
-        assert _resolve("qa", "codex", invocation_model="frugal").model == "gpt-6-luna"
+        # The shipped Codex ladder inherits the Codex default; Gemini has aliases.
+        assert _resolve("qa", "codex", invocation_model="frugal").model == "default"
+        assert _resolve("qa", "gemini", invocation_model="frugal").model == "flash"
+
+    @pytest.mark.parametrize(
+        ("provider", "model", "expected"),
+        [
+            ("openai", "gpt-6-luna", "default"),
+            ("openai", "gpt-5.1-codex-mini", "default"),
+            ("openai", "proxy/small", "proxy/small"),
+            ("codex", "gpt-6-luna", "gpt-6-luna"),
+        ],
+    )
+    def test_codex_invocation_tier_uses_only_configured_tier_models(
+        self, provider: str, model: str, expected: str
+    ) -> None:
+        shipped = OuroborosConfig().model_copy(
+            update={
+                "economics": EconomicsConfig(
+                    tiers={
+                        "frugal": TierConfig(
+                            cost_factor=1, models=[ModelConfig(provider=provider, model=model)]
+                        )
+                    }
+                )
+            }
+        )
+        assert _resolve("qa", "codex", config=shipped, invocation_model="frugal").model == expected
 
     def test_invocation_auto_ignores_pinned_values(self) -> None:
         resolved = _resolve(

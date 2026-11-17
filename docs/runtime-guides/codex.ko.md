@@ -128,11 +128,16 @@ uv run ouroboros run workflow --runtime codex ~/.ouroboros/seeds/seed_abcd1234ef
 
 **Use Codex default model**을 고르면 Codex의 현재 기본 모델을 그대로 씁니다. 이게 권장 설정입니다 — Ouroboros가 Codex 호출마다 역할별 추론 강도만 넘기므로, Codex App이나 CLI에서 새 모델로 바꾸면 자동으로 그게 쓰입니다. 목록에서 모델을 고르거나 **Enter another model ID…**를 쓰는 건, 특정 단계(Execute 포함)에 모델을 의도적으로 고정하고 싶을 때만 하세요.
 
-AC별 모델 티어 라우팅도 이 자동 선택을 유지합니다. 구체적인 사다리를
-사용하려면 `--model frontier`처럼 티어를 명시하거나
-`OUROBOROS_MODEL_TIER_ROUTING=1`을 설정하세요. `economics.tiers`의
-`provider: codex` 항목이 `openai` 항목보다 우선하며, 명시적 모델 고정은
-라우팅보다 우선합니다. [설정 예시](../config-reference.md#native-runtime-ladders)를 보세요.
+AC별 모델 티어 라우팅도 이 자동 선택을 유지합니다. 기본 제공
+`economics.tiers` 사다리는 Codex 모델을 지정하지 않으므로(각 `openai` 티어가
+`default`) 티어를 요청해도 Codex는 선택된 모델을 그대로 씁니다. 이전 릴리스가
+기록한 `gpt-6-luna` / `gpt-6.1-sol` / `gpt-6-astra` 등 과거 기본 ID가 남아
+있는 설정도 같게 처리됩니다. 티어별로 특정 모델을 쓰려면 직접 ID를 지정한 뒤
+`--model frontier`처럼 티어를 명시하거나 `OUROBOROS_MODEL_TIER_ROUTING=1`을
+설정하세요. `economics.tiers`의 `provider: codex` 항목이 `openai` 항목보다
+우선하며, 과거 기본값과 같은 ID를 그대로 쓰려면 `provider: codex` 아래에
+두세요. 명시적 모델 고정은 라우팅보다 우선합니다.
+[설정 예시](../config-reference.md#native-runtime-ladders)를 보세요.
 
 설정 화면의 정적 모델 목록은 계정별 사용 가능 목록을 보장하지 않습니다.
 2026-10-18에 확인한 `codex-cli 0.160.0 --help`는 `--model`을 지원하지만

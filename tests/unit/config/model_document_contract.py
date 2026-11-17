@@ -13,15 +13,16 @@ from ouroboros.config.model_selection import SHIPPED_CONSENSUS_ROSTER
 
 DIRECT_PATHS: Final = {
     "### Portable Task Profiles": (("llm_profiles", "deep", "providers", "claude_code", "model"),),
-    "## `economics`": (("economics", "tiers", "frontier", "models", "anthropic", "model"),),
+    "## `economics`": (),
     "### Full Config Skeleton": (
-        ("economics", "tiers", "frontier", "models", "anthropic", "model"),
         ("clarification", "default_model"),
         ("resilience", "wonder_model"),
         ("resilience", "reflect_model"),
         ("evaluation", "semantic_model"),
     ),
 }
+# Sections whose example shows the whole shipped ``economics.tiers`` ladder.
+LADDER_HEADINGS: Final = frozenset({"## `economics`", "### Full Config Skeleton"})
 PROVIDER_PATHS: Final = {
     "### Portable Task Profiles": (("llm_profiles", "deep", "providers", "litellm", "model"),),
     "### Full Config Skeleton": (("consensus", "advocate_model"),),
@@ -137,6 +138,12 @@ def model_default_errors(markdown: str) -> tuple[str, ...]:
             (path, (_model_defaults.DEFAULT_CONSENSUS_OPUS_MODEL,))
             for path in PROVIDER_PATHS.get(heading, ())
         )
+        if heading in LADDER_HEADINGS:
+            expectations.extend(
+                (("economics", "tiers", tier, "models", provider, "model"), (model,))
+                for provider, tiers in _model_defaults.SHIPPED_TIER_LADDER.items()
+                for tier, model in tiers.items()
+            )
         if heading == "### Full Config Skeleton":
             expectations.append((("consensus", "models"), SHIPPED_CONSENSUS_ROSTER))
         for path, expected in expectations:

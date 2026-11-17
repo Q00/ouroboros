@@ -82,15 +82,22 @@ async def legacy_contract(
     historical: bool = False,
 ) -> dict[str, Any]:
     providers = model_routing.tier_model_providers
+    build_router = model_routing.build_model_router
     vendor = "openai" if backend == "codex_mcp" else "anthropic"
 
     def old_providers(name: str) -> tuple[str, ...]:
         return (backend, vendor) if name == backend else providers(name)
 
+    def old_build_router(*args: Any, **kwargs: Any) -> Any:
+        # Old releases persisted an advisory-only router as well.
+        kwargs.pop("require_enforceable", None)
+        return build_router(*args, **kwargs)
+
     # Reproduce only the old resolver. Runner preparation, policy snapshots,
     # Route B serialization, and authority handling remain real.
     with monkeypatch.context() as old_release:
         old_release.setenv("OUROBOROS_MODEL_TIER_ROUTING", "1")
+        old_release.setattr(model_routing, "build_model_router", old_build_router)
         if sentinel:
             old_release.setattr(
                 model_routing, "normalize_tier_model", lambda _model, **_kw: "default"

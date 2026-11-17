@@ -1073,7 +1073,8 @@ class TestRunnerRouterConstruction:
 
         The public MCP response reports this as automatic selection, not
         ``medium``. Supplying ``medium`` intentionally is different and
-        re-enables tier routing.
+        re-enables tier routing, which enforces only tier models the user
+        configured: the shipped Codex ladder keeps Codex's own model.
         """
         monkeypatch.delenv("OUROBOROS_MODEL_TIER_ROUTING", raising=False)
         monkeypatch.delenv("OUROBOROS_EXECUTION_MODEL", raising=False)
@@ -1100,12 +1101,40 @@ class TestRunnerRouterConstruction:
             "standard",
             "medium",
         )
+        shipped_runtime = CodexCliRuntime(cli_path="/bin/echo", model=None, cwd="/tmp/project")
+        shipped_runner = self._runner(shipped_runtime, base_model_tier=explicit_override)
+        assert shipped_runner._model_router is None
+        assert shipped_runner._requested_model_tier is None
+        assert "--model" not in shipped_runtime._build_command("/tmp/output", prompt="tier")
+
+        shipped = get_default_config()
+        configured = shipped.model_copy(
+            update={
+                "economics": shipped.economics.model_copy(
+                    update={
+                        "tiers": {
+                            name: tier.model_copy(
+                                update={
+                                    "models": [
+                                        ModelConfig(provider="codex", model=f"proxy/{name}"),
+                                        *tier.models,
+                                    ]
+                                }
+                            )
+                            for name, tier in shipped.economics.tiers.items()
+                        }
+                    }
+                )
+            }
+        )
+        monkeypatch.setattr("ouroboros.config.load_config", lambda: configured)
         explicit_runner = self._runner(
             CodexCliRuntime(cli_path="/bin/echo", model=None, cwd="/tmp/project"),
             base_model_tier=explicit_override,
         )
         assert explicit_runner._model_router is not None
         assert explicit_runner._model_router.base_tier == "standard"
+        assert explicit_runner._model_router.tier_models["standard"] == "proxy/standard"
 
     def test_missing_user_config_uses_shipped_routing_and_verify_defaults(
         self,

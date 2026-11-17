@@ -69,49 +69,87 @@ LEGACY_DEFAULT_MODELS: dict[str, tuple[str, ...]] = {
 }
 
 
-# Historical shipped default pins for the ``economics.tiers`` model ladder,
-# keyed by the legacy id and valued by the CURRENT shipped id that replaced it.
-# Same rationale as LEGACY_DEFAULT_MODELS (Q00/ouroboros#1324), applied to the
-# tier ladder that model-tier routing reads: a user's persisted
-# ``~/.ouroboros/config.yaml`` written by an older release still carries the OLD
-# shipped tier defaults verbatim (the defaults ship as concrete ids inside
-# EconomicsConfig, not a ``"default"`` sentinel). When a pin is bumped, an
-# untouched shipped default in that persisted config is otherwise
-# indistinguishable from a deliberate user override — so per-call model-tier
-# routing would enforce a retired id (e.g. ``--model gpt-4o``) that the current
-# provider map cannot execute, failing every AC. Normalizing a legacy shipped id
-# to its current replacement keeps the shipped defaults live across a bump. This
-# necessarily means a deliberate override that is byte-for-byte equal to an old
-# shipped default is normalized too: the persisted schema carries no provenance
-# bit that could distinguish those cases. Explicit ids that were never shipped
-# (for example a proxy-specific model) remain untouched.
+# The ``"default"`` sentinel: a tier holding it sends no per-call model
+# override, so the runtime runs on its own configured model. Kept equal to
+# ``backends.model_catalog.DEFAULT_MODEL_SENTINEL``; importing it here would be
+# circular (the catalog imports ``ouroboros.config``).
+RUNTIME_DEFAULT_MODEL = "default"
+
+# Claude Code tier aliases. Claude Code resolves each to the newest model of that
+# class for whichever provider it runs on (Anthropic, Bedrock, Vertex, a gateway,
+# or the ``ANTHROPIC_DEFAULT_*_MODEL`` variables).
+CLAUDE_TIER_ALIASES: dict[str, str] = {
+    "frugal": "haiku",
+    "standard": "sonnet",
+    "frontier": "opus",
+}
+
+# Gemini CLI model-class aliases (https://geminicli.com/docs/cli/model/). The
+# shipped ladder has never had a Google frontier rung.
+GEMINI_TIER_ALIASES: dict[str, str] = {
+    "frugal": "flash",
+    "standard": "pro",
+}
+
+# The shipped ``economics.tiers`` ladder per vendor namespace: every runtime runs
+# its own default model for the tier rather than an id Ouroboros hard-codes.
+# Claude Code and Gemini CLI receive their tier aliases. Codex has no tier
+# aliases, so its tiers inherit the model Codex is configured with.
+SHIPPED_TIER_LADDER: dict[str, dict[str, str]] = {
+    "openai": dict.fromkeys(("frugal", "standard", "frontier"), RUNTIME_DEFAULT_MODEL),
+    "anthropic": dict(CLAUDE_TIER_ALIASES),
+    "google": dict(GEMINI_TIER_ALIASES),
+}
+
+# Every concrete tier id an earlier release shipped in the ladder, by vendor
+# namespace and tier. Same rationale as LEGACY_DEFAULT_MODELS
+# (Q00/ouroboros#1324): a ``~/.ouroboros/config.yaml`` written by an older
+# release carries the shipped ladder verbatim, so an untouched shipped id is
+# otherwise indistinguishable from a deliberate override and per-call routing
+# would keep forcing an id the runtime or account may not serve. Each one
+# resolves to the current shipped value of the same provider and tier.
 #
 # Verified against git history of ``ouroboros.config.models`` (the tier defaults
-# have only ever held these ids): openai frugal ``gpt-4o-mini`` -> standard
-# ``gpt-4o`` -> frontier ``o3`` became ``gpt-5.1-codex-mini`` / ``gpt-5-codex`` /
-# ``gpt-5.2``; anthropic frugal ``claude-3-5-haiku``, standard
-# ``claude-sonnet-4-20250514``, frontier ``claude-opus-4-5-20251101`` (and the
-# later frontier ``claude-opus-4-6`` and ``claude-opus-4-8``) became the
-# DEFAULT_*_MODEL pins. The google tier ids (``gemini-2.0-flash`` /
-# ``gemini-2.5-pro``) have never been bumped, so they carry no entry and are
-# preserved as-is.
+# have only ever held these ids): openai ``gpt-4o-mini`` / ``gpt-4o`` / ``o3``,
+# then ``gpt-5.1-codex-mini`` / ``gpt-5-codex`` / ``gpt-5.2``, then the Codex
+# guide's ``gpt-6-luna`` / ``gpt-6.1-sol`` / ``gpt-6-astra``; anthropic
+# ``claude-3-5-haiku`` / ``claude-sonnet-4-20250514`` /
+# ``claude-opus-4-5-20251101`` through the 5.5 pins; google
+# ``gemini-2.0-flash`` / ``gemini-2.5-pro``.
+_SHIPPED_TIER_HISTORY: dict[str, dict[str, tuple[str, ...]]] = {
+    "openai": {
+        "frugal": ("gpt-4o-mini", "gpt-5.1-codex-mini", "gpt-6-luna"),
+        "standard": ("gpt-4o", "gpt-5-codex", "gpt-6.1-sol"),
+        "frontier": ("o3", "gpt-5.2", "gpt-6-astra"),
+    },
+    "anthropic": {
+        "frugal": ("claude-3-5-haiku", "claude-haiku-4-5", DEFAULT_HAIKU_MODEL),
+        "standard": ("claude-sonnet-4-20250514", "claude-sonnet-4-6", DEFAULT_SONNET_MODEL),
+        "frontier": (
+            "claude-opus-4-5-20251101",
+            "claude-opus-4-6",
+            "claude-opus-4-8",
+            "claude-opus-5",
+            DEFAULT_OPUS_MODEL,
+        ),
+    },
+    "google": {
+        "frugal": ("gemini-2.0-flash",),
+        "standard": ("gemini-2.5-pro",),
+    },
+}
+
+# Historical shipped tier id -> the current shipped value of its provider and
+# tier. A deliberate override that is byte-for-byte equal to a historical id is
+# normalized too: the persisted schema carries no provenance bit that could
+# distinguish those cases. Explicit ids that were never shipped (for example a
+# proxy-specific model) and every entry under a runtime namespace such as
+# ``claude`` or ``codex`` remain untouched.
 LEGACY_TIER_MODELS: dict[str, str] = {
-    # openai (Codex CLI) tier ids
-    "gpt-4o-mini": "gpt-6-luna",
-    "gpt-4o": "gpt-6.1-sol",
-    "o3": "gpt-6-astra",
-    "gpt-5.1-codex-mini": "gpt-6-luna",
-    "gpt-5-codex": "gpt-6.1-sol",
-    "gpt-5.2": "gpt-6-astra",
-    # anthropic tier ids
-    "claude-haiku-4-5": DEFAULT_HAIKU_MODEL,
-    "claude-sonnet-4-6": DEFAULT_SONNET_MODEL,
-    "claude-opus-5": DEFAULT_OPUS_MODEL,
-    "claude-3-5-haiku": DEFAULT_HAIKU_MODEL,
-    "claude-sonnet-4-20250514": DEFAULT_SONNET_MODEL,
-    "claude-opus-4-5-20251101": DEFAULT_OPUS_MODEL,
-    "claude-opus-4-6": DEFAULT_OPUS_MODEL,
-    "claude-opus-4-8": DEFAULT_OPUS_MODEL,
+    model: SHIPPED_TIER_LADDER[provider][tier]
+    for provider, tiers in _SHIPPED_TIER_HISTORY.items()
+    for tier, models in tiers.items()
+    for model in models
 }
 
 # Provider each historical tier default shipped under. The same model-looking
@@ -119,26 +157,28 @@ LEGACY_TIER_MODELS: dict[str, str] = {
 # necessarily an explicit/custom routing choice (often a proxy alias) and must be
 # preserved verbatim.
 LEGACY_TIER_MODEL_PROVIDERS: dict[str, str] = {
-    "gpt-5.1-codex-mini": "openai",
-    "gpt-5-codex": "openai",
-    "gpt-5.2": "openai",
-    "gpt-4o-mini": "openai",
-    "gpt-4o": "openai",
-    "o3": "openai",
-    "claude-haiku-4-5": "anthropic",
-    "claude-sonnet-4-6": "anthropic",
-    "claude-opus-5": "anthropic",
-    "claude-3-5-haiku": "anthropic",
-    "claude-sonnet-4-20250514": "anthropic",
-    "claude-opus-4-5-20251101": "anthropic",
-    "claude-opus-4-6": "anthropic",
-    "claude-opus-4-8": "anthropic",
+    model: provider
+    for provider, tiers in _SHIPPED_TIER_HISTORY.items()
+    for models in tiers.values()
+    for model in models
+}
+
+# Tier each historical tier default shipped in. Several Codex ids now resolve to
+# the same ``"default"`` sentinel, so resume replay needs the original tier to
+# keep refusing a historical id moved to a different tier.
+LEGACY_TIER_MODEL_TIERS: dict[str, str] = {
+    model: tier
+    for tiers in _SHIPPED_TIER_HISTORY.values()
+    for tier, models in tiers.items()
+    for model in models
 }
 
 
-# Official Codex model guide, verified 2026-10-18. Focused/high-volume work
-# uses Luna, complex coding uses Sol, hardest workflows use Astra. Availability
-# still depends on account, workspace, provider and CLI rollout.
+# Codex model guide, verified 2026-10-18: focused/high-volume work uses Luna,
+# complex coding uses Sol, hardest workflows use Astra. Availability depends on
+# account, workspace, provider and CLI rollout, so these are only settings-UI
+# suggestions (``backends.model_catalog``); the shipped ladder does not route to
+# them.
 CODEX_TIER_MODELS: dict[str, str] = {
     "frugal": "gpt-6-luna",
     "standard": "gpt-6.1-sol",
@@ -147,22 +187,31 @@ CODEX_TIER_MODELS: dict[str, str] = {
 
 
 def normalize_tier_model(model: str, *, provider: str | None = None) -> str:
-    """Return the current shipped id for ``model`` if it is a legacy shipped default.
+    """Return the current shipped value for ``model`` if it is a historical shipped id.
 
     A tier model matching a historically shipped default (see
-    :data:`LEGACY_TIER_MODELS`) resolves to its current replacement, even if the
-    user deliberately typed that same historical id under the same provider:
-    persisted config has no provenance with which to tell that override from an
-    untouched old default. When ``provider`` is supplied, normalization is limited
-    to the provider the historical value actually shipped under; a cross-provider
-    occurrence is necessarily explicit and is preserved. Any id outside the
-    historical set — including current shipped defaults and explicit never-shipped
-    choices — is returned verbatim.
+    :data:`LEGACY_TIER_MODELS`) resolves to the current shipped value of its
+    provider and tier (a Claude alias, a Gemini alias, or the ``"default"``
+    sentinel for Codex), even if the user deliberately typed that same id under
+    the same provider: persisted config has no provenance with which to tell
+    that override from an untouched old default. When ``provider`` is supplied,
+    normalization is limited to the provider the historical value actually
+    shipped under; a cross-provider occurrence is necessarily explicit and is
+    preserved. Any id outside the historical set, including current shipped
+    values and explicit never-shipped choices, is returned verbatim.
     """
     shipped_provider = LEGACY_TIER_MODEL_PROVIDERS.get(model)
     if provider is not None and model in LEGACY_TIER_MODELS and provider != shipped_provider:
         return model
     return LEGACY_TIER_MODELS.get(model, model)
+
+
+def is_historical_tier_model(model: str, *, provider: str, tier: str) -> bool:
+    """Whether ``model`` is an id a release shipped for ``provider``'s ``tier``."""
+    return (
+        LEGACY_TIER_MODEL_PROVIDERS.get(model) == provider
+        and LEGACY_TIER_MODEL_TIERS.get(model) == tier
+    )
 
 
 def recognized_shipped_defaults(default_model: str) -> tuple[str, ...]:

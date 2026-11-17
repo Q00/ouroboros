@@ -41,6 +41,9 @@ import os
 from typing import TYPE_CHECKING, Final, Literal, cast, get_args
 
 from ouroboros.config._model_defaults import (
+    CLAUDE_TIER_ALIASES as _CLAUDE_TIER_ALIASES,
+)
+from ouroboros.config._model_defaults import (
     DEFAULT_CONSENSUS_OPUS_MODEL,
     DEFAULT_HAIKU_MODEL,
     DEFAULT_OPUS_MODEL,
@@ -67,11 +70,8 @@ TIERS: Final[tuple[Tier, ...]] = get_args(Tier)
 # here at module level would be circular (the catalog imports ``ouroboros.config``).
 _SENTINEL: Final = "default"
 
-CLAUDE_TIER_ALIASES: Final[Mapping[Tier, str]] = {
-    "frugal": "haiku",
-    "standard": "sonnet",
-    "frontier": "opus",
-}
+# One table for role selection and the shipped per-AC tier ladder.
+CLAUDE_TIER_ALIASES: Final[Mapping[Tier, str]] = cast("Mapping[Tier, str]", _CLAUDE_TIER_ALIASES)
 # Concrete ids an explicit backend receives for a tier request. Only backends in
 # ``_SHIPPED_PIN_FALLBACK_BACKENDS`` use them; they cannot receive an alias.
 SHIPPED_TIER_MODELS: Final[Mapping[Tier, str]] = {

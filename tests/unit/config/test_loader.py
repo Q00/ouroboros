@@ -2733,7 +2733,8 @@ class TestGetExecutionModel:
 
     @pytest.mark.parametrize(
         ("backend", "expected"),
-        [("claude", "opus"), ("codex", "gpt-6-astra"), ("litellm", DEFAULT_OPUS_MODEL)],
+        # The shipped Codex ladder names no model, so Codex keeps its own: no pin.
+        [("claude", "opus"), ("codex", None), ("litellm", DEFAULT_OPUS_MODEL)],
     )
     def test_global_model_choice_pins_execute(
         self, monkeypatch: pytest.MonkeyPatch, backend: str, expected: str | None
