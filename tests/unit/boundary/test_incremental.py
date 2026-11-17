@@ -298,8 +298,10 @@ async def test_a_refused_reply_leaves_no_trace_of_its_values(tmp_path: Path) -> 
     # itself is now always the product's). Neither the event-safe manifest nor
     # the stored record may contain it.
     bad = _oracle(2, -5, 0)
-    bad["check_id"] = "c2_6173!"
-    bad["role"] = "r6173"
+    # The marker holds letters outside [0-9a-f], so no sha256 hex digest in the
+    # manifest can contain it by chance (a digit-only marker failed ~1 run in 200).
+    bad["check_id"] = "c2_xyzzy!"
+    bad["role"] = "rxyzzy"
     runtime = _PerCriterionRuntime({1: {"oracles": [_oracle(1, 15, 10)]}, 2: {"oracles": [bad]}})
     outcome = await _constructor(runtime, 5).construct(_probe_seed(), _base(tmp_path))
     assert outcome.package is not None
@@ -307,8 +309,8 @@ async def test_a_refused_reply_leaves_no_trace_of_its_values(tmp_path: Path) -> 
     reasons = {item.criterion_key: item.reason for item in outcome.package.uncovered}
     assert reasons == {keys[1]: "constructor_failed:constructor_reply_invalid:role_invalid"}
     sealed = seal_package(outcome.package)
-    assert "6173" not in json.dumps(sealed.manifest_summary())
-    assert b"6173" not in package_record_bytes(sealed)
+    assert "xyzzy" not in json.dumps(sealed.manifest_summary())
+    assert b"xyzzy" not in package_record_bytes(sealed)
 
 
 async def test_a_single_call_refusal_is_a_closed_code(tmp_path: Path) -> None:
