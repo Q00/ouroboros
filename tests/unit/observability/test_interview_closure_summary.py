@@ -337,7 +337,9 @@ async def test_record_forced_seed_writes_counts_and_the_snapshot() -> None:
 def test_interview_events_are_not_on_the_telemetry_event_table(event_type: str) -> None:
     from ouroboros import telemetry
 
-    assert telemetry._resolve_allowed_keys(event_type, {"surface": "console"}) is None
+    # Interview events stay in the local event store; only the closed
+    # network event set ever leaves the machine.
+    assert event_type not in telemetry._NETWORK_EVENTS
 
 
 def test_dashboard_projection_reads_events_with_closure_fields_unchanged() -> None:
