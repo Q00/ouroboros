@@ -66,9 +66,16 @@ async def test_direct_55_omits_sampling_and_prefill_without_corrupting_json(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "model", ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-5", "claude-custom-proxy"]
+    ("model", "sampling"),
+    [
+        ("claude-3-5-haiku-latest", {"temperature": 0.2, "top_p": 0.8}),
+        ("claude-haiku-4-5", {"temperature": 0.2}),
+        ("claude-opus-4-1-20250805", {"temperature": 0.2}),
+    ],
 )
-async def test_explicit_legacy_direct_keeps_sampling_prefill_and_suffix_repair(model: str) -> None:
+async def test_explicit_legacy_direct_keeps_sampling_prefill_and_suffix_repair(
+    model: str, sampling: dict[str, float]
+) -> None:
     adapter = AnthropicAdapter(api_key="test-only-placeholder")
     client = MagicMock()
     client.messages.create = AsyncMock(
@@ -89,7 +96,8 @@ async def test_explicit_legacy_direct_keeps_sampling_prefill_and_suffix_repair(m
     assert result.is_ok
     assert result.value.content == '{"ok":true}'
     request = client.messages.create.await_args.kwargs
-    assert request["extra_body"] == {"temperature": 0.2, "top_p": 0.8}
+    # Claude 4.x rejects temperature with top_p; only Claude 3.x takes both.
+    assert request["extra_body"] == sampling
     assert request["messages"][-1] == {"role": "assistant", "content": "{"}
 
 
@@ -255,9 +263,12 @@ async def test_legacy_litellm_keeps_request_arguments(
 @pytest.mark.parametrize(
     ("model", "top_p", "temperature"),
     [
-        ("claude-opus-5", None, 0.2),
-        ("claude-custom-proxy", None, 0.2),
-        ("openrouter/anthropic/claude-opus-5", None, 0.2),
+        # Claude ids LiteLLM's bundled map lists keep LiteLLM's own effort and
+        # JSON handling; only recognised legacy families are sent temperature.
+        # Unlisted current ids take the native path (test_claude_sampling_gate).
+        ("claude-sonnet-4-5", None, 0.2),
+        ("claude-opus-4-8", None, None),
+        ("openrouter/anthropic/claude-opus-4.7", None, None),
         ("openai/gpt-5.4", None, None),
     ],
 )

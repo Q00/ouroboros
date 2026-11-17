@@ -10,7 +10,7 @@ from typing import Any
 
 import litellm
 
-from ouroboros.providers.anthropic_models import is_claude_5_5
+from ouroboros.providers.anthropic_models import omit_claude_sampling
 from ouroboros.providers.base import CompletionConfig
 from ouroboros.providers.litellm_adapter import (
     _HTTPX_DEPENDENCY_VERSION,
@@ -22,6 +22,7 @@ from ouroboros.providers.litellm_adapter import (
     LiteLLMAdapter,
     _worker_runtime_authority,
 )
+from ouroboros.providers.litellm_claude_routes import native_claude_route
 from ouroboros.providers.openai_sampling import omit_openai_reasoning_sampling
 
 _MAX_INPUT_BYTES = 4 * 1024 * 1024
@@ -61,9 +62,16 @@ def _valid_completion_kwargs(kwargs: dict[str, Any], config: CompletionConfig) -
     allowed = _COMPLETION_KWARGS
     required = _REQUIRED_COMPLETION_KWARGS
     native: dict[str, object] = {}
-    if is_claude_5_5(config.model):
-        allowed = allowed - {"temperature", "top_p", "reasoning_effort"}
+    # Mirrors ``LiteLLMAdapter._build_completion_kwargs``: both sides decide
+    # sampling with the same shared predicates, so a sealed request is never
+    # rejected for omitting a field the model refuses.
+    if omit_claude_sampling(config.model) or omit_openai_reasoning_sampling(
+        config.model, config.reasoning_effort
+    ):
+        allowed = allowed - {"temperature", "top_p"}
         required = required - {"temperature"}
+    if native_claude_route(config.model):
+        allowed = allowed - {"reasoning_effort"}
         effort = config.reasoning_effort
         if effort is not None and not isinstance(effort, str):
             return False
@@ -84,9 +92,6 @@ def _valid_completion_kwargs(kwargs: dict[str, Any], config: CompletionConfig) -
             native = {"reasoning_effort": effort}
         allowed = allowed | frozenset(native)
         required = required | frozenset(native)
-    if omit_openai_reasoning_sampling(config.model, config.reasoning_effort):
-        allowed = allowed - {"temperature", "top_p"}
-        required = required - {"temperature"}
     return (
         required.issubset(kwargs)
         and set(kwargs).issubset(allowed)

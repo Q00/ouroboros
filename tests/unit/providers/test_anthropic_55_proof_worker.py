@@ -16,8 +16,9 @@ pytest.importorskip("openai")
 
 from ouroboros.providers import litellm_adapter
 from ouroboros.providers import litellm_proof_worker as worker
-from ouroboros.providers.anthropic_models import is_claude_5_5
+from ouroboros.providers.anthropic_models import omit_claude_sampling
 from ouroboros.providers.base import CompletionConfig, Message, MessageRole
+from ouroboros.providers.litellm_claude_routes import native_claude_route
 
 
 def _payload(model: str, effort: str | None, api_base: str) -> dict:
@@ -28,7 +29,7 @@ def _payload(model: str, effort: str | None, api_base: str) -> dict:
         temperature=0.2,
         top_p=0.8,
         reasoning_effort=effort,
-        response_format={"type": "json_object"} if is_claude_5_5(model) else None,
+        response_format={"type": "json_object"} if native_claude_route(model) else None,
     )
     dispatch = SimpleNamespace(api_key="test-only", api_base=api_base, timeout=30.0)
     return {
@@ -51,6 +52,10 @@ def _payload(model: str, effort: str | None, api_base: str) -> dict:
         "anthropic/claude-sonnet-5-5",
         "openrouter/anthropic/claude-opus-5.5",
         "claude-sonnet-4-6",
+        "claude-opus-4-8",
+        # Current Claude ids LiteLLM's bundled map does not list.
+        "anthropic/claude-sonnet-5",
+        "openrouter/anthropic/claude-sonnet-5",
     ],
 )
 @pytest.mark.parametrize("effort", [None, "high"])
@@ -162,7 +167,7 @@ async def test_real_isolated_worker_dispatches_built_anthropic_arguments(
     assert len(requests) == 1
     request = requests[0]
     assert request["model"] == wire_model
-    if is_claude_5_5(model):
+    if native_claude_route(model):
         assert not {"temperature", "top_p", "top_k"} & request.keys()
         if effort:
             if openrouter:
@@ -177,7 +182,11 @@ async def test_real_isolated_worker_dispatches_built_anthropic_arguments(
             assert "JSON" in json.dumps(request["system"])
             assert "tools" not in request
     else:
-        assert request["temperature"] == 0.2
+        if omit_claude_sampling(model):
+            # Opus 4.7 and later reject sampling; LiteLLM would refuse it too.
+            assert not {"temperature", "top_p", "top_k"} & request.keys()
+        else:
+            assert request["temperature"] == 0.2
         assert "top_p" not in request
         if effort:
             assert request["thinking"] == {"type": "adaptive"}
@@ -213,7 +222,8 @@ async def test_real_isolated_worker_dispatches_built_anthropic_arguments(
         ("openrouter/anthropic/claude-opus-5.5", "high", "thinking", {"type": "adaptive"}),
         ("claude-sonnet-4-6", "high", "thinking", {"type": "adaptive"}),
         ("claude-sonnet-4-6", "high", "extra_body", {}),
-        ("claude-custom", "high", "allowed_openai_params", ["thinking"]),
+        # A Claude id LiteLLM's bundled map lists keeps LiteLLM's effort path.
+        ("claude-opus-4-8", "high", "allowed_openai_params", ["thinking"]),
     ],
 )
 def test_worker_rejects_out_of_contract_native_shapes(

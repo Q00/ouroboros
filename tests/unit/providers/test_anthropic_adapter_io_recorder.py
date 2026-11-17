@@ -280,7 +280,7 @@ async def test_invalid_prefill_response_cannot_reach_downstream_consumer(
     )
     response = _StubAnthropicResponse(
         content=[text_block],
-        model="claude-sonnet-4-6",
+        model="claude-haiku-4-5",
         stop_reason="end_turn",
         usage=MagicMock(input_tokens=1, output_tokens=1),
     )
@@ -292,7 +292,7 @@ async def test_invalid_prefill_response_cannot_reach_downstream_consumer(
     result = await adapter.complete(
         messages=[Message(role=MessageRole.USER, content="return JSON")],
         config=CompletionConfig(
-            model="claude-sonnet-4-6",
+            model="claude-haiku-4-5",
             response_format={"type": "json_object"},
         ),
     )
@@ -323,7 +323,7 @@ async def test_complete_rejects_oversized_prefill_before_content_mutation(
     text_block = MagicMock(type="text", text=_oversized_prefill_suffix())
     response = _StubAnthropicResponse(
         content=[text_block],
-        model="claude-sonnet-4-6",
+        model="claude-haiku-4-5",
         stop_reason="end_turn",
         usage=MagicMock(input_tokens=1, output_tokens=1),
     )
@@ -335,7 +335,7 @@ async def test_complete_rejects_oversized_prefill_before_content_mutation(
     result = await adapter.complete(
         messages=[Message(role=MessageRole.USER, content="return JSON")],
         config=CompletionConfig(
-            model="claude-sonnet-4-6",
+            model="claude-haiku-4-5",
             response_format={"type": "json_object"},
         ),
     )
@@ -571,7 +571,9 @@ async def test_complete_records_top_p_and_stop_sequences_in_journal_extra() -> N
     fake_client.messages.create.assert_awaited_once()
     kwargs = fake_client.messages.create.await_args.kwargs
     assert kwargs["system"] == "sys a\n\nsys b"
-    assert kwargs["extra_body"]["top_p"] == 0.7
+    # Claude 4.6 rejects temperature with top_p, so only temperature goes on
+    # the wire; the journal above still records the requested top_p.
+    assert kwargs["extra_body"] == {"temperature": 0.7}
     assert kwargs["stop_sequences"] == ["STOP"]
 
 

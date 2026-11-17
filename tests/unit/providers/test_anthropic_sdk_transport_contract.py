@@ -17,14 +17,18 @@ httpx2 = pytest.importorskip("httpx2")
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("model", ["claude-sonnet-4-6", "claude-sonnet-5-5", "claude-fable-5"])
+@pytest.mark.parametrize(
+    "model", ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-sonnet-5-5", "claude-fable-5"]
+)
 @pytest.mark.parametrize("effort", [None, "low"])
 @pytest.mark.parametrize("structured", [False, True])
 async def test_installed_sdk_preserves_completion_wire_contract(
     model: str, structured: bool, effort: str | None, monkeypatch
 ) -> None:
     requests = []
-    text = '"ok": true}' if structured and model == "claude-sonnet-4-6" else '{"ok": true}'
+    # Only families before Claude 4.6 accept an assistant prefill.
+    prefill = structured and model == "claude-haiku-4-5"
+    text = '"ok": true}' if prefill else '{"ok": true}'
 
     def respond(request):
         requests.append(request)
@@ -86,16 +90,17 @@ async def test_installed_sdk_preserves_completion_wire_contract(
             assert body["thinking"] == {"type": "adaptive"}
     else:
         assert "output_config" not in body and "thinking" not in body
-    if model == "claude-sonnet-4-6":
+    if model in ("claude-haiku-4-5", "claude-sonnet-4-6"):
+        # Claude 4 through 4.6 accept temperature or top_p, never both.
         assert body["temperature"] == 0.25
-        assert body["top_p"] == 0.8
-        if structured:
-            assert body["messages"][-1] == {"role": "assistant", "content": "{"}
+        assert "top_p" not in body
     else:
         assert "temperature" not in body and "top_p" not in body
-        if structured:
-            assert len(body["messages"]) == 1
-            assert "JSON" in body["system"]
+    if prefill:
+        assert body["messages"][-1] == {"role": "assistant", "content": "{"}
+    elif structured:
+        assert len(body["messages"]) == 1
+        assert "JSON" in body["system"]
 
 
 @pytest.mark.asyncio
