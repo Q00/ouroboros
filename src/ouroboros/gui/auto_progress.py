@@ -37,6 +37,21 @@ MAX_SEED_ITEMS = 40
 MAX_SEED_ITEM = 1000
 MAX_SEED_YAML = 64 * 1024
 
+# The shape of the saved view. A chat saved with another version is rebuilt
+# from its progress file when the console loads it (:func:`upgrade_view`).
+VIEW_VERSION = 2
+# What the events do not carry: facts from the auto session record and how
+# the job ended. An upgraded view keeps them from the view it replaces.
+_NOT_FROM_EVENTS = (
+    "max_rounds",
+    "max_repair_rounds",
+    "findings",
+    "execution_id",
+    "seed_loaded",
+    "outcome",
+    "read_error",
+)
+
 KINDS = frozenset({"phase", "grade", "repair", "question", "answer"})
 _PHASE = re.compile(r"^[a-z_]{1,40}$")
 _GRADE = re.compile(r"^[A-Za-z][+-]?$")
@@ -204,7 +219,7 @@ def parse_event(raw: bytes | str) -> dict[str, Any] | None:
 def new_view() -> dict[str, Any]:
     """The empty view of an Auto chat that has just started."""
     return {
-        "v": 1,
+        "v": VIEW_VERSION,
         "auto_session_id": None,
         "phase": None,
         "message": None,
@@ -334,6 +349,41 @@ def fold(view: dict[str, Any], event: dict[str, Any]) -> bool:
     return reload
 
 
+def upgrade_view(old: dict[str, Any], progress: Path) -> dict[str, Any]:
+    """The current shape of a view saved by an older console.
+
+    The events are folded again from the chat's progress file, so the new
+    fold applies to every round (a v1 view kept the interview's
+    ``(ambiguity: …)`` prefix in the question). What the events do not carry
+    is kept from the old view. Without the file, the old rounds are migrated
+    in place: each question's prefix is split off into its ``ambiguity``.
+    """
+    if progress.is_file():
+        view = new_view()
+        tail = ProgressTail(progress)
+        for event in tail.read(final=True):
+            fold(view, event)
+        view["skipped"] = tail.skipped
+        for key in _NOT_FROM_EVENTS:
+            if old.get(key) is not None:
+                view[key] = old[key]
+        return view
+    view = {**new_view(), **old, "v": VIEW_VERSION, "ambiguity_trend": []}
+    rounds = [dict(entry) for entry in old.get("rounds") or [] if isinstance(entry, dict)]
+    view["rounds"] = rounds
+    for entry in rounds:
+        kept = entry.get("ambiguity")
+        entry["ambiguity"] = None
+        ambiguity = kept if isinstance(kept, float) else None
+        if isinstance(entry.get("question"), str):
+            question, found = split_ambiguity(entry["question"])
+            entry["question"] = question
+            ambiguity = found if found is not None else ambiguity
+        if ambiguity is not None and isinstance(entry.get("round"), int):
+            _record_ambiguity(view, entry, ambiguity)
+    return view
+
+
 def item_text(item: Any) -> str:
     """A spec item as one sentence (criteria may be strings or structured dicts)."""
     if isinstance(item, dict):
@@ -419,4 +469,5 @@ __all__ = [
     "progress_file",
     "seed_fields",
     "split_ambiguity",
+    "upgrade_view",
 ]

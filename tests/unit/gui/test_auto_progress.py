@@ -731,3 +731,128 @@ def test_deleting_an_auto_chat_removes_its_progress_file() -> None:
     h.delete("c1")
 
     assert not progress.exists()
+
+
+# ── upgrading a view saved by an older console ───────────────────────
+
+_V1 = json.loads(
+    (Path(__file__).resolve().parents[2] / "fixtures" / "gui_auto_view_v1.json").read_text(
+        encoding="utf-8"
+    )
+)
+
+
+def _v1_chat(chat_id: str) -> dict[str, Any]:
+    return {
+        "id": chat_id,
+        "title": "word_count",
+        "goal": "word_count",
+        "cwd": "/tmp",
+        "mode": "auto",
+        "status": "done",
+        "version": 58,
+        "auto": json.loads(json.dumps(_V1["view"])),
+        "messages": [{"id": "m1", "role": "user", "kind": "text", "text": "w", "ts": 0}],
+    }
+
+
+def _write_v1(chat_id: str, *, with_progress: bool) -> Path:
+    path = harness.chats_dir() / f"{chat_id}.json"
+    path.write_text(json.dumps(_v1_chat(chat_id), ensure_ascii=False), encoding="utf-8")
+    if with_progress:
+        progress = auto_progress.progress_file(harness.chats_dir(), chat_id)
+        progress.parent.mkdir(parents=True, exist_ok=True)
+        progress.write_text("".join(_line(e) for e in _V1["events"]), encoding="utf-8")
+    return path
+
+
+def test_the_fixture_is_a_real_v1_view_with_the_raw_prefix() -> None:
+    view = _V1["view"]
+    assert view["v"] == 1 and "ambiguity_trend" not in view
+    assert view["rounds"][1]["question"].startswith("(ambiguity: 0.43) ")
+    assert "ambiguity" not in view["rounds"][1]
+
+
+def test_a_v1_view_is_rebuilt_from_its_progress_file_when_the_console_loads() -> None:
+    path = _write_v1("v1chat000001", with_progress=True)
+
+    view = (harness.Harness(jobs.JobRegistry()).get("v1chat000001") or {})["auto"]
+
+    assert view["v"] == auto_progress.VIEW_VERSION == 2
+    assert [(r["round"], r["question"], r["ambiguity"]) for r in view["rounds"]] == [
+        (1, "word_count는 어떤 입력을 받나요?", None),
+        (2, "세 가지 결정(구두점, 대소문자, 빈 입력)을 이렇게 확정해도 될까요?", 0.43),
+        (3, "CLI와 패키징은 범위 밖으로 둘까요?", 0.38),
+    ]
+    assert view["ambiguity_trend"] == [{"round": 2, "value": 0.43}, {"round": 3, "value": 0.38}]
+    # Folded again from the events…
+    assert [p["phase"] for p in view["phases"]] == [p["phase"] for p in _V1["view"]["phases"]]
+    assert (view["grade"], view["repair_round"]) == ("A", 1)
+    # …and what the events never carried is kept from the old view.
+    old = _V1["view"]
+    for key in ("max_rounds", "max_repair_rounds", "execution_id", "seed_loaded", "outcome"):
+        assert view[key] == old[key], key
+    # Saved once, so the next start finds the current shape.
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["auto"]["v"] == 2 and saved["auto"]["ambiguity_trend"] == view["ambiguity_trend"]
+
+
+def test_a_v1_view_without_its_progress_file_is_migrated_in_place() -> None:
+    _write_v1("v1chat000002", with_progress=False)
+
+    view = (harness.Harness(jobs.JobRegistry()).get("v1chat000002") or {})["auto"]
+
+    assert view["v"] == 2
+    assert [r["question"] for r in view["rounds"]][1:] == [
+        "세 가지 결정(구두점, 대소문자, 빈 입력)을 이렇게 확정해도 될까요?",
+        "CLI와 패키징은 범위 밖으로 둘까요?",
+    ]
+    assert [r["ambiguity"] for r in view["rounds"]] == [None, 0.43, 0.38]
+    assert [p["value"] for p in view["ambiguity_trend"]] == [0.43, 0.38]
+    rest = {k: v for k, v in view.items() if k not in ("v", "rounds", "ambiguity_trend")}
+    assert rest == {k: v for k, v in _V1["view"].items() if k not in ("v", "rounds")}
+
+
+def test_a_current_view_is_loaded_as_saved_not_folded_again() -> None:
+    chat = _v1_chat("v2chat000001")
+    chat["auto"] = {**auto_progress.new_view(), "phase": "review", "grade": "B"}
+    (harness.chats_dir() / "v2chat000001.json").write_text(json.dumps(chat), encoding="utf-8")
+    progress = auto_progress.progress_file(harness.chats_dir(), "v2chat000001")
+    progress.parent.mkdir(parents=True, exist_ok=True)
+    progress.write_text("".join(_line(e) for e in _V1["events"]), encoding="utf-8")
+
+    view = (harness.Harness(jobs.JobRegistry()).get("v2chat000001") or {})["auto"]
+
+    assert view == chat["auto"]
+
+
+# ── how an Auto job ends ──────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("cancelled", "status", "keys"),
+    [(True, "interrupted", ["result"]), (False, "failed", ["auto_exited", "result"])],
+)
+def test_a_stopped_auto_job_is_interrupted_and_only_a_failure_reports_its_exit(
+    tmp_path: Path, cancelled: bool, status: str, keys: list[str]
+) -> None:
+    h = harness.Harness(jobs.JobRegistry())
+    h._sessions["c1"] = {
+        "id": "c1",
+        "title": "t",
+        "goal": "t",
+        "cwd": str(tmp_path),
+        "mode": "auto",
+        "status": "running",
+        "version": 0,
+        "auto": auto_progress.new_view(),
+        "messages": [],
+    }
+    snap = {"status": "failed", "exit_code": -15 if cancelled else 1, "found": {}}
+
+    h._finish_auto("c1", snap, cancelled=cancelled)
+
+    session = h.get("c1") or {}
+    assert session["status"] == status
+    assert [m.get("key") or m["kind"] for m in session["messages"]] == keys
+    assert session["auto"]["outcome"] == ("stopped" if cancelled else "failed")

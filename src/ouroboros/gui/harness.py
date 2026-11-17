@@ -346,6 +346,13 @@ class Harness:
                                 message["run_status"] = "interrupted"
                 if isinstance(data.get("suggestion"), dict) and data["suggestion"].get("pending"):
                     data["suggestion"] = {"pending": False}
+                view = data.get("auto")
+                if isinstance(view, dict) and view.get("v") != auto_progress.VIEW_VERSION:
+                    data["auto"] = auto_progress.upgrade_view(
+                        view, auto_progress.progress_file(chats_dir(), data["id"])
+                    )
+                    with contextlib.suppress(OSError):
+                        self._save(data)  # once: the next load finds the current shape
                 self._sessions[data["id"]] = data
 
     def _save(self, session: dict[str, Any]) -> None:
@@ -1368,12 +1375,13 @@ class Harness:
 
         def finish(s: dict[str, Any]) -> None:
             ok = snap["status"] == "succeeded"
-            s["status"] = "done" if ok else "failed"
+            # Stopped on request is not a failure: the stop note already says why.
+            s["status"] = "done" if ok else "interrupted" if cancelled else "failed"
             if ok:
                 s["messages"].append(
                     _msg("assistant", "note", "ouroboros auto finished.", key="auto_finished")
                 )
-            else:
+            elif not cancelled:
                 code = snap["exit_code"]
                 s["messages"].append(
                     _msg(

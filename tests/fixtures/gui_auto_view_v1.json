@@ -1,0 +1,228 @@
+{
+ "_comment": "An Auto chat view as the #3028 first-commit fold saved it (v1): the interview's (ambiguity: ...) prefix is still in the question text and there is no ambiguity_trend. `events` are the progress-file lines it was folded from.",
+ "events": [
+  {
+   "auto_session_id": "auto_9495afc71265",
+   "phase": "interview",
+   "kind": "phase",
+   "message": "interview round 1/50",
+   "round": null,
+   "grade": null,
+   "question": null,
+   "answer": null,
+   "answer_source": null,
+   "timestamp": "2026-11-17T14:58:01+00:00"
+  },
+  {
+   "auto_session_id": "auto_9495afc71265",
+   "phase": "interview",
+   "kind": "question",
+   "message": "question round 1/50",
+   "round": 1,
+   "grade": null,
+   "question": "word_count는 어떤 입력을 받나요?",
+   "answer": null,
+   "answer_source": null,
+   "timestamp": "2026-11-17T14:58:01+00:00"
+  },
+  {
+   "auto_session_id": "auto_9495afc71265",
+   "phase": "interview",
+   "kind": "answer",
+   "message": "answered round 1/50 from assumption",
+   "round": 1,
+   "grade": null,
+   "question": "word_count는 어떤 입력을 받나요?",
+   "answer": "The repository code does not settle this question. It stays an open question for the implementer, who decides it from the code when making the change.",
+   "answer_source": "assumption",
+   "timestamp": "2026-11-17T14:58:01+00:00"
+  },
+  {
+   "auto_session_id": "auto_9495afc71265",
+   "phase": "interview",
+   "kind": "question",
+   "message": "question round 2/50",
+   "round": 2,
+   "grade": null,
+   "question": "(ambiguity: 0.43) 세 가지 결정(구두점, 대소문자, 빈 입력)을 이렇게 확정해도 될까요?",
+   "answer": null,
+   "answer_source": null,
+   "timestamp": "2026-11-17T14:58:01+00:00"
+  },
+  {
+   "auto_session_id": "auto_9495afc71265",
+   "phase": "interview",
+   "kind": "answer",
+   "message": "answered round 2/50 from assumption",
+   "round": 2,
+   "grade": null,
+   "question": "(ambiguity: 0.43) 세 가지 결정(구두점, 대소문자, 빈 입력)을 이렇게 확정해도 될까요?",
+   "answer": "The repository code does not settle this question. It stays an open question for the implementer, who decides it from the code when making the change.",
+   "answer_source": "assumption",
+   "timestamp": "2026-11-17T14:58:01+00:00"
+  },
+  {
+   "auto_session_id": "auto_9495afc71265",
+   "phase": "interview",
+   "kind": "question",
+   "message": "question round 3/50",
+   "round": 3,
+   "grade": null,
+   "question": "(ambiguity: 0.38) CLI와 패키징은 범위 밖으로 둘까요?",
+   "answer": null,
+   "answer_source": null,
+   "timestamp": "2026-11-17T14:58:01+00:00"
+  },
+  {
+   "auto_session_id": "auto_9495afc71265",
+   "phase": "interview",
+   "kind": "answer",
+   "message": "answered round 3/50 from non_goal",
+   "round": 3,
+   "grade": null,
+   "question": "(ambiguity: 0.38) CLI와 패키징은 범위 밖으로 둘까요?",
+   "answer": "For auto MVP scope, cloud sync, paid services, authentication, production deployment are non-goals unless explicitly requested.",
+   "answer_source": "non_goal",
+   "timestamp": "2026-11-17T14:58:01+00:00"
+  },
+  {
+   "auto_session_id": "auto_9495afc71265",
+   "phase": "seed_generation",
+   "kind": "phase",
+   "message": "generating Seed from auto interview",
+   "round": null,
+   "grade": null,
+   "question": null,
+   "answer": null,
+   "answer_source": null,
+   "timestamp": "2026-11-17T14:58:01+00:00"
+  },
+  {
+   "auto_session_id": "auto_9495afc71265",
+   "phase": "review",
+   "kind": "phase",
+   "message": "reviewing Seed for required grade A",
+   "round": null,
+   "grade": null,
+   "question": null,
+   "answer": null,
+   "answer_source": null,
+   "timestamp": "2026-11-17T14:58:01+00:00"
+  },
+  {
+   "auto_session_id": "auto_9495afc71265",
+   "phase": "review",
+   "kind": "repair",
+   "message": "repair round 1",
+   "round": 1,
+   "grade": null,
+   "question": null,
+   "answer": null,
+   "answer_source": null,
+   "timestamp": "2026-11-17T14:58:01+00:00"
+  },
+  {
+   "auto_session_id": "auto_9495afc71265",
+   "phase": "review",
+   "kind": "grade",
+   "message": "Seed grade A",
+   "round": null,
+   "grade": "A",
+   "question": null,
+   "answer": null,
+   "answer_source": null,
+   "timestamp": "2026-11-17T14:58:01+00:00"
+  },
+  {
+   "auto_session_id": "auto_9495afc71265",
+   "phase": "run",
+   "kind": "phase",
+   "message": "starting execution for grade A Seed",
+   "round": null,
+   "grade": null,
+   "question": null,
+   "answer": null,
+   "answer_source": null,
+   "timestamp": "2026-11-17T14:58:01+00:00"
+  },
+  {
+   "auto_session_id": "auto_9495afc71265",
+   "phase": "complete",
+   "kind": "phase",
+   "message": "execution started for grade A Seed",
+   "round": null,
+   "grade": null,
+   "question": null,
+   "answer": null,
+   "answer_source": null,
+   "timestamp": "2026-11-17T14:58:01+00:00"
+  }
+ ],
+ "view": {
+  "v": 1,
+  "auto_session_id": "auto_9495afc71265",
+  "phase": "complete",
+  "message": "execution started for grade A Seed",
+  "phases": [
+   {
+    "phase": "interview",
+    "at": "2026-11-17T14:58:01+00:00"
+   },
+   {
+    "phase": "seed_generation",
+    "at": "2026-11-17T14:58:01+00:00"
+   },
+   {
+    "phase": "review",
+    "at": "2026-11-17T14:58:01+00:00"
+   },
+   {
+    "phase": "run",
+    "at": "2026-11-17T14:58:01+00:00"
+   },
+   {
+    "phase": "complete",
+    "at": "2026-11-17T14:58:01+00:00"
+   }
+  ],
+  "rounds": [
+   {
+    "round": 1,
+    "question": "word_count는 어떤 입력을 받나요?",
+    "answer": "The repository code does not settle this question. It stays an open question for the implementer, who decides it from the code when making the change.",
+    "answer_source": "assumption"
+   },
+   {
+    "round": 2,
+    "question": "(ambiguity: 0.43) 세 가지 결정(구두점, 대소문자, 빈 입력)을 이렇게 확정해도 될까요?",
+    "answer": "The repository code does not settle this question. It stays an open question for the implementer, who decides it from the code when making the change.",
+    "answer_source": "assumption"
+   },
+   {
+    "round": 3,
+    "question": "(ambiguity: 0.38) CLI와 패키징은 범위 밖으로 둘까요?",
+    "answer": "For auto MVP scope, cloud sync, paid services, authentication, production deployment are non-goals unless explicitly requested.",
+    "answer_source": "non_goal"
+   }
+  ],
+  "rounds_dropped": 0,
+  "max_rounds": 50,
+  "max_repair_rounds": 5,
+  "grade": "A",
+  "grades": [
+   {
+    "grade": "A",
+    "repair_round": 1,
+    "at": "2026-11-17T14:58:01+00:00"
+   }
+  ],
+  "review_message": "Seed grade A",
+  "findings": [],
+  "repair_round": 1,
+  "execution_id": "exec_6f69688e9268",
+  "seed_loaded": true,
+  "outcome": "completed",
+  "skipped": 0,
+  "read_error": null
+ }
+}

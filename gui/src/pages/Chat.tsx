@@ -43,7 +43,7 @@ import { Spinner } from "../ui/Mark";
 import { Modal } from "../ui/Modal";
 import { Picker } from "../ui/Picker";
 import { Segmented } from "../ui/Segmented";
-import { AutoInterview, AutoLog, AutoReview, AutoStepper, autoActivity } from "./AutoView";
+import { AutoInterview, AutoLog, AutoReview, AutoStepper, autoActivity, autoEnding } from "./AutoView";
 import { Progress, RunStatus, activityLabel, phaseLabel } from "./Runs";
 import { GLIDE, SETTLE } from "../core/motion";
 
@@ -349,9 +349,11 @@ function RunCard({ message }: { message: ChatMessage }) {
   return (
     <div className="bubble-card run-card">
       <div className="run-card-head">
+        <Play size={16} aria-hidden />
         <strong>{t("chat.run.title")}</strong>
         <RunStatus status={status} />
-        {progress?.phase ? <Chip>{phaseLabel(t, progress.phase)}</Chip> : null}
+        {/* What it is doing only while it does it; a finished bar says the rest. */}
+        {status === "running" && progress?.phase ? <Chip>{phaseLabel(t, progress.phase)}</Chip> : null}
         {message.execution_id ? (
           <a className="more-link" href={href("runs", message.execution_id)}>
             {t("chat.run.board")}
@@ -365,7 +367,7 @@ function RunCard({ message }: { message: ChatMessage }) {
             <Progress done={progress.done} total={progress.total} failed={progress.counts.failed} label={t("runs.progress")} />
             <span>{t("runs.count", { done: progress.done, total: progress.total })}</span>
           </div>
-          {progress.activity ? <p className="run-card-activity">{activityLabel(t, progress.activity)}</p> : null}
+          {status === "running" && progress.activity ? <p className="run-card-activity">{activityLabel(t, progress.activity)}</p> : null}
           {progress.tiles.length > 0 ? (
             <ul className="tiles">
               {progress.tiles.map((tile) => (
@@ -475,12 +477,6 @@ function AutoResultCard({ message }: { message: ChatMessage }) {
         <Folder size={16} aria-hidden />
         <strong>{t("chat.result.title")}</strong>
         <Chip tone={outcome.tone}>{t(outcome.key)}</Chip>
-        {message.execution_id ? (
-          <a className="more-link" href={href("runs", message.execution_id)}>
-            {t("chat.run.board")}
-            <ArrowRight size={13} aria-hidden />
-          </a>
-        ) : null}
       </div>
       {message.outcome === "unverified" ? <p className="section-note">{t("chat.result.unverifiedBody", { status: message.handoff_status ?? "–" })}</p> : null}
       {message.folder ? (
@@ -488,16 +484,17 @@ function AutoResultCard({ message }: { message: ChatMessage }) {
           <div>
             <dt>{t("chat.result.folder")}</dt>
             <dd>
-              <code>{message.folder}</code>
+              {/* The short form reads; the full path is in the tooltip and the copy. */}
+              <code title={message.folder}>{shortPath(message.folder)}</code>
               <CopyButton text={message.folder} />
             </dd>
           </div>
         </dl>
       ) : null}
       {message.in_repo ? (
-        <>
-          <h4>{t("chat.result.folderFiles", { count })}</h4>
-          {files.length > 0 ? (
+        count > 0 ? (
+          <>
+            <h4>{t("chat.result.folderFiles", { count })}</h4>
             <ul className="file-list">
               {files.map((file) => (
                 <li key={file}>
@@ -505,12 +502,12 @@ function AutoResultCard({ message }: { message: ChatMessage }) {
                 </li>
               ))}
             </ul>
-          ) : (
-            <p className="section-note">{t("chat.result.noFiles")}</p>
-          )}
-          {count > files.length ? <p className="section-note">{t("chat.result.more", { count: count - files.length })}</p> : null}
-          <p className="section-note">{t("chat.result.folderNote")}</p>
-        </>
+            {count > files.length ? <p className="section-note">{t("chat.result.more", { count: count - files.length })}</p> : null}
+            <p className="section-note">{t("chat.result.folderNote")}</p>
+          </>
+        ) : (
+          <p className="section-note">{t("chat.result.noFiles")}</p>
+        )
       ) : (
         <p className="section-note">{t("chat.result.notRepo")}</p>
       )}
@@ -987,6 +984,7 @@ function Thread({ id }: { id: string }) {
   const auto = mode === "auto" ? (session.auto ?? null) : null;
   const autoLog = auto ? session.messages.find((message) => message.kind === "log") : undefined;
   const autoNow = auto ? autoActivity(session, auto) : null;
+  const autoEnd = auto ? autoEnding(session, auto, t) : null;
 
   function submit(event?: FormEvent) {
     event?.preventDefault();
@@ -1024,7 +1022,7 @@ function Thread({ id }: { id: string }) {
         </div>
         <AnimatePresence mode="wait" initial={false}>
           <motion.span key={status} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }} transition={{ duration: 0.16 }}>
-            <StatusChip status={status} />
+            <StatusChip status={auto?.outcome === "stopped" ? "interrupted" : status} />
           </motion.span>
         </AnimatePresence>
         <IconButton label={t("chat.delete")} onClick={() => setConfirmDelete(true)}>
@@ -1033,8 +1031,6 @@ function Thread({ id }: { id: string }) {
       </header>
 
       {mode === "interview" && session.readiness ? <ReadinessMeter readiness={session.readiness} /> : null}
-      {auto ? <AutoStepper session={session} view={auto} /> : null}
-
       <div
         className="thread-scroll"
         ref={scroller}
@@ -1043,9 +1039,14 @@ function Thread({ id }: { id: string }) {
           pinned.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
         }}
       >
-        <ol className="thread" aria-live="polite" aria-label={t("chat.thread")}>
+        {/* Inside the scroll box, so it lines up with the cards under any scrollbar. */}
+        {auto ? <AutoStepper session={session} view={auto} /> : null}
+        {/* An Auto thread announces from its own live parts (the interview rounds), not twice. */}
+        <ol className="thread" aria-live={auto ? undefined : "polite"} aria-label={t("chat.thread")}>
           {session.messages.map((message) => {
             if (message.kind === "question") questionNumber += 1;
+            // The stepper, the result card and the footer say how Auto ended.
+            if (auto && ((message.kind === "note" && message.key === "auto_finished") || (message.kind === "error" && message.key === "auto_exited"))) return null;
             return (
               <MessageView
                 key={message.id}
@@ -1175,24 +1176,36 @@ function Thread({ id }: { id: string }) {
             </motion.div>
           ) : null}
           {mode === "auto" && status === "running" ? (
-            <motion.div key="stop" className="next-step" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
+            <motion.div key="stop" className="next-step next-step-auto" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
               <div>
                 <strong>{t("chat.next.auto.title")}</strong>
                 <span>{t("chat.next.auto.body")}</span>
               </div>
-              <Button variant="danger" icon={<Square size={13} aria-hidden />} pending={busyAction("stop")} onClick={() => void run("stop")}>
+              <Button size="sm" variant="danger" icon={<Square size={12} aria-hidden />} pending={busyAction("stop")} onClick={() => void run("stop")}>
                 {t("chat.stop")}
               </Button>
             </motion.div>
           ) : null}
-          {status === "done" && !ask ? (
-            <motion.div key="done" className="next-step next-step-done" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
+          {auto && autoEnd ? (
+            <motion.div key="auto-end" className="next-step next-step-auto next-step-end" role="status" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
+              <div>
+                <strong>{t(autoEnd.title)}</strong>
+                <span>{autoEnd.body}</span>
+              </div>
+              <a className="btn btn-secondary btn-sm" href={href("chat")}>
+                <Plus size={14} aria-hidden />
+                <span className="btn-label">{t("chat.new")}</span>
+              </a>
+            </motion.div>
+          ) : null}
+          {status === "done" && !ask && !autoEnd ? (
+            <motion.div key="done" className={`next-step next-step-done${mode === "auto" ? " next-step-auto" : ""}`} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
               <div>
                 <strong>{t("chat.next.done.title")}</strong>
                 <span>{mode === "auto" ? t("chat.next.done.autoBody") : t("chat.next.done.body")}</span>
               </div>
-              <a className="btn btn-secondary" href={href("chat")}>
-                <Plus size={15} aria-hidden />
+              <a className={`btn btn-secondary${mode === "auto" ? " btn-sm" : ""}`} href={href("chat")}>
+                <Plus size={mode === "auto" ? 14 : 15} aria-hidden />
                 <span className="btn-label">{t("chat.new")}</span>
               </a>
             </motion.div>
