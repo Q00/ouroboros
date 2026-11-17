@@ -23,6 +23,9 @@ Invariants, each covered by ``tests/unit/test_telemetry_rollup.py``:
   ``sent`` so it stays closed. A failed delivery releases it, and a claim
   whose process died is taken over once its lease runs out; every send of a
   day carries ``event_uuid(install id, day)``, which PostHog deduplicates on.
+  The clock behind a lease is read while the lock is held, so a process that
+  waited for the lock never judges a lease by a reading taken before the
+  lease was written.
 - Only days before ``today`` are claimed. A bucket for a later day, left by
   a clock that moved backwards, is kept and sent once that day is over.
 - Size is bounded: at most ``MAX_BUCKETS`` buckets, ``MAX_KEYS`` counters per
@@ -34,7 +37,7 @@ Invariants, each covered by ``tests/unit/test_telemetry_rollup.py``:
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import date
 import json
@@ -54,6 +57,12 @@ SCHEMA_VERSION = 1
 LOCK_TIMEOUT_SECONDS = 0.5
 _LOCK_POLL_SECONDS = 0.005
 LEASE_SECONDS = 120.0
+# How far past a full term a lease may end before it is taken to have been
+# set by a clock that was ahead, and so treated as expired. It must exceed any
+# honest gap between two readings of this machine's clock taken in lock order
+# (a wall-clock step of a few seconds, the 0.5 s lock wait); a clock that was
+# ahead by less only delays a takeover by up to this long.
+CLOCK_AHEAD_TOLERANCE_SECONDS = 60.0
 MAX_BUCKETS = 32
 MAX_KEYS = 96
 MAX_DIMS = 8
@@ -348,21 +357,28 @@ def record(
         _write(path, state)
 
 
-def claim_due(state_dir: Path, today: str, now: float) -> list[dict[str, Any]]:
+def claim_due(
+    state_dir: Path, today: str, *, clock: Callable[[], float] | None = None
+) -> list[dict[str, Any]]:
     """Claim every bucket ready to send and return copies of them.
 
     Ready means a bucket for a day before ``today``, or a claimed bucket whose
     lease ran out. A bucket for a later day (left by a clock that moved
     backwards) waits until that day is over, so counts recorded on the day
-    itself join it instead of becoming a second row. A lease further ahead
-    than ``LEASE_SECONDS`` can only come from a clock that moved backwards and
-    counts as expired. Claiming closes the day (see ``record``). Raises
-    ``LockUnavailable`` or ``OSError`` when nothing could be claimed.
+    itself join it instead of becoming a second row. A lease that ends more
+    than ``LEASE_SECONDS + CLOCK_AHEAD_TOLERANCE_SECONDS`` from now can only
+    come from a clock that was ahead and counts as expired. ``clock``
+    (``time.time`` by default) is read once the lock is held, never before,
+    so a process that waited for the lock cannot mistake a lease another
+    process just wrote for one from a clock that was ahead. Claiming closes
+    the day (see ``record``). Raises ``LockUnavailable`` or ``OSError`` when
+    nothing could be claimed.
     """
     if _day_ordinal(today) is None:
         raise ValueError(f"invalid day: {today!r}")
     path = state_dir / ROLLUP_FILENAME
     with _locked(state_dir):
+        now = (clock or time.time)()
         state = _load(path)
         _prune(state, today)
         sending = state["sending"]
@@ -378,7 +394,8 @@ def claim_due(state_dir: Path, today: str, now: float) -> list[dict[str, Any]]:
                 del sending[bucket_id]  # nothing to report
                 continue
             lease = bucket["lease_until"]
-            if lease <= now or lease - now > LEASE_SECONDS:
+            set_by_a_clock_ahead = lease - now > LEASE_SECONDS + CLOCK_AHEAD_TOLERANCE_SECONDS
+            if lease <= now or set_by_a_clock_ahead:
                 bucket["lease_until"] = now + LEASE_SECONDS
                 claimed.append(bucket)
         if path.exists() or claimed:
@@ -406,6 +423,7 @@ def settle(state_dir: Path, bucket_id: str, *, delivered: bool) -> None:
 
 
 __all__ = [
+    "CLOCK_AHEAD_TOLERANCE_SECONDS",
     "LEASE_SECONDS",
     "LOCK_FILENAME",
     "DayClosed",
