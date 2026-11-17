@@ -1,7 +1,12 @@
-"""Anonymous telemetry of criteria accepted without evidence (boundary/no_evidence.py)."""
+"""Anonymous telemetry of criteria accepted without evidence (boundary/no_evidence.py).
+
+The count is folded into the run's ``workflow_outcome`` through the outcome
+tally bound to the run (``telemetry.outcome_scope``); no separate event is sent.
+"""
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -41,13 +46,13 @@ from .calc_fixtures import _seed
 
 
 @pytest.fixture
-def captured(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, Any]]]:
-    """Every event the telemetry boundary would queue, after its own folding."""
-    events: list[tuple[str, dict[str, Any]]] = []
-    monkeypatch.setattr(
-        telemetry, "capture", lambda event, properties=None: events.append((event, properties))
-    )
-    return events
+def tally(monkeypatch: pytest.MonkeyPatch) -> Iterator[telemetry.OutcomeTally]:
+    """The run's outcome tally; tests bind it around ``finish`` and drain it."""
+    sent: list[str] = []
+    # No event may reach the network from this boundary any more.
+    monkeypatch.setattr(telemetry, "capture", lambda event, _properties=None: sent.append(event))
+    yield telemetry.new_outcome_tally()
+    assert sent == []
 
 
 def _legacy_result(**fields: Any) -> SimpleNamespace:
@@ -197,8 +202,8 @@ def _run(outcome: AuthorityOutcome) -> CheckPackageRun:
     return run
 
 
-def test_a_reconciliation_with_no_evidence_criteria_emits_exactly_one_event(
-    captured: list[tuple[str, dict[str, Any]]],
+def test_a_reconciliation_with_no_evidence_criteria_is_counted_once(
+    tally: telemetry.OutcomeTally,
 ) -> None:
     unverified = CriterionVerdict(
         "b",
@@ -226,52 +231,45 @@ def test_a_reconciliation_with_no_evidence_criteria_emits_exactly_one_event(
         package_id="pkg_1",
     )
     run = _run(outcome)
-    run.finish("completed", surface="cli_run")
-    run.finish("completed", surface="cli_run")  # once per run
-    assert len(captured) == 1
-    event, props = captured[0]
-    assert event == "acceptance_no_evidence"
-    assert props["pair_no_held_out_case__transcript_unavailable"] == 1
-    assert props["pair_uncovered__no_verifier_verdict"] == 2
-    assert props["no_evidence_count"] == 3
-    assert props["criterion_count"] == 5
-    assert props["verification_coverage"] == "low"
-    assert props["surface"] == "cli_run"
-    assert props["check_package"] == "on"
-    assert props["check_package_mode"] == "decide"
-    assert props["check_package_status"] == "admitted"
-    assert props["runtime_backend"] == "codex"
-    assert set(props) <= telemetry._ACCEPTANCE_NO_EVIDENCE_KEYS
+    with telemetry.outcome_scope(tally):
+        run.finish("completed", surface="cli_run")
+        run.finish("completed", surface="cli_run")  # once per run
+    # Two criteria lack a package binding (uncovered), one a held-out case.
+    assert tally.drain() == {
+        "no_evidence_criteria": 3,
+        "no_evidence_top_reason": "uncovered",
+        "verification_coverage": "low",
+    }
     # Acceptance is unchanged: every criterion is still accepted.
     assert outcome.reconciliation is not None and outcome.reconciliation.run_accepted
 
 
-def test_no_event_without_a_no_evidence_acceptance_or_a_terminal_status(
-    captured: list[tuple[str, dict[str, Any]]],
+def test_nothing_counted_without_a_no_evidence_acceptance_or_a_terminal_status(
+    tally: telemetry.OutcomeTally,
 ) -> None:
     evidenced = _outcome(
         {"a": PackageCriterionStatus.PASS, "b": PackageCriterionStatus.UNCOVERED},
         {0: _accepted(0), 1: _accepted(1)},
         package_id="pkg_1",
     )
-    _run(evidenced).finish("completed", surface="mcp_execute")
-    paused = _outcome(
-        {"a": PackageCriterionStatus.UNCOVERED},
-        {0: _accepted(0, LegacyNoEvidenceReason.NO_VERIFIER_VERDICT)},
-        package_id="pkg_1",
-    )
-    run = _run(paused)
-    run.finish("paused", surface="mcp_execute")
-    assert captured == []
-    run.finish("completed", surface="mcp_execute")
-    assert len(captured) == 1
+    with telemetry.outcome_scope(tally):
+        _run(evidenced).finish("completed", surface="mcp_execute")
+        paused = _outcome(
+            {"a": PackageCriterionStatus.UNCOVERED},
+            {0: _accepted(0, LegacyNoEvidenceReason.NO_VERIFIER_VERDICT)},
+            package_id="pkg_1",
+        )
+        run = _run(paused)
+        run.finish("paused", surface="mcp_execute")
+        assert tally.drain() == {}
+        run.finish("completed", surface="mcp_execute")
+    assert tally.drain()["no_evidence_criteria"] == 1
 
 
-def test_a_run_without_a_decision_emits_nothing(
-    captured: list[tuple[str, dict[str, Any]]],
-) -> None:
-    CheckPackageRun(CheckPackageSettings(enabled=False)).finish("completed", surface="cli_run")
-    assert captured == []
+def test_a_run_without_a_decision_counts_nothing(tally: telemetry.OutcomeTally) -> None:
+    with telemetry.outcome_scope(tally):
+        CheckPackageRun(CheckPackageSettings(enabled=False)).finish("completed", surface="cli_run")
+    assert tally.drain() == {}
 
 
 def test_the_package_vocabulary_matches_telemetry() -> None:
@@ -281,12 +279,10 @@ def test_the_package_vocabulary_matches_telemetry() -> None:
         *no_evidence._UNVERIFIED_REASONS,
     }
     assert reasons == telemetry._NO_EVIDENCE_PACKAGE_REASONS
-    replay = {reason.value for reason in LegacyNoEvidenceReason} | {no_evidence.NO_LEGACY_RECORD}
-    assert replay == telemetry._NO_EVIDENCE_REPLAY_REASONS
 
 
 async def test_an_unadmitted_run_names_no_admitted_package(
-    tmp_path: Path, captured: list[tuple[str, dict[str, Any]]]
+    tmp_path: Path, tally: telemetry.OutcomeTally
 ) -> None:
     # The real authority with no admitted package: the legacy verifier owns the
     # decision, and a success without evidence is still accepted.
@@ -330,30 +326,8 @@ async def test_an_unadmitted_run_names_no_admitted_package(
         authority=authority,
         attempted=True,
     )
-    run.finish("completed", surface="evolve")
-    assert len(captured) == 1
-    props = captured[0][1]
-    assert props["pair_no_admitted_package__no_verifier_verdict"] == 1
-    assert props["surface"] == "evolve"
-    assert props["check_package_status"] == "construction_failed"
-
-
-def test_a_record_mode_run_names_its_mode_and_an_off_run_names_off(
-    captured: list[tuple[str, dict[str, Any]]],
-) -> None:
-    outcome = _outcome(
-        {"a": PackageCriterionStatus.UNCOVERED},
-        {0: _accepted(0, LegacyNoEvidenceReason.NO_VERIFIER_VERDICT)},
-        package_id="pkg_1",
-    )
-    run = _run(outcome)
-    run.settings = CheckPackageSettings(enabled=True, mode="record")
-    run.finish("completed", surface="cli_run")
-    assert captured[-1][1]["check_package_mode"] == "record"
-    assert captured[-1][1]["check_package"] == "on"
-
-    off = CheckPackageRun(CheckPackageSettings(enabled=False))
-    off._outcome = lambda: outcome  # type: ignore[method-assign]
-    off.finish("completed", surface="cli_run")
-    assert captured[-1][1]["check_package"] == "off"
-    assert captured[-1][1]["check_package_mode"] == "off"
+    with telemetry.outcome_scope(tally):
+        run.finish("completed", surface="evolve")
+    props = tally.drain()
+    assert props["no_evidence_criteria"] == 1
+    assert props["no_evidence_top_reason"] == "no_admitted_package"

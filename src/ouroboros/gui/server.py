@@ -128,6 +128,11 @@ class _Handler(BaseHTTPRequestHandler):
                 {"error": "Missing or wrong console token", "code": "unauthorized"}, 401
             )
             return
+        # An authorized console request is Ouroboros activity: send any
+        # finished usage day (cheap after the first check of the day).
+        from ouroboros import telemetry
+
+        telemetry.note_activity()
         body: Any = None
         if method in ("POST", "PUT"):
             try:

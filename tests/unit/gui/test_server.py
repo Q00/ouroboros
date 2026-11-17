@@ -65,6 +65,18 @@ def test_api_accepts_token(console) -> None:
     assert json.loads(body) == {"jobs": []}
 
 
+def test_an_authorized_request_runs_the_due_day_check(console, monkeypatch) -> None:
+    """A long-running console sends finished usage days on use, like any process."""
+    from ouroboros import telemetry
+
+    calls: list[bool] = []
+    monkeypatch.setattr(telemetry, "note_activity", lambda: calls.append(True))
+    assert _request(console, "GET", "/api/jobs", token=False)[0] == 401
+    assert calls == []
+    assert _request(console, "GET", "/api/jobs")[0] == 200
+    assert calls == [True]
+
+
 def test_dns_rebinding_host_is_refused(console) -> None:
     status, _ = _request(console, "GET", "/api/jobs", host="evil.example:80")
     assert status == 403

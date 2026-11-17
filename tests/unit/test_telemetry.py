@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
 import json
 import os
 from pathlib import Path
 import platform
+import queue
 import re
 import socket
 import subprocess
@@ -17,7 +20,7 @@ import uuid
 
 import pytest
 
-from ouroboros import telemetry
+from ouroboros import telemetry, telemetry_rollup
 from ouroboros.config.loader import get_telemetry_enabled, telemetry_opt_out_in_env
 
 
@@ -47,6 +50,37 @@ def sent(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     monkeypatch.setenv("OUROBOROS_POSTHOG_API_KEY", "phc_test")
     monkeypatch.setattr(telemetry, "_post", fake_post)
     return events
+
+
+@pytest.fixture
+def recorded(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, int]]:
+    """Counts handed to the local usage rollup, one dict per call."""
+    calls: list[dict[str, int]] = []
+    monkeypatch.setattr(telemetry, "_record_usage", lambda counts: calls.append(dict(counts)))
+    return calls
+
+
+_OUTCOME: dict[str, Any] = {"command": "run", "terminal_status": "completed", "verified": False}
+
+
+def _capture_outcome() -> None:
+    """Capture one workflow_outcome, the only event capture() may send."""
+    telemetry.capture("workflow_outcome", dict(_OUTCOME))
+
+
+def _rollup_path() -> Path:
+    return Path.home() / ".ouroboros" / telemetry_rollup.ROLLUP_FILENAME
+
+
+def _on_day(monkeypatch: pytest.MonkeyPatch, day: str) -> None:
+    monkeypatch.setattr(telemetry, "_utc_day", lambda: day)
+
+
+def _next_process_on(monkeypatch: pytest.MonkeyPatch, day: str) -> None:
+    """Settle this "process", then start a fresh one (empty caches) on ``day``."""
+    telemetry.flush(timeout=2.0)
+    telemetry._reset_for_tests()
+    _on_day(monkeypatch, day)
 
 
 def _sentinel_wait_snippet(sentinel: Path) -> str:
@@ -211,7 +245,7 @@ class TestOptOut:
     def test_capture_is_noop_when_disabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
         events: list[dict[str, Any]] = []
         monkeypatch.setattr(telemetry, "_post", lambda batch: events.extend(batch))
-        telemetry.capture("command_run", {"command": "run"})
+        _capture_outcome()
         telemetry.flush(timeout=1.0)
         assert events == []
 
@@ -286,7 +320,7 @@ class TestDistinctIdValidation:
             encoding="utf-8",
         )
 
-        telemetry.capture("service_active", {"service": "mcp"})
+        _capture_outcome()
         telemetry.flush(timeout=2.0)
 
         assert len(sent) == 1
@@ -318,7 +352,7 @@ class TestDistinctIdValidation:
             encoding="utf-8",
         )
 
-        telemetry.capture("service_active", {"service": "mcp"})
+        _capture_outcome()
         telemetry.flush(timeout=2.0)
 
         assert len(sent) == 1
@@ -515,7 +549,7 @@ class TestIdentityFailClosed:
         )
         os.chmod(state_dir, 0o500)
         try:
-            telemetry.capture("service_active", {"service": "mcp"})
+            _capture_outcome()
             telemetry.flush(timeout=2.0)
         finally:
             os.chmod(state_dir, 0o700)
@@ -539,7 +573,7 @@ class TestIdentityFailClosed:
         )
         os.chmod(state_dir, 0o500)
         try:
-            telemetry.capture("service_active", {"service": "mcp"})
+            _capture_outcome()
             telemetry.flush(timeout=2.0)
         finally:
             os.chmod(state_dir, 0o700)
@@ -557,7 +591,7 @@ class TestIdentityFailClosed:
         state_dir.mkdir(parents=True)
         os.chmod(state_dir, 0o500)
         try:
-            telemetry.capture("service_active", {"service": "mcp"})
+            _capture_outcome()
             telemetry.flush(timeout=2.0)
             result = telemetry.distinct_id()
         finally:
@@ -579,14 +613,14 @@ class TestIdentityFailClosed:
         )
         os.chmod(state_dir, 0o500)
         try:
-            telemetry.capture("service_active", {"service": "mcp"})
+            _capture_outcome()
             telemetry.flush(timeout=2.0)
             assert sent == []
             assert telemetry.distinct_id() == ""
         finally:
             os.chmod(state_dir, 0o700)
 
-        telemetry.capture("service_active", {"service": "mcp"})
+        _capture_outcome()
         telemetry.flush(timeout=2.0)
 
         assert len(sent) == 1
@@ -597,166 +631,21 @@ class TestIdentityFailClosed:
 
 
 class TestCapture:
-    def test_lifecycle_command_shape(
-        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
-    ) -> None:
-        monkeypatch.delenv("CI", raising=False)
-        monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
-        telemetry.set_context(runtime_backend="codex")
-        telemetry.capture_tool_call("ouroboros_start_execute_seed", ok=True)
+    def test_only_workflow_outcome_is_publicly_capturable(self, sent: list[dict[str, Any]]) -> None:
+        for retired in (
+            "command_run",
+            "service_active",
+            "mcp_serve_started",
+            "subagent_dispatch",
+            "ac_verify_failed",
+            "runtime_drift",
+            "acceptance_no_evidence",
+            "acceptance_artifact_checks",
+            "usage_daily",  # only the daily rollup may send this one
+        ):
+            telemetry.capture(retired, {"command": "run"})
         telemetry.flush(timeout=2.0)
-
-        assert len(sent) == 2
-        service_event, event = sent
-        assert service_event["event"] == "service_active"
-        assert event["event"] == "command_run"
-        assert event["distinct_id"] == telemetry.distinct_id()
-        assert event["properties"] == {
-            "command": "run",
-            "service": "mcp",
-            "status": "accepted",
-            "$insert_id": event["properties"]["$insert_id"],
-            "runtime_backend": "codex",
-            "app_version": telemetry.__version__,
-            "os": platform.system().lower(),
-        }
-
-    def test_failed_internal_command_is_retained(self, sent: list[dict[str, Any]]) -> None:
-        telemetry.capture_tool_call(
-            "ouroboros_checklist_verify", ok=False, error_type="MCPToolError"
-        )
-        telemetry.flush(timeout=2.0)
-
-        props = next(event["properties"] for event in sent if event["event"] == "command_run")
-        assert props["command"] == "checklist_verify"
-        assert props["status"] == "failed"
-        assert props["error_type"] == "MCPToolError"
-
-    def test_blocked_seed_is_distinct_from_exception_failure(
-        self, sent: list[dict[str, Any]]
-    ) -> None:
-        telemetry.capture_tool_call("ouroboros_generate_seed", ok=False, blocked=True)
-        telemetry.flush(timeout=2.0)
-
-        command = next(event for event in sent if event["event"] == "command_run")
-        assert command["properties"]["command"] == "seed"
-        assert command["properties"]["status"] == "blocked"
-        assert "error_type" not in command["properties"]
-
-    def test_seed_origin_is_kept_only_from_the_closed_set(self, sent: list[dict[str, Any]]) -> None:
-        """``origin`` answers one question: is the interview-less path used."""
-        telemetry.capture_tool_call(
-            "ouroboros_generate_seed", ok=True, origin="session_context_gap"
-        )
-        telemetry.flush(timeout=2.0)
-
-        props = next(event["properties"] for event in sent if event["event"] == "command_run")
-        assert props["command"] == "seed"
-        assert props["origin"] == "session_context_gap"
-
-    def test_seed_origin_outside_closed_set_is_dropped(self, sent: list[dict[str, Any]]) -> None:
-        telemetry.capture_tool_call(
-            "ouroboros_generate_seed", ok=True, origin="/home/alice/private-seed"
-        )
-        telemetry.flush(timeout=2.0)
-
-        props = next(event["properties"] for event in sent if event["event"] == "command_run")
-        assert "origin" not in props
-
-    def test_origin_is_dropped_for_every_other_command(self, sent: list[dict[str, Any]]) -> None:
-        telemetry.capture_tool_call("ouroboros_start_execute_seed", ok=True, origin="interview")
-        telemetry.flush(timeout=2.0)
-
-        props = next(event["properties"] for event in sent if event["event"] == "command_run")
-        assert props["command"] == "run"
-        assert "origin" not in props
-
-    def test_seed_rows_with_different_origins_are_not_collapsed_by_daily_dedupe(
-        self, sent: list[dict[str, Any]]
-    ) -> None:
-        """One user can take both entrances in a day; each is its own row."""
-        telemetry.capture_tool_call("ouroboros_generate_seed", ok=True, origin="interview")
-        telemetry.capture_tool_call("ouroboros_generate_seed", ok=True, origin="session_context")
-        telemetry.capture_tool_call("ouroboros_generate_seed", ok=True, origin="session_context")
-        telemetry.flush(timeout=2.0)
-
-        rows = [event["properties"] for event in sent if event["event"] == "command_run"]
-        assert [row["origin"] for row in rows] == [
-            "interview",
-            "session_context",
-            "session_context",
-        ]
-        # PostHog folds rows on ``$insert_id``: the two entrances keep distinct
-        # ids, the repeated entrance shares one.
-        assert rows[0]["$insert_id"] != rows[1]["$insert_id"]
-        assert rows[1]["$insert_id"] == rows[2]["$insert_id"]
-
-    def test_successful_internal_and_polling_commands_are_dropped(
-        self, sent: list[dict[str, Any]]
-    ) -> None:
-        telemetry.capture_tool_call("ouroboros_fetch_artifact", ok=True)
-        telemetry.capture_tool_call("ouroboros_job_status", ok=True)
-        telemetry.capture_tool_call("some_other_tool", ok=True)
-        telemetry.flush(timeout=2.0)
-        assert [event["event"] for event in sent] == ["service_active"]
-
-    def test_subagent_dispatch_is_one_daily_row_with_closed_dimensions(
-        self, sent: list[dict[str, Any]]
-    ) -> None:
-        """Reinstated as an adoption signal: one row per user/day/phase/kind,
-        and the rich per-dispatch properties removed by #2278 stay removed."""
-        rich = {
-            "phase": "emitted",
-            "fanout_kind": "lateral_panel",
-            "payload_count": 5,
-            "host_family": "codex",
-        }
-        telemetry.capture_subagent_dispatch(rich)
-        telemetry.capture_subagent_dispatch(rich)  # same day/dims -> suppressed
-        telemetry.capture_subagent_dispatch({"phase": "submitted", "fanout_kind": "lateral_panel"})
-        telemetry.flush(timeout=2.0)
-
-        dispatches = [event for event in sent if event["event"] == "subagent_dispatch"]
-        assert len(dispatches) == 2
-        props = dispatches[0]["properties"]
-        assert props["phase"] == "emitted"
-        assert props["fanout_kind"] == "lateral_panel"
-        assert set(props) <= telemetry._SUBAGENT_DISPATCH_KEYS
-        assert "payload_count" not in props
-        assert "host_family" not in props
-
-    def test_subagent_dispatch_folds_unaudited_dimensions(self, sent: list[dict[str, Any]]) -> None:
-        telemetry.capture_subagent_dispatch(
-            {"phase": "acme_phase", "fanout_kind": "/private/path: boom"}
-        )
-        telemetry.flush(timeout=2.0)
-
-        props = sent[0]["properties"]
-        assert props["phase"] == "unknown"
-        assert props["fanout_kind"] == "unknown"
-
-    def test_mcp_serve_started_is_one_daily_row_per_transport(
-        self, sent: list[dict[str, Any]]
-    ) -> None:
-        telemetry.capture_mcp_serve_started("stdio")
-        telemetry.capture_mcp_serve_started("stdio")  # same day/transport -> suppressed
-        telemetry.capture_mcp_serve_started("attacker-transport")  # folds to unknown
-        telemetry.flush(timeout=2.0)
-
-        serves = [event for event in sent if event["event"] == "mcp_serve_started"]
-        assert [event["properties"]["transport"] for event in serves] == ["stdio", "unknown"]
-        assert all(set(e["properties"]) <= telemetry._MCP_SERVE_STARTED_KEYS for e in serves)
-
-    def test_daily_insert_id_is_stable_for_same_dimension(self, sent: list[dict[str, Any]]) -> None:
-        telemetry.capture_tool_call("ouroboros_interview", ok=True)
-        telemetry.capture_tool_call("ouroboros_interview", ok=True)
-        telemetry.capture_tool_call("ouroboros_interview", ok=False, error_type="TimeoutError")
-        telemetry.flush(timeout=2.0)
-
-        commands = [event for event in sent if event["event"] == "command_run"]
-        assert len(commands) == 3
-        assert commands[0]["properties"]["$insert_id"] == commands[1]["properties"]["$insert_id"]
-        assert commands[0]["properties"]["$insert_id"] != commands[2]["properties"]["$insert_id"]
+        assert sent == []
 
     def test_durable_job_outcome_keeps_only_terminal_fields(
         self, sent: list[dict[str, Any]]
@@ -776,6 +665,18 @@ class TestCapture:
         assert props["verified"] is True
         assert props["runtime_backend"] == "codex"
         assert "job_private_id" not in json.dumps(sent[0])
+
+    def test_job_outcome_uuid_is_deterministic_per_job(self, sent: list[dict[str, Any]]) -> None:
+        """PostHog dedupes on the event uuid (not $insert_id): a retried
+        terminal append for the same job must carry the same uuid."""
+        for job_id in ("job-a", "job-a", "job-b"):
+            telemetry.capture_job_outcome(job_id, "auto", terminal_status="completed")
+        telemetry.flush(timeout=2.0)
+
+        uuids = [event["uuid"] for event in sent]
+        assert uuids[0] == uuids[1] != uuids[2]
+        assert all(uuid.UUID(value).version == 5 for value in uuids)
+        assert "job-a" not in json.dumps(sent)
 
     def test_failed_outcome_keeps_closed_reason(self, sent: list[dict[str, Any]]) -> None:
         telemetry.capture_job_outcome(
@@ -888,31 +789,12 @@ class TestCapture:
         assert "failure_cause" not in sent[0]["properties"]
         assert "failure_reason_code" not in sent[0]["properties"]
 
-    def test_runtime_drift_keeps_closed_kind_only(
-        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
-    ) -> None:
-        _no_ambient_frontdoor_or_ci(monkeypatch)
-        telemetry.set_context(runtime_backend="codex")
-        telemetry.capture_runtime_drift("cli_executable")
-        telemetry.capture_runtime_drift("/Users/private/codex was replaced")
-        telemetry.flush(timeout=2.0)
-
-        assert [event["event"] for event in sent] == ["runtime_drift", "runtime_drift"]
-        assert sent[0]["properties"]["kind"] == "cli_executable"
-        assert sent[1]["properties"]["kind"] == "unknown"
-        assert set(sent[0]["properties"]) == {
-            "kind",
-            "runtime_backend",
-            "app_version",
-            "os",
-        }
-        assert "private" not in json.dumps(sent)
-
     def test_never_raises_when_post_fails(
         self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
     ) -> None:
         monkeypatch.setattr(telemetry, "_post", lambda _batch: (_ for _ in ()).throw(OSError()))
         telemetry.capture_tool_call("ouroboros_interview", ok=True)
+        _capture_outcome()
         telemetry.flush(timeout=2.0)
 
 
@@ -934,7 +816,7 @@ class TestPropertyAllowlist:
         self, sent: list[dict[str, Any]]
     ) -> None:
         telemetry.capture(
-            "command_run",
+            "workflow_outcome",
             {"command": "run", "prompt": "secret", "file_path": "/etc/passwd"},
         )
         telemetry.flush(timeout=2.0)
@@ -946,7 +828,7 @@ class TestPropertyAllowlist:
 
     def test_set_context_ignores_unlisted_keys(self, sent: list[dict[str, Any]]) -> None:
         telemetry.set_context(prompt="secret", runtime_backend="claude")
-        telemetry.capture("command_run", {"command": "run"})
+        telemetry.capture("workflow_outcome", {"command": "run"})
         telemetry.flush(timeout=2.0)
         assert len(sent) == 1
         props = sent[0]["properties"]
@@ -955,26 +837,26 @@ class TestPropertyAllowlist:
 
     def test_oversized_string_property_dropped(self, sent: list[dict[str, Any]]) -> None:
         telemetry.capture(
-            "command_run",
-            {"command": "run", "error_type": "E" * (telemetry._MAX_PROPERTY_STR_LEN + 1)},
+            "workflow_outcome",
+            {"command": "run", "failure_cause": "E" * (telemetry._MAX_PROPERTY_STR_LEN + 1)},
         )
         telemetry.flush(timeout=2.0)
         assert len(sent) == 1
         props = sent[0]["properties"]
         assert props["command"] == "run"
-        assert "error_type" not in props
+        assert "failure_cause" not in props
 
     def test_non_scalar_property_dropped(self, sent: list[dict[str, Any]]) -> None:
         telemetry.capture(
-            "command_run",
-            {"command": "run", "tool": {"nested": "value"}, "sample_rate": [1, 2]},
+            "workflow_outcome",
+            {"command": "run", "terminal_status": {"nested": "value"}, "ac_total": [1, 2]},
         )
         telemetry.flush(timeout=2.0)
         assert len(sent) == 1
         props = sent[0]["properties"]
         assert props["command"] == "run"
-        assert "tool" not in props
-        assert "sample_rate" not in props
+        assert "terminal_status" not in props
+        assert "ac_total" not in props
 
 
 def _no_ambient_frontdoor_or_ci(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1003,49 +885,13 @@ def test_genuine_process_ci_still_stamps_ci_true(
     environment, which the loader never touches regardless of the
     denylist, so `ci=true` must still be stamped from there."""
     monkeypatch.setenv("CI", "true")
-    telemetry.capture_cli_command("run")
+    _capture_outcome()
     telemetry.flush(timeout=2.0)
     assert len(sent) == 1
     assert sent[0]["properties"]["ci"] is True
 
 
 class TestExactPropertySets:
-    def test_command_run_mcp_exact_keys(
-        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
-    ) -> None:
-        _no_ambient_frontdoor_or_ci(monkeypatch)
-        telemetry.set_context(runtime_backend="claude", execute_runtime_backend="ignored")
-        telemetry.capture_tool_call("ouroboros_evaluate", ok=False, error_type="TimeoutError")
-        telemetry.flush(timeout=2.0)
-        props = next(event["properties"] for event in sent if event["event"] == "command_run")
-        assert set(props) == {
-            "command",
-            "service",
-            "status",
-            "error_type",
-            "$insert_id",
-            "runtime_backend",
-            "app_version",
-            "os",
-        }
-
-    def test_command_run_cli_exact_keys(
-        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
-    ) -> None:
-        _no_ambient_frontdoor_or_ci(monkeypatch)
-        telemetry.set_context(runtime_backend="claude")
-        telemetry.capture_cli_command("run")
-        telemetry.flush(timeout=2.0)
-
-        assert set(sent[0]["properties"]) == {
-            "command",
-            "service",
-            "status",
-            "$insert_id",
-            "app_version",
-            "os",
-        }
-
     def test_workflow_outcome_exact_keys(
         self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
     ) -> None:
@@ -1066,62 +912,91 @@ class TestExactPropertySets:
             "os",
         }
 
-    def test_service_active_exact_keys(
+    def test_usage_daily_exact_keys(
         self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
     ) -> None:
         _no_ambient_frontdoor_or_ci(monkeypatch)
-        telemetry.set_context(runtime_backend="codex")
-        telemetry.capture_service_active()
+        telemetry.set_context(runtime_backend="claude", execute_runtime_backend="ignored")
+        _on_day(monkeypatch, "2026-11-16")
+        telemetry.capture_tool_call("ouroboros_interview", ok=True)
+        telemetry.capture_cli_command("run")
+        _next_process_on(monkeypatch, "2026-11-17")
+        telemetry.capture_mcp_serve_started("stdio")
         telemetry.flush(timeout=2.0)
 
-        assert set(sent[0]["properties"]) == {
-            "service",
-            "$insert_id",
-            "runtime_backend",
-            "app_version",
-            "os",
+        (row,) = sent
+        assert row["event"] == "usage_daily"
+        assert row["properties"] == {
+            "cmd_interview": 1,
+            "cmd_run": 1,
+            "surface_mcp": 1,
+            "surface_cli": 1,
+            "day": "2026-11-16",
+            "runtime_backend": "claude",
+            "app_version": telemetry.__version__,
+            "os": platform.system().lower(),
         }
+        assert set(row["properties"]) <= telemetry._USAGE_DAILY_KEYS
 
 
 class TestCliCapture:
-    def test_init_normalized_to_interview(self, sent: list[dict[str, Any]]) -> None:
+    def test_init_normalized_to_interview(self, recorded: list[dict[str, int]]) -> None:
         telemetry.capture_cli_command("init")
-        telemetry.flush(timeout=2.0)
-        assert sent[0]["properties"]["command"] == "interview"
-        assert sent[0]["properties"]["service"] == "cli"
+        assert recorded == [{"cmd_interview": 1, "surface_cli": 1}]
 
-    def test_internal_commands_skipped(self, sent: list[dict[str, Any]]) -> None:
+    def test_internal_commands_skipped(self, recorded: list[dict[str, int]]) -> None:
         telemetry.capture_cli_command("dispatch")
         telemetry.capture_cli_command("job")
         telemetry.capture_cli_command("mcp")
         telemetry.capture_cli_command(None)
-        telemetry.flush(timeout=2.0)
-        assert sent == []
+        assert recorded == []
 
     def test_dynamic_plugin_command_is_replaced_not_forwarded(
-        self, sent: list[dict[str, Any]]
+        self, recorded: list[dict[str, int]]
     ) -> None:
         """subcommand is caller-controlled the same way an MCP tool name or
         a job_type is: _PluginAwareGroup resolves any name not in the
         static command table as a dynamically-installed plugin command, so
-        an unaudited value must never carry an identifying name through
-        `command`."""
+        an unaudited value must never become a usage key."""
         hostile = "acme-private-project"
         telemetry.capture_cli_command(hostile)
-        telemetry.flush(timeout=2.0)
-
-        assert len(sent) == 1
-        event = sent[0]
-        assert event["properties"]["command"] == "extension_command"
-        assert event["properties"]["status"] == "invoked"
-        assert hostile not in repr(event)
+        assert recorded == [{"cmd_extension_command": 1, "surface_cli": 1}]
 
     def test_canonical_cli_command_passes_through_unchanged(
-        self, sent: list[dict[str, Any]]
+        self, recorded: list[dict[str, int]]
     ) -> None:
         telemetry.capture_cli_command("run")
-        telemetry.flush(timeout=2.0)
-        assert sent[0]["properties"]["command"] == "run"
+        telemetry.capture_cli_command("workflow-ir")
+        assert recorded == [
+            {"cmd_run": 1, "surface_cli": 1},
+            {"cmd_workflow_ir": 1, "surface_cli": 1},
+        ]
+
+    def test_gui_and_console_started_commands_count_as_console(
+        self, monkeypatch: pytest.MonkeyPatch, recorded: list[dict[str, int]]
+    ) -> None:
+        telemetry.capture_cli_command("gui")
+        monkeypatch.setenv(telemetry._SURFACE_ENV, "console")
+        telemetry.capture_cli_command("auto")
+        monkeypatch.setenv(telemetry._SURFACE_ENV, "anything-else")
+        telemetry.capture_cli_command("auto")
+        assert recorded == [
+            {"cmd_gui": 1, "surface_console": 1},
+            {"cmd_auto": 1, "surface_console": 1},
+            {"cmd_auto": 1, "surface_cli": 1},
+        ]
+
+    def test_console_jobs_carry_the_surface_marker(self) -> None:
+        from ouroboros.gui.jobs import _child_env
+
+        assert _child_env()[telemetry._SURFACE_ENV] == "console"
+
+    def test_every_counted_cli_command_has_a_usage_key(self) -> None:
+        for name in telemetry._CANONICAL_CLI_COMMANDS - telemetry._CLI_SKIP:
+            key = telemetry._usage_key(telemetry._CLI_FUNNEL.get(name, name))
+            assert key in telemetry._USAGE_COUNT_KEYS
+        # Every key fits in one rollup bucket, so none is ever capped away.
+        assert len(telemetry._USAGE_COUNT_KEYS) <= telemetry_rollup.MAX_KEYS
 
     def test_cli_funnel_and_is_funnel_tuple_are_subsets_of_canonical_set(self) -> None:
         assert set(telemetry._CLI_FUNNEL) <= telemetry._CANONICAL_CLI_COMMANDS
@@ -1218,7 +1093,7 @@ class TestNotice:
         assert repaired["notice_shown"] is True
         assert repaired["distinct_id"] == valid_id
 
-        telemetry.capture("service_active", {"service": "mcp"})
+        _capture_outcome()
         telemetry.flush(timeout=2.0)
         assert len(sent) == 1
         assert sent[0]["distinct_id"] == valid_id
@@ -1388,7 +1263,7 @@ class TestExitDoesNotBlock:
                 "from ouroboros import telemetry\n"
                 "telemetry._HTTP_TIMEOUT_SECONDS = 30.0\n"
                 "Path(sys.argv[1]).write_text('ready', encoding='utf-8')\n"
-                "telemetry.capture_service_active()\n"
+                "telemetry.capture('workflow_outcome', {'command': 'run'})\n"
                 "if sys.stdin.readline().strip() != 'exit':\n"
                 "    raise SystemExit('parent exit signal was not received')\n"
                 "assert telemetry._worker is not None and telemetry._worker.is_alive()\n"
@@ -1702,262 +1577,737 @@ class TestNoticeRace:
         )
 
 
-class TestAcVerifyFailed:
-    """Closed-vocabulary rejection-cause telemetry for the AC verify gate."""
+class TestVocabularies:
+    """SSOT pairings for the closed labels folded into workflow_outcome."""
 
-    def test_forwards_closed_cause(self, sent: list[dict[str, Any]]) -> None:
-        telemetry.capture_ac_verify_failed(cause="artifacts_missing_found_elsewhere")
-        telemetry.flush(timeout=2.0)
-
-        event = sent[0]
-        assert event["event"] == "ac_verify_failed"
-        props = event["properties"]
-        assert props["cause"] == "artifacts_missing_found_elsewhere"
-        assert set(props) <= telemetry._AC_VERIFY_FAILED_KEYS
-
-    @pytest.mark.parametrize("hostile", ("/private/seed.yaml: boom", "AcmeCause", None))
-    def test_folds_unaudited_cause_to_unknown(
-        self, sent: list[dict[str, Any]], hostile: str | None
-    ) -> None:
-        telemetry.capture_ac_verify_failed(cause=hostile)
-        telemetry.flush(timeout=2.0)
-
-        assert sent[0]["properties"]["cause"] == "unknown"
-        if hostile is not None:
-            assert hostile not in json.dumps(sent[0])
-
-    def test_vocabulary_matches_the_gate_ssot(self) -> None:
+    def test_verify_causes_match_the_gate_ssot(self) -> None:
         from ouroboros.orchestrator.verify_gate_outcome import _VERIFY_GATE_CAUSES
 
         assert telemetry._AC_VERIFY_CAUSES == _VERIFY_GATE_CAUSES
 
+    def test_drift_kinds_match_the_runtime_ssot(self) -> None:
+        from ouroboros.orchestrator.runtime_drift import RUNTIME_DRIFT_KINDS
 
-class TestAcceptanceNoEvidence:
-    """Closed-vocabulary counts of criteria accepted without evidence."""
+        assert telemetry._RUNTIME_DRIFT_KINDS == RUNTIME_DRIFT_KINDS
 
-    @staticmethod
-    def _config(text: str) -> None:
-        config_dir = Path.home() / ".ouroboros"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "config.yaml").write_text(text, encoding="utf-8")
-
-    @staticmethod
-    def _capture(pairs: Any, **overrides: Any) -> None:
-        kwargs: dict[str, Any] = {
-            "criterion_count": 4,
-            "verification_coverage": "low",
-            "surface": "cli_run",
-            "check_package": "on",
-            "check_package_status": "admitted",
-            "runtime_backend": "codex",
-        }
-        kwargs.update(overrides)
-        telemetry.capture_acceptance_no_evidence(pairs, **kwargs)
-
-    def test_counts_each_reason_pair(self, sent: list[dict[str, Any]]) -> None:
-        self._capture(
-            [
-                ("uncovered", "no_verifier_verdict"),
-                ("uncovered", "no_verifier_verdict"),
-                ("no_binding", "transcript_unavailable"),
-            ]
-        )
-        telemetry.flush(timeout=2.0)
-
-        assert len(sent) == 1
-        assert sent[0]["event"] == "acceptance_no_evidence"
-        props = sent[0]["properties"]
-        assert props["pair_uncovered__no_verifier_verdict"] == 2
-        assert props["pair_no_binding__transcript_unavailable"] == 1
-        assert props["no_evidence_count"] == 3
-        assert props["criterion_count"] == 4
-        assert props["verification_coverage"] == "low"
-        assert props["surface"] == "cli_run"
-        assert props["check_package"] == "on"
-        assert props["check_package_status"] == "admitted"
-        assert props["runtime_backend"] == "codex"
-        assert set(props) <= telemetry._ACCEPTANCE_NO_EVIDENCE_KEYS
-
-    def test_folds_unaudited_values_to_unknown(self, sent: list[dict[str, Any]]) -> None:
-        hostile = "/private/seed.yaml: add(2, 3) returns 5"
-        self._capture(
-            [(hostile, hostile), (None, None)],
-            verification_coverage=hostile,
-            surface=hostile,
-            check_package=hostile,
-            check_package_status=hostile,
-            runtime_backend=hostile,
-        )
-        telemetry.flush(timeout=2.0)
-
-        props = sent[0]["properties"]
-        assert props["pair_unknown__unknown"] == 2
-        for key in (
-            "verification_coverage",
-            "surface",
-            "check_package",
-            "check_package_status",
-            "runtime_backend",
-        ):
-            assert props[key] == "unknown"
-        assert hostile not in json.dumps(sent[0])
-
-    def test_sends_nothing_without_a_no_evidence_acceptance(
-        self, sent: list[dict[str, Any]]
-    ) -> None:
-        self._capture([])
-        telemetry.flush(timeout=2.0)
-        assert sent == []
-
-    def test_on_by_default_without_any_config(self, sent: list[dict[str, Any]]) -> None:
-        assert not (Path.home() / ".ouroboros" / "config.yaml").exists()
-        self._capture([("uncovered", "no_verifier_verdict")])
-        telemetry.flush(timeout=2.0)
-        assert len(sent) == 1
-
-    @pytest.mark.parametrize(
-        ("env", "config"),
-        (
-            ({"DO_NOT_TRACK": "1"}, None),
-            ({"OUROBOROS_TELEMETRY": "0"}, None),
-            ({}, "telemetry:\n  enabled: false\n"),
-        ),
-    )
-    def test_every_opt_out_suppresses_it(
-        self,
-        sent: list[dict[str, Any]],
-        monkeypatch: pytest.MonkeyPatch,
-        env: dict[str, str],
-        config: str | None,
-    ) -> None:
-        for key, value in env.items():
-            monkeypatch.setenv(key, value)
-        if config is not None:
-            self._config(config)
-        self._capture([("uncovered", "no_verifier_verdict")])
-        telemetry.flush(timeout=2.0)
-        assert sent == []
-
-    def test_never_raises(self, sent: list[dict[str, Any]]) -> None:
-        def broken() -> Any:
-            yield ("uncovered", "no_verifier_verdict")
-            raise RuntimeError("boom")
-
-        self._capture(broken())
-        self._capture(None)
-        telemetry.flush(timeout=2.0)
-        assert sent == []
-
-
-class TestAcceptanceArtifactChecks:
-    """Closed-vocabulary outcomes of the controller-run artifact checks."""
-
-    @staticmethod
-    def _capture(**overrides: Any) -> None:
-        kwargs: dict[str, Any] = {
-            "base_regression": "rejected",
-            "worker_tests": "no_selected_files",
-            "failed_criteria": 2,
-            "criterion_count": 3,
-            "repairs": 1,
-            "surface": "cli_run",
-            "runtime_backend": "codex",
-        }
-        kwargs.update(overrides)
-        telemetry.capture_acceptance_artifact_checks(**kwargs)
-
-    def test_reports_what_each_check_observed(self, sent: list[dict[str, Any]]) -> None:
-        self._capture()
-        telemetry.flush(timeout=2.0)
-
-        assert len(sent) == 1
-        assert sent[0]["event"] == "acceptance_artifact_checks"
-        props = sent[0]["properties"]
-        assert props["base_regression"] == "rejected"
-        assert props["worker_tests"] == "no_selected_files"
-        assert (props["failed_criteria"], props["criterion_count"], props["repairs"]) == (2, 3, 1)
-        assert props["surface"] == "cli_run"
-        assert props["runtime_backend"] == "codex"
-        assert set(props) <= telemetry._ACCEPTANCE_ARTIFACT_CHECKS_KEYS
-
-    @pytest.mark.parametrize(
-        "reason",
-        ("timeout", "base_runner_crash", "no_selected_files", "unsupported_runner", "unavailable"),
-    )
-    def test_reports_why_a_check_had_no_observation(
-        self, sent: list[dict[str, Any]], reason: str
-    ) -> None:
-        self._capture(base_regression=reason, worker_tests="not_a_test_result", failed_criteria=0)
-        telemetry.flush(timeout=2.0)
-        props = sent[0]["properties"]
-        assert props["base_regression"] == reason
-        assert props["worker_tests"] == "not_a_test_result"
-
-    def test_folds_unaudited_values_to_unknown(self, sent: list[dict[str, Any]]) -> None:
-        hostile = "tests/test_calc.py::test_add"
-        self._capture(
-            base_regression=hostile, worker_tests=None, surface=hostile, runtime_backend=hostile
-        )
-        telemetry.flush(timeout=2.0)
-        props = sent[0]["properties"]
-        for key in ("base_regression", "worker_tests", "surface", "runtime_backend"):
-            assert props[key] == "unknown"
-        assert hostile not in json.dumps(sent[0])
-
-    def test_the_vocabulary_matches_the_product(self) -> None:
-        from ouroboros.boundary.base_regression import (
-            ArtifactCheckMode,
-            ArtifactCheckOutcome,
-            ArtifactEffect,
-            Exemption,
-        )
+    def test_artifact_outcomes_match_the_product(self) -> None:
+        from ouroboros.boundary.base_regression import ArtifactCheckOutcome
 
         assert {item.value for item in ArtifactCheckOutcome} == telemetry._ARTIFACT_CHECK_OUTCOMES
-        assert {item.value for item in Exemption} == telemetry._ARTIFACT_EXEMPTIONS
-        assert {item.value for item in ArtifactCheckMode} == telemetry._ARTIFACT_CHECK_MODES
-        assert {item.value for item in ArtifactEffect} == telemetry._ARTIFACT_EFFECTS
 
-    def test_reports_each_modes_effect_and_what_would_have_failed(
-        self, sent: list[dict[str, Any]]
+
+_NO_EVIDENCE_KW: dict[str, Any] = {
+    "criterion_count": 4,
+    "verification_coverage": "low",
+    "surface": "cli_run",
+    "check_package": "on",
+    "check_package_status": "admitted",
+    "runtime_backend": "codex",
+}
+_ARTIFACT_KW: dict[str, Any] = {
+    "base_regression": "rejected",
+    "worker_tests": "no_selected_files",
+    "failed_criteria": 2,
+    "criterion_count": 3,
+    "repairs": 1,
+    "surface": "cli_run",
+    "runtime_backend": "codex",
+}
+_FOLDED_KEYS = frozenset(
+    {
+        "verify_rejections",
+        "verify_top_cause",
+        "runtime_drifts",
+        "runtime_drift_kind",
+        "no_evidence_criteria",
+        "no_evidence_top_reason",
+        "verification_coverage",
+        "base_regression",
+        "worker_tests",
+        "artifact_failed_criteria",
+    }
+)
+
+
+class TestOutcomeFolding:
+    """Verify-gate, acceptance and drift observations ride on workflow_outcome."""
+
+    def test_observations_outside_a_run_are_dropped(
+        self, sent: list[dict[str, Any]], recorded: list[dict[str, int]]
     ) -> None:
-        self._capture(
-            base_regression_mode="decide",
-            worker_test_gate_mode="record",
-            base_regression_effect="regression_unadjudicated",
-            worker_tests_effect="recorded",
-            would_fail_criteria=2,
+        telemetry.capture_ac_verify_failed("exit_nonzero")
+        telemetry.capture_runtime_drift("codex_config")
+        telemetry.capture_acceptance_no_evidence(
+            [("uncovered", "no_call_evidence")], **_NO_EVIDENCE_KW
         )
-        self._capture(base_regression_mode="/a/path", worker_tests_effect="maybe")
-        telemetry.flush(timeout=2.0)
-        first, second = (row["properties"] for row in sent)
-        assert (
-            first["base_regression_mode"],
-            first["worker_test_gate_mode"],
-            first["base_regression_effect"],
-            first["worker_tests_effect"],
-            first["would_fail_criteria"],
-        ) == ("decide", "record", "regression_unadjudicated", "recorded", 2)
-        assert second["base_regression_mode"] == "unknown"
-        assert second["worker_tests_effect"] == "unknown"
-
-    def test_reports_how_many_regressions_the_exemption_set_aside(
-        self, sent: list[dict[str, Any]]
-    ) -> None:
-        self._capture(base_regression="exempted", exemption="applied", exempted_tests=3)
-        self._capture(exemption="/private/path", exempted_tests=0)
-        telemetry.flush(timeout=2.0)
-        first, second = (row["properties"] for row in sent)
-        assert (first["base_regression"], first["exemption"], first["exempted_tests"]) == (
-            "exempted",
-            "applied",
-            3,
-        )
-        assert second["exemption"] == "unknown"
-
-    def test_an_opt_out_suppresses_it(
-        self, sent: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("DO_NOT_TRACK", "1")
-        self._capture()
+        telemetry.capture_acceptance_artifact_checks(**_ARTIFACT_KW)
         telemetry.flush(timeout=2.0)
         assert sent == []
+        assert recorded == []
+
+    def test_a_run_outcome_carries_its_folded_observations(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        _no_ambient_frontdoor_or_ci(monkeypatch)
+        with telemetry.outcome_scope(telemetry.new_outcome_tally()):
+            for cause in ("exit_nonzero", "timeout", "exit_nonzero", "/private/seed.yaml: boom"):
+                telemetry.capture_ac_verify_failed(cause)
+            telemetry.capture_runtime_drift("/Users/private/codex was replaced")
+            telemetry.capture_runtime_drift("cli_executable")
+            telemetry.capture_runtime_drift("cli_executable")
+            telemetry.capture_acceptance_no_evidence(
+                [
+                    ("uncovered", "no_verifier_verdict"),
+                    ("no_binding", "transcript_unavailable"),
+                    ("uncovered", None),
+                ],
+                **_NO_EVIDENCE_KW,
+            )
+            telemetry.capture_acceptance_artifact_checks(
+                **{**_ARTIFACT_KW, "worker_tests": "/Users/private/tests/test_x.py"}
+            )
+            telemetry.capture_job_outcome(
+                "job-1",
+                "execute_seed",
+                terminal_status="failed",
+                result_meta={"failure_reason_code": "validation"},
+            )
+            telemetry.capture_job_outcome("job-2", "execute_seed", terminal_status="completed")
+        telemetry.flush(timeout=2.0)
+
+        first, second = sent
+        assert {key: first["properties"][key] for key in _FOLDED_KEYS} == {
+            "verify_rejections": 4,
+            "verify_top_cause": "exit_nonzero",
+            "runtime_drifts": 3,
+            "runtime_drift_kind": "cli_executable",
+            "no_evidence_criteria": 3,
+            "no_evidence_top_reason": "uncovered",
+            "verification_coverage": "low",
+            "base_regression": "rejected",
+            "worker_tests": "unknown",
+            "artifact_failed_criteria": 2,
+        }
+        assert set(first["properties"]) <= telemetry._WORKFLOW_OUTCOME_KEYS
+        # Drained: the next outcome in the same scope starts from nothing.
+        assert _FOLDED_KEYS.isdisjoint(second["properties"])
+        assert "private" not in json.dumps(sent)
+
+    def test_ties_pick_the_alphabetically_first_label_and_counts_are_bounded(self) -> None:
+        tally = telemetry.new_outcome_tally()
+        with telemetry.outcome_scope(tally):
+            telemetry.capture_ac_verify_failed("timeout")
+            telemetry.capture_ac_verify_failed("exit_nonzero")
+            telemetry.capture_acceptance_artifact_checks(
+                **{**_ARTIFACT_KW, "failed_criteria": True}
+            )
+        props = tally.drain()
+        assert props["verify_top_cause"] == "exit_nonzero"
+        assert props["artifact_failed_criteria"] == 0
+
+        for _ in range(10_001):
+            tally.add_verify_rejection("timeout")
+        tally.set_artifact_checks("passed", "passed", 10_001)
+        props = tally.drain()
+        assert props["verify_rejections"] == 10_000
+        assert props["artifact_failed_criteria"] == 10_000
+
+    def test_a_run_with_every_criterion_evidenced_adds_nothing(self) -> None:
+        tally = telemetry.new_outcome_tally()
+        with telemetry.outcome_scope(tally):
+            telemetry.capture_acceptance_no_evidence([], **_NO_EVIDENCE_KW)
+        assert tally.drain() == {}
+
+    def test_tasks_and_threads_started_in_a_run_report_into_its_tally(self) -> None:
+        async def child() -> None:
+            telemetry.capture_ac_verify_failed("timeout")
+            await asyncio.to_thread(telemetry.capture_runtime_drift, "codex_config")
+
+        async def main() -> dict[str, Any]:
+            tally = telemetry.new_outcome_tally()
+            with telemetry.outcome_scope(tally):
+                task = asyncio.create_task(child())
+            # The scope has exited; the task still holds the run's binding.
+            await task
+            assert telemetry._OUTCOME_TALLY.get() is None
+            return tally.drain()
+
+        assert asyncio.run(main()) == {
+            "verify_rejections": 1,
+            "verify_top_cause": "timeout",
+            "runtime_drifts": 1,
+            "runtime_drift_kind": "codex_config",
+        }
+
+    def test_job_boundary_gives_each_job_its_own_tally(self, sent: list[dict[str, Any]]) -> None:
+        from ouroboros.mcp.telemetry_boundary import JobTelemetryBoundary
+
+        boundary = JobTelemetryBoundary()
+        for job_id in ("outer", "inner", "untracked"):
+            boundary.observe("mcp.job.created", job_id, {"job_type": "execute_seed"})
+
+        async def inner_runner() -> None:
+            telemetry.capture_ac_verify_failed("exit_nonzero")
+            telemetry.capture_ac_verify_failed("exit_nonzero")
+
+        async def outer_runner() -> None:
+            telemetry.capture_ac_verify_failed("timeout")
+            with boundary.runner_scope("inner"):
+                inner = asyncio.create_task(inner_runner())
+            await inner
+            # Both terminals are observed inside the outer job's context: each
+            # must drain only its own tally.
+            boundary.observe("mcp.job.completed", "inner", {"status": "completed"})
+            boundary.observe("mcp.job.completed", "untracked", {"status": "completed"})
+
+        async def main() -> None:
+            with boundary.runner_scope("outer"):
+                outer = asyncio.create_task(outer_runner())
+            await outer
+            boundary.observe("mcp.job.failed", "outer", {"status": "failed"})
+
+        asyncio.run(main())
+        telemetry.flush(timeout=2.0)
+
+        inner, untracked, outer = (event["properties"] for event in sent)
+        assert (inner["verify_rejections"], inner["verify_top_cause"]) == (2, "exit_nonzero")
+        assert _FOLDED_KEYS.isdisjoint(untracked)
+        assert (outer["verify_rejections"], outer["verify_top_cause"]) == (1, "timeout")
+        assert boundary._tallies == {}
+
+
+def _exercise_every_capture_path() -> None:
+    from ouroboros.mcp.telemetry_boundary import record_direct_evaluation_outcome
+
+    for name in sorted(telemetry._CANONICAL_TOOL_NAMES | {"custom_tool"}):
+        telemetry.capture_tool_call(name, ok=True, origin="session_context")
+        telemetry.capture_tool_call(name, ok=False, error_type="TimeoutError")
+        telemetry.capture_tool_call(name, ok=False, blocked=True)
+        telemetry.capture_tool_call(name, ok=True, registered=False)
+    for command in sorted(telemetry._CANONICAL_CLI_COMMANDS | {"acme-private"}):
+        telemetry.capture_cli_command(command)
+    telemetry.capture_cli_command(None)
+    telemetry.capture_mcp_serve_started("stdio")
+    telemetry.capture_subagent_dispatch({"phase": "emitted", "fanout_kind": "question_advisory"})
+    telemetry.capture_subagent_dispatch({"phase": "submitted", "fanout_kind": "question_advisory"})
+    telemetry.capture_ac_verify_failed("exit_nonzero")
+    telemetry.capture_runtime_drift("codex_config")
+    telemetry.capture_acceptance_no_evidence([("uncovered", "no_call_evidence")], **_NO_EVIDENCE_KW)
+    telemetry.capture_acceptance_artifact_checks(**_ARTIFACT_KW)
+    for job_type in sorted(telemetry._CANONICAL_JOB_TYPES | {"acme_private_job"}):
+        telemetry.capture_job_outcome(f"job-{job_type}", job_type, terminal_status="completed")
+    record_direct_evaluation_outcome(final_approved=True)
+    for retired in (
+        "command_run",
+        "service_active",
+        "mcp_serve_started",
+        "subagent_dispatch",
+        "ac_verify_failed",
+        "runtime_drift",
+        "acceptance_no_evidence",
+        "acceptance_artifact_checks",
+        "usage_daily",
+        "install_started",
+    ):
+        telemetry.capture(retired, {"command": "run"})
+
+
+class TestNetworkEventSet:
+    """The complete set of event names that can reach the network."""
+
+    def test_only_usage_daily_and_workflow_outcome_leave_the_process(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        assert {"usage_daily", "workflow_outcome"} == telemetry._NETWORK_EVENTS
+        _on_day(monkeypatch, "2026-11-16")
+        _exercise_every_capture_path()
+        with telemetry.outcome_scope(telemetry.new_outcome_tally()):
+            _exercise_every_capture_path()
+        _next_process_on(monkeypatch, "2026-11-17")
+        _exercise_every_capture_path()
+        telemetry.flush(timeout=2.0)
+
+        names = [event["event"] for event in sent]
+        assert set(names) == telemetry._NETWORK_EVENTS
+        assert names.count("usage_daily") == 1
+        allowed = {
+            "usage_daily": telemetry._USAGE_DAILY_KEYS,
+            "workflow_outcome": telemetry._WORKFLOW_OUTCOME_KEYS,
+        }
+        for event in sent:
+            assert set(event["properties"]) <= allowed[event["event"]]
+        assert "acme" not in json.dumps(sent)
+
+    def test_installers_send_only_the_install_funnel(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        install_sh = (repo_root / "scripts" / "install.sh").read_text(encoding="utf-8")
+        pings = set(re.findall(r"^\s*_telemetry_ping (\w+)", install_sh, flags=re.MULTILINE))
+        assert pings == {"install_started", "install_completed"}
+        install_ps1 = (repo_root / "scripts" / "install.ps1").read_text(encoding="utf-8")
+        assert "posthog" not in install_ps1.lower().replace("emits no installer events", "")
+
+    def test_only_the_telemetry_module_holds_the_posthog_destination(self) -> None:
+        package_root = Path(telemetry.__file__).resolve().parent
+        holders = {
+            path.relative_to(package_root).as_posix()
+            for path in package_root.rglob("*.py")
+            if "posthog.com" in path.read_text(encoding="utf-8")
+        }
+        assert holders == {"telemetry.py"}
+
+
+# Every telemetry entry point that a process reaches when it does anything
+# (CLI command, MCP tool call of any kind, MCP server start, fan-out, run
+# observation, run outcome, console request via note_activity), called the
+# way that adds no count wherever such a way exists.
+_ACTIVITY_ENTRY_POINTS: dict[str, Callable[[], None]] = {
+    "capture": lambda: telemetry.capture("workflow_outcome", dict(_OUTCOME)),
+    "capture_ac_verify_failed": lambda: telemetry.capture_ac_verify_failed("unknown"),
+    "capture_acceptance_artifact_checks": lambda: telemetry.capture_acceptance_artifact_checks(
+        base_regression=None,
+        worker_tests=None,
+        failed_criteria=0,
+        criterion_count=0,
+        repairs=0,
+        surface=None,
+        runtime_backend=None,
+    ),
+    "capture_acceptance_no_evidence": lambda: telemetry.capture_acceptance_no_evidence(
+        [],
+        criterion_count=0,
+        verification_coverage=None,
+        surface=None,
+        check_package=None,
+        check_package_status=None,
+        runtime_backend=None,
+    ),
+    "capture_cli_command": lambda: telemetry.capture_cli_command("mcp"),
+    "capture_job_outcome": lambda: telemetry.capture_job_outcome(
+        "job_1", "run", terminal_status="completed"
+    ),
+    "capture_mcp_serve_started": lambda: telemetry.capture_mcp_serve_started("stdio"),
+    "capture_runtime_drift": lambda: telemetry.capture_runtime_drift("unknown"),
+    "capture_subagent_dispatch": lambda: telemetry.capture_subagent_dispatch(
+        {"phase": "submitted"}
+    ),
+    "capture_tool_call": lambda: telemetry.capture_tool_call("ouroboros_job_wait", ok=True),
+    "note_activity": lambda: telemetry.note_activity(),
+}
+
+
+class TestUsageRollup:
+    """Commands are counted locally and sent as one usage_daily row per day."""
+
+    def test_counted_tools_record_command_and_surface(self, recorded: list[dict[str, int]]) -> None:
+        telemetry.capture_tool_call("ouroboros_start_execute_seed", ok=True)
+        telemetry.capture_tool_call("ouroboros_lateral_think", ok=True)
+        telemetry.capture_tool_call("ouroboros_cancel_job", ok=True)
+        assert recorded == [
+            {"cmd_run": 1, "surface_mcp": 1},
+            {"cmd_unstuck": 1, "surface_mcp": 1},
+            {"cmd_cancel": 1, "surface_mcp": 1},
+        ]
+
+    @pytest.mark.parametrize("name", sorted(telemetry._UNCOUNTED_TOOLS))
+    def test_polling_status_and_read_only_tools_are_not_usage(
+        self, recorded: list[dict[str, int]], name: str
+    ) -> None:
+        for _ in range(50):  # a host pumping job_wait through a long run
+            telemetry.capture_tool_call(name, ok=True)
+        # A poll on a failed job returns is_error (a logical block), not an error.
+        telemetry.capture_tool_call(name, ok=False, blocked=True)
+        assert recorded == []
+
+    def test_unregistered_and_extension_tools_are_not_usage(
+        self, recorded: list[dict[str, int]]
+    ) -> None:
+        telemetry.capture_tool_call("custom_tool", ok=True)
+        telemetry.capture_tool_call("ouroboros_interview", ok=True, registered=False)
+        assert recorded == []
+
+    def test_errors_count_for_any_tool_but_logical_blocks_do_not(
+        self, recorded: list[dict[str, int]]
+    ) -> None:
+        telemetry.capture_tool_call("ouroboros_job_wait", ok=False, error_type="MCPToolError")
+        telemetry.capture_tool_call("ouroboros_interview", ok=False, error_type="TimeoutError")
+        telemetry.capture_tool_call("ouroboros_generate_seed", ok=False, blocked=True)
+        assert recorded == [
+            {"mcp_tool_errors": 1},
+            {"cmd_interview": 1, "surface_mcp": 1, "mcp_tool_errors": 1},
+            {"cmd_seed": 1, "surface_mcp": 1},
+        ]
+
+    def test_seed_origin_counts_only_the_interview_less_entrances(
+        self, recorded: list[dict[str, int]]
+    ) -> None:
+        for origin in ("interview", "session_context", "session_context_gap", "/private/x", None):
+            telemetry.capture_tool_call("ouroboros_generate_seed", ok=True, origin=origin)
+        telemetry.capture_tool_call(
+            "ouroboros_start_execute_seed", ok=True, origin="session_context"
+        )
+        assert recorded == [
+            {"cmd_seed": 1, "surface_mcp": 1},
+            {"cmd_seed": 1, "surface_mcp": 1, "seed_session_context": 1},
+            {"cmd_seed": 1, "surface_mcp": 1, "seed_session_context_gap": 1},
+            {"cmd_seed": 1, "surface_mcp": 1},
+            {"cmd_seed": 1, "surface_mcp": 1},
+            {"cmd_run": 1, "surface_mcp": 1},
+        ]
+
+    def test_every_shipped_tool_is_classified(self) -> None:
+        counted = set(telemetry._USAGE_TOOLS)
+        assert counted.isdisjoint(telemetry._UNCOUNTED_TOOLS)
+        assert counted | telemetry._UNCOUNTED_TOOLS == telemetry._CANONICAL_TOOL_NAMES
+
+    def test_mcp_starts_and_fanout_are_daily_counts(self, recorded: list[dict[str, int]]) -> None:
+        telemetry.capture_mcp_serve_started("stdio")
+        telemetry.capture_mcp_serve_started("/private/odd")
+        telemetry.capture_subagent_dispatch({"phase": "emitted", "fanout_kind": "acme_private"})
+        telemetry.capture_subagent_dispatch({"phase": "submitted", "fanout_kind": "x"})
+        assert recorded == [
+            {"mcp_serve_starts": 1},
+            {"mcp_serve_starts": 1},
+            {"subagent_dispatches": 1},
+        ]
+
+    def test_unknown_keys_and_bad_values_are_never_recorded(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        _on_day(monkeypatch, "2026-11-16")
+        telemetry._record_usage({"cmd_acme_private": 1, "cmd_run": True, "cmd_seed": -1})
+        assert not _rollup_path().exists()
+
+    def test_nothing_is_recorded_or_sent_when_disabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        posted: list[dict[str, Any]] = []
+        monkeypatch.setattr(telemetry, "_post", posted.extend)
+        monkeypatch.setenv("OUROBOROS_POSTHOG_API_KEY", "phc_test")
+        monkeypatch.setenv("OUROBOROS_TELEMETRY", "0")
+        telemetry.capture_tool_call("ouroboros_interview", ok=True)
+        telemetry.capture_cli_command("run")
+        telemetry.flush(timeout=1.0)
+        assert not _rollup_path().exists()
+        assert posted == []
+
+    def test_a_server_up_past_midnight_sends_the_day_on_a_status_poll(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        # One MCP server process: a counted call on day 1, then only
+        # successful polls (counted as nothing) once the day is over.
+        _on_day(monkeypatch, "2026-11-16")
+        telemetry.capture_tool_call("ouroboros_interview", ok=True)
+        telemetry.flush(timeout=2.0)
+        _on_day(monkeypatch, "2026-11-17")
+        telemetry.capture_tool_call("ouroboros_job_wait", ok=True)
+        telemetry.capture_tool_call("ouroboros_session_status", ok=True)
+        telemetry.flush(timeout=2.0)
+
+        (row,) = sent
+        assert (row["event"], row["properties"]["day"]) == ("usage_daily", "2026-11-16")
+        assert row["properties"]["cmd_interview"] == 1
+        state = json.loads(_rollup_path().read_text(encoding="utf-8"))
+        assert (state["days"], state["sending"], state["sent"]) == ({}, {}, ["2026-11-16"])
+
+    def test_every_activity_entry_point_is_listed(self) -> None:
+        public = {name for name in telemetry.__all__ if name.startswith("capture")}
+        assert public | {"note_activity"} == set(_ACTIVITY_ENTRY_POINTS)
+
+    @pytest.mark.parametrize("entry", sorted(_ACTIVITY_ENTRY_POINTS))
+    def test_every_activity_entry_point_sends_a_finished_day_once(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]], entry: str
+    ) -> None:
+        _on_day(monkeypatch, "2026-11-16")
+        telemetry.capture_cli_command("run")
+        _next_process_on(monkeypatch, "2026-11-17")
+        _ACTIVITY_ENTRY_POINTS[entry]()
+        _ACTIVITY_ENTRY_POINTS[entry]()
+        telemetry.flush(timeout=2.0)
+
+        usage = [event for event in sent if event["event"] == "usage_daily"]
+        assert [(e["properties"]["day"], e["properties"]["cmd_run"]) for e in usage] == [
+            ("2026-11-16", 1)
+        ]
+
+    def test_activity_while_opted_out_sends_and_claims_nothing(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        _on_day(monkeypatch, "2026-11-16")
+        telemetry.capture_cli_command("run")
+        _next_process_on(monkeypatch, "2026-11-17")
+        monkeypatch.setenv("OUROBOROS_TELEMETRY", "0")
+        for entry in _ACTIVITY_ENTRY_POINTS.values():
+            entry()
+        telemetry.flush(timeout=2.0)
+
+        assert sent == []
+        state = json.loads(_rollup_path().read_text(encoding="utf-8"))
+        assert (list(state["days"]), state["sending"]) == (["2026-11-16"], {})
+
+    def test_polls_check_the_rollup_once_a_day_and_post_nothing_when_none_is_due(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        _on_day(monkeypatch, "2026-11-17")
+        claims: list[tuple[Any, ...]] = []
+        enabled_checks: list[bool] = []
+        real_claim, real_enabled = telemetry_rollup.claim_due, telemetry.is_enabled
+
+        def counting_claim(*args: Any) -> list[dict[str, Any]]:
+            claims.append(args)
+            return real_claim(*args)
+
+        def counting_enabled() -> bool:
+            enabled_checks.append(True)
+            return real_enabled()
+
+        monkeypatch.setattr(telemetry_rollup, "claim_due", counting_claim)
+        monkeypatch.setattr(telemetry, "is_enabled", counting_enabled)
+        for _ in range(50):
+            telemetry.capture_tool_call("ouroboros_job_wait", ok=True)
+        telemetry.flush(timeout=2.0)
+
+        # After the first poll of the day, a poll neither reads the
+        # configuration nor touches the rollup file.
+        assert (len(claims), len(enabled_checks)) == (1, 1)
+        assert sent == []
+
+    def test_a_day_is_sent_once_after_it_ends(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        _on_day(monkeypatch, "2026-11-16")
+        for _ in range(3):
+            telemetry.capture_tool_call("ouroboros_interview", ok=True)
+        telemetry.flush(timeout=2.0)
+        assert sent == []  # nothing per call, and nothing for today
+
+        _next_process_on(monkeypatch, "2026-11-17")
+        telemetry.capture_cli_command("status")
+        telemetry.capture_cli_command("status")
+        _capture_outcome()
+        _next_process_on(monkeypatch, "2026-11-17")
+        telemetry.capture_cli_command("status")  # a new process finds nothing left
+        telemetry.flush(timeout=2.0)
+
+        rows = [event for event in sent if event["event"] == "usage_daily"]
+        (row,) = rows
+        assert row["timestamp"] == "2026-11-16T12:00:00Z"
+        assert row["properties"]["cmd_interview"] == 3
+        assert row["properties"]["day"] == "2026-11-16"
+        assert row["distinct_id"] == telemetry.distinct_id()
+        assert row["uuid"] == telemetry_rollup.event_uuid(telemetry.distinct_id(), "2026-11-16")
+        state = json.loads(_rollup_path().read_text(encoding="utf-8"))
+        assert state["sending"] == {}
+        assert list(state["days"]) == ["2026-11-17"]
+        assert state["days"]["2026-11-17"]["counts"]["cmd_status"] == 3
+
+    def test_a_failed_delivery_is_retried_under_the_same_uuid(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        _on_day(monkeypatch, "2026-11-16")
+        telemetry.capture_cli_command("run")
+        attempts: list[dict[str, Any]] = []
+
+        def offline(batch: list[dict[str, Any]]) -> None:
+            attempts.extend(batch)
+            raise OSError("offline")
+
+        delivered = telemetry._post
+        monkeypatch.setattr(telemetry, "_post", offline)
+        _next_process_on(monkeypatch, "2026-11-17")
+        telemetry.capture_cli_command("status")
+        telemetry.flush(timeout=2.0)
+        assert [event["event"] for event in attempts] == ["usage_daily"]
+
+        monkeypatch.setattr(telemetry, "_post", delivered)
+        _next_process_on(monkeypatch, "2026-11-17")
+        telemetry.capture_cli_command("status")
+        telemetry.flush(timeout=2.0)
+
+        (row,) = sent
+        assert row["uuid"] == attempts[0]["uuid"]
+        assert row["properties"]["cmd_run"] == 1
+
+    def test_a_queue_overflow_releases_the_day_for_retry(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        _on_day(monkeypatch, "2026-11-16")
+        telemetry.capture_cli_command("run")
+        _next_process_on(monkeypatch, "2026-11-17")
+        full: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=1)
+        full.put_nowait({"event": "placeholder"})
+        real_queue = telemetry._queue
+        monkeypatch.setattr(telemetry, "_queue", full)
+        telemetry.capture_cli_command("status")
+        monkeypatch.setattr(telemetry, "_queue", real_queue)
+        state = json.loads(_rollup_path().read_text(encoding="utf-8"))
+        (released,) = state["sending"].values()
+        assert released["lease_until"] == 0.0
+
+        _next_process_on(monkeypatch, "2026-11-17")
+        telemetry.capture_cli_command("status")
+        telemetry.flush(timeout=2.0)
+        assert [event["properties"]["day"] for event in sent] == ["2026-11-16"]
+
+    def test_skipped_days_send_only_days_with_activity(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        _on_day(monkeypatch, "2026-11-13")
+        telemetry.capture_cli_command("run")
+        _next_process_on(monkeypatch, "2026-11-17")
+        telemetry.capture_cli_command("status")
+        telemetry.flush(timeout=2.0)
+        assert [event["properties"]["day"] for event in sent] == ["2026-11-13"]
+
+    def test_a_clock_moved_back_keeps_the_later_day_until_it_is_over(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        _on_day(monkeypatch, "2026-11-18")
+        telemetry.capture_cli_command("run")
+        _next_process_on(monkeypatch, "2026-11-17")
+        telemetry.capture_cli_command("status")
+        _next_process_on(monkeypatch, "2026-11-18")
+        telemetry.capture_cli_command("status")
+        _next_process_on(monkeypatch, "2026-11-19")
+        telemetry.capture_cli_command("status")
+        telemetry.flush(timeout=2.0)
+        # 11-18 is not sent while the clock reads 11-17; the counts made on
+        # 11-18 itself join it, and each day is sent once after it ends.
+        rows = {event["properties"]["day"]: event for event in sent}
+        assert sorted(event["properties"]["day"] for event in sent) == ["2026-11-17", "2026-11-18"]
+        assert rows["2026-11-18"]["properties"]["cmd_run"] == 1
+        assert rows["2026-11-18"]["properties"]["cmd_status"] == 1
+        resolved = telemetry.distinct_id()
+        assert [rows[day]["uuid"] for day in sorted(rows)] == [
+            telemetry_rollup.event_uuid(resolved, day) for day in sorted(rows)
+        ]
+
+    def test_a_clock_40_days_behind_keeps_the_unsent_day(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        _on_day(monkeypatch, "2026-11-16")
+        telemetry.capture_cli_command("run")
+        _next_process_on(monkeypatch, "2026-10-07")  # a clock 40 days behind
+        telemetry.capture_cli_command("status")
+        _next_process_on(monkeypatch, "2026-11-17")
+        telemetry.capture_cli_command("status")
+        _next_process_on(monkeypatch, "2026-11-17")
+        telemetry.capture_cli_command("status")
+        telemetry.flush(timeout=2.0)
+
+        rows = [event for event in sent if event["event"] == "usage_daily"]
+        assert [(row["properties"]["day"], row["properties"]["cmd_run"]) for row in rows] == [
+            ("2026-11-16", 1)
+        ]
+
+    def test_a_late_count_for_a_sent_day_never_makes_a_second_row(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        _on_day(monkeypatch, "2026-11-16")
+        telemetry.capture_cli_command("run")
+        _next_process_on(monkeypatch, "2026-11-17")
+        telemetry.capture_cli_command("status")  # claims and sends 11-16
+        _next_process_on(monkeypatch, "2026-11-16")  # a clock still on the old day
+        telemetry.capture_cli_command("run")  # dropped: 11-16 is closed
+        _next_process_on(monkeypatch, "2026-11-17")
+        telemetry.capture_cli_command("status")
+        telemetry.flush(timeout=2.0)
+
+        (row,) = [event for event in sent if event["event"] == "usage_daily"]
+        assert row["properties"]["day"] == "2026-11-16"
+        assert row["properties"]["cmd_run"] == 1
+        state = json.loads(_rollup_path().read_text(encoding="utf-8"))
+        assert sorted(state["days"]) == ["2026-11-17"]
+        assert state["sent"] == ["2026-11-16"]
+
+    def test_a_day_rebuilt_after_the_file_was_lost_reuses_its_uuid(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        _on_day(monkeypatch, "2026-11-16")
+        telemetry.capture_cli_command("run")
+        _next_process_on(monkeypatch, "2026-11-17")
+        telemetry.capture_cli_command("status")
+        telemetry.flush(timeout=2.0)
+        _rollup_path().unlink()  # loses the record that 11-16 was sent
+        _next_process_on(monkeypatch, "2026-11-16")
+        telemetry.capture_cli_command("run")
+        _next_process_on(monkeypatch, "2026-11-17")
+        telemetry.capture_cli_command("status")
+        telemetry.flush(timeout=2.0)
+
+        rows = [event for event in sent if event["event"] == "usage_daily"]
+        assert [row["properties"]["day"] for row in rows] == ["2026-11-16", "2026-11-16"]
+        # Both sends carry the same uuid, so PostHog keeps one row for the day.
+        expected = telemetry_rollup.event_uuid(telemetry.distinct_id(), "2026-11-16")
+        assert [row["uuid"] for row in rows] == [expected, expected]
+
+    def test_no_identity_keeps_the_day_for_a_later_process(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        _on_day(monkeypatch, "2026-11-16")
+        telemetry.capture_cli_command("run")
+        _next_process_on(monkeypatch, "2026-11-17")
+        real_distinct_id = telemetry.distinct_id
+        monkeypatch.setattr(telemetry, "distinct_id", lambda: "")
+        telemetry.capture_cli_command("status")
+        telemetry.flush(timeout=2.0)
+        assert sent == []
+        monkeypatch.setattr(telemetry, "distinct_id", real_distinct_id)
+        telemetry.capture_cli_command("status")  # the same process tries again
+        telemetry.flush(timeout=2.0)
+        assert [event["properties"]["day"] for event in sent] == ["2026-11-16"]
+
+    def test_concurrent_processes_send_a_day_exactly_once(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]], tmp_path: Path
+    ) -> None:
+        _on_day(monkeypatch, "2026-11-16")
+        for _ in range(5):
+            telemetry.capture_tool_call("ouroboros_start_auto", ok=True)
+        sentinel = tmp_path / "go"
+        out_dir = tmp_path / "posted"
+        out_dir.mkdir()
+        child_code = (
+            "import json, os, sys\n"
+            + _sentinel_wait_snippet(sentinel)
+            + "from ouroboros import telemetry\n"
+            "telemetry._utc_day = lambda: '2026-11-17'\n"
+            "out = Path(sys.argv[1])\n"
+            "def post(batch):\n"
+            "    with out.open('a', encoding='utf-8') as handle:\n"
+            "        for event in batch:\n"
+            "            handle.write(json.dumps(event) + '\\n')\n"
+            "telemetry._post = post\n"
+            "telemetry.capture_cli_command('status')\n"
+            "telemetry.flush(timeout=5.0)\n"
+        )
+        env = os.environ.copy()
+        for key in ("DO_NOT_TRACK", "OUROBOROS_TELEMETRY"):
+            env.pop(key, None)
+        env["HOME"] = str(tmp_path)
+        env["OUROBOROS_POSTHOG_API_KEY"] = "phc_test"
+        repo_root = Path(__file__).resolve().parents[2]
+        env["PYTHONPATH"] = str(repo_root / "src")
+        children = [
+            subprocess.Popen(
+                [sys.executable, "-c", child_code, str(out_dir / f"{index}.jsonl")],
+                env=env,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for index in range(6)
+        ]
+        sentinel.write_text("go", encoding="utf-8")
+        for child in children:
+            _, stderr = child.communicate(timeout=60)
+            assert child.returncode == 0, stderr
+
+        rows = [
+            json.loads(line)
+            for path in out_dir.glob("*.jsonl")
+            for line in path.read_text(encoding="utf-8").splitlines()
+        ]
+        usage = [row for row in rows if row["event"] == "usage_daily"]
+        assert len(usage) == 1
+        assert usage[0]["properties"]["cmd_auto"] == 5
+        state = json.loads(_rollup_path().read_text(encoding="utf-8"))
+        assert state["sending"] == {}
+        assert state["days"]["2026-11-17"]["counts"]["cmd_status"] == 6

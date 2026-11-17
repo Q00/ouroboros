@@ -104,7 +104,8 @@ TRUST BOUNDARIES (authoritative for this scan):
 
   E6. TELEMETRY / PRIVACY TOGGLES (MEDIUM VALUE)
   - `OUROBOROS_TELEMETRY`, `OUROBOROS_POSTHOG_*`, `DO_NOT_TRACK`, `CI`,
-    `GITHUB_ACTIONS`, `OUROBOROS_FIRST_COMMAND_SURFACE`, the events privacy
+    `GITHUB_ACTIONS`, `OUROBOROS_FIRST_COMMAND_SURFACE`,
+    `_OUROBOROS_TELEMETRY_SURFACE`, the events privacy
     mode var in `events/io.py`, and any log/preview redaction toggle. A cloned
     repository must not be able to re-enable collection, redirect the ingest
     endpoint, or switch redaction off. Report any such toggle NOT covered by

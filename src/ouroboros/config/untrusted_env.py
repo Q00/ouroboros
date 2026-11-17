@@ -229,6 +229,10 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # Onboarding attribution is an analytics boundary. A cloned repo must
         # not rewrite the surface label used to compare activation cohorts.
         "OUROBOROS_FIRST_COMMAND_SURFACE",
+        # Same boundary: the console sets this on the CLI processes it starts
+        # so their usage counts under the console surface; a cloned repo must
+        # not relabel a user's CLI usage.
+        "_OUROBOROS_TELEMETRY_SURFACE",
         # Check-package switch (boundary/switch.py): a cloned repo must not
         # turn off the verification layer that judges its own changes, nor
         # decide whether model-written checks execute.

@@ -3,23 +3,32 @@
 Privacy contract — see TELEMETRY.md at the repository root:
 
 - Never collects code, prompts, seed content, file paths, or arguments.
-  Only closed command/status dimensions, runtime backend, version, OS, and
-  failure reason codes are sent. Daily activity uses deterministic insert IDs.
-  Country is derived by PostHog from the request, not sent by Ouroboros.
+  Only closed command/status dimensions, counts, runtime backend, version,
+  OS, and failure reason codes are sent. Country is derived by PostHog from
+  the request, not sent by Ouroboros.
 - Identity is a random UUID stored in ``~/.ouroboros/telemetry.json``.
   No PII, no machine fingerprinting.
 - Opt out any time: ``DO_NOT_TRACK=1``, ``OUROBOROS_TELEMETRY=0``, or
   ``telemetry.enabled: false`` in ``~/.ouroboros/config.yaml``.
+- Only ``usage_daily`` and ``workflow_outcome`` reach the network from this
+  module (``_NETWORK_EVENTS``). Commands, MCP starts and fan-out dispatches
+  are counted in a local daily rollup (``telemetry_rollup``) sent once per
+  day; verify-gate, acceptance and runtime-drift observations are folded
+  into their run's ``workflow_outcome``.
 - Ordinary capture queues events asynchronously for a daemon thread using
   stdlib urllib, without waiting for delivery. Explicit exit flushes may
   delay CLI return by up to 1.5 seconds or detached worker exit by up to
   5 seconds. These waits are best effort, not delivery guarantees; events
-  still queued or in flight when the process exits may be dropped.
+  still queued or in flight when the process exits may be dropped, except
+  a daily rollup, which stays on disk until a later process delivers it.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections import Counter
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 import hashlib
 import json
 import os
@@ -34,7 +43,7 @@ from typing import Any
 import urllib.request
 import uuid
 
-from ouroboros import __version__
+from ouroboros import __version__, telemetry_rollup
 from ouroboros.mcp.failure_taxonomy import (
     RUN_FAILURE_CAUSES,
     UNKNOWN_RUN_FAILURE_CAUSE,
@@ -54,9 +63,9 @@ _BATCH_MAX = 25
 _HTTP_TIMEOUT_SECONDS = 4.0
 
 
-# Funnel step per retained MCP lifecycle command.
-# but these get a stable ``command`` value so the interview -> seed -> run ->
-# evaluate -> evolve funnel can be built without knowing tool names.
+# Lifecycle MCP tools and the stable ``command`` each counts under, so the
+# interview -> seed -> run -> evaluate -> evolve funnel can be built without
+# knowing tool names.
 _TOOL_FUNNEL: dict[str, str] = {
     "ouroboros_interview": "interview",
     "ouroboros_pm_interview": "pm",
@@ -77,12 +86,13 @@ _TOOL_FUNNEL: dict[str, str] = {
     "ouroboros_lateral_think": "unstuck",
 }
 
-# Internal CLI plumbing is excluded. MCP service activity is emitted separately
-# as a daily-deduplicated `service_active` event.
+# Internal CLI plumbing is not counted: `mcp` (a host starting the server is
+# counted as `mcp_serve_starts`), `job` and `dispatch` (called by tools, not
+# typed by people).
 _CLI_SKIP = frozenset({"dispatch", "job", "mcp"})
 _CLI_FUNNEL = {"init": "interview"}
 
-# The audited privacy contract for a direct CLI command_run's `command`,
+# The audited privacy contract for a CLI command's `cmd_*` usage key,
 # mirroring _CANONICAL_TOOL_NAMES'/_CANONICAL_JOB_TYPES' rationale:
 # `_PluginAwareGroup.get_command()` (src/ouroboros/cli/main.py) resolves any
 # name NOT in this static table as a dynamically-installed plugin command
@@ -135,24 +145,9 @@ _CANONICAL_CLI_COMMANDS = frozenset(
 )
 _EXTENSION_CLI_COMMAND = "extension_command"
 
-# These handlers acknowledge durable background-job submission. Their return
-# value says only whether work was accepted, never whether the workflow later
-# completed or passed verification. Keeping them structurally separate avoids
-# turning queue acceptance into a successful run in analytics.
-_ASYNC_SUBMISSION_TOOLS = frozenset(
-    {
-        "ouroboros_start_execute_seed",
-        "ouroboros_start_evolve_step",
-        "ouroboros_start_auto",
-        "ouroboros_start_evaluate",
-        "ouroboros_start_qa",
-        "ouroboros_start_ralph",
-    }
-)
-_UNKNOWN_TOOL_NAME = "ouroboros_unknown_tool"
-
-# The audited privacy contract for `tool`/`command`: every SHIPPED built-in
-# ouroboros_* MCP tool name, and nothing else. Deliberately a static literal
+# Every SHIPPED built-in ouroboros_* MCP tool name, and nothing else. Each one
+# is classified below as counted usage (_USAGE_TOOLS) or not (_UNCOUNTED_TOOLS),
+# so a new tool cannot start counting, or silently stop, without a decision. Deliberately a static literal
 # set, NOT the adapter's mutable tool registry -- `register_tool()` accepts
 # arbitrary names (extensions, custom tools registered by a plugin/host),
 # and a registered-but-not-ours name is exactly as caller-controlled as an
@@ -169,7 +164,7 @@ _UNKNOWN_TOOL_NAME = "ouroboros_unknown_tool"
 #    composition path (used for a different runtime mode) that additionally
 #    registers `ouroboros_checklist_verify`, a genuine top-level tool absent
 #    from (1)'s default composition.
-# _TOOL_FUNNEL and _ASYNC_SUBMISSION_TOOLS must remain subsets of this set.
+# _TOOL_FUNNEL must remain a subset of this set.
 _CANONICAL_TOOL_NAMES = frozenset(
     {
         "ouroboros_ac_dashboard",
@@ -211,7 +206,40 @@ _CANONICAL_TOOL_NAMES = frozenset(
         "ouroboros_submit_fanout_results",
     }
 )
-_EXTENSION_TOOL_NAME = "ouroboros_extension_tool"
+
+# MCP tools a person (or their agent, on their behalf) calls to do work: each
+# call adds one to `cmd_<command>` and `surface_mcp` in today's rollup.
+_USAGE_TOOLS: dict[str, str] = {
+    **_TOOL_FUNNEL,
+    "ouroboros_brownfield": "brownfield",
+    "ouroboros_cancel_execution": "cancel",
+    "ouroboros_cancel_job": "cancel",
+}
+# Polling, status, read-only and internal plumbing tools. A call to one of
+# these is not usage: a host waiting on a background job calls
+# ouroboros_job_wait many times per run. Only their failures are counted
+# (`mcp_tool_errors`).
+_UNCOUNTED_TOOLS = frozenset(
+    {
+        "ouroboros_ac_dashboard",
+        "ouroboros_ac_tree_hud",
+        "ouroboros_checklist_verify",
+        "ouroboros_fetch_artifact",
+        "ouroboros_job_result",
+        "ouroboros_job_status",
+        "ouroboros_job_wait",
+        "ouroboros_lineage_status",
+        "ouroboros_measure_drift",
+        "ouroboros_project_status",
+        "ouroboros_query_events",
+        "ouroboros_query_projection",
+        "ouroboros_record_conductor_decision",
+        "ouroboros_session_signal",
+        "ouroboros_session_signal_targets",
+        "ouroboros_session_status",
+        "ouroboros_submit_fanout_results",
+    }
+)
 
 _JOB_FUNNEL: dict[str, str] = {
     "execute_seed": "run",
@@ -236,129 +264,31 @@ _JOB_FUNNEL: dict[str, str] = {
 # called with from shipped code.
 _INTERNAL_SHIPPED_JOB_TYPES = frozenset({"detached_probe", "detached_nested_probe"})
 
-# The audited privacy contract for workflow_outcome's `command`, mirroring
-# _CANONICAL_TOOL_NAMES' rationale: JobManager.start_job() accepts an
-# arbitrary job_type string from whatever code calls it -- a third-party
-# extension using the same job manager included -- and
-# JobTelemetryBoundary.observe fires for every terminal job regardless of
-# who started it. A job_type outside this static set is registered but not
-# ours, symmetric with an unrecognized MCP tool name (see
-# _EXTENSION_TOOL_NAME), so it folds to a fixed literal command rather than
+# The audited privacy contract for workflow_outcome's `command`:
+# JobManager.start_job() accepts an arbitrary job_type string from whatever
+# code calls it -- a third-party extension using the same job manager
+# included -- and JobTelemetryBoundary.observe fires for every terminal job
+# regardless of who started it. A job_type outside this static set is
+# registered but not ours, so it folds to a fixed literal command rather than
 # being forwarded verbatim.
 _CANONICAL_JOB_TYPES = frozenset(_JOB_FUNNEL) | _INTERNAL_SHIPPED_JOB_TYPES
 _EXTENSION_JOB_COMMAND = "extension_job"
 
 # Exact minimal contract paired with TELEMETRY.md. Anything else is dropped.
 _CONTEXT_ALLOWLIST = frozenset({"runtime_backend"})
-_COMMAND_RUN_MCP_KEYS = frozenset(
-    {
-        "command",
-        "service",
-        "status",
-        "error_type",
-        "origin",
-        "$insert_id",
-        "runtime_backend",
-        "app_version",
-        "os",
-        "ci",
-    }
-)
-# ``origin`` exists for exactly one question -- is the interview-less Seed
-# path (``ouroboros_generate_seed`` with ``session_context``) being used, and
-# does it produce a Seed or bounce back gap questions? It is stamped only on
-# ``command=seed`` rows and only from this closed set; any other value or
-# command drops it before the properties dict is built.
-_SEED_ORIGINS = frozenset({"interview", "session_context", "session_context_gap"})
-_COMMAND_RUN_CLI_KEYS = frozenset(
-    {
-        "command",
-        "service",
-        "status",
-        "$insert_id",
-        "app_version",
-        "os",
-        "ci",
-    }
-)
-_WORKFLOW_OUTCOME_KEYS = frozenset(
-    {
-        "command",
-        "terminal_status",
-        "verified",
-        "failure_reason_code",
-        "failure_cause",
-        "ac_passed",
-        "ac_total",
-        "$insert_id",
-        "runtime_backend",
-        "app_version",
-        "os",
-        "ci",
-    }
-)
-_SERVICE_ACTIVE_KEYS = frozenset(
-    {
-        "service",
-        "$insert_id",
-        "runtime_backend",
-        "app_version",
-        "os",
-        "ci",
-    }
-)
-# Reinstated adoption events (removed by #2278 for volume, brought back as
-# ONE daily-deduplicated row per user/day/dimension via `$insert_id` plus the
-# process-local suppression cache): the funnel's top needs "MCP attached"
-# (`mcp_serve_started`) separately from "made a tool request" (`service_active`),
-# and fan-out adoption needs `subagent_dispatch`. Same lean property contract
-# as the other retained events — closed dimensions only.
-_MCP_SERVE_STARTED_KEYS = frozenset(
-    {
-        "transport",
-        "$insert_id",
-        "runtime_backend",
-        "app_version",
-        "os",
-        "ci",
-    }
-)
-_MCP_TRANSPORTS = frozenset({"stdio", "sse", "streamable-http"})
-_SUBAGENT_DISPATCH_KEYS = frozenset(
-    {
-        "phase",
-        "fanout_kind",
-        "$insert_id",
-        "runtime_backend",
-        "app_version",
-        "os",
-        "ci",
-    }
-)
-_SUBAGENT_DISPATCH_PHASES = frozenset({"emitted", "submitted"})
+_BASE_KEYS = frozenset({"runtime_backend", "app_version", "os", "ci"})
 
-# Events stamped with a deterministic per-day `$insert_id` (PostHog dedupes
-# identical ids server-side) and, for _DAILY_ONCE_EVENTS, also suppressed
-# process-locally after the first emission of the day.
-_DAILY_INSERT_ID_EVENTS = frozenset(
-    {"command_run", "service_active", "mcp_serve_started", "subagent_dispatch"}
-)
-_DAILY_ONCE_EVENTS = frozenset({"service_active", "mcp_serve_started", "subagent_dispatch"})
+# The complete set of event names this module can put on the wire. Every other
+# name is dropped before anything is queued. (install.sh adds install_started
+# and install_completed; nothing else sends.)
+_NETWORK_EVENTS = frozenset({"usage_daily", "workflow_outcome"})
 
-# The AC verify-gate rejection-cause event. `cause` mirrors the orchestrator's
-# closed _VERIFY_GATE_CAUSES vocabulary (SSOT pairing with
-# orchestrator/verify_gate_outcome.py -- edit both together): which structural
-# reason the deterministic verify gate rejected an AC attempt for. Never a
-# command, path, artifact name, or output.
-_AC_VERIFY_FAILED_KEYS = frozenset(
-    {
-        "cause",
-        "runtime_backend",
-        "app_version",
-        "os",
-        "ci",
-    }
-)
+# --- workflow_outcome: one row per terminal run/job --------------------------
+#
+# The AC verify-gate rejection causes. SSOT pairing with the orchestrator's
+# closed _VERIFY_GATE_CAUSES vocabulary (orchestrator/verify_gate_outcome.py --
+# edit both together). Folded into the run's workflow_outcome as
+# verify_rejections + verify_top_cause; never a command, path, or output.
 _AC_VERIFY_CAUSES = frozenset(
     {
         "invalid_contract",
@@ -372,20 +302,9 @@ _AC_VERIFY_CAUSES = frozenset(
         "no_evidence",
     }
 )
-_UNKNOWN_VERIFY_CAUSE = "unknown"
-# A frozen runtime authority input (CLI config, executable, dispatch registry,
-# profile routing) changed after a runtime initialized. SSOT pairing with
-# orchestrator/codex_cli_runtime.py `_RUNTIME_DRIFT_KINDS` — edit both
-# together. The run continues; this counts how often the world moves under it.
-_RUNTIME_DRIFT_KEYS = frozenset(
-    {
-        "kind",
-        "runtime_backend",
-        "app_version",
-        "os",
-        "ci",
-    }
-)
+# A frozen runtime authority input changed after a runtime initialized. SSOT
+# pairing with orchestrator/runtime_drift.py ``RUNTIME_DRIFT_KINDS`` -- edit
+# both together. Folded as runtime_drifts + runtime_drift_kind.
 _RUNTIME_DRIFT_KINDS = frozenset(
     {
         "codex_config",
@@ -398,13 +317,9 @@ _RUNTIME_DRIFT_KINDS = frozenset(
         "attestation_timeout",
     }
 )
-_UNKNOWN_DRIFT_KIND = "unknown"
-# A run accepted criteria no verifier had evidence for. The acceptance itself
-# is unchanged (``boundary/acceptance.py``); this counts how often it happens
-# and why, per (package_reason, replay_reason) pair. SSOT pairing with
-# boundary/no_evidence.py (package reasons) and boundary/acceptance.py
-# ``LegacyNoEvidenceReason`` (replay reasons) -- edit them together. Only
-# closed tokens and counts; never a criterion, check, binding, or path.
+# Why the check package did not decide a criterion the run accepted without
+# evidence. SSOT pairing with boundary/no_evidence.py -- edit them together.
+# Folded as no_evidence_criteria + no_evidence_top_reason.
 _NO_EVIDENCE_PACKAGE_REASONS = frozenset(
     {
         "uncovered",
@@ -417,56 +332,9 @@ _NO_EVIDENCE_PACKAGE_REASONS = frozenset(
         "no_reproduction_check",
     }
 )
-_NO_EVIDENCE_REPLAY_REASONS = frozenset(
-    {
-        "environment_unverifiable",
-        "transcript_unavailable",
-        "script_absent_from_artifact",
-        "no_call_evidence",
-        "no_verifier_verdict",
-        "verifier_verdict_not_passed",
-        "no_legacy_record",
-    }
-)
-_NO_EVIDENCE_SURFACES = frozenset({"cli_run", "mcp_execute", "evolve"})
 _NO_EVIDENCE_COVERAGES = frozenset({"full", "partial", "low"})
-_NO_EVIDENCE_CHECK_PACKAGE = frozenset({"on", "off"})
-_NO_EVIDENCE_CHECK_PACKAGE_MODES = frozenset({"record", "decide", "off"})
-_NO_EVIDENCE_PACKAGE_STATUSES = frozenset(
-    {"admitted", "construction_failed", "rejected", "not_run"}
-)
-_UNKNOWN_NO_EVIDENCE_VALUE = "unknown"
-_NO_EVIDENCE_PAIR_PREFIX = "pair_"
-
-
-def _no_evidence_pair_key(package_reason: str, replay_reason: str) -> str:
-    return f"{_NO_EVIDENCE_PAIR_PREFIX}{package_reason}__{replay_reason}"
-
-
-_ACCEPTANCE_NO_EVIDENCE_KEYS = frozenset(
-    {
-        "criterion_count",
-        "no_evidence_count",
-        "verification_coverage",
-        "surface",
-        "check_package",
-        "check_package_mode",
-        "check_package_status",
-        "runtime_backend",
-        "app_version",
-        "os",
-        "ci",
-    }
-    | {
-        _no_evidence_pair_key(package_reason, replay_reason)
-        for package_reason in _NO_EVIDENCE_PACKAGE_REASONS | {_UNKNOWN_NO_EVIDENCE_VALUE}
-        for replay_reason in _NO_EVIDENCE_REPLAY_REASONS | {_UNKNOWN_NO_EVIDENCE_VALUE}
-    }
-)
-# The controller-run artifact checks of a decided run (boundary/base_regression.py):
-# what each observed, closed tokens and counts only. SSOT pairing with
-# ``base_regression.ArtifactCheckOutcome``; edit them together. Never a test
-# name, file, path, or criterion.
+# What each controller-run artifact check observed. SSOT pairing with
+# ``base_regression.ArtifactCheckOutcome``; edit them together.
 _ARTIFACT_CHECK_OUTCOMES = frozenset(
     {
         "rejected",
@@ -484,44 +352,69 @@ _ARTIFACT_CHECK_OUTCOMES = frozenset(
         "unconfirmed",
     }
 )
-# Each check's mode and what its finding did. SSOT pairing with
-# ``base_regression.ArtifactCheckMode`` and ``ArtifactEffect``.
-_ARTIFACT_CHECK_MODES = frozenset({"decide", "record", "off"})
-_ARTIFACT_EFFECTS = frozenset({"decided", "recorded", "regression_unadjudicated", "none"})
-# How the footprint exemption treated a base regression. SSOT pairing with
-# ``base_regression.Exemption``; edit them together.
-_ARTIFACT_EXEMPTIONS = frozenset(
-    {
-        "applied",
-        "none_inside",
-        "no_passing_oracle",
-        "mass_breakage",
-        "no_changed_function",
-        "no_oracle_footprint",
-        "change_outside_functions",
-    }
+_UNKNOWN_VALUE = "unknown"
+# Folded counts are bounded ints; anything larger is clamped.
+_AC_TALLY_CAP = 10_000
+
+_WORKFLOW_OUTCOME_KEYS = (
+    frozenset(
+        {
+            "command",
+            "terminal_status",
+            "verified",
+            "failure_reason_code",
+            "failure_cause",
+            "ac_passed",
+            "ac_total",
+            "$insert_id",
+            # Folded from the run's verify gate, acceptance and runtime (see
+            # OutcomeTally). Each is present only when observed.
+            "verify_rejections",
+            "verify_top_cause",
+            "runtime_drifts",
+            "runtime_drift_kind",
+            "no_evidence_criteria",
+            "no_evidence_top_reason",
+            "verification_coverage",
+            "base_regression",
+            "worker_tests",
+            "artifact_failed_criteria",
+        }
+    )
+    | _BASE_KEYS
 )
-_ACCEPTANCE_ARTIFACT_CHECKS_KEYS = frozenset(
-    {
-        "base_regression",
-        "worker_tests",
-        "exemption",
-        "exempted_tests",
-        "base_regression_mode",
-        "worker_test_gate_mode",
-        "base_regression_effect",
-        "worker_tests_effect",
-        "would_fail_criteria",
-        "failed_criteria",
-        "criterion_count",
-        "repairs",
-        "surface",
-        "runtime_backend",
-        "app_version",
-        "os",
-        "ci",
-    }
+
+# --- usage_daily: one row per install per UTC day ----------------------------
+#
+# ``origin`` of an ``ouroboros_generate_seed`` call, counted only for the two
+# interview-less entrances: is that path used, and does it produce a Seed or
+# bounce back gap questions? (``interview`` is the rest of `cmd_seed`.)
+_SEED_CONTEXT_ORIGINS = frozenset({"session_context", "session_context_gap"})
+_SURFACES = frozenset({"cli", "mcp", "console"})
+# Set by the console (gui/jobs.py) on the CLI processes it starts for the user,
+# so their usage counts under `surface_console` instead of `surface_cli`.
+_SURFACE_ENV = "_OUROBOROS_TELEMETRY_SURFACE"
+
+
+def _usage_key(command: str) -> str:
+    return "cmd_" + command.replace("-", "_")
+
+
+_USAGE_COMMANDS = (
+    frozenset(_USAGE_TOOLS.values())
+    | frozenset(
+        _CLI_FUNNEL.get(name, name) for name in _CANONICAL_CLI_COMMANDS if name not in _CLI_SKIP
+    )
+    | {_EXTENSION_CLI_COMMAND}
 )
+_USAGE_COUNT_KEYS = (
+    frozenset(_usage_key(command) for command in _USAGE_COMMANDS)
+    | frozenset(f"surface_{surface}" for surface in _SURFACES)
+    | frozenset(f"seed_{origin}" for origin in _SEED_CONTEXT_ORIGINS)
+    | {"mcp_serve_starts", "subagent_dispatches", "mcp_tool_errors"}
+)
+_USAGE_DAILY_KEYS = _USAGE_COUNT_KEYS | {"day"} | _BASE_KEYS
+
 # Bound on any single string property. Dropped, not truncated -- a truncated
 # value could still leak the start of a prompt or path.
 _MAX_PROPERTY_STR_LEN = 200
@@ -531,7 +424,11 @@ _queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=_QUEUE_MAX)
 _worker: threading.Thread | None = None
 _context: dict[str, Any] = {}
 _state_cache: dict[str, Any] | None = None
-_activity_cache: set[str] = set()
+# Delivery callbacks for queued rollup events, keyed by event uuid. The worker
+# calls each with True (posted) or False (failed) once its batch settles.
+_delivery_callbacks: dict[str, Callable[[bool], None]] = {}
+# UTC day this process last checked the rollup for days ready to send.
+_rollup_checked_day: str | None = None
 
 
 def _api_key() -> str:
@@ -554,8 +451,12 @@ def is_enabled() -> bool:
         return False
 
 
+def _state_dir() -> Path:
+    return Path.home() / ".ouroboros"
+
+
 def _state_path() -> Path:
-    return Path.home() / ".ouroboros" / "telemetry.json"
+    return _state_dir() / "telemetry.json"
 
 
 # Canonical hyphenated UUID: 8-4-4-4-12 hex, case-insensitive on read,
@@ -996,6 +897,21 @@ def _post(events: list[dict[str, Any]]) -> None:
         pass
 
 
+def _settle_deliveries(batch: list[dict[str, Any]], delivered: bool) -> None:
+    """Tell each queued rollup event's owner whether its batch was posted."""
+    for event in batch:
+        event_uuid = event.get("uuid")
+        if not isinstance(event_uuid, str):
+            continue
+        with _lock:
+            callback = _delivery_callbacks.pop(event_uuid, None)
+        if callback is not None:
+            try:
+                callback(delivered)
+            except Exception:
+                pass
+
+
 def _worker_loop() -> None:
     while True:
         item = _queue.get()
@@ -1005,11 +921,16 @@ def _worker_loop() -> None:
                 batch.append(_queue.get_nowait())
         except queue.Empty:
             pass
+        delivered = False
         try:
             _post(batch)
+            delivered = True
         except Exception:
             pass
         finally:
+            # Settle before task_done so flush() returns only after a delivered
+            # rollup day has been removed from disk.
+            _settle_deliveries(batch, delivered)
             for _ in batch:
                 _queue.task_done()
 
@@ -1046,58 +967,40 @@ def flush(timeout: float = 1.5) -> None:
         pass
 
 
-def _resolve_allowed_keys(event: str, properties: dict[str, Any] | None) -> frozenset[str] | None:
-    if event == "command_run":
-        service = (properties or {}).get("service")
-        return _COMMAND_RUN_CLI_KEYS if service == "cli" else _COMMAND_RUN_MCP_KEYS
-    if event == "workflow_outcome":
-        return _WORKFLOW_OUTCOME_KEYS
-    if event == "service_active":
-        return _SERVICE_ACTIVE_KEYS
-    if event == "mcp_serve_started":
-        return _MCP_SERVE_STARTED_KEYS
-    if event == "subagent_dispatch":
-        return _SUBAGENT_DISPATCH_KEYS
-    if event == "ac_verify_failed":
-        return _AC_VERIFY_FAILED_KEYS
-    if event == "runtime_drift":
-        return _RUNTIME_DRIFT_KEYS
-    if event == "acceptance_no_evidence":
-        return _ACCEPTANCE_NO_EVIDENCE_KEYS
-    if event == "acceptance_artifact_checks":
-        return _ACCEPTANCE_ARTIFACT_CHECKS_KEYS
-    return None
+def _enqueue(
+    payload: dict[str, Any],
+    on_result: Callable[[bool], None] | None = None,
+) -> None:
+    """Queue one serialized event; ``on_result`` learns whether it was posted."""
+    event_uuid = payload.get("uuid")
+    if on_result is not None and isinstance(event_uuid, str):
+        with _lock:
+            _delivery_callbacks[event_uuid] = on_result
+    try:
+        _queue.put_nowait(payload)
+    except queue.Full:
+        if on_result is not None:
+            with _lock:
+                _delivery_callbacks.pop(str(event_uuid), None)
+            on_result(False)
+        return
+    _ensure_worker()
 
 
-def _daily_insert_id(
-    event: str,
-    distinct_id_value: str,
-    properties: dict[str, Any],
-) -> str:
-    """Deduplicate DAU rows to one user/day/dimension tuple."""
-    day = time.strftime("%Y-%m-%d", time.gmtime())
-    dimensions = (
-        properties.get("service"),
-        properties.get("command"),
-        properties.get("status"),
-        properties.get("error_type"),
-        properties.get("runtime_backend"),
-        properties.get("transport"),
-        properties.get("phase"),
-        properties.get("fanout_kind"),
-        properties.get("origin"),
-    )
-    material = "\0".join(str(value or "") for value in (distinct_id_value, day, event, *dimensions))
-    return hashlib.sha256(material.encode()).hexdigest()
+# Namespace for the deterministic event uuid of a job-derived workflow_outcome.
+# PostHog deduplicates on (uuid, event, distinct_id, day); it ignores $insert_id.
+_OUTCOME_UUID_NAMESPACE = uuid.uuid5(
+    uuid.NAMESPACE_URL, "https://github.com/Q00/ouroboros#telemetry"
+)
 
 
 def capture(event: str, properties: dict[str, Any] | None = None) -> None:
-    """Queue one event. Non-blocking, never raises, drops when queue is full.
+    """Queue one ``workflow_outcome``. Non-blocking, never raises.
 
-    Enforces the event/property whitelist: an event (or command_run source
-    variant) not on the disclosed table is dropped entirely, and any
-    property not on that exact variant's set is dropped before the
-    properties dict is built. See _resolve_allowed_keys.
+    Enforces the event/property whitelist: any other event name is dropped
+    entirely (``usage_daily`` is sent only by the daily rollup), and any
+    property not on ``_WORKFLOW_OUTCOME_KEYS`` is dropped before the
+    properties dict is built.
 
     Also enforces identity fail-closed: the id is resolved via distinct_id()
     up front, before anything is built or queued, and a "" result (no
@@ -1108,34 +1011,153 @@ def capture(event: str, properties: dict[str, Any] | None = None) -> None:
     try:
         if not is_enabled():
             return
-        allowed_keys = _resolve_allowed_keys(event, properties)
-        if allowed_keys is None:
+        if event != "workflow_outcome":
             return  # not on the disclosed event table -- drop, don't guess
         resolved_id = distinct_id()
         if not resolved_id:
             return  # no durable identity this attempt -- drop, don't emit
+        _send_due_usage()
         props = _base_properties()
         if properties:
             props.update({k: v for k, v in properties.items() if v is not None})
-        if event in _DAILY_INSERT_ID_EVENTS and "$insert_id" not in props:
-            props["$insert_id"] = _daily_insert_id(event, resolved_id, props)
-        props = _sanitize_properties(props, allowed_keys)
-        event_payload = {
+        props = _sanitize_properties(props, _WORKFLOW_OUTCOME_KEYS)
+        payload: dict[str, Any] = {
             "event": event,
             "distinct_id": resolved_id,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "properties": props,
         }
-        if event in _DAILY_ONCE_EVENTS:
-            insert_id = str(props["$insert_id"])
-            with _lock:
-                if insert_id in _activity_cache:
-                    return
-                _queue.put_nowait(event_payload)
-                _activity_cache.add(insert_id)
-        else:
-            _queue.put_nowait(event_payload)
-        _ensure_worker()
+        insert_id = props.get("$insert_id")
+        if isinstance(insert_id, str):
+            payload["uuid"] = str(uuid.uuid5(_OUTCOME_UUID_NAMESPACE, insert_id))
+        _enqueue(payload)
+    except Exception:
+        pass
+
+
+# --- usage_daily: the local daily rollup ------------------------------------
+
+
+def _utc_day() -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime())
+
+
+def _usage_dims() -> dict[str, str | bool]:
+    """The dimensions stored with today's counts: version, OS, backend, CI."""
+    return {
+        key: value
+        for key, value in _base_properties().items()
+        if key in _BASE_KEYS and isinstance(value, (str, bool))
+    }
+
+
+def _queue_usage_daily(bucket: Mapping[str, Any], resolved_id: str) -> None:
+    """Queue one claimed day; delivery deletes it, failure releases it for retry."""
+    bucket_id = str(bucket["id"])
+    day = str(bucket["day"])
+    props = _sanitize_properties(
+        {**bucket["dims"], **bucket["counts"], "day": day}, _USAGE_DAILY_KEYS
+    )
+    state_dir = _state_dir()
+
+    def settle(delivered: bool) -> None:
+        try:
+            telemetry_rollup.settle(state_dir, bucket_id, delivered=delivered)
+        except Exception:
+            pass  # still leased: a later process retries it under the same uuid
+
+    _enqueue(
+        {
+            "event": "usage_daily",
+            "distinct_id": resolved_id,
+            # The uuid is fixed per install and day and is the PostHog dedupe
+            # key, so no resend can count the day twice; the timestamp places
+            # the row on the day it describes, not the day it was sent.
+            "uuid": telemetry_rollup.event_uuid(resolved_id, day),
+            "timestamp": f"{day}T12:00:00Z",
+            "properties": props,
+        },
+        settle,
+    )
+
+
+def _send_due_usage(today: str | None = None) -> None:
+    """Send every rollup day that is over, checking at most once per process per day.
+
+    Callers have already checked ``is_enabled()``. When the identity or the
+    rollup lock is unavailable nothing is claimed, and the next capture in
+    this process tries again.
+    """
+    global _rollup_checked_day
+    day = today or _utc_day()
+    with _lock:
+        if _rollup_checked_day == day:
+            return
+        _rollup_checked_day = day
+    resolved_id = ""
+    buckets: list[dict[str, Any]] | None = None
+    try:
+        resolved_id = distinct_id()
+        if resolved_id:
+            buckets = telemetry_rollup.claim_due(_state_dir(), day, time.time())
+    except Exception:
+        buckets = None
+    if buckets is None:
+        with _lock:
+            if _rollup_checked_day == day:
+                _rollup_checked_day = None
+        return
+    for bucket in buckets:
+        _queue_usage_daily(bucket, resolved_id)
+
+
+def note_activity() -> None:
+    """Send finished rollup days on process activity that adds no count.
+
+    Every capture entry point that adds no count calls this (a successful
+    status poll, an internal CLI command, a console request, a run
+    observation), and every one that does goes through ``_record_usage``, so
+    any Ouroboros activity on a later day sends the days that are over. Once
+    this process has checked the rollup today it returns before reading the
+    configuration, so a hot polling path stays cheap. Respects every opt-out
+    (``is_enabled``), queues nothing when no day is due, and never raises.
+    """
+    try:
+        day = _utc_day()
+        with _lock:
+            if _rollup_checked_day == day:
+                return
+        if is_enabled():
+            _send_due_usage(day)
+    except Exception:
+        pass
+
+
+def _record_usage(counts: Mapping[str, int]) -> None:
+    """Add closed-vocabulary counts to today's local rollup. Never raises.
+
+    Nothing is sent per call: the day is sent as one ``usage_daily`` row once
+    it is over. Keys outside ``_USAGE_COUNT_KEYS`` and non-positive values are
+    dropped. If the rollup lock is busy past its bound or the state directory
+    is unwritable, this count is skipped rather than blocking the caller. A
+    count for a day whose row was already claimed is dropped
+    (``telemetry_rollup.DayClosed``), so a day is never sent twice.
+    """
+    try:
+        if not is_enabled():
+            return
+        clean = {
+            key: value
+            for key, value in counts.items()
+            if key in _USAGE_COUNT_KEYS and type(value) is int and value > 0
+        }
+        day = _utc_day()
+        if clean:
+            try:
+                telemetry_rollup.record(_state_dir(), day, clean, _usage_dims())
+            except Exception:
+                pass
+        _send_due_usage(day)
     except Exception:
         pass
 
@@ -1150,85 +1172,214 @@ def capture_tool_call(
     registered: bool = True,
     origin: str | None = None,
 ) -> None:
-    """Capture service activity plus retained lifecycle/failure commands.
+    """Count one MCP request in today's rollup; nothing is sent per call.
 
-    ``origin`` is honoured only for ``command=seed`` and only when it is one
-    of ``_SEED_ORIGINS``; every other combination is dropped silently.
+    A call to a tool in ``_USAGE_TOOLS`` adds ``cmd_<command>`` and
+    ``surface_mcp``; polling, status and other ``_UNCOUNTED_TOOLS`` add
+    nothing. Any request that failed with an error (not a logical block such
+    as ``input_required``) adds ``mcp_tool_errors``. ``origin`` is counted
+    only for ``command=seed`` and only from ``_SEED_CONTEXT_ORIGINS``. A call
+    that adds nothing still sends finished days (``note_activity``).
     """
-    del duration_ms
+    del duration_ms, error_type
     try:
-        if not registered:
-            name = _UNKNOWN_TOOL_NAME
-        elif name not in _CANONICAL_TOOL_NAMES:
-            name = _EXTENSION_TOOL_NAME
-        command = _TOOL_FUNNEL.get(name)
-        capture_service_active()
-        if ok and not blocked and command is None:
-            return
-        if blocked:
-            status = "blocked"
-        elif name in _ASYNC_SUBMISSION_TOOLS:
-            status = "accepted" if ok else "rejected"
+        command = _USAGE_TOOLS.get(name) if registered else None
+        counts: dict[str, int] = {}
+        if command is not None:
+            counts[_usage_key(command)] = 1
+            counts["surface_mcp"] = 1
+            if command == "seed" and origin in _SEED_CONTEXT_ORIGINS:
+                counts[f"seed_{origin}"] = 1
+        if not ok and not blocked:
+            counts["mcp_tool_errors"] = 1
+        if counts:
+            _record_usage(counts)
         else:
-            status = "succeeded" if ok else "failed"
-        command_value = command or name.removeprefix("ouroboros_")
-        properties: dict[str, Any] = {
-            "command": command_value,
-            "service": "mcp",
-            "status": status,
-            "error_type": error_type,
-        }
-        if command_value == "seed" and origin in _SEED_ORIGINS:
-            properties["origin"] = origin
-        capture("command_run", properties)
+            note_activity()
     except Exception:
         pass
 
 
-def capture_ac_verify_failed(cause: str | None) -> None:
-    """Capture one deterministic verify-gate rejection with its closed cause.
+def capture_cli_command(subcommand: str | None) -> None:
+    """Count a direct ``ooo <subcommand>`` invocation in today's rollup.
 
-    ``cause`` is produced by the orchestrator's own gate branches, but this
-    boundary still folds anything outside the audited ``_AC_VERIFY_CAUSES``
-    vocabulary to a fixed ``unknown`` literal -- a future gate branch (or a
-    replayed/spoofed value) is counted, never forwarded verbatim.
+    ``subcommand`` is caller-controlled the same way an MCP tool name or a
+    job_type is: ``_PluginAwareGroup`` resolves any name not in the static
+    command table as a dynamically-installed plugin command, so an
+    unaudited value is counted as ``cmd_extension_command`` and never
+    becomes a key -- see ``_CANONICAL_CLI_COMMANDS``. ``ouroboros gui`` and
+    commands the console starts (``_SURFACE_ENV``) count as
+    ``surface_console``; everything else as ``surface_cli``. The internal
+    ``mcp``, ``job`` and ``dispatch`` commands count nothing but still send
+    finished days (``note_activity``).
     """
     try:
-        capture(
-            "ac_verify_failed",
-            {"cause": cause if cause in _AC_VERIFY_CAUSES else _UNKNOWN_VERIFY_CAUSE},
+        if not subcommand or subcommand in _CLI_SKIP:
+            note_activity()
+            return
+        command = (
+            _CLI_FUNNEL.get(subcommand, subcommand)
+            if subcommand in _CANONICAL_CLI_COMMANDS
+            else _EXTENSION_CLI_COMMAND
         )
+        console = subcommand == "gui" or os.environ.get(_SURFACE_ENV) == "console"
+        _record_usage({_usage_key(command): 1, f"surface_{'console' if console else 'cli'}": 1})
+    except Exception:
+        pass
+
+
+def capture_mcp_serve_started(transport: str | None) -> None:
+    """Count one MCP server that reached its serve loop (``mcp_serve_starts``)."""
+    del transport
+    _record_usage({"mcp_serve_starts": 1})
+
+
+def capture_subagent_dispatch(properties: Mapping[str, Any]) -> None:
+    """Count one emitted fan-out contract (``subagent_dispatches``)."""
+    try:
+        if properties.get("phase") == "emitted":
+            _record_usage({"subagent_dispatches": 1})
+        else:
+            note_activity()
+    except Exception:
+        pass
+
+
+# --- workflow_outcome folding ------------------------------------------------
+
+
+def _fold(value: Any, vocabulary: frozenset[str]) -> str:
+    return value if isinstance(value, str) and value in vocabulary else _UNKNOWN_VALUE
+
+
+def _top(counter: Counter[str]) -> str:
+    """Most frequent label; ties go to the alphabetically first."""
+    return max(sorted(counter), key=counter.__getitem__)
+
+
+def _bounded_count(value: Any) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        return 0
+    return min(value, _AC_TALLY_CAP)
+
+
+class OutcomeTally:
+    """What one run's verify gate, acceptance checks and runtime observed.
+
+    Each observation used to be its own event. Now ``capture_*`` below adds
+    it to the tally bound to the current context (``outcome_scope``), and
+    ``capture_job_outcome`` drains the tally into that run's single
+    ``workflow_outcome``. Observations made outside any scope are dropped.
+    Thread-safe: a run's tasks and worker threads share one tally.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._verify_causes: Counter[str] = Counter()
+        self._drift_kinds: Counter[str] = Counter()
+        self._no_evidence_reasons: Counter[str] = Counter()
+        self._coverage: str | None = None
+        self._artifact_checks: tuple[str, str] | None = None
+        self._artifact_failed = 0
+
+    def _clear(self) -> None:
+        self._verify_causes.clear()
+        self._drift_kinds.clear()
+        self._no_evidence_reasons.clear()
+        self._coverage = None
+        self._artifact_checks = None
+        self._artifact_failed = 0
+
+    def add_verify_rejection(self, cause: str) -> None:
+        with self._lock:
+            self._verify_causes[cause] += 1
+
+    def add_runtime_drift(self, kind: str) -> None:
+        with self._lock:
+            self._drift_kinds[kind] += 1
+
+    def add_no_evidence(self, reasons: Counter[str], coverage: str) -> None:
+        with self._lock:
+            self._no_evidence_reasons.update(reasons)
+            self._coverage = coverage
+
+    def set_artifact_checks(self, base_regression: str, worker_tests: str, failed: int) -> None:
+        with self._lock:
+            self._artifact_checks = (base_regression, worker_tests)
+            self._artifact_failed = min(self._artifact_failed + failed, _AC_TALLY_CAP)
+
+    def drain(self) -> dict[str, Any]:
+        """The outcome properties observed so far; the tally starts over."""
+        props: dict[str, Any] = {}
+        with self._lock:
+            if self._verify_causes:
+                props["verify_rejections"] = min(self._verify_causes.total(), _AC_TALLY_CAP)
+                props["verify_top_cause"] = _top(self._verify_causes)
+            if self._drift_kinds:
+                props["runtime_drifts"] = min(self._drift_kinds.total(), _AC_TALLY_CAP)
+                props["runtime_drift_kind"] = _top(self._drift_kinds)
+            if self._no_evidence_reasons:
+                props["no_evidence_criteria"] = min(
+                    self._no_evidence_reasons.total(), _AC_TALLY_CAP
+                )
+                props["no_evidence_top_reason"] = _top(self._no_evidence_reasons)
+            if self._coverage is not None:
+                props["verification_coverage"] = self._coverage
+            if self._artifact_checks is not None:
+                props["base_regression"], props["worker_tests"] = self._artifact_checks
+                props["artifact_failed_criteria"] = self._artifact_failed
+            self._clear()
+        return props
+
+
+_OUTCOME_TALLY: ContextVar[OutcomeTally | None] = ContextVar(
+    "ouroboros_outcome_tally", default=None
+)
+
+
+def new_outcome_tally() -> OutcomeTally:
+    return OutcomeTally()
+
+
+@contextmanager
+def outcome_scope(tally: OutcomeTally | None) -> Iterator[None]:
+    """Bind ``tally`` as the current run's tally (``None`` hides an outer one).
+
+    Tasks created inside the block copy the binding, so a job runner task
+    created here keeps reporting into ``tally`` after the block exits.
+    """
+    token = _OUTCOME_TALLY.set(tally)
+    try:
+        yield
+    finally:
+        _OUTCOME_TALLY.reset(token)
+
+
+def capture_ac_verify_failed(cause: str | None) -> None:
+    """Count one verify-gate rejection, with its closed cause, for this run.
+
+    Anything outside the audited ``_AC_VERIFY_CAUSES`` vocabulary folds to a
+    fixed ``unknown`` literal -- a future gate branch (or a replayed/spoofed
+    value) is counted, never forwarded verbatim.
+    """
+    note_activity()
+    try:
+        tally = _OUTCOME_TALLY.get()
+        if tally is not None:
+            tally.add_verify_rejection(_fold(cause, _AC_VERIFY_CAUSES))
     except Exception:
         pass
 
 
 def capture_runtime_drift(kind: str | None) -> None:
-    """Capture one observed mid-run change of a frozen runtime authority input.
-
-    Folds anything outside the audited ``_RUNTIME_DRIFT_KINDS`` vocabulary to
-    a fixed ``unknown`` literal; never a path, config value, or message.
-    """
+    """Count one mid-run change of a frozen runtime authority input for this run."""
+    note_activity()
     try:
-        capture(
-            "runtime_drift",
-            {"kind": kind if kind in _RUNTIME_DRIFT_KINDS else _UNKNOWN_DRIFT_KIND},
-        )
+        tally = _OUTCOME_TALLY.get()
+        if tally is not None:
+            tally.add_runtime_drift(_fold(kind, _RUNTIME_DRIFT_KINDS))
     except Exception:
         pass
-
-
-def _fold(value: Any, vocabulary: frozenset[str]) -> str:
-    return value if isinstance(value, str) and value in vocabulary else _UNKNOWN_NO_EVIDENCE_VALUE
-
-
-def _canonical_runtime_backend(value: Any) -> str:
-    """A shipped runtime backend name, else ``unknown`` (never a caller string)."""
-    try:
-        from ouroboros.backends.capabilities import runtime_backend_choices
-
-        return _fold(value, frozenset(runtime_backend_choices()))
-    except Exception:
-        return _UNKNOWN_NO_EVIDENCE_VALUE
 
 
 def capture_acceptance_no_evidence(
@@ -1242,40 +1393,24 @@ def capture_acceptance_no_evidence(
     runtime_backend: str | None,
     check_package_mode: str | None = None,
 ) -> None:
-    """Capture one run's criteria accepted without evidence from any verifier.
+    """Count this run's criteria accepted without evidence from any verifier.
 
     ``pairs`` holds one ``(package_reason, replay_reason)`` per such
-    criterion: why the check package did not decide it, and why the legacy
-    verifier (claim replay) had no evidence. Each axis folds anything outside
-    its audited vocabulary to ``unknown``; the counts are sent as
-    ``pair_<package_reason>__<replay_reason>`` integers. Nothing is sent when
-    no criterion was accepted without evidence. Never raises.
+    criterion. Only the count, the most common package reason (folded to
+    ``_NO_EVIDENCE_PACKAGE_REASONS`` or ``unknown``) and the coverage label
+    reach the run's ``workflow_outcome``; the other arguments are accepted
+    for the call site's sake and dropped. Never raises.
     """
+    del criterion_count, surface, check_package, check_package_status
+    del runtime_backend, check_package_mode
+    note_activity()
     try:
-        counts: dict[str, int] = {}
-        for package_reason, replay_reason in pairs:
-            key = _no_evidence_pair_key(
-                _fold(package_reason, _NO_EVIDENCE_PACKAGE_REASONS),
-                _fold(replay_reason, _NO_EVIDENCE_REPLAY_REASONS),
-            )
-            counts[key] = counts.get(key, 0) + 1
-        total = sum(counts.values())
-        if total == 0:
-            return
-        capture(
-            "acceptance_no_evidence",
-            {
-                **counts,
-                "criterion_count": criterion_count,
-                "no_evidence_count": total,
-                "verification_coverage": _fold(verification_coverage, _NO_EVIDENCE_COVERAGES),
-                "surface": _fold(surface, _NO_EVIDENCE_SURFACES),
-                "check_package": _fold(check_package, _NO_EVIDENCE_CHECK_PACKAGE),
-                "check_package_mode": _fold(check_package_mode, _NO_EVIDENCE_CHECK_PACKAGE_MODES),
-                "check_package_status": _fold(check_package_status, _NO_EVIDENCE_PACKAGE_STATUSES),
-                "runtime_backend": _canonical_runtime_backend(runtime_backend),
-            },
+        reasons = Counter(
+            _fold(package_reason, _NO_EVIDENCE_PACKAGE_REASONS) for package_reason, _ in pairs
         )
+        tally = _OUTCOME_TALLY.get()
+        if reasons and tally is not None:
+            tally.add_no_evidence(reasons, _fold(verification_coverage, _NO_EVIDENCE_COVERAGES))
     except Exception:
         pass
 
@@ -1297,98 +1432,27 @@ def capture_acceptance_artifact_checks(
     worker_tests_effect: str | None = None,
     would_fail_criteria: int = 0,
 ) -> None:
-    """Capture what the controller-run artifact checks observed on one decided run.
+    """Record what this run's controller-run artifact checks observed.
 
-    ``base_regression`` and ``worker_tests`` are each check's outcome: it
-    decided (``rejected``), ran and found nothing (``passed``), or had no
-    observation and why; anything outside the audited vocabulary folds to
-    ``unknown``. ``failed_criteria`` counts the criteria the checks failed in
-    the final decision and ``repairs`` the attempts they sent back to the
-    worker. ``exemption`` is how the footprint exemption treated a base
-    regression (absent when nothing regressed) and ``exempted_tests`` how many
-    regressed tests it set aside. ``*_mode`` is each check's mode
-    (``decide``/``record``/``off``) and ``*_effect`` what its finding did
-    (``decided``, ``recorded`` in record mode, ``regression_unadjudicated``
-    when a regression found without an admitted package decided nothing, or
-    ``none``); ``would_fail_criteria`` counts the criteria the findings that
-    did not decide would have failed. Never raises.
+    Only each check's outcome (``base_regression``, ``worker_tests``; folded
+    to ``_ARTIFACT_CHECK_OUTCOMES`` or ``unknown``) and ``failed_criteria``
+    reach the run's ``workflow_outcome``; the other arguments are accepted
+    for the call site's sake and dropped. Never raises.
     """
+    del criterion_count, repairs, surface, runtime_backend, exemption, exempted_tests
+    del base_regression_mode, worker_test_gate_mode, base_regression_effect
+    del worker_tests_effect, would_fail_criteria
+    note_activity()
     try:
-        capture(
-            "acceptance_artifact_checks",
-            {
-                "base_regression": _fold(base_regression, _ARTIFACT_CHECK_OUTCOMES),
-                "worker_tests": _fold(worker_tests, _ARTIFACT_CHECK_OUTCOMES),
-                "failed_criteria": failed_criteria,
-                "criterion_count": criterion_count,
-                "repairs": repairs,
-                "exemption": None if exemption is None else _fold(exemption, _ARTIFACT_EXEMPTIONS),
-                "exempted_tests": exempted_tests,
-                "base_regression_mode": _fold(base_regression_mode, _ARTIFACT_CHECK_MODES),
-                "worker_test_gate_mode": _fold(worker_test_gate_mode, _ARTIFACT_CHECK_MODES),
-                "base_regression_effect": _fold(base_regression_effect, _ARTIFACT_EFFECTS),
-                "worker_tests_effect": _fold(worker_tests_effect, _ARTIFACT_EFFECTS),
-                "would_fail_criteria": would_fail_criteria,
-                "surface": _fold(surface, _NO_EVIDENCE_SURFACES),
-                "runtime_backend": _canonical_runtime_backend(runtime_backend),
-            },
-        )
+        tally = _OUTCOME_TALLY.get()
+        if tally is not None:
+            tally.set_artifact_checks(
+                _fold(base_regression, _ARTIFACT_CHECK_OUTCOMES),
+                _fold(worker_tests, _ARTIFACT_CHECK_OUTCOMES),
+                _bounded_count(failed_criteria),
+            )
     except Exception:
         pass
-
-
-def capture_service_active() -> None:
-    """Record at most one service-active row per user/day/backend."""
-    capture("service_active", {"service": "mcp"})
-
-
-def capture_mcp_serve_started(transport: str | None) -> None:
-    """Record at most one "MCP attached" row per user/day/transport.
-
-    The top of the activation funnel: a host spawned ``ouroboros mcp serve``
-    for a session, whether or not any tool was ever requested. Kept separate
-    from ``service_active`` (first tool request of the day) so the
-    attached → used conversion stays measurable. Daily-deduplicated, so this
-    reinstates the metric #2278 removed without its per-session volume.
-    """
-    try:
-        capture(
-            "mcp_serve_started",
-            {"transport": transport if transport in _MCP_TRANSPORTS else "unknown"},
-        )
-    except Exception:
-        pass
-
-
-def capture_subagent_dispatch(properties: dict[str, Any]) -> None:
-    """Record at most one fan-out adoption row per user/day/phase/fanout_kind.
-
-    The rich per-dispatch contract #2278 removed stays removed; what survives
-    is the adoption signal ("this user's sessions used subagent fan-out
-    today"), with both dimensions folded to closed vocabularies before
-    anything is queued.
-    """
-    try:
-        phase = properties.get("phase")
-        fanout_kind = properties.get("fanout_kind")
-        capture(
-            "subagent_dispatch",
-            {
-                "phase": phase if phase in _SUBAGENT_DISPATCH_PHASES else "unknown",
-                "fanout_kind": (
-                    fanout_kind
-                    if isinstance(fanout_kind, str)
-                    and fanout_kind.isidentifier()
-                    and len(fanout_kind) <= 64
-                    else "unknown"
-                ),
-            },
-        )
-    except Exception:
-        pass
-
-
-_AC_TALLY_CAP = 10_000
 
 
 def _run_ac_tally_properties(meta: Mapping[str, Any]) -> dict[str, int]:
@@ -1417,11 +1481,12 @@ def capture_job_outcome(
 ) -> None:
     """Capture a durable background-job terminal transition.
 
-    ``command_run`` submission receipts and durable outcomes are deliberately
-    different events. Evaluation completion is also different from verified
-    success: only an explicit ``final_approved is True`` earns ``verified``.
-    The PostHog insert id is a one-way digest, so retries can be de-duplicated
-    without disclosing the internal job identifier.
+    Evaluation completion is different from verified success: only an
+    explicit ``final_approved is True`` earns ``verified``. The insert id is
+    a one-way digest of the job id, and the event uuid is derived from it, so
+    PostHog can de-duplicate a retry without seeing the internal identifier.
+    The run's ``OutcomeTally`` bound to the current context (if any) is
+    drained into the same event.
 
     ``job_type`` is caller-controlled the same way an MCP tool name is:
     ``JobManager.start_job()`` accepts an arbitrary string, so ``command``
@@ -1460,36 +1525,10 @@ def capture_job_outcome(
                 properties["failure_cause"] = (
                     raw_cause if raw_cause in RUN_FAILURE_CAUSES else UNKNOWN_RUN_FAILURE_CAUSE
                 )
+        tally = _OUTCOME_TALLY.get()
+        if tally is not None:
+            properties.update(tally.drain())
         capture("workflow_outcome", properties)
-    except Exception:
-        pass
-
-
-def capture_cli_command(subcommand: str | None) -> None:
-    """Capture a direct ``ooo <subcommand>`` invocation.
-
-    ``subcommand`` is caller-controlled the same way an MCP tool name or a
-    job_type is: ``_PluginAwareGroup`` resolves any name not in the static
-    command table as a dynamically-installed plugin command, so an
-    unaudited value must never carry an identifying name through
-    ``command`` -- see ``_CANONICAL_CLI_COMMANDS``.
-    """
-    try:
-        if not subcommand or subcommand in _CLI_SKIP:
-            return
-        command = (
-            _CLI_FUNNEL.get(subcommand, subcommand)
-            if subcommand in _CANONICAL_CLI_COMMANDS
-            else _EXTENSION_CLI_COMMAND
-        )
-        capture(
-            "command_run",
-            {
-                "command": command,
-                "service": "cli",
-                "status": "invoked",
-            },
-        )
     except Exception:
         pass
 
@@ -1602,26 +1641,32 @@ def show_first_run_notice() -> None:
 
 def _reset_for_tests() -> None:
     """Clear module caches so tests can run isolated (not public API)."""
-    global _state_cache
+    global _state_cache, _rollup_checked_day
     with _lock:
         _state_cache = None
+        _rollup_checked_day = None
         _context.clear()
-        _activity_cache.clear()
+        _delivery_callbacks.clear()
 
 
 __all__ = [
+    "OutcomeTally",
     "capture",
     "capture_ac_verify_failed",
-    "capture_runtime_drift",
+    "capture_acceptance_artifact_checks",
+    "capture_acceptance_no_evidence",
     "capture_cli_command",
     "capture_job_outcome",
     "capture_mcp_serve_started",
-    "capture_service_active",
+    "capture_runtime_drift",
+    "capture_subagent_dispatch",
     "capture_tool_call",
     "distinct_id",
     "flush",
     "is_enabled",
+    "new_outcome_tally",
+    "note_activity",
+    "outcome_scope",
     "set_context",
-    "capture_subagent_dispatch",
     "show_first_run_notice",
 ]

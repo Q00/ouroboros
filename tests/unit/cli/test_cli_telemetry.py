@@ -1,4 +1,4 @@
-"""CLI-level telemetry regression: closed-vocabulary `command` values.
+"""CLI-level telemetry regression: closed-vocabulary `cmd_*` usage keys.
 
 ``_PluginAwareGroup`` (src/ouroboros/cli/main.py) resolves any top-level
 name not in the static command table as a dynamically-installed plugin
@@ -7,8 +7,8 @@ command via ``build_plugin_dispatch_command``, so ``ctx.invoked_subcommand``
 argument -- is exactly as caller-controlled as an MCP tool name or a job
 type. This exercises the REAL Typer app through a genuine dynamic plugin
 dispatch (not a direct ``capture_cli_command()`` call) to prove the
-integration wiring folds a dynamically-resolved plugin name to the fixed
-``extension_command`` literal end to end, mirroring the fixture pattern
+integration wiring counts a dynamically-resolved plugin name under the fixed
+``cmd_extension_command`` key end to end, mirroring the fixture pattern
 ``tests/unit/cli/test_plugin_dispatch.py`` already uses to stage an
 installed plugin (``stub_default_paths`` + ``_stage_installed_plugin``).
 """
@@ -106,15 +106,11 @@ def test_dynamic_plugin_dispatch_captures_extension_command_not_plugin_name(
     """A REAL Click dynamic dispatch (not a direct capture_cli_command()
     call): the plugin name is resolved by _PluginAwareGroup exactly the
     way an actually-installed third-party plugin would be, and the
-    telemetry captured from that dispatch must carry `extension_command`,
+    usage counted from that dispatch must be `cmd_extension_command`,
     never the plugin's identifying name -- checked against the full
-    captured event, not just the `command` field."""
-    captured: list[dict[str, Any]] = []
-    monkeypatch.setattr(
-        telemetry,
-        "capture",
-        lambda event, properties=None: captured.append({"event": event, "properties": properties}),
-    )
+    recorded counts, not just one key."""
+    captured: list[dict[str, int]] = []
+    monkeypatch.setattr(telemetry, "_record_usage", lambda counts: captured.append(dict(counts)))
 
     monkeypatch.setattr(
         "ouroboros.plugin.firewall.subprocess.run",
@@ -127,27 +123,20 @@ def test_dynamic_plugin_dispatch_captures_extension_command_not_plugin_name(
     result = runner.invoke(ouroboros_app, [installed_plugin, "run"])
 
     assert result.exit_code == 0, result.output
-    assert len(captured) == 1
-    assert captured[0]["event"] == "command_run"
-    assert captured[0]["properties"]["command"] == "extension_command"
-    assert installed_plugin not in repr(captured[0])
+    assert captured == [{"cmd_extension_command": 1, "surface_cli": 1}]
+    assert installed_plugin.replace("-", "_") not in repr(captured)
 
 
 def test_canonical_builtin_command_is_unaffected(monkeypatch: pytest.MonkeyPatch) -> None:
     """Control case: a genuine built-in top-level command (no plugin
     dispatch involved) must still capture its own real command value."""
-    captured: list[dict[str, Any]] = []
-    monkeypatch.setattr(
-        telemetry,
-        "capture",
-        lambda event, properties=None: captured.append({"event": event, "properties": properties}),
-    )
+    captured: list[dict[str, int]] = []
+    monkeypatch.setattr(telemetry, "_record_usage", lambda counts: captured.append(dict(counts)))
 
     runner = CliRunner()
     runner.invoke(ouroboros_app, ["status", "--help"])
 
-    assert len(captured) == 1
-    assert captured[0]["properties"]["command"] == "status"
+    assert captured == [{"cmd_status": 1, "surface_cli": 1}]
 
 
 def test_statically_registered_commands_are_subset_of_canonical_set() -> None:

@@ -1109,14 +1109,14 @@ async def _run_mcp_server(
                 name="ouroboros-mcp-idle-shutdown",
             )
 
-        # One daily-deduplicated "MCP attached" row per user — the denominator
-        # of the attached → used activation funnel. The row must reflect a
-        # server that actually reached its serve loop: a transport that fails
-        # to bind/listen (e.g. "address already in use") completes serve_task
-        # immediately with an exception and must not count. Wait out a short
-        # confirmation window; a serve task still running afterwards — or one
-        # that already finished cleanly (a real, short session) — is an
-        # authoritative attachment.
+        # Count one "MCP attached" start in today's local usage rollup
+        # (`mcp_serve_starts`) — the denominator of the attached → used
+        # activation funnel. The count must reflect a server that actually
+        # reached its serve loop: a transport that fails to bind/listen (e.g.
+        # "address already in use") completes serve_task immediately with an
+        # exception and must not count. Wait out a short confirmation window;
+        # a serve task still running afterwards — or one that already finished
+        # cleanly (a real, short session) — is an authoritative attachment.
         done, _pending = await asyncio.wait(
             {serve_task, stop_task},
             timeout=_ATTACH_CONFIRM_SECONDS,

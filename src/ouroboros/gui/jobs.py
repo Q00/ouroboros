@@ -42,6 +42,8 @@ def _child_env() -> dict[str, str]:
     env = dict(os.environ)
     # Plain text: the page renders lines itself, and rich must not wrap them.
     env.update({"NO_COLOR": "1", "TERM": "dumb", "COLUMNS": "120", "PYTHONUNBUFFERED": "1"})
+    # Usage telemetry counts these commands under the console surface, not the CLI.
+    env["_OUROBOROS_TELEMETRY_SURFACE"] = "console"
     env.pop("FORCE_COLOR", None)
     return env
 

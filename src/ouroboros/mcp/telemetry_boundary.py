@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import builtins
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
+from contextlib import contextmanager
 import json
 import time
 from typing import TYPE_CHECKING, Any
@@ -35,14 +36,10 @@ _TERMINAL_JOB_EVENTS = frozenset(
     }
 )
 
-# capture_tool_call() derives both "tool" and "command" from whatever name
-# reaches it, so a caller-controlled unregistered name (e.g. a filesystem
-# path smuggled in as a tool call) must never be queued verbatim -- that
-# would leak arbitrary caller-controlled strings into telemetry despite
-# TELEMETRY.md promising file paths are never collected. Every unregistered
-# lookup is folded to this fixed literal instead. It keeps the "ouroboros_"
-# prefix so capture_tool_call's existing funnel gate still records it (as
-# command="unknown_tool", is_funnel=False).
+# A caller-controlled unregistered name (e.g. a filesystem path smuggled in as
+# a tool call) must never reach telemetry verbatim, even though
+# capture_tool_call() only counts names from its static usage table: every
+# unregistered lookup is folded to this fixed literal first.
 _UNKNOWN_TOOL_NAME = "ouroboros_unknown_tool"
 
 # error_type is a plain exception-class name, so it is just as capable of
@@ -156,6 +153,23 @@ def _is_logical_error(value: object) -> bool:
         return False
 
 
+def _is_input_required(value: object) -> bool:
+    """Whether a logical-error result is a request for input, not a failure.
+
+    Only the explicit ``meta.status == "input_required"`` marker (e.g.
+    ``ouroboros_ralph`` called without a lineage id) qualifies. Every other
+    ``is_error`` result, such as a recoverable interview failure
+    (``meta.recoverable``), is a failure that counts toward
+    ``mcp_tool_errors``; anything unreadable counts as a failure too. Never
+    raises (see ``_is_logical_error``).
+    """
+    try:
+        meta = getattr(value, "meta", None)
+        return isinstance(meta, Mapping) and bool(meta.get("status") == "input_required")
+    except BaseException:  # noqa: BLE001 -- sanitization-only
+        return False
+
+
 _SEED_TOOL_NAME = "ouroboros_generate_seed"
 
 
@@ -207,7 +221,8 @@ async def observe_adapter_tool_call[T, E](
     e.g. a validation/input-required response). A logical error has no
     exception to name, so it carries ``error_type=None`` -- the request
     completed, the outcome was a logical error, and there is no dishonest
-    "unknown"/"none of the above" value to invent in its place.
+    "unknown"/"none of the above" value to invent in its place. It is passed
+    as ``blocked`` (not an error) only when ``_is_input_required`` says so.
     """
     safe_name = name if registered else _UNKNOWN_TOOL_NAME
     started_at = time.monotonic()
@@ -228,7 +243,7 @@ async def observe_adapter_tool_call[T, E](
         ok=result.is_ok and not logical_error,
         duration_ms=_duration_ms(started_at),
         error_type=_safe_error_type(result.error) if result.is_err else None,
-        blocked=logical_error,
+        blocked=logical_error and _is_input_required(result.value),
         registered=registered,
         origin=_seed_origin(safe_name, result.value) if result.is_ok else None,
     )
@@ -282,7 +297,8 @@ async def call_sdk_tool(
     validation/input-required payload returned as ``Result.ok``) counts as
     ``ok=False`` here too, matching :func:`observe_adapter_tool_call`. Its
     ``error_type`` stays ``None``: there is no exception to name, only a
-    completed request whose outcome was a logical error.
+    completed request whose outcome was a logical error. As there, only an
+    input-required result is passed as ``blocked``.
     """
     from jsonschema import Draft202012Validator
 
@@ -343,7 +359,7 @@ async def call_sdk_tool(
         safe_name,
         ok=not logical_error,
         duration_ms=_duration_ms(started_at),
-        blocked=logical_error,
+        blocked=logical_error and _is_input_required(value),
         registered=registered,
         origin=_seed_origin(safe_name, value),
     )
@@ -483,16 +499,32 @@ def stamp_backend_context(
 
 
 class JobTelemetryBoundary:
-    """Remember privacy-safe job classes and observe durable terminal appends."""
+    """Remember privacy-safe job classes and observe durable terminal appends.
+
+    Each job started in this process gets its own ``OutcomeTally``: the
+    runner task is created inside ``runner_scope`` and so reports its verify
+    gate, acceptance and runtime-drift observations into it, and the job's
+    terminal ``workflow_outcome`` carries what the tally collected.
+    """
 
     def __init__(self) -> None:
         self._job_types: dict[str, str] = {}
+        self._tallies: dict[str, usage_telemetry.OutcomeTally] = {}
 
     def remember(self, job_id: str, data: dict[str, Any]) -> None:
         self._job_types[job_id] = str(data.get("job_type", "unknown"))
 
     def forget(self, job_id: str) -> None:
         self._job_types.pop(job_id, None)
+        self._tallies.pop(job_id, None)
+
+    @contextmanager
+    def runner_scope(self, job_id: str) -> Iterator[None]:
+        """Bind a fresh tally for ``job_id`` while its runner task is created."""
+        tally = usage_telemetry.new_outcome_tally()
+        self._tallies[job_id] = tally
+        with usage_telemetry.outcome_scope(tally):
+            yield
 
     def observe(self, event_type: str, job_id: str, data: dict[str, Any]) -> None:
         if event_type == "mcp.job.created":
@@ -502,14 +534,17 @@ class JobTelemetryBoundary:
         status = data.get("status")
         if not isinstance(status, str):
             status = event_type.removeprefix("mcp.job.")
-        usage_telemetry.capture_job_outcome(
-            job_id,
-            self._job_types.get(job_id, "unknown"),
-            terminal_status=status,
-            result_meta=(
-                data.get("result_meta") if isinstance(data.get("result_meta"), dict) else None
-            ),
-        )
+        # Bind exactly this job's tally, or none: a job started from inside
+        # another job's runner must not drain the outer job's observations.
+        with usage_telemetry.outcome_scope(self._tallies.pop(job_id, None)):
+            usage_telemetry.capture_job_outcome(
+                job_id,
+                self._job_types.get(job_id, "unknown"),
+                terminal_status=status,
+                result_meta=(
+                    data.get("result_meta") if isinstance(data.get("result_meta"), dict) else None
+                ),
+            )
 
 
 __all__ = [
