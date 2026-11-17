@@ -10,6 +10,7 @@ git config and never touches a repository that already has commits.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import subprocess
 from typing import Literal
@@ -22,7 +23,7 @@ FALLBACK_IDENTITY = (("user.name", "Ouroboros"), ("user.email", "ouroboros@local
 
 _TIMEOUT = 10.0
 _COMMIT_TIMEOUT = 20.0  # a commit may run the user's hooks or signing
-_MAX_FILES = 50
+MAX_FILES = 50  # paths a result lists; its count always covers every path
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,34 +58,49 @@ def _git(
     )
 
 
-def _has_git_dir(cwd: str) -> bool:
-    """A ``.git`` entry in the folder or a parent: git would treat it as a repository."""
+def _nearest_git_entry(cwd: str) -> Path | None:
+    """The closest folder, ``cwd`` or a parent, holding a ``.git`` entry of any kind.
+
+    ``lexists`` sees a broken symlink too: git skips an entry it cannot read
+    and walks on to a parent repository, so the entry itself is what counts.
+    """
     path = Path(cwd).resolve()
-    return any((folder / ".git").exists() for folder in (path, *path.parents))
+    return next(
+        (folder for folder in (path, *path.parents) if os.path.lexists(folder / ".git")), None
+    )
 
 
 def git_state(cwd: str) -> GitState:
-    """Classify ``cwd`` without changing anything in it."""
+    """Classify ``cwd`` without changing anything in it.
+
+    A ``.git`` entry git cannot use (a broken link, a file naming a missing
+    git directory, an empty directory, a repository it refuses to read) makes
+    the folder ``unreadable``, even when git falls back to a parent repository.
+    """
+    declared = _nearest_git_entry(cwd)
+    unusable = f"{declared / '.git' if declared else '.git'} is not a git repository git can use."
     try:
         inside = _git(cwd, "rev-parse", "--is-inside-work-tree")
+        if inside.returncode != 0:
+            # Never initialize over a .git entry, readable or not.
+            if declared is not None:
+                return GitState("unreadable", inside.stderr.strip() or unusable)
+            return GitState("not_repo")
+        if inside.stdout.strip() != "true":
+            return GitState(
+                "unreadable", "This folder is inside a .git directory or a bare repository."
+            )
+        top = _git(cwd, "rev-parse", "--show-toplevel")
+        if declared is not None and (
+            top.returncode != 0 or Path(top.stdout.strip()).resolve() != declared
+        ):
+            # git skipped the nearest .git entry for a repository further up.
+            return GitState("unreadable", unusable)
+        head = _git(cwd, "rev-parse", "--verify", "--quiet", "HEAD")
     except OSError:
         return GitState("no_git")
     except subprocess.TimeoutExpired:
         return GitState("unreadable", f"git did not answer within {_TIMEOUT:g} seconds.")
-    if inside.returncode != 0:
-        if _has_git_dir(cwd):
-            # A repository git refuses to read (ownership, corruption): never
-            # initialize over it.
-            return GitState("unreadable", inside.stderr.strip())
-        return GitState("not_repo")
-    if inside.stdout.strip() != "true":
-        return GitState(
-            "unreadable", "This folder is inside a .git directory or a bare repository."
-        )
-    try:
-        head = _git(cwd, "rev-parse", "--verify", "--quiet", "HEAD")
-    except (OSError, subprocess.TimeoutExpired):
-        return GitState("unreadable", "git could not read HEAD.")
     return GitState("ready" if head.returncode == 0 else "no_commits")
 
 
@@ -157,10 +173,15 @@ def prepare_git(cwd: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class FolderChanges:
-    """Paths ``git status`` reports as changed: the first ``_MAX_FILES``, and how many in all."""
+    """Paths ``git status`` reports as changed: the first ``MAX_FILES``, and how many in all."""
 
     files: tuple[str, ...]
     count: int
+
+
+def status_paths(porcelain: str) -> list[str]:
+    """Every path in ``git status --porcelain`` output, as git reports it, in its order."""
+    return [line[3:] for line in porcelain.splitlines() if line[3:]]
 
 
 def folder_changes(cwd: str) -> FolderChanges | None:
@@ -173,24 +194,20 @@ def folder_changes(cwd: str) -> FolderChanges | None:
         return None
     if status.returncode != 0:
         return None
-    files = sorted(
-        {
-            line[3:]
-            for line in status.stdout.splitlines()
-            if len(line) > 3 and "__pycache__" not in line and not line.endswith(".pyc")
-        }
-    )
-    return FolderChanges(tuple(files[:_MAX_FILES]), len(files))
+    files = status_paths(status.stdout)
+    return FolderChanges(tuple(files[:MAX_FILES]), len(files))
 
 
 __all__ = [
     "FALLBACK_IDENTITY",
     "INITIAL_COMMIT_MESSAGE",
+    "MAX_FILES",
     "FolderChanges",
     "GitPrepareError",
     "GitState",
     "folder_changes",
     "git_state",
     "prepare_git",
+    "status_paths",
     "workspace_problem",
 ]

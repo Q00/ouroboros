@@ -1335,27 +1335,25 @@ def _run_result(cwd: str, run_session_id: object) -> dict[str, Any] | None:
         return None
 
     def git(*args: str) -> str:
-        return subprocess.run(  # noqa: S603 - fixed git arguments
-            ["git", *args], capture_output=True, text=True, timeout=10, check=False
-        ).stdout
+        try:
+            return subprocess.run(  # noqa: S603 - fixed git arguments
+                ["git", *args], capture_output=True, text=True, timeout=10, check=False
+            ).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
 
     base = git("-C", cwd, "rev-parse", "HEAD").strip()
     committed = (
         git("-C", worktree, "diff", "--name-only", f"{base}...HEAD").splitlines() if base else []
     )
-    pending = [line[3:] for line in git("-C", worktree, "status", "--porcelain").splitlines()]
-    files = sorted(
-        {
-            name
-            for name in [*committed, *pending]
-            if name and "__pycache__" not in name and not name.endswith(".pyc")
-        }
-    )
+    pending = workspace.status_paths(git("-C", worktree, "status", "--porcelain"))
+    # Every path git reports, nothing hidden: both counts come from these lists.
+    files = sorted({name for name in [*committed, *pending] if name})
     return {
         "worktree": worktree,
         "branch": branch,
         "base": base[:12],
-        "files": files[:50],
+        "files": files[: workspace.MAX_FILES],
         "file_count": len(files),
         "uncommitted": len(pending),
     }

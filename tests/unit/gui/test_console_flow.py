@@ -198,6 +198,52 @@ def test_a_failed_prepare_is_reported_and_nothing_starts(
     assert started_runs == []
 
 
+@pytest.mark.parametrize("prepare", [False, True])
+@pytest.mark.parametrize("kind", ["dangling_symlink", "missing_gitdir_file"])
+def test_hand_off_from_a_broken_git_entry_is_refused_and_never_prepared(
+    tmp_path: Path, kind: str, prepare: bool, started_runs: list[str]
+) -> None:
+    folder = tmp_path / "broken"
+    folder.mkdir()
+    if kind == "dangling_symlink":
+        (folder / ".git").symlink_to("/nonexistent/ouroboros-gitdir")
+    else:
+        (folder / ".git").write_text("gitdir: /nonexistent/ouroboros-gitdir\n")
+    state = _state()
+    chat_id = _spec_chat(state.harness, folder)
+    body: dict[str, Any] = {"action": "run", **({"prepare_git": True} if prepare else {})}
+
+    with pytest.raises(api.ApiError) as refused:
+        api.post_chat_action(state, chat_id, query={}, body=body)
+
+    assert (refused.value.status, refused.value.code) == (409, "git_unreadable")
+    assert started_runs == []
+    assert state.harness.get(chat_id)["messages"] == []  # nothing claimed
+    entry = folder / ".git"
+    assert entry.is_symlink() if kind == "dangling_symlink" else entry.is_file()  # no git init
+    probe = api.get_chat_folder(state, query={"path": str(folder)}, body=None)
+    assert probe["git"] == "unreadable"
+
+
+def test_a_run_result_lists_and_counts_every_path_git_reports(tmp_path: Path) -> None:
+    project = _repo(tmp_path / "proj")
+    session = "orch_0123456789ab"
+    worktree = tmp_path / "worktrees" / session
+    _git(project, "worktree", "add", "-q", "-b", f"ooo/{session}", str(worktree))
+    for name in ("median.py", "test_median.py"):
+        (worktree / name).write_text("x\n")
+    (worktree / "__pycache__").mkdir()
+    (worktree / "__pycache__" / "median.cpython-312.pyc").write_bytes(b"")
+
+    result = harness._run_result(str(project), session)
+
+    assert result is not None
+    assert result["files"] == ["__pycache__/", "median.py", "test_median.py"]
+    # The card's two numbers come from the same listing: 3 changed, 3 uncommitted.
+    assert (result["file_count"], result["uncommitted"]) == (3, 3)
+    assert result["branch"] == f"ooo/{session}"
+
+
 def test_the_folder_probe_reads_git_state_and_creates_nothing(tmp_path: Path) -> None:
     state = _state()
     empty = tmp_path / "empty"

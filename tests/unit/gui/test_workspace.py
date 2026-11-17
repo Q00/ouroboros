@@ -142,6 +142,79 @@ def test_a_repository_git_cannot_read_is_never_initialized_over(tmp_path: Path) 
     assert (folder / ".git").is_file()  # still the file: no `git init` ran
 
 
+def _broken_git_entry(folder: Path, kind: str) -> None:
+    if kind == "dangling_symlink":
+        (folder / ".git").symlink_to("/nonexistent/ouroboros-gitdir")
+    elif kind == "missing_gitdir_file":
+        (folder / ".git").write_text("gitdir: /nonexistent/ouroboros-gitdir\n")
+    else:  # an empty directory git does not recognize
+        (folder / ".git").mkdir()
+
+
+def _git_entry_kind(path: Path) -> str:
+    entry = path / ".git"
+    if entry.is_symlink():
+        return f"symlink->{entry.readlink()}"
+    if entry.is_file():
+        return f"file:{entry.read_text()}"
+    return f"dir:{sorted(child.name for child in entry.iterdir())}"
+
+
+@pytest.mark.parametrize("kind", ["dangling_symlink", "missing_gitdir_file", "empty_dir"])
+@pytest.mark.parametrize("inside_a_repository", [False, True])
+def test_a_git_entry_git_cannot_use_is_unreadable_and_never_initialized(
+    tmp_path: Path, kind: str, inside_a_repository: bool
+) -> None:
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    if inside_a_repository:
+        # git silently falls back to this repository for a .git entry it skips.
+        _git(parent, "init", "-q")
+        _commit_empty = ["-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        _git(parent, *_commit_empty, "commit", "-q", "--allow-empty", "-m", "init")
+        head = _git(parent, "rev-parse", "HEAD")
+    folder = parent / "project"
+    folder.mkdir()
+    _broken_git_entry(folder, kind)
+    before = _git_entry_kind(folder)
+
+    state = workspace.git_state(str(folder))
+
+    assert state.kind == "unreadable"
+    assert not state.needs_prepare
+    with pytest.raises(workspace.GitPrepareError, match="cannot use this folder"):
+        workspace.prepare_git(str(folder))
+    assert _git_entry_kind(folder) == before  # no `git init` ran over it
+    assert workspace.folder_changes(str(folder)) is None
+    if inside_a_repository:
+        assert _git(parent, "rev-parse", "HEAD") == head  # nothing committed above it
+
+
+def test_a_readable_git_file_is_not_mistaken_for_a_broken_one(tmp_path: Path) -> None:
+    main = tmp_path / "main"
+    main.mkdir()
+    _git(main, "init", "-q")
+    _git(
+        main,
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@x.invalid",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "i",
+    )
+    linked = tmp_path / "linked"
+    _git(main, "worktree", "add", "-q", str(linked))  # its .git is a file
+    assert (linked / ".git").is_file()
+    assert workspace.git_state(str(linked)).kind == "ready"
+    sub = linked / "pkg"
+    sub.mkdir()
+    assert workspace.git_state(str(sub)).kind == "ready"
+
+
 def test_a_failed_commit_is_reported_not_hidden(tmp_path: Path) -> None:
     folder = _folder(tmp_path)
     _git(folder, "init", "-q")
@@ -171,7 +244,7 @@ def test_a_git_that_hangs_is_bounded_and_reported(
         workspace.prepare_git(str(folder))
 
 
-def test_folder_changes_lists_git_status_only_in_a_repository(tmp_path: Path) -> None:
+def test_folder_changes_lists_every_path_git_status_reports(tmp_path: Path) -> None:
     folder = _folder(tmp_path)
     assert workspace.folder_changes(str(folder)) is None
     _git(folder, "init", "-q")
@@ -182,15 +255,43 @@ def test_folder_changes_lists_git_status_only_in_a_repository(tmp_path: Path) ->
     (folder / "__pycache__" / "p.cpython-312.pyc").write_bytes(b"")
 
     changes = workspace.folder_changes(str(folder))
-    assert changes == workspace.FolderChanges(("palindrome.py",), 1)
+    # Nothing is hidden: bytecode is a change git reports, and it is counted.
+    assert changes == workspace.FolderChanges(("__pycache__/", "palindrome.py"), 2)
 
 
-def test_folder_changes_is_bounded(tmp_path: Path) -> None:
+def test_a_bytecode_path_is_shown_and_counted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     folder = _folder(tmp_path)
     _git(folder, "init", "-q")
-    for index in range(workspace._MAX_FILES + 5):
+    real = workspace._git
+
+    def status(cwd: str, *args: str, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if args[:1] == ("status",):
+            return subprocess.CompletedProcess(args, 0, "?? __pycache__/custom.pyc\n", "")
+        return real(cwd, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(workspace, "_git", status)
+    changes = workspace.folder_changes(str(folder))
+    assert changes == workspace.FolderChanges(("__pycache__/custom.pyc",), 1)
+
+
+def test_status_paths_keeps_every_line_in_git_order() -> None:
+    porcelain = " M b.py\n?? __pycache__/\nR  old.py -> new.py\n?? a.pyc\n"
+    assert workspace.status_paths(porcelain) == [
+        "b.py",
+        "__pycache__/",
+        "old.py -> new.py",
+        "a.pyc",
+    ]
+
+
+def test_folder_changes_is_bounded_but_counts_everything(tmp_path: Path) -> None:
+    folder = _folder(tmp_path)
+    _git(folder, "init", "-q")
+    for index in range(workspace.MAX_FILES + 5):
         (folder / f"f{index:03}.txt").write_text("x")
     changes = workspace.folder_changes(str(folder))
     assert changes is not None
-    assert len(changes.files) == workspace._MAX_FILES
-    assert changes.count == workspace._MAX_FILES + 5
+    assert len(changes.files) == workspace.MAX_FILES
+    assert changes.count == workspace.MAX_FILES + 5

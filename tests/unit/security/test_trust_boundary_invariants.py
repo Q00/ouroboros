@@ -459,10 +459,10 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
     ("src/ouroboros/gui/harness.py", "_run_result", "subprocess.run", 1318, 18): (
         "implicit inherit; read-only `git worktree list`."
     ),
-    ("src/ouroboros/gui/harness.py", "_run_result.git", "subprocess.run", 1338, 15): (
+    ("src/ouroboros/gui/harness.py", "_run_result.git", "subprocess.run", 1339, 19): (
         "implicit inherit; read-only `git diff --name-only` / `git status`."
     ),
-    ("src/ouroboros/gui/workspace.py", "_git", "subprocess.run", 50, 11): (
+    ("src/ouroboros/gui/workspace.py", "_git", "subprocess.run", 51, 11): (
         "implicit inherit, stdin closed; read-only `git rev-parse` / `config --get` / "
         "`status` checks, and, when the user clicks the hand-off offer, `git init` plus one "
         "empty `git commit` in the chat's own project folder."
