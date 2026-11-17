@@ -337,10 +337,13 @@ export interface ChatMessage {
   kind: "text" | "question" | "note" | "error" | "seed" | "run" | "result" | "log";
   text: string;
   ts: number;
+  /** A fixed sentence the page translates (`chat.note.<key>`); `text` is its English. */
+  key?: string;
+  vars?: Record<string, string | number>;
   ambiguity?: number | null;
   /** How a user answer was given, when Ouroboros drafted it from the repository or a default. */
   via?: "auto_confirmed" | "repo_confirmed" | "suggested";
-  /** For an auto-confirmed answer: the manifest or config file it was read from. */
+  /** For an auto-confirmed answer: the manifest or config file it was read from. For a result: "auto". */
   source?: string;
   evidence?: string[];
   /** The question an auto-confirmed or confirmed answer answered. */
@@ -348,6 +351,9 @@ export interface ChatMessage {
   corrected?: boolean;
   corrects?: string;
   model?: string | null;
+  /** For a reply whose model is the "default" sentinel: which agent's default, and its configured model. */
+  model_backend?: string | null;
+  model_default?: string | null;
   acceptance_criteria?: string[];
   constraints?: string[];
   seed_yaml?: string;
@@ -362,6 +368,21 @@ export interface ChatMessage {
   files?: string[];
   file_count?: number;
   uncommitted?: number;
+  /** An Auto result: how it ended, the run status it reported, and the folder it worked in. */
+  outcome?: "completed" | "failed" | "stopped" | "unverified";
+  handoff_status?: string | null;
+  folder?: string;
+  in_repo?: boolean;
+}
+
+export type GitKind = "ready" | "no_commits" | "not_repo" | "unreadable" | "no_git";
+
+/** GET /api/chat/folder: whether a folder exists and is a git repository with a commit. */
+export interface FolderProbe {
+  path: string;
+  exists: boolean;
+  git: GitKind | null;
+  detail?: string;
 }
 
 export interface Suggestion {

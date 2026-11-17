@@ -1469,6 +1469,20 @@
   overflow-wrap: anywhere;
 }
 
+.folder-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+.folder-status svg {
+  flex: none;
+  margin-top: 2px;
+}
+
 .composer-correcting {
   display: flex;
   align-items: center;

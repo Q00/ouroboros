@@ -5,23 +5,27 @@ from __future__ import annotations
 from pathlib import Path
 import subprocess
 
-from ouroboros.gui import harness, installers
+from ouroboros.gui import harness, installers, workspace
 
 
 def _git(cwd: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True)
 
 
+def _problem(cwd: Path) -> str | None:
+    return workspace.workspace_problem(workspace.git_state(str(cwd)))
+
+
 def test_workspace_problem_reports_missing_repo_and_commit(tmp_path: Path) -> None:
-    assert "not a git" in (harness._workspace_problem(str(tmp_path)) or "")
+    assert "not a git" in (_problem(tmp_path) or "")
     _git(tmp_path, "init", "-q")
-    assert "no commits" in (harness._workspace_problem(str(tmp_path)) or "")
+    assert "no commits" in (_problem(tmp_path) or "")
     (tmp_path / "a.txt").write_text("a")
     _git(tmp_path, "add", "a.txt")
     _git(
         tmp_path, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "init"
     )
-    assert harness._workspace_problem(str(tmp_path)) is None
+    assert _problem(tmp_path) is None
 
 
 def test_item_text_prefers_description() -> None:

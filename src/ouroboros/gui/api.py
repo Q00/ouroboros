@@ -73,7 +73,8 @@ class ConsoleState:
             if self._harness is None:
                 from ouroboros.gui.harness import Harness
 
-                self._harness = Harness()
+                # One registry: the jobs chats start are listed with every other job.
+                self._harness = Harness(jobs=self.jobs)
             return self._harness
 
     def health(self, started: float, port: int) -> dict[str, Any]:
@@ -447,11 +448,34 @@ def get_chat_sessions(state: ConsoleState, *, query: dict[str, str], body: Any) 
     return {"sessions": state.harness.list_sessions(), "defaults": state.harness.defaults()}
 
 
+def _refused(exc: ValueError, status: int, fallback: str) -> ApiError:
+    """A harness refusal as an API error: its stable code and values, else ``fallback``."""
+    from ouroboros.gui.harness import Refusal
+
+    if isinstance(exc, Refusal):
+        return ApiError(status, str(exc), exc.code, **exc.extra)
+    return ApiError(status, str(exc), fallback)
+
+
 def post_chat_session(state: ConsoleState, *, query: dict[str, str], body: Any) -> dict[str, Any]:
     try:
         return state.harness.create(body or {})
     except ValueError as exc:
-        raise ApiError(400, str(exc), "bad_request") from exc
+        raise _refused(exc, 400, "bad_request") from exc
+
+
+_MAX_PATH = 4096
+
+
+def get_chat_folder(state: ConsoleState, *, query: dict[str, str], body: Any) -> dict[str, Any]:
+    """Whether a folder exists and is a git repository with a commit. Reads only."""
+    path = query.get("path", "").strip()
+    if not path or len(path) > _MAX_PATH or "\x00" in path:
+        raise ApiError(400, "Pass ?path=<folder>", "bad_path")
+    try:
+        return state.harness.folder(path)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ApiError(400, f"Cannot read {path}: {exc}", "bad_path") from exc
 
 
 def get_chat_session(
@@ -484,7 +508,7 @@ def post_chat_message(
     except KeyError:
         raise ApiError(404, "Conversation not found", "not_found") from None
     except ValueError as exc:
-        raise ApiError(409, str(exc), "not_ready") from exc
+        raise _refused(exc, 409, "not_ready") from exc
 
 
 def post_chat_action(
@@ -495,7 +519,7 @@ def post_chat_action(
     except KeyError:
         raise ApiError(404, "Conversation not found", "not_found") from None
     except ValueError as exc:
-        raise ApiError(409, str(exc), "not_ready") from exc
+        raise _refused(exc, 409, "not_ready") from exc
 
 
 def get_chat_stream(
@@ -655,6 +679,7 @@ ROUTES: list[tuple[str, re.Pattern[str], Any]] = [
     _r("POST", rf"/api/providers/{_ID}/test", post_provider_test),
     _r("GET", r"/api/chat/sessions", get_chat_sessions),
     _r("POST", r"/api/chat/sessions", post_chat_session),
+    _r("GET", r"/api/chat/folder", get_chat_folder),
     _r("GET", rf"/api/chat/sessions/{_ID}", get_chat_session),
     _r("DELETE", rf"/api/chat/sessions/{_ID}", delete_chat_session),
     _r("POST", rf"/api/chat/sessions/{_ID}/messages", post_chat_message),

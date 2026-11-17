@@ -1,6 +1,7 @@
 import { Activity, ArrowLeft, RefreshCw } from "lucide-react";
 import { AnimatePresence, LayoutGroup, motion } from "motion/react";
 
+import type { Key, Translator } from "../i18n";
 import { useT } from "../i18n";
 import { backendName, compactNumber, timeAgo } from "../core/format";
 import { useResource } from "../core/resource";
@@ -30,6 +31,42 @@ export function RunStatus({ status }: { status: string }) {
   );
 }
 
+// Phase and activity values the runner reports (orchestrator/workflow_state.py,
+// parallel_executor.py). Anything else is shown as the server sent it.
+const PHASE_KEYS: Record<string, Key> = {
+  Discover: "run.phase.discover",
+  Define: "run.phase.define",
+  Develop: "run.phase.develop",
+  Deliver: "run.phase.deliver",
+};
+
+const ACTIVITY_KEYS: Record<string, Key> = {
+  idle: "run.activity.idle",
+  exploring: "run.activity.exploring",
+  building: "run.activity.building",
+  testing: "run.activity.testing",
+  debugging: "run.activity.debugging",
+  documenting: "run.activity.documenting",
+  finalizing: "run.activity.finalizing",
+  "Starting parallel execution": "run.activity.starting",
+  Executing: "run.activity.executing",
+  Monitoring: "run.activity.monitoring",
+};
+
+/** A run phase in the reader's language; an unknown one exactly as reported. */
+export function phaseLabel(t: Translator["t"], phase: string): string {
+  const key = PHASE_KEYS[phase];
+  return key ? t(key) : phase;
+}
+
+/** A run activity in the reader's language; an unknown one exactly as reported. */
+export function activityLabel(t: Translator["t"], activity: string): string {
+  const level = /^Level (\d+) complete$/.exec(activity);
+  if (level) return t("run.activity.levelComplete", { level: level[1] });
+  const key = ACTIVITY_KEYS[activity];
+  return key ? t(key) : activity;
+}
+
 export function Progress({ done, total, failed = 0, label }: { done: number; total: number; failed?: number; label: string }) {
   const safeTotal = Math.max(total, 1);
   return (
@@ -49,7 +86,7 @@ export function RunRow({ run }: { run: RunSummary }) {
       <span className="run-row-main">
         <span className="run-row-goal">{run.goal || run.execution_id}</span>
         <span className="run-row-meta">
-          {run.phase ? <span>{run.phase}</span> : null}
+          {run.phase ? <span>{phaseLabel(t, run.phase)}</span> : null}
           {run.provider ? <span>{backendName(run.provider)}</span> : null}
           {run.start_time ? <span>{timeAgo(run.start_time, locale)}</span> : null}
         </span>
@@ -132,7 +169,7 @@ function BoardView({ runId }: { runId: string }) {
             <div className="board-summary-top">
               <RunStatus status={status} />
               <span className="board-count">{t("runs.count", { done: counts[2], total })}</span>
-              {board.meta.phase ? <Chip>{board.meta.phase}</Chip> : null}
+              {board.meta.phase ? <Chip>{phaseLabel(t, board.meta.phase)}</Chip> : null}
               {board.meta.provider ? <Chip tone="info">{backendName(board.meta.provider)}</Chip> : null}
               {board.meta.total_tokens ? <span className="board-tokens">{t("runs.tokens", { count: compactNumber(board.meta.total_tokens, locale) })}</span> : null}
             </div>
@@ -140,7 +177,7 @@ function BoardView({ runId }: { runId: string }) {
             <AnimatePresence mode="wait">
               {board.meta.activity ? (
                 <motion.p key={board.meta.activity} className="board-activity" initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.18 }}>
-                  {board.meta.activity}
+                  {activityLabel(t, board.meta.activity)}
                 </motion.p>
               ) : null}
             </AnimatePresence>
