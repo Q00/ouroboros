@@ -353,6 +353,95 @@ def test_an_auto_job_that_did_not_complete_says_so(
         assert (error["kind"], error["key"], error["vars"]) == ("error", "auto_exited", {"code": 3})
 
 
+_LONG_AUTO_SCRIPT = """
+import sys
+print("Execution started:")
+print("  Execution ID: exec_20e9d3785fd6")
+{early}
+for index in range(2500):
+    print(f"[auto] progress line {{index}}")
+{late}
+"""
+
+
+@pytest.mark.parametrize("handoff_early", [False, True])
+def test_the_result_keeps_ids_printed_more_than_the_log_holds_ago(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, handoff_early: bool
+) -> None:
+    from ouroboros.gui import jobs
+
+    line = 'print("Run handoff status: completed")'
+    script = _LONG_AUTO_SCRIPT.format(
+        early=line if handoff_early else "", late="" if handoff_early else line
+    )
+    monkeypatch.setattr(harness, "ouroboros_command", lambda *_args: [sys.executable, "-c", script])
+    state = _state()
+    chat = state.harness.create({"goal": "long run", "mode": "auto", "cwd": str(tmp_path)})
+
+    session = _wait(state.harness, chat["id"], lambda s: s.get("status") == "done")
+
+    job = state.jobs.get(chat["auto_job_id"])
+    assert job is not None and len(job.lines) == jobs._MAX_LINES  # the id line is long gone
+    assert not any("exec_20e9d3785fd6" in kept for kept in job.lines)
+    result = session["messages"][-1]
+    assert (result["execution_id"], result["handoff_status"], result["outcome"]) == (
+        "exec_20e9d3785fd6",
+        "completed",
+        "completed",
+    )
+    assert session["execution_id"] == "exec_20e9d3785fd6"
+
+
+def test_a_job_whose_id_line_left_the_log_still_gives_the_board_link(tmp_path: Path) -> None:
+    """Deterministic: the follow loop first sees the job after the id scrolled out."""
+    from ouroboros.gui import jobs
+
+    state = _state()
+    job = jobs.Job(
+        id="j-long", kind="auto", title="t", argv=["ouroboros", "auto"], watch=harness._AUTO_WATCH
+    )
+    job.read_output("  Execution ID: exec_20e9d3785fd6")
+    for index in range(jobs._MAX_LINES + 100):
+        job.read_output(f"[auto] progress line {index}")
+    job.read_output("Run handoff status: completed")
+    job.exit_code, job.status = 0, "succeeded"
+    state.jobs._jobs[job.id] = job
+    assert not any("exec_" in line for line in job.lines)
+    state.harness._sessions["a1"] = {
+        "id": "a1",
+        "title": "t",
+        "goal": "t",
+        "cwd": str(tmp_path),
+        "mode": "auto",
+        "status": "running",
+        "auto_job_id": job.id,
+        "version": 0,
+        "messages": [_msg_log(job.id)],
+    }
+
+    state.harness._follow_auto("a1", job.id)
+
+    session = state.harness.get("a1") or {}
+    result = session["messages"][-1]
+    assert result["kind"] == "result"
+    assert (result["execution_id"], result["outcome"]) == ("exec_20e9d3785fd6", "completed")
+    assert session["execution_id"] == "exec_20e9d3785fd6"
+    log = session["messages"][0]
+    assert len(log["lines"]) == harness._MAX_LOG_LINES  # the transcript log stays bounded
+
+
+def _msg_log(job_id: str) -> dict[str, Any]:
+    return {
+        "id": "l1",
+        "role": "assistant",
+        "kind": "log",
+        "text": "ouroboros auto",
+        "ts": 0.0,
+        "lines": [],
+        "job_id": job_id,
+    }
+
+
 def test_a_stopped_auto_job_is_reported_as_stopped() -> None:
     assert harness._auto_outcome("failed", True, None) == "stopped"
     assert harness._auto_outcome("succeeded", False, None) == "unverified"

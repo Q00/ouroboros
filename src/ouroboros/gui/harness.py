@@ -50,7 +50,13 @@ from ouroboros.gui.jobs import JobRegistry, ouroboros_command
 _MAX_LOG_LINES = 400
 _RUN_POLL_SEC = 2.0
 _TERMINAL_RUN = frozenset({"completed", "failed", "cancelled"})
-_HANDOFF_STATUS = re.compile(r"^Run handoff status:\s*(\S+)\s*$")
+# What an Auto result needs from `ouroboros auto`'s output. The job reads them
+# from every line as it arrives (``JobRegistry.start(watch=...)``), so a long
+# run cannot push them out of the job's bounded log.
+_AUTO_WATCH = {
+    "execution_id": re.compile(r"\b(exec_[A-Za-z0-9_-]{6,})\b"),
+    "handoff_status": re.compile(r"^\s*Run handoff status:\s*(\S+)\s*$"),
+}
 
 # The project folder of the chat whose interview or Seed call this task runs.
 # Handlers are shared by every chat on the same agent; each call runs as its
@@ -1155,6 +1161,7 @@ class Harness:
             ),
             meta={"key": session_id},
             cwd=session["cwd"],
+            watch=_AUTO_WATCH,
         )
 
         def apply(s: dict[str, Any]) -> None:
@@ -1181,18 +1188,17 @@ class Harness:
             cursor = snap["cursor"]
             if snap["lines"]:
 
-                def apply(s: dict[str, Any], lines: list[str] = snap["lines"]) -> None:
+                def apply(
+                    s: dict[str, Any],
+                    lines: list[str] = snap["lines"],
+                    found: dict[str, str] = snap["found"],
+                ) -> None:
                     for message in reversed(s["messages"]):
                         if message.get("kind") == "log" and message.get("job_id") == job_id:
                             message["lines"] = (message.get("lines", []) + lines)[-_MAX_LOG_LINES:]
                             break
-                    for line in lines:
-                        found = _execution_id_in(line)
-                        if found:
-                            s["execution_id"] = found
-                        handoff = _HANDOFF_STATUS.match(line.strip())
-                        if handoff:
-                            s["auto_handoff_status"] = handoff.group(1)
+                    if found.get("execution_id"):
+                        s["execution_id"] = found["execution_id"]
 
                 self._update(session_id, apply)
             if not running:
@@ -1201,9 +1207,16 @@ class Harness:
             time.sleep(0.5)
 
     def _finish_auto(self, session_id: str, snap: dict[str, Any], *, cancelled: bool) -> None:
-        """End an Auto chat with what it produced: outcome, run board, folder and changes."""
+        """End an Auto chat with what it produced: outcome, run board, folder and changes.
+
+        The execution id and handoff status come from what the job recorded from
+        every output line (``snap["found"]``), not from its bounded log.
+        """
         cwd = str((self.get(session_id) or {}).get("cwd") or "")
         changes = workspace.folder_changes(cwd) if cwd else None
+        found: dict[str, str] = snap.get("found") or {}
+        execution_id = found.get("execution_id")
+        handoff = found.get("handoff_status")
 
         def finish(s: dict[str, Any]) -> None:
             ok = snap["status"] == "succeeded"
@@ -1223,7 +1236,8 @@ class Harness:
                         vars={"code": code},
                     )
                 )
-            handoff = s.get("auto_handoff_status")
+            if execution_id:
+                s["execution_id"] = execution_id
             s["messages"].append(
                 _msg(
                     "assistant",
@@ -1232,7 +1246,7 @@ class Harness:
                     source="auto",
                     outcome=_auto_outcome(snap["status"], cancelled, handoff),
                     handoff_status=handoff,
-                    execution_id=s.get("execution_id"),
+                    execution_id=execution_id,
                     folder=cwd,
                     in_repo=changes is not None,
                     files=list(changes.files) if changes else [],
@@ -1490,13 +1504,6 @@ def _auto_outcome(status: str, cancelled: bool, handoff: str | None) -> str:
     if status != "succeeded":
         return "failed"
     return "completed" if handoff == "completed" else "unverified"
-
-
-def _execution_id_in(line: str) -> str | None:
-    import re
-
-    match = re.search(r"\b(exec_[A-Za-z0-9_-]{6,})\b", line)
-    return match.group(1) if match else None
 
 
 def _board_summary(board: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, Any]:
