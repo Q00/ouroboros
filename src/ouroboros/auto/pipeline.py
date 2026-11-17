@@ -52,6 +52,7 @@ from ouroboros.auto.ledger import AssumptionRecord, SeedDraftLedger
 from ouroboros.auto.ledger_seed import (
     PARTIAL_SEED_GENERATION_MODE,
     brownfield_context_from_cwd,
+    ledger_non_goal_constraints,
     partial_seed_from_evidence,
     synthesize_seed_from_ledger,
     with_ledger_carryover,
@@ -79,6 +80,12 @@ from ouroboros.auto.seed_qa_advisory import (
     clear_seed_qa_verdict,
     publish_advisory,
     seed_qa_advisory_progress,
+)
+from ouroboros.auto.seed_qa_repair import (
+    SeedQaRepairMappingError,
+    contains_seed_qa_repair_instruction,
+    requests_seed_qa_ambiguity_repair,
+    seed_qa_repair_plan,
 )
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
@@ -135,15 +142,6 @@ _RECOVERY_BLOCKED_CHOICES: str = (
     "next: (1) re-interview with a refined goal (the in-state Seed cannot "
     "be edited mid-session); (2) abandon this session"
 )
-
-
-class SeedQaRepairMappingError(RuntimeError):
-    def __init__(self, feedback: tuple[str, ...]) -> None:
-        self.feedback: tuple[str, ...] = feedback
-        super().__init__(
-            "Seed QA feedback could not be mapped to a bounded repair; "
-            "manual Seed revision is required"
-        )
 
 
 class SeedGenerator(Protocol):
@@ -2109,7 +2107,7 @@ class AutoPipeline:
                 return None, current_seed, current_review
 
             if attempt < max_attempts:
-                if _requests_seed_qa_ambiguity_repair(qa_result):
+                if requests_seed_qa_ambiguity_repair(qa_result):
                     blocker = (
                         "seed_qa_ambiguity_unrepairable: Seed QA found unresolved ambiguity; "
                         "new interview evidence is required before execution"
@@ -2128,7 +2126,7 @@ class AutoPipeline:
                 try:
                     current_seed = normalize_execution_acceptance(
                         await self._repair_seed_after_qa(
-                            state, current_seed, qa_result, attempt=attempt
+                            state, current_seed, qa_result, attempt=attempt, ledger=ledger
                         )
                     )
                 except TimeoutError:
@@ -2233,31 +2231,34 @@ class AutoPipeline:
         qa_result: EvaluateResult,
         *,
         attempt: int,
+        ledger: SeedDraftLedger,
     ) -> Seed:
         """Repair a Seed that failed the QA gate before the next re-judge.
 
-        When a ``lateral_thinker`` is wired, ask a lateral persona to turn only
-        mapped repair constraints into one *concrete decision* and fold that
-        decision into the Seed — this resolves substance blockers (e.g. "no
+        When a ``lateral_thinker`` is wired, brief a lateral persona with the
+        mapped repair guidance (instructions included) and fold its *concrete
+        decision* into the Seed — this resolves substance blockers (e.g. "no
         binding contract chosen; a section is missing") that the mechanical
         feedback echo cannot, because the echo only restates the gap. Falls back when no
-        lateral handle is wired, the persona chain is exhausted, or the lateral
-        attempt fails (timeout / transient / plugin-delegation), so prior
-        behaviour and the ``seed_qa`` → REVIEW resume contract are preserved.
+        lateral handle is wired, the persona chain is exhausted, the lateral
+        attempt fails (timeout / transient / plugin-delegation), or the persona
+        returns no concrete decision, so prior behaviour and the ``seed_qa`` →
+        REVIEW resume contract are preserved. Repair instructions only steer;
+        they never become Seed constraints (#3033).
         """
         if self.lateral_thinker is None:
-            return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt)
+            return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt, ledger=ledger)
 
-        safe_feedback = _normalized_seed_qa_feedback(qa_result)
+        guidance = seed_qa_repair_plan(qa_result).guidance
 
         already_tried = tuple(ThinkingPersona(value) for value in state.personas_invoked)
         persona = select_persona_for_qa_failure(
-            safe_feedback,
+            guidance,
             (),
             already_tried_personas=already_tried,
         )
         if persona is None:
-            return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt)
+            return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt, ledger=ledger)
 
         seed_yaml = yaml.dump(
             seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False
@@ -2268,7 +2269,7 @@ class AutoPipeline:
                 candidate = await asyncio.wait_for(
                     self.lateral_thinker(
                         persona=persona,
-                        qa_differences=safe_feedback,
+                        qa_differences=guidance,
                         qa_suggestions=(),
                         run_artifact=seed_yaml,
                     ),
@@ -2291,13 +2292,15 @@ class AutoPipeline:
                 if self._enforce_deadline(state):
                     raise TimeoutError
         if lateral_result is None:
-            return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt)
+            return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt, ledger=ledger)
 
         state.last_lateral_persona = lateral_result.persona or persona.value
         state.last_lateral_approach_summary = lateral_result.approach_summary
         state.last_lateral_text = lateral_result.text
         if persona.value not in state.personas_invoked:
             state.personas_invoked.append(persona.value)
+        if not _normalized_seed_qa_lateral_feedback(lateral_result):
+            return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt, ledger=ledger)
         state.mark_progress(
             f"Seed QA lateral repair via {persona.value} (attempt {attempt})",
             tool_name="seed_qa",
@@ -2919,12 +2922,42 @@ def _seed_with_seed_qa_lateral_feedback(
     length-bounded so an overlong persona dump cannot bloat the Seed.
     """
     del attempt, qa_result
-    normalized_feedback = _normalized_seed_qa_lateral_feedback(lateral_result)
-    existing_constraints = tuple(
-        constraint
-        for constraint in seed.constraints
-        if not _is_seed_qa_diagnostic_constraint(constraint)
-    )
+    decisions = _normalized_seed_qa_lateral_feedback(lateral_result)
+    return _seed_with_repaired_constraints(seed, _repaired_constraints(seed, decisions))
+
+
+def _seed_with_seed_qa_feedback(
+    seed: Seed,
+    qa_result: EvaluateResult,
+    *,
+    attempt: int,
+    ledger: SeedDraftLedger | None = None,
+) -> Seed:
+    """Return a Seed revised with bounded pre-run Seed QA feedback.
+
+    Only the plan's product/runtime constraints and the ledger's own binding
+    non-goals are written; its Seed-authoring instructions direct this rebuild
+    and never reach the Seed (#3033). Feedback that maps only to instructions
+    and leaves the constraints unchanged raises :class:`SeedQaRepairMappingError`,
+    so the gate never re-judges an unchanged Seed as a repair.
+    """
+    del attempt
+    plan = seed_qa_repair_plan(qa_result)
+    restored: tuple[str, ...] = ()
+    if plan.restore_ledger_non_goals and ledger is not None:
+        restored = ledger_non_goal_constraints(ledger)
+    constraints = _repaired_constraints(seed, (*plan.constraints, *restored))
+    if not plan.constraints and constraints == seed.constraints:
+        raise SeedQaRepairMappingError(plan.feedback)
+    return _seed_with_repaired_constraints(seed, constraints)
+
+
+def _repaired_constraints(seed: Seed, additions: tuple[str, ...]) -> tuple[str, ...]:
+    kept = (c for c in seed.constraints if not _is_seed_qa_diagnostic_constraint(c))
+    return tuple(dict.fromkeys((*kept, *additions)))
+
+
+def _seed_with_repaired_constraints(seed: Seed, constraints: tuple[str, ...]) -> Seed:
     metadata_updates: dict[str, Any] = {
         "seed_id": f"seed_{uuid4().hex[:12]}",
         "created_at": datetime.now(UTC),
@@ -2932,31 +2965,9 @@ def _seed_with_seed_qa_lateral_feedback(
     }
     return seed.model_copy(
         update={
-            "constraints": tuple(dict.fromkeys((*existing_constraints, *normalized_feedback))),
+            "constraints": constraints,
             "metadata": seed.metadata.model_copy(update=metadata_updates),
         }
-    )
-
-
-def _seed_with_seed_qa_feedback(seed: Seed, qa_result: EvaluateResult, *, attempt: int) -> Seed:
-    """Return a Seed revised with bounded pre-run Seed QA feedback."""
-    del attempt
-    normalized_feedback = _normalized_seed_qa_feedback(qa_result)
-    existing_constraints = tuple(
-        constraint
-        for constraint in seed.constraints
-        if not _is_seed_qa_diagnostic_constraint(constraint)
-    )
-    metadata_updates: dict[str, Any] = {
-        "seed_id": f"seed_{uuid4().hex[:12]}",
-        "created_at": datetime.now(UTC),
-        "parent_seed_id": seed.metadata.seed_id,
-    }
-    return seed.model_copy(
-        update={
-            "constraints": tuple(dict.fromkeys((*existing_constraints, *normalized_feedback))),
-            "metadata": seed.metadata.model_copy(update=metadata_updates),
-        },
     )
 
 
@@ -2969,6 +2980,7 @@ def _is_seed_qa_diagnostic_constraint(constraint: str) -> bool:
         or "# lateral thinking:" in lowered
         or "qa differences:" in lowered
         or "qa suggestions:" in lowered
+        or contains_seed_qa_repair_instruction(constraint)
     )
 
 
@@ -2982,8 +2994,10 @@ def _normalized_seed_qa_lateral_feedback(lateral_result: LateralResult) -> tuple
     """Translate lateral Seed QA output into durable implementation constraints.
 
     Persona output is useful evidence for choosing a repair direction, but the
-    Seed must not persist the review transcript, attempt counters, or lateral
-    diagnostic headings that status doctor classifies as spec pollution.
+    Seed must not persist the review transcript, attempt counters, lateral
+    diagnostic headings that status doctor classifies as spec pollution, or an
+    echo of the repair's own instructions. Returns nothing when no concrete
+    decision remains; the caller then falls back to the deterministic repair.
     """
     summary = _clean_seed_qa_repair_text(lateral_result.approach_summary or "", limit=320)
     decision = _clean_seed_qa_repair_text(lateral_result.text, limit=1600)
@@ -2992,15 +3006,12 @@ def _normalized_seed_qa_lateral_feedback(lateral_result: LateralResult) -> tuple
     if (
         summary
         and not _is_seed_qa_recovery_transcript(summary)
+        and not contains_seed_qa_repair_instruction(summary)
         and not (persona_prefix and summary.casefold().startswith(f"{persona_prefix}:"))
     ):
         repairs.append(f"Use this bounded implementation approach to resolve Seed QA: {summary}")
     if _is_clean_seed_qa_lateral_decision(decision, raw_text=lateral_result.text):
         repairs.append(f"Use this bounded implementation approach to resolve Seed QA: {decision}")
-    if not repairs:
-        repairs.append(
-            "Resolve Seed QA feedback before execution without copying recovery persona prompts, failed-run transcripts, or diagnostic prose."
-        )
     return tuple(dict.fromkeys(repairs))
 
 
@@ -3034,7 +3045,11 @@ def _clean_seed_qa_repair_text(text: str, *, limit: int) -> str:
 
 
 def _is_clean_seed_qa_lateral_decision(decision: str, *, raw_text: str) -> bool:
-    if not decision or _is_seed_qa_recovery_transcript(decision):
+    if (
+        not decision
+        or _is_seed_qa_recovery_transcript(decision)
+        or contains_seed_qa_repair_instruction(decision)
+    ):
         return False
     if decision.casefold().startswith("decision:"):
         return True
@@ -3079,73 +3094,6 @@ def _is_seed_qa_recovery_transcript_line(text: str) -> bool:
 def _starts_seed_qa_recovery_context_block(text: str) -> bool:
     lowered = text.casefold()
     return lowered.startswith("## problem context") or lowered.startswith("# problem context")
-
-
-def _normalized_seed_qa_feedback(qa_result: EvaluateResult) -> tuple[str, ...]:
-    """Translate QA diagnostics into short actionable Seed repair constraints.
-
-    The Seed direction must not absorb raw reviewer/lateral transcripts. Keep
-    the feedback as bounded repair intent, not as pasted diagnostic evidence.
-    """
-    feedback = tuple(
-        item.strip()
-        for item in (*qa_result.differences[:5], *qa_result.suggestions[:5])
-        if item.strip()
-    )
-    lowered = "\n".join(feedback).casefold()
-    if re.search(r"\bexit[_\s-]*conditions?\b", lowered):
-        raise SeedQaRepairMappingError(feedback)
-    repairs: list[str] = []
-    if _requests_seed_qa_ambiguity_repair(qa_result):
-        repairs.append("Seed metadata must satisfy the readiness gate: ambiguity_score <= 0.20.")
-    if "non_goals" in lowered or "non-goals" in lowered or "runtime_context" in lowered:
-        repairs.append(
-            "Preserve ledger non-goals and runtime context in executable Seed surfaces; "
-            "use constraints prefixed with `Non-goal:` and explicit runtime constraints or ontology fields."
-        )
-    if "polluted" in lowered or "diagnostic" in lowered or "lateral repair" in lowered:
-        repairs.append(
-            "Constraints must contain only actionable product/runtime constraints; omit QA or lateral diagnostic prose."
-        )
-    if "transcript schema" in lowered or "schema_version" in lowered:
-        repairs.append("Use one transcript JSON schema consistently across acceptance criteria.")
-    if "no-op" in lowered or "noop" in lowered:
-        repairs.append("Define explicit no-op scope for supported command behavior.")
-    if "review-blocking" in lowered:
-        repairs.append("Introduce the review-blocking post-QA constraint before execution.")
-    if "binding" in lowered and "contract" in lowered:
-        repairs.append("Define one explicit binding contract before execution.")
-    if "templated" in lowered or "indirect" in lowered:
-        repairs.append(
-            "Acceptance criteria must be direct executable checks, not generic templates."
-        )
-    if "partial" in lowered and (
-        "output" in lowered or "mp4" in lowered or "transcript" in lowered
-    ):
-        repairs.append("Failure paths must leave no partial output artifacts.")
-    if not repairs:
-        raise SeedQaRepairMappingError(feedback)
-    return tuple(dict.fromkeys(repairs))
-
-
-def _requests_seed_qa_ambiguity_repair(qa_result: EvaluateResult) -> bool:
-    score = r"(?:metadata\.)?ambiguity_score"
-    target = r"0\.2(?:0)?"
-    patterns = (
-        rf"{score}\s*(?:<=|<)\s*{target}",
-        rf"{score}\s+(?:must|should|needs? to)\s+(?:be|remain)\s*(?:<=|<)\s*{target}",
-        rf"{score}\s+(?:must|should|needs? to)\s+be\s+reduced\s+to\s+{target}",
-        rf"{score}\s+(?:must|should|needs? to)\s+be\s+(?:at most|no greater than)\s+{target}",
-        rf"{score}\s+must\s+not\s+exceed\s+{target}",
-        rf"{score}\s+(?:must|should)\s+not\s+be\s+greater\s+than\s+{target}",
-        rf"{score}\s+(?:is|remains)\s+above\s+{target}\s+and\s+exceeds\s+(?:the\s+)?(?:required\s+)?(?:readiness\s+)?gate",
-        rf"{score}\s+(?:is|=)\s*(?:0\.\d+|1\.0+)\s*,?\s*(?:which\s+)?(?:exceeds?|exceeding|is above|is greater than)\s+(?:the\s+)?(?:required\s+)?(?:readiness\s+gate(?:\s+of)?\s*)?(?:<=?\s*)?{target}",
-    )
-    for item in (*qa_result.differences, *qa_result.suggestions):
-        lowered = item.strip().casefold()
-        if any(re.fullmatch(rf"{pattern}[.!]?", lowered) for pattern in patterns):
-            return True
-    return False
 
 
 def _safe_seed_qa_evidence(feedback: tuple[str, ...]) -> list[str]:

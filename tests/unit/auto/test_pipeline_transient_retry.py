@@ -356,7 +356,10 @@ async def test_seed_repair_lateral_recovers_after_one_transient_raise(tmp_path) 
         differences=("non_goals are missing from executable constraints",),
     )
 
-    repaired = await pipeline._repair_seed_after_qa(state, _build_seed(), qa_result, attempt=1)
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    repaired = await pipeline._repair_seed_after_qa(
+        state, _build_seed(), qa_result, attempt=1, ledger=ledger
+    )
 
     assert calls == 2
     assert any("explicit prefixed constraints" in item for item in repaired.constraints)
@@ -384,10 +387,26 @@ async def test_seed_repair_lateral_falls_back_after_transient_exhaustion(tmp_pat
         differences=("non_goals are missing from executable constraints",),
     )
 
-    repaired = await pipeline._repair_seed_after_qa(state, _build_seed(), qa_result, attempt=1)
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    ledger.add_entry(
+        "non_goals",
+        LedgerEntry(
+            key="non_goals.user",
+            value="No cloud sync",
+            source=LedgerSource.NON_GOAL,
+            confidence=0.95,
+            status=LedgerStatus.CONFIRMED,
+        ),
+    )
+    repaired = await pipeline._repair_seed_after_qa(
+        state, _build_seed(), qa_result, attempt=1, ledger=ledger
+    )
 
     assert calls == pipeline_module._TRANSIENT_TOOL_ATTEMPTS
-    assert any("Non-goal:" in item for item in repaired.constraints)
+    # #3033: the fallback restores the ledger's own non-goal rather than
+    # appending the instruction that asked for it.
+    assert "Non-goal: No cloud sync" in repaired.constraints
+    assert not any("executable Seed surfaces" in item for item in repaired.constraints)
 
 
 @pytest.mark.asyncio

@@ -108,7 +108,12 @@ def test_seed_qa_feedback_does_not_pollute_constraints_with_diagnostics() -> Non
     assert "# Lateral Thinking" not in constraints
     assert "QA differences:" not in constraints
     assert "[seed qa lateral repair attempt" not in constraints
-    assert "omit QA or lateral diagnostic prose" in constraints
+    # #3033: the pollution and readiness lines are instructions for the repair,
+    # not user requirements. Stripping the pasted diagnostics is the repair; the
+    # instruction sentences themselves never become Seed constraints.
+    assert "omit QA or lateral diagnostic prose" not in constraints
+    assert "readiness gate" not in constraints
+    assert repaired.constraints == ("Use existing project patterns",)
     assert repaired.metadata.ambiguity_score == 0.206
     assert repaired.metadata.parent_seed_id == "seed_dirty"
 
@@ -314,7 +319,11 @@ def test_seed_qa_lateral_feedback_discards_persona_transcripts() -> None:
     assert "## Persona" not in constraints
     assert "Contrarian" not in constraints
     assert "Most recent run artifact" not in constraints
-    assert "without copying recovery persona prompts" in constraints
+    # #3033: a transcript-only persona answer yields no decision. The old
+    # placeholder sentence is not a user requirement and is no longer written;
+    # the pipeline falls back to the deterministic repair instead.
+    assert "without copying recovery persona prompts" not in constraints
+    assert repaired.constraints == ("Use existing project patterns",)
 
 
 def test_seed_qa_lateral_feedback_preserves_clean_summary_with_dirty_body() -> None:
