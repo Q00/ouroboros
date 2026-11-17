@@ -263,12 +263,12 @@ async def test_legacy_litellm_keeps_request_arguments(
 @pytest.mark.parametrize(
     ("model", "top_p", "temperature"),
     [
-        # Non-5.5 Claude ids keep LiteLLM's own effort and JSON handling;
-        # only recognised legacy families are sent temperature.
+        # Claude ids LiteLLM's bundled map lists keep LiteLLM's own effort and
+        # JSON handling; only recognised legacy families are sent temperature.
+        # Unlisted current ids take the native path (test_claude_sampling_gate).
         ("claude-sonnet-4-5", None, 0.2),
-        ("claude-opus-5", None, None),
-        ("claude-custom-proxy", None, None),
-        ("openrouter/anthropic/claude-opus-5", None, None),
+        ("claude-opus-4-8", None, None),
+        ("openrouter/anthropic/claude-opus-4.7", None, None),
         ("openai/gpt-5.4", None, None),
     ],
 )

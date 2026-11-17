@@ -88,6 +88,13 @@ MODERN_OR_UNKNOWN = [
     "sonnet",
     "haiku",
     "default",
+    # Aliases and unknown names on Anthropic routes are Claude too.
+    "anthropic/default",
+    "anthropic/opus",
+    "openrouter/anthropic/sonnet",
+    "anthropic/some-new-model",
+    "bedrock/anthropic.some-new-model-v1:0",
+    "vertex_ai/claude-next",
     "claude-opus-6",
     "claude-sonnet-5-7",
     "claude-opus-4-10",
@@ -96,8 +103,11 @@ MODERN_OR_UNKNOWN = [
 NON_CLAUDE = [
     "gpt-6.1-sol",
     "groq/llama-4",
+    "groq/some-new-model",
     "gemini/gemini-3-pro",
     "openrouter/meta-llama/llama-4-maverick",
+    # An alias on a non-Anthropic route does not name a Claude model.
+    "openai/default",
 ]
 
 TABLE = (
@@ -168,6 +178,11 @@ def test_proof_worker_accepts_exactly_what_the_adapter_builds(
     else:
         missing_temperature = {k: v for k, v in kwargs.items() if k != "temperature"}
         assert not worker._valid_completion_kwargs(missing_temperature, config)
+    if effort and "thinking" in kwargs:
+        # The native effort trio is required, and raw effort is refused.
+        without_thinking = {k: v for k, v in kwargs.items() if k != "thinking"}
+        assert not worker._valid_completion_kwargs(without_thinking, config)
+        assert not worker._valid_completion_kwargs({**kwargs, "reasoning_effort": effort}, config)
 
 
 # Ids the direct adapter sends as-is (it strips ``anthropic/`` and
@@ -311,3 +326,250 @@ async def test_litellm_http_body_follows_the_family(
     assert request["model"] == wire_model
     assert request.get("temperature") == temperature
     assert not {"top_p", "top_k"} & request.keys()
+
+
+# Current Claude routes LiteLLM's bundled model map does not list. LiteLLM would
+# refuse effort or turn it into ``thinking.budget_tokens``, and turn a JSON
+# schema into a forced tool call; these routes take the Claude 5.5 path instead.
+UNLISTED_DIRECT = [
+    "claude-sonnet-5",
+    "claude-opus-5",
+    "claude-haiku-5-5",
+    "anthropic/claude-sonnet-5",
+    "claude-mythos-5-2",
+    "opus",
+    "anthropic/default",
+    "claude-opus-6",
+]
+UNLISTED_OPENROUTER = [
+    "openrouter/anthropic/claude-sonnet-5",
+    "openrouter/anthropic/sonnet",
+]
+# Routes whose request shape this change leaves exactly as it was: Claude ids
+# the bundled map lists, legacy families, Bedrock/Vertex, and non-Claude routes.
+UNCHANGED_PATH = [
+    ("claude-opus-4-7", None),
+    ("claude-opus-4-8", None),
+    ("claude-fable-5", None),
+    ("openrouter/anthropic/claude-opus-4.7", None),
+    ("claude-sonnet-4-6", 0.2),
+    ("bedrock/us.anthropic.claude-opus-4-7-v1:0", None),
+    ("groq/some-new-model", 0.2),
+]
+FORMATS = [
+    None,
+    {"type": "json_object"},
+    {"type": "json_schema", "json_schema": {"type": "object"}},
+]
+
+
+def _litellm_kwargs(model: str, effort: str | None, response_format: dict | None) -> dict:
+    from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+
+    return LiteLLMAdapter(api_key="test-only-placeholder")._build_completion_kwargs(
+        [Message(role=MessageRole.USER, content="hello")],
+        CompletionConfig(
+            model=model,
+            temperature=0.2,
+            top_p=0.8,
+            reasoning_effort=effort,
+            response_format=response_format,
+        ),
+    )
+
+
+@pytest.mark.parametrize("model", UNLISTED_DIRECT)
+@pytest.mark.parametrize("effort", [None, "low", "high"])
+@pytest.mark.parametrize("response_format", FORMATS)
+def test_unlisted_direct_claude_gets_native_effort_and_json(
+    model: str, effort: str | None, response_format: dict | None
+) -> None:
+    pytest.importorskip("litellm")
+    kwargs = _litellm_kwargs(model, effort, response_format)
+    assert not {"temperature", "top_p", "top_k", "response_format", "reasoning_effort"} & (
+        kwargs.keys()
+    )
+    assert "budget_tokens" not in json.dumps(kwargs)
+    if response_format:
+        assert kwargs["messages"][-1]["role"] == "system"
+        assert "JSON" in kwargs["messages"][-1]["content"]
+    else:
+        assert kwargs["messages"][-1]["role"] == "user"
+    if effort:
+        assert kwargs["thinking"] == {"type": "adaptive"}
+        assert kwargs["output_config"] == {"effort": effort}
+        assert kwargs["allowed_openai_params"] == ["thinking"]
+    else:
+        assert not {"thinking", "output_config", "allowed_openai_params"} & kwargs.keys()
+
+
+@pytest.mark.parametrize("model", UNLISTED_OPENROUTER)
+@pytest.mark.parametrize("effort", [None, "high"])
+def test_unlisted_openrouter_claude_matches_the_openrouter_55_path(
+    model: str, effort: str | None
+) -> None:
+    pytest.importorskip("litellm")
+    # LiteLLM forwards response_format to OpenRouter unchanged (no forced tool),
+    # as on the OpenRouter 5.5 path; effort bypasses LiteLLM's map-based refusal.
+    kwargs = _litellm_kwargs(model, effort, {"type": "json_object"})
+    assert not {"temperature", "top_p", "top_k", "reasoning_effort", "thinking"} & kwargs.keys()
+    assert kwargs["response_format"] == {"type": "json_object"}
+    if effort:
+        assert kwargs["extra_body"] == {"reasoning": {"effort": effort}}
+    else:
+        assert "extra_body" not in kwargs
+
+
+@pytest.mark.parametrize(("model", "temperature"), UNCHANGED_PATH)
+@pytest.mark.parametrize("effort", [None, "high"])
+@pytest.mark.parametrize("response_format", FORMATS)
+def test_listed_and_other_routes_keep_litellm_handling(
+    model: str, temperature: float | None, effort: str | None, response_format: dict | None
+) -> None:
+    pytest.importorskip("litellm")
+    from ouroboros.providers.litellm_adapter import _litellm_response_format
+
+    kwargs = _litellm_kwargs(model, effort, response_format)
+    assert kwargs.get("temperature") == temperature
+    assert kwargs.get("top_p") == (0.8 if model.startswith("groq/") else None)
+    assert kwargs["messages"] == [{"role": "user", "content": "hello"}]
+    assert kwargs.get("reasoning_effort") == effort
+    if response_format:
+        assert kwargs["response_format"] == _litellm_response_format(response_format)
+    else:
+        assert "response_format" not in kwargs
+    assert not {"thinking", "output_config", "allowed_openai_params", "extra_body"} & (
+        kwargs.keys()
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["anthropic/claude-sonnet-5", "anthropic/default"])
+@pytest.mark.parametrize("effort", [None, "high"])
+async def test_unlisted_direct_claude_http_body(
+    monkeypatch: pytest.MonkeyPatch, model: str, effort: str | None
+) -> None:
+    pytest.importorskip("litellm")
+    import httpx
+
+    from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+
+    requests: list[dict] = []
+
+    async def send(
+        client: httpx.AsyncClient, request: httpx.Request, **kwargs: object
+    ) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "model": model.removeprefix("anthropic/"),
+                "content": [{"type": "text", "text": '{"ok":true}'}],
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    result = await LiteLLMAdapter(api_key="test-only-placeholder").complete(
+        [Message(role=MessageRole.USER, content="hello")],
+        CompletionConfig(
+            model=model,
+            temperature=0.2,
+            top_p=0.8,
+            reasoning_effort=effort,
+            response_format={"type": "json_schema", "json_schema": {"type": "object"}},
+        ),
+    )
+    assert result.is_ok, result.error if result.is_err else None
+    assert len(requests) == 1
+    request = requests[0]
+    assert not {"temperature", "top_p", "top_k", "tools", "tool_choice"} & request.keys()
+    assert "budget_tokens" not in json.dumps(request)
+    assert "JSON" in json.dumps(request["system"])
+    if effort:
+        assert request["thinking"] == {"type": "adaptive"}
+        assert request["output_config"] == {"effort": effort}
+    else:
+        assert not {"thinking", "output_config"} & request.keys()
+
+
+@pytest.mark.asyncio
+async def test_unlisted_openrouter_claude_http_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("litellm")
+    import httpx
+
+    from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+
+    requests: list[dict] = []
+
+    async def send(
+        client: httpx.AsyncClient, request: httpx.Request, **kwargs: object
+    ) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "chatcmpl_test",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "anthropic/claude-sonnet-5",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": '{"ok":true}'},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    result = await LiteLLMAdapter(api_key="test-only-placeholder").complete(
+        [Message(role=MessageRole.USER, content="hello")],
+        CompletionConfig(
+            model="openrouter/anthropic/claude-sonnet-5",
+            temperature=0.2,
+            top_p=0.8,
+            reasoning_effort="high",
+            response_format={"type": "json_object"},
+        ),
+    )
+    assert result.is_ok, result.error if result.is_err else None
+    assert len(requests) == 1
+    request = requests[0]
+    assert not {"temperature", "top_p", "top_k", "thinking", "reasoning_effort"} & request.keys()
+    assert request["reasoning"] == {"effort": "high"}
+    assert request["response_format"] == {"type": "json_object"}
+
+
+def test_unreadable_bundled_map_counts_every_route_as_unlisted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("litellm")
+    from litellm.litellm_core_utils.get_model_cost_map import GetModelCostMap
+
+    from ouroboros.providers import litellm_claude_routes as routes
+
+    def unreadable() -> dict:
+        raise OSError("bundled map missing")
+
+    monkeypatch.setattr(GetModelCostMap, "load_local_model_cost_map", staticmethod(unreadable))
+    routes._bundled_claude_route_ids.cache_clear()
+    routes.native_claude_route.cache_clear()
+    try:
+        assert routes._bundled_claude_route_ids() == frozenset()
+        assert routes.native_claude_route("claude-opus-4-8") is True
+        # Legacy families and non-Claude routes never take the native path.
+        assert routes.native_claude_route("claude-sonnet-4-6") is False
+        assert routes.native_claude_route("groq/some-new-model") is False
+    finally:
+        routes._bundled_claude_route_ids.cache_clear()
+        routes.native_claude_route.cache_clear()

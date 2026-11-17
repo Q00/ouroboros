@@ -10,7 +10,7 @@ from typing import Any
 
 import litellm
 
-from ouroboros.providers.anthropic_models import is_claude_5_5, omit_claude_sampling
+from ouroboros.providers.anthropic_models import omit_claude_sampling
 from ouroboros.providers.base import CompletionConfig
 from ouroboros.providers.litellm_adapter import (
     _HTTPX_DEPENDENCY_VERSION,
@@ -22,6 +22,7 @@ from ouroboros.providers.litellm_adapter import (
     LiteLLMAdapter,
     _worker_runtime_authority,
 )
+from ouroboros.providers.litellm_claude_routes import native_claude_route
 from ouroboros.providers.openai_sampling import omit_openai_reasoning_sampling
 
 _MAX_INPUT_BYTES = 4 * 1024 * 1024
@@ -69,7 +70,7 @@ def _valid_completion_kwargs(kwargs: dict[str, Any], config: CompletionConfig) -
     ):
         allowed = allowed - {"temperature", "top_p"}
         required = required - {"temperature"}
-    if is_claude_5_5(config.model):
+    if native_claude_route(config.model):
         allowed = allowed - {"reasoning_effort"}
         effort = config.reasoning_effort
         if effort is not None and not isinstance(effort, str):

@@ -14,7 +14,9 @@ import re
 CLAUDE_5_5_MODELS = frozenset({"claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"})
 
 # Substrings that mark a model string as Claude, whatever the route prefix.
-_CLAUDE_MARKERS = ("claude", "fable", "mythos")
+# ``anthropic`` covers every Anthropic route (``anthropic/``,
+# ``openrouter/anthropic/``, Bedrock ``anthropic.`` ids), which serve only Claude.
+_CLAUDE_MARKERS = ("claude", "fable", "mythos", "anthropic")
 # Runtime aliases and the backend sentinel resolve to whatever Claude model is
 # current, which Ouroboros cannot know, so they are never treated as legacy.
 _CLAUDE_ALIASES = frozenset({"opus", "sonnet", "haiku", "default"})
@@ -40,6 +42,13 @@ def is_claude_5_5(model: str) -> bool:
 
 
 def _is_claude(model: str) -> bool:
+    """Whether a model string targets Claude.
+
+    A bare alias (``opus``) counts, and an alias on an Anthropic route
+    (``anthropic/default``, ``openrouter/anthropic/sonnet``) counts through the
+    ``anthropic`` marker. An alias on another provider (``openai/default``)
+    does not, because that route does not serve Claude.
+    """
     normalized = model.strip().lower()
     return normalized in _CLAUDE_ALIASES or any(m in normalized for m in _CLAUDE_MARKERS)
 
@@ -91,8 +100,9 @@ def claude_accepts_prefill(model: str) -> bool:
 def omit_claude_sampling(model: str) -> bool:
     """Whether a routed request must omit sampling because it targets Claude.
 
-    True for any Claude-looking model string (``claude``, ``fable`` or
-    ``mythos`` anywhere, or exactly ``opus`` / ``sonnet`` / ``haiku`` /
+    True for any Claude model string (``claude``, ``fable``, ``mythos`` or
+    ``anthropic`` anywhere, so every Anthropic route including prefixed aliases
+    such as ``anthropic/opus``, or exactly ``opus`` / ``sonnet`` / ``haiku`` /
     ``default``) that is not a recognised legacy sampling family. Non-Claude
     model strings return False so their routes keep their own behavior.
     """
