@@ -386,6 +386,8 @@ export interface AutoRound {
   answer: string | null;
   /** auto/answerer.py AutoAnswerSource: user_goal, repo_fact, assumption, … */
   answer_source: string | null;
+  /** The ambiguity the interview reported with this question, when it did. */
+  ambiguity?: number | null;
 }
 
 /** An Auto chat's structured view, folded from `ouroboros auto --progress-jsonl` (gui/auto_progress.py). */
@@ -398,6 +400,8 @@ export interface AutoView {
   phases: { phase: string; at: string | null }[];
   rounds: AutoRound[];
   rounds_dropped: number;
+  /** One point per round that reported an ambiguity, in round order. */
+  ambiguity_trend?: { round: number; value: number }[];
   max_rounds: number | null;
   max_repair_rounds: number | null;
   grade: string | null;

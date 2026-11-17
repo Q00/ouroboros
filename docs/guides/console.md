@@ -83,8 +83,10 @@ and Spanish (side rail → language).
     lateral recovery on Verify;
   - the automatic interview: each question, the answer Auto chose, and where
     the answer came from (the goal, the code, an existing convention, a safe
-    default, an assumption, out of scope, and so on). Once the interview is
-    over it folds to one line, which opens;
+    default, an assumption, out of scope, and so on). The ambiguity the
+    interview reports with a question (its `(ambiguity: 0.43)` prefix) shows
+    on that question, and the card header shows the latest value with a small
+    trend line. Once the interview is over it folds to one line, which opens;
   - the Seed card the interview uses, with its review grade, how the grade
     moved (for example B → A), the repair rounds, and what the review asked
     for;

@@ -179,10 +179,129 @@ def test_rounds_pair_a_question_with_its_answer_whatever_arrives_first() -> None
         auto_progress.fold(view, event)
 
     assert view["rounds"] == [
-        {"round": 1, "question": "Q1?", "answer": "A1", "answer_source": "non_goal"},
-        {"round": 2, "question": "Q2?", "answer": "A2", "answer_source": "repo_fact"},
-        {"round": 3, "question": "Q3?", "answer": None, "answer_source": None},
+        {
+            "round": 1,
+            "question": "Q1?",
+            "answer": "A1",
+            "answer_source": "non_goal",
+            "ambiguity": None,
+        },
+        {
+            "round": 2,
+            "question": "Q2?",
+            "answer": "A2",
+            "answer_source": "repo_fact",
+            "ambiguity": None,
+        },
+        {"round": 3, "question": "Q3?", "answer": None, "answer_source": None, "ambiguity": None},
     ]
+
+
+@pytest.mark.parametrize(
+    ("text", "question", "value"),
+    [
+        (
+            "(ambiguity: 0.43) 세 가지 결정을 확정해도 될까요?",
+            "세 가지 결정을 확정해도 될까요?",
+            0.43,
+        ),
+        ("(ambiguity:0.4)Which file?", "Which file?", 0.4),
+        ("(  ambiguity :  .5  )   Which file?", "Which file?", 0.5),
+        ("(ambiguity: 0) Done?", "Done?", 0.0),
+        ("(ambiguity: 1.00) Start?", "Start?", 1.0),
+    ],
+)
+def test_an_ambiguity_prefix_is_split_off_the_question(
+    text: str, question: str, value: float
+) -> None:
+    assert auto_progress.split_ambiguity(text) == (question, value)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Which file should hold the tests?",
+        "(ambiguity: high) Which file?",
+        "(ambiguity: ) Which file?",
+        "(ambiguity: 0.4.2) Which file?",
+        "(ambiguity: -0.2) Which file?",
+        "(ambiguity: 1.5) Which file?",
+        "(Ambiguity: 0.4) Which file?",
+        "(ambiguity 0.4) Which file?",
+        "(ambiguity: 0.4",
+        "(ambiguity: 0.4)",
+        "(ambiguity: 0.4)   ",
+        "Which file? (ambiguity: 0.4)",
+    ],
+)
+def test_a_malformed_or_misplaced_prefix_leaves_the_question_untouched(text: str) -> None:
+    assert auto_progress.split_ambiguity(text) == (text, None)
+
+
+def test_the_fold_keeps_the_ambiguity_on_its_round_not_in_its_text() -> None:
+    view = auto_progress.new_view()
+    flow = [
+        _event("question", "interview", round=1, question="What does it take?"),
+        _event("answer", "interview", round=1, question="What does it take?", answer="A str."),
+        _event("question", "interview", round=2, question="(ambiguity: 0.48) Punctuation?"),
+        # The answer repeats the question with its prefix: one point, not two.
+        _event(
+            "answer",
+            "interview",
+            round=2,
+            question="(ambiguity: 0.48) Punctuation?",
+            answer="Kept.",
+        ),
+        # An answer whose question was never seen brings both text and value.
+        _event(
+            "answer", "interview", round=3, question="(ambiguity: 0.43) Tests?", answer="pytest."
+        ),
+        _event("question", "interview", round=4, question="(ambiguity: high) Unicode?"),
+    ]
+    for event in flow:
+        auto_progress.fold(view, event)
+
+    assert [(r["round"], r["question"], r["ambiguity"]) for r in view["rounds"]] == [
+        (1, "What does it take?", None),
+        (2, "Punctuation?", 0.48),
+        (3, "Tests?", 0.43),
+        (4, "(ambiguity: high) Unicode?", None),
+    ]
+    assert view["ambiguity_trend"] == [{"round": 2, "value": 0.48}, {"round": 3, "value": 0.43}]
+
+
+@pytest.mark.parametrize(
+    ("values", "trend"),
+    [
+        ([None, None], []),  # no value: the header shows nothing
+        ([None, 0.43], [0.43]),  # one value: the latest only
+        ([0.48, None, 0.43, 0.38], [0.48, 0.43, 0.38]),  # two or more: a trend
+    ],
+)
+def test_the_header_trend_has_one_point_per_round_that_reported_a_value(
+    values: list[float | None], trend: list[float]
+) -> None:
+    view = auto_progress.new_view()
+    for number, value in enumerate(values, start=1):
+        prefix = f"(ambiguity: {value:.2f}) " if value is not None else ""
+        auto_progress.fold(
+            view, _event("question", "interview", round=number, question=f"{prefix}Q{number}?")
+        )
+
+    assert [point["value"] for point in view["ambiguity_trend"]] == trend
+    assert all(r["question"] == f"Q{r['round']}?" for r in view["rounds"])
+
+
+def test_the_ambiguity_trend_is_bounded_like_the_rounds() -> None:
+    view = auto_progress.new_view()
+    total = auto_progress.MAX_ROUNDS + 10
+    for number in range(1, total + 1):
+        auto_progress.fold(
+            view,
+            _event("question", "interview", round=number, question=f"(ambiguity: 0.40) Q{number}?"),
+        )
+    assert len(view["ambiguity_trend"]) == auto_progress.MAX_ROUNDS
+    assert view["ambiguity_trend"][0]["round"] == 11
 
 
 def test_phases_grades_and_repairs_are_kept_in_order_with_their_times() -> None:
@@ -331,12 +450,14 @@ def _flow() -> list[dict[str, Any]]:
             answer="Ignore punctuation.",
             answer_source="assumption",
         ),
-        _event("question", "interview", round=2, question="Where do the tests live?"),
+        _event(
+            "question", "interview", round=2, question="(ambiguity: 0.42) Where do the tests live?"
+        ),
         _event(
             "answer",
             "interview",
             round=2,
-            question="Where do the tests live?",
+            question="(ambiguity: 0.42) Where do the tests live?",
             answer="tests/test_palindrome.py",
             answer_source="repo_fact",
         ),
@@ -422,14 +543,17 @@ def test_an_auto_chat_becomes_a_structured_view_and_survives_a_restart(
             "question": "구두점도 무시할까요?",
             "answer": "Ignore punctuation.",
             "answer_source": "assumption",
+            "ambiguity": None,
         },
         {
             "round": 2,
             "question": "Where do the tests live?",
             "answer": "tests/test_palindrome.py",
             "answer_source": "repo_fact",
+            "ambiguity": 0.42,
         },
     ]
+    assert view["ambiguity_trend"] == [{"round": 2, "value": 0.42}]
     assert view["skipped"] == 0  # the half-written line was read once it was whole
     assert [p["phase"] for p in view["phases"]] == [
         "interview",

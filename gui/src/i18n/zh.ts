@@ -750,6 +750,8 @@ const zh: Catalog = {
   "auto.log.all": "显示内部日志行（{count}）",
   "auto.log.skipped": "有 {count} 行进度无法读取，上方视图可能缺少这些内容。",
   "auto.log.readError": "无法读取进度文件：{error}",
+  "auto.ambiguity": "模糊度 {value}",
+  "auto.ambiguity.trend": "模糊度在 {count} 个问题中从 {from} 变为 {to}",
   "auto.pane.session": "自动会话",
   "auto.seed.file": "规格文件",
   "run.status.interrupted": "已中断",

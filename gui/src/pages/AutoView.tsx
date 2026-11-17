@@ -233,6 +233,49 @@ function SourceChip({ source, count }: { source: string | null; count?: number }
   );
 }
 
+const score = (value: number) => value.toFixed(2);
+
+/** A few points as a line, scaled to their own range: a trend, not a gauge. */
+function Sparkline({ values }: { values: number[] }) {
+  const width = 40;
+  const height = 14;
+  const pad = 2;
+  const low = Math.min(...values);
+  const high = Math.max(...values);
+  const points = values.map((value, index) => [
+    pad + (index * (width - pad * 2)) / (values.length - 1),
+    high === low ? height / 2 : pad + ((high - value) / (high - low)) * (height - pad * 2),
+  ]);
+  const [lastX, lastY] = points[points.length - 1];
+  return (
+    <svg className="auto-spark" width={width} height={height} viewBox={`0 0 ${width} ${height}`} aria-hidden>
+      <polyline points={points.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ")} />
+      <circle cx={lastX} cy={lastY} r={2} />
+    </svg>
+  );
+}
+
+/** The ambiguity the interview reported: the latest value, and its trend once there are two. */
+function AmbiguityTrend({ view }: { view: AutoView }) {
+  const { t } = useT();
+  const values = (view.ambiguity_trend ?? []).map((point) => point.value);
+  if (values.length === 0) return null;
+  const latest = values[values.length - 1];
+  const many = values.length > 1;
+  return (
+    <span
+      className="auto-trend"
+      role="img"
+      aria-label={many ? t("auto.ambiguity.trend", { from: score(values[0]), to: score(latest), count: values.length }) : t("auto.ambiguity", { value: score(latest) })}
+      title={many ? `${score(values[0])} → ${score(latest)}` : undefined}
+    >
+      <span className="auto-trend-label">{t("chat.ambiguity")}</span>
+      {many ? <Sparkline values={values} /> : null}
+      <span className="auto-trend-value">{score(latest)}</span>
+    </span>
+  );
+}
+
 function Round({ round, pending }: { round: AutoRound; pending: boolean }) {
   const { t } = useT();
   return (
@@ -245,6 +288,7 @@ function Round({ round, pending }: { round: AutoRound; pending: boolean }) {
           <span className="sr-only">{t("chat.question", { n: round.round })}: </span>
           {round.question ?? "…"}
         </p>
+        {typeof round.ambiguity === "number" ? <span className="auto-amb">{t("auto.ambiguity", { value: score(round.ambiguity) })}</span> : null}
       </div>
       <AnimatePresence mode="wait" initial={false}>
         {round.answer ? (
@@ -308,6 +352,7 @@ export function AutoInterview({ view, live }: { view: AutoView; live: boolean })
               </span>
             ) : null}
           </span>
+          <AmbiguityTrend view={view} />
           {rounds.length > 0 ? <ChevronDown className="auto-chevron" size={16} aria-hidden /> : null}
         </button>
         <AnimatePresence initial={false}>
@@ -334,9 +379,12 @@ export function AutoInterview({ view, live }: { view: AutoView; live: boolean })
       <div className="auto-card-head">
         <MessagesSquare size={16} aria-hidden />
         <strong>{t("auto.interview.title")}</strong>
-        {last ? (
-          <Chip pulse>{view.max_rounds ? t("auto.interview.counter", { n: last.round, max: view.max_rounds }) : t("auto.interview.counterOnly", { n: last.round })}</Chip>
-        ) : null}
+        <span className="auto-card-side">
+          <AmbiguityTrend view={view} />
+          {last ? (
+            <Chip pulse>{view.max_rounds ? t("auto.interview.counter", { n: last.round, max: view.max_rounds }) : t("auto.interview.counterOnly", { n: last.round })}</Chip>
+          ) : null}
+        </span>
       </div>
       <p className="auto-lead">{t("auto.interview.lead")}</p>
       {hidden > 0 || (earlier && rounds.length > SHOWN_WHILE_LIVE) ? (

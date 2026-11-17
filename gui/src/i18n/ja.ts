@@ -750,6 +750,8 @@ const ja: Catalog = {
   "auto.log.all": "内部ログ行も表示（{count}）",
   "auto.log.skipped": "進行記録 {count} 行を読み取れなかったため、上の表示から漏れている可能性があります。",
   "auto.log.readError": "進行記録ファイルを読み取れませんでした：{error}",
+  "auto.ambiguity": "あいまいさ {value}",
+  "auto.ambiguity.trend": "あいまいさは {count} 件の質問で {from} から {to} になりました",
   "auto.pane.session": "自動セッション",
   "auto.seed.file": "仕様ファイル",
   "run.status.interrupted": "中断",

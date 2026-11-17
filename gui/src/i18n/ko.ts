@@ -750,6 +750,8 @@ const ko: Catalog = {
   "auto.log.all": "내부 로그 줄도 보기 ({count})",
   "auto.log.skipped": "진행 기록 {count}줄을 읽지 못해 위 화면에 빠졌을 수 있어요.",
   "auto.log.readError": "진행 기록 파일을 읽지 못했어요: {error}",
+  "auto.ambiguity": "모호도 {value}",
+  "auto.ambiguity.trend": "모호도가 질문 {count}개를 거치며 {from}에서 {to}(으)로 바뀌었어요",
   "auto.pane.session": "자동 세션",
   "auto.seed.file": "스펙 파일",
   "run.status.interrupted": "중단됨",

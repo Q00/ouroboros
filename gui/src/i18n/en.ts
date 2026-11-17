@@ -765,6 +765,8 @@ const en = {
   "auto.log.all": "Show internal log lines ({count})",
   "auto.log.skipped": "{count} progress lines couldn't be read, so the view above may miss them.",
   "auto.log.readError": "The progress file couldn't be read: {error}",
+  "auto.ambiguity": "Ambiguity {value}",
+  "auto.ambiguity.trend": "Ambiguity went from {from} to {to} over {count} questions",
   "auto.pane.session": "Auto session",
   "auto.seed.file": "Spec file",
   "run.status.interrupted": "Interrupted",

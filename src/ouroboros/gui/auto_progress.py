@@ -40,6 +40,9 @@ MAX_SEED_YAML = 64 * 1024
 KINDS = frozenset({"phase", "grade", "repair", "question", "answer"})
 _PHASE = re.compile(r"^[a-z_]{1,40}$")
 _GRADE = re.compile(r"^[A-Za-z][+-]?$")
+# The interview server puts the ambiguity it measured before a question
+# (orchestrator/capabilities/question_text.py: ``(ambiguity: 0.43) <question>``).
+_AMBIGUITY = re.compile(r"^\(\s*ambiguity\s*:\s*(\d+(?:\.\d+)?|\.\d+)\s*\)\s*")
 # Phases whose arrival means the persisted record has something new for the page.
 _FACT_PHASES = frozenset(
     {
@@ -208,6 +211,7 @@ def new_view() -> dict[str, Any]:
         "phases": [],
         "rounds": [],
         "rounds_dropped": 0,
+        "ambiguity_trend": [],
         "max_rounds": None,
         "max_repair_rounds": None,
         "grade": None,
@@ -231,7 +235,13 @@ def _round_entry(view: dict[str, Any], number: int) -> dict[str, Any] | None:
             return entry
     if view["rounds_dropped"] and rounds and number < rounds[0]["round"]:
         return None  # older than what the view keeps
-    entry = {"round": number, "question": None, "answer": None, "answer_source": None}
+    entry = {
+        "round": number,
+        "question": None,
+        "answer": None,
+        "answer_source": None,
+        "ambiguity": None,
+    }
     rounds.append(entry)
     rounds.sort(key=lambda item: item["round"])
     while len(rounds) > MAX_ROUNDS:
@@ -240,12 +250,43 @@ def _round_entry(view: dict[str, Any], number: int) -> dict[str, Any] | None:
     return entry if entry in rounds else None
 
 
+def split_ambiguity(text: str) -> tuple[str, float | None]:
+    """A question without its ``(ambiguity: 0.43)`` prefix, and that value.
+
+    Only a number from 0 to 1 in exactly that shape is taken, and only when a
+    question follows it; anything else comes back unchanged, with ``None``.
+    """
+    match = _AMBIGUITY.match(text)
+    if match is None:
+        return text, None
+    value = float(match.group(1))
+    rest = text[match.end() :]
+    if not 0.0 <= value <= 1.0 or not rest.strip():
+        return text, None
+    return rest, value
+
+
+def _record_ambiguity(view: dict[str, Any], entry: dict[str, Any], value: float) -> None:
+    """Keep ``value`` on its round and in the view's trend, one point per round."""
+    entry["ambiguity"] = value
+    trend: list[dict[str, Any]] = view.setdefault("ambiguity_trend", [])
+    for point in trend:
+        if point["round"] == entry["round"]:
+            point["value"] = value
+            return
+    trend.append({"round": entry["round"], "value": value})
+    trend.sort(key=lambda point: point["round"])
+    del trend[:-MAX_ROUNDS]
+
+
 def fold(view: dict[str, Any], event: dict[str, Any]) -> bool:
     """Apply one event to ``view``; ``True`` when the persisted record is worth reading now.
 
     Rounds are paired by number: a question and the answer to it land on the
     same entry whichever arrives first, and an answer that repeats its
-    question fills a question that was never seen.
+    question fills a question that was never seen. A question's
+    ``(ambiguity: …)`` prefix is kept as the round's ``ambiguity`` and in
+    ``ambiguity_trend``, not in its text.
     """
     reload = False
     if view["auto_session_id"] != event["auto_session_id"]:
@@ -263,8 +304,12 @@ def fold(view: dict[str, Any], event: dict[str, Any]) -> bool:
     if kind in ("question", "answer") and number is not None and number > 0:
         entry = _round_entry(view, number)
         if entry is not None:
-            if event["question"] and (kind == "question" or not entry["question"]):
-                entry["question"] = cut(event["question"].strip(), MAX_TEXT)
+            if event["question"]:
+                question, ambiguity = split_ambiguity(event["question"].strip())
+                if kind == "question" or not entry["question"]:
+                    entry["question"] = cut(question, MAX_TEXT)
+                if ambiguity is not None and (kind == "question" or entry.get("ambiguity") is None):
+                    _record_ambiguity(view, entry, ambiguity)
             if kind == "answer":
                 entry["answer"] = cut((event["answer"] or "").strip(), MAX_TEXT) or None
                 entry["answer_source"] = event["answer_source"]
@@ -373,4 +418,5 @@ __all__ = [
     "parse_event",
     "progress_file",
     "seed_fields",
+    "split_ambiguity",
 ]

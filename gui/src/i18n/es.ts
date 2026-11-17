@@ -750,6 +750,8 @@ const es: Catalog = {
   "auto.log.all": "Ver líneas internas del registro ({count})",
   "auto.log.skipped": "No se pudieron leer {count} líneas de progreso, así que la vista de arriba puede no incluirlas.",
   "auto.log.readError": "No se pudo leer el archivo de progreso: {error}",
+  "auto.ambiguity": "Ambigüedad {value}",
+  "auto.ambiguity.trend": "La ambigüedad pasó de {from} a {to} en {count} preguntas",
   "auto.pane.session": "Sesión de Auto",
   "auto.seed.file": "Archivo de especificación",
   "run.status.interrupted": "Interrumpida",
