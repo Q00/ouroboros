@@ -34,13 +34,19 @@ current UTC day in `~/.ouroboros/telemetry-usage.json`, on this machine. The
 first Ouroboros process that runs on a later day sends each finished day as
 one `usage_daily` row, timestamped at noon UTC of the day it describes, and
 deletes it once the send succeeds. A failed send is retried by a later
-process under the same event `uuid`, which PostHog uses to drop duplicates. A
-day is therefore reported on the next day Ouroboros runs, and a day after
-which Ouroboros never runs again is never reported. Polling and status tools
-(for example `ouroboros_job_wait`, `ouroboros_session_status`) are not counted
-at all. The file is bounded (at most 32 days, 96 counters per day) and is
-written atomically under a file lock, so concurrent processes neither lose a
-count nor send a day twice.
+process with the same content. Every send of a day carries the same event
+`uuid`, derived from the anonymous ID and the day, which PostHog uses to drop
+duplicates. A day is therefore reported on the next day Ouroboros runs, and a
+day after which Ouroboros never runs again is never reported. Polling and
+status tools (for example `ouroboros_job_wait`, `ouroboros_session_status`)
+are not counted at all. The file is bounded (at most 32 days, 96 counters per
+day) and is written atomically under a file lock, so concurrent processes
+neither overwrite each other's counts nor send a day twice. Once a day has
+been picked up for sending, its row is fixed: a count that still arrives for
+that day (from a process that records just as UTC midnight passes, or after
+the system clock moved backwards) is dropped, not sent as a second row. A day
+that is still in the future by this machine's clock is not sent until it is
+over.
 
 **Identity honesty:** the ID in `~/.ouroboros/telemetry.json` is a random UUID,
 stable across sessions for lifecycle analysis and derived from nothing about the
@@ -233,6 +239,8 @@ Notes:
 - `$insert_id` on a job-derived `workflow_outcome` is a one-way digest of the
   job id, and the event `uuid` is derived from it, so PostHog can drop a
   retried terminal for the same job. Direct evaluations are not deduplicated.
+- The event `uuid` on `usage_daily` is a one-way digest (UUID v5) of the
+  anonymous ID and the `day`, so every send of a day dedupes to one row.
 - PostHog may derive coarse country from the request IP for the country
   aggregate. Ouroboros does not include the IP address in event properties.
 - Events use a public write-only project key and a fire-and-forget worker.

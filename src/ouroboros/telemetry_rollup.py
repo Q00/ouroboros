@@ -14,12 +14,17 @@ Invariants, each covered by ``tests/unit/test_telemetry_rollup.py``:
 - Writes go to a same-directory temp file, are fsynced, then replace the
   file, so a crash leaves either the old or the new file, never a torn one.
   An unreadable, oversized or malformed file is treated as empty.
-- Claiming a day moves its bucket out of ``days`` into ``sending`` under the
-  lock, so two processes can never claim the same bucket, and later counts
-  for that day start a new bucket instead of being lost. The bucket is
-  deleted only after delivery succeeds. A failed delivery releases it, and a
-  claim whose process died is taken over once its lease runs out; the retry
-  reuses the bucket id, which is the event ``uuid`` PostHog deduplicates on.
+- A day has at most one bucket, ever. Claiming a day moves its bucket out of
+  ``days`` into ``sending`` under the lock, so two processes can never claim
+  the same bucket, and closes the day: a later ``record`` for it (a process
+  still on the old day at UTC midnight, or a clock that moved backwards)
+  raises ``DayClosed`` and its counts are dropped, never sent as a second
+  row. The bucket is deleted only after delivery succeeds, leaving the day in
+  ``sent`` so it stays closed. A failed delivery releases it, and a claim
+  whose process died is taken over once its lease runs out; every send of a
+  day carries ``event_uuid(install id, day)``, which PostHog deduplicates on.
+- Only days before ``today`` are claimed. A bucket for a later day, left by
+  a clock that moved backwards, is kept and sent once that day is over.
 - Size is bounded: at most ``MAX_BUCKETS`` buckets, ``MAX_KEYS`` counters per
   bucket, each counter at most ``MAX_COUNT``, and buckets more than
   ``MAX_AGE_DAYS`` from today are discarded unsent.
@@ -52,6 +57,7 @@ MAX_KEYS = 96
 MAX_DIMS = 8
 MAX_COUNT = 1_000_000
 MAX_AGE_DAYS = 30
+MAX_SENT_DAYS = 2 * MAX_AGE_DAYS + 1
 MAX_FILE_BYTES = 256 * 1024
 _MAX_DIM_LEN = 64
 
@@ -60,10 +66,17 @@ _KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 _thread_lock = threading.Lock()
+_EVENT_UUID_NAMESPACE = uuid.uuid5(
+    uuid.NAMESPACE_URL, "https://github.com/Q00/ouroboros#telemetry-usage-daily"
+)
 
 
 class LockUnavailable(Exception):
     """The rollup lock was not acquired within ``LOCK_TIMEOUT_SECONDS``."""
+
+
+class DayClosed(Exception):
+    """The day was already claimed for sending, so counts for it are dropped."""
 
 
 def _try_lock(fd: int) -> bool:
@@ -188,9 +201,26 @@ def _clean_bucket(raw: Any) -> dict[str, Any] | None:
     }
 
 
+def event_uuid(install_id: str, day: str) -> str:
+    """The ``usage_daily`` event uuid for one install's UTC day.
+
+    It depends only on the anonymous install id and the day, so every send of
+    a day (a retry after a lost acknowledgement, or a bucket rebuilt after the
+    rollup file was lost) carries the same uuid and PostHog keeps one row.
+    """
+    if _day_ordinal(day) is None:
+        raise ValueError(f"invalid day: {day!r}")
+    return str(uuid.uuid5(_EVENT_UUID_NAMESPACE, f"{install_id}/{day}"))
+
+
+def _closed_days(state: dict[str, Any]) -> set[str]:
+    """Days whose bucket was claimed: being sent, or already delivered."""
+    return {bucket["day"] for bucket in state["sending"].values()} | set(state["sent"])
+
+
 def _load(path: Path) -> dict[str, Any]:
     """Read the rollup file; anything unreadable or malformed reads as empty."""
-    empty: dict[str, Any] = {"schema": SCHEMA_VERSION, "days": {}, "sending": {}}
+    empty: dict[str, Any] = {"schema": SCHEMA_VERSION, "days": {}, "sending": {}, "sent": []}
     try:
         if path.stat().st_size > MAX_FILE_BYTES:
             return empty
@@ -211,7 +241,21 @@ def _load(path: Path) -> dict[str, Any]:
         cleaned = _clean_bucket(bucket)
         if cleaned is not None and cleaned["id"] == bucket_id:
             sending[bucket_id] = cleaned
-    return {"schema": SCHEMA_VERSION, "days": days, "sending": sending}
+    raw_sent = raw.get("sent")
+    sent = sorted(
+        {d for d in raw_sent if isinstance(d, str) and _day_ordinal(d) is not None}
+        if isinstance(raw_sent, list)
+        else set()
+    )[-MAX_SENT_DAYS:]
+    state: dict[str, Any] = {
+        "schema": SCHEMA_VERSION,
+        "days": days,
+        "sending": sending,
+        "sent": sent,
+    }
+    for day in _closed_days(state) & set(days):
+        del days[day]  # a closed day never gets a second bucket
+    return state
 
 
 def _prune(state: dict[str, Any], today: str) -> None:
@@ -230,6 +274,11 @@ def _prune(state: dict[str, Any], today: str) -> None:
     entries.sort()
     for _ordinal, section, key in entries[: max(0, len(entries) - MAX_BUCKETS)]:
         del state[section][key]
+    state["sent"] = [
+        d
+        for d in state["sent"]
+        if (ordinal := _day_ordinal(d)) is not None and abs(ordinal - today_ordinal) <= MAX_AGE_DAYS
+    ]
 
 
 def _write(path: Path, state: dict[str, Any]) -> None:
@@ -261,6 +310,8 @@ def record(
     the day names the version and backend; a key absent from ``dims`` keeps
     its stored value. Raises ``ValueError`` for an invalid day, and
     ``LockUnavailable`` or ``OSError`` when the update was not persisted.
+    Raises ``DayClosed``, persisting nothing, when ``day`` was already claimed
+    for sending: its one row is fixed, so these counts are dropped.
     """
     if _day_ordinal(day) is None:
         raise ValueError(f"invalid day: {day!r}")
@@ -270,6 +321,8 @@ def record(
     path = state_dir / ROLLUP_FILENAME
     with _locked(state_dir):
         state = _load(path)
+        if day in _closed_days(state):
+            raise DayClosed(day)
         bucket = state["days"].get(day)
         if bucket is None:
             bucket = {
@@ -292,11 +345,13 @@ def record(
 def claim_due(state_dir: Path, today: str, now: float) -> list[dict[str, Any]]:
     """Claim every bucket ready to send and return copies of them.
 
-    Ready means a bucket for any day other than ``today`` (a past day, or a
-    future one left behind by a clock that moved backwards), or a claimed
-    bucket whose lease ran out. A lease further ahead than ``LEASE_SECONDS``
-    can only come from a clock that moved backwards and counts as expired.
-    Raises ``LockUnavailable`` or ``OSError`` when nothing could be claimed.
+    Ready means a bucket for a day before ``today``, or a claimed bucket whose
+    lease ran out. A bucket for a later day (left by a clock that moved
+    backwards) waits until that day is over, so counts recorded on the day
+    itself join it instead of becoming a second row. A lease further ahead
+    than ``LEASE_SECONDS`` can only come from a clock that moved backwards and
+    counts as expired. Claiming closes the day (see ``record``). Raises
+    ``LockUnavailable`` or ``OSError`` when nothing could be claimed.
     """
     if _day_ordinal(today) is None:
         raise ValueError(f"invalid day: {today!r}")
@@ -305,7 +360,8 @@ def claim_due(state_dir: Path, today: str, now: float) -> list[dict[str, Any]]:
         state = _load(path)
         _prune(state, today)
         sending = state["sending"]
-        for day in [d for d in state["days"] if d != today]:
+        # Validated ``YYYY-MM-DD`` strings sort chronologically.
+        for day in [d for d in state["days"] if d < today]:
             bucket = state["days"].pop(day)
             bucket["lease_until"] = 0.0
             sending[bucket["id"]] = bucket
@@ -328,7 +384,7 @@ def claim_due(state_dir: Path, today: str, now: float) -> list[dict[str, Any]]:
 
 
 def settle(state_dir: Path, bucket_id: str, *, delivered: bool) -> None:
-    """Delete a delivered bucket, or release an undelivered one for retry."""
+    """Delete a delivered bucket (its day stays closed), or release it for retry."""
     path = state_dir / ROLLUP_FILENAME
     with _locked(state_dir):
         state = _load(path)
@@ -337,6 +393,7 @@ def settle(state_dir: Path, bucket_id: str, *, delivered: bool) -> None:
             return
         if delivered:
             del state["sending"][bucket_id]
+            state["sent"] = sorted({*state["sent"], bucket["day"]})[-MAX_SENT_DAYS:]
         else:
             bucket["lease_until"] = 0.0
         _write(path, state)
@@ -345,9 +402,11 @@ def settle(state_dir: Path, bucket_id: str, *, delivered: bool) -> None:
 __all__ = [
     "LEASE_SECONDS",
     "LOCK_FILENAME",
+    "DayClosed",
     "LockUnavailable",
     "ROLLUP_FILENAME",
     "claim_due",
+    "event_uuid",
     "record",
     "settle",
 ]

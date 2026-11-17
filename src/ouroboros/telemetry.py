@@ -1070,10 +1070,10 @@ def _queue_usage_daily(bucket: Mapping[str, Any], resolved_id: str) -> None:
         {
             "event": "usage_daily",
             "distinct_id": resolved_id,
-            # The bucket id is the PostHog dedupe key, so a retry after a lost
-            # acknowledgement cannot count the day twice; the timestamp places
+            # The uuid is fixed per install and day and is the PostHog dedupe
+            # key, so no resend can count the day twice; the timestamp places
             # the row on the day it describes, not the day it was sent.
-            "uuid": bucket_id,
+            "uuid": telemetry_rollup.event_uuid(resolved_id, day),
             "timestamp": f"{day}T12:00:00Z",
             "properties": props,
         },
@@ -1117,7 +1117,9 @@ def _record_usage(counts: Mapping[str, int]) -> None:
     Nothing is sent per call: the day is sent as one ``usage_daily`` row once
     it is over. Keys outside ``_USAGE_COUNT_KEYS`` and non-positive values are
     dropped. If the rollup lock is busy past its bound or the state directory
-    is unwritable, this count is skipped rather than blocking the caller.
+    is unwritable, this count is skipped rather than blocking the caller. A
+    count for a day whose row was already claimed is dropped
+    (``telemetry_rollup.DayClosed``), so a day is never sent twice.
     """
     try:
         if not is_enabled():

@@ -1973,7 +1973,7 @@ class TestUsageRollup:
         assert row["properties"]["cmd_interview"] == 3
         assert row["properties"]["day"] == "2026-11-16"
         assert row["distinct_id"] == telemetry.distinct_id()
-        uuid.UUID(row["uuid"])
+        assert row["uuid"] == telemetry_rollup.event_uuid(telemetry.distinct_id(), "2026-11-16")
         state = json.loads(_rollup_path().read_text(encoding="utf-8"))
         assert state["sending"] == {}
         assert list(state["days"]) == ["2026-11-17"]
@@ -2037,7 +2037,7 @@ class TestUsageRollup:
         telemetry.flush(timeout=2.0)
         assert [event["properties"]["day"] for event in sent] == ["2026-11-13"]
 
-    def test_a_clock_moved_back_still_sends_the_later_day_once(
+    def test_a_clock_moved_back_keeps_the_later_day_until_it_is_over(
         self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
     ) -> None:
         _on_day(monkeypatch, "2026-11-18")
@@ -2046,11 +2046,60 @@ class TestUsageRollup:
         telemetry.capture_cli_command("status")
         _next_process_on(monkeypatch, "2026-11-18")
         telemetry.capture_cli_command("status")
+        _next_process_on(monkeypatch, "2026-11-19")
+        telemetry.capture_cli_command("status")
         telemetry.flush(timeout=2.0)
-        # 11-18 was sent when the clock read 11-17; the 11-17 counts are sent
-        # when the clock reads 11-18 again. Each bucket exactly once.
+        # 11-18 is not sent while the clock reads 11-17; the counts made on
+        # 11-18 itself join it, and each day is sent once after it ends.
+        rows = {event["properties"]["day"]: event for event in sent}
         assert sorted(event["properties"]["day"] for event in sent) == ["2026-11-17", "2026-11-18"]
-        assert len({event["uuid"] for event in sent}) == 2
+        assert rows["2026-11-18"]["properties"]["cmd_run"] == 1
+        assert rows["2026-11-18"]["properties"]["cmd_status"] == 1
+        resolved = telemetry.distinct_id()
+        assert [rows[day]["uuid"] for day in sorted(rows)] == [
+            telemetry_rollup.event_uuid(resolved, day) for day in sorted(rows)
+        ]
+
+    def test_a_late_count_for_a_sent_day_never_makes_a_second_row(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        _on_day(monkeypatch, "2026-11-16")
+        telemetry.capture_cli_command("run")
+        _next_process_on(monkeypatch, "2026-11-17")
+        telemetry.capture_cli_command("status")  # claims and sends 11-16
+        _next_process_on(monkeypatch, "2026-11-16")  # a clock still on the old day
+        telemetry.capture_cli_command("run")  # dropped: 11-16 is closed
+        _next_process_on(monkeypatch, "2026-11-17")
+        telemetry.capture_cli_command("status")
+        telemetry.flush(timeout=2.0)
+
+        (row,) = [event for event in sent if event["event"] == "usage_daily"]
+        assert row["properties"]["day"] == "2026-11-16"
+        assert row["properties"]["cmd_run"] == 1
+        state = json.loads(_rollup_path().read_text(encoding="utf-8"))
+        assert sorted(state["days"]) == ["2026-11-17"]
+        assert state["sent"] == ["2026-11-16"]
+
+    def test_a_day_rebuilt_after_the_file_was_lost_reuses_its_uuid(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        _on_day(monkeypatch, "2026-11-16")
+        telemetry.capture_cli_command("run")
+        _next_process_on(monkeypatch, "2026-11-17")
+        telemetry.capture_cli_command("status")
+        telemetry.flush(timeout=2.0)
+        _rollup_path().unlink()  # loses the record that 11-16 was sent
+        _next_process_on(monkeypatch, "2026-11-16")
+        telemetry.capture_cli_command("run")
+        _next_process_on(monkeypatch, "2026-11-17")
+        telemetry.capture_cli_command("status")
+        telemetry.flush(timeout=2.0)
+
+        rows = [event for event in sent if event["event"] == "usage_daily"]
+        assert [row["properties"]["day"] for row in rows] == ["2026-11-16", "2026-11-16"]
+        # Both sends carry the same uuid, so PostHog keeps one row for the day.
+        expected = telemetry_rollup.event_uuid(telemetry.distinct_id(), "2026-11-16")
+        assert [row["uuid"] for row in rows] == [expected, expected]
 
     def test_no_identity_keeps_the_day_for_a_later_process(
         self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]

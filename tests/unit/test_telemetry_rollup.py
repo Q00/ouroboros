@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 from typing import Any
+import uuid
 
 import pytest
 
@@ -117,6 +118,7 @@ class TestClaimAndSettle:
         state = _state(tmp_path)
         assert state["sending"] == {}
         assert list(state["days"]) == [DAY2]
+        assert state["sent"] == [DAY1]
         assert rollup.claim_due(tmp_path, DAY2, now + rollup.LEASE_SECONDS * 2) == []
 
     def test_an_undelivered_day_is_released_and_resent_under_the_same_id(
@@ -137,35 +139,115 @@ class TestClaimAndSettle:
         (takeover,) = rollup.claim_due(tmp_path, DAY2, now + rollup.LEASE_SECONDS + 1)
         assert takeover["id"] == first["id"]
 
-    def test_counts_after_a_claim_start_a_new_bucket(self, tmp_path: Path) -> None:
+    def test_a_claimed_day_never_gets_a_second_bucket(self, tmp_path: Path) -> None:
+        # A process on DAY3 claims DAY2 and holds the lease; a process whose
+        # clock still reads DAY2 records again; another DAY3 process claims.
+        # DAY2 must still produce exactly one row, so the late count is
+        # refused (DayClosed) instead of starting a second bucket.
         rollup.record(tmp_path, DAY2, {"cmd_run": 1}, DIMS)
         now = time.time()
         (claimed,) = rollup.claim_due(tmp_path, DAY3, now)
-        # Another process whose clock still reads DAY2 keeps counting.
-        rollup.record(tmp_path, DAY2, {"cmd_run": 5}, DIMS)
-        rollup.settle(tmp_path, claimed["id"], delivered=True)
-        (later,) = rollup.claim_due(tmp_path, DAY3, now + 1)
-        assert later["day"] == DAY2
-        assert later["counts"] == {"cmd_run": 5}
-        assert later["id"] != claimed["id"]
+        with pytest.raises(rollup.DayClosed):
+            rollup.record(tmp_path, DAY2, {"cmd_run": 5}, DIMS)
+        assert rollup.claim_due(tmp_path, DAY3, now + 1) == []
+        assert list(_state(tmp_path)["sending"]) == [claimed["id"]]
 
-    def test_a_clock_moved_back_claims_the_future_day_and_expires_its_lease(
+        # The day stays closed after delivery, long after any lease.
+        rollup.settle(tmp_path, claimed["id"], delivered=True)
+        with pytest.raises(rollup.DayClosed):
+            rollup.record(tmp_path, DAY2, {"cmd_run": 5}, DIMS)
+        assert rollup.claim_due(tmp_path, DAY3, now + rollup.LEASE_SECONDS * 2) == []
+        state = _state(tmp_path)
+        assert (state["days"], state["sending"], state["sent"]) == ({}, {}, [DAY2])
+        assert claimed["counts"] == {"cmd_run": 1}
+
+    def test_a_released_day_is_resent_unchanged_and_late_counts_stay_out(
         self, tmp_path: Path
     ) -> None:
+        rollup.record(tmp_path, DAY2, {"cmd_run": 1}, DIMS)
+        now = time.time()
+        (first,) = rollup.claim_due(tmp_path, DAY3, now)
+        rollup.settle(tmp_path, first["id"], delivered=False)
+        with pytest.raises(rollup.DayClosed):
+            rollup.record(tmp_path, DAY2, {"cmd_seed": 1}, DIMS)
+        # A retry carries exactly what the first attempt carried, so a copy
+        # PostHog already stored cannot differ from it.
+        (retry,) = rollup.claim_due(tmp_path, DAY3, now + 1)
+        assert retry == first
+
+    def test_a_future_day_is_kept_until_it_is_over(self, tmp_path: Path) -> None:
+        # A clock that moved back from DAY3 to DAY2 leaves a DAY3 bucket.
         rollup.record(tmp_path, DAY3, {"cmd_run": 1}, DIMS)
         now = time.time()
-        (future,) = rollup.claim_due(tmp_path, DAY2, now)
-        assert future["day"] == DAY3
+        assert rollup.claim_due(tmp_path, DAY2, now) == []
+        # Counts made on DAY3 itself join that bucket: one row for the day.
+        rollup.record(tmp_path, DAY3, {"cmd_run": 2}, DIMS)
+        (claimed,) = rollup.claim_due(tmp_path, "2026-11-18", now)
+        assert (claimed["day"], claimed["counts"]) == (DAY3, {"cmd_run": 3})
+
+    def test_a_lease_from_a_clock_that_was_ahead_counts_as_expired(self, tmp_path: Path) -> None:
+        rollup.record(tmp_path, DAY1, {"cmd_run": 1}, DIMS)
+        now = time.time()
+        (first,) = rollup.claim_due(tmp_path, DAY2, now)
         # The clock then jumps back a day: a lease further ahead than
         # LEASE_SECONDS cannot be live, so the bucket is claimable again.
         (again,) = rollup.claim_due(tmp_path, DAY2, now - 86_400)
-        assert again["id"] == future["id"]
+        assert again["id"] == first["id"]
+
+    def test_a_file_with_a_second_bucket_for_a_closed_day_keeps_one(self, tmp_path: Path) -> None:
+        rollup.record(tmp_path, DAY1, {"cmd_run": 1}, DIMS)
+        rollup.record(tmp_path, DAY2, {"cmd_run": 1}, DIMS)
+        now = time.time()
+        (claimed,) = rollup.claim_due(tmp_path, DAY2, now)
+        rollup.record(tmp_path, DAY3, {"cmd_run": 1}, DIMS)
+        # Hand-craft what this module never writes: open buckets for a day
+        # that is being sent (DAY1) and for one already delivered (DAY3).
+        path = tmp_path / rollup.ROLLUP_FILENAME
+        state = _state(tmp_path)
+        state["days"][DAY1] = {
+            **state["days"][DAY2],
+            "id": "00000000-0000-4000-8000-000000000001",
+            "day": DAY1,
+        }
+        state["sent"] = [DAY3, DAY3, "not-a-day", 7]
+        path.write_text(json.dumps(state), encoding="utf-8")
+
+        rollup.record(tmp_path, DAY2, {"cmd_run": 1}, DIMS)
+        state = _state(tmp_path)
+        assert sorted(state["days"]) == [DAY2]
+        assert state["sent"] == [DAY3]
+        assert list(state["sending"]) == [claimed["id"]]
+        # DAY1 is still leased, so only DAY2 is ready; nothing for DAY1 or DAY3.
+        ready = rollup.claim_due(tmp_path, "2026-11-18", now + 1)
+        assert [(b["day"], b["counts"]) for b in ready] == [(DAY2, {"cmd_run": 2})]
+
+    def test_delivered_days_are_forgotten_outside_the_age_window(self, tmp_path: Path) -> None:
+        rollup.record(tmp_path, DAY1, {"cmd_run": 1}, DIMS)
+        (claimed,) = rollup.claim_due(tmp_path, DAY2, time.time())
+        rollup.settle(tmp_path, claimed["id"], delivered=True)
+        assert _state(tmp_path)["sent"] == [DAY1]
+        rollup.record(tmp_path, "2026-12-16", {"cmd_run": 1}, DIMS)  # 31 days later
+        assert _state(tmp_path)["sent"] == []
 
     def test_settling_an_unknown_bucket_changes_nothing(self, tmp_path: Path) -> None:
         rollup.record(tmp_path, DAY1, {"cmd_run": 1}, DIMS)
         before = _state(tmp_path)
         rollup.settle(tmp_path, "00000000-0000-4000-8000-000000000000", delivered=True)
         assert _state(tmp_path) == before
+
+
+class TestEventUuid:
+    def test_the_uuid_depends_only_on_the_install_and_the_day(self) -> None:
+        install, other = "11111111-1111-4111-8111-111111111111", str(uuid.uuid4())
+        first = rollup.event_uuid(install, DAY1)
+        assert first == rollup.event_uuid(install, DAY1)
+        assert uuid.UUID(first).version == 5
+        assert len({first, rollup.event_uuid(install, DAY2), rollup.event_uuid(other, DAY1)}) == 3
+
+    @pytest.mark.parametrize("day", ["2026-13-01", "2026-11-1", "", "2026-11-16T00:00"])
+    def test_an_invalid_day_is_rejected(self, day: str) -> None:
+        with pytest.raises(ValueError):
+            rollup.event_uuid("11111111-1111-4111-8111-111111111111", day)
 
 
 class TestCrashSafety:
