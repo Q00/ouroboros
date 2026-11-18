@@ -29,6 +29,8 @@ from ouroboros.auto.answer_text import (
     MAX_ANSWER_PART_CHARS,
     answer_language,
     answer_problems,
+    is_code_token,
+    latin_prose,
     normalize_answer,
 )
 from ouroboros.auto.answerer import AutoAnswer, AutoAnswerer, AutoAnswerSource
@@ -625,3 +627,90 @@ async def test_english_goal_with_a_korean_question_answers_in_english(tmp_path: 
 
     assert calls and "Write the answer in English." in calls[0]
     assert sent[0] == "[from-auto][assumption] The repository code does not settle this question."
+
+
+# -- Latin prose in a non-Latin answer is a second language --------------------------------
+
+MIXED = "contains English words outside inline code"
+
+
+@pytest.mark.parametrize(
+    ("language", "reply"),
+    [
+        ("ko", "한국어 Return None"),
+        ("zh", "中文 Return None"),
+        ("ru", "Русский Return None"),
+        ("ja", "日本語の Return None"),
+        ("ko", "서로 다른 값이 두 개 미만이면 return None when empty."),
+        ("ko", "None을 반환한다. Return None otherwise."),
+        ("zh", "返回 None。 Otherwise raise ValueError."),
+        ("ru", "Вернуть None. Then exit."),
+        ("ja", "None を返す。 Return None otherwise."),
+        # A word next to a code token is prose too; commands go in inline code.
+        ("ko", "pytest -q로 실행합니다."),
+        ("ko", "CI는 GitHub Actions에서 실행합니다."),
+    ],
+)
+def test_latin_prose_in_a_non_latin_answer_is_mixed(language: str, reply: str) -> None:
+    assert MIXED in answer_problems(reply, language)
+
+
+@pytest.mark.parametrize(
+    ("language", "reply"),
+    [
+        ("ko", "pytest로 테스트를 실행합니다."),
+        ("ko", "`pathlib`를 씁니다."),
+        ("ko", "`pytest -q`로 실행합니다."),
+        ("ko", "서로 다른 값이 두 개 미만이면 None을 반환하고 ValueError는 내지 않습니다."),
+        ("ko", "mode.py와 config.toml을 읽고 CSV 파일을 UTF-8로 저장합니다."),
+        ("ko", "second_largest([1, 3, 5])는 3을 반환하고 Python 3.12에서 실행합니다."),
+        ("ko", "HTTP 200과 JSON 응답을 확인합니다."),
+        ("ko", "src/stats.py config.toml 두 파일만 바꿉니다."),
+        ("zh", "当少于两个不同的值时返回 None，并用 pytest 测试。"),
+        ("zh", "读取 data.csv，失败时抛出 ValueError。"),
+        ("ru", "Вернуть None, если меньше двух значений; проверить через pytest."),
+        ("ru", "Читать mode.py и при ошибке выбрасывать ValueError."),
+        ("ja", "異なる値が二つ未満なら None を返し、pytest で確認する。"),
+        ("ja", "CSV を読み、失敗したら ValueError を投げる。"),
+    ],
+)
+def test_non_latin_answers_may_name_code(language: str, reply: str) -> None:
+    assert answer_problems(reply, language) == []
+
+
+@pytest.mark.parametrize(
+    "token",
+    ["None", "True", "false", "mode.py", "src/cli.py", "second_largest", "C++", "UTF-8", "v2"]
+    + ["ValueError", "GitHub", "CSV", "JSON", "HTTP"],
+)
+def test_code_tokens(token: str) -> None:
+    assert is_code_token(token)
+
+
+@pytest.mark.parametrize("token", ["pytest", "Return", "Python", "framework", "Actions", "README"])
+def test_word_tokens(token: str) -> None:
+    """``README`` has six capitals: past the five-letter acronym bound, it is a word."""
+    assert not is_code_token(token)
+
+
+def test_a_lone_word_or_a_row_of_code_is_not_prose() -> None:
+    assert not latin_prose("pytest로 실행")
+    assert not latin_prose("mode.py config.toml None")
+    assert not latin_prose("Python 3.12에서")
+    assert latin_prose("Return None")
+    assert latin_prose("hello, world")
+
+
+@pytest.mark.parametrize(
+    "reply",
+    ["second_largest는 `None`을 반환한다.", "None을 반환한다", "`None` 반환"],
+)
+def test_english_goal_rejects_a_korean_answer_with_code_tokens(reply: str) -> None:
+    assert "contains another language (hangul script)" in answer_problems(reply, "en")
+
+
+@pytest.mark.asyncio
+async def test_a_mixed_korean_reply_is_retried_then_replaced() -> None:
+    assert await _refine(_ScriptedLLM("한국어 Return None", KO_REPLY), goal=KO_GOAL) == KO_REPLY
+    replaced = await _refine(_ScriptedLLM("한국어 Return None"), goal=KO_GOAL)
+    assert replaced == FALLBACK_ANSWERS["ko"]

@@ -12,8 +12,8 @@ user's language, short, and in plain product words (#3050):
 - ``normalize_answer`` turns a model reply into one plain line: escaped line
   breaks (a literal backslash and ``n``) and real ones become spaces.
 - ``answer_problems`` lists why a reply cannot be shown: no text in the expected
-  script, another language's script, a whole sentence of English inside a
-  non-Latin answer, more than ``MAX_ANSWER_PART_CHARS`` characters, or internal
+  script, another language's script, English words outside inline code in a
+  non-Latin answer (``latin_prose``), more than ``MAX_ANSWER_PART_CHARS`` characters, or internal
   vocabulary (field names such as ``acceptance_criteria``). Text inside inline
   code is not checked for script, since identifiers and literals may use any.
 - ``FALLBACK_ANSWERS`` holds one short, conservative answer per language, used
@@ -62,9 +62,14 @@ _FORBIDDEN_SCRIPTS: Mapping[str, tuple[str, ...]] = {
     "zh": ("hangul", "kana", "cyrillic"),
     "ru": ("hangul", "kana", "han"),
 }
-# Five Latin words in a row outside inline code are a sentence, not an
-# identifier: in a non-Latin answer that is a second language.
-_LATIN_SENTENCE = re.compile(r"(?:\b[A-Za-z][A-Za-z'-]*\b[\s,;:]+){4}\b[A-Za-z][A-Za-z'-]*\b")
+# Latin prose inside a non-Latin answer (``latin_prose``). A token is a run of
+# Latin letters with the characters code and file names use; it starts at a
+# letter, so a bare number is never one.
+_LATIN_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9_.'/+#-]*")
+_TOKEN_TRAILING_PUNCTUATION = ".,;:!?'-"
+_CODE_LITERALS = frozenset({"None", "True", "False", "null", "true", "false"})
+_CAMEL_CASE = re.compile(r"[a-z][A-Z]")
+_MAX_ACRONYM_LETTERS = 5
 _INLINE_CODE = re.compile(r"`[^`]*`")
 _ESCAPED_BREAK = re.compile(r"\\[nrt]")
 
@@ -116,6 +121,49 @@ def normalize_answer(text: str) -> str:
     return " ".join(_ESCAPED_BREAK.sub(" ", text).split())
 
 
+def is_code_token(token: str) -> bool:
+    """Whether a bare Latin token reads as code, a file name or a unit, not as a word.
+
+    Code: a literal (``None``, ``True``, ``False``, ``null``, ``true``,
+    ``false``); a token with a dot, slash, underscore, plus, hash or digit
+    (``mode.py``, ``src/cli.py``, ``second_largest``, ``C++``, ``UTF-8``,
+    ``v2``); a CamelCase name (``ValueError``, ``DataFrame``); an all-caps
+    acronym of at most five letters (``CSV``, ``JSON``, ``HTTP``). Anything
+    else is a word: ``pytest``, ``Return``, ``Python``, ``framework``.
+    """
+    if token in _CODE_LITERALS:
+        return True
+    if any(char in "._/+#" or char.isdigit() for char in token):
+        return True
+    if _CAMEL_CASE.search(token):
+        return True
+    return token.isupper() and len(token) <= _MAX_ACRONYM_LETTERS
+
+
+def latin_prose(text: str) -> bool:
+    """Whether ``text`` holds Latin prose: two Latin tokens in a row, one a word.
+
+    Two tokens are in a row when nothing but spaces, digits or punctuation
+    separates them; a letter of any other script starts a new row. A lone
+    word is allowed (``pytest로``, ``Python 3.12에서``), and so is a row of
+    code tokens (``mode.py config.toml``). A word next to anything Latin is
+    prose: ``Return None``, ``hello world``, and also ``Visual Studio`` or
+    ``pytest -q``, which belong in inline code. Strip inline code first.
+    """
+    row, row_has_word, previous_end = 0, False, -1
+    for match in _LATIN_TOKEN.finditer(text):
+        gap = text[previous_end : match.start()] if previous_end >= 0 else "x"
+        if any(char.isalpha() for char in gap):
+            row, row_has_word = 0, False
+        token = match.group().rstrip(_TOKEN_TRAILING_PUNCTUATION)
+        row += 1
+        row_has_word = row_has_word or not is_code_token(token)
+        if row >= 2 and row_has_word:
+            return True
+        previous_end = match.end()
+    return False
+
+
 def answer_problems(text: str, language: str, *, script_only: bool = False) -> list[str]:
     """Why ``text`` cannot be shown as an answer in ``language`` (empty when it can).
 
@@ -132,8 +180,8 @@ def answer_problems(text: str, language: str, *, script_only: bool = False) -> l
     others = [s for s in _FORBIDDEN_SCRIPTS.get(language, ()) if _SCRIPTS[s].search(prose)]
     if others:
         problems.append(f"contains another language ({', '.join(others)} script)")
-    if language != "en" and _LATIN_SENTENCE.search(prose):
-        problems.append("contains a sentence in English")
+    if language != "en" and latin_prose(prose):
+        problems.append("contains English words outside inline code")
     if script_only:
         return problems
     if len(text) > MAX_ANSWER_PART_CHARS:
@@ -151,5 +199,7 @@ __all__ = [
     "MAX_ANSWER_PART_CHARS",
     "answer_language",
     "answer_problems",
+    "is_code_token",
+    "latin_prose",
     "normalize_answer",
 ]
