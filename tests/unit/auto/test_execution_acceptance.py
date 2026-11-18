@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import pytest
+
 from ouroboros.auto.execution_acceptance import (
     _AUTORESEARCH_CANONICAL_AC,
     _unwrap_seed_repairer_original_requirement,
     is_auto_reporting_acceptance_criterion,
     normalize_execution_acceptance,
+)
+from ouroboros.auto.seed_repairer import (
+    OBSERVABLE_CHECK_SEPARATOR,
+    _observable_preserving_replacement,
 )
 
 _SEED_REPAIRER_WRAPPER = (
@@ -354,6 +360,34 @@ def test_normalize_execution_acceptance_unwraps_repaired_observation_criteria() 
             "goal": "Observation run for ooo auto via ouroboros_auto: create hello_auto.py and tests/test_hello_auto.py; hello_auto returns exactly hello from ooo auto; validate with uv run pytest tests/test_hello_auto.py."
         }
     )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert ac_texts(normalized.acceptance_criteria) == (_SINGLE_HELLO_AUTO_OBSERVATION_AC,)
+
+
+def test_normalize_execution_acceptance_unwraps_clause_repaired_observation_criteria() -> None:
+    """#3045: criteria the current repairer annotated normalize like legacy ones."""
+    goal = (
+        "Observation run for ooo auto via ouroboros_auto: create hello_auto.py and "
+        "tests/test_hello_auto.py; hello_auto returns exactly hello from ooo auto; "
+        "validate with uv run pytest tests/test_hello_auto.py."
+    )
+    originals = (
+        "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.",
+        "tests/test_hello_auto.py imports hello_auto and asserts exact return value.",
+        "The exact command `uv run pytest tests/test_hello_auto.py` passes.",
+        "Final observation report plain chat summary including requested unavailable "
+        "MCP/auto metadata as not available/not run in this surface when applicable.",
+    )
+    repaired = tuple(
+        _observable_preserving_replacement(text, index=index, goal=goal)
+        for index, text in enumerate(originals)
+    )
+    # The report line is one the repairer annotates, so the drop below is
+    # the clause-aware wrapper check, not an exact-text match.
+    assert repaired[3] != originals[3]
+    seed = _seed(*repaired).model_copy(update={"goal": goal})
 
     normalized = normalize_execution_acceptance(seed)
 
@@ -733,6 +767,37 @@ def test_normalize_execution_acceptance_drops_wrapped_library_defaults_for_file_
         "A command/API check returns stable observable output or artifacts proving the original requirement for pi_auto_smoke.txt exists at repository root.",
         "A command/API check returns stable observable output or artifacts proving the original requirement for pi_auto_smoke.txt full content exactly pi-auto-ok followed by a newline.",
     )
+
+
+def test_normalize_execution_acceptance_drops_clause_repaired_library_defaults() -> None:
+    """#3045: library defaults the current repairer annotated are still dropped."""
+    goal = (
+        "Create a tiny smoke-test file named pi_auto_smoke.txt. "
+        "The file must contain exactly the single line pi-auto-ok."
+    )
+    defaults = (
+        "All public API symbols importable from the documented module path.",
+        "Unit tests cover every public function/method's primary success path.",
+    )
+    kept = (
+        "pi_auto_smoke.txt exists at repository root.",
+        "pi_auto_smoke.txt full content exactly pi-auto-ok followed by a newline.",
+    )
+    repaired = tuple(
+        _observable_preserving_replacement(text, index=index, goal=goal)
+        for index, text in enumerate((*defaults, *kept))
+    )
+    assert all(OBSERVABLE_CHECK_SEPARATOR in text for text in repaired)
+    seed = _seed(*repaired).model_copy(
+        update={
+            "goal": goal,
+            "constraints": ("Keep the implementation to this one smoke-test file.",),
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert ac_texts(normalized.acceptance_criteria) == repaired[len(defaults) :]
 
 
 def test_normalize_execution_acceptance_preserves_library_defaults_for_api_goal() -> None:
@@ -1201,6 +1266,25 @@ def test_unwrap_seed_repairer_preserves_case_and_recurses() -> None:
     # A doubly-wrapped requirement is fully unwrapped to its inner requirement.
     nested = _SEED_REPAIRER_WRAPPER + _SEED_REPAIRER_WRAPPER + "preserve the raw stderr log."
     assert _unwrap_seed_repairer_original_requirement(nested) == "preserve the raw stderr log."
+
+
+@pytest.mark.parametrize(
+    ("criterion", "goal"),
+    [
+        ("RawStderr.LOG and VAL_BPB must match", "Build a CLI"),
+        ("Pytest tests cover the parser", "Build a CLI"),
+        ("Todos can be created and listed", "Build a REST API"),
+        ("Python CLI가 마크다운 표를 CSV로 변환한다", "CLI를 만든다"),
+    ],
+)
+def test_unwrap_seed_repairer_strips_the_observation_clause(criterion: str, goal: str) -> None:
+    """#3045: the clause the repairer appends unwraps to the verbatim criterion."""
+    repaired = _observable_preserving_replacement(criterion, index=0, goal=goal)
+
+    assert repaired != criterion
+    assert _unwrap_seed_repairer_original_requirement(repaired) == criterion
+    # A sentence-final period added after the clause does not hide it.
+    assert _unwrap_seed_repairer_original_requirement(repaired + ".") == criterion
 
 
 def test_normalize_execution_acceptance_preserves_nested_wrapped_requirement() -> None:

@@ -1052,11 +1052,10 @@ async def test_pipeline_repairs_b_seed_to_a_and_starts_run(tmp_path) -> None:
     ]
     assert repaired_entries, "expected to find the repaired user-supplied CLI AC"
     repaired_acceptance = repaired_entries[0]
-    assert "stable observable output" in repaired_acceptance
-    assert (
-        repaired_acceptance
-        != "A command/API check returns stable observable output or artifacts proving this requirement."
-    )
+    # #3045: the repair keeps the requester's sentence first and appends how
+    # it is observed; it no longer wraps it in a fixed English template.
+    assert repaired_acceptance.startswith("The CLI — ")
+    assert "A command/API check" not in repaired_acceptance
     assert result.job_id == "job_1"
     assert result.run_session_id == "session_1"
     assert state.execution_id == "exec_1"
@@ -1206,9 +1205,10 @@ def test_seed_repairer_rewrites_each_acceptance_criterion_once() -> None:
 
     assert result.changed
     repaired_acceptance = ac_text(result.seed.acceptance_criteria[0])
-    assert repaired_acceptance.count("original requirement for") == 1
-    assert "The CLI" in repaired_acceptance
-    assert "original requirement for A command/API check" not in repaired_acceptance
+    # #3045: one observation clause, appended once, after the kept sentence.
+    assert repaired_acceptance.count(" — ") == 1
+    assert repaired_acceptance.startswith("The CLI — ")
+    assert "A command/API check" not in repaired_acceptance
 
 
 def test_seed_repairer_preserves_structured_ac_identity_and_evidence() -> None:

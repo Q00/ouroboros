@@ -67,6 +67,20 @@ _OBSERVABLE_HINTS = (
     "http",
     "200",
 )
+# Korean statements of the evidence the English patterns accept: command output
+# that appears, a test run that passes, an API response, a file that is created
+# or written, an exit code. Korean has no word boundaries and the English hints
+# never occur in it, so each pattern pairs the evidence noun with the verb that
+# observes it instead of matching a lone keyword.
+_HANGUL_RE = re.compile(r"[\uac00-\ud7a3]")
+_KOREAN_OBSERVABLE_PATTERNS = (
+    r"`[^`]+`.*(출력|반환|생성|종료)",
+    r"(출력|stdout|stderr).*(나오|나타나|출력되|출력한|표시되|표시한|포함)",
+    r"테스트.*(통과|성공)",
+    r"(api|엔드포인트|http).*(응답|반환|상태\s*코드)",
+    r"파일.*(생성|작성|저장|존재|포함)",
+    r"종료\s*코드.{0,12}\d|\d.{0,12}종료\s*코드",
+)
 _FINAL_REPORT_REQUIRED_FIELDS = (
     "auto session id",
     "seed id",
@@ -554,6 +568,10 @@ def _is_observable(value: str | AcceptanceCriterionSpec) -> bool:
             return True
         value = value.description
     lowered = value.lower()
+    if _HANGUL_RE.search(lowered) and any(
+        re.search(pattern, lowered) for pattern in _KOREAN_OBSERVABLE_PATTERNS
+    ):
+        return True
     if not any(hint in lowered for hint in _OBSERVABLE_HINTS):
         return False
     if _is_concrete_final_report_observation(lowered):
