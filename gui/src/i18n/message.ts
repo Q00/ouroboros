@@ -76,6 +76,14 @@ function parseParts(src: string, start: number, inBranch: boolean): { parts: Par
         at = block.end;
         continue;
       }
+      if (opensArgument(src, at)) {
+        // A `{name, …}` block this format refuses stays exactly as written,
+        // placeholders inside it included.
+        const end = closingBrace(src, at);
+        text += src.slice(at, end);
+        at = end;
+        continue;
+      }
     } else if (inBranch && ch === "}") {
       flush();
       return { parts, end: at };
@@ -91,6 +99,22 @@ function parseParts(src: string, start: number, inBranch: boolean): { parts: Par
   if (inBranch) return null;
   flush();
   return { parts, end: at };
+}
+
+/** `{name,` at `start`: the opening of an ICU-style argument, well formed or not. */
+function opensArgument(src: string, start: number): boolean {
+  const [name, afterName] = readName(src, start + 1);
+  return name !== "" && src[skipSpace(src, afterName)] === ",";
+}
+
+/** Just past the `}` that closes the `{` at `start`, or the end of `src` when none does. */
+function closingBrace(src: string, start: number): number {
+  let depth = 0;
+  for (let at = start; at < src.length; at += 1) {
+    if (src[at] === "{") depth += 1;
+    else if (src[at] === "}" && --depth === 0) return at + 1;
+  }
+  return src.length;
 }
 
 /** `{name}` or `{name, plural, …}` at `start` (a `{`), or null when it is neither. */

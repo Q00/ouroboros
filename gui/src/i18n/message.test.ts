@@ -106,8 +106,18 @@ describe("formatMessage plural blocks", () => {
       "{count, plural, one # file other {# files}}", // branch without braces
       "{count, plural, one {# file} other {# files}", // unclosed block
       "{count, plural, one {# file} other {# files", // unclosed branch
+      "{count, plural, one {{name} file}}", // no other, with a placeholder the caller gives
+      "{count, select, one {{name}} other {{name}s}}", // not a plural block, with placeholders
+      "{count, plural, one {{name} file} other {{name} files}", // unclosed, with placeholders
     ];
-    for (const template of malformed) expect(formatMessage(template, { count: 1 }, "en")).toBe(template);
+    for (const template of malformed) expect(formatMessage(template, { count: 1, name: "X" }, "en")).toBe(template);
+  });
+
+  test("only the refused block stays as written; the rest of the string is filled", () => {
+    expect(formatMessage("{count, plural, one {{name}}} for {name}", { count: 1, name: "X" }, "en")).toBe("{count, plural, one {{name}}} for X");
+    const nested = "{a, plural, one {# run, {b, plural, one {{name}}}} other {# runs}}";
+    expect(formatMessage(nested, { a: 1, b: 1, name: "X" }, "en")).toBe("1 run, {b, plural, one {{name}}}");
+    expect(formatMessage(nested, { a: 2, b: 1, name: "X" }, "en")).toBe("2 runs");
   });
 });
 
